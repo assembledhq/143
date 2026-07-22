@@ -668,6 +668,7 @@ func (h *WebhookHandler) handleStatus(w http.ResponseWriter, r *http.Request, bo
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse status event")
 		return
 	}
+	event.DeliveryID = strings.TrimSpace(r.Header.Get("X-GitHub-Delivery"))
 	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
 	if !ok {
 		return

@@ -138,10 +138,11 @@ When the repair session pushes code and CI reruns, the PR health row should upda
 repair session pushes changes to PR branch
         |
         v
-GitHub emits pull_request.synchronize and later check_run / check_suite events
+GitHub emits pull_request.synchronize and later check_run / status events
         |
         v
-143 enqueues sync_pull_request_state for that PR
+143 fully reconciles the new head once; later check webhooks update the local
+per-check projection and enqueue one coalesced DB-only health rebuild
         |
         v
 backend writes the new health snapshot and recomputes active_repairs
@@ -211,8 +212,8 @@ We should not add a new frontend polling loop just to clear `Fix tests running`.
 Instead, after a repair session changes the PR branch:
 
 1. a successful repair turn marks its repair row inactive and emits `pull_request.updated` on the existing org-scoped SSE channel, so clients can immediately refetch even before GitHub emits a webhook
-2. GitHub webhook events (`pull_request.synchronize`, `check_run`, and `check_suite`) enqueue the normal PR-health sync job
-3. the sync job writes the latest health snapshot and recomputes `ActiveRepairs`
+2. `pull_request.synchronize` enqueues the full PR-health reconciliation job; `check_run` and `status` webhooks update the durable check projection and enqueue the DB-only rebuild job
+3. reconciliation or the projected rebuild writes the latest health snapshot and recomputes `ActiveRepairs`
 4. the backend emits the normalized `pull_request.updated` event on the same org-scoped SSE channel
 5. subscribed clients refetch only the affected PR health query
 

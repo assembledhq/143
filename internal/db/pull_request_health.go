@@ -92,6 +92,14 @@ func (s *PullRequestStore) ListOpenStaleForHealthSync(ctx context.Context, orgID
 }
 
 func (s *PullRequestStore) UpsertHealthSummary(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA, baseSHA string, summary models.PullRequestHealthSummary, preview json.RawMessage) (models.PullRequestHealthCurrent, error) {
+	return s.upsertHealthSummary(ctx, orgID, pullRequestID, headSHA, baseSHA, summary, preview, true)
+}
+
+func (s *PullRequestStore) UpsertProjectedHealthSummary(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA, baseSHA string, summary models.PullRequestHealthSummary, preview json.RawMessage) (models.PullRequestHealthCurrent, error) {
+	return s.upsertHealthSummary(ctx, orgID, pullRequestID, headSHA, baseSHA, summary, preview, false)
+}
+
+func (s *PullRequestStore) upsertHealthSummary(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA, baseSHA string, summary models.PullRequestHealthSummary, preview json.RawMessage, markGitHubSynced bool) (models.PullRequestHealthCurrent, error) {
 	summaryJSON, err := json.Marshal(summary)
 	if err != nil {
 		return models.PullRequestHealthCurrent{}, fmt.Errorf("marshal pull request health summary: %w", err)
@@ -105,6 +113,16 @@ func (s *PullRequestStore) UpsertHealthSummary(ctx context.Context, orgID, pullR
 		return models.PullRequestHealthCurrent{}, fmt.Errorf("begin pull request health summary upsert: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `
+		SELECT id
+		FROM pull_requests
+		WHERE org_id = @org_id AND id = @pull_request_id
+		FOR UPDATE`, pgx.NamedArgs{
+		"org_id":          orgID,
+		"pull_request_id": pullRequestID,
+	}); err != nil {
+		return models.PullRequestHealthCurrent{}, fmt.Errorf("lock pull request health writer: %w", err)
+	}
 
 	var existing models.PullRequestHealthCurrent
 	existingRows, err := tx.Query(ctx, `
@@ -216,7 +234,7 @@ func (s *PullRequestStore) UpsertHealthSummary(ctx context.Context, orgID, pullR
 			has_conflicts = @has_conflicts,
 			failing_test_count = @failing_test_count,
 			needs_agent_action = @needs_agent_action,
-			github_state_synced_at = now(),
+			github_state_synced_at = CASE WHEN @mark_github_synced THEN now() ELSE github_state_synced_at END,
 			health_version = @version,
 			updated_at = now()
 		WHERE id = @pull_request_id AND org_id = @org_id`, pgx.NamedArgs{
@@ -229,6 +247,7 @@ func (s *PullRequestStore) UpsertHealthSummary(ctx context.Context, orgID, pullR
 		"failing_test_count": summary.FailingTestCount,
 		"needs_agent_action": summary.NeedsAgentAction,
 		"version":            version,
+		"mark_github_synced": markGitHubSynced,
 	}); err != nil {
 		return models.PullRequestHealthCurrent{}, fmt.Errorf("update pull request health hot summary fields: %w", err)
 	}

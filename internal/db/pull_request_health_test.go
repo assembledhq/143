@@ -92,6 +92,9 @@ func TestPullRequestStore_UpsertHealthSummary_InsertsNewVersion(t *testing.T) {
 	}
 
 	mock.ExpectBegin()
+	mock.ExpectExec("SELECT id[\\s\\S]+FROM pull_requests[\\s\\S]+FOR UPDATE").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentColumns))
@@ -135,6 +138,7 @@ func TestPullRequestStore_UpsertHealthSummary_InsertsNewVersion(t *testing.T) {
 			"failing_test_count": 2,
 			"needs_agent_action": true,
 			"version":            int64(1),
+			"mark_github_synced": true,
 		}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
@@ -144,6 +148,67 @@ func TestPullRequestStore_UpsertHealthSummary_InsertsNewVersion(t *testing.T) {
 	require.Equal(t, int64(1), current.Version, "UpsertHealthSummary should start at version 1")
 	require.Equal(t, models.PullRequestHealthEnrichmentStatusNotRequested, current.EnrichmentStatus, "new health versions should start without enrichment")
 	require.NoError(t, mock.ExpectationsWereMet(), "all insert expectations should be met")
+}
+
+func TestPullRequestStore_UpsertProjectedHealthSummary_DoesNotMarkGitHubSynced(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewPullRequestStore(mock)
+	orgID := uuid.New()
+	prID := uuid.New()
+	summary := models.PullRequestHealthSummary{
+		MergeState:      models.PullRequestMergeStateClean,
+		ChecksConfirmed: false,
+		Checks: []models.PullRequestCheckSummary{
+			{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPending},
+		},
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectExec("SELECT id[\\s\\S]+FROM pull_requests[\\s\\S]+FOR UPDATE").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentColumns))
+	mock.ExpectExec("INSERT INTO pull_request_health_snapshots").
+		WithArgs(pgx.NamedArgs{
+			"pull_request_id": prID, "org_id": orgID, "version": int64(1),
+			"head_sha": "head-projected", "base_sha": "base-projected",
+			"summary_json": pgxmock.AnyArg(), "enrichment_status": models.PullRequestHealthEnrichmentStatusNotRequested,
+		}).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec("UPDATE pull_request_repair_runs").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID, "version": int64(1), "head_sha": "head-projected"}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("INSERT INTO pull_request_health_current").
+		WithArgs(pgx.NamedArgs{
+			"pull_request_id": prID, "org_id": orgID, "version": int64(1),
+			"head_sha": "head-projected", "base_sha": "base-projected",
+			"summary_json": pgxmock.AnyArg(), "summary_preview_json": pgxmock.AnyArg(),
+			"enrichment_status": models.PullRequestHealthEnrichmentStatusNotRequested,
+			"enriched_at":       (*time.Time)(nil), "created_at": pgxmock.AnyArg(), "updated_at": pgxmock.AnyArg(),
+		}).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec("UPDATE pull_requests").
+		WithArgs(pgx.NamedArgs{
+			"pull_request_id": prID, "org_id": orgID,
+			"head_sha": "head-projected", "base_sha": "base-projected",
+			"merge_state": models.PullRequestMergeStateClean, "has_conflicts": false,
+			"failing_test_count": 0, "needs_agent_action": false,
+			"version": int64(1), "mark_github_synced": false,
+		}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+
+	current, err := store.UpsertProjectedHealthSummary(context.Background(), orgID, prID, "head-projected", "base-projected", summary, nil)
+	require.NoError(t, err, "projected health should persist without marking a GitHub reconciliation")
+	require.Equal(t, int64(1), current.Version, "projected health should create the next health version")
+	require.NoError(t, mock.ExpectationsWereMet(), "projected health should preserve the prior GitHub reconciliation timestamp")
 }
 
 func TestPullRequestStore_UpsertHealthSummary_OnlyObsoletesRepairsForDifferentHead(t *testing.T) {
@@ -193,6 +258,9 @@ func TestPullRequestStore_UpsertHealthSummary_OnlyObsoletesRepairsForDifferentHe
 			}
 
 			mock.ExpectBegin()
+			mock.ExpectExec("SELECT id[\\s\\S]+FROM pull_requests[\\s\\S]+FOR UPDATE").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+				WillReturnResult(pgxmock.NewResult("SELECT", 1))
 			mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
 				WillReturnRows(pgxmock.NewRows(prHealthCurrentColumns).AddRow(
@@ -238,6 +306,7 @@ func TestPullRequestStore_UpsertHealthSummary_OnlyObsoletesRepairsForDifferentHe
 					"failing_test_count": 2,
 					"needs_agent_action": true,
 					"version":            int64(9),
+					"mark_github_synced": true,
 				}).
 				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			mock.ExpectCommit()
@@ -271,6 +340,9 @@ func TestPullRequestStore_UpsertHealthSummary_ReusesExistingVersion(t *testing.T
 	require.NoError(t, err, "should marshal the existing summary")
 
 	mock.ExpectBegin()
+	mock.ExpectExec("SELECT id[\\s\\S]+FROM pull_requests[\\s\\S]+FOR UPDATE").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentColumns).AddRow(
@@ -302,6 +374,7 @@ func TestPullRequestStore_UpsertHealthSummary_ReusesExistingVersion(t *testing.T
 			"failing_test_count": 0,
 			"needs_agent_action": false,
 			"version":            int64(7),
+			"mark_github_synced": true,
 		}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()

@@ -75,6 +75,22 @@ func (s PullRequestCheckStatus) Validate() error {
 	}
 }
 
+type PullRequestCheckSource string
+
+const (
+	PullRequestCheckSourceCheckRun     PullRequestCheckSource = "check_run"
+	PullRequestCheckSourceCommitStatus PullRequestCheckSource = "commit_status"
+)
+
+func (s PullRequestCheckSource) Validate() error {
+	switch s {
+	case PullRequestCheckSourceCheckRun, PullRequestCheckSourceCommitStatus:
+		return nil
+	default:
+		return fmt.Errorf("invalid PullRequestCheckSource: %q", s)
+	}
+}
+
 type PullRequestHealthEnrichmentStatus string
 
 const (
@@ -181,6 +197,36 @@ type PullRequestCheckSummary struct {
 	Provider   string                   `json:"provider,omitempty"`
 	DetailsURL string                   `json:"details_url,omitempty"`
 	Summary    string                   `json:"summary,omitempty"`
+}
+
+type PullRequestCheckState struct {
+	OrgID             uuid.UUID                `db:"org_id" json:"org_id"`
+	PullRequestID     uuid.UUID                `db:"pull_request_id" json:"pull_request_id"`
+	HeadSHA           string                   `db:"head_sha" json:"head_sha"`
+	Source            PullRequestCheckSource   `db:"source" json:"source"`
+	ExternalKey       string                   `db:"external_key" json:"external_key"`
+	Name              string                   `db:"name" json:"name"`
+	Category          PullRequestCheckCategory `db:"category" json:"category"`
+	Status            PullRequestCheckStatus   `db:"status" json:"status"`
+	Provider          string                   `db:"provider" json:"provider,omitempty"`
+	DetailsURL        string                   `db:"details_url" json:"details_url,omitempty"`
+	Summary           string                   `db:"summary" json:"summary,omitempty"`
+	ProviderEventID   string                   `db:"provider_event_id" json:"provider_event_id,omitempty"`
+	ProviderSequence  int64                    `db:"provider_sequence" json:"provider_sequence"`
+	ProviderUpdatedAt time.Time                `db:"provider_updated_at" json:"provider_updated_at"`
+	CreatedAt         time.Time                `db:"created_at" json:"created_at"`
+	UpdatedAt         time.Time                `db:"updated_at" json:"updated_at"`
+}
+
+func (s PullRequestCheckState) CheckSummary() PullRequestCheckSummary {
+	return PullRequestCheckSummary{
+		Name:       s.Name,
+		Category:   s.Category,
+		Status:     s.Status,
+		Provider:   s.Provider,
+		DetailsURL: s.DetailsURL,
+		Summary:    s.Summary,
+	}
 }
 
 type PullRequestHealthSummary struct {

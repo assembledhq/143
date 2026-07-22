@@ -501,6 +501,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register(models.JobTypeRestackChangesets, newRestackChangesetsHandler(stores, services, logger))
 		w.Register(models.JobTypePublishChangesetStack, newPublishChangesetStackHandler(stores, services, logger))
 		w.Register("sync_pull_request_state", newSyncPullRequestStateHandler(services, logger))
+		w.Register("rebuild_pull_request_health", newRebuildPullRequestHealthHandler(services, logger))
 		w.Register("reconcile_pull_request_state", newReconcilePullRequestStateHandler(services, logger))
 		w.Register("enrich_pull_request_health", newEnrichPullRequestHealthHandler(services, logger))
 		w.Register("merge_pull_request_when_ready", newMergePullRequestWhenReadyHandler(services, logger))
@@ -763,6 +764,7 @@ type prCreator interface {
 	CreateBranch(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*ghservice.CreateBranchResult, error)
 	PushChangesToPR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
 	SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error
+	RebuildPullRequestHealthFromCheckStates(ctx context.Context, orgID, pullRequestID uuid.UUID) error
 	ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error
 	EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error
 	CompletePullRequestRepairRun(ctx context.Context, orgID, pullRequestID, repairRunID uuid.UUID) error
@@ -10835,6 +10837,47 @@ func newSyncPullRequestStateHandler(services *Services, logger zerolog.Logger) J
 				Str("auto_repair_action", string(decision.Action)).
 				Str("head_sha", decision.HeadSHA).
 				Msg("started automatic pull request repair after GitHub health update")
+		}
+		return nil
+	}
+}
+
+func newRebuildPullRequestHealthHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID         string `json:"org_id"`
+			PullRequestID string `json:"pull_request_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal rebuild_pull_request_health payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		pullRequestID, err := uuid.Parse(input.PullRequestID)
+		if err != nil {
+			return fmt.Errorf("parse pull request ID: %w", err)
+		}
+		if err := services.PR.RebuildPullRequestHealthFromCheckStates(ctx, orgID, pullRequestID); err != nil {
+			return fmt.Errorf("rebuild projected pull request health: %w", err)
+		}
+		decision, autoRepairErr := services.PR.MaybeStartAutoRepairForPullRequest(ctx, orgID, pullRequestID, "github_pr_check_state_updated")
+		if autoRepairErr != nil {
+			logger.Warn().
+				Err(autoRepairErr).
+				Str("org_id", orgID.String()).
+				Str("pull_request_id", pullRequestID.String()).
+				Msg("failed to evaluate automatic pull request repair after projected health update")
+			return nil
+		}
+		if decision != nil && decision.Status == ghservice.AutoRepairDecisionStarted {
+			logger.Info().
+				Str("org_id", orgID.String()).
+				Str("pull_request_id", pullRequestID.String()).
+				Str("auto_repair_action", string(decision.Action)).
+				Str("head_sha", decision.HeadSHA).
+				Msg("started automatic pull request repair after projected health update")
 		}
 		return nil
 	}

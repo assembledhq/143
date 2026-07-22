@@ -299,25 +299,29 @@ The prompt should not repeat the logs or the PR metadata. That information belon
 
 ## Backend Sync Design
 
-### New sync job
+### Full reconciliation job
 
 Add a job such as:
 
 - `sync_pull_request_state`
 
-This job is the single place that talks to GitHub to refresh repair-relevant state.
-It should be optimized for fast summary refresh, not for always building full repair payloads inline.
+This job is the single place that reads GitHub to reconcile mergeability, PR lifecycle state, and the complete check baseline. It should be optimized for summary refresh, not for always building full repair payloads inline.
+
+Individual `status` and `check_run` webhooks do not run this job. They upsert an ordered row in `pull_request_check_states` and enqueue the DB-only `rebuild_pull_request_health` job. That job overlays check rows newer than the current aggregate, versions the normalized health summary, publishes the existing update event, and evaluates automatic repair without spending GitHub API quota.
 
 ### Triggers
 
 Enqueue the sync job on:
 
 - `pull_request` events for `opened`, `reopened`, `synchronize`, and `closed`
-- `check_suite.completed` as a coarse wake-up signal
-- `check_run.completed` as the canonical per-job repairability signal
 - optional manual refresh from the UI
 
-Do not dedupe by a naive time bucket.
+Apply check state directly on:
+
+- classic commit `status` events, keyed by context
+- `check_run.created`, `check_run.completed`, and `check_run.rerequested`, keyed by source and normalized check name
+
+`check_suite.completed` remains a coarse aggregate CI update, but it neither supplies per-check repair data nor wakes a full GitHub sync.
 
 Instead, use a **per-PR singleflight sync queue**:
 
@@ -327,7 +331,7 @@ Instead, use a **per-PR singleflight sync queue**:
 
 This scales better under sustained webhook bursts and avoids arbitrary behavior around time windows.
 
-Current implementation note: ordinary PR lifecycle webhooks use the stable per-PR dedupe key `sync_pull_request_state:<pull_request_id>`. Completed `check_suite` and `check_run` webhooks use separate completion-scoped dedupe keys so a check-completion wake-up is not swallowed by a generic sync that was already pending or running before GitHub finished CI. This is a pragmatic approximation of the dirty-reschedule behavior above and keeps the post-completion sync low-latency without flooding the queue.
+Current implementation note: ordinary PR lifecycle and manual refreshes use the stable per-PR dedupe key `sync_pull_request_state:<pull_request_id>`. Check webhooks use `rebuild_pull_request_health:<pull_request_id>` with a five-second deferred run time, so a CI fanout produces one low-priority DB aggregation rather than one multi-call GitHub read per check transition. Provider sequence and update timestamps make duplicate and out-of-order deliveries harmless; stale-head events are ignored.
 
 ### Reconciliation path
 
@@ -453,14 +457,14 @@ This keeps GitHub API usage bounded and avoids spending enrichment work on faili
 
 ### GitHub reads
 
-Long-term, `check_run` or workflow-job data should be the canonical source for repairability because it supports:
+`check_run` data is the canonical source for repairability because it supports:
 
 - job-level attribution
 - failing-step extraction
 - annotations
 - repair-ready payload construction
 
-`check_suite` can remain a wake-up signal, but it should not be the source of truth for repair payloads.
+Classic commit statuses are projected alongside check runs for providers such as CircleCI. `check_suite` remains only a coarse aggregate signal and is not the source of truth for repair payloads.
 
 ### Mergeability retry
 
@@ -900,6 +904,7 @@ The product principle is:
 
 - **GitHub is the source of truth**
 - **143 materializes a small summary state plus a separate versioned repair snapshot**
+- **143 projects ordered webhook check state locally and reserves GitHub reads for lifecycle reconciliation and missed-delivery repair**
 - **143 retains immutable snapshots for referenced health versions**
 - **143 uses `check_run` as the canonical repairability signal**
 - **PR health is a shared domain primitive, not a page-local implementation**

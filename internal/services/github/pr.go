@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -5667,7 +5668,6 @@ func (s *PRService) HandleCheckSuiteEvent(ctx context.Context, event CheckSuiteE
 		if err := s.pullRequests.UpdateCIStatus(ctx, pr.OrgID, pr.ID, ciStatus); err != nil {
 			s.logger.Warn().Err(err).Str("pr_id", pr.ID.String()).Msg("failed to update CI status")
 		}
-		s.enqueuePullRequestStateSyncWithScope(ctx, pr, "check_suite_completed")
 	}
 
 	return nil
@@ -5679,9 +5679,23 @@ type CheckRunEvent struct {
 	OwnerOrgID *uuid.UUID `json:"-"`
 	DeliveryID string     `json:"-"`
 	CheckRun   struct {
-		ID           int64   `json:"id"`
-		Conclusion   *string `json:"conclusion"`
-		HeadSHA      string  `json:"head_sha"`
+		ID          int64      `json:"id"`
+		Name        string     `json:"name"`
+		Status      string     `json:"status"`
+		Conclusion  *string    `json:"conclusion"`
+		HeadSHA     string     `json:"head_sha"`
+		DetailsURL  string     `json:"details_url"`
+		HTMLURL     string     `json:"html_url"`
+		StartedAt   *time.Time `json:"started_at"`
+		CompletedAt *time.Time `json:"completed_at"`
+		UpdatedAt   *time.Time `json:"updated_at"`
+		App         struct {
+			Slug string `json:"slug"`
+		} `json:"app"`
+		Output struct {
+			Title   string `json:"title"`
+			Summary string `json:"summary"`
+		} `json:"output"`
 		PullRequests []struct {
 			Number int `json:"number"`
 			Base   struct {
@@ -5697,37 +5711,49 @@ type CheckRunEvent struct {
 
 // HandleCheckRunEvent processes check_run webhook events and refreshes repairable PR state.
 func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent) error {
-	if event.Action != "completed" {
+	if event.Action != "created" && event.Action != "completed" && event.Action != "rerequested" {
 		return nil
 	}
 
 	for _, prRef := range event.CheckRun.PullRequests {
-		conclusion := "unknown"
-		if event.CheckRun.Conclusion != nil && *event.CheckRun.Conclusion != "" {
-			conclusion = *event.CheckRun.Conclusion
+		if event.Action == "completed" {
+			conclusion := "unknown"
+			if event.CheckRun.Conclusion != nil && *event.CheckRun.Conclusion != "" {
+				conclusion = *event.CheckRun.Conclusion
+			}
+			// The product trigger "github.checks.completed" expands to check_suite.completed
+			// only. check_run.completed is preserved here so that automations configured
+			// directly with the raw event type (via github_event_triggers) still fire.
+			// In typical usage ListEnabledByGitHubEvent returns empty for this event.
+			s.triggerGitHubAutomations(ctx, automationevents.GitHubEventTriggerRequest{
+				Event:             models.AutomationGitHubEventCheckRunCompleted,
+				Repository:        event.Repository.FullName,
+				PullRequestNumber: prRef.Number,
+				HeadSHA:           event.CheckRun.HeadSHA,
+				BaseBranch:        prRef.Base.Ref,
+				Actor:             "github",
+				ActorType:         "System",
+				Body:              "Check run completed: " + conclusion,
+				ProviderEventID:   event.DeliveryID,
+				EventID:           githubIDEventKey("check_run", event.CheckRun.ID),
+			}, event.OwnerOrgID, event.Repository.ID)
 		}
-		// The product trigger "github.checks.completed" expands to check_suite.completed
-		// only. check_run.completed is preserved here so that automations configured
-		// directly with the raw event type (via github_event_triggers) still fire.
-		// In typical usage ListEnabledByGitHubEvent returns empty for this event.
-		s.triggerGitHubAutomations(ctx, automationevents.GitHubEventTriggerRequest{
-			Event:             models.AutomationGitHubEventCheckRunCompleted,
-			Repository:        event.Repository.FullName,
-			PullRequestNumber: prRef.Number,
-			HeadSHA:           event.CheckRun.HeadSHA,
-			BaseBranch:        prRef.Base.Ref,
-			Actor:             "github",
-			ActorType:         "System",
-			Body:              "Check run completed: " + conclusion,
-			ProviderEventID:   event.DeliveryID,
-			EventID:           githubIDEventKey("check_run", event.CheckRun.ID),
-		}, event.OwnerOrgID, event.Repository.ID)
 
 		pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, prRef.Number)
 		if err != nil {
 			continue // Not a 143-managed PR.
 		}
-		s.enqueuePullRequestStateSyncWithScope(ctx, pr, "check_run_completed")
+		if pr.HeadSHA == nil || strings.TrimSpace(event.CheckRun.HeadSHA) == "" || *pr.HeadSHA != event.CheckRun.HeadSHA {
+			continue
+		}
+		state := checkRunEventState(pr, event)
+		applied, err := s.pullRequests.UpsertCheckState(ctx, pr.OrgID, state)
+		if err != nil {
+			return err
+		}
+		if applied {
+			s.enqueuePullRequestHealthRebuild(ctx, pr)
+		}
 	}
 
 	return nil
@@ -5735,11 +5761,17 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 
 // StatusEvent represents a GitHub commit status webhook payload.
 type StatusEvent struct {
-	State      string     `json:"state"`
-	SHA        string     `json:"sha"`
-	Context    string     `json:"context"`
-	OwnerOrgID *uuid.UUID `json:"-"`
-	Repository struct {
+	ID          int64      `json:"id"`
+	State       string     `json:"state"`
+	SHA         string     `json:"sha"`
+	Context     string     `json:"context"`
+	TargetURL   string     `json:"target_url"`
+	Description string     `json:"description"`
+	CreatedAt   *time.Time `json:"created_at"`
+	UpdatedAt   *time.Time `json:"updated_at"`
+	OwnerOrgID  *uuid.UUID `json:"-"`
+	DeliveryID  string     `json:"-"`
+	Repository  struct {
 		ID       int64  `json:"id"`
 		FullName string `json:"full_name"`
 	} `json:"repository"`
@@ -5763,21 +5795,92 @@ func (s *PRService) HandleStatusEvent(ctx context.Context, event StatusEvent) er
 	if err != nil {
 		return err
 	}
-	scope := statusSyncScope(event.Context, event.State)
 	for _, pr := range prs {
-		s.enqueuePullRequestStateSyncWithScope(ctx, pr, scope)
+		state := statusEventState(pr, event)
+		applied, err := s.pullRequests.UpsertCheckState(ctx, pr.OrgID, state)
+		if err != nil {
+			return err
+		}
+		if applied {
+			s.enqueuePullRequestHealthRebuild(ctx, pr)
+		}
 	}
 	return nil
 }
 
-func statusSyncScope(contextName, state string) string {
-	contextName = strings.TrimSpace(contextName)
-	if contextName == "" {
-		contextName = "unknown"
+func checkRunEventState(pr models.PullRequest, event CheckRunEvent) models.PullRequestCheckState {
+	name := strings.TrimSpace(event.CheckRun.Name)
+	if name == "" {
+		name = fmt.Sprintf("Check run %d", event.CheckRun.ID)
 	}
-	state = strings.ToLower(strings.TrimSpace(state))
-	if state == "" {
-		state = "unknown"
+	check := gitHubCheckRun{
+		ID:         event.CheckRun.ID,
+		Name:       name,
+		Status:     event.CheckRun.Status,
+		HTMLURL:    event.CheckRun.HTMLURL,
+		DetailsURL: event.CheckRun.DetailsURL,
 	}
-	return fmt.Sprintf("status:%s:%s", contextName, state)
+	if event.CheckRun.Conclusion != nil {
+		check.Conclusion = *event.CheckRun.Conclusion
+	}
+	if event.Action == "rerequested" {
+		check.Status = "queued"
+		check.Conclusion = ""
+	}
+	return models.PullRequestCheckState{
+		OrgID:             pr.OrgID,
+		PullRequestID:     pr.ID,
+		HeadSHA:           event.CheckRun.HeadSHA,
+		Source:            models.PullRequestCheckSourceCheckRun,
+		ExternalKey:       normalizedCheckExternalKey(name, strconv.FormatInt(event.CheckRun.ID, 10)),
+		Name:              name,
+		Category:          classifyCheckRunCategory(name),
+		Status:            normalizeCheckRunStatus(check),
+		Provider:          strings.TrimSpace(event.CheckRun.App.Slug),
+		DetailsURL:        firstNonEmpty(event.CheckRun.DetailsURL, event.CheckRun.HTMLURL),
+		Summary:           firstNonEmpty(event.CheckRun.Output.Title, truncateText(stripWhitespace(event.CheckRun.Output.Summary), 240)),
+		ProviderEventID:   event.DeliveryID,
+		ProviderSequence:  event.CheckRun.ID,
+		ProviderUpdatedAt: firstProviderTimestamp(event.CheckRun.UpdatedAt, event.CheckRun.CompletedAt, event.CheckRun.StartedAt),
+	}
+}
+
+func statusEventState(pr models.PullRequest, event StatusEvent) models.PullRequestCheckState {
+	name := strings.TrimSpace(event.Context)
+	if name == "" {
+		name = fmt.Sprintf("Commit status %d", event.ID)
+	}
+	status := gitHubCommitStatus{Context: name, State: event.State, TargetURL: event.TargetURL, Description: event.Description}
+	return models.PullRequestCheckState{
+		OrgID:             pr.OrgID,
+		PullRequestID:     pr.ID,
+		HeadSHA:           event.SHA,
+		Source:            models.PullRequestCheckSourceCommitStatus,
+		ExternalKey:       normalizedCheckExternalKey(name, strconv.FormatInt(event.ID, 10)),
+		Name:              name,
+		Category:          classifyCheckRunCategory(name),
+		Status:            normalizeCommitStatus(status),
+		Provider:          commitStatusProvider(name),
+		DetailsURL:        event.TargetURL,
+		Summary:           truncateText(stripWhitespace(event.Description), 240),
+		ProviderEventID:   event.DeliveryID,
+		ProviderSequence:  event.ID,
+		ProviderUpdatedAt: firstProviderTimestamp(event.UpdatedAt, event.CreatedAt),
+	}
+}
+
+func normalizedCheckExternalKey(name, fallback string) string {
+	if key := strings.ToLower(strings.TrimSpace(name)); key != "" {
+		return key
+	}
+	return fallback
+}
+
+func firstProviderTimestamp(values ...*time.Time) time.Time {
+	for _, value := range values {
+		if value != nil && !value.IsZero() {
+			return value.UTC()
+		}
+	}
+	return time.Now().UTC()
 }

@@ -28,6 +28,7 @@ const (
 	prHealthStaleAfter       = 2 * time.Minute
 	prHealthSyncQueue        = "default"
 	prHealthSyncJobType      = "sync_pull_request_state"
+	prHealthRebuildJobType   = "rebuild_pull_request_health"
 	prHealthReconcileJobType = "reconcile_pull_request_state"
 	prHealthEnrichJobType    = "enrich_pull_request_health"
 	prMergeWhenReadyJobType  = "merge_pull_request_when_ready"
@@ -90,13 +91,15 @@ type requiredStatusChecksCacheEntry struct {
 }
 
 type gitHubCheckRun struct {
-	ID         int64  `json:"id"`
-	Name       string `json:"name"`
-	HTMLURL    string `json:"html_url"`
-	Conclusion string `json:"conclusion"`
-	Status     string `json:"status"`
-	DetailsURL string `json:"details_url"`
-	App        struct {
+	ID          int64      `json:"id"`
+	Name        string     `json:"name"`
+	HTMLURL     string     `json:"html_url"`
+	Conclusion  string     `json:"conclusion"`
+	Status      string     `json:"status"`
+	DetailsURL  string     `json:"details_url"`
+	StartedAt   *time.Time `json:"started_at"`
+	CompletedAt *time.Time `json:"completed_at"`
+	App         struct {
 		Slug string `json:"slug"`
 	} `json:"app"`
 	Output struct {
@@ -109,10 +112,13 @@ type gitHubCheckRun struct {
 }
 
 type gitHubCommitStatus struct {
-	Context     string `json:"context"`
-	State       string `json:"state"`
-	TargetURL   string `json:"target_url"`
-	Description string `json:"description"`
+	ID          int64      `json:"id"`
+	Context     string     `json:"context"`
+	State       string     `json:"state"`
+	TargetURL   string     `json:"target_url"`
+	Description string     `json:"description"`
+	CreatedAt   *time.Time `json:"created_at"`
+	UpdatedAt   *time.Time `json:"updated_at"`
 }
 
 type gitHubCheckRunAnnotation struct {
@@ -553,35 +559,76 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 	summary := models.PullRequestHealthSummary{
 		Checks: make([]models.PullRequestCheckSummary, 0),
 	}
+	checkStates := make([]models.PullRequestCheckState, 0, len(checkRuns)+len(commitStatuses))
 	summary.MergeState, summary.HasConflicts = normalizeMergeState(details.Mergeable, details.MergeableState)
 	for _, check := range checkRuns {
-		category := classifyCheckRunCategory(check.Name)
+		name := strings.TrimSpace(check.Name)
+		if name == "" {
+			name = fmt.Sprintf("Check run %d", check.ID)
+		}
+		category := classifyCheckRunCategory(name)
 		status := normalizeCheckRunStatus(check)
 		if category == models.PullRequestCheckCategoryTest && status == models.PullRequestCheckStatusFailed {
 			summary.FailingTestCount++
 		}
-		summary.Checks = append(summary.Checks, models.PullRequestCheckSummary{
-			Name:       check.Name,
+		checkSummary := models.PullRequestCheckSummary{
+			Name:       name,
 			Category:   category,
 			Status:     status,
 			Provider:   check.App.Slug,
 			DetailsURL: firstNonEmpty(check.DetailsURL, check.HTMLURL),
 			Summary:    firstNonEmpty(check.Output.Title, truncateText(stripWhitespace(check.Output.Summary), 240)),
+		}
+		summary.Checks = append(summary.Checks, checkSummary)
+		checkStates = append(checkStates, models.PullRequestCheckState{
+			OrgID:             orgID,
+			PullRequestID:     pullRequestID,
+			HeadSHA:           details.Head.SHA,
+			Source:            models.PullRequestCheckSourceCheckRun,
+			ExternalKey:       normalizedCheckExternalKey(name, strconv.FormatInt(check.ID, 10)),
+			Name:              checkSummary.Name,
+			Category:          checkSummary.Category,
+			Status:            checkSummary.Status,
+			Provider:          checkSummary.Provider,
+			DetailsURL:        checkSummary.DetailsURL,
+			Summary:           checkSummary.Summary,
+			ProviderSequence:  check.ID,
+			ProviderUpdatedAt: firstProviderTimestamp(check.CompletedAt, check.StartedAt),
 		})
 	}
 	for _, status := range commitStatuses {
-		category := classifyCheckRunCategory(status.Context)
+		name := strings.TrimSpace(status.Context)
+		if name == "" {
+			name = fmt.Sprintf("Commit status %d", status.ID)
+		}
+		category := classifyCheckRunCategory(name)
 		checkStatus := normalizeCommitStatus(status)
 		if category == models.PullRequestCheckCategoryTest && checkStatus == models.PullRequestCheckStatusFailed {
 			summary.FailingTestCount++
 		}
-		summary.Checks = append(summary.Checks, models.PullRequestCheckSummary{
-			Name:       status.Context,
+		checkSummary := models.PullRequestCheckSummary{
+			Name:       name,
 			Category:   category,
 			Status:     checkStatus,
-			Provider:   commitStatusProvider(status.Context),
+			Provider:   commitStatusProvider(name),
 			DetailsURL: status.TargetURL,
 			Summary:    truncateText(stripWhitespace(status.Description), 240),
+		}
+		summary.Checks = append(summary.Checks, checkSummary)
+		checkStates = append(checkStates, models.PullRequestCheckState{
+			OrgID:             orgID,
+			PullRequestID:     pullRequestID,
+			HeadSHA:           details.Head.SHA,
+			Source:            models.PullRequestCheckSourceCommitStatus,
+			ExternalKey:       normalizedCheckExternalKey(name, strconv.FormatInt(status.ID, 10)),
+			Name:              checkSummary.Name,
+			Category:          checkSummary.Category,
+			Status:            checkSummary.Status,
+			Provider:          checkSummary.Provider,
+			DetailsURL:        checkSummary.DetailsURL,
+			Summary:           checkSummary.Summary,
+			ProviderSequence:  status.ID,
+			ProviderUpdatedAt: firstProviderTimestamp(status.UpdatedAt, status.CreatedAt),
 		})
 	}
 	summary.ChecksConfirmed = determineChecksConfirmed(summary.Checks, requiredChecksConfigured)
@@ -602,7 +649,6 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 			return nil
 		}
 	}
-
 	current, err := s.pullRequests.UpsertHealthSummary(ctx, orgID, pullRequestID, details.Head.SHA, details.Base.SHA, summary, nil)
 	if err != nil {
 		return err
@@ -615,10 +661,112 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 
 	s.publishPullRequestUpdated(ctx, pr, current)
 	s.enqueueMergeWhenReadyProcessing(ctx, pr)
+	if err := s.pullRequests.ReconcileCheckStates(ctx, orgID, pullRequestID, details.Head.SHA, checkStates); err != nil {
+		s.logger.Warn().Err(err).
+			Str("pull_request_id", pullRequestID.String()).
+			Str("head_sha", details.Head.SHA).
+			Msg("failed to seed pull request check projection during GitHub reconciliation")
+	}
 	if mergeStateIndeterminate {
 		return ErrPullRequestMergeabilityPending
 	}
 	return nil
+}
+
+func (s *PRService) RebuildPullRequestHealthFromCheckStates(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
+	pr, err := s.pullRequests.GetByID(ctx, orgID, pullRequestID)
+	if err != nil {
+		return err
+	}
+	if pr.Status != models.PullRequestStatusOpen || pr.HeadSHA == nil || strings.TrimSpace(*pr.HeadSHA) == "" {
+		return nil
+	}
+
+	current, err := s.pullRequests.GetHealthCurrent(ctx, orgID, pullRequestID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if current.HeadSHA != *pr.HeadSHA {
+		return nil
+	}
+
+	states, err := s.pullRequests.ListCheckStates(ctx, orgID, pullRequestID, *pr.HeadSHA)
+	if err != nil {
+		return err
+	}
+	// Reconciliation writes the full authoritative summary directly. Only
+	// webhook rows that landed after that aggregate was written need to be
+	// overlaid; older retained rows may describe checks removed by GitHub.
+	states = checkStatesUpdatedAfter(states, current.UpdatedAt)
+	if len(states) == 0 {
+		return nil
+	}
+
+	var summary models.PullRequestHealthSummary
+	if err := json.Unmarshal(current.SummaryJSON, &summary); err != nil {
+		return fmt.Errorf("decode current pull request health summary for check rebuild: %w", err)
+	}
+	summary = rebuildProjectedHealthSummary(summary, states)
+
+	rebuilt, err := s.pullRequests.UpsertProjectedHealthSummary(ctx, orgID, pullRequestID, current.HeadSHA, current.BaseSHA, summary, nil)
+	if err != nil {
+		return err
+	}
+	if err := s.pullRequests.UpdateCIStatus(ctx, orgID, pullRequestID, models.PullRequestCIStatus(deriveAggregateCIStatus(summary.Checks))); err != nil {
+		s.logger.Warn().Err(err).Str("pull_request_id", pullRequestID.String()).Msg("failed to update CI status during projected pull request health rebuild")
+	}
+	s.publishPullRequestUpdated(ctx, pr, rebuilt)
+	s.enqueueMergeWhenReadyProcessing(ctx, pr)
+	return nil
+}
+
+func checkStatesUpdatedAfter(states []models.PullRequestCheckState, after time.Time) []models.PullRequestCheckState {
+	updated := make([]models.PullRequestCheckState, 0, len(states))
+	for _, state := range states {
+		if state.UpdatedAt.After(after) {
+			updated = append(updated, state)
+		}
+	}
+	return updated
+}
+
+func rebuildProjectedHealthSummary(summary models.PullRequestHealthSummary, states []models.PullRequestCheckState) models.PullRequestHealthSummary {
+	summary.Checks = mergeProjectedCheckSummaries(summary.Checks, states)
+	summary.FailingTestCount = 0
+	for _, check := range summary.Checks {
+		if check.Category == models.PullRequestCheckCategoryTest && classifyStoredCheckStatus(check) == models.PullRequestCheckStatusFailed {
+			summary.FailingTestCount++
+		}
+	}
+	summary.ChecksConfirmed = determineChecksConfirmed(summary.Checks, false)
+	summary.NeedsAgentAction = summary.HasConflicts || healthSummaryHasRepairableFailedChecks(summary)
+	return summary
+}
+
+func mergeProjectedCheckSummaries(existing []models.PullRequestCheckSummary, states []models.PullRequestCheckState) []models.PullRequestCheckSummary {
+	merged := append([]models.PullRequestCheckSummary(nil), existing...)
+	indexByKey := make(map[string]int, len(merged))
+	for i, check := range merged {
+		indexByKey[projectedCheckSummaryKey(check)] = i
+	}
+	for _, state := range states {
+		check := state.CheckSummary()
+		key := projectedCheckSummaryKey(check)
+		if index, ok := indexByKey[key]; ok {
+			merged[index] = check
+			continue
+		}
+		indexByKey[key] = len(merged)
+		merged = append(merged, check)
+	}
+	return merged
+}
+
+func projectedCheckSummaryKey(check models.PullRequestCheckSummary) string {
+	return strings.ToLower(strings.TrimSpace(check.Provider)) + "\x00" + strings.ToLower(strings.TrimSpace(check.Name))
 }
 
 func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error {
@@ -1684,21 +1832,10 @@ func (s *PRService) fetchCheckRunAnnotations(ctx context.Context, token, owner, 
 }
 
 func (s *PRService) enqueuePullRequestStateSync(ctx context.Context, pr models.PullRequest) {
-	s.enqueuePullRequestStateSyncWithScope(ctx, pr, "")
-}
-
-func (s *PRService) enqueuePullRequestStateSyncWithScope(ctx context.Context, pr models.PullRequest, scope string) {
 	if s.jobs == nil {
 		return
 	}
 	dedupeKey := pullRequestStateSyncDedupeKey(pr.ID)
-	priority := 6
-	var runAt *time.Time
-	if scope != "" {
-		deferred := time.Now().UTC().Add(prHealthWebhookDebounce)
-		runAt = &deferred
-		priority = 4
-	}
 	_, err := s.jobs.EnqueueWithOpts(ctx, pr.OrgID, db.EnqueueOpts{
 		Queue:   prHealthSyncQueue,
 		JobType: prHealthSyncJobType,
@@ -1706,12 +1843,33 @@ func (s *PRService) enqueuePullRequestStateSyncWithScope(ctx context.Context, pr
 			"org_id":          pr.OrgID.String(),
 			"pull_request_id": pr.ID.String(),
 		},
-		Priority:  priority,
+		Priority:  6,
 		DedupeKey: &dedupeKey,
-		RunAt:     runAt,
 	})
 	if err != nil {
 		s.logger.Warn().Err(err).Str("pull_request_id", pr.ID.String()).Msg("failed to enqueue pull request health sync")
+	}
+}
+
+func (s *PRService) enqueuePullRequestHealthRebuild(ctx context.Context, pr models.PullRequest) {
+	if s.jobs == nil {
+		return
+	}
+	dedupeKey := fmt.Sprintf("%s:%s", prHealthRebuildJobType, pr.ID.String())
+	runAt := time.Now().UTC().Add(prHealthWebhookDebounce)
+	_, err := s.jobs.EnqueueWithOpts(ctx, pr.OrgID, db.EnqueueOpts{
+		Queue:   prHealthSyncQueue,
+		JobType: prHealthRebuildJobType,
+		Payload: map[string]string{
+			"org_id":          pr.OrgID.String(),
+			"pull_request_id": pr.ID.String(),
+		},
+		Priority:  4,
+		DedupeKey: &dedupeKey,
+		RunAt:     &runAt,
+	})
+	if err != nil {
+		s.logger.Warn().Err(err).Str("pull_request_id", pr.ID.String()).Msg("failed to enqueue projected pull request health rebuild")
 	}
 }
 

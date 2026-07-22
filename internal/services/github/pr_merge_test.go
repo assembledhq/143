@@ -420,6 +420,9 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
 
 	prMock.ExpectBegin()
+	prMock.ExpectExec("SELECT id[\\s\\S]+FROM pull_requests[\\s\\S]+FOR UPDATE").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	prMock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
@@ -463,6 +466,7 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 			"failing_test_count": 0,
 			"needs_agent_action": false,
 			"version":            int64(1),
+			"mark_github_synced": true,
 		}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	prMock.ExpectCommit()

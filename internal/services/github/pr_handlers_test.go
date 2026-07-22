@@ -2481,18 +2481,6 @@ func TestHandleCheckSuiteEvent_Success(t *testing.T) {
 	prMock.ExpectExec("UPDATE pull_requests SET ci_status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	dedupeKey := pullRequestStateSyncDedupeKey(prID)
-	jobMock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgx.NamedArgs{
-			"org_id":     orgID,
-			"queue":      prHealthSyncQueue,
-			"job_type":   prHealthSyncJobType,
-			"payload":    pgxmock.AnyArg(),
-			"priority":   4,
-			"dedupe_key": &dedupeKey,
-			"run_at":     pgxmock.AnyArg(),
-		}).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	conclusion := "success"
 	event := CheckSuiteEvent{Action: "completed"}
 	event.CheckSuite.Conclusion = &conclusion
@@ -2507,7 +2495,7 @@ func TestHandleCheckSuiteEvent_Success(t *testing.T) {
 	err := svc.HandleCheckSuiteEvent(context.Background(), event)
 	require.NoError(t, err, "should process check suite event without error")
 	require.NoError(t, prMock.ExpectationsWereMet(), "all database expectations should be met")
-	require.NoError(t, jobMock.ExpectationsWereMet(), "check suite completion should enqueue a scoped health sync")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "check suite completion should not enqueue a full health sync")
 }
 
 func TestHandleCheckSuiteEvent_Failure(t *testing.T) {
@@ -2570,26 +2558,58 @@ func TestHandleCheckRunEvent_CompletedEnqueuesHealthSync(t *testing.T) {
 		logger:       zerolog.Nop(),
 	}
 
+	prRow := handlerPRRow(prID, &sessionID, orgID, "testorg/testrepo", now)
+	headSHA := "head-sha"
+	prRow[12] = &headSHA
 	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
-				AddRow(handlerPRRow(prID, &sessionID, orgID, "testorg/testrepo", now)...),
+				AddRow(prRow...),
 		)
-	dedupeKey := pullRequestStateSyncDedupeKey(prID)
+	providerUpdatedAt := now.UTC()
+	prMock.ExpectQuery("WITH applied AS").
+		WithArgs(pgx.NamedArgs{
+			"org_id":              orgID,
+			"pull_request_id":     prID,
+			"head_sha":            "head-sha",
+			"source":              models.PullRequestCheckSourceCheckRun,
+			"external_key":        "backend test",
+			"name":                "Backend Test",
+			"category":            models.PullRequestCheckCategoryTest,
+			"status":              models.PullRequestCheckStatusPassed,
+			"provider":            "github-actions",
+			"details_url":         "https://github.com/test/checks/101",
+			"summary":             "Tests passed",
+			"provider_event_id":   "delivery-check-101",
+			"provider_sequence":   int64(101),
+			"provider_updated_at": providerUpdatedAt,
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+	dedupeKey := fmt.Sprintf("%s:%s", prHealthRebuildJobType, prID.String())
 	jobMock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgx.NamedArgs{
 			"org_id":     orgID,
 			"queue":      prHealthSyncQueue,
-			"job_type":   prHealthSyncJobType,
+			"job_type":   prHealthRebuildJobType,
 			"payload":    pgxmock.AnyArg(),
 			"priority":   4,
 			"dedupe_key": &dedupeKey,
 			"run_at":     pgxmock.AnyArg(),
 		}).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
-	event := CheckRunEvent{Action: "completed"}
+	conclusion := "success"
+	event := CheckRunEvent{Action: "completed", DeliveryID: "delivery-check-101"}
 	event.Repository.FullName = "testorg/testrepo"
+	event.CheckRun.ID = 101
+	event.CheckRun.Name = "Backend Test"
+	event.CheckRun.Status = "completed"
+	event.CheckRun.Conclusion = &conclusion
+	event.CheckRun.HeadSHA = "head-sha"
+	event.CheckRun.DetailsURL = "https://github.com/test/checks/101"
+	event.CheckRun.CompletedAt = &providerUpdatedAt
+	event.CheckRun.App.Slug = "github-actions"
+	event.CheckRun.Output.Title = "Tests passed"
 	event.CheckRun.PullRequests = append(event.CheckRun.PullRequests, struct {
 		Number int `json:"number"`
 		Base   struct {
@@ -2598,9 +2618,9 @@ func TestHandleCheckRunEvent_CompletedEnqueuesHealthSync(t *testing.T) {
 	}{Number: 42})
 
 	err := svc.HandleCheckRunEvent(context.Background(), event)
-	require.NoError(t, err, "HandleCheckRunEvent should enqueue a health sync for completed check runs")
+	require.NoError(t, err, "HandleCheckRunEvent should project completed check runs")
 	require.NoError(t, prMock.ExpectationsWereMet(), "all pull request expectations should be met")
-	require.NoError(t, jobMock.ExpectationsWereMet(), "check run completion should enqueue a scoped health sync")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "check run completion should enqueue a DB-only health rebuild")
 }
 
 func TestHandleStatusEvent_EnqueuesHealthSyncForHeadSHA(t *testing.T) {
@@ -2619,18 +2639,40 @@ func TestHandleStatusEvent_EnqueuesHealthSyncForHeadSHA(t *testing.T) {
 		logger:       zerolog.Nop(),
 	}
 
+	prRow := handlerPRRow(prID, &sessionID, orgID, "testorg/testrepo", now)
+	headSHA := "head-sha"
+	prRow[12] = &headSHA
 	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE org_id = .+ AND github_repo = .+ AND head_sha = .+ AND status = 'open'").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": "testorg/testrepo", "head_sha": "head-sha"}).
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
-				AddRow(handlerPRRow(prID, &sessionID, orgID, "testorg/testrepo", now)...),
+				AddRow(prRow...),
 		)
-	dedupeKey := pullRequestStateSyncDedupeKey(prID)
+	providerUpdatedAt := now.UTC()
+	prMock.ExpectQuery("WITH applied AS").
+		WithArgs(pgx.NamedArgs{
+			"org_id":              orgID,
+			"pull_request_id":     prID,
+			"head_sha":            "head-sha",
+			"source":              models.PullRequestCheckSourceCommitStatus,
+			"external_key":        "ci/circleci: frontend_lint_format_license",
+			"name":                "ci/circleci: frontend_lint_format_license",
+			"category":            models.PullRequestCheckCategoryLint,
+			"status":              models.PullRequestCheckStatusFailed,
+			"provider":            "circleci",
+			"details_url":         "https://circleci.com/build/202",
+			"summary":             "Lint failed",
+			"provider_event_id":   "delivery-status-202",
+			"provider_sequence":   int64(202),
+			"provider_updated_at": providerUpdatedAt,
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+	dedupeKey := fmt.Sprintf("%s:%s", prHealthRebuildJobType, prID.String())
 	jobMock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgx.NamedArgs{
 			"org_id":     orgID,
 			"queue":      prHealthSyncQueue,
-			"job_type":   prHealthSyncJobType,
+			"job_type":   prHealthRebuildJobType,
 			"payload":    pgxmock.AnyArg(),
 			"priority":   4,
 			"dedupe_key": &dedupeKey,
@@ -2639,17 +2681,22 @@ func TestHandleStatusEvent_EnqueuesHealthSyncForHeadSHA(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
 	event := StatusEvent{
-		State:      "failure",
-		SHA:        "head-sha",
-		Context:    "ci/circleci: frontend_lint_format_license",
-		OwnerOrgID: &orgID,
+		ID:          202,
+		State:       "failure",
+		SHA:         "head-sha",
+		Context:     "ci/circleci: frontend_lint_format_license",
+		TargetURL:   "https://circleci.com/build/202",
+		Description: "Lint failed",
+		UpdatedAt:   &providerUpdatedAt,
+		OwnerOrgID:  &orgID,
+		DeliveryID:  "delivery-status-202",
 	}
 	event.Repository.FullName = "testorg/testrepo"
 
 	err := svc.HandleStatusEvent(context.Background(), event)
-	require.NoError(t, err, "HandleStatusEvent should enqueue a health sync for matching open PR heads")
+	require.NoError(t, err, "HandleStatusEvent should project statuses for matching open PR heads")
 	require.NoError(t, prMock.ExpectationsWereMet(), "all pull request expectations should be met")
-	require.NoError(t, jobMock.ExpectationsWereMet(), "status event should enqueue a scoped health sync")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "status event should enqueue a DB-only health rebuild")
 }
 
 func TestHandleCheckSuiteEvent_PRNotFound(t *testing.T) {
