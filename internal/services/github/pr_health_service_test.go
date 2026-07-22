@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -370,7 +371,8 @@ func (a pullRequestHealthSummaryArg) Match(value interface{}) bool {
 	}
 	if summary.FailingTestCount != a.wantFailingTestCount ||
 		summary.NeedsAgentAction != a.wantNeedsAgentAction ||
-		summary.ChecksConfirmed != a.wantChecksConfirmed {
+		summary.ChecksConfirmed != a.wantChecksConfirmed ||
+		summary.CheckSetComplete == nil || !*summary.CheckSetComplete {
 		return false
 	}
 	for _, check := range summary.Checks {
@@ -417,6 +419,7 @@ func TestPRServiceBuildPullRequestHealthResponseUsesCurrentSummaryForRepairActio
 			"summary_preview_json",
 			"enrichment_status",
 			"enriched_at",
+			"check_state_version",
 			"created_at",
 			"updated_at",
 		}).AddRow(
@@ -429,6 +432,7 @@ func TestPRServiceBuildPullRequestHealthResponseUsesCurrentSummaryForRepairActio
 			summaryJSON,
 			models.PullRequestHealthEnrichmentStatusNotRequested,
 			nil,
+			int64(0),
 			now,
 			now,
 		))
@@ -539,6 +543,7 @@ func TestPRServiceBuildPullRequestHealthResponseIncludesActiveRepairs(t *testing
 			"summary_preview_json",
 			"enrichment_status",
 			"enriched_at",
+			"check_state_version",
 			"created_at",
 			"updated_at",
 		}).AddRow(
@@ -551,6 +556,7 @@ func TestPRServiceBuildPullRequestHealthResponseIncludesActiveRepairs(t *testing
 			summaryJSON,
 			models.PullRequestHealthEnrichmentStatusReady,
 			nil,
+			int64(0),
 			now,
 			now,
 		))
@@ -633,7 +639,7 @@ func TestPRServiceBuildPullRequestHealthResponseLoadsSnapshotDetails(t *testing.
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(4), "head-ready", "base-ready", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+			pullRequestID, orgID, int64(4), "head-ready", "base-ready", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, int64(0), now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_snapshots WHERE org_id = .+ AND pull_request_id = .+ AND version = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(4)}).
@@ -696,7 +702,7 @@ func TestPRServiceBuildPullRequestHealthResponseNormalizesLegacyCheckStatuses(t 
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(4), "head-ready", "base-ready", legacySummaryJSON, legacySummaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, now, now,
+			pullRequestID, orgID, int64(4), "head-ready", "base-ready", legacySummaryJSON, legacySummaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
 		))
 
 	service := &PRService{
@@ -738,13 +744,14 @@ func TestPRServiceBuildPullRequestHealthResponseRespectsStoredChecksConfirmed(t 
 		"failing_test_count":0,
 		"needs_agent_action":false,
 		"checks_confirmed":false,
-		"checks":[]
+		"check_set_complete":false,
+		"checks":[{"name":"unit tests","category":"test","status":"passed"}]
 	}`)
 
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(2), "head-new", "base-new", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, now, now,
+			pullRequestID, orgID, int64(2), "head-new", "base-new", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
 		))
 
 	service := &PRService{
@@ -791,7 +798,7 @@ func TestPRServiceBuildPullRequestHealthResponseMarksConfirmedZeroChecksMergeabl
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(4), "head-ready", "base-ready", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, now, now,
+			pullRequestID, orgID, int64(4), "head-ready", "base-ready", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
 		))
 
 	service := &PRService{
@@ -856,7 +863,7 @@ func TestPRServiceGetPullRequestHealthEnqueuesSyncAndEnrichment(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(3), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, now, now,
+			pullRequestID, orgID, int64(3), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
 		))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgx.NamedArgs{
@@ -1014,6 +1021,185 @@ func TestPullRequestStateSyncDedupeKey(t *testing.T) {
 	)
 }
 
+func TestEnqueuePullRequestHealthRebuildChainsAfterRunningJob(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	runningJobID := uuid.New()
+	baseDedupeKey := fmt.Sprintf("%s:%s", prHealthRebuildJobType, prID.String())
+	followUpDedupeKey := fmt.Sprintf("%s:after:%s", baseDedupeKey, runningJobID.String())
+	payload := pgxmock.AnyArg()
+
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "queue": prHealthSyncQueue, "job_type": prHealthRebuildJobType,
+			"payload": payload, "priority": 4, "dedupe_key": &baseDedupeKey, "run_at": pgxmock.AnyArg(),
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}))
+	mock.ExpectQuery("SELECT id, status[\\s\\S]+FROM jobs").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "queue": prHealthSyncQueue, "dedupe_key": baseDedupeKey}).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "status"}).AddRow(runningJobID, models.JobStatusRunning))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "queue": prHealthSyncQueue, "job_type": prHealthRebuildJobType,
+			"payload": payload, "priority": 4, "dedupe_key": &followUpDedupeKey, "run_at": pgxmock.AnyArg(),
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	service := &PRService{
+		jobs:   db.NewJobStore(mock),
+		logger: zerolog.New(io.Discard),
+	}
+	err = service.enqueuePullRequestHealthRebuild(context.Background(), models.PullRequest{ID: prID, OrgID: orgID})
+	require.NoError(t, err, "running rebuild should receive one deduplicated successor")
+	require.NoError(t, mock.ExpectationsWereMet(), "late webhook should enqueue behind the running rebuild")
+}
+
+func TestMergeProjectedCheckSummaries(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		existing []models.PullRequestCheckSummary
+		states   []models.PullRequestCheckState
+		expected []models.PullRequestCheckSummary
+	}{
+		{
+			name: "replaces an existing check without dropping unrelated checks",
+			existing: []models.PullRequestCheckSummary{
+				{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPending, Provider: "github-actions"},
+				{Name: "Lint", Category: models.PullRequestCheckCategoryLint, Status: models.PullRequestCheckStatusPassed},
+			},
+			states: []models.PullRequestCheckState{
+				{Name: "backend test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusFailed, Provider: "github-actions"},
+			},
+			expected: []models.PullRequestCheckSummary{
+				{Name: "backend test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusFailed, Provider: "github-actions"},
+				{Name: "Lint", Category: models.PullRequestCheckCategoryLint, Status: models.PullRequestCheckStatusPassed},
+			},
+		},
+		{
+			name: "appends a newly observed check",
+			existing: []models.PullRequestCheckSummary{
+				{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed},
+			},
+			states: []models.PullRequestCheckState{
+				{Name: "Deploy Preview", Category: models.PullRequestCheckCategoryDeploy, Status: models.PullRequestCheckStatusPending},
+			},
+			expected: []models.PullRequestCheckSummary{
+				{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed},
+				{Name: "Deploy Preview", Category: models.PullRequestCheckCategoryDeploy, Status: models.PullRequestCheckStatusPending},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := mergeProjectedCheckSummaries(tt.existing, tt.states)
+			require.Equal(t, tt.expected, actual, "projected checks should update the aggregate without losing unrelated state")
+		})
+	}
+}
+
+func TestRebuildProjectedHealthSummary(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		initial  models.PullRequestHealthSummary
+		state    models.PullRequestCheckState
+		expected models.PullRequestHealthSummary
+	}{
+		{
+			name: "failed test becomes a confirmed repairable blocker",
+			initial: models.PullRequestHealthSummary{
+				MergeState: models.PullRequestMergeStateClean,
+				Checks:     []models.PullRequestCheckSummary{{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed}},
+			},
+			state: models.PullRequestCheckState{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusFailed},
+			expected: models.PullRequestHealthSummary{
+				MergeState: models.PullRequestMergeStateClean, FailingTestCount: 1, NeedsAgentAction: true, ChecksConfirmed: true,
+				Checks: []models.PullRequestCheckSummary{{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusFailed}},
+			},
+		},
+		{
+			name: "pending test keeps checks unconfirmed",
+			initial: models.PullRequestHealthSummary{
+				MergeState: models.PullRequestMergeStateClean,
+				Checks:     []models.PullRequestCheckSummary{{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed}},
+			},
+			state: models.PullRequestCheckState{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPending},
+			expected: models.PullRequestHealthSummary{
+				MergeState: models.PullRequestMergeStateClean, ChecksConfirmed: false,
+				Checks: []models.PullRequestCheckSummary{{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPending}},
+			},
+		},
+		{
+			name: "new passing check invalidates authoritative membership",
+			initial: models.PullRequestHealthSummary{
+				MergeState: models.PullRequestMergeStateClean, ChecksConfirmed: false, CheckSetComplete: boolPtr(true),
+			},
+			state: models.PullRequestCheckState{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed},
+			expected: models.PullRequestHealthSummary{
+				MergeState: models.PullRequestMergeStateClean, ChecksConfirmed: false, CheckSetComplete: boolPtr(false),
+				Checks: []models.PullRequestCheckSummary{{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed}},
+			},
+		},
+		{
+			name: "known check can complete an authoritative set",
+			initial: models.PullRequestHealthSummary{
+				MergeState: models.PullRequestMergeStateClean, ChecksConfirmed: false, CheckSetComplete: boolPtr(true),
+				Checks: []models.PullRequestCheckSummary{{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPending}},
+			},
+			state: models.PullRequestCheckState{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed},
+			expected: models.PullRequestHealthSummary{
+				MergeState: models.PullRequestMergeStateClean, ChecksConfirmed: true, CheckSetComplete: boolPtr(true),
+				Checks: []models.PullRequestCheckSummary{{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed}},
+			},
+		},
+		{
+			name: "partial set stays unconfirmed after known check completes",
+			initial: models.PullRequestHealthSummary{
+				MergeState: models.PullRequestMergeStateClean, ChecksConfirmed: false, CheckSetComplete: boolPtr(false),
+				Checks: []models.PullRequestCheckSummary{{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPending}},
+			},
+			state: models.PullRequestCheckState{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed},
+			expected: models.PullRequestHealthSummary{
+				MergeState: models.PullRequestMergeStateClean, ChecksConfirmed: false, CheckSetComplete: boolPtr(false),
+				Checks: []models.PullRequestCheckSummary{{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := rebuildProjectedHealthSummary(tt.initial, []models.PullRequestCheckState{tt.state})
+			require.Equal(t, tt.expected, actual, "projected rebuild should derive aggregate health entirely from merged check state")
+		})
+	}
+}
+
+func TestLatestProjectedCheckStateVersion(t *testing.T) {
+	t.Parallel()
+
+	states := []models.PullRequestCheckState{
+		{Name: "older", ProjectionVersion: 7},
+		{Name: "newest", ProjectionVersion: 12},
+		{Name: "middle", ProjectionVersion: 9},
+	}
+
+	require.Equal(t, int64(12), latestProjectedCheckStateVersion(states), "projected rebuild should persist the newest applied projection version")
+}
+
 func TestPRServiceGetPullRequestHealthEnqueuesFollowUpWhenInlineMergeabilityPending(t *testing.T) {
 	t.Parallel()
 
@@ -1070,10 +1256,15 @@ func TestPRServiceGetPullRequestHealthEnqueuesFollowUpWhenInlineMergeabilityPend
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
+	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
+	expectCheckStateReconciliation(mock, orgID, pullRequestID, "head-pending", 1)
 	mock.ExpectBegin()
+	mock.ExpectExec("SELECT id[\\s\\S]+FROM pull_requests[\\s\\S]+FOR UPDATE").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
@@ -1102,6 +1293,7 @@ func TestPRServiceGetPullRequestHealthEnqueuesFollowUpWhenInlineMergeabilityPend
 			"summary_preview_json": pgxmock.AnyArg(),
 			"enrichment_status":    models.PullRequestHealthEnrichmentStatusNotRequested,
 			"enriched_at":          (*time.Time)(nil),
+			"check_state_version":  int64(0),
 			"created_at":           pgxmock.AnyArg(),
 			"updated_at":           pgxmock.AnyArg(),
 		}).
@@ -1117,6 +1309,7 @@ func TestPRServiceGetPullRequestHealthEnqueuesFollowUpWhenInlineMergeabilityPend
 			"failing_test_count": 0,
 			"needs_agent_action": false,
 			"version":            int64(1),
+			"mark_github_synced": true,
 		}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
@@ -1143,7 +1336,7 @@ func TestPRServiceGetPullRequestHealthEnqueuesFollowUpWhenInlineMergeabilityPend
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(1), headSHA, baseSHA, pendingSummaryJSON, pendingSummaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, now, now,
+			pullRequestID, orgID, int64(1), headSHA, baseSHA, pendingSummaryJSON, pendingSummaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
 		))
 
 	service := &PRService{
@@ -1203,10 +1396,15 @@ func TestPRServiceSyncPullRequestState(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
+	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
+	expectCheckStateReconciliation(mock, orgID, pullRequestID, "head-sync", 2)
 	mock.ExpectBegin()
+	mock.ExpectExec("SELECT id[\\s\\S]+FROM pull_requests[\\s\\S]+FOR UPDATE").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
@@ -1235,6 +1433,7 @@ func TestPRServiceSyncPullRequestState(t *testing.T) {
 			"summary_preview_json": pgxmock.AnyArg(),
 			"enrichment_status":    models.PullRequestHealthEnrichmentStatusNotRequested,
 			"enriched_at":          (*time.Time)(nil),
+			"check_state_version":  int64(0),
 			"created_at":           pgxmock.AnyArg(),
 			"updated_at":           pgxmock.AnyArg(),
 		}).
@@ -1250,6 +1449,7 @@ func TestPRServiceSyncPullRequestState(t *testing.T) {
 			"failing_test_count": 1,
 			"needs_agent_action": true,
 			"version":            int64(1),
+			"mark_github_synced": true,
 		}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
@@ -1321,10 +1521,15 @@ func TestPRServiceSyncPullRequestStateIncludesCommitStatuses(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
+	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
+	expectCheckStateReconciliation(mock, orgID, pullRequestID, "head-status", 2)
 	mock.ExpectBegin()
+	mock.ExpectExec("SELECT id[\\s\\S]+FROM pull_requests[\\s\\S]+FOR UPDATE").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
@@ -1353,6 +1558,7 @@ func TestPRServiceSyncPullRequestStateIncludesCommitStatuses(t *testing.T) {
 			"summary_preview_json": pgxmock.AnyArg(),
 			"enrichment_status":    models.PullRequestHealthEnrichmentStatusNotRequested,
 			"enriched_at":          (*time.Time)(nil),
+			"check_state_version":  int64(0),
 			"created_at":           pgxmock.AnyArg(),
 			"updated_at":           pgxmock.AnyArg(),
 		}).
@@ -1368,6 +1574,7 @@ func TestPRServiceSyncPullRequestStateIncludesCommitStatuses(t *testing.T) {
 			"failing_test_count": 0,
 			"needs_agent_action": true,
 			"version":            int64(1),
+			"mark_github_synced": true,
 		}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
@@ -1431,6 +1638,7 @@ func TestPRServiceSyncPullRequestStateSelfHealsMergedDrift(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
+	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
 	// Self-heal must run UpdateStatus("merged"). The merged-status branch sets
 	// merged_at = now() in the same statement (see PullRequestStore.UpdateStatus).
 	mock.ExpectExec("UPDATE pull_requests SET status = .+ merged_at = now").
@@ -1495,6 +1703,7 @@ func TestPRServiceSyncPullRequestStateSelfHealsClosedWithoutMergeDrift(t *testin
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
+	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
 	mock.ExpectExec("UPDATE pull_requests SET status").
 		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID, "status": models.PullRequestStatusClosed}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -1567,10 +1776,11 @@ func TestPRServiceSyncPullRequestStateSkipsIndeterminateMergeRegression(t *testi
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
+	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(3), "head-flap", "base-flap", priorJSON, priorJSON, models.PullRequestHealthEnrichmentStatusReady, &now, now, now,
+			pullRequestID, orgID, int64(3), "head-flap", "base-flap", priorJSON, priorJSON, models.PullRequestHealthEnrichmentStatusReady, &now, int64(0), now, now,
 		))
 
 	service := &PRService{
@@ -1625,10 +1835,15 @@ func TestPRServiceSyncPullRequestStatePersistsMergeabilityPendingAndRequestsRetr
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
+	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
+	expectCheckStateReconciliation(mock, orgID, pullRequestID, "head-pending", 1)
 	mock.ExpectBegin()
+	mock.ExpectExec("SELECT id[\\s\\S]+FROM pull_requests[\\s\\S]+FOR UPDATE").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
@@ -1657,6 +1872,7 @@ func TestPRServiceSyncPullRequestStatePersistsMergeabilityPendingAndRequestsRetr
 			"summary_preview_json": pgxmock.AnyArg(),
 			"enrichment_status":    models.PullRequestHealthEnrichmentStatusNotRequested,
 			"enriched_at":          (*time.Time)(nil),
+			"check_state_version":  int64(0),
 			"created_at":           pgxmock.AnyArg(),
 			"updated_at":           pgxmock.AnyArg(),
 		}).
@@ -1672,6 +1888,7 @@ func TestPRServiceSyncPullRequestStatePersistsMergeabilityPendingAndRequestsRetr
 			"failing_test_count": 0,
 			"needs_agent_action": false,
 			"version":            int64(1),
+			"mark_github_synced": true,
 		}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
@@ -1747,10 +1964,11 @@ func TestPRServiceSyncPullRequestStateSkipsIndeterminateTestRegression(t *testin
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
+	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(4), "head-rerun", "base-rerun", priorJSON, priorJSON, models.PullRequestHealthEnrichmentStatusReady, &now, now, now,
+			pullRequestID, orgID, int64(4), "head-rerun", "base-rerun", priorJSON, priorJSON, models.PullRequestHealthEnrichmentStatusReady, &now, int64(0), now, now,
 		))
 
 	service := &PRService{
@@ -1877,7 +2095,7 @@ func TestPRServiceStartPullRequestRepairBlocksWhenInFlight(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+			pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, int64(0), now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_snapshots WHERE org_id = .+ AND pull_request_id = .+ AND version = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(5)}).
@@ -1944,7 +2162,7 @@ func TestPRServiceStartPullRequestRepairReturnsBusyWhenCanonicalSessionRunning(t
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+			pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, int64(0), now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_snapshots WHERE org_id = .+ AND pull_request_id = .+ AND version = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(5)}).
@@ -2018,7 +2236,7 @@ func TestPRServiceCompletePullRequestRepairRunPublishesUpdate(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+			pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, int64(0), now, now,
 		))
 
 	service := &PRService{
@@ -2067,7 +2285,7 @@ func TestPRServiceCompletePullRequestRepairRunClearsRevisionContextWhenNoActiveR
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(6), "head-clean", "base-clean", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+			pullRequestID, orgID, int64(6), "head-clean", "base-clean", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, int64(0), now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM pull_request_repair_runs").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "head_sha": "head-clean"}).
@@ -2115,7 +2333,7 @@ func TestPRServiceCompletePullRequestRepairRunKeepsRevisionContextForActiveRepai
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(6), "head-blocked", "base-blocked", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+			pullRequestID, orgID, int64(6), "head-blocked", "base-blocked", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, int64(0), now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM pull_request_repair_runs").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "head_sha": "head-blocked"}).
@@ -2763,7 +2981,7 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 		mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 			WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-				pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, now, now,
+				pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
 			))
 
 		resp, err := service.GetPullRequestHealth(context.Background(), orgID, pullRequestID)
@@ -2828,10 +3046,15 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 			WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 				repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 			))
+		expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
 		mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 			WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
+		expectCheckStateReconciliation(mock, orgID, pullRequestID, "head-inline", 1)
 		mock.ExpectBegin()
+		mock.ExpectExec("SELECT id[\\s\\S]+FROM pull_requests[\\s\\S]+FOR UPDATE").
+			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+			WillReturnResult(pgxmock.NewResult("SELECT", 1))
 		mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 			WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
@@ -2860,6 +3083,7 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 				"summary_preview_json": pgxmock.AnyArg(),
 				"enrichment_status":    models.PullRequestHealthEnrichmentStatusNotRequested,
 				"enriched_at":          (*time.Time)(nil),
+				"check_state_version":  int64(0),
 				"created_at":           pgxmock.AnyArg(),
 				"updated_at":           pgxmock.AnyArg(),
 			}).
@@ -2875,6 +3099,7 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 				"failing_test_count": 1,
 				"needs_agent_action": true,
 				"version":            int64(1),
+				"mark_github_synced": true,
 			}).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 		mock.ExpectCommit()
@@ -2891,7 +3116,7 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 		mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 			WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-				pullRequestID, orgID, int64(1), "head-inline", "base-inline", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, now, now,
+				pullRequestID, orgID, int64(1), "head-inline", "base-inline", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
 			))
 
 		service := &PRService{
@@ -2975,7 +3200,7 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 		mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 			WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-				pullRequestID, orgID, int64(5), "head", "base", []byte(`{"merge_state":`), []byte(`{"merge_state":`), models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+				pullRequestID, orgID, int64(5), "head", "base", []byte(`{"merge_state":`), []byte(`{"merge_state":`), models.PullRequestHealthEnrichmentStatusReady, nil, int64(0), now, now,
 			))
 		mock.ExpectQuery("SELECT .+ FROM pull_request_health_snapshots WHERE org_id = .+ AND pull_request_id = .+ AND version = .+").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(5)}).
@@ -3094,7 +3319,7 @@ func TestPRServiceReconcileAndRepairBranchCoverage(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 					WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 					WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-						pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+						pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, int64(0), now, now,
 					))
 				mock.ExpectQuery("SELECT .+ FROM pull_request_health_snapshots WHERE org_id = .+ AND pull_request_id = .+ AND version = .+").
 					WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(5)}).
@@ -3145,7 +3370,7 @@ func TestPRServiceReconcileAndRepairBranchCoverage(t *testing.T) {
 		mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 			WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-				pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+				pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, int64(0), now, now,
 			))
 		mock.ExpectQuery("SELECT .+ FROM pull_request_health_snapshots WHERE org_id = .+ AND pull_request_id = .+ AND version = .+").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(5)}).
@@ -3253,7 +3478,36 @@ func TestPRServiceDirectErrorBranches(t *testing.T) {
 
 var prHealthCurrentTestColumns = []string{
 	"pull_request_id", "org_id", "version", "head_sha", "base_sha", "summary_json",
-	"summary_preview_json", "enrichment_status", "enriched_at", "created_at", "updated_at",
+	"summary_preview_json", "enrichment_status", "enriched_at", "check_state_version", "created_at", "updated_at",
+}
+
+func expectReserveCheckStateVersion(mock pgxmock.PgxPoolIface, orgID, pullRequestID uuid.UUID, version int64) {
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id[\\s\\S]+FOR UPDATE").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(pullRequestID))
+	mock.ExpectQuery("SELECT nextval").
+		WillReturnRows(pgxmock.NewRows([]string{"version"}).AddRow(version))
+	mock.ExpectCommit()
+}
+
+func expectCheckStateReconciliation(mock pgxmock.PgxPoolIface, orgID, pullRequestID uuid.UUID, headSHA string, stateCount int) {
+	mock.ExpectBegin()
+	mock.ExpectExec("DELETE FROM pull_request_check_states").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "head_sha": headSHA}).
+		WillReturnResult(pgxmock.NewResult("DELETE", 0))
+	for range stateCount {
+		mock.ExpectExec("INSERT INTO pull_request_check_states").
+			WithArgs(pgx.NamedArgs{
+				"org_id": pgxmock.AnyArg(), "pull_request_id": pgxmock.AnyArg(), "head_sha": pgxmock.AnyArg(),
+				"source": pgxmock.AnyArg(), "external_key": pgxmock.AnyArg(), "name": pgxmock.AnyArg(),
+				"category": pgxmock.AnyArg(), "status": pgxmock.AnyArg(), "provider": pgxmock.AnyArg(),
+				"details_url": pgxmock.AnyArg(), "summary": pgxmock.AnyArg(), "provider_event_id": pgxmock.AnyArg(),
+				"provider_sequence": pgxmock.AnyArg(), "provider_updated_at": pgxmock.AnyArg(), "projection_version": pgxmock.AnyArg(),
+			}).
+			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	}
+	mock.ExpectCommit()
 }
 
 var prHealthSnapshotTestColumns = []string{

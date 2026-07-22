@@ -239,6 +239,32 @@ func (s *JobStore) HasActiveByDedupeKey(ctx context.Context, orgID uuid.UUID, qu
 	return active, nil
 }
 
+type ActiveJobRef struct {
+	ID     uuid.UUID
+	Status models.JobStatus
+}
+
+// GetActiveByDedupeKey returns the pending or running job that currently owns
+// a queue dedupe key. The partial unique index guarantees at most one row.
+func (s *JobStore) GetActiveByDedupeKey(ctx context.Context, orgID uuid.UUID, queue, dedupeKey string) (ActiveJobRef, error) {
+	var active ActiveJobRef
+	err := s.db.QueryRow(ctx, `
+		SELECT id, status
+		FROM jobs
+		WHERE org_id = @org_id
+		  AND queue = @queue
+		  AND dedupe_key = @dedupe_key
+		  AND status IN ('pending', 'running')`, pgx.NamedArgs{
+		"org_id":     orgID,
+		"queue":      queue,
+		"dedupe_key": dedupeKey,
+	}).Scan(&active.ID, &active.Status)
+	if err != nil {
+		return ActiveJobRef{}, err
+	}
+	return active, nil
+}
+
 // QueueChangesetPRCreation atomically reserves a changeset's PR slot and
 // inserts its open_pr job. A false queued result means another caller already
 // owns the slot or PR creation has completed; it is not an error.
