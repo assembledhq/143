@@ -395,14 +395,28 @@ func CodeReviewLowRiskLaneApplies(lane CodeReviewLowRiskLane, categories []strin
 }
 
 type CodeReviewAgentRoster struct {
-	Reviewers             []AgentType     `json:"reviewers"`
-	Orchestrator          AgentType       `json:"orchestrator"`
-	ReviewerModels        []string        `json:"reviewer_models,omitempty"`
-	OrchestratorModel     *string         `json:"orchestrator_model,omitempty"`
-	ReasoningEffort       ReasoningEffort `json:"reasoning_effort,omitempty"`
-	DisagreementBlocks    bool            `json:"disagreement_blocks"`
-	RequireReviewerQuorum int             `json:"require_reviewer_quorum"`
-	TimeoutSeconds        int             `json:"timeout_seconds"`
+	Reviewers                []AgentType       `json:"reviewers"`
+	Orchestrator             AgentType         `json:"orchestrator"`
+	ReviewerModels           []string          `json:"reviewer_models,omitempty"`
+	ReviewerReasoningEfforts []ReasoningEffort `json:"reviewer_reasoning_efforts,omitempty"`
+	OrchestratorModel        *string           `json:"orchestrator_model,omitempty"`
+	ReasoningEffort          ReasoningEffort   `json:"reasoning_effort,omitempty"`
+	DisagreementBlocks       bool              `json:"disagreement_blocks"`
+	RequireReviewerQuorum    int               `json:"require_reviewer_quorum"`
+	TimeoutSeconds           int               `json:"timeout_seconds"`
+}
+
+// ReviewerReasoningEffort returns the explicit effort for one reviewer. The
+// legacy roster-wide value remains the fallback for policies saved before
+// reviewer_reasoning_efforts was introduced.
+func (r CodeReviewAgentRoster) ReviewerReasoningEffort(index int) ReasoningEffort {
+	if index >= 0 && index < len(r.ReviewerReasoningEfforts) && r.ReviewerReasoningEfforts[index] != "" {
+		return r.ReviewerReasoningEfforts[index]
+	}
+	if r.ReasoningEffort != "" {
+		return r.ReasoningEffort
+	}
+	return ReasoningEffortHigh
 }
 
 type CodeReviewPolicyConfig struct {
@@ -504,14 +518,15 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 			},
 		},
 		AgentRoster: CodeReviewAgentRoster{
-			Reviewers:             []AgentType{AgentTypeCodex, AgentTypeClaudeCode},
-			Orchestrator:          AgentTypeOpenCode,
-			ReviewerModels:        []string{DefaultCodexModel, DefaultClaudeCodeModel},
-			OrchestratorModel:     strPtr(OpenCodeModelGPT55),
-			ReasoningEffort:       ReasoningEffortHigh,
-			DisagreementBlocks:    true,
-			RequireReviewerQuorum: 2,
-			TimeoutSeconds:        1800,
+			Reviewers:                []AgentType{AgentTypeCodex, AgentTypeClaudeCode},
+			Orchestrator:             AgentTypeOpenCode,
+			ReviewerModels:           []string{DefaultCodexModel, DefaultClaudeCodeModel},
+			ReviewerReasoningEfforts: []ReasoningEffort{ReasoningEffortHigh, ReasoningEffortHigh},
+			OrchestratorModel:        strPtr(OpenCodeModelGPT55),
+			ReasoningEffort:          ReasoningEffortHigh,
+			DisagreementBlocks:       true,
+			RequireReviewerQuorum:    2,
+			TimeoutSeconds:           1800,
 		},
 		InlineCommentLimit: 4,
 	}
@@ -578,6 +593,12 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 		defaults.AgentRoster = config.AgentRoster
 		if defaults.AgentRoster.ReasoningEffort == "" {
 			defaults.AgentRoster.ReasoningEffort = ReasoningEffortHigh
+		}
+		if len(defaults.AgentRoster.ReviewerReasoningEfforts) == 0 {
+			defaults.AgentRoster.ReviewerReasoningEfforts = make([]ReasoningEffort, len(defaults.AgentRoster.Reviewers))
+			for i := range defaults.AgentRoster.ReviewerReasoningEfforts {
+				defaults.AgentRoster.ReviewerReasoningEfforts[i] = defaults.AgentRoster.ReasoningEffort
+			}
 		}
 	}
 	if config.InlineCommentLimit != 0 {
@@ -647,15 +668,25 @@ func (c CodeReviewPolicyConfig) Validate() error {
 	if len(c.AgentRoster.Reviewers) == 0 {
 		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, "at least one reviewer agent is required")
 	}
-	for _, agentType := range c.AgentRoster.Reviewers {
+	if len(c.AgentRoster.ReviewerReasoningEfforts) > 0 && len(c.AgentRoster.ReviewerReasoningEfforts) != len(c.AgentRoster.Reviewers) {
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, "reviewer_reasoning_efforts must match reviewer count")
+	}
+	for idx, agentType := range c.AgentRoster.Reviewers {
 		if err := agentType.Validate(); err != nil {
 			return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, err.Error())
 		}
 		if !AgentSupportsNativeReview(agentType) {
 			return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("agent %q does not support native review", agentType))
 		}
-		if agentType.SupportsReasoningEffort() && !agentType.SupportsReasoningEffortLevel(c.AgentRoster.ReasoningEffort) {
-			return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("reasoning effort %q is not supported by reviewer %q", c.AgentRoster.ReasoningEffort, agentType))
+		reasoningEffort := c.AgentRoster.ReviewerReasoningEffort(idx)
+		if len(c.AgentRoster.ReviewerReasoningEfforts) > 0 && c.AgentRoster.ReviewerReasoningEfforts[idx] == "" {
+			return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("reviewer reasoning effort %d must be non-empty", idx+1))
+		}
+		if err := reasoningEffort.Validate(); err != nil {
+			return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("invalid reviewer reasoning effort %d: %v", idx+1, err))
+		}
+		if agentType.SupportsReasoningEffort() && !agentType.SupportsReasoningEffortLevel(reasoningEffort) {
+			return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("reasoning effort %q is not supported by reviewer %q", reasoningEffort, agentType))
 		}
 	}
 	if len(c.AgentRoster.ReviewerModels) > 0 && len(c.AgentRoster.ReviewerModels) != len(c.AgentRoster.Reviewers) {

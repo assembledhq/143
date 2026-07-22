@@ -936,6 +936,7 @@ type SessionThread struct {
 	OrgID                 uuid.UUID                   `db:"org_id" json:"org_id"`
 	AgentType             AgentType                   `db:"agent_type" json:"agent_type"`
 	ModelOverride         *string                     `db:"model_override" json:"model_override,omitempty"`
+	ReasoningEffort       *ReasoningEffort            `db:"reasoning_effort" json:"reasoning_effort,omitempty"`
 	Label                 string                      `db:"label" json:"label"`
 	Instructions          *string                     `db:"instructions" json:"instructions,omitempty"`
 	FileScope             []string                    `db:"file_scope" json:"file_scope,omitempty"`

@@ -9729,6 +9729,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				threadOpts := &agent.ContinueSessionOptions{
 					AgentType:            thread.AgentType,
 					ModelOverride:        thread.ModelOverride,
+					ReasoningEffort:      thread.ReasoningEffort,
 					ThreadAgentSessionID: thread.AgentSessionID,
 					ResultAgentSessionID: &resultAgentSessionID,
 					HumanInputRequestID:  humanInputRequestID,
