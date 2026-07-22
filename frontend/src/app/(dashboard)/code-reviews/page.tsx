@@ -1412,7 +1412,7 @@ function AdvancedPolicyControls({ children, forceOpen, onOpened }: { children: R
     <Collapsible open={open || forceOpen} onOpenChange={(next) => { setOpen(next); if (next) onOpened(); }} className="rounded-md border border-border">
       <div className="flex items-center gap-1 border-border pr-3">
         <CollapsibleTrigger asChild>
-          <Button variant="ghost" className="group h-auto min-w-0 flex-1 justify-between rounded-md p-4 text-left sm:h-auto" aria-label="Advanced controls">
+          <Button variant="ghost" className="group h-auto min-w-0 flex-1 justify-between whitespace-normal rounded-md p-4 text-left sm:h-auto" aria-label="Advanced controls">
             <span className="min-w-0">
               <span className="block text-sm font-medium text-foreground">Advanced controls</span>
               <span className="mt-0.5 block text-xs font-normal text-muted-foreground">Safety gates, paths, agents, limits, and structured checks</span>
