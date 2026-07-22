@@ -128,6 +128,9 @@ func resolveMigrationSource() (string, error) {
 var truncatedTables = []string{
 	"nodes",
 	"jobs",
+	"github_installation_rate_reservations",
+	"github_installation_rate_limits",
+	"github_installations",
 	"session_messages",
 	"session_logs",
 	"session_questions",

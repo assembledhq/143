@@ -95,6 +95,14 @@ type githubAppService interface {
 	GetInstallationToken(ctx context.Context, installationID int64) (string, error)
 }
 
+type githubRateLimitObserver interface {
+	ObserveRateLimitForToken(ctx context.Context, token string, statusCode int, resource string, header http.Header)
+}
+
+type githubRateLimitBodyObserver interface {
+	ObserveRateLimitForTokenWithBody(ctx context.Context, token string, statusCode int, resource string, header http.Header, body []byte)
+}
+
 type githubOrgAutoJoinService interface {
 	GetInstallationDetails(ctx context.Context, installationID int64) (ghapp.InstallationDetails, error)
 	ListOrgMembers(ctx context.Context, installationID int64, orgLogin string) ([]ghapp.OrgMember, error)
@@ -1629,10 +1637,16 @@ func (h *IntegrationHandler) listInstallationRepos(ctx context.Context, token st
 		if err != nil {
 			return nil, err
 		}
+		h.observeGitHubRateLimit(ctx, token, resp.StatusCode, models.GitHubRateLimitResourceCore, resp.Header)
 
 		if resp.StatusCode != http.StatusOK {
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			h.observeGitHubRateLimitBody(ctx, token, resp.StatusCode, models.GitHubRateLimitResourceCore, resp.Header, body)
 			if closeErr := resp.Body.Close(); closeErr != nil {
 				return nil, closeErr
+			}
+			if readErr != nil {
+				return nil, fmt.Errorf("read github API error response: %w", readErr)
 			}
 			return nil, fmt.Errorf("github API error %d", resp.StatusCode)
 		}
@@ -1653,6 +1667,22 @@ func (h *IntegrationHandler) listInstallationRepos(ctx context.Context, token st
 		repos = append(repos, result.Repositories...)
 	}
 	return repos, nil
+}
+
+func (h *IntegrationHandler) observeGitHubRateLimit(ctx context.Context, token string, statusCode int, resource models.GitHubRateLimitResource, header http.Header) {
+	observer, ok := h.githubService.(githubRateLimitObserver)
+	if !ok {
+		return
+	}
+	observer.ObserveRateLimitForToken(ctx, token, statusCode, string(resource), header)
+}
+
+func (h *IntegrationHandler) observeGitHubRateLimitBody(ctx context.Context, token string, statusCode int, resource models.GitHubRateLimitResource, header http.Header, body []byte) {
+	observer, ok := h.githubService.(githubRateLimitBodyObserver)
+	if !ok {
+		return
+	}
+	observer.ObserveRateLimitForTokenWithBody(ctx, token, statusCode, string(resource), header, body)
 }
 
 func githubNextLink(linkHeader string) string {

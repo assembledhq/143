@@ -20,6 +20,14 @@ type InstallationTokenProvider interface {
 	GetInstallationToken(ctx context.Context, installationID int64) (string, error)
 }
 
+type installationRateLimitObserver interface {
+	ObserveRateLimitForToken(ctx context.Context, token string, statusCode int, resource string, header http.Header)
+}
+
+type installationRateLimitBodyObserver interface {
+	ObserveRateLimitForTokenWithBody(ctx context.Context, token string, statusCode int, resource string, header http.Header, body []byte)
+}
+
 type GitHubSubmitter struct {
 	tokens  InstallationTokenProvider
 	client  *http.Client
@@ -52,6 +60,20 @@ func NewGitHubSubmitter(tokens InstallationTokenProvider, opts ...GitHubSubmitte
 		opt(s)
 	}
 	return s
+}
+
+func (s *GitHubSubmitter) do(httpReq *http.Request, token string) (*http.Response, error) {
+	resp, err := s.client.Do(httpReq)
+	if resp != nil {
+		if observer, ok := s.tokens.(installationRateLimitObserver); ok {
+			resource := "core"
+			if strings.HasSuffix(httpReq.URL.Path, "/graphql") {
+				resource = "graphql"
+			}
+			observer.ObserveRateLimitForToken(httpReq.Context(), token, resp.StatusCode, resource, resp.Header)
+		}
+	}
+	return resp, err
 }
 
 type SubmitReviewDecision string
@@ -237,13 +259,13 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 	httpReq.Header.Set("Accept", "application/vnd.github+json")
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := s.client.Do(httpReq)
+	resp, err := s.do(httpReq, token)
 	if err != nil {
 		return SubmitReviewResult{}, fmt.Errorf("submit GitHub review: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return SubmitReviewResult{}, fmt.Errorf("submit GitHub review: %w", readGitHubAPIResponseError(httpReq, resp))
+		return SubmitReviewResult{}, fmt.Errorf("submit GitHub review: %w", s.readGitHubAPIResponseError(httpReq, resp, token))
 	}
 	var decoded struct {
 		ID      int64  `json:"id"`
@@ -358,13 +380,13 @@ func (s *GitHubSubmitter) ensureFormalApproval(ctx context.Context, token, owner
 	httpReq.Header.Set("Accept", "application/vnd.github+json")
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := s.client.Do(httpReq)
+	resp, err := s.do(httpReq, token)
 	if err != nil {
 		return fmt.Errorf("submit formal GitHub approval: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("submit formal GitHub approval: %w", readGitHubAPIResponseError(httpReq, resp))
+		return fmt.Errorf("submit formal GitHub approval: %w", s.readGitHubAPIResponseError(httpReq, resp, token))
 	}
 	return nil
 }
@@ -383,13 +405,13 @@ func (s *GitHubSubmitter) updateReviewSummary(ctx context.Context, token, owner,
 	httpReq.Header.Set("Accept", "application/vnd.github+json")
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := s.client.Do(httpReq)
+	resp, err := s.do(httpReq, token)
 	if err != nil {
 		return SubmitReviewResult{}, fmt.Errorf("update GitHub review summary: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return SubmitReviewResult{}, fmt.Errorf("update GitHub review summary: %w", readGitHubAPIResponseError(httpReq, resp))
+		return SubmitReviewResult{}, fmt.Errorf("update GitHub review summary: %w", s.readGitHubAPIResponseError(httpReq, resp, token))
 	}
 	var decoded struct {
 		ID      int64  `json:"id"`
@@ -420,13 +442,13 @@ func (s *GitHubSubmitter) createReviewComment(ctx context.Context, token, owner,
 	httpReq.Header.Set("Accept", "application/vnd.github+json")
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := s.client.Do(httpReq)
+	resp, err := s.do(httpReq, token)
 	if err != nil {
 		return SubmitReviewPostedComment{}, fmt.Errorf("create GitHub review comment: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return SubmitReviewPostedComment{}, fmt.Errorf("create GitHub review comment: %w", readGitHubAPIResponseError(httpReq, resp))
+		return SubmitReviewPostedComment{}, fmt.Errorf("create GitHub review comment: %w", s.readGitHubAPIResponseError(httpReq, resp, token))
 	}
 	var decoded githubReviewCommentItem
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
@@ -470,13 +492,13 @@ func (s *GitHubSubmitter) listReviewComments(ctx context.Context, token, owner, 
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Accept", "application/vnd.github+json")
 	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := s.client.Do(httpReq)
+	resp, err := s.do(httpReq, token)
 	if err != nil {
 		return nil, fmt.Errorf("list GitHub review comments: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("list GitHub review comments: %w", readGitHubAPIResponseError(httpReq, resp))
+		return nil, fmt.Errorf("list GitHub review comments: %w", s.readGitHubAPIResponseError(httpReq, resp, token))
 	}
 	var decoded []struct {
 		ID   int64  `json:"id"`
@@ -567,13 +589,13 @@ func (s *GitHubSubmitter) updateReviewComment(ctx context.Context, token, owner,
 	httpReq.Header.Set("Accept", "application/vnd.github+json")
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := s.client.Do(httpReq)
+	resp, err := s.do(httpReq, token)
 	if err != nil {
 		return fmt.Errorf("update GitHub review comment: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("update GitHub review comment: %w", readGitHubAPIResponseError(httpReq, resp))
+		return fmt.Errorf("update GitHub review comment: %w", s.readGitHubAPIResponseError(httpReq, resp, token))
 	}
 	return nil
 }
@@ -586,13 +608,13 @@ func (s *GitHubSubmitter) getGitHubJSONPage(ctx context.Context, token, path str
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Accept", "application/vnd.github+json")
 	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := s.client.Do(httpReq)
+	resp, err := s.do(httpReq, token)
 	if err != nil {
 		return "", fmt.Errorf("GitHub request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("GitHub request failed: %w", readGitHubAPIResponseError(httpReq, resp))
+		return "", fmt.Errorf("GitHub request failed: %w", s.readGitHubAPIResponseError(httpReq, resp, token))
 	}
 	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
 		return "", fmt.Errorf("decode GitHub response: %w", err)
@@ -612,7 +634,7 @@ func (s *GitHubSubmitter) doGitHubGraphQL(ctx context.Context, token, query stri
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Accept", "application/vnd.github+json")
 	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := s.client.Do(httpReq)
+	resp, err := s.do(httpReq, token)
 	if err != nil {
 		return nil, fmt.Errorf("GitHub GraphQL request failed: %w", err)
 	}
@@ -622,6 +644,7 @@ func (s *GitHubSubmitter) doGitHubGraphQL(ctx context.Context, token, query stri
 		return nil, fmt.Errorf("read GitHub GraphQL response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		s.observeGitHubRateLimitBody(httpReq, resp, token, body)
 		return nil, fmt.Errorf("GitHub GraphQL request failed: %w", newGitHubAPIResponseError(httpReq, resp, body))
 	}
 	return body, nil
@@ -792,13 +815,13 @@ func (s *GitHubSubmitter) RemoveRequestedReviewers(ctx context.Context, req Requ
 	httpReq.Header.Set("Accept", "application/vnd.github+json")
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := s.client.Do(httpReq)
+	resp, err := s.do(httpReq, token)
 	if err != nil {
 		return fmt.Errorf("remove GitHub requested reviewers: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("remove GitHub requested reviewers: %w", readGitHubAPIResponseError(httpReq, resp))
+		return fmt.Errorf("remove GitHub requested reviewers: %w", s.readGitHubAPIResponseError(httpReq, resp, token))
 	}
 	return nil
 }
@@ -933,13 +956,13 @@ func (s *GitHubSubmitter) getPullRequestFilesPage(ctx context.Context, token, pa
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Accept", "application/vnd.github+json")
 	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := s.client.Do(httpReq)
+	resp, err := s.do(httpReq, token)
 	if err != nil {
 		return nil, "", fmt.Errorf("list GitHub pull request files: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, "", fmt.Errorf("list GitHub pull request files: %w", readGitHubAPIResponseError(httpReq, resp))
+		return nil, "", fmt.Errorf("list GitHub pull request files: %w", s.readGitHubAPIResponseError(httpReq, resp, token))
 	}
 	var files []PullRequestFile
 	if err := json.NewDecoder(resp.Body).Decode(&files); err != nil {
@@ -948,13 +971,26 @@ func (s *GitHubSubmitter) getPullRequestFilesPage(ctx context.Context, token, pa
 	return files, parseNextGitHubPath(resp.Header.Get("Link")), nil
 }
 
-func readGitHubAPIResponseError(req *http.Request, resp *http.Response) error {
+func (s *GitHubSubmitter) readGitHubAPIResponseError(req *http.Request, resp *http.Response, token string) error {
 	errorBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	s.observeGitHubRateLimitBody(req, resp, token, errorBody)
 	apiErr := newGitHubAPIResponseError(req, resp, errorBody)
 	if readErr != nil {
 		return errors.Join(apiErr, fmt.Errorf("read GitHub error response: %w", readErr))
 	}
 	return apiErr
+}
+
+func (s *GitHubSubmitter) observeGitHubRateLimitBody(req *http.Request, resp *http.Response, token string, body []byte) {
+	observer, ok := s.tokens.(installationRateLimitBodyObserver)
+	if !ok || req == nil || resp == nil {
+		return
+	}
+	resource := "core"
+	if req.URL != nil && strings.HasSuffix(req.URL.Path, "/graphql") {
+		resource = "graphql"
+	}
+	observer.ObserveRateLimitForTokenWithBody(req.Context(), token, resp.StatusCode, resource, resp.Header, body)
 }
 
 func newGitHubAPIResponseError(req *http.Request, resp *http.Response, body []byte) *ghservice.GitHubAPIError {

@@ -13,17 +13,25 @@ import (
 	"sync"
 	"time"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/golang-jwt/jwt/v5"
 )
 
 type Service struct {
-	appID        int64
-	privateKey   *rsa.PrivateKey
-	httpClient   *http.Client
-	apiBaseURL   string
-	cache        map[int64]*cachedToken
-	sandboxCache map[sandboxTokenCacheKey]*cachedToken
-	mu           sync.RWMutex
+	appID              int64
+	privateKey         *rsa.PrivateKey
+	httpClient         *http.Client
+	apiBaseURL         string
+	cache              map[int64]*cachedToken
+	sandboxCache       map[sandboxTokenCacheKey]*cachedToken
+	tokenInstallations map[string]installationTokenMetadata
+	rateLimitBudget    *RateBudget
+	mu                 sync.RWMutex
+}
+
+type installationTokenMetadata struct {
+	InstallationID int64
+	ExpiresAt      time.Time
 }
 
 type sandboxTokenCacheKey struct {
@@ -72,13 +80,25 @@ func NewService(appID int64, privateKeyPEM string) (*Service, error) {
 		return nil, fmt.Errorf("parse private key: %w", err)
 	}
 	return &Service{
-		appID:        appID,
-		privateKey:   key,
-		httpClient:   &http.Client{Timeout: 10 * time.Second},
-		apiBaseURL:   "https://api.github.com",
-		cache:        make(map[int64]*cachedToken),
-		sandboxCache: make(map[sandboxTokenCacheKey]*cachedToken),
+		appID:              appID,
+		privateKey:         key,
+		httpClient:         &http.Client{Timeout: 10 * time.Second},
+		apiBaseURL:         "https://api.github.com",
+		cache:              make(map[int64]*cachedToken),
+		sandboxCache:       make(map[sandboxTokenCacheKey]*cachedToken),
+		tokenInstallations: make(map[string]installationTokenMetadata),
 	}, nil
+}
+
+// SetRateLimitBudget enables installation-wide GitHub quota observation for
+// every API client that uses tokens issued by this service.
+func (s *Service) SetRateLimitBudget(budget *RateBudget) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.rateLimitBudget = budget
+	s.mu.Unlock()
 }
 
 func (s *Service) GetInstallationToken(ctx context.Context, installationID int64) (string, error) {
@@ -86,6 +106,7 @@ func (s *Service) GetInstallationToken(ctx context.Context, installationID int64
 	cached, ok := s.cache[installationID]
 	s.mu.RUnlock()
 	if ok && time.Now().Add(5*time.Minute).Before(cached.ExpiresAt) {
+		s.rememberInstallationToken(installationID, cached.Token, cached.ExpiresAt)
 		return cached.Token, nil
 	}
 
@@ -101,6 +122,7 @@ func (s *Service) GetInstallationToken(ctx context.Context, installationID int64
 
 	s.mu.Lock()
 	s.cache[installationID] = &cachedToken{Token: token, ExpiresAt: expiresAt}
+	s.rememberInstallationTokenLocked(installationID, token, expiresAt)
 	s.mu.Unlock()
 
 	return token, nil
@@ -139,6 +161,7 @@ func (s *Service) GetSandboxInstallationToken(ctx context.Context, installationI
 	cached, ok := s.sandboxCache[key]
 	s.mu.RUnlock()
 	if ok && time.Now().Add(5*time.Minute).Before(cached.ExpiresAt) {
+		s.rememberInstallationToken(installationID, cached.Token, cached.ExpiresAt)
 		return cached.Token, nil
 	}
 
@@ -159,8 +182,139 @@ func (s *Service) GetSandboxInstallationToken(ctx context.Context, installationI
 		s.sandboxCache = make(map[sandboxTokenCacheKey]*cachedToken)
 	}
 	s.sandboxCache[key] = &cachedToken{Token: token, ExpiresAt: expiresAt}
+	s.rememberInstallationTokenLocked(installationID, token, expiresAt)
 	s.mu.Unlock()
 	return token, nil
+}
+
+func (s *Service) rememberInstallationToken(installationID int64, token string, expiresAt time.Time) {
+	if s == nil || installationID <= 0 || token == "" {
+		return
+	}
+	s.mu.Lock()
+	s.rememberInstallationTokenLocked(installationID, token, expiresAt)
+	s.mu.Unlock()
+}
+
+func (s *Service) rememberInstallationTokenLocked(installationID int64, token string, expiresAt time.Time) {
+	if s.tokenInstallations == nil {
+		s.tokenInstallations = make(map[string]installationTokenMetadata)
+	}
+	now := time.Now()
+	for cachedToken, metadata := range s.tokenInstallations {
+		if metadata.ExpiresAt.Before(now) {
+			delete(s.tokenInstallations, cachedToken)
+		}
+	}
+	s.tokenInstallations[token] = installationTokenMetadata{InstallationID: installationID, ExpiresAt: expiresAt}
+}
+
+// ObserveRateLimitForToken associates response headers with the installation
+// that owns the token without forcing every downstream GitHub helper to carry
+// installation identity through its call stack.
+func (s *Service) ObserveRateLimitForToken(ctx context.Context, token string, statusCode int, resource string, header http.Header) {
+	s.observeRateLimitForToken(ctx, token, statusCode, resource, header, nil)
+}
+
+func (s *Service) ObserveRateLimitForTokenWithBody(ctx context.Context, token string, statusCode int, resource string, header http.Header, body []byte) {
+	s.observeRateLimitForToken(ctx, token, statusCode, resource, header, body)
+}
+
+func (s *Service) observeRateLimitForToken(ctx context.Context, token string, statusCode int, resource string, header http.Header, body []byte) {
+	if s == nil || token == "" {
+		return
+	}
+	s.mu.RLock()
+	metadata, ok := s.tokenInstallations[token]
+	budget := s.rateLimitBudget
+	s.mu.RUnlock()
+	if !ok || budget == nil {
+		return
+	}
+	budget.ObserveResponseWithBody(ctx, metadata.InstallationID, models.GitHubRateLimitResource(resource), statusCode, header, body)
+}
+
+func (s *Service) observeRateLimit(ctx context.Context, installationID int64, statusCode int, resource models.GitHubRateLimitResource, header http.Header) {
+	s.observeRateLimitWithBody(ctx, installationID, statusCode, resource, header, nil)
+}
+
+func (s *Service) observeRateLimitWithBody(ctx context.Context, installationID int64, statusCode int, resource models.GitHubRateLimitResource, header http.Header, body []byte) {
+	if s == nil {
+		return
+	}
+	s.mu.RLock()
+	budget := s.rateLimitBudget
+	s.mu.RUnlock()
+	if budget != nil {
+		budget.ObserveResponseWithBody(ctx, installationID, resource, statusCode, header, body)
+	}
+}
+
+// FetchRateLimitSnapshot reads GitHub's authenticated quota status endpoint.
+// GitHub documents this endpoint as free of primary-rate-limit cost; callers
+// use it only when the durable observation is missing or stale.
+func (s *Service) FetchRateLimitSnapshot(ctx context.Context, installationID int64) ([]models.GitHubRateLimitObservation, error) {
+	token, err := s.GetInstallationToken(ctx, installationID)
+	if err != nil {
+		return nil, fmt.Errorf("get installation token for GitHub rate-limit snapshot: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.apiURL("/rate_limit"), nil)
+	if err != nil {
+		return nil, fmt.Errorf("create GitHub rate-limit snapshot request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := s.httpClient.Do(req) // #nosec G704 -- URL is the configured GitHub API endpoint
+	if err != nil {
+		return nil, fmt.Errorf("fetch GitHub rate-limit snapshot: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read GitHub rate-limit snapshot: %w", err)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		s.ObserveRateLimitForTokenWithBody(ctx, token, resp.StatusCode, string(models.GitHubRateLimitResourceCore), resp.Header, body)
+		return nil, &GitHubAPIError{
+			Method: http.MethodGet, Path: "/rate_limit", StatusCode: resp.StatusCode,
+			Body: body, Header: resp.Header.Clone(),
+		}
+	}
+	var decoded struct {
+		Resources map[string]struct {
+			Limit     int   `json:"limit"`
+			Remaining int   `json:"remaining"`
+			Reset     int64 `json:"reset"`
+		} `json:"resources"`
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return nil, fmt.Errorf("decode GitHub rate-limit snapshot: %w", err)
+	}
+	now := time.Now().UTC()
+	resources := []models.GitHubRateLimitResource{
+		models.GitHubRateLimitResourceCore,
+		models.GitHubRateLimitResourceGraphQL,
+		models.GitHubRateLimitResourceSearch,
+	}
+	observations := make([]models.GitHubRateLimitObservation, 0, len(resources))
+	for _, resource := range resources {
+		quota, ok := decoded.Resources[string(resource)]
+		if !ok || quota.Limit <= 0 || quota.Remaining < 0 || quota.Remaining > quota.Limit || quota.Reset <= 0 {
+			continue
+		}
+		limit := quota.Limit
+		remaining := quota.Remaining
+		resetAt := time.Unix(quota.Reset, 0).UTC()
+		observations = append(observations, models.GitHubRateLimitObservation{
+			InstallationID: installationID,
+			Resource:       resource,
+			Limit:          &limit,
+			Remaining:      &remaining,
+			ResetAt:        &resetAt,
+			ObservedAt:     now,
+		})
+	}
+	return observations, nil
 }
 
 func (s *Service) generateJWT() (string, error) {
@@ -271,6 +425,7 @@ func (s *Service) ListOrgMembers(ctx context.Context, installationID int64, orgL
 			return nil, fmt.Errorf("request org members: %w", err)
 		}
 		body, readErr := io.ReadAll(resp.Body)
+		s.observeRateLimitWithBody(ctx, installationID, resp.StatusCode, models.GitHubRateLimitResourceCore, resp.Header, body)
 		closeErr := resp.Body.Close()
 		if readErr != nil {
 			if closeErr != nil {
@@ -310,17 +465,28 @@ func (s *Service) IsActiveOrgMember(ctx context.Context, installationID int64, o
 	if err != nil {
 		return false, fmt.Errorf("request org membership: %w", err)
 	}
-	defer resp.Body.Close()
+	body, readErr := io.ReadAll(resp.Body)
+	s.observeRateLimitWithBody(ctx, installationID, resp.StatusCode, models.GitHubRateLimitResourceCore, resp.Header, body)
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		if closeErr != nil {
+			return false, fmt.Errorf("read org membership response: %w", errors.Join(readErr, closeErr))
+		}
+		return false, fmt.Errorf("read org membership response: %w", readErr)
+	}
+	if closeErr != nil {
+		return false, fmt.Errorf("close org membership response: %w", closeErr)
+	}
 	if resp.StatusCode == http.StatusNotFound {
 		return false, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return false, newGitHubAPIResponseError(http.MethodGet, path, resp)
+		return false, &GitHubAPIError{Method: http.MethodGet, Path: path, StatusCode: resp.StatusCode, Body: body, Header: resp.Header.Clone()}
 	}
 	var result struct {
 		State string `json:"state"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(body, &result); err != nil {
 		return false, fmt.Errorf("decode org membership: %w", err)
 	}
 	return result.State == "active", nil

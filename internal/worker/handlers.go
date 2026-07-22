@@ -791,6 +791,12 @@ type codeReviewLifecycle interface {
 	HandleReviewChanged(ctx context.Context, input codereviewsvc.ReviewChangedInput) (codereviewsvc.ReviewRequestedResult, error)
 }
 
+type githubRateLimitBudget interface {
+	ReserveCodeReview(ctx context.Context, orgID uuid.UUID, installationID int64, metadataID uuid.UUID) (models.GitHubRateLimitDecision, error)
+	CheckCodeReviewBlock(ctx context.Context, installationID int64) (models.GitHubRateLimitDecision, error)
+	RefreshCodeReview(ctx context.Context, installationID int64) error
+}
+
 type codingAgentAvailability interface {
 	IsAgentAvailable(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, agentType models.AgentType, model string) (bool, error)
 }
@@ -819,6 +825,7 @@ type Services struct {
 	PagerDutyWrites     pagerDutyPRWritebacker        // nil-safe: PagerDuty writeback disabled if nil
 	CodeReviews         codeReviewSubmitter           // nil-safe: GitHub review submission disabled if nil
 	CodeReviewLifecycle codeReviewLifecycle           // nil-safe: starts durable follow-up assessments after webhook changes
+	GitHubRateLimits    githubRateLimitBudget         // nil-safe: reserves installation quota before starting queued reviews
 	CodingAgents        codingAgentAvailability       // nil-safe: code review falls back to the configured roster when nil
 	SlackbotMetrics     *metrics.SlackbotMetrics      // nil-safe: Slackbot observability disabled if nil
 	// Redis is optional and used for non-authoritative shared caches such as

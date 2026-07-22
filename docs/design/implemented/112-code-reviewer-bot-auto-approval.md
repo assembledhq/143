@@ -1,6 +1,6 @@
 # Design: Code Reviewer Bot And Acceptable-Risk Auto-Approval
 
-> **Status:** Implemented | **Last reviewed:** 2026-07-20
+> **Status:** Implemented | **Last reviewed:** 2026-07-21
 >
 > **Depends on:** [../overall.md](../overall.md), [78-review-agent-loops.md](78-review-agent-loops.md), [107-pr-readiness-checks.md](107-pr-readiness-checks.md), [61-pr-state-sync-and-repair-actions.md](61-pr-state-sync-and-repair-actions.md), [../backlog/11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md)
 
@@ -24,6 +24,7 @@ Implemented:
 - event-driven reassessment after the initial reviewer request when the PR head/description, human reviews/comments/threads, or GitHub checks/statuses change, with durable follow-up jobs, self-authored webhook suppression, and a terminal stop once 143 approves
 - service-layer code review request orchestration that resolves/materializes policy, marks stale older heads, reuses running sessions, creates normal code-review sessions, and enqueues `run_code_review`
 - `run_code_review` worker handler that loads the captured policy version, fans out read-only reviewer threads running native `/review`, synthesizes via an orchestrator thread, records agent results, submits a GitHub review when the worker has GitHub credentials, and stores the GitHub review id/url
+- installation-wide GitHub quota observations and durable per-review reservations that defer queued reviews before they consume recovery capacity while allowing admitted reviews to finish
 - live reviewer/orchestrator evidence ingestion harvested from running review threads rather than pre-existing stored result rows
 - evidence-gated approval path that evaluates reviewer results, blocking findings, PR health, reviewed head SHA, required check state, changed-file size/path/category context from GitHub, and the captured policy before choosing approval vs comment-only
 - LLM-backed PR description requirement evaluation with prompt-injection screening
@@ -124,6 +125,16 @@ assessment and update the existing GitHub review summary. Approval is final.
 ```
 
 Reviewer assignment should be explicit in v1. Auto-running can come later after teams trust the signal.
+
+### GitHub Installation Quota Admission
+
+GitHub App primary limits are shared by every repository and 143 organization linked to one installation. They are therefore a global control-plane resource, not tenant-local state and not an optional Redis cache.
+
+Every installation-authenticated PR-sync, review-submission, repository-list, and team-search response records its `X-RateLimit-*` headers in `github_installation_rate_limits`. Updates are monotonic within one reset window (`remaining` can only decrease), while a newer reset window replaces the prior observation. `Retry-After`, 429 responses, and body-classified secondary-limit 403 responses record an installation-wide block across REST, GraphQL, and search; ordinary permission 403 responses and resource-local primary exhaustion do not. Observation persistence is best effort so a database write failure cannot turn a successful GitHub operation into an application failure.
+
+Before `run_code_review` marks queued metadata running or makes any GitHub request, it atomically obtains an installation/core reservation under a PostgreSQL advisory lock shared with quota observation. Admission includes reservations for queued/running reviews across every linked 143 organization and requires the projected balance to retain `max(500, 10% of limit)` for in-flight recovery. Each new review reserves 100 requests conservatively. The reservation is idempotent by code-review metadata ID, but a retry with an existing reservation still honors a newer installation-wide block. Terminal reservations are lazily released and excluded through a partial active index so admission cost scales with active reviews rather than installation history.
+
+Unknown, expired, or older-than-two-minutes observations allow one leased bootstrap refresh installation-wide. The lease owner calls GitHub's authenticated `/rate_limit` endpoint—which does not consume primary quota—persists the returned resource snapshot, and then repeats admission before metadata can become running. Additional queued reviews poll below the observation-staleness window, and the lease is independent of reservations from a prior reset window, so a long-running review cannot deadlock quota refresh after reset. Denied reviews stay visibly queued and retry at the reset with stable jitter. Already-running reviews do not pass through new-work admission, so the recovery reserve remains usable for reconciliation and GitHub review publication. Admission uses the repository installation ID that all later review calls consume; legacy repository-only IDs are materialized into the global installation table on migration and defensively on first use.
 
 ## Product Surfaces
 

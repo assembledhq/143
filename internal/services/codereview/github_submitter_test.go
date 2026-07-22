@@ -688,10 +688,84 @@ func TestGitHubSubmitter_SubmitReviewRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+func TestGitHubSubmitterObservesInstallationRateLimit(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-RateLimit-Limit", "5000")
+		w.Header().Set("X-RateLimit-Remaining", "4321")
+		w.Header().Set("X-RateLimit-Reset", "1784678400")
+		w.Header().Set("X-RateLimit-Resource", "core")
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`[]`))
+		require.NoError(t, err, "test response should write the file list")
+	}))
+	defer server.Close()
+
+	tokens := &observingTokenStub{tokenStub: tokenStub{token: "ghs_token"}}
+	submitter := NewGitHubSubmitter(tokens, WithGitHubSubmitterBaseURL(server.URL))
+	_, err := submitter.ListPullRequestFiles(context.Background(), PullRequestFilesRequest{
+		InstallationID: 143,
+		Repository:     "acme/repo",
+		PullNumber:     42,
+	})
+
+	require.NoError(t, err, "file retrieval should succeed")
+	require.Equal(t, "ghs_token", tokens.observedToken, "submitter should identify the installation token used by the response")
+	require.Equal(t, http.StatusOK, tokens.statusCode, "submitter should preserve the response status for secondary-limit detection")
+	require.Equal(t, "core", tokens.resource, "REST file retrieval should update the core resource budget")
+	require.Equal(t, "4321", tokens.header.Get("X-RateLimit-Remaining"), "submitter should preserve GitHub's quota headers")
+}
+
+func TestGitHubSubmitterClassifiesHeaderlessSecondaryLimitBody(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, err := w.Write([]byte(`{"message":"You have exceeded a secondary rate limit"}`))
+		require.NoError(t, err, "test response should write the secondary-limit body")
+	}))
+	defer server.Close()
+
+	tokens := &observingTokenStub{tokenStub: tokenStub{token: "ghs_token"}}
+	submitter := NewGitHubSubmitter(tokens, WithGitHubSubmitterBaseURL(server.URL))
+	_, err := submitter.ListPullRequestFiles(context.Background(), PullRequestFilesRequest{
+		InstallationID: 143,
+		Repository:     "acme/repo",
+		PullNumber:     42,
+	})
+
+	require.Error(t, err, "secondary limiting should remain visible to the caller")
+	require.Equal(t, []byte(`{"message":"You have exceeded a secondary rate limit"}`), tokens.body, "the observer should receive the response body needed to distinguish rate limiting from permissions")
+	require.Equal(t, http.StatusForbidden, tokens.statusCode, "the observer should retain the secondary-limit status")
+	require.Equal(t, "core", tokens.resource, "REST secondary limiting should block installation-wide admission")
+}
+
 type tokenStub struct {
 	token string
 }
 
 func (s *tokenStub) GetInstallationToken(context.Context, int64) (string, error) {
 	return s.token, nil
+}
+
+type observingTokenStub struct {
+	tokenStub
+	observedToken string
+	statusCode    int
+	resource      string
+	header        http.Header
+	body          []byte
+}
+
+func (s *observingTokenStub) ObserveRateLimitForTokenWithBody(_ context.Context, token string, statusCode int, resource string, header http.Header, body []byte) {
+	s.ObserveRateLimitForToken(context.Background(), token, statusCode, resource, header)
+	s.body = append([]byte(nil), body...)
+}
+
+func (s *observingTokenStub) ObserveRateLimitForToken(_ context.Context, token string, statusCode int, resource string, header http.Header) {
+	s.observedToken = token
+	s.statusCode = statusCode
+	s.resource = resource
+	s.header = header.Clone()
 }

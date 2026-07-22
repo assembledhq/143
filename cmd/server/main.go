@@ -1320,6 +1320,9 @@ func buildServices(
 		logger.Error().Err(err).Msg("failed to initialize GitHub App service — all Phase 3+ services disabled")
 		return nil
 	}
+	githubRateBudget := ghservice.NewRateBudget(db.NewGitHubRateLimitStore(pool), logger)
+	githubRateBudget.SetSnapshotFetcher(ghSvc)
+	ghSvc.SetRateLimitBudget(githubRateBudget)
 
 	// Docker sandbox provider.
 	dockerCli, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
@@ -1785,6 +1788,7 @@ func buildServices(
 		GitHub:              ghSvc,
 		CodeReviews:         codereviewsvc.NewGitHubSubmitter(ghSvc),
 		CodeReviewLifecycle: codeReviewLifecycle,
+		GitHubRateLimits:    githubRateBudget,
 		CodingAgents:        agentEnv,
 		GitHubOrgRoster:     ghSvc,
 		Snapshots:           snapshotStore,

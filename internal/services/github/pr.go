@@ -3604,6 +3604,7 @@ func (s *PRService) doGitHubRequest(ctx context.Context, token, method, path str
 	if err != nil {
 		return nil, err
 	}
+	s.tokenProvider.ObserveRateLimitForTokenWithBody(ctx, token, resp.StatusCode, string(models.GitHubRateLimitResourceCore), resp.Header, respBody)
 
 	if resp.StatusCode >= 400 {
 		return nil, &GitHubAPIError{
@@ -3651,6 +3652,7 @@ func (s *PRService) doGitHubGraphQL(ctx context.Context, token, query string, va
 	if err != nil {
 		return nil, err
 	}
+	s.tokenProvider.ObserveRateLimitForTokenWithBody(ctx, token, resp.StatusCode, string(models.GitHubRateLimitResourceGraphQL), resp.Header, respBody)
 
 	if resp.StatusCode >= 400 {
 		return nil, &GitHubAPIError{

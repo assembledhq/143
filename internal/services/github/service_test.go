@@ -8,12 +8,15 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/assembledhq/143/internal/models"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -82,6 +85,54 @@ func TestNewService(t *testing.T) {
 	}
 }
 
+func TestServiceObserveRateLimitForTokenResolvesInstallation(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 21, 18, 0, 0, 0, time.UTC)
+	store := &rateLimitStoreStub{}
+	budget := NewRateBudget(store, zerolog.Nop())
+	budget.now = func() time.Time { return now }
+	svc := &Service{
+		tokenInstallations: map[string]installationTokenMetadata{
+			"ghs_installation": {InstallationID: 143, ExpiresAt: now.Add(time.Hour)},
+		},
+		rateLimitBudget: budget,
+	}
+
+	svc.ObserveRateLimitForToken(context.Background(), "ghs_installation", http.StatusOK, "core",
+		githubRateHeaders("core", 5000, 4321, now.Add(time.Hour)))
+
+	require.Equal(t, int64(143), store.observation.InstallationID, "token observations should be charged to the issuing installation")
+	require.Equal(t, models.GitHubRateLimitResourceCore, store.observation.Resource, "REST responses should update the core budget")
+	require.Equal(t, 4321, *store.observation.Remaining, "observer should persist GitHub's exact remaining quota")
+}
+
+func TestServiceFetchRateLimitSnapshotParsesResources(t *testing.T) {
+	t.Parallel()
+
+	reset := time.Date(2026, 7, 21, 19, 0, 0, 0, time.UTC)
+	svc := &Service{
+		httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			require.Equal(t, "https://api.github.test/rate_limit", req.URL.String(), "snapshot should use GitHub's rate-limit status endpoint")
+			require.Equal(t, "Bearer cached-token", req.Header.Get("Authorization"), "snapshot should authenticate as the installation")
+			body := `{"resources":{"core":{"limit":5000,"remaining":700,"reset":` + fmt.Sprint(reset.Unix()) + `},"graphql":{"limit":5000,"remaining":4500,"reset":` + fmt.Sprint(reset.Unix()) + `}}}`
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+		})},
+		apiBaseURL:         "https://api.github.test",
+		cache:              map[int64]*cachedToken{143: {Token: "cached-token", ExpiresAt: time.Now().Add(time.Hour)}},
+		tokenInstallations: make(map[string]installationTokenMetadata),
+	}
+
+	observations, err := svc.FetchRateLimitSnapshot(context.Background(), 143)
+
+	require.NoError(t, err, "valid rate-limit status should parse")
+	require.Len(t, observations, 2, "snapshot should return each valid resource reported by GitHub")
+	require.Equal(t, models.GitHubRateLimitResourceCore, observations[0].Resource, "core quota should be first for deterministic persistence")
+	require.Equal(t, 700, *observations[0].Remaining, "snapshot should retain exact core remaining quota")
+	require.Equal(t, models.GitHubRateLimitResourceGraphQL, observations[1].Resource, "snapshot should include GraphQL quota")
+	require.True(t, reset.Equal(*observations[1].ResetAt), "snapshot should parse GitHub's reset epoch")
+}
+
 func TestService_ListOrgMembers_ReturnsBodyCloseError(t *testing.T) {
 	t.Parallel()
 
@@ -116,6 +167,34 @@ func TestService_ListOrgMembers_ReturnsBodyCloseError(t *testing.T) {
 	require.Error(t, err, "ListOrgMembers should return response body close errors")
 	require.ErrorIs(t, err, closeErr, "ListOrgMembers should preserve the close error for callers")
 	require.Nil(t, members, "ListOrgMembers should not return members when response cleanup fails")
+}
+
+func TestServiceListOrgMembersObservesHeaderlessSecondaryLimitBody(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 21, 18, 0, 0, 0, time.UTC)
+	store := &rateLimitStoreStub{}
+	budget := NewRateBudget(store, zerolog.Nop())
+	budget.now = func() time.Time { return now }
+	svc := &Service{
+		httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"message":"You have exceeded a secondary rate limit"}`)),
+			}, nil
+		})},
+		apiBaseURL:         "https://api.github.test",
+		cache:              map[int64]*cachedToken{143: {Token: "cached-token", ExpiresAt: time.Now().Add(time.Hour)}},
+		tokenInstallations: make(map[string]installationTokenMetadata),
+		rateLimitBudget:    budget,
+	}
+
+	_, err := svc.ListOrgMembers(context.Background(), 143, "assembled")
+
+	require.Error(t, err, "secondary limit should remain visible to roster sync")
+	require.NotNil(t, store.observation.BlockedUntil, "headerless secondary 403 should install a global block")
+	require.Equal(t, now.Add(time.Minute), *store.observation.BlockedUntil, "secondary fallback should block new reviews for one minute")
 }
 
 func TestService_GetInstallationToken_UsesCache(t *testing.T) {

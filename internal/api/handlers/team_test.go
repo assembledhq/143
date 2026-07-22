@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -129,6 +131,7 @@ func (m *mockTeamIntegrationStore) ListByOrgAndProvider(ctx context.Context, org
 
 type mockTeamGitHubService struct {
 	getInstallationTokenFn func(ctx context.Context, installationID int64) (string, error)
+	observations           []githubRateLimitTestObservation
 }
 
 func (m *mockTeamGitHubService) GetInstallationToken(ctx context.Context, installationID int64) (string, error) {
@@ -136,6 +139,36 @@ func (m *mockTeamGitHubService) GetInstallationToken(ctx context.Context, instal
 		return m.getInstallationTokenFn(ctx, installationID)
 	}
 	return "token", nil
+}
+
+func (m *mockTeamGitHubService) ObserveRateLimitForToken(_ context.Context, token string, statusCode int, resource string, header http.Header) {
+	m.observations = append(m.observations, githubRateLimitTestObservation{token: token, statusCode: statusCode, resource: resource, header: header.Clone()})
+}
+
+func TestTeamHandlerSearchGitHubUsersObservesSearchQuota(t *testing.T) {
+	t.Parallel()
+
+	githubService := &mockTeamGitHubService{}
+	handler := &TeamHandler{
+		githubSvc: githubService,
+		httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			require.Equal(t, "token installation-token", req.Header.Get("Authorization"), "search should use the installation token")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"X-RateLimit-Remaining": []string{"29"}},
+				Body:       io.NopCloser(strings.NewReader(`{"items":[{"login":"octocat","type":"User"}]}`)),
+			}, nil
+		})},
+	}
+
+	users, err := handler.searchGitHubUsers(context.Background(), "installation-token", "octo")
+
+	require.NoError(t, err, "GitHub user search should decode a successful response")
+	require.Equal(t, []GitHubUserSuggestion{{Login: "octocat"}}, users, "GitHub user search should return matching users")
+	require.Equal(t, []githubRateLimitTestObservation{{
+		token: "installation-token", statusCode: http.StatusOK, resource: string(models.GitHubRateLimitResourceSearch),
+		header: http.Header{"X-RateLimit-Remaining": []string{"29"}},
+	}}, githubService.observations, "search responses should update the installation-wide search quota")
 }
 
 func (m *mockTeamInvitationStore) Create(ctx context.Context, inv *models.Invitation) error {
