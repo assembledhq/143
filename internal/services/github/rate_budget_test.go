@@ -151,6 +151,24 @@ func TestRateBudgetReserveCodeReviewDelegatesDurableIdentity(t *testing.T) {
 	require.Equal(t, now, store.now, "admission should use one deterministic decision timestamp")
 }
 
+func TestRateBudgetCheckCodeReviewBlockDelegatesInstallationIdentity(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 21, 18, 0, 0, 0, time.UTC)
+	blockedUntil := now.Add(90 * time.Second)
+	expected := models.GitHubRateLimitDecision{BlockedUntil: blockedUntil, RetryAfter: 90 * time.Second}
+	store := &rateLimitStoreStub{blockDecision: expected}
+	budget := NewRateBudget(store, zerolog.Nop())
+	budget.now = func() time.Time { return now }
+
+	actual, err := budget.CheckCodeReviewBlock(context.Background(), 143)
+
+	require.NoError(t, err, "running-review block check should return the store decision")
+	require.Equal(t, expected, actual, "rate budget should preserve the installation-wide block")
+	require.Equal(t, int64(143), store.installationID, "block check should retain the GitHub installation identity")
+	require.Equal(t, now, store.now, "block check should use one deterministic decision timestamp")
+}
+
 func TestRateBudgetRefreshCodeReviewPersistsFetchedCoreSnapshot(t *testing.T) {
 	t.Parallel()
 
@@ -182,7 +200,15 @@ type rateLimitStoreStub struct {
 	metadataID     uuid.UUID
 	now            time.Time
 	decision       models.GitHubRateLimitDecision
+	blockDecision  models.GitHubRateLimitDecision
 	reserveErr     error
+	blockErr       error
+}
+
+func (s *rateLimitStoreStub) CheckCodeReviewBlock(_ context.Context, installationID int64, now time.Time) (models.GitHubRateLimitDecision, error) {
+	s.installationID = installationID
+	s.now = now
+	return s.blockDecision, s.blockErr
 }
 
 func (s *rateLimitStoreStub) Observe(_ context.Context, observation models.GitHubRateLimitObservation) error {

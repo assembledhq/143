@@ -164,6 +164,61 @@ func TestDecideGitHubCodeReviewAdmission(t *testing.T) {
 	}
 }
 
+func TestGitHubRateLimitStoreCheckCodeReviewBlock(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 21, 18, 0, 0, 0, time.UTC)
+	activeBlock := now.Add(90 * time.Second)
+	expiredBlock := now.Add(-time.Second)
+	tests := []struct {
+		name         string
+		blockedUntil *time.Time
+		expected     models.GitHubRateLimitDecision
+	}{
+		{
+			name:         "active installation block defers running review",
+			blockedUntil: &activeBlock,
+			expected: models.GitHubRateLimitDecision{
+				BlockedUntil: activeBlock,
+				RetryAfter:   90 * time.Second,
+			},
+		},
+		{
+			name:         "expired installation block allows running review",
+			blockedUntil: &expiredBlock,
+			expected:     models.GitHubRateLimitDecision{Allowed: true},
+		},
+		{
+			name:     "unknown installation block allows running review",
+			expected: models.GitHubRateLimitDecision{Allowed: true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock should initialize")
+			defer mock.Close()
+
+			var blockedValue any
+			if tt.blockedUntil != nil {
+				blockedValue = *tt.blockedUntil
+			}
+			mock.ExpectQuery("SELECT MAX\\(blocked_until\\)").
+				WithArgs(pgx.NamedArgs{"installation_id": int64(143)}).
+				WillReturnRows(pgxmock.NewRows([]string{"blocked_until"}).AddRow(blockedValue))
+
+			actual, err := NewGitHubRateLimitStore(mock).CheckCodeReviewBlock(context.Background(), 143, now)
+
+			require.NoError(t, err, "installation block check should query durable shared state")
+			require.Equal(t, tt.expected, actual, "running review should only defer for an active installation-wide block")
+			require.NoError(t, mock.ExpectationsWereMet(), "block check should aggregate all installation resources")
+		})
+	}
+}
+
 func TestGitHubRateLimitStoreReserveCodeReviewCreatesAtomicReservation(t *testing.T) {
 	t.Parallel()
 

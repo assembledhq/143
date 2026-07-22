@@ -793,6 +793,7 @@ type codeReviewLifecycle interface {
 
 type githubRateLimitBudget interface {
 	ReserveCodeReview(ctx context.Context, orgID uuid.UUID, installationID int64, metadataID uuid.UUID) (models.GitHubRateLimitDecision, error)
+	CheckCodeReviewBlock(ctx context.Context, installationID int64) (models.GitHubRateLimitDecision, error)
 	RefreshCodeReview(ctx context.Context, installationID int64) error
 }
 

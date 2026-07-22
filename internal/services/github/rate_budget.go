@@ -17,6 +17,7 @@ import (
 type GitHubRateLimitStore interface {
 	Observe(ctx context.Context, observation models.GitHubRateLimitObservation) error
 	ReserveCodeReview(ctx context.Context, orgID uuid.UUID, installationID int64, metadataID uuid.UUID, now time.Time) (models.GitHubRateLimitDecision, error)
+	CheckCodeReviewBlock(ctx context.Context, installationID int64, now time.Time) (models.GitHubRateLimitDecision, error)
 }
 
 type GitHubRateLimitSnapshotFetcher interface {
@@ -78,6 +79,16 @@ func (b *RateBudget) ReserveCodeReview(ctx context.Context, orgID uuid.UUID, ins
 		return models.GitHubRateLimitDecision{Allowed: true}, nil
 	}
 	return b.store.ReserveCodeReview(ctx, orgID, installationID, metadataID, b.now().UTC())
+}
+
+// CheckCodeReviewBlock lets an admitted review resume without reapplying the
+// primary-capacity floor while still honoring installation-wide secondary
+// limits observed by another worker.
+func (b *RateBudget) CheckCodeReviewBlock(ctx context.Context, installationID int64) (models.GitHubRateLimitDecision, error) {
+	if b == nil || b.store == nil {
+		return models.GitHubRateLimitDecision{Allowed: true}, nil
+	}
+	return b.store.CheckCodeReviewBlock(ctx, installationID, b.now().UTC())
 }
 
 // RefreshCodeReview synchronously fetches and durably persists GitHub's

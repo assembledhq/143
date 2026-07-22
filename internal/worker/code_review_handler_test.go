@@ -162,7 +162,7 @@ func TestSyncCodeReviewPullRequestStateClassifiesTransientGitHubFailures(t *test
 	}
 }
 
-func TestReserveQueuedCodeReviewRateLimitDefersBeforeRunning(t *testing.T) {
+func TestEnforceCodeReviewRateLimitDefersQueuedReviewBeforeRunning(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -211,7 +211,7 @@ func TestReserveQueuedCodeReviewRateLimitDefersBeforeRunning(t *testing.T) {
 		RepositoryID: repositoryID, PullRequestID: pullRequestID,
 	}
 
-	stopped, err := reserveQueuedCodeReviewRateLimit(context.Background(), &Stores{
+	stopped, err := enforceCodeReviewRateLimit(context.Background(), &Stores{
 		CodeReviews: db.NewCodeReviewStore(mock), Repositories: db.NewRepositoryStore(mock),
 		PullRequests: db.NewPullRequestStore(mock),
 	}, &Services{GitHubRateLimits: budget}, zerolog.Nop(), job)
@@ -231,7 +231,7 @@ func TestReserveQueuedCodeReviewRateLimitDefersBeforeRunning(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "deferred admission should perform only durable preflight reads")
 }
 
-func TestReserveQueuedCodeReviewRateLimitSkipsRunningReview(t *testing.T) {
+func TestEnforceCodeReviewRateLimitHonorsBlockForRunningReview(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -253,31 +253,58 @@ func TestReserveQueuedCodeReviewRateLimitSkipsRunningReview(t *testing.T) {
 			models.CodeReviewSessionStatusRunning, nil, nil, false, nil, "output-key",
 			nil, nil, nil, nil, nil, nil, now,
 		))
-	budget := &githubRateLimitBudgetStub{decision: models.GitHubRateLimitDecision{Allowed: false}}
+	mock.ExpectQuery("(?s)FROM repositories.*WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgx.NamedArgs{"id": repositoryID, "org_id": orgID}).
+		WillReturnRows(workerRepositoryRows(models.Repository{
+			ID: repositoryID, OrgID: orgID, IntegrationID: uuid.New(), GitHubID: 42,
+			FullName: "acme/repo", DefaultBranch: "main", CloneURL: "https://github.com/acme/repo.git",
+			InstallationID: 143, Status: models.RepositoryStatusActive, Settings: json.RawMessage(`{}`),
+			CreatedAt: now, UpdatedAt: now,
+		}))
+	blockedUntil := now.Add(90 * time.Second)
+	budget := &githubRateLimitBudgetStub{blockDecision: models.GitHubRateLimitDecision{
+		BlockedUntil: blockedUntil,
+		RetryAfter:   90 * time.Second,
+	}}
 
-	stopped, err := reserveQueuedCodeReviewRateLimit(context.Background(), &Stores{
+	stopped, err := enforceCodeReviewRateLimit(context.Background(), &Stores{
 		CodeReviews: db.NewCodeReviewStore(mock), Repositories: db.NewRepositoryStore(mock),
 		PullRequests: db.NewPullRequestStore(mock),
 	}, &Services{GitHubRateLimits: budget}, zerolog.Nop(), runCodeReviewPayload{
 		OrgID: orgID, SessionID: sessionID, RepositoryID: repositoryID, PullRequestID: pullRequestID,
 	})
 
-	require.NoError(t, err, "running reviews should retain access to recovery quota")
-	require.False(t, stopped, "running reviews should continue through their normal workflow")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "running review retries should defer while the installation has a shared secondary block")
+	require.Equal(t, githubRateLimitMaxRetryDuration, *retryable.MaxRetryDuration, "secondary-limit waits should remain bounded")
+	expectedDelay := githubRateLimitRetryAfter(&budget.blockDecision.RetryAfter, sessionID.String())
+	require.Equal(t, *expectedDelay, *retryable.RetryAfter, "running review should honor the shared block with stable jitter")
+	require.False(t, stopped, "secondary-limit deferral should leave the running review available for retry")
 	require.Equal(t, 0, budget.calls, "running reviews should not request a second reservation")
-	require.NoError(t, mock.ExpectationsWereMet(), "running admission should only inspect durable review state")
+	require.Equal(t, 1, budget.blockCalls, "running reviews should check the installation-wide block before making more GitHub calls")
+	require.Equal(t, int64(143), budget.installationID, "the block check should use the repository installation consumed by the review")
+	require.NoError(t, mock.ExpectationsWereMet(), "running admission should inspect review and repository identity")
 }
 
 type githubRateLimitBudgetStub struct {
 	decision         models.GitHubRateLimitDecision
+	blockDecision    models.GitHubRateLimitDecision
 	reserveDecisions []models.GitHubRateLimitDecision
 	err              error
+	blockErr         error
 	calls            int
+	blockCalls       int
 	refreshCalls     int
 	refreshErr       error
 	orgID            uuid.UUID
 	installationID   int64
 	metadataID       uuid.UUID
+}
+
+func (s *githubRateLimitBudgetStub) CheckCodeReviewBlock(_ context.Context, installationID int64) (models.GitHubRateLimitDecision, error) {
+	s.blockCalls++
+	s.installationID = installationID
+	return s.blockDecision, s.blockErr
 }
 
 func (s *githubRateLimitBudgetStub) ReserveCodeReview(_ context.Context, orgID uuid.UUID, installationID int64, metadataID uuid.UUID) (models.GitHubRateLimitDecision, error) {

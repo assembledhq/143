@@ -75,7 +75,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			return fmt.Errorf("org_id and session_id are required")
 		}
 		registerCodeReviewDeadLetterReconciliation(ctx, stores, services, logger, job)
-		stopped, err := reserveQueuedCodeReviewRateLimit(ctx, stores, services, logger, job)
+		stopped, err := enforceCodeReviewRateLimit(ctx, stores, services, logger, job)
 		if stopped || err != nil {
 			return err
 		}
@@ -282,7 +282,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 	}
 }
 
-func reserveQueuedCodeReviewRateLimit(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload) (bool, error) {
+func enforceCodeReviewRateLimit(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload) (bool, error) {
 	if services == nil || services.GitHubRateLimits == nil {
 		return false, nil
 	}
@@ -293,15 +293,17 @@ func reserveQueuedCodeReviewRateLimit(ctx context.Context, stores *Stores, servi
 	if err != nil {
 		return false, fmt.Errorf("load code review for GitHub rate-limit admission: %w", err)
 	}
-	if metadata.Status != models.CodeReviewSessionStatusQueued {
+	if metadata.Status != models.CodeReviewSessionStatusQueued && metadata.Status != models.CodeReviewSessionStatusRunning {
 		return false, nil
 	}
-	pr, err := stores.PullRequests.GetByID(ctx, job.OrgID, job.PullRequestID)
-	if err != nil {
-		return false, fmt.Errorf("load pull request for GitHub rate-limit admission: %w", err)
-	}
-	if stopped, err := stopCodeReviewIfParentSessionCancelled(ctx, stores, services, logger, job, pr); stopped || err != nil {
-		return stopped, err
+	if metadata.Status == models.CodeReviewSessionStatusQueued {
+		pr, err := stores.PullRequests.GetByID(ctx, job.OrgID, job.PullRequestID)
+		if err != nil {
+			return false, fmt.Errorf("load pull request for GitHub rate-limit admission: %w", err)
+		}
+		if stopped, err := stopCodeReviewIfParentSessionCancelled(ctx, stores, services, logger, job, pr); stopped || err != nil {
+			return stopped, err
+		}
 	}
 	repo, err := stores.Repositories.GetByID(ctx, job.OrgID, job.RepositoryID)
 	if err != nil {
@@ -311,22 +313,30 @@ func reserveQueuedCodeReviewRateLimit(ctx context.Context, stores *Stores, servi
 	if installationID <= 0 {
 		return false, fmt.Errorf("repository %s has no GitHub installation for rate-limit admission", repo.ID)
 	}
-	decision, err := services.GitHubRateLimits.ReserveCodeReview(ctx, job.OrgID, installationID, metadata.ID)
-	if err != nil {
-		return false, fmt.Errorf("reserve GitHub installation quota for code review: %w", err)
-	}
-	if decision.RefreshRequired {
-		logger.Info().
-			Str("org_id", job.OrgID.String()).
-			Str("session_id", job.SessionID.String()).
-			Int64("installation_id", installationID).
-			Msg("refreshing stale GitHub installation quota before code review admission")
-		if err := services.GitHubRateLimits.RefreshCodeReview(ctx, installationID); err != nil {
-			return false, classifyGitHubJobError(fmt.Errorf("refresh GitHub installation quota for code review: %w", err), job.SessionID.String())
+	var decision models.GitHubRateLimitDecision
+	if metadata.Status == models.CodeReviewSessionStatusRunning {
+		decision, err = services.GitHubRateLimits.CheckCodeReviewBlock(ctx, installationID)
+		if err != nil {
+			return false, fmt.Errorf("check GitHub installation block for running code review: %w", err)
 		}
+	} else {
 		decision, err = services.GitHubRateLimits.ReserveCodeReview(ctx, job.OrgID, installationID, metadata.ID)
 		if err != nil {
-			return false, fmt.Errorf("reserve refreshed GitHub installation quota for code review: %w", err)
+			return false, fmt.Errorf("reserve GitHub installation quota for code review: %w", err)
+		}
+		if decision.RefreshRequired {
+			logger.Info().
+				Str("org_id", job.OrgID.String()).
+				Str("session_id", job.SessionID.String()).
+				Int64("installation_id", installationID).
+				Msg("refreshing stale GitHub installation quota before code review admission")
+			if err := services.GitHubRateLimits.RefreshCodeReview(ctx, installationID); err != nil {
+				return false, classifyGitHubJobError(fmt.Errorf("refresh GitHub installation quota for code review: %w", err), job.SessionID.String())
+			}
+			decision, err = services.GitHubRateLimits.ReserveCodeReview(ctx, job.OrgID, installationID, metadata.ID)
+			if err != nil {
+				return false, fmt.Errorf("reserve refreshed GitHub installation quota for code review: %w", err)
+			}
 		}
 	}
 	if decision.Allowed {
@@ -339,6 +349,7 @@ func reserveQueuedCodeReviewRateLimit(ctx context.Context, stores *Stores, servi
 	logEvent := logger.Warn().
 		Str("org_id", job.OrgID.String()).
 		Str("session_id", job.SessionID.String()).
+		Str("review_status", string(metadata.Status)).
 		Int64("installation_id", installationID).
 		Int("rate_limit", decision.Limit).
 		Int("rate_remaining", decision.Remaining).
@@ -352,7 +363,7 @@ func reserveQueuedCodeReviewRateLimit(ctx context.Context, stores *Stores, servi
 	if !decision.BlockedUntil.IsZero() {
 		logEvent = logEvent.Time("rate_blocked_until", decision.BlockedUntil)
 	}
-	logEvent.Msg("deferring queued code review to preserve GitHub installation quota")
+	logEvent.Msg("deferring code review for GitHub installation rate limit")
 	reason := fmt.Sprintf("GitHub installation %d quota is being refreshed before code review admission", installationID)
 	if !decision.BlockedUntil.IsZero() {
 		reason = fmt.Sprintf("GitHub installation %d is rate limited until %s", installationID, decision.BlockedUntil.Format(time.RFC3339))

@@ -275,6 +275,37 @@ func (s *GitHubRateLimitStore) ReserveCodeReview(ctx context.Context, orgID uuid
 	return decision, nil
 }
 
+// CheckCodeReviewBlock checks only installation-wide secondary-limit state.
+// Admitted reviews use this on retries so they can consume recovery capacity
+// without making requests while GitHub has told the installation to stop.
+// lint:allow-no-orgid reason="GitHub API blocks are global per App installation, not per linked 143 organization"
+func (s *GitHubRateLimitStore) CheckCodeReviewBlock(ctx context.Context, installationID int64, now time.Time) (models.GitHubRateLimitDecision, error) {
+	if installationID <= 0 {
+		return models.GitHubRateLimitDecision{}, fmt.Errorf("GitHub installation ID must be positive")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+
+	var blockedUntil sql.NullTime
+	if err := s.db.QueryRow(ctx, `
+		SELECT MAX(blocked_until)
+		FROM github_installation_rate_limits
+		WHERE installation_id = @installation_id`, pgx.NamedArgs{
+		"installation_id": installationID,
+	}).Scan(&blockedUntil); err != nil {
+		return models.GitHubRateLimitDecision{}, fmt.Errorf("check GitHub installation rate-limit block: %w", err)
+	}
+
+	decision := models.GitHubRateLimitDecision{Allowed: true}
+	if blockedUntil.Valid && blockedUntil.Time.After(now) {
+		decision.Allowed = false
+		decision.BlockedUntil = blockedUntil.Time
+		decision.RetryAfter = blockedUntil.Time.Sub(now)
+	}
+	return decision, nil
+}
+
 func loadGitHubRateLimitState(ctx context.Context, tx pgx.Tx, installationID int64) (githubRateLimitState, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT resource, limit_count, remaining_count, reset_at, blocked_until,
