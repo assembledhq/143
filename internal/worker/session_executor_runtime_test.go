@@ -115,6 +115,10 @@ func (s *executorRuntimeJobStoreStub) RenewLeaseForSessionExecutor(context.Conte
 	return &models.Job{LeaseExpiresAt: ptr(time.Now().Add(time.Minute))}, true, nil
 }
 
+func (s *executorRuntimeJobStoreStub) EnsureRetryWindowStartedAtWithLease(_ context.Context, _ uuid.UUID, _ uuid.UUID, startedAt time.Time) (time.Time, bool, error) {
+	return startedAt, true, nil
+}
+
 func (s *executorRuntimeJobStoreStub) MarkSucceededWithLease(ctx context.Context, _ uuid.UUID, lockToken uuid.UUID) (bool, error) {
 	s.succeededCalls++
 	s.succeededToken = lockToken

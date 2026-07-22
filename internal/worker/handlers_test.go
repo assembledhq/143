@@ -5783,6 +5783,37 @@ func TestSyncPullRequestStateHandlerDefersPendingMergeability(t *testing.T) {
 	require.True(t, retryable.ConsumeAttempt, "pending mergeability should consume attempts so exponential backoff advances")
 }
 
+func TestSyncPullRequestStateHandlerWaitsForGitHubRateLimit(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.MustParse("11111111-2222-3333-4444-555555555555")
+	services := &Services{
+		PR: &stubPRService{
+			syncPullRequestStateFn: func(context.Context, uuid.UUID, uuid.UUID) error {
+				return &ghservice.GitHubAPIError{
+					Method:     http.MethodGet,
+					Path:       "/repos/acme/repo/pulls/42",
+					StatusCode: http.StatusForbidden,
+					Body:       []byte(`{"message":"API rate limit exceeded"}`),
+					Header:     http.Header{"Retry-After": []string{"37"}},
+				}
+			},
+		},
+	}
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`)
+
+	err := newSyncPullRequestStateHandler(services, zerolog.Nop())(context.Background(), "sync_pull_request_state", payload)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "rate-limited PR sync should remain pending until GitHub recovers")
+	require.False(t, retryable.ConsumeAttempt, "rate-limited PR sync should not consume its attempt budget")
+	require.NotNil(t, retryable.RetryAfter, "rate-limited PR sync should preserve GitHub's retry delay")
+	require.Equal(t, 78*time.Second, *retryable.RetryAfter, "rate-limited PR sync should apply the minimum delay and stable per-job jitter")
+	require.NotNil(t, retryable.MaxRetryDuration, "rate-limited PR sync should use a longer bounded retry window")
+	require.Equal(t, githubRateLimitMaxRetryDuration, *retryable.MaxRetryDuration, "rate-limited PR sync should survive a normal GitHub reset interval")
+}
+
 func TestSyncPullRequestStateHandlerTreatsAutoRepairEvaluationFailureAsNonFatal(t *testing.T) {
 	t.Parallel()
 

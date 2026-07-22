@@ -165,6 +165,32 @@ func TestService_GetInstallationToken_FetchesAndCaches(t *testing.T) {
 	require.Equal(t, 1, callCount, "GetInstallationToken should exchange only once and use cache on subsequent calls")
 }
 
+func TestService_GetInstallationToken_PreservesRateLimitHeaders(t *testing.T) {
+	t.Parallel()
+
+	header := make(http.Header)
+	header.Set("Retry-After", "43")
+	header.Set("X-RateLimit-Remaining", "0")
+	svc, err := NewService(143, testPrivateKeyPEM(t))
+	require.NoError(t, err, "NewService should create a valid GitHub service")
+	svc.httpClient = &http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Body:       io.NopCloser(strings.NewReader(`{"message":"API rate limit exceeded"}`)),
+				Header:     header,
+			}, nil
+		}),
+	}
+
+	_, err = svc.GetInstallationToken(context.Background(), 77)
+
+	var apiErr *GitHubAPIError
+	require.ErrorAs(t, err, &apiErr, "installation token failure should retain typed GitHub response details")
+	require.Equal(t, "43", apiErr.Header.Get("Retry-After"), "installation token failure should preserve GitHub's retry delay")
+	require.Equal(t, "0", apiErr.Header.Get("X-RateLimit-Remaining"), "installation token failure should preserve GitHub's remaining budget")
+}
+
 func TestService_GetSandboxInstallationToken_ScopesRepositoryAndPermissions(t *testing.T) {
 	t.Parallel()
 

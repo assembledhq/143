@@ -645,7 +645,7 @@ func (s *JobStore) DeleteExpiredCompleted(ctx context.Context, retentionDays int
 const claimedJobColumns = `j.id, j.org_id, j.queue, j.job_type, j.payload, j.priority, j.status,
 	j.attempts, j.max_attempts, j.run_at, j.locked_by_node_id, j.locked_at,
 	j.lease_expires_at, j.lock_token, j.run_owner_id, j.owner_kind, j.last_error,
-	j.dedupe_key, j.target_node_id, j.created_at, j.updated_at, j.completed_at`
+	j.dedupe_key, j.target_node_id, j.retry_window_started_at, j.created_at, j.updated_at, j.completed_at`
 
 // nodeDeadHeartbeatThreshold is how long a node can go without heartbeating
 // before its pinned jobs become claimable by any worker. Set generously
@@ -737,12 +737,13 @@ func scanJobRow(row pgx.Row) (*models.Job, error) {
 	var lastError pgtype.Text
 	var dedupeKey pgtype.Text
 	var targetNodeID pgtype.Text
+	var retryWindowStartedAt pgtype.Timestamptz
 	var completedAt pgtype.Timestamptz
 	err := row.Scan(
 		&job.ID, &job.OrgID, &job.Queue, &job.JobType, &job.Payload, &job.Priority,
 		&job.Status, &job.Attempts, &job.MaxAttempts, &job.RunAt, &lockedByNodeID,
 		&lockedAt, &leaseExpiresAt, &persistedLockToken, &runOwnerID,
-		&ownerKind, &lastError, &dedupeKey, &targetNodeID, &job.CreatedAt, &job.UpdatedAt, &completedAt,
+		&ownerKind, &lastError, &dedupeKey, &targetNodeID, &retryWindowStartedAt, &job.CreatedAt, &job.UpdatedAt, &completedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -773,10 +774,36 @@ func scanJobRow(row pgx.Row) (*models.Job, error) {
 	if targetNodeID.Valid {
 		job.TargetNodeID = &targetNodeID.String
 	}
+	if retryWindowStartedAt.Valid {
+		job.RetryWindowStartedAt = &retryWindowStartedAt.Time
+	}
 	if completedAt.Valid {
 		job.CompletedAt = &completedAt.Time
 	}
 	return &job, nil
+}
+
+// EnsureRetryWindowStartedAtWithLease records the first bounded retry under
+// the current fencing token and returns the durable start time. Repeated calls
+// preserve the original timestamp so worker restarts cannot extend the window.
+// lint:allow-no-orgid reason="worker queue consumer updates cross-org jobs by globally unique fenced job id"
+func (s *JobStore) EnsureRetryWindowStartedAtWithLease(ctx context.Context, jobID, lockToken uuid.UUID, startedAt time.Time) (time.Time, bool, error) {
+	var persisted time.Time
+	err := s.db.QueryRow(ctx, `
+		UPDATE jobs
+		SET retry_window_started_at = COALESCE(retry_window_started_at, $1),
+			updated_at = now()
+		WHERE id = $2
+		  AND status = 'running'
+		  AND lock_token = $3
+		RETURNING retry_window_started_at`, startedAt, jobID, lockToken).Scan(&persisted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("ensure retry window started at with lease: %w", err)
+	}
+	return persisted, true, nil
 }
 
 // GetRunningForSessionExecutor returns the running job only when the executor

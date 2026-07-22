@@ -1124,10 +1124,14 @@ type Job struct {
 	// docker daemon as the session's recorded container_id. NULL means any
 	// worker can claim. A pinned job becomes claimable by any worker if its
 	// target node is marked dead in the `nodes` table (starvation safety).
-	TargetNodeID *string    `db:"target_node_id" json:"target_node_id,omitempty"`
-	CreatedAt    time.Time  `db:"created_at" json:"created_at"`
-	UpdatedAt    time.Time  `db:"updated_at" json:"updated_at"`
-	CompletedAt  *time.Time `db:"completed_at" json:"completed_at,omitempty"`
+	TargetNodeID *string `db:"target_node_id" json:"target_node_id,omitempty"`
+	// RetryWindowStartedAt records the first bounded external retry for this job.
+	// It is set once under the job's fencing token so retry limits survive worker
+	// restarts without counting unrelated queue or execution time.
+	RetryWindowStartedAt *time.Time `db:"retry_window_started_at" json:"retry_window_started_at,omitempty"`
+	CreatedAt            time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt            time.Time  `db:"updated_at" json:"updated_at"`
+	CompletedAt          *time.Time `db:"completed_at" json:"completed_at,omitempty"`
 }
 
 // SessionWorkerTarget returns the worker_node_id to pin sandbox-bound jobs
