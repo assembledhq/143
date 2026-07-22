@@ -1414,7 +1414,8 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
     await user.click(await screen.findByRole("tab", { name: "Policy" }));
     const viewOnlyNotice = await screen.findByText(/view-only access/i);
-    expect(viewOnlyNotice.closest('[data-slot="card"]')).toBeInTheDocument();
+    expect(viewOnlyNotice).toHaveClass("border-border", "bg-muted/50", "text-xs", "text-muted-foreground");
+    expect(viewOnlyNotice.parentElement).toHaveAttribute("data-slot", "card-content");
     expect(screen.getByRole("switch", { name: "Code reviews enabled" })).toBeDisabled();
     expect(screen.getByRole("textbox", { name: "Additional review instructions (optional)" })).toBeDisabled();
 

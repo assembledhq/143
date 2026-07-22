@@ -849,7 +849,7 @@ export default function CodeReviewsPage() {
                 </div>
               </CardHeader>
               <CardContent className="space-y-5">
-                {!canManagePolicy ? <Card className="rounded-md bg-muted/30 shadow-none"><CardContent className="p-3 text-sm text-muted-foreground">You have view-only access to this policy. An organization administrator can change review behavior and GitHub setup.</CardContent></Card> : null}
+                {!canManagePolicy ? <div className="rounded-md border border-border bg-muted/50 px-4 py-3 text-xs text-muted-foreground">You have view-only access to this policy. An organization administrator can change review behavior and GitHub setup.</div> : null}
                 <fieldset disabled={!canManagePolicy} className="space-y-5">
                 <PolicyBehaviorSection
                       config={config}
