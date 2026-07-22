@@ -99,6 +99,7 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"InternalCodeReviewHandler.Get":                     "internal API, uses signed tool token claims.OrgID and restricts rows to claims.RepoID",
 		"InternalCodeReviewHandler.Policy":                  "internal API, uses signed tool token claims.OrgID",
 		"InternalCodeReviewHandler.PolicyByID":              "internal API, uses signed tool token claims.OrgID",
+		"InternalCodeReviewHandler.UpdatePolicy":            "internal API, uses signed tool token claims.OrgID and requires the code_review_policy_management write capability",
 		"InternalAutomationHandler.Create":                  "internal sandbox API, uses signed tool token claims.OrgID and restricts repository_id to claims.RepoID",
 		"InternalAutomationHandler.Update":                  "internal sandbox API, uses signed tool token claims.OrgID and restricts automation repository_id to claims.RepoID",
 		"InternalAutomationHandler.RunNow":                  "internal sandbox API, uses signed tool token claims.OrgID and restricts automation repository_id to claims.RepoID",

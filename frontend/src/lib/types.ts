@@ -383,6 +383,7 @@ export type AgentCapabilityID =
   | 'external_comments'
   | 'slack_notifications'
   | 'automation_management'
+  | 'code_review_policy_management'
   | 'project_proposals'
   | 'eval_authoring'
   | 'publishing';

@@ -72,6 +72,11 @@ func addAllowedToolPaths(allowed map[string]bool, capability models.AgentCapabil
 		add(NamespaceSessionHistory, ActionSearch, ActionGet, ActionMessages)
 	case models.AgentCapabilityReviewFeedback:
 		add(NamespaceCodeReviewHistory, ActionList, ActionGet, ActionPolicy)
+	case models.AgentCapabilityCodeReviewPolicy:
+		// Policy read rides along with the write grant so an agent can learn
+		// the expected_version its update must carry even when the org has
+		// not granted review_feedback; the internal API mirrors this.
+		add(NamespaceCodeReviewHistory, ActionPolicy, ActionUpdatePolicy)
 	case models.AgentCapabilityPRHistory:
 		add(CLINamespace("github"), CLIAction("list_recent_prs"), CLIAction("get_pr_reviews"))
 	case models.AgentCapabilityCIHistory:

@@ -1044,6 +1044,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		internalAgentPreviewHandler := handlers.NewInternalAgentPreviewHandler(previewHandler, sessionStore, cfg.SessionSecret, logger)
 		internalSessionHistoryHandler := handlers.NewInternalSessionHistoryHandler(sessionHistoryStore, sessionStore, sessionMessageStore, cfg.SessionSecret)
 		internalCodeReviewHandler := handlers.NewInternalCodeReviewHandler(codeReviewStore, sessionStore, cfg.SessionSecret)
+		internalCodeReviewHandler.SetAuditEmitter(auditEmitter)
 		internalChangesetHandler := handlers.NewInternalChangesetHandler(sessionStore, sessionHandler, cfg.SessionSecret)
 		internalSessionTabsHandler.SetAuditEmitter(auditEmitter)
 		r.Route("/api/v1/internal", func(r chi.Router) {
@@ -1094,6 +1095,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Get("/session-history/{session_id}/threads/{thread_id}/messages", internalSessionHistoryHandler.Messages)
 			r.Get("/code-reviews", internalCodeReviewHandler.List)
 			r.Get("/code-reviews/policy", internalCodeReviewHandler.Policy)
+			r.Put("/code-reviews/policy", internalCodeReviewHandler.UpdatePolicy)
 			r.Get("/code-reviews/policies/{policy_id}", internalCodeReviewHandler.PolicyByID)
 			r.Get("/code-reviews/{session_id}", internalCodeReviewHandler.Get)
 			r.Get("/session-tabs", internalSessionTabsHandler.List)

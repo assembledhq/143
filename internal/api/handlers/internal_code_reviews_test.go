@@ -42,6 +42,15 @@ type internalCodeReviewFixture struct {
 
 func newInternalCodeReviewFixture(t *testing.T, capabilities ...models.AgentCapabilityID) internalCodeReviewFixture {
 	t.Helper()
+	snapshot := make([]models.AgentCapabilitySnapshotItem, 0, len(capabilities))
+	for _, id := range capabilities {
+		snapshot = append(snapshot, models.AgentCapabilitySnapshotItem{ID: id, AccessLevel: models.AgentCapabilityAccessRead})
+	}
+	return newInternalCodeReviewFixtureWithSnapshot(t, snapshot)
+}
+
+func newInternalCodeReviewFixtureWithSnapshot(t *testing.T, snapshot []models.AgentCapabilitySnapshotItem) internalCodeReviewFixture {
+	t.Helper()
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock should initialize")
@@ -52,10 +61,6 @@ func newInternalCodeReviewFixture(t *testing.T, capabilities ...models.AgentCapa
 	sessionID := uuid.New()
 	secret := "test-secret-32-chars-long-enough"
 
-	snapshot := make([]models.AgentCapabilitySnapshotItem, 0, len(capabilities))
-	for _, id := range capabilities {
-		snapshot = append(snapshot, models.AgentCapabilitySnapshotItem{ID: id, AccessLevel: models.AgentCapabilityAccessRead})
-	}
 	sessions := stubInternalCodeReviewSessions{session: models.Session{
 		ID:                 sessionID,
 		OrgID:              orgID,
@@ -74,6 +79,13 @@ func newInternalCodeReviewFixture(t *testing.T, capabilities ...models.AgentCapa
 		handler:   NewInternalCodeReviewHandler(db.NewCodeReviewStore(mock), sessions, secret),
 		mock:      mock,
 	}
+}
+
+func newInternalCodeReviewWriteFixture(t *testing.T) internalCodeReviewFixture {
+	t.Helper()
+	return newInternalCodeReviewFixtureWithSnapshot(t, []models.AgentCapabilitySnapshotItem{
+		{ID: models.AgentCapabilityCodeReviewPolicy, AccessLevel: models.AgentCapabilityAccessWrite},
+	})
 }
 
 var internalCodeReviewListColumns = []string{
@@ -382,6 +394,192 @@ func TestInternalCodeReviewHandler_PolicyByIDReturnsHistoricalVersion(t *testing
 	require.Equal(t, 3, resp.Data.Version, "historical policy version should be returned")
 	require.Equal(t, "Focus on tenancy bugs", resp.Data.ReviewInstructions, "historical review instructions should be returned")
 	require.NoError(t, fx.mock.ExpectationsWereMet(), "policy version should be loaded by ID")
+}
+
+var internalCodeReviewPolicyColumns = []string{
+	"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
+	"review_instructions", "automated_approval_policy", "description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at",
+}
+
+func internalCodeReviewPolicyRow(orgID uuid.UUID, version int, reviewInstructions, approvalPolicy string) []any {
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	return []any{
+		uuid.New(), orgID, nil, true, version, true, models.CodeReviewApprovalModeApproveAcceptable,
+		reviewInstructions, approvalPolicy, []byte(`{}`), []byte(`{}`), []byte(`{}`), 5, nil, now,
+	}
+}
+
+func newUpdatePolicyRequest(t *testing.T, fx internalCodeReviewFixture, body string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/internal/code-reviews/policy", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+fx.token)
+	return req
+}
+
+func TestInternalCodeReviewHandler_UpdatePolicyRequiresWriteCapability(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		snapshot []models.AgentCapabilitySnapshotItem
+	}{
+		{
+			name: "read-only history grant is not enough",
+			snapshot: []models.AgentCapabilitySnapshotItem{
+				{ID: models.AgentCapabilityReviewFeedback, AccessLevel: models.AgentCapabilityAccessRead},
+			},
+		},
+		{
+			name: "policy capability granted at read level is not enough",
+			snapshot: []models.AgentCapabilitySnapshotItem{
+				{ID: models.AgentCapabilityCodeReviewPolicy, AccessLevel: models.AgentCapabilityAccessRead},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fx := newInternalCodeReviewFixtureWithSnapshot(t, tt.snapshot)
+			rec := httptest.NewRecorder()
+			fx.handler.UpdatePolicy(rec, newUpdatePolicyRequest(t, fx, `{"config":{"enabled":true},"expected_version":0,"reason":"test"}`))
+			require.Equal(t, http.StatusForbidden, rec.Code, "policy updates should require the write capability")
+			require.Contains(t, rec.Body.String(), "CAPABILITY_DENIED", "denial should name the capability gate")
+			require.NoError(t, fx.mock.ExpectationsWereMet(), "no database calls should be made")
+		})
+	}
+}
+
+func TestInternalCodeReviewHandler_UpdatePolicyValidatesArguments(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body string
+		code string
+	}{
+		{name: "config must be an object", body: `{"config":[],"expected_version":0,"reason":"r"}`, code: "INVALID_CONFIG"},
+		{name: "config must not be empty", body: `{"config":{},"expected_version":0,"reason":"r"}`, code: "INVALID_CONFIG"},
+		{name: "expected_version is required", body: `{"config":{"enabled":true},"reason":"r"}`, code: "EXPECTED_VERSION_REQUIRED"},
+		{name: "reason is required", body: `{"config":{"enabled":true},"expected_version":0,"reason":"  "}`, code: "REASON_REQUIRED"},
+		{name: "reason is bounded", body: `{"config":{"enabled":true},"expected_version":0,"reason":"` + strings.Repeat("y", internalCodeReviewReasonLimit+1) + `"}`, code: "REASON_TOO_LONG"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fx := newInternalCodeReviewWriteFixture(t)
+			rec := httptest.NewRecorder()
+			fx.handler.UpdatePolicy(rec, newUpdatePolicyRequest(t, fx, tt.body))
+			require.Equal(t, http.StatusBadRequest, rec.Code, "invalid arguments should be rejected")
+			require.Contains(t, rec.Body.String(), tt.code, "error should carry the expected code")
+			require.NoError(t, fx.mock.ExpectationsWereMet(), "no database calls should be made")
+		})
+	}
+}
+
+func TestInternalCodeReviewHandler_WriteGrantAlsoReadsPolicyButNotHistory(t *testing.T) {
+	t.Parallel()
+
+	fx := newInternalCodeReviewWriteFixture(t)
+	fx.mock.ExpectQuery("FROM code_review_policies").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(internalCodeReviewPolicyColumns))
+
+	policyReq := httptest.NewRequest(http.MethodGet, "/api/v1/internal/code-reviews/policy", nil)
+	policyReq.Header.Set("Authorization", "Bearer "+fx.token)
+	policyRec := httptest.NewRecorder()
+	fx.handler.Policy(policyRec, policyReq)
+	require.Equal(t, http.StatusOK, policyRec.Code, "the write grant must be able to read the policy to learn expected_version: %s", policyRec.Body.String())
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/internal/code-reviews", nil)
+	listReq.Header.Set("Authorization", "Bearer "+fx.token)
+	listRec := httptest.NewRecorder()
+	fx.handler.List(listRec, listReq)
+	require.Equal(t, http.StatusForbidden, listRec.Code, "the write grant alone should not open the review history reads")
+	require.NoError(t, fx.mock.ExpectationsWereMet(), "only the policy read should reach the database")
+}
+
+func TestInternalCodeReviewHandler_UpdatePolicyVersionConflict(t *testing.T) {
+	t.Parallel()
+
+	fx := newInternalCodeReviewWriteFixture(t)
+
+	fx.mock.ExpectQuery("FROM code_review_policies").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(internalCodeReviewPolicyColumns).
+			AddRow(internalCodeReviewPolicyRow(fx.orgID, 3, "Current instructions", "Current approvals")...))
+	fx.mock.ExpectBegin()
+	fx.mock.ExpectExec("pg_advisory_xact_lock").
+		WithArgs("code_review_policy:" + fx.orgID.String()).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	fx.mock.ExpectQuery("SELECT COALESCE").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"version"}).AddRow(3))
+	fx.mock.ExpectRollback()
+	fx.mock.ExpectQuery("FROM code_review_policies").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(internalCodeReviewPolicyColumns).
+			AddRow(internalCodeReviewPolicyRow(fx.orgID, 3, "Current instructions", "Current approvals")...))
+
+	rec := httptest.NewRecorder()
+	fx.handler.UpdatePolicy(rec, newUpdatePolicyRequest(t, fx, `{"config":{"review_instructions":"Newer"},"expected_version":2,"reason":"stale agent"}`))
+
+	require.Equal(t, http.StatusConflict, rec.Code, "stale expected_version should conflict: %s", rec.Body.String())
+	require.Contains(t, rec.Body.String(), "CODE_REVIEW_POLICY_VERSION_CONFLICT", "conflict should carry a retryable code")
+	require.Contains(t, rec.Body.String(), `"current_version":3`, "conflict should tell the agent the version to re-read")
+	require.NoError(t, fx.mock.ExpectationsWereMet(), "conflict should stop at the version check")
+}
+
+func TestInternalCodeReviewHandler_UpdatePolicyMergesOntoActiveConfig(t *testing.T) {
+	t.Parallel()
+
+	fx := newInternalCodeReviewWriteFixture(t)
+	preservedApproval := "Keep approving docs-only changes"
+	newInstructions := "Focus on tenancy and auth regressions"
+
+	fx.mock.ExpectQuery("FROM code_review_policies").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(internalCodeReviewPolicyColumns).
+			AddRow(internalCodeReviewPolicyRow(fx.orgID, 2, "Old instructions", preservedApproval)...))
+	fx.mock.ExpectBegin()
+	fx.mock.ExpectExec("pg_advisory_xact_lock").
+		WithArgs("code_review_policy:" + fx.orgID.String()).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	fx.mock.ExpectQuery("SELECT COALESCE").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"version"}).AddRow(2))
+	fx.mock.ExpectExec("UPDATE code_review_policies").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// Named-arg order: org_id, version, enabled, approval_mode,
+	// review_instructions, automated_approval_policy, description_policy,
+	// risk_policy, agent_roster, inline_comment_limit, created_by_user_id.
+	fx.mock.ExpectQuery("INSERT INTO code_review_policies").
+		WithArgs(
+			pgxmock.AnyArg(), 3, true, pgxmock.AnyArg(),
+			newInstructions, preservedApproval,
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows(internalCodeReviewPolicyColumns).
+			AddRow(internalCodeReviewPolicyRow(fx.orgID, 3, newInstructions, preservedApproval)...))
+	fx.mock.ExpectCommit()
+
+	rec := httptest.NewRecorder()
+	body := `{"config":{"review_instructions":"` + newInstructions + `"},"expected_version":2,"reason":"tighten tenancy focus"}`
+	fx.handler.UpdatePolicy(rec, newUpdatePolicyRequest(t, fx, body))
+
+	require.Equal(t, http.StatusOK, rec.Code, "merge update should succeed: %s", rec.Body.String())
+	var resp struct {
+		Data struct {
+			Version                 int    `json:"version"`
+			ReviewInstructions      string `json:"review_instructions"`
+			AutomatedApprovalPolicy string `json:"automated_approval_policy"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), "update response should be JSON")
+	require.Equal(t, 3, resp.Data.Version, "update should produce the next policy version")
+	require.Equal(t, newInstructions, resp.Data.ReviewInstructions, "supplied fields should be applied")
+	require.Equal(t, preservedApproval, resp.Data.AutomatedApprovalPolicy, "omitted fields should keep their active values")
+	require.NoError(t, fx.mock.ExpectationsWereMet(), "update should read, CAS, and insert the new version")
 }
 
 func withChiURLParam(r *http.Request, key, value string) *http.Request {

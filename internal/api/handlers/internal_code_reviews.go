@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog"
 )
 
 // internalCodeReviewTextLimit bounds large free-text fields (agent raw output,
@@ -33,11 +35,14 @@ type InternalCodeReviewHandler struct {
 	store         *db.CodeReviewStore
 	sessions      internalSessionGetter
 	signingSecret string
+	audit         *db.AuditEmitter
 }
 
 func NewInternalCodeReviewHandler(store *db.CodeReviewStore, sessions internalSessionGetter, signingSecret string) *InternalCodeReviewHandler {
 	return &InternalCodeReviewHandler{store: store, sessions: sessions, signingSecret: signingSecret}
 }
+
+func (h *InternalCodeReviewHandler) SetAuditEmitter(audit *db.AuditEmitter) { h.audit = audit }
 
 // internalCodeReviewSummary is the compact list row returned to agents. It
 // intentionally omits the final review body and output keys to keep list
@@ -120,6 +125,10 @@ type internalCodeReviewDetail struct {
 
 const internalCodeReviewDefaultLimit = 20
 const internalCodeReviewMaxLimit = 50
+
+// internalCodeReviewReasonLimit bounds the audit reason on policy updates so
+// agent-supplied text cannot bloat audit rows.
+const internalCodeReviewReasonLimit = 2000
 
 // List returns past code reviews for the session's repository, newest first.
 func (h *InternalCodeReviewHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -335,7 +344,7 @@ func (h *InternalCodeReviewHandler) Get(w http.ResponseWriter, r *http.Request) 
 
 // Policy returns the active resolved code review policy for the org.
 func (h *InternalCodeReviewHandler) Policy(w http.ResponseWriter, r *http.Request) {
-	claims, ok := h.authorize(w, r)
+	claims, ok := h.authorizePolicyRead(w, r)
 	if !ok {
 		return
 	}
@@ -347,10 +356,115 @@ func (h *InternalCodeReviewHandler) Policy(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewResolvedPolicy]{Data: resolved})
 }
 
+// UpdatePolicy saves a new version of the org's code review policy on behalf
+// of a sandbox agent. Supplied config keys are merged onto the active resolved
+// config, so an agent can adjust one knob without restating the whole policy.
+// The write is optimistic-concurrency guarded: expected_version must match the
+// active version (0 when the org has never saved one) or the call fails with
+// 409 and the current version, forcing the agent to re-read before retrying.
+// Every change is a new immutable version with a required reason, audited as a
+// system action, so humans can inspect and roll back agent edits.
+func (h *InternalCodeReviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Request) {
+	claims, ok := h.authorizeWrite(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Config          json.RawMessage `json:"config"`
+		ExpectedVersion *int            `json:"expected_version"`
+		Reason          string          `json:"reason"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
+		return
+	}
+	var supplied map[string]json.RawMessage
+	if len(req.Config) == 0 || json.Unmarshal(req.Config, &supplied) != nil || len(supplied) == 0 {
+		writeError(w, r, http.StatusBadRequest, "INVALID_CONFIG", "config must be a JSON object with at least one policy field")
+		return
+	}
+	if req.ExpectedVersion == nil || *req.ExpectedVersion < 0 {
+		writeError(w, r, http.StatusBadRequest, "EXPECTED_VERSION_REQUIRED", "expected_version must be the active policy version (0 if the org has never saved a policy)")
+		return
+	}
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" {
+		writeError(w, r, http.StatusBadRequest, "REASON_REQUIRED", "reason is required so humans can audit why the policy changed")
+		return
+	}
+	if utf8.RuneCountInString(reason) > internalCodeReviewReasonLimit {
+		writeError(w, r, http.StatusBadRequest, "REASON_TOO_LONG", "reason must be at most 2000 characters")
+		return
+	}
+	current, err := h.store.ResolvePolicy(r.Context(), claims.OrgID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_POLICY_LOAD_FAILED", "failed to load code review policy", err)
+		return
+	}
+	// Overlay the supplied keys onto the active config: unmarshal into a copy
+	// pre-populated with current values, so absent fields keep their setting
+	// instead of resetting to zero values. json.Unmarshal merges nested struct
+	// sections field-wise the same way (only supplied keys change); JSON
+	// arrays are the exception and replace the current array wholesale.
+	merged := current.Config
+	if err := json.Unmarshal(req.Config, &merged); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_CONFIG", "invalid policy config", err)
+		return
+	}
+	record, err := h.store.SavePolicyExpectingVersion(r.Context(), claims.OrgID, merged, *req.ExpectedVersion, nil)
+	if err != nil {
+		if errors.Is(err, db.ErrCodeReviewPolicyVersionConflict) {
+			currentVersion := 0
+			if fresh, freshErr := h.store.ResolvePolicy(r.Context(), claims.OrgID); freshErr == nil && fresh.Policy != nil {
+				currentVersion = fresh.Policy.Version
+			}
+			writeErrorWithDetails(w, r, http.StatusConflict, "CODE_REVIEW_POLICY_VERSION_CONFLICT",
+				"the policy changed since it was read; fetch it again and retry with the current version",
+				map[string]int{"current_version": currentVersion}, err)
+			return
+		}
+		var validationErr *models.CodeReviewPolicyValidationError
+		if errors.As(err, &validationErr) {
+			writeErrorWithDetails(w, r, http.StatusBadRequest, "CODE_REVIEW_POLICY_INVALID", "invalid code review policy", map[string]string{"field": validationErr.Field}, err)
+			return
+		}
+		writeError(w, r, http.StatusBadRequest, "CODE_REVIEW_POLICY_INVALID", "invalid code review policy", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewPolicyRecord]{Data: record})
+	h.emitPolicyAudit(r, claims, record, reason, *req.ExpectedVersion)
+}
+
+func (h *InternalCodeReviewHandler) emitPolicyAudit(r *http.Request, claims *auth.InternalTokenClaims, record models.CodeReviewPolicyRecord, reason string, expectedVersion int) {
+	if h.audit == nil {
+		return
+	}
+	resourceID := record.ID.String()
+	details := marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{
+		"source":                          "agent_tool",
+		"tool_name":                       "code_review_history_update_policy",
+		"session_id":                      claims.SessionID.String(),
+		"reason":                          reason,
+		"version":                         record.Version,
+		"expected_version":                expectedVersion,
+		"review_instructions_runes":       utf8.RuneCountInString(record.ReviewInstructions),
+		"automated_approval_policy_runes": utf8.RuneCountInString(record.AutomatedApprovalPolicy),
+	})
+	h.audit.EmitSystemAction(r.Context(), db.SystemActionParams{
+		OrgID:        claims.OrgID,
+		ActorID:      "agent_tool",
+		Action:       models.AuditActionCodeReviewPolicyUpdated,
+		ResourceType: models.AuditResourceCodeReviewPolicy,
+		ResourceID:   &resourceID,
+		Details:      details,
+		SessionID:    claims.SessionID,
+	})
+}
+
 // PolicyByID returns one historical policy version so agents can compare the
 // policy that governed an old review against the active one.
 func (h *InternalCodeReviewHandler) PolicyByID(w http.ResponseWriter, r *http.Request) {
-	claims, ok := h.authorize(w, r)
+	claims, ok := h.authorizePolicyRead(w, r)
 	if !ok {
 		return
 	}
@@ -381,6 +495,51 @@ func (h *InternalCodeReviewHandler) authorize(w http.ResponseWriter, r *http.Req
 		return nil, false
 	}
 	return claims, true
+}
+
+// authorizePolicyRead admits either capability to the policy read endpoints:
+// review_feedback (the default-on history read grant) or
+// code_review_policy_management at any level. Without the latter, an org that
+// granted only the write capability would have an agent able to update the
+// policy but unable to read it — and so unable to learn the expected_version
+// its own update requires.
+func (h *InternalCodeReviewHandler) authorizePolicyRead(w http.ResponseWriter, r *http.Request) (*auth.InternalTokenClaims, bool) {
+	claims, session, ok := authorizeInternalSession(w, r, h.signingSecret, h.sessions)
+	if !ok {
+		return nil, false
+	}
+	if !sessionHasCapability(session.CapabilitySnapshot, models.AgentCapabilityReviewFeedback) &&
+		!sessionHasCapability(session.CapabilitySnapshot, models.AgentCapabilityCodeReviewPolicy) {
+		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "review_feedback is not enabled for this agent run")
+		return nil, false
+	}
+	return claims, true
+}
+
+// authorizeWrite gates the policy-mutation path on the dedicated write
+// capability. Unlike read access (review_feedback, in the recommended
+// defaults), code_review_policy_management is default-off and org-scoped:
+// it must be granted explicitly through a capability policy or approved at
+// runtime via `143-tools capability request`.
+func (h *InternalCodeReviewHandler) authorizeWrite(w http.ResponseWriter, r *http.Request) (*auth.InternalTokenClaims, bool) {
+	claims, session, ok := authorizeInternalSession(w, r, h.signingSecret, h.sessions)
+	if !ok {
+		return nil, false
+	}
+	if !sessionHasCapabilityAtLeast(session.CapabilitySnapshot, models.AgentCapabilityCodeReviewPolicy, models.AgentCapabilityAccessWrite) {
+		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "code_review_policy_management write access is not enabled for this agent run; request it with `143-tools capability request`")
+		return nil, false
+	}
+	return claims, true
+}
+
+func sessionHasCapabilityAtLeast(snapshot []models.AgentCapabilitySnapshotItem, id models.AgentCapabilityID, level models.AgentCapabilityAccessLevel) bool {
+	for _, item := range snapshot {
+		if item.ID == id && level.AtMost(item.AccessLevel) {
+			return true
+		}
+	}
+	return false
 }
 
 func internalCodeReviewSummaryFromItem(item models.CodeReviewListItem) internalCodeReviewSummary {
