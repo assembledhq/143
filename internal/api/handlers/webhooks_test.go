@@ -801,7 +801,8 @@ func TestWebhook_ReassessesRequestedCodeReviewAfterPullRequestEdit(t *testing.T)
 	require.Equal(t, prID, jobs.reassessmentPayload.PullRequestID, "reassessment should target the reviewed pull request")
 	require.Equal(t, priorSessionID, jobs.reassessmentPayload.PriorSessionID, "queued reassessment should remain ordered behind the assessment active when the event arrived")
 	require.Equal(t, "head-sha", jobs.reassessmentPayload.HeadSHA, "queued reassessment should capture the current PR head")
-	require.Equal(t, "pull_request:delivery-143", jobs.reassessmentPayload.ChangeKey, "queued reassessment should retain the delivery idempotency key")
+	require.Contains(t, jobs.reassessmentPayload.ChangeKey, "material:", "queued reassessment should use a material-state key")
+	require.NotContains(t, jobs.reassessmentPayload.ChangeKey, "delivery-143", "queued reassessment should not use the webhook delivery id")
 	require.Equal(t, 0, sessions.createCalls, "webhook should defer session creation to the durable starter job")
 	require.NoError(t, mock.ExpectationsWereMet(), "pull request mirror refresh should be org-scoped")
 }
@@ -809,21 +810,223 @@ func TestWebhook_ReassessesRequestedCodeReviewAfterPullRequestEdit(t *testing.T)
 func TestWebhook_CodeReviewReassessmentIgnores143ReviewWrites(t *testing.T) {
 	t.Parallel()
 
+	tests := []struct {
+		name      string
+		eventType string
+		body      string
+	}{
+		{
+			name:      "marked review summary",
+			eventType: "pull_request_review",
+			body: `{
+				"action":"submitted","repository":{"full_name":"assembledhq/143"},"pull_request":{"number":42},
+				"review":{"body":"Updated assessment\n\n<!-- 143-code-review-output:abc -->"}
+			}`,
+		},
+		{
+			name:      "empty review body from app bot sender",
+			eventType: "pull_request_review",
+			body: `{
+				"action":"submitted","repository":{"full_name":"assembledhq/143"},"pull_request":{"number":42},
+				"sender":{"login":"143-dev[bot]"},"review":{"body":""}
+			}`,
+		},
+		{
+			name:      "empty review body from configured app identity",
+			eventType: "pull_request_review",
+			body: `{
+				"action":"submitted","repository":{"full_name":"assembledhq/143"},"pull_request":{"number":42},
+				"review":{"body":"","performed_via_github_app":{"id":143,"slug":"renamed-app"}}
+			}`,
+		},
+		{
+			name:      "unmarked inline comment from app bot login",
+			eventType: "pull_request_review_comment",
+			body: `{
+				"action":"created","repository":{"full_name":"assembledhq/143"},"pull_request":{"number":42},
+				"comment":{"body":"Automated finding without a marker","user":{"login":"143-dev[bot]"}}
+			}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should initialize")
+			defer mock.Close()
+			handler := &WebhookHandler{
+				cfg:          &config.Config{GitHubAppID: 143, GitHubAppSlug: "143-dev"},
+				pullRequests: db.NewPullRequestStore(mock),
+				codeReviews:  &codereviewsvc.Service{},
+			}
+
+			err = handler.reassessCodeReviewsForGitHubEvent(context.Background(), db.GitHubRepoOwner{
+				OrgID: uuid.New(), RepositoryID: uuid.New(), FullName: "assembledhq/143", Status: "active",
+			}, tt.eventType, []byte(tt.body), "delivery-self")
+
+			require.NoError(t, err, "143-authored review webhook should be ignored without a feedback loop")
+			require.NoError(t, mock.ExpectationsWereMet(), "self-authored review should not query pull request state")
+		})
+	}
+}
+
+func TestCodeReviewMaterialChangeKey(t *testing.T) {
+	t.Parallel()
+
+	body := "Description with tests"
+	headSHA := "head-sha"
+	baseSHA := "base-sha"
+	pr := models.PullRequest{
+		Title:            "Improve reviewer reassessment",
+		Body:             &body,
+		HeadSHA:          &headSHA,
+		BaseSHA:          &baseSHA,
+		ReviewStatus:     models.PullRequestReviewStatusPending,
+		CIStatus:         models.PullRequestCIStatusSuccess,
+		MergeState:       models.PullRequestMergeStateClean,
+		FailingTestCount: 0,
+	}
+	success := "success"
+	failure := "failure"
+	checkRunSuccess := codeReviewReassessmentWebhook{Action: "completed"}
+	checkRunSuccess.CheckRun.Conclusion = &success
+	checkSuiteSuccess := codeReviewReassessmentWebhook{Action: "completed"}
+	checkSuiteSuccess.CheckSuite.Conclusion = &success
+	checkRunFailure := codeReviewReassessmentWebhook{Action: "completed"}
+	checkRunFailure.CheckRun.Conclusion = &failure
+	humanReview := codeReviewReassessmentWebhook{Action: "submitted"}
+	humanReview.Review.ID = 101
+	humanReview.Review.State = "commented"
+	humanReview.Review.Body = "Please add a regression test."
+	editedHumanReview := humanReview
+	editedHumanReview.Action = "edited"
+	editedHumanReview.Review.Body = "Please add two regression tests."
+	synchronizedPullRequest := codeReviewReassessmentWebhook{Action: "synchronize"}
+	editedPullRequest := codeReviewReassessmentWebhook{Action: "edited"}
+
+	tests := []struct {
+		name       string
+		leftType   string
+		left       codeReviewReassessmentWebhook
+		rightType  string
+		right      codeReviewReassessmentWebhook
+		rightCI    models.PullRequestCIStatus
+		expectSame bool
+	}{
+		{
+			name:     "check run and suite with same aggregate result",
+			leftType: "check_run", left: checkRunSuccess,
+			rightType: "check_suite", right: checkSuiteSuccess,
+			expectSame: true,
+		},
+		{
+			name:     "changed check result",
+			leftType: "check_run", left: checkRunSuccess,
+			rightType: "check_run", right: checkRunFailure,
+			expectSame: false,
+		},
+		{
+			name:     "edited human review body",
+			leftType: "pull_request_review", left: humanReview,
+			rightType: "pull_request_review", right: editedHumanReview,
+			expectSame: false,
+		},
+		{
+			name:       "different deliveries for unchanged pull request state",
+			leftType:   "pull_request",
+			left:       synchronizedPullRequest,
+			rightType:  "pull_request",
+			right:      editedPullRequest,
+			expectSame: true,
+		},
+		{
+			name:       "aggregate CI state changed",
+			leftType:   "check_run",
+			left:       checkRunSuccess,
+			rightType:  "check_run",
+			right:      checkRunSuccess,
+			rightCI:    models.PullRequestCIStatusFailure,
+			expectSame: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			left, err := codeReviewMaterialChangeKey(tt.leftType, tt.left, pr)
+			require.NoError(t, err, "left material state should serialize")
+			rightPR := pr
+			if tt.rightCI != "" {
+				rightPR.CIStatus = tt.rightCI
+			}
+			right, err := codeReviewMaterialChangeKey(tt.rightType, tt.right, rightPR)
+			require.NoError(t, err, "right material state should serialize")
+			if tt.expectSame {
+				require.Equal(t, left, right, "equivalent material assessment state should share a dedupe key")
+				return
+			}
+			require.NotEqual(t, left, right, "materially different assessment state should use a new dedupe key")
+		})
+	}
+}
+
+func TestWebhook_CodeReviewReassessmentUsesSameKeyForEquivalentDeliveries(t *testing.T) {
+	t.Parallel()
+
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock pool should initialize")
 	defer mock.Close()
-	handler := &WebhookHandler{pullRequests: db.NewPullRequestStore(mock), codeReviews: &codereviewsvc.Service{}}
-	body := []byte(`{
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	prID := uuid.New()
+	policyID := uuid.New()
+	priorSessionID := uuid.New()
+	now := time.Now().UTC()
+	metadata := &codeReviewWebhookMetadataStore{latest: models.CodeReviewSessionMetadata{
+		ID: uuid.New(), SessionID: priorSessionID, RepositoryID: repoID, PullRequestID: prID, PolicyID: policyID,
+		HeadSHA: "head-sha", TriggerSource: models.CodeReviewTriggerSourceTeamReviewer,
+		Status: models.CodeReviewSessionStatusCompleted, ReviewOutputKey: "prior-output",
+	}}
+	jobs := &codeReviewWebhookJobStore{jobID: uuid.New()}
+	cfg := models.DefaultCodeReviewPolicyConfig()
+	codeReviews := codereviewsvc.NewService(
+		&codeReviewWebhookPolicyStore{policyID: policyID, config: cfg}, metadata,
+		&codeReviewWebhookSessionStore{}, jobs, zerolog.Nop(), codereviewsvc.Config{},
+	)
+	handler := &WebhookHandler{pullRequests: db.NewPullRequestStore(mock), codeReviews: codeReviews}
+	body := "Description with tests"
+	headSHA := "head-sha"
+	headRef := "feature/code-review"
+	baseSHA := "base-sha"
+	expectPullRequest := func() {
+		mock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*WHERE org_id").
+			WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": "assembledhq/143", "github_pr_number": 42}).
+			WillReturnRows(pgxmock.NewRows(codeReviewWebhookPullRequestColumns()).AddRow(
+				prID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+				"Improve reviewer reassessment", &body, "open", "pending", "user", "success", &headSHA, &headRef, &baseSHA,
+				"clean", false, 0, false, nil, int64(1),
+				models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil,
+				nil, now, now,
+			))
+	}
+	eventBody := []byte(`{
 		"action":"submitted","repository":{"full_name":"assembledhq/143"},"pull_request":{"number":42},
-		"review":{"body":"Updated assessment\n\n<!-- 143-code-review-output:abc -->"}
+		"review":{"id":101,"state":"commented","body":"Please add a regression test.","user":{"login":"anya"}}
 	}`)
+	owner := db.GitHubRepoOwner{OrgID: orgID, RepositoryID: repoID, FullName: "assembledhq/143", Status: "active"}
+	for _, deliveryID := range []string{"delivery-one", "delivery-two"} {
+		expectPullRequest()
+		require.NoError(t, handler.reassessCodeReviewsForGitHubEvent(
+			context.Background(), owner, "pull_request_review", eventBody, deliveryID,
+		), "equivalent delivery should queue without error")
+	}
 
-	err = handler.reassessCodeReviewsForGitHubEvent(context.Background(), db.GitHubRepoOwner{
-		OrgID: uuid.New(), RepositoryID: uuid.New(), FullName: "assembledhq/143", Status: "active",
-	}, "pull_request_review", body, "delivery-self")
-
-	require.NoError(t, err, "143-authored review webhook should be ignored without a feedback loop")
-	require.NoError(t, mock.ExpectationsWereMet(), "self-authored review should not query pull request state")
+	require.Len(t, jobs.reassessmentPayloads, 2, "both deliveries should reach the durable queue boundary")
+	require.Equal(t, jobs.reassessmentPayloads[0].ChangeKey, jobs.reassessmentPayloads[1].ChangeKey, "equivalent deliveries should share a semantic dedupe key")
+	require.NotContains(t, jobs.reassessmentPayloads[0].ChangeKey, "delivery-", "semantic dedupe key should not contain delivery identity")
+	require.NoError(t, mock.ExpectationsWereMet(), "equivalent deliveries should use org-scoped pull request lookups")
 }
 
 func TestCodeReviewEventChangesAssessment(t *testing.T) {
@@ -1007,9 +1210,10 @@ func (s *codeReviewWebhookSessionStore) UpdateFailure(context.Context, uuid.UUID
 }
 
 type codeReviewWebhookJobStore struct {
-	jobID               uuid.UUID
-	payload             codereviewsvc.RunCodeReviewJobPayload
-	reassessmentPayload codereviewsvc.ReviewChangedInput
+	jobID                uuid.UUID
+	payload              codereviewsvc.RunCodeReviewJobPayload
+	reassessmentPayload  codereviewsvc.ReviewChangedInput
+	reassessmentPayloads []codereviewsvc.ReviewChangedInput
 }
 
 func (s *codeReviewWebhookJobStore) EnqueueWithOpts(_ context.Context, _ uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
@@ -1020,6 +1224,7 @@ func (s *codeReviewWebhookJobStore) EnqueueWithOpts(_ context.Context, _ uuid.UU
 	changed, ok := opts.Payload.(codereviewsvc.ReviewChangedInput)
 	if ok {
 		s.reassessmentPayload = changed
+		s.reassessmentPayloads = append(s.reassessmentPayloads, changed)
 	}
 	return s.jobID, nil
 }
