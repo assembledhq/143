@@ -329,6 +329,35 @@ func TestJobStore_EnqueueWithOpts_SetsCustomMaxAttempts(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestJobStore_EnqueueWithOpts_DefersRunAt(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	orgID := uuid.New()
+	generatedID := uuid.New()
+	runAt := time.Now().UTC().Add(5 * time.Second)
+
+	mock.ExpectQuery("INSERT INTO jobs[\\s\\S]+run_at").
+		WithArgs(orgID, "default", "deferred", pgxmock.AnyArg(), 4, jobDedupeKeyPtr("deferred:key"), runAt).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(generatedID))
+
+	id, err := store.EnqueueWithOpts(context.Background(), orgID, EnqueueOpts{
+		Queue:     "default",
+		JobType:   "deferred",
+		Payload:   map[string]string{"kind": "debounced"},
+		Priority:  4,
+		DedupeKey: jobDedupeKeyPtr("deferred:key"),
+		RunAt:     &runAt,
+	})
+	require.NoError(t, err, "deferred enqueue should succeed")
+	require.Equal(t, generatedID, id, "deferred enqueue should return the generated job ID")
+	require.NoError(t, mock.ExpectationsWereMet(), "deferred enqueue should persist the requested run time")
+}
+
 func TestJobStore_HasActiveByDedupeKeyFiltersByOrg(t *testing.T) {
 	t.Parallel()
 

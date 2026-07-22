@@ -170,6 +170,9 @@ type EnqueueOpts struct {
 	Payload   any
 	Priority  int
 	DedupeKey *string
+	// RunAt defers the job until the requested time. Nil keeps the jobs table
+	// default of now(), preserving immediate execution for existing callers.
+	RunAt *time.Time
 	// MaxAttempts overrides the jobs table default when positive. Zero keeps
 	// the schema default so existing enqueue call sites retain their current
 	// retry budget.
@@ -610,6 +613,11 @@ func enqueueOn(ctx context.Context, q jobQuerier, orgID uuid.UUID, opts EnqueueO
 		columns = append(columns, "target_node_id")
 		values = append(values, "@target_node_id")
 		args["target_node_id"] = opts.TargetNodeID
+	}
+	if opts.RunAt != nil {
+		columns = append(columns, "run_at")
+		values = append(values, "@run_at")
+		args["run_at"] = opts.RunAt.UTC()
 	}
 	if opts.MaxAttempts > 0 {
 		columns = append(columns, "max_attempts")
