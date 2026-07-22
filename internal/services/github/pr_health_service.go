@@ -31,6 +31,7 @@ const (
 	prHealthReconcileJobType = "reconcile_pull_request_state"
 	prHealthEnrichJobType    = "enrich_pull_request_health"
 	prMergeWhenReadyJobType  = "merge_pull_request_when_ready"
+	prHealthWebhookDebounce  = 5 * time.Second
 	requiredChecksCacheTTL   = 24 * time.Hour
 	noRequiredChecksCacheTTL = 6 * time.Hour
 )
@@ -1690,22 +1691,32 @@ func (s *PRService) enqueuePullRequestStateSyncWithScope(ctx context.Context, pr
 	if s.jobs == nil {
 		return
 	}
-	dedupeKey := pullRequestStateSyncDedupeKey(pr.ID, scope)
-	_, err := s.jobs.Enqueue(ctx, pr.OrgID, prHealthSyncQueue, prHealthSyncJobType, map[string]string{
-		"org_id":          pr.OrgID.String(),
-		"pull_request_id": pr.ID.String(),
-	}, 6, &dedupeKey)
+	dedupeKey := pullRequestStateSyncDedupeKey(pr.ID)
+	priority := 6
+	var runAt *time.Time
+	if scope != "" {
+		deferred := time.Now().UTC().Add(prHealthWebhookDebounce)
+		runAt = &deferred
+		priority = 4
+	}
+	_, err := s.jobs.EnqueueWithOpts(ctx, pr.OrgID, db.EnqueueOpts{
+		Queue:   prHealthSyncQueue,
+		JobType: prHealthSyncJobType,
+		Payload: map[string]string{
+			"org_id":          pr.OrgID.String(),
+			"pull_request_id": pr.ID.String(),
+		},
+		Priority:  priority,
+		DedupeKey: &dedupeKey,
+		RunAt:     runAt,
+	})
 	if err != nil {
 		s.logger.Warn().Err(err).Str("pull_request_id", pr.ID.String()).Msg("failed to enqueue pull request health sync")
 	}
 }
 
-func pullRequestStateSyncDedupeKey(pullRequestID uuid.UUID, scope string) string {
-	dedupeKey := fmt.Sprintf("%s:%s", prHealthSyncJobType, pullRequestID.String())
-	if scope != "" {
-		dedupeKey = fmt.Sprintf("%s:%s", dedupeKey, scope)
-	}
-	return dedupeKey
+func pullRequestStateSyncDedupeKey(pullRequestID uuid.UUID) string {
+	return fmt.Sprintf("%s:%s", prHealthSyncJobType, pullRequestID.String())
 }
 
 func (s *PRService) enqueuePullRequestHealthEnrichment(ctx context.Context, pr models.PullRequest, version int64) {

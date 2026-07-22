@@ -1213,7 +1213,7 @@ func TestHandlePullRequestEvent_ClosedWithoutMergeFlow(t *testing.T) {
 	prMock.ExpectExec("UPDATE pull_requests SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	dedupeKey := pullRequestStateSyncDedupeKey(prID, "")
+	dedupeKey := pullRequestStateSyncDedupeKey(prID)
 	jobMock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgx.NamedArgs{
 			"org_id":     orgID,
@@ -2481,15 +2481,16 @@ func TestHandleCheckSuiteEvent_Success(t *testing.T) {
 	prMock.ExpectExec("UPDATE pull_requests SET ci_status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	dedupeKey := pullRequestStateSyncDedupeKey(prID, "check_suite_completed")
+	dedupeKey := pullRequestStateSyncDedupeKey(prID)
 	jobMock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgx.NamedArgs{
 			"org_id":     orgID,
 			"queue":      prHealthSyncQueue,
 			"job_type":   prHealthSyncJobType,
 			"payload":    pgxmock.AnyArg(),
-			"priority":   6,
+			"priority":   4,
 			"dedupe_key": &dedupeKey,
+			"run_at":     pgxmock.AnyArg(),
 		}).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	conclusion := "success"
@@ -2575,15 +2576,16 @@ func TestHandleCheckRunEvent_CompletedEnqueuesHealthSync(t *testing.T) {
 			pgxmock.NewRows(handlerPRColumns).
 				AddRow(handlerPRRow(prID, &sessionID, orgID, "testorg/testrepo", now)...),
 		)
-	dedupeKey := pullRequestStateSyncDedupeKey(prID, "check_run_completed")
+	dedupeKey := pullRequestStateSyncDedupeKey(prID)
 	jobMock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgx.NamedArgs{
 			"org_id":     orgID,
 			"queue":      prHealthSyncQueue,
 			"job_type":   prHealthSyncJobType,
 			"payload":    pgxmock.AnyArg(),
-			"priority":   6,
+			"priority":   4,
 			"dedupe_key": &dedupeKey,
+			"run_at":     pgxmock.AnyArg(),
 		}).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	event := CheckRunEvent{Action: "completed"}
@@ -2623,15 +2625,16 @@ func TestHandleStatusEvent_EnqueuesHealthSyncForHeadSHA(t *testing.T) {
 			pgxmock.NewRows(handlerPRColumns).
 				AddRow(handlerPRRow(prID, &sessionID, orgID, "testorg/testrepo", now)...),
 		)
-	dedupeKey := pullRequestStateSyncDedupeKey(prID, "status:ci/circleci: frontend_lint_format_license:failure")
+	dedupeKey := pullRequestStateSyncDedupeKey(prID)
 	jobMock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgx.NamedArgs{
 			"org_id":     orgID,
 			"queue":      prHealthSyncQueue,
 			"job_type":   prHealthSyncJobType,
 			"payload":    pgxmock.AnyArg(),
-			"priority":   6,
+			"priority":   4,
 			"dedupe_key": &dedupeKey,
+			"run_at":     pgxmock.AnyArg(),
 		}).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
