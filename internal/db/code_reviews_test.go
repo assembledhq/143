@@ -913,6 +913,32 @@ func TestCodeReviewStore_GetListItemBySessionIDScopesByOrgAndSession(t *testing.
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestCodeReviewStore_ListFindingsRanksSeverityExplicitly(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	// severity is a text enum; the query must rank it via CASE rather than
+	// sorting alphabetically (which would put medium above critical).
+	mock.ExpectQuery(`CASE severity\s+WHEN 'critical' THEN 5\s+WHEN 'high' THEN 4\s+WHEN 'medium' THEN 3\s+WHEN 'low' THEN 2\s+WHEN 'info' THEN 1\s+ELSE 0\s+END DESC`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "agent_result_id", "dedupe_key", "severity",
+			"confidence", "path", "start_line", "end_line", "summary", "body", "selected_for_inline", "github_comment_id", "created_at",
+		}))
+
+	findings, err := NewCodeReviewStore(mock).ListFindings(context.Background(), orgID, sessionID, false)
+
+	require.NoError(t, err, "ListFindings should order by explicit severity rank")
+	require.Empty(t, findings, "ListFindings should return the mocked empty result")
+	require.NoError(t, mock.ExpectationsWereMet(), "the severity rank ORDER BY should be present")
+}
+
 func TestCodeReviewStore_MarkFindingsSelectedForInlineFiltersByOrgAndSession(t *testing.T) {
 	t.Parallel()
 

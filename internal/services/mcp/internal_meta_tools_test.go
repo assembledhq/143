@@ -120,11 +120,16 @@ func TestInternalMetaToolSourceCodeReviewHistoryRoutes(t *testing.T) {
 	}
 }
 
-func TestInternalMetaToolSourceCodeReviewHistoryGetRequiresSessionID(t *testing.T) {
+func TestInternalMetaToolSourceCodeReviewHistoryGetArgumentErrors(t *testing.T) {
 	t.Parallel()
 
 	source := NewInternalMetaToolSource(staticToolSource{}, "token", "https://143.dev")
-	result := source.CallTool(context.Background(), "code_review_history_get", json.RawMessage(`{}`))
-	require.True(t, result.IsError, "get without session_id should fail before hitting the API")
-	require.Contains(t, result.Content[0].Text, "session_id is required", "error should name the missing argument")
+
+	missing := source.CallTool(context.Background(), "code_review_history_get", json.RawMessage(`{}`))
+	require.True(t, missing.IsError, "get without session_id should fail before hitting the API")
+	require.Contains(t, missing.Content[0].Text, "session_id is required", "error should name the missing argument")
+
+	malformed := source.CallTool(context.Background(), "code_review_history_get", json.RawMessage(`{not json`))
+	require.True(t, malformed.IsError, "get with malformed JSON should fail before hitting the API")
+	require.Contains(t, malformed.Content[0].Text, "invalid JSON", "malformed input should be reported as invalid JSON, not a missing field")
 }

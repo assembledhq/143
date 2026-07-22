@@ -116,7 +116,12 @@ func (s *internalMetaToolSource) CallTool(ctx context.Context, name string, args
 			IncludeRawOutput bool   `json:"include_raw_output"`
 			IncludePrompts   bool   `json:"include_prompts"`
 		}
-		if err := json.Unmarshal(args, &in); err != nil || strings.TrimSpace(in.SessionID) == "" {
+		if len(args) > 0 {
+			if err := json.Unmarshal(args, &in); err != nil {
+				return ErrorResult("INVALID_ARGUMENTS: invalid JSON")
+			}
+		}
+		if strings.TrimSpace(in.SessionID) == "" {
 			return ErrorResult("INVALID_ARGUMENTS: session_id is required")
 		}
 		q := url.Values{}
@@ -168,12 +173,12 @@ func (s *internalMetaToolSource) codeReviewHistoryList(ctx context.Context, args
 			}
 		}
 	}
+	// json.Unmarshal into map[string]any only ever yields float64 or string
+	// for numeric-ish inputs, so those are the only limit shapes handled.
 	if v, ok := in["limit"]; ok {
 		switch typed := v.(type) {
 		case float64:
 			q.Set("limit", fmt.Sprintf("%.0f", typed))
-		case json.Number:
-			q.Set("limit", typed.String())
 		case string:
 			q.Set("limit", typed)
 		}

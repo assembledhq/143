@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/db"
@@ -104,14 +105,17 @@ type internalCodeReviewPromptArtifact struct {
 
 type internalCodeReviewDetail struct {
 	internalCodeReviewSummary
-	BaseSHA               string                             `json:"base_sha"`
-	HeadSHA               string                             `json:"head_sha"`
-	FromFork              bool                               `json:"from_fork"`
-	SupersededBySessionID *uuid.UUID                         `json:"superseded_by_session_id,omitempty"`
-	FinalReviewBody       *string                            `json:"final_review_body,omitempty"`
-	Findings              []internalCodeReviewFinding        `json:"findings"`
-	AgentResults          []internalCodeReviewAgentResult    `json:"agent_results"`
-	PromptArtifacts       []internalCodeReviewPromptArtifact `json:"prompt_artifacts,omitempty"`
+	BaseSHA               string                          `json:"base_sha"`
+	HeadSHA               string                          `json:"head_sha"`
+	FromFork              bool                            `json:"from_fork"`
+	SupersededBySessionID *uuid.UUID                      `json:"superseded_by_session_id,omitempty"`
+	FinalReviewBody       *string                         `json:"final_review_body,omitempty"`
+	Findings              []internalCodeReviewFinding     `json:"findings"`
+	AgentResults          []internalCodeReviewAgentResult `json:"agent_results"`
+	// Pointer so a requested-but-empty artifact list serializes as [] while an
+	// unrequested one is omitted entirely — a plain slice with omitempty cannot
+	// distinguish the two.
+	PromptArtifacts *[]internalCodeReviewPromptArtifact `json:"prompt_artifacts,omitempty"`
 }
 
 const internalCodeReviewDefaultLimit = 20
@@ -298,7 +302,7 @@ func (h *InternalCodeReviewHandler) Get(w http.ResponseWriter, r *http.Request) 
 			item.StructuredResult = result.StructuredResult
 		}
 		if result.RawOutput != nil {
-			item.RawOutputRunes = len([]rune(*result.RawOutput))
+			item.RawOutputRunes = utf8.RuneCountInString(*result.RawOutput)
 			if includeRawOutput {
 				truncated := truncateInternalCodeReviewText(*result.RawOutput)
 				item.RawOutput = &truncated
@@ -312,18 +316,19 @@ func (h *InternalCodeReviewHandler) Get(w http.ResponseWriter, r *http.Request) 
 			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_HISTORY_FAILED", "failed to list code review prompt artifacts", err)
 			return
 		}
-		detail.PromptArtifacts = make([]internalCodeReviewPromptArtifact, 0, len(artifacts))
+		items := make([]internalCodeReviewPromptArtifact, 0, len(artifacts))
 		for _, artifact := range artifacts {
-			detail.PromptArtifacts = append(detail.PromptArtifacts, internalCodeReviewPromptArtifact{
+			items = append(items, internalCodeReviewPromptArtifact{
 				ID:            artifact.ID,
 				ArtifactKey:   artifact.ArtifactKey,
 				Role:          artifact.Role,
 				AgentProvider: artifact.AgentProvider,
 				Content:       truncateInternalCodeReviewText(artifact.Content),
-				ContentRunes:  len([]rune(artifact.Content)),
+				ContentRunes:  utf8.RuneCountInString(artifact.Content),
 				CreatedAt:     artifact.CreatedAt,
 			})
 		}
+		detail.PromptArtifacts = &items
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[internalCodeReviewDetail]{Data: detail})
 }
@@ -402,10 +407,17 @@ func internalCodeReviewSummaryFromItem(item models.CodeReviewListItem) internalC
 	}
 }
 
+// truncateInternalCodeReviewText caps text at internalCodeReviewTextLimit
+// runes. It walks rune boundaries instead of materializing a []rune so
+// multi-megabyte agent transcripts don't allocate 4 bytes per rune just to be
+// cut down to 16K.
 func truncateInternalCodeReviewText(text string) string {
-	runes := []rune(text)
-	if len(runes) <= internalCodeReviewTextLimit {
-		return text
+	count := 0
+	for i := range text {
+		if count == internalCodeReviewTextLimit {
+			return text[:i] + "\n...(truncated)"
+		}
+		count++
 	}
-	return string(runes[:internalCodeReviewTextLimit]) + "\n...(truncated)"
+	return text
 }

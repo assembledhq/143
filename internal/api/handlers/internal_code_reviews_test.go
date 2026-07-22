@@ -239,6 +239,66 @@ func TestInternalCodeReviewHandler_GetReturnsFindingsAndAgentResults(t *testing.
 	require.NoError(t, fx.mock.ExpectationsWereMet(), "get should load review, findings, and agent results")
 }
 
+func TestInternalCodeReviewHandler_GetIncludeFlagsTruncateAndMarkEmptyPrompts(t *testing.T) {
+	t.Parallel()
+
+	fx := newInternalCodeReviewFixture(t, models.AgentCapabilityReviewFeedback)
+	reviewSessionID := uuid.New()
+	agentResultID := uuid.New()
+	rawOutput := strings.Repeat("y", internalCodeReviewTextLimit+1000)
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+
+	fx.mock.ExpectQuery(`m\.session_id = @session_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(internalCodeReviewListColumns).
+			AddRow(internalCodeReviewListRow(fx, uuid.New(), reviewSessionID, nil)...))
+	fx.mock.ExpectQuery("FROM code_review_findings").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "agent_result_id", "dedupe_key", "severity",
+			"confidence", "path", "start_line", "end_line", "summary", "body", "selected_for_inline", "github_comment_id", "created_at",
+		}))
+	fx.mock.ExpectQuery("FROM code_review_agent_results").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "agent_provider", "agent_model", "role", "status", "raw_output", "structured_result", "created_at",
+		}).AddRow(
+			agentResultID, fx.orgID, reviewSessionID, "claude_code", nil, models.CodeReviewAgentRoleReviewer,
+			models.CodeReviewAgentResultStatusCompleted, &rawOutput, nil, now,
+		))
+	fx.mock.ExpectQuery("FROM code_review_prompt_artifacts").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "artifact_key", "role", "agent_provider", "content", "metadata", "created_at",
+		}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/internal/code-reviews/"+reviewSessionID.String()+"?include_raw_output=true&include_prompts=true", nil)
+	req.Header.Set("Authorization", "Bearer "+fx.token)
+	req = withChiURLParam(req, "session_id", reviewSessionID.String())
+	rec := httptest.NewRecorder()
+	fx.handler.Get(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "get with include flags should succeed: %s", rec.Body.String())
+	var resp struct {
+		Data struct {
+			AgentResults []struct {
+				RawOutput      *string `json:"raw_output"`
+				RawOutputRunes int     `json:"raw_output_runes"`
+			} `json:"agent_results"`
+			PromptArtifacts *[]any `json:"prompt_artifacts"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), "get response should be JSON")
+	require.Len(t, resp.Data.AgentResults, 1, "detail should include the agent result")
+	require.NotNil(t, resp.Data.AgentResults[0].RawOutput, "raw output should be included when requested")
+	require.True(t, strings.HasSuffix(*resp.Data.AgentResults[0].RawOutput, "...(truncated)"), "over-limit raw output should carry the truncation marker")
+	require.Equal(t, internalCodeReviewTextLimit+len("\n...(truncated)"), len(*resp.Data.AgentResults[0].RawOutput), "raw output should be cut at the rune limit")
+	require.Equal(t, len(rawOutput), resp.Data.AgentResults[0].RawOutputRunes, "rune count should report the original size so truncation is detectable")
+	require.NotNil(t, resp.Data.PromptArtifacts, "requested prompt artifacts should serialize as an empty list, not disappear")
+	require.Empty(t, *resp.Data.PromptArtifacts, "no stored artifacts should yield an empty list")
+	require.NoError(t, fx.mock.ExpectationsWereMet(), "get should load review, findings, agent results, and prompt artifacts")
+}
+
 func TestInternalCodeReviewHandler_GetHidesOtherRepositories(t *testing.T) {
 	t.Parallel()
 

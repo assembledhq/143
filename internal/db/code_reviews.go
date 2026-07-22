@@ -1110,13 +1110,24 @@ func (s *CodeReviewStore) upsertFinding(ctx context.Context, finding *models.Cod
 }
 
 func (s *CodeReviewStore) ListFindings(ctx context.Context, orgID, sessionID uuid.UUID, selectedOnly bool) ([]models.CodeReviewFinding, error) {
+	// severity is a text enum, so a bare ORDER BY would sort alphabetically
+	// (medium > low > info > high > critical); rank it explicitly instead.
 	rows, err := s.db.Query(ctx, `
 		SELECT `+codeReviewFindingColumns+`
 		FROM code_review_findings
 		WHERE org_id = @org_id
 		  AND session_id = @session_id
 		  AND (@selected_only = false OR selected_for_inline = true)
-		ORDER BY selected_for_inline DESC, severity DESC, created_at ASC, id ASC`, pgx.NamedArgs{
+		ORDER BY selected_for_inline DESC,
+		         CASE severity
+		           WHEN 'critical' THEN 5
+		           WHEN 'high' THEN 4
+		           WHEN 'medium' THEN 3
+		           WHEN 'low' THEN 2
+		           WHEN 'info' THEN 1
+		           ELSE 0
+		         END DESC,
+		         created_at ASC, id ASC`, pgx.NamedArgs{
 		"org_id":        orgID,
 		"session_id":    sessionID,
 		"selected_only": selectedOnly,
