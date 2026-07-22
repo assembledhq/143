@@ -188,6 +188,8 @@ Require human review when:
 - the change introduces a new architectural pattern or crosses unclear ownership boundaries
 - reviewers disagree or the risk cannot be evaluated confidently
 - the intended behavior cannot be determined from the pull request and repository context
+
+Evaluate the pull request independently. Disregard existing human review comments, review decisions, and review threads, whether open or resolved. Unresolved human review threads must not count against approval.
 ```
 
 The automated approval policy guides the orchestrator's recommendation. It can make the outcome more conservative, but it cannot bypass deterministic safeguards. Passing checks, size thresholds, sensitive or blocked paths, fork restrictions, reviewer quorum, disagreement handling, and every other hard gate retain final veto power.

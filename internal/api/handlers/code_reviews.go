@@ -306,11 +306,7 @@ func (h *CodeReviewHandler) Evidence(w http.ResponseWriter, r *http.Request) {
 
 func (h *CodeReviewHandler) GetPolicy(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
-	repositoryID, ok := parseOptionalUUIDQuery(w, r, "repository_id")
-	if !ok {
-		return
-	}
-	resolved, err := h.store.ResolvePolicy(r.Context(), orgID, repositoryID)
+	resolved, err := h.store.ResolvePolicy(r.Context(), orgID)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_POLICY_LOAD_FAILED", "failed to load code review policy", err)
 		return
@@ -336,6 +332,10 @@ func (h *CodeReviewHandler) PutPolicy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_SOURCE", "invalid policy edit source", err)
 		return
 	}
+	if req.RepositoryID != nil {
+		writeError(w, r, http.StatusBadRequest, "CODE_REVIEW_POLICY_SCOPE_UNSUPPORTED", "code review policy applies to all repositories")
+		return
+	}
 	var config models.CodeReviewPolicyConfig
 	if err := json.Unmarshal(req.Config, &config); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid policy config")
@@ -349,7 +349,7 @@ func (h *CodeReviewHandler) PutPolicy(w http.ResponseWriter, r *http.Request) {
 	_, reviewInstructionsSupplied := supplied["review_instructions"]
 	_, automatedApprovalPolicySupplied := supplied["automated_approval_policy"]
 	if !reviewInstructionsSupplied || !automatedApprovalPolicySupplied {
-		current, err := h.store.ResolvePolicy(r.Context(), orgID, req.RepositoryID)
+		current, err := h.store.ResolvePolicy(r.Context(), orgID)
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_POLICY_LOAD_FAILED", "failed to load code review policy", err)
 			return
@@ -366,17 +366,7 @@ func (h *CodeReviewHandler) PutPolicy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user is required")
 		return
 	}
-	if req.RepositoryID != nil && h.repos != nil {
-		if _, err := h.repos.GetByID(r.Context(), orgID, *req.RepositoryID); err != nil {
-			if err == pgx.ErrNoRows {
-				writeError(w, r, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "repository not found")
-				return
-			}
-			writeError(w, r, http.StatusInternalServerError, "REPOSITORY_LOAD_FAILED", "failed to load repository", err)
-			return
-		}
-	}
-	record, err := h.store.SavePolicy(r.Context(), orgID, req.RepositoryID, config, &user.ID)
+	record, err := h.store.SavePolicy(r.Context(), orgID, config, &user.ID)
 	if err != nil {
 		var validationErr *models.CodeReviewPolicyValidationError
 		if errors.As(err, &validationErr) {
@@ -387,41 +377,9 @@ func (h *CodeReviewHandler) PutPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewPolicyRecord]{Data: record})
-	details := marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{"source": req.Source, "repository_id": req.RepositoryID, "version": record.Version, "review_instructions_runes": utf8.RuneCountInString(record.ReviewInstructions), "automated_approval_policy_runes": utf8.RuneCountInString(record.AutomatedApprovalPolicy)})
+	details := marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{"source": req.Source, "version": record.Version, "review_instructions_runes": utf8.RuneCountInString(record.ReviewInstructions), "automated_approval_policy_runes": utf8.RuneCountInString(record.AutomatedApprovalPolicy)})
 	resourceID := record.ID.String()
 	emitUserAudit(h.audit, r, models.AuditActionCodeReviewPolicyUpdated, models.AuditResourceCodeReviewPolicy, &resourceID, details)
-}
-
-func (h *CodeReviewHandler) ResetPolicy(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-	repositoryID, err := uuid.Parse(chi.URLParam(r, "repository_id"))
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid repository ID")
-		return
-	}
-	if h.repos != nil {
-		if _, err := h.repos.GetByID(r.Context(), orgID, repositoryID); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				writeError(w, r, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "repository not found")
-				return
-			}
-			writeError(w, r, http.StatusInternalServerError, "REPOSITORY_LOAD_FAILED", "failed to load repository", err)
-			return
-		}
-	}
-	policyID, deactivated, err := h.store.ResetRepositoryPolicy(r.Context(), orgID, repositoryID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_POLICY_RESET_FAILED", "failed to reset code review policy", err)
-		return
-	}
-	if !deactivated {
-		writeError(w, r, http.StatusConflict, "CODE_REVIEW_POLICY_OVERRIDE_NOT_FOUND", "repository policy is already inherited")
-		return
-	}
-	details := marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{"source": models.CodeReviewPolicyEditSourceReset, "repository_id": repositoryID})
-	resourceID := policyID.String()
-	emitUserAudit(h.audit, r, models.AuditActionCodeReviewPolicyReset, models.AuditResourceCodeReviewPolicy, &resourceID, details)
-	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *CodeReviewHandler) GetGitHubTrigger(w http.ResponseWriter, r *http.Request) {

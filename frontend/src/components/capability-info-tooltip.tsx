@@ -31,6 +31,8 @@ const CAPABILITY_DETAILS: Record<AgentCapabilityID, string> = {
     "Lets the agent send Slack completion and status notifications through the connected 143 Slack app.",
   automation_management:
     "Lets the agent create, update, pause, resume, and run repo-scoped automations. Enable only for trusted setup or maintenance work.",
+  code_review_policy_management:
+    "Lets the agent apply versioned updates to your org's automated code review policy. Every change is audited and reversible, but it steers future reviews — keep off unless you want agents tuning review behavior.",
   project_proposals:
     "Lets the agent draft and create planning documents and project proposals.",
   eval_authoring:

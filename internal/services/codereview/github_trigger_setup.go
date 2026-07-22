@@ -266,12 +266,16 @@ func (s *GitHubTriggerSetupService) githubJSON(ctx context.Context, method, path
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != expectedStatus {
-		raw, _ := io.ReadAll(resp.Body)
-		apiErr := &ghservice.GitHubAPIError{Method: method, Path: path, StatusCode: resp.StatusCode, Body: raw}
-		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
-			return fmt.Errorf("%w: %w", ErrGitHubTriggerPermissionRequired, apiErr)
+		raw, readErr := io.ReadAll(resp.Body)
+		apiErr := &ghservice.GitHubAPIError{Method: method, Path: path, StatusCode: resp.StatusCode, Body: raw, Header: resp.Header.Clone()}
+		var responseErr error = apiErr
+		if readErr != nil {
+			responseErr = errors.Join(apiErr, fmt.Errorf("read GitHub error response: %w", readErr))
 		}
-		return apiErr
+		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("%w: %w", ErrGitHubTriggerPermissionRequired, responseErr)
+		}
+		return responseErr
 	}
 	if out == nil || resp.StatusCode == http.StatusNoContent {
 		return nil

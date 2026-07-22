@@ -202,16 +202,14 @@ export interface CodeReviewPolicyConfig {
     reviewers: string[];
     orchestrator: string;
     reviewer_models?: string[];
+    reviewer_reasoning_efforts?: ("low" | "medium" | "high" | "xhigh" | "max")[];
     orchestrator_model?: string;
+    reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max";
     disagreement_blocks: boolean;
     require_reviewer_quorum: number;
     timeout_seconds: number;
   };
   inline_comment_limit: number;
-  inheritance?: {
-    inherit_org_defaults: boolean;
-    override_fields?: string[];
-  };
 }
 
 export interface CodeReviewPolicyRecord extends CodeReviewPolicyConfig {
@@ -228,7 +226,6 @@ export interface CodeReviewResolvedPolicy {
   config: CodeReviewPolicyConfig;
   source: "default" | "organization" | "repository" | string;
   policy?: CodeReviewPolicyRecord;
-  inherited_policy?: CodeReviewPolicyRecord;
 }
 
 export type CodeReviewGitHubTriggerStatus =
@@ -386,6 +383,7 @@ export type AgentCapabilityID =
   | 'external_comments'
   | 'slack_notifications'
   | 'automation_management'
+  | 'code_review_policy_management'
   | 'project_proposals'
   | 'eval_authoring'
   | 'publishing';
@@ -1416,6 +1414,7 @@ export interface SessionThread {
   org_id: string;
   agent_type: string;
   model_override?: string;
+  reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max";
   label: string;
   instructions?: string;
   file_scope?: string[];
@@ -3120,6 +3119,7 @@ export type AuditResourceType =
   | "organization"
   | "preview_secret_bundle"
   | "preview_policy"
+  | "code_review_policy"
   | "pr_readiness_policy"
   | "pr_readiness_custom_check"
   | "pr_readiness_bypass"

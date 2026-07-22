@@ -6536,6 +6536,9 @@ export function SessionDetailContent({ id }: { id: string }) {
               <Badge
                 variant={selectedPublicationPresentation.variant}
                 className="h-6"
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
                 title={selectedPublication.last_error_message || selectedPublicationPresentation.label}
               >
                 {selectedPublicationPresentation.label}

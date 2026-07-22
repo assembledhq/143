@@ -65,6 +65,46 @@ func TestCapabilityFilteredToolSourceAllowsAutomationGoalImprovementComplete(t *
 	require.False(t, result.IsError, "goal improvement completion should remain callable after capability filtering")
 }
 
+func TestCapabilityFilteredToolSourceAllowsCodeReviewHistoryWithReviewFeedbackGrant(t *testing.T) {
+	t.Parallel()
+
+	tools := []Tool{
+		{Name: "code_review_history_list"},
+		{Name: "code_review_history_get"},
+		{Name: "code_review_history_policy"},
+		{Name: "code_review_history_update_policy"},
+		{Name: "log_query"},
+	}
+
+	granted := NewCapabilityFilteredToolSource(staticToolSource{tools: tools}, ToolCapabilityPolicy{Capabilities: []models.AgentCapabilitySnapshotItem{
+		{ID: models.AgentCapabilityReviewFeedback, AccessLevel: models.AgentCapabilityAccessRead},
+	}})
+	require.Equal(t, []Tool{
+		{Name: "code_review_history_list"},
+		{Name: "code_review_history_get"},
+		{Name: "code_review_history_policy"},
+	}, granted.ListTools(), "review feedback capability should expose the read-only code review history tools, never the policy write")
+
+	denied := NewCapabilityFilteredToolSource(staticToolSource{tools: tools}, ToolCapabilityPolicy{Capabilities: []models.AgentCapabilitySnapshotItem{
+		{ID: models.AgentCapabilitySessionHistory, AccessLevel: models.AgentCapabilityAccessRead},
+	}})
+	result := denied.CallTool(context.Background(), "code_review_history_list", json.RawMessage(`{}`))
+	require.True(t, result.IsError, "code review history should stay blocked without the review feedback grant")
+	require.Contains(t, result.Content[0].Text, "CAPABILITY_DENIED", "blocked call should explain capability denial")
+
+	writeDenied := granted.CallTool(context.Background(), "code_review_history_update_policy", json.RawMessage(`{}`))
+	require.True(t, writeDenied.IsError, "policy updates should stay blocked under a read-only grant")
+	require.Contains(t, writeDenied.Content[0].Text, "CAPABILITY_DENIED", "blocked policy write should explain capability denial")
+
+	writeGranted := NewCapabilityFilteredToolSource(staticToolSource{tools: tools}, ToolCapabilityPolicy{Capabilities: []models.AgentCapabilitySnapshotItem{
+		{ID: models.AgentCapabilityCodeReviewPolicy, AccessLevel: models.AgentCapabilityAccessWrite},
+	}})
+	require.Equal(t, []Tool{
+		{Name: "code_review_history_policy"},
+		{Name: "code_review_history_update_policy"},
+	}, writeGranted.ListTools(), "the policy management capability should expose the policy write plus the policy read it depends on, never the review history reads")
+}
+
 func TestCapabilityFilteredToolSourceAllowsSessionPreviewTools(t *testing.T) {
 	t.Parallel()
 	source := NewCapabilityFilteredToolSource(staticToolSource{tools: []Tool{{Name: "preview_ensure"}, {Name: "preview_observe"}, {Name: "preview_act"}}}, ToolCapabilityPolicy{})

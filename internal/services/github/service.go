@@ -210,13 +210,7 @@ func (s *Service) exchangeForInstallationTokenRequest(ctx context.Context, jwtTo
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		return "", time.Time{}, &GitHubAPIError{
-			Method:     http.MethodPost,
-			Path:       path,
-			StatusCode: resp.StatusCode,
-			Body:       body,
-		}
+		return "", time.Time{}, newGitHubAPIResponseError(http.MethodPost, path, resp)
 	}
 
 	var result struct {
@@ -249,8 +243,7 @@ func (s *Service) GetInstallationDetails(ctx context.Context, installationID int
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return InstallationDetails{}, &GitHubAPIError{Method: http.MethodGet, Path: path, StatusCode: resp.StatusCode, Body: body}
+		return InstallationDetails{}, newGitHubAPIResponseError(http.MethodGet, path, resp)
 	}
 	var result InstallationDetails
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -289,7 +282,7 @@ func (s *Service) ListOrgMembers(ctx context.Context, installationID int64, orgL
 			return nil, fmt.Errorf("close org members response: %w", closeErr)
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, &GitHubAPIError{Method: http.MethodGet, Path: nextPath, StatusCode: resp.StatusCode, Body: body}
+			return nil, &GitHubAPIError{Method: http.MethodGet, Path: nextPath, StatusCode: resp.StatusCode, Body: body, Header: resp.Header.Clone()}
 		}
 		var page []OrgMember
 		if err := json.Unmarshal(body, &page); err != nil {
@@ -322,8 +315,7 @@ func (s *Service) IsActiveOrgMember(ctx context.Context, installationID int64, o
 		return false, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return false, &GitHubAPIError{Method: http.MethodGet, Path: path, StatusCode: resp.StatusCode, Body: body}
+		return false, newGitHubAPIResponseError(http.MethodGet, path, resp)
 	}
 	var result struct {
 		State string `json:"state"`
@@ -332,6 +324,21 @@ func (s *Service) IsActiveOrgMember(ctx context.Context, installationID int64, o
 		return false, fmt.Errorf("decode org membership: %w", err)
 	}
 	return result.State == "active", nil
+}
+
+func newGitHubAPIResponseError(method, path string, resp *http.Response) error {
+	body, readErr := io.ReadAll(resp.Body)
+	apiErr := &GitHubAPIError{
+		Method:     method,
+		Path:       path,
+		StatusCode: resp.StatusCode,
+		Body:       body,
+		Header:     resp.Header.Clone(),
+	}
+	if readErr != nil {
+		return errors.Join(apiErr, fmt.Errorf("read GitHub error response: %w", readErr))
+	}
+	return apiErr
 }
 
 func (s *Service) apiURL(path string) string {

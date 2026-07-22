@@ -78,14 +78,15 @@ func newForkSessionThreadHandler(stores *Stores, services *Services, logger zero
 		title := label
 
 		newSession := &models.Session{
-			OrgID:         orgID,
-			RepositoryID:  source.RepositoryID,
-			AgentType:     thread.AgentType,
-			ModelOverride: thread.ModelOverride,
-			Status:        models.SessionStatusIdle,
-			Origin:        models.SessionOriginManual,
-			TargetBranch:  source.TargetBranch,
-			Title:         &title,
+			OrgID:           orgID,
+			RepositoryID:    source.RepositoryID,
+			AgentType:       thread.AgentType,
+			ModelOverride:   thread.ModelOverride,
+			ReasoningEffort: thread.ReasoningEffort,
+			Status:          models.SessionStatusIdle,
+			Origin:          models.SessionOriginManual,
+			TargetBranch:    source.TargetBranch,
+			Title:           &title,
 		}
 		if input.UserID != "" {
 			if uid, err := uuid.Parse(input.UserID); err == nil {

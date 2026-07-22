@@ -103,6 +103,7 @@ func skillsExamples(commands []CLICommand) []string {
 		{NamespacePR, ActionCreate, "143-tools pr create --draft false"},
 		{NamespaceTabs, ActionList, "143-tools session-tabs list"},
 		{NamespaceTabs, ActionSend, "143-tools session-tabs send --tab-id <uuid> --message \"Run focused tests and summarize failures.\""},
+		{NamespaceCodeReviewHistory, ActionList, "143-tools code-review-history list --decision blocked --limit 20"},
 	}
 
 	examples := make([]string, 0, 5)

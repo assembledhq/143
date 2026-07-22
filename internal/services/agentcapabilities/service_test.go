@@ -89,6 +89,26 @@ func TestServiceResolveForSessionAddsIssueSourcesForTriggeredSessions(t *testing
 		"issue-triggered sessions should get issue sources scoped to that origin")
 }
 
+func TestServiceDefinitionsIncludeCodeReviewPolicyManagement(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(nil)
+	var found *models.AgentCapabilityDefinition
+	for _, def := range svc.Definitions() {
+		if def.ID == models.AgentCapabilityCodeReviewPolicy {
+			capability := def
+			found = &capability
+			break
+		}
+	}
+	require.NotNil(t, found, "capability catalog should include code review policy management")
+	require.Equal(t, models.AgentCapabilityAccessWrite, found.MaxAccessLevel, "policy management should cap at write access")
+	require.Equal(t, models.AgentCapabilityRiskHigh, found.Risk, "changing the org review policy is a high-risk action")
+	require.Equal(t, models.AgentCapabilityScopeOrg, found.Scope, "the review policy is org-wide")
+	require.False(t, recommendedDefaultEnabledCapabilities[models.AgentCapabilityCodeReviewPolicy],
+		"policy management must stay out of the recommended defaults so it is granted only explicitly")
+}
+
 func TestServiceDefinitionsIncludesSlackNotificationsCapability(t *testing.T) {
 	t.Parallel()
 

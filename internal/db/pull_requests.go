@@ -262,12 +262,12 @@ func (s *PullRequestStore) UpdateGitHubSnapshot(ctx context.Context, orgID, id u
 		    head_sha = @head_sha,
 		    head_ref = @head_ref,
 		    base_sha = @base_sha,
-		    github_state_synced_at = CASE WHEN head_sha IS DISTINCT FROM @head_sha THEN NULL ELSE github_state_synced_at END,
-		    health_version = CASE WHEN head_sha IS DISTINCT FROM @head_sha THEN 0 ELSE health_version END,
-		    merge_state = CASE WHEN head_sha IS DISTINCT FROM @head_sha THEN @merge_state ELSE merge_state END,
-		    has_conflicts = CASE WHEN head_sha IS DISTINCT FROM @head_sha THEN false ELSE has_conflicts END,
-		    failing_test_count = CASE WHEN head_sha IS DISTINCT FROM @head_sha THEN 0 ELSE failing_test_count END,
-		    needs_agent_action = CASE WHEN head_sha IS DISTINCT FROM @head_sha THEN false ELSE needs_agent_action END,
+		    github_state_synced_at = CASE WHEN head_sha IS DISTINCT FROM @head_sha OR base_sha IS DISTINCT FROM @base_sha THEN NULL ELSE github_state_synced_at END,
+		    health_version = CASE WHEN head_sha IS DISTINCT FROM @head_sha OR base_sha IS DISTINCT FROM @base_sha THEN 0 ELSE health_version END,
+		    merge_state = CASE WHEN head_sha IS DISTINCT FROM @head_sha OR base_sha IS DISTINCT FROM @base_sha THEN @merge_state ELSE merge_state END,
+		    has_conflicts = CASE WHEN head_sha IS DISTINCT FROM @head_sha OR base_sha IS DISTINCT FROM @base_sha THEN false ELSE has_conflicts END,
+		    failing_test_count = CASE WHEN head_sha IS DISTINCT FROM @head_sha OR base_sha IS DISTINCT FROM @base_sha THEN 0 ELSE failing_test_count END,
+		    needs_agent_action = CASE WHEN head_sha IS DISTINCT FROM @head_sha OR base_sha IS DISTINCT FROM @base_sha THEN false ELSE needs_agent_action END,
 		    updated_at = now()
 		WHERE id = @id AND org_id = @org_id`
 	res, err := s.db.Exec(ctx, query, pgx.NamedArgs{

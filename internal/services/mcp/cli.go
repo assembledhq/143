@@ -35,25 +35,28 @@ const (
 	NamespaceAutomationGoalImprovement CLINamespace = "automation-goal-improvement"
 	NamespaceCapability                CLINamespace = "capability"
 	NamespaceSessionHistory            CLINamespace = "session-history"
+	NamespaceCodeReviewHistory         CLINamespace = "code-review-history"
 	NamespacePreview                   CLINamespace = "preview"
 )
 
 // Fixed actions for the hardcoded 143-owned namespace mappings.
 const (
-	ActionCreate   CLIAction = "create"
-	ActionGet      CLIAction = "get"
-	ActionList     CLIAction = "list"
-	ActionMessages CLIAction = "messages"
-	ActionPropose  CLIAction = "propose"
-	ActionUpdate   CLIAction = "update"
-	ActionRun      CLIAction = "run"
-	ActionPause    CLIAction = "pause"
-	ActionResume   CLIAction = "resume"
-	ActionSend     CLIAction = "send"
-	ActionAdd      CLIAction = "add"
-	ActionComplete CLIAction = "complete"
-	ActionRequest  CLIAction = "request"
-	ActionSearch   CLIAction = "search"
+	ActionCreate       CLIAction = "create"
+	ActionGet          CLIAction = "get"
+	ActionList         CLIAction = "list"
+	ActionMessages     CLIAction = "messages"
+	ActionPropose      CLIAction = "propose"
+	ActionUpdate       CLIAction = "update"
+	ActionRun          CLIAction = "run"
+	ActionPause        CLIAction = "pause"
+	ActionResume       CLIAction = "resume"
+	ActionSend         CLIAction = "send"
+	ActionAdd          CLIAction = "add"
+	ActionComplete     CLIAction = "complete"
+	ActionRequest      CLIAction = "request"
+	ActionSearch       CLIAction = "search"
+	ActionPolicy       CLIAction = "policy"
+	ActionUpdatePolicy CLIAction = "update_policy"
 )
 
 // RunCLI executes a tool call from command-line arguments, printing the result
@@ -240,6 +243,14 @@ func cliPathForTool(name string) (CLINamespace, CLIAction, bool) {
 		return NamespaceSessionHistory, ActionGet, true
 	case name == "session_history_messages":
 		return NamespaceSessionHistory, ActionMessages, true
+	case name == "code_review_history_list":
+		return NamespaceCodeReviewHistory, ActionList, true
+	case name == "code_review_history_get":
+		return NamespaceCodeReviewHistory, ActionGet, true
+	case name == "code_review_history_policy":
+		return NamespaceCodeReviewHistory, ActionPolicy, true
+	case name == "code_review_history_update_policy":
+		return NamespaceCodeReviewHistory, ActionUpdatePolicy, true
 	case strings.HasPrefix(name, "log_"):
 		return NamespaceLogs, CLIAction(strings.TrimPrefix(name, "log_")), true
 	default:
@@ -273,6 +284,8 @@ func cliCategory(namespace CLINamespace, action CLIAction) string {
 		return "Agent capabilities"
 	case NamespaceSessionHistory:
 		return "Session history"
+	case NamespaceCodeReviewHistory:
+		return "143 code review history"
 	}
 	a := string(action)
 	switch {

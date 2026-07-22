@@ -239,6 +239,35 @@ describe("useDebouncedTextField", () => {
     expect(result.current.value).toBe("local draft");
   });
 
+  it("does not rewrite local text when the server canonicalizes an equivalent committed value", async () => {
+    const onCommit: Mock<(value: string) => void> = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ serverValue }: { serverValue: string }) =>
+        useDebouncedTextField({
+          serverValue,
+          onCommit,
+          debounceMs: 20,
+          valuesEqual: (left, right) => left.trim() === right.trim(),
+        }),
+      { initialProps: { serverValue: "Approve" } },
+    );
+
+    act(() => result.current.onChange("Approve routine "));
+    await waitFor(() => expect(onCommit).toHaveBeenCalledWith("Approve routine "));
+
+    rerender({ serverValue: "Approve routine " });
+    rerender({ serverValue: "Approve routine" });
+
+    expect(result.current.value).toBe("Approve routine ");
+    expect(result.current.dirty).toBe(false);
+
+    act(() => result.current.onChange("Approve routine changes"));
+    await waitFor(() => expect(onCommit).toHaveBeenLastCalledWith("Approve routine changes"));
+
+    rerender({ serverValue: "Escalate uncertain changes" });
+    expect(result.current.value).toBe("Escalate uncertain changes");
+  });
+
   it("replaces local text immediately and cancels a pending commit", async () => {
     const onCommit: Mock<(value: string) => void> = vi.fn();
     const { result } = renderHook(() => useDebouncedTextField({ serverValue: "repository", onCommit, debounceMs: 30 }));

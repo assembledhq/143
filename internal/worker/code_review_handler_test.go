@@ -22,27 +22,91 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestStartCodeReviewReassessmentHandlerDefersBehindOlderAssessment(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	repoID := uuid.New()
+	priorSessionID := uuid.New()
+	now := time.Now().UTC()
+	head := "current-head"
+	base := "current-base"
+	row := workerPullRequestRow(prID, uuid.New(), orgID, "acme/repo", "feature/reassess", now)
+	for index, column := range workerPullRequestColumns {
+		switch column {
+		case "head_sha":
+			row[index] = &head
+		case "base_sha":
+			row[index] = &base
+		}
+	}
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery("(?s)FROM pull_requests.*WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgx.NamedArgs{"id": prID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(workerPullRequestColumns).AddRow(row...))
+	lifecycle := &codeReviewLifecycleStub{result: codereview.ReviewRequestedResult{Processed: true, Reused: true, Deferred: true}}
+	payload, err := json.Marshal(codereview.ReviewChangedInput{
+		OrgID: orgID, RepositoryID: repoID, PullRequestID: prID, PriorSessionID: priorSessionID,
+		HeadSHA: "event-head", ChangeKey: "pull_request:delivery-143", ChangeReason: "pull_request.edited",
+	})
+	require.NoError(t, err, "reassessment starter payload should marshal")
+
+	err = newStartCodeReviewReassessmentHandler(
+		&Stores{PullRequests: db.NewPullRequestStore(mock)},
+		&Services{CodeReviewLifecycle: lifecycle},
+		zerolog.Nop(),
+	)(context.Background(), models.JobTypeStartCodeReviewReassessment, payload)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "active older assessment should keep the starter job pending")
+	require.False(t, retryable.ConsumeAttempt, "waiting for an active review should not consume the job attempt budget")
+	require.True(t, retryable.BypassMaxRetryDuration, "durable follow-up should survive long-running reviewer agents")
+	require.Equal(t, "current-head", lifecycle.input.HeadSHA, "starter should reassess the current mirrored PR head")
+	require.Equal(t, priorSessionID, lifecycle.input.PriorSessionID, "starter should preserve event ordering against the prior assessment")
+	require.NoError(t, mock.ExpectationsWereMet(), "starter should load the current pull request with org isolation")
+}
+
+type codeReviewLifecycleStub struct {
+	input  codereview.ReviewChangedInput
+	result codereview.ReviewRequestedResult
+	err    error
+}
+
+func (s *codeReviewLifecycleStub) HandleReviewChanged(_ context.Context, input codereview.ReviewChangedInput) (codereview.ReviewRequestedResult, error) {
+	s.input = input
+	return s.result, s.err
+}
+
 func TestSyncCodeReviewPullRequestStateClassifiesTransientGitHubFailures(t *testing.T) {
 	t.Parallel()
 
+	sessionID := uuid.MustParse("00000000-0000-0000-0000-000000000143")
+	fallbackRetryAfter := *githubRateLimitRetryAfter(nil, sessionID.String())
+	secondaryRetryAfterHint := 117 * time.Second
+	secondaryRetryAfter := *githubRateLimitRetryAfter(&secondaryRetryAfterHint, sessionID.String())
 	tests := []struct {
 		name               string
 		status             int
 		body               string
 		header             http.Header
 		retryable          bool
+		rateLimited        bool
 		fatal              bool
 		expectedRetryAfter time.Duration
 	}{
 		{name: "retries service unavailable", status: http.StatusServiceUnavailable, retryable: true},
-		{name: "retries rate limiting", status: http.StatusTooManyRequests, retryable: true},
+		{name: "retries rate limiting with fallback delay", status: http.StatusTooManyRequests, retryable: true, rateLimited: true, expectedRetryAfter: fallbackRetryAfter},
 		{
 			name:               "retries forbidden secondary rate limit using server delay",
 			status:             http.StatusForbidden,
 			body:               `{"message":"You have exceeded a secondary rate limit"}`,
-			header:             http.Header{"Retry-After": []string{"17"}},
+			header:             http.Header{"Retry-After": []string{"117"}},
 			retryable:          true,
-			expectedRetryAfter: 17 * time.Second,
+			rateLimited:        true,
+			expectedRetryAfter: secondaryRetryAfter,
 		},
 		{name: "does not retry forbidden permission failure", status: http.StatusForbidden, body: `{"message":"Resource not accessible by integration"}`, fatal: true},
 		{name: "does not retry validation failure", status: http.StatusUnprocessableEntity, fatal: true},
@@ -71,6 +135,7 @@ func TestSyncCodeReviewPullRequestStateClassifiesTransientGitHubFailures(t *test
 
 			err := syncCodeReviewPullRequestState(context.Background(), services, zerolog.Nop(), runCodeReviewPayload{
 				OrgID:         uuid.New(),
+				SessionID:     sessionID,
 				PullRequestID: uuid.New(),
 			})
 
@@ -79,12 +144,18 @@ func TestSyncCodeReviewPullRequestStateClassifiesTransientGitHubFailures(t *test
 			var fatalErr *FatalError
 			require.Equal(t, tt.fatal, errors.As(err, &fatalErr), "non-transient GitHub status should receive the expected fatal classification")
 			if tt.retryable {
-				require.True(t, retryErr.ConsumeAttempt, "transient GitHub retries should consume attempts so exponential backoff increases")
+				require.Equal(t, !tt.rateLimited, retryErr.ConsumeAttempt, "only non-rate-limit transient failures should consume attempts")
 				if tt.expectedRetryAfter > 0 {
 					require.NotNil(t, retryErr.RetryAfter, "rate-limited response should preserve the upstream retry delay")
 					require.Equal(t, tt.expectedRetryAfter, *retryErr.RetryAfter, "rate-limited response should use the upstream retry delay")
 				} else {
 					require.Nil(t, retryErr.RetryAfter, "transient GitHub retries without a hint should use exponential backoff")
+				}
+				if tt.rateLimited {
+					require.NotNil(t, retryErr.MaxRetryDuration, "rate limits should use an extended but bounded retry window")
+					require.Equal(t, githubRateLimitMaxRetryDuration, *retryErr.MaxRetryDuration, "rate limits should survive GitHub's normal reset interval")
+				} else {
+					require.Nil(t, retryErr.MaxRetryDuration, "ordinary transient failures should use the standard retry window")
 				}
 			}
 		})
@@ -174,7 +245,8 @@ func TestCodeReviewDeadLetterReconciliationFailsMetadata(t *testing.T) {
 }
 
 type capturingCodeReviewSubmitter struct {
-	removeRequests []codereview.RequestedReviewersRequest
+	removeRequests   []codereview.RequestedReviewersRequest
+	fileListRequests []codereview.PullRequestFilesRequest
 }
 
 func (s *capturingCodeReviewSubmitter) SubmitReview(context.Context, codereview.SubmitReviewRequest) (codereview.SubmitReviewResult, error) {
@@ -184,6 +256,11 @@ func (s *capturingCodeReviewSubmitter) SubmitReview(context.Context, codereview.
 func (s *capturingCodeReviewSubmitter) RemoveRequestedReviewers(_ context.Context, req codereview.RequestedReviewersRequest) error {
 	s.removeRequests = append(s.removeRequests, req)
 	return nil
+}
+
+func (s *capturingCodeReviewSubmitter) ListPullRequestFiles(_ context.Context, req codereview.PullRequestFilesRequest) ([]codereview.PullRequestFile, error) {
+	s.fileListRequests = append(s.fileListRequests, req)
+	return []codereview.PullRequestFile{{Filename: "internal/worker/code_review_handler.go"}}, nil
 }
 
 func TestCodeReviewInlineComments(t *testing.T) {
@@ -423,6 +500,43 @@ func TestEvaluateCodeReviewDescriptionPolicyUsesCachedArtifact(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestCodeReviewDescriptionResultFromArtifactChecksInputHash(t *testing.T) {
+	t.Parallel()
+
+	passed := true
+	tests := []struct {
+		name          string
+		artifactHash  string
+		currentHash   string
+		expectedFound bool
+	}{
+		{name: "reuses matching description", artifactHash: "same", currentHash: "same", expectedFound: true},
+		{name: "rejects edited description", artifactHash: "before", currentHash: "after", expectedFound: false},
+		{name: "accepts legacy artifact without hash", artifactHash: "", currentHash: "current", expectedFound: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			metadata, err := json.Marshal(codeReviewDescriptionArtifactMetadata{
+				Passed: &passed, PolicyVersion: 3, HeadSHA: "head", InputHash: tt.artifactHash,
+			})
+			require.NoError(t, err, "description artifact metadata should marshal")
+			artifact := models.CodeReviewPromptArtifact{Metadata: metadata}
+
+			result, found := codeReviewDescriptionResultFromArtifact(runCodeReviewPayload{
+				PolicyVersion: 3, HeadSHA: "head",
+			}, artifact, tt.currentHash)
+
+			require.Equal(t, tt.expectedFound, found, "description cache should be scoped to the current PR text")
+			if tt.expectedFound {
+				require.Equal(t, codeReviewDescriptionLLMResponse{Passed: true, Reason: "requirement satisfied"}, result, "matching cache should return the exact stored assessment")
+			} else {
+				require.Equal(t, codeReviewDescriptionLLMResponse{}, result, "stale cache should return no assessment")
+			}
+		})
+	}
+}
+
 func TestCodeReviewDescriptionRequirementAppliesTypedRules(t *testing.T) {
 	t.Parallel()
 
@@ -475,15 +589,18 @@ func TestCodeReviewDescriptionRequirementAppliesTypedRules(t *testing.T) {
 func TestCodeReviewReviewerMessageUsesNativeReviewCommand(t *testing.T) {
 	t.Parallel()
 
-	prompt := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, models.DefaultCodeReviewPolicyConfig(), 0, "", nil)
+	prURL := "https://github.com/assembledhq/assembled/pull/53786"
+	prompt := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{GitHubPRURL: prURL}, models.DefaultCodeReviewPolicyConfig(), 0, "", nil)
 
-	require.True(t, strings.HasPrefix(prompt, "/review"), "code review reviewer prompt should invoke the native review command")
+	require.True(t, strings.HasPrefix(prompt, "/review "+prURL), "code review reviewer prompt should pass the authoritative pull request URL directly to the native review command")
+	require.Contains(t, prompt, "do not infer the target from recent pull requests", "reviewer prompt should forbid selecting a different pull request from repository activity")
 	require.Contains(t, prompt, "Do NOT run test suites", "reviewer prompt should forbid running test suites")
 	require.Contains(t, prompt, "Do NOT modify the workspace", "reviewer prompt should forbid workspace changes")
 	require.Equal(t, prompt, codeReviewReviewerMessage(models.AgentTypeCodex, prompt), "Codex reviewer messages should invoke native /review with the review constraints")
 	commands := codeReviewNativeReviewCommands(models.AgentTypeCodex, prompt)
 	require.Len(t, commands, 1, "native reviewer command metadata should be persisted")
 	require.Equal(t, strings.TrimSpace(strings.TrimPrefix(prompt, "/review")), commands[0].Arguments, "native reviewer command should carry the review constraints as arguments")
+	require.True(t, strings.HasPrefix(commands[0].Arguments, prURL), "native reviewer command arguments should begin with the authoritative pull request URL")
 	require.Equal(t, prompt, codeReviewReviewerMessage(models.AgentTypeOpenCode, prompt), "agents without a native /review command should receive the plain prompt")
 	require.Empty(t, codeReviewNativeReviewCommands(models.AgentTypeOpenCode, prompt), "agents without a native /review command should not persist command metadata")
 }
@@ -633,7 +750,7 @@ func TestHarvestCodeReviewReviewerResultsIgnoresReadOnlyWorkspaceChanges(t *test
 	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
 		WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
 		WillReturnRows(newSessionThreadRows().
-			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil,
+			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, nil,
 				"Code review: codex", nil, []string{"internal/db/users.go"}, models.ThreadStatusCompleted,
 				nil, 1, &now, nil, &rawDiff, nil, nil,
 				&now, &now, now, models.ThreadCreatedBySourceSystem, nil, nil,
@@ -703,7 +820,7 @@ func TestHarvestCodeReviewReviewerResultsCompletesIdleReadOnlyViolationWithoutAs
 	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
 		WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
 		WillReturnRows(newSessionThreadRows().
-			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil,
+			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, nil,
 				"Code review: codex", nil, []string{"internal/db/users.go"}, models.ThreadStatusIdle,
 				nil, 1, &now, nil, &rawDiff, &failure, stringPtr("read_only_violation"),
 				&now, &now, now, models.ThreadCreatedBySourceSystem, nil, nil,
@@ -795,7 +912,7 @@ func TestHarvestCodeReviewReviewerResultsClassifiesFailedThreadOutput(t *testing
 			mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
 				WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
 				WillReturnRows(newSessionThreadRows().
-					AddRow(threadID, sessionID, orgID, models.AgentTypeClaudeCode, nil,
+					AddRow(threadID, sessionID, orgID, models.AgentTypeClaudeCode, nil, nil,
 						"Code review: claude_code", nil, []string{"internal/db/users.go"}, models.ThreadStatusFailed,
 						nil, 1, &now, nil, nil, &tt.failure, &tt.failureCategory,
 						&now, &now, now, models.ThreadCreatedBySourceSystem, nil, nil,
@@ -926,6 +1043,211 @@ func TestRunCodeReviewHandlerReconcilesTerminalFailedMetadata(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "terminal failed metadata should retry parent failure reconciliation")
 }
 
+func TestRunCodeReviewHandlerFastWaitSkipsGitHubRefresh(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		role          models.CodeReviewAgentRole
+		agentProvider models.AgentType
+		state         func(threadID uuid.UUID) json.RawMessage
+		expectedError string
+	}{
+		{
+			name:          "running reviewer",
+			role:          models.CodeReviewAgentRoleReviewer,
+			agentProvider: models.AgentTypeCodex,
+			state: func(threadID uuid.UUID) json.RawMessage {
+				return marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+					ReviewerKey:   codeReviewReviewerKey(0, models.AgentTypeCodex),
+					ReviewerIndex: 0,
+					ThreadID:      threadID.String(),
+				})
+			},
+			expectedError: "waiting for code review reviewer agents",
+		},
+		{
+			name:          "running orchestrator",
+			role:          models.CodeReviewAgentRoleOrchestrator,
+			agentProvider: models.AgentTypeOpenCode,
+			state: func(threadID uuid.UUID) json.RawMessage {
+				return marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{ThreadID: threadID.String()})
+			},
+			expectedError: "waiting for code review orchestrator agent",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock should initialize")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			repositoryID := uuid.New()
+			pullRequestID := uuid.New()
+			policyID := uuid.New()
+			metadataID := uuid.New()
+			resultID := uuid.New()
+			threadID := uuid.New()
+			now := time.Now().UTC()
+			headSHA := "reviewed-head"
+			promptArtifactKey := "code-review-prompts/" + sessionID.String() + "/" + headSHA
+			policy := models.DefaultCodeReviewPolicyConfig()
+			policy.AgentRoster.Reviewers = []models.AgentType{models.AgentTypeCodex}
+			policy.AgentRoster.ReviewerModels = []string{models.DefaultCodexModel}
+			policy.AgentRoster.RequireReviewerQuorum = 1
+
+			mock.ExpectQuery("UPDATE code_review_session_metadata").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+				WillReturnRows(newCodeReviewMetadataRows().
+					AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
+						"base", headSHA, false, models.CodeReviewTriggerSourceTeamReviewer,
+						models.CodeReviewSessionStatusRunning, nil, nil, false, nil,
+						"output-key", &promptArtifactKey, nil, nil, nil, nil, nil, now))
+			mock.ExpectQuery("(?s)FROM code_review_policies.*WHERE org_id = @org_id.*AND id = @id").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "id": policyID}).
+				WillReturnRows(codeReviewPolicyRowsForTest(t, orgID, policyID, policy, now))
+			prRow := workerPullRequestRow(pullRequestID, sessionID, orgID, "acme/repo", "feature/reduce-calls", now)
+			for index, column := range workerPullRequestColumns {
+				if column == "head_sha" {
+					prRow[index] = &headSHA
+				}
+			}
+			mock.ExpectQuery("(?s)FROM pull_requests.*WHERE id = @id AND org_id = @org_id").
+				WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID}).
+				WillReturnRows(pgxmock.NewRows(workerPullRequestColumns).AddRow(prRow...))
+			sessionRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusRunning, 0, nil, nil)
+			setWorkerSessionColumn(sessionRow, "origin", models.SessionOriginCodeReview)
+			mock.ExpectQuery("(?s)SELECT .*FROM sessions").
+				WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
+				WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+			mock.ExpectQuery("(?s)FROM code_review_agent_results.*WHERE org_id = @org_id.*AND session_id = @session_id").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+				WillReturnRows(newCodeReviewAgentResultRows().
+					AddRow(resultID, orgID, sessionID, string(tt.agentProvider), nil, tt.role,
+						models.CodeReviewAgentResultStatusRunning, nil, tt.state(threadID), now))
+			mock.ExpectQuery("(?s)FROM session_threads.*WHERE org_id = @org_id AND session_id = @session_id").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+				WillReturnRows(newSessionThreadRows().AddRow(workerSessionThreadRow(threadID, sessionID, orgID, tt.agentProvider, nil, models.ThreadStatusRunning)...))
+
+			syncCalls := 0
+			submitter := &capturingCodeReviewSubmitter{}
+			services := &Services{
+				PR: &stubPRService{syncPullRequestStateFn: func(context.Context, uuid.UUID, uuid.UUID) error {
+					syncCalls++
+					return nil
+				}},
+				CodeReviews: submitter,
+			}
+			stores := &Stores{
+				CodeReviews:     db.NewCodeReviewStore(mock),
+				PullRequests:    db.NewPullRequestStore(mock),
+				Sessions:        db.NewSessionStore(mock),
+				SessionThreads:  db.NewSessionThreadStore(mock),
+				SessionMessages: db.NewSessionMessageStore(mock),
+				SessionLogs:     db.NewSessionLogStore(mock),
+				Jobs:            db.NewJobStore(mock),
+			}
+			payload, err := json.Marshal(runCodeReviewPayload{
+				OrgID: orgID, SessionID: sessionID, MetadataID: metadataID, RepositoryID: repositoryID,
+				PullRequestID: pullRequestID, PolicyID: policyID, PolicyVersion: 1, HeadSHA: headSHA, OutputKey: "output-key",
+			})
+			require.NoError(t, err, "code review job payload should marshal")
+
+			err = newRunCodeReviewHandler(stores, services, zerolog.Nop())(context.Background(), models.JobTypeRunCodeReview, payload)
+
+			var retryable *RetryableError
+			require.ErrorAs(t, err, &retryable, "in-flight agent work should keep the durable review job pending")
+			require.ErrorContains(t, retryable, tt.expectedError, "fast wait should preserve the current agent phase")
+			require.Equal(t, 0, syncCalls, "fast wait should not synchronize pull request state through GitHub")
+			require.Empty(t, submitter.fileListRequests, "fast wait should not list pull request files through GitHub")
+			require.NoError(t, mock.ExpectationsWereMet(), "fast wait should only read durable local agent state")
+		})
+	}
+}
+
+func TestRunCodeReviewHandlerChecksCancellationBeforeGitHubRefresh(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repositoryID := uuid.New()
+	pullRequestID := uuid.New()
+	policyID := uuid.New()
+	metadataID := uuid.New()
+	now := time.Now().UTC()
+	headSHA := "reviewed-head"
+	reason := "parent code review session was cancelled"
+	policy := models.DefaultCodeReviewPolicyConfig()
+
+	mock.ExpectQuery("UPDATE code_review_session_metadata").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+		WillReturnRows(newCodeReviewMetadataRows().
+			AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
+				"base", headSHA, false, models.CodeReviewTriggerSourceTeamReviewer,
+				models.CodeReviewSessionStatusRunning, nil, nil, false, nil,
+				"output-key", nil, nil, nil, nil, nil, nil, now))
+	mock.ExpectQuery("(?s)FROM code_review_policies.*WHERE org_id = @org_id.*AND id = @id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "id": policyID}).
+		WillReturnRows(codeReviewPolicyRowsForTest(t, orgID, policyID, policy, now))
+	prRow := workerPullRequestRow(pullRequestID, sessionID, orgID, "acme/repo", "feature/reduce-calls", now)
+	for index, column := range workerPullRequestColumns {
+		if column == "head_sha" {
+			prRow[index] = &headSHA
+		}
+	}
+	mock.ExpectQuery("(?s)FROM pull_requests.*WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(workerPullRequestColumns).AddRow(prRow...))
+	sessionRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusCancelled, 0, nil, nil)
+	setWorkerSessionColumn(sessionRow, "origin", models.SessionOriginCodeReview)
+	mock.ExpectQuery("(?s)SELECT .*FROM sessions").
+		WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	mock.ExpectQuery("UPDATE code_review_session_metadata").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "failure_reason": reason}).
+		WillReturnRows(newCodeReviewMetadataRows().
+			AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
+				"base", headSHA, false, models.CodeReviewTriggerSourceTeamReviewer,
+				models.CodeReviewSessionStatusCancelled, nil, nil, false, nil,
+				"output-key", nil, nil, nil, nil, &reason, &now, now))
+
+	syncCalls := 0
+	submitter := &capturingCodeReviewSubmitter{}
+	services := &Services{
+		PR: &stubPRService{syncPullRequestStateFn: func(context.Context, uuid.UUID, uuid.UUID) error {
+			syncCalls++
+			return nil
+		}},
+		CodeReviews: submitter,
+	}
+	stores := &Stores{
+		CodeReviews:  db.NewCodeReviewStore(mock),
+		PullRequests: db.NewPullRequestStore(mock),
+		Sessions:     db.NewSessionStore(mock),
+	}
+	payload, err := json.Marshal(runCodeReviewPayload{
+		OrgID: orgID, SessionID: sessionID, MetadataID: metadataID, RepositoryID: repositoryID,
+		PullRequestID: pullRequestID, PolicyID: policyID, PolicyVersion: 1, HeadSHA: headSHA, OutputKey: "output-key",
+	})
+	require.NoError(t, err, "code review job payload should marshal")
+
+	err = newRunCodeReviewHandler(stores, services, zerolog.Nop())(context.Background(), models.JobTypeRunCodeReview, payload)
+
+	require.NoError(t, err, "parent cancellation should end the code review without external reconciliation")
+	require.Equal(t, 0, syncCalls, "parent cancellation should not synchronize pull request state through GitHub")
+	require.Empty(t, submitter.fileListRequests, "parent cancellation should not list pull request files through GitHub")
+	require.NoError(t, mock.ExpectationsWereMet(), "parent cancellation should be handled entirely from durable local state")
+}
+
 func TestStopCodeReviewIfParentSessionCancelledCancelsMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -1050,7 +1372,7 @@ func TestHarvestCodeReviewOrchestratorResultPersistsFindings(t *testing.T) {
 	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
 		WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
 		WillReturnRows(newSessionThreadRows().
-			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil,
+			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, nil,
 				"Main", nil, []string{"internal/worker/code_review_handler.go"}, models.ThreadStatusCompleted,
 				nil, 1, &now, nil, nil, nil, nil,
 				&now, &now, now, models.ThreadCreatedBySourceSystem, nil, nil,
@@ -1224,7 +1546,7 @@ func TestHarvestCodeReviewOrchestratorResultRejectsMalformedSynthesis(t *testing
 	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
 		WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
 		WillReturnRows(newSessionThreadRows().
-			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil,
+			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, nil,
 				"Main", nil, []string{"internal/worker/code_review_handler.go"}, models.ThreadStatusCompleted,
 				nil, 1, &now, nil, nil, nil, nil,
 				&now, &now, now, models.ThreadCreatedBySourceSystem, nil, nil,
@@ -1262,6 +1584,175 @@ type codeReviewDescriptionLLMStub struct {
 func (s *codeReviewDescriptionLLMStub) Complete(context.Context, string, string) (string, error) {
 	s.calls++
 	return s.response, nil
+}
+
+func TestCodeReviewInFlightAgentPhaseFromState(t *testing.T) {
+	t.Parallel()
+
+	reviewerOneThreadID := uuid.New()
+	reviewerTwoThreadID := uuid.New()
+	orchestratorThreadID := uuid.New()
+	reviewerResult := func(index int, agentType models.AgentType, status models.CodeReviewAgentResultStatus, threadID string) models.CodeReviewAgentResult {
+		return models.CodeReviewAgentResult{
+			Role:          models.CodeReviewAgentRoleReviewer,
+			AgentProvider: string(agentType),
+			Status:        status,
+			StructuredResult: marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+				ReviewerKey:   codeReviewReviewerKey(index, agentType),
+				ReviewerIndex: index,
+				ThreadID:      threadID,
+			}),
+		}
+	}
+	orchestratorResult := func(status models.CodeReviewAgentResultStatus, threadID string) models.CodeReviewAgentResult {
+		return models.CodeReviewAgentResult{
+			Role:          models.CodeReviewAgentRoleOrchestrator,
+			AgentProvider: string(models.AgentTypeOpenCode),
+			Status:        status,
+			StructuredResult: marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
+				ThreadID: threadID,
+			}),
+		}
+	}
+	policy := models.DefaultCodeReviewPolicyConfig()
+	runningThreads := []models.SessionThread{
+		{ID: reviewerOneThreadID, Status: models.ThreadStatusRunning},
+		{ID: reviewerTwoThreadID, Status: models.ThreadStatusAwaitingInput},
+		{ID: orchestratorThreadID, Status: models.ThreadStatusPending},
+	}
+	tests := []struct {
+		name     string
+		results  []models.CodeReviewAgentResult
+		threads  []models.SessionThread
+		expected codeReviewAgentPhase
+	}{
+		{
+			name: "complete running reviewer roster waits",
+			results: []models.CodeReviewAgentResult{
+				reviewerResult(0, models.AgentTypeCodex, models.CodeReviewAgentResultStatusRunning, reviewerOneThreadID.String()),
+				reviewerResult(1, models.AgentTypeClaudeCode, models.CodeReviewAgentResultStatusRunning, reviewerTwoThreadID.String()),
+			},
+			threads:  runningThreads,
+			expected: codeReviewAgentPhaseReviewers,
+		},
+		{
+			name: "mixed terminal and running reviewers wait",
+			results: []models.CodeReviewAgentResult{
+				reviewerResult(0, models.AgentTypeCodex, models.CodeReviewAgentResultStatusCompleted, ""),
+				reviewerResult(1, models.AgentTypeClaudeCode, models.CodeReviewAgentResultStatusRunning, reviewerTwoThreadID.String()),
+			},
+			threads:  runningThreads,
+			expected: codeReviewAgentPhaseReviewers,
+		},
+		{
+			name: "partial reviewer roster falls through",
+			results: []models.CodeReviewAgentResult{
+				reviewerResult(0, models.AgentTypeCodex, models.CodeReviewAgentResultStatusRunning, reviewerOneThreadID.String()),
+			},
+			threads: runningThreads,
+		},
+		{
+			name: "missing reviewer thread id falls through",
+			results: []models.CodeReviewAgentResult{
+				reviewerResult(0, models.AgentTypeCodex, models.CodeReviewAgentResultStatusRunning, ""),
+				reviewerResult(1, models.AgentTypeClaudeCode, models.CodeReviewAgentResultStatusRunning, reviewerTwoThreadID.String()),
+			},
+			threads: runningThreads,
+		},
+		{
+			name: "malformed reviewer state falls through",
+			results: []models.CodeReviewAgentResult{
+				{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: string(models.AgentTypeCodex), Status: models.CodeReviewAgentResultStatusRunning, StructuredResult: json.RawMessage(`{`)},
+				reviewerResult(1, models.AgentTypeClaudeCode, models.CodeReviewAgentResultStatusRunning, reviewerTwoThreadID.String()),
+			},
+			threads: runningThreads,
+		},
+		{
+			name: "terminal backing thread falls through to harvest",
+			results: []models.CodeReviewAgentResult{
+				reviewerResult(0, models.AgentTypeCodex, models.CodeReviewAgentResultStatusRunning, reviewerOneThreadID.String()),
+				reviewerResult(1, models.AgentTypeClaudeCode, models.CodeReviewAgentResultStatusRunning, reviewerTwoThreadID.String()),
+			},
+			threads: []models.SessionThread{
+				{ID: reviewerOneThreadID, Status: models.ThreadStatusCompleted},
+				{ID: reviewerTwoThreadID, Status: models.ThreadStatusRunning},
+			},
+		},
+		{
+			name: "running orchestrator takes precedence",
+			results: []models.CodeReviewAgentResult{
+				reviewerResult(0, models.AgentTypeCodex, models.CodeReviewAgentResultStatusRunning, reviewerOneThreadID.String()),
+				reviewerResult(1, models.AgentTypeClaudeCode, models.CodeReviewAgentResultStatusRunning, reviewerTwoThreadID.String()),
+				orchestratorResult(models.CodeReviewAgentResultStatusRunning, orchestratorThreadID.String()),
+			},
+			threads:  runningThreads,
+			expected: codeReviewAgentPhaseOrchestrator,
+		},
+		{
+			name: "terminal orchestrator falls through",
+			results: []models.CodeReviewAgentResult{
+				reviewerResult(0, models.AgentTypeCodex, models.CodeReviewAgentResultStatusRunning, reviewerOneThreadID.String()),
+				reviewerResult(1, models.AgentTypeClaudeCode, models.CodeReviewAgentResultStatusRunning, reviewerTwoThreadID.String()),
+				orchestratorResult(models.CodeReviewAgentResultStatusCompleted, orchestratorThreadID.String()),
+			},
+			threads: runningThreads,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := codeReviewInFlightAgentPhaseFromState(policy, tt.results, tt.threads)
+			require.Equal(t, tt.expected, actual, "in-flight phase detection should only fast-wait for complete durable agent work")
+		})
+	}
+}
+
+func TestCodeReviewInFlightAgentPhaseRejectsInvalidContext(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	reviewedHead := "reviewed-head"
+	differentHead := "different-head"
+	policy := models.DefaultCodeReviewPolicyConfig()
+	tests := []struct {
+		name     string
+		job      runCodeReviewPayload
+		pr       models.PullRequest
+		metadata models.CodeReviewSessionMetadata
+	}{
+		{
+			name:     "reviewer timeout falls through",
+			job:      runCodeReviewPayload{HeadSHA: reviewedHead},
+			pr:       models.PullRequest{HeadSHA: &reviewedHead},
+			metadata: models.CodeReviewSessionMetadata{CreatedAt: now.Add(-time.Hour)},
+		},
+		{
+			name:     "persisted head mismatch falls through",
+			job:      runCodeReviewPayload{HeadSHA: reviewedHead},
+			pr:       models.PullRequest{HeadSHA: &differentHead},
+			metadata: models.CodeReviewSessionMetadata{CreatedAt: now},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock should initialize")
+			defer mock.Close()
+			phase, err := codeReviewInFlightAgentPhase(context.Background(), &Stores{
+				CodeReviews:    db.NewCodeReviewStore(mock),
+				SessionThreads: db.NewSessionThreadStore(mock),
+			}, tt.job, tt.pr, policy, tt.metadata)
+
+			require.NoError(t, err, "invalid fast-wait context should fall through without querying agent state")
+			require.Equal(t, codeReviewAgentPhaseNone, phase, "invalid fast-wait context should preserve live reconciliation")
+			require.NoError(t, mock.ExpectationsWereMet(), "invalid context should not query durable agent state")
+		})
+	}
 }
 
 func TestCodeReviewReviewerExecutionFailed(t *testing.T) {
@@ -1413,6 +1904,53 @@ func TestCodeReviewReviewerAgentModel(t *testing.T) {
 		"missing reviewer_models should fall back to the per-agent default")
 }
 
+func TestCodeReviewReviewerReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		index     int
+		configure func(*models.CodeReviewPolicyConfig)
+		expected  models.ReasoningEffort
+	}{
+		{
+			name:  "uses first reviewer override",
+			index: 0,
+			configure: func(cfg *models.CodeReviewPolicyConfig) {
+				cfg.AgentRoster.ReviewerReasoningEfforts = []models.ReasoningEffort{models.ReasoningEffortLow, models.ReasoningEffortMax}
+			},
+			expected: models.ReasoningEffortLow,
+		},
+		{
+			name:  "uses second reviewer override independently",
+			index: 1,
+			configure: func(cfg *models.CodeReviewPolicyConfig) {
+				cfg.AgentRoster.ReviewerReasoningEfforts = []models.ReasoningEffort{models.ReasoningEffortLow, models.ReasoningEffortMax}
+			},
+			expected: models.ReasoningEffortMax,
+		},
+		{
+			name:  "falls back for legacy policy",
+			index: 0,
+			configure: func(cfg *models.CodeReviewPolicyConfig) {
+				cfg.AgentRoster.ReviewerReasoningEfforts = nil
+				cfg.AgentRoster.ReasoningEffort = models.ReasoningEffortMedium
+			},
+			expected: models.ReasoningEffortMedium,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := models.DefaultCodeReviewPolicyConfig()
+			tt.configure(&cfg)
+			require.Equal(t, tt.expected, cfg.AgentRoster.ReviewerReasoningEffort(tt.index), "reviewer should use the expected reasoning effort")
+		})
+	}
+}
+
 type codeReviewAgentAvailabilityStub struct {
 	available      map[models.AgentType]bool
 	availableModel map[models.AgentType]map[string]bool
@@ -1505,6 +2043,7 @@ func TestResolveCodeReviewOrchestratorAvailability(t *testing.T) {
 	cfg := models.DefaultCodeReviewPolicyConfig()
 	tests := []struct {
 		name      string
+		configure func(*models.CodeReviewPolicyConfig)
 		services  *Services
 		expected  codeReviewOrchestratorSelection
 		expectErr bool
@@ -1516,9 +2055,10 @@ func TestResolveCodeReviewOrchestratorAvailability(t *testing.T) {
 				models.AgentTypeCodex:    true,
 			}}},
 			expected: codeReviewOrchestratorSelection{
-				AgentType:  models.AgentTypeOpenCode,
-				AgentModel: stringPtr(models.OpenCodeModelGPT55),
-				Available:  true,
+				AgentType:       models.AgentTypeOpenCode,
+				AgentModel:      stringPtr(models.OpenCodeModelGPT55),
+				ReasoningEffort: reasoningEffortPtr(models.ReasoningEffortHigh),
+				Available:       true,
 			},
 		},
 		{
@@ -1527,9 +2067,10 @@ func TestResolveCodeReviewOrchestratorAvailability(t *testing.T) {
 				models.AgentTypeCodex: true,
 			}}},
 			expected: codeReviewOrchestratorSelection{
-				AgentType:  models.AgentTypeCodex,
-				AgentModel: stringPtr(models.DefaultCodexModel),
-				Available:  true,
+				AgentType:       models.AgentTypeCodex,
+				AgentModel:      stringPtr(models.DefaultCodexModel),
+				ReasoningEffort: reasoningEffortPtr(models.ReasoningEffortHigh),
+				Available:       true,
 			},
 		},
 		{
@@ -1545,9 +2086,10 @@ func TestResolveCodeReviewOrchestratorAvailability(t *testing.T) {
 				},
 			}},
 			expected: codeReviewOrchestratorSelection{
-				AgentType:  models.AgentTypeCodex,
-				AgentModel: stringPtr(models.DefaultCodexModel),
-				Available:  true,
+				AgentType:       models.AgentTypeCodex,
+				AgentModel:      stringPtr(models.DefaultCodexModel),
+				ReasoningEffort: reasoningEffortPtr(models.ReasoningEffortHigh),
+				Available:       true,
 			},
 		},
 		{
@@ -1556,26 +2098,49 @@ func TestResolveCodeReviewOrchestratorAvailability(t *testing.T) {
 				models.AgentTypeClaudeCode: true,
 			}}},
 			expected: codeReviewOrchestratorSelection{
-				AgentType:  models.AgentTypeClaudeCode,
-				AgentModel: stringPtr(models.DefaultClaudeCodeModel),
-				Available:  true,
+				AgentType:       models.AgentTypeClaudeCode,
+				AgentModel:      stringPtr(models.DefaultClaudeCodeModel),
+				ReasoningEffort: reasoningEffortPtr(models.ReasoningEffortHigh),
+				Available:       true,
+			},
+		},
+		{
+			name: "uses the fallback reviewer's reasoning instead of an incompatible orchestrator level",
+			configure: func(cfg *models.CodeReviewPolicyConfig) {
+				cfg.AgentRoster.Orchestrator = models.AgentTypeClaudeCode
+				cfg.AgentRoster.OrchestratorModel = stringPtr(models.DefaultClaudeCodeModel)
+				cfg.AgentRoster.ReasoningEffort = models.ReasoningEffortMax
+				cfg.AgentRoster.Reviewers = []models.AgentType{models.AgentTypeCodex}
+				cfg.AgentRoster.ReviewerModels = []string{models.DefaultCodexModel}
+				cfg.AgentRoster.ReviewerReasoningEfforts = []models.ReasoningEffort{models.ReasoningEffortHigh}
+			},
+			services: &Services{CodingAgents: codeReviewAgentAvailabilityStub{available: map[models.AgentType]bool{
+				models.AgentTypeCodex: true,
+			}}},
+			expected: codeReviewOrchestratorSelection{
+				AgentType:       models.AgentTypeCodex,
+				AgentModel:      stringPtr(models.DefaultCodexModel),
+				ReasoningEffort: reasoningEffortPtr(models.ReasoningEffortHigh),
+				Available:       true,
 			},
 		},
 		{
 			name:     "does not select an unauthenticated agent",
 			services: &Services{CodingAgents: codeReviewAgentAvailabilityStub{available: map[models.AgentType]bool{}}},
 			expected: codeReviewOrchestratorSelection{
-				AgentType:  models.AgentTypeOpenCode,
-				AgentModel: stringPtr(models.OpenCodeModelGPT55),
-				Available:  false,
+				AgentType:       models.AgentTypeOpenCode,
+				AgentModel:      stringPtr(models.OpenCodeModelGPT55),
+				ReasoningEffort: reasoningEffortPtr(models.ReasoningEffortHigh),
+				Available:       false,
 			},
 		},
 		{
 			name: "preserves the configured orchestrator without an availability service",
 			expected: codeReviewOrchestratorSelection{
-				AgentType:  models.AgentTypeOpenCode,
-				AgentModel: stringPtr(models.OpenCodeModelGPT55),
-				Available:  true,
+				AgentType:       models.AgentTypeOpenCode,
+				AgentModel:      stringPtr(models.OpenCodeModelGPT55),
+				ReasoningEffort: reasoningEffortPtr(models.ReasoningEffortHigh),
+				Available:       true,
 			},
 		},
 		{
@@ -1589,7 +2154,11 @@ func TestResolveCodeReviewOrchestratorAvailability(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			actual, err := resolveCodeReviewOrchestratorAvailability(context.Background(), tt.services, uuid.New(), cfg)
+			testConfig := cfg
+			if tt.configure != nil {
+				tt.configure(&testConfig)
+			}
+			actual, err := resolveCodeReviewOrchestratorAvailability(context.Background(), tt.services, uuid.New(), testConfig)
 			if tt.expectErr {
 				require.Error(t, err, "orchestrator availability resolution should propagate lookup failures")
 				return
@@ -1975,7 +2544,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			reason:   "fork PRs are not eligible for approval",
 		},
 		{
-			name: "withholds approval when prior human review requested changes",
+			name: "ignores a prior human changes-requested review",
 			input: liveCodeReviewOutcomeInput{
 				Policy: policy,
 				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
@@ -2005,8 +2574,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 				},
 				ChangedFilesAvailable: true,
 			},
-			expected: models.CodeReviewDecisionNeedsHumanReview,
-			reason:   "unresolved human review threads are present",
+			expected: models.CodeReviewDecisionApproved,
 		},
 		{
 			name: "withholds approval when PR head moved",
@@ -2331,9 +2899,28 @@ func codeReviewPolicyRecordForTest(config models.CodeReviewPolicyConfig) models.
 		RiskPolicy:              config.RiskPolicy,
 		AgentRoster:             config.AgentRoster,
 		InlineCommentLimit:      config.InlineCommentLimit,
-		Inheritance:             config.Inheritance,
 		CreatedAt:               time.Now().UTC(),
 	}
+}
+
+func codeReviewPolicyRowsForTest(t *testing.T, orgID, policyID uuid.UUID, config models.CodeReviewPolicyConfig, createdAt time.Time) *pgxmock.Rows {
+	t.Helper()
+
+	descriptionPolicy, err := json.Marshal(config.DescriptionPolicy)
+	require.NoError(t, err, "description policy should marshal")
+	riskPolicy, err := json.Marshal(config.RiskPolicy)
+	require.NoError(t, err, "risk policy should marshal")
+	agentRoster, err := json.Marshal(config.AgentRoster)
+	require.NoError(t, err, "agent roster should marshal")
+	return pgxmock.NewRows([]string{
+		"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
+		"review_instructions", "automated_approval_policy", "description_policy", "risk_policy",
+		"agent_roster", "inline_comment_limit", "created_by_user_id", "created_at",
+	}).AddRow(
+		policyID, orgID, nil, true, 1, config.Enabled, config.ApprovalMode,
+		config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy,
+		agentRoster, config.InlineCommentLimit, nil, createdAt,
+	)
 }
 
 func newCodeReviewAgentResultRows() *pgxmock.Rows {
@@ -2362,7 +2949,7 @@ func newCodeReviewMetadataRows() *pgxmock.Rows {
 
 func newSessionThreadRows() *pgxmock.Rows {
 	return pgxmock.NewRows([]string{
-		"id", "session_id", "org_id", "agent_type", "model_override",
+		"id", "session_id", "org_id", "agent_type", "model_override", "reasoning_effort",
 		"label", "instructions", "file_scope", "status", "agent_session_id", "current_turn", "last_activity_at",
 		"result_summary", "diff", "failure_explanation", "failure_category",
 		"started_at", "completed_at", "created_at", "created_by_source", "created_by_thread_id", "archived_at",

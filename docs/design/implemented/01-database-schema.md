@@ -975,6 +975,7 @@ Durable, database-backed async work queue for the full pipeline (`ingest_webhook
 | locked_at | timestamptz | when worker claimed job |
 | last_error | text | latest error message |
 | dedupe_key | text | optional idempotency key for coalescing duplicates |
+| retry_window_started_at | timestamptz | first bounded external retry, preserved across worker restarts |
 | created_at | timestamptz | |
 | updated_at | timestamptz | |
 | completed_at | timestamptz | nullable |

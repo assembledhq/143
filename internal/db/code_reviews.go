@@ -68,7 +68,7 @@ func (s *CodeReviewStore) publishUpdated(ctx context.Context, metadata models.Co
 }
 
 const codeReviewPolicyColumns = `id, org_id, repository_id, active, version, enabled, approval_mode,
-		review_instructions, automated_approval_policy, description_policy, risk_policy, agent_roster, inline_comment_limit, inheritance, created_by_user_id, created_at`
+		review_instructions, automated_approval_policy, description_policy, risk_policy, agent_roster, inline_comment_limit, created_by_user_id, created_at`
 
 const codeReviewMetadataColumns = `id, org_id, session_id, repository_id, pull_request_id, policy_id,
 	base_sha, head_sha, from_fork, trigger_source, status, decision, acceptable, stale, superseded_by_session_id,
@@ -256,61 +256,29 @@ func (s *CodeReviewStore) DeactivateGitHubTrigger(ctx context.Context, orgID, re
 	return tx.Commit(ctx)
 }
 
-func (s *CodeReviewStore) ResolvePolicy(ctx context.Context, orgID uuid.UUID, repositoryID *uuid.UUID) (models.CodeReviewResolvedPolicy, error) {
+func (s *CodeReviewStore) ResolvePolicy(ctx context.Context, orgID uuid.UUID) (models.CodeReviewResolvedPolicy, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT `+codeReviewPolicyColumns+`
 		FROM code_review_policies
 		WHERE org_id = @org_id
 		  AND active = true
-		  AND (repository_id IS NULL OR repository_id = @repository_id)
-		ORDER BY CASE WHEN repository_id = @repository_id THEN 0 ELSE 1 END, created_at DESC, id DESC
-		LIMIT 2`, pgx.NamedArgs{"org_id": orgID, "repository_id": repositoryID})
+		  AND repository_id IS NULL
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`, pgx.NamedArgs{"org_id": orgID})
 	if err != nil {
 		return models.CodeReviewResolvedPolicy{}, fmt.Errorf("query code review policy: %w", err)
 	}
-	records, err := collectCodeReviewPolicies(rows)
+	record, err := collectOneCodeReviewPolicy(rows)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return models.CodeReviewResolvedPolicy{
+				Config: models.DefaultCodeReviewPolicyConfig(),
+				Source: "default",
+			}, nil
+		}
 		return models.CodeReviewResolvedPolicy{}, err
 	}
-	if len(records) == 0 {
-		return models.CodeReviewResolvedPolicy{
-			Config: models.DefaultCodeReviewPolicyConfig(),
-			Source: "default",
-		}, nil
-	}
-	var repoPolicy, orgPolicy *models.CodeReviewPolicyRecord
-	for idx := range records {
-		record := records[idx]
-		if record.RepositoryID != nil && repositoryID != nil && *record.RepositoryID == *repositoryID {
-			repoPolicy = &records[idx]
-			continue
-		}
-		if record.RepositoryID == nil {
-			orgPolicy = &records[idx]
-		}
-	}
-	if repoPolicy != nil {
-		config := repoPolicy.Config()
-		var inherited *models.CodeReviewPolicyRecord
-		if config.Inheritance.InheritOrgDefaults {
-			base := models.DefaultCodeReviewPolicyConfig()
-			if orgPolicy != nil {
-				base = orgPolicy.Config()
-				inherited = orgPolicy
-			}
-			config = models.MergeCodeReviewPolicyConfig(base, config)
-		}
-		return models.CodeReviewResolvedPolicy{
-			Config:          config,
-			Source:          "repository",
-			Policy:          repoPolicy,
-			InheritedPolicy: inherited,
-		}, nil
-	}
-	if orgPolicy != nil {
-		return models.CodeReviewResolvedPolicy{Config: orgPolicy.Config(), Source: "organization", Policy: orgPolicy}, nil
-	}
-	return models.CodeReviewResolvedPolicy{Config: models.DefaultCodeReviewPolicyConfig(), Source: "default"}, nil
+	return models.CodeReviewResolvedPolicy{Config: record.Config(), Source: "organization", Policy: &record}, nil
 }
 
 func (s *CodeReviewStore) GetPolicyByID(ctx context.Context, orgID, policyID uuid.UUID) (models.CodeReviewPolicyRecord, error) {
@@ -328,25 +296,32 @@ func (s *CodeReviewStore) GetPolicyByID(ctx context.Context, orgID, policyID uui
 	return collectOneCodeReviewPolicy(rows)
 }
 
-func (s *CodeReviewStore) SavePolicy(ctx context.Context, orgID uuid.UUID, repositoryID *uuid.UUID, config models.CodeReviewPolicyConfig, createdByUserID *uuid.UUID) (models.CodeReviewPolicyRecord, error) {
+// ErrCodeReviewPolicyVersionConflict is returned by SavePolicyExpectingVersion
+// when the active policy version no longer matches the caller's expectation —
+// someone else (human or agent) saved a newer version first.
+var ErrCodeReviewPolicyVersionConflict = errors.New("code review policy version conflict")
+
+func (s *CodeReviewStore) SavePolicy(ctx context.Context, orgID uuid.UUID, config models.CodeReviewPolicyConfig, createdByUserID *uuid.UUID) (models.CodeReviewPolicyRecord, error) {
+	return s.savePolicy(ctx, orgID, config, createdByUserID, nil)
+}
+
+// SavePolicyExpectingVersion saves a new policy version only if the current
+// active version still equals expectedVersion (0 when the org has never saved
+// a policy). The check runs inside the same advisory-locked transaction as the
+// insert, so concurrent writers cannot both pass it. Agent-driven policy
+// updates use this so a stale agent never silently clobbers a newer human (or
+// agent) edit.
+func (s *CodeReviewStore) SavePolicyExpectingVersion(ctx context.Context, orgID uuid.UUID, config models.CodeReviewPolicyConfig, expectedVersion int, createdByUserID *uuid.UUID) (models.CodeReviewPolicyRecord, error) {
+	return s.savePolicy(ctx, orgID, config, createdByUserID, &expectedVersion)
+}
+
+func (s *CodeReviewStore) savePolicy(ctx context.Context, orgID uuid.UUID, config models.CodeReviewPolicyConfig, createdByUserID *uuid.UUID, expectedVersion *int) (models.CodeReviewPolicyRecord, error) {
 	config.ReviewInstructions = strings.TrimSpace(config.ReviewInstructions)
 	config.AutomatedApprovalPolicy = strings.TrimSpace(config.AutomatedApprovalPolicy)
 	if err := config.ValidatePromptFields(); err != nil {
 		return models.CodeReviewPolicyRecord{}, err
 	}
 	config = models.ResolveCodeReviewPolicyConfig(&config)
-	if repositoryID != nil {
-		base, err := s.activeOrgPolicyConfig(ctx, orgID)
-		if err != nil {
-			return models.CodeReviewPolicyRecord{}, err
-		}
-		config.Inheritance = models.CodeReviewPolicyInheritance{
-			InheritOrgDefaults: true,
-			OverrideFields:     models.CodeReviewPolicyOverrideFields(base, config),
-		}
-	} else {
-		config.Inheritance = models.CodeReviewPolicyInheritance{InheritOrgDefaults: false}
-	}
 	if err := config.Validate(); err != nil {
 		return models.CodeReviewPolicyRecord{}, err
 	}
@@ -360,43 +335,51 @@ func (s *CodeReviewStore) SavePolicy(ctx context.Context, orgID uuid.UUID, repos
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var version int
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		"code_review_policy:"+orgID.String(),
+	); err != nil {
+		return models.CodeReviewPolicyRecord{}, fmt.Errorf("acquire code review policy lock: %w", err)
+	}
+
+	var currentVersion int
 	if err := tx.QueryRow(ctx, `
-		SELECT COALESCE(MAX(version), 0) + 1
+		SELECT COALESCE(MAX(version), 0)
 		FROM code_review_policies
 		WHERE org_id = @org_id
-		  AND repository_id IS NOT DISTINCT FROM @repository_id`, pgx.NamedArgs{
-		"org_id":        orgID,
-		"repository_id": repositoryID,
-	}).Scan(&version); err != nil {
-		return models.CodeReviewPolicyRecord{}, fmt.Errorf("select next code review policy version: %w", err)
+		  AND repository_id IS NULL`, pgx.NamedArgs{
+		"org_id": orgID,
+	}).Scan(&currentVersion); err != nil {
+		return models.CodeReviewPolicyRecord{}, fmt.Errorf("select current code review policy version: %w", err)
 	}
+	if expectedVersion != nil && *expectedVersion != currentVersion {
+		return models.CodeReviewPolicyRecord{}, fmt.Errorf("%w: active version is %d, expected %d", ErrCodeReviewPolicyVersionConflict, currentVersion, *expectedVersion)
+	}
+	version := currentVersion + 1
 	if _, err := tx.Exec(ctx, `
 		UPDATE code_review_policies
 		SET active = false
 		WHERE org_id = @org_id
 		  AND active = true
-		  AND repository_id IS NOT DISTINCT FROM @repository_id`, pgx.NamedArgs{
-		"org_id":        orgID,
-		"repository_id": repositoryID,
+		  AND repository_id IS NULL`, pgx.NamedArgs{
+		"org_id": orgID,
 	}); err != nil {
 		return models.CodeReviewPolicyRecord{}, fmt.Errorf("inactivate code review policy: %w", err)
 	}
-	descriptionPolicy, riskPolicy, agentRoster, inheritance, err := marshalCodeReviewPolicyParts(config)
+	descriptionPolicy, riskPolicy, agentRoster, err := marshalCodeReviewPolicyParts(config)
 	if err != nil {
 		return models.CodeReviewPolicyRecord{}, err
 	}
 	rows, err := tx.Query(ctx, `
 			INSERT INTO code_review_policies (
 				org_id, repository_id, active, version, enabled, approval_mode, review_instructions, automated_approval_policy, description_policy,
-				risk_policy, agent_roster, inline_comment_limit, inheritance, created_by_user_id
+				risk_policy, agent_roster, inline_comment_limit, created_by_user_id
 			) VALUES (
-				@org_id, @repository_id, true, @version, @enabled, @approval_mode, @review_instructions, @automated_approval_policy, @description_policy,
-				@risk_policy, @agent_roster, @inline_comment_limit, @inheritance, @created_by_user_id
+				@org_id, NULL, true, @version, @enabled, @approval_mode, @review_instructions, @automated_approval_policy, @description_policy,
+				@risk_policy, @agent_roster, @inline_comment_limit, @created_by_user_id
 			)
 			RETURNING `+codeReviewPolicyColumns, pgx.NamedArgs{
 		"org_id":                    orgID,
-		"repository_id":             repositoryID,
 		"version":                   version,
 		"enabled":                   config.Enabled,
 		"approval_mode":             config.ApprovalMode,
@@ -406,7 +389,6 @@ func (s *CodeReviewStore) SavePolicy(ctx context.Context, orgID uuid.UUID, repos
 		"risk_policy":               riskPolicy,
 		"agent_roster":              agentRoster,
 		"inline_comment_limit":      config.InlineCommentLimit,
-		"inheritance":               inheritance,
 		"created_by_user_id":        createdByUserID,
 	})
 	if err != nil {
@@ -423,66 +405,11 @@ func (s *CodeReviewStore) SavePolicy(ctx context.Context, orgID uuid.UUID, repos
 		Str("org_id", orgID.String()).
 		Str("policy_id", record.ID.String()).
 		Int("policy_version", record.Version)
-	if repositoryID != nil {
-		logEvent = logEvent.Str("repository_id", repositoryID.String())
-	}
 	logEvent.
 		Int("review_instructions_runes", utf8.RuneCountInString(record.ReviewInstructions)).
 		Int("automated_approval_policy_runes", utf8.RuneCountInString(record.AutomatedApprovalPolicy)).
 		Msg("saved code review policy version")
 	return record, nil
-}
-
-// ResetRepositoryPolicy deactivates the complete active repository override.
-// Historical versions remain available to review sessions that captured them.
-func (s *CodeReviewStore) ResetRepositoryPolicy(ctx context.Context, orgID, repositoryID uuid.UUID) (uuid.UUID, bool, error) {
-	txStarter, ok := s.db.(TxStarter)
-	if !ok {
-		return uuid.Nil, false, fmt.Errorf("reset code review policy requires transaction support")
-	}
-	tx, err := txStarter.Begin(ctx)
-	if err != nil {
-		return uuid.Nil, false, fmt.Errorf("begin reset code review policy tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	var policyID uuid.UUID
-	err = tx.QueryRow(ctx, `
-		UPDATE code_review_policies
-		SET active = false
-		WHERE org_id = @org_id
-		  AND repository_id = @repository_id
-		  AND active = true
-		RETURNING id`, pgx.NamedArgs{"org_id": orgID, "repository_id": repositoryID}).Scan(&policyID)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, false, fmt.Errorf("inactivate repository code review policy: %w", err)
-	}
-	deactivated := err == nil
-	if err := tx.Commit(ctx); err != nil {
-		return uuid.Nil, false, fmt.Errorf("commit reset code review policy tx: %w", err)
-	}
-	return policyID, deactivated, nil
-}
-
-func (s *CodeReviewStore) activeOrgPolicyConfig(ctx context.Context, orgID uuid.UUID) (models.CodeReviewPolicyConfig, error) {
-	rows, err := s.db.Query(ctx, `
-		SELECT `+codeReviewPolicyColumns+`
-		FROM code_review_policies
-		WHERE org_id = @org_id
-		  AND active = true
-		  AND repository_id IS NULL
-		ORDER BY created_at DESC, id DESC
-		LIMIT 1`, pgx.NamedArgs{"org_id": orgID})
-	if err != nil {
-		return models.CodeReviewPolicyConfig{}, fmt.Errorf("query active org code review policy: %w", err)
-	}
-	record, err := collectOneCodeReviewPolicy(rows)
-	if err != nil {
-		if err == pgx.ErrNoRows {
-			return models.DefaultCodeReviewPolicyConfig(), nil
-		}
-		return models.CodeReviewPolicyConfig{}, err
-	}
-	return record.Config(), nil
 }
 
 func (s *CodeReviewStore) CreateSessionMetadata(ctx context.Context, metadata *models.CodeReviewSessionMetadata) error {
@@ -574,6 +501,62 @@ func (s *CodeReviewStore) GetBySessionID(ctx context.Context, orgID, sessionID u
 		return models.CodeReviewSessionMetadata{}, fmt.Errorf("query code review by session id: %w", err)
 	}
 	return collectOneCodeReviewMetadata(rows)
+}
+
+func (s *CodeReviewStore) GetLatestByPullRequest(ctx context.Context, orgID, pullRequestID uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT `+codeReviewMetadataColumns+`
+		FROM code_review_session_metadata
+		WHERE org_id = @org_id
+		  AND pull_request_id = @pull_request_id
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`, pgx.NamedArgs{
+		"org_id":          orgID,
+		"pull_request_id": pullRequestID,
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("query latest code review by pull request: %w", err)
+	}
+	return collectOneCodeReviewMetadata(rows)
+}
+
+func (s *CodeReviewStore) GetLatestSubmittedByPullRequest(ctx context.Context, orgID, pullRequestID uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT `+codeReviewMetadataColumns+`
+		FROM code_review_session_metadata
+		WHERE org_id = @org_id
+		  AND pull_request_id = @pull_request_id
+		  AND github_review_id IS NOT NULL
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`, pgx.NamedArgs{
+		"org_id":          orgID,
+		"pull_request_id": pullRequestID,
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("query latest submitted code review by pull request: %w", err)
+	}
+	return collectOneCodeReviewMetadata(rows)
+}
+
+func (s *CodeReviewStore) HasApprovedByPullRequest(ctx context.Context, orgID, pullRequestID uuid.UUID) (bool, error) {
+	var approved bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM code_review_session_metadata
+			WHERE org_id = @org_id
+			  AND pull_request_id = @pull_request_id
+			  AND status = 'completed'
+			  AND decision = 'approved'
+			  AND github_review_id IS NOT NULL
+		)`, pgx.NamedArgs{
+		"org_id":          orgID,
+		"pull_request_id": pullRequestID,
+	}).Scan(&approved)
+	if err != nil {
+		return false, fmt.Errorf("query prior code review approval: %w", err)
+	}
+	return approved, nil
 }
 
 func (s *CodeReviewStore) GetRunningByPullRequestHead(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA string, policyID uuid.UUID) (models.CodeReviewSessionMetadata, error) {
@@ -832,14 +815,54 @@ func (s *CodeReviewStore) CancelReview(ctx context.Context, orgID, sessionID uui
 	return metadata, nil
 }
 
+const codeReviewListItemSelect = `
+			SELECT m.id, m.org_id, m.session_id, m.repository_id, m.pull_request_id, m.policy_id,
+			       m.base_sha, m.head_sha, m.from_fork, m.trigger_source, m.status, m.decision, m.acceptable, m.stale,
+			       m.superseded_by_session_id, m.review_output_key, m.prompt_artifact_key, m.github_review_id,
+			       m.github_review_url, m.final_review_body, m.failure_reason, m.completed_at, m.created_at,
+			       s.title AS session_title, r.full_name AS repository_name, pr.github_repo, pr.github_pr_number,
+			       pr.github_pr_url, pr.title AS pull_request_title,
+			       COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), pr.authored_by::text) AS pull_request_author
+		FROM code_review_session_metadata m
+			JOIN sessions s ON s.id = m.session_id AND s.org_id = m.org_id
+			JOIN repositories r ON r.id = m.repository_id AND r.org_id = m.org_id
+			JOIN pull_requests pr ON pr.id = m.pull_request_id AND pr.org_id = m.org_id`
+
+// GetListItemBySessionID returns one review with the same joined pull request
+// and repository context as ListReviews rows. Used by the internal (sandbox)
+// code review history API where agents need PR context alongside the review.
+func (s *CodeReviewStore) GetListItemBySessionID(ctx context.Context, orgID, sessionID uuid.UUID) (models.CodeReviewListItem, error) {
+	rows, err := s.db.Query(ctx, codeReviewListItemSelect+`
+			WHERE m.org_id = @org_id
+			  AND m.session_id = @session_id`, pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID,
+	})
+	if err != nil {
+		return models.CodeReviewListItem{}, fmt.Errorf("query code review list item: %w", err)
+	}
+	defer rows.Close()
+	item, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.CodeReviewListItem])
+	if err != nil {
+		return models.CodeReviewListItem{}, err
+	}
+	return item, nil
+}
+
 type CodeReviewListFilters struct {
-	RepositoryID *uuid.UUID
-	Decision     *models.CodeReviewDecision
-	Outcome      *models.CodeReviewListOutcome
-	Status       *models.CodeReviewSessionStatus
-	Acceptable   *bool
-	Search       string
-	Limit        int
+	RepositoryID  *uuid.UUID
+	Decision      *models.CodeReviewDecision
+	Outcome       *models.CodeReviewListOutcome
+	Status        *models.CodeReviewSessionStatus
+	Acceptable    *bool
+	Search        string
+	Limit         int
+	CreatedAfter  *time.Time
+	CreatedBefore *time.Time
+	// Cursor is the metadata row ID of the last item from the previous page.
+	// Rows strictly after it in the (created_at DESC, id DESC) order are
+	// returned, matching the session-history keyset pagination contract.
+	Cursor *uuid.UUID
 }
 
 func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filters CodeReviewListFilters) ([]models.CodeReviewListItem, error) {
@@ -851,18 +874,7 @@ func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filt
 		"org_id": orgID,
 		"limit":  limit,
 	}
-	query := `
-			SELECT m.id, m.org_id, m.session_id, m.repository_id, m.pull_request_id, m.policy_id,
-			       m.base_sha, m.head_sha, m.from_fork, m.trigger_source, m.status, m.decision, m.acceptable, m.stale,
-			       m.superseded_by_session_id, m.review_output_key, m.prompt_artifact_key, m.github_review_id,
-			       m.github_review_url, m.final_review_body, m.failure_reason, m.completed_at, m.created_at,
-			       s.title AS session_title, r.full_name AS repository_name, pr.github_repo, pr.github_pr_number,
-			       pr.github_pr_url, pr.title AS pull_request_title,
-			       COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), pr.authored_by::text) AS pull_request_author
-		FROM code_review_session_metadata m
-			JOIN sessions s ON s.id = m.session_id AND s.org_id = m.org_id
-			JOIN repositories r ON r.id = m.repository_id AND r.org_id = m.org_id
-			JOIN pull_requests pr ON pr.id = m.pull_request_id AND pr.org_id = m.org_id
+	query := codeReviewListItemSelect + `
 			WHERE m.org_id = @org_id`
 	if filters.RepositoryID != nil {
 		query += `
@@ -906,6 +918,24 @@ func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filt
 		query += `
 			  AND m.acceptable = @acceptable`
 		args["acceptable"] = *filters.Acceptable
+	}
+	if filters.CreatedAfter != nil {
+		query += `
+			  AND m.created_at >= @created_after`
+		args["created_after"] = *filters.CreatedAfter
+	}
+	if filters.CreatedBefore != nil {
+		query += `
+			  AND m.created_at <= @created_before`
+		args["created_before"] = *filters.CreatedBefore
+	}
+	if filters.Cursor != nil {
+		query += `
+			  AND (m.created_at, m.id) < (
+			    SELECT created_at, id FROM code_review_session_metadata
+			    WHERE id = @cursor AND org_id = @org_id
+			  )`
+		args["cursor"] = *filters.Cursor
 	}
 	if search := strings.TrimSpace(filters.Search); search != "" {
 		query += `
@@ -1103,13 +1133,24 @@ func (s *CodeReviewStore) upsertFinding(ctx context.Context, finding *models.Cod
 }
 
 func (s *CodeReviewStore) ListFindings(ctx context.Context, orgID, sessionID uuid.UUID, selectedOnly bool) ([]models.CodeReviewFinding, error) {
+	// severity is a text enum, so a bare ORDER BY would sort alphabetically
+	// (medium > low > info > high > critical); rank it explicitly instead.
 	rows, err := s.db.Query(ctx, `
 		SELECT `+codeReviewFindingColumns+`
 		FROM code_review_findings
 		WHERE org_id = @org_id
 		  AND session_id = @session_id
 		  AND (@selected_only = false OR selected_for_inline = true)
-		ORDER BY selected_for_inline DESC, severity DESC, created_at ASC, id ASC`, pgx.NamedArgs{
+		ORDER BY selected_for_inline DESC,
+		         CASE severity
+		           WHEN 'critical' THEN 5
+		           WHEN 'high' THEN 4
+		           WHEN 'medium' THEN 3
+		           WHEN 'low' THEN 2
+		           WHEN 'info' THEN 1
+		           ELSE 0
+		         END DESC,
+		         created_at ASC, id ASC`, pgx.NamedArgs{
 		"org_id":        orgID,
 		"session_id":    sessionID,
 		"selected_only": selectedOnly,
@@ -1158,24 +1199,20 @@ func (s *CodeReviewStore) MarkFindingsSelectedForInline(ctx context.Context, org
 	return tag.RowsAffected(), nil
 }
 
-func marshalCodeReviewPolicyParts(config models.CodeReviewPolicyConfig) ([]byte, []byte, []byte, []byte, error) {
+func marshalCodeReviewPolicyParts(config models.CodeReviewPolicyConfig) ([]byte, []byte, []byte, error) {
 	descriptionPolicy, err := json.Marshal(config.DescriptionPolicy)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("marshal code review description policy: %w", err)
+		return nil, nil, nil, fmt.Errorf("marshal code review description policy: %w", err)
 	}
 	riskPolicy, err := json.Marshal(config.RiskPolicy)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("marshal code review risk policy: %w", err)
+		return nil, nil, nil, fmt.Errorf("marshal code review risk policy: %w", err)
 	}
 	agentRoster, err := json.Marshal(config.AgentRoster)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("marshal code review agent roster: %w", err)
+		return nil, nil, nil, fmt.Errorf("marshal code review agent roster: %w", err)
 	}
-	inheritance, err := json.Marshal(config.Inheritance)
-	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("marshal code review inheritance: %w", err)
-	}
-	return descriptionPolicy, riskPolicy, agentRoster, inheritance, nil
+	return descriptionPolicy, riskPolicy, agentRoster, nil
 }
 
 func collectOneCodeReviewPolicy(rows pgx.Rows) (models.CodeReviewPolicyRecord, error) {
@@ -1202,24 +1239,11 @@ func collectOneCodeReviewGitHubTriggerSetting(rows pgx.Rows) (models.CodeReviewG
 	return setting, nil
 }
 
-func collectCodeReviewPolicies(rows pgx.Rows) ([]models.CodeReviewPolicyRecord, error) {
-	defer rows.Close()
-	records := make([]models.CodeReviewPolicyRecord, 0)
-	for rows.Next() {
-		record, err := scanCodeReviewPolicy(rows)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, record)
-	}
-	return records, rows.Err()
-}
-
 func scanCodeReviewPolicy(rows pgx.Rows) (models.CodeReviewPolicyRecord, error) {
 	var record models.CodeReviewPolicyRecord
-	var descriptionPolicy, riskPolicy, agentRoster, inheritance []byte
+	var descriptionPolicy, riskPolicy, agentRoster []byte
 	if err := rows.Scan(&record.ID, &record.OrgID, &record.RepositoryID, &record.Active, &record.Version, &record.Enabled, &record.ApprovalMode,
-		&record.ReviewInstructions, &record.AutomatedApprovalPolicy, &descriptionPolicy, &riskPolicy, &agentRoster, &record.InlineCommentLimit, &inheritance, &record.CreatedByUserID, &record.CreatedAt); err != nil {
+		&record.ReviewInstructions, &record.AutomatedApprovalPolicy, &descriptionPolicy, &riskPolicy, &agentRoster, &record.InlineCommentLimit, &record.CreatedByUserID, &record.CreatedAt); err != nil {
 		return models.CodeReviewPolicyRecord{}, err
 	}
 	if err := json.Unmarshal(descriptionPolicy, &record.DescriptionPolicy); err != nil {
@@ -1230,11 +1254,6 @@ func scanCodeReviewPolicy(rows pgx.Rows) (models.CodeReviewPolicyRecord, error) 
 	}
 	if err := json.Unmarshal(agentRoster, &record.AgentRoster); err != nil {
 		return models.CodeReviewPolicyRecord{}, fmt.Errorf("decode code review agent roster: %w", err)
-	}
-	if len(inheritance) > 0 {
-		if err := json.Unmarshal(inheritance, &record.Inheritance); err != nil {
-			return models.CodeReviewPolicyRecord{}, fmt.Errorf("decode code review inheritance: %w", err)
-		}
 	}
 	record.DescriptionPolicy = models.ResolveCodeReviewPolicyConfig(&models.CodeReviewPolicyConfig{DescriptionPolicy: record.DescriptionPolicy}).DescriptionPolicy
 	return record, nil

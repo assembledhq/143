@@ -1049,6 +1049,9 @@ func TestWorkerSelector_SelectStartNodeWithPlacementPrefersRegionThenCrossRegion
 		MaxPreviewsPerWorker: 3,
 		PreferredRegion:      "us-east-1",
 	})
+	// Keep this multi-query routing test independent of scheduler delays under
+	// the race detector and coverage instrumentation in CI.
+	selector.cacheLookupTimeout = 5 * time.Second
 	worker, err := selector.SelectStartNodeWithPlacement(context.Background(), orgID, &models.Session{ID: sessionID}, repoID, "placement")
 	require.NoError(t, err, "worker selection should fall back across regions when preferred region is full")
 	require.Equal(t, "west-worker", worker.ID, "cross-region fallback should pick a healthy worker only after preferred-region candidates are full")
