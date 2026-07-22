@@ -178,6 +178,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	// Create services
 	ingestionSvc := ingestion.NewService(issueStore, webhookDeliveryStore, jobStore, logger)
+	githubRateBudget := ghservice.NewRateBudget(db.NewGitHubRateLimitStore(pool), logger)
 
 	// Create PRService if GitHub App credentials are configured.
 	var prService *ghservice.PRService
@@ -187,6 +188,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		if err != nil {
 			logger.Warn().Err(err).Msg("failed to initialize GitHub App service, PR webhooks will be disabled")
 		} else {
+			ghSvc.SetRateLimitBudget(githubRateBudget)
 			prService = ghservice.NewPRService(
 				ghSvc, pullRequestStore, sessionStore, issueStore,
 				deployStore, repoStore, jobStore, logger,
@@ -258,6 +260,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
 		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
 		if err == nil {
+			ghSvc.SetRateLimitBudget(githubRateBudget)
 			integrationOpts = append(integrationOpts, handlers.WithGitHubApp(ghSvc, repoStore))
 			authHandler.SetGitHubOrgAutoJoinDeps(githubInstallationStore, ghSvc)
 		}
@@ -645,6 +648,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
 		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
 		if err == nil {
+			ghSvc.SetRateLimitBudget(githubRateBudget)
 			teamHandler.SetGitHubIntegration(integrationStore, ghSvc)
 		}
 	}

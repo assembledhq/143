@@ -1,6 +1,6 @@
 # Design: 143.dev
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-06-30
+> **Status:** Partially Implemented | **Last reviewed:** 2026-07-21
 
 143.dev is shared coding-agent infrastructure for engineering teams. It turns production errors, issue-tracker work, PR feedback, automations, and human requests into repo-scoped coding sessions that run in isolated sandboxes, produce reviewable diffs, launch previews, and publish branches or pull requests through the team's normal GitHub workflow.
 
@@ -86,7 +86,7 @@ Vector -> VictoriaLogs / Grafana for centralized logs, dashboards, and alerts
 
 ### Integration Plane
 
-- GitHub is the repository, branch, PR, check, mergeability, review, and deploy-signal integration. Repository-native CI/CD is authoritative after 143 publishes a branch or PR. The Code reviews surface is the post-PR reviewer-bot view over code review sessions and versioned acceptable-risk policy; an explicit GitHub reviewer request starts monitoring, subsequent PR/review/check changes create durable reassessments and update the existing GitHub review summary, and a submitted 143 approval ends monitoring so automation cannot later undo it.
+- GitHub is the repository, branch, PR, check, mergeability, review, and deploy-signal integration. Repository-native CI/CD is authoritative after 143 publishes a branch or PR. The Code reviews surface is the post-PR reviewer-bot view over code review sessions and versioned acceptable-risk policy; an explicit GitHub reviewer request starts monitoring, subsequent PR/review/check changes create durable reassessments and update the existing GitHub review summary, and a submitted 143 approval ends monitoring so automation cannot later undo it. Installation-wide quota observations, shared secondary-limit blocks, pre-start stale-snapshot refresh leases, and durable active reservations defer queued reviews before they consume capacity reserved for in-flight review recovery; see [implemented/112-code-reviewer-bot-auto-approval.md](implemented/112-code-reviewer-bot-auto-approval.md).
 - Sentry is the primary production-error ingestion source and still anchors the canonical "error to PR" loop.
 - Linear integration supports issue linking, bidirectional session updates, agent-triggered work from assignments or mentions, and Linear issue create/update automation triggers with filters for teams, labels/tags, issue types, states, priorities, and title text. Linear-started sessions resolve the AgentSession creator through a persistent Linear-user-to-143-user bridge before PR authorship falls back to issue-creator email or the GitHub App. See [implemented/62-linear-session-linking.md](implemented/62-linear-session-linking.md), [implemented/69-linear-agent.md](implemented/69-linear-agent.md), and [implemented/112-linear-automation-event-triggers.md](implemented/112-linear-automation-event-triggers.md).
 - PagerDuty is a first-class incident source and automation trigger. Signed or shared-secret webhooks are persisted through the durable ingress ledger, normalized into issues and `pagerduty_incidents`, matched against generic automation event triggers, and exposed to sandbox agents through `143-tools pagerduty`. See [implemented/107-pagerduty-integration.md](implemented/107-pagerduty-integration.md).

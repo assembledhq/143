@@ -162,6 +162,141 @@ func TestSyncCodeReviewPullRequestStateClassifiesTransientGitHubFailures(t *test
 	}
 }
 
+func TestReserveQueuedCodeReviewRateLimitDefersBeforeRunning(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.MustParse("00000000-0000-0000-0000-000000000143")
+	metadataID := uuid.New()
+	repositoryID := uuid.New()
+	pullRequestID := uuid.New()
+	policyID := uuid.New()
+	now := time.Date(2026, 7, 21, 18, 0, 0, 0, time.UTC)
+	reset := now.Add(30 * time.Minute)
+	mock.ExpectQuery("FROM code_review_session_metadata").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+		WillReturnRows(newCodeReviewMetadataRows().AddRow(
+			metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
+			"base", "head", false, models.CodeReviewTriggerSourceTeamReviewer,
+			models.CodeReviewSessionStatusQueued, nil, nil, false, nil, "output-key",
+			nil, nil, nil, nil, nil, nil, now,
+		))
+	mock.ExpectQuery("(?s)FROM pull_requests.*WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(workerPullRequestColumns).AddRow(
+			workerPullRequestRow(pullRequestID, sessionID, orgID, "acme/repo", "feature", now)...,
+		))
+	mock.ExpectQuery("(?s)FROM repositories.*WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgx.NamedArgs{"id": repositoryID, "org_id": orgID}).
+		WillReturnRows(workerRepositoryRows(models.Repository{
+			ID: repositoryID, OrgID: orgID, IntegrationID: uuid.New(), GitHubID: 42,
+			FullName: "acme/repo", DefaultBranch: "main", CloneURL: "https://github.com/acme/repo.git",
+			InstallationID: 143, Status: models.RepositoryStatusActive, Settings: json.RawMessage(`{}`),
+			CreatedAt: now, UpdatedAt: now,
+		}))
+	lowDecision := models.GitHubRateLimitDecision{
+		Known: true, Limit: 5000, Remaining: 900, ActiveReserved: 400,
+		RecoveryReserve: 500, ResetAt: reset, RetryAfter: 30 * time.Minute,
+	}
+	budget := &githubRateLimitBudgetStub{reserveDecisions: []models.GitHubRateLimitDecision{
+		{Bootstrap: true, RefreshRequired: true},
+		lowDecision,
+	}}
+	job := runCodeReviewPayload{
+		OrgID: orgID, SessionID: sessionID, MetadataID: metadataID,
+		RepositoryID: repositoryID, PullRequestID: pullRequestID,
+	}
+
+	stopped, err := reserveQueuedCodeReviewRateLimit(context.Background(), &Stores{
+		CodeReviews: db.NewCodeReviewStore(mock), Repositories: db.NewRepositoryStore(mock),
+		PullRequests: db.NewPullRequestStore(mock),
+	}, &Services{GitHubRateLimits: budget}, zerolog.Nop(), job)
+
+	require.False(t, stopped, "quota deferral should leave the queued review available for retry")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "low installation capacity should defer before the review is marked running")
+	require.False(t, retryable.ConsumeAttempt, "quota admission should not consume the normal job attempt budget")
+	require.Equal(t, githubRateLimitMaxRetryDuration, *retryable.MaxRetryDuration, "quota admission should remain bounded so persistent failures surface")
+	expectedDelay := githubRateLimitRetryAfter(&lowDecision.RetryAfter, sessionID.String())
+	require.Equal(t, *expectedDelay, *retryable.RetryAfter, "quota admission should honor reset time with stable per-session jitter")
+	require.Equal(t, orgID, budget.orgID, "admission should retain tenant ownership")
+	require.Equal(t, int64(143), budget.installationID, "admission should reserve the same repository installation used by review GitHub calls")
+	require.Equal(t, metadataID, budget.metadataID, "admission should be idempotent for the queued review")
+	require.Equal(t, 2, budget.calls, "bootstrap admission should re-check the durable budget after refresh")
+	require.Equal(t, 1, budget.refreshCalls, "stale quota should trigger exactly one pre-start snapshot refresh")
+	require.NoError(t, mock.ExpectationsWereMet(), "deferred admission should perform only durable preflight reads")
+}
+
+func TestReserveQueuedCodeReviewRateLimitSkipsRunningReview(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	metadataID := uuid.New()
+	repositoryID := uuid.New()
+	pullRequestID := uuid.New()
+	policyID := uuid.New()
+	now := time.Now().UTC()
+	mock.ExpectQuery("FROM code_review_session_metadata").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+		WillReturnRows(newCodeReviewMetadataRows().AddRow(
+			metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
+			"base", "head", false, models.CodeReviewTriggerSourceTeamReviewer,
+			models.CodeReviewSessionStatusRunning, nil, nil, false, nil, "output-key",
+			nil, nil, nil, nil, nil, nil, now,
+		))
+	budget := &githubRateLimitBudgetStub{decision: models.GitHubRateLimitDecision{Allowed: false}}
+
+	stopped, err := reserveQueuedCodeReviewRateLimit(context.Background(), &Stores{
+		CodeReviews: db.NewCodeReviewStore(mock), Repositories: db.NewRepositoryStore(mock),
+		PullRequests: db.NewPullRequestStore(mock),
+	}, &Services{GitHubRateLimits: budget}, zerolog.Nop(), runCodeReviewPayload{
+		OrgID: orgID, SessionID: sessionID, RepositoryID: repositoryID, PullRequestID: pullRequestID,
+	})
+
+	require.NoError(t, err, "running reviews should retain access to recovery quota")
+	require.False(t, stopped, "running reviews should continue through their normal workflow")
+	require.Equal(t, 0, budget.calls, "running reviews should not request a second reservation")
+	require.NoError(t, mock.ExpectationsWereMet(), "running admission should only inspect durable review state")
+}
+
+type githubRateLimitBudgetStub struct {
+	decision         models.GitHubRateLimitDecision
+	reserveDecisions []models.GitHubRateLimitDecision
+	err              error
+	calls            int
+	refreshCalls     int
+	refreshErr       error
+	orgID            uuid.UUID
+	installationID   int64
+	metadataID       uuid.UUID
+}
+
+func (s *githubRateLimitBudgetStub) ReserveCodeReview(_ context.Context, orgID uuid.UUID, installationID int64, metadataID uuid.UUID) (models.GitHubRateLimitDecision, error) {
+	s.calls++
+	s.orgID = orgID
+	s.installationID = installationID
+	s.metadataID = metadataID
+	if s.calls <= len(s.reserveDecisions) {
+		return s.reserveDecisions[s.calls-1], s.err
+	}
+	return s.decision, s.err
+}
+
+func (s *githubRateLimitBudgetStub) RefreshCodeReview(_ context.Context, installationID int64) error {
+	s.refreshCalls++
+	s.installationID = installationID
+	return s.refreshErr
+}
+
 func TestCodeReviewDeadLetterReconciliationFailsMetadata(t *testing.T) {
 	t.Parallel()
 

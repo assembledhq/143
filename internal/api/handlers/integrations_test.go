@@ -35,8 +35,9 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 type fakeGitHubAppService struct {
-	token string
-	err   error
+	token        string
+	err          error
+	observations []githubRateLimitTestObservation
 }
 
 func (f *fakeGitHubAppService) GetInstallationToken(context.Context, int64) (string, error) {
@@ -44,6 +45,17 @@ func (f *fakeGitHubAppService) GetInstallationToken(context.Context, int64) (str
 		return "", f.err
 	}
 	return f.token, nil
+}
+
+type githubRateLimitTestObservation struct {
+	token      string
+	statusCode int
+	resource   string
+	header     http.Header
+}
+
+func (f *fakeGitHubAppService) ObserveRateLimitForToken(_ context.Context, token string, statusCode int, resource string, header http.Header) {
+	f.observations = append(f.observations, githubRateLimitTestObservation{token: token, statusCode: statusCode, resource: resource, header: header.Clone()})
 }
 
 type fakeGitHubAppUserAuth struct {
@@ -2646,6 +2658,8 @@ func TestIntegrationHandler_ListInstallationRepos_FollowsPagination(t *testing.T
 	t.Parallel()
 
 	handler := NewIntegrationHandler(nil, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	githubService := &fakeGitHubAppService{}
+	handler.githubService = githubService
 	requested := make([]string, 0, 2)
 	handler.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		requested = append(requested, req.URL.String())
@@ -2655,7 +2669,8 @@ func TestIntegrationHandler_ListInstallationRepos_FollowsPagination(t *testing.T
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Header: http.Header{
-					"Link": []string{`<` + githubAPIURL + `/installation/repositories?per_page=100&page=2>; rel="next"`},
+					"Link":                  []string{`<` + githubAPIURL + `/installation/repositories?per_page=100&page=2>; rel="next"`},
+					"X-RateLimit-Remaining": []string{"4999"},
 				},
 				Body: io.NopCloser(strings.NewReader(`{"repositories":[{"id":1,"full_name":"org/one"}]}`)),
 			}, nil
@@ -2680,6 +2695,13 @@ func TestIntegrationHandler_ListInstallationRepos_FollowsPagination(t *testing.T
 		{ID: 2, FullName: "org/two"},
 	}, repos, "listInstallationRepos should concatenate paginated repositories")
 	require.Len(t, requested, 2, "listInstallationRepos should request exactly two pages")
+	require.Equal(t, []githubRateLimitTestObservation{
+		{token: "installation-token", statusCode: http.StatusOK, resource: string(models.GitHubRateLimitResourceCore), header: http.Header{
+			"Link":                  []string{`<` + githubAPIURL + `/installation/repositories?per_page=100&page=2>; rel="next"`},
+			"X-RateLimit-Remaining": []string{"4999"},
+		}},
+		{token: "installation-token", statusCode: http.StatusOK, resource: string(models.GitHubRateLimitResourceCore), header: http.Header{}},
+	}, githubService.observations, "every installation-token response should update the shared rate-limit observer")
 }
 
 func TestIntegrationHandler_HandleGitHubOAuthCallback_SavesCredentialAndIntegration(t *testing.T) {

@@ -86,6 +86,10 @@ type teamGitHubService interface {
 	GetInstallationToken(ctx context.Context, installationID int64) (string, error)
 }
 
+type teamGitHubRateLimitObserver interface {
+	ObserveRateLimitForToken(ctx context.Context, token string, statusCode int, resource string, header http.Header)
+}
+
 // teamRepositoryStore supplies repo-scoped fallbacks for GitHub App metadata.
 // Some orgs predate integration.config.installation_id but already have active
 // repo rows populated from a prior install sync; those repos still carry the
@@ -861,9 +865,15 @@ func (h *TeamHandler) searchGitHubUsers(ctx context.Context, token, query string
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if observer, ok := h.githubSvc.(teamGitHubRateLimitObserver); ok {
+		observer.ObserveRateLimitForToken(ctx, token, resp.StatusCode, string(models.GitHubRateLimitResourceSearch), resp.Header)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if observer, ok := h.githubSvc.(githubRateLimitBodyObserver); ok {
+			observer.ObserveRateLimitForTokenWithBody(ctx, token, resp.StatusCode, string(models.GitHubRateLimitResourceSearch), resp.Header, body)
+		}
 		return nil, fmt.Errorf("github search returned %d: %s", resp.StatusCode, body)
 	}
 
