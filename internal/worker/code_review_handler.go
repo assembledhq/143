@@ -491,7 +491,7 @@ func syncCodeReviewPullRequestState(ctx context.Context, services *Services, log
 			return nil
 		}
 		wrapped := fmt.Errorf("sync code review pull request state: %w", err)
-		return classifyGitHubJobError(wrapped)
+		return classifyGitHubJobError(wrapped, job.SessionID.String())
 	}
 	return nil
 }
@@ -2226,7 +2226,7 @@ func loadCodeReviewChangedFiles(ctx context.Context, stores *Stores, services *S
 		PullNumber:     pr.GitHubPRNumber,
 	})
 	if err != nil {
-		return nil, false, classifyGitHubJobError(fmt.Errorf("list GitHub pull request files: %w", err))
+		return nil, false, classifyGitHubJobError(fmt.Errorf("list GitHub pull request files: %w", err), job.SessionID.String())
 	}
 	return files, true, nil
 }
@@ -3158,7 +3158,7 @@ func submitCodeReviewToGitHub(ctx context.Context, stores *Stores, services *Ser
 		Comments:          comments,
 	})
 	if err != nil {
-		return codeReviewSubmission{}, false, classifyGitHubJobError(fmt.Errorf("submit code review to GitHub: %w", err))
+		return codeReviewSubmission{}, false, classifyGitHubJobError(fmt.Errorf("submit code review to GitHub: %w", err), job.SessionID.String())
 	}
 	if _, err := stores.CodeReviews.RecordGitHubReview(ctx, job.OrgID, job.SessionID, result.ID, result.URL, body); err != nil {
 		return codeReviewSubmission{}, true, fmt.Errorf("record submitted code review: %w", err)

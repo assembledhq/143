@@ -443,6 +443,7 @@ CREATE TABLE jobs (
     locked_at timestamptz,
     last_error text,
     dedupe_key text,
+    retry_window_started_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     completed_at timestamptz

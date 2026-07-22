@@ -23,6 +23,18 @@ type wakeTestStore struct {
 	claims atomic.Int32
 }
 
+type retryWindowLeaseStoreStub struct {
+	startedAt time.Time
+	ok        bool
+	err       error
+	calls     int
+}
+
+func (s *retryWindowLeaseStoreStub) EnsureRetryWindowStartedAtWithLease(context.Context, uuid.UUID, uuid.UUID, time.Time) (time.Time, bool, error) {
+	s.calls++
+	return s.startedAt, s.ok, s.err
+}
+
 func (s *wakeTestStore) ClaimNextRunnable(context.Context, string, string, uuid.UUID, time.Duration) (*models.Job, error) {
 	s.claims.Add(1)
 	return nil, nil
@@ -30,6 +42,10 @@ func (s *wakeTestStore) ClaimNextRunnable(context.Context, string, string, uuid.
 
 func (s *wakeTestStore) RenewLease(context.Context, uuid.UUID, uuid.UUID, time.Duration) (*models.Job, bool, error) {
 	return nil, false, nil
+}
+
+func (s *wakeTestStore) EnsureRetryWindowStartedAtWithLease(context.Context, uuid.UUID, uuid.UUID, time.Time) (time.Time, bool, error) {
+	return time.Time{}, false, nil
 }
 
 func (s *wakeTestStore) MarkSucceededWithLease(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
@@ -82,35 +98,35 @@ func TestRetryableDurationExceeded(t *testing.T) {
 	twentyOneMinutes := 21 * time.Minute
 	tests := []struct {
 		name           string
-		createdAt      time.Time
+		retryStartedAt time.Time
 		retryable      *RetryableError
 		expected       bool
 		expectedWindow time.Duration
 	}{
 		{
 			name:           "default window rejects an old job",
-			createdAt:      now.Add(-maxRetryableDuration - time.Second),
+			retryStartedAt: now.Add(-maxRetryableDuration - time.Second),
 			retryable:      &RetryableError{Err: errors.New("dependency unavailable")},
 			expected:       true,
 			expectedWindow: maxRetryableDuration,
 		},
 		{
-			name:           "custom window permits a bounded wait",
-			createdAt:      now.Add(-10 * time.Minute),
+			name:           "custom window permits a recent bounded retry for an older job",
+			retryStartedAt: now.Add(-10 * time.Minute),
 			retryable:      &RetryableError{Err: errors.New("rate limited"), MaxRetryDuration: &customWindow, RetryAfter: &fiveMinutes},
 			expected:       false,
 			expectedWindow: customWindow,
 		},
 		{
 			name:           "custom window rejects a retry scheduled beyond its deadline",
-			createdAt:      now.Add(-10 * time.Minute),
+			retryStartedAt: now.Add(-10 * time.Minute),
 			retryable:      &RetryableError{Err: errors.New("rate limited"), MaxRetryDuration: &customWindow, RetryAfter: &twentyOneMinutes},
 			expected:       true,
 			expectedWindow: customWindow,
 		},
 		{
 			name:           "explicit bypass remains unbounded",
-			createdAt:      now.Add(-time.Hour),
+			retryStartedAt: now.Add(-time.Hour),
 			retryable:      &RetryableError{Err: errors.New("durable owner recovery"), BypassMaxRetryDuration: true},
 			expected:       false,
 			expectedWindow: maxRetryableDuration,
@@ -121,9 +137,78 @@ func TestRetryableDurationExceeded(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			actual, retryWindow := retryableDurationExceeded(tt.createdAt, tt.retryable, now)
+			actual, retryWindow := retryableDurationExceeded(tt.retryStartedAt, tt.retryable, now)
 			require.Equal(t, tt.expected, actual, "retry window should make the expected terminal decision")
 			require.Equal(t, tt.expectedWindow, retryWindow, "retry window should report the applied duration")
+		})
+	}
+}
+
+func TestEnsureRetryWindowStartedAt(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 21, 18, 0, 0, 0, time.UTC)
+	createdAt := now.Add(-3 * time.Hour)
+	persistedStart := now.Add(-10 * time.Minute)
+	customWindow := 2 * time.Hour
+	lockToken := uuid.New()
+	tests := []struct {
+		name          string
+		job           *models.Job
+		retryable     *RetryableError
+		store         *retryWindowLeaseStoreStub
+		expectedStart time.Time
+		expectedOK    bool
+		expectErr     bool
+		expectedCalls int
+	}{
+		{
+			name:          "default retry window remains based on job creation",
+			job:           &models.Job{CreatedAt: createdAt},
+			retryable:     &RetryableError{Err: errors.New("dependency unavailable")},
+			store:         &retryWindowLeaseStoreStub{},
+			expectedStart: createdAt,
+			expectedOK:    true,
+		},
+		{
+			name:          "new bounded retry gets a durable window independent of job age",
+			job:           &models.Job{ID: uuid.New(), LockToken: &lockToken, CreatedAt: createdAt},
+			retryable:     &RetryableError{Err: errors.New("rate limited"), MaxRetryDuration: &customWindow},
+			store:         &retryWindowLeaseStoreStub{startedAt: now, ok: true},
+			expectedStart: now,
+			expectedOK:    true,
+			expectedCalls: 1,
+		},
+		{
+			name:          "existing durable window is reused after restart",
+			job:           &models.Job{ID: uuid.New(), LockToken: &lockToken, CreatedAt: createdAt, RetryWindowStartedAt: &persistedStart},
+			retryable:     &RetryableError{Err: errors.New("rate limited"), MaxRetryDuration: &customWindow},
+			store:         &retryWindowLeaseStoreStub{},
+			expectedStart: persistedStart,
+			expectedOK:    true,
+		},
+		{
+			name:      "bounded retry requires a fencing token",
+			job:       &models.Job{ID: uuid.New(), CreatedAt: createdAt},
+			retryable: &RetryableError{Err: errors.New("rate limited"), MaxRetryDuration: &customWindow},
+			store:     &retryWindowLeaseStoreStub{},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual, ok, err := ensureRetryWindowStartedAt(context.Background(), tt.store, tt.job, tt.retryable, now)
+			if tt.expectErr {
+				require.Error(t, err, "bounded retry setup should reject invalid lease state")
+			} else {
+				require.NoError(t, err, "bounded retry setup should resolve its durable start time")
+			}
+			require.Equal(t, tt.expectedOK, ok, "bounded retry setup should report expected lease ownership")
+			require.Equal(t, tt.expectedStart, actual, "bounded retry setup should return the expected window start")
+			require.Equal(t, tt.expectedCalls, tt.store.calls, "bounded retry setup should persist only when the durable start is absent")
 		})
 	}
 }
@@ -261,6 +346,37 @@ func TestWorker_Poll(t *testing.T) {
 				})
 
 				expectClaim(mock, jobID, orgID, "retryable_job", json.RawMessage(`{}`), now, lockToken)
+				mock.ExpectExec("attempts = GREATEST\\(attempts - 1, 0\\)").
+					WithArgs(handlerErr.Error(), pgxmock.AnyArg(), jobID, lockToken).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+		},
+		{
+			name: "bounded retry starts when an older job first observes the failure",
+			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
+				t.Helper()
+
+				jobID := uuid.New()
+				lockToken := uuid.New()
+				orgID := uuid.New()
+				oldCreatedAt := time.Now().Add(-3 * time.Hour)
+				retryWindowStartedAt := time.Now()
+				retryAfter := time.Minute
+				customWindow := 2 * time.Hour
+				handlerErr := &RetryableError{
+					Err:              errors.New("rate limited"),
+					RetryAfter:       &retryAfter,
+					MaxRetryDuration: &customWindow,
+				}
+
+				w.Register("bounded_retry_job", func(ctx context.Context, jobType string, got json.RawMessage) error {
+					return handlerErr
+				})
+
+				expectClaim(mock, jobID, orgID, "bounded_retry_job", json.RawMessage(`{}`), oldCreatedAt, lockToken)
+				mock.ExpectQuery("UPDATE jobs[\\s\\S]+retry_window_started_at = COALESCE\\(retry_window_started_at, \\$1\\)").
+					WithArgs(pgxmock.AnyArg(), jobID, lockToken).
+					WillReturnRows(pgxmock.NewRows([]string{"retry_window_started_at"}).AddRow(retryWindowStartedAt))
 				mock.ExpectExec("attempts = GREATEST\\(attempts - 1, 0\\)").
 					WithArgs(handlerErr.Error(), pgxmock.AnyArg(), jobID, lockToken).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -467,10 +583,10 @@ func TestWorker_Poll(t *testing.T) {
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
 						"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
-						"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
+						"dedupe_key", "target_node_id", "retry_window_started_at", "created_at", "updated_at", "completed_at",
 					}).AddRow(
 						jobID, orgID, "default", "missing_token", json.RawMessage(`{}`), 5, "running",
-						1, 3, now, "test-node", now, now.Add(defaultLeaseDuration), nil, "test-node", string(models.JobOwnerKindWorker), nil, nil, nil, now, now, nil,
+						1, 3, now, "test-node", now, now.Add(defaultLeaseDuration), nil, "test-node", string(models.JobOwnerKindWorker), nil, nil, nil, nil, now, now, nil,
 					))
 			},
 		},
@@ -764,6 +880,10 @@ func (s *renewLeaseStoreStub) DeadLetterWithLease(ctx context.Context, jobID, lo
 	return false, nil
 }
 
+func (s *renewLeaseStoreStub) EnsureRetryWindowStartedAtWithLease(_ context.Context, _ uuid.UUID, _ uuid.UUID, startedAt time.Time) (time.Time, bool, error) {
+	return startedAt, true, nil
+}
+
 func TestWorker_RenewLeaseLoop_CancelsAfterLeaseExpiryOnRenewErrors(t *testing.T) {
 	t.Parallel()
 
@@ -877,6 +997,10 @@ func (s *terminalLeaseStoreStub) RetryWithoutConsumingAttemptWithLease(ctx conte
 
 func (s *terminalLeaseStoreStub) DeadLetterWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string) (bool, error) {
 	return s.deadLetterFn(ctx, jobID, lockToken, errMsg)
+}
+
+func (s *terminalLeaseStoreStub) EnsureRetryWindowStartedAtWithLease(_ context.Context, _ uuid.UUID, _ uuid.UUID, startedAt time.Time) (time.Time, bool, error) {
+	return startedAt, true, nil
 }
 
 func TestWorker_StateAccessors(t *testing.T) {
@@ -1017,10 +1141,10 @@ func expectClaimWithAttemptsAndTarget(mock pgxmock.PgxPoolIface, jobID, orgID uu
 			"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 			"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
 			"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
-			"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
+			"dedupe_key", "target_node_id", "retry_window_started_at", "created_at", "updated_at", "completed_at",
 		}).AddRow(
 			jobID, orgID, "default", jobType, payload, 5, "running",
 			attempts, maxAttempts, createdAt, "test-node", createdAt, createdAt.Add(defaultLeaseDuration),
-			lockToken.String(), "test-node", string(models.JobOwnerKindWorker), nil, nil, target, createdAt, createdAt, nil,
+			lockToken.String(), "test-node", string(models.JobOwnerKindWorker), nil, nil, target, nil, createdAt, createdAt, nil,
 		))
 }

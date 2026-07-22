@@ -96,6 +96,7 @@ func jobOrgIDFromContext(ctx context.Context) (uuid.UUID, bool) {
 }
 
 type jobLeaseStore interface {
+	retryWindowLeaseStore
 	ClaimNextRunnable(ctx context.Context, nodeID, ownerID string, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, error)
 	RenewLease(ctx context.Context, jobID, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, bool, error)
 	MarkSucceededWithLease(ctx context.Context, jobID, lockToken uuid.UUID) (bool, error)
@@ -103,6 +104,10 @@ type jobLeaseStore interface {
 	RetryWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error)
 	RetryWithoutConsumingAttemptWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error)
 	DeadLetterWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string) (bool, error)
+}
+
+type retryWindowLeaseStore interface {
+	EnsureRetryWindowStartedAtWithLease(ctx context.Context, jobID, lockToken uuid.UUID, startedAt time.Time) (time.Time, bool, error)
 }
 
 type targetRetryLeaseStore interface {
@@ -279,10 +284,20 @@ func (w *Worker) poll(ctx context.Context) {
 			w.runDeadLetterHooks(handlerCtx, err)
 			return
 		}
-		if timedOut, retryWindow := retryableDurationExceeded(job.CreatedAt, retryable, time.Now()); timedOut {
+		now := time.Now()
+		retryWindowStartedAt, ok, startErr := ensureRetryWindowStartedAt(ctx, w.jobs, job, retryable, now)
+		if startErr != nil {
+			w.logger.Error().Err(startErr).Str("job_id", job.ID.String()).Msg("failed to persist retry window start; leaving job for lease recovery")
+			return
+		}
+		if !ok {
+			w.logger.Warn().Str("job_id", job.ID.String()).Msg("lost ownership before persisting retry window start")
+			return
+		}
+		if timedOut, retryWindow := retryableDurationExceeded(retryWindowStartedAt, retryable, now); timedOut {
 			w.logger.Error().Err(err).
 				Str("job_id", job.ID.String()).
-				Dur("age", time.Since(job.CreatedAt)).
+				Dur("retry_window_age", now.Sub(retryWindowStartedAt)).
 				Msg("retryable job exceeded max duration, dead-lettering")
 			timeoutErr := fmt.Errorf("retryable job timed out after %s: %w", retryWindow, err)
 			w.deadLetterJob(ctx, job.ID, *job.LockToken, timeoutErr.Error())
@@ -303,7 +318,31 @@ func (w *Worker) poll(ctx context.Context) {
 	w.retryJob(ctx, job.ID, *job.LockToken, err.Error(), job.Attempts, false)
 }
 
-func retryableDurationExceeded(createdAt time.Time, retryable *RetryableError, now time.Time) (bool, time.Duration) {
+func ensureRetryWindowStartedAt(ctx context.Context, store retryWindowLeaseStore, job *models.Job, retryable *RetryableError, now time.Time) (time.Time, bool, error) {
+	if job == nil {
+		return time.Time{}, false, errors.New("ensure retry window start: job is nil")
+	}
+	if retryable == nil || retryable.MaxRetryDuration == nil || retryable.BypassMaxRetryDuration {
+		return job.CreatedAt, true, nil
+	}
+	if job.RetryWindowStartedAt != nil {
+		return *job.RetryWindowStartedAt, true, nil
+	}
+	if job.LockToken == nil {
+		return time.Time{}, false, errors.New("ensure retry window start: job lock token is nil")
+	}
+	if store == nil {
+		return time.Time{}, false, errors.New("ensure retry window start: store is nil")
+	}
+	startedAt, ok, err := store.EnsureRetryWindowStartedAtWithLease(ctx, job.ID, *job.LockToken, now)
+	if err != nil || !ok {
+		return time.Time{}, ok, err
+	}
+	job.RetryWindowStartedAt = &startedAt
+	return startedAt, true, nil
+}
+
+func retryableDurationExceeded(retryWindowStartedAt time.Time, retryable *RetryableError, now time.Time) (bool, time.Duration) {
 	retryWindow := maxRetryableDuration
 	if retryable != nil && retryable.MaxRetryDuration != nil {
 		retryWindow = *retryable.MaxRetryDuration
@@ -311,7 +350,7 @@ func retryableDurationExceeded(createdAt time.Time, retryable *RetryableError, n
 	if retryable == nil || retryable.BypassMaxRetryDuration {
 		return false, retryWindow
 	}
-	age := now.Sub(createdAt)
+	age := now.Sub(retryWindowStartedAt)
 	if age > retryWindow {
 		return true, retryWindow
 	}

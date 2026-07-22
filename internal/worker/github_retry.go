@@ -1,6 +1,8 @@
 package worker
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"time"
 
@@ -8,11 +10,12 @@ import (
 )
 
 const (
-	githubRateLimitFallbackRetryAfter = time.Minute
-	githubRateLimitMaxRetryDuration   = 2 * time.Hour
+	githubRateLimitMinimumRetryAfter = time.Minute
+	githubRateLimitJitterRange       = 30 * time.Second
+	githubRateLimitMaxRetryDuration  = 2 * time.Hour
 )
 
-func githubRetryableError(err error) *RetryableError {
+func githubRetryableError(err error, retryKey string) *RetryableError {
 	classification := ghservice.ClassifyRetry(err, time.Now())
 	if !classification.Retryable {
 		return nil
@@ -23,18 +26,27 @@ func githubRetryableError(err error) *RetryableError {
 		RetryAfter:     classification.RetryAfter,
 	}
 	if classification.RateLimited {
-		if retryable.RetryAfter == nil {
-			retryAfter := githubRateLimitFallbackRetryAfter
-			retryable.RetryAfter = &retryAfter
-		}
+		retryable.RetryAfter = githubRateLimitRetryAfter(classification.RetryAfter, retryKey)
 		retryWindow := githubRateLimitMaxRetryDuration
 		retryable.MaxRetryDuration = &retryWindow
 	}
 	return retryable
 }
 
-func classifyGitHubJobError(err error) error {
-	if retryable := githubRetryableError(err); retryable != nil {
+func githubRateLimitRetryAfter(upstream *time.Duration, retryKey string) *time.Duration {
+	delay := githubRateLimitMinimumRetryAfter
+	if upstream != nil && *upstream > delay {
+		delay = *upstream
+	}
+	digest := sha256.Sum256([]byte(retryKey))
+	jitterSlots := uint32(githubRateLimitJitterRange / time.Second)
+	jitter := time.Duration(binary.BigEndian.Uint32(digest[:4])%jitterSlots) * time.Second
+	delay += jitter
+	return &delay
+}
+
+func classifyGitHubJobError(err error, retryKey string) error {
+	if retryable := githubRetryableError(err, retryKey); retryable != nil {
 		return retryable
 	}
 	var apiErr *ghservice.GitHubAPIError

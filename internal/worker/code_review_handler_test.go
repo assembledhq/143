@@ -83,6 +83,10 @@ func (s *codeReviewLifecycleStub) HandleReviewChanged(_ context.Context, input c
 func TestSyncCodeReviewPullRequestStateClassifiesTransientGitHubFailures(t *testing.T) {
 	t.Parallel()
 
+	sessionID := uuid.MustParse("00000000-0000-0000-0000-000000000143")
+	fallbackRetryAfter := *githubRateLimitRetryAfter(nil, sessionID.String())
+	secondaryRetryAfterHint := 117 * time.Second
+	secondaryRetryAfter := *githubRateLimitRetryAfter(&secondaryRetryAfterHint, sessionID.String())
 	tests := []struct {
 		name               string
 		status             int
@@ -94,15 +98,15 @@ func TestSyncCodeReviewPullRequestStateClassifiesTransientGitHubFailures(t *test
 		expectedRetryAfter time.Duration
 	}{
 		{name: "retries service unavailable", status: http.StatusServiceUnavailable, retryable: true},
-		{name: "retries rate limiting with fallback delay", status: http.StatusTooManyRequests, retryable: true, rateLimited: true, expectedRetryAfter: githubRateLimitFallbackRetryAfter},
+		{name: "retries rate limiting with fallback delay", status: http.StatusTooManyRequests, retryable: true, rateLimited: true, expectedRetryAfter: fallbackRetryAfter},
 		{
 			name:               "retries forbidden secondary rate limit using server delay",
 			status:             http.StatusForbidden,
 			body:               `{"message":"You have exceeded a secondary rate limit"}`,
-			header:             http.Header{"Retry-After": []string{"17"}},
+			header:             http.Header{"Retry-After": []string{"117"}},
 			retryable:          true,
 			rateLimited:        true,
-			expectedRetryAfter: 17 * time.Second,
+			expectedRetryAfter: secondaryRetryAfter,
 		},
 		{name: "does not retry forbidden permission failure", status: http.StatusForbidden, body: `{"message":"Resource not accessible by integration"}`, fatal: true},
 		{name: "does not retry validation failure", status: http.StatusUnprocessableEntity, fatal: true},
@@ -131,6 +135,7 @@ func TestSyncCodeReviewPullRequestStateClassifiesTransientGitHubFailures(t *test
 
 			err := syncCodeReviewPullRequestState(context.Background(), services, zerolog.Nop(), runCodeReviewPayload{
 				OrgID:         uuid.New(),
+				SessionID:     sessionID,
 				PullRequestID: uuid.New(),
 			})
 
