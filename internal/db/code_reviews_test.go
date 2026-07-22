@@ -841,6 +841,78 @@ func TestCodeReviewStore_ListReviewsAppliesOutcomeFilters(t *testing.T) {
 	}
 }
 
+func TestCodeReviewStore_SavePolicyExpectingVersionConflict(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	config := models.DefaultCodeReviewPolicyConfig()
+	config.ReviewInstructions = "agent-tuned guidance"
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("pg_advisory_xact_lock").
+		WithArgs("code_review_policy:" + orgID.String()).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectQuery("SELECT COALESCE").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"version"}).AddRow(3))
+	mock.ExpectRollback()
+
+	_, err = NewCodeReviewStore(mock).SavePolicyExpectingVersion(context.Background(), orgID, config, 2, nil)
+
+	require.ErrorIs(t, err, ErrCodeReviewPolicyVersionConflict, "stale expected version should return the typed conflict error")
+	require.Contains(t, err.Error(), "active version is 3", "conflict error should report the current version")
+	require.NoError(t, mock.ExpectationsWereMet(), "conflict should abort before deactivating or inserting")
+}
+
+func TestCodeReviewStore_SavePolicyExpectingVersionIncrementsFromCurrent(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	policyID := uuid.New()
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	config := models.DefaultCodeReviewPolicyConfig()
+	config.ReviewInstructions = "agent-tuned guidance"
+	descriptionPolicy, riskPolicy, agentRoster := mustCodeReviewPolicyJSON(t, config)
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("pg_advisory_xact_lock").
+		WithArgs("code_review_policy:" + orgID.String()).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectQuery("SELECT COALESCE").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"version"}).AddRow(3))
+	mock.ExpectExec("UPDATE code_review_policies").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO code_review_policies").
+		WithArgs(
+			pgxmock.AnyArg(), 4, pgxmock.AnyArg(), pgxmock.AnyArg(),
+			config.ReviewInstructions, config.AutomatedApprovalPolicy,
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
+			"review_instructions", "automated_approval_policy",
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at",
+		}).AddRow(policyID, orgID, nil, true, 4, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, nil, now))
+	mock.ExpectCommit()
+
+	record, err := NewCodeReviewStore(mock).SavePolicyExpectingVersion(context.Background(), orgID, config, 3, nil)
+
+	require.NoError(t, err, "matching expected version should save the next version")
+	require.Equal(t, 4, record.Version, "the new version should be current+1")
+	require.Nil(t, record.CreatedByUserID, "agent-authored versions have no created_by user")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestCodeReviewStore_ListReviewsAppliesCursorAndTimeFilters(t *testing.T) {
 	t.Parallel()
 

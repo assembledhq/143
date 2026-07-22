@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -38,8 +39,61 @@ func TestInternalMetaToolSourceListsCodeReviewHistoryTools(t *testing.T) {
 	for _, tool := range source.ListTools() {
 		names[tool.Name] = true
 	}
-	for _, name := range []string{"code_review_history_list", "code_review_history_get", "code_review_history_policy"} {
+	for _, name := range []string{"code_review_history_list", "code_review_history_get", "code_review_history_policy", "code_review_history_update_policy"} {
 		require.True(t, names[name], "internal meta tools should expose %s alongside the session history tools", name)
+	}
+}
+
+func TestInternalMetaToolSourceCodeReviewHistoryUpdatePolicyRoutes(t *testing.T) {
+	t.Parallel()
+
+	var gotMethod, gotPath, gotBody, gotContentType string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotContentType = r.Header.Get("Content-Type")
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"version":8}}`))
+	}))
+	defer server.Close()
+
+	source := NewInternalMetaToolSource(staticToolSource{}, "token", server.URL)
+	result := source.CallTool(context.Background(), "code_review_history_update_policy", json.RawMessage(
+		`{"config":"{\"automated_approval_policy\":\"Approve docs-only changes.\"}","expected_version":7,"reason":"docs-only PRs were blocked"}`,
+	))
+
+	require.False(t, result.IsError, "policy update should proxy to the internal API without error")
+	require.Equal(t, http.MethodPut, gotMethod, "policy update should PUT the internal policy route")
+	require.Equal(t, "/api/v1/internal/code-reviews/policy", gotPath, "policy update should target the policy route")
+	require.Equal(t, "application/json", gotContentType, "policy update should send a JSON body")
+	require.JSONEq(t, `{"config":{"automated_approval_policy":"Approve docs-only changes."},"expected_version":7,"reason":"docs-only PRs were blocked"}`, gotBody,
+		"the config JSON should be embedded as an object alongside version and reason")
+}
+
+func TestInternalMetaToolSourceCodeReviewHistoryUpdatePolicyArgumentErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		args     string
+		expected string
+	}{
+		{name: "config required", args: `{"expected_version":1,"reason":"r"}`, expected: "config must be a JSON object"},
+		{name: "config must be an object", args: `{"config":"[]","expected_version":1,"reason":"r"}`, expected: "config must be a JSON object"},
+		{name: "config must not be empty", args: `{"config":"{}","expected_version":1,"reason":"r"}`, expected: "config must be a JSON object"},
+		{name: "expected_version required", args: `{"config":"{\"enabled\":true}","reason":"r"}`, expected: "expected_version is required"},
+		{name: "reason required", args: `{"config":"{\"enabled\":true}","expected_version":1}`, expected: "reason is required"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			source := NewInternalMetaToolSource(staticToolSource{}, "token", "https://143.dev")
+			result := source.CallTool(context.Background(), "code_review_history_update_policy", json.RawMessage(tt.args))
+			require.True(t, result.IsError, "invalid arguments should fail before hitting the API")
+			require.Contains(t, result.Content[0].Text, tt.expected, "error should explain the invalid argument")
+		})
 	}
 }
 

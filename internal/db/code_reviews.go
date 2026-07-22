@@ -296,7 +296,26 @@ func (s *CodeReviewStore) GetPolicyByID(ctx context.Context, orgID, policyID uui
 	return collectOneCodeReviewPolicy(rows)
 }
 
+// ErrCodeReviewPolicyVersionConflict is returned by SavePolicyExpectingVersion
+// when the active policy version no longer matches the caller's expectation —
+// someone else (human or agent) saved a newer version first.
+var ErrCodeReviewPolicyVersionConflict = errors.New("code review policy version conflict")
+
 func (s *CodeReviewStore) SavePolicy(ctx context.Context, orgID uuid.UUID, config models.CodeReviewPolicyConfig, createdByUserID *uuid.UUID) (models.CodeReviewPolicyRecord, error) {
+	return s.savePolicy(ctx, orgID, config, createdByUserID, nil)
+}
+
+// SavePolicyExpectingVersion saves a new policy version only if the current
+// active version still equals expectedVersion (0 when the org has never saved
+// a policy). The check runs inside the same advisory-locked transaction as the
+// insert, so concurrent writers cannot both pass it. Agent-driven policy
+// updates use this so a stale agent never silently clobbers a newer human (or
+// agent) edit.
+func (s *CodeReviewStore) SavePolicyExpectingVersion(ctx context.Context, orgID uuid.UUID, config models.CodeReviewPolicyConfig, expectedVersion int, createdByUserID *uuid.UUID) (models.CodeReviewPolicyRecord, error) {
+	return s.savePolicy(ctx, orgID, config, createdByUserID, &expectedVersion)
+}
+
+func (s *CodeReviewStore) savePolicy(ctx context.Context, orgID uuid.UUID, config models.CodeReviewPolicyConfig, createdByUserID *uuid.UUID, expectedVersion *int) (models.CodeReviewPolicyRecord, error) {
 	config.ReviewInstructions = strings.TrimSpace(config.ReviewInstructions)
 	config.AutomatedApprovalPolicy = strings.TrimSpace(config.AutomatedApprovalPolicy)
 	if err := config.ValidatePromptFields(); err != nil {
@@ -323,16 +342,20 @@ func (s *CodeReviewStore) SavePolicy(ctx context.Context, orgID uuid.UUID, confi
 		return models.CodeReviewPolicyRecord{}, fmt.Errorf("acquire code review policy lock: %w", err)
 	}
 
-	var version int
+	var currentVersion int
 	if err := tx.QueryRow(ctx, `
-		SELECT COALESCE(MAX(version), 0) + 1
+		SELECT COALESCE(MAX(version), 0)
 		FROM code_review_policies
 		WHERE org_id = @org_id
 		  AND repository_id IS NULL`, pgx.NamedArgs{
 		"org_id": orgID,
-	}).Scan(&version); err != nil {
-		return models.CodeReviewPolicyRecord{}, fmt.Errorf("select next code review policy version: %w", err)
+	}).Scan(&currentVersion); err != nil {
+		return models.CodeReviewPolicyRecord{}, fmt.Errorf("select current code review policy version: %w", err)
 	}
+	if expectedVersion != nil && *expectedVersion != currentVersion {
+		return models.CodeReviewPolicyRecord{}, fmt.Errorf("%w: active version is %d, expected %d", ErrCodeReviewPolicyVersionConflict, currentVersion, *expectedVersion)
+	}
+	version := currentVersion + 1
 	if _, err := tx.Exec(ctx, `
 		UPDATE code_review_policies
 		SET active = false

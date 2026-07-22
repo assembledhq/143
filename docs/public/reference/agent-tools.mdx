@@ -60,7 +60,7 @@ Only configured namespaces appear in `143-tools --help`.
 | `pr` | `create` |
 | `project` | `propose` |
 | `eval` | `add` |
-| `code-review-history` | `list`, `get`, `policy` |
+| `code-review-history` | `list`, `get`, `policy`, `update_policy` |
 
 ## Error tracking
 
@@ -722,4 +722,31 @@ Common use: diff the policy version behind a run of bad decisions against the cu
 ```bash
 143-tools code-review-history policy
 143-tools code-review-history policy --policy_id 5c2f9a51-40cb-45f7-8f0d-6bc47d4e2a11
+```
+
+### `code-review-history update_policy`
+
+Apply a versioned update to the org's code review policy. Supplied `config` keys merge onto the active policy — omitted fields keep their current values (supplied nested sections replace that section wholesale). The write closes the iteration loop: an agent that audited past reviews can adjust the policy itself instead of asking a human to tweak the knobs.
+
+This is the only write in the namespace and it is separately permissioned. It requires the `code_review_policy_management` capability at `write` access, which is **off by default** (unlike `review_feedback`, it is not in the recommended default grants). Org admins can grant it in capability settings, or an agent can ask for one-run approval with `143-tools capability request --capability-id code_review_policy_management --access-level write --reason "..."`.
+
+Safeguards on every update:
+
+- `--expected_version` must match the active policy version (`0` if the org has never saved one). If the policy changed since it was read, the call fails with `409 CODE_REVIEW_POLICY_VERSION_CONFLICT` and the current version — re-read with `policy` and retry.
+- `--reason` is required and recorded in the org audit log along with the session that made the change.
+- Policies are insert-only versions; a human can review the audit trail and restore any earlier version from review settings.
+
+| Flag | Type | Required | Description |
+|---|---|---:|---|
+| `--config` | string | Yes | JSON object of policy fields to change, same shape as the `policy` output's `config` (e.g. `{"review_instructions":"..."}`). |
+| `--expected_version` | number | Yes | Active policy version this change is based on. `0` when the org has never saved a policy. |
+| `--reason` | string | Yes | Why the policy is changing; stored in the audit log. |
+
+Common use: after `list`/`get` show a pattern of wrong decisions, apply the corrected instructions directly.
+
+```bash
+143-tools code-review-history update_policy \
+  --expected_version 7 \
+  --reason "Blocked three doc-only PRs this week; policy now exempts docs-only diffs" \
+  --config '{"automated_approval_policy":"Approve documentation-only changes that touch no executable code."}'
 ```

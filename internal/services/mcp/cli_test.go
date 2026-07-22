@@ -262,6 +262,7 @@ func TestCLIPathForTool_CodeReviewHistoryMapping(t *testing.T) {
 		{tool: "code_review_history_list", namespace: NamespaceCodeReviewHistory, action: ActionList},
 		{tool: "code_review_history_get", namespace: NamespaceCodeReviewHistory, action: ActionGet},
 		{tool: "code_review_history_policy", namespace: NamespaceCodeReviewHistory, action: ActionPolicy},
+		{tool: "code_review_history_update_policy", namespace: NamespaceCodeReviewHistory, action: ActionUpdatePolicy},
 	}
 	for _, tt := range tests {
 		namespace, action, ok := cliPathForTool(tt.tool)
@@ -285,6 +286,7 @@ func TestRunCLI_CodeReviewHistoryNamespaceDispatch(t *testing.T) {
 	for _, action := range []string{"list", "get", "policy"} {
 		require.Contains(t, stdout.String(), action, "code-review-history namespace help should list the %s action", action)
 	}
+	require.NotContains(t, stdout.String(), "update_policy", "a read-only review feedback grant should not surface the policy write action")
 }
 
 func TestRunCLI_UnknownUnderscoreNameIsUnknownNamespace(t *testing.T) {

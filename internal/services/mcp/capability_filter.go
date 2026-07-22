@@ -72,6 +72,8 @@ func addAllowedToolPaths(allowed map[string]bool, capability models.AgentCapabil
 		add(NamespaceSessionHistory, ActionSearch, ActionGet, ActionMessages)
 	case models.AgentCapabilityReviewFeedback:
 		add(NamespaceCodeReviewHistory, ActionList, ActionGet, ActionPolicy)
+	case models.AgentCapabilityCodeReviewPolicy:
+		add(NamespaceCodeReviewHistory, ActionUpdatePolicy)
 	case models.AgentCapabilityPRHistory:
 		add(CLINamespace("github"), CLIAction("list_recent_prs"), CLIAction("get_pr_reviews"))
 	case models.AgentCapabilityCIHistory:

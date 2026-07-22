@@ -78,6 +78,11 @@ func (s *internalMetaToolSource) ListTools() []Tool {
 		Tool{Name: "code_review_history_policy", Description: "Get the org's code review policy: the active version by default, or a specific historical version via policy_id (from a review's policy_id field). Compare the policy that governed past reviews against their outcomes to judge whether the policy is correct.", InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
 			"policy_id": {Type: "string", Description: "Policy version UUID; omit for the active policy"},
 		}}},
+		Tool{Name: "code_review_history_update_policy", Description: "Apply a versioned update to the org's code review policy. Supplied config keys merge onto the active policy; omitted fields keep their current values. Requires the code_review_policy_management write capability (default off; request it with `143-tools capability request`). Pass the active policy version you read — the call fails with the current version if someone changed the policy in between. Every update is a new audited version humans can inspect and roll back.", InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
+			"config":           {Type: "string", Description: "JSON object of policy fields to change, same shape as the policy tool's config output (e.g. '{\"review_instructions\":\"...\"}')"},
+			"expected_version": {Type: "number", Description: "Active policy version this change is based on (0 if the org has never saved a policy)"},
+			"reason":           {Type: "string", Description: "Why the policy is changing; recorded in the audit log for humans"},
+		}, Required: []string{"config", "expected_version", "reason"}}},
 	)
 	return tools
 }
@@ -145,6 +150,37 @@ func (s *internalMetaToolSource) CallTool(ctx context.Context, name string, args
 			return s.do(ctx, http.MethodGet, "/api/v1/internal/code-reviews/policies/"+url.PathEscape(policyID), nil, nil)
 		}
 		return s.do(ctx, http.MethodGet, "/api/v1/internal/code-reviews/policy", nil, nil)
+	case "code_review_history_update_policy":
+		var in struct {
+			Config          string `json:"config"`
+			ExpectedVersion *int   `json:"expected_version"`
+			Reason          string `json:"reason"`
+		}
+		if len(args) > 0 {
+			if err := json.Unmarshal(args, &in); err != nil {
+				return ErrorResult("INVALID_ARGUMENTS: invalid JSON")
+			}
+		}
+		configRaw := strings.TrimSpace(in.Config)
+		var configProbe map[string]any
+		if configRaw == "" || json.Unmarshal([]byte(configRaw), &configProbe) != nil || len(configProbe) == 0 {
+			return ErrorResult("INVALID_ARGUMENTS: config must be a JSON object with at least one policy field")
+		}
+		if in.ExpectedVersion == nil || *in.ExpectedVersion < 0 {
+			return ErrorResult("INVALID_ARGUMENTS: expected_version is required (0 if the org has never saved a policy)")
+		}
+		if strings.TrimSpace(in.Reason) == "" {
+			return ErrorResult("INVALID_ARGUMENTS: reason is required")
+		}
+		body, err := json.Marshal(map[string]any{
+			"config":           json.RawMessage(configRaw),
+			"expected_version": *in.ExpectedVersion,
+			"reason":           in.Reason,
+		})
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("INVALID_ARGUMENTS: %s", err))
+		}
+		return s.do(ctx, http.MethodPut, "/api/v1/internal/code-reviews/policy", nil, body)
 	default:
 		return s.base.CallTool(ctx, name, args)
 	}
