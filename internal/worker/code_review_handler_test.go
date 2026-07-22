@@ -185,13 +185,22 @@ func TestCodeReviewDeadLetterReconciliationFailsMetadata(t *testing.T) {
 	reason := codeReviewDeadLetterReason(deadLetterErr)
 	decision := models.CodeReviewDecisionBlocked
 	acceptable := false
+	statusCode := models.CodeReviewStatusCodeGitHubUnavailable
+	statusMessage := "GitHub remained unavailable until automatic retries expired. Retry the review to start a fresh attempt."
 
 	mock.ExpectQuery("UPDATE code_review_session_metadata").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "failure_reason": reason}).
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "session_id": sessionID, "failure_reason": reason,
+			"status_code":       statusCode,
+			"status_message":    statusMessage,
+			"retryable_failure": true,
+		}).
 		WillReturnRows(newCodeReviewMetadataRows().
 			AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
 				"base", "head", false, models.CodeReviewTriggerSourceTeamReviewer,
-				models.CodeReviewSessionStatusFailed, &decision, &acceptable, false, nil,
+				models.CodeReviewSessionStatusFailed, nil, &statusCode,
+				&statusMessage, nil, &now, true,
+				&decision, &acceptable, false, nil,
 				"output-key", nil, nil, nil, nil, &reason, &now, now))
 	idleRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusIdle, 0, nil, nil)
 	setWorkerSessionColumn(idleRow, "origin", models.SessionOriginCodeReview)
@@ -242,6 +251,87 @@ func TestCodeReviewDeadLetterReconciliationFailsMetadata(t *testing.T) {
 		PullNumber:     42,
 		Reviewers:      []string{"143-code-reviewer"},
 	}}, remover.removeRequests, "dead-letter hook should remove the pending reviewer so GitHub can emit a new request")
+}
+
+func TestRecordCodeReviewAutomaticWaitPersistsRateLimitOnly(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	metadataID := uuid.New()
+	now := time.Now().UTC()
+	delay := 90 * time.Second
+	message := "GitHub is rate-limited. The review will resume automatically when the limit resets."
+	phase := models.CodeReviewPhaseWaitingGitHub
+	statusCode := models.CodeReviewStatusCodeGitHubRateLimited
+	retryAt := now.Add(delay)
+	lastErrorAt := now
+	rateLimitErr := &RetryableError{
+		Err: &ghservice.GitHubAPIError{
+			Method: http.MethodGet, Path: "/repos/acme/repo/pulls/42", StatusCode: http.StatusTooManyRequests,
+		},
+		RetryAfter: &delay,
+	}
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery("UPDATE code_review_session_metadata").
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "session_id": sessionID, "retry_at": pgxmock.AnyArg(), "status_message": message,
+		}).
+		WillReturnRows(newCodeReviewMetadataRows().AddRow(
+			metadataID, orgID, sessionID, uuid.New(), uuid.New(), uuid.New(),
+			"base", "head", false, models.CodeReviewTriggerSourceAppReviewer,
+			models.CodeReviewSessionStatusRunning, &phase, &statusCode, &message, &retryAt, &lastErrorAt, true,
+			nil, nil, false, nil, "output", nil, nil, nil, nil, nil, nil, now,
+		))
+	store := db.NewCodeReviewStore(mock)
+
+	recordCodeReviewAutomaticWait(context.Background(), store, zerolog.Nop(), runCodeReviewPayload{
+		OrgID: orgID, SessionID: sessionID,
+	}, rateLimitErr)
+	recordCodeReviewAutomaticWait(context.Background(), store, zerolog.Nop(), runCodeReviewPayload{
+		OrgID: orgID, SessionID: sessionID,
+	}, codeReviewWaitingForReviewers(models.DefaultCodeReviewPolicyConfig()))
+
+	require.NoError(t, mock.ExpectationsWereMet(), "only a GitHub rate limit should persist an automatic wait")
+}
+
+func TestCodeReviewTerminalFailureStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		err            error
+		expectedCode   models.CodeReviewStatusCode
+		expectRetry    bool
+		expectedAction string
+	}{
+		{
+			name: "preserves exhausted GitHub rate limit as retryable",
+			err: &RetryableError{Err: &ghservice.GitHubAPIError{
+				Method: http.MethodGet, Path: "/rate_limit", StatusCode: http.StatusTooManyRequests,
+			}},
+			expectedCode: models.CodeReviewStatusCodeGitHubRateLimited, expectRetry: true, expectedAction: "Retry the review",
+		},
+		{
+			name:         "keeps non-retryable worker failures terminal",
+			err:          errors.New("invalid policy snapshot"),
+			expectedCode: models.CodeReviewStatusCodeWorkerFailed, expectRetry: false, expectedAction: "Check the failure details",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			code, message, retryable := codeReviewTerminalFailureStatus(tt.err)
+
+			require.Equal(t, tt.expectedCode, code, "terminal status should use the stable operational code")
+			require.Equal(t, tt.expectRetry, retryable, "terminal status should expose retry eligibility accurately")
+			require.Contains(t, message, tt.expectedAction, "terminal status should contain a concise operator action")
+		})
+	}
 }
 
 type capturingCodeReviewSubmitter struct {
@@ -962,12 +1052,21 @@ func TestFailCodeReviewWithoutReviewerOutputFailsMetadata(t *testing.T) {
 	reason := "no code review reviewer produced usable output: Codex failed, Claude Code failed"
 	decision := models.CodeReviewDecisionBlocked
 	acceptable := false
+	statusCode := models.CodeReviewStatusCodeReviewerFailed
+	statusMessage := "Reviewer agents did not produce usable output. Retry the review to start a fresh attempt."
 	mock.ExpectQuery("UPDATE code_review_session_metadata").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "failure_reason": reason}).
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "session_id": sessionID, "failure_reason": reason,
+			"status_code":       statusCode,
+			"status_message":    statusMessage,
+			"retryable_failure": true,
+		}).
 		WillReturnRows(newCodeReviewMetadataRows().
 			AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
 				"base", "head", false, models.CodeReviewTriggerSourceTeamReviewer,
-				models.CodeReviewSessionStatusFailed, &decision, &acceptable, false, nil,
+				models.CodeReviewSessionStatusFailed, nil, &statusCode,
+				&statusMessage, nil, &now, true,
+				&decision, &acceptable, false, nil,
 				"output-key", nil, nil, nil, nil, &reason, &now, now))
 
 	err = failCodeReviewWithoutReviewerOutput(context.Background(), &Stores{
@@ -1008,7 +1107,14 @@ func TestRunCodeReviewHandlerReconcilesTerminalFailedMetadata(t *testing.T) {
 		WillReturnRows(newCodeReviewMetadataRows().
 			AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
 				"base", "head", false, models.CodeReviewTriggerSourceTeamReviewer,
-				models.CodeReviewSessionStatusFailed, nil, nil, false, nil,
+				models.CodeReviewSessionStatusFailed, nil, nil, nil, nil, nil, false, nil, nil, false, nil,
+				"output-key", nil, nil, nil, nil, &reason, &now, now))
+	mock.ExpectQuery("(?s)SELECT .*FROM code_review_session_metadata").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+		WillReturnRows(newCodeReviewMetadataRows().
+			AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
+				"base", "head", false, models.CodeReviewTriggerSourceTeamReviewer,
+				models.CodeReviewSessionStatusFailed, nil, nil, nil, nil, nil, false, nil, nil, false, nil,
 				"output-key", nil, nil, nil, nil, &reason, &now, now))
 
 	pendingRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusPending, 0, nil, nil)
@@ -1106,7 +1212,7 @@ func TestRunCodeReviewHandlerFastWaitSkipsGitHubRefresh(t *testing.T) {
 				WillReturnRows(newCodeReviewMetadataRows().
 					AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
 						"base", headSHA, false, models.CodeReviewTriggerSourceTeamReviewer,
-						models.CodeReviewSessionStatusRunning, nil, nil, false, nil,
+						models.CodeReviewSessionStatusRunning, nil, nil, nil, nil, nil, false, nil, nil, false, nil,
 						"output-key", &promptArtifactKey, nil, nil, nil, nil, nil, now))
 			mock.ExpectQuery("(?s)FROM code_review_policies.*WHERE org_id = @org_id.*AND id = @id").
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "id": policyID}).
@@ -1133,6 +1239,17 @@ func TestRunCodeReviewHandlerFastWaitSkipsGitHubRefresh(t *testing.T) {
 			mock.ExpectQuery("(?s)FROM session_threads.*WHERE org_id = @org_id AND session_id = @session_id").
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
 				WillReturnRows(newSessionThreadRows().AddRow(workerSessionThreadRow(threadID, sessionID, orgID, tt.agentProvider, nil, models.ThreadStatusRunning)...))
+			operationalPhase := models.CodeReviewPhaseReviewing
+			if tt.role == models.CodeReviewAgentRoleOrchestrator {
+				operationalPhase = models.CodeReviewPhaseSynthesizing
+			}
+			mock.ExpectQuery("(?s)UPDATE code_review_session_metadata.*SET phase = @phase").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "phase": operationalPhase}).
+				WillReturnRows(newCodeReviewMetadataRows().
+					AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
+						"base", headSHA, false, models.CodeReviewTriggerSourceTeamReviewer,
+						models.CodeReviewSessionStatusRunning, &operationalPhase, nil, nil, nil, nil, false, nil, nil, false, nil,
+						"output-key", &promptArtifactKey, nil, nil, nil, nil, nil, now))
 
 			syncCalls := 0
 			submitter := &capturingCodeReviewSubmitter{}
@@ -1193,7 +1310,7 @@ func TestRunCodeReviewHandlerChecksCancellationBeforeGitHubRefresh(t *testing.T)
 		WillReturnRows(newCodeReviewMetadataRows().
 			AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
 				"base", headSHA, false, models.CodeReviewTriggerSourceTeamReviewer,
-				models.CodeReviewSessionStatusRunning, nil, nil, false, nil,
+				models.CodeReviewSessionStatusRunning, nil, nil, nil, nil, nil, false, nil, nil, false, nil,
 				"output-key", nil, nil, nil, nil, nil, nil, now))
 	mock.ExpectQuery("(?s)FROM code_review_policies.*WHERE org_id = @org_id.*AND id = @id").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "id": policyID}).
@@ -1217,7 +1334,7 @@ func TestRunCodeReviewHandlerChecksCancellationBeforeGitHubRefresh(t *testing.T)
 		WillReturnRows(newCodeReviewMetadataRows().
 			AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
 				"base", headSHA, false, models.CodeReviewTriggerSourceTeamReviewer,
-				models.CodeReviewSessionStatusCancelled, nil, nil, false, nil,
+				models.CodeReviewSessionStatusCancelled, nil, nil, nil, nil, nil, false, nil, nil, false, nil,
 				"output-key", nil, nil, nil, nil, &reason, &now, now))
 
 	syncCalls := 0
@@ -1274,7 +1391,7 @@ func TestStopCodeReviewIfParentSessionCancelledCancelsMetadata(t *testing.T) {
 		WillReturnRows(newCodeReviewMetadataRows().
 			AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
 				"base", "head", false, models.CodeReviewTriggerSourceTeamReviewer,
-				models.CodeReviewSessionStatusCancelled, nil, nil, false, nil,
+				models.CodeReviewSessionStatusCancelled, nil, nil, nil, nil, nil, false, nil, nil, false, nil,
 				"output-key", nil, nil, nil, nil, &reason, &now, now))
 
 	stopped, err := stopCodeReviewIfParentSessionCancelled(context.Background(), &Stores{
@@ -2941,7 +3058,8 @@ func newCodeReviewFindingRows() *pgxmock.Rows {
 func newCodeReviewMetadataRows() *pgxmock.Rows {
 	return pgxmock.NewRows([]string{
 		"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
-		"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable",
+		"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message",
+		"retry_at", "last_error_at", "retryable_failure", "decision", "acceptable",
 		"stale", "superseded_by_session_id", "review_output_key", "prompt_artifact_key",
 		"github_review_id", "github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
 	})

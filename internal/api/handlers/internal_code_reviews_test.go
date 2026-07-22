@@ -90,9 +90,9 @@ func newInternalCodeReviewWriteFixture(t *testing.T) internalCodeReviewFixture {
 
 var internalCodeReviewListColumns = []string{
 	"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
-	"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable", "stale",
+	"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
 	"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id",
-	"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at", "session_title",
+	"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at", "retry_eligible", "session_title",
 	"repository_name", "github_repo", "github_pr_number", "github_pr_url", "pull_request_title", "pull_request_author",
 }
 
@@ -104,8 +104,8 @@ func internalCodeReviewListRow(fx internalCodeReviewFixture, reviewID, reviewSes
 	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
 	return []any{
 		reviewID, fx.orgID, reviewSessionID, fx.repoID, uuid.New(), uuid.New(),
-		"base", "head", false, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusCompleted, &decision, &acceptable, false,
-		nil, "key-" + reviewID.String(), nil, nil, nil, body, nil, &now, now, &title,
+		"base", "head", false, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusCompleted, nil, nil, nil, nil, nil, false, &decision, &acceptable, false,
+		nil, "key-" + reviewID.String(), nil, nil, nil, body, nil, &now, now, false, &title,
 		&repoName, "acme/repo", 42, "https://github.com/acme/repo/pull/42", "Fix auth bug", "devin",
 	}
 }

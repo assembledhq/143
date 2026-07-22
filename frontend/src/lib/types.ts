@@ -301,6 +301,13 @@ export interface CodeReviewListItem {
   from_fork: boolean;
   trigger_source: string;
   status: CodeReviewSessionStatus;
+  phase?: CodeReviewPhase;
+  status_code?: CodeReviewStatusCode;
+  status_message?: string;
+  retry_at?: string;
+  last_error_at?: string;
+  retryable_failure: boolean;
+  retry_eligible: boolean;
   decision?: CodeReviewDecision;
   acceptable?: boolean;
   stale: boolean;
@@ -320,6 +327,26 @@ export interface CodeReviewListItem {
   github_pr_url: string;
   pull_request_title: string;
   pull_request_author: string;
+}
+
+export type CodeReviewPhase =
+  | "syncing_github"
+  | "waiting_for_github"
+  | "reviewing"
+  | "synthesizing"
+  | "publishing";
+
+export type CodeReviewStatusCode =
+  | "github_rate_limited"
+  | "github_unavailable"
+  | "reviewer_failed"
+  | "worker_failed";
+
+export interface CodeReviewRetryResult {
+  previous_session_id: string;
+  session_id: string;
+  metadata_id: string;
+  job_id: string;
 }
 
 export interface CodeReviewAgentResult {

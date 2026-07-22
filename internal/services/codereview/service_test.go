@@ -3,11 +3,13 @@ package codereview
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
@@ -77,6 +79,7 @@ func TestService_HandleReviewRequested(t *testing.T) {
 				var revisionContext map[string]any
 				require.NoError(t, json.Unmarshal(sessions.created.RevisionContext, &revisionContext), "session revision context should be valid JSON")
 				require.Equal(t, true, revisionContext["from_fork"], "session revision context should include fork source evidence")
+				require.Equal(t, "143-code-reviewer", revisionContext["requested_reviewer_login"], "session revision context should preserve reviewer identity for replacement cleanup")
 			},
 		},
 		{
@@ -97,6 +100,9 @@ func TestService_HandleReviewRequested(t *testing.T) {
 				require.Equal(t, models.CodeReviewTriggerSourceTeamReviewer, result.TriggerSource, "team trigger should be recorded as team_reviewer")
 				require.Equal(t, "143-code-reviewer", jobs.payload.RequestedTeamSlug, "worker payload should remember requested team for cleanup")
 				require.Equal(t, 1, sessions.createCalls, "configured team reviewer request should create a session")
+				var revisionContext map[string]any
+				require.NoError(t, json.Unmarshal(sessions.created.RevisionContext, &revisionContext), "team review revision context should be valid JSON")
+				require.Equal(t, "143-code-reviewer", revisionContext["requested_team_slug"], "session revision context should preserve team identity for replacement cleanup")
 			},
 		},
 		{
@@ -525,6 +531,265 @@ func TestService_QueueReviewChanged(t *testing.T) {
 	}
 }
 
+func TestService_RetryReview(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		mutate           func(*models.CodeReviewSessionMetadata, *metadataStub, *policyStub, *pullRequestStub)
+		enqueueErr       error
+		syncErr          error
+		expectedCode     RetryReviewConflictCode
+		expectStart      bool
+		unconfirmedReuse bool
+	}{
+		{name: "creates a fresh replacement attempt", expectStart: true},
+		{name: "uses persisted health while mergeability is pending", syncErr: ghservice.ErrPullRequestMergeabilityPending, expectStart: true},
+		{name: "terminalizes an unqueued replacement for recovery", enqueueErr: errors.New("queue unavailable")},
+		{
+			name: "keeps source retryable while concurrent replacement dispatch is unconfirmed",
+			mutate: func(source *models.CodeReviewSessionMetadata, metadata *metadataStub, _ *policyStub, _ *pullRequestStub) {
+				replacement := *source
+				replacement.ID = uuid.New()
+				replacement.SessionID = uuid.New()
+				replacement.Status = models.CodeReviewSessionStatusQueued
+				replacement.RetryableFailure = false
+				replacement.ReviewOutputKey = "concurrent-replacement"
+				replacement.CreatedAt = time.Now()
+				metadata.latestByHead = replacement
+			},
+			expectedCode:     RetryReviewConflictNewerAttempt,
+			unconfirmedReuse: true,
+		},
+		{
+			name: "rejects a pull request with an existing approval",
+			mutate: func(_ *models.CodeReviewSessionMetadata, metadata *metadataStub, _ *policyStub, _ *pullRequestStub) {
+				metadata.approved = true
+			},
+			expectedCode: RetryReviewConflictCompleted,
+		},
+		{
+			name: "rejects a completed attempt",
+			mutate: func(source *models.CodeReviewSessionMetadata, _ *metadataStub, _ *policyStub, _ *pullRequestStub) {
+				source.Status = models.CodeReviewSessionStatusCompleted
+			},
+			expectedCode: RetryReviewConflictCompleted,
+		},
+		{
+			name: "rejects a non-retryable failure",
+			mutate: func(source *models.CodeReviewSessionMetadata, _ *metadataStub, _ *policyStub, _ *pullRequestStub) {
+				source.RetryableFailure = false
+			},
+			expectedCode: RetryReviewConflictNotRetryable,
+		},
+		{
+			name: "rejects a superseded failure",
+			mutate: func(source *models.CodeReviewSessionMetadata, _ *metadataStub, _ *policyStub, _ *pullRequestStub) {
+				replacementID := uuid.New()
+				source.SupersededBySessionID = &replacementID
+			},
+			expectedCode: RetryReviewConflictSuperseded,
+		},
+		{
+			name: "rejects a changed pull request head",
+			mutate: func(_ *models.CodeReviewSessionMetadata, _ *metadataStub, _ *policyStub, pullRequests *pullRequestStub) {
+				pullRequests.health.HeadSHA = "new-head"
+			},
+			expectedCode: RetryReviewConflictHeadChanged,
+		},
+		{
+			name: "rejects a closed pull request",
+			mutate: func(_ *models.CodeReviewSessionMetadata, _ *metadataStub, _ *policyStub, pullRequests *pullRequestStub) {
+				pullRequests.result.Status = models.PullRequestStatusClosed
+			},
+			expectedCode: RetryReviewConflictPRClosed,
+		},
+		{
+			name: "rejects a failure with a newer attempt",
+			mutate: func(source *models.CodeReviewSessionMetadata, metadata *metadataStub, _ *policyStub, _ *pullRequestStub) {
+				newer := *source
+				newer.ID = uuid.New()
+				newer.SessionID = uuid.New()
+				newer.CreatedAt = source.CreatedAt.Add(time.Second)
+				metadata.latestByPullRequest = newer
+			},
+			expectedCode: RetryReviewConflictNewerAttempt,
+		},
+		{
+			name: "rejects a disabled current policy",
+			mutate: func(_ *models.CodeReviewSessionMetadata, _ *metadataStub, policies *policyStub, _ *pullRequestStub) {
+				config := models.DefaultCodeReviewPolicyConfig()
+				config.Enabled = false
+				policies.resolved = models.CodeReviewResolvedPolicy{
+					Config: config,
+					Source: "organization",
+					Policy: &models.CodeReviewPolicyRecord{ID: uuid.New(), Version: 1, Enabled: false},
+				}
+			},
+			expectedCode: RetryReviewConflictPolicyOff,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			repoID := uuid.New()
+			pullRequestID := uuid.New()
+			githubReviewID := int64(9182)
+			githubReviewURL := "https://github.com/acme/repo/pull/42#pullrequestreview-9182"
+			source := models.CodeReviewSessionMetadata{
+				ID: uuid.New(), OrgID: orgID, SessionID: uuid.New(), RepositoryID: repoID,
+				PullRequestID: pullRequestID, PolicyID: uuid.New(), BaseSHA: "base", HeadSHA: "head",
+				TriggerSource: models.CodeReviewTriggerSourceAppReviewer,
+				Status:        models.CodeReviewSessionStatusFailed, RetryableFailure: true,
+				ReviewOutputKey: "failed-output", GitHubReviewID: &githubReviewID, GitHubReviewURL: &githubReviewURL,
+				CreatedAt: time.Now().Add(-time.Minute),
+			}
+			metadata := &metadataStub{latest: source, submitted: source}
+			policies := newPolicyStub()
+			head := "head"
+			base := "base"
+			pullRequests := &pullRequestStub{result: models.PullRequest{
+				ID: pullRequestID, OrgID: orgID, GitHubRepo: "acme/repo", GitHubPRNumber: 42,
+				GitHubPRURL: "https://github.com/acme/repo/pull/42", Title: "Fix rounding",
+				Status: models.PullRequestStatusOpen, HeadSHA: &head, BaseSHA: &base,
+			}, health: models.PullRequestHealthCurrent{
+				PullRequestID: pullRequestID, OrgID: orgID, HeadSHA: "head", BaseSHA: "base",
+			}}
+			if tt.mutate != nil {
+				tt.mutate(&source, metadata, policies, pullRequests)
+				metadata.latest = source
+			}
+			metadata.getBySession = source
+			sessions := &sessionStub{getResult: models.Session{RevisionContext: json.RawMessage(`{"pull_request_author":"anya","requested_reviewer_login":"143-code-reviewer"}`)}}
+			jobs := &jobStub{jobID: uuid.New(), active: !tt.unconfirmedReuse, err: tt.enqueueErr}
+			svc := NewService(policies, metadata, sessions, jobs, zerolog.Nop(), Config{})
+			svc.SetRetryDependencies(pullRequests, &pullRequestSyncerStub{err: tt.syncErr})
+
+			result, err := svc.RetryReview(context.Background(), RetryReviewInput{OrgID: orgID, SessionID: source.SessionID})
+
+			if tt.expectedCode != "" {
+				var conflict *RetryReviewConflictError
+				require.ErrorAs(t, err, &conflict, "ineligible retries should return a typed conflict")
+				require.Equal(t, tt.expectedCode, conflict.Code, "retry conflict should identify the rejected state")
+				require.Equal(t, 0, jobs.enqueueCalls, "rejected retries should not enqueue review work")
+				if tt.unconfirmedReuse {
+					require.Nil(t, metadata.latest.SupersededBySessionID, "unconfirmed replacement must not hide the source retry action")
+				}
+				return
+			}
+			if tt.enqueueErr != nil {
+				require.ErrorContains(t, err, tt.enqueueErr.Error(), "enqueue failures should be returned to the caller")
+				require.Equal(t, models.CodeReviewSessionStatusFailed, metadata.created.Status, "unqueued replacement should become terminal")
+				require.True(t, metadata.created.RetryableFailure, "unqueued replacement should remain manually recoverable")
+				require.Equal(t, metadata.created.SessionID, result.SessionID, "failed dispatch should identify its durable replacement for auditing")
+				require.Equal(t, metadata.created.SessionID, *metadata.latest.SupersededBySessionID, "failed source should link to the recoverable replacement")
+				require.Equal(t, 1, sessions.updateStatusCalls, "unqueued replacement session should be terminalized")
+
+				failedReplacement := metadata.created
+				metadata.getBySession = failedReplacement
+				metadata.latest = failedReplacement
+				metadata.latestByPullRequest = models.CodeReviewSessionMetadata{}
+				metadata.created = models.CodeReviewSessionMetadata{}
+				jobs.err = nil
+				jobs.jobID = uuid.New()
+				recovered, retryErr := svc.RetryReview(context.Background(), RetryReviewInput{OrgID: orgID, SessionID: failedReplacement.SessionID})
+
+				require.NoError(t, retryErr, "compensated replacement should itself be retryable")
+				require.NotEqual(t, failedReplacement.SessionID, recovered.SessionID, "recovery should create a fresh immutable attempt")
+				require.Equal(t, recovered.SessionID, *metadata.latest.SupersededBySessionID, "compensated failure should link to the recovered attempt")
+				require.Equal(t, 2, jobs.enqueueCalls, "recovery should make a second queue attempt")
+				require.Equal(t, source.GitHubReviewID, jobs.payload.ExistingGitHubReviewID, "recovery should still update the original GitHub evidence")
+				return
+			}
+			require.NoError(t, err, "eligible retry should create a replacement attempt")
+			require.True(t, tt.expectStart, "success case should be explicitly marked")
+			require.Equal(t, source.SessionID, result.PreviousSessionID, "retry should identify the failed source attempt")
+			require.NotEqual(t, source.SessionID, result.SessionID, "retry should create an immutable replacement session")
+			require.Equal(t, result.SessionID, *metadata.latest.SupersededBySessionID, "failed attempt should link to its replacement")
+			require.Equal(t, 1, jobs.enqueueCalls, "retry should enqueue one replacement job")
+			require.Equal(t, models.CodeReviewPhaseSyncingGitHub, *metadata.created.Phase, "replacement should start in the GitHub sync phase")
+			require.Equal(t, "anya", jobs.payload.PullRequestAuthor, "replacement should preserve author context")
+			require.Equal(t, "143-code-reviewer", jobs.payload.RequestedReviewerLogin, "replacement should preserve reviewer identity for GitHub cleanup")
+			require.Equal(t, source.ReviewOutputKey, jobs.payload.PreviousOutputKey, "replacement should preserve the prior output key")
+			require.Equal(t, source.GitHubReviewID, jobs.payload.ExistingGitHubReviewID, "replacement should update the submitted GitHub review")
+			require.Equal(t, source.GitHubReviewURL, jobs.payload.ExistingGitHubReviewURL, "replacement should preserve the submitted GitHub review URL")
+			require.Equal(t, orgID, pullRequests.healthOrgID, "live head lookup should preserve org tenancy")
+			require.Equal(t, pullRequestID, pullRequests.healthPullRequestID, "live head lookup should target the retried pull request")
+		})
+	}
+}
+
+func TestService_RetryReviewRecoversUnqueuedNewerAttempt(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repositoryID := uuid.New()
+	pullRequestID := uuid.New()
+	githubReviewID := int64(9182)
+	githubReviewURL := "https://github.com/acme/repo/pull/42#pullrequestreview-9182"
+	source := models.CodeReviewSessionMetadata{
+		ID: uuid.New(), OrgID: orgID, SessionID: uuid.New(), RepositoryID: repositoryID,
+		PullRequestID: pullRequestID, PolicyID: uuid.New(), BaseSHA: "base", HeadSHA: "head",
+		TriggerSource: models.CodeReviewTriggerSourceAppReviewer,
+		Status:        models.CodeReviewSessionStatusFailed, RetryableFailure: true,
+		ReviewOutputKey: "failed-output", GitHubReviewID: &githubReviewID, GitHubReviewURL: &githubReviewURL,
+		CreatedAt: time.Now().Add(-3 * time.Minute),
+	}
+	unqueued := source
+	unqueued.ID = uuid.New()
+	unqueued.SessionID = uuid.New()
+	unqueued.Status = models.CodeReviewSessionStatusQueued
+	unqueued.RetryableFailure = false
+	unqueued.GitHubReviewID = nil
+	unqueued.GitHubReviewURL = nil
+	unqueued.ReviewOutputKey = "unqueued-output"
+	unqueued.CreatedAt = time.Now().Add(-2 * codeReviewJobEnqueueGracePeriod)
+	metadata := &metadataStub{
+		getBySession: source, latest: source, latestByPullRequest: unqueued, submitted: source,
+	}
+	head := "head"
+	base := "base"
+	pullRequests := &pullRequestStub{
+		result: models.PullRequest{
+			ID: pullRequestID, OrgID: orgID, GitHubRepo: "acme/repo", GitHubPRNumber: 42,
+			GitHubPRURL: "https://github.com/acme/repo/pull/42", Title: "Fix rounding",
+			Status: models.PullRequestStatusOpen, HeadSHA: &head, BaseSHA: &base,
+		},
+		health: models.PullRequestHealthCurrent{
+			PullRequestID: pullRequestID, OrgID: orgID, HeadSHA: head, BaseSHA: base,
+		},
+	}
+	sessions := &sessionStub{getResult: models.Session{RevisionContext: json.RawMessage(`{"pull_request_author":"anya"}`)}}
+	jobs := &jobStub{jobID: uuid.New()}
+	svc := NewService(newPolicyStub(), metadata, sessions, jobs, zerolog.Nop(), Config{})
+	svc.SetRetryDependencies(pullRequests, &pullRequestSyncerStub{})
+
+	_, err := svc.RetryReview(context.Background(), RetryReviewInput{OrgID: orgID, SessionID: source.SessionID})
+
+	var conflict *RetryReviewConflictError
+	require.ErrorAs(t, err, &conflict, "selected source should report the newer replacement")
+	require.Equal(t, RetryReviewConflictNewerAttempt, conflict.Code, "recovered orphan should remain a newer-attempt conflict for the old row")
+	require.Equal(t, models.CodeReviewSessionStatusFailed, metadata.latestByPullRequest.Status, "orphaned replacement should be terminalized")
+	require.True(t, metadata.latestByPullRequest.RetryableFailure, "orphaned replacement should become manually recoverable")
+	require.Equal(t, unqueued.SessionID, *metadata.latest.SupersededBySessionID, "old attempt should link to the recovered orphan")
+	require.Equal(t, 1, sessions.updateStatusCalls, "orphaned replacement session should be terminalized")
+
+	failedReplacement := metadata.latestByPullRequest
+	metadata.getBySession = failedReplacement
+	metadata.latest = failedReplacement
+	metadata.latestByPullRequest = models.CodeReviewSessionMetadata{}
+	jobs.jobID = uuid.New()
+	recovered, retryErr := svc.RetryReview(context.Background(), RetryReviewInput{OrgID: orgID, SessionID: failedReplacement.SessionID})
+
+	require.NoError(t, retryErr, "recovered orphan should support a fresh retry")
+	require.NotEqual(t, failedReplacement.SessionID, recovered.SessionID, "retry should create a new immutable session")
+	require.Equal(t, recovered.SessionID, *metadata.latest.SupersededBySessionID, "recovered orphan should link to its queued replacement")
+	require.Equal(t, 1, jobs.enqueueCalls, "retrying the recovered orphan should enqueue one job")
+}
+
 func newReviewChangedInput() ReviewChangedInput {
 	return ReviewChangedInput{
 		OrgID: uuid.New(), RepositoryID: uuid.New(), PullRequestID: uuid.New(),
@@ -601,16 +866,20 @@ func (s *policyStub) SavePolicy(_ context.Context, orgID uuid.UUID, config model
 }
 
 type metadataStub struct {
-	createCalls     int
-	staleCalls      int
-	supersededBy    *uuid.UUID
-	created         models.CodeReviewSessionMetadata
-	createResult    models.CodeReviewSessionMetadata
-	latest          models.CodeReviewSessionMetadata
-	latestAfterFail models.CodeReviewSessionMetadata
-	failCalls       int
-	failErr         error
-	approved        bool
+	createCalls         int
+	staleCalls          int
+	supersededBy        *uuid.UUID
+	created             models.CodeReviewSessionMetadata
+	createResult        models.CodeReviewSessionMetadata
+	getBySession        models.CodeReviewSessionMetadata
+	latest              models.CodeReviewSessionMetadata
+	latestByHead        models.CodeReviewSessionMetadata
+	latestByPullRequest models.CodeReviewSessionMetadata
+	submitted           models.CodeReviewSessionMetadata
+	latestAfterFail     models.CodeReviewSessionMetadata
+	failCalls           int
+	failErr             error
+	approved            bool
 }
 
 func (s *metadataStub) CreateSessionMetadata(_ context.Context, metadata *models.CodeReviewSessionMetadata) error {
@@ -632,7 +901,20 @@ func (s *metadataStub) GetByOutputKey(context.Context, uuid.UUID, string) (model
 	return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
 }
 
+func (s *metadataStub) GetBySessionID(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	if s.getBySession.ID != uuid.Nil {
+		return s.getBySession, nil
+	}
+	if s.latest.ID != uuid.Nil {
+		return s.latest, nil
+	}
+	return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
+}
+
 func (s *metadataStub) GetLatestByPullRequestHead(_ context.Context, _, _ uuid.UUID, _ string, _ uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	if s.latestByHead.ID != uuid.Nil {
+		return s.latestByHead, nil
+	}
 	if s.latest.ID != uuid.Nil {
 		return s.latest, nil
 	}
@@ -640,6 +922,9 @@ func (s *metadataStub) GetLatestByPullRequestHead(_ context.Context, _, _ uuid.U
 }
 
 func (s *metadataStub) GetLatestByPullRequest(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	if s.latestByPullRequest.ID != uuid.Nil {
+		return s.latestByPullRequest, nil
+	}
 	if s.latest.ID != uuid.Nil {
 		return s.latest, nil
 	}
@@ -647,6 +932,9 @@ func (s *metadataStub) GetLatestByPullRequest(context.Context, uuid.UUID, uuid.U
 }
 
 func (s *metadataStub) GetLatestSubmittedByPullRequest(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	if s.submitted.GitHubReviewID != nil {
+		return s.submitted, nil
+	}
 	if s.latest.GitHubReviewID != nil {
 		return s.latest, nil
 	}
@@ -672,6 +960,41 @@ func (s *metadataStub) FailReview(_ context.Context, _ uuid.UUID, _ uuid.UUID, r
 	failed.FailureReason = &reason
 	s.latest = failed
 	return failed, nil
+}
+
+func (s *metadataStub) FailReviewWithStatus(_ context.Context, _ uuid.UUID, params db.FailCodeReviewParams) (models.CodeReviewSessionMetadata, error) {
+	s.failCalls++
+	var failed models.CodeReviewSessionMetadata
+	var assign func(models.CodeReviewSessionMetadata)
+	switch {
+	case s.created.SessionID == params.SessionID:
+		failed = s.created
+		assign = func(value models.CodeReviewSessionMetadata) { s.created = value }
+	case s.latestByPullRequest.SessionID == params.SessionID:
+		failed = s.latestByPullRequest
+		assign = func(value models.CodeReviewSessionMetadata) { s.latestByPullRequest = value }
+	case s.latest.SessionID == params.SessionID:
+		failed = s.latest
+		assign = func(value models.CodeReviewSessionMetadata) { s.latest = value }
+	default:
+		return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
+	}
+	failed.Status = models.CodeReviewSessionStatusFailed
+	failed.Phase = nil
+	failed.FailureReason = &params.Reason
+	failed.StatusCode = &params.Code
+	failed.StatusMessage = &params.Message
+	failed.RetryableFailure = params.Retryable
+	assign(failed)
+	return failed, nil
+}
+
+func (s *metadataStub) MarkSupersededBy(_ context.Context, _ uuid.UUID, sessionID, replacementSessionID uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	if s.latest.SessionID != sessionID {
+		return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
+	}
+	s.latest.SupersededBySessionID = &replacementSessionID
+	return s.latest, nil
 }
 
 func (s *metadataStub) MarkStaleForPullRequestExceptHead(_ context.Context, _, _ uuid.UUID, _ string, supersededBySessionID *uuid.UUID) (int64, error) {
@@ -720,6 +1043,33 @@ type jobStub struct {
 	reassessmentPayload ReviewChangedInput
 	opts                db.EnqueueOpts
 	active              bool
+	err                 error
+}
+
+type pullRequestStub struct {
+	result              models.PullRequest
+	health              models.PullRequestHealthCurrent
+	healthOrgID         uuid.UUID
+	healthPullRequestID uuid.UUID
+	err                 error
+}
+
+func (s *pullRequestStub) GetByID(context.Context, uuid.UUID, uuid.UUID) (models.PullRequest, error) {
+	return s.result, s.err
+}
+
+func (s *pullRequestStub) GetHealthCurrent(_ context.Context, orgID, pullRequestID uuid.UUID) (models.PullRequestHealthCurrent, error) {
+	s.healthOrgID = orgID
+	s.healthPullRequestID = pullRequestID
+	return s.health, s.err
+}
+
+type pullRequestSyncerStub struct {
+	err error
+}
+
+func (s *pullRequestSyncerStub) SyncPullRequestState(context.Context, uuid.UUID, uuid.UUID) error {
+	return s.err
 }
 
 func (s *jobStub) EnqueueWithOpts(_ context.Context, _ uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
@@ -735,7 +1085,7 @@ func (s *jobStub) EnqueueWithOpts(_ context.Context, _ uuid.UUID, opts db.Enqueu
 	if opts.DedupeKey != nil {
 		s.dedupeKey = *opts.DedupeKey
 	}
-	return s.jobID, nil
+	return s.jobID, s.err
 }
 
 func (s *jobStub) HasActiveByDedupeKey(context.Context, uuid.UUID, string, string) (bool, error) {

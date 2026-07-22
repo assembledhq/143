@@ -326,13 +326,14 @@ func TestCodeReviewStore_CreateSessionMetadataReusesOutputKey(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
-			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable", "stale",
+			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
 			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id", "github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
-		}).AddRow(metadataID, orgID, sessionID, repoID, prID, policyID, "base", "head", true, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusQueued, nil, nil, false, nil, "pr:head:policy", nil, nil, nil, nil, nil, nil, now))
+		}).AddRow(metadataID, orgID, sessionID, repoID, prID, policyID, "base", "head", true, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusQueued, nil, nil, nil, nil, nil, false, nil, nil, false, nil, "pr:head:policy", nil, nil, nil, nil, nil, nil, now))
 
 	metadata := &models.CodeReviewSessionMetadata{
 		OrgID:           orgID,
@@ -354,6 +355,75 @@ func TestCodeReviewStore_CreateSessionMetadataReusesOutputKey(t *testing.T) {
 	require.Equal(t, metadataID, metadata.ID, "CreateSessionMetadata should scan metadata id")
 	require.True(t, metadata.FromFork, "CreateSessionMetadata should persist fork source evidence")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCodeReviewStore_SetWaitingForGitHubPersistsOperationalState(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	retryAt := time.Date(2026, 7, 21, 23, 45, 0, 0, time.UTC)
+	lastErrorAt := retryAt.Add(-time.Minute)
+	phase := models.CodeReviewPhaseWaitingGitHub
+	statusCode := models.CodeReviewStatusCodeGitHubRateLimited
+	message := "GitHub is rate-limited. The review will resume automatically when the limit resets."
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery("(?s)UPDATE code_review_session_metadata.*phase = 'waiting_for_github'.*WHERE org_id = @org_id.*session_id = @session_id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "retry_at": retryAt, "status_message": message}).
+		WillReturnRows(codeReviewMetadataRowsForTest().AddRow(
+			uuid.New(), orgID, sessionID, uuid.New(), uuid.New(), uuid.New(),
+			"base", "head", false, models.CodeReviewTriggerSourceAppReviewer,
+			models.CodeReviewSessionStatusRunning, &phase, &statusCode, &message, &retryAt, &lastErrorAt, true,
+			nil, nil, false, nil, "output", nil, nil, nil, nil, nil, nil, retryAt,
+		))
+
+	metadata, err := NewCodeReviewStore(mock).SetWaitingForGitHub(context.Background(), orgID, sessionID, retryAt, message)
+
+	require.NoError(t, err, "rate-limit wait should persist")
+	require.Equal(t, &phase, metadata.Phase, "wait should expose the GitHub wait phase")
+	require.Equal(t, &retryAt, metadata.RetryAt, "wait should expose the worker retry time")
+	require.True(t, metadata.RetryableFailure, "wait should remain eligible if automatic retries later exhaust")
+	require.NoError(t, mock.ExpectationsWereMet(), "wait update should stay org and session scoped")
+}
+
+func TestCodeReviewStore_MarkSupersededByUsesRetryableFailureCAS(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	replacementID := uuid.New()
+	now := time.Now().UTC()
+	statusMessage := "A replacement attempt was started for this review."
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery("(?s)UPDATE code_review_session_metadata.*superseded_by_session_id = @replacement_session_id.*status = 'failed'.*retryable_failure = true.*superseded_by_session_id IS NULL").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "replacement_session_id": replacementID}).
+		WillReturnRows(codeReviewMetadataRowsForTest().AddRow(
+			uuid.New(), orgID, sessionID, uuid.New(), uuid.New(), uuid.New(),
+			"base", "head", false, models.CodeReviewTriggerSourceAppReviewer,
+			models.CodeReviewSessionStatusFailed, nil, nil, &statusMessage, nil, &now, true,
+			nil, nil, false, &replacementID, "output", nil, nil, nil, nil, nil, &now, now,
+		))
+
+	metadata, err := NewCodeReviewStore(mock).MarkSupersededBy(context.Background(), orgID, sessionID, replacementID)
+
+	require.NoError(t, err, "eligible failed attempt should link to its replacement")
+	require.Equal(t, &replacementID, metadata.SupersededBySessionID, "supersession CAS should return the replacement link")
+	require.Equal(t, &statusMessage, metadata.StatusMessage, "superseded attempt should stop instructing operators to retry it")
+	require.NoError(t, mock.ExpectationsWereMet(), "supersession CAS should enforce org and retry eligibility")
+}
+
+func codeReviewMetadataRowsForTest() *pgxmock.Rows {
+	return pgxmock.NewRows([]string{
+		"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
+		"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message",
+		"retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale", "superseded_by_session_id",
+		"review_output_key", "prompt_artifact_key", "github_review_id", "github_review_url", "final_review_body",
+		"failure_reason", "completed_at", "created_at",
+	})
 }
 
 // TestCodeReviewStore_CompleteReviewPublishesUpdate verifies the store fans a
@@ -392,11 +462,11 @@ func TestCodeReviewStore_CompleteReviewPublishesUpdate(t *testing.T) {
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
-			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable", "stale",
+			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
 			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id", "github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
 		}).AddRow(
 			metadataID, orgID, sessionID, uuid.New(), uuid.New(), uuid.New(),
-			"base", "head", false, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusCompleted, &decisionApproved, &acceptableTrue, false,
+			"base", "head", false, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusCompleted, nil, nil, nil, nil, nil, false, &decisionApproved, &acceptableTrue, false,
 			nil, "pr:head:policy", nil, nil, nil, &finalBody, nil, &completedAt, now,
 		))
 
@@ -528,9 +598,9 @@ func TestCodeReviewStore_GetByOutputKeyFiltersByOrg(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
-			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable", "stale",
+			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
 			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id", "github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
-		}).AddRow(metadataID, orgID, sessionID, repoID, prID, policyID, "base", "head", false, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusCompleted, nil, nil, false, nil, outputKey, nil, nil, nil, nil, nil, nil, now))
+		}).AddRow(metadataID, orgID, sessionID, repoID, prID, policyID, "base", "head", false, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusCompleted, nil, nil, nil, nil, nil, false, nil, nil, false, nil, outputKey, nil, nil, nil, nil, nil, nil, now))
 
 	metadata, err := NewCodeReviewStore(mock).GetByOutputKey(context.Background(), orgID, outputKey)
 
@@ -559,9 +629,9 @@ func TestCodeReviewStore_GetLatestByPullRequestHeadFiltersByOrgAndPolicy(t *test
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
-			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable", "stale",
+			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
 			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id", "github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
-		}).AddRow(metadataID, orgID, sessionID, repoID, prID, policyID, "base", "head", false, models.CodeReviewTriggerSourceTeamReviewer, models.CodeReviewSessionStatusFailed, nil, nil, false, nil, "output", nil, nil, nil, nil, nil, &now, now))
+		}).AddRow(metadataID, orgID, sessionID, repoID, prID, policyID, "base", "head", false, models.CodeReviewTriggerSourceTeamReviewer, models.CodeReviewSessionStatusFailed, nil, nil, nil, nil, nil, false, nil, nil, false, nil, "output", nil, nil, nil, nil, nil, &now, now))
 
 	metadata, err := NewCodeReviewStore(mock).GetLatestByPullRequestHead(context.Background(), orgID, prID, "head", policyID)
 	require.NoError(t, err, "latest review lookup should succeed")
@@ -620,10 +690,10 @@ func TestCodeReviewStore_GetLatestByPullRequestFiltersByOrg(t *testing.T) {
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
 				WillReturnRows(pgxmock.NewRows([]string{
 					"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
-					"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable", "stale",
+					"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
 					"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id", "github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
 				}).AddRow(metadataID, orgID, sessionID, repoID, prID, policyID, "base", "head", false,
-					models.CodeReviewTriggerSourceTeamReviewer, models.CodeReviewSessionStatusCompleted, nil, nil, false,
+					models.CodeReviewTriggerSourceTeamReviewer, models.CodeReviewSessionStatusCompleted, nil, nil, nil, nil, nil, false, nil, nil, false,
 					nil, "output", nil, &reviewID, &reviewURL, nil, nil, nil, now))
 
 			actual, err := tt.load(context.Background(), NewCodeReviewStore(mock), orgID, prID)
@@ -717,9 +787,9 @@ func TestCodeReviewStore_CompleteReviewStoresGitHubReviewEvidence(t *testing.T) 
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
-			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable", "stale",
+			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
 			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id", "github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
-		}).AddRow(metadataID, orgID, sessionID, repoID, prID, policyID, "base", "head", false, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusCompleted, &decision, &acceptable, false, nil, "key", nil, &reviewID, &reviewURL, &body, nil, &now, now))
+		}).AddRow(metadataID, orgID, sessionID, repoID, prID, policyID, "base", "head", false, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusCompleted, nil, nil, nil, nil, nil, false, &decision, &acceptable, false, nil, "key", nil, &reviewID, &reviewURL, &body, nil, &now, now))
 
 	metadata, err := NewCodeReviewStore(mock).CompleteReview(context.Background(), orgID, CompleteCodeReviewParams{
 		SessionID:       sessionID,
@@ -757,21 +827,21 @@ func TestCodeReviewStore_ListReviewsAppliesDesignFilters(t *testing.T) {
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
 
-	mock.ExpectQuery("m.decision = @decision").
+	mock.ExpectQuery("(?s)m.status = 'failed'.*pr.status = 'open'.*current_health.head_sha = m.head_sha.*FROM code_review_session_metadata newer.*approved.status = 'completed'.*policy.active = true.*AS retry_eligible.*m.decision = @decision").
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
-			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable", "stale",
+			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
 			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id",
-			"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at", "session_title", "repository_name", "github_repo",
+			"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at", "retry_eligible", "session_title", "repository_name", "github_repo",
 			"github_pr_number", "github_pr_url", "pull_request_title", "pull_request_author",
 		}).AddRow(
 			metadataID, orgID, sessionID, repoID, prID, policyID,
-			"base", "head", false, models.CodeReviewTriggerSourceAppReviewer, status, &decision, &acceptable, false,
-			nil, "key", nil, nil, nil, nil, nil, &now, now, &title, &repoName, "acme/repo",
+			"base", "head", false, models.CodeReviewTriggerSourceAppReviewer, status, nil, nil, nil, nil, nil, false, &decision, &acceptable, false,
+			nil, "key", nil, nil, nil, nil, nil, &now, now, false, &title, &repoName, "acme/repo",
 			42, "https://github.com/acme/repo/pull/42", "Fix auth bug", "devin",
 		))
 
@@ -788,6 +858,7 @@ func TestCodeReviewStore_ListReviewsAppliesDesignFilters(t *testing.T) {
 	require.Len(t, reviews, 1, "ListReviews should scan matching rows")
 	require.Equal(t, "Fix auth bug", reviews[0].PullRequestTitle, "ListReviews should return pull request metadata")
 	require.Equal(t, "devin", reviews[0].PullRequestAuthor, "ListReviews should return the GitHub pull request author")
+	require.False(t, reviews[0].RetryEligible, "completed reviews should not expose the retry action")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -824,7 +895,7 @@ func TestCodeReviewStore_ListReviewsAppliesOutcomeFilters(t *testing.T) {
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 				WillReturnRows(pgxmock.NewRows([]string{
 					"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
-					"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable", "stale",
+					"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
 					"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id",
 					"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at", "session_title",
 					"repository_name", "github_repo", "github_pr_number", "github_pr_url", "pull_request_title", "pull_request_author",
@@ -966,14 +1037,14 @@ func TestCodeReviewStore_GetListItemBySessionIDScopesByOrgAndSession(t *testing.
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
-			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable", "stale",
+			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
 			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id",
-			"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at", "session_title",
+			"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at", "retry_eligible", "session_title",
 			"repository_name", "github_repo", "github_pr_number", "github_pr_url", "pull_request_title", "pull_request_author",
 		}).AddRow(
 			metadataID, orgID, sessionID, repoID, uuid.New(), uuid.New(),
-			"base", "head", false, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusRunning, nil, nil, false,
-			nil, "key", nil, nil, nil, nil, nil, nil, now, &title, &repoName, "acme/repo",
+			"base", "head", false, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusRunning, nil, nil, nil, nil, nil, false, nil, nil, false,
+			nil, "key", nil, nil, nil, nil, nil, nil, now, false, &title, &repoName, "acme/repo",
 			42, "https://github.com/acme/repo/pull/42", "Fix auth bug", "devin",
 		))
 
