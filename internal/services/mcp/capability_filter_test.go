@@ -100,8 +100,9 @@ func TestCapabilityFilteredToolSourceAllowsCodeReviewHistoryWithReviewFeedbackGr
 		{ID: models.AgentCapabilityCodeReviewPolicy, AccessLevel: models.AgentCapabilityAccessWrite},
 	}})
 	require.Equal(t, []Tool{
+		{Name: "code_review_history_policy"},
 		{Name: "code_review_history_update_policy"},
-	}, writeGranted.ListTools(), "the policy management capability should expose exactly the policy write tool")
+	}, writeGranted.ListTools(), "the policy management capability should expose the policy write plus the policy read it depends on, never the review history reads")
 }
 
 func TestCapabilityFilteredToolSourceAllowsSessionPreviewTools(t *testing.T) {

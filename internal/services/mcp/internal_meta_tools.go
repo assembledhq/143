@@ -81,7 +81,7 @@ func (s *internalMetaToolSource) ListTools() []Tool {
 		Tool{Name: "code_review_history_update_policy", Description: "Apply a versioned update to the org's code review policy. Supplied config keys merge onto the active policy; omitted fields keep their current values. Requires the code_review_policy_management write capability (default off; request it with `143-tools capability request`). Pass the active policy version you read — the call fails with the current version if someone changed the policy in between. Every update is a new audited version humans can inspect and roll back.", InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
 			"config":           {Type: "string", Description: "JSON object of policy fields to change, same shape as the policy tool's config output (e.g. '{\"review_instructions\":\"...\"}')"},
 			"expected_version": {Type: "number", Description: "Active policy version this change is based on (0 if the org has never saved a policy)"},
-			"reason":           {Type: "string", Description: "Why the policy is changing; recorded in the audit log for humans"},
+			"reason":           {Type: "string", Description: "Why the policy is changing; recorded in the audit log for humans (max 2000 characters)"},
 		}, Required: []string{"config", "expected_version", "reason"}}},
 	)
 	return tools

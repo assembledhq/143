@@ -126,6 +126,10 @@ type internalCodeReviewDetail struct {
 const internalCodeReviewDefaultLimit = 20
 const internalCodeReviewMaxLimit = 50
 
+// internalCodeReviewReasonLimit bounds the audit reason on policy updates so
+// agent-supplied text cannot bloat audit rows.
+const internalCodeReviewReasonLimit = 2000
+
 // List returns past code reviews for the session's repository, newest first.
 func (h *InternalCodeReviewHandler) List(w http.ResponseWriter, r *http.Request) {
 	claims, ok := h.authorize(w, r)
@@ -340,7 +344,7 @@ func (h *InternalCodeReviewHandler) Get(w http.ResponseWriter, r *http.Request) 
 
 // Policy returns the active resolved code review policy for the org.
 func (h *InternalCodeReviewHandler) Policy(w http.ResponseWriter, r *http.Request) {
-	claims, ok := h.authorize(w, r)
+	claims, ok := h.authorizePolicyRead(w, r)
 	if !ok {
 		return
 	}
@@ -388,6 +392,10 @@ func (h *InternalCodeReviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.
 		writeError(w, r, http.StatusBadRequest, "REASON_REQUIRED", "reason is required so humans can audit why the policy changed")
 		return
 	}
+	if utf8.RuneCountInString(reason) > internalCodeReviewReasonLimit {
+		writeError(w, r, http.StatusBadRequest, "REASON_TOO_LONG", "reason must be at most 2000 characters")
+		return
+	}
 	current, err := h.store.ResolvePolicy(r.Context(), claims.OrgID)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_POLICY_LOAD_FAILED", "failed to load code review policy", err)
@@ -395,8 +403,9 @@ func (h *InternalCodeReviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.
 	}
 	// Overlay the supplied keys onto the active config: unmarshal into a copy
 	// pre-populated with current values, so absent fields keep their setting
-	// instead of resetting to zero values. Supplied nested objects replace
-	// their section wholesale.
+	// instead of resetting to zero values. json.Unmarshal merges nested struct
+	// sections field-wise the same way (only supplied keys change); JSON
+	// arrays are the exception and replace the current array wholesale.
 	merged := current.Config
 	if err := json.Unmarshal(req.Config, &merged); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_CONFIG", "invalid policy config", err)
@@ -455,7 +464,7 @@ func (h *InternalCodeReviewHandler) emitPolicyAudit(r *http.Request, claims *aut
 // PolicyByID returns one historical policy version so agents can compare the
 // policy that governed an old review against the active one.
 func (h *InternalCodeReviewHandler) PolicyByID(w http.ResponseWriter, r *http.Request) {
-	claims, ok := h.authorize(w, r)
+	claims, ok := h.authorizePolicyRead(w, r)
 	if !ok {
 		return
 	}
@@ -482,6 +491,25 @@ func (h *InternalCodeReviewHandler) authorize(w http.ResponseWriter, r *http.Req
 		return nil, false
 	}
 	if !sessionHasCapability(session.CapabilitySnapshot, models.AgentCapabilityReviewFeedback) {
+		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "review_feedback is not enabled for this agent run")
+		return nil, false
+	}
+	return claims, true
+}
+
+// authorizePolicyRead admits either capability to the policy read endpoints:
+// review_feedback (the default-on history read grant) or
+// code_review_policy_management at any level. Without the latter, an org that
+// granted only the write capability would have an agent able to update the
+// policy but unable to read it — and so unable to learn the expected_version
+// its own update requires.
+func (h *InternalCodeReviewHandler) authorizePolicyRead(w http.ResponseWriter, r *http.Request) (*auth.InternalTokenClaims, bool) {
+	claims, session, ok := authorizeInternalSession(w, r, h.signingSecret, h.sessions)
+	if !ok {
+		return nil, false
+	}
+	if !sessionHasCapability(session.CapabilitySnapshot, models.AgentCapabilityReviewFeedback) &&
+		!sessionHasCapability(session.CapabilitySnapshot, models.AgentCapabilityCodeReviewPolicy) {
 		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "review_feedback is not enabled for this agent run")
 		return nil, false
 	}

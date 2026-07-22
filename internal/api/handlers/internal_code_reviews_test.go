@@ -461,6 +461,7 @@ func TestInternalCodeReviewHandler_UpdatePolicyValidatesArguments(t *testing.T) 
 		{name: "config must not be empty", body: `{"config":{},"expected_version":0,"reason":"r"}`, code: "INVALID_CONFIG"},
 		{name: "expected_version is required", body: `{"config":{"enabled":true},"reason":"r"}`, code: "EXPECTED_VERSION_REQUIRED"},
 		{name: "reason is required", body: `{"config":{"enabled":true},"expected_version":0,"reason":"  "}`, code: "REASON_REQUIRED"},
+		{name: "reason is bounded", body: `{"config":{"enabled":true},"expected_version":0,"reason":"` + strings.Repeat("y", internalCodeReviewReasonLimit+1) + `"}`, code: "REASON_TOO_LONG"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -473,6 +474,28 @@ func TestInternalCodeReviewHandler_UpdatePolicyValidatesArguments(t *testing.T) 
 			require.NoError(t, fx.mock.ExpectationsWereMet(), "no database calls should be made")
 		})
 	}
+}
+
+func TestInternalCodeReviewHandler_WriteGrantAlsoReadsPolicyButNotHistory(t *testing.T) {
+	t.Parallel()
+
+	fx := newInternalCodeReviewWriteFixture(t)
+	fx.mock.ExpectQuery("FROM code_review_policies").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(internalCodeReviewPolicyColumns))
+
+	policyReq := httptest.NewRequest(http.MethodGet, "/api/v1/internal/code-reviews/policy", nil)
+	policyReq.Header.Set("Authorization", "Bearer "+fx.token)
+	policyRec := httptest.NewRecorder()
+	fx.handler.Policy(policyRec, policyReq)
+	require.Equal(t, http.StatusOK, policyRec.Code, "the write grant must be able to read the policy to learn expected_version: %s", policyRec.Body.String())
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/internal/code-reviews", nil)
+	listReq.Header.Set("Authorization", "Bearer "+fx.token)
+	listRec := httptest.NewRecorder()
+	fx.handler.List(listRec, listReq)
+	require.Equal(t, http.StatusForbidden, listRec.Code, "the write grant alone should not open the review history reads")
+	require.NoError(t, fx.mock.ExpectationsWereMet(), "only the policy read should reach the database")
 }
 
 func TestInternalCodeReviewHandler_UpdatePolicyVersionConflict(t *testing.T) {
