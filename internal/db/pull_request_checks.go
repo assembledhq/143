@@ -13,15 +13,23 @@ import (
 
 const pullRequestCheckStateSelectColumns = `org_id, pull_request_id, head_sha, source, external_key,
 	name, category, status, provider, details_url, summary, provider_event_id,
-	provider_sequence, provider_updated_at, created_at, updated_at`
+	provider_sequence, provider_updated_at, projection_version, created_at, updated_at`
 
 func (s *PullRequestStore) UpsertCheckState(ctx context.Context, orgID uuid.UUID, state models.PullRequestCheckState) (bool, error) {
 	if err := validatePullRequestCheckState(orgID, state.PullRequestID, state.HeadSHA, state); err != nil {
 		return false, err
 	}
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin pull request check state upsert: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockPullRequestCheckProjection(ctx, tx, orgID, state.PullRequestID); err != nil {
+		return false, err
+	}
 
 	var applied bool
-	err := s.db.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		WITH applied AS (
 			INSERT INTO pull_request_check_states (
 				org_id, pull_request_id, head_sha, source, external_key, name,
@@ -42,6 +50,7 @@ func (s *PullRequestStore) UpsertCheckState(ctx context.Context, orgID uuid.UUID
 				provider_event_id = EXCLUDED.provider_event_id,
 				provider_sequence = EXCLUDED.provider_sequence,
 				provider_updated_at = EXCLUDED.provider_updated_at,
+				projection_version = nextval('pull_request_check_state_projection_version_seq'),
 				updated_at = now()
 			WHERE pull_request_check_states.org_id = EXCLUDED.org_id
 			  AND (
@@ -57,28 +66,94 @@ func (s *PullRequestStore) UpsertCheckState(ctx context.Context, orgID uuid.UUID
 	if err != nil {
 		return false, fmt.Errorf("upsert pull request check state: %w", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit pull request check state upsert: %w", err)
+	}
 	return applied, nil
 }
 
-func (s *PullRequestStore) ListCheckStates(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA string) ([]models.PullRequestCheckState, error) {
+// ReserveCheckStateVersion creates an ordering barrier for an authoritative
+// health sync. Webhook writes committed after this call receive a greater
+// version and can therefore be overlaid without relying on wall-clock time.
+func (s *PullRequestStore) ReserveCheckStateVersion(ctx context.Context, orgID, pullRequestID uuid.UUID) (int64, error) {
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin pull request check state version reservation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockPullRequestCheckProjection(ctx, tx, orgID, pullRequestID); err != nil {
+		return 0, err
+	}
+
+	var version int64
+	err = tx.QueryRow(ctx, `SELECT nextval('pull_request_check_state_projection_version_seq')`).Scan(&version)
+	if err != nil {
+		return 0, fmt.Errorf("reserve pull request check state version: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit pull request check state version reservation: %w", err)
+	}
+	return version, nil
+}
+
+func lockPullRequestCheckProjection(ctx context.Context, tx pgx.Tx, orgID, pullRequestID uuid.UUID) error {
+	var lockedID uuid.UUID
+	if err := tx.QueryRow(ctx, `
+		SELECT id
+		FROM pull_requests
+		WHERE org_id = @org_id AND id = @pull_request_id
+		FOR UPDATE`, pgx.NamedArgs{
+		"org_id":          orgID,
+		"pull_request_id": pullRequestID,
+	}).Scan(&lockedID); err != nil {
+		return fmt.Errorf("lock pull request check projection: %w", err)
+	}
+	return nil
+}
+
+func (s *PullRequestStore) ListCheckStatesAfter(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA string, afterVersion int64) ([]models.PullRequestCheckState, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT `+pullRequestCheckStateSelectColumns+`
 		FROM pull_request_check_states
 		WHERE org_id = @org_id
 		  AND pull_request_id = @pull_request_id
 		  AND head_sha = @head_sha
+		  AND projection_version > @after_version
 		ORDER BY lower(name), source, external_key`, pgx.NamedArgs{
 		"org_id":          orgID,
 		"pull_request_id": pullRequestID,
 		"head_sha":        headSHA,
+		"after_version":   afterVersion,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list pull request check states: %w", err)
+		return nil, fmt.Errorf("list pull request check states after version: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PullRequestCheckState])
 }
 
-func (s *PullRequestStore) ReconcileCheckStates(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA string, states []models.PullRequestCheckState) error {
+func (s *PullRequestStore) HasCheckStatesAfter(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA string, afterVersion int64) (bool, error) {
+	var pending bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pull_request_check_states
+			WHERE org_id = @org_id
+			  AND pull_request_id = @pull_request_id
+			  AND head_sha = @head_sha
+			  AND projection_version > @after_version
+		)`, pgx.NamedArgs{
+		"org_id":          orgID,
+		"pull_request_id": pullRequestID,
+		"head_sha":        headSHA,
+		"after_version":   afterVersion,
+	}).Scan(&pending)
+	if err != nil {
+		return false, fmt.Errorf("check for unapplied pull request check states: %w", err)
+	}
+	return pending, nil
+}
+
+func (s *PullRequestStore) ReconcileCheckStates(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA string, checkStateVersion int64, states []models.PullRequestCheckState) error {
 	for _, state := range states {
 		if err := validatePullRequestCheckState(orgID, pullRequestID, headSHA, state); err != nil {
 			return err
@@ -107,15 +182,17 @@ func (s *PullRequestStore) ReconcileCheckStates(ctx context.Context, orgID, pull
 	}
 
 	for _, state := range states {
+		args := pullRequestCheckStateArgs(orgID, state)
+		args["projection_version"] = checkStateVersion
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO pull_request_check_states (
 				org_id, pull_request_id, head_sha, source, external_key, name,
 				category, status, provider, details_url, summary, provider_event_id,
-				provider_sequence, provider_updated_at
+				provider_sequence, provider_updated_at, projection_version
 			) VALUES (
 				@org_id, @pull_request_id, @head_sha, @source, @external_key, @name,
 				@category, @status, @provider, @details_url, @summary, @provider_event_id,
-				@provider_sequence, @provider_updated_at
+				@provider_sequence, @provider_updated_at, @projection_version
 			)
 			ON CONFLICT (pull_request_id, head_sha, source, external_key) DO UPDATE
 			SET name = EXCLUDED.name,
@@ -127,6 +204,7 @@ func (s *PullRequestStore) ReconcileCheckStates(ctx context.Context, orgID, pull
 				provider_event_id = EXCLUDED.provider_event_id,
 				provider_sequence = EXCLUDED.provider_sequence,
 				provider_updated_at = EXCLUDED.provider_updated_at,
+				projection_version = EXCLUDED.projection_version,
 				updated_at = now()
 			WHERE pull_request_check_states.org_id = EXCLUDED.org_id
 			  AND (
@@ -135,7 +213,7 @@ func (s *PullRequestStore) ReconcileCheckStates(ctx context.Context, orgID, pull
 					pull_request_check_states.provider_sequence = EXCLUDED.provider_sequence
 					AND pull_request_check_states.provider_updated_at < EXCLUDED.provider_updated_at
 				)
-			  )`, pullRequestCheckStateArgs(orgID, state)); err != nil {
+			  )`, args); err != nil {
 			return fmt.Errorf("insert reconciled pull request check state: %w", err)
 		}
 	}

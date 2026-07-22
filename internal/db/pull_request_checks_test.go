@@ -16,7 +16,7 @@ import (
 var pullRequestCheckStateColumns = []string{
 	"org_id", "pull_request_id", "head_sha", "source", "external_key",
 	"name", "category", "status", "provider", "details_url", "summary",
-	"provider_event_id", "provider_sequence", "provider_updated_at", "created_at", "updated_at",
+	"provider_event_id", "provider_sequence", "provider_updated_at", "projection_version", "created_at", "updated_at",
 }
 
 func TestPullRequestStore_UpsertCheckState(t *testing.T) {
@@ -60,9 +60,14 @@ func TestPullRequestStore_UpsertCheckState(t *testing.T) {
 				ProviderUpdatedAt: providerUpdatedAt,
 			}
 
+			mock.ExpectBegin()
+			mock.ExpectQuery("SELECT id[\\s\\S]+FOR UPDATE").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+				WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(prID))
 			mock.ExpectQuery("WITH applied AS[\\s\\S]+provider_sequence < EXCLUDED.provider_sequence").
 				WithArgs(pullRequestCheckStateArgs(orgID, state)).
 				WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(tt.databaseApplied))
+			mock.ExpectCommit()
 
 			applied, err := store.UpsertCheckState(context.Background(), orgID, state)
 			require.NoError(t, err, "UpsertCheckState should persist a valid provider event")
@@ -72,7 +77,7 @@ func TestPullRequestStore_UpsertCheckState(t *testing.T) {
 	}
 }
 
-func TestPullRequestStore_ListCheckStates(t *testing.T) {
+func TestPullRequestStore_ListCheckStatesAfter(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -89,22 +94,53 @@ func TestPullRequestStore_ListCheckStates(t *testing.T) {
 			Source: models.PullRequestCheckSourceCheckRun, ExternalKey: "backend test", Name: "Backend Test",
 			Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed,
 			Provider: "github-actions", DetailsURL: "https://github.example/check/7", Summary: "Passed",
-			ProviderEventID: "delivery-7", ProviderSequence: 7, ProviderUpdatedAt: now, CreatedAt: now, UpdatedAt: now,
+			ProviderEventID: "delivery-7", ProviderSequence: 7, ProviderUpdatedAt: now, ProjectionVersion: 12, CreatedAt: now, UpdatedAt: now,
 		},
 	}
 
 	mock.ExpectQuery("SELECT .+ FROM pull_request_check_states").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID, "head_sha": "head-1"}).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID, "head_sha": "head-1", "after_version": int64(9)}).
 		WillReturnRows(pgxmock.NewRows(pullRequestCheckStateColumns).AddRow(
 			orgID, prID, "head-1", models.PullRequestCheckSourceCheckRun, "backend test", "Backend Test",
 			models.PullRequestCheckCategoryTest, models.PullRequestCheckStatusPassed, "github-actions",
-			"https://github.example/check/7", "Passed", "delivery-7", int64(7), now, now, now,
+			"https://github.example/check/7", "Passed", "delivery-7", int64(7), now, int64(12), now, now,
 		))
 
-	states, err := store.ListCheckStates(context.Background(), orgID, prID, "head-1")
-	require.NoError(t, err, "ListCheckStates should return the current head projection")
-	require.Equal(t, expected, states, "ListCheckStates should decode every projected check field")
+	states, err := store.ListCheckStatesAfter(context.Background(), orgID, prID, "head-1", 9)
+	require.NoError(t, err, "ListCheckStatesAfter should return the unapplied current-head projection")
+	require.Equal(t, expected, states, "ListCheckStatesAfter should decode every projected check field")
 	require.NoError(t, mock.ExpectationsWereMet(), "all check state list expectations should be met")
+}
+
+func TestPullRequestStore_CheckStateProjectionVersions(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	defer mock.Close()
+
+	store := NewPullRequestStore(mock)
+	orgID := uuid.New()
+	prID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id[\\s\\S]+FOR UPDATE").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(prID))
+	mock.ExpectQuery("SELECT nextval").
+		WillReturnRows(pgxmock.NewRows([]string{"version"}).AddRow(int64(17)))
+	mock.ExpectCommit()
+	version, err := store.ReserveCheckStateVersion(context.Background(), orgID, prID)
+	require.NoError(t, err, "ReserveCheckStateVersion should create the reconciliation-start barrier")
+	require.Equal(t, int64(17), version, "ReserveCheckStateVersion should return the reserved projection version")
+
+	mock.ExpectQuery("SELECT EXISTS").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID, "head_sha": "head-1", "after_version": int64(17)}).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+	pending, err := store.HasCheckStatesAfter(context.Background(), orgID, prID, "head-1", 17)
+	require.NoError(t, err, "HasCheckStatesAfter should detect a webhook that raced reconciliation")
+	require.True(t, pending, "HasCheckStatesAfter should report unapplied projection rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all projection version expectations should be met")
 }
 
 func TestPullRequestStore_ReconcileCheckStates(t *testing.T) {
@@ -130,11 +166,15 @@ func TestPullRequestStore_ReconcileCheckStates(t *testing.T) {
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID, "head_sha": "head-2"}).
 		WillReturnResult(pgxmock.NewResult("DELETE", 2))
 	mock.ExpectExec("INSERT INTO pull_request_check_states").
-		WithArgs(pullRequestCheckStateArgs(orgID, state)).
+		WithArgs(func() pgx.NamedArgs {
+			args := pullRequestCheckStateArgs(orgID, state)
+			args["projection_version"] = int64(44)
+			return args
+		}()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectCommit()
 
-	err = store.ReconcileCheckStates(context.Background(), orgID, prID, "head-2", []models.PullRequestCheckState{state})
+	err = store.ReconcileCheckStates(context.Background(), orgID, prID, "head-2", 44, []models.PullRequestCheckState{state})
 	require.NoError(t, err, "ReconcileCheckStates should atomically refresh the reconciliation baseline")
 	require.NoError(t, mock.ExpectationsWereMet(), "all check state replacement expectations should be met")
 }

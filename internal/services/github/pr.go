@@ -5747,12 +5747,12 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 			continue
 		}
 		state := checkRunEventState(pr, event)
-		applied, err := s.pullRequests.UpsertCheckState(ctx, pr.OrgID, state)
+		_, err = s.pullRequests.UpsertCheckState(ctx, pr.OrgID, state)
 		if err != nil {
 			return err
 		}
-		if applied {
-			s.enqueuePullRequestHealthRebuild(ctx, pr)
+		if err := s.enqueuePullRequestHealthRebuild(ctx, pr); err != nil {
+			return err
 		}
 	}
 
@@ -5797,12 +5797,12 @@ func (s *PRService) HandleStatusEvent(ctx context.Context, event StatusEvent) er
 	}
 	for _, pr := range prs {
 		state := statusEventState(pr, event)
-		applied, err := s.pullRequests.UpsertCheckState(ctx, pr.OrgID, state)
+		_, err = s.pullRequests.UpsertCheckState(ctx, pr.OrgID, state)
 		if err != nil {
 			return err
 		}
-		if applied {
-			s.enqueuePullRequestHealthRebuild(ctx, pr)
+		if err := s.enqueuePullRequestHealthRebuild(ctx, pr); err != nil {
+			return err
 		}
 	}
 	return nil

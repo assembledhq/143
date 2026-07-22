@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -417,6 +418,7 @@ func TestPRServiceBuildPullRequestHealthResponseUsesCurrentSummaryForRepairActio
 			"summary_preview_json",
 			"enrichment_status",
 			"enriched_at",
+			"check_state_version",
 			"created_at",
 			"updated_at",
 		}).AddRow(
@@ -429,6 +431,7 @@ func TestPRServiceBuildPullRequestHealthResponseUsesCurrentSummaryForRepairActio
 			summaryJSON,
 			models.PullRequestHealthEnrichmentStatusNotRequested,
 			nil,
+			int64(0),
 			now,
 			now,
 		))
@@ -539,6 +542,7 @@ func TestPRServiceBuildPullRequestHealthResponseIncludesActiveRepairs(t *testing
 			"summary_preview_json",
 			"enrichment_status",
 			"enriched_at",
+			"check_state_version",
 			"created_at",
 			"updated_at",
 		}).AddRow(
@@ -551,6 +555,7 @@ func TestPRServiceBuildPullRequestHealthResponseIncludesActiveRepairs(t *testing
 			summaryJSON,
 			models.PullRequestHealthEnrichmentStatusReady,
 			nil,
+			int64(0),
 			now,
 			now,
 		))
@@ -633,7 +638,7 @@ func TestPRServiceBuildPullRequestHealthResponseLoadsSnapshotDetails(t *testing.
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(4), "head-ready", "base-ready", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+			pullRequestID, orgID, int64(4), "head-ready", "base-ready", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, int64(0), now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_snapshots WHERE org_id = .+ AND pull_request_id = .+ AND version = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(4)}).
@@ -696,7 +701,7 @@ func TestPRServiceBuildPullRequestHealthResponseNormalizesLegacyCheckStatuses(t 
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(4), "head-ready", "base-ready", legacySummaryJSON, legacySummaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, now, now,
+			pullRequestID, orgID, int64(4), "head-ready", "base-ready", legacySummaryJSON, legacySummaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
 		))
 
 	service := &PRService{
@@ -744,7 +749,7 @@ func TestPRServiceBuildPullRequestHealthResponseRespectsStoredChecksConfirmed(t 
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(2), "head-new", "base-new", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, now, now,
+			pullRequestID, orgID, int64(2), "head-new", "base-new", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
 		))
 
 	service := &PRService{
@@ -791,7 +796,7 @@ func TestPRServiceBuildPullRequestHealthResponseMarksConfirmedZeroChecksMergeabl
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(4), "head-ready", "base-ready", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, now, now,
+			pullRequestID, orgID, int64(4), "head-ready", "base-ready", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
 		))
 
 	service := &PRService{
@@ -856,7 +861,7 @@ func TestPRServiceGetPullRequestHealthEnqueuesSyncAndEnrichment(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(3), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, now, now,
+			pullRequestID, orgID, int64(3), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
 		))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgx.NamedArgs{
@@ -1014,6 +1019,45 @@ func TestPullRequestStateSyncDedupeKey(t *testing.T) {
 	)
 }
 
+func TestEnqueuePullRequestHealthRebuildChainsAfterRunningJob(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	runningJobID := uuid.New()
+	baseDedupeKey := fmt.Sprintf("%s:%s", prHealthRebuildJobType, prID.String())
+	followUpDedupeKey := fmt.Sprintf("%s:after:%s", baseDedupeKey, runningJobID.String())
+	payload := pgxmock.AnyArg()
+
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "queue": prHealthSyncQueue, "job_type": prHealthRebuildJobType,
+			"payload": payload, "priority": 4, "dedupe_key": &baseDedupeKey, "run_at": pgxmock.AnyArg(),
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}))
+	mock.ExpectQuery("SELECT id, status[\\s\\S]+FROM jobs").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "queue": prHealthSyncQueue, "dedupe_key": baseDedupeKey}).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "status"}).AddRow(runningJobID, models.JobStatusRunning))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "queue": prHealthSyncQueue, "job_type": prHealthRebuildJobType,
+			"payload": payload, "priority": 4, "dedupe_key": &followUpDedupeKey, "run_at": pgxmock.AnyArg(),
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	service := &PRService{
+		jobs:   db.NewJobStore(mock),
+		logger: zerolog.New(io.Discard),
+	}
+	err = service.enqueuePullRequestHealthRebuild(context.Background(), models.PullRequest{ID: prID, OrgID: orgID})
+	require.NoError(t, err, "running rebuild should receive one deduplicated successor")
+	require.NoError(t, mock.ExpectationsWereMet(), "late webhook should enqueue behind the running rebuild")
+}
+
 func TestMergeProjectedCheckSummaries(t *testing.T) {
 	t.Parallel()
 
@@ -1102,18 +1146,16 @@ func TestRebuildProjectedHealthSummary(t *testing.T) {
 	}
 }
 
-func TestCheckStatesUpdatedAfter(t *testing.T) {
+func TestLatestProjectedCheckStateVersion(t *testing.T) {
 	t.Parallel()
 
-	cutoff := time.Date(2026, 7, 22, 20, 0, 0, 0, time.UTC)
 	states := []models.PullRequestCheckState{
-		{Name: "stale", UpdatedAt: cutoff.Add(-time.Second)},
-		{Name: "same", UpdatedAt: cutoff},
-		{Name: "new", UpdatedAt: cutoff.Add(time.Second)},
+		{Name: "older", ProjectionVersion: 7},
+		{Name: "newest", ProjectionVersion: 12},
+		{Name: "middle", ProjectionVersion: 9},
 	}
 
-	actual := checkStatesUpdatedAfter(states, cutoff)
-	require.Equal(t, []models.PullRequestCheckState{{Name: "new", UpdatedAt: cutoff.Add(time.Second)}}, actual, "projected rebuild should apply only check rows newer than the current aggregate")
+	require.Equal(t, int64(12), latestProjectedCheckStateVersion(states), "projected rebuild should persist the newest applied projection version")
 }
 
 func TestPRServiceGetPullRequestHealthEnqueuesFollowUpWhenInlineMergeabilityPending(t *testing.T) {
@@ -1172,6 +1214,7 @@ func TestPRServiceGetPullRequestHealthEnqueuesFollowUpWhenInlineMergeabilityPend
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
+	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
@@ -1207,6 +1250,7 @@ func TestPRServiceGetPullRequestHealthEnqueuesFollowUpWhenInlineMergeabilityPend
 			"summary_preview_json": pgxmock.AnyArg(),
 			"enrichment_status":    models.PullRequestHealthEnrichmentStatusNotRequested,
 			"enriched_at":          (*time.Time)(nil),
+			"check_state_version":  int64(0),
 			"created_at":           pgxmock.AnyArg(),
 			"updated_at":           pgxmock.AnyArg(),
 		}).
@@ -1249,7 +1293,7 @@ func TestPRServiceGetPullRequestHealthEnqueuesFollowUpWhenInlineMergeabilityPend
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(1), headSHA, baseSHA, pendingSummaryJSON, pendingSummaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, now, now,
+			pullRequestID, orgID, int64(1), headSHA, baseSHA, pendingSummaryJSON, pendingSummaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
 		))
 
 	service := &PRService{
@@ -1309,6 +1353,7 @@ func TestPRServiceSyncPullRequestState(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
+	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
@@ -1344,6 +1389,7 @@ func TestPRServiceSyncPullRequestState(t *testing.T) {
 			"summary_preview_json": pgxmock.AnyArg(),
 			"enrichment_status":    models.PullRequestHealthEnrichmentStatusNotRequested,
 			"enriched_at":          (*time.Time)(nil),
+			"check_state_version":  int64(0),
 			"created_at":           pgxmock.AnyArg(),
 			"updated_at":           pgxmock.AnyArg(),
 		}).
@@ -1376,7 +1422,7 @@ func TestPRServiceSyncPullRequestState(t *testing.T) {
 			"source": models.PullRequestCheckSourceCheckRun, "external_key": "unit tests", "name": "unit tests",
 			"category": models.PullRequestCheckCategoryTest, "status": models.PullRequestCheckStatusFailed,
 			"provider": "github-actions", "details_url": "https://example.com/tests/details", "summary": "2 tests failed",
-			"provider_event_id": "", "provider_sequence": int64(11), "provider_updated_at": pgxmock.AnyArg(),
+			"provider_event_id": "", "provider_sequence": int64(11), "provider_updated_at": pgxmock.AnyArg(), "projection_version": int64(0),
 		}).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec("INSERT INTO pull_request_check_states").
@@ -1385,7 +1431,7 @@ func TestPRServiceSyncPullRequestState(t *testing.T) {
 			"source": models.PullRequestCheckSourceCheckRun, "external_key": "eslint", "name": "eslint",
 			"category": models.PullRequestCheckCategoryLint, "status": models.PullRequestCheckStatusPassed,
 			"provider": "github-actions", "details_url": "https://example.com/lint/details", "summary": "",
-			"provider_event_id": "", "provider_sequence": int64(12), "provider_updated_at": pgxmock.AnyArg(),
+			"provider_event_id": "", "provider_sequence": int64(12), "provider_updated_at": pgxmock.AnyArg(), "projection_version": int64(0),
 		}).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectCommit()
@@ -1454,6 +1500,7 @@ func TestPRServiceSyncPullRequestStateIncludesCommitStatuses(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
+	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
@@ -1489,6 +1536,7 @@ func TestPRServiceSyncPullRequestStateIncludesCommitStatuses(t *testing.T) {
 			"summary_preview_json": pgxmock.AnyArg(),
 			"enrichment_status":    models.PullRequestHealthEnrichmentStatusNotRequested,
 			"enriched_at":          (*time.Time)(nil),
+			"check_state_version":  int64(0),
 			"created_at":           pgxmock.AnyArg(),
 			"updated_at":           pgxmock.AnyArg(),
 		}).
@@ -1568,6 +1616,7 @@ func TestPRServiceSyncPullRequestStateSelfHealsMergedDrift(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
+	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
 	// Self-heal must run UpdateStatus("merged"). The merged-status branch sets
 	// merged_at = now() in the same statement (see PullRequestStore.UpdateStatus).
 	mock.ExpectExec("UPDATE pull_requests SET status = .+ merged_at = now").
@@ -1632,6 +1681,7 @@ func TestPRServiceSyncPullRequestStateSelfHealsClosedWithoutMergeDrift(t *testin
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
+	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
 	mock.ExpectExec("UPDATE pull_requests SET status").
 		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID, "status": models.PullRequestStatusClosed}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -1704,10 +1754,11 @@ func TestPRServiceSyncPullRequestStateSkipsIndeterminateMergeRegression(t *testi
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
+	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(3), "head-flap", "base-flap", priorJSON, priorJSON, models.PullRequestHealthEnrichmentStatusReady, &now, now, now,
+			pullRequestID, orgID, int64(3), "head-flap", "base-flap", priorJSON, priorJSON, models.PullRequestHealthEnrichmentStatusReady, &now, int64(0), now, now,
 		))
 
 	service := &PRService{
@@ -1762,6 +1813,7 @@ func TestPRServiceSyncPullRequestStatePersistsMergeabilityPendingAndRequestsRetr
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
+	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
@@ -1797,6 +1849,7 @@ func TestPRServiceSyncPullRequestStatePersistsMergeabilityPendingAndRequestsRetr
 			"summary_preview_json": pgxmock.AnyArg(),
 			"enrichment_status":    models.PullRequestHealthEnrichmentStatusNotRequested,
 			"enriched_at":          (*time.Time)(nil),
+			"check_state_version":  int64(0),
 			"created_at":           pgxmock.AnyArg(),
 			"updated_at":           pgxmock.AnyArg(),
 		}).
@@ -1888,10 +1941,11 @@ func TestPRServiceSyncPullRequestStateSkipsIndeterminateTestRegression(t *testin
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
+	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(4), "head-rerun", "base-rerun", priorJSON, priorJSON, models.PullRequestHealthEnrichmentStatusReady, &now, now, now,
+			pullRequestID, orgID, int64(4), "head-rerun", "base-rerun", priorJSON, priorJSON, models.PullRequestHealthEnrichmentStatusReady, &now, int64(0), now, now,
 		))
 
 	service := &PRService{
@@ -2018,7 +2072,7 @@ func TestPRServiceStartPullRequestRepairBlocksWhenInFlight(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+			pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, int64(0), now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_snapshots WHERE org_id = .+ AND pull_request_id = .+ AND version = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(5)}).
@@ -2085,7 +2139,7 @@ func TestPRServiceStartPullRequestRepairReturnsBusyWhenCanonicalSessionRunning(t
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+			pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, int64(0), now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_snapshots WHERE org_id = .+ AND pull_request_id = .+ AND version = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(5)}).
@@ -2159,7 +2213,7 @@ func TestPRServiceCompletePullRequestRepairRunPublishesUpdate(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+			pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, int64(0), now, now,
 		))
 
 	service := &PRService{
@@ -2208,7 +2262,7 @@ func TestPRServiceCompletePullRequestRepairRunClearsRevisionContextWhenNoActiveR
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(6), "head-clean", "base-clean", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+			pullRequestID, orgID, int64(6), "head-clean", "base-clean", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, int64(0), now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM pull_request_repair_runs").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "head_sha": "head-clean"}).
@@ -2256,7 +2310,7 @@ func TestPRServiceCompletePullRequestRepairRunKeepsRevisionContextForActiveRepai
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			pullRequestID, orgID, int64(6), "head-blocked", "base-blocked", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+			pullRequestID, orgID, int64(6), "head-blocked", "base-blocked", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, int64(0), now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM pull_request_repair_runs").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "head_sha": "head-blocked"}).
@@ -2904,7 +2958,7 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 		mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 			WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-				pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, now, now,
+				pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
 			))
 
 		resp, err := service.GetPullRequestHealth(context.Background(), orgID, pullRequestID)
@@ -2969,6 +3023,7 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 			WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 				repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 			))
+		expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
 		mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 			WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
@@ -3004,6 +3059,7 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 				"summary_preview_json": pgxmock.AnyArg(),
 				"enrichment_status":    models.PullRequestHealthEnrichmentStatusNotRequested,
 				"enriched_at":          (*time.Time)(nil),
+				"check_state_version":  int64(0),
 				"created_at":           pgxmock.AnyArg(),
 				"updated_at":           pgxmock.AnyArg(),
 			}).
@@ -3036,7 +3092,7 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 		mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 			WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-				pullRequestID, orgID, int64(1), "head-inline", "base-inline", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, now, now,
+				pullRequestID, orgID, int64(1), "head-inline", "base-inline", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
 			))
 
 		service := &PRService{
@@ -3120,7 +3176,7 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 		mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 			WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-				pullRequestID, orgID, int64(5), "head", "base", []byte(`{"merge_state":`), []byte(`{"merge_state":`), models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+				pullRequestID, orgID, int64(5), "head", "base", []byte(`{"merge_state":`), []byte(`{"merge_state":`), models.PullRequestHealthEnrichmentStatusReady, nil, int64(0), now, now,
 			))
 		mock.ExpectQuery("SELECT .+ FROM pull_request_health_snapshots WHERE org_id = .+ AND pull_request_id = .+ AND version = .+").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(5)}).
@@ -3239,7 +3295,7 @@ func TestPRServiceReconcileAndRepairBranchCoverage(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 					WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 					WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-						pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+						pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, int64(0), now, now,
 					))
 				mock.ExpectQuery("SELECT .+ FROM pull_request_health_snapshots WHERE org_id = .+ AND pull_request_id = .+ AND version = .+").
 					WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(5)}).
@@ -3290,7 +3346,7 @@ func TestPRServiceReconcileAndRepairBranchCoverage(t *testing.T) {
 		mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 			WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-				pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+				pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, int64(0), now, now,
 			))
 		mock.ExpectQuery("SELECT .+ FROM pull_request_health_snapshots WHERE org_id = .+ AND pull_request_id = .+ AND version = .+").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(5)}).
@@ -3398,7 +3454,17 @@ func TestPRServiceDirectErrorBranches(t *testing.T) {
 
 var prHealthCurrentTestColumns = []string{
 	"pull_request_id", "org_id", "version", "head_sha", "base_sha", "summary_json",
-	"summary_preview_json", "enrichment_status", "enriched_at", "created_at", "updated_at",
+	"summary_preview_json", "enrichment_status", "enriched_at", "check_state_version", "created_at", "updated_at",
+}
+
+func expectReserveCheckStateVersion(mock pgxmock.PgxPoolIface, orgID, pullRequestID uuid.UUID, version int64) {
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id[\\s\\S]+FOR UPDATE").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(pullRequestID))
+	mock.ExpectQuery("SELECT nextval").
+		WillReturnRows(pgxmock.NewRows([]string{"version"}).AddRow(version))
+	mock.ExpectCommit()
 }
 
 var prHealthSnapshotTestColumns = []string{

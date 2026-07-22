@@ -2568,6 +2568,10 @@ func TestHandleCheckRunEvent_CompletedEnqueuesHealthSync(t *testing.T) {
 				AddRow(prRow...),
 		)
 	providerUpdatedAt := now.UTC()
+	prMock.ExpectBegin()
+	prMock.ExpectQuery("SELECT id[\\s\\S]+FOR UPDATE").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(prID))
 	prMock.ExpectQuery("WITH applied AS").
 		WithArgs(pgx.NamedArgs{
 			"org_id":              orgID,
@@ -2586,6 +2590,7 @@ func TestHandleCheckRunEvent_CompletedEnqueuesHealthSync(t *testing.T) {
 			"provider_updated_at": providerUpdatedAt,
 		}).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+	prMock.ExpectCommit()
 	dedupeKey := fmt.Sprintf("%s:%s", prHealthRebuildJobType, prID.String())
 	jobMock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgx.NamedArgs{
@@ -2649,6 +2654,10 @@ func TestHandleStatusEvent_EnqueuesHealthSyncForHeadSHA(t *testing.T) {
 				AddRow(prRow...),
 		)
 	providerUpdatedAt := now.UTC()
+	prMock.ExpectBegin()
+	prMock.ExpectQuery("SELECT id[\\s\\S]+FOR UPDATE").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(prID))
 	prMock.ExpectQuery("WITH applied AS").
 		WithArgs(pgx.NamedArgs{
 			"org_id":              orgID,
@@ -2667,6 +2676,7 @@ func TestHandleStatusEvent_EnqueuesHealthSyncForHeadSHA(t *testing.T) {
 			"provider_updated_at": providerUpdatedAt,
 		}).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+	prMock.ExpectCommit()
 	dedupeKey := fmt.Sprintf("%s:%s", prHealthRebuildJobType, prID.String())
 	jobMock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgx.NamedArgs{

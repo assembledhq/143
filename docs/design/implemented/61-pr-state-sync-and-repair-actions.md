@@ -331,7 +331,7 @@ Instead, use a **per-PR singleflight sync queue**:
 
 This scales better under sustained webhook bursts and avoids arbitrary behavior around time windows.
 
-Current implementation note: ordinary PR lifecycle and manual refreshes use the stable per-PR dedupe key `sync_pull_request_state:<pull_request_id>`. Check webhooks use `rebuild_pull_request_health:<pull_request_id>` with a five-second deferred run time, so a CI fanout produces one low-priority DB aggregation rather than one multi-call GitHub read per check transition. Provider sequence and update timestamps make duplicate and out-of-order deliveries harmless; stale-head events are ignored.
+Current implementation note: ordinary PR lifecycle and manual refreshes use the stable per-PR dedupe key `sync_pull_request_state:<pull_request_id>`. Check webhooks use `rebuild_pull_request_health:<pull_request_id>` with a five-second deferred run time, so a CI fanout produces one low-priority DB aggregation rather than one multi-call GitHub read per check transition. If a webhook arrives after a rebuild has started, it chains one deduplicated successor behind that running job. Provider sequence and update timestamps make duplicate and out-of-order deliveries harmless; each authoritative sync reserves a monotonic projection-version barrier so webhook rows committed afterward can be identified exactly, and projected writes compare the locked PR head, health version, and barrier before committing.
 
 ### Reconciliation path
 

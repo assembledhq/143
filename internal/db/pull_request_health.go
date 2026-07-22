@@ -16,7 +16,7 @@ import (
 
 const (
 	prHealthCurrentSelectColumns = `pull_request_id, org_id, version, head_sha, base_sha, summary_json,
-		summary_preview_json, enrichment_status, enriched_at, created_at, updated_at`
+		summary_preview_json, enrichment_status, enriched_at, check_state_version, created_at, updated_at`
 	prHealthSnapshotSelectColumns = `pull_request_id, org_id, version, head_sha, base_sha, summary_json,
 		conflict_payload, failing_tests_payload, payload_size_bytes, enrichment_status, enriched_at, created_at`
 	prRepairRunSelectColumns = `id, org_id, pull_request_id, session_id, thread_id, action_type, health_version,
@@ -91,18 +91,29 @@ func (s *PullRequestStore) ListOpenStaleForHealthSync(ctx context.Context, orgID
 	return pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.PullRequest])
 }
 
-func (s *PullRequestStore) UpsertHealthSummary(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA, baseSHA string, summary models.PullRequestHealthSummary, preview json.RawMessage) (models.PullRequestHealthCurrent, error) {
-	return s.upsertHealthSummary(ctx, orgID, pullRequestID, headSHA, baseSHA, summary, preview, true)
+type ProjectedHealthSummaryOptions struct {
+	ExpectedHealthVersion     int64
+	ExpectedHeadSHA           string
+	ExpectedCheckStateVersion int64
+	AppliedCheckStateVersion  int64
 }
 
-func (s *PullRequestStore) UpsertProjectedHealthSummary(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA, baseSHA string, summary models.PullRequestHealthSummary, preview json.RawMessage) (models.PullRequestHealthCurrent, error) {
-	return s.upsertHealthSummary(ctx, orgID, pullRequestID, headSHA, baseSHA, summary, preview, false)
+func (s *PullRequestStore) UpsertHealthSummary(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA, baseSHA string, summary models.PullRequestHealthSummary, preview json.RawMessage, checkStateVersion int64) (models.PullRequestHealthCurrent, error) {
+	current, _, _, err := s.upsertHealthSummary(ctx, orgID, pullRequestID, headSHA, baseSHA, summary, preview, true, checkStateVersion, nil)
+	return current, err
 }
 
-func (s *PullRequestStore) upsertHealthSummary(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA, baseSHA string, summary models.PullRequestHealthSummary, preview json.RawMessage, markGitHubSynced bool) (models.PullRequestHealthCurrent, error) {
+func (s *PullRequestStore) UpsertProjectedHealthSummary(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA, baseSHA string, summary models.PullRequestHealthSummary, preview json.RawMessage, opts ProjectedHealthSummaryOptions) (models.PullRequestHealthCurrent, bool, bool, error) {
+	if opts.AppliedCheckStateVersion < opts.ExpectedCheckStateVersion {
+		return models.PullRequestHealthCurrent{}, false, false, fmt.Errorf("applied check state version cannot precede expected version")
+	}
+	return s.upsertHealthSummary(ctx, orgID, pullRequestID, headSHA, baseSHA, summary, preview, false, opts.AppliedCheckStateVersion, &opts)
+}
+
+func (s *PullRequestStore) upsertHealthSummary(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA, baseSHA string, summary models.PullRequestHealthSummary, preview json.RawMessage, markGitHubSynced bool, checkStateVersion int64, expected *ProjectedHealthSummaryOptions) (models.PullRequestHealthCurrent, bool, bool, error) {
 	summaryJSON, err := json.Marshal(summary)
 	if err != nil {
-		return models.PullRequestHealthCurrent{}, fmt.Errorf("marshal pull request health summary: %w", err)
+		return models.PullRequestHealthCurrent{}, false, false, fmt.Errorf("marshal pull request health summary: %w", err)
 	}
 	if len(preview) == 0 {
 		preview = summaryJSON
@@ -110,7 +121,7 @@ func (s *PullRequestStore) upsertHealthSummary(ctx context.Context, orgID, pullR
 
 	tx, err := s.beginTx(ctx)
 	if err != nil {
-		return models.PullRequestHealthCurrent{}, fmt.Errorf("begin pull request health summary upsert: %w", err)
+		return models.PullRequestHealthCurrent{}, false, false, fmt.Errorf("begin pull request health summary upsert: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `
@@ -121,7 +132,20 @@ func (s *PullRequestStore) upsertHealthSummary(ctx context.Context, orgID, pullR
 		"org_id":          orgID,
 		"pull_request_id": pullRequestID,
 	}); err != nil {
-		return models.PullRequestHealthCurrent{}, fmt.Errorf("lock pull request health writer: %w", err)
+		return models.PullRequestHealthCurrent{}, false, false, fmt.Errorf("lock pull request health writer: %w", err)
+	}
+	var lockedPRHeadSHA string
+	var lockedPRHealthVersion int64
+	if expected != nil {
+		if err := tx.QueryRow(ctx, `
+			SELECT COALESCE(head_sha, ''), health_version
+			FROM pull_requests
+			WHERE org_id = @org_id AND id = @pull_request_id`, pgx.NamedArgs{
+			"org_id":          orgID,
+			"pull_request_id": pullRequestID,
+		}).Scan(&lockedPRHeadSHA, &lockedPRHealthVersion); err != nil {
+			return models.PullRequestHealthCurrent{}, false, false, fmt.Errorf("read locked pull request health writer state: %w", err)
+		}
 	}
 
 	var existing models.PullRequestHealthCurrent
@@ -133,12 +157,23 @@ func (s *PullRequestStore) upsertHealthSummary(ctx context.Context, orgID, pullR
 		"pull_request_id": pullRequestID,
 	})
 	if err != nil {
-		return models.PullRequestHealthCurrent{}, fmt.Errorf("query existing pull request health current: %w", err)
+		return models.PullRequestHealthCurrent{}, false, false, fmt.Errorf("query existing pull request health current: %w", err)
 	}
 	existing, err = pgx.CollectOneRow(existingRows, pgx.RowToStructByName[models.PullRequestHealthCurrent])
 	hasExisting := err == nil
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return models.PullRequestHealthCurrent{}, fmt.Errorf("decode existing pull request health current: %w", err)
+		return models.PullRequestHealthCurrent{}, false, false, fmt.Errorf("decode existing pull request health current: %w", err)
+	}
+	if expected != nil {
+		lockedHeadMatches := lockedPRHeadSHA == expected.ExpectedHeadSHA
+		if !hasExisting ||
+			existing.Version != expected.ExpectedHealthVersion ||
+			existing.HeadSHA != expected.ExpectedHeadSHA ||
+			existing.CheckStateVersion != expected.ExpectedCheckStateVersion ||
+			!lockedHeadMatches ||
+			lockedPRHealthVersion != expected.ExpectedHealthVersion {
+			return existing, false, false, nil
+		}
 	}
 
 	now := time.Now().UTC()
@@ -172,7 +207,7 @@ func (s *PullRequestStore) upsertHealthSummary(ctx context.Context, orgID, pullR
 			"summary_json":      summaryJSON,
 			"enrichment_status": models.PullRequestHealthEnrichmentStatusNotRequested,
 		}); err != nil {
-			return models.PullRequestHealthCurrent{}, fmt.Errorf("insert pull request health snapshot: %w", err)
+			return models.PullRequestHealthCurrent{}, false, false, fmt.Errorf("insert pull request health snapshot: %w", err)
 		}
 
 		if _, err := tx.Exec(ctx, `
@@ -190,17 +225,17 @@ func (s *PullRequestStore) upsertHealthSummary(ctx context.Context, orgID, pullR
 			"version":         version,
 			"head_sha":        headSHA,
 		}); err != nil {
-			return models.PullRequestHealthCurrent{}, fmt.Errorf("obsolete prior pull request repair runs: %w", err)
+			return models.PullRequestHealthCurrent{}, false, false, fmt.Errorf("obsolete prior pull request repair runs: %w", err)
 		}
 	}
 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO pull_request_health_current (
 			pull_request_id, org_id, version, head_sha, base_sha, summary_json,
-			summary_preview_json, enrichment_status, enriched_at, created_at, updated_at
+			summary_preview_json, enrichment_status, enriched_at, check_state_version, created_at, updated_at
 		) VALUES (
 			@pull_request_id, @org_id, @version, @head_sha, @base_sha, @summary_json,
-			@summary_preview_json, @enrichment_status, @enriched_at, @created_at, @updated_at
+			@summary_preview_json, @enrichment_status, @enriched_at, @check_state_version, @created_at, @updated_at
 		)
 		ON CONFLICT (pull_request_id) DO UPDATE
 		SET version = EXCLUDED.version,
@@ -210,6 +245,7 @@ func (s *PullRequestStore) upsertHealthSummary(ctx context.Context, orgID, pullR
 			summary_preview_json = EXCLUDED.summary_preview_json,
 			enrichment_status = EXCLUDED.enrichment_status,
 			enriched_at = EXCLUDED.enriched_at,
+			check_state_version = EXCLUDED.check_state_version,
 			updated_at = EXCLUDED.updated_at`, pgx.NamedArgs{
 		"pull_request_id":      pullRequestID,
 		"org_id":               orgID,
@@ -220,10 +256,11 @@ func (s *PullRequestStore) upsertHealthSummary(ctx context.Context, orgID, pullR
 		"summary_preview_json": preview,
 		"enrichment_status":    enrichmentStatus,
 		"enriched_at":          enrichedAt,
+		"check_state_version":  checkStateVersion,
 		"created_at":           now,
 		"updated_at":           now,
 	}); err != nil {
-		return models.PullRequestHealthCurrent{}, fmt.Errorf("upsert pull request health current: %w", err)
+		return models.PullRequestHealthCurrent{}, false, false, fmt.Errorf("upsert pull request health current: %w", err)
 	}
 
 	if _, err := tx.Exec(ctx, `
@@ -249,14 +286,14 @@ func (s *PullRequestStore) upsertHealthSummary(ctx context.Context, orgID, pullR
 		"version":            version,
 		"mark_github_synced": markGitHubSynced,
 	}); err != nil {
-		return models.PullRequestHealthCurrent{}, fmt.Errorf("update pull request health hot summary fields: %w", err)
+		return models.PullRequestHealthCurrent{}, false, false, fmt.Errorf("update pull request health hot summary fields: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return models.PullRequestHealthCurrent{}, fmt.Errorf("commit pull request health summary upsert: %w", err)
+		return models.PullRequestHealthCurrent{}, false, false, fmt.Errorf("commit pull request health summary upsert: %w", err)
 	}
 
-	return models.PullRequestHealthCurrent{
+	current := models.PullRequestHealthCurrent{
 		PullRequestID:      pullRequestID,
 		OrgID:              orgID,
 		Version:            version,
@@ -266,9 +303,11 @@ func (s *PullRequestStore) upsertHealthSummary(ctx context.Context, orgID, pullR
 		SummaryPreviewJSON: preview,
 		EnrichmentStatus:   enrichmentStatus,
 		EnrichedAt:         enrichedAt,
+		CheckStateVersion:  checkStateVersion,
 		CreatedAt:          now,
 		UpdatedAt:          now,
-	}, nil
+	}
+	return current, true, !hasExisting || version != existing.Version, nil
 }
 
 func (s *PullRequestStore) UpdateHealthEnrichment(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64, conflictPayload, failingTestsPayload json.RawMessage, status models.PullRequestHealthEnrichmentStatus) error {

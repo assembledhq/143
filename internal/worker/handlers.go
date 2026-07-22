@@ -764,7 +764,7 @@ type prCreator interface {
 	CreateBranch(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*ghservice.CreateBranchResult, error)
 	PushChangesToPR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
 	SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error
-	RebuildPullRequestHealthFromCheckStates(ctx context.Context, orgID, pullRequestID uuid.UUID) error
+	RebuildPullRequestHealthFromCheckStates(ctx context.Context, orgID, pullRequestID uuid.UUID) (bool, error)
 	ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error
 	EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error
 	CompletePullRequestRepairRun(ctx context.Context, orgID, pullRequestID, repairRunID uuid.UUID) error
@@ -10859,8 +10859,12 @@ func newRebuildPullRequestHealthHandler(services *Services, logger zerolog.Logge
 		if err != nil {
 			return fmt.Errorf("parse pull request ID: %w", err)
 		}
-		if err := services.PR.RebuildPullRequestHealthFromCheckStates(ctx, orgID, pullRequestID); err != nil {
+		healthChanged, err := services.PR.RebuildPullRequestHealthFromCheckStates(ctx, orgID, pullRequestID)
+		if err != nil {
 			return fmt.Errorf("rebuild projected pull request health: %w", err)
+		}
+		if !healthChanged {
+			return nil
 		}
 		decision, autoRepairErr := services.PR.MaybeStartAutoRepairForPullRequest(ctx, orgID, pullRequestID, "github_pr_check_state_updated")
 		if autoRepairErr != nil {

@@ -4738,7 +4738,7 @@ type stubPRService struct {
 	createBranchFn                 func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*ghservice.CreateBranchResult, error)
 	pushChangesToPRFn              func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
 	syncPullRequestStateFn         func(context.Context, uuid.UUID, uuid.UUID) error
-	rebuildPullRequestHealthFn     func(context.Context, uuid.UUID, uuid.UUID) error
+	rebuildPullRequestHealthFn     func(context.Context, uuid.UUID, uuid.UUID) (bool, error)
 	reconcilePullRequestFn         func(context.Context, uuid.UUID, int) error
 	enrichPullRequestHealthFn      func(context.Context, uuid.UUID, uuid.UUID, int64) error
 	completePullRequestRepairRunFn func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
@@ -4791,11 +4791,11 @@ func (s *stubPRService) SyncPullRequestState(ctx context.Context, orgID, pullReq
 	return nil
 }
 
-func (s *stubPRService) RebuildPullRequestHealthFromCheckStates(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
+func (s *stubPRService) RebuildPullRequestHealthFromCheckStates(ctx context.Context, orgID, pullRequestID uuid.UUID) (bool, error) {
 	if s.rebuildPullRequestHealthFn != nil {
 		return s.rebuildPullRequestHealthFn(ctx, orgID, pullRequestID)
 	}
-	return nil
+	return false, nil
 }
 
 func (s *stubPRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error {
@@ -5706,11 +5706,11 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 						called.prID = gotPRID
 						return nil
 					},
-					rebuildPullRequestHealthFn: func(_ context.Context, gotOrgID, gotPRID uuid.UUID) error {
+					rebuildPullRequestHealthFn: func(_ context.Context, gotOrgID, gotPRID uuid.UUID) (bool, error) {
 						called.rebuildCalls++
 						called.orgID = gotOrgID
 						called.prID = gotPRID
-						return nil
+						return true, nil
 					},
 					maybeStartAutoRepairForPRFn: func(_ context.Context, gotOrgID, gotPRID uuid.UUID, reason string) (*ghservice.AutoRepairDecision, error) {
 						called.autoRepairCalls++
@@ -5793,6 +5793,31 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRebuildPullRequestHealthHandlerSkipsAutoRepairAfterNoOp(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	rebuildCalls := 0
+	autoRepairCalls := 0
+	services := &Services{PR: &stubPRService{
+		rebuildPullRequestHealthFn: func(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+			rebuildCalls++
+			return false, nil
+		},
+		maybeStartAutoRepairForPRFn: func(context.Context, uuid.UUID, uuid.UUID, string) (*ghservice.AutoRepairDecision, error) {
+			autoRepairCalls++
+			return &ghservice.AutoRepairDecision{Status: ghservice.AutoRepairDecisionNoBlocker}, nil
+		},
+	}}
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`)
+
+	err := newRebuildPullRequestHealthHandler(services, zerolog.Nop())(context.Background(), "rebuild_pull_request_health", payload)
+	require.NoError(t, err, "no-op projected rebuild should complete successfully")
+	require.Equal(t, 1, rebuildCalls, "handler should evaluate the durable projection once")
+	require.Equal(t, 0, autoRepairCalls, "handler should not sync or repair when no projected health change committed")
 }
 
 func TestSyncPullRequestStateHandlerDefersPendingMergeability(t *testing.T) {

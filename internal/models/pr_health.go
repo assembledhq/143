@@ -214,6 +214,7 @@ type PullRequestCheckState struct {
 	ProviderEventID   string                   `db:"provider_event_id" json:"provider_event_id,omitempty"`
 	ProviderSequence  int64                    `db:"provider_sequence" json:"provider_sequence"`
 	ProviderUpdatedAt time.Time                `db:"provider_updated_at" json:"provider_updated_at"`
+	ProjectionVersion int64                    `db:"projection_version" json:"projection_version"`
 	CreatedAt         time.Time                `db:"created_at" json:"created_at"`
 	UpdatedAt         time.Time                `db:"updated_at" json:"updated_at"`
 }
@@ -263,6 +264,7 @@ type PullRequestHealthCurrent struct {
 	SummaryPreviewJSON json.RawMessage                   `db:"summary_preview_json" json:"summary_preview_json,omitempty"`
 	EnrichmentStatus   PullRequestHealthEnrichmentStatus `db:"enrichment_status" json:"enrichment_status"`
 	EnrichedAt         *time.Time                        `db:"enriched_at" json:"enriched_at,omitempty"`
+	CheckStateVersion  int64                             `db:"check_state_version" json:"check_state_version"`
 	CreatedAt          time.Time                         `db:"created_at" json:"created_at"`
 	UpdatedAt          time.Time                         `db:"updated_at" json:"updated_at"`
 }
