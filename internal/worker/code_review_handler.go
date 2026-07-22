@@ -110,15 +110,43 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			return fmt.Errorf("load captured code review policy: %w", err)
 		}
-		if syncErr := syncCodeReviewPullRequestState(ctx, services, logger, job); syncErr != nil {
-			return syncErr
-		}
 		pr, err := stores.PullRequests.GetByID(ctx, job.OrgID, job.PullRequestID)
 		if err != nil {
 			return fmt.Errorf("load code review pull request: %w", err)
 		}
 		if cancelled, err := stopCodeReviewIfParentSessionCancelled(ctx, stores, services, logger, job, pr); cancelled || err != nil {
 			return err
+		}
+		// Reviewer and orchestrator waits requeue this job every few seconds. Use
+		// their durable result/thread state as a phase checkpoint so polling does
+		// not repeat the expensive GitHub preflight. Terminal or inconsistent
+		// state falls through, preserving the live refresh before every phase
+		// transition and final decision.
+		if codeReviewCanRunReviewerThreads(stores) {
+			phase, phaseErr := codeReviewInFlightAgentPhase(ctx, stores, job, pr, policy.Config(), metadata)
+			if phaseErr != nil {
+				return phaseErr
+			}
+			if phase != codeReviewAgentPhaseNone {
+				logger.Debug().
+					Str("org_id", job.OrgID.String()).
+					Str("session_id", job.SessionID.String()).
+					Str("agent_phase", string(phase)).
+					Msg("deferring code review without refreshing GitHub while agent work remains in flight")
+			}
+			switch phase {
+			case codeReviewAgentPhaseReviewers:
+				return codeReviewWaitingForReviewers(policy.Config())
+			case codeReviewAgentPhaseOrchestrator:
+				return codeReviewWaitingForOrchestrator(policy.Config())
+			}
+		}
+		if syncErr := syncCodeReviewPullRequestState(ctx, services, logger, job); syncErr != nil {
+			return syncErr
+		}
+		pr, err = stores.PullRequests.GetByID(ctx, job.OrgID, job.PullRequestID)
+		if err != nil {
+			return fmt.Errorf("reload code review pull request after sync: %w", err)
 		}
 		health, err := loadStoredCodeReviewHealth(ctx, stores, job, pr)
 		if err != nil {
@@ -1708,6 +1736,97 @@ func codeReviewReviewerResultTerminal(status models.CodeReviewAgentResultStatus)
 	default:
 		return false
 	}
+}
+
+type codeReviewAgentPhase string
+
+const (
+	codeReviewAgentPhaseNone         codeReviewAgentPhase = ""
+	codeReviewAgentPhaseReviewers    codeReviewAgentPhase = "reviewers"
+	codeReviewAgentPhaseOrchestrator codeReviewAgentPhase = "orchestrator"
+)
+
+func codeReviewInFlightAgentPhase(ctx context.Context, stores *Stores, job runCodeReviewPayload, pr models.PullRequest, policy models.CodeReviewPolicyConfig, metadata models.CodeReviewSessionMetadata) (codeReviewAgentPhase, error) {
+	if stores == nil || stores.CodeReviews == nil || stores.SessionThreads == nil {
+		return codeReviewAgentPhaseNone, nil
+	}
+	if codeReviewHeadChanged(job.HeadSHA, pr, nil) || codeReviewReviewTimedOut(policy, metadata) {
+		return codeReviewAgentPhaseNone, nil
+	}
+	results, err := stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
+	if err != nil {
+		return codeReviewAgentPhaseNone, fmt.Errorf("list code review agent results for in-flight check: %w", err)
+	}
+	hasNonterminalAgent := false
+	for _, result := range results {
+		if (result.Role == models.CodeReviewAgentRoleReviewer || result.Role == models.CodeReviewAgentRoleOrchestrator) && !codeReviewReviewerResultTerminal(result.Status) {
+			hasNonterminalAgent = true
+			break
+		}
+	}
+	if !hasNonterminalAgent {
+		return codeReviewAgentPhaseNone, nil
+	}
+	threads, err := stores.SessionThreads.ListBySession(ctx, job.OrgID, job.SessionID)
+	if err != nil {
+		return codeReviewAgentPhaseNone, fmt.Errorf("list code review threads for in-flight check: %w", err)
+	}
+	return codeReviewInFlightAgentPhaseFromState(policy, results, threads), nil
+}
+
+func codeReviewInFlightAgentPhaseFromState(policy models.CodeReviewPolicyConfig, results []models.CodeReviewAgentResult, threads []models.SessionThread) codeReviewAgentPhase {
+	threadsByID := make(map[uuid.UUID]models.SessionThread, len(threads))
+	for _, thread := range threads {
+		threadsByID[thread.ID] = thread
+	}
+
+	orchestratorResults := make([]models.CodeReviewAgentResult, 0, 1)
+	for _, result := range results {
+		if result.Role != models.CodeReviewAgentRoleOrchestrator {
+			continue
+		}
+		if codeReviewReviewerResultTerminal(result.Status) {
+			return codeReviewAgentPhaseNone
+		}
+		orchestratorResults = append(orchestratorResults, result)
+	}
+	if len(orchestratorResults) > 0 {
+		for _, result := range orchestratorResults {
+			state, ok := parseCodeReviewOrchestratorStructuredResult(result.StructuredResult)
+			threadID, parseErr := uuid.Parse(strings.TrimSpace(state.ThreadID))
+			thread, found := threadsByID[threadID]
+			if !ok || parseErr != nil || !found || !codeReviewThreadStillRunning(thread.Status) {
+				return codeReviewAgentPhaseNone
+			}
+		}
+		return codeReviewAgentPhaseOrchestrator
+	}
+
+	byKey := codeReviewReviewerResultsByKey(results)
+	if len(policy.AgentRoster.Reviewers) == 0 {
+		return codeReviewAgentPhaseNone
+	}
+	waiting := false
+	for idx, agentType := range policy.AgentRoster.Reviewers {
+		result, found := byKey[codeReviewReviewerKey(idx, agentType)]
+		if !found {
+			return codeReviewAgentPhaseNone
+		}
+		if codeReviewReviewerResultTerminal(result.Status) {
+			continue
+		}
+		state, ok := parseCodeReviewReviewerStructuredResult(result.StructuredResult)
+		threadID, parseErr := uuid.Parse(strings.TrimSpace(state.ThreadID))
+		thread, found := threadsByID[threadID]
+		if !ok || parseErr != nil || !found || !codeReviewThreadStillRunning(thread.Status) {
+			return codeReviewAgentPhaseNone
+		}
+		waiting = true
+	}
+	if waiting {
+		return codeReviewAgentPhaseReviewers
+	}
+	return codeReviewAgentPhaseNone
 }
 
 func codeReviewReviewTimedOut(policy models.CodeReviewPolicyConfig, metadata models.CodeReviewSessionMetadata) bool {
