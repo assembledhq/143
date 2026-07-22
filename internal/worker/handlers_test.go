@@ -2615,7 +2615,7 @@ var workerSessionColumns = []string{
 }
 
 var workerSessionThreadColumns = []string{
-	"id", "session_id", "org_id", "agent_type", "model_override",
+	"id", "session_id", "org_id", "agent_type", "model_override", "reasoning_effort",
 	"label", "instructions", "file_scope", "status", "agent_session_id", "current_turn", "last_activity_at",
 	"result_summary", "diff", "failure_explanation", "failure_category",
 	"started_at", "completed_at", "created_at",
@@ -2656,7 +2656,7 @@ func workerSessionThreadRow(threadID, sessionID, orgID uuid.UUID, agentType mode
 	now := time.Now()
 	nowPtr := &now
 	return []any{
-		threadID, sessionID, orgID, agentType, modelOverride,
+		threadID, sessionID, orgID, agentType, modelOverride, nil,
 		"Thread", nil, []string{}, status, nil, 1, nowPtr,
 		nil, nil, nil, nil,
 		nowPtr, nil, now,
@@ -11901,6 +11901,7 @@ func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T
 	threadID := uuid.New()
 	issueID := uuid.New()
 	threadModel := models.OpenCodeModelGemini3Flash
+	threadReasoning := models.ReasoningEffortXHigh
 	continuationErr := errors.New("sandbox hydrate failed")
 
 	mock.ExpectQuery("SELECT .* FROM sessions").
@@ -11910,10 +11911,12 @@ func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T
 				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
 			),
 		)
+	threadRow := workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeOpenCode, &threadModel, models.ThreadStatusRunning)
+	threadRow[5] = &threadReasoning
 	mock.ExpectQuery("SELECT .* FROM session_threads").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
-			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeOpenCode, &threadModel, models.ThreadStatusRunning)...,
+			threadRow...,
 		))
 	mock.ExpectExec("UPDATE session_threads SET status = @status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -11925,6 +11928,8 @@ func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T
 			require.Equal(t, models.AgentTypeOpenCode, opts.AgentType, "thread execution should use the thread agent type")
 			require.NotNil(t, opts.ModelOverride, "thread execution should include the thread model override")
 			require.Equal(t, threadModel, *opts.ModelOverride, "thread execution should use the thread model")
+			require.NotNil(t, opts.ReasoningEffort, "thread execution should include the thread reasoning override")
+			require.Equal(t, threadReasoning, *opts.ReasoningEffort, "thread execution should use the thread reasoning effort")
 			return continuationErr
 		},
 	}

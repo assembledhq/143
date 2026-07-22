@@ -733,6 +733,7 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 			OrgID:           job.OrgID,
 			AgentType:       string(agentType),
 			Model:           stringPtrValue(agentModel),
+			ReasoningEffort: reasoningEffortPtr(cfg.AgentRoster.ReviewerReasoningEffort(idx)),
 			Label:           codeReviewReviewerThreadLabel(agentType),
 			FileScope:       fileScope,
 			ExecutionMode:   models.ThreadExecutionModeReview,
@@ -805,9 +806,10 @@ type codeReviewReviewerSelection struct {
 }
 
 type codeReviewOrchestratorSelection struct {
-	AgentType  models.AgentType
-	AgentModel *string
-	Available  bool
+	AgentType       models.AgentType
+	AgentModel      *string
+	ReasoningEffort *models.ReasoningEffort
+	Available       bool
 }
 
 func resolveCodeReviewReviewerAvailability(ctx context.Context, services *Services, orgID uuid.UUID, cfg models.CodeReviewPolicyConfig) ([]codeReviewReviewerSelection, error) {
@@ -833,9 +835,10 @@ func resolveCodeReviewReviewerAvailability(ctx context.Context, services *Servic
 
 func resolveCodeReviewOrchestratorAvailability(ctx context.Context, services *Services, orgID uuid.UUID, cfg models.CodeReviewPolicyConfig) (codeReviewOrchestratorSelection, error) {
 	configured := codeReviewOrchestratorSelection{
-		AgentType:  cfg.AgentRoster.Orchestrator,
-		AgentModel: codeReviewOrchestratorAgentModel(cfg),
-		Available:  true,
+		AgentType:       cfg.AgentRoster.Orchestrator,
+		AgentModel:      codeReviewOrchestratorAgentModel(cfg),
+		ReasoningEffort: reasoningEffortPtr(cfg.AgentRoster.ReasoningEffort),
+		Available:       true,
 	}
 	if services == nil || services.CodingAgents == nil {
 		return configured, nil
@@ -857,9 +860,10 @@ func resolveCodeReviewOrchestratorAvailability(ctx context.Context, services *Se
 		}
 		if available {
 			return codeReviewOrchestratorSelection{
-				AgentType:  agentType,
-				AgentModel: agentModel,
-				Available:  true,
+				AgentType:       agentType,
+				AgentModel:      agentModel,
+				ReasoningEffort: reasoningEffortPtr(cfg.AgentRoster.ReviewerReasoningEffort(idx)),
+				Available:       true,
 			}, nil
 		}
 	}
@@ -1138,6 +1142,10 @@ func codeReviewReviewerAgentModel(cfg models.CodeReviewPolicyConfig, idx int, ag
 		}
 	}
 	return codeReviewDefaultAgentModel(agentType)
+}
+
+func reasoningEffortPtr(value models.ReasoningEffort) *models.ReasoningEffort {
+	return &value
 }
 
 func codeReviewOrchestratorAgentModel(cfg models.CodeReviewPolicyConfig) *string {
@@ -1925,6 +1933,7 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 	}
 	agentType := selection.AgentType
 	agentModel := selection.AgentModel
+	reasoningEffort := selection.ReasoningEffort
 	if !selection.Available {
 		raw := "orchestrator skipped because no authenticated coding agent is configured"
 		result := &models.CodeReviewAgentResult{
@@ -2018,18 +2027,21 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 	if err != nil {
 		return fmt.Errorf("load code review primary thread for orchestrator: %w", err)
 	}
-	if primaryThread.AgentType != agentType || !codeReviewAgentModelsEqual(primaryThread.ModelOverride, agentModel) {
+	if primaryThread.AgentType != agentType ||
+		!codeReviewAgentModelsEqual(primaryThread.ModelOverride, agentModel) ||
+		!codeReviewReasoningEffortsEqual(primaryThread.ReasoningEffort, reasoningEffort) {
 		model := ""
 		if agentModel != nil {
 			model = *agentModel
 		}
 		_, updateErr := threads.UpdateThread(ctx, threadsvc.UpdateThreadInput{
-			SessionID: job.SessionID,
-			OrgID:     job.OrgID,
-			ThreadID:  threadID,
-			AgentType: string(agentType),
-			Model:     &model,
-			Label:     primaryThread.Label,
+			SessionID:       job.SessionID,
+			OrgID:           job.OrgID,
+			ThreadID:        threadID,
+			AgentType:       string(agentType),
+			Model:           &model,
+			ReasoningEffort: reasoningEffort,
+			Label:           primaryThread.Label,
 		})
 		if updateErr != nil {
 			return fmt.Errorf("retarget code review primary thread to available orchestrator %s: %w", agentType, updateErr)
@@ -2109,6 +2121,13 @@ func codeReviewAgentModelsEqual(left, right *string) bool {
 		return left == nil && right == nil
 	}
 	return strings.TrimSpace(*left) == strings.TrimSpace(*right)
+}
+
+func codeReviewReasoningEffortsEqual(left, right *models.ReasoningEffort) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile) error {

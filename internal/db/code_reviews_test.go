@@ -912,6 +912,176 @@ func TestCodeReviewStore_ListReviewsAppliesOutcomeFilters(t *testing.T) {
 	}
 }
 
+func TestCodeReviewStore_SavePolicyExpectingVersionConflict(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	config := models.DefaultCodeReviewPolicyConfig()
+	config.ReviewInstructions = "agent-tuned guidance"
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("pg_advisory_xact_lock").
+		WithArgs("code_review_policy:" + orgID.String()).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectQuery("SELECT COALESCE").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"version"}).AddRow(3))
+	mock.ExpectRollback()
+
+	_, err = NewCodeReviewStore(mock).SavePolicyExpectingVersion(context.Background(), orgID, config, 2, nil)
+
+	require.ErrorIs(t, err, ErrCodeReviewPolicyVersionConflict, "stale expected version should return the typed conflict error")
+	require.Contains(t, err.Error(), "active version is 3", "conflict error should report the current version")
+	require.NoError(t, mock.ExpectationsWereMet(), "conflict should abort before deactivating or inserting")
+}
+
+func TestCodeReviewStore_SavePolicyExpectingVersionIncrementsFromCurrent(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	policyID := uuid.New()
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	config := models.DefaultCodeReviewPolicyConfig()
+	config.ReviewInstructions = "agent-tuned guidance"
+	descriptionPolicy, riskPolicy, agentRoster := mustCodeReviewPolicyJSON(t, config)
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("pg_advisory_xact_lock").
+		WithArgs("code_review_policy:" + orgID.String()).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectQuery("SELECT COALESCE").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"version"}).AddRow(3))
+	mock.ExpectExec("UPDATE code_review_policies").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO code_review_policies").
+		WithArgs(
+			pgxmock.AnyArg(), 4, pgxmock.AnyArg(), pgxmock.AnyArg(),
+			config.ReviewInstructions, config.AutomatedApprovalPolicy,
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
+			"review_instructions", "automated_approval_policy",
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at",
+		}).AddRow(policyID, orgID, nil, true, 4, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, nil, now))
+	mock.ExpectCommit()
+
+	record, err := NewCodeReviewStore(mock).SavePolicyExpectingVersion(context.Background(), orgID, config, 3, nil)
+
+	require.NoError(t, err, "matching expected version should save the next version")
+	require.Equal(t, 4, record.Version, "the new version should be current+1")
+	require.Nil(t, record.CreatedByUserID, "agent-authored versions have no created_by user")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCodeReviewStore_ListReviewsAppliesCursorAndTimeFilters(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	cursor := uuid.New()
+	createdAfter := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	createdBefore := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	// Named args: org_id, limit, created_after, created_before, cursor.
+	mock.ExpectQuery(`\(m\.created_at, m\.id\) < \(\s+SELECT created_at, id FROM code_review_session_metadata`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
+			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable", "stale",
+			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id",
+			"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at", "session_title",
+			"repository_name", "github_repo", "github_pr_number", "github_pr_url", "pull_request_title", "pull_request_author",
+		}))
+
+	reviews, err := NewCodeReviewStore(mock).ListReviews(context.Background(), orgID, CodeReviewListFilters{
+		CreatedAfter:  &createdAfter,
+		CreatedBefore: &createdBefore,
+		Cursor:        &cursor,
+	})
+
+	require.NoError(t, err, "ListReviews should accept cursor and time filters")
+	require.Empty(t, reviews, "ListReviews should return the mocked empty result")
+	require.NoError(t, mock.ExpectationsWereMet(), "cursor pagination should add the keyset comparison")
+}
+
+func TestCodeReviewStore_GetListItemBySessionIDScopesByOrgAndSession(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	sessionID := uuid.New()
+	metadataID := uuid.New()
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	title := "Code review for acme/repo#42"
+	repoName := "acme/repo"
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery(`m\.session_id = @session_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
+			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
+			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id",
+			"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at", "retry_eligible", "session_title",
+			"repository_name", "github_repo", "github_pr_number", "github_pr_url", "pull_request_title", "pull_request_author",
+		}).AddRow(
+			metadataID, orgID, sessionID, repoID, uuid.New(), uuid.New(),
+			"base", "head", false, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusRunning, nil, nil, nil, nil, nil, false, nil, nil, false,
+			nil, "key", nil, nil, nil, nil, nil, nil, now, false, &title, &repoName, "acme/repo",
+			42, "https://github.com/acme/repo/pull/42", "Fix auth bug", "devin",
+		))
+
+	item, err := NewCodeReviewStore(mock).GetListItemBySessionID(context.Background(), orgID, sessionID)
+
+	require.NoError(t, err, "GetListItemBySessionID should scan the joined review row")
+	require.Equal(t, sessionID, item.SessionID, "GetListItemBySessionID should return the requested review")
+	require.Equal(t, "Fix auth bug", item.PullRequestTitle, "GetListItemBySessionID should include pull request context")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCodeReviewStore_ListFindingsRanksSeverityExplicitly(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	// severity is a text enum; the query must rank it via CASE rather than
+	// sorting alphabetically (which would put medium above critical).
+	mock.ExpectQuery(`CASE severity\s+WHEN 'critical' THEN 5\s+WHEN 'high' THEN 4\s+WHEN 'medium' THEN 3\s+WHEN 'low' THEN 2\s+WHEN 'info' THEN 1\s+ELSE 0\s+END DESC`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "agent_result_id", "dedupe_key", "severity",
+			"confidence", "path", "start_line", "end_line", "summary", "body", "selected_for_inline", "github_comment_id", "created_at",
+		}))
+
+	findings, err := NewCodeReviewStore(mock).ListFindings(context.Background(), orgID, sessionID, false)
+
+	require.NoError(t, err, "ListFindings should order by explicit severity rank")
+	require.Empty(t, findings, "ListFindings should return the mocked empty result")
+	require.NoError(t, mock.ExpectationsWereMet(), "the severity rank ORDER BY should be present")
+}
+
 func TestCodeReviewStore_MarkFindingsSelectedForInlineFiltersByOrgAndSession(t *testing.T) {
 	t.Parallel()
 

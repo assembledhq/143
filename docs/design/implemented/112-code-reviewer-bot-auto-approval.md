@@ -78,7 +78,7 @@ Recommended v1 scope:
 - Normal 143 code review sessions keyed by org, repository, PR, head SHA, and policy version.
 - Editable PR-description policy and acceptable-risk starter templates.
 - Two reviewer agents plus one orchestrator by default.
-- One policy-versioned reasoning-effort setting applies across reviewer and orchestrator execution; omitted legacy values resolve to `high`.
+- Each reviewer has a policy-versioned reasoning-effort value aligned by index with `reviewers` and `reviewer_models`; the orchestrator keeps its own `reasoning_effort`. Omitted legacy reviewer values inherit the former roster-wide value, or `high` when that value is also absent.
 - GitHub final review with summary body and a configurable number of inline comments.
 - Approval only for acceptable PRs; otherwise comment with escalation reasons.
 - Idempotent reruns for duplicate requests, stale heads, and GitHub review retries.
@@ -535,6 +535,12 @@ code_review_policies (
     inline_comment_limit int not null default 4,
     created_at timestamptz not null default now()
 );
+
+-- Reviewer tabs persist their policy-captured override here so the generic
+-- thread worker can execute each reviewer independently of the parent
+-- orchestrator session's reasoning level.
+ALTER TABLE session_threads
+    ADD COLUMN reasoning_effort text;
 
 code_review_session_metadata (
     id uuid primary key,

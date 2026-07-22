@@ -394,6 +394,7 @@ func TestService_CreateThread(t *testing.T) {
 	sessionID := uuid.New()
 	threadID := uuid.New()
 	now := time.Now()
+	highReasoning := models.ReasoningEffortHigh
 
 	tests := []struct {
 		name      string
@@ -422,12 +423,13 @@ func TestService_CreateThread(t *testing.T) {
 		{
 			name: "success with explicit agent type and instructions",
 			input: CreateThreadInput{
-				SessionID:    sessionID,
-				OrgID:        orgID,
-				AgentType:    "claude_code",
-				Label:        "Frontend",
-				Instructions: "focus on UI",
-				FileScope:    []string{"src/"},
+				SessionID:       sessionID,
+				OrgID:           orgID,
+				AgentType:       "claude_code",
+				ReasoningEffort: &highReasoning,
+				Label:           "Frontend",
+				Instructions:    "focus on UI",
+				FileScope:       []string{"src/"},
 			},
 			setupDeps: func(deps *testDeps) {
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
@@ -560,6 +562,7 @@ func TestService_CreateThread(t *testing.T) {
 			require.NotNil(t, result, "should return a thread")
 			require.Equal(t, threadID, result.ID, "should set the thread ID")
 			require.Equal(t, tt.input.Label, result.Label, "should set the label")
+			require.Equal(t, tt.input.ReasoningEffort, result.ReasoningEffort, "should preserve the thread reasoning override")
 			require.Equal(t, models.ThreadStatusIdle, result.Status, "new tab should wait for first user message")
 		})
 	}
@@ -603,13 +606,14 @@ func TestService_UpdateThread(t *testing.T) {
 	threadID := uuid.New()
 
 	tests := []struct {
-		name          string
-		input         UpdateThreadInput
-		setupDeps     func(deps *testDeps)
-		expectErr     error
-		expectedType  models.AgentType
-		expectedLabel string
-		expectedModel *string
+		name              string
+		input             UpdateThreadInput
+		setupDeps         func(deps *testDeps)
+		expectErr         error
+		expectedType      models.AgentType
+		expectedLabel     string
+		expectedModel     *string
+		expectedReasoning *models.ReasoningEffort
 	}{
 		{
 			name: "updates blank idle thread and clears inherited model override",
@@ -651,12 +655,13 @@ func TestService_UpdateThread(t *testing.T) {
 		{
 			name: "accepts an explicit model override for the replacement agent",
 			input: UpdateThreadInput{
-				SessionID: sessionID,
-				OrgID:     orgID,
-				ThreadID:  threadID,
-				AgentType: "codex",
-				Model:     stringPtr(models.CodexModelGPT54Mini),
-				Label:     "Codex 2",
+				SessionID:       sessionID,
+				OrgID:           orgID,
+				ThreadID:        threadID,
+				AgentType:       "codex",
+				Model:           stringPtr(models.CodexModelGPT54Mini),
+				ReasoningEffort: reasoningEffortTestPtr(models.ReasoningEffortHigh),
+				Label:           "Codex 2",
 			},
 			setupDeps: func(deps *testDeps) {
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
@@ -676,12 +681,15 @@ func TestService_UpdateThread(t *testing.T) {
 				deps.threadStore.updateFn = func(_ context.Context, updated *models.SessionThread) error {
 					require.NotNil(t, updated.ModelOverride, "UpdateThread should persist the requested model override")
 					require.Equal(t, models.CodexModelGPT54Mini, *updated.ModelOverride, "UpdateThread should persist the requested model override")
+					require.NotNil(t, updated.ReasoningEffort, "UpdateThread should persist the requested reasoning override")
+					require.Equal(t, models.ReasoningEffortHigh, *updated.ReasoningEffort, "UpdateThread should persist a reasoning level supported by the replacement agent")
 					return nil
 				}
 			},
-			expectedType:  models.AgentTypeCodex,
-			expectedLabel: "Codex 2",
-			expectedModel: stringPtr(models.CodexModelGPT54Mini),
+			expectedType:      models.AgentTypeCodex,
+			expectedLabel:     "Codex 2",
+			expectedModel:     stringPtr(models.CodexModelGPT54Mini),
+			expectedReasoning: reasoningEffortTestPtr(models.ReasoningEffortHigh),
 		},
 		{
 			name: "explicit empty model clears an existing override without switching agent",
@@ -989,6 +997,7 @@ func TestService_UpdateThread(t *testing.T) {
 			require.Equal(t, tt.expectedType, result.AgentType, "UpdateThread should return the updated agent type")
 			require.Equal(t, tt.expectedLabel, result.Label, "UpdateThread should return the updated label")
 			require.Equal(t, tt.expectedModel, result.ModelOverride, "UpdateThread should return the updated model override")
+			require.Equal(t, tt.expectedReasoning, result.ReasoningEffort, "UpdateThread should return the updated reasoning override")
 		})
 	}
 }
@@ -1099,6 +1108,10 @@ func TestService_ArchiveThread(t *testing.T) {
 }
 
 func stringPtr(value string) *string {
+	return &value
+}
+
+func reasoningEffortTestPtr(value models.ReasoningEffort) *models.ReasoningEffort {
 	return &value
 }
 

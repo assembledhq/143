@@ -15,7 +15,7 @@ import (
 )
 
 var sessionThreadTestColumns = []string{
-	"id", "session_id", "org_id", "agent_type", "model_override",
+	"id", "session_id", "org_id", "agent_type", "model_override", "reasoning_effort",
 	"label", "instructions", "file_scope", "status", "agent_session_id",
 	"current_turn", "last_activity_at",
 	"result_summary", "diff", "failure_explanation", "failure_category",
@@ -27,7 +27,7 @@ var sessionThreadTestColumns = []string{
 
 func newSessionThreadRow(threadID, sessionID, orgID uuid.UUID, label string, now time.Time) []interface{} {
 	return []interface{}{
-		threadID, sessionID, orgID, "claude_code", nil,
+		threadID, sessionID, orgID, "claude_code", nil, nil,
 		label, nil, nil, "pending", nil,
 		0, nil,
 		nil, nil, nil, nil,
@@ -50,18 +50,22 @@ func TestSessionThreadStore_Create(t *testing.T) {
 	sessionID := uuid.New()
 	orgID := uuid.New()
 	now := time.Now()
+	reasoningEffort := models.ReasoningEffortXHigh
 
-	// Create has 11 named args: session_id, org_id, agent_type, model_override, label, instructions, file_scope, status, execution_mode, filesystem_mode, max_threads
+	// Create has 12 named args, including the optional per-thread reasoning effort.
+	args := anyArgs(12)
+	args[4] = &reasoningEffort
 	mock.ExpectQuery("INSERT INTO session_threads").
-		WithArgs(anyArgs(11)...).
+		WithArgs(args...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(threadID, now))
 
 	thread := &models.SessionThread{
-		SessionID: sessionID,
-		OrgID:     orgID,
-		AgentType: models.AgentTypeClaudeCode,
-		Label:     "Backend API",
-		Status:    models.ThreadStatusPending,
+		SessionID:       sessionID,
+		OrgID:           orgID,
+		AgentType:       models.AgentTypeClaudeCode,
+		ReasoningEffort: &reasoningEffort,
+		Label:           "Backend API",
+		Status:          models.ThreadStatusPending,
 	}
 
 	err = store.Create(context.Background(), thread, 4)
@@ -85,7 +89,7 @@ func TestSessionThreadStore_CreateWithProvenance(t *testing.T) {
 	sourceThreadID := uuid.New()
 	now := time.Now()
 
-	args := append(anyArgs(8), models.ThreadCreatedBySourceAgentTool, &sourceThreadID, models.ThreadExecutionModeWork, models.ThreadFilesystemModeReadWrite, 4)
+	args := append(anyArgs(9), models.ThreadCreatedBySourceAgentTool, &sourceThreadID, models.ThreadExecutionModeWork, models.ThreadFilesystemModeReadWrite, 4)
 	mock.ExpectQuery("INSERT INTO session_threads").
 		WithArgs(args...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(threadID, now))
@@ -370,7 +374,7 @@ func TestSessionThreadStore_GetRetryTarget(t *testing.T) {
 			rows := pgxmock.NewRows(sessionThreadTestColumns)
 			if !tt.expectErr {
 				row := newSessionThreadRow(threadID, sessionID, orgID, "Backend", now)
-				row[8] = tt.rowStatus
+				row[9] = tt.rowStatus
 				rows.AddRow(row...)
 			}
 
@@ -410,8 +414,8 @@ func TestSessionThreadStore_ListStuckRunningThreads(t *testing.T) {
 	// Build a 'running' row variant of the standard test row.
 	row := func(id uuid.UUID) []interface{} {
 		base := newSessionThreadRow(id, sessionID, orgID, "thread", now)
-		base[8] = "running"   // status
-		base[16] = &startedAt // started_at
+		base[9] = "running"   // status
+		base[17] = &startedAt // started_at
 		return base
 	}
 
@@ -484,8 +488,8 @@ func TestSessionThreadStore_Archive(t *testing.T) {
 	threadID := uuid.New()
 	now := time.Now()
 	row := newSessionThreadRow(threadID, sessionID, orgID, "Review", now)
-	row[8] = "completed"
-	row[21] = &now
+	row[9] = "completed"
+	row[22] = &now
 
 	mock.ExpectQuery(`WITH visible_threads AS[\s\S]*FOR UPDATE[\s\S]*UPDATE session_threads[\s\S]*SET archived_at = now\(\)[\s\S]*WHERE id = @id[\s\S]*session_id = @session_id[\s\S]*org_id = @org_id[\s\S]*archived_at IS NULL[\s\S]*RETURNING`).
 		WithArgs(anyArgs(3)...).
@@ -574,12 +578,14 @@ func TestSessionThreadStore_UpdateEditable(t *testing.T) {
 		{
 			name: "updates blank idle threads",
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID, threadID uuid.UUID, now time.Time, model string) {
+				reasoningEffort := models.ReasoningEffortHigh
 				row := newSessionThreadRow(threadID, sessionID, orgID, "Codex 2", now)
 				row[3] = "codex"
 				row[4] = &model
-				row[8] = "idle"
+				row[5] = &reasoningEffort
+				row[9] = "idle"
 				mock.ExpectQuery(`UPDATE session_threads[\s\S]*WHERE id = @id[\s\S]*org_id = @org_id[\s\S]*session_id = @session_id[\s\S]*status = 'idle'[\s\S]*current_turn = 0[\s\S]*RETURNING`).
-					WithArgs(anyArgs(6)...).
+					WithArgs(anyArgs(7)...).
 					WillReturnRows(
 						pgxmock.NewRows(sessionThreadTestColumns).
 							AddRow(row...),
@@ -590,7 +596,7 @@ func TestSessionThreadStore_UpdateEditable(t *testing.T) {
 			name: "returns no rows when thread is no longer editable",
 			setupMock: func(mock pgxmock.PgxPoolIface, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID, _ time.Time, _ string) {
 				mock.ExpectQuery(`UPDATE session_threads[\s\S]*WHERE id = @id[\s\S]*org_id = @org_id[\s\S]*session_id = @session_id[\s\S]*status = 'idle'[\s\S]*current_turn = 0[\s\S]*RETURNING`).
-					WithArgs(anyArgs(6)...).
+					WithArgs(anyArgs(7)...).
 					WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns))
 			},
 			expectErr: pgx.ErrNoRows,
@@ -611,17 +617,19 @@ func TestSessionThreadStore_UpdateEditable(t *testing.T) {
 			threadID := uuid.New()
 			now := time.Now()
 			model := models.CodexModelGPT54
+			reasoningEffort := models.ReasoningEffortHigh
 
 			tt.setupMock(mock, orgID, sessionID, threadID, now, model)
 
 			thread := &models.SessionThread{
-				ID:            threadID,
-				SessionID:     sessionID,
-				OrgID:         orgID,
-				AgentType:     models.AgentTypeCodex,
-				ModelOverride: &model,
-				Label:         "Codex 2",
-				Status:        models.ThreadStatusIdle,
+				ID:              threadID,
+				SessionID:       sessionID,
+				OrgID:           orgID,
+				AgentType:       models.AgentTypeCodex,
+				ModelOverride:   &model,
+				ReasoningEffort: &reasoningEffort,
+				Label:           "Codex 2",
+				Status:          models.ThreadStatusIdle,
 			}
 
 			err = store.UpdateEditable(context.Background(), thread)
@@ -636,6 +644,8 @@ func TestSessionThreadStore_UpdateEditable(t *testing.T) {
 			require.Equal(t, "Codex 2", thread.Label, "UpdateEditable should preserve the updated label")
 			require.NotNil(t, thread.ModelOverride, "UpdateEditable should preserve the updated model override")
 			require.Equal(t, model, *thread.ModelOverride, "UpdateEditable should preserve the updated model override")
+			require.NotNil(t, thread.ReasoningEffort, "UpdateEditable should preserve the reasoning override")
+			require.Equal(t, reasoningEffort, *thread.ReasoningEffort, "UpdateEditable should return the updated reasoning override")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
@@ -681,7 +691,7 @@ func TestSessionThreadStore_ClaimIdle(t *testing.T) {
 				sessionID := uuid.New()
 				now := time.Now()
 				row := newSessionThreadRow(threadID, sessionID, orgID, "Backend", now)
-				row[8] = "running" // status after claim
+				row[9] = "running" // status after claim
 				// ClaimIdle has 2 named args: id, org_id
 				mock.ExpectQuery("UPDATE session_threads").
 					WithArgs(anyArgs(2)...).
@@ -773,9 +783,9 @@ func TestSessionThreadStore_ClaimIdleForSessionLocksSiblings(t *testing.T) {
 	threadID := uuid.New()
 	now := time.Now()
 	row := newSessionThreadRow(threadID, sessionID, orgID, "Backend", now)
-	row[8] = models.ThreadStatusRunning
-	row[11] = &now
-	row[17] = &now
+	row[9] = models.ThreadStatusRunning
+	row[12] = &now
+	row[18] = &now
 
 	// Pin the guard explicitly: the CTE locks every session_threads row,
 	// requires target.status to match the claimable-statuses list, counts
@@ -806,9 +816,9 @@ func TestSessionThreadStore_ClaimForResumeInSession(t *testing.T) {
 	threadID := uuid.New()
 	now := time.Now()
 	row := newSessionThreadRow(threadID, sessionID, orgID, "Backend", now)
-	row[8] = models.ThreadStatusRunning
-	row[11] = &now
-	row[17] = &now
+	row[9] = models.ThreadStatusRunning
+	row[12] = &now
+	row[18] = &now
 
 	// Pin the resume claim's distinguishing properties: it should refresh
 	// started_at for the new turn so the stuck-running reaper measures this

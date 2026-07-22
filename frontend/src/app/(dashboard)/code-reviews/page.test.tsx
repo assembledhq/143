@@ -108,6 +108,7 @@ const policy: CodeReviewResolvedPolicy = {
       reviewers: ["codex", "claude_code"],
       orchestrator: "claude_code",
       reviewer_models: ["gpt-5.4", "claude-sonnet-4-6"],
+      reviewer_reasoning_efforts: ["high", "high"],
       orchestrator_model: "claude-sonnet-4-6",
       reasoning_effort: "high",
       disagreement_blocks: true,
@@ -467,7 +468,9 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findByRole("combobox", { name: "Reviewer 1 model" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Reviewer 2 model" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Orchestrator model" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Reasoning level" })).toHaveTextContent("High");
+    expect(screen.getByRole("combobox", { name: "Reviewer 1 reasoning level" })).toHaveTextContent("High");
+    expect(screen.getByRole("combobox", { name: "Reviewer 2 reasoning level" })).toHaveTextContent("High");
+    expect(screen.getByRole("combobox", { name: "Orchestrator reasoning level" })).toHaveTextContent("High");
 
     // Autosave: applying a template persists without a Save button.
     await user.click(screen.getByRole("combobox", { name: /Advanced policy preset/i }));
@@ -1082,7 +1085,7 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByRole("radio", { name: /^Approve acceptable PRs/i })).toBeChecked();
   });
 
-  it("saves the code review reasoning level", async () => {
+  it("saves independent reasoning levels for each reviewer", async () => {
     const user = userEvent.setup();
     const state = mockCodeReviewBaseHandlers();
 
@@ -1090,11 +1093,26 @@ describe("CodeReviewsPage", () => {
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
     await user.click(screen.getByRole("button", { name: "Advanced controls" }));
     await user.click(screen.getByRole("button", { name: /Reviewers & agents/i }));
-    await user.click(await screen.findByRole("combobox", { name: "Reasoning level" }));
+    await user.click(await screen.findByRole("combobox", { name: "Reviewer 1 reasoning level" }));
     await user.click(await screen.findByRole("option", { name: "Extra high" }));
 
     await waitFor(() => {
-      expect(state.getCurrentConfig().agent_roster.reasoning_effort).toBe("xhigh");
+      expect(state.getCurrentConfig().agent_roster.reviewer_reasoning_efforts).toEqual(["xhigh", "high"]);
+      expect(state.getCurrentConfig().agent_roster.reasoning_effort).toBe("high");
+    });
+
+    await user.click(screen.getByRole("combobox", { name: "Reviewer 2 reasoning level" }));
+    await user.click(await screen.findByRole("option", { name: "Max" }));
+
+    await waitFor(() => {
+      expect(state.getCurrentConfig().agent_roster.reviewer_reasoning_efforts).toEqual(["xhigh", "max"]);
+    });
+
+    await user.click(screen.getByRole("button", { name: "Remove reviewer 1" }));
+    await waitFor(() => {
+      expect(state.getCurrentConfig().agent_roster.reviewers).toEqual(["claude_code"]);
+      expect(state.getCurrentConfig().agent_roster.reviewer_models).toEqual(["claude-sonnet-4-6"]);
+      expect(state.getCurrentConfig().agent_roster.reviewer_reasoning_efforts).toEqual(["max"]);
     });
   });
 
@@ -1106,6 +1124,7 @@ describe("CodeReviewsPage", () => {
         ...policy.config.agent_roster,
         reviewers: ["claude_code"],
         reviewer_models: ["claude-sonnet-4-6"],
+        reviewer_reasoning_efforts: ["max"],
         orchestrator: "claude_code",
         orchestrator_model: "claude-sonnet-4-6",
         reasoning_effort: "max",
@@ -1139,7 +1158,7 @@ describe("CodeReviewsPage", () => {
     await user.click(screen.getByRole("button", { name: "Advanced controls" }));
     await user.click(screen.getByRole("button", { name: /Reviewers & agents/i }));
 
-    const reasoningSelect = await screen.findByRole("combobox", { name: "Reasoning level" });
+    const reasoningSelect = await screen.findByRole("combobox", { name: "Reviewer 1 reasoning level" });
     expect(reasoningSelect).toHaveTextContent("Max");
     await user.click(reasoningSelect);
     expect(await screen.findByRole("option", { name: "Max" })).toBeInTheDocument();
@@ -1150,7 +1169,8 @@ describe("CodeReviewsPage", () => {
 
     await waitFor(() => {
       expect(state.getCurrentConfig().agent_roster.reviewers).toEqual(["codex"]);
-      expect(state.getCurrentConfig().agent_roster.reasoning_effort).toBe("high");
+      expect(state.getCurrentConfig().agent_roster.reviewer_reasoning_efforts).toEqual(["high"]);
+      expect(state.getCurrentConfig().agent_roster.reasoning_effort).toBe("max");
     });
   });
 
@@ -1622,7 +1642,8 @@ describe("CodeReviewsPage", () => {
     server.use(http.get("/api/v1/auth/me", () => HttpResponse.json({ data: { id: "viewer-1", org_id: "org-1", email: "viewer@example.com", name: "Viewer", role: "viewer", created_at: "2026-01-01T00:00:00Z" } })));
     renderWithProviders(<CodeReviewsPage />);
     await user.click(await screen.findByRole("tab", { name: "Policy" }));
-    expect(await screen.findByText(/view-only access/i)).toBeInTheDocument();
+    const viewOnlyNotice = await screen.findByText(/view-only access/i);
+    expect(viewOnlyNotice.closest('[data-slot="card"]')).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Code reviews enabled" })).toBeDisabled();
     expect(screen.getByRole("textbox", { name: "Additional review instructions (optional)" })).toBeDisabled();
 

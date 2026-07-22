@@ -522,6 +522,10 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 		wantEventID    string
 		wantGroupID    string
 		wantBaseBranch string
+		wantURL        string
+		wantTitle      string
+		wantHeadSHA    string
+		wantActorType  string
 	}{
 		{
 			name:   "pull request opened",
@@ -529,18 +533,21 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			withPR: true,
 			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
 				t.Helper()
-				event := PullRequestEvent{Action: "opened", Number: 42, OwnerOrgID: &orgID}
+				event := PullRequestEvent{Action: "opened", Number: 42, OwnerOrgID: &orgID, DeliveryID: "delivery-123"}
 				event.Sender.Login = "octocat"
+				event.Sender.Type = "User"
 				event.Repository.ID = githubRepoID
 				event.Repository.FullName = fullName
 				event.PR.HTMLURL = "https://github.com/acme/app/pull/42"
 				event.PR.Title = "Add checkout"
 				event.PR.Body = "Please review"
+				event.PR.Head.SHA = "head-123"
 				require.NoError(t, svc.HandlePullRequestEvent(context.Background(), event), "opened PR webhook should not fail")
 			},
 			wantActor:   "octocat",
 			wantBody:    "Add checkout\n\nPlease review",
 			wantEventID: "pull_request:opened:42",
+			wantURL:     "https://github.com/acme/app/pull/42", wantTitle: "Add checkout", wantHeadSHA: "head-123", wantActorType: "User",
 		},
 		{
 			name:   "pull request updated",
@@ -548,18 +555,21 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			withPR: true,
 			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
 				t.Helper()
-				event := PullRequestEvent{Action: "synchronize", Number: 42, OwnerOrgID: &orgID}
+				event := PullRequestEvent{Action: "synchronize", Number: 42, OwnerOrgID: &orgID, DeliveryID: "delivery-123"}
 				event.Sender.Login = "octocat"
+				event.Sender.Type = "User"
 				event.Repository.ID = githubRepoID
 				event.Repository.FullName = fullName
 				event.PR.HTMLURL = "https://github.com/acme/app/pull/42"
 				event.PR.Title = "Add checkout"
 				event.PR.Body = "New commits"
+				event.PR.Head.SHA = "head-123"
 				require.NoError(t, svc.HandlePullRequestEvent(context.Background(), event), "updated PR webhook should not fail")
 			},
 			wantActor:   "octocat",
 			wantBody:    "Add checkout\n\nNew commits",
 			wantEventID: "pull_request:synchronize:42",
+			wantURL:     "https://github.com/acme/app/pull/42", wantTitle: "Add checkout", wantHeadSHA: "head-123", wantActorType: "User",
 		},
 		{
 			name:   "pull request merged",
@@ -567,19 +577,22 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			withPR: true,
 			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
 				t.Helper()
-				event := PullRequestEvent{Action: "closed", Number: 42, OwnerOrgID: &orgID}
+				event := PullRequestEvent{Action: "closed", Number: 42, OwnerOrgID: &orgID, DeliveryID: "delivery-123"}
 				event.Sender.Login = "octocat"
+				event.Sender.Type = "User"
 				event.Repository.ID = githubRepoID
 				event.Repository.FullName = fullName
 				event.PR.Merged = true
 				event.PR.HTMLURL = "https://github.com/acme/app/pull/42"
 				event.PR.Title = "Add checkout"
 				event.PR.Body = "Merged"
+				event.PR.Head.SHA = "head-123"
 				require.NoError(t, svc.HandlePullRequestEvent(context.Background(), event), "merged PR webhook should not fail")
 			},
 			wantActor:   "octocat",
 			wantBody:    "Add checkout\n\nMerged",
 			wantEventID: "pull_request:closed:42",
+			wantURL:     "https://github.com/acme/app/pull/42", wantTitle: "Add checkout", wantHeadSHA: "head-123", wantActorType: "User",
 		},
 		{
 			name:   "check suite completed",
@@ -588,10 +601,11 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
 				t.Helper()
 				conclusion := "success"
-				event := CheckSuiteEvent{Action: "completed", OwnerOrgID: &orgID}
+				event := CheckSuiteEvent{Action: "completed", OwnerOrgID: &orgID, DeliveryID: "delivery-123"}
 				event.Repository.ID = githubRepoID
 				event.Repository.FullName = fullName
 				event.CheckSuite.Conclusion = &conclusion
+				event.CheckSuite.HeadSHA = "head-123"
 				event.CheckSuite.PullRequests = append(event.CheckSuite.PullRequests, struct {
 					Number int `json:"number"`
 					Base   struct {
@@ -605,6 +619,7 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			wantActor:      "github",
 			wantBody:       "Checks completed: success",
 			wantBaseBranch: "main",
+			wantHeadSHA:    "head-123", wantActorType: "System",
 		},
 		{
 			name:   "check run completed",
@@ -613,11 +628,12 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
 				t.Helper()
 				conclusion := "failure"
-				event := CheckRunEvent{Action: "completed", OwnerOrgID: &orgID}
+				event := CheckRunEvent{Action: "completed", OwnerOrgID: &orgID, DeliveryID: "delivery-123"}
 				event.Repository.ID = githubRepoID
 				event.Repository.FullName = fullName
 				event.CheckRun.ID = 777
 				event.CheckRun.Conclusion = &conclusion
+				event.CheckRun.HeadSHA = "head-123"
 				event.CheckRun.PullRequests = append(event.CheckRun.PullRequests, struct {
 					Number int `json:"number"`
 					Base   struct {
@@ -632,25 +648,31 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			wantBody:       "Check run completed: failure",
 			wantEventID:    "check_run:777",
 			wantBaseBranch: "release",
+			wantHeadSHA:    "head-123", wantActorType: "System",
 		},
 		{
 			name:  "issue comment on pull request",
 			event: models.AutomationGitHubEventIssueCommentCreated,
 			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
 				t.Helper()
-				event := IssueCommentEvent{Action: "created", OwnerOrgID: &orgID}
+				event := IssueCommentEvent{Action: "created", OwnerOrgID: &orgID, DeliveryID: "delivery-123"}
 				event.Sender.Login = "commenter"
+				event.Sender.Type = "User"
 				event.Repository.ID = githubRepoID
 				event.Repository.FullName = fullName
 				event.Issue.Number = 42
+				event.Issue.HTMLURL = "https://github.com/acme/app/pull/42"
+				event.Issue.Title = "Add checkout"
 				event.Issue.PullRequest = &struct{}{}
 				event.Comment.ID = 901
 				event.Comment.Body = "Can you handle this?"
 				require.NoError(t, svc.HandleIssueCommentEvent(context.Background(), event), "PR issue_comment webhook should not fail")
 			},
-			wantActor:   "commenter",
-			wantBody:    "Can you handle this?",
-			wantEventID: "issue_comment:901",
+			wantActor:      "commenter",
+			wantBody:       "Can you handle this?",
+			wantEventID:    "issue_comment:901",
+			wantBaseBranch: "main",
+			wantURL:        "https://github.com/acme/app/pull/42", wantTitle: "Add checkout", wantHeadSHA: "head-123", wantActorType: "User",
 		},
 		{
 			name:   "pull request review submitted",
@@ -658,11 +680,15 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			withPR: true,
 			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
 				t.Helper()
-				event := PullRequestReviewEvent{Action: "submitted", OwnerOrgID: &orgID}
+				event := PullRequestReviewEvent{Action: "submitted", OwnerOrgID: &orgID, DeliveryID: "delivery-123"}
 				event.Sender.Login = "reviewer"
+				event.Sender.Type = "User"
 				event.Repository.ID = githubRepoID
 				event.Repository.FullName = fullName
 				event.PullRequest.Number = 42
+				event.PullRequest.HTMLURL = "https://github.com/acme/app/pull/42"
+				event.PullRequest.Title = "Add checkout"
+				event.PullRequest.Head.SHA = "head-123"
 				event.Review.ID = 902
 				event.Review.State = "commented"
 				event.Review.Body = "Looks close"
@@ -672,6 +698,7 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			wantBody:    "Looks close",
 			wantEventID: "review:902",
 			wantGroupID: "review:902",
+			wantURL:     "https://github.com/acme/app/pull/42", wantTitle: "Add checkout", wantHeadSHA: "head-123", wantActorType: "User",
 		},
 		{
 			name:   "inline pull request review comment",
@@ -679,11 +706,15 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			withPR: true,
 			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
 				t.Helper()
-				event := PullRequestReviewCommentEvent{Action: "created", OwnerOrgID: &orgID}
+				event := PullRequestReviewCommentEvent{Action: "created", OwnerOrgID: &orgID, DeliveryID: "delivery-123"}
 				event.Sender.Login = "inline-reviewer"
+				event.Sender.Type = "User"
 				event.Repository.ID = githubRepoID
 				event.Repository.FullName = fullName
 				event.PullRequest.Number = 42
+				event.PullRequest.HTMLURL = "https://github.com/acme/app/pull/42"
+				event.PullRequest.Title = "Add checkout"
+				event.PullRequest.Head.SHA = "head-123"
 				event.Comment.ID = 903
 				event.Comment.PullRequestReviewID = 902
 				event.Comment.Path = "src/app.ts"
@@ -694,12 +725,20 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			wantBody:    "Please adjust this line",
 			wantEventID: "review_comment:903",
 			wantGroupID: "review:902",
+			wantURL:     "https://github.com/acme/app/pull/42", wantTitle: "Add checkout", wantHeadSHA: "head-123", wantActorType: "User",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			githubAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "/repos/acme/app/pulls/42", r.URL.Path, "revision lookup should request the triggering pull request")
+				require.Equal(t, "token installation-token", r.Header.Get("Authorization"), "revision lookup should use the repository installation token")
+				_, err := fmt.Fprint(w, `{"number":42,"html_url":"https://github.com/acme/app/pull/42","state":"open","head":{"ref":"feature","sha":"head-123"},"base":{"ref":"main"}}`)
+				require.NoError(t, err, "GitHub test response should be written")
+			}))
+			t.Cleanup(githubAPI.Close)
 
 			orgID := uuid.New()
 			repoID := uuid.New()
@@ -714,10 +753,15 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			}
 
 			svc := &PRService{
+				tokenProvider: &Service{cache: map[int64]*cachedToken{
+					456: {Token: "installation-token", ExpiresAt: time.Now().Add(time.Hour)},
+				}},
 				repos:                   db.NewRepositoryStore(repoMock),
 				pullRequests:            db.NewPullRequestStore(prMock),
 				automationEventTriggers: triggerer,
 				logger:                  zerolog.Nop(),
+				baseURL:                 githubAPI.URL,
+				httpClient:              githubAPI.Client(),
 			}
 
 			tt.run(t, svc, orgID, githubRepoID, fullName)
@@ -733,6 +777,11 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			require.Equal(t, tt.wantEventID, triggerer.calls[0].EventID, "automation trigger should include expected event id")
 			require.Equal(t, tt.wantGroupID, triggerer.calls[0].DedupeGroupID, "automation trigger should include expected dedupe group id")
 			require.Equal(t, tt.wantBaseBranch, triggerer.calls[0].BaseBranch, "automation trigger should include base branch from check event payload")
+			require.Equal(t, tt.wantURL, triggerer.calls[0].PullRequestURL, "automation trigger should include the target PR URL when GitHub provides it")
+			require.Equal(t, tt.wantTitle, triggerer.calls[0].PullRequestTitle, "automation trigger should include the target PR title")
+			require.Equal(t, tt.wantHeadSHA, triggerer.calls[0].HeadSHA, "automation trigger should include the evaluated head SHA")
+			require.Equal(t, tt.wantActorType, triggerer.calls[0].ActorType, "automation trigger should include the GitHub actor type")
+			require.Equal(t, "delivery-123", triggerer.calls[0].ProviderEventID, "automation trigger should include the GitHub delivery id")
 			require.NoError(t, repoMock.ExpectationsWereMet(), "repository expectations should be met")
 			require.NoError(t, prMock.ExpectationsWereMet(), "pull request expectations should be met")
 		})

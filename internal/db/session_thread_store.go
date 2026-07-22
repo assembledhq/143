@@ -38,7 +38,7 @@ func (s *SessionThreadStore) SetLogger(logger zerolog.Logger) {
 	s.logger = logger
 }
 
-const sessionThreadSelectColumns = `id, session_id, org_id, agent_type, model_override,
+const sessionThreadSelectColumns = `id, session_id, org_id, agent_type, model_override, reasoning_effort,
 	label, instructions, file_scope, status, agent_session_id, current_turn, last_activity_at,
 	result_summary, diff, failure_explanation, failure_category,
 	started_at, completed_at, created_at, created_by_source, created_by_thread_id, archived_at,
@@ -49,7 +49,7 @@ const sessionThreadSelectColumns = `id, session_id, org_id, agent_type, model_ov
 // sessionThreadListColumns omits the raw diff while preserving a lightweight
 // truthy marker for UI affordances such as "Revert tab". Server-side actions
 // that need the real patch use GetByID and sessionThreadSelectColumns.
-const sessionThreadListColumns = `id, session_id, org_id, agent_type, model_override,
+const sessionThreadListColumns = `id, session_id, org_id, agent_type, model_override, reasoning_effort,
 	label, instructions, file_scope, status, agent_session_id, current_turn, last_activity_at,
 	result_summary,
 	CASE WHEN diff IS NULL THEN NULL ELSE '__diff_present__' END AS diff,
@@ -75,26 +75,27 @@ func (s *SessionThreadStore) Create(ctx context.Context, thread *models.SessionT
 	normalizeSessionThreadExecutionDefaults(thread)
 	query := `
 		INSERT INTO session_threads (
-			session_id, org_id, agent_type, model_override,
+			session_id, org_id, agent_type, model_override, reasoning_effort,
 			label, instructions, file_scope, status, execution_mode, filesystem_mode
 		)
-		SELECT @session_id, @org_id, @agent_type, @model_override,
+		SELECT @session_id, @org_id, @agent_type, @model_override, @reasoning_effort,
 			@label, @instructions, @file_scope, @status, @execution_mode, @filesystem_mode
 		WHERE (SELECT count(*) FROM session_threads WHERE session_id = @session_id AND org_id = @org_id AND archived_at IS NULL) < @max_threads
 		RETURNING id, created_at`
 
 	args := pgx.NamedArgs{
-		"session_id":      thread.SessionID,
-		"org_id":          thread.OrgID,
-		"agent_type":      thread.AgentType,
-		"model_override":  thread.ModelOverride,
-		"label":           thread.Label,
-		"instructions":    thread.Instructions,
-		"file_scope":      thread.FileScope,
-		"status":          thread.Status,
-		"execution_mode":  thread.ExecutionMode,
-		"filesystem_mode": thread.FilesystemMode,
-		"max_threads":     maxThreads,
+		"session_id":       thread.SessionID,
+		"org_id":           thread.OrgID,
+		"agent_type":       thread.AgentType,
+		"model_override":   thread.ModelOverride,
+		"reasoning_effort": thread.ReasoningEffort,
+		"label":            thread.Label,
+		"instructions":     thread.Instructions,
+		"file_scope":       thread.FileScope,
+		"status":           thread.Status,
+		"execution_mode":   thread.ExecutionMode,
+		"filesystem_mode":  thread.FilesystemMode,
+		"max_threads":      maxThreads,
 	}
 
 	row := s.db.QueryRow(ctx, query, args)
@@ -116,11 +117,11 @@ func (s *SessionThreadStore) CreateWithProvenance(ctx context.Context, thread *m
 	}
 	query := `
 		INSERT INTO session_threads (
-			session_id, org_id, agent_type, model_override,
+			session_id, org_id, agent_type, model_override, reasoning_effort,
 			label, instructions, file_scope, status, created_by_source, created_by_thread_id,
 			execution_mode, filesystem_mode
 		)
-		SELECT @session_id, @org_id, @agent_type, @model_override,
+		SELECT @session_id, @org_id, @agent_type, @model_override, @reasoning_effort,
 			@label, @instructions, @file_scope, @status, @created_by_source, @created_by_thread_id,
 			@execution_mode, @filesystem_mode
 		WHERE (SELECT count(*) FROM session_threads WHERE session_id = @session_id AND org_id = @org_id AND archived_at IS NULL) < @max_threads
@@ -131,6 +132,7 @@ func (s *SessionThreadStore) CreateWithProvenance(ctx context.Context, thread *m
 		"org_id":               thread.OrgID,
 		"agent_type":           thread.AgentType,
 		"model_override":       thread.ModelOverride,
+		"reasoning_effort":     thread.ReasoningEffort,
 		"label":                thread.Label,
 		"instructions":         thread.Instructions,
 		"file_scope":           thread.FileScope,
@@ -376,6 +378,7 @@ func (s *SessionThreadStore) UpdateEditable(ctx context.Context, thread *models.
 		UPDATE session_threads
 		SET agent_type = @agent_type,
 		    model_override = @model_override,
+		    reasoning_effort = @reasoning_effort,
 		    label = @label
 		WHERE id = @id
 		  AND org_id = @org_id
@@ -385,12 +388,13 @@ func (s *SessionThreadStore) UpdateEditable(ctx context.Context, thread *models.
 		RETURNING ` + sessionThreadSelectColumns
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
-		"id":             thread.ID,
-		"org_id":         thread.OrgID,
-		"session_id":     thread.SessionID,
-		"agent_type":     thread.AgentType,
-		"model_override": thread.ModelOverride,
-		"label":          thread.Label,
+		"id":               thread.ID,
+		"org_id":           thread.OrgID,
+		"session_id":       thread.SessionID,
+		"agent_type":       thread.AgentType,
+		"model_override":   thread.ModelOverride,
+		"reasoning_effort": thread.ReasoningEffort,
+		"label":            thread.Label,
 	})
 	if err != nil {
 		return fmt.Errorf("update editable thread fields: %w", err)

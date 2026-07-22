@@ -690,7 +690,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	// Wire user credential store and LLM client into PR service.
 	if prService != nil {
-		githubAutomationTriggerer := automations.NewGitHubEventTriggerService(automationStore, automationRunStore, jobStore, logger)
+		githubAutomationTriggerer := automations.NewGitHubEventTriggerService(automationStore, automationRunStore, jobStore, pool, logger)
 		githubAutomationTriggerer.SetCapabilityResolver(agentCapabilitySvc)
 		prService.SetAutomationEventTriggerer(githubAutomationTriggerer)
 		prService.SetSessionMessageStore(sessionMessageStore)
@@ -1047,6 +1047,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		internalAgentCapabilitiesHandler := handlers.NewInternalAgentCapabilitiesHandler(agentCapabilitySvc, sessionStore, cfg.SessionSecret)
 		internalAgentPreviewHandler := handlers.NewInternalAgentPreviewHandler(previewHandler, sessionStore, cfg.SessionSecret, logger)
 		internalSessionHistoryHandler := handlers.NewInternalSessionHistoryHandler(sessionHistoryStore, sessionStore, sessionMessageStore, cfg.SessionSecret)
+		internalCodeReviewHandler := handlers.NewInternalCodeReviewHandler(codeReviewStore, sessionStore, cfg.SessionSecret)
+		internalCodeReviewHandler.SetAuditEmitter(auditEmitter)
 		internalChangesetHandler := handlers.NewInternalChangesetHandler(sessionStore, sessionHandler, cfg.SessionSecret)
 		internalSessionTabsHandler.SetAuditEmitter(auditEmitter)
 		r.Route("/api/v1/internal", func(r chi.Router) {
@@ -1095,6 +1097,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Get("/session-history/search", internalSessionHistoryHandler.Search)
 			r.Get("/session-history/{session_id}", internalSessionHistoryHandler.Get)
 			r.Get("/session-history/{session_id}/threads/{thread_id}/messages", internalSessionHistoryHandler.Messages)
+			r.Get("/code-reviews", internalCodeReviewHandler.List)
+			r.Get("/code-reviews/policy", internalCodeReviewHandler.Policy)
+			r.Put("/code-reviews/policy", internalCodeReviewHandler.UpdatePolicy)
+			r.Get("/code-reviews/policies/{policy_id}", internalCodeReviewHandler.PolicyByID)
+			r.Get("/code-reviews/{session_id}", internalCodeReviewHandler.Get)
 			r.Get("/session-tabs", internalSessionTabsHandler.List)
 			r.Post("/session-tabs", internalSessionTabsHandler.Create)
 			r.Get("/session-tabs/{thread_id}", internalSessionTabsHandler.Get)

@@ -840,7 +840,7 @@ func TestHarvestCodeReviewReviewerResultsIgnoresReadOnlyWorkspaceChanges(t *test
 	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
 		WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
 		WillReturnRows(newSessionThreadRows().
-			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil,
+			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, nil,
 				"Code review: codex", nil, []string{"internal/db/users.go"}, models.ThreadStatusCompleted,
 				nil, 1, &now, nil, &rawDiff, nil, nil,
 				&now, &now, now, models.ThreadCreatedBySourceSystem, nil, nil,
@@ -910,7 +910,7 @@ func TestHarvestCodeReviewReviewerResultsCompletesIdleReadOnlyViolationWithoutAs
 	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
 		WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
 		WillReturnRows(newSessionThreadRows().
-			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil,
+			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, nil,
 				"Code review: codex", nil, []string{"internal/db/users.go"}, models.ThreadStatusIdle,
 				nil, 1, &now, nil, &rawDiff, &failure, stringPtr("read_only_violation"),
 				&now, &now, now, models.ThreadCreatedBySourceSystem, nil, nil,
@@ -1002,7 +1002,7 @@ func TestHarvestCodeReviewReviewerResultsClassifiesFailedThreadOutput(t *testing
 			mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
 				WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
 				WillReturnRows(newSessionThreadRows().
-					AddRow(threadID, sessionID, orgID, models.AgentTypeClaudeCode, nil,
+					AddRow(threadID, sessionID, orgID, models.AgentTypeClaudeCode, nil, nil,
 						"Code review: claude_code", nil, []string{"internal/db/users.go"}, models.ThreadStatusFailed,
 						nil, 1, &now, nil, nil, &tt.failure, &tt.failureCategory,
 						&now, &now, now, models.ThreadCreatedBySourceSystem, nil, nil,
@@ -1489,7 +1489,7 @@ func TestHarvestCodeReviewOrchestratorResultPersistsFindings(t *testing.T) {
 	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
 		WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
 		WillReturnRows(newSessionThreadRows().
-			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil,
+			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, nil,
 				"Main", nil, []string{"internal/worker/code_review_handler.go"}, models.ThreadStatusCompleted,
 				nil, 1, &now, nil, nil, nil, nil,
 				&now, &now, now, models.ThreadCreatedBySourceSystem, nil, nil,
@@ -1663,7 +1663,7 @@ func TestHarvestCodeReviewOrchestratorResultRejectsMalformedSynthesis(t *testing
 	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
 		WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
 		WillReturnRows(newSessionThreadRows().
-			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil,
+			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, nil,
 				"Main", nil, []string{"internal/worker/code_review_handler.go"}, models.ThreadStatusCompleted,
 				nil, 1, &now, nil, nil, nil, nil,
 				&now, &now, now, models.ThreadCreatedBySourceSystem, nil, nil,
@@ -2021,6 +2021,53 @@ func TestCodeReviewReviewerAgentModel(t *testing.T) {
 		"missing reviewer_models should fall back to the per-agent default")
 }
 
+func TestCodeReviewReviewerReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		index     int
+		configure func(*models.CodeReviewPolicyConfig)
+		expected  models.ReasoningEffort
+	}{
+		{
+			name:  "uses first reviewer override",
+			index: 0,
+			configure: func(cfg *models.CodeReviewPolicyConfig) {
+				cfg.AgentRoster.ReviewerReasoningEfforts = []models.ReasoningEffort{models.ReasoningEffortLow, models.ReasoningEffortMax}
+			},
+			expected: models.ReasoningEffortLow,
+		},
+		{
+			name:  "uses second reviewer override independently",
+			index: 1,
+			configure: func(cfg *models.CodeReviewPolicyConfig) {
+				cfg.AgentRoster.ReviewerReasoningEfforts = []models.ReasoningEffort{models.ReasoningEffortLow, models.ReasoningEffortMax}
+			},
+			expected: models.ReasoningEffortMax,
+		},
+		{
+			name:  "falls back for legacy policy",
+			index: 0,
+			configure: func(cfg *models.CodeReviewPolicyConfig) {
+				cfg.AgentRoster.ReviewerReasoningEfforts = nil
+				cfg.AgentRoster.ReasoningEffort = models.ReasoningEffortMedium
+			},
+			expected: models.ReasoningEffortMedium,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := models.DefaultCodeReviewPolicyConfig()
+			tt.configure(&cfg)
+			require.Equal(t, tt.expected, cfg.AgentRoster.ReviewerReasoningEffort(tt.index), "reviewer should use the expected reasoning effort")
+		})
+	}
+}
+
 type codeReviewAgentAvailabilityStub struct {
 	available      map[models.AgentType]bool
 	availableModel map[models.AgentType]map[string]bool
@@ -2113,6 +2160,7 @@ func TestResolveCodeReviewOrchestratorAvailability(t *testing.T) {
 	cfg := models.DefaultCodeReviewPolicyConfig()
 	tests := []struct {
 		name      string
+		configure func(*models.CodeReviewPolicyConfig)
 		services  *Services
 		expected  codeReviewOrchestratorSelection
 		expectErr bool
@@ -2124,9 +2172,10 @@ func TestResolveCodeReviewOrchestratorAvailability(t *testing.T) {
 				models.AgentTypeCodex:    true,
 			}}},
 			expected: codeReviewOrchestratorSelection{
-				AgentType:  models.AgentTypeOpenCode,
-				AgentModel: stringPtr(models.OpenCodeModelGPT55),
-				Available:  true,
+				AgentType:       models.AgentTypeOpenCode,
+				AgentModel:      stringPtr(models.OpenCodeModelGPT55),
+				ReasoningEffort: reasoningEffortPtr(models.ReasoningEffortHigh),
+				Available:       true,
 			},
 		},
 		{
@@ -2135,9 +2184,10 @@ func TestResolveCodeReviewOrchestratorAvailability(t *testing.T) {
 				models.AgentTypeCodex: true,
 			}}},
 			expected: codeReviewOrchestratorSelection{
-				AgentType:  models.AgentTypeCodex,
-				AgentModel: stringPtr(models.DefaultCodexModel),
-				Available:  true,
+				AgentType:       models.AgentTypeCodex,
+				AgentModel:      stringPtr(models.DefaultCodexModel),
+				ReasoningEffort: reasoningEffortPtr(models.ReasoningEffortHigh),
+				Available:       true,
 			},
 		},
 		{
@@ -2153,9 +2203,10 @@ func TestResolveCodeReviewOrchestratorAvailability(t *testing.T) {
 				},
 			}},
 			expected: codeReviewOrchestratorSelection{
-				AgentType:  models.AgentTypeCodex,
-				AgentModel: stringPtr(models.DefaultCodexModel),
-				Available:  true,
+				AgentType:       models.AgentTypeCodex,
+				AgentModel:      stringPtr(models.DefaultCodexModel),
+				ReasoningEffort: reasoningEffortPtr(models.ReasoningEffortHigh),
+				Available:       true,
 			},
 		},
 		{
@@ -2164,26 +2215,49 @@ func TestResolveCodeReviewOrchestratorAvailability(t *testing.T) {
 				models.AgentTypeClaudeCode: true,
 			}}},
 			expected: codeReviewOrchestratorSelection{
-				AgentType:  models.AgentTypeClaudeCode,
-				AgentModel: stringPtr(models.DefaultClaudeCodeModel),
-				Available:  true,
+				AgentType:       models.AgentTypeClaudeCode,
+				AgentModel:      stringPtr(models.DefaultClaudeCodeModel),
+				ReasoningEffort: reasoningEffortPtr(models.ReasoningEffortHigh),
+				Available:       true,
+			},
+		},
+		{
+			name: "uses the fallback reviewer's reasoning instead of an incompatible orchestrator level",
+			configure: func(cfg *models.CodeReviewPolicyConfig) {
+				cfg.AgentRoster.Orchestrator = models.AgentTypeClaudeCode
+				cfg.AgentRoster.OrchestratorModel = stringPtr(models.DefaultClaudeCodeModel)
+				cfg.AgentRoster.ReasoningEffort = models.ReasoningEffortMax
+				cfg.AgentRoster.Reviewers = []models.AgentType{models.AgentTypeCodex}
+				cfg.AgentRoster.ReviewerModels = []string{models.DefaultCodexModel}
+				cfg.AgentRoster.ReviewerReasoningEfforts = []models.ReasoningEffort{models.ReasoningEffortHigh}
+			},
+			services: &Services{CodingAgents: codeReviewAgentAvailabilityStub{available: map[models.AgentType]bool{
+				models.AgentTypeCodex: true,
+			}}},
+			expected: codeReviewOrchestratorSelection{
+				AgentType:       models.AgentTypeCodex,
+				AgentModel:      stringPtr(models.DefaultCodexModel),
+				ReasoningEffort: reasoningEffortPtr(models.ReasoningEffortHigh),
+				Available:       true,
 			},
 		},
 		{
 			name:     "does not select an unauthenticated agent",
 			services: &Services{CodingAgents: codeReviewAgentAvailabilityStub{available: map[models.AgentType]bool{}}},
 			expected: codeReviewOrchestratorSelection{
-				AgentType:  models.AgentTypeOpenCode,
-				AgentModel: stringPtr(models.OpenCodeModelGPT55),
-				Available:  false,
+				AgentType:       models.AgentTypeOpenCode,
+				AgentModel:      stringPtr(models.OpenCodeModelGPT55),
+				ReasoningEffort: reasoningEffortPtr(models.ReasoningEffortHigh),
+				Available:       false,
 			},
 		},
 		{
 			name: "preserves the configured orchestrator without an availability service",
 			expected: codeReviewOrchestratorSelection{
-				AgentType:  models.AgentTypeOpenCode,
-				AgentModel: stringPtr(models.OpenCodeModelGPT55),
-				Available:  true,
+				AgentType:       models.AgentTypeOpenCode,
+				AgentModel:      stringPtr(models.OpenCodeModelGPT55),
+				ReasoningEffort: reasoningEffortPtr(models.ReasoningEffortHigh),
+				Available:       true,
 			},
 		},
 		{
@@ -2197,7 +2271,11 @@ func TestResolveCodeReviewOrchestratorAvailability(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			actual, err := resolveCodeReviewOrchestratorAvailability(context.Background(), tt.services, uuid.New(), cfg)
+			testConfig := cfg
+			if tt.configure != nil {
+				tt.configure(&testConfig)
+			}
+			actual, err := resolveCodeReviewOrchestratorAvailability(context.Background(), tt.services, uuid.New(), testConfig)
 			if tt.expectErr {
 				require.Error(t, err, "orchestrator availability resolution should propagate lookup failures")
 				return
@@ -2989,7 +3067,7 @@ func newCodeReviewMetadataRows() *pgxmock.Rows {
 
 func newSessionThreadRows() *pgxmock.Rows {
 	return pgxmock.NewRows([]string{
-		"id", "session_id", "org_id", "agent_type", "model_override",
+		"id", "session_id", "org_id", "agent_type", "model_override", "reasoning_effort",
 		"label", "instructions", "file_scope", "status", "agent_session_id", "current_turn", "last_activity_at",
 		"result_summary", "diff", "failure_explanation", "failure_category",
 		"started_at", "completed_at", "created_at", "created_by_source", "created_by_thread_id", "archived_at",

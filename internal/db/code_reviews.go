@@ -297,7 +297,26 @@ func (s *CodeReviewStore) GetPolicyByID(ctx context.Context, orgID, policyID uui
 	return collectOneCodeReviewPolicy(rows)
 }
 
+// ErrCodeReviewPolicyVersionConflict is returned by SavePolicyExpectingVersion
+// when the active policy version no longer matches the caller's expectation —
+// someone else (human or agent) saved a newer version first.
+var ErrCodeReviewPolicyVersionConflict = errors.New("code review policy version conflict")
+
 func (s *CodeReviewStore) SavePolicy(ctx context.Context, orgID uuid.UUID, config models.CodeReviewPolicyConfig, createdByUserID *uuid.UUID) (models.CodeReviewPolicyRecord, error) {
+	return s.savePolicy(ctx, orgID, config, createdByUserID, nil)
+}
+
+// SavePolicyExpectingVersion saves a new policy version only if the current
+// active version still equals expectedVersion (0 when the org has never saved
+// a policy). The check runs inside the same advisory-locked transaction as the
+// insert, so concurrent writers cannot both pass it. Agent-driven policy
+// updates use this so a stale agent never silently clobbers a newer human (or
+// agent) edit.
+func (s *CodeReviewStore) SavePolicyExpectingVersion(ctx context.Context, orgID uuid.UUID, config models.CodeReviewPolicyConfig, expectedVersion int, createdByUserID *uuid.UUID) (models.CodeReviewPolicyRecord, error) {
+	return s.savePolicy(ctx, orgID, config, createdByUserID, &expectedVersion)
+}
+
+func (s *CodeReviewStore) savePolicy(ctx context.Context, orgID uuid.UUID, config models.CodeReviewPolicyConfig, createdByUserID *uuid.UUID, expectedVersion *int) (models.CodeReviewPolicyRecord, error) {
 	config.ReviewInstructions = strings.TrimSpace(config.ReviewInstructions)
 	config.AutomatedApprovalPolicy = strings.TrimSpace(config.AutomatedApprovalPolicy)
 	if err := config.ValidatePromptFields(); err != nil {
@@ -324,16 +343,20 @@ func (s *CodeReviewStore) SavePolicy(ctx context.Context, orgID uuid.UUID, confi
 		return models.CodeReviewPolicyRecord{}, fmt.Errorf("acquire code review policy lock: %w", err)
 	}
 
-	var version int
+	var currentVersion int
 	if err := tx.QueryRow(ctx, `
-		SELECT COALESCE(MAX(version), 0) + 1
+		SELECT COALESCE(MAX(version), 0)
 		FROM code_review_policies
 		WHERE org_id = @org_id
 		  AND repository_id IS NULL`, pgx.NamedArgs{
 		"org_id": orgID,
-	}).Scan(&version); err != nil {
-		return models.CodeReviewPolicyRecord{}, fmt.Errorf("select next code review policy version: %w", err)
+	}).Scan(&currentVersion); err != nil {
+		return models.CodeReviewPolicyRecord{}, fmt.Errorf("select current code review policy version: %w", err)
 	}
+	if expectedVersion != nil && *expectedVersion != currentVersion {
+		return models.CodeReviewPolicyRecord{}, fmt.Errorf("%w: active version is %d, expected %d", ErrCodeReviewPolicyVersionConflict, currentVersion, *expectedVersion)
+	}
+	version := currentVersion + 1
 	if _, err := tx.Exec(ctx, `
 		UPDATE code_review_policies
 		SET active = false
@@ -1001,26 +1024,7 @@ func (s *CodeReviewStore) CancelReview(ctx context.Context, orgID, sessionID uui
 	return metadata, nil
 }
 
-type CodeReviewListFilters struct {
-	RepositoryID *uuid.UUID
-	Decision     *models.CodeReviewDecision
-	Outcome      *models.CodeReviewListOutcome
-	Status       *models.CodeReviewSessionStatus
-	Acceptable   *bool
-	Search       string
-	Limit        int
-}
-
-func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filters CodeReviewListFilters) ([]models.CodeReviewListItem, error) {
-	limit := filters.Limit
-	if limit <= 0 || limit > 100 {
-		limit = 50
-	}
-	args := pgx.NamedArgs{
-		"org_id": orgID,
-		"limit":  limit,
-	}
-	query := `
+const codeReviewListItemSelect = `
 			SELECT m.id, m.org_id, m.session_id, m.repository_id, m.pull_request_id, m.policy_id,
 			       m.base_sha, m.head_sha, m.from_fork, m.trigger_source, m.status, m.phase, m.status_code,
 			       m.status_message, m.retry_at, m.last_error_at, m.retryable_failure, m.decision, m.acceptable, m.stale,
@@ -1061,12 +1065,60 @@ func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filt
 			       s.title AS session_title, r.full_name AS repository_name, pr.github_repo, pr.github_pr_number,
 			       pr.github_pr_url, pr.title AS pull_request_title,
 			       COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), pr.authored_by::text) AS pull_request_author
-			FROM code_review_session_metadata m
+		FROM code_review_session_metadata m
 			JOIN sessions s ON s.id = m.session_id AND s.org_id = m.org_id
 			JOIN repositories r ON r.id = m.repository_id AND r.org_id = m.org_id
 			JOIN pull_requests pr ON pr.id = m.pull_request_id AND pr.org_id = m.org_id
 			LEFT JOIN pull_request_health_current current_health
-			       ON current_health.pull_request_id = m.pull_request_id AND current_health.org_id = m.org_id
+			       ON current_health.pull_request_id = m.pull_request_id AND current_health.org_id = m.org_id`
+
+// GetListItemBySessionID returns one review with the same joined pull request
+// and repository context as ListReviews rows. Used by the internal (sandbox)
+// code review history API where agents need PR context alongside the review.
+func (s *CodeReviewStore) GetListItemBySessionID(ctx context.Context, orgID, sessionID uuid.UUID) (models.CodeReviewListItem, error) {
+	rows, err := s.db.Query(ctx, codeReviewListItemSelect+`
+			WHERE m.org_id = @org_id
+			  AND m.session_id = @session_id`, pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID,
+	})
+	if err != nil {
+		return models.CodeReviewListItem{}, fmt.Errorf("query code review list item: %w", err)
+	}
+	defer rows.Close()
+	item, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.CodeReviewListItem])
+	if err != nil {
+		return models.CodeReviewListItem{}, err
+	}
+	return item, nil
+}
+
+type CodeReviewListFilters struct {
+	RepositoryID  *uuid.UUID
+	Decision      *models.CodeReviewDecision
+	Outcome       *models.CodeReviewListOutcome
+	Status        *models.CodeReviewSessionStatus
+	Acceptable    *bool
+	Search        string
+	Limit         int
+	CreatedAfter  *time.Time
+	CreatedBefore *time.Time
+	// Cursor is the metadata row ID of the last item from the previous page.
+	// Rows strictly after it in the (created_at DESC, id DESC) order are
+	// returned, matching the session-history keyset pagination contract.
+	Cursor *uuid.UUID
+}
+
+func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filters CodeReviewListFilters) ([]models.CodeReviewListItem, error) {
+	limit := filters.Limit
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	args := pgx.NamedArgs{
+		"org_id": orgID,
+		"limit":  limit,
+	}
+	query := codeReviewListItemSelect + `
 			WHERE m.org_id = @org_id`
 	if filters.RepositoryID != nil {
 		query += `
@@ -1110,6 +1162,24 @@ func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filt
 		query += `
 			  AND m.acceptable = @acceptable`
 		args["acceptable"] = *filters.Acceptable
+	}
+	if filters.CreatedAfter != nil {
+		query += `
+			  AND m.created_at >= @created_after`
+		args["created_after"] = *filters.CreatedAfter
+	}
+	if filters.CreatedBefore != nil {
+		query += `
+			  AND m.created_at <= @created_before`
+		args["created_before"] = *filters.CreatedBefore
+	}
+	if filters.Cursor != nil {
+		query += `
+			  AND (m.created_at, m.id) < (
+			    SELECT created_at, id FROM code_review_session_metadata
+			    WHERE id = @cursor AND org_id = @org_id
+			  )`
+		args["cursor"] = *filters.Cursor
 	}
 	if search := strings.TrimSpace(filters.Search); search != "" {
 		query += `
@@ -1307,13 +1377,24 @@ func (s *CodeReviewStore) upsertFinding(ctx context.Context, finding *models.Cod
 }
 
 func (s *CodeReviewStore) ListFindings(ctx context.Context, orgID, sessionID uuid.UUID, selectedOnly bool) ([]models.CodeReviewFinding, error) {
+	// severity is a text enum, so a bare ORDER BY would sort alphabetically
+	// (medium > low > info > high > critical); rank it explicitly instead.
 	rows, err := s.db.Query(ctx, `
 		SELECT `+codeReviewFindingColumns+`
 		FROM code_review_findings
 		WHERE org_id = @org_id
 		  AND session_id = @session_id
 		  AND (@selected_only = false OR selected_for_inline = true)
-		ORDER BY selected_for_inline DESC, severity DESC, created_at ASC, id ASC`, pgx.NamedArgs{
+		ORDER BY selected_for_inline DESC,
+		         CASE severity
+		           WHEN 'critical' THEN 5
+		           WHEN 'high' THEN 4
+		           WHEN 'medium' THEN 3
+		           WHEN 'low' THEN 2
+		           WHEN 'info' THEN 1
+		           ELSE 0
+		         END DESC,
+		         created_at ASC, id ASC`, pgx.NamedArgs{
 		"org_id":        orgID,
 		"session_id":    sessionID,
 		"selected_only": selectedOnly,
