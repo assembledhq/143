@@ -1661,16 +1661,20 @@ func TestHandlePullRequestEvent_EditedRefreshesSnapshot(t *testing.T) {
 		logger:       zerolog.Nop(),
 	}
 
+	headSHA := "head-sha"
+	headRef := "feature/metadata-sync"
+	baseSHA := "base-sha"
+	storedPRRow := handlerPRRow(prID, &sessionID, orgID, "testorg/testrepo", now)
+	storedPRRow[12] = &headSHA
+	storedPRRow[13] = &headRef
+	storedPRRow[14] = &baseSHA
 	prMock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*WHERE org_id").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": "testorg/testrepo", "github_pr_number": 42}).
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
-				AddRow(handlerPRRow(prID, &sessionID, orgID, "testorg/testrepo", now)...),
+				AddRow(storedPRRow...),
 		)
 	body := "Updated pull request description"
-	headSHA := "head-sha"
-	headRef := "feature/metadata-sync"
-	baseSHA := "base-sha"
 	prMock.ExpectExec("UPDATE pull_requests[\\s\\S]*github_pr_url = @github_pr_url[\\s\\S]*title = @title[\\s\\S]*body = @body").
 		WithArgs(pgx.NamedArgs{
 			"id": prID, "org_id": orgID,
@@ -1694,6 +1698,60 @@ func TestHandlePullRequestEvent_EditedRefreshesSnapshot(t *testing.T) {
 
 	require.NoError(t, err, "edited pull request should refresh its stored GitHub snapshot")
 	require.NoError(t, prMock.ExpectationsWereMet(), "edited pull request snapshot update should remain org-scoped")
+}
+
+func TestHandlePullRequestEvent_BaseEditEnqueuesHealthSync(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	headSHA := "head-sha"
+	headRef := "feature/metadata-sync"
+	oldBaseSHA := "old-base-sha"
+	newBaseSHA := "new-base-sha"
+	prMock := newMockPool(t)
+	jobMock := newMockPool(t)
+	svc := &PRService{
+		pullRequests: db.NewPullRequestStore(prMock),
+		jobs:         db.NewJobStore(jobMock),
+		logger:       zerolog.Nop(),
+	}
+
+	storedPRRow := handlerPRRow(prID, &sessionID, orgID, "testorg/testrepo", now)
+	storedPRRow[12] = &headSHA
+	storedPRRow[13] = &headRef
+	storedPRRow[14] = &oldBaseSHA
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*WHERE org_id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": "testorg/testrepo", "github_pr_number": 42}).
+		WillReturnRows(pgxmock.NewRows(handlerPRColumns).AddRow(storedPRRow...))
+	prMock.ExpectExec("UPDATE pull_requests[\\s\\S]*github_pr_url = @github_pr_url[\\s\\S]*base_sha = @base_sha[\\s\\S]*health_version = CASE WHEN head_sha IS DISTINCT FROM @head_sha OR base_sha IS DISTINCT FROM @base_sha THEN 0").
+		WithArgs(pgx.NamedArgs{
+			"id": prID, "org_id": orgID,
+			"github_pr_url": "https://github.com/testorg/testrepo/pull/42",
+			"title":         "Updated pull request title", "body": (*string)(nil),
+			"head_sha": &headSHA, "head_ref": &headRef, "base_sha": &newBaseSHA,
+			"merge_state": models.PullRequestMergeStateUnknown,
+		}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	jobMock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	event := PullRequestEvent{Action: "edited", Number: 42, OwnerOrgID: &orgID}
+	event.Repository.FullName = "testorg/testrepo"
+	event.PR.HTMLURL = "https://github.com/testorg/testrepo/pull/42"
+	event.PR.Title = "Updated pull request title"
+	event.PR.Head.SHA = headSHA
+	event.PR.Head.Ref = headRef
+	event.PR.Base.SHA = newBaseSHA
+
+	err := svc.HandlePullRequestEvent(context.Background(), event)
+
+	require.NoError(t, err, "retargeting a pull request should refresh its snapshot and queue health synchronization")
+	require.NoError(t, prMock.ExpectationsWereMet(), "base retarget should update the org-scoped pull request snapshot")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "base retarget should enqueue a pull request health sync")
 }
 
 func TestHandlePullRequestEvent_OpenedEnqueuesHealthSync(t *testing.T) {

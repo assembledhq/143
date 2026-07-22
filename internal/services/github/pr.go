@@ -2417,6 +2417,7 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 
 	switch event.Action {
 	case "edited":
+		baseChanged := stringValue(pr.BaseSHA) != event.PR.Base.SHA
 		if err := s.pullRequests.UpdateGitHubSnapshot(ctx, pr.OrgID, pr.ID, db.PullRequestGitHubSnapshot{
 			GitHubPRURL: event.PR.HTMLURL,
 			Title:       event.PR.Title,
@@ -2426,6 +2427,9 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 			BaseSHA:     pullRequestWebhookOptionalString(event.PR.Base.SHA),
 		}); err != nil {
 			return fmt.Errorf("refresh edited pull request snapshot: %w", err)
+		}
+		if baseChanged {
+			s.enqueuePullRequestStateSync(ctx, pr)
 		}
 		return nil
 	case "opened", "reopened", "ready_for_review", "synchronize":

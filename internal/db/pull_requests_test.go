@@ -354,7 +354,7 @@ func TestPullRequestStore_UpdateGitHubSnapshot(t *testing.T) {
 	headRef := "feature/code-review"
 	baseSHA := "new-base"
 
-	mock.ExpectExec("UPDATE pull_requests[\\s\\S]*github_pr_url = @github_pr_url[\\s\\S]*head_sha = @head_sha[\\s\\S]*health_version = CASE WHEN head_sha IS DISTINCT FROM @head_sha THEN 0").
+	mock.ExpectExec("UPDATE pull_requests[\\s\\S]*github_pr_url = @github_pr_url[\\s\\S]*head_sha = @head_sha[\\s\\S]*health_version = CASE WHEN head_sha IS DISTINCT FROM @head_sha OR base_sha IS DISTINCT FROM @base_sha THEN 0").
 		WithArgs(pgx.NamedArgs{
 			"id":            prID,
 			"org_id":        orgID,
