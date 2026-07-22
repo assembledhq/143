@@ -65,22 +65,25 @@ type codeReviewReassessmentWebhook struct {
 		PerformedViaGitHubApp *codeReviewGitHubAppIdentity `json:"performed_via_github_app"`
 	} `json:"comment"`
 	Thread struct {
-		ID string `json:"id"`
+		NodeID string `json:"node_id"`
 	} `json:"thread"`
 	CheckSuite struct {
+		ID           int64   `json:"id"`
 		Conclusion   *string `json:"conclusion"`
 		PullRequests []struct {
 			Number int `json:"number"`
 		} `json:"pull_requests"`
 	} `json:"check_suite"`
 	CheckRun struct {
+		ID           int64   `json:"id"`
 		Conclusion   *string `json:"conclusion"`
 		PullRequests []struct {
 			Number int `json:"number"`
 		} `json:"pull_requests"`
 	} `json:"check_run"`
-	SHA   string `json:"sha"`
-	State string `json:"state"`
+	SHA     string `json:"sha"`
+	State   string `json:"state"`
+	Context string `json:"context"`
 }
 
 type codeReviewGitHubAppIdentity struct {
@@ -294,15 +297,30 @@ func codeReviewMaterialChangeKey(eventType string, event codeReviewReassessmentW
 	case "pull_request_review_thread":
 		state.Event = codeReviewMaterialEventState{
 			Class:    "review_thread",
-			ObjectID: strings.TrimSpace(event.Thread.ID),
+			ObjectID: strings.TrimSpace(event.Thread.NodeID),
 			State:    strings.ToLower(strings.TrimSpace(event.Action)),
 		}
 	case "check_suite":
-		state.Event = codeReviewMaterialEventState{Class: "checks", State: codeReviewCheckState(event.CheckSuite.Conclusion, "")}
+		state.Event = codeReviewMaterialCheckEventState(
+			pr.CIStatus,
+			fmt.Sprintf("check_suite:%d", event.CheckSuite.ID),
+			event.CheckSuite.Conclusion,
+			"",
+		)
 	case "check_run":
-		state.Event = codeReviewMaterialEventState{Class: "checks", State: codeReviewCheckState(event.CheckRun.Conclusion, "")}
+		state.Event = codeReviewMaterialCheckEventState(
+			pr.CIStatus,
+			fmt.Sprintf("check_run:%d", event.CheckRun.ID),
+			event.CheckRun.Conclusion,
+			"",
+		)
 	case "status":
-		state.Event = codeReviewMaterialEventState{Class: "checks", State: codeReviewCheckState(nil, event.State)}
+		state.Event = codeReviewMaterialCheckEventState(
+			pr.CIStatus,
+			"status:"+strings.ToLower(strings.TrimSpace(event.Context)),
+			nil,
+			event.State,
+		)
 	default:
 		state.Event = codeReviewMaterialEventState{Class: eventType, State: strings.ToLower(strings.TrimSpace(event.Action))}
 	}
@@ -338,6 +356,28 @@ func codeReviewCheckState(conclusion *string, statusState string) string {
 	case "failure", "error", "cancelled", "timed_out", "action_required", "startup_failure", "stale":
 		return "failure"
 	case "pending", "queued", "in_progress", "requested", "waiting":
+		return "pending"
+	default:
+		return "unknown"
+	}
+}
+
+func codeReviewMaterialCheckEventState(prCIStatus models.PullRequestCIStatus, objectID string, conclusion *string, statusState string) codeReviewMaterialEventState {
+	state := codeReviewCheckState(conclusion, statusState)
+	event := codeReviewMaterialEventState{Class: "checks", State: state}
+	if codeReviewStoredCIState(prCIStatus) != state {
+		event.ObjectID = strings.TrimSpace(objectID)
+	}
+	return event
+}
+
+func codeReviewStoredCIState(status models.PullRequestCIStatus) string {
+	switch status {
+	case models.PullRequestCIStatusSuccess:
+		return "success"
+	case models.PullRequestCIStatusFailure:
+		return "failure"
+	case models.PullRequestCIStatusPending:
 		return "pending"
 	default:
 		return "unknown"

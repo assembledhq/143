@@ -890,11 +890,22 @@ func TestCodeReviewMaterialChangeKey(t *testing.T) {
 	success := "success"
 	failure := "failure"
 	checkRunSuccess := codeReviewReassessmentWebhook{Action: "completed"}
+	checkRunSuccess.CheckRun.ID = 501
 	checkRunSuccess.CheckRun.Conclusion = &success
+	secondCheckRunSuccess := checkRunSuccess
+	secondCheckRunSuccess.CheckRun.ID = 502
 	checkSuiteSuccess := codeReviewReassessmentWebhook{Action: "completed"}
+	checkSuiteSuccess.CheckSuite.ID = 601
 	checkSuiteSuccess.CheckSuite.Conclusion = &success
 	checkRunFailure := codeReviewReassessmentWebhook{Action: "completed"}
+	checkRunFailure.CheckRun.ID = 501
 	checkRunFailure.CheckRun.Conclusion = &failure
+	statusSuccess := codeReviewReassessmentWebhook{State: "success", Context: "ci/unit-tests"}
+	secondStatusSuccess := codeReviewReassessmentWebhook{State: "success", Context: "ci/integration-tests"}
+	var firstResolvedThread codeReviewReassessmentWebhook
+	require.NoError(t, json.Unmarshal([]byte(`{"action":"resolved","thread":{"node_id":"PRRT_first"}}`), &firstResolvedThread), "first review thread webhook should decode")
+	var secondResolvedThread codeReviewReassessmentWebhook
+	require.NoError(t, json.Unmarshal([]byte(`{"action":"resolved","thread":{"node_id":"PRRT_second"}}`), &secondResolvedThread), "second review thread webhook should decode")
 	humanReview := codeReviewReassessmentWebhook{Action: "submitted"}
 	humanReview.Review.ID = 101
 	humanReview.Review.State = "commented"
@@ -911,6 +922,7 @@ func TestCodeReviewMaterialChangeKey(t *testing.T) {
 		left       codeReviewReassessmentWebhook
 		rightType  string
 		right      codeReviewReassessmentWebhook
+		leftCI     models.PullRequestCIStatus
 		rightCI    models.PullRequestCIStatus
 		expectSame bool
 	}{
@@ -919,6 +931,44 @@ func TestCodeReviewMaterialChangeKey(t *testing.T) {
 			leftType: "check_run", left: checkRunSuccess,
 			rightType: "check_suite", right: checkSuiteSuccess,
 			expectSame: true,
+		},
+		{
+			name:       "same check run redelivery while aggregate state is stale",
+			leftType:   "check_run",
+			left:       checkRunSuccess,
+			rightType:  "check_run",
+			right:      checkRunSuccess,
+			leftCI:     models.PullRequestCIStatusPending,
+			rightCI:    models.PullRequestCIStatusPending,
+			expectSame: true,
+		},
+		{
+			name:       "distinct check runs while aggregate state is stale",
+			leftType:   "check_run",
+			left:       checkRunSuccess,
+			rightType:  "check_run",
+			right:      secondCheckRunSuccess,
+			leftCI:     models.PullRequestCIStatusPending,
+			rightCI:    models.PullRequestCIStatusPending,
+			expectSame: false,
+		},
+		{
+			name:       "distinct status contexts while aggregate state is stale",
+			leftType:   "status",
+			left:       statusSuccess,
+			rightType:  "status",
+			right:      secondStatusSuccess,
+			leftCI:     models.PullRequestCIStatusPending,
+			rightCI:    models.PullRequestCIStatusPending,
+			expectSame: false,
+		},
+		{
+			name:       "distinct resolved review threads",
+			leftType:   "pull_request_review_thread",
+			left:       firstResolvedThread,
+			rightType:  "pull_request_review_thread",
+			right:      secondResolvedThread,
+			expectSame: false,
 		},
 		{
 			name:     "changed check result",
@@ -954,7 +1004,11 @@ func TestCodeReviewMaterialChangeKey(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			left, err := codeReviewMaterialChangeKey(tt.leftType, tt.left, pr)
+			leftPR := pr
+			if tt.leftCI != "" {
+				leftPR.CIStatus = tt.leftCI
+			}
+			left, err := codeReviewMaterialChangeKey(tt.leftType, tt.left, leftPR)
 			require.NoError(t, err, "left material state should serialize")
 			rightPR := pr
 			if tt.rightCI != "" {
