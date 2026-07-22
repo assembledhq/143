@@ -67,23 +67,6 @@ type codeReviewReassessmentWebhook struct {
 	Thread struct {
 		NodeID string `json:"node_id"`
 	} `json:"thread"`
-	CheckSuite struct {
-		ID           int64   `json:"id"`
-		Conclusion   *string `json:"conclusion"`
-		PullRequests []struct {
-			Number int `json:"number"`
-		} `json:"pull_requests"`
-	} `json:"check_suite"`
-	CheckRun struct {
-		ID           int64   `json:"id"`
-		Conclusion   *string `json:"conclusion"`
-		PullRequests []struct {
-			Number int `json:"number"`
-		} `json:"pull_requests"`
-	} `json:"check_run"`
-	SHA     string `json:"sha"`
-	State   string `json:"state"`
-	Context string `json:"context"`
 }
 
 type codeReviewGitHubAppIdentity struct {
@@ -107,18 +90,6 @@ func (h *WebhookHandler) reassessCodeReviewsForGitHubEvent(ctx context.Context, 
 	}
 
 	numbers := codeReviewReassessmentPullRequestNumbers(eventType, event)
-	if eventType == "status" {
-		prs, err := h.pullRequests.ListOpenByOrgRepoAndHeadSHA(ctx, owner.OrgID, event.Repository.FullName, event.SHA)
-		if err != nil {
-			return fmt.Errorf("list pull requests for code review status reassessment: %w", err)
-		}
-		for _, pr := range prs {
-			if err := h.reassessCodeReviewTarget(ctx, owner, eventType, event, pr); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
 	for _, number := range numbers {
 		pr, err := h.pullRequests.GetByOrgRepoAndNumber(ctx, owner.OrgID, event.Repository.FullName, number)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -219,19 +190,6 @@ func canonicalCodeReviewBotLogin(login string) string {
 	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(login)), "[bot]")
 }
 
-type codeReviewMaterialPullRequestState struct {
-	HeadSHA          string                         `json:"head_sha"`
-	BaseSHA          string                         `json:"base_sha"`
-	Title            string                         `json:"title"`
-	Body             string                         `json:"body"`
-	Status           models.PullRequestStatus       `json:"status"`
-	ReviewStatus     models.PullRequestReviewStatus `json:"review_status"`
-	CIStatus         models.PullRequestCIStatus     `json:"ci_status"`
-	MergeState       models.PullRequestMergeState   `json:"merge_state"`
-	HasConflicts     bool                           `json:"has_conflicts"`
-	FailingTestCount int                            `json:"failing_test_count"`
-}
-
 type codeReviewMaterialEventState struct {
 	Class       string `json:"class"`
 	ObjectID    string `json:"object_id,omitempty"`
@@ -244,28 +202,17 @@ type codeReviewMaterialEventState struct {
 }
 
 type codeReviewMaterialAssessmentState struct {
-	PullRequest codeReviewMaterialPullRequestState `json:"pull_request"`
-	Event       codeReviewMaterialEventState       `json:"event"`
+	HeadSHA string                       `json:"head_sha"`
+	Event   codeReviewMaterialEventState `json:"event"`
 }
 
 func codeReviewMaterialChangeKey(eventType string, event codeReviewReassessmentWebhook, pr models.PullRequest) (string, error) {
 	state := codeReviewMaterialAssessmentState{
-		PullRequest: codeReviewMaterialPullRequestState{
-			HeadSHA:          codeReviewStringValue(pr.HeadSHA),
-			BaseSHA:          codeReviewStringValue(pr.BaseSHA),
-			Title:            strings.TrimSpace(pr.Title),
-			Body:             strings.TrimSpace(codeReviewStringValue(pr.Body)),
-			Status:           pr.Status,
-			ReviewStatus:     pr.ReviewStatus,
-			CIStatus:         pr.CIStatus,
-			MergeState:       pr.MergeState,
-			HasConflicts:     pr.HasConflicts,
-			FailingTestCount: pr.FailingTestCount,
-		},
+		HeadSHA: codeReviewStringValue(pr.HeadSHA),
 	}
 	switch eventType {
 	case "pull_request":
-		state.Event = codeReviewMaterialEventState{Class: "pull_request", State: codeReviewPullRequestEventState(event.Action)}
+		state.Event = codeReviewMaterialEventState{Class: "pull_request"}
 	case "pull_request_review":
 		reviewState := strings.ToLower(strings.TrimSpace(event.Review.State))
 		if event.Action == "dismissed" {
@@ -300,27 +247,6 @@ func codeReviewMaterialChangeKey(eventType string, event codeReviewReassessmentW
 			ObjectID: strings.TrimSpace(event.Thread.NodeID),
 			State:    strings.ToLower(strings.TrimSpace(event.Action)),
 		}
-	case "check_suite":
-		state.Event = codeReviewMaterialCheckEventState(
-			pr.CIStatus,
-			fmt.Sprintf("check_suite:%d", event.CheckSuite.ID),
-			event.CheckSuite.Conclusion,
-			"",
-		)
-	case "check_run":
-		state.Event = codeReviewMaterialCheckEventState(
-			pr.CIStatus,
-			fmt.Sprintf("check_run:%d", event.CheckRun.ID),
-			event.CheckRun.Conclusion,
-			"",
-		)
-	case "status":
-		state.Event = codeReviewMaterialCheckEventState(
-			pr.CIStatus,
-			"status:"+strings.ToLower(strings.TrimSpace(event.Context)),
-			nil,
-			event.State,
-		)
 	default:
 		state.Event = codeReviewMaterialEventState{Class: eventType, State: strings.ToLower(strings.TrimSpace(event.Action))}
 	}
@@ -330,58 +256,6 @@ func codeReviewMaterialChangeKey(eventType string, event codeReviewReassessmentW
 	}
 	sum := sha256.Sum256(raw)
 	return fmt.Sprintf("material:%x", sum[:]), nil
-}
-
-func codeReviewPullRequestEventState(action string) string {
-	switch strings.ToLower(strings.TrimSpace(action)) {
-	case "ready_for_review":
-		return "ready"
-	case "converted_to_draft":
-		return "draft"
-	default:
-		// Synchronize, edit, and reopen events are fully represented by the
-		// mirrored pull-request state included in the material key.
-		return ""
-	}
-}
-
-func codeReviewCheckState(conclusion *string, statusState string) string {
-	value := strings.ToLower(strings.TrimSpace(statusState))
-	if conclusion != nil {
-		value = strings.ToLower(strings.TrimSpace(*conclusion))
-	}
-	switch value {
-	case "success", "neutral", "skipped":
-		return "success"
-	case "failure", "error", "cancelled", "timed_out", "action_required", "startup_failure", "stale":
-		return "failure"
-	case "pending", "queued", "in_progress", "requested", "waiting":
-		return "pending"
-	default:
-		return "unknown"
-	}
-}
-
-func codeReviewMaterialCheckEventState(prCIStatus models.PullRequestCIStatus, objectID string, conclusion *string, statusState string) codeReviewMaterialEventState {
-	state := codeReviewCheckState(conclusion, statusState)
-	event := codeReviewMaterialEventState{Class: "checks", State: state}
-	if codeReviewStoredCIState(prCIStatus) != state {
-		event.ObjectID = strings.TrimSpace(objectID)
-	}
-	return event
-}
-
-func codeReviewStoredCIState(status models.PullRequestCIStatus) string {
-	switch status {
-	case models.PullRequestCIStatusSuccess:
-		return "success"
-	case models.PullRequestCIStatusFailure:
-		return "failure"
-	case models.PullRequestCIStatusPending:
-		return "pending"
-	default:
-		return "unknown"
-	}
 }
 
 func codeReviewIntValue(value *int) int {
@@ -401,20 +275,13 @@ func codeReviewStringValue(value *string) string {
 func codeReviewEventChangesAssessment(eventType string, event codeReviewReassessmentWebhook) bool {
 	switch eventType {
 	case "pull_request":
-		switch event.Action {
-		case "synchronize", "edited", "reopened", "ready_for_review", "converted_to_draft":
-			return true
-		}
+		return event.Action == "synchronize"
 	case "pull_request_review":
 		return event.Action == "submitted" || event.Action == "edited" || event.Action == "dismissed"
 	case "pull_request_review_comment":
 		return event.Action == "created" || event.Action == "edited" || event.Action == "deleted"
 	case "pull_request_review_thread":
 		return event.Action == "resolved" || event.Action == "unresolved"
-	case "check_suite", "check_run":
-		return event.Action == "completed"
-	case "status":
-		return strings.TrimSpace(event.SHA) != ""
 	}
 	return false
 }
@@ -437,14 +304,6 @@ func codeReviewReassessmentPullRequestNumbers(eventType string, event codeReview
 		numbers = add(numbers, event.Number)
 	case "pull_request_review", "pull_request_review_comment", "pull_request_review_thread":
 		numbers = add(numbers, event.PullRequest.Number)
-	case "check_suite":
-		for _, ref := range event.CheckSuite.PullRequests {
-			numbers = add(numbers, ref.Number)
-		}
-	case "check_run":
-		for _, ref := range event.CheckRun.PullRequests {
-			numbers = add(numbers, ref.Number)
-		}
 	}
 	return numbers
 }

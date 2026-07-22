@@ -731,7 +731,7 @@ func TestWebhook_HandleCodeReviewRequestedRefreshesExistingMirror(t *testing.T) 
 	require.NoError(t, mock.ExpectationsWereMet(), "existing pull request mirror should be refreshed from the webhook payload")
 }
 
-func TestWebhook_ReassessesRequestedCodeReviewAfterPullRequestEdit(t *testing.T) {
+func TestWebhook_ReassessesRequestedCodeReviewAfterNewCommits(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -748,7 +748,7 @@ func TestWebhook_ReassessesRequestedCodeReviewAfterPullRequestEdit(t *testing.T)
 	now := time.Now().UTC()
 	metadata := &codeReviewWebhookMetadataStore{latest: models.CodeReviewSessionMetadata{
 		ID: uuid.New(), SessionID: priorSessionID, RepositoryID: repoID, PullRequestID: prID, PolicyID: policyID,
-		HeadSHA: "head-sha", TriggerSource: models.CodeReviewTriggerSourceTeamReviewer,
+		HeadSHA: "old-head-sha", TriggerSource: models.CodeReviewTriggerSourceTeamReviewer,
 		Status: models.CodeReviewSessionStatusCompleted, ReviewOutputKey: "prior-output",
 		GitHubReviewID: &priorReviewID, GitHubReviewURL: &priorReviewURL,
 	}}
@@ -761,7 +761,7 @@ func TestWebhook_ReassessesRequestedCodeReviewAfterPullRequestEdit(t *testing.T)
 	handler := &WebhookHandler{pullRequests: db.NewPullRequestStore(mock), codeReviews: codeReviews}
 
 	oldBody := "Old description"
-	oldHead := "head-sha"
+	oldHead := "old-head-sha"
 	oldRef := "feature/code-review"
 	oldBase := "base-sha"
 	mock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*WHERE org_id").
@@ -783,7 +783,7 @@ func TestWebhook_ReassessesRequestedCodeReviewAfterPullRequestEdit(t *testing.T)
 		}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	body := []byte(`{
-		"action":"edited",
+		"action":"synchronize",
 		"number":42,
 		"repository":{"full_name":"assembledhq/143"},
 		"pull_request":{
@@ -797,7 +797,7 @@ func TestWebhook_ReassessesRequestedCodeReviewAfterPullRequestEdit(t *testing.T)
 		OrgID: orgID, RepositoryID: repoID, FullName: "assembledhq/143", Status: "active",
 	}, "pull_request", body, "delivery-143")
 
-	require.NoError(t, err, "edited pull request should trigger code review reassessment")
+	require.NoError(t, err, "new commits should trigger code review reassessment")
 	require.Equal(t, prID, jobs.reassessmentPayload.PullRequestID, "reassessment should target the reviewed pull request")
 	require.Equal(t, priorSessionID, jobs.reassessmentPayload.PriorSessionID, "queued reassessment should remain ordered behind the assessment active when the event arrived")
 	require.Equal(t, "head-sha", jobs.reassessmentPayload.HeadSHA, "queued reassessment should capture the current PR head")
@@ -887,21 +887,6 @@ func TestCodeReviewMaterialChangeKey(t *testing.T) {
 		MergeState:       models.PullRequestMergeStateClean,
 		FailingTestCount: 0,
 	}
-	success := "success"
-	failure := "failure"
-	checkRunSuccess := codeReviewReassessmentWebhook{Action: "completed"}
-	checkRunSuccess.CheckRun.ID = 501
-	checkRunSuccess.CheckRun.Conclusion = &success
-	secondCheckRunSuccess := checkRunSuccess
-	secondCheckRunSuccess.CheckRun.ID = 502
-	checkSuiteSuccess := codeReviewReassessmentWebhook{Action: "completed"}
-	checkSuiteSuccess.CheckSuite.ID = 601
-	checkSuiteSuccess.CheckSuite.Conclusion = &success
-	checkRunFailure := codeReviewReassessmentWebhook{Action: "completed"}
-	checkRunFailure.CheckRun.ID = 501
-	checkRunFailure.CheckRun.Conclusion = &failure
-	statusSuccess := codeReviewReassessmentWebhook{State: "success", Context: "ci/unit-tests"}
-	secondStatusSuccess := codeReviewReassessmentWebhook{State: "success", Context: "ci/integration-tests"}
 	var firstResolvedThread codeReviewReassessmentWebhook
 	require.NoError(t, json.Unmarshal([]byte(`{"action":"resolved","thread":{"node_id":"PRRT_first"}}`), &firstResolvedThread), "first review thread webhook should decode")
 	var secondResolvedThread codeReviewReassessmentWebhook
@@ -914,7 +899,6 @@ func TestCodeReviewMaterialChangeKey(t *testing.T) {
 	editedHumanReview.Action = "edited"
 	editedHumanReview.Review.Body = "Please add two regression tests."
 	synchronizedPullRequest := codeReviewReassessmentWebhook{Action: "synchronize"}
-	editedPullRequest := codeReviewReassessmentWebhook{Action: "edited"}
 
 	tests := []struct {
 		name       string
@@ -922,46 +906,9 @@ func TestCodeReviewMaterialChangeKey(t *testing.T) {
 		left       codeReviewReassessmentWebhook
 		rightType  string
 		right      codeReviewReassessmentWebhook
-		leftCI     models.PullRequestCIStatus
 		rightCI    models.PullRequestCIStatus
 		expectSame bool
 	}{
-		{
-			name:     "check run and suite with same aggregate result",
-			leftType: "check_run", left: checkRunSuccess,
-			rightType: "check_suite", right: checkSuiteSuccess,
-			expectSame: true,
-		},
-		{
-			name:       "same check run redelivery while aggregate state is stale",
-			leftType:   "check_run",
-			left:       checkRunSuccess,
-			rightType:  "check_run",
-			right:      checkRunSuccess,
-			leftCI:     models.PullRequestCIStatusPending,
-			rightCI:    models.PullRequestCIStatusPending,
-			expectSame: true,
-		},
-		{
-			name:       "distinct check runs while aggregate state is stale",
-			leftType:   "check_run",
-			left:       checkRunSuccess,
-			rightType:  "check_run",
-			right:      secondCheckRunSuccess,
-			leftCI:     models.PullRequestCIStatusPending,
-			rightCI:    models.PullRequestCIStatusPending,
-			expectSame: false,
-		},
-		{
-			name:       "distinct status contexts while aggregate state is stale",
-			leftType:   "status",
-			left:       statusSuccess,
-			rightType:  "status",
-			right:      secondStatusSuccess,
-			leftCI:     models.PullRequestCIStatusPending,
-			rightCI:    models.PullRequestCIStatusPending,
-			expectSame: false,
-		},
 		{
 			name:       "distinct resolved review threads",
 			leftType:   "pull_request_review_thread",
@@ -971,44 +918,34 @@ func TestCodeReviewMaterialChangeKey(t *testing.T) {
 			expectSame: false,
 		},
 		{
-			name:     "changed check result",
-			leftType: "check_run", left: checkRunSuccess,
-			rightType: "check_run", right: checkRunFailure,
-			expectSame: false,
-		},
-		{
 			name:     "edited human review body",
 			leftType: "pull_request_review", left: humanReview,
 			rightType: "pull_request_review", right: editedHumanReview,
 			expectSame: false,
 		},
 		{
-			name:       "different deliveries for unchanged pull request state",
+			name:       "equivalent synchronize events for unchanged pull request state",
 			leftType:   "pull_request",
 			left:       synchronizedPullRequest,
 			rightType:  "pull_request",
-			right:      editedPullRequest,
+			right:      synchronizedPullRequest,
 			expectSame: true,
 		},
 		{
-			name:       "aggregate CI state changed",
-			leftType:   "check_run",
-			left:       checkRunSuccess,
-			rightType:  "check_run",
-			right:      checkRunSuccess,
+			name:       "equivalent review event ignores CI state changes",
+			leftType:   "pull_request_review",
+			left:       humanReview,
+			rightType:  "pull_request_review",
+			right:      humanReview,
 			rightCI:    models.PullRequestCIStatusFailure,
-			expectSame: false,
+			expectSame: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			leftPR := pr
-			if tt.leftCI != "" {
-				leftPR.CIStatus = tt.leftCI
-			}
-			left, err := codeReviewMaterialChangeKey(tt.leftType, tt.left, leftPR)
+			left, err := codeReviewMaterialChangeKey(tt.leftType, tt.left, pr)
 			require.NoError(t, err, "left material state should serialize")
 			rightPR := pr
 			if tt.rightCI != "" {
@@ -1093,12 +1030,15 @@ func TestCodeReviewEventChangesAssessment(t *testing.T) {
 		expected  bool
 	}{
 		{name: "new commits", eventType: "pull_request", action: "synchronize", expected: true},
-		{name: "description edit", eventType: "pull_request", action: "edited", expected: true},
+		{name: "description edit", eventType: "pull_request", action: "edited", expected: false},
+		{name: "pull request reopened", eventType: "pull_request", action: "reopened", expected: false},
 		{name: "human review", eventType: "pull_request_review", action: "submitted", expected: true},
 		{name: "review dismissal", eventType: "pull_request_review", action: "dismissed", expected: true},
 		{name: "inline review edit", eventType: "pull_request_review_comment", action: "edited", expected: true},
 		{name: "thread resolution", eventType: "pull_request_review_thread", action: "resolved", expected: true},
-		{name: "checks complete", eventType: "check_suite", action: "completed", expected: true},
+		{name: "check suite complete", eventType: "check_suite", action: "completed", expected: false},
+		{name: "check run complete", eventType: "check_run", action: "completed", expected: false},
+		{name: "commit status changed", eventType: "status", action: "", expected: false},
 		{name: "unrelated label", eventType: "pull_request", action: "labeled", expected: false},
 	}
 	for _, tt := range tests {

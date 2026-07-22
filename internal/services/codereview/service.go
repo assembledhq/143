@@ -83,7 +83,7 @@ type ReviewRequestedInput struct {
 
 // ReviewChangedInput describes a new externally-observed state for a pull
 // request that has already been assigned to 143 Code Reviewer. ChangeKey must
-// be stable for the material PR/review/check state so equivalent webhook
+// be stable for the material code/review state so equivalent webhook
 // deliveries reuse the same assessment.
 type ReviewChangedInput struct {
 	OrgID             uuid.UUID `json:"org_id"`

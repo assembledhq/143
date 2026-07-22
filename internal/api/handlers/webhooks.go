@@ -632,10 +632,6 @@ func (h *WebhookHandler) handleCheckSuite(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusInternalServerError, "CHECK_SUITE_FAILED", "failed to process check_suite event", err)
 		return
 	}
-	if err := h.reassessCodeReviewsForGitHubEvent(r.Context(), owner, "check_suite", body, r.Header.Get("X-GitHub-Delivery")); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REASSESSMENT_FAILED", "failed to reassess code review", err)
-		return
-	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
 }
@@ -663,10 +659,6 @@ func (h *WebhookHandler) handleCheckRun(w http.ResponseWriter, r *http.Request, 
 		writeError(w, r, http.StatusInternalServerError, "CHECK_RUN_FAILED", "failed to process check_run event", err)
 		return
 	}
-	if err := h.reassessCodeReviewsForGitHubEvent(r.Context(), owner, "check_run", body, r.Header.Get("X-GitHub-Delivery")); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REASSESSMENT_FAILED", "failed to reassess code review", err)
-		return
-	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
 }
@@ -692,10 +684,6 @@ func (h *WebhookHandler) handleStatus(w http.ResponseWriter, r *http.Request, bo
 
 	if err := h.prService.HandleStatusEvent(r.Context(), event); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "STATUS_FAILED", "failed to process status event", err)
-		return
-	}
-	if err := h.reassessCodeReviewsForGitHubEvent(r.Context(), owner, "status", body, r.Header.Get("X-GitHub-Delivery")); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REASSESSMENT_FAILED", "failed to reassess code review", err)
 		return
 	}
 
