@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,6 +59,25 @@ func (s *internalMetaToolSource) ListTools() []Tool {
 			"session_id": {Type: "string", Description: "Session ID"},
 			"thread_id":  {Type: "string", Description: "Thread ID"},
 		}, Required: []string{"session_id", "thread_id"}}},
+		Tool{Name: "code_review_history_list", Description: "List past 143 automated code reviews for this repository, newest first. Each row has the PR, decision, status, and policy version used. Use this to audit how the review policy behaved before proposing policy adjustments.", InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
+			"decision":       {Type: "string", Description: "Filter by review decision", Enum: []string{"approved", "comment_only", "needs_human_review", "blocked"}},
+			"status":         {Type: "string", Description: "Filter by review run status", Enum: []string{"queued", "running", "completed", "failed", "stale", "cancelled"}},
+			"outcome":        {Type: "string", Description: "Filter by posted outcome", Enum: []string{"automatically_approved", "completed_not_approved"}},
+			"acceptable":     {Type: "boolean", Description: "Filter by risk verdict: true for reviews judged acceptable, false for reviews flagged for humans"},
+			"search":         {Type: "string", Description: "Match PR title, repo name, session title, or PR number"},
+			"created_after":  {Type: "string", Description: "Only reviews created after this RFC3339 timestamp"},
+			"created_before": {Type: "string", Description: "Only reviews created before this RFC3339 timestamp"},
+			"cursor":         {Type: "string", Description: "Pagination cursor (id of the last row from the previous page)"},
+			"limit":          {Type: "number", Description: "Max results (default 20, max 50)", Default: 20},
+		}}},
+		Tool{Name: "code_review_history_get", Description: "Get one past code review in full: final review body, every finding (severity, confidence, file, whether it was posted inline), and each reviewer agent's verdict. Look up by the session_id from a list row.", InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
+			"session_id":         {Type: "string", Description: "Code review session ID from code_review_history_list"},
+			"include_raw_output": {Type: "boolean", Description: "Include each reviewer agent's raw output (truncated)", Default: false},
+			"include_prompts":    {Type: "boolean", Description: "Include the rendered reviewer prompts (truncated)", Default: false},
+		}, Required: []string{"session_id"}}},
+		Tool{Name: "code_review_history_policy", Description: "Get the org's code review policy: the active version by default, or a specific historical version via policy_id (from a review's policy_id field). Compare the policy that governed past reviews against their outcomes to judge whether the policy is correct.", InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
+			"policy_id": {Type: "string", Description: "Policy version UUID; omit for the active policy"},
+		}}},
 	)
 	return tools
 }
@@ -88,9 +108,77 @@ func (s *internalMetaToolSource) CallTool(ctx context.Context, name string, args
 		}
 		path := "/api/v1/internal/session-history/" + url.PathEscape(in.SessionID) + "/threads/" + url.PathEscape(in.ThreadID) + "/messages"
 		return s.do(ctx, http.MethodGet, path, nil, nil)
+	case "code_review_history_list":
+		return s.codeReviewHistoryList(ctx, args)
+	case "code_review_history_get":
+		var in struct {
+			SessionID        string `json:"session_id"`
+			IncludeRawOutput bool   `json:"include_raw_output"`
+			IncludePrompts   bool   `json:"include_prompts"`
+		}
+		if err := json.Unmarshal(args, &in); err != nil || strings.TrimSpace(in.SessionID) == "" {
+			return ErrorResult("INVALID_ARGUMENTS: session_id is required")
+		}
+		q := url.Values{}
+		if in.IncludeRawOutput {
+			q.Set("include_raw_output", "true")
+		}
+		if in.IncludePrompts {
+			q.Set("include_prompts", "true")
+		}
+		return s.do(ctx, http.MethodGet, "/api/v1/internal/code-reviews/"+url.PathEscape(in.SessionID), q, nil)
+	case "code_review_history_policy":
+		var in struct {
+			PolicyID string `json:"policy_id"`
+		}
+		if len(args) > 0 {
+			if err := json.Unmarshal(args, &in); err != nil {
+				return ErrorResult("INVALID_ARGUMENTS: invalid JSON")
+			}
+		}
+		if policyID := strings.TrimSpace(in.PolicyID); policyID != "" {
+			return s.do(ctx, http.MethodGet, "/api/v1/internal/code-reviews/policies/"+url.PathEscape(policyID), nil, nil)
+		}
+		return s.do(ctx, http.MethodGet, "/api/v1/internal/code-reviews/policy", nil, nil)
 	default:
 		return s.base.CallTool(ctx, name, args)
 	}
+}
+
+func (s *internalMetaToolSource) codeReviewHistoryList(ctx context.Context, args json.RawMessage) *ToolCallResult {
+	var in map[string]any
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &in); err != nil {
+			return ErrorResult("INVALID_ARGUMENTS: invalid JSON")
+		}
+	}
+	q := url.Values{}
+	for _, key := range []string{"decision", "status", "outcome", "search", "created_after", "created_before", "cursor"} {
+		if v, ok := in[key].(string); ok && strings.TrimSpace(v) != "" {
+			q.Set(key, v)
+		}
+	}
+	if v, ok := in["acceptable"]; ok {
+		switch typed := v.(type) {
+		case bool:
+			q.Set("acceptable", strconv.FormatBool(typed))
+		case string:
+			if strings.TrimSpace(typed) != "" {
+				q.Set("acceptable", typed)
+			}
+		}
+	}
+	if v, ok := in["limit"]; ok {
+		switch typed := v.(type) {
+		case float64:
+			q.Set("limit", fmt.Sprintf("%.0f", typed))
+		case json.Number:
+			q.Set("limit", typed.String())
+		case string:
+			q.Set("limit", typed)
+		}
+	}
+	return s.do(ctx, http.MethodGet, "/api/v1/internal/code-reviews", q, nil)
 }
 
 func (s *internalMetaToolSource) sessionHistorySearch(ctx context.Context, args json.RawMessage) *ToolCallResult {

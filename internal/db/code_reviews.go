@@ -792,14 +792,54 @@ func (s *CodeReviewStore) CancelReview(ctx context.Context, orgID, sessionID uui
 	return metadata, nil
 }
 
+const codeReviewListItemSelect = `
+			SELECT m.id, m.org_id, m.session_id, m.repository_id, m.pull_request_id, m.policy_id,
+			       m.base_sha, m.head_sha, m.from_fork, m.trigger_source, m.status, m.decision, m.acceptable, m.stale,
+			       m.superseded_by_session_id, m.review_output_key, m.prompt_artifact_key, m.github_review_id,
+			       m.github_review_url, m.final_review_body, m.failure_reason, m.completed_at, m.created_at,
+			       s.title AS session_title, r.full_name AS repository_name, pr.github_repo, pr.github_pr_number,
+			       pr.github_pr_url, pr.title AS pull_request_title,
+			       COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), pr.authored_by::text) AS pull_request_author
+		FROM code_review_session_metadata m
+			JOIN sessions s ON s.id = m.session_id AND s.org_id = m.org_id
+			JOIN repositories r ON r.id = m.repository_id AND r.org_id = m.org_id
+			JOIN pull_requests pr ON pr.id = m.pull_request_id AND pr.org_id = m.org_id`
+
+// GetListItemBySessionID returns one review with the same joined pull request
+// and repository context as ListReviews rows. Used by the internal (sandbox)
+// code review history API where agents need PR context alongside the review.
+func (s *CodeReviewStore) GetListItemBySessionID(ctx context.Context, orgID, sessionID uuid.UUID) (models.CodeReviewListItem, error) {
+	rows, err := s.db.Query(ctx, codeReviewListItemSelect+`
+			WHERE m.org_id = @org_id
+			  AND m.session_id = @session_id`, pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID,
+	})
+	if err != nil {
+		return models.CodeReviewListItem{}, fmt.Errorf("query code review list item: %w", err)
+	}
+	defer rows.Close()
+	item, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.CodeReviewListItem])
+	if err != nil {
+		return models.CodeReviewListItem{}, err
+	}
+	return item, nil
+}
+
 type CodeReviewListFilters struct {
-	RepositoryID *uuid.UUID
-	Decision     *models.CodeReviewDecision
-	Outcome      *models.CodeReviewListOutcome
-	Status       *models.CodeReviewSessionStatus
-	Acceptable   *bool
-	Search       string
-	Limit        int
+	RepositoryID  *uuid.UUID
+	Decision      *models.CodeReviewDecision
+	Outcome       *models.CodeReviewListOutcome
+	Status        *models.CodeReviewSessionStatus
+	Acceptable    *bool
+	Search        string
+	Limit         int
+	CreatedAfter  *time.Time
+	CreatedBefore *time.Time
+	// Cursor is the metadata row ID of the last item from the previous page.
+	// Rows strictly after it in the (created_at DESC, id DESC) order are
+	// returned, matching the session-history keyset pagination contract.
+	Cursor *uuid.UUID
 }
 
 func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filters CodeReviewListFilters) ([]models.CodeReviewListItem, error) {
@@ -811,18 +851,7 @@ func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filt
 		"org_id": orgID,
 		"limit":  limit,
 	}
-	query := `
-			SELECT m.id, m.org_id, m.session_id, m.repository_id, m.pull_request_id, m.policy_id,
-			       m.base_sha, m.head_sha, m.from_fork, m.trigger_source, m.status, m.decision, m.acceptable, m.stale,
-			       m.superseded_by_session_id, m.review_output_key, m.prompt_artifact_key, m.github_review_id,
-			       m.github_review_url, m.final_review_body, m.failure_reason, m.completed_at, m.created_at,
-			       s.title AS session_title, r.full_name AS repository_name, pr.github_repo, pr.github_pr_number,
-			       pr.github_pr_url, pr.title AS pull_request_title,
-			       COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), pr.authored_by::text) AS pull_request_author
-		FROM code_review_session_metadata m
-			JOIN sessions s ON s.id = m.session_id AND s.org_id = m.org_id
-			JOIN repositories r ON r.id = m.repository_id AND r.org_id = m.org_id
-			JOIN pull_requests pr ON pr.id = m.pull_request_id AND pr.org_id = m.org_id
+	query := codeReviewListItemSelect + `
 			WHERE m.org_id = @org_id`
 	if filters.RepositoryID != nil {
 		query += `
@@ -866,6 +895,24 @@ func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filt
 		query += `
 			  AND m.acceptable = @acceptable`
 		args["acceptable"] = *filters.Acceptable
+	}
+	if filters.CreatedAfter != nil {
+		query += `
+			  AND m.created_at >= @created_after`
+		args["created_after"] = *filters.CreatedAfter
+	}
+	if filters.CreatedBefore != nil {
+		query += `
+			  AND m.created_at <= @created_before`
+		args["created_before"] = *filters.CreatedBefore
+	}
+	if filters.Cursor != nil {
+		query += `
+			  AND (m.created_at, m.id) < (
+			    SELECT created_at, id FROM code_review_session_metadata
+			    WHERE id = @cursor AND org_id = @org_id
+			  )`
+		args["cursor"] = *filters.Cursor
 	}
 	if search := strings.TrimSpace(filters.Search); search != "" {
 		query += `
