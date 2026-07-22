@@ -885,6 +885,7 @@ type CodeReviewFinding struct {
 
 type CodeReviewListItem struct {
 	CodeReviewSessionMetadata
+	RetryEligible     bool    `db:"retry_eligible" json:"retry_eligible"`
 	SessionTitle      *string `db:"session_title" json:"session_title,omitempty"`
 	RepositoryName    *string `db:"repository_name" json:"repository_name,omitempty"`
 	GitHubRepo        string  `db:"github_repo" json:"github_repo"`

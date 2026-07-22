@@ -131,6 +131,7 @@ const review: CodeReviewListItem = {
   trigger_source: "app_reviewer",
   status: "completed",
   retryable_failure: false,
+  retry_eligible: false,
   decision: "approved",
   acceptable: true,
   stale: false,
@@ -559,6 +560,7 @@ describe("CodeReviewsPage", () => {
       status_code: "reviewer_failed",
       status_message: "Reviewer agents did not produce usable output.",
       retryable_failure: true,
+      retry_eligible: true,
       decision: "blocked",
       acceptable: false,
       completed_at: "2026-06-26T12:05:00Z",
@@ -627,6 +629,7 @@ describe("CodeReviewsPage", () => {
       status: "failed",
       status_message: "The review could not recover automatically.",
       retryable_failure: true,
+      retry_eligible: true,
       decision: "blocked",
       acceptable: false,
       github_review_id: undefined,
@@ -674,12 +677,50 @@ describe("CodeReviewsPage", () => {
     expect(within(failedRow).getByRole("button", { name: "Retry review" })).toBeEnabled();
   });
 
+  it("does not offer retry for a historical failure the server marks ineligible", async () => {
+    const historicalFailure: CodeReviewListItem = {
+      ...review,
+      status: "failed",
+      status_message: "A newer review attempt already exists.",
+      retryable_failure: true,
+      retry_eligible: false,
+      decision: "blocked",
+      acceptable: false,
+      github_review_id: undefined,
+      github_review_url: undefined,
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/auth/me", () =>
+        HttpResponse.json({
+          data: {
+            id: "member-1",
+            org_id: "org-1",
+            email: "member@example.com",
+            name: "Member User",
+            role: "member",
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        } satisfies SingleResponse<User>),
+      ),
+      http.get("/api/v1/code-reviews", () =>
+        HttpResponse.json({ data: [historicalFailure], meta: {} } satisfies ListResponse<CodeReviewListItem>),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    expect(await screen.findAllByText("A newer review attempt already exists.")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "Retry review" })).not.toBeInTheDocument();
+  });
+
   it("does not offer manual review retry to builders", async () => {
     const failedReview: CodeReviewListItem = {
       ...review,
       status: "failed",
       status_message: "The code review stopped before it could finish.",
       retryable_failure: true,
+      retry_eligible: true,
       decision: "blocked",
       acceptable: false,
       github_review_id: undefined,

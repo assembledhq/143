@@ -1026,13 +1026,47 @@ func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filt
 			       m.status_message, m.retry_at, m.last_error_at, m.retryable_failure, m.decision, m.acceptable, m.stale,
 			       m.superseded_by_session_id, m.review_output_key, m.prompt_artifact_key, m.github_review_id,
 			       m.github_review_url, m.final_review_body, m.failure_reason, m.completed_at, m.created_at,
+			       (
+			           m.status = 'failed'
+			           AND m.retryable_failure = true
+			           AND m.superseded_by_session_id IS NULL
+			           AND m.retry_at IS NULL
+			           AND pr.status = 'open'
+			           AND COALESCE(current_health.head_sha = m.head_sha, false)
+			           AND NOT EXISTS (
+			               SELECT 1
+			               FROM code_review_session_metadata newer
+			               WHERE newer.org_id = m.org_id
+			                 AND newer.pull_request_id = m.pull_request_id
+			                 AND (newer.created_at, newer.id) > (m.created_at, m.id)
+			           )
+			           AND NOT EXISTS (
+			               SELECT 1
+			               FROM code_review_session_metadata approved
+			               WHERE approved.org_id = m.org_id
+			                 AND approved.pull_request_id = m.pull_request_id
+			                 AND approved.status = 'completed'
+			                 AND approved.decision = 'approved'
+			                 AND approved.github_review_id IS NOT NULL
+			           )
+			           AND COALESCE((
+			               SELECT policy.enabled
+			               FROM code_review_policies policy
+			               WHERE policy.org_id = m.org_id
+			                 AND policy.repository_id IS NULL
+			                 AND policy.active = true
+			               LIMIT 1
+			           ), true)
+			       ) AS retry_eligible,
 			       s.title AS session_title, r.full_name AS repository_name, pr.github_repo, pr.github_pr_number,
 			       pr.github_pr_url, pr.title AS pull_request_title,
 			       COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), pr.authored_by::text) AS pull_request_author
-		FROM code_review_session_metadata m
+			FROM code_review_session_metadata m
 			JOIN sessions s ON s.id = m.session_id AND s.org_id = m.org_id
 			JOIN repositories r ON r.id = m.repository_id AND r.org_id = m.org_id
 			JOIN pull_requests pr ON pr.id = m.pull_request_id AND pr.org_id = m.org_id
+			LEFT JOIN pull_request_health_current current_health
+			       ON current_health.pull_request_id = m.pull_request_id AND current_health.org_id = m.org_id
 			WHERE m.org_id = @org_id`
 	if filters.RepositoryID != nil {
 		query += `

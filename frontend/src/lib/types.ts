@@ -306,6 +306,7 @@ export interface CodeReviewListItem {
   retry_at?: string;
   last_error_at?: string;
   retryable_failure: boolean;
+  retry_eligible: boolean;
   decision?: CodeReviewDecision;
   acceptable?: boolean;
   stale: boolean;

@@ -827,7 +827,7 @@ func TestCodeReviewStore_ListReviewsAppliesDesignFilters(t *testing.T) {
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
 
-	mock.ExpectQuery("m.decision = @decision").
+	mock.ExpectQuery("(?s)m.status = 'failed'.*pr.status = 'open'.*current_health.head_sha = m.head_sha.*FROM code_review_session_metadata newer.*approved.status = 'completed'.*policy.active = true.*AS retry_eligible.*m.decision = @decision").
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -836,12 +836,12 @@ func TestCodeReviewStore_ListReviewsAppliesDesignFilters(t *testing.T) {
 			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
 			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
 			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id",
-			"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at", "session_title", "repository_name", "github_repo",
+			"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at", "retry_eligible", "session_title", "repository_name", "github_repo",
 			"github_pr_number", "github_pr_url", "pull_request_title", "pull_request_author",
 		}).AddRow(
 			metadataID, orgID, sessionID, repoID, prID, policyID,
 			"base", "head", false, models.CodeReviewTriggerSourceAppReviewer, status, nil, nil, nil, nil, nil, false, &decision, &acceptable, false,
-			nil, "key", nil, nil, nil, nil, nil, &now, now, &title, &repoName, "acme/repo",
+			nil, "key", nil, nil, nil, nil, nil, &now, now, false, &title, &repoName, "acme/repo",
 			42, "https://github.com/acme/repo/pull/42", "Fix auth bug", "devin",
 		))
 
@@ -858,6 +858,7 @@ func TestCodeReviewStore_ListReviewsAppliesDesignFilters(t *testing.T) {
 	require.Len(t, reviews, 1, "ListReviews should scan matching rows")
 	require.Equal(t, "Fix auth bug", reviews[0].PullRequestTitle, "ListReviews should return pull request metadata")
 	require.Equal(t, "devin", reviews[0].PullRequestAuthor, "ListReviews should return the GitHub pull request author")
+	require.False(t, reviews[0].RetryEligible, "completed reviews should not expose the retry action")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

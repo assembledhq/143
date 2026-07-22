@@ -79,6 +79,7 @@ func TestService_HandleReviewRequested(t *testing.T) {
 				var revisionContext map[string]any
 				require.NoError(t, json.Unmarshal(sessions.created.RevisionContext, &revisionContext), "session revision context should be valid JSON")
 				require.Equal(t, true, revisionContext["from_fork"], "session revision context should include fork source evidence")
+				require.Equal(t, "143-code-reviewer", revisionContext["requested_reviewer_login"], "session revision context should preserve reviewer identity for replacement cleanup")
 			},
 		},
 		{
@@ -99,6 +100,9 @@ func TestService_HandleReviewRequested(t *testing.T) {
 				require.Equal(t, models.CodeReviewTriggerSourceTeamReviewer, result.TriggerSource, "team trigger should be recorded as team_reviewer")
 				require.Equal(t, "143-code-reviewer", jobs.payload.RequestedTeamSlug, "worker payload should remember requested team for cleanup")
 				require.Equal(t, 1, sessions.createCalls, "configured team reviewer request should create a session")
+				var revisionContext map[string]any
+				require.NoError(t, json.Unmarshal(sessions.created.RevisionContext, &revisionContext), "team review revision context should be valid JSON")
+				require.Equal(t, "143-code-reviewer", revisionContext["requested_team_slug"], "session revision context should preserve team identity for replacement cleanup")
 			},
 		},
 		{
@@ -659,7 +663,7 @@ func TestService_RetryReview(t *testing.T) {
 				metadata.latest = source
 			}
 			metadata.getBySession = source
-			sessions := &sessionStub{getResult: models.Session{RevisionContext: json.RawMessage(`{"pull_request_author":"anya"}`)}}
+			sessions := &sessionStub{getResult: models.Session{RevisionContext: json.RawMessage(`{"pull_request_author":"anya","requested_reviewer_login":"143-code-reviewer"}`)}}
 			jobs := &jobStub{jobID: uuid.New(), active: !tt.unconfirmedReuse, err: tt.enqueueErr}
 			svc := NewService(policies, metadata, sessions, jobs, zerolog.Nop(), Config{})
 			svc.SetRetryDependencies(pullRequests, &pullRequestSyncerStub{err: tt.syncErr})
@@ -708,6 +712,7 @@ func TestService_RetryReview(t *testing.T) {
 			require.Equal(t, 1, jobs.enqueueCalls, "retry should enqueue one replacement job")
 			require.Equal(t, models.CodeReviewPhaseSyncingGitHub, *metadata.created.Phase, "replacement should start in the GitHub sync phase")
 			require.Equal(t, "anya", jobs.payload.PullRequestAuthor, "replacement should preserve author context")
+			require.Equal(t, "143-code-reviewer", jobs.payload.RequestedReviewerLogin, "replacement should preserve reviewer identity for GitHub cleanup")
 			require.Equal(t, source.ReviewOutputKey, jobs.payload.PreviousOutputKey, "replacement should preserve the prior output key")
 			require.Equal(t, source.GitHubReviewID, jobs.payload.ExistingGitHubReviewID, "replacement should update the submitted GitHub review")
 			require.Equal(t, source.GitHubReviewURL, jobs.payload.ExistingGitHubReviewURL, "replacement should preserve the submitted GitHub review URL")

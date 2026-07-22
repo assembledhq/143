@@ -283,6 +283,8 @@ func (s *Service) RetryReview(ctx context.Context, input RetryReviewInput) (Retr
 		BaseSHA:           strings.TrimSpace(health.BaseSHA),
 		HeadSHA:           currentHead,
 		FromFork:          failed.FromFork,
+		RequestedLogin:    codeReviewRevisionContextString(priorSession.RevisionContext, "requested_reviewer_login"),
+		RequestedTeam:     codeReviewRevisionContextString(priorSession.RevisionContext, "requested_team_slug"),
 	}
 	submitted := failed
 	if submitted.GitHubReviewID == nil {
@@ -656,19 +658,21 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 	modelOverride := resolved.Config.AgentRoster.OrchestratorModel
 	reasoningEffort := resolved.Config.AgentRoster.ReasoningEffort
 	revisionContext, err := json.Marshal(map[string]any{
-		"kind":                "code_review",
-		"github_repo":         input.GitHubRepo,
-		"github_pr_number":    input.GitHubPRNumber,
-		"github_pr_url":       input.GitHubPRURL,
-		"pull_request_title":  input.PullRequestTitle,
-		"pull_request_author": input.PullRequestAuthor,
-		"base_sha":            input.BaseSHA,
-		"head_sha":            input.HeadSHA,
-		"from_fork":           input.FromFork,
-		"policy_id":           policy.ID,
-		"policy_version":      policy.Version,
-		"trigger_source":      source,
-		"change_reason":       strings.TrimSpace(opts.changeReason),
+		"kind":                     "code_review",
+		"github_repo":              input.GitHubRepo,
+		"github_pr_number":         input.GitHubPRNumber,
+		"github_pr_url":            input.GitHubPRURL,
+		"pull_request_title":       input.PullRequestTitle,
+		"pull_request_author":      input.PullRequestAuthor,
+		"base_sha":                 input.BaseSHA,
+		"head_sha":                 input.HeadSHA,
+		"from_fork":                input.FromFork,
+		"requested_reviewer_login": strings.TrimSpace(input.RequestedLogin),
+		"requested_team_slug":      strings.TrimSpace(input.RequestedTeam),
+		"policy_id":                policy.ID,
+		"policy_version":           policy.Version,
+		"trigger_source":           source,
+		"change_reason":            strings.TrimSpace(opts.changeReason),
 	})
 	if err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("marshal code review revision context: %w", err)

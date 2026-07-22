@@ -271,7 +271,7 @@ function ReviewOutcome({
 }
 
 function reviewCanBeRetried(review: CodeReviewListItem): boolean {
-  return review.status === "failed" && review.retryable_failure && !review.superseded_by_session_id && !review.retry_at;
+  return review.retry_eligible;
 }
 
 function ReviewActions({
