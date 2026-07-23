@@ -57,8 +57,10 @@ func NewGitHubSubmitter(tokens InstallationTokenProvider, opts ...GitHubSubmitte
 type SubmitReviewDecision string
 
 const (
-	SubmitReviewDecisionApproved    SubmitReviewDecision = "approved"
-	SubmitReviewDecisionCommentOnly SubmitReviewDecision = "comment_only"
+	SubmitReviewDecisionApproved         SubmitReviewDecision = "approved"
+	SubmitReviewDecisionCommentOnly      SubmitReviewDecision = "comment_only"
+	SubmitReviewDecisionNeedsHumanReview SubmitReviewDecision = "needs_human_review"
+	SubmitReviewDecisionBlocked          SubmitReviewDecision = "blocked"
 )
 
 type SubmitReviewRequest struct {
@@ -71,6 +73,9 @@ type SubmitReviewRequest struct {
 	ExistingReviewID  int64
 	ExistingReviewURL string
 	Decision          SubmitReviewDecision
+	PreviousDecision  SubmitReviewDecision
+	PreviousDecidedAt time.Time
+	PreviousBody      string
 	Body              string
 	Comments          []SubmitReviewComment
 }
@@ -85,6 +90,7 @@ type SubmitReviewComment struct {
 type SubmitReviewResult struct {
 	ID       int64
 	URL      string
+	Body     string
 	Comments []SubmitReviewPostedComment
 }
 
@@ -154,16 +160,22 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 	if err != nil {
 		return SubmitReviewResult{}, fmt.Errorf("get installation token: %w", err)
 	}
-	reviewBody := withCodeReviewOutputMarker(req.Body, req.OutputKey)
+	visibleReviewBody := strings.TrimSpace(req.Body)
 	if req.ExistingReviewID > 0 {
-		return s.updateExistingReview(ctx, token, owner, repo, req, reviewBody)
+		visibleReviewBody = withCodeReviewHistory(visibleReviewBody, req.PreviousBody, req.PreviousDecision, req.PreviousDecidedAt)
+		reviewBody := withCodeReviewOutputMarker(visibleReviewBody, req.OutputKey)
+		result, err := s.updateExistingReview(ctx, token, owner, repo, req, reviewBody)
+		result.Body = visibleReviewBody
+		return result, err
 	}
+	reviewBody := withCodeReviewOutputMarker(visibleReviewBody, req.OutputKey)
 	if strings.TrimSpace(req.OutputKey) != "" {
 		existing, found, err := s.findExistingReview(ctx, token, owner, repo, req.PullNumber, req.OutputKey)
 		if err != nil {
 			return SubmitReviewResult{}, err
 		}
 		if found {
+			existing.Body = visibleReviewBody
 			return existing, nil
 		}
 	}
@@ -252,7 +264,7 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		return SubmitReviewResult{}, fmt.Errorf("decode GitHub review response: %w", err)
 	}
-	result := SubmitReviewResult{ID: decoded.ID, URL: decoded.HTMLURL}
+	result := SubmitReviewResult{ID: decoded.ID, URL: decoded.HTMLURL, Body: visibleReviewBody}
 	result.Comments = append(result.Comments, knownPostedComments...)
 	if decoded.ID != 0 && len(req.Comments) > 0 {
 		if comments, commentsErr := s.listReviewComments(ctx, token, owner, repo, req.PullNumber, decoded.ID); commentsErr == nil {
@@ -1007,6 +1019,100 @@ func withCodeReviewFindingMarker(body, markerKey string) string {
 	return body + "\n\n" + marker
 }
 
+const (
+	codeReviewHistoryStartMarker = "<!-- 143-code-review-history:start -->"
+	codeReviewHistoryEndMarker   = "<!-- 143-code-review-history:end -->"
+)
+
+func withCodeReviewHistory(body, previousBody string, decision SubmitReviewDecision, decidedAt time.Time) string {
+	body = stripCodeReviewHistory(body)
+	entries := codeReviewHistoryEntries(previousBody)
+	if entry := codeReviewHistoryEntry(decision, decidedAt); entry != "" && !containsString(entries, entry) {
+		entries = append(entries, entry)
+	}
+	if len(entries) == 0 {
+		return body
+	}
+	history := codeReviewHistoryStartMarker + "\nPrevious 143 code reviews:\n" + strings.Join(entries, "\n") + "\n" + codeReviewHistoryEndMarker
+	if body == "" {
+		return history
+	}
+	return body + "\n\n" + history
+}
+
+func codeReviewHistoryEntries(body string) []string {
+	start := strings.Index(body, codeReviewHistoryStartMarker)
+	if start < 0 {
+		return nil
+	}
+	rest := body[start+len(codeReviewHistoryStartMarker):]
+	end := strings.Index(rest, codeReviewHistoryEndMarker)
+	if end < 0 {
+		return nil
+	}
+	lines := strings.Split(rest[:end], "\n")
+	entries := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "- ") {
+			entries = append(entries, line)
+		}
+	}
+	return entries
+}
+
+func stripCodeReviewHistory(body string) string {
+	start := strings.Index(body, codeReviewHistoryStartMarker)
+	if start < 0 {
+		return strings.TrimSpace(body)
+	}
+	rest := body[start+len(codeReviewHistoryStartMarker):]
+	end := strings.Index(rest, codeReviewHistoryEndMarker)
+	if end < 0 {
+		return strings.TrimSpace(body)
+	}
+	before := strings.TrimSpace(body[:start])
+	after := strings.TrimSpace(rest[end+len(codeReviewHistoryEndMarker):])
+	if before == "" {
+		return after
+	}
+	if after == "" {
+		return before
+	}
+	return before + "\n\n" + after
+}
+
+func codeReviewHistoryEntry(decision SubmitReviewDecision, decidedAt time.Time) string {
+	if decidedAt.IsZero() || decision.validate() != nil {
+		return ""
+	}
+	return fmt.Sprintf("- `%s` — **%s**", decidedAt.UTC().Format(time.RFC3339), codeReviewDecisionLabel(decision))
+}
+
+func codeReviewDecisionLabel(decision SubmitReviewDecision) string {
+	switch decision {
+	case SubmitReviewDecisionApproved:
+		return "Approved"
+	case SubmitReviewDecisionCommentOnly:
+		return "Not approved"
+	case SubmitReviewDecisionNeedsHumanReview:
+		return "Not approved — needs human review"
+	case SubmitReviewDecisionBlocked:
+		return "Not approved — blocked"
+	default:
+		return string(decision)
+	}
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
 func codeReviewOutputMarker(outputKey string) string {
 	return "<!-- 143-code-review-output:" + codeReviewMarkerDigest(outputKey) + " -->"
 }
@@ -1077,7 +1183,8 @@ func githubReviewEvent(decision SubmitReviewDecision) string {
 
 func (d SubmitReviewDecision) validate() error {
 	switch d {
-	case SubmitReviewDecisionApproved, SubmitReviewDecisionCommentOnly:
+	case SubmitReviewDecisionApproved, SubmitReviewDecisionCommentOnly,
+		SubmitReviewDecisionNeedsHumanReview, SubmitReviewDecisionBlocked:
 		return nil
 	default:
 		return fmt.Errorf("invalid submit review decision: %q", d)

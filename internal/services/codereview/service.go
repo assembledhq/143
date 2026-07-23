@@ -161,22 +161,25 @@ type RetryReviewConflictError struct {
 func (e *RetryReviewConflictError) Error() string { return e.Message }
 
 type RunCodeReviewJobPayload struct {
-	OrgID                   uuid.UUID `json:"org_id"`
-	SessionID               uuid.UUID `json:"session_id"`
-	MetadataID              uuid.UUID `json:"metadata_id"`
-	RepositoryID            uuid.UUID `json:"repository_id"`
-	PullRequestID           uuid.UUID `json:"pull_request_id"`
-	PolicyID                uuid.UUID `json:"policy_id"`
-	PolicyVersion           int       `json:"policy_version"`
-	HeadSHA                 string    `json:"head_sha"`
-	FromFork                bool      `json:"from_fork"`
-	PullRequestAuthor       string    `json:"pull_request_author,omitempty"`
-	OutputKey               string    `json:"review_output_key"`
-	RequestedReviewerLogin  string    `json:"requested_reviewer_login,omitempty"`
-	RequestedTeamSlug       string    `json:"requested_team_slug,omitempty"`
-	PreviousOutputKey       string    `json:"previous_review_output_key,omitempty"`
-	ExistingGitHubReviewID  *int64    `json:"existing_github_review_id,omitempty"`
-	ExistingGitHubReviewURL *string   `json:"existing_github_review_url,omitempty"`
+	OrgID                   uuid.UUID                  `json:"org_id"`
+	SessionID               uuid.UUID                  `json:"session_id"`
+	MetadataID              uuid.UUID                  `json:"metadata_id"`
+	RepositoryID            uuid.UUID                  `json:"repository_id"`
+	PullRequestID           uuid.UUID                  `json:"pull_request_id"`
+	PolicyID                uuid.UUID                  `json:"policy_id"`
+	PolicyVersion           int                        `json:"policy_version"`
+	HeadSHA                 string                     `json:"head_sha"`
+	FromFork                bool                       `json:"from_fork"`
+	PullRequestAuthor       string                     `json:"pull_request_author,omitempty"`
+	OutputKey               string                     `json:"review_output_key"`
+	RequestedReviewerLogin  string                     `json:"requested_reviewer_login,omitempty"`
+	RequestedTeamSlug       string                     `json:"requested_team_slug,omitempty"`
+	PreviousOutputKey       string                     `json:"previous_review_output_key,omitempty"`
+	PreviousReviewDecision  *models.CodeReviewDecision `json:"previous_review_decision,omitempty"`
+	PreviousReviewDecidedAt *time.Time                 `json:"previous_review_decided_at,omitempty"`
+	PreviousReviewBody      *string                    `json:"previous_review_body,omitempty"`
+	ExistingGitHubReviewID  *int64                     `json:"existing_github_review_id,omitempty"`
+	ExistingGitHubReviewURL *string                    `json:"existing_github_review_url,omitempty"`
 }
 
 type reviewStartOptions struct {
@@ -185,6 +188,9 @@ type reviewStartOptions struct {
 	changeKey               string
 	changeReason            string
 	previousOutputKey       string
+	previousReviewDecision  *models.CodeReviewDecision
+	previousReviewDecidedAt *time.Time
+	previousReviewBody      *string
 	existingGitHubReviewID  *int64
 	existingGitHubReviewURL *string
 }
@@ -299,6 +305,9 @@ func (s *Service) RetryReview(ctx context.Context, input RetryReviewInput) (Retr
 	started, err := s.startReview(ctx, requested, reviewStartOptions{
 		triggerSource:           failed.TriggerSource,
 		previousOutputKey:       submitted.ReviewOutputKey,
+		previousReviewDecision:  submitted.Decision,
+		previousReviewDecidedAt: submitted.CompletedAt,
+		previousReviewBody:      submitted.FinalReviewBody,
 		existingGitHubReviewID:  submitted.GitHubReviewID,
 		existingGitHubReviewURL: submitted.GitHubReviewURL,
 	})
@@ -543,6 +552,9 @@ func (s *Service) HandleReviewChanged(ctx context.Context, input ReviewChangedIn
 		changeKey:               input.ChangeKey,
 		changeReason:            input.ChangeReason,
 		previousOutputKey:       submitted.ReviewOutputKey,
+		previousReviewDecision:  submitted.Decision,
+		previousReviewDecidedAt: submitted.CompletedAt,
+		previousReviewBody:      submitted.FinalReviewBody,
 		existingGitHubReviewID:  submitted.GitHubReviewID,
 		existingGitHubReviewURL: submitted.GitHubReviewURL,
 	})
@@ -739,6 +751,9 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 		RequestedReviewerLogin:  input.RequestedLogin,
 		RequestedTeamSlug:       input.RequestedTeam,
 		PreviousOutputKey:       opts.previousOutputKey,
+		PreviousReviewDecision:  opts.previousReviewDecision,
+		PreviousReviewDecidedAt: opts.previousReviewDecidedAt,
+		PreviousReviewBody:      opts.previousReviewBody,
 		ExistingGitHubReviewID:  opts.existingGitHubReviewID,
 		ExistingGitHubReviewURL: opts.existingGitHubReviewURL,
 	}
