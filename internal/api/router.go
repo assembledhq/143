@@ -39,6 +39,7 @@ import (
 	"github.com/assembledhq/143/internal/services/domains"
 	"github.com/assembledhq/143/internal/services/email"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/ownerloss"
@@ -183,7 +184,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	var prService *ghservice.PRService
 	var appUserAuthSvc *ghservice.AppUserAuthService
 	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
-		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
+		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey, logger)
 		if err != nil {
 			logger.Warn().Err(err).Msg("failed to initialize GitHub App service, PR webhooks will be disabled")
 		} else {
@@ -214,6 +215,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		healthHandler.SetRedisHealthCheck(redisClient.Healthy)
 	}
 	authHandler := handlers.NewAuthHandler(cfg, pool, userStore, authSessionStore, invitationStore, membershipStore)
+	authHandler.SetGitHubHTTPClient(githubtelemetry.NewHTTPClient(10*time.Second, logger))
 	// CLI login flow stores (browser-based `143-tools login`, join-token JIT).
 	cliAuthCodeStore := db.NewCLIAuthCodeStore(pool)
 	userCLITokenStore := db.NewUserCLITokenStore(pool)
@@ -240,6 +242,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	integrationOpts := []handlers.IntegrationHandlerOption{
 		handlers.WithSentryOAuth(cfg.SentryOAuthClientID, cfg.SentryOAuthClientSecret),
 		handlers.WithGitHubIntegrationOAuth(cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret),
+		handlers.WithGitHubHTTPClient(githubtelemetry.NewHTTPClient(30*time.Second, logger)),
 		handlers.WithGitHubAppSlug(cfg.GitHubAppSlug),
 		handlers.WithGitHubInstallationStore(githubInstallationStore),
 		handlers.WithIntegrationMembershipStore(membershipStore),
@@ -256,7 +259,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// If the GitHub App service is available, let the integration handler list
 	// installation repos for explicit repository claims.
 	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
-		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
+		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey, logger)
 		if err == nil {
 			integrationOpts = append(integrationOpts, handlers.WithGitHubApp(ghSvc, repoStore))
 			authHandler.SetGitHubOrgAutoJoinDeps(githubInstallationStore, ghSvc)
@@ -635,6 +638,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		logger.Info().Str("smtp_host", cfg.SMTPHost).Msg("SMTP email sender configured")
 	}
 	teamHandler := handlers.NewTeamHandler(userStore, membershipStore, authSessionStore, invitationStore, orgStore, cfg.FrontendURL, emailSender)
+	teamHandler.SetGitHubHTTPClient(githubtelemetry.NewHTTPClient(10*time.Second, logger))
 	teamHandler.SetRepositoryStore(repoStore)
 	teamHandler.SetCLITokenStore(userCLITokenStore)
 	orgDomainStore := db.NewOrganizationDomainStore(pool)
@@ -647,7 +651,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	apiClientHandler.SetTxStarter(pool)
 	apiClientHandler.SetLogger(logger)
 	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
-		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
+		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey, logger)
 		if err == nil {
 			teamHandler.SetGitHubIntegration(integrationStore, ghSvc)
 		}

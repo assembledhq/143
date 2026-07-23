@@ -26,6 +26,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/domains"
 	"github.com/assembledhq/143/internal/services/email"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 )
 
 type githubOrgAutoJoinVerifier interface {
@@ -73,6 +74,14 @@ func (h *AuthHandler) SetGitHubURLsForTest(apiBaseURL, oauthBaseURL string, clie
 	h.gitHubAPIBaseURL = apiBaseURL
 	h.gitHubOAuthBaseURL = oauthBaseURL
 	h.httpClient = client
+}
+
+// SetGitHubHTTPClient wires the instrumented client used for server-owned
+// GitHub OAuth and API requests.
+func (h *AuthHandler) SetGitHubHTTPClient(client *http.Client) {
+	if client != nil {
+		h.httpClient = client
+	}
 }
 
 func (h *AuthHandler) gitHubAPIBase() string {
@@ -539,14 +548,14 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Exchange code for access token
-	tokenResp, err := h.exchangeGitHubCode(code)
+	tokenResp, err := h.exchangeGitHubCode(r.Context(), code)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "TOKEN_EXCHANGE_FAILED", "failed to exchange code", err)
 		return
 	}
 
 	// Fetch GitHub user
-	ghUser, err := h.fetchGitHubUser(tokenResp.AccessToken)
+	ghUser, err := h.fetchGitHubUser(r.Context(), tokenResp.AccessToken)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "GITHUB_API_FAILED", "failed to fetch GitHub user", err)
 		return
@@ -1638,14 +1647,18 @@ type githubUser struct {
 	AvatarURL string `json:"avatar_url"`
 }
 
-func (h *AuthHandler) exchangeGitHubCode(code string) (*githubTokenResponse, error) {
+func (h *AuthHandler) exchangeGitHubCode(ctx context.Context, code string) (*githubTokenResponse, error) {
 	data := url.Values{
 		"client_id":     {h.cfg.GitHubOAuthClientID},
 		"client_secret": {h.cfg.GitHubOAuthClientSecret},
 		"code":          {code},
 	}
 
-	req, err := http.NewRequest("POST", h.gitHubOAuthBase()+"/login/oauth/access_token", nil)
+	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
+		Kind:     githubtelemetry.RequestKindOAuth,
+		AuthType: githubtelemetry.AuthTypeOAuth,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.gitHubOAuthBase()+"/login/oauth/access_token", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1668,8 +1681,12 @@ func (h *AuthHandler) exchangeGitHubCode(code string) (*githubTokenResponse, err
 	return &tokenResp, nil
 }
 
-func (h *AuthHandler) fetchGitHubUser(accessToken string) (*githubUser, error) {
-	req, err := http.NewRequest("GET", h.gitHubAPIBase()+"/user", nil)
+func (h *AuthHandler) fetchGitHubUser(ctx context.Context, accessToken string) (*githubUser, error) {
+	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
+		Kind:     githubtelemetry.RequestKindAPI,
+		AuthType: githubtelemetry.AuthTypeUser,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.gitHubAPIBase()+"/user", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1739,6 +1756,10 @@ func fetchGitHubNoreplyEmailFrom(ctx context.Context, client *http.Client, email
 // missing list as "no information" (fallback noreply address, email not
 // provider-verified).
 func fetchGitHubEmailsFrom(ctx context.Context, client *http.Client, emailsURL, accessToken string) []gitHubEmail {
+	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
+		Kind:     githubtelemetry.RequestKindAPI,
+		AuthType: githubtelemetry.AuthTypeUser,
+	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, emailsURL, nil)
 	if err != nil {
 		return nil

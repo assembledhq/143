@@ -14,6 +14,7 @@ import (
 	"time"
 
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 )
 
 type InstallationTokenProvider interface {
@@ -52,6 +53,14 @@ func NewGitHubSubmitter(tokens InstallationTokenProvider, opts ...GitHubSubmitte
 		opt(s)
 	}
 	return s
+}
+
+func withGitHubInstallationTelemetry(ctx context.Context, installationID int64) context.Context {
+	return githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
+		Kind:           githubtelemetry.RequestKindAPI,
+		AuthType:       githubtelemetry.AuthTypeAppInstallation,
+		InstallationID: installationID,
+	})
 }
 
 type SubmitReviewDecision string
@@ -150,6 +159,7 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 	if err := req.Decision.validate(); err != nil {
 		return SubmitReviewResult{}, err
 	}
+	ctx = withGitHubInstallationTelemetry(ctx, req.InstallationID)
 	token, err := s.tokens.GetInstallationToken(ctx, req.InstallationID)
 	if err != nil {
 		return SubmitReviewResult{}, fmt.Errorf("get installation token: %w", err)
@@ -769,6 +779,7 @@ func (s *GitHubSubmitter) RemoveRequestedReviewers(ctx context.Context, req Requ
 	if len(reviewers) == 0 && len(teams) == 0 {
 		return nil
 	}
+	ctx = withGitHubInstallationTelemetry(ctx, req.InstallationID)
 	token, err := s.tokens.GetInstallationToken(ctx, req.InstallationID)
 	if err != nil {
 		return fmt.Errorf("get installation token: %w", err)
@@ -817,6 +828,7 @@ func (s *GitHubSubmitter) ListPullRequestFiles(ctx context.Context, req PullRequ
 	if req.InstallationID <= 0 {
 		return nil, fmt.Errorf("installation id is required")
 	}
+	ctx = withGitHubInstallationTelemetry(ctx, req.InstallationID)
 	token, err := s.tokens.GetInstallationToken(ctx, req.InstallationID)
 	if err != nil {
 		return nil, fmt.Errorf("get installation token: %w", err)
@@ -848,6 +860,7 @@ func (s *GitHubSubmitter) ListReviewContext(ctx context.Context, req ReviewConte
 	if req.InstallationID <= 0 {
 		return ReviewContext{}, fmt.Errorf("installation id is required")
 	}
+	ctx = withGitHubInstallationTelemetry(ctx, req.InstallationID)
 	token, err := s.tokens.GetInstallationToken(ctx, req.InstallationID)
 	if err != nil {
 		return ReviewContext{}, fmt.Errorf("get installation token: %w", err)

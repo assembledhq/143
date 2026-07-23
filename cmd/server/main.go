@@ -46,6 +46,7 @@ import (
 	"github.com/assembledhq/143/internal/services/domains"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/github/identity"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/ownerloss"
@@ -1315,7 +1316,7 @@ func buildServices(
 	fileReader sandbox.FileReader,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
-	ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
+	ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey, logger)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to initialize GitHub App service — all Phase 3+ services disabled")
 		return nil
@@ -1772,18 +1773,21 @@ func buildServices(
 		},
 	)
 	svc := &worker.Services{
-		Orchestrator:        orchestrator,
-		PR:                  prService,
-		Failure:             failureSvc,
-		SandboxProvider:     sandboxProvider,
-		ProjectTasks:        projectTaskUpdater,
-		AutomationRuns:      automationRunUpdater,
-		Prioritization:      prioritizationSvc,
-		PM:                  pmSvc,
-		SlackSummarizer:     slackSummarizer,
-		LLM:                 llmClient,
-		GitHub:              ghSvc,
-		CodeReviews:         codereviewsvc.NewGitHubSubmitter(ghSvc),
+		Orchestrator:    orchestrator,
+		PR:              prService,
+		Failure:         failureSvc,
+		SandboxProvider: sandboxProvider,
+		ProjectTasks:    projectTaskUpdater,
+		AutomationRuns:  automationRunUpdater,
+		Prioritization:  prioritizationSvc,
+		PM:              pmSvc,
+		SlackSummarizer: slackSummarizer,
+		LLM:             llmClient,
+		GitHub:          ghSvc,
+		CodeReviews: codereviewsvc.NewGitHubSubmitter(
+			ghSvc,
+			codereviewsvc.WithGitHubSubmitterHTTPClient(githubtelemetry.NewHTTPClient(15*time.Second, logger)),
+		),
 		CodeReviewLifecycle: codeReviewLifecycle,
 		CodingAgents:        agentEnv,
 		GitHubOrgRoster:     ghSvc,

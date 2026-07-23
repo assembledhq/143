@@ -1,0 +1,390 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Focused health view for server-owned GitHub HTTP API traffic. Shows exact request volume, throttling, quota headroom, upstream reliability, and latency from structured request summaries. Git protocol traffic and GitHub calls made directly inside sandboxes are intentionally out of scope.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "row",
+      "id": 100,
+      "title": "Health summary for selected range",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 1,
+      "title": "API requests",
+      "description": "Completed and transport-failed server-owned GitHub API requests in the selected time range. OAuth token exchange and git protocol traffic are excluded.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed-color", "fixedColor": "blue" },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "stats",
+          "expr": "_msg:\"github api request\" | stats count() as requests"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "Rate limits hit",
+      "description": "Requests rejected by GitHub primary or secondary rate limiting. One transient rejection is visible; ten or more in the selected range is treated as an incident signal.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 10 }
+            ]
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "stats",
+          "expr": "_msg:\"github api request\" AND github_rate_limited:true | stats count() as rate_limits"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 3,
+      "title": "Upstream / transport failures",
+      "description": "GitHub 5xx responses plus network-level failures. Expected 4xx responses are excluded so this remains a reliability signal instead of a general error counter.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 1 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "stats",
+          "expr": "_msg:\"github api request\" AND (github_result:\"server_error\" OR github_result:\"transport_error\") | stats count() as failures"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 4,
+      "title": "Lowest quota headroom",
+      "description": "Lowest X-RateLimit-Remaining percentage observed in the selected range across all installations and resources. This is a low-water mark, not the current value.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 1 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "green", "value": 20 }
+            ]
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "stats",
+          "expr": "_msg:\"github api request\" | stats min(github_rate_limit_remaining_pct) as lowest_remaining_pct"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 101,
+      "title": "Traffic, throttling, and headroom",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 5,
+      "title": "Request volume by result",
+      "description": "Request throughput split into success, expected client errors, GitHub/server failures, transport failures, and rate limiting.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 7 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "min": 0 },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"github api request\" | stats by (github_result) count() as requests",
+          "step": "$__interval"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 6,
+      "title": "Rate-limit rejections by kind",
+      "description": "Primary quota exhaustion versus secondary/abuse throttling. Empty is healthy.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 7 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "min": 0 },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"github api request\" AND github_rate_limited:true | stats by (github_rate_limit_kind) count() as rate_limits",
+          "step": "$__interval"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 7,
+      "title": "Quota headroom by installation and resource",
+      "description": "Low-water quota percentage per time bucket. Series are separated by auth mode, GitHub App installation when applicable, and rate-limit resource; a sustained fall below 20% warrants investigation.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 15 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "green", "value": 20 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "min"] },
+        "tooltip": { "mode": "multi", "sort": "asc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"github api request\" | stats by (github_auth_type, github_installation_id, github_rate_limit_resource) min(github_rate_limit_remaining_pct) as remaining_pct",
+          "step": "$__interval"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 8,
+      "title": "GitHub API latency",
+      "description": "End-to-end HTTP latency for all server-owned GitHub API requests. Overall p50 and p95 avoid a noisy series per endpoint; route-level p95 is available below.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 15 },
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "min": 0 },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"github api request\" | stats quantile(0.50, github_duration_ms) as p50_ms",
+          "step": "$__interval"
+        },
+        {
+          "refId": "B",
+          "queryType": "statsRange",
+          "expr": "_msg:\"github api request\" | stats quantile(0.95, github_duration_ms) as p95_ms",
+          "step": "$__interval"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 102,
+      "title": "Focused drilldowns",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "table",
+      "id": 9,
+      "title": "Top API routes",
+      "description": "The twenty busiest normalized routes with p95 latency. Repository owners, names, IDs, refs, paths, and query strings are excluded from the route dimension to prevent cardinality noise.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 25 },
+      "options": { "showHeader": true },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "displayMode": "auto" } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "stats",
+          "expr": "_msg:\"github api request\" | stats by (github_method, github_route) count() as requests, quantile(0.95, github_duration_ms) as p95_ms | sort by (requests desc) | limit 20"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "id": 10,
+      "title": "Rate-limit sources",
+      "description": "Installations, auth modes, routes, and repositories that actually received rate-limit responses. Limited to the top twenty combinations to keep the table actionable.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 25 },
+      "options": { "showHeader": true },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "displayMode": "auto" } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "stats",
+          "expr": "_msg:\"github api request\" AND github_rate_limited:true | stats by (github_installation_id, github_auth_type, github_rate_limit_kind, github_route, github_repository) count() as rate_limits | sort by (rate_limits desc) | limit 20"
+        }
+      ]
+    },
+    {
+      "type": "logs",
+      "id": 11,
+      "title": "Recent rate-limit responses",
+      "description": "Raw structured request summaries for the latest primary and secondary rate-limit responses. Expand a row for reset time, remaining quota, retry guidance, request ID, and repository context.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 34 },
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "instant",
+          "expr": "_msg:\"github api request\" AND github_rate_limited:true",
+          "maxLines": 100
+        }
+      ]
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 42,
+  "tags": ["github", "api", "rate-limits", "platform"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "GitHub API Health",
+  "uid": "github-api-health",
+  "version": 1,
+  "weekStart": ""
+}

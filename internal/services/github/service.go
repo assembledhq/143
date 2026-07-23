@@ -14,6 +14,9 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/rs/zerolog"
+
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 )
 
 type Service struct {
@@ -63,7 +66,26 @@ type cachedToken struct {
 	ExpiresAt time.Time
 }
 
-func NewService(appID int64, privateKeyPEM string) (*Service, error) {
+func (s *Service) installationIDForToken(token string) (int64, bool) {
+	if s == nil || token == "" {
+		return 0, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for installationID, cached := range s.cache {
+		if cached != nil && cached.Token == token {
+			return installationID, true
+		}
+	}
+	for key, cached := range s.sandboxCache {
+		if cached != nil && cached.Token == token {
+			return key.InstallationID, true
+		}
+	}
+	return 0, false
+}
+
+func NewService(appID int64, privateKeyPEM string, loggers ...zerolog.Logger) (*Service, error) {
 	// Env vars often encode newlines as literal "\n"; convert to real newlines
 	// so PEM parsing succeeds.
 	privateKeyPEM = strings.ReplaceAll(privateKeyPEM, `\n`, "\n")
@@ -71,10 +93,14 @@ func NewService(appID int64, privateKeyPEM string) (*Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse private key: %w", err)
 	}
+	logger := zerolog.Nop()
+	if len(loggers) > 0 {
+		logger = loggers[0]
+	}
 	return &Service{
 		appID:        appID,
 		privateKey:   key,
-		httpClient:   &http.Client{Timeout: 10 * time.Second},
+		httpClient:   githubtelemetry.NewHTTPClient(10*time.Second, logger),
 		apiBaseURL:   "https://api.github.com",
 		cache:        make(map[int64]*cachedToken),
 		sandboxCache: make(map[sandboxTokenCacheKey]*cachedToken),
@@ -183,6 +209,11 @@ func (s *Service) exchangeForScopedInstallationToken(ctx context.Context, jwtTok
 }
 
 func (s *Service) exchangeForInstallationTokenRequest(ctx context.Context, jwtToken string, installationID int64, tokenRequest *installationTokenRequest) (string, time.Time, error) {
+	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
+		Kind:           githubtelemetry.RequestKindAPI,
+		AuthType:       githubtelemetry.AuthTypeAppJWT,
+		InstallationID: installationID,
+	})
 	path := fmt.Sprintf("/app/installations/%d/access_tokens", installationID)
 	url := s.apiURL(path)
 	var body io.Reader
@@ -225,6 +256,11 @@ func (s *Service) exchangeForInstallationTokenRequest(ctx context.Context, jwtTo
 }
 
 func (s *Service) GetInstallationDetails(ctx context.Context, installationID int64) (InstallationDetails, error) {
+	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
+		Kind:           githubtelemetry.RequestKindAPI,
+		AuthType:       githubtelemetry.AuthTypeAppJWT,
+		InstallationID: installationID,
+	})
 	jwtToken, err := s.generateJWT()
 	if err != nil {
 		return InstallationDetails{}, err
@@ -253,6 +289,11 @@ func (s *Service) GetInstallationDetails(ctx context.Context, installationID int
 }
 
 func (s *Service) ListOrgMembers(ctx context.Context, installationID int64, orgLogin string) ([]OrgMember, error) {
+	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
+		Kind:           githubtelemetry.RequestKindAPI,
+		AuthType:       githubtelemetry.AuthTypeAppInstallation,
+		InstallationID: installationID,
+	})
 	token, err := s.GetInstallationToken(ctx, installationID)
 	if err != nil {
 		return nil, err
@@ -295,6 +336,11 @@ func (s *Service) ListOrgMembers(ctx context.Context, installationID int64, orgL
 }
 
 func (s *Service) IsActiveOrgMember(ctx context.Context, installationID int64, orgLogin, username string) (bool, error) {
+	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
+		Kind:           githubtelemetry.RequestKindAPI,
+		AuthType:       githubtelemetry.AuthTypeAppInstallation,
+		InstallationID: installationID,
+	})
 	token, err := s.GetInstallationToken(ctx, installationID)
 	if err != nil {
 		return false, err

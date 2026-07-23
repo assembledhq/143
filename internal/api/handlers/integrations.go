@@ -24,6 +24,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/externalidentity"
 	ghapp "github.com/assembledhq/143/internal/services/github"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	linearservice "github.com/assembledhq/143/internal/services/linear"
 	"github.com/go-chi/chi/v5"
@@ -203,6 +204,7 @@ type IntegrationHandler struct {
 	baseURL          string
 	frontendURL      string
 	client           *http.Client
+	githubHTTPClient *http.Client
 
 	// untrustedURLClient fetches user-supplied URLs (e.g. a custom Mezmo
 	// base_url). It blocks private/loopback/metadata addresses at dial time;
@@ -356,6 +358,23 @@ func WithGitHubIntegrationOAuth(clientID, secret string) IntegrationHandlerOptio
 		h.githubClientID = clientID
 		h.githubSecret = secret
 	}
+}
+
+// WithGitHubHTTPClient configures the instrumented client used only for
+// server-owned GitHub requests. Other provider calls continue to use client.
+func WithGitHubHTTPClient(client *http.Client) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		if client != nil {
+			h.githubHTTPClient = client
+		}
+	}
+}
+
+func (h *IntegrationHandler) gitHubClient() *http.Client {
+	if h.githubHTTPClient != nil {
+		return h.githubHTTPClient
+	}
+	return h.client
 }
 
 // WithGitHubAppSlug configures the GitHub App slug for the installation flow.
@@ -1582,7 +1601,7 @@ func (h *IntegrationHandler) SyncGitHubRepos(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	repos, err := h.listInstallationRepos(ctx, token)
+	repos, err := h.listInstallationRepos(ctx, token, config.InstallationID)
 	if err != nil {
 		zerolog.Ctx(ctx).Warn().Err(err).Msg("failed to list installation repos for sync")
 		writeError(w, r, http.StatusBadGateway, "LIST_REPOS_FAILED", "failed to list github repositories")
@@ -1614,7 +1633,12 @@ type githubInstallationRepo struct {
 
 // listInstallationRepos calls the GitHub API to list all repos accessible
 // to the given installation token.
-func (h *IntegrationHandler) listInstallationRepos(ctx context.Context, token string) ([]githubInstallationRepo, error) {
+func (h *IntegrationHandler) listInstallationRepos(ctx context.Context, token string, installationID int64) ([]githubInstallationRepo, error) {
+	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
+		Kind:           githubtelemetry.RequestKindAPI,
+		AuthType:       githubtelemetry.AuthTypeAppInstallation,
+		InstallationID: installationID,
+	})
 	nextURL := githubAPIURL + "/installation/repositories?per_page=100"
 	var repos []githubInstallationRepo
 	for nextURL != "" {
@@ -1625,7 +1649,7 @@ func (h *IntegrationHandler) listInstallationRepos(ctx context.Context, token st
 		req.Header.Set("Authorization", "token "+token)
 		req.Header.Set("Accept", "application/vnd.github+json")
 
-		resp, err := h.client.Do(req)
+		resp, err := h.gitHubClient().Do(req)
 		if err != nil {
 			return nil, err
 		}
@@ -1687,7 +1711,7 @@ func (h *IntegrationHandler) ListGitHubInstallationRepositories(w http.ResponseW
 		writeError(w, r, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "failed to get github installation token", err)
 		return
 	}
-	repos, err := h.listInstallationRepos(ctx, token)
+	repos, err := h.listInstallationRepos(ctx, token, link.InstallationID)
 	if err != nil {
 		writeError(w, r, http.StatusBadGateway, "LIST_REPOS_FAILED", "failed to list github repositories", err)
 		return
@@ -1780,7 +1804,7 @@ func (h *IntegrationHandler) ClaimGitHubInstallationRepositories(w http.Response
 		writeError(w, r, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "failed to get github installation token", err)
 		return
 	}
-	installationRepos, err := h.listInstallationRepos(ctx, appToken)
+	installationRepos, err := h.listInstallationRepos(ctx, appToken, link.InstallationID)
 	if err != nil {
 		writeError(w, r, http.StatusBadGateway, "LIST_REPOS_FAILED", "failed to list github repositories", err)
 		return
@@ -2007,13 +2031,17 @@ func (h *IntegrationHandler) userIsAdminInOrg(ctx context.Context, userID, orgID
 }
 
 func (h *IntegrationHandler) githubUserCanAccessRepo(ctx context.Context, token, fullName string) (bool, error) {
+	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
+		Kind:     githubtelemetry.RequestKindAPI,
+		AuthType: githubtelemetry.AuthTypeUser,
+	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubAPIURL+"/repos/"+fullName, nil)
 	if err != nil {
 		return false, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
-	resp, err := h.client.Do(req)
+	resp, err := h.gitHubClient().Do(req)
 	if err != nil {
 		return false, err
 	}
@@ -3930,6 +3958,10 @@ func (h *IntegrationHandler) fetchSentryOrganization(ctx context.Context, access
 // --- GitHub token exchange ---
 
 func (h *IntegrationHandler) exchangeGitHubCode(ctx context.Context, code string) (*githubIntegrationTokenResponse, error) {
+	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
+		Kind:     githubtelemetry.RequestKindOAuth,
+		AuthType: githubtelemetry.AuthTypeOAuth,
+	})
 	body, err := json.Marshal(map[string]string{
 		"client_id":     h.githubClientID,
 		"client_secret": h.githubSecret,
@@ -3947,7 +3979,7 @@ func (h *IntegrationHandler) exchangeGitHubCode(ctx context.Context, code string
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := h.client.Do(req)
+	resp, err := h.gitHubClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("github oauth token request failed: %w", err)
 	}
