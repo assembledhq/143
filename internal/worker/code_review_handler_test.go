@@ -50,7 +50,8 @@ func TestStartCodeReviewReassessmentHandlerDefersBehindOlderAssessment(t *testin
 	lifecycle := &codeReviewLifecycleStub{result: codereview.ReviewRequestedResult{Processed: true, Reused: true, Deferred: true}}
 	payload, err := json.Marshal(codereview.ReviewChangedInput{
 		OrgID: orgID, RepositoryID: repoID, PullRequestID: prID, PriorSessionID: priorSessionID,
-		HeadSHA: "event-head", ChangeKey: "pull_request:delivery-143", ChangeReason: "pull_request.edited",
+		HeadSHA: "event-head", ChangeKey: "review_requested:delivery-143", ChangeReason: "pull_request.review_requested",
+		GitHubDeliveryID: "delivery-143", RequestedTeamSlug: "143-code-reviewer", ExplicitRequest: true,
 	})
 	require.NoError(t, err, "reassessment starter payload should marshal")
 
@@ -66,6 +67,9 @@ func TestStartCodeReviewReassessmentHandlerDefersBehindOlderAssessment(t *testin
 	require.True(t, retryable.BypassMaxRetryDuration, "durable follow-up should survive long-running reviewer agents")
 	require.Equal(t, "current-head", lifecycle.input.HeadSHA, "starter should reassess the current mirrored PR head")
 	require.Equal(t, priorSessionID, lifecycle.input.PriorSessionID, "starter should preserve event ordering against the prior assessment")
+	require.True(t, lifecycle.input.ExplicitRequest, "starter should preserve the explicit request contract")
+	require.Equal(t, "delivery-143", lifecycle.input.GitHubDeliveryID, "starter should preserve GitHub delivery identity")
+	require.Equal(t, "143-code-reviewer", lifecycle.input.RequestedTeamSlug, "starter should preserve reviewer cleanup context")
 	require.NoError(t, mock.ExpectationsWereMet(), "starter should load the current pull request with org isolation")
 }
 

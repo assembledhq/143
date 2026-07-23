@@ -292,6 +292,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			ChangedFilesAvailable: changedFilesAvailable,
 			DescriptionEvaluation: descriptionEvaluation,
 			OrchestratorSynthesis: codeReviewOrchestratorSynthesisFromResults(agentResults),
+			AssessedAt:            time.Now().UTC(),
 		})
 		if err := ensureCodeReviewInlineSelection(ctx, stores.CodeReviews, job, findings, changedFiles, policy.Config().InlineCommentLimit); err != nil {
 			return fmt.Errorf("select code review inline findings: %w", err)
@@ -2304,6 +2305,7 @@ type liveCodeReviewOutcomeInput struct {
 	ChangedFilesAvailable bool
 	DescriptionEvaluation codeReviewDescriptionEvaluation
 	OrchestratorSynthesis codeReviewOrchestratorSynthesis
+	AssessedAt            time.Time
 }
 
 func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.CodeReviewDecisionEvaluation, string) {
@@ -2361,6 +2363,8 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		ReviewerQuorum:            reviewerQuorum,
 		RequiredReviewerQuorum:    requiredReviewerQuorum,
 		ReviewerQuorumWaived:      reviewerQuorumWaived,
+		HeadSHA:                   input.Job.HeadSHA,
+		AssessedAt:                input.AssessedAt,
 	})
 	return decision, body
 }

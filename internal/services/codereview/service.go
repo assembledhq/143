@@ -58,8 +58,10 @@ type JobStore interface {
 }
 
 const (
-	codeReviewJobMaxAttempts        = 8
-	codeReviewJobEnqueueGracePeriod = time.Minute
+	codeReviewJobMaxAttempts          = 8
+	codeReviewJobEnqueueGracePeriod   = time.Minute
+	explicitReviewRequestChangeReason = "pull_request.review_requested"
+	codeReviewUndispatchedReason      = "code review job was not queued"
 )
 
 type Service struct {
@@ -94,27 +96,33 @@ type ReviewRequestedInput struct {
 	FromFork          bool
 	RequestedLogin    string
 	RequestedTeam     string
+	DeliveryID        string
 }
 
-// ReviewChangedInput describes a new externally-observed state for a pull
-// request that has already been assigned to 143 Code Reviewer. ChangeKey must
-// be stable for the material code-head state so equivalent webhook
-// deliveries reuse the same assessment.
+// ReviewChangedInput describes a new externally-observed state or explicit
+// request for a pull request already assigned to 143 Code Reviewer. ChangeKey
+// must be stable for equivalent webhook deliveries so redeliveries reuse the
+// same assessment.
 type ReviewChangedInput struct {
-	OrgID             uuid.UUID `json:"org_id"`
-	RepositoryID      uuid.UUID `json:"repository_id"`
-	PullRequestID     uuid.UUID `json:"pull_request_id"`
-	PriorSessionID    uuid.UUID `json:"prior_session_id"`
-	GitHubRepo        string    `json:"github_repo"`
-	GitHubPRNumber    int       `json:"github_pr_number"`
-	GitHubPRURL       string    `json:"github_pr_url"`
-	PullRequestTitle  string    `json:"pull_request_title"`
-	PullRequestAuthor string    `json:"pull_request_author,omitempty"`
-	BaseSHA           string    `json:"base_sha"`
-	HeadSHA           string    `json:"head_sha"`
-	FromFork          bool      `json:"from_fork"`
-	ChangeKey         string    `json:"change_key"`
-	ChangeReason      string    `json:"change_reason"`
+	OrgID                  uuid.UUID                      `json:"org_id"`
+	RepositoryID           uuid.UUID                      `json:"repository_id"`
+	PullRequestID          uuid.UUID                      `json:"pull_request_id"`
+	PriorSessionID         uuid.UUID                      `json:"prior_session_id"`
+	GitHubRepo             string                         `json:"github_repo"`
+	GitHubPRNumber         int                            `json:"github_pr_number"`
+	GitHubPRURL            string                         `json:"github_pr_url"`
+	PullRequestTitle       string                         `json:"pull_request_title"`
+	PullRequestAuthor      string                         `json:"pull_request_author,omitempty"`
+	BaseSHA                string                         `json:"base_sha"`
+	HeadSHA                string                         `json:"head_sha"`
+	FromFork               bool                           `json:"from_fork"`
+	ChangeKey              string                         `json:"change_key"`
+	ChangeReason           string                         `json:"change_reason"`
+	GitHubDeliveryID       string                         `json:"github_delivery_id,omitempty"`
+	RequestedReviewerLogin string                         `json:"requested_reviewer_login,omitempty"`
+	RequestedTeamSlug      string                         `json:"requested_team_slug,omitempty"`
+	ExplicitRequest        bool                           `json:"explicit_request,omitempty"`
+	TriggerSource          models.CodeReviewTriggerSource `json:"trigger_source,omitempty"`
 }
 
 type ReviewRequestedResult struct {
@@ -435,7 +443,69 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 	if approved {
 		return ReviewRequestedResult{IgnoredReason: "already_approved", TriggerSource: source}, nil
 	}
-	return s.startReview(ctx, input, reviewStartOptions{triggerSource: source})
+	deliveryID := strings.TrimSpace(input.DeliveryID)
+	if deliveryID == "" {
+		s.logger.Warn().
+			Str("org_id", input.OrgID.String()).
+			Str("pull_request_id", input.PullRequestID.String()).
+			Msg("code review request is missing GitHub delivery identity; preserving same-head reuse behavior")
+		return s.startReview(ctx, input, reviewStartOptions{triggerSource: source})
+	}
+
+	submitted, err := s.metadata.GetLatestSubmittedByPullRequest(ctx, input.OrgID, input.PullRequestID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return ReviewRequestedResult{}, fmt.Errorf("load submitted code review before explicit rerequest: %w", err)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		submitted = models.CodeReviewSessionMetadata{}
+	}
+	changeKey := explicitReviewRequestChangeKey(deliveryID)
+	// A policy-independent delivery key distinguishes an intentional rerequest
+	// from a GitHub redelivery. If another assessment is active, startReview
+	// returns Deferred and the durable starter below serializes this request.
+	result, err := s.startReview(ctx, input, reviewStartOptions{
+		triggerSource:           source,
+		forceReassessment:       true,
+		changeKey:               changeKey,
+		changeReason:            explicitReviewRequestChangeReason,
+		previousOutputKey:       submitted.ReviewOutputKey,
+		existingGitHubReviewID:  submitted.GitHubReviewID,
+		existingGitHubReviewURL: submitted.GitHubReviewURL,
+	})
+	if err != nil || !result.Deferred {
+		return result, err
+	}
+
+	queued, err := s.QueueReviewChanged(ctx, ReviewChangedInput{
+		OrgID:                  input.OrgID,
+		RepositoryID:           input.RepositoryID,
+		PullRequestID:          input.PullRequestID,
+		GitHubRepo:             input.GitHubRepo,
+		GitHubPRNumber:         input.GitHubPRNumber,
+		GitHubPRURL:            input.GitHubPRURL,
+		PullRequestTitle:       input.PullRequestTitle,
+		PullRequestAuthor:      input.PullRequestAuthor,
+		BaseSHA:                input.BaseSHA,
+		HeadSHA:                input.HeadSHA,
+		FromFork:               input.FromFork,
+		ChangeKey:              changeKey,
+		ChangeReason:           explicitReviewRequestChangeReason,
+		GitHubDeliveryID:       deliveryID,
+		RequestedReviewerLogin: input.RequestedLogin,
+		RequestedTeamSlug:      input.RequestedTeam,
+		ExplicitRequest:        true,
+		TriggerSource:          source,
+	})
+	if err != nil || !queued.Processed {
+		queued.TriggerSource = source
+		return queued, err
+	}
+	queued.Reused = result.Reused
+	queued.Deferred = true
+	queued.SessionID = result.SessionID
+	queued.MetadataID = result.MetadataID
+	queued.TriggerSource = source
+	return queued, nil
 }
 
 // QueueReviewChanged durably records a pass-relevant webhook change. The
@@ -492,6 +562,11 @@ func (s *Service) HandleReviewChanged(ctx context.Context, input ReviewChangedIn
 	if strings.TrimSpace(input.HeadSHA) == "" {
 		return ReviewRequestedResult{}, fmt.Errorf("head_sha is required")
 	}
+	if input.TriggerSource != "" {
+		if err := input.TriggerSource.Validate(); err != nil {
+			return ReviewRequestedResult{}, fmt.Errorf("validate trigger_source: %w", err)
+		}
+	}
 	approved, err := s.metadata.HasApprovedByPullRequest(ctx, input.OrgID, input.PullRequestID)
 	if err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("check prior code review approval before reassessment: %w", err)
@@ -506,7 +581,7 @@ func (s *Service) HandleReviewChanged(ctx context.Context, input ReviewChangedIn
 	if err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("load latest code review for reassessment: %w", err)
 	}
-	if input.PriorSessionID != uuid.Nil && latest.SessionID != input.PriorSessionID {
+	if input.PriorSessionID != uuid.Nil && latest.SessionID != input.PriorSessionID && !input.ExplicitRequest {
 		switch latest.Status {
 		case models.CodeReviewSessionStatusQueued, models.CodeReviewSessionStatusRunning, models.CodeReviewSessionStatusCompleted:
 			return ReviewRequestedResult{
@@ -545,9 +620,16 @@ func (s *Service) HandleReviewChanged(ctx context.Context, input ReviewChangedIn
 		BaseSHA:           input.BaseSHA,
 		HeadSHA:           input.HeadSHA,
 		FromFork:          input.FromFork,
+		RequestedLogin:    input.RequestedReviewerLogin,
+		RequestedTeam:     input.RequestedTeamSlug,
+		DeliveryID:        input.GitHubDeliveryID,
+	}
+	triggerSource := latest.TriggerSource
+	if input.TriggerSource != "" {
+		triggerSource = input.TriggerSource
 	}
 	return s.startReview(ctx, requested, reviewStartOptions{
-		triggerSource:           latest.TriggerSource,
+		triggerSource:           triggerSource,
 		forceReassessment:       true,
 		changeKey:               input.ChangeKey,
 		changeReason:            input.ChangeReason,
@@ -574,6 +656,29 @@ func codeReviewRevisionContextString(raw json.RawMessage, key string) string {
 
 func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, opts reviewStartOptions) (ReviewRequestedResult, error) {
 	source := opts.triggerSource
+	explicitOutputRoot := ""
+	outputKey := ""
+	if opts.forceReassessment && strings.TrimSpace(input.DeliveryID) != "" {
+		explicitOutputRoot = explicitReviewRequestOutputKey(input.PullRequestID, input.DeliveryID)
+		outputKey = explicitOutputRoot
+		for {
+			existing, existingErr := s.metadata.GetByOutputKey(ctx, input.OrgID, outputKey)
+			if errors.Is(existingErr, pgx.ErrNoRows) {
+				break
+			}
+			if existingErr != nil {
+				return ReviewRequestedResult{}, fmt.Errorf("lookup explicit code review request by output key: %w", existingErr)
+			}
+			if !codeReviewAttemptNeverDispatched(existing) {
+				return reusedReviewRequestedResult(existing, source), nil
+			}
+			// The delivery is reserved by an immutable attempt whose worker job
+			// never reached the queue. Advance from the delivery root using that
+			// failed row's identity so concurrent redeliveries converge on one
+			// replacement without making policy or head part of delivery identity.
+			outputKey = retryOutputKey(explicitOutputRoot, existing.ID)
+		}
+	}
 
 	resolved, err := s.policies.ResolvePolicy(ctx, input.OrgID)
 	if err != nil {
@@ -590,8 +695,10 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 	if !resolved.Config.Enabled {
 		return ReviewRequestedResult{IgnoredReason: "policy_disabled", TriggerSource: source}, nil
 	}
-	outputKey := StableOutputKey(input.PullRequestID, input.HeadSHA, policy.ID, policy.Version)
-	if opts.forceReassessment && strings.TrimSpace(opts.changeKey) != "" {
+	if outputKey == "" {
+		outputKey = StableOutputKey(input.PullRequestID, input.HeadSHA, policy.ID, policy.Version)
+	}
+	if explicitOutputRoot == "" && opts.forceReassessment && strings.TrimSpace(opts.changeKey) != "" {
 		outputKey = reassessmentOutputKey(outputKey, opts.changeKey)
 		existing, existingErr := s.metadata.GetByOutputKey(ctx, input.OrgID, outputKey)
 		if existingErr == nil {
@@ -685,6 +792,8 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 		"policy_version":           policy.Version,
 		"trigger_source":           source,
 		"change_reason":            strings.TrimSpace(opts.changeReason),
+		"change_key":               strings.TrimSpace(opts.changeKey),
+		"github_delivery_id":       strings.TrimSpace(input.DeliveryID),
 	})
 	if err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("marshal code review revision context: %w", err)
@@ -724,6 +833,19 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 		ReviewOutputKey: outputKey,
 	}
 	if err := s.metadata.CreateSessionMetadata(ctx, metadata); err != nil {
+		if errors.Is(err, db.ErrCodeReviewActiveHeadConflict) {
+			s.reconcileUnclaimedReviewSession(ctx, input.OrgID, session.ID)
+			active, activeErr := s.metadata.GetLatestByPullRequestHead(ctx, input.OrgID, input.PullRequestID, input.HeadSHA, policy.ID)
+			if activeErr != nil {
+				return ReviewRequestedResult{}, errors.Join(
+					fmt.Errorf("create code review metadata: %w", err),
+					fmt.Errorf("load concurrent active code review: %w", activeErr),
+				)
+			}
+			result := reusedReviewRequestedResult(active, source)
+			result.Deferred = opts.forceReassessment
+			return result, nil
+		}
 		return ReviewRequestedResult{}, fmt.Errorf("create code review metadata: %w", err)
 	}
 	if metadata.SessionID != session.ID {
@@ -767,7 +889,7 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 		MaxAttempts: codeReviewJobMaxAttempts,
 	})
 	if err != nil {
-		reason := fmt.Sprintf("enqueue code review job: %v", err)
+		reason := fmt.Sprintf("%s: %v", codeReviewUndispatchedReason, err)
 		if _, failErr := s.metadata.FailReviewWithStatus(ctx, input.OrgID, db.FailCodeReviewParams{
 			SessionID: session.ID,
 			Reason:    reason,
@@ -814,6 +936,15 @@ func (s *Service) reconcileStrandedSession(ctx context.Context, orgID, sessionID
 	}
 }
 
+func (s *Service) reconcileUnclaimedReviewSession(ctx context.Context, orgID, sessionID uuid.UUID) {
+	if err := s.sessions.UpdateStatus(ctx, orgID, sessionID, models.SessionStatusCancelled); err != nil {
+		s.logger.Warn().Err(err).
+			Str("org_id", orgID.String()).
+			Str("session_id", sessionID.String()).
+			Msg("failed to cancel code review session that lost metadata ownership")
+	}
+}
+
 func StableOutputKey(pullRequestID uuid.UUID, headSHA string, policyID uuid.UUID, policyVersion int) string {
 	return fmt.Sprintf("pr:%s:head:%s:policy:%s:v%d", pullRequestID, headSHA, policyID, policyVersion)
 }
@@ -825,6 +956,24 @@ func retryOutputKey(base string, previousAttemptID uuid.UUID) string {
 func reassessmentOutputKey(base, changeKey string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(changeKey)))
 	return fmt.Sprintf("%s:change:%x", base, sum[:])
+}
+
+func explicitReviewRequestOutputKey(pullRequestID uuid.UUID, deliveryID string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(deliveryID)))
+	return fmt.Sprintf("pr:%s:review-request:%x", pullRequestID, sum[:])
+}
+
+func codeReviewAttemptNeverDispatched(metadata models.CodeReviewSessionMetadata) bool {
+	if metadata.Status != models.CodeReviewSessionStatusFailed || !metadata.RetryableFailure || metadata.FailureReason == nil {
+		return false
+	}
+	reason := strings.TrimSpace(*metadata.FailureReason)
+	return strings.HasPrefix(reason, codeReviewUndispatchedReason+":") ||
+		strings.HasPrefix(reason, "enqueue code review job:")
+}
+
+func explicitReviewRequestChangeKey(deliveryID string) string {
+	return "review_requested:" + strings.TrimSpace(deliveryID)
 }
 
 func reusedReviewRequestedResult(metadata models.CodeReviewSessionMetadata, source models.CodeReviewTriggerSource) ReviewRequestedResult {
