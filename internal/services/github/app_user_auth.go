@@ -17,6 +17,7 @@ import (
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 )
 
 const (
@@ -56,7 +57,7 @@ func NewAppUserAuthService(credentials *db.UserCredentialStore, clientID, client
 		redirectURI:   strings.TrimRight(baseURL, "/") + "/api/v1/users/me/github/callback",
 		oauthBaseURL:  defaultGitHubOAuthBaseURL,
 		apiBaseURL:    defaultGitHubAPI,
-		httpClient:    &http.Client{Timeout: 15 * time.Second},
+		httpClient:    githubtelemetry.NewHTTPClient(15*time.Second, logger),
 		logger:        logger,
 		now:           time.Now,
 		refreshWindow: githubAppUserRefreshWindow,
@@ -179,6 +180,10 @@ func (s *AppUserAuthService) exchangeToken(ctx context.Context, values url.Value
 	if s.clientID == "" || s.clientSecret == "" {
 		return nil, errors.New("github app user auth is not configured")
 	}
+	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
+		Kind:     githubtelemetry.RequestKindOAuth,
+		AuthType: githubtelemetry.AuthTypeOAuth,
+	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.oauthBaseURL+"/login/oauth/access_token", strings.NewReader(values.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("build token exchange request: %w", err)
@@ -235,6 +240,10 @@ func (s *AppUserAuthService) exchangeToken(ctx context.Context, values url.Value
 }
 
 func (s *AppUserAuthService) validateAccessToken(ctx context.Context, token string) (bool, error) {
+	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
+		Kind:     githubtelemetry.RequestKindAPI,
+		AuthType: githubtelemetry.AuthTypeUser,
+	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.apiBaseURL+"/user", nil)
 	if err != nil {
 		return false, fmt.Errorf("build github user validation request: %w", err)

@@ -1,16 +1,64 @@
 package codereview
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+func TestGitHubSubmitter_EmitsInstallationTelemetry(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/repos/acme/repo/pulls/42/files", r.URL.Path, "file lookup should use the expected GitHub route")
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode([]PullRequestFile{}), "test response should encode")
+	}))
+	defer server.Close()
+
+	var logs bytes.Buffer
+	client := githubtelemetry.NewHTTPClient(time.Second, zerolog.New(&logs))
+	submitter := NewGitHubSubmitter(
+		&tokenStub{token: "ghs_token"},
+		WithGitHubSubmitterBaseURL(server.URL),
+		WithGitHubSubmitterHTTPClient(client),
+	)
+
+	files, err := submitter.ListPullRequestFiles(context.Background(), PullRequestFilesRequest{
+		InstallationID: 99,
+		Repository:     "acme/repo",
+		PullNumber:     42,
+	})
+
+	require.NoError(t, err, "file lookup should succeed")
+	require.Equal(t, []PullRequestFile{}, files, "file lookup should preserve the empty GitHub response")
+	var event map[string]any
+	require.NoError(t, json.Unmarshal(logs.Bytes(), &event), "GitHub telemetry should be valid JSON")
+	delete(event, "github_duration_ms")
+	require.Equal(t, map[string]any{
+		"level":                  "info",
+		"message":                "github api request",
+		"github_method":          http.MethodGet,
+		"github_route":           "/repos/:owner/:repo/pulls/:id/files",
+		"github_auth_type":       githubtelemetry.AuthTypeAppInstallation,
+		"github_status_code":     float64(http.StatusOK),
+		"github_status_class":    "2xx",
+		"github_result":          "success",
+		"github_rate_limited":    false,
+		"github_repository":      "acme/repo",
+		"github_installation_id": float64(99),
+	}, event, "submitter requests should emit bounded installation-scoped telemetry")
+}
 
 func TestGitHubSubmitter_SubmitReview(t *testing.T) {
 	t.Parallel()

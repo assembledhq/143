@@ -32,6 +32,7 @@ import (
 	"github.com/assembledhq/143/internal/services/agent"
 	automationevents "github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/github/identity"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
@@ -195,7 +196,7 @@ func NewPRService(
 		logger:                   logger,
 		baseURL:                  defaultGitHubAPI,
 		appBaseURL:               defaultAppBaseURL,
-		httpClient:               &http.Client{Timeout: 30 * time.Second},
+		httpClient:               githubtelemetry.NewHTTPClient(30*time.Second, logger),
 		prPreviewSurfacesEnabled: true,
 	}
 }
@@ -3670,6 +3671,7 @@ func (s *PRService) enqueueReinforceMemories(ctx context.Context, orgID uuid.UUI
 // --- GitHub API helpers ---
 
 func (s *PRService) doGitHubRequest(ctx context.Context, token, method, path string, body any) ([]byte, error) {
+	ctx = githubtelemetry.WithRequestMetadata(ctx, s.githubRequestMetadataForToken(token))
 	var bodyReader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -3723,6 +3725,7 @@ func (s *PRService) doGitHubRequest(ctx context.Context, token, method, path str
 // GitHub Enterprise Server splits these differently (REST at /api/v3, GraphQL at
 // /api/graphql); revisit this if 143 ever targets a GHES base URL.
 func (s *PRService) doGitHubGraphQL(ctx context.Context, token, query string, variables map[string]any) ([]byte, error) {
+	ctx = githubtelemetry.WithRequestMetadata(ctx, s.githubRequestMetadataForToken(token))
 	payload, err := json.Marshal(map[string]any{"query": query, "variables": variables})
 	if err != nil {
 		return nil, err
@@ -3758,6 +3761,20 @@ func (s *PRService) doGitHubGraphQL(ctx context.Context, token, query string, va
 	}
 
 	return respBody, nil
+}
+
+func (s *PRService) githubRequestMetadataForToken(token string) githubtelemetry.RequestMetadata {
+	metadata := githubtelemetry.RequestMetadata{
+		Kind:     githubtelemetry.RequestKindAPI,
+		AuthType: githubtelemetry.AuthTypeUser,
+	}
+	if s != nil && s.tokenProvider != nil {
+		if installationID, ok := s.tokenProvider.installationIDForToken(token); ok {
+			metadata.AuthType = githubtelemetry.AuthTypeAppInstallation
+			metadata.InstallationID = installationID
+		}
+	}
+	return metadata
 }
 
 // GitHubAPIError wraps a non-2xx response from the GitHub REST API so callers

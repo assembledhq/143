@@ -27,6 +27,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/models"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 )
 
 const defaultAPIBaseURL = "https://api.github.com"
@@ -132,7 +133,7 @@ type Resolver struct {
 func NewResolver(tokens InstallationTokenSource, logger zerolog.Logger) *Resolver {
 	return &Resolver{
 		tokens:     tokens,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: githubtelemetry.NewHTTPClient(30*time.Second, logger),
 		apiBaseURL: defaultAPIBaseURL,
 		logger:     logger,
 	}
@@ -394,6 +395,10 @@ func integrationInstallationID(integration *models.Integration) (int64, error) {
 // distinguish "user has GitHub but isn't a collaborator" (403/404 — fall
 // through) from real errors (500, network — propagate).
 func (r *Resolver) userTokenCanAccessRepo(ctx context.Context, token, fullName string) (bool, error) {
+	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
+		Kind:     githubtelemetry.RequestKindAPI,
+		AuthType: githubtelemetry.AuthTypeUser,
+	})
 	owner, repo := splitRepo(fullName)
 	if owner == "" || repo == "" {
 		return false, fmt.Errorf("invalid repo full name %q", fullName)

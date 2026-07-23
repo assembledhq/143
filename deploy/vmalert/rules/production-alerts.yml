@@ -182,6 +182,26 @@ groups:
           description: 'Workers logged {{ $value }} `push_pr_changes failed` errors in the last 15 minutes.'
           runbook: 'Filter VictoriaLogs for service=worker _msg="push_pr_changes failed". Common causes: snapshot hydration, git push (token / branch protection), or sandbox creation.'
 
+  - name: github-api-health
+    type: vlogs
+    interval: 1m
+    rules:
+      # Do not alert on a single transient rejection. This requires a sustained
+      # burst: at least ten rejected requests in each rolling 10-minute window
+      # for five minutes. The dashboard still exposes every individual hit.
+      - alert: GitHubAPIRateLimitSustained
+        expr: '_time:10m _msg:"github api request" AND github_rate_limited:true | stats count() as rate_limits | filter rate_limits:>9'
+        for: 5m
+        labels:
+          service: github
+          severity: warning
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'GitHub API rate limiting is sustained'
+          description: 'GitHub rejected {{ $value }} server-owned API requests for rate limiting in the rolling 10-minute window, sustained for five minutes.'
+          runbook: 'Open the GitHub API Health dashboard. Check quota headroom, installation ID, rate-limit kind, and the top affected normalized routes before increasing retries or concurrency.'
+
   - name: dns-health
     type: vlogs
     interval: 1m
