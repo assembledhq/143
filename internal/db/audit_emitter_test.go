@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -12,6 +13,59 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+func TestAuditEmitter_EmitUserActionPreservesAllFields(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	emitter := NewAuditEmitter(NewAuditLogStore(mock), zerolog.Nop())
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	projectID := uuid.New()
+	resourceID := uuid.New().String()
+	requestID := uuid.New().String()
+	ipAddress := netip.MustParsePrefix("192.0.2.1/32")
+	userAgent := "audit-emitter-test"
+	details := json.RawMessage(`{"source":"test"}`)
+
+	mock.ExpectQuery("INSERT INTO audit_logs").
+		WithArgs(
+			orgID,
+			models.AuditActorUser,
+			userID.String(),
+			&userID,
+			models.AuditActionSessionArchived,
+			models.AuditResourceSession,
+			&resourceID,
+			details,
+			&requestID,
+			&ipAddress,
+			&userAgent,
+			&sessionID,
+			&projectID,
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), time.Now()))
+
+	emitter.EmitUserAction(context.Background(), UserActionParams{
+		OrgID:        orgID,
+		UserID:       userID,
+		Action:       models.AuditActionSessionArchived,
+		ResourceType: models.AuditResourceSession,
+		ResourceID:   &resourceID,
+		Details:      details,
+		RequestID:    &requestID,
+		IPAddress:    &ipAddress,
+		UserAgent:    &userAgent,
+		SessionID:    &sessionID,
+		ProjectID:    &projectID,
+	})
+
+	require.NoError(t, mock.ExpectationsWereMet(), "user audit emit should persist every supplied field")
+}
 
 func TestAuditEmitter_EmitWebhookActionIncludesSessionAndProject(t *testing.T) {
 	t.Parallel()
