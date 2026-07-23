@@ -13,8 +13,13 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/rs/zerolog"
 )
+
+var ErrCodeReviewActiveHeadConflict = errors.New("another code review is active for this pull request head and policy")
+
+const codeReviewActiveHeadConstraint = "idx_code_review_metadata_active_head"
 
 type CodeReviewStore struct {
 	db      DBTX
@@ -481,6 +486,10 @@ func (s *CodeReviewStore) CreateSessionMetadata(ctx context.Context, metadata *m
 		"completed_at":             metadata.CompletedAt,
 	})
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if isUniqueViolation(err) && errors.As(err, &pgErr) && pgErr.ConstraintName == codeReviewActiveHeadConstraint {
+			return fmt.Errorf("%w: %v", ErrCodeReviewActiveHeadConflict, err)
+		}
 		return fmt.Errorf("create code review metadata: %w", err)
 	}
 	created, err := collectOneCodeReviewMetadata(rows)

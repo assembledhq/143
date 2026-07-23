@@ -512,6 +512,7 @@ func (h *WebhookHandler) handleCodeReviewRequested(w http.ResponseWriter, r *htt
 		FromFork:          event.PullRequest.Head.Repo.Fork,
 		RequestedLogin:    requestedLogin,
 		RequestedTeam:     requestedTeam,
+		DeliveryID:        strings.TrimSpace(r.Header.Get("X-GitHub-Delivery")),
 	})
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REQUEST_FAILED", "failed to process code review request", err)

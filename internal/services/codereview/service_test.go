@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -54,6 +55,7 @@ func TestService_HandleReviewRequested(t *testing.T) {
 			name: "creates session and enqueues durable review job",
 			input: newReviewRequestedInput(func(in *ReviewRequestedInput) {
 				in.FromFork = true
+				in.DeliveryID = "delivery-initial"
 			}),
 			expected: func(t *testing.T, result ReviewRequestedResult, policies *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
 				require.True(t, result.Processed, "matching reviewer request should be processed")
@@ -72,6 +74,7 @@ func TestService_HandleReviewRequested(t *testing.T) {
 				require.Equal(t, models.JobTypeRunCodeReview, jobs.jobType, "service should use the code review job type")
 				require.Equal(t, codeReviewJobMaxAttempts, jobs.opts.MaxAttempts, "code review jobs should get the extended retry budget")
 				require.NotEmpty(t, jobs.dedupeKey, "service should dedupe by stable output key")
+				require.Contains(t, metadata.created.ReviewOutputKey, ":review-request:", "delivery-backed review should use policy-independent request identity")
 				require.True(t, jobs.payload.FromFork, "service should carry fork source evidence into worker payload")
 				require.Equal(t, "anya", jobs.payload.PullRequestAuthor, "service should carry GitHub author login into worker payload")
 				require.Equal(t, "143-code-reviewer", jobs.payload.RequestedReviewerLogin, "service should carry requested reviewer login for stale-request cleanup")
@@ -80,6 +83,98 @@ func TestService_HandleReviewRequested(t *testing.T) {
 				require.NoError(t, json.Unmarshal(sessions.created.RevisionContext, &revisionContext), "session revision context should be valid JSON")
 				require.Equal(t, true, revisionContext["from_fork"], "session revision context should include fork source evidence")
 				require.Equal(t, "143-code-reviewer", revisionContext["requested_reviewer_login"], "session revision context should preserve reviewer identity for replacement cleanup")
+				require.Equal(t, "delivery-initial", revisionContext["github_delivery_id"], "session revision context should preserve GitHub delivery identity for audit")
+			},
+		},
+		{
+			name: "starts a fresh same-head assessment for a new explicit request",
+			input: newReviewRequestedInput(func(in *ReviewRequestedInput) {
+				in.DeliveryID = "delivery-rerequest"
+			}),
+			setup: func(_ *policyStub, m *metadataStub, _ *triggerStub) {
+				reviewID := int64(143)
+				reviewURL := "https://github.com/acme/repo/pull/42#pullrequestreview-143"
+				m.latest = models.CodeReviewSessionMetadata{
+					ID: uuid.New(), SessionID: uuid.New(), Status: models.CodeReviewSessionStatusCompleted,
+					ReviewOutputKey: "prior-output", GitHubReviewID: &reviewID, GitHubReviewURL: &reviewURL,
+				}
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, _ *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.True(t, result.Processed, "new explicit request should be processed")
+				require.False(t, result.Reused, "new delivery should create a distinct assessment")
+				require.Equal(t, 1, sessions.createCalls, "new delivery should create one new session")
+				require.Equal(t, 1, jobs.enqueueCalls, "new delivery should enqueue one review job")
+				require.Equal(t, models.JobTypeRunCodeReview, jobs.jobType, "terminal same-head rerequest should start review work directly")
+				require.Contains(t, metadata.created.ReviewOutputKey, ":review-request:", "new delivery should receive a policy-independent delivery key")
+				require.Equal(t, metadata.latest.GitHubReviewID, jobs.payload.ExistingGitHubReviewID, "same-head rerequest should update the persistent GitHub review")
+				require.Equal(t, metadata.latest.ReviewOutputKey, jobs.payload.PreviousOutputKey, "same-head rerequest should retain prior inline-comment marker context")
+			},
+		},
+		{
+			name: "reuses a completed assessment for a redelivered explicit request",
+			input: newReviewRequestedInput(func(in *ReviewRequestedInput) {
+				in.DeliveryID = "delivery-duplicate"
+			}),
+			setup: func(_ *policyStub, m *metadataStub, _ *triggerStub) {
+				existing := models.CodeReviewSessionMetadata{
+					ID: uuid.New(), SessionID: uuid.New(), Status: models.CodeReviewSessionStatusCompleted,
+					ReviewOutputKey: "delivery-output",
+				}
+				m.byOutputKey = existing
+				m.latest = existing
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, _ *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.True(t, result.Processed, "redelivered explicit request should be recognized")
+				require.True(t, result.Reused, "redelivered delivery ID should reuse its assessment")
+				require.Equal(t, metadata.byOutputKey.SessionID, result.SessionID, "redelivery should return the delivery's existing session")
+				require.Equal(t, 0, sessions.createCalls, "redelivery should not create a session")
+				require.Equal(t, 0, jobs.enqueueCalls, "redelivery should not enqueue work")
+			},
+		},
+		{
+			name: "reuses a dispatched assessment that later failed",
+			input: newReviewRequestedInput(func(in *ReviewRequestedInput) {
+				in.DeliveryID = "delivery-worker-failed"
+			}),
+			setup: func(_ *policyStub, m *metadataStub, _ *triggerStub) {
+				reason := "reviewer agents exhausted their retry budget"
+				m.byOutputKey = models.CodeReviewSessionMetadata{
+					ID: uuid.New(), SessionID: uuid.New(), Status: models.CodeReviewSessionStatusFailed,
+					RetryableFailure: true, FailureReason: &reason, ReviewOutputKey: "delivery-worker-failed-output",
+				}
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, _ *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.True(t, result.Reused, "redelivery should not duplicate an assessment that reached its worker")
+				require.Equal(t, metadata.byOutputKey.SessionID, result.SessionID, "redelivery should retain the dispatched failed assessment")
+				require.Equal(t, 0, sessions.createCalls, "dispatched failure should require a genuinely new request or explicit retry")
+				require.Equal(t, 0, jobs.enqueueCalls, "redelivery should not enqueue a second assessment after worker execution")
+			},
+		},
+		{
+			name: "durably queues a new explicit request behind active work",
+			input: newReviewRequestedInput(func(in *ReviewRequestedInput) {
+				in.DeliveryID = "delivery-waiting"
+				in.RequestedLogin = ""
+				in.RequestedTeam = "143-code-reviewer"
+			}),
+			setup: func(_ *policyStub, m *metadataStub, triggers *triggerStub) {
+				m.latest = models.CodeReviewSessionMetadata{
+					ID: uuid.New(), SessionID: uuid.New(), Status: models.CodeReviewSessionStatusRunning,
+					ReviewOutputKey: "active-output",
+				}
+				triggers.setting = models.CodeReviewGitHubTriggerSetting{TeamSlug: "143-code-reviewer"}
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, _ *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.True(t, result.Processed, "request behind active work should be accepted")
+				require.True(t, result.Deferred, "request behind active work should report durable deferral")
+				require.True(t, result.Reused, "request should reuse the active session until the starter advances")
+				require.Equal(t, metadata.latest.SessionID, result.SessionID, "deferred result should identify the active assessment")
+				require.Equal(t, 0, sessions.createCalls, "deferred request should not race the active assessment")
+				require.Equal(t, 1, jobs.enqueueCalls, "deferred request should enqueue one durable starter")
+				require.Equal(t, models.JobTypeStartCodeReviewReassessment, jobs.jobType, "deferred request should use the reassessment starter")
+				require.True(t, jobs.reassessmentPayload.ExplicitRequest, "starter payload should preserve the explicit-request contract")
+				require.Equal(t, "delivery-waiting", jobs.reassessmentPayload.GitHubDeliveryID, "starter payload should preserve delivery identity")
+				require.Equal(t, "143-code-reviewer", jobs.reassessmentPayload.RequestedTeamSlug, "starter payload should preserve requested-team cleanup context")
 			},
 		},
 		{
@@ -309,6 +404,125 @@ func TestService_HandleReviewRequested(t *testing.T) {
 	}
 }
 
+func TestService_HandleReviewRequestedRedeliveryKeepsIdentityAcrossPolicyChange(t *testing.T) {
+	t.Parallel()
+
+	input := newReviewRequestedInput(func(in *ReviewRequestedInput) {
+		in.DeliveryID = "delivery-policy-stable"
+	})
+	config := models.DefaultCodeReviewPolicyConfig()
+	firstPolicy := models.CodeReviewPolicyRecord{
+		ID: uuid.New(), OrgID: input.OrgID, Version: 1, Enabled: true, ApprovalMode: config.ApprovalMode,
+	}
+	policies := newPolicyStub()
+	policies.resolved = models.CodeReviewResolvedPolicy{Policy: &firstPolicy, Config: config, Source: "organization"}
+	metadata := &metadataStub{byOutputKeys: make(map[string]models.CodeReviewSessionMetadata)}
+	sessions := &sessionStub{}
+	jobs := &jobStub{jobID: uuid.New(), active: true}
+	service := NewService(policies, metadata, sessions, jobs, zerolog.Nop(), Config{AppReviewerLogins: []string{"143-code-reviewer"}})
+
+	first, err := service.HandleReviewRequested(context.Background(), input)
+	require.NoError(t, err, "initial explicit delivery should start successfully")
+	require.False(t, first.Reused, "initial explicit delivery should create an assessment")
+	firstMetadata := metadata.created
+	metadata.byOutputKeys[firstMetadata.ReviewOutputKey] = firstMetadata
+
+	secondPolicy := firstPolicy
+	secondPolicy.ID = uuid.New()
+	secondPolicy.Version = 2
+	policies.resolved = models.CodeReviewResolvedPolicy{Policy: &secondPolicy, Config: config, Source: "organization"}
+
+	redelivery, err := service.HandleReviewRequested(context.Background(), input)
+	require.NoError(t, err, "redelivery should remain idempotent after a policy change")
+	require.True(t, redelivery.Reused, "same GitHub delivery should reuse its original assessment")
+	require.Equal(t, first.SessionID, redelivery.SessionID, "redelivery should resolve to the original delivery session")
+	require.Equal(t, 1, sessions.createCalls, "policy changes should not create a second session for the same delivery")
+	require.Equal(t, 1, jobs.enqueueCalls, "policy changes should not enqueue a second job for the same delivery")
+}
+
+func TestService_HandleReviewRequestedRedeliveryRetriesUndispatchedAttempt(t *testing.T) {
+	t.Parallel()
+
+	input := newReviewRequestedInput(func(in *ReviewRequestedInput) {
+		in.DeliveryID = "delivery-dispatch-retry"
+	})
+	policies := newPolicyStub()
+	config := models.DefaultCodeReviewPolicyConfig()
+	policy := models.CodeReviewPolicyRecord{
+		ID: uuid.New(), OrgID: input.OrgID, Version: 1, Enabled: true, ApprovalMode: config.ApprovalMode,
+	}
+	policies.resolved = models.CodeReviewResolvedPolicy{Policy: &policy, Config: config, Source: "organization"}
+	metadata := &metadataStub{byOutputKeys: make(map[string]models.CodeReviewSessionMetadata)}
+	sessions := &sessionStub{}
+	jobs := &jobStub{jobID: uuid.New(), active: true, err: errors.New("job queue unavailable")}
+	service := NewService(policies, metadata, sessions, jobs, zerolog.Nop(), Config{AppReviewerLogins: []string{"143-code-reviewer"}})
+
+	first, err := service.HandleReviewRequested(context.Background(), input)
+	require.Error(t, err, "initial delivery should surface the dispatch failure")
+	require.True(t, first.Processed, "failed dispatch should retain its attempted assessment metadata")
+	failedMetadata := metadata.created
+	require.Equal(t, models.CodeReviewSessionStatusFailed, failedMetadata.Status, "undispatched assessment should be terminalized")
+	require.True(t, failedMetadata.RetryableFailure, "undispatched assessment should remain retryable")
+	metadata.byOutputKeys[failedMetadata.ReviewOutputKey] = failedMetadata
+	jobs.err = nil
+	jobs.jobID = uuid.New()
+
+	retry, err := service.HandleReviewRequested(context.Background(), input)
+	require.NoError(t, err, "redelivery should replace an assessment that never dispatched")
+	require.False(t, retry.Reused, "undispatched attempt should not satisfy the delivery")
+	require.NotEqual(t, failedMetadata.SessionID, retry.SessionID, "redelivery should create an immutable replacement attempt")
+	require.Equal(t, 2, sessions.createCalls, "redelivery should create one replacement session")
+	require.Equal(t, 2, jobs.enqueueCalls, "redelivery should retry the worker enqueue")
+	require.Contains(t, metadata.created.ReviewOutputKey, failedMetadata.ID.String(), "replacement output key should advance from the undispatched attempt")
+}
+
+func TestService_HandleReviewRequestedDefersAfterConcurrentActiveHeadInsert(t *testing.T) {
+	t.Parallel()
+
+	input := newReviewRequestedInput(func(in *ReviewRequestedInput) {
+		in.DeliveryID = "delivery-lost-race"
+	})
+	config := models.DefaultCodeReviewPolicyConfig()
+	policy := models.CodeReviewPolicyRecord{
+		ID: uuid.New(), OrgID: input.OrgID, Version: 1, Enabled: true, ApprovalMode: config.ApprovalMode,
+	}
+	winner := models.CodeReviewSessionMetadata{
+		ID:              uuid.New(),
+		OrgID:           input.OrgID,
+		SessionID:       uuid.New(),
+		RepositoryID:    input.RepositoryID,
+		PullRequestID:   input.PullRequestID,
+		PolicyID:        policy.ID,
+		HeadSHA:         input.HeadSHA,
+		Status:          models.CodeReviewSessionStatusQueued,
+		ReviewOutputKey: "winning-delivery-output",
+	}
+	policies := newPolicyStub()
+	policies.resolved = models.CodeReviewResolvedPolicy{Policy: &policy, Config: config, Source: "organization"}
+	metadata := &metadataStub{
+		createErr:           fmt.Errorf("insert metadata: %w", db.ErrCodeReviewActiveHeadConflict),
+		latestAfterCreate:   winner,
+		latestByPullRequest: winner,
+	}
+	sessions := &sessionStub{}
+	jobs := &jobStub{jobID: uuid.New(), active: true}
+	service := NewService(policies, metadata, sessions, jobs, zerolog.Nop(), Config{AppReviewerLogins: []string{"143-code-reviewer"}})
+
+	result, err := service.HandleReviewRequested(context.Background(), input)
+
+	require.NoError(t, err, "losing an active-head insert race should enter durable deferral")
+	require.True(t, result.Processed, "concurrent explicit request should remain accepted")
+	require.True(t, result.Deferred, "losing delivery should wait behind the winning assessment")
+	require.True(t, result.Reused, "deferred result should reference the active winner")
+	require.Equal(t, winner.SessionID, result.SessionID, "deferred result should identify the winning active assessment")
+	require.Equal(t, 1, metadata.createCalls, "service should attempt the raced metadata insert once")
+	require.Equal(t, 1, sessions.updateStatusCalls, "losing session should be terminalized instead of remaining orphaned")
+	require.Equal(t, models.SessionStatusCancelled, sessions.updatedStatus, "losing session should be cancelled without affecting the winner")
+	require.Equal(t, 1, jobs.enqueueCalls, "losing delivery should enqueue one durable starter")
+	require.Equal(t, models.JobTypeStartCodeReviewReassessment, jobs.jobType, "active-head conflict should use the reassessment starter")
+	require.Equal(t, input.DeliveryID, jobs.reassessmentPayload.GitHubDeliveryID, "durable starter should preserve losing delivery identity")
+}
+
 func TestService_HandleReviewChanged(t *testing.T) {
 	t.Parallel()
 
@@ -318,6 +532,7 @@ func TestService_HandleReviewChanged(t *testing.T) {
 		name              string
 		usePriorSessionID bool
 		setup             func(*metadataStub, *sessionStub)
+		mutateInput       func(*ReviewChangedInput)
 		expected          func(*testing.T, ReviewRequestedResult, *metadataStub, *sessionStub, *jobStub)
 	}{
 		{
@@ -388,6 +603,39 @@ func TestService_HandleReviewChanged(t *testing.T) {
 				require.True(t, result.Deferred, "change during an older active review should remain pending for a follow-up")
 				require.Equal(t, 0, sessions.createCalls, "active reassessment should not create concurrent reviewer sessions")
 				require.Equal(t, 0, jobs.enqueueCalls, "active reassessment should not enqueue duplicate work")
+			},
+		},
+		{
+			name:              "runs an explicit request even when another assessment advanced first",
+			usePriorSessionID: true,
+			setup: func(metadata *metadataStub, sessions *sessionStub) {
+				reviewID := int64(143)
+				reviewURL := "https://github.com/acme/repo/pull/42#pullrequestreview-143"
+				metadata.latest = models.CodeReviewSessionMetadata{
+					ID: uuid.New(), SessionID: uuid.New(), HeadSHA: "head",
+					TriggerSource: models.CodeReviewTriggerSourceAppReviewer,
+					Status:        models.CodeReviewSessionStatusCompleted, ReviewOutputKey: "newer-output-key",
+					GitHubReviewID: &reviewID, GitHubReviewURL: &reviewURL,
+				}
+				sessions.getResult = models.Session{RevisionContext: json.RawMessage(`{"pull_request_author":"anya"}`)}
+			},
+			mutateInput: func(input *ReviewChangedInput) {
+				input.ExplicitRequest = true
+				input.GitHubDeliveryID = "delivery-explicit"
+				input.RequestedTeamSlug = "143-code-reviewer"
+				input.TriggerSource = models.CodeReviewTriggerSourceTeamReviewer
+				input.ChangeKey = explicitReviewRequestChangeKey(input.GitHubDeliveryID)
+				input.ChangeReason = explicitReviewRequestChangeReason
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.True(t, result.Processed, "explicit request should retain its own assessment intent")
+				require.False(t, result.Reused, "different explicit delivery should create a distinct assessment")
+				require.Equal(t, 1, sessions.createCalls, "explicit request should create a session after the intervening assessment")
+				require.Equal(t, 1, jobs.enqueueCalls, "explicit request should enqueue its review work")
+				require.Equal(t, models.CodeReviewTriggerSourceTeamReviewer, metadata.created.TriggerSource, "explicit request should preserve its current trigger source")
+				require.Contains(t, jobs.payload.OutputKey, ":review-request:", "explicit delivery should retain its policy-independent identity")
+				require.Equal(t, "143-code-reviewer", jobs.payload.RequestedTeamSlug, "explicit request should carry team cleanup context into the worker")
+				require.Equal(t, metadata.latest.GitHubReviewID, jobs.payload.ExistingGitHubReviewID, "explicit request should update the persistent GitHub review")
 			},
 		},
 		{
@@ -462,6 +710,9 @@ func TestService_HandleReviewChanged(t *testing.T) {
 			input := newReviewChangedInput()
 			if tt.usePriorSessionID {
 				input.PriorSessionID = uuid.New()
+			}
+			if tt.mutateInput != nil {
+				tt.mutateInput(&input)
 			}
 
 			result, err := svc.HandleReviewChanged(context.Background(), input)
@@ -877,6 +1128,10 @@ type metadataStub struct {
 	latestByPullRequest models.CodeReviewSessionMetadata
 	submitted           models.CodeReviewSessionMetadata
 	latestAfterFail     models.CodeReviewSessionMetadata
+	byOutputKey         models.CodeReviewSessionMetadata
+	byOutputKeys        map[string]models.CodeReviewSessionMetadata
+	createErr           error
+	latestAfterCreate   models.CodeReviewSessionMetadata
 	failCalls           int
 	failErr             error
 	approved            bool
@@ -884,6 +1139,10 @@ type metadataStub struct {
 
 func (s *metadataStub) CreateSessionMetadata(_ context.Context, metadata *models.CodeReviewSessionMetadata) error {
 	s.createCalls++
+	s.created = *metadata
+	if s.createErr != nil {
+		return s.createErr
+	}
 	if s.createResult.ID != uuid.Nil {
 		*metadata = s.createResult
 		s.created = *metadata
@@ -894,7 +1153,13 @@ func (s *metadataStub) CreateSessionMetadata(_ context.Context, metadata *models
 	return nil
 }
 
-func (s *metadataStub) GetByOutputKey(context.Context, uuid.UUID, string) (models.CodeReviewSessionMetadata, error) {
+func (s *metadataStub) GetByOutputKey(_ context.Context, _ uuid.UUID, outputKey string) (models.CodeReviewSessionMetadata, error) {
+	if existing, ok := s.byOutputKeys[outputKey]; ok {
+		return existing, nil
+	}
+	if s.byOutputKey.ID != uuid.Nil {
+		return s.byOutputKey, nil
+	}
 	if s.createResult.ID != uuid.Nil {
 		return s.createResult, nil
 	}
@@ -912,6 +1177,9 @@ func (s *metadataStub) GetBySessionID(context.Context, uuid.UUID, uuid.UUID) (mo
 }
 
 func (s *metadataStub) GetLatestByPullRequestHead(_ context.Context, _, _ uuid.UUID, _ string, _ uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	if s.createCalls > 0 && s.latestAfterCreate.ID != uuid.Nil {
+		return s.latestAfterCreate, nil
+	}
 	if s.latestByHead.ID != uuid.Nil {
 		return s.latestByHead, nil
 	}
