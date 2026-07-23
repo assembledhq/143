@@ -334,6 +334,30 @@ func TestCodeReviewTerminalFailureStatus(t *testing.T) {
 	}
 }
 
+func TestCodeReviewSubmitDecision(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		decision models.CodeReviewDecision
+		expected codereview.SubmitReviewDecision
+	}{
+		{name: "approved", decision: models.CodeReviewDecisionApproved, expected: codereview.SubmitReviewDecisionApproved},
+		{name: "comment only", decision: models.CodeReviewDecisionCommentOnly, expected: codereview.SubmitReviewDecisionCommentOnly},
+		{name: "needs human review", decision: models.CodeReviewDecisionNeedsHumanReview, expected: codereview.SubmitReviewDecisionNeedsHumanReview},
+		{name: "blocked", decision: models.CodeReviewDecisionBlocked, expected: codereview.SubmitReviewDecisionBlocked},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := codeReviewSubmitDecision(tt.decision)
+
+			require.Equal(t, tt.expected, actual, "GitHub submission should retain the exact 143 decision while mapping non-approvals to comment reviews")
+		})
+	}
+}
+
 type capturingCodeReviewSubmitter struct {
 	removeRequests   []codereview.RequestedReviewersRequest
 	fileListRequests []codereview.PullRequestFilesRequest

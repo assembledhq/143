@@ -314,6 +314,9 @@ func TestService_HandleReviewChanged(t *testing.T) {
 
 	priorReviewID := int64(143)
 	priorReviewURL := "https://github.com/acme/repo/pull/42#pullrequestreview-143"
+	priorDecision := models.CodeReviewDecisionNeedsHumanReview
+	priorDecidedAt := time.Date(2026, time.July, 22, 18, 45, 0, 0, time.UTC)
+	priorReviewBody := "143 Code Reviewer did not approve this PR"
 	tests := []struct {
 		name              string
 		usePriorSessionID bool
@@ -353,9 +356,12 @@ func TestService_HandleReviewChanged(t *testing.T) {
 					FromFork:        true,
 					TriggerSource:   models.CodeReviewTriggerSourceTeamReviewer,
 					Status:          models.CodeReviewSessionStatusCompleted,
+					Decision:        &priorDecision,
 					ReviewOutputKey: "prior-output-key",
 					GitHubReviewID:  &priorReviewID,
 					GitHubReviewURL: &priorReviewURL,
+					FinalReviewBody: &priorReviewBody,
+					CompletedAt:     &priorDecidedAt,
 				}
 				sessions.getResult = models.Session{RevisionContext: json.RawMessage(`{"pull_request_author":"anya"}`)}
 			},
@@ -369,6 +375,9 @@ func TestService_HandleReviewChanged(t *testing.T) {
 				require.Equal(t, &priorReviewID, jobs.payload.ExistingGitHubReviewID, "worker should update the existing GitHub review")
 				require.Equal(t, &priorReviewURL, jobs.payload.ExistingGitHubReviewURL, "worker should retain the existing review URL")
 				require.Equal(t, "prior-output-key", jobs.payload.PreviousOutputKey, "worker should be able to match prior inline findings")
+				require.Equal(t, &priorDecision, jobs.payload.PreviousReviewDecision, "worker should retain the prior decision for the visible history line")
+				require.Equal(t, &priorDecidedAt, jobs.payload.PreviousReviewDecidedAt, "worker should retain when the prior decision completed")
+				require.Equal(t, &priorReviewBody, jobs.payload.PreviousReviewBody, "worker should retain any earlier visible review history")
 				require.Equal(t, "anya", jobs.payload.PullRequestAuthor, "reassessment should retain author eligibility context")
 				require.True(t, jobs.payload.FromFork, "reassessment should retain fork eligibility context")
 			},
