@@ -785,45 +785,58 @@ export default function CodeReviewsPage() {
                 {reviews.map((review) => (
                   <ResourceRow
                     key={review.id}
-                        title={
-                      <span className="break-words text-sm">
+                    title={
+                      <span className="break-words text-sm leading-5">
                         <ReviewTitle review={review} />
                       </span>
-                        }
-                        metadata={
+                    }
+                    metadata={
                       <span>
                         {review.repository_name || review.github_repo} · {review.pull_request_author || "Unknown author"} · {review.head_sha.slice(0, 7)}
                       </span>
-                        }
-                        status={
+                    }
+                    detail={
+                      <div className="space-y-2.5 pt-1">
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                          <StatusLabel
+                            label={decisionLabel(review)}
+                            tone={reviewDecisionTone(review)}
+                            indicator={false}
+                          />
                           <StatusLabel
                             label={reviewStatusLabel(review)}
                             tone={reviewStatusTone(review.stale ? "stale" : review.status)}
                             indicator={false}
                           />
-                        }
-                        detail={
-                      <div className="space-y-2">
-                        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-foreground">
+                          {review.completed_at ? (
+                            <span className="text-foreground">{formatDate(review.completed_at)}</span>
+                          ) : null}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                          <span className="text-muted-foreground">Risk</span>
                           <StatusLabel
                             label={review.acceptable ? "Acceptable" : "Review needed"}
                             tone={reviewRiskTone(review)}
                             indicator={false}
                           />
-                              <span>Completed {formatDate(review.completed_at)}</span>
-                            </div>
-                            <ReviewOutcome
-                              review={review}
-                              selected={selectedEvidenceSessionId === review.session_id}
-                              onToggleEvidence={() => setSelectedEvidenceSessionId((current) => (current === review.session_id ? null : review.session_id))}
-                      />
-                    </div>
-                        }
-                        actions={<ReviewActions review={review} />}
-                        className="[&_[data-slot=resource-row-actions]]:ml-0"
-                      />
-                    ))}
-                  </Card>
+                        </div>
+                      </div>
+                    }
+                    actions={
+                      <div className="flex w-full items-center justify-between gap-2">
+                        <EvidenceButton
+                          selected={selectedEvidenceSessionId === review.session_id}
+                          onToggleEvidence={() => setSelectedEvidenceSessionId((current) => (current === review.session_id ? null : review.session_id))}
+                        />
+                        <Button variant="ghost" size="sm" asChild>
+                          <Link href={`/sessions/${review.session_id}`}>Session</Link>
+                        </Button>
+                      </div>
+                    }
+                    className="px-4 py-3.5 [&_[data-slot=resource-row-actions]]:ml-0"
+                  />
+                ))}
+              </Card>
                   <CodeReviewEvidenceSheet
                     review={selectedEvidenceReview}
                     evidence={evidenceQuery.data?.data}

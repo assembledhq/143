@@ -525,6 +525,33 @@ describe("CodeReviewsPage", () => {
     expect(evidenceRequests).toBe(2);
   });
 
+  it("omits the mobile completion timestamp until a review completes", async () => {
+    const queuedReview: CodeReviewListItem = {
+      ...review,
+      status: "queued",
+      decision: undefined,
+      acceptable: undefined,
+      completed_at: undefined,
+      github_review_id: undefined,
+      github_review_url: undefined,
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", () =>
+        HttpResponse.json({
+          data: [queuedReview],
+          meta: {},
+        } satisfies ListResponse<CodeReviewListItem>),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    const mobileActivity = await screen.findByLabelText("Code review activity");
+    expect(within(mobileActivity).getByText("Queued")).toBeInTheDocument();
+    expect(within(mobileActivity).queryByText("-")).not.toBeInTheDocument();
+  });
+
   it("shows who changed the review policy over time", async () => {
     const user = userEvent.setup();
     const members: User[] = [

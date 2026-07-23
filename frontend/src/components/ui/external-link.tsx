@@ -14,18 +14,19 @@ function ExternalLink({
     <a
       data-slot="external-link"
       className={cn(
-        "inline-flex items-baseline gap-1 font-medium text-primary underline decoration-primary/40 underline-offset-4 transition-colors hover:decoration-primary focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        "font-medium text-primary underline decoration-primary/40 underline-offset-4 transition-colors hover:decoration-primary focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         className,
       )}
       target={target}
       rel={rel}
       {...props}
     >
-      <span>{children}</span>
+      {children}
+      {"\u00a0"}
       <ExternalLinkIcon
         data-slot="external-link-icon"
         aria-hidden="true"
-        className="size-3.5 shrink-0 translate-y-px"
+        className="inline-block size-3.5 translate-y-px"
       />
     </a>
   )
