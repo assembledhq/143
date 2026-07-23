@@ -16,6 +16,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
@@ -258,6 +259,121 @@ func TestCodeReviewHandler_ListRejectsInvalidOutcome(t *testing.T) {
 
 	require.Equal(t, http.StatusBadRequest, rr.Code, "an invalid outcome filter should return a bad request")
 	require.Contains(t, rr.Body.String(), "INVALID_OUTCOME", "the response should identify the invalid outcome filter")
+}
+
+func TestCodeReviewHandler_Retry(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	replacementID := uuid.New()
+	tests := []struct {
+		name         string
+		pathID       string
+		service      *codeReviewRetryServiceStub
+		expectedCode int
+		expectedBody string
+		retryAfter   string
+	}{
+		{name: "rejects invalid session id", pathID: "invalid", service: &codeReviewRetryServiceStub{}, expectedCode: http.StatusBadRequest, expectedBody: "INVALID_ID"},
+		{name: "returns missing review", pathID: sessionID.String(), service: &codeReviewRetryServiceStub{err: pgx.ErrNoRows}, expectedCode: http.StatusNotFound, expectedBody: "CODE_REVIEW_NOT_FOUND"},
+		{
+			name: "returns retry conflict details", pathID: sessionID.String(),
+			service: &codeReviewRetryServiceStub{err: &codereviewsvc.RetryReviewConflictError{
+				Code: codereviewsvc.RetryReviewConflictSuperseded, Message: "already replaced",
+			}},
+			expectedCode: http.StatusConflict, expectedBody: `"reason":"superseded"`,
+		},
+		{
+			name: "maps GitHub rate limits", pathID: sessionID.String(),
+			service: &codeReviewRetryServiceStub{err: &ghservice.GitHubAPIError{
+				Method: http.MethodGet, Path: "/repos/acme/repo/pulls/42", StatusCode: http.StatusTooManyRequests,
+				Header: http.Header{"Retry-After": []string{"60"}},
+			}},
+			expectedCode: http.StatusTooManyRequests, expectedBody: "GITHUB_RATE_LIMITED", retryAfter: "60",
+		},
+		{
+			name: "accepts a replacement attempt", pathID: sessionID.String(),
+			service: &codeReviewRetryServiceStub{result: codereviewsvc.RetryReviewResult{
+				PreviousSessionID: sessionID, SessionID: replacementID, MetadataID: uuid.New(), JobID: uuid.New(),
+			}},
+			expectedCode: http.StatusAccepted, expectedBody: replacementID.String(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := NewCodeReviewHandler(nil, nil)
+			handler.SetRetryService(tt.service)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/code-reviews/"+tt.pathID+"/retry", nil)
+			routeContext := chi.NewRouteContext()
+			routeContext.URLParams.Add("id", tt.pathID)
+			ctx := context.WithValue(req.Context(), chi.RouteCtxKey, routeContext)
+			ctx = middleware.WithOrgID(ctx, orgID)
+			req = req.WithContext(ctx)
+			rr := httptest.NewRecorder()
+
+			handler.Retry(rr, req)
+
+			require.Equal(t, tt.expectedCode, rr.Code, "retry handler should return the expected status")
+			require.Contains(t, rr.Body.String(), tt.expectedBody, "retry handler should return the expected response contract")
+			require.Equal(t, tt.retryAfter, rr.Header().Get("Retry-After"), "retry handler should expose GitHub's requested wait")
+			if tt.pathID == sessionID.String() {
+				require.Equal(t, codereviewsvc.RetryReviewInput{OrgID: orgID, SessionID: sessionID}, tt.service.input, "retry handler should preserve org tenancy and session id")
+			}
+		})
+	}
+}
+
+func TestCodeReviewHandler_RetryAuditsCompensatedDispatchFailure(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	orgID := uuid.New()
+	userID := uuid.New()
+	previousSessionID := uuid.New()
+	replacementSessionID := uuid.New()
+	metadataID := uuid.New()
+	handler := NewCodeReviewHandler(nil, nil)
+	handler.SetRetryService(&codeReviewRetryServiceStub{
+		result: codereviewsvc.RetryReviewResult{
+			PreviousSessionID: previousSessionID,
+			SessionID:         replacementSessionID,
+			MetadataID:        metadataID,
+		},
+		err: errors.New("queue unavailable"),
+	})
+	handler.SetAuditEmitter(newAuditEmitterForTest(mock))
+	expectAuditInsert(mock)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/code-reviews/"+previousSessionID.String()+"/retry", nil)
+	routeContext := chi.NewRouteContext()
+	routeContext.URLParams.Add("id", previousSessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, routeContext)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: "member"})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.Retry(rr, req)
+
+	require.Equal(t, http.StatusInternalServerError, rr.Code, "failed dispatch should remain visible to the caller")
+	require.NoError(t, mock.ExpectationsWereMet(), "compensated replacement creation should emit an audit row")
+}
+
+type codeReviewRetryServiceStub struct {
+	input  codereviewsvc.RetryReviewInput
+	result codereviewsvc.RetryReviewResult
+	err    error
+}
+
+func (s *codeReviewRetryServiceStub) RetryReview(_ context.Context, input codereviewsvc.RetryReviewInput) (codereviewsvc.RetryReviewResult, error) {
+	s.input = input
+	return s.result, s.err
 }
 
 type codeReviewTriggerHandlerStoreStub struct{}

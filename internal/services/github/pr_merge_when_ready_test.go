@@ -120,7 +120,7 @@ func TestPRServiceQueueMergeWhenReadyPreflightsUserRequiredGitHubAuth(t *testing
 	prMock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			prID, orgID, int64(7), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, now, now,
+			prID, orgID, int64(7), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
 		))
 	orgMock.ExpectQuery("SELECT .+ FROM organizations WHERE id = @id").
 		WithArgs(pgx.NamedArgs{"id": orgID}).

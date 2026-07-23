@@ -170,6 +170,9 @@ type EnqueueOpts struct {
 	Payload   any
 	Priority  int
 	DedupeKey *string
+	// RunAt defers the job until the requested time. Nil keeps the jobs table
+	// default of now(), preserving immediate execution for existing callers.
+	RunAt *time.Time
 	// MaxAttempts overrides the jobs table default when positive. Zero keeps
 	// the schema default so existing enqueue call sites retain their current
 	// retry budget.
@@ -232,6 +235,32 @@ func (s *JobStore) HasActiveByDedupeKey(ctx context.Context, orgID uuid.UUID, qu
 	}).Scan(&active)
 	if err != nil {
 		return false, fmt.Errorf("query active job by dedupe key: %w", err)
+	}
+	return active, nil
+}
+
+type ActiveJobRef struct {
+	ID     uuid.UUID
+	Status models.JobStatus
+}
+
+// GetActiveByDedupeKey returns the pending or running job that currently owns
+// a queue dedupe key. The partial unique index guarantees at most one row.
+func (s *JobStore) GetActiveByDedupeKey(ctx context.Context, orgID uuid.UUID, queue, dedupeKey string) (ActiveJobRef, error) {
+	var active ActiveJobRef
+	err := s.db.QueryRow(ctx, `
+		SELECT id, status
+		FROM jobs
+		WHERE org_id = @org_id
+		  AND queue = @queue
+		  AND dedupe_key = @dedupe_key
+		  AND status IN ('pending', 'running')`, pgx.NamedArgs{
+		"org_id":     orgID,
+		"queue":      queue,
+		"dedupe_key": dedupeKey,
+	}).Scan(&active.ID, &active.Status)
+	if err != nil {
+		return ActiveJobRef{}, err
 	}
 	return active, nil
 }
@@ -610,6 +639,11 @@ func enqueueOn(ctx context.Context, q jobQuerier, orgID uuid.UUID, opts EnqueueO
 		columns = append(columns, "target_node_id")
 		values = append(values, "@target_node_id")
 		args["target_node_id"] = opts.TargetNodeID
+	}
+	if opts.RunAt != nil {
+		columns = append(columns, "run_at")
+		values = append(values, "@run_at")
+		args["run_at"] = opts.RunAt.UTC()
 	}
 	if opts.MaxAttempts > 0 {
 		columns = append(columns, "max_attempts")

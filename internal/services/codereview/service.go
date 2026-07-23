@@ -11,6 +11,7 @@ import (
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
@@ -24,12 +25,24 @@ type PolicyStore interface {
 type MetadataStore interface {
 	CreateSessionMetadata(ctx context.Context, metadata *models.CodeReviewSessionMetadata) error
 	GetByOutputKey(ctx context.Context, orgID uuid.UUID, outputKey string) (models.CodeReviewSessionMetadata, error)
+	GetBySessionID(ctx context.Context, orgID, sessionID uuid.UUID) (models.CodeReviewSessionMetadata, error)
 	GetLatestByPullRequest(ctx context.Context, orgID, pullRequestID uuid.UUID) (models.CodeReviewSessionMetadata, error)
 	GetLatestSubmittedByPullRequest(ctx context.Context, orgID, pullRequestID uuid.UUID) (models.CodeReviewSessionMetadata, error)
 	HasApprovedByPullRequest(ctx context.Context, orgID, pullRequestID uuid.UUID) (bool, error)
 	GetLatestByPullRequestHead(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA string, policyID uuid.UUID) (models.CodeReviewSessionMetadata, error)
 	FailReview(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (models.CodeReviewSessionMetadata, error)
+	FailReviewWithStatus(ctx context.Context, orgID uuid.UUID, params db.FailCodeReviewParams) (models.CodeReviewSessionMetadata, error)
+	MarkSupersededBy(ctx context.Context, orgID, sessionID, replacementSessionID uuid.UUID) (models.CodeReviewSessionMetadata, error)
 	MarkStaleForPullRequestExceptHead(ctx context.Context, orgID, pullRequestID uuid.UUID, currentHeadSHA string, supersededBySessionID *uuid.UUID) (int64, error)
+}
+
+type PullRequestStore interface {
+	GetByID(ctx context.Context, orgID, pullRequestID uuid.UUID) (models.PullRequest, error)
+	GetHealthCurrent(ctx context.Context, orgID, pullRequestID uuid.UUID) (models.PullRequestHealthCurrent, error)
+}
+
+type PullRequestSyncer interface {
+	SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error
 }
 
 type SessionStore interface {
@@ -50,13 +63,15 @@ const (
 )
 
 type Service struct {
-	policies PolicyStore
-	metadata MetadataStore
-	sessions SessionStore
-	jobs     JobStore
-	triggers GitHubTriggerStore
-	logger   zerolog.Logger
-	cfg      Config
+	policies          PolicyStore
+	metadata          MetadataStore
+	sessions          SessionStore
+	jobs              JobStore
+	triggers          GitHubTriggerStore
+	pullRequests      PullRequestStore
+	pullRequestSyncer PullRequestSyncer
+	logger            zerolog.Logger
+	cfg               Config
 }
 
 type Config struct {
@@ -103,15 +118,47 @@ type ReviewChangedInput struct {
 }
 
 type ReviewRequestedResult struct {
-	Processed     bool
-	Reused        bool
-	Deferred      bool
-	SessionID     uuid.UUID
-	MetadataID    uuid.UUID
-	JobID         uuid.UUID
-	TriggerSource models.CodeReviewTriggerSource
-	IgnoredReason string
+	Processed         bool
+	Reused            bool
+	Deferred          bool
+	DispatchConfirmed bool
+	SessionID         uuid.UUID
+	MetadataID        uuid.UUID
+	JobID             uuid.UUID
+	TriggerSource     models.CodeReviewTriggerSource
+	IgnoredReason     string
 }
+
+type RetryReviewInput struct {
+	OrgID     uuid.UUID
+	SessionID uuid.UUID
+}
+
+type RetryReviewResult struct {
+	PreviousSessionID uuid.UUID `json:"previous_session_id"`
+	SessionID         uuid.UUID `json:"session_id"`
+	MetadataID        uuid.UUID `json:"metadata_id"`
+	JobID             uuid.UUID `json:"job_id"`
+}
+
+type RetryReviewConflictCode string
+
+const (
+	RetryReviewConflictCompleted    RetryReviewConflictCode = "completed"
+	RetryReviewConflictSuperseded   RetryReviewConflictCode = "superseded"
+	RetryReviewConflictNotRetryable RetryReviewConflictCode = "not_retryable"
+	RetryReviewConflictNewerAttempt RetryReviewConflictCode = "newer_attempt"
+	RetryReviewConflictHeadChanged  RetryReviewConflictCode = "head_changed"
+	RetryReviewConflictPRClosed     RetryReviewConflictCode = "pull_request_closed"
+	RetryReviewConflictPolicyOff    RetryReviewConflictCode = "policy_disabled"
+)
+
+type RetryReviewConflictError struct {
+	Code    RetryReviewConflictCode
+	Message string
+}
+
+func (e *RetryReviewConflictError) Error() string { return e.Message }
 
 type RunCodeReviewJobPayload struct {
 	OrgID                   uuid.UUID `json:"org_id"`
@@ -155,6 +202,207 @@ func NewService(policies PolicyStore, metadata MetadataStore, sessions SessionSt
 
 func (s *Service) SetGitHubTriggerStore(triggers GitHubTriggerStore) {
 	s.triggers = triggers
+}
+
+func (s *Service) SetRetryDependencies(pullRequests PullRequestStore, syncer PullRequestSyncer) {
+	s.pullRequests = pullRequests
+	s.pullRequestSyncer = syncer
+}
+
+// RetryReview creates a replacement attempt for a terminal retryable failure.
+// It never mutates the terminal status of the selected attempt. Concurrent
+// requests converge through startReview's deterministic retry output key, then
+// compare-and-set the old row's supersession link to that winner.
+func (s *Service) RetryReview(ctx context.Context, input RetryReviewInput) (RetryReviewResult, error) {
+	if input.OrgID == uuid.Nil || input.SessionID == uuid.Nil {
+		return RetryReviewResult{}, fmt.Errorf("org_id and session_id are required")
+	}
+	if s.pullRequests == nil || s.pullRequestSyncer == nil {
+		return RetryReviewResult{}, fmt.Errorf("code review retry dependencies are unavailable")
+	}
+
+	failed, err := s.metadata.GetBySessionID(ctx, input.OrgID, input.SessionID)
+	if err != nil {
+		return RetryReviewResult{}, fmt.Errorf("load code review retry source: %w", err)
+	}
+	if err := validateRetrySource(failed); err != nil {
+		return RetryReviewResult{}, err
+	}
+	approved, err := s.metadata.HasApprovedByPullRequest(ctx, input.OrgID, failed.PullRequestID)
+	if err != nil {
+		return RetryReviewResult{}, fmt.Errorf("check prior code review approval before retry: %w", err)
+	}
+	if approved {
+		return RetryReviewResult{}, &RetryReviewConflictError{
+			Code: RetryReviewConflictCompleted, Message: "This pull request already has a completed approval.",
+		}
+	}
+	if err := s.ensureLatestRetrySource(ctx, failed); err != nil {
+		return RetryReviewResult{}, err
+	}
+
+	if err := s.pullRequestSyncer.SyncPullRequestState(ctx, input.OrgID, failed.PullRequestID); err != nil && !errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
+		return RetryReviewResult{}, fmt.Errorf("refresh pull request before code review retry: %w", err)
+	}
+	pr, err := s.pullRequests.GetByID(ctx, input.OrgID, failed.PullRequestID)
+	if err != nil {
+		return RetryReviewResult{}, fmt.Errorf("load refreshed pull request before code review retry: %w", err)
+	}
+	if pr.Status != models.PullRequestStatusOpen {
+		return RetryReviewResult{}, &RetryReviewConflictError{
+			Code: RetryReviewConflictPRClosed, Message: "This pull request is no longer open.",
+		}
+	}
+	health, err := s.pullRequests.GetHealthCurrent(ctx, input.OrgID, failed.PullRequestID)
+	if err != nil {
+		return RetryReviewResult{}, fmt.Errorf("load refreshed pull request head before code review retry: %w", err)
+	}
+	currentHead := strings.TrimSpace(health.HeadSHA)
+	if currentHead == "" || currentHead != strings.TrimSpace(failed.HeadSHA) {
+		return RetryReviewResult{}, &RetryReviewConflictError{
+			Code: RetryReviewConflictHeadChanged, Message: "The pull request head changed; wait for or request a review of the current commit.",
+		}
+	}
+	if err := s.ensureLatestRetrySource(ctx, failed); err != nil {
+		return RetryReviewResult{}, err
+	}
+
+	priorSession, err := s.sessions.GetByID(ctx, input.OrgID, failed.SessionID)
+	if err != nil {
+		return RetryReviewResult{}, fmt.Errorf("load failed code review session: %w", err)
+	}
+	requested := ReviewRequestedInput{
+		OrgID:             input.OrgID,
+		RepositoryID:      failed.RepositoryID,
+		PullRequestID:     failed.PullRequestID,
+		GitHubRepo:        pr.GitHubRepo,
+		GitHubPRNumber:    pr.GitHubPRNumber,
+		GitHubPRURL:       pr.GitHubPRURL,
+		PullRequestTitle:  pr.Title,
+		PullRequestAuthor: codeReviewRevisionContextString(priorSession.RevisionContext, "pull_request_author"),
+		BaseSHA:           strings.TrimSpace(health.BaseSHA),
+		HeadSHA:           currentHead,
+		FromFork:          failed.FromFork,
+		RequestedLogin:    codeReviewRevisionContextString(priorSession.RevisionContext, "requested_reviewer_login"),
+		RequestedTeam:     codeReviewRevisionContextString(priorSession.RevisionContext, "requested_team_slug"),
+	}
+	submitted := failed
+	if submitted.GitHubReviewID == nil {
+		submitted, err = s.metadata.GetLatestSubmittedByPullRequest(ctx, input.OrgID, failed.PullRequestID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return RetryReviewResult{}, fmt.Errorf("load submitted code review before retry: %w", err)
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			submitted = models.CodeReviewSessionMetadata{}
+		}
+	}
+	started, err := s.startReview(ctx, requested, reviewStartOptions{
+		triggerSource:           failed.TriggerSource,
+		previousOutputKey:       submitted.ReviewOutputKey,
+		existingGitHubReviewID:  submitted.GitHubReviewID,
+		existingGitHubReviewURL: submitted.GitHubReviewURL,
+	})
+	if err != nil {
+		if started.SessionID != uuid.Nil {
+			if linkErr := s.linkRetryReplacement(ctx, failed, started.SessionID); linkErr != nil {
+				return retryReviewResult(failed.SessionID, started), errors.Join(err, linkErr)
+			}
+			return retryReviewResult(failed.SessionID, started), err
+		}
+		return RetryReviewResult{}, err
+	}
+	if started.IgnoredReason == "policy_disabled" {
+		return RetryReviewResult{}, &RetryReviewConflictError{
+			Code: RetryReviewConflictPolicyOff, Message: "Code review is disabled by the current policy.",
+		}
+	}
+	if !started.Processed || started.SessionID == uuid.Nil {
+		return RetryReviewResult{}, fmt.Errorf("code review retry did not create a replacement attempt")
+	}
+	if !started.DispatchConfirmed {
+		return RetryReviewResult{}, &RetryReviewConflictError{
+			Code: RetryReviewConflictNewerAttempt, Message: "A replacement attempt is still being queued.",
+		}
+	}
+	if err := s.linkRetryReplacement(ctx, failed, started.SessionID); err != nil {
+		return RetryReviewResult{}, err
+	}
+	return retryReviewResult(failed.SessionID, started), nil
+}
+
+func (s *Service) linkRetryReplacement(ctx context.Context, failed models.CodeReviewSessionMetadata, replacementSessionID uuid.UUID) error {
+	if _, err := s.metadata.MarkSupersededBy(ctx, failed.OrgID, failed.SessionID, replacementSessionID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			current, getErr := s.metadata.GetBySessionID(ctx, failed.OrgID, failed.SessionID)
+			if getErr == nil && current.SupersededBySessionID != nil && *current.SupersededBySessionID == replacementSessionID {
+				return nil
+			}
+			return &RetryReviewConflictError{
+				Code: RetryReviewConflictSuperseded, Message: "This failed review already has a replacement attempt.",
+			}
+		}
+		return fmt.Errorf("link failed code review to replacement: %w", err)
+	}
+	return nil
+}
+
+func validateRetrySource(metadata models.CodeReviewSessionMetadata) error {
+	if metadata.Status == models.CodeReviewSessionStatusCompleted {
+		return &RetryReviewConflictError{Code: RetryReviewConflictCompleted, Message: "Completed code reviews cannot be retried."}
+	}
+	if metadata.SupersededBySessionID != nil {
+		return &RetryReviewConflictError{Code: RetryReviewConflictSuperseded, Message: "This failed review already has a replacement attempt."}
+	}
+	if metadata.Status != models.CodeReviewSessionStatusFailed || !metadata.RetryableFailure {
+		return &RetryReviewConflictError{Code: RetryReviewConflictNotRetryable, Message: "Only terminal retryable code review failures can be retried."}
+	}
+	return nil
+}
+
+func (s *Service) ensureLatestRetrySource(ctx context.Context, source models.CodeReviewSessionMetadata) error {
+	latest, err := s.metadata.GetLatestByPullRequest(ctx, source.OrgID, source.PullRequestID)
+	if err != nil {
+		return fmt.Errorf("load latest code review attempt: %w", err)
+	}
+	if latest.SessionID == source.SessionID {
+		return nil
+	}
+	if latest.Status == models.CodeReviewSessionStatusQueued || latest.Status == models.CodeReviewSessionStatusRunning {
+		outputKey := strings.TrimSpace(latest.ReviewOutputKey)
+		active, activeErr := s.jobs.HasActiveByDedupeKey(ctx, source.OrgID, "agent", "code_review:"+outputKey)
+		if activeErr != nil {
+			return fmt.Errorf("check newer code review dispatch: %w", activeErr)
+		}
+		if !active && (latest.CreatedAt.IsZero() || time.Since(latest.CreatedAt) >= codeReviewJobEnqueueGracePeriod) {
+			const reason = "code review replacement job was not queued"
+			failed, failErr := s.metadata.FailReviewWithStatus(ctx, source.OrgID, db.FailCodeReviewParams{
+				SessionID: latest.SessionID,
+				Reason:    reason,
+				Code:      models.CodeReviewStatusCodeWorkerFailed,
+				Message:   "The replacement review was not queued. Retry this attempt to continue.",
+				Retryable: true,
+			})
+			if failErr != nil && !errors.Is(failErr, pgx.ErrNoRows) {
+				return fmt.Errorf("recover unqueued code review replacement: %w", failErr)
+			}
+			if failErr == nil {
+				s.reconcileStrandedSession(ctx, source.OrgID, failed.SessionID, reason)
+				if linkErr := s.linkRetryReplacement(ctx, source, failed.SessionID); linkErr != nil {
+					return linkErr
+				}
+			}
+		}
+	}
+	return &RetryReviewConflictError{Code: RetryReviewConflictNewerAttempt, Message: "A newer code review attempt already exists."}
+}
+
+func retryReviewResult(previousSessionID uuid.UUID, started ReviewRequestedResult) RetryReviewResult {
+	return RetryReviewResult{
+		PreviousSessionID: previousSessionID,
+		SessionID:         started.SessionID,
+		MetadataID:        started.MetadataID,
+		JobID:             started.JobID,
+	}
 }
 
 func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequestedInput) (ReviewRequestedResult, error) {
@@ -363,6 +611,7 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 				if active {
 					result := reusedReviewRequestedResult(latest, source)
 					result.Deferred = opts.forceReassessment
+					result.DispatchConfirmed = true
 					return result, nil
 				}
 				if !latest.CreatedAt.IsZero() && time.Since(latest.CreatedAt) < codeReviewJobEnqueueGracePeriod {
@@ -409,19 +658,21 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 	modelOverride := resolved.Config.AgentRoster.OrchestratorModel
 	reasoningEffort := resolved.Config.AgentRoster.ReasoningEffort
 	revisionContext, err := json.Marshal(map[string]any{
-		"kind":                "code_review",
-		"github_repo":         input.GitHubRepo,
-		"github_pr_number":    input.GitHubPRNumber,
-		"github_pr_url":       input.GitHubPRURL,
-		"pull_request_title":  input.PullRequestTitle,
-		"pull_request_author": input.PullRequestAuthor,
-		"base_sha":            input.BaseSHA,
-		"head_sha":            input.HeadSHA,
-		"from_fork":           input.FromFork,
-		"policy_id":           policy.ID,
-		"policy_version":      policy.Version,
-		"trigger_source":      source,
-		"change_reason":       strings.TrimSpace(opts.changeReason),
+		"kind":                     "code_review",
+		"github_repo":              input.GitHubRepo,
+		"github_pr_number":         input.GitHubPRNumber,
+		"github_pr_url":            input.GitHubPRURL,
+		"pull_request_title":       input.PullRequestTitle,
+		"pull_request_author":      input.PullRequestAuthor,
+		"base_sha":                 input.BaseSHA,
+		"head_sha":                 input.HeadSHA,
+		"from_fork":                input.FromFork,
+		"requested_reviewer_login": strings.TrimSpace(input.RequestedLogin),
+		"requested_team_slug":      strings.TrimSpace(input.RequestedTeam),
+		"policy_id":                policy.ID,
+		"policy_version":           policy.Version,
+		"trigger_source":           source,
+		"change_reason":            strings.TrimSpace(opts.changeReason),
 	})
 	if err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("marshal code review revision context: %w", err)
@@ -457,6 +708,7 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 		FromFork:        input.FromFork,
 		TriggerSource:   source,
 		Status:          models.CodeReviewSessionStatusQueued,
+		Phase:           codeReviewPhasePtr(models.CodeReviewPhaseSyncingGitHub),
 		ReviewOutputKey: outputKey,
 	}
 	if err := s.metadata.CreateSessionMetadata(ctx, metadata); err != nil {
@@ -500,15 +752,36 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 		MaxAttempts: codeReviewJobMaxAttempts,
 	})
 	if err != nil {
-		return ReviewRequestedResult{}, fmt.Errorf("enqueue code review job: %w", err)
+		reason := fmt.Sprintf("enqueue code review job: %v", err)
+		if _, failErr := s.metadata.FailReviewWithStatus(ctx, input.OrgID, db.FailCodeReviewParams{
+			SessionID: session.ID,
+			Reason:    reason,
+			Code:      models.CodeReviewStatusCodeWorkerFailed,
+			Message:   "The review could not be queued. Retry the review to start a fresh attempt.",
+			Retryable: true,
+		}); failErr != nil {
+			return ReviewRequestedResult{}, errors.Join(
+				fmt.Errorf("enqueue code review job: %w", err),
+				fmt.Errorf("mark unqueued code review retryable: %w", failErr),
+			)
+		}
+		s.reconcileStrandedSession(ctx, input.OrgID, session.ID, reason)
+		return ReviewRequestedResult{
+			Processed: true, SessionID: session.ID, MetadataID: metadata.ID, TriggerSource: source,
+		}, fmt.Errorf("enqueue code review job: %w", err)
 	}
 	return ReviewRequestedResult{
-		Processed:     true,
-		SessionID:     session.ID,
-		MetadataID:    metadata.ID,
-		JobID:         jobID,
-		TriggerSource: source,
+		Processed:         true,
+		DispatchConfirmed: true,
+		SessionID:         session.ID,
+		MetadataID:        metadata.ID,
+		JobID:             jobID,
+		TriggerSource:     source,
 	}, nil
+}
+
+func codeReviewPhasePtr(phase models.CodeReviewPhase) *models.CodeReviewPhase {
+	return &phase
 }
 
 func (s *Service) reconcileStrandedSession(ctx context.Context, orgID, sessionID uuid.UUID, reason string) {

@@ -13,6 +13,7 @@ import {
   FileSearch,
   Plus,
   PowerOff,
+  RefreshCw,
   Settings2,
   SlidersHorizontal,
   Trash2,
@@ -50,6 +51,7 @@ import { getActiveOrgId } from "@/lib/active-org";
 import { buildCodeReviewStreamURL, SSE_EVENT } from "@/lib/sse";
 import { useResourceSSE } from "@/lib/use-resource-sse";
 import { pollMs } from "@/lib/poll-intervals";
+import { cn } from "@/lib/utils";
 import { useAutosave, type UseAutosaveResult } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
@@ -269,24 +271,99 @@ function ReviewOutcome({
   );
 }
 
-function ReviewActions({ review }: { review: CodeReviewListItem }) {
+function reviewCanBeRetried(review: CodeReviewListItem): boolean {
+  return review.retry_eligible;
+}
+
+function ReviewActions({
+  review,
+  canRetry,
+  isRetrying,
+  onRetry,
+  className,
+}: {
+  review: CodeReviewListItem;
+  canRetry: boolean;
+  isRetrying: boolean;
+  onRetry: () => void;
+  className?: string;
+}) {
   return (
-    <div className="flex w-full md:w-auto md:justify-end">
-      <Button className="min-h-11 w-full justify-center md:min-h-0 md:w-auto" variant="ghost" size="sm" asChild>
+    <div className={cn("flex w-full gap-1 md:w-auto md:justify-end", className)}>
+      {canRetry && reviewCanBeRetried(review) ? (
+        <Button
+          className="min-h-11 flex-1 justify-center md:min-h-0 md:flex-none"
+          variant="outline"
+          size="sm"
+          disabled={isRetrying}
+          onClick={onRetry}
+        >
+          <RefreshCw className={isRetrying ? "animate-spin" : undefined} />
+          {isRetrying ? "Retrying…" : "Retry review"}
+        </Button>
+      ) : null}
+      <Button className="min-h-11 flex-1 justify-center md:min-h-0 md:flex-none" variant="ghost" size="sm" asChild>
         <Link href={`/sessions/${review.session_id}`}>Session</Link>
       </Button>
     </div>
   );
 }
 
+const CODE_REVIEW_PHASE_LABELS: Record<NonNullable<CodeReviewListItem["phase"]>, string> = {
+  syncing_github: "Syncing GitHub",
+  waiting_for_github: "Waiting for GitHub",
+  reviewing: "Reviewing",
+  synthesizing: "Synthesizing",
+  publishing: "Publishing",
+};
+
 function reviewStatusLabel(review: CodeReviewListItem): string {
   if (review.stale || review.status === "stale") return "Stale";
   if (review.status === "completed") return "Completed";
   if (review.status === "failed") return "Failed";
+  if ((review.status === "running" || review.status === "queued") && review.phase) return CODE_REVIEW_PHASE_LABELS[review.phase];
   if (review.status === "running") return "Running";
   if (review.status === "queued") return "Queued";
   if (review.status === "cancelled") return "Cancelled";
   return review.status;
+}
+
+function reviewStatusMessage(review: CodeReviewListItem): string | null {
+  const message = review.status_message?.trim();
+  return message || null;
+}
+
+function retryCountdown(retryAt: string | undefined, nowMs: number): string | null {
+  if (!retryAt) return null;
+  const retryAtMs = Date.parse(retryAt);
+  if (!Number.isFinite(retryAtMs)) return null;
+  const seconds = Math.ceil((retryAtMs - nowMs) / 1000);
+  if (seconds <= 0) return "Retrying now…";
+  if (seconds < 60) return `Retrying in ${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes < 60) return `Retrying in ${minutes}m ${remainingSeconds}s`;
+  const hours = Math.floor(minutes / 60);
+  return `Retrying in ${hours}h ${minutes % 60}m`;
+}
+
+function ReviewOperationalStatus({ review, nowMs }: { review: CodeReviewListItem; nowMs: number }) {
+  const waitingForGitHub = review.phase === "waiting_for_github";
+  const active = (review.status === "running" || review.status === "queued") && !waitingForGitHub;
+  const message = reviewStatusMessage(review);
+  const countdown = retryCountdown(review.retry_at, nowMs);
+  return (
+    <div className="max-w-sm space-y-1">
+      <StatusLabel
+        label={reviewStatusLabel(review)}
+        tone={waitingForGitHub ? "warning" : reviewStatusTone(review.stale ? "stale" : review.status)}
+        active={active}
+        indicator={false}
+      />
+      {message ? <p className="text-xs leading-5 text-muted-foreground">{message}</p> : null}
+      {countdown ? <p className="text-xs font-medium text-warning">{countdown}</p> : null}
+    </div>
+  );
 }
 
 function clonePolicy(config: CodeReviewPolicyConfig): CodeReviewPolicyConfig {
@@ -359,6 +436,7 @@ export default function CodeReviewsPage() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const canManagePolicy = user?.role === "admin";
+  const canRetryReviews = user?.role === "admin" || user?.role === "member";
   const [repositoryFilter, setRepositoryFilter] = useState(ALL_REPOSITORIES);
   const [githubRepositoryId, setGitHubRepositoryId] = useState(NO_REPOSITORY);
   const [outcomeFilter, setOutcomeParam] = useQueryState(
@@ -566,7 +644,39 @@ export default function CodeReviewsPage() {
       });
     },
   });
+  const [retryingReviewSessionIds, setRetryingReviewSessionIds] = useState<Set<string>>(() => new Set());
+  const retryReview = useMutation({
+    mutationFn: (sessionId: string) => api.codeReviews.retry(sessionId),
+    onMutate: (sessionId) => {
+      setRetryingReviewSessionIds((current) => new Set(current).add(sessionId));
+    },
+    onSuccess: (_result, sessionId) => {
+      setSelectedEvidenceSessionId((current) => (current === sessionId ? null : current));
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.lists() });
+      toast.success("Code review retry started");
+    },
+    onError: (error) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.lists() });
+      toast.error("Code review could not be retried", {
+        description: apiErrorMessage(error) ?? "Try again after checking the review failure details.",
+      });
+    },
+    onSettled: (_result, _error, sessionId) => {
+      setRetryingReviewSessionIds((current) => {
+        const next = new Set(current);
+        next.delete(sessionId);
+        return next;
+      });
+    },
+  });
   const reviews = useMemo(() => reviewsQuery.data?.data ?? [], [reviewsQuery.data?.data]);
+  const [countdownNowMs, setCountdownNowMs] = useState(() => Date.now());
+  const hasScheduledReviewRetry = reviews.some((item) => Boolean(item.retry_at));
+  useEffect(() => {
+    if (!hasScheduledReviewRetry) return;
+    const timer = window.setInterval(() => setCountdownNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [hasScheduledReviewRetry]);
   const selectedEvidenceReview = useMemo(
     () => reviews.find((review) => review.session_id === selectedEvidenceSessionId) ?? null,
     [reviews, selectedEvidenceSessionId],
@@ -765,15 +875,16 @@ export default function CodeReviewsPage() {
                             />
                           </TableCell>
                           <TableCell>
-                            <StatusLabel
-                              label={reviewStatusLabel(review)}
-                              tone={reviewStatusTone(review.stale ? "stale" : review.status)}
-                              indicator={false}
-                            />
+                            <ReviewOperationalStatus review={review} nowMs={countdownNowMs} />
                           </TableCell>
                           <TableCell>{formatDate(review.completed_at)}</TableCell>
                           <TableCell>
-                            <ReviewActions review={review} />
+                            <ReviewActions
+                              review={review}
+                              canRetry={canRetryReviews}
+                              isRetrying={retryingReviewSessionIds.has(review.session_id)}
+                              onRetry={() => retryReview.mutate(review.session_id)}
+                            />
                           </TableCell>
                         </TableRow>
                       ))}
@@ -797,15 +908,11 @@ export default function CodeReviewsPage() {
                     }
                     detail={
                       <div className="space-y-2.5 pt-1">
+                        <ReviewOperationalStatus review={review} nowMs={countdownNowMs} />
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
                           <StatusLabel
                             label={decisionLabel(review)}
                             tone={reviewDecisionTone(review)}
-                            indicator={false}
-                          />
-                          <StatusLabel
-                            label={reviewStatusLabel(review)}
-                            tone={reviewStatusTone(review.stale ? "stale" : review.status)}
                             indicator={false}
                           />
                           {review.completed_at ? (
@@ -823,14 +930,18 @@ export default function CodeReviewsPage() {
                       </div>
                     }
                     actions={
-                      <div className="flex w-full items-center justify-between gap-2">
+                      <div className="flex w-full flex-wrap items-center gap-2">
                         <EvidenceButton
                           selected={selectedEvidenceSessionId === review.session_id}
                           onToggleEvidence={() => setSelectedEvidenceSessionId((current) => (current === review.session_id ? null : review.session_id))}
                         />
-                        <Button variant="ghost" size="sm" asChild>
-                          <Link href={`/sessions/${review.session_id}`}>Session</Link>
-                        </Button>
+                        <ReviewActions
+                          review={review}
+                          canRetry={canRetryReviews}
+                          isRetrying={retryingReviewSessionIds.has(review.session_id)}
+                          onRetry={() => retryReview.mutate(review.session_id)}
+                          className="ml-auto w-auto"
+                        />
                       </div>
                     }
                     className="px-4 py-3.5 [&_[data-slot=resource-row-actions]]:ml-0"
@@ -842,7 +953,13 @@ export default function CodeReviewsPage() {
                     evidence={evidenceQuery.data?.data}
                     isLoading={evidenceQuery.isLoading}
                     error={evidenceQuery.error}
-                    onRetry={() => void evidenceQuery.refetch()}
+                    nowMs={countdownNowMs}
+                    canRetryReview={canRetryReviews}
+                    isRetryingReview={Boolean(selectedEvidenceReview && retryingReviewSessionIds.has(selectedEvidenceReview.session_id))}
+                    onRetryEvidence={() => void evidenceQuery.refetch()}
+                    onRetryReview={() => {
+                      if (selectedEvidenceReview) retryReview.mutate(selectedEvidenceReview.session_id);
+                    }}
                     open={Boolean(selectedEvidenceReview)}
                     onOpenChange={(open) => {
                       if (!open) setSelectedEvidenceSessionId(null);
@@ -2768,7 +2885,11 @@ function CodeReviewEvidenceSheet({
   evidence,
   isLoading,
   error,
-  onRetry,
+  nowMs,
+  canRetryReview,
+  isRetryingReview,
+  onRetryEvidence,
+  onRetryReview,
   open,
   onOpenChange,
 }: {
@@ -2776,7 +2897,11 @@ function CodeReviewEvidenceSheet({
   evidence?: CodeReviewEvidence;
   isLoading: boolean;
   error: Error | null;
-  onRetry: () => void;
+  nowMs: number;
+  canRetryReview: boolean;
+  isRetryingReview: boolean;
+  onRetryEvidence: () => void;
+  onRetryReview: () => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
@@ -2796,12 +2921,28 @@ function CodeReviewEvidenceSheet({
           </div>
         </SheetHeader>
         <div className="space-y-6 px-6 py-5">
+          {review?.status === "failed" ? (
+            <div className="space-y-3">
+              <ErrorNotice
+                title="Code review failed"
+                description={reviewStatusMessage(review) ?? "The review stopped before it could finish."}
+              />
+              {canRetryReview && reviewCanBeRetried(review) ? (
+                <Button variant="outline" disabled={isRetryingReview} onClick={onRetryReview}>
+                  <RefreshCw className={isRetryingReview ? "animate-spin" : undefined} />
+                  {isRetryingReview ? "Retrying…" : "Retry review"}
+                </Button>
+              ) : null}
+            </div>
+          ) : review && (review.status === "queued" || review.status === "running") ? (
+            <ReviewOperationalStatus review={review} nowMs={nowMs} />
+          ) : null}
           {isLoading ? <div className="text-sm text-muted-foreground">Loading evidence...</div> : null}
           {error ? (
             <ErrorNotice
               title="Evidence could not be loaded"
               description="Retry the request to view this review's evidence."
-              action={{ label: "Retry", onClick: onRetry }}
+              action={{ label: "Retry", onClick: onRetryEvidence }}
             />
           ) : null}
           {!isLoading && !error && !evidence ? <div className="text-sm text-muted-foreground">No evidence recorded for this review.</div> : null}

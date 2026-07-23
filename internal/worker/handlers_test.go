@@ -4738,6 +4738,7 @@ type stubPRService struct {
 	createBranchFn                 func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*ghservice.CreateBranchResult, error)
 	pushChangesToPRFn              func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
 	syncPullRequestStateFn         func(context.Context, uuid.UUID, uuid.UUID) error
+	rebuildPullRequestHealthFn     func(context.Context, uuid.UUID, uuid.UUID) (bool, error)
 	reconcilePullRequestFn         func(context.Context, uuid.UUID, int) error
 	enrichPullRequestHealthFn      func(context.Context, uuid.UUID, uuid.UUID, int64) error
 	completePullRequestRepairRunFn func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
@@ -4788,6 +4789,13 @@ func (s *stubPRService) SyncPullRequestState(ctx context.Context, orgID, pullReq
 		return s.syncPullRequestStateFn(ctx, orgID, pullRequestID)
 	}
 	return nil
+}
+
+func (s *stubPRService) RebuildPullRequestHealthFromCheckStates(ctx context.Context, orgID, pullRequestID uuid.UUID) (bool, error) {
+	if s.rebuildPullRequestHealthFn != nil {
+		return s.rebuildPullRequestHealthFn(ctx, orgID, pullRequestID)
+	}
+	return false, nil
 }
 
 func (s *stubPRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error {
@@ -5584,6 +5592,21 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 			expectErr: "parse pull request ID",
 		},
 		{
+			name:    "rebuild pull request health passes parsed ids",
+			payload: json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`),
+			handler: func(services *Services, logger zerolog.Logger) JobHandler {
+				return newRebuildPullRequestHealthHandler(services, logger)
+			},
+		},
+		{
+			name:    "rebuild pull request health rejects invalid payload",
+			payload: json.RawMessage(`{bad json`),
+			handler: func(services *Services, logger zerolog.Logger) JobHandler {
+				return newRebuildPullRequestHealthHandler(services, logger)
+			},
+			expectErr: "unmarshal rebuild_pull_request_health payload",
+		},
+		{
 			name:    "reconcile pull request state defaults the limit",
 			payload: json.RawMessage(`{"org_id":"` + orgID.String() + `","limit":0}`),
 			handler: func(services *Services, logger zerolog.Logger) JobHandler {
@@ -5683,6 +5706,12 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 						called.prID = gotPRID
 						return nil
 					},
+					rebuildPullRequestHealthFn: func(_ context.Context, gotOrgID, gotPRID uuid.UUID) (bool, error) {
+						called.rebuildCalls++
+						called.orgID = gotOrgID
+						called.prID = gotPRID
+						return true, nil
+					},
 					maybeStartAutoRepairForPRFn: func(_ context.Context, gotOrgID, gotPRID uuid.UUID, reason string) (*ghservice.AutoRepairDecision, error) {
 						called.autoRepairCalls++
 						called.orgID = gotOrgID
@@ -5732,6 +5761,12 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 				require.Equal(t, orgID, called.orgID, "sync handler should parse and pass the org ID")
 				require.Equal(t, prID, called.prID, "sync handler should parse and pass the pull request ID")
 				require.Equal(t, "github_pr_health_updated", called.autoRepairReason, "sync handler should identify GitHub health as the automatic repair trigger")
+			case "rebuild pull request health passes parsed ids":
+				require.Equal(t, 1, called.rebuildCalls, "rebuild handler should invoke the projected health service once")
+				require.Equal(t, 1, called.autoRepairCalls, "rebuild handler should evaluate automatic repair after projected health is persisted")
+				require.Equal(t, orgID, called.orgID, "rebuild handler should parse and pass the org ID")
+				require.Equal(t, prID, called.prID, "rebuild handler should parse and pass the pull request ID")
+				require.Equal(t, "github_pr_check_state_updated", called.autoRepairReason, "rebuild handler should identify webhook check state as the automatic repair trigger")
 			case "reconcile pull request state defaults the limit":
 				require.Equal(t, 1, called.reconcileCalls, "reconcile handler should invoke the PR service once")
 				require.Equal(t, orgID, called.orgID, "reconcile handler should parse and pass the org ID")
@@ -5758,6 +5793,31 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRebuildPullRequestHealthHandlerSkipsAutoRepairAfterNoOp(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	rebuildCalls := 0
+	autoRepairCalls := 0
+	services := &Services{PR: &stubPRService{
+		rebuildPullRequestHealthFn: func(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+			rebuildCalls++
+			return false, nil
+		},
+		maybeStartAutoRepairForPRFn: func(context.Context, uuid.UUID, uuid.UUID, string) (*ghservice.AutoRepairDecision, error) {
+			autoRepairCalls++
+			return &ghservice.AutoRepairDecision{Status: ghservice.AutoRepairDecisionNoBlocker}, nil
+		},
+	}}
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`)
+
+	err := newRebuildPullRequestHealthHandler(services, zerolog.Nop())(context.Background(), "rebuild_pull_request_health", payload)
+	require.NoError(t, err, "no-op projected rebuild should complete successfully")
+	require.Equal(t, 1, rebuildCalls, "handler should evaluate the durable projection once")
+	require.Equal(t, 0, autoRepairCalls, "handler should not sync or repair when no projected health change committed")
 }
 
 func TestSyncPullRequestStateHandlerDefersPendingMergeability(t *testing.T) {
@@ -5838,6 +5898,7 @@ func TestSyncPullRequestStateHandlerTreatsAutoRepairEvaluationFailureAsNonFatal(
 
 type prHandlerCalls struct {
 	syncCalls           int
+	rebuildCalls        int
 	autoRepairCalls     int
 	reconcileCalls      int
 	enrichCalls         int
@@ -6878,6 +6939,8 @@ func TestRegisterHandlers_AllRegistered(t *testing.T) {
 		"prioritize",
 		"run_agent",
 		"open_pr",
+		"sync_pull_request_state",
+		"rebuild_pull_request_health",
 		"analyze_failure",
 	}
 	for _, name := range unexpectedHandlers {
