@@ -518,6 +518,8 @@ func TestCodeReviewRiskReasonCodeValidate(t *testing.T) {
 		CodeReviewRiskReasonExcludedCategory,
 		CodeReviewRiskReasonReviewerQuorum,
 		CodeReviewRiskReasonOrchestratorSynthesisInvalid,
+		CodeReviewRiskReasonOrchestratorEscalation,
+		CodeReviewRiskReasonOrchestratorContextStale,
 	}
 	tests := make([]struct {
 		name      string
@@ -583,6 +585,8 @@ func TestCodeReviewRiskReasonMessage(t *testing.T) {
 		{name: "category", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonExcludedCategory, Subject: "auth"}, expected: "excluded risk category changed: auth"},
 		{name: "quorum", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonReviewerQuorum, Actual: 1, Limit: 2}, expected: "reviewer quorum 1 is below policy requirement 2"},
 		{name: "invalid orchestrator synthesis", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonOrchestratorSynthesisInvalid}, expected: "orchestrator did not produce a valid structured synthesis"},
+		{name: "orchestrator escalation", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonOrchestratorEscalation}, expected: "coding-agent orchestrator recommends human review"},
+		{name: "stale orchestrator context", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonOrchestratorContextStale}, expected: "PR title or description changed after the coding-agent assessment"},
 	}
 
 	for _, tt := range tests {

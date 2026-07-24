@@ -324,6 +324,7 @@ type CodeReviewReviewerPromptData struct {
 }
 
 type CodeReviewDescriptionRequirementPromptData struct {
+	Key           string
 	Title         string
 	Prompt        string
 	Applicability string
@@ -333,27 +334,12 @@ func CodeReviewReviewerPrompt(data CodeReviewReviewerPromptData) string {
 	return render("code_review_reviewer.template", data)
 }
 
-func CodeReviewDescriptionCheckSystemPrompt() string {
-	return render("code_review_description_check.template", nil)
-}
-
-type CodeReviewDescriptionCheckUserPromptData struct {
-	Title        string
-	Requirement  string
-	PRTitle      string
-	PRBody       string
-	ChangedFiles []string
-}
-
-func CodeReviewDescriptionCheckUserPrompt(data CodeReviewDescriptionCheckUserPromptData) string {
-	return render("code_review_description_check_user.template", data)
-}
-
 type CodeReviewOrchestratorPromptData struct {
 	Repository                 string
 	PullNumber                 int
 	PullRequestURL             string
 	Title                      string
+	PRBody                     string
 	Author                     string
 	BaseSHA                    string
 	HeadSHA                    string
@@ -362,7 +348,7 @@ type CodeReviewOrchestratorPromptData struct {
 	RequiredReviewerQuorum     int
 	InlineCommentLimit         int
 	RiskReasons                []string
-	DescriptionResults         []string
+	DescriptionRequirements    []CodeReviewDescriptionRequirementPromptData
 	ReviewerOutputs            []string
 	Findings                   []string
 	ChangedFiles               []string
