@@ -237,6 +237,10 @@ func humanizeCodeReviewRiskReason(reason CodeReviewRiskReason, descriptionIssues
 		return fmt.Sprintf("Only %d of %d required review agents completed a usable review.", reason.Actual, reason.Limit)
 	case CodeReviewRiskReasonOrchestratorSynthesisInvalid:
 		return "The orchestrator did not produce a valid structured synthesis."
+	case CodeReviewRiskReasonOrchestratorEscalation:
+		return "The coding-agent orchestrator recommends human review."
+	case CodeReviewRiskReasonOrchestratorContextStale:
+		return "The PR title or description changed after the coding-agent assessment, so that recommendation is stale."
 	}
 
 	return codeReviewSentence(reason.Message())

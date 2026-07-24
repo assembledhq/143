@@ -1,6 +1,6 @@
 # Design: Code Reviewer Bot And Acceptable-Risk Auto-Approval
 
-> **Status:** Implemented | **Last reviewed:** 2026-07-20
+> **Status:** Implemented | **Last reviewed:** 2026-07-24
 >
 > **Depends on:** [../overall.md](../overall.md), [78-review-agent-loops.md](78-review-agent-loops.md), [107-pr-readiness-checks.md](107-pr-readiness-checks.md), [61-pr-state-sync-and-repair-actions.md](61-pr-state-sync-and-repair-actions.md), [../backlog/11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md)
 
@@ -26,8 +26,8 @@ Implemented:
 - `run_code_review` worker handler that loads the captured policy version, fans out read-only reviewer threads running native `/review`, synthesizes via an orchestrator thread, records agent results, submits a GitHub review when the worker has GitHub credentials, and stores the GitHub review id/url
 - live reviewer/orchestrator evidence ingestion harvested from running review threads rather than pre-existing stored result rows
 - evidence-gated approval path that evaluates reviewer results, blocking findings, PR health, reviewed head SHA, required check state, changed-file size/path/category context from GitHub, and the captured policy before choosing approval vs comment-only
-- LLM-backed PR description requirement evaluation with prompt-injection screening
-- prompt artifact storage and recovery for rendered reviewer/orchestrator/description prompts and their structured outputs
+- coding-agent orchestrator evaluation of PR description requirements and the substantive approve-or-escalate recommendation, with prompt-injection screening
+- prompt artifact storage and recovery for rendered reviewer/orchestrator prompts and their structured outputs
 - inline-comment posting with marker-based dedupe/update and posted-comment id persistence
 - GitHub changed-file fetch support for PR file/line threshold and coarse risk-category evaluation
 - GitHub review submission as the sole GitHub result surface, avoiding a redundant commit status that could be mistaken for a required CI check
@@ -104,16 +104,17 @@ Developer requests "143 Code Reviewer" in GitHub
 143 receives review_requested webhook and creates a code review session
         |
         v
-Check PR description policy
-        |
-        v
 Run configured review agents against the PR diff and context
         |
         v
-Orchestrator agent synthesizes findings and risk decision
+Orchestrator agent inspects the change, evaluates description requirements,
+and synthesizes findings plus an approve-or-escalate recommendation
         |
         v
-If acceptable risk and approval prerequisites pass:
+Backend applies non-bypassable safeguards to the recommendation
+        |
+        v
+If the orchestrator recommends approval and every safeguard passes:
   submit GitHub approval with evidence
 Else:
   submit a GitHub review comment with escalation reasons
@@ -177,7 +178,7 @@ GitHub stays concise; the session keeps the full detail:
 
 - PR metadata, base/head SHA, author, requested reviewer, run status
 - current operational phase, automatic GitHub retry time, and curated failure action
-- description policy results
+- coding-agent description policy assessments
 - per-agent raw review outputs
 - orchestrator synthesis
 - risk rubric inputs and final classification
@@ -318,7 +319,11 @@ Reviewer agents run in isolated read-only review sandboxes at the PR head SHA. T
 
 Acceptable risk is fully configurable by org admins with optional repository overrides. 143 ships conservative defaults, but approval always comes from the active org/repo policy.
 
-Risk evaluation combines deterministic signals with synthesized review findings.
+Risk evaluation combines deterministic safeguards with coding-agent assessments
+and synthesized review findings. The coding-agent orchestrator owns the
+substantive approve-or-escalate recommendation. The backend owns the final
+GitHub action and can only narrow the orchestrator's recommendation by applying
+non-bypassable safeguards.
 
 Configurable deterministic signals:
 
@@ -326,7 +331,6 @@ Configurable deterministic signals:
 - no sensitive paths touched
 - no migrations, auth, billing, permissions, crypto, infra, dependency lockfile, or generated artifact surprises
 - CI/checks are green or not required by policy
-- PR description passes required sections
 - branch is mergeable and up to date according to policy
 - author is in an eligible role or team
 
@@ -334,6 +338,8 @@ Existing human comments, review decisions, and open or resolved review threads a
 
 Configurable synthesized signals:
 
+- each applicable PR-description requirement is `satisfied`, `not_applicable`,
+  or `missing`; both `satisfied` and `not_applicable` pass the requirement
 - reviewer agents found no blocking correctness, security, or maintainability issues
 - orchestrator agrees the change matches the stated intent
 - no reviewer-agent disagreement on severity
@@ -451,8 +457,10 @@ Code review session
     - reads PR metadata, policy, diff summary, description, CI/check state
     - starts reviewer tabs according to policy
     - waits for reviewer results or timeout
+    - inspects the actual diff to determine whether description evidence is
+      satisfied, missing, or not applicable
     - compares findings against acceptable-risk policy
-    - writes final synthesized review
+    - recommends approval or human review and writes the synthesized review
 
   Reviewer tab: Codex
     - runs native /review against the PR diff
@@ -464,6 +472,14 @@ Code review session
 ```
 
 Reviewer agents run native `/review` or the closest equivalent. They inspect and explain; they do not edit files or push commits. The orchestrator preserves raw outputs in the session and produces the GitHub review.
+
+The worker validates that the orchestrator returned exactly one assessment for
+every applicable structured description requirement. Unknown, duplicate, or
+omitted requirement keys make the synthesis unusable for approval. It also
+captures a hash of the PR title and body supplied to the orchestrator; if either
+changes before the final decision, the assessment is stale and approval is
+withheld until a new review runs. These checks prevent malformed or out-of-date
+agent output from becoming approval authority.
 
 The final GitHub review should include:
 
@@ -502,6 +518,7 @@ Editable prompts are approval policy and are versioned with that policy. A revie
 - editable acceptable-risk rubric prompt text
 - reviewer agent/provider/model versions
 - PR base SHA and head SHA
+- PR title/body input hash used for the orchestrator's description assessment
 
 LLM prompts should follow the existing 143 prompt architecture where possible: stable system prompts live in versioned templates, while org/repo editable policy text is stored as policy data and rendered at runtime. Exact rendered prompts used for approval must be recoverable from audit state.
 

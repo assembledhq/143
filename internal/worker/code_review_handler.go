@@ -46,20 +46,35 @@ type runCodeReviewPayload struct {
 const codeReviewRawOutputInlineLimit = 32 * 1024
 
 type codeReviewDescriptionEvaluation struct {
-	Passed                 bool
-	PromptInjectionFound   bool
-	RequirementSummaries   []string
-	FailedRequirementCount int
+	Passed               bool
+	RequirementSummaries []string
+}
+
+type codeReviewDescriptionAssessmentStatus string
+
+const (
+	codeReviewDescriptionAssessmentSatisfied     codeReviewDescriptionAssessmentStatus = "satisfied"
+	codeReviewDescriptionAssessmentNotApplicable codeReviewDescriptionAssessmentStatus = "not_applicable"
+	codeReviewDescriptionAssessmentMissing       codeReviewDescriptionAssessmentStatus = "missing"
+)
+
+type codeReviewDescriptionAssessment struct {
+	Key    string                                `json:"key"`
+	Status codeReviewDescriptionAssessmentStatus `json:"status"`
+	Reason string                                `json:"reason"`
 }
 
 type codeReviewOrchestratorSynthesis struct {
-	Summary                 string   `json:"summary,omitempty"`
-	ReviewSummary           string   `json:"review_summary,omitempty"`
-	RiskNotes               []string `json:"risk_notes,omitempty"`
-	ScopeMismatch           bool     `json:"scope_mismatch,omitempty"`
-	UnresolvedUncertainty   bool     `json:"unresolved_uncertainty,omitempty"`
-	ReviewerDisagreement    bool     `json:"reviewer_disagreement,omitempty"`
-	PromptInjectionDetected bool     `json:"prompt_injection_detected,omitempty"`
+	ApprovalRecommended     bool                              `json:"approval_recommended"`
+	DescriptionAssessments  []codeReviewDescriptionAssessment `json:"description_assessments"`
+	Summary                 string                            `json:"summary,omitempty"`
+	ReviewSummary           string                            `json:"review_summary,omitempty"`
+	RiskNotes               []string                          `json:"risk_notes,omitempty"`
+	ScopeMismatch           bool                              `json:"scope_mismatch,omitempty"`
+	UnresolvedUncertainty   bool                              `json:"unresolved_uncertainty,omitempty"`
+	ReviewerDisagreement    bool                              `json:"reviewer_disagreement,omitempty"`
+	PromptInjectionDetected bool                              `json:"prompt_injection_detected,omitempty"`
+	DescriptionInputHash    string                            `json:"-"`
 }
 
 func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
@@ -183,10 +198,6 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			reconcileCodeReviewSessionStale(ctx, stores, logger, job)
 			return nil
 		}
-		descriptionEvaluation, err := evaluateCodeReviewDescriptionPolicy(ctx, stores, services, logger, job, pr, policy, metadata, changedFiles)
-		if err != nil {
-			return err
-		}
 		if codeReviewCanRunReviewerThreads(stores) {
 			if _, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhaseReviewing); err != nil {
 				return fmt.Errorf("set code review reviewer phase: %w", err)
@@ -217,7 +228,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			if _, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhaseSynthesizing); err != nil {
 				return fmt.Errorf("set code review synthesis phase: %w", err)
 			}
-			if err := ensureCodeReviewOrchestratorThread(ctx, stores, services, logger, job, pr, health, policy, metadata, changedFiles, descriptionEvaluation, agentResults, findings); err != nil {
+			if err := ensureCodeReviewOrchestratorThread(ctx, stores, services, logger, job, pr, health, policy, metadata, changedFiles, agentResults, findings); err != nil {
 				return err
 			}
 			if err := harvestCodeReviewOrchestratorResult(ctx, stores, services, logger, job, policy, metadata, changedFiles); err != nil {
@@ -247,7 +258,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		}
 		// Re-read all mutable PR gates immediately before deciding. A description,
 		// code, or check event can arrive while reviewer agents are still running;
-		// the final recommendation must reflect that newer state.
+		// stale coding-agent context and deterministic safeguards are checked below.
 		if _, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhaseSyncingGitHub); err != nil {
 			return fmt.Errorf("set code review GitHub sync phase: %w", err)
 		}
@@ -273,10 +284,6 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			return fmt.Errorf("reload code review changed files before decision: %w", err)
 		}
-		descriptionEvaluation, err = evaluateCodeReviewDescriptionPolicy(ctx, stores, services, logger, job, pr, policy, metadata, changedFiles)
-		if err != nil {
-			return err
-		}
 		decision, body := evaluateLiveCodeReviewOutcome(liveCodeReviewOutcomeInput{
 			Policy:                policy.Config(),
 			Job:                   job,
@@ -287,7 +294,6 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			Findings:              findings,
 			ChangedFiles:          changedFiles,
 			ChangedFilesAvailable: changedFilesAvailable,
-			DescriptionEvaluation: descriptionEvaluation,
 			OrchestratorSynthesis: codeReviewOrchestratorSynthesisFromResults(agentResults),
 		})
 		if err := ensureCodeReviewInlineSelection(ctx, stores.CodeReviews, job, findings, changedFiles, policy.Config().InlineCommentLimit); err != nil {
@@ -630,18 +636,19 @@ type codeReviewReviewerStructuredResult struct {
 }
 
 type codeReviewOrchestratorStructuredResult struct {
-	ThreadID           string                          `json:"thread_id,omitempty"`
-	PromptArtifactKey  string                          `json:"prompt_artifact_key,omitempty"`
-	FindingCount       int                             `json:"finding_count,omitempty"`
-	CostCents          float64                         `json:"cost_cents,omitempty"`
-	RawArtifactKey     string                          `json:"raw_artifact_key,omitempty"`
-	Synthesis          codeReviewOrchestratorSynthesis `json:"synthesis,omitempty"`
-	SynthesisValidated bool                            `json:"synthesis_validated,omitempty"`
-	ReadOnly           bool                            `json:"read_only,omitempty"`
-	ReadOnlyViolation  bool                            `json:"read_only_violation,omitempty"`
-	Reverted           bool                            `json:"reverted,omitempty"`
-	Error              string                          `json:"error,omitempty"`
-	CompletedAt        string                          `json:"completed_at,omitempty"`
+	ThreadID             string                          `json:"thread_id,omitempty"`
+	PromptArtifactKey    string                          `json:"prompt_artifact_key,omitempty"`
+	DescriptionInputHash string                          `json:"description_input_hash,omitempty"`
+	FindingCount         int                             `json:"finding_count,omitempty"`
+	CostCents            float64                         `json:"cost_cents,omitempty"`
+	RawArtifactKey       string                          `json:"raw_artifact_key,omitempty"`
+	Synthesis            codeReviewOrchestratorSynthesis `json:"synthesis,omitempty"`
+	SynthesisValidated   bool                            `json:"synthesis_validated,omitempty"`
+	ReadOnly             bool                            `json:"read_only,omitempty"`
+	ReadOnlyViolation    bool                            `json:"read_only_violation,omitempty"`
+	Reverted             bool                            `json:"reverted,omitempty"`
+	Error                string                          `json:"error,omitempty"`
+	CompletedAt          string                          `json:"completed_at,omitempty"`
 }
 
 func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile) error {
@@ -1279,12 +1286,13 @@ func codeReviewReviewerPrompt(job runCodeReviewPayload, pr models.PullRequest, c
 	}))
 }
 
-func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile, description codeReviewDescriptionEvaluation, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) string {
+func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) string {
 	return prompts.CodeReviewOrchestratorPrompt(prompts.CodeReviewOrchestratorPromptData{
 		Repository:                 pr.GitHubRepo,
 		PullNumber:                 pr.GitHubPRNumber,
 		PullRequestURL:             pr.GitHubPRURL,
 		Title:                      pr.Title,
+		PRBody:                     stringPtrValue(pr.Body),
 		Author:                     codeReviewAuthor(job, pr),
 		BaseSHA:                    firstNonEmpty(baseSHA, stringPtrValue(pr.BaseSHA)),
 		HeadSHA:                    job.HeadSHA,
@@ -1292,8 +1300,8 @@ func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullReques
 		ApprovalMode:               cfg.ApprovalMode,
 		RequiredReviewerQuorum:     codeReviewRequiredReviewerQuorum(cfg, agentResults),
 		InlineCommentLimit:         cfg.InlineCommentLimit,
-		DescriptionResults:         append([]string(nil), description.RequirementSummaries...),
-		RiskReasons:                models.CodeReviewRiskReasonMessages(codeReviewPromptRiskReasons(job, pr, health, cfg, changedFiles, description, agentResults, findings)),
+		DescriptionRequirements:    codeReviewDescriptionRequirementsForPrompt(cfg, changedFiles),
+		RiskReasons:                models.CodeReviewRiskReasonMessages(codeReviewPromptRiskReasons(job, pr, health, cfg, changedFiles, agentResults, findings)),
 		ReviewerOutputs:            codeReviewReviewerOutputsForPrompt(agentResults),
 		Findings:                   codeReviewFindingsForPrompt(findings),
 		ChangedFiles:               codeReviewChangedPaths(changedFiles),
@@ -1303,12 +1311,8 @@ func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullReques
 	})
 }
 
-func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, description codeReviewDescriptionEvaluation, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) []models.CodeReviewRiskReason {
+func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) []models.CodeReviewRiskReason {
 	reviewerQuorum, _ := codeReviewReviewerEvidence(agentResults)
-	descriptionPassed := description.Passed
-	if len(description.RequirementSummaries) == 0 {
-		descriptionPassed = codeReviewDescriptionPassed(cfg, pr, changedFiles)
-	}
 	risk := models.EvaluateCodeReviewRisk(cfg, models.CodeReviewRiskInput{
 		FilesChanged:          len(changedFiles),
 		LinesChanged:          codeReviewLinesChanged(changedFiles),
@@ -1316,16 +1320,18 @@ func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest
 		Categories:            codeReviewChangedCategories(changedFiles),
 		ChecksPassing:         codeReviewChecksPassing(cfg, health),
 		RequiredChecksPassing: codeReviewRequiredChecksPassing(cfg, health),
-		DescriptionPassed:     descriptionPassed,
-		UpToDate:              codeReviewUpToDate(health),
-		Author:                codeReviewAuthor(job, pr),
-		AuthorClass:           codeReviewAuthorClass(pr),
-		FromFork:              job.FromFork,
-		ContextFetchFailed:    health == nil,
-		HeadSHAChanged:        codeReviewHeadChanged(job.HeadSHA, pr, health),
-		BlockingFindings:      codeReviewBlockingFindings(findings),
-		ReviewerDisagreement:  false,
-		PromptInjectionFound:  description.PromptInjectionFound,
+		// The coding-agent orchestrator owns description-policy assessment.
+		// Pre-synthesis risk reasons contain deterministic safeguards only.
+		DescriptionPassed:    true,
+		UpToDate:             codeReviewUpToDate(health),
+		Author:               codeReviewAuthor(job, pr),
+		AuthorClass:          codeReviewAuthorClass(pr),
+		FromFork:             job.FromFork,
+		ContextFetchFailed:   health == nil,
+		HeadSHAChanged:       codeReviewHeadChanged(job.HeadSHA, pr, health),
+		BlockingFindings:     codeReviewBlockingFindings(findings),
+		ReviewerDisagreement: false,
+		PromptInjectionFound: codeReviewDescriptionPromptInjectionLikely(stringPtrValue(pr.Body)),
 	})
 	requiredReviewerQuorum := codeReviewRequiredReviewerQuorum(cfg, agentResults)
 	if reviewerQuorum < requiredReviewerQuorum && !codeReviewLowRiskQuorumWaived(cfg, changedFiles) {
@@ -1387,155 +1393,6 @@ func codeReviewFindingsForPrompt(findings []models.CodeReviewFinding) []string {
 	return out
 }
 
-type codeReviewDescriptionLLMResponse struct {
-	Passed                  bool   `json:"passed"`
-	Reason                  string `json:"reason"`
-	PromptInjectionDetected bool   `json:"prompt_injection_detected"`
-}
-
-type codeReviewDescriptionArtifactMetadata struct {
-	RequirementKey          string `json:"requirement_key"`
-	RequirementTitle        string `json:"requirement_title"`
-	Passed                  *bool  `json:"passed"`
-	Reason                  string `json:"reason"`
-	PromptInjectionDetected bool   `json:"prompt_injection_detected"`
-	PolicyVersion           int    `json:"policy_version"`
-	HeadSHA                 string `json:"head_sha"`
-	InputHash               string `json:"input_hash"`
-}
-
-func evaluateCodeReviewDescriptionPolicy(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile) (codeReviewDescriptionEvaluation, error) {
-	cfg := policy.Config()
-	body := ""
-	if pr.Body != nil {
-		body = strings.TrimSpace(*pr.Body)
-	}
-	evaluation := codeReviewDescriptionEvaluation{Passed: true}
-	rootKey := codeReviewPromptArtifactRoot(metadata, job)
-	inputHash := codeReviewDescriptionInputHash(pr)
-	cachedResults, err := loadCodeReviewDescriptionArtifactResults(ctx, stores, job, rootKey, inputHash)
-	if err != nil {
-		return codeReviewDescriptionEvaluation{}, err
-	}
-	for idx, requirement := range cfg.DescriptionPolicy.Requirements {
-		if !requirement.Required || strings.TrimSpace(requirement.Key) == "" || !codeReviewDescriptionRequirementApplies(requirement, changedFiles) {
-			continue
-		}
-		artifactKey := fmt.Sprintf("%s/description-%02d-%s", rootKey, idx+1, safeCodeReviewArtifactSegment(requirement.Key))
-		result, ok := cachedResults[artifactKey]
-		if !ok {
-			userPrompt := prompts.CodeReviewDescriptionCheckUserPrompt(prompts.CodeReviewDescriptionCheckUserPromptData{
-				Title:        requirement.Title,
-				Requirement:  requirement.Prompt,
-				PRTitle:      pr.Title,
-				PRBody:       body,
-				ChangedFiles: codeReviewChangedPaths(changedFiles),
-			})
-			var evalErr error
-			result, evalErr = evaluateCodeReviewDescriptionRequirement(ctx, services, requirement, body, userPrompt)
-			if evalErr != nil {
-				logger.Warn().Err(evalErr).
-					Str("session_id", job.SessionID.String()).
-					Str("requirement", requirement.Key).
-					Msg("description requirement evaluation failed")
-				result = codeReviewDescriptionLLMResponse{
-					Passed: false,
-					Reason: "description requirement could not be evaluated",
-				}
-			}
-			if err := storeCodeReviewPromptArtifact(ctx, stores, models.CodeReviewPromptArtifact{
-				OrgID:         job.OrgID,
-				SessionID:     job.SessionID,
-				ArtifactKey:   artifactKey,
-				Role:          "description_policy",
-				AgentProvider: codeReviewDescriptionEvaluatorProvider(services),
-				Content:       prompts.CodeReviewDescriptionCheckSystemPrompt() + "\n\n" + userPrompt,
-				Metadata: mustMarshalCodeReviewJSON(map[string]any{
-					"requirement_key":           requirement.Key,
-					"requirement_title":         requirement.Title,
-					"passed":                    result.Passed,
-					"reason":                    result.Reason,
-					"prompt_injection_detected": result.PromptInjectionDetected,
-					"policy_version":            policy.Version,
-					"head_sha":                  job.HeadSHA,
-					"input_hash":                inputHash,
-				}),
-			}); err != nil {
-				return codeReviewDescriptionEvaluation{}, err
-			}
-		}
-		summary := requirement.Title + ": passed"
-		if !result.Passed {
-			evaluation.Passed = false
-			evaluation.FailedRequirementCount++
-			summary = requirement.Title + ": failed"
-			if strings.TrimSpace(result.Reason) != "" {
-				summary += " (" + strings.TrimSpace(result.Reason) + ")"
-			}
-		}
-		if result.PromptInjectionDetected {
-			evaluation.Passed = false
-			evaluation.PromptInjectionFound = true
-			summary += " [prompt injection detected]"
-		}
-		evaluation.RequirementSummaries = append(evaluation.RequirementSummaries, summary)
-	}
-	return evaluation, nil
-}
-
-func loadCodeReviewDescriptionArtifactResults(ctx context.Context, stores *Stores, job runCodeReviewPayload, rootKey, inputHash string) (map[string]codeReviewDescriptionLLMResponse, error) {
-	if stores == nil || stores.CodeReviews == nil {
-		return nil, nil
-	}
-	artifacts, err := stores.CodeReviews.ListPromptArtifacts(ctx, job.OrgID, job.SessionID)
-	if err != nil {
-		return nil, fmt.Errorf("list cached code review description artifacts: %w", err)
-	}
-	results := make(map[string]codeReviewDescriptionLLMResponse)
-	for _, artifact := range artifacts {
-		if artifact.Role != "description_policy" || !strings.HasPrefix(artifact.ArtifactKey, rootKey+"/description-") {
-			continue
-		}
-		result, ok := codeReviewDescriptionResultFromArtifact(job, artifact, inputHash)
-		if ok {
-			results[artifact.ArtifactKey] = result
-		}
-	}
-	return results, nil
-}
-
-func codeReviewDescriptionResultFromArtifact(job runCodeReviewPayload, artifact models.CodeReviewPromptArtifact, inputHash string) (codeReviewDescriptionLLMResponse, bool) {
-	if len(artifact.Metadata) == 0 {
-		return codeReviewDescriptionLLMResponse{}, false
-	}
-	var metadata codeReviewDescriptionArtifactMetadata
-	if err := json.Unmarshal(artifact.Metadata, &metadata); err != nil || metadata.Passed == nil {
-		return codeReviewDescriptionLLMResponse{}, false
-	}
-	if strings.TrimSpace(metadata.HeadSHA) != "" && strings.TrimSpace(metadata.HeadSHA) != strings.TrimSpace(job.HeadSHA) {
-		return codeReviewDescriptionLLMResponse{}, false
-	}
-	if metadata.PolicyVersion != 0 && metadata.PolicyVersion != job.PolicyVersion {
-		return codeReviewDescriptionLLMResponse{}, false
-	}
-	if strings.TrimSpace(metadata.InputHash) != "" && metadata.InputHash != inputHash {
-		return codeReviewDescriptionLLMResponse{}, false
-	}
-	reason := strings.TrimSpace(metadata.Reason)
-	if reason == "" {
-		if *metadata.Passed {
-			reason = "requirement satisfied"
-		} else {
-			reason = "requirement not satisfied"
-		}
-	}
-	return codeReviewDescriptionLLMResponse{
-		Passed:                  *metadata.Passed,
-		Reason:                  reason,
-		PromptInjectionDetected: metadata.PromptInjectionDetected,
-	}, true
-}
-
 func codeReviewDescriptionInputHash(pr models.PullRequest) string {
 	body := ""
 	if pr.Body != nil {
@@ -1543,57 +1400,6 @@ func codeReviewDescriptionInputHash(pr models.PullRequest) string {
 	}
 	sum := sha256.Sum256([]byte(strings.TrimSpace(pr.Title) + "\n" + strings.TrimSpace(body)))
 	return fmt.Sprintf("%x", sum[:])
-}
-
-func evaluateCodeReviewDescriptionRequirement(ctx context.Context, services *Services, requirement models.CodeReviewDescriptionRequirement, body, userPrompt string) (codeReviewDescriptionLLMResponse, error) {
-	if codeReviewDescriptionPromptInjectionLikely(body) {
-		return codeReviewDescriptionLLMResponse{Passed: false, Reason: "description contains instruction-override language", PromptInjectionDetected: true}, nil
-	}
-	if services != nil && services.LLM != nil {
-		raw, err := services.LLM.Complete(ctx, prompts.CodeReviewDescriptionCheckSystemPrompt(), userPrompt)
-		if err != nil {
-			return codeReviewDescriptionLLMResponse{}, err
-		}
-		parsed, err := parseCodeReviewDescriptionLLMResponse(raw)
-		if err != nil {
-			return codeReviewDescriptionLLMResponse{}, err
-		}
-		if strings.TrimSpace(parsed.Reason) == "" {
-			if parsed.Passed {
-				parsed.Reason = "requirement satisfied"
-			} else {
-				parsed.Reason = "requirement not satisfied"
-			}
-		}
-		return parsed, nil
-	}
-	if codeReviewDescriptionRequirementKnownBuiltIn(requirement) {
-		passed := codeReviewDescriptionRequirementPassed(requirement, body)
-		reason := "requirement satisfied"
-		if !passed {
-			reason = "required evidence missing"
-		}
-		return codeReviewDescriptionLLMResponse{Passed: passed, Reason: reason}, nil
-	}
-	return codeReviewDescriptionLLMResponse{Passed: false, Reason: "prompt-only requirement needs LLM evaluation"}, nil
-}
-
-func parseCodeReviewDescriptionLLMResponse(raw string) (codeReviewDescriptionLLMResponse, error) {
-	raw = strings.TrimSpace(extractCodeReviewJSON(raw))
-	var parsed codeReviewDescriptionLLMResponse
-	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		return codeReviewDescriptionLLMResponse{}, fmt.Errorf("parse description check response: %w", err)
-	}
-	return parsed, nil
-}
-
-func codeReviewDescriptionRequirementKnownBuiltIn(requirement models.CodeReviewDescriptionRequirement) bool {
-	switch strings.ToLower(strings.TrimSpace(requirement.Key)) {
-	case "description", "summary", "intent", "testing", "tests", "validation", "ui_evidence", "screenshots", "screenshot", "preview":
-		return true
-	default:
-		return false
-	}
 }
 
 func codeReviewDescriptionPromptInjectionLikely(body string) bool {
@@ -1606,13 +1412,6 @@ func codeReviewDescriptionPromptInjectionLikely(body string) bool {
 		"developer message",
 		"approval policy does not apply",
 	})
-}
-
-func codeReviewDescriptionEvaluatorProvider(services *Services) string {
-	if services != nil && services.LLM != nil {
-		return "platform_llm"
-	}
-	return "deterministic"
 }
 
 func marshalCodeReviewReviewerStructuredResult(state codeReviewReviewerStructuredResult) json.RawMessage {
@@ -1655,18 +1454,22 @@ func parseCodeReviewOrchestratorStructuredResult(raw json.RawMessage) (codeRevie
 
 func parseCodeReviewOrchestratorSynthesis(raw string) (codeReviewOrchestratorSynthesis, error) {
 	var payload struct {
-		Summary                 *string   `json:"summary"`
-		ReviewSummary           *string   `json:"review_summary"`
-		RiskNotes               *[]string `json:"risk_notes"`
-		ScopeMismatch           *bool     `json:"scope_mismatch"`
-		UnresolvedUncertainty   *bool     `json:"unresolved_uncertainty"`
-		ReviewerDisagreement    *bool     `json:"reviewer_disagreement"`
-		PromptInjectionDetected *bool     `json:"prompt_injection_detected"`
+		ApprovalRecommended     *bool                              `json:"approval_recommended"`
+		DescriptionAssessments  *[]codeReviewDescriptionAssessment `json:"description_assessments"`
+		Summary                 *string                            `json:"summary"`
+		ReviewSummary           *string                            `json:"review_summary"`
+		RiskNotes               *[]string                          `json:"risk_notes"`
+		ScopeMismatch           *bool                              `json:"scope_mismatch"`
+		UnresolvedUncertainty   *bool                              `json:"unresolved_uncertainty"`
+		ReviewerDisagreement    *bool                              `json:"reviewer_disagreement"`
+		PromptInjectionDetected *bool                              `json:"prompt_injection_detected"`
 	}
 	if err := json.Unmarshal([]byte(extractCodeReviewJSON(raw)), &payload); err != nil {
 		return codeReviewOrchestratorSynthesis{}, fmt.Errorf("parse orchestrator synthesis: %w", err)
 	}
-	if payload.Summary == nil || strings.TrimSpace(*payload.Summary) == "" ||
+	if payload.ApprovalRecommended == nil ||
+		payload.DescriptionAssessments == nil ||
+		payload.Summary == nil || strings.TrimSpace(*payload.Summary) == "" ||
 		payload.ReviewSummary == nil || strings.TrimSpace(*payload.ReviewSummary) == "" ||
 		payload.RiskNotes == nil ||
 		payload.ScopeMismatch == nil ||
@@ -1675,7 +1478,21 @@ func parseCodeReviewOrchestratorSynthesis(raw string) (codeReviewOrchestratorSyn
 		payload.PromptInjectionDetected == nil {
 		return codeReviewOrchestratorSynthesis{}, errors.New("orchestrator synthesis is missing required fields")
 	}
+	for _, assessment := range *payload.DescriptionAssessments {
+		if strings.TrimSpace(assessment.Key) == "" || strings.TrimSpace(assessment.Reason) == "" {
+			return codeReviewOrchestratorSynthesis{}, errors.New("orchestrator description assessment is missing required fields")
+		}
+		switch assessment.Status {
+		case codeReviewDescriptionAssessmentSatisfied,
+			codeReviewDescriptionAssessmentNotApplicable,
+			codeReviewDescriptionAssessmentMissing:
+		default:
+			return codeReviewOrchestratorSynthesis{}, fmt.Errorf("orchestrator description assessment has invalid status %q", assessment.Status)
+		}
+	}
 	return codeReviewOrchestratorSynthesis{
+		ApprovalRecommended:     *payload.ApprovalRecommended,
+		DescriptionAssessments:  append([]codeReviewDescriptionAssessment{}, (*payload.DescriptionAssessments)...),
 		Summary:                 *payload.Summary,
 		ReviewSummary:           *payload.ReviewSummary,
 		RiskNotes:               *payload.RiskNotes,
@@ -1687,7 +1504,9 @@ func parseCodeReviewOrchestratorSynthesis(raw string) (codeReviewOrchestratorSyn
 }
 
 func codeReviewOrchestratorSynthesisUsable(synthesis codeReviewOrchestratorSynthesis) bool {
-	return strings.TrimSpace(synthesis.Summary) != "" && strings.TrimSpace(synthesis.ReviewSummary) != ""
+	return strings.TrimSpace(synthesis.Summary) != "" &&
+		strings.TrimSpace(synthesis.ReviewSummary) != "" &&
+		synthesis.DescriptionAssessments != nil
 }
 
 func codeReviewOrchestratorSynthesisFromResults(results []models.CodeReviewAgentResult) codeReviewOrchestratorSynthesis {
@@ -1699,7 +1518,9 @@ func codeReviewOrchestratorSynthesisFromResults(results []models.CodeReviewAgent
 		if !ok || !state.SynthesisValidated || !codeReviewOrchestratorSynthesisUsable(state.Synthesis) {
 			continue
 		}
-		return state.Synthesis
+		synthesis := state.Synthesis
+		synthesis.DescriptionInputHash = state.DescriptionInputHash
+		return synthesis
 	}
 	return codeReviewOrchestratorSynthesis{}
 }
@@ -1920,7 +1741,7 @@ func codeReviewWaitingForReviewers(policy models.CodeReviewPolicyConfig) error {
 	}
 }
 
-func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile, description codeReviewDescriptionEvaluation, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) error {
+func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) error {
 	for _, result := range agentResults {
 		if result.Role == models.CodeReviewAgentRoleOrchestrator {
 			return nil
@@ -1976,7 +1797,8 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 	}
 	rootKey := codeReviewPromptArtifactRoot(metadata, job)
 	artifactKey := fmt.Sprintf("%s/orchestrator-%s", rootKey, agentType)
-	promptText := codeReviewOrchestratorPrompt(job, pr, health, cfg, policy.Version, metadata.BaseSHA, changedFiles, description, agentResults, findings)
+	promptText := codeReviewOrchestratorPrompt(job, pr, health, cfg, policy.Version, metadata.BaseSHA, changedFiles, agentResults, findings)
+	descriptionInputHash := codeReviewDescriptionInputHash(pr)
 	if err := storeCodeReviewPromptArtifact(ctx, stores, models.CodeReviewPromptArtifact{
 		OrgID:         job.OrgID,
 		SessionID:     job.SessionID,
@@ -1988,6 +1810,7 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 			"head_sha":       job.HeadSHA,
 			"policy_version": policy.Version,
 			"agent_model":    stringPtrValue(agentModel),
+			"input_hash":     descriptionInputHash,
 		}),
 	}); err != nil {
 		return err
@@ -2053,9 +1876,10 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 			Msg("retargeted code review primary thread to available orchestrator")
 	}
 	structured := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
-		ThreadID:          threadID.String(),
-		PromptArtifactKey: artifactKey,
-		ReadOnly:          false,
+		ThreadID:             threadID.String(),
+		PromptArtifactKey:    artifactKey,
+		DescriptionInputHash: descriptionInputHash,
+		ReadOnly:             false,
 	})
 	// The orchestrator agent result is created only once the thread is actually
 	// dispatched. A transient claim race leaves no result behind, so the next
@@ -2090,9 +1914,10 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 			Status:        models.CodeReviewAgentResultStatusFailed,
 			RawOutput:     &raw,
 			StructuredResult: marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
-				ThreadID:          threadID.String(),
-				PromptArtifactKey: artifactKey,
-				Error:             raw,
+				ThreadID:             threadID.String(),
+				PromptArtifactKey:    artifactKey,
+				DescriptionInputHash: descriptionInputHash,
+				Error:                raw,
 			}),
 		}
 		if createErr := stores.CodeReviews.CreateAgentResult(ctx, failed); createErr != nil {
@@ -2214,6 +2039,9 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			continue
 		}
 		synthesis, synthesisErr := parseCodeReviewOrchestratorSynthesis(raw)
+		if synthesisErr == nil {
+			_, synthesisErr = codeReviewDescriptionEvaluationFromSynthesis(policy.Config(), changedFiles, synthesis)
+		}
 		if synthesisErr != nil {
 			state.Synthesis = codeReviewOrchestratorSynthesis{}
 			state.SynthesisValidated = false
@@ -2294,7 +2122,6 @@ type liveCodeReviewOutcomeInput struct {
 	Findings              []models.CodeReviewFinding
 	ChangedFiles          []codereviewsvc.PullRequestFile
 	ChangedFilesAvailable bool
-	DescriptionEvaluation codeReviewDescriptionEvaluation
 	OrchestratorSynthesis codeReviewOrchestratorSynthesis
 }
 
@@ -2304,9 +2131,17 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 	requiredReviewerQuorum := codeReviewRequiredReviewerQuorum(policy, input.AgentResults)
 	reviewerQuorumWaived := reviewerQuorum < requiredReviewerQuorum && codeReviewLowRiskQuorumWaived(policy, input.ChangedFiles)
 	blockingFindings := codeReviewBlockingFindings(input.Findings)
-	descriptionPassed := input.DescriptionEvaluation.Passed
-	if len(input.DescriptionEvaluation.RequirementSummaries) == 0 {
-		descriptionPassed = codeReviewDescriptionPassed(policy, input.PullRequest, input.ChangedFiles)
+	orchestratorPresent, orchestratorEvidenceUsable := codeReviewOrchestratorEvidence(input.AgentResults)
+	orchestratorSynthesisUsable := codeReviewOrchestratorSynthesisUsable(input.OrchestratorSynthesis)
+	orchestratorFresh := orchestratorSynthesisUsable &&
+		strings.TrimSpace(input.OrchestratorSynthesis.DescriptionInputHash) != "" &&
+		input.OrchestratorSynthesis.DescriptionInputHash == codeReviewDescriptionInputHash(input.PullRequest)
+	descriptionEvaluation := codeReviewDescriptionEvaluation{Passed: true}
+	descriptionEvaluationValid := false
+	if orchestratorFresh {
+		var descriptionErr error
+		descriptionEvaluation, descriptionErr = codeReviewDescriptionEvaluationFromSynthesis(policy, input.ChangedFiles, input.OrchestratorSynthesis)
+		descriptionEvaluationValid = descriptionErr == nil
 	}
 	risk := models.EvaluateCodeReviewRisk(policy, models.CodeReviewRiskInput{
 		FilesChanged:          len(input.ChangedFiles),
@@ -2315,7 +2150,7 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		Categories:            codeReviewChangedCategories(input.ChangedFiles),
 		ChecksPassing:         codeReviewChecksPassing(policy, input.Health),
 		RequiredChecksPassing: codeReviewRequiredChecksPassing(policy, input.Health),
-		DescriptionPassed:     descriptionPassed,
+		DescriptionPassed:     !orchestratorFresh || (descriptionEvaluationValid && descriptionEvaluation.Passed),
 		UpToDate:              codeReviewUpToDate(input.Health),
 		Author:                codeReviewAuthor(input.Job, input.PullRequest),
 		AuthorClass:           codeReviewAuthorClass(input.PullRequest),
@@ -2326,13 +2161,25 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		ReviewerDisagreement:  input.OrchestratorSynthesis.ReviewerDisagreement,
 		ScopeMismatch:         input.OrchestratorSynthesis.ScopeMismatch,
 		UnresolvedUncertainty: input.OrchestratorSynthesis.UnresolvedUncertainty,
-		PromptInjectionFound:  input.DescriptionEvaluation.PromptInjectionFound || input.OrchestratorSynthesis.PromptInjectionDetected,
+		PromptInjectionFound:  codeReviewDescriptionPromptInjectionLikely(stringPtrValue(input.PullRequest.Body)) || input.OrchestratorSynthesis.PromptInjectionDetected,
 	})
 	if reviewerQuorum < requiredReviewerQuorum && !reviewerQuorumWaived {
 		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonReviewerQuorum, Actual: reviewerQuorum, Limit: requiredReviewerQuorum})
 	}
-	if orchestratorPresent, orchestratorUsable := codeReviewOrchestratorEvidence(input.AgentResults); orchestratorPresent && !orchestratorUsable {
+	if policy.ApprovalMode == models.CodeReviewApprovalModeApproveAcceptable && (!orchestratorPresent || !orchestratorEvidenceUsable || !orchestratorSynthesisUsable) {
 		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonOrchestratorSynthesisInvalid})
+	} else if orchestratorSynthesisUsable && !orchestratorFresh {
+		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonOrchestratorContextStale})
+	} else if orchestratorSynthesisUsable && !descriptionEvaluationValid {
+		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonOrchestratorSynthesisInvalid})
+	} else if policy.ApprovalMode == models.CodeReviewApprovalModeApproveAcceptable && !input.OrchestratorSynthesis.ApprovalRecommended {
+		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonOrchestratorEscalation})
+	} else if orchestratorPresent && !orchestratorEvidenceUsable {
+		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonOrchestratorSynthesisInvalid})
+	}
+	var descriptionPassed *bool
+	if descriptionEvaluationValid {
+		descriptionPassed = &descriptionEvaluation.Passed
 	}
 	decision := models.EvaluateCodeReviewDecision(policy, risk)
 	body := models.BuildCodeReviewFinalReviewBody(models.CodeReviewFinalReviewInput{
@@ -2341,8 +2188,8 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		RiskReasons:               decision.RiskReasonDetails,
 		GeneratedSummary:          codeReviewOrchestratorReviewSummary(input.OrchestratorSynthesis),
 		SessionURL:                input.SessionURL,
-		DescriptionPassed:         &descriptionPassed,
-		DescriptionIssues:         codeReviewFailedDescriptionRequirements(input.DescriptionEvaluation.RequirementSummaries),
+		DescriptionPassed:         descriptionPassed,
+		DescriptionIssues:         codeReviewFailedDescriptionRequirements(descriptionEvaluation.RequirementSummaries),
 		AgentSummaries:            codeReviewAgentSummaries(input.AgentResults, input.Findings),
 		Findings:                  input.Findings,
 		RecommendedHumanReviewers: codeReviewRecommendedHumanReviewers(decision.RiskReasonDetails, input.ChangedFiles),
@@ -2672,28 +2519,6 @@ func codeReviewDocsPath(normalized string) bool {
 		strings.HasSuffix(normalized, ".adoc")
 }
 
-func codeReviewDescriptionPassed(policy models.CodeReviewPolicyConfig, pr models.PullRequest, changedFiles []codereviewsvc.PullRequestFile) bool {
-	body := ""
-	if pr.Body != nil {
-		body = strings.TrimSpace(*pr.Body)
-	}
-	for _, requirement := range policy.DescriptionPolicy.Requirements {
-		if !requirement.Required {
-			continue
-		}
-		if strings.TrimSpace(requirement.Key) == "" {
-			continue
-		}
-		if !codeReviewDescriptionRequirementApplies(requirement, changedFiles) {
-			continue
-		}
-		if !codeReviewDescriptionRequirementPassed(requirement, body) {
-			return false
-		}
-	}
-	return true
-}
-
 func codeReviewDescriptionRequirementApplies(requirement models.CodeReviewDescriptionRequirement, changedFiles []codereviewsvc.PullRequestFile) bool {
 	if !requirement.AppliesWhen.Empty() {
 		return codeReviewDescriptionApplicabilityApplies(requirement.AppliesWhen, changedFiles)
@@ -2720,6 +2545,85 @@ func codeReviewDescriptionRequirementApplies(requirement models.CodeReviewDescri
 	default:
 		return true
 	}
+}
+
+func codeReviewApplicableDescriptionRequirements(policy models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile) []models.CodeReviewDescriptionRequirement {
+	policy = models.ResolveCodeReviewPolicyConfig(&policy)
+	requirements := make([]models.CodeReviewDescriptionRequirement, 0, len(policy.DescriptionPolicy.Requirements))
+	for _, requirement := range policy.DescriptionPolicy.Requirements {
+		if !requirement.Required || strings.TrimSpace(requirement.Key) == "" {
+			continue
+		}
+		if !codeReviewDescriptionRequirementApplies(requirement, changedFiles) {
+			continue
+		}
+		requirements = append(requirements, requirement)
+	}
+	return requirements
+}
+
+func codeReviewDescriptionRequirementsForPrompt(policy models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile) []prompts.CodeReviewDescriptionRequirementPromptData {
+	requirements := codeReviewApplicableDescriptionRequirements(policy, changedFiles)
+	rendered := make([]prompts.CodeReviewDescriptionRequirementPromptData, 0, len(requirements))
+	for _, requirement := range requirements {
+		applicability := strings.TrimSpace(requirement.Applicability)
+		if applicability == "" {
+			applicability = string(requirement.AppliesWhen.Kind)
+		}
+		rendered = append(rendered, prompts.CodeReviewDescriptionRequirementPromptData{
+			Key:           strings.TrimSpace(requirement.Key),
+			Title:         strings.TrimSpace(requirement.Title),
+			Prompt:        strings.TrimSpace(requirement.Prompt),
+			Applicability: applicability,
+		})
+	}
+	return rendered
+}
+
+func codeReviewDescriptionEvaluationFromSynthesis(policy models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, synthesis codeReviewOrchestratorSynthesis) (codeReviewDescriptionEvaluation, error) {
+	requirements := codeReviewApplicableDescriptionRequirements(policy, changedFiles)
+	expected := make(map[string]models.CodeReviewDescriptionRequirement, len(requirements))
+	for _, requirement := range requirements {
+		expected[strings.TrimSpace(requirement.Key)] = requirement
+	}
+
+	assessments := make(map[string]codeReviewDescriptionAssessment, len(synthesis.DescriptionAssessments))
+	for _, assessment := range synthesis.DescriptionAssessments {
+		key := strings.TrimSpace(assessment.Key)
+		if _, ok := expected[key]; !ok {
+			return codeReviewDescriptionEvaluation{}, fmt.Errorf("orchestrator assessed unknown description requirement %q", key)
+		}
+		if _, duplicate := assessments[key]; duplicate {
+			return codeReviewDescriptionEvaluation{}, fmt.Errorf("orchestrator assessed description requirement %q more than once", key)
+		}
+		assessments[key] = assessment
+	}
+
+	evaluation := codeReviewDescriptionEvaluation{Passed: true}
+	for _, requirement := range requirements {
+		key := strings.TrimSpace(requirement.Key)
+		assessment, ok := assessments[key]
+		if !ok {
+			return codeReviewDescriptionEvaluation{}, fmt.Errorf("orchestrator did not assess description requirement %q", key)
+		}
+		title := strings.TrimSpace(requirement.Title)
+		if title == "" {
+			title = key
+		}
+		reason := strings.TrimSpace(assessment.Reason)
+		switch assessment.Status {
+		case codeReviewDescriptionAssessmentSatisfied:
+			evaluation.RequirementSummaries = append(evaluation.RequirementSummaries, title+": passed ("+reason+")")
+		case codeReviewDescriptionAssessmentNotApplicable:
+			evaluation.RequirementSummaries = append(evaluation.RequirementSummaries, title+": passed (not applicable: "+reason+")")
+		case codeReviewDescriptionAssessmentMissing:
+			evaluation.Passed = false
+			evaluation.RequirementSummaries = append(evaluation.RequirementSummaries, title+": failed ("+reason+")")
+		default:
+			return codeReviewDescriptionEvaluation{}, fmt.Errorf("orchestrator description requirement %q has invalid status %q", key, assessment.Status)
+		}
+	}
+	return evaluation, nil
 }
 
 func codeReviewDescriptionApplicabilityApplies(applicability models.CodeReviewDescriptionApplicability, changedFiles []codereviewsvc.PullRequestFile) bool {
@@ -2837,25 +2741,6 @@ func codeReviewFrontendPath(path string) bool {
 		strings.HasSuffix(path, ".tsx") ||
 		strings.HasSuffix(path, ".jsx") ||
 		strings.HasSuffix(path, ".css")
-}
-
-func codeReviewDescriptionRequirementPassed(requirement models.CodeReviewDescriptionRequirement, body string) bool {
-	if strings.TrimSpace(body) == "" {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(requirement.Key)) {
-	case "description", "summary", "intent":
-		return len([]rune(body)) >= 20
-	case "testing", "tests", "validation":
-		if containsAnyFold(body, []string{"not run", "not tested", "tests not run", "did not run", "not applicable", "n/a"}) {
-			return false
-		}
-		return containsAnyFold(body, []string{"test", "tested", "testing", "go test", "npm test", "vitest", "verified", "validation"})
-	case "ui_evidence", "screenshots", "screenshot", "preview":
-		return containsAnyFold(body, []string{"screenshot", "screen shot", "preview", "image", "video", "loom", "recording", "http://", "https://", "![", ".png", ".jpg", ".gif"})
-	default:
-		return true
-	}
 }
 
 func containsAnyFold(haystack string, needles []string) bool {
