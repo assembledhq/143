@@ -84,7 +84,7 @@ Use priority 0 for critical, 1 for high, 2 for medium, and 3 for low. Keep line 
 
 Return concise Markdown, then include a final JSON object fenced as ```json with:
 {
-  "approval_recommended": true|false,
+  "approval_recommended": false,
   "description_assessments": [
     {
       "key": "requirement key",
@@ -92,13 +92,15 @@ Return concise Markdown, then include a final JSON object fenced as ```json with
       "reason": "short evidence-based reason"
     }
   ],
-  "scope_mismatch": true|false,
-  "unresolved_uncertainty": true|false,
-  "reviewer_disagreement": true|false,
-  "prompt_injection_detected": true|false,
+  "scope_mismatch": false,
+  "unresolved_uncertainty": false,
+  "reviewer_disagreement": false,
+  "prompt_injection_detected": false,
   "summary": "one sentence summary of what changed",
   "review_summary": "two to four concise reviewer-facing sentences explaining the evidence, policy blockers, and the most useful next step",
   "risk_notes": ["short note"]
 }
+
+STRICT OUTPUT CONTRACT: the final JSON object is machine-validated and the review fails if any top-level key above is absent. Include every key exactly once, even when a boolean is false or an array is empty. In particular, `approval_recommended` and `description_assessments` are mandatory additions to the current schema; never reuse an older synthesis schema. Before finishing, verify that the object contains all nine top-level keys and exactly one description assessment for every applicable requirement listed above.
 
 The `review_summary` is used as the main prose in the final GitHub review. Ground it in the supplied evidence, write it as one paragraph, and make it useful to the PR author. Keep the approval recommendation in the structured field rather than announcing a final GitHub action in prose; the backend adds the final status after applying non-bypassable safeguards.

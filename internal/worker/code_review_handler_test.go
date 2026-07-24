@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services/codereview"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	threadsvc "github.com/assembledhq/143/internal/services/thread"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
@@ -1493,6 +1495,332 @@ func (validatedOrchestratorResultArg) Match(value any) bool {
 	return ok && state.SynthesisValidated && codeReviewOrchestratorSynthesisUsable(state.Synthesis)
 }
 
+type repairingOrchestratorResultArg struct {
+	baseTurn     int
+	findingCount int
+}
+
+func (matcher repairingOrchestratorResultArg) Match(value any) bool {
+	var raw json.RawMessage
+	switch typed := value.(type) {
+	case json.RawMessage:
+		raw = typed
+	case []byte:
+		raw = typed
+	case string:
+		raw = json.RawMessage(typed)
+	default:
+		return false
+	}
+	state, ok := parseCodeReviewOrchestratorStructuredResult(raw)
+	return ok &&
+		!state.SynthesisValidated &&
+		state.SynthesisRepairCount == 0 &&
+		state.SynthesisRepairPending &&
+		state.SynthesisRepairBaseTurn == matcher.baseTurn &&
+		state.FindingCount == matcher.findingCount &&
+		strings.Contains(state.Error, "missing required fields")
+}
+
+type codeReviewOrchestratorRepairSenderStub struct {
+	inputs []threadsvc.SendMessageInput
+}
+
+func (s *codeReviewOrchestratorRepairSenderStub) SendMessage(_ context.Context, input threadsvc.SendMessageInput) (*threadsvc.SendMessageResult, error) {
+	s.inputs = append(s.inputs, input)
+	return &threadsvc.SendMessageResult{}, nil
+}
+
+func TestRequestCodeReviewOrchestratorSynthesisRepair(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	resultID := uuid.New()
+	now := time.Now().UTC()
+	rawReview := "```json\n{\"summary\":\"The change is focused.\"}\n```"
+	state := codeReviewOrchestratorStructuredResult{
+		ThreadID:             threadID.String(),
+		DescriptionInputHash: "description-hash",
+	}
+	mock.ExpectQuery("UPDATE code_review_agent_results").
+		WithArgs(models.CodeReviewAgentResultStatusRunning, &rawReview, repairingOrchestratorResultArg{baseTurn: 1}, orgID, resultID).
+		WillReturnRows(newCodeReviewAgentResultRows().
+			AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleOrchestrator, models.CodeReviewAgentResultStatusRunning, &rawReview, marshalCodeReviewOrchestratorStructuredResult(state), now))
+
+	sender := &codeReviewOrchestratorRepairSenderStub{}
+	stores := &Stores{CodeReviews: db.NewCodeReviewStore(mock)}
+	handled, started, err := requestCodeReviewOrchestratorSynthesisRepair(
+		context.Background(),
+		stores,
+		sender,
+		zerolog.Nop(),
+		runCodeReviewPayload{OrgID: orgID, SessionID: sessionID},
+		models.DefaultCodeReviewPolicyConfig(),
+		[]codereview.PullRequestFile{{Filename: "internal/worker/code_review_handler.go"}},
+		models.CodeReviewAgentResult{
+			ID:            resultID,
+			OrgID:         orgID,
+			SessionID:     sessionID,
+			AgentProvider: "codex",
+			Role:          models.CodeReviewAgentRoleOrchestrator,
+		},
+		state,
+		1,
+		rawReview,
+		errors.New("orchestrator synthesis is missing required fields"),
+	)
+
+	require.NoError(t, err, "repair request should be persisted and dispatched")
+	require.True(t, handled, "repair request should handle the malformed synthesis")
+	require.True(t, started, "repair request should start one bounded correction turn")
+	require.Len(t, sender.inputs, 1, "repair request should dispatch exactly one correction message")
+	require.Equal(t, threadID, sender.inputs[0].ThreadID, "repair request should continue the existing orchestrator thread")
+	require.Contains(t, sender.inputs[0].Message, `"approval_recommended": false`, "correction message should require the omitted approval field with valid JSON")
+	require.NoError(t, mock.ExpectationsWereMet(), "repair request should preserve the invalid output as a durable pending repair")
+}
+
+func TestRequestCodeReviewOrchestratorSynthesisRepairRedispatchesPendingRepair(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	resultID := uuid.New()
+	now := time.Now().UTC()
+	rawReview := "```json\n{\"summary\":\"The change is focused.\"}\n```"
+	state := codeReviewOrchestratorStructuredResult{
+		ThreadID:                threadID.String(),
+		DescriptionInputHash:    "description-hash",
+		SynthesisRepairPending:  true,
+		SynthesisRepairBaseTurn: 1,
+	}
+	mock.ExpectQuery("UPDATE code_review_agent_results").
+		WithArgs(models.CodeReviewAgentResultStatusRunning, &rawReview, repairingOrchestratorResultArg{baseTurn: 1}, orgID, resultID).
+		WillReturnRows(newCodeReviewAgentResultRows().
+			AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleOrchestrator, models.CodeReviewAgentResultStatusRunning, &rawReview, marshalCodeReviewOrchestratorStructuredResult(state), now))
+
+	sender := &codeReviewOrchestratorRepairSenderStub{}
+	stores := &Stores{CodeReviews: db.NewCodeReviewStore(mock)}
+	handled, started, err := requestCodeReviewOrchestratorSynthesisRepair(
+		context.Background(),
+		stores,
+		sender,
+		zerolog.Nop(),
+		runCodeReviewPayload{OrgID: orgID, SessionID: sessionID},
+		models.DefaultCodeReviewPolicyConfig(),
+		[]codereview.PullRequestFile{{Filename: "internal/worker/code_review_handler.go"}},
+		models.CodeReviewAgentResult{
+			ID:            resultID,
+			OrgID:         orgID,
+			SessionID:     sessionID,
+			AgentProvider: "codex",
+			Role:          models.CodeReviewAgentRoleOrchestrator,
+		},
+		state,
+		1,
+		rawReview,
+		errors.New("orchestrator synthesis is missing required fields"),
+	)
+
+	require.NoError(t, err, "a persisted pending repair should be safe to dispatch after a worker restart")
+	require.True(t, handled, "the persisted pending repair should handle the malformed synthesis")
+	require.True(t, started, "the persisted pending repair should start the correction turn")
+	require.Len(t, sender.inputs, 1, "the retry should dispatch the correction message exactly once in this attempt")
+	require.NoError(t, mock.ExpectationsWereMet(), "the retry should retain the pending repair without consuming the repair count")
+}
+
+func TestRequestCodeReviewOrchestratorSynthesisRepairPersistsOversizedFindingsBeforeArtifactSubstitution(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	resultID := uuid.New()
+	findingID := uuid.New()
+	artifactID := uuid.New()
+	now := time.Now().UTC()
+	rawReview := `::code-comment{title="[P2] Preserve this finding" body="The finding must survive synthesis repair." file="internal/worker/code_review_handler.go" start=42 priority=2}
+
+` + strings.Repeat("x", codeReviewRawOutputInlineLimit) + `
+` + "```json\n{\"summary\":\"The change is focused.\"}\n```"
+	artifactKey := fmt.Sprintf("code-review-prompts/%s/orchestrator-output-%s", sessionID, resultID)
+	storedSummary := fmt.Sprintf("Raw output stored in prompt artifact %s (%d bytes).", artifactKey, len(rawReview))
+	state := codeReviewOrchestratorStructuredResult{
+		ThreadID:             threadID.String(),
+		DescriptionInputHash: "description-hash",
+	}
+
+	mock.ExpectQuery("INSERT INTO code_review_findings").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(newCodeReviewFindingRows().
+			AddRow(findingID, orgID, sessionID, &resultID, "internal/worker/code_review_handler.go:42:42:preserve this finding",
+				models.CodeReviewFindingSeverityMedium, models.CodeReviewFindingConfidenceHigh,
+				stringPtr("internal/worker/code_review_handler.go"), intPtr(42), intPtr(42), "Preserve this finding",
+				"The finding must survive synthesis repair.", false, nil, now))
+	mock.ExpectQuery("INSERT INTO code_review_prompt_artifacts").
+		WithArgs(orgID, sessionID, artifactKey, "orchestrator_output", "codex", rawReview, pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "artifact_key", "role", "agent_provider", "content", "metadata", "created_at",
+		}).AddRow(artifactID, orgID, sessionID, artifactKey, "orchestrator_output", "codex", rawReview, json.RawMessage(`{}`), now))
+	mock.ExpectQuery("UPDATE code_review_agent_results").
+		WithArgs(models.CodeReviewAgentResultStatusRunning, &storedSummary, repairingOrchestratorResultArg{baseTurn: 1, findingCount: 1}, orgID, resultID).
+		WillReturnRows(newCodeReviewAgentResultRows().
+			AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleOrchestrator, models.CodeReviewAgentResultStatusRunning, &storedSummary, marshalCodeReviewOrchestratorStructuredResult(state), now))
+
+	sender := &codeReviewOrchestratorRepairSenderStub{}
+	stores := &Stores{CodeReviews: db.NewCodeReviewStore(mock)}
+	handled, started, err := requestCodeReviewOrchestratorSynthesisRepair(
+		context.Background(),
+		stores,
+		sender,
+		zerolog.Nop(),
+		runCodeReviewPayload{OrgID: orgID, SessionID: sessionID},
+		models.DefaultCodeReviewPolicyConfig(),
+		[]codereview.PullRequestFile{{Filename: "internal/worker/code_review_handler.go"}},
+		models.CodeReviewAgentResult{
+			ID:            resultID,
+			OrgID:         orgID,
+			SessionID:     sessionID,
+			AgentProvider: "codex",
+			Role:          models.CodeReviewAgentRoleOrchestrator,
+		},
+		state,
+		1,
+		rawReview,
+		errors.New("orchestrator synthesis is missing required fields"),
+	)
+
+	require.NoError(t, err, "oversized malformed output should persist findings before starting repair")
+	require.True(t, handled, "oversized malformed output should be handled by synthesis repair")
+	require.True(t, started, "oversized malformed output should start the correction turn")
+	require.Len(t, sender.inputs, 1, "oversized malformed output should dispatch exactly one correction message")
+	require.NoError(t, mock.ExpectationsWereMet(), "finding persistence should precede replacement of oversized raw output with an artifact summary")
+}
+
+func TestCodeReviewOrchestratorObserveRepairCompletion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		state       codeReviewOrchestratorStructuredResult
+		currentTurn int
+		expected    codeReviewOrchestratorStructuredResult
+	}{
+		{
+			name:        "leaves non-pending state unchanged",
+			state:       codeReviewOrchestratorStructuredResult{SynthesisRepairCount: 0},
+			currentTurn: 2,
+			expected:    codeReviewOrchestratorStructuredResult{SynthesisRepairCount: 0},
+		},
+		{
+			name: "keeps repair pending until its turn completes",
+			state: codeReviewOrchestratorStructuredResult{
+				SynthesisRepairPending:  true,
+				SynthesisRepairBaseTurn: 2,
+			},
+			currentTurn: 2,
+			expected: codeReviewOrchestratorStructuredResult{
+				SynthesisRepairPending:  true,
+				SynthesisRepairBaseTurn: 2,
+			},
+		},
+		{
+			name: "consumes repair only after its turn completes",
+			state: codeReviewOrchestratorStructuredResult{
+				SynthesisRepairPending:  true,
+				SynthesisRepairBaseTurn: 2,
+			},
+			currentTurn: 3,
+			expected: codeReviewOrchestratorStructuredResult{
+				SynthesisRepairCount:    1,
+				SynthesisRepairBaseTurn: 2,
+			},
+		},
+		{
+			name: "does not exceed repair limit",
+			state: codeReviewOrchestratorStructuredResult{
+				SynthesisRepairCount:    codeReviewOrchestratorSynthesisRepairLimit,
+				SynthesisRepairPending:  true,
+				SynthesisRepairBaseTurn: 2,
+			},
+			currentTurn: 3,
+			expected: codeReviewOrchestratorStructuredResult{
+				SynthesisRepairCount:    codeReviewOrchestratorSynthesisRepairLimit,
+				SynthesisRepairBaseTurn: 2,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := codeReviewOrchestratorObserveRepairCompletion(tt.state, tt.currentTurn)
+
+			require.Equal(t, tt.expected, actual, "repair state should advance only when the correction turn has completed")
+		})
+	}
+}
+
+func TestCodeReviewOrchestratorCombinedOutputPreservesFindingsAfterRepair(t *testing.T) {
+	t.Parallel()
+
+	original := `::code-comment{title="[P2] Test the short circuit" body="Assert the database is not queried." file="internal/worker/code_review_handler.go" start=42 end=42 priority=2}
+
+` + "```json" + `
+{"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":true,"prompt_injection_detected":false,"summary":"Moves validation earlier.","review_summary":"The implementation is focused but needs a direct short-circuit test.","risk_notes":["Regression coverage is incomplete."]}
+` + "```"
+	repaired := "```json\n" +
+		`{"approval_recommended":false,"description_assessments":[],"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":true,"prompt_injection_detected":false,"summary":"Moves validation earlier.","review_summary":"The implementation is focused but needs a direct short-circuit test.","risk_notes":["Regression coverage is incomplete."]}` +
+		"\n```"
+	combined := codeReviewOrchestratorCombinedOutput(&original, repaired, 1)
+
+	synthesis, err := parseCodeReviewOrchestratorSynthesis(combined)
+	require.NoError(t, err, "the corrected final JSON should validate when stored with the original response")
+	require.Equal(t, codeReviewOrchestratorSynthesis{
+		ApprovalRecommended:     false,
+		DescriptionAssessments:  []codeReviewDescriptionAssessment{},
+		Summary:                 "Moves validation earlier.",
+		ReviewSummary:           "The implementation is focused but needs a direct short-circuit test.",
+		RiskNotes:               []string{"Regression coverage is incomplete."},
+		ScopeMismatch:           false,
+		UnresolvedUncertainty:   false,
+		ReviewerDisagreement:    true,
+		PromptInjectionDetected: false,
+	}, synthesis, "the corrected synthesis should preserve every current-schema field")
+
+	path := "internal/worker/code_review_handler.go"
+	line := 42
+	require.Equal(t, []models.CodeReviewFinding{{
+		DedupeKey:  codeReviewFindingDedupeKey(path, line, line, "Test the short circuit"),
+		Severity:   models.CodeReviewFindingSeverityMedium,
+		Confidence: models.CodeReviewFindingConfidenceHigh,
+		Path:       &path,
+		StartLine:  &line,
+		EndLine:    &line,
+		Summary:    "Test the short circuit",
+		Body:       "Assert the database is not queried.",
+	}}, parseCodeReviewFindings(combined, []string{path}), "the correction turn should not discard inline findings from the original response")
+}
+
 func TestParseCodeReviewOrchestratorSynthesis(t *testing.T) {
 	t.Parallel()
 
@@ -1600,7 +1928,8 @@ func TestHarvestCodeReviewOrchestratorResultRejectsMalformedSynthesis(t *testing
 	now := time.Now().UTC()
 	rawReview := "I reviewed the code and found no issues."
 	state := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
-		ThreadID: threadID.String(),
+		ThreadID:             threadID.String(),
+		SynthesisRepairCount: codeReviewOrchestratorSynthesisRepairLimit,
 	})
 
 	mock.ExpectQuery("(?s)SELECT .*FROM code_review_agent_results").

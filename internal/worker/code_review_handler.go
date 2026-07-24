@@ -47,6 +47,7 @@ type runCodeReviewPayload struct {
 }
 
 const codeReviewRawOutputInlineLimit = 32 * 1024
+const codeReviewOrchestratorSynthesisRepairLimit = 1
 
 type codeReviewDescriptionEvaluation struct {
 	Passed               bool
@@ -651,19 +652,22 @@ type codeReviewReviewerStructuredResult struct {
 }
 
 type codeReviewOrchestratorStructuredResult struct {
-	ThreadID             string                          `json:"thread_id,omitempty"`
-	PromptArtifactKey    string                          `json:"prompt_artifact_key,omitempty"`
-	DescriptionInputHash string                          `json:"description_input_hash,omitempty"`
-	FindingCount         int                             `json:"finding_count,omitempty"`
-	CostCents            float64                         `json:"cost_cents,omitempty"`
-	RawArtifactKey       string                          `json:"raw_artifact_key,omitempty"`
-	Synthesis            codeReviewOrchestratorSynthesis `json:"synthesis,omitempty"`
-	SynthesisValidated   bool                            `json:"synthesis_validated,omitempty"`
-	ReadOnly             bool                            `json:"read_only,omitempty"`
-	ReadOnlyViolation    bool                            `json:"read_only_violation,omitempty"`
-	Reverted             bool                            `json:"reverted,omitempty"`
-	Error                string                          `json:"error,omitempty"`
-	CompletedAt          string                          `json:"completed_at,omitempty"`
+	ThreadID                string                          `json:"thread_id,omitempty"`
+	PromptArtifactKey       string                          `json:"prompt_artifact_key,omitempty"`
+	DescriptionInputHash    string                          `json:"description_input_hash,omitempty"`
+	FindingCount            int                             `json:"finding_count,omitempty"`
+	CostCents               float64                         `json:"cost_cents,omitempty"`
+	RawArtifactKey          string                          `json:"raw_artifact_key,omitempty"`
+	Synthesis               codeReviewOrchestratorSynthesis `json:"synthesis,omitempty"`
+	SynthesisValidated      bool                            `json:"synthesis_validated,omitempty"`
+	SynthesisRepairCount    int                             `json:"synthesis_repair_count,omitempty"`
+	SynthesisRepairPending  bool                            `json:"synthesis_repair_pending,omitempty"`
+	SynthesisRepairBaseTurn int                             `json:"synthesis_repair_base_turn,omitempty"`
+	ReadOnly                bool                            `json:"read_only,omitempty"`
+	ReadOnlyViolation       bool                            `json:"read_only_violation,omitempty"`
+	Reverted                bool                            `json:"reverted,omitempty"`
+	Error                   string                          `json:"error,omitempty"`
+	CompletedAt             string                          `json:"completed_at,omitempty"`
 }
 
 func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile) error {
@@ -1564,6 +1568,33 @@ func codeReviewOrchestratorReviewSummary(synthesis codeReviewOrchestratorSynthes
 	return strings.TrimSpace(synthesis.Summary)
 }
 
+func codeReviewOrchestratorRepairPrompt(validationErr error, policy models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile) string {
+	return strings.TrimSpace(prompts.CodeReviewOrchestratorRepairPrompt(prompts.CodeReviewOrchestratorRepairPromptData{
+		ValidationError:         validationErr.Error(),
+		DescriptionRequirements: codeReviewDescriptionRequirementsForPrompt(policy, changedFiles),
+	}))
+}
+
+func codeReviewOrchestratorCombinedOutput(previous *string, current string, repairCount int) string {
+	current = strings.TrimSpace(current)
+	if repairCount <= 0 || previous == nil || strings.TrimSpace(*previous) == "" {
+		return current
+	}
+	return strings.TrimSpace(*previous) + "\n\n--- synthesis repair response ---\n\n" + current
+}
+
+func codeReviewOrchestratorObserveRepairCompletion(state codeReviewOrchestratorStructuredResult, currentTurn int) codeReviewOrchestratorStructuredResult {
+	if !state.SynthesisRepairPending || currentTurn <= state.SynthesisRepairBaseTurn {
+		return state
+	}
+	nextState := state
+	nextState.SynthesisRepairPending = false
+	if nextState.SynthesisRepairCount < codeReviewOrchestratorSynthesisRepairLimit {
+		nextState.SynthesisRepairCount++
+	}
+	return nextState
+}
+
 func extractCodeReviewJSON(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -1581,6 +1612,108 @@ func extractCodeReviewJSON(raw string) string {
 		return strings.TrimSpace(raw[start : end+1])
 	}
 	return raw
+}
+
+type codeReviewOrchestratorRepairSender interface {
+	SendMessage(context.Context, threadsvc.SendMessageInput) (*threadsvc.SendMessageResult, error)
+}
+
+func persistCodeReviewOrchestratorFindings(
+	ctx context.Context,
+	stores *Stores,
+	job runCodeReviewPayload,
+	resultID uuid.UUID,
+	raw string,
+	changedPaths []string,
+) (int, error) {
+	findings := parseCodeReviewFindings(raw, changedPaths)
+	for i := range findings {
+		findings[i].OrgID = job.OrgID
+		findings[i].SessionID = job.SessionID
+		findings[i].AgentResultID = &resultID
+		if err := stores.CodeReviews.ReplaceFinding(ctx, &findings[i]); err != nil {
+			return 0, fmt.Errorf("create harvested orchestrator code review finding: %w", err)
+		}
+	}
+	return len(findings), nil
+}
+
+func requestCodeReviewOrchestratorSynthesisRepair(
+	ctx context.Context,
+	stores *Stores,
+	sender codeReviewOrchestratorRepairSender,
+	logger zerolog.Logger,
+	job runCodeReviewPayload,
+	policy models.CodeReviewPolicyConfig,
+	changedFiles []codereviewsvc.PullRequestFile,
+	result models.CodeReviewAgentResult,
+	state codeReviewOrchestratorStructuredResult,
+	threadCurrentTurn int,
+	raw string,
+	validationErr error,
+) (bool, bool, error) {
+	if state.SynthesisRepairCount >= codeReviewOrchestratorSynthesisRepairLimit {
+		return false, false, nil
+	}
+	threadID, err := uuid.Parse(strings.TrimSpace(state.ThreadID))
+	if err != nil {
+		return false, false, fmt.Errorf("parse orchestrator thread id for synthesis repair: %w", err)
+	}
+
+	findingCount, err := persistCodeReviewOrchestratorFindings(ctx, stores, job, result.ID, raw, codeReviewChangedPaths(changedFiles))
+	if err != nil {
+		return false, false, err
+	}
+	nextState := state
+	nextState.Synthesis = codeReviewOrchestratorSynthesis{}
+	nextState.SynthesisValidated = false
+	nextState.SynthesisRepairPending = true
+	if !state.SynthesisRepairPending {
+		nextState.SynthesisRepairBaseTurn = threadCurrentTurn
+	}
+	if findingCount > nextState.FindingCount {
+		nextState.FindingCount = findingCount
+	}
+	nextState.Error = "repairing invalid orchestrator synthesis: " + validationErr.Error()
+	nextState.CompletedAt = ""
+
+	rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, raw)
+	if err != nil {
+		return false, false, err
+	}
+	nextState.RawArtifactKey = rawArtifactKey
+	if _, err := stores.CodeReviews.UpdateAgentResultOutcome(
+		ctx,
+		job.OrgID,
+		result.ID,
+		models.CodeReviewAgentResultStatusRunning,
+		rawOutput,
+		marshalCodeReviewOrchestratorStructuredResult(nextState),
+	); err != nil {
+		return false, false, fmt.Errorf("record orchestrator synthesis repair: %w", err)
+	}
+
+	if _, err := sender.SendMessage(ctx, threadsvc.SendMessageInput{
+		SessionID:     job.SessionID,
+		OrgID:         job.OrgID,
+		ThreadID:      threadID,
+		Message:       codeReviewOrchestratorRepairPrompt(validationErr, policy, changedFiles),
+		MessageSource: models.SessionMessageSourceAgentTool,
+	}); err != nil {
+		logger.Warn().Err(err).
+			Str("session_id", job.SessionID.String()).
+			Str("thread_id", nextState.ThreadID).
+			Msg("failed to request orchestrator synthesis repair")
+		return true, false, fmt.Errorf("request orchestrator synthesis repair: %w", err)
+	}
+
+	logger.Info().
+		Str("session_id", job.SessionID.String()).
+		Str("thread_id", nextState.ThreadID).
+		Int("repair_count", nextState.SynthesisRepairCount).
+		Bool("repair_pending", nextState.SynthesisRepairPending).
+		Msg("requested orchestrator synthesis repair")
+	return true, true, nil
 }
 
 func codeReviewReviewerResultTerminal(status models.CodeReviewAgentResultStatus) bool {
@@ -2015,6 +2148,7 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			return fmt.Errorf("load code review orchestrator thread: %w", err)
 		}
 		state.CostCents = thread.CostCents
+		state = codeReviewOrchestratorObserveRepairCompletion(state, thread.CurrentTurn)
 		if codeReviewThreadStillRunning(thread.Status) {
 			continue
 		}
@@ -2053,43 +2187,71 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			}
 			continue
 		}
+		combinedRaw := codeReviewOrchestratorCombinedOutput(result.RawOutput, raw, state.SynthesisRepairCount)
 		synthesis, synthesisErr := parseCodeReviewOrchestratorSynthesis(raw)
 		if synthesisErr == nil {
 			_, synthesisErr = codeReviewDescriptionEvaluationFromSynthesis(policy.Config(), changedFiles, synthesis)
 		}
 		if synthesisErr != nil {
+			threads := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
+			repairHandled, repairStarted, repairErr := requestCodeReviewOrchestratorSynthesisRepair(
+				ctx,
+				stores,
+				threads,
+				logger,
+				job,
+				policy.Config(),
+				changedFiles,
+				result,
+				state,
+				thread.CurrentTurn,
+				combinedRaw,
+				synthesisErr,
+			)
+			if repairErr != nil {
+				return repairErr
+			}
+			if repairStarted {
+				return codeReviewWaitingForOrchestrator(policy.Config())
+			}
+			if repairHandled {
+				continue
+			}
+
 			state.Synthesis = codeReviewOrchestratorSynthesis{}
 			state.SynthesisValidated = false
 			state.Error = "invalid orchestrator synthesis: " + synthesisErr.Error()
 			state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
-			rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, raw)
+			rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, combinedRaw)
 			if err != nil {
 				return err
 			}
-			state.RawArtifactKey = rawArtifactKey
+			if rawArtifactKey != "" {
+				state.RawArtifactKey = rawArtifactKey
+			}
 			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, rawOutput, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
 				return fmt.Errorf("mark malformed orchestrator synthesis failed: %w", err)
 			}
 			continue
 		}
-		findings := parseCodeReviewFindings(raw, changedPaths)
-		for i := range findings {
-			findings[i].OrgID = job.OrgID
-			findings[i].SessionID = job.SessionID
-			findings[i].AgentResultID = &result.ID
-			if err := stores.CodeReviews.ReplaceFinding(ctx, &findings[i]); err != nil {
-				return fmt.Errorf("create harvested orchestrator code review finding: %w", err)
-			}
-		}
-		state.Synthesis = synthesis
-		state.SynthesisValidated = true
-		state.FindingCount = len(findings)
-		state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
-		rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, raw)
+		findingCount, err := persistCodeReviewOrchestratorFindings(ctx, stores, job, result.ID, combinedRaw, changedPaths)
 		if err != nil {
 			return err
 		}
-		state.RawArtifactKey = rawArtifactKey
+		state.Synthesis = synthesis
+		state.SynthesisValidated = true
+		if findingCount > state.FindingCount {
+			state.FindingCount = findingCount
+		}
+		state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+		state.Error = ""
+		rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, combinedRaw)
+		if err != nil {
+			return err
+		}
+		if rawArtifactKey != "" {
+			state.RawArtifactKey = rawArtifactKey
+		}
 		if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusCompleted, rawOutput, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
 			return fmt.Errorf("mark orchestrator completed: %w", err)
 		}

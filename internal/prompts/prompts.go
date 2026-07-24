@@ -361,6 +361,15 @@ func CodeReviewOrchestratorPrompt(data CodeReviewOrchestratorPromptData) string 
 	return render("code_review_orchestrator.template", data)
 }
 
+type CodeReviewOrchestratorRepairPromptData struct {
+	ValidationError         string
+	DescriptionRequirements []CodeReviewDescriptionRequirementPromptData
+}
+
+func CodeReviewOrchestratorRepairPrompt(data CodeReviewOrchestratorRepairPromptData) string {
+	return render("code_review_orchestrator_repair.template", data)
+}
+
 // ─── Automations ────────────────────────────────────────────────────────────
 
 type AutomationGoalFastImprovementPromptData struct {
