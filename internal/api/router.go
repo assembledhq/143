@@ -370,6 +370,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		AliasLogins:       cfg.CodeReviewAliasLogins,
 		TeamSlugs:         cfg.CodeReviewTeamSlugs,
 	})
+	codeReviewSvc.SetReviewStatusCommentJobs(jobStore)
 	codeReviewSvc.SetGitHubTriggerStore(codeReviewStore)
 	if prService != nil {
 		codeReviewSvc.SetRetryDependencies(pullRequestStore, prService)

@@ -65,6 +65,40 @@ func TestPullRequestStoreAssociateGitHubPullRequestScopesAndAdopts(t *testing.T)
 	require.NoError(t, mock.ExpectationsWereMet(), "GitHub PR association should include the tenant and session identity")
 }
 
+func TestPullRequestStoreCodeReviewStatusCommentID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+	commentID := int64(7331)
+	store := NewPullRequestStore(mock)
+
+	mock.ExpectQuery("SELECT code_review_status_comment_id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "id": pullRequestID}).
+		WillReturnRows(pgxmock.NewRows([]string{"code_review_status_comment_id"}).AddRow(nil))
+	missing, err := store.GetCodeReviewStatusCommentID(context.Background(), orgID, pullRequestID)
+	require.NoError(t, err, "an unrecorded rolling comment should load without error")
+	require.Nil(t, missing, "an unrecorded rolling comment should return a nil id")
+
+	mock.ExpectQuery("UPDATE pull_requests[\\s\\S]*code_review_status_comment_id = @comment_id[\\s\\S]*org_id = @org_id[\\s\\S]*id = @id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "id": pullRequestID, "comment_id": commentID}).
+		WillReturnRows(pgxmock.NewRows([]string{"code_review_status_comment_id"}).AddRow(commentID))
+	err = store.SetCodeReviewStatusCommentID(context.Background(), orgID, pullRequestID, commentID)
+	require.NoError(t, err, "a GitHub rolling comment id should persist for the pull request")
+
+	mock.ExpectQuery("SELECT code_review_status_comment_id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "id": pullRequestID}).
+		WillReturnRows(pgxmock.NewRows([]string{"code_review_status_comment_id"}).AddRow(commentID))
+	stored, err := store.GetCodeReviewStatusCommentID(context.Background(), orgID, pullRequestID)
+	require.NoError(t, err, "a recorded rolling comment should load without error")
+	require.Equal(t, &commentID, stored, "the pull request should return its exact rolling comment id")
+	require.NoError(t, mock.ExpectationsWereMet(), "rolling comment id queries should remain scoped to the organization and pull request")
+}
+
 func TestPullRequestStoreAssociateGitHubPullRequestValidatesIdentity(t *testing.T) {
 	t.Parallel()
 

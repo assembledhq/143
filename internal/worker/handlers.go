@@ -461,6 +461,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	}
 	if stores.CodeReviews != nil {
 		w.Register(models.JobTypeRunCodeReview, newRunCodeReviewHandler(stores, services, logger))
+		w.Register(models.JobTypeSyncCodeReviewStatusComment, newSyncCodeReviewStatusCommentHandler(stores, services, logger))
 		if services != nil && services.CodeReviewLifecycle != nil {
 			w.Register(models.JobTypeStartCodeReviewReassessment, newStartCodeReviewReassessmentHandler(stores, services, logger))
 		}
@@ -787,6 +788,10 @@ type prFeedbackTriager interface {
 
 type codeReviewSubmitter interface {
 	SubmitReview(ctx context.Context, req codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, error)
+}
+
+type codeReviewStatusCommentUpdater interface {
+	UpsertReviewStatusComment(ctx context.Context, req codereviewsvc.UpsertReviewStatusCommentRequest) (int64, error)
 }
 
 type codeReviewLifecycle interface {

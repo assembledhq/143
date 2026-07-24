@@ -1,0 +1,184 @@
+package worker
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
+	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
+	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+)
+
+const codeReviewStatusCommentJobMaxAttempts = 3
+
+func newSyncCodeReviewStatusCommentHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, _ string, payload json.RawMessage) error {
+		if stores == nil || stores.CodeReviews == nil {
+			return fmt.Errorf("code review store is unavailable")
+		}
+		if services == nil || services.CodeReviews == nil {
+			return nil
+		}
+		updater, ok := services.CodeReviews.(codeReviewStatusCommentUpdater)
+		if !ok {
+			return nil
+		}
+		var job codereviewsvc.SyncReviewStatusCommentJobPayload
+		if err := json.Unmarshal(payload, &job); err != nil {
+			return fmt.Errorf("decode code review status comment job payload: %w", err)
+		}
+		if job.OrgID == uuid.Nil || job.SessionID == uuid.Nil {
+			return fmt.Errorf("org_id and session_id are required")
+		}
+		metadata, err := stores.CodeReviews.GetBySessionID(ctx, job.OrgID, job.SessionID)
+		if err != nil {
+			return fmt.Errorf("load code review for status comment: %w", err)
+		}
+		latest, err := stores.CodeReviews.GetLatestByPullRequest(ctx, job.OrgID, metadata.PullRequestID)
+		if err != nil {
+			return fmt.Errorf("load latest code review for status comment: %w", err)
+		}
+		if latest.SessionID != metadata.SessionID {
+			logger.Info().
+				Str("session_id", metadata.SessionID.String()).
+				Str("latest_session_id", latest.SessionID.String()).
+				Msg("skipping superseded code review status comment sync")
+			return nil
+		}
+		if stores.Repositories == nil || stores.PullRequests == nil {
+			return fmt.Errorf("code review status comment repository stores are unavailable")
+		}
+		repository, err := stores.Repositories.GetByID(ctx, job.OrgID, metadata.RepositoryID)
+		if err != nil {
+			return fmt.Errorf("load repository for code review status comment: %w", err)
+		}
+		if repository.InstallationID == 0 {
+			return fmt.Errorf("repository %s has no GitHub installation id", repository.ID)
+		}
+		pullRequest, err := stores.PullRequests.GetByID(ctx, job.OrgID, metadata.PullRequestID)
+		if err != nil {
+			return fmt.Errorf("load pull request for code review status comment: %w", err)
+		}
+		repositoryName := strings.TrimSpace(pullRequest.GitHubRepo)
+		if repositoryName == "" {
+			repositoryName = strings.TrimSpace(repository.FullName)
+		}
+		var (
+			commentID int64
+			status    models.CodeReviewSessionStatus
+			updated   bool
+		)
+		err = stores.CodeReviews.RunWithStatusCommentLock(ctx, job.OrgID, metadata.PullRequestID, func(lockCtx context.Context, lockDB db.DBTX) error {
+			lockedCodeReviews := db.NewCodeReviewStore(lockDB)
+			lockedPullRequests := db.NewPullRequestStore(lockDB)
+			lockedLatest, latestErr := lockedCodeReviews.GetLatestByPullRequest(lockCtx, job.OrgID, metadata.PullRequestID)
+			if latestErr != nil {
+				return fmt.Errorf("recheck latest code review under status comment lock: %w", latestErr)
+			}
+			if lockedLatest.SessionID != metadata.SessionID {
+				logger.Info().
+					Str("session_id", metadata.SessionID.String()).
+					Str("latest_session_id", lockedLatest.SessionID.String()).
+					Msg("skipping superseded code review status comment sync under lock")
+				return nil
+			}
+			existingCommentID, existingErr := lockedPullRequests.GetCodeReviewStatusCommentID(lockCtx, job.OrgID, metadata.PullRequestID)
+			if existingErr != nil {
+				return fmt.Errorf("load durable code review status comment id: %w", existingErr)
+			}
+			body := codeReviewStatusCommentBody(lockedLatest, codeReviewSessionURL(services.FrontendURL, lockedLatest.SessionID))
+			var updateErr error
+			commentID, updateErr = updater.UpsertReviewStatusComment(lockCtx, codereviewsvc.UpsertReviewStatusCommentRequest{
+				InstallationID:    repository.InstallationID,
+				Repository:        repositoryName,
+				PullNumber:        pullRequest.GitHubPRNumber,
+				Body:              body,
+				ExistingCommentID: existingCommentID,
+			})
+			if updateErr == nil {
+				updateErr = lockedPullRequests.SetCodeReviewStatusCommentID(lockCtx, job.OrgID, metadata.PullRequestID, commentID)
+			}
+			status = lockedLatest.Status
+			updated = updateErr == nil
+			return updateErr
+		})
+		if err != nil {
+			return classifyGitHubJobError(fmt.Errorf("upsert code review status comment: %w", err), metadata.SessionID.String())
+		}
+		if !updated {
+			return nil
+		}
+		logger.Info().
+			Str("org_id", job.OrgID.String()).
+			Str("session_id", job.SessionID.String()).
+			Int64("github_comment_id", commentID).
+			Str("review_status", string(status)).
+			Msg("synchronized code review status comment")
+		return nil
+	}
+}
+
+func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, sessionURL string) string {
+	var paragraphs []string
+	switch metadata.Status {
+	case models.CodeReviewSessionStatusCompleted:
+		if body := strings.TrimSpace(stringPtrValue(metadata.FinalReviewBody)); body != "" {
+			paragraphs = append(paragraphs, body)
+		} else if metadata.Decision != nil && *metadata.Decision == models.CodeReviewDecisionApproved {
+			paragraphs = append(paragraphs, "143 Code Reviewer approved this PR.")
+		} else {
+			paragraphs = append(paragraphs, "143 Code Reviewer completed its review.")
+		}
+	case models.CodeReviewSessionStatusFailed:
+		paragraphs = append(paragraphs, "143 Code Reviewer could not complete this review.")
+		if message := strings.TrimSpace(stringPtrValue(metadata.StatusMessage)); message != "" {
+			paragraphs = append(paragraphs, message)
+		}
+	case models.CodeReviewSessionStatusStale:
+		paragraphs = append(paragraphs, "143 Code Reviewer stopped this review because the pull request changed before the result was published.")
+	case models.CodeReviewSessionStatusCancelled:
+		paragraphs = append(paragraphs, "This 143 code review was cancelled.")
+	default:
+		paragraphs = append(paragraphs, "143 Code Reviewer has started reviewing this pull request.")
+	}
+	if sessionURL != "" && !strings.Contains(strings.Join(paragraphs, "\n\n"), sessionURL) {
+		label := "Follow the review session"
+		if codeReviewMetadataTerminal(metadata.Status) {
+			label = "View the review session"
+		}
+		paragraphs = append(paragraphs, fmt.Sprintf("[%s](%s)", label, sessionURL))
+	}
+	return strings.Join(paragraphs, "\n\n")
+}
+
+func enqueueCodeReviewStatusCommentSync(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, stage string) {
+	if stores == nil || stores.Jobs == nil || services == nil || services.CodeReviews == nil {
+		return
+	}
+	if _, ok := services.CodeReviews.(codeReviewStatusCommentUpdater); !ok {
+		return
+	}
+	dedupeKey := fmt.Sprintf("code_review_status_comment:%s:%s", job.SessionID, strings.TrimSpace(stage))
+	if _, err := stores.Jobs.EnqueueWithOpts(ctx, job.OrgID, db.EnqueueOpts{
+		Queue:   "default",
+		JobType: models.JobTypeSyncCodeReviewStatusComment,
+		Payload: codereviewsvc.SyncReviewStatusCommentJobPayload{
+			OrgID:         job.OrgID,
+			SessionID:     job.SessionID,
+			RepositoryID:  job.RepositoryID,
+			PullRequestID: job.PullRequestID,
+		},
+		Priority:    3,
+		DedupeKey:   &dedupeKey,
+		MaxAttempts: codeReviewStatusCommentJobMaxAttempts,
+	}); err != nil {
+		logger.Warn().Err(err).
+			Str("session_id", job.SessionID.String()).
+			Str("stage", stage).
+			Msg("failed to enqueue best-effort code review status comment sync")
+	}
+}

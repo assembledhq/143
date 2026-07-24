@@ -107,6 +107,14 @@ func NewService(appID int64, privateKeyPEM string, loggers ...zerolog.Logger) (*
 	}, nil
 }
 
+// GitHubAppID identifies comments and other artifacts authored by this app.
+func (s *Service) GitHubAppID() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.appID
+}
+
 func (s *Service) GetInstallationToken(ctx context.Context, installationID int64) (string, error) {
 	s.mu.RLock()
 	cached, ok := s.cache[installationID]

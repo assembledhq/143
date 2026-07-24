@@ -69,6 +69,7 @@ type Service struct {
 	metadata          MetadataStore
 	sessions          SessionStore
 	jobs              JobStore
+	statusCommentJobs JobStore
 	triggers          GitHubTriggerStore
 	pullRequests      PullRequestStore
 	pullRequestSyncer PullRequestSyncer
@@ -190,6 +191,13 @@ type RunCodeReviewJobPayload struct {
 	ExistingGitHubReviewURL *string                    `json:"existing_github_review_url,omitempty"`
 }
 
+type SyncReviewStatusCommentJobPayload struct {
+	OrgID         uuid.UUID `json:"org_id"`
+	SessionID     uuid.UUID `json:"session_id"`
+	RepositoryID  uuid.UUID `json:"repository_id"`
+	PullRequestID uuid.UUID `json:"pull_request_id"`
+}
+
 type reviewStartOptions struct {
 	triggerSource           models.CodeReviewTriggerSource
 	forceReassessment       bool
@@ -221,6 +229,13 @@ func (s *Service) SetGitHubTriggerStore(triggers GitHubTriggerStore) {
 func (s *Service) SetRetryDependencies(pullRequests PullRequestStore, syncer PullRequestSyncer) {
 	s.pullRequests = pullRequests
 	s.pullRequestSyncer = syncer
+}
+
+// SetReviewStatusCommentJobs enables asynchronous, best-effort PR status
+// comments. It is opt-in so callers that only need lifecycle calculations do
+// not unexpectedly enqueue external writes.
+func (s *Service) SetReviewStatusCommentJobs(jobs JobStore) {
+	s.statusCommentJobs = jobs
 }
 
 // RetryReview creates a replacement attempt for a terminal retryable failure.
@@ -907,6 +922,7 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 			Processed: true, SessionID: session.ID, MetadataID: metadata.ID, TriggerSource: source,
 		}, fmt.Errorf("enqueue code review job: %w", err)
 	}
+	s.enqueueReviewStatusComment(ctx, *metadata)
 	return ReviewRequestedResult{
 		Processed:         true,
 		DispatchConfirmed: true,
@@ -915,6 +931,30 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 		JobID:             jobID,
 		TriggerSource:     source,
 	}, nil
+}
+
+func (s *Service) enqueueReviewStatusComment(ctx context.Context, metadata models.CodeReviewSessionMetadata) {
+	if s.statusCommentJobs == nil {
+		return
+	}
+	dedupeKey := "code_review_status_comment:" + metadata.SessionID.String() + ":started"
+	if _, err := s.statusCommentJobs.EnqueueWithOpts(ctx, metadata.OrgID, db.EnqueueOpts{
+		Queue:   "default",
+		JobType: models.JobTypeSyncCodeReviewStatusComment,
+		Payload: SyncReviewStatusCommentJobPayload{
+			OrgID:         metadata.OrgID,
+			SessionID:     metadata.SessionID,
+			RepositoryID:  metadata.RepositoryID,
+			PullRequestID: metadata.PullRequestID,
+		},
+		Priority:    3,
+		DedupeKey:   &dedupeKey,
+		MaxAttempts: 3,
+	}); err != nil {
+		s.logger.Warn().Err(err).
+			Str("session_id", metadata.SessionID.String()).
+			Msg("failed to enqueue best-effort code review status comment")
+	}
 }
 
 func codeReviewPhasePtr(phase models.CodeReviewPhase) *models.CodeReviewPhase {

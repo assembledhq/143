@@ -105,6 +105,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 							return reconcileErr
 						}
 					}
+					enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
 					return nil
 				}
 			}
@@ -184,6 +185,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 				Str("reviewed_head", job.HeadSHA).
 				Msg("marked code review stale after PR head changed")
 			reconcileCodeReviewSessionStale(ctx, stores, logger, job)
+			enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
 			return nil
 		}
 		descriptionEvaluation, err := evaluateCodeReviewDescriptionPolicy(ctx, stores, services, logger, job, pr, policy, metadata, changedFiles)
@@ -270,6 +272,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 				return fmt.Errorf("mark code review stale before decision: %w", staleErr)
 			}
 			reconcileCodeReviewSessionStale(ctx, stores, logger, job)
+			enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
 			return nil
 		}
 		changedFiles, changedFilesAvailable, err := loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
@@ -331,6 +334,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		}
 		event.Str("decision", string(decision.Decision)).Msg("completed code review")
 		reconcileCodeReviewSessionSuccess(ctx, stores, logger, job)
+		enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
 		return nil
 	}
 }
@@ -356,6 +360,7 @@ func stopCodeReviewIfParentSessionCancelled(ctx context.Context, stores *Stores,
 		}
 	}
 	removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
+	enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
 	logger.Info().
 		Str("session_id", job.SessionID.String()).
 		Msg("stopped code review because parent session was cancelled")
@@ -377,6 +382,7 @@ func failCodeReviewWithoutReviewerOutput(ctx context.Context, stores *Stores, se
 	if err := reconcileCodeReviewSessionFailure(ctx, stores, job, reason); err != nil {
 		return err
 	}
+	enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
 	logger.Warn().
 		Str("session_id", job.SessionID.String()).
 		Str("reason", reason).
@@ -498,6 +504,7 @@ func registerCodeReviewDeadLetterReconciliation(ctx context.Context, stores *Sto
 				Msg("failed to reconcile dead-lettered code review session")
 		}
 		removeCodeReviewRequestedReviewerAfterDeadLetter(hookCtx, stores, services, logger, job)
+		enqueueCodeReviewStatusCommentSync(hookCtx, stores, services, logger, job, "terminal")
 	})
 }
 

@@ -1772,6 +1772,7 @@ func buildServices(
 			TeamSlugs:         cfg.CodeReviewTeamSlugs,
 		},
 	)
+	codeReviewLifecycle.SetReviewStatusCommentJobs(jobStore)
 	svc := &worker.Services{
 		Orchestrator:    orchestrator,
 		PR:              prService,

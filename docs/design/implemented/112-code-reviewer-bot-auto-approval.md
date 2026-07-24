@@ -30,7 +30,8 @@ Implemented:
 - prompt artifact storage and recovery for rendered reviewer/orchestrator/description prompts and their structured outputs
 - inline-comment posting with marker-based dedupe/update and posted-comment id persistence
 - GitHub changed-file fetch support for PR file/line threshold and coarse risk-category evaluation
-- GitHub review submission as the sole GitHub result surface, avoiding a redundant commit status that could be mistaken for a required CI check
+- one rolling PR conversation comment that links to the active session while review is running and is replaced with the result when it completes, alongside the formal GitHub review and without a redundant commit status that could be mistaken for a required CI check
+- durable per-PR storage of that rolling comment's GitHub ID, using direct updates normally and an app-authored marker scan only to recover a missing or deleted comment
 - in-place GitHub review-summary refresh for reassessments, with visible latest-assessment commit/time provenance, prior inline findings updated by stable markers, and each assessment retained as a separate auditable 143 session
 - stale requested-reviewer cleanup after final review submission for reviewer-login and team-slug triggers carried in the durable job payload
 - productized GitHub team-trigger setup that creates or repairs the `143-code-reviewer` org team, grants repository read access, and persists repo-scoped active trigger settings
@@ -104,6 +105,9 @@ Developer requests "143 Code Reviewer" in GitHub
 143 receives review_requested webhook and creates a code review session
         |
         v
+Best-effort async job creates or refreshes one PR comment linked to the session
+        |
+        v
 Check PR description policy
         |
         v
@@ -119,10 +123,14 @@ Else:
   submit a GitHub review comment with escalation reasons
         |
         v
+Replace the rolling PR comment with the result
+        |
+        v
 Until approval, later commits automatically rerun the assessment, and a new
 explicit reviewer request reruns it even at the same head. Both update the
-existing GitHub review summary. Equivalent webhook deliveries are idempotent;
-other webhook activity only synchronizes PR state. Approval is final.
+existing GitHub review summary and rolling PR comment. Equivalent webhook
+deliveries are idempotent; other webhook activity only synchronizes PR state.
+Approval is final.
 ```
 
 Reviewer assignment should be explicit in v1. Auto-running can come later after teams trust the signal.
@@ -136,7 +144,9 @@ Primary interaction:
 - A 143 admin creates or repairs the `143-code-reviewer` GitHub team from the Code reviews configuration page.
 - 143 grants that team read access to the selected repository and stores the team slug as the repo's active trigger.
 - A user requests `@org/143-code-reviewer` as a team reviewer on a PR.
+- 143 asynchronously creates or refreshes one PR conversation comment that links to the running review session.
 - The bot submits a final GitHub review with a summary body and a configurable number of inline comments on changed lines; it does not publish a separate commit status.
+- The rolling conversation comment is replaced with that result, and later review passes reuse the same comment.
 
 This does not use CODEOWNERS and does not auto-request reviews on PR open. The team is only the selectable GitHub reviewer trigger; normal review submission still uses the installed GitHub App.
 
