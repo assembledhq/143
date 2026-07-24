@@ -3092,10 +3092,11 @@ func codeReviewChangedLineSet(files []codereviewsvc.PullRequestFile) map[string]
 }
 
 var (
-	codeReviewDirectivePattern = regexp.MustCompile(`::code-comment\{([^}]*)\}`)
-	codeReviewAttributePattern = regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*)=("(?:\\.|[^"\\])*"|[^\s}]+)`)
-	codeReviewPriorityPattern  = regexp.MustCompile(`(?i)\[P([0-3])\]`)
-	codeReviewDiffHunkPattern  = regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
+	codeReviewDirectivePattern       = regexp.MustCompile(`::code-comment\{([^}]*)\}`)
+	codeReviewAttributePattern       = regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*)=("(?:\\.|[^"\\])*"|[^\s}]+)`)
+	codeReviewPriorityPattern        = regexp.MustCompile(`(?i)\[P([0-3])\]`)
+	codeReviewLeadingPriorityPattern = regexp.MustCompile(`(?i)^\[P[0-3]\]\s*`)
+	codeReviewDiffHunkPattern        = regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
 )
 
 func parseCodeReviewFindings(output string, changedPaths []string) []models.CodeReviewFinding {
@@ -3449,10 +3450,7 @@ func codeReviewInlineComments(findings []models.CodeReviewFinding) []codereviews
 		if finding.Path == nil || strings.TrimSpace(*finding.Path) == "" || finding.StartLine == nil || *finding.StartLine <= 0 {
 			continue
 		}
-		body := strings.TrimSpace(finding.Body)
-		if body == "" {
-			body = strings.TrimSpace(finding.Summary)
-		}
+		body := codeReviewInlineCommentBody(finding)
 		if body == "" {
 			continue
 		}
@@ -3466,6 +3464,32 @@ func codeReviewInlineComments(findings []models.CodeReviewFinding) []codereviews
 	return comments
 }
 
+func codeReviewInlineCommentBody(finding models.CodeReviewFinding) string {
+	body := strings.TrimSpace(finding.Body)
+	if body == "" {
+		body = strings.TrimSpace(finding.Summary)
+	}
+	if body == "" {
+		return ""
+	}
+	return codeReviewPriorityPrefix(finding.Severity) + " " + codeReviewLeadingPriorityPattern.ReplaceAllString(body, "")
+}
+
+func codeReviewPriorityPrefix(severity models.CodeReviewFindingSeverity) string {
+	switch severity {
+	case models.CodeReviewFindingSeverityCritical:
+		return "[P0]"
+	case models.CodeReviewFindingSeverityHigh:
+		return "[P1]"
+	case models.CodeReviewFindingSeverityMedium:
+		return "[P2]"
+	case models.CodeReviewFindingSeverityLow, models.CodeReviewFindingSeverityInfo:
+		return "[P3]"
+	default:
+		return "[P2]"
+	}
+}
+
 func markPostedCodeReviewFindings(ctx context.Context, store *db.CodeReviewStore, orgID uuid.UUID, findings []models.CodeReviewFinding, posted []codereviewsvc.SubmitReviewPostedComment) {
 	if store == nil || len(findings) == 0 || len(posted) == 0 {
 		return
@@ -3475,10 +3499,7 @@ func markPostedCodeReviewFindings(ctx context.Context, store *db.CodeReviewStore
 		if finding.ID == uuid.Nil || finding.GitHubCommentID != nil || finding.Path == nil || finding.StartLine == nil {
 			continue
 		}
-		body := strings.TrimSpace(finding.Body)
-		if body == "" {
-			body = strings.TrimSpace(finding.Summary)
-		}
+		body := codeReviewInlineCommentBody(finding)
 		for idx, comment := range posted {
 			if _, ok := used[idx]; ok {
 				continue
