@@ -309,6 +309,42 @@ func TestService_HandleReviewRequested(t *testing.T) {
 	}
 }
 
+func TestService_ReviewStatusCommentDispatchIsAsynchronousAndBestEffort(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		statusErr error
+	}{
+		{name: "queues status comment sync", statusErr: nil},
+		{name: "does not fail review when status comment dispatch fails", statusErr: errors.New("queue unavailable")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			metadata := &metadataStub{}
+			sessions := &sessionStub{}
+			reviewJobs := &jobStub{jobID: uuid.New()}
+			statusJobs := &jobStub{jobID: uuid.New(), err: tt.statusErr}
+			svc := NewService(newPolicyStub(), metadata, sessions, reviewJobs, zerolog.Nop(), Config{})
+			svc.SetReviewStatusCommentJobs(statusJobs)
+
+			result, err := svc.HandleReviewRequested(context.Background(), newReviewRequestedInput(nil))
+
+			require.NoError(t, err, "best-effort status comment dispatch should never fail review kickoff")
+			require.True(t, result.DispatchConfirmed, "review worker dispatch should remain confirmed")
+			require.Equal(t, 1, reviewJobs.enqueueCalls, "review kickoff should enqueue its durable review work once")
+			require.Equal(t, 1, statusJobs.enqueueCalls, "review kickoff should asynchronously enqueue one status comment sync")
+			require.Equal(t, models.JobTypeSyncCodeReviewStatusComment, statusJobs.jobType, "status dispatch should use the dedicated comment job")
+			require.Equal(t, "default", statusJobs.opts.Queue, "status comment writes should not consume the agent queue")
+			require.Equal(t, 3, statusJobs.opts.MaxAttempts, "best-effort comment sync should use a small bounded retry budget")
+			require.Equal(t, result.SessionID, statusJobs.statusPayload.SessionID, "status comment job should target the running review session")
+			require.Equal(t, metadata.created.PullRequestID, statusJobs.statusPayload.PullRequestID, "status comment job should target the reviewed pull request")
+		})
+	}
+}
+
 func TestService_HandleReviewChanged(t *testing.T) {
 	t.Parallel()
 
@@ -1040,6 +1076,7 @@ type jobStub struct {
 	jobType             string
 	dedupeKey           string
 	payload             RunCodeReviewJobPayload
+	statusPayload       SyncReviewStatusCommentJobPayload
 	reassessmentPayload ReviewChangedInput
 	opts                db.EnqueueOpts
 	active              bool
@@ -1078,6 +1115,9 @@ func (s *jobStub) EnqueueWithOpts(_ context.Context, _ uuid.UUID, opts db.Enqueu
 	s.jobType = opts.JobType
 	if typed, ok := opts.Payload.(RunCodeReviewJobPayload); ok {
 		s.payload = typed
+	}
+	if typed, ok := opts.Payload.(SyncReviewStatusCommentJobPayload); ok {
+		s.statusPayload = typed
 	}
 	if typed, ok := opts.Payload.(ReviewChangedInput); ok {
 		s.reassessmentPayload = typed

@@ -1090,6 +1090,7 @@ const (
 	JobTypePagerDutySync                 = "pagerduty_sync"
 	JobTypeRunCodeReview                 = "run_code_review"
 	JobTypeStartCodeReviewReassessment   = "start_code_review_reassessment"
+	JobTypeSyncCodeReviewStatusComment   = "sync_code_review_status_comment"
 	JobTypeMaterializeChangeset          = "materialize_changeset"
 	JobTypeVerifyChangesetSplit          = "verify_changeset_split"
 	JobTypeRestackChangesets             = "restack_changesets"

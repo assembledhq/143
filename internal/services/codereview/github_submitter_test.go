@@ -12,6 +12,131 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestGitHubSubmitter_UpsertReviewStatusCommentCreatesThenUpdatesStickyComment(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu         sync.Mutex
+		storedBody string
+		listCalls  int
+		postCalls  int
+		patchCalls int
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/issues/42/comments":
+			listCalls++
+			if storedBody == "" {
+				if err := json.NewEncoder(w).Encode([]any{}); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+				}
+				return
+			}
+			if err := json.NewEncoder(w).Encode([]map[string]any{{"id": int64(7331), "body": storedBody}}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/repo/issues/42/comments":
+			var payload map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			postCalls++
+			storedBody = payload["body"]
+			if err := json.NewEncoder(w).Encode(map[string]any{"id": int64(7331), "body": storedBody}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+		case r.Method == http.MethodPatch && r.URL.Path == "/repos/acme/repo/issues/comments/7331":
+			var payload map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			patchCalls++
+			storedBody = payload["body"]
+			if err := json.NewEncoder(w).Encode(map[string]any{"id": int64(7331), "body": storedBody}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
+	request := UpsertReviewStatusCommentRequest{
+		InstallationID: 99,
+		Repository:     "acme/repo",
+		PullNumber:     42,
+		Body:           "143 Code Reviewer has started.\n\n[Follow the review session](https://143.test/sessions/one)",
+	}
+	commentID, err := submitter.UpsertReviewStatusComment(context.Background(), request)
+	require.NoError(t, err, "first status sync should create the rolling PR comment")
+	require.Equal(t, int64(7331), commentID, "created status sync should return the issue comment id")
+
+	request.Body = "143 Code Reviewer approved this PR.\n\n[View the full review](https://143.test/sessions/two)"
+	request.ExistingCommentID = &commentID
+	commentID, err = submitter.UpsertReviewStatusComment(context.Background(), request)
+	require.NoError(t, err, "subsequent review status should update the marker-backed comment")
+	require.Equal(t, int64(7331), commentID, "subsequent review should preserve the same issue comment id")
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, 1, listCalls, "only the first status sync should scan PR comments")
+	require.Equal(t, 1, postCalls, "the PR should receive exactly one rolling status comment")
+	require.Equal(t, 1, patchCalls, "the durable comment id should update the existing status comment directly")
+	require.Contains(t, storedBody, codeReviewStatusCommentMarker, "the rolling comment should retain its recovery marker")
+	require.Contains(t, storedBody, "approved this PR", "the rolling comment should contain the latest review result")
+}
+
+func TestGitHubSubmitter_UpsertReviewStatusCommentRecoversStaleIDFromAppAuthoredMarker(t *testing.T) {
+	t.Parallel()
+
+	var patchedCommentID int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPatch && r.URL.Path == "/repos/acme/repo/issues/comments/7000":
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/issues/42/comments":
+			require.NoError(t, json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"id":                       int64(8000),
+					"body":                     codeReviewStatusCommentMarker + "\n\nHuman-authored marker",
+					"performed_via_github_app": map[string]any{"id": int64(999)},
+				},
+				{
+					"id":                       int64(8001),
+					"body":                     codeReviewStatusCommentMarker + "\n\nOld app status",
+					"performed_via_github_app": map[string]any{"id": int64(143)},
+				},
+			}), "marker recovery response should encode")
+		case r.Method == http.MethodPatch && r.URL.Path == "/repos/acme/repo/issues/comments/8001":
+			patchedCommentID = 8001
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"id": patchedCommentID}), "marker recovery update should encode")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	staleCommentID := int64(7000)
+	submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token", appID: 143}, WithGitHubSubmitterBaseURL(server.URL))
+	commentID, err := submitter.UpsertReviewStatusComment(context.Background(), UpsertReviewStatusCommentRequest{
+		InstallationID:    99,
+		Repository:        "acme/repo",
+		PullNumber:        42,
+		Body:              "143 Code Reviewer completed its review.",
+		ExistingCommentID: &staleCommentID,
+	})
+
+	require.NoError(t, err, "a deleted durable comment should recover through the app-authored marker")
+	require.Equal(t, int64(8001), commentID, "marker recovery should return the replacement durable comment id")
+	require.Equal(t, int64(8001), patchedCommentID, "marker recovery must ignore a marker authored by another GitHub app")
+}
+
 func TestGitHubSubmitter_SubmitReview(t *testing.T) {
 	t.Parallel()
 
@@ -311,6 +436,7 @@ func TestIsCodeReviewAuthoredBody(t *testing.T) {
 	}{
 		{name: "review summary marker", body: "result\n\n" + codeReviewOutputMarker("output"), expected: true},
 		{name: "inline finding marker", body: withCodeReviewFindingMarker("finding", "key"), expected: true},
+		{name: "rolling status marker", body: codeReviewStatusCommentMarker + "\n\nReviewing", expected: true},
 		{name: "human review", body: "Please add a regression test.", expected: false},
 	}
 	for _, tt := range tests {
@@ -690,8 +816,16 @@ func TestGitHubSubmitter_SubmitReviewRejectsInvalidInput(t *testing.T) {
 
 type tokenStub struct {
 	token string
+	appID int64
 }
 
 func (s *tokenStub) GetInstallationToken(context.Context, int64) (string, error) {
 	return s.token, nil
+}
+
+func (s *tokenStub) GitHubAppID() int64 {
+	if s.appID > 0 {
+		return s.appID
+	}
+	return 143
 }

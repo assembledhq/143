@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/assembledhq/143/internal/models"
 )
@@ -180,6 +181,49 @@ func (s *PullRequestStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (mo
 		return models.PullRequest{}, fmt.Errorf("query pull request: %w", err)
 	}
 	return pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.PullRequest])
+}
+
+// GetCodeReviewStatusCommentID returns the durable GitHub issue-comment ID for
+// the rolling code review status comment. A nil ID means the comment has not
+// been recorded yet and the caller should recover it by marker or create it.
+func (s *PullRequestStore) GetCodeReviewStatusCommentID(ctx context.Context, orgID, id uuid.UUID) (*int64, error) {
+	var commentID pgtype.Int8
+	if err := s.db.QueryRow(ctx, `
+		SELECT code_review_status_comment_id
+		FROM pull_requests
+		WHERE org_id = @org_id
+		  AND id = @id`, pgx.NamedArgs{
+		"org_id": orgID,
+		"id":     id,
+	}).Scan(&commentID); err != nil {
+		return nil, fmt.Errorf("query code review status comment id: %w", err)
+	}
+	if !commentID.Valid {
+		return nil, nil
+	}
+	return &commentID.Int64, nil
+}
+
+// SetCodeReviewStatusCommentID records the app-created rolling comment after a
+// successful GitHub create, recovery, or update.
+func (s *PullRequestStore) SetCodeReviewStatusCommentID(ctx context.Context, orgID, id uuid.UUID, commentID int64) error {
+	if commentID <= 0 {
+		return fmt.Errorf("code review status comment id must be positive")
+	}
+	var storedID int64
+	if err := s.db.QueryRow(ctx, `
+		UPDATE pull_requests
+		SET code_review_status_comment_id = @comment_id
+		WHERE org_id = @org_id
+		  AND id = @id
+		RETURNING code_review_status_comment_id`, pgx.NamedArgs{
+		"org_id":     orgID,
+		"id":         id,
+		"comment_id": commentID,
+	}).Scan(&storedID); err != nil {
+		return fmt.Errorf("record code review status comment id: %w", err)
+	}
+	return nil
 }
 
 func (s *PullRequestStore) GetBySessionID(ctx context.Context, orgID, sessionID uuid.UUID) (models.PullRequest, error) {

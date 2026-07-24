@@ -168,6 +168,34 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestCodeReviewStore_RunWithStatusCommentLock(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+	lockKey := "code_review_status_comment:" + orgID.String() + ":" + pullRequestID.String()
+	mock.ExpectBegin()
+	mock.ExpectExec("SELECT pg_advisory_xact_lock").
+		WithArgs(pgx.NamedArgs{"lock_key": lockKey}).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectCommit()
+
+	called := false
+	err = NewCodeReviewStore(mock).RunWithStatusCommentLock(context.Background(), orgID, pullRequestID, func(_ context.Context, lockDB DBTX) error {
+		require.NotNil(t, lockDB, "status comment lock should expose its transaction-bound database handle")
+		called = true
+		return nil
+	})
+
+	require.NoError(t, err, "status comment lock should commit after the protected GitHub operation")
+	require.True(t, called, "status comment lock should execute the protected operation")
+	require.NoError(t, mock.ExpectationsWereMet(), "status comment lock should use one transaction-scoped advisory lock")
+}
+
 func TestCodeReviewStore_CreatePromptArtifactPreservesEffectivePrompt(t *testing.T) {
 	t.Parallel()
 	orgID, sessionID, artifactID := uuid.New(), uuid.New(), uuid.New()

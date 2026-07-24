@@ -22,6 +22,8 @@ Turning code reviews off pauses new reviewer-triggered runs without forgetting t
 
 After someone requests 143 Code Reviewer once, new commits pushed to the pull request durably trigger a new assessment until 143 approves the PR. Human review submissions, edits, and dismissals; inline review comment changes; resolved or reopened review threads; PR title or description edits; readiness changes; completed checks; and commit-status updates continue through normal PR synchronization without starting another review session. The existing GitHub review summary is updated in place after a new-commit reassessment, while the Code reviews page retains each assessment as audit history.
 
+When a review starts, 143 asynchronously posts a best-effort PR conversation comment with a link to the running session. When the session finishes, that same comment is updated with the result. Later review passes reuse it, so the PR keeps one current 143 status comment instead of accumulating one per commit.
+
 Once 143 submits an approval, that approval is final for the PR: later changes and reviewer rerequests do not start another 143 assessment, so automation never reverses or contradicts the approval.
 
 ## Monitor and recover reviews
