@@ -25,9 +25,9 @@ func TestPMModelConstants(t *testing.T) {
 func TestClaudeCodeModelConstants(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, ClaudeCodeModelOpus48, DefaultClaudeCodeModel, "DefaultClaudeCodeModel should use Opus 4.8")
+	require.Equal(t, ClaudeCodeModelOpus5, DefaultClaudeCodeModel, "DefaultClaudeCodeModel should use Opus 5")
 	require.Equal(t,
-		[]string{ClaudeCodeModelFable5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45},
+		[]string{ClaudeCodeModelFable5, ClaudeCodeModelOpus5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45},
 		AvailableClaudeCodeModels,
 		"AvailableClaudeCodeModels should be ordered by capability",
 	)
@@ -305,7 +305,7 @@ func TestAgentTypeForModel(t *testing.T) {
 		{CodexModelGPT56Luna, AgentTypeCodex},
 		{CodexModelGPT56LunaFast, AgentTypeCodex},
 		{CodexModelGPT54, AgentTypeCodex},
-		{ClaudeCodeModelOpus48, AgentTypeClaudeCode},
+		{ClaudeCodeModelOpus5, AgentTypeClaudeCode},
 		{AmpModeSmart, AgentTypeAmp},
 		{OpenCodeModelGPT54Mini, AgentTypeOpenCode},
 		// OpenCode registers provider/model IDs explicitly, including some
@@ -328,7 +328,7 @@ func TestValidatePMModel(t *testing.T) {
 
 	require.NoError(t, ValidatePMModel(""), "empty pm_model is allowed (caller falls back to default)")
 	require.NoError(t, ValidatePMModel(CodexModelGPT54))
-	require.NoError(t, ValidatePMModel(ClaudeCodeModelOpus48))
+	require.NoError(t, ValidatePMModel(ClaudeCodeModelOpus5), "Opus 5 should be accepted as a PM model")
 	require.NoError(t, ValidatePMModel(AmpModeSmart))
 	require.NoError(t, ValidatePMModel(PiModelClaudeOpus48))
 	require.NoError(t, ValidatePMModel(OpenCodeModelGPT54Mini))

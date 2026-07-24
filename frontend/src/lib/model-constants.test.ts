@@ -13,7 +13,7 @@ import {
   DEFAULT_CODEX_MODEL,
   DEFAULT_PM_MODEL,
   DEFAULT_LLM_MODEL,
-  CLAUDE_CODE_MODEL_OPUS_48,
+  CLAUDE_CODE_MODEL_OPUS_5,
   CODEX_MODEL_GPT_5_6_SOL,
   LLM_PROVIDER_INFO,
   LLM_MODELS_BY_PROVIDER,
@@ -26,13 +26,14 @@ describe("model constants", () => {
     expect(DEFAULT_PM_MODEL).toBe(DEFAULT_CODEX_MODEL);
   });
 
-  it("uses Opus 4.8 as the Claude Code default", () => {
-    expect(DEFAULT_CLAUDE_CODE_MODEL).toBe(CLAUDE_CODE_MODEL_OPUS_48);
+  it("uses Opus 5 as the Claude Code default", () => {
+    expect(DEFAULT_CLAUDE_CODE_MODEL).toBe(CLAUDE_CODE_MODEL_OPUS_5);
   });
 
   it("includes latest Claude Code models", () => {
     expect(AVAILABLE_CLAUDE_CODE_MODELS).toEqual([
       "claude-fable-5",
+      "claude-opus-5",
       "claude-opus-4-8",
       "claude-opus-4-7",
       "claude-opus-4-6",
