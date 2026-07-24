@@ -1,6 +1,6 @@
 # Design: Prompt-First Code Review Policy
 
-> **Status:** Implemented | **Last reviewed:** 2026-07-19
+> **Status:** Implemented | **Last reviewed:** 2026-07-24
 >
 > **Depends on:** [../overall.md](../overall.md), [112-code-reviewer-bot-auto-approval.md](112-code-reviewer-bot-auto-approval.md), [../03-frontend.md](../03-frontend.md)
 
@@ -16,7 +16,7 @@ Make code review policy setup feel like configuring an engineer-facing agent rat
 4. optionally add **Review instructions** when the team wants guidance beyond the review agent's native behavior;
 5. connect the GitHub reviewer and enable reviews.
 
-Deterministic safeguards, agent configuration, path rules, thresholds, and structured PR-description checks remain available under **Advanced controls**. They continue to be enforced independently of the editable prompts.
+Deterministic safeguards, agent configuration, path rules, thresholds, and structured PR-description checks remain available under **Advanced controls**. Hard safeguards continue to be enforced independently of the editable prompts. The configured coding-agent orchestrator evaluates structured PR-description checks alongside the automated approval policy.
 
 The central mental model is:
 
@@ -192,7 +192,13 @@ Require human review when:
 Evaluate the pull request independently. Disregard existing human review comments, review decisions, and review threads, whether open or resolved. Unresolved human review threads must not count against approval.
 ```
 
-The automated approval policy guides the orchestrator's recommendation. It can make the outcome more conservative, but it cannot bypass deterministic safeguards. Passing checks, size thresholds, sensitive or blocked paths, fork restrictions, reviewer quorum, disagreement handling, and every other hard gate retain final veto power.
+The automated approval policy guides the orchestrator's recommendation. The
+orchestrator also assesses every applicable structured PR-description
+requirement as `satisfied`, `not_applicable`, or `missing` after inspecting the
+pull request and actual diff. It can make the outcome more conservative, but it
+cannot bypass deterministic safeguards. Passing checks, size thresholds,
+sensitive or blocked paths, fork restrictions, reviewer quorum, disagreement
+handling, and every other hard gate retain final veto power.
 
 ### Prompt examples
 
@@ -594,7 +600,15 @@ Render this entire organization-instructions section only when `ReviewInstructio
 
 Use Go template escaping appropriate for plain text and do not interpret Markdown, `{{ ... }}`, XML-like tags, or variable syntax inside either prompt. Data values must not be recursively rendered as templates.
 
-The same review instructions should be available to the orchestrator so synthesis respects team priorities. Add both fields to `CodeReviewOrchestratorPromptData`, delimit them separately, and label their purposes. `AutomatedApprovalPolicy` is sent only to the orchestrator and only participates in approval recommendation when `ApprovalMode == approve_acceptable`; individual reviewer agents receive only `ReviewInstructions`. Description-check prompts continue to use individual structured requirement prompts and are unchanged.
+The same review instructions should be available to the orchestrator so synthesis respects team priorities. Add both fields to `CodeReviewOrchestratorPromptData`, delimit them separately, and label their purposes. `AutomatedApprovalPolicy` is sent only to the orchestrator and only participates in approval recommendation when `ApprovalMode == approve_acceptable`; individual reviewer agents receive only `ReviewInstructions`.
+
+Structured description requirements are also rendered into the orchestrator
+prompt as trusted policy data. The pull request title, body, changed-file
+summary, reviewer outputs, and repository diff remain untrusted evidence. The
+orchestrator must inspect the diff and return one keyed assessment per
+applicable requirement using `satisfied`, `not_applicable`, or `missing`;
+standalone platform-LLM description-check calls are not part of the code-review
+approval path.
 
 Rendered prompt artifacts already recorded for evidence must include the exact effective prompts used by the captured policy version. Artifact access keeps existing authorization. Normal logs should record only policy ID/version and the rune length of each field, never text.
 

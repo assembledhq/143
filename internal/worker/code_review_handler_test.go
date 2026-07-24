@@ -525,166 +525,6 @@ func TestCodeReviewFindingsOnChangedLines(t *testing.T) {
 	require.Equal(t, []models.CodeReviewFinding{findings[0]}, filtered, "inline selection should keep only findings attached to added diff lines")
 }
 
-func TestCodeReviewDescriptionPassed(t *testing.T) {
-	t.Parallel()
-
-	policy := models.DefaultCodeReviewPolicyConfig()
-	body := "Fix invoice rounding.\n\nTesting: go test ./...\n\nPreview: https://preview.example.com"
-
-	tests := []struct {
-		name    string
-		body    *string
-		files   []codereview.PullRequestFile
-		passed  bool
-		message string
-	}{
-		{
-			name:   "passes applicable built-ins",
-			body:   &body,
-			files:  []codereview.PullRequestFile{{Filename: "frontend/src/App.tsx", Additions: 40, Deletions: 2}},
-			passed: true,
-		},
-		{
-			name:   "skips nontrivial and UI requirements for tiny backend change",
-			body:   stringPtr("Fix typo in log message."),
-			files:  []codereview.PullRequestFile{{Filename: "internal/api/router.go", Additions: 1}},
-			passed: true,
-		},
-		{
-			name:   "requires testing evidence for nontrivial change",
-			body:   stringPtr("Fix invoice rounding with backend changes."),
-			files:  []codereview.PullRequestFile{{Filename: "internal/api/router.go", Additions: 40}},
-			passed: false,
-		},
-		{
-			name:   "rejects explicit missing testing evidence",
-			body:   stringPtr("Fix invoice rounding with backend changes.\n\nTesting: not run"),
-			files:  []codereview.PullRequestFile{{Filename: "internal/api/router.go", Additions: 40}},
-			passed: false,
-		},
-		{
-			name:   "requires UI evidence for frontend change",
-			body:   stringPtr("Fix chart tooltip.\n\nTesting: npm test"),
-			files:  []codereview.PullRequestFile{{Filename: "frontend/src/Chart.tsx", Additions: 8}},
-			passed: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			pr := models.PullRequest{Body: tt.body}
-			require.Equal(t, tt.passed, codeReviewDescriptionPassed(policy, pr, tt.files), "description policy should respect applicability and built-in evidence checks")
-		})
-	}
-}
-
-func TestEvaluateCodeReviewDescriptionPolicyUsesCachedArtifact(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "pgxmock pool should initialize")
-	defer mock.Close()
-
-	orgID := uuid.New()
-	sessionID := uuid.New()
-	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
-	job := runCodeReviewPayload{
-		OrgID:         orgID,
-		SessionID:     sessionID,
-		PolicyVersion: 3,
-		HeadSHA:       "head-sha",
-	}
-	rootKey := "code-review-prompts/" + sessionID.String() + "/head-sha"
-	artifactKey := rootKey + "/description-01-custom-requirement"
-	passed := false
-	artifactMetadata, err := json.Marshal(map[string]any{
-		"requirement_key": "custom_requirement",
-		"passed":          passed,
-		"reason":          "cached failure",
-		"policy_version":  3,
-		"head_sha":        "head-sha",
-	})
-	require.NoError(t, err, "cached artifact metadata should marshal")
-
-	mock.ExpectQuery("SELECT .+ FROM code_review_prompt_artifacts").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "session_id", "artifact_key", "role", "agent_provider",
-			"content", "metadata", "created_at",
-		}).AddRow(uuid.New(), orgID, sessionID, artifactKey, "description_policy", "platform_llm", "cached prompt", artifactMetadata, now))
-
-	policyConfig := models.DefaultCodeReviewPolicyConfig()
-	policyConfig.DescriptionPolicy.Requirements = []models.CodeReviewDescriptionRequirement{{
-		Key:      "custom_requirement",
-		Title:    "Custom requirement",
-		Prompt:   "Require a custom statement.",
-		Required: true,
-		AppliesWhen: models.CodeReviewDescriptionApplicability{
-			Kind: models.CodeReviewDescriptionApplicabilityAll,
-		},
-	}}
-	policy := models.CodeReviewPolicyRecord{
-		Version:            3,
-		Enabled:            policyConfig.Enabled,
-		ApprovalMode:       policyConfig.ApprovalMode,
-		DescriptionPolicy:  policyConfig.DescriptionPolicy,
-		RiskPolicy:         policyConfig.RiskPolicy,
-		AgentRoster:        policyConfig.AgentRoster,
-		InlineCommentLimit: policyConfig.InlineCommentLimit,
-	}
-	llm := &codeReviewDescriptionLLMStub{response: `{"passed":true,"reason":"fresh call"}`}
-
-	evaluation, err := evaluateCodeReviewDescriptionPolicy(context.Background(), &Stores{
-		CodeReviews: db.NewCodeReviewStore(mock),
-	}, &Services{LLM: llm}, zerolog.Nop(), job, models.PullRequest{Title: "Fix invoices", Body: stringPtr("Body")}, policy, models.CodeReviewSessionMetadata{}, nil)
-
-	require.NoError(t, err, "description evaluation should reuse cached prompt artifact")
-	require.False(t, evaluation.Passed, "cached failed requirement should drive the evaluation result")
-	require.Equal(t, 1, evaluation.FailedRequirementCount, "cached failed requirement should be counted once")
-	require.Equal(t, []string{"Custom requirement: failed (cached failure)"}, evaluation.RequirementSummaries, "cached artifact should produce the same summary as a fresh evaluation")
-	require.Equal(t, 0, llm.calls, "cached description artifact should avoid another LLM call")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-}
-
-func TestCodeReviewDescriptionResultFromArtifactChecksInputHash(t *testing.T) {
-	t.Parallel()
-
-	passed := true
-	tests := []struct {
-		name          string
-		artifactHash  string
-		currentHash   string
-		expectedFound bool
-	}{
-		{name: "reuses matching description", artifactHash: "same", currentHash: "same", expectedFound: true},
-		{name: "rejects edited description", artifactHash: "before", currentHash: "after", expectedFound: false},
-		{name: "accepts legacy artifact without hash", artifactHash: "", currentHash: "current", expectedFound: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			metadata, err := json.Marshal(codeReviewDescriptionArtifactMetadata{
-				Passed: &passed, PolicyVersion: 3, HeadSHA: "head", InputHash: tt.artifactHash,
-			})
-			require.NoError(t, err, "description artifact metadata should marshal")
-			artifact := models.CodeReviewPromptArtifact{Metadata: metadata}
-
-			result, found := codeReviewDescriptionResultFromArtifact(runCodeReviewPayload{
-				PolicyVersion: 3, HeadSHA: "head",
-			}, artifact, tt.currentHash)
-
-			require.Equal(t, tt.expectedFound, found, "description cache should be scoped to the current PR text")
-			if tt.expectedFound {
-				require.Equal(t, codeReviewDescriptionLLMResponse{Passed: true, Reason: "requirement satisfied"}, result, "matching cache should return the exact stored assessment")
-			} else {
-				require.Equal(t, codeReviewDescriptionLLMResponse{}, result, "stale cache should return no assessment")
-			}
-		})
-	}
-}
-
 func TestCodeReviewDescriptionRequirementAppliesTypedRules(t *testing.T) {
 	t.Parallel()
 
@@ -730,6 +570,83 @@ func TestCodeReviewDescriptionRequirementAppliesTypedRules(t *testing.T) {
 
 			requirement := models.CodeReviewDescriptionRequirement{Key: "custom", Required: true, AppliesWhen: tt.appliesWhen}
 			require.Equal(t, tt.expected, codeReviewDescriptionRequirementApplies(requirement, files), "typed applicability should be evaluated from changed files")
+		})
+	}
+}
+
+func TestCodeReviewDescriptionEvaluationFromSynthesis(t *testing.T) {
+	t.Parallel()
+
+	policy := models.DefaultCodeReviewPolicyConfig()
+	files := []codereview.PullRequestFile{{
+		Filename:  "assets/src/components/EventType/EventTypeSelect.tsx",
+		Deletions: 21,
+	}}
+	tests := []struct {
+		name        string
+		assessments []codeReviewDescriptionAssessment
+		expected    codeReviewDescriptionEvaluation
+		expectErr   bool
+	}{
+		{
+			name: "passes satisfied and not applicable requirements",
+			assessments: []codeReviewDescriptionAssessment{
+				{Key: "description", Status: codeReviewDescriptionAssessmentSatisfied, Reason: "The cleanup intent is clear."},
+				{Key: "ui_evidence", Status: codeReviewDescriptionAssessmentNotApplicable, Reason: "Only comments changed, so rendered output is unchanged."},
+			},
+			expected: codeReviewDescriptionEvaluation{
+				Passed: true,
+				RequirementSummaries: []string{
+					"Understandable description: passed (The cleanup intent is clear.)",
+					"Screenshots or preview link: passed (not applicable: Only comments changed, so rendered output is unchanged.)",
+				},
+			},
+		},
+		{
+			name: "fails a missing requirement",
+			assessments: []codeReviewDescriptionAssessment{
+				{Key: "description", Status: codeReviewDescriptionAssessmentSatisfied, Reason: "The cleanup intent is clear."},
+				{Key: "ui_evidence", Status: codeReviewDescriptionAssessmentMissing, Reason: "The UI changed without visual evidence."},
+			},
+			expected: codeReviewDescriptionEvaluation{
+				Passed: false,
+				RequirementSummaries: []string{
+					"Understandable description: passed (The cleanup intent is clear.)",
+					"Screenshots or preview link: failed (The UI changed without visual evidence.)",
+				},
+			},
+		},
+		{
+			name: "rejects an omitted applicable requirement",
+			assessments: []codeReviewDescriptionAssessment{
+				{Key: "description", Status: codeReviewDescriptionAssessmentSatisfied, Reason: "The cleanup intent is clear."},
+			},
+			expectErr: true,
+		},
+		{
+			name: "rejects an unknown requirement",
+			assessments: []codeReviewDescriptionAssessment{
+				{Key: "description", Status: codeReviewDescriptionAssessmentSatisfied, Reason: "The cleanup intent is clear."},
+				{Key: "ui_evidence", Status: codeReviewDescriptionAssessmentNotApplicable, Reason: "Only comments changed."},
+				{Key: "invented", Status: codeReviewDescriptionAssessmentSatisfied, Reason: "Not configured."},
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual, err := codeReviewDescriptionEvaluationFromSynthesis(policy, files, codeReviewOrchestratorSynthesis{
+				DescriptionAssessments: tt.assessments,
+			})
+			if tt.expectErr {
+				require.Error(t, err, "invalid coding-agent description assessments should be rejected")
+				return
+			}
+			require.NoError(t, err, "complete coding-agent description assessments should validate")
+			require.Equal(t, tt.expected, actual, "description evaluation should preserve coding-agent applicability decisions")
 		})
 	}
 }
@@ -1534,7 +1451,7 @@ func TestHarvestCodeReviewOrchestratorResultPersistsFindings(t *testing.T) {
 ::code-comment{title="[P2] Missing regression coverage" body="The parser behavior changed without a direct regression test." file="internal/worker/code_review_handler.go" start=42 priority=2}
 
 ` + "```json" + `
-{"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"Adds review handling.","review_summary":"The parser change is focused, but it needs direct regression coverage before approval.","risk_notes":["tests needed"]}
+{"approval_recommended":false,"description_assessments":[{"key":"description","status":"satisfied","reason":"The PR intent is clear."}],"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"Adds review handling.","review_summary":"The parser change is focused, but it needs direct regression coverage before approval.","risk_notes":["tests needed"]}
 ` + "```"
 	state := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
 		ThreadID: threadID.String(),
@@ -1610,6 +1527,8 @@ func TestParseCodeReviewOrchestratorSynthesis(t *testing.T) {
 	t.Parallel()
 
 	valid := codeReviewOrchestratorSynthesis{
+		ApprovalRecommended:     true,
+		DescriptionAssessments:  []codeReviewDescriptionAssessment{},
 		Summary:                 "The change is safe to approve.",
 		ReviewSummary:           "The change is focused, and the review evidence supports approval.",
 		RiskNotes:               []string{},
@@ -1626,7 +1545,7 @@ func TestParseCodeReviewOrchestratorSynthesis(t *testing.T) {
 	}{
 		{
 			name:     "accepts complete fenced synthesis",
-			raw:      "Review complete.\n```json\n{\"scope_mismatch\":false,\"unresolved_uncertainty\":false,\"reviewer_disagreement\":false,\"prompt_injection_detected\":false,\"summary\":\"The change is safe to approve.\",\"review_summary\":\"The change is focused, and the review evidence supports approval.\",\"risk_notes\":[]}\n```",
+			raw:      "Review complete.\n```json\n{\"approval_recommended\":true,\"description_assessments\":[],\"scope_mismatch\":false,\"unresolved_uncertainty\":false,\"reviewer_disagreement\":false,\"prompt_injection_detected\":false,\"summary\":\"The change is safe to approve.\",\"review_summary\":\"The change is focused, and the review evidence supports approval.\",\"risk_notes\":[]}\n```",
 			expected: valid,
 		},
 		{
@@ -1641,12 +1560,12 @@ func TestParseCodeReviewOrchestratorSynthesis(t *testing.T) {
 		},
 		{
 			name:      "rejects empty summary",
-			raw:       `{"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":" ","review_summary":"The review evidence is otherwise complete.","risk_notes":[]}`,
+			raw:       `{"approval_recommended":true,"description_assessments":[],"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":" ","review_summary":"The review evidence is otherwise complete.","risk_notes":[]}`,
 			expectErr: true,
 		},
 		{
 			name:      "rejects missing reviewer-facing summary",
-			raw:       `{"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"The change is safe to approve.","risk_notes":[]}`,
+			raw:       `{"approval_recommended":true,"description_assessments":[],"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"The change is safe to approve.","risk_notes":[]}`,
 			expectErr: true,
 		},
 	}
@@ -1749,16 +1668,6 @@ func TestHarvestCodeReviewOrchestratorResultRejectsMalformedSynthesis(t *testing
 
 	require.NoError(t, err, "orchestrator harvest should record malformed synthesis as an agent failure")
 	require.NoError(t, mock.ExpectationsWereMet(), "malformed synthesis should be retained as raw output and never marked completed")
-}
-
-type codeReviewDescriptionLLMStub struct {
-	calls    int
-	response string
-}
-
-func (s *codeReviewDescriptionLLMStub) Complete(context.Context, string, string) (string, error) {
-	s.calls++
-	return s.response, nil
 }
 
 func TestCodeReviewInFlightAgentPhaseFromState(t *testing.T) {
@@ -2416,25 +2325,58 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 	policy := models.DefaultCodeReviewPolicyConfig()
 	policy.ApprovalMode = models.CodeReviewApprovalModeApproveAcceptable
 	prBody := "Fixes invoice rounding.\n\nTesting: go test ./..."
-	validOrchestratorResult := models.CodeReviewAgentResult{
-		Role:   models.CodeReviewAgentRoleOrchestrator,
-		Status: models.CodeReviewAgentResultStatusCompleted,
-		StructuredResult: marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
-			SynthesisValidated: true,
-			Synthesis: codeReviewOrchestratorSynthesis{
-				Summary:       "The reviewed change is safe to approve.",
-				ReviewSummary: "The router update is focused, and both review agents found no blocking issues.",
-				RiskNotes:     []string{},
-			},
-		}),
+	eslintPRBody := "Removes redundant eslint-disable comments only. No behavior or UI-visible changes.\n\nTesting: npm run lint\n\nScreenshots: not applicable because no rendered output changes."
+	setCodingAgentDecision := func(input *liveCodeReviewOutcomeInput, approvalRecommended bool, statuses map[string]codeReviewDescriptionAssessmentStatus) {
+		assessments := make([]codeReviewDescriptionAssessment, 0)
+		for _, requirement := range codeReviewApplicableDescriptionRequirements(input.Policy, input.ChangedFiles) {
+			status := codeReviewDescriptionAssessmentSatisfied
+			if configured, ok := statuses[requirement.Key]; ok {
+				status = configured
+			}
+			reason := "The coding agent found the requirement satisfied."
+			if status == codeReviewDescriptionAssessmentNotApplicable {
+				reason = "The coding agent found the requirement not applicable to this diff."
+			} else if status == codeReviewDescriptionAssessmentMissing {
+				reason = "The coding agent found the required evidence missing."
+			}
+			assessments = append(assessments, codeReviewDescriptionAssessment{
+				Key:    requirement.Key,
+				Status: status,
+				Reason: reason,
+			})
+		}
+		synthesis := input.OrchestratorSynthesis
+		synthesis.ApprovalRecommended = approvalRecommended
+		synthesis.DescriptionAssessments = assessments
+		synthesis.DescriptionInputHash = codeReviewDescriptionInputHash(input.PullRequest)
+		if strings.TrimSpace(synthesis.Summary) == "" {
+			synthesis.Summary = "The coding agent completed the approval assessment."
+		}
+		if strings.TrimSpace(synthesis.ReviewSummary) == "" {
+			synthesis.ReviewSummary = "The coding-agent review found no blocking issues."
+		}
+		if synthesis.RiskNotes == nil {
+			synthesis.RiskNotes = []string{}
+		}
+		input.OrchestratorSynthesis = synthesis
+		input.AgentResults = append(input.AgentResults, models.CodeReviewAgentResult{
+			Role:   models.CodeReviewAgentRoleOrchestrator,
+			Status: models.CodeReviewAgentResultStatusCompleted,
+			StructuredResult: marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
+				DescriptionInputHash: synthesis.DescriptionInputHash,
+				SynthesisValidated:   true,
+				Synthesis:            synthesis,
+			}),
+		})
 	}
 
 	tests := []struct {
-		name         string
-		input        liveCodeReviewOutcomeInput
-		expected     models.CodeReviewDecision
-		reason       string
-		bodyContains string
+		name                  string
+		input                 liveCodeReviewOutcomeInput
+		configureOrchestrator func(*liveCodeReviewOutcomeInput)
+		expected              models.CodeReviewDecision
+		reason                string
+		bodyContains          string
 	}{
 		{
 			name: "approves when live reviewer quorum and PR health satisfy policy",
@@ -2461,7 +2403,6 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 				AgentResults: []models.CodeReviewAgentResult{
 					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
 					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
-					validOrchestratorResult,
 				},
 				ChangedFiles: []codereview.PullRequestFile{
 					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
@@ -2513,6 +2454,9 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			},
 			expected: models.CodeReviewDecisionNeedsHumanReview,
 			reason:   "orchestrator did not produce a valid structured synthesis",
+			configureOrchestrator: func(*liveCodeReviewOutcomeInput) {
+				// Preserve the deliberately malformed orchestrator result.
+			},
 		},
 		{
 			name: "uses queued GitHub author login for eligible author policy",
@@ -2612,7 +2556,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			bodyContains: "Reviewer evidence: Codex found no blocking issues; Claude Code failed",
 		},
 		{
-			name: "explains the failed PR description requirement",
+			name: "explains a description requirement the coding agent marked missing",
 			input: liveCodeReviewOutcomeInput{
 				Policy: policy,
 				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
@@ -2637,14 +2581,118 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
 				},
 				ChangedFilesAvailable: true,
-				DescriptionEvaluation: codeReviewDescriptionEvaluation{
-					Passed:               false,
-					RequirementSummaries: []string{"Understandable description: failed (explain why this change is needed)"},
-				},
+			},
+			configureOrchestrator: func(input *liveCodeReviewOutcomeInput) {
+				setCodingAgentDecision(input, false, map[string]codeReviewDescriptionAssessmentStatus{
+					"description": codeReviewDescriptionAssessmentMissing,
+				})
 			},
 			expected:     models.CodeReviewDecisionNeedsHumanReview,
 			reason:       "PR description policy did not pass",
-			bodyContains: "Understandable description (explain why this change is needed)",
+			bodyContains: "Understandable description (The coding agent found the required evidence missing.)",
+		},
+		{
+			name: "withholds approval when coding agent recommends human review",
+			input: liveCodeReviewOutcomeInput{
+				Policy: policy,
+				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
+				PullRequest: models.PullRequest{
+					OrgID:   orgID,
+					Body:    &prBody,
+					HeadSHA: stringPtr("head"),
+					Status:  models.PullRequestStatusOpen,
+				},
+				Health: &models.PullRequestHealthResponse{
+					HeadSHA:         "head",
+					Status:          models.PullRequestStatusOpen,
+					CanMerge:        true,
+					ChecksConfirmed: true,
+					MergeState:      models.PullRequestMergeStateClean,
+				},
+				AgentResults: []models.CodeReviewAgentResult{
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+				},
+				ChangedFiles: []codereview.PullRequestFile{
+					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
+				},
+				ChangedFilesAvailable: true,
+			},
+			configureOrchestrator: func(input *liveCodeReviewOutcomeInput) {
+				setCodingAgentDecision(input, false, nil)
+			},
+			expected: models.CodeReviewDecisionNeedsHumanReview,
+			reason:   "coding-agent orchestrator recommends human review",
+		},
+		{
+			name: "withholds approval when PR description changed after coding-agent assessment",
+			input: liveCodeReviewOutcomeInput{
+				Policy: policy,
+				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
+				PullRequest: models.PullRequest{
+					OrgID:   orgID,
+					Body:    &prBody,
+					HeadSHA: stringPtr("head"),
+					Status:  models.PullRequestStatusOpen,
+				},
+				Health: &models.PullRequestHealthResponse{
+					HeadSHA:         "head",
+					Status:          models.PullRequestStatusOpen,
+					CanMerge:        true,
+					ChecksConfirmed: true,
+					MergeState:      models.PullRequestMergeStateClean,
+				},
+				AgentResults: []models.CodeReviewAgentResult{
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+				},
+				ChangedFiles: []codereview.PullRequestFile{
+					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
+				},
+				ChangedFilesAvailable: true,
+			},
+			configureOrchestrator: func(input *liveCodeReviewOutcomeInput) {
+				setCodingAgentDecision(input, true, nil)
+				input.OrchestratorSynthesis.DescriptionInputHash = "stale-description-hash"
+			},
+			expected: models.CodeReviewDecisionNeedsHumanReview,
+			reason:   "PR title or description changed after the coding-agent assessment",
+		},
+		{
+			name: "approves comment-only eslint frontend cleanup when coding agent marks screenshots not applicable",
+			input: liveCodeReviewOutcomeInput{
+				Policy: policy,
+				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
+				PullRequest: models.PullRequest{
+					OrgID:   orgID,
+					Body:    &eslintPRBody,
+					HeadSHA: stringPtr("head"),
+					Status:  models.PullRequestStatusOpen,
+				},
+				Health: &models.PullRequestHealthResponse{
+					HeadSHA:         "head",
+					Status:          models.PullRequestStatusOpen,
+					CanMerge:        true,
+					ChecksConfirmed: true,
+					MergeState:      models.PullRequestMergeStateClean,
+				},
+				AgentResults: []models.CodeReviewAgentResult{
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+				},
+				ChangedFiles: []codereview.PullRequestFile{
+					{Filename: "assets/src/components/EventType/EventTypeSelect.tsx", Deletions: 21},
+					{Filename: "assets/src/components/timeline/BaseTimeHeader.tsx", Deletions: 10},
+					{Filename: "eslint.seatbelt.tsv", Additions: 2, Deletions: 4},
+				},
+				ChangedFilesAvailable: true,
+			},
+			configureOrchestrator: func(input *liveCodeReviewOutcomeInput) {
+				setCodingAgentDecision(input, true, map[string]codeReviewDescriptionAssessmentStatus{
+					"ui_evidence": codeReviewDescriptionAssessmentNotApplicable,
+				})
+			},
+			expected: models.CodeReviewDecisionApproved,
 		},
 		{
 			name: "withholds approval when completed read-only reviewer has no usable output",
@@ -2880,7 +2928,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 				ChangedFilesAvailable: true,
 			},
 			expected:     models.CodeReviewDecisionApproved,
-			bodyContains: "reviewer quorum was waived for this low-risk change",
+			bodyContains: "reviewer quorum waived for this low-risk change",
 		},
 		{
 			name: "reports satisfied reviewer quorum for a low-risk change with complete reviews",
@@ -2913,7 +2961,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 				ChangedFilesAvailable: true,
 			},
 			expected:     models.CodeReviewDecisionApproved,
-			bodyContains: "2 usable reviewer reports met the required quorum of 2",
+			bodyContains: "reviewer quorum 2/2",
 		},
 		{
 			name: "clamps reviewer quorum to reviewers whose credentials are available",
@@ -2947,7 +2995,6 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 							Error:       "reviewer skipped because claude_code authentication is not configured",
 						}),
 					},
-					validOrchestratorResult,
 				},
 				ChangedFiles: []codereview.PullRequestFile{
 					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
@@ -2999,7 +3046,13 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			decision, body := evaluateLiveCodeReviewOutcome(tt.input)
+			input := tt.input
+			if tt.configureOrchestrator != nil {
+				tt.configureOrchestrator(&input)
+			} else {
+				setCodingAgentDecision(&input, true, nil)
+			}
+			decision, body := evaluateLiveCodeReviewOutcome(input)
 
 			require.Equal(t, tt.expected, decision.Decision, "live code review outcome should choose the expected decision")
 			if tt.reason != "" {

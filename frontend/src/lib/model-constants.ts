@@ -1,4 +1,5 @@
 export const CLAUDE_CODE_MODEL_FABLE_5 = "claude-fable-5";
+export const CLAUDE_CODE_MODEL_OPUS_5 = "claude-opus-5";
 export const CLAUDE_CODE_MODEL_OPUS_48 = "claude-opus-4-8";
 export const CLAUDE_CODE_MODEL_OPUS_47 = "claude-opus-4-7";
 export const CLAUDE_CODE_MODEL_OPUS_46 = "claude-opus-4-6";
@@ -8,6 +9,7 @@ export const CLAUDE_CODE_MODEL_HAIKU_45 = "claude-haiku-4-5";
 
 export const AVAILABLE_CLAUDE_CODE_MODELS = [
   CLAUDE_CODE_MODEL_FABLE_5,
+  CLAUDE_CODE_MODEL_OPUS_5,
   CLAUDE_CODE_MODEL_OPUS_48,
   CLAUDE_CODE_MODEL_OPUS_47,
   CLAUDE_CODE_MODEL_OPUS_46,
@@ -16,7 +18,7 @@ export const AVAILABLE_CLAUDE_CODE_MODELS = [
   CLAUDE_CODE_MODEL_HAIKU_45,
 ] as const;
 
-export const DEFAULT_CLAUDE_CODE_MODEL = CLAUDE_CODE_MODEL_OPUS_48;
+export const DEFAULT_CLAUDE_CODE_MODEL = CLAUDE_CODE_MODEL_OPUS_5;
 
 export const CODEX_MODEL_GPT_5_6_SOL = "gpt-5.6-sol";
 export const CODEX_MODEL_GPT_5_6_SOL_FAST = "gpt-5.6-sol-fast";

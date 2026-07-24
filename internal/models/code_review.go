@@ -1144,6 +1144,8 @@ const (
 	CodeReviewRiskReasonExcludedCategory             CodeReviewRiskReasonCode = "excluded_category"
 	CodeReviewRiskReasonReviewerQuorum               CodeReviewRiskReasonCode = "reviewer_quorum"
 	CodeReviewRiskReasonOrchestratorSynthesisInvalid CodeReviewRiskReasonCode = "orchestrator_synthesis_invalid"
+	CodeReviewRiskReasonOrchestratorEscalation       CodeReviewRiskReasonCode = "orchestrator_escalation"
+	CodeReviewRiskReasonOrchestratorContextStale     CodeReviewRiskReasonCode = "orchestrator_context_stale"
 )
 
 func (c CodeReviewRiskReasonCode) Validate() error {
@@ -1171,7 +1173,9 @@ func (c CodeReviewRiskReasonCode) Validate() error {
 		CodeReviewRiskReasonPolicyPathChanged,
 		CodeReviewRiskReasonExcludedCategory,
 		CodeReviewRiskReasonReviewerQuorum,
-		CodeReviewRiskReasonOrchestratorSynthesisInvalid:
+		CodeReviewRiskReasonOrchestratorSynthesisInvalid,
+		CodeReviewRiskReasonOrchestratorEscalation,
+		CodeReviewRiskReasonOrchestratorContextStale:
 		return nil
 	default:
 		return fmt.Errorf("invalid CodeReviewRiskReasonCode: %q", c)
@@ -1235,6 +1239,10 @@ func (r CodeReviewRiskReason) Message() string {
 		return fmt.Sprintf("reviewer quorum %d is below policy requirement %d", r.Actual, r.Limit)
 	case CodeReviewRiskReasonOrchestratorSynthesisInvalid:
 		return "orchestrator did not produce a valid structured synthesis"
+	case CodeReviewRiskReasonOrchestratorEscalation:
+		return "coding-agent orchestrator recommends human review"
+	case CodeReviewRiskReasonOrchestratorContextStale:
+		return "PR title or description changed after the coding-agent assessment"
 	default:
 		return string(r.Code)
 	}

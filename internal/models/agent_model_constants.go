@@ -56,6 +56,7 @@ var AvailablePiModels = []string{
 
 const (
 	ClaudeCodeModelFable5   = "claude-fable-5"
+	ClaudeCodeModelOpus5    = "claude-opus-5"
 	ClaudeCodeModelOpus48   = "claude-opus-4-8"
 	ClaudeCodeModelOpus47   = "claude-opus-4-7"
 	ClaudeCodeModelOpus46   = "claude-opus-4-6"
@@ -64,9 +65,9 @@ const (
 	ClaudeCodeModelHaiku45  = "claude-haiku-4-5"
 )
 
-const DefaultClaudeCodeModel = ClaudeCodeModelOpus48
+const DefaultClaudeCodeModel = ClaudeCodeModelOpus5
 
-var AvailableClaudeCodeModels = []string{ClaudeCodeModelFable5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45}
+var AvailableClaudeCodeModels = []string{ClaudeCodeModelFable5, ClaudeCodeModelOpus5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45}
 
 const (
 	CodexModelGPT56Sol        = "gpt-5.6-sol"

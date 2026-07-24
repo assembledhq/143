@@ -614,7 +614,16 @@ func TestCodeReviewPolicyPromptComposition(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			orchestrator := CodeReviewOrchestratorPrompt(CodeReviewOrchestratorPromptData{
-				ReviewInstructions: reviewInstructions, AutomatedApprovalPolicy: approvalPolicy, UseAutomatedApprovalPolicy: tt.useApprovalPolicy,
+				PRBody:                     "Comment-only ESLint cleanup with no rendered output changes.",
+				ReviewInstructions:         reviewInstructions,
+				AutomatedApprovalPolicy:    approvalPolicy,
+				UseAutomatedApprovalPolicy: tt.useApprovalPolicy,
+				DescriptionRequirements: []CodeReviewDescriptionRequirementPromptData{{
+					Key:           "ui_evidence",
+					Title:         "Screenshots or preview link",
+					Prompt:        "Screenshots are not required for non-visible or comment-only changes.",
+					Applicability: "frontend_or_ui_visible",
+				}},
 			})
 			require.Equal(t, 1, strings.Count(orchestrator, reviewInstructions), "orchestrator should receive review instructions exactly once")
 			require.Equal(t, tt.expectApprovalText, strings.Contains(orchestrator, approvalPolicy), "approval policy presence should match approval mode")
@@ -629,6 +638,11 @@ func TestCodeReviewPolicyPromptComposition(t *testing.T) {
 			require.Contains(t, orchestrator, "P1 — Urgent.", "orchestrator should define the urgent priority threshold")
 			require.Contains(t, orchestrator, "P2 — Normal.", "orchestrator should define the normal priority threshold")
 			require.Contains(t, orchestrator, "P3 — Low.", "orchestrator should define the low priority threshold")
+			require.Contains(t, orchestrator, "You own the substantive approve-or-escalate recommendation", "coding-agent orchestrator should own the substantive approval recommendation")
+			require.Contains(t, orchestrator, "Comment-only ESLint cleanup", "orchestrator should receive the pull-request description as evidence")
+			require.Contains(t, orchestrator, "Screenshots are not required for non-visible or comment-only changes.", "orchestrator should receive the trusted description rubric")
+			require.Contains(t, orchestrator, `"approval_recommended": true|false`, "orchestrator output contract should include the approval recommendation")
+			require.Contains(t, orchestrator, `"description_assessments":`, "orchestrator output contract should include structured description assessments")
 		})
 	}
 }
