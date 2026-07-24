@@ -397,30 +397,60 @@ func TestCodeReviewInlineComments(t *testing.T) {
 		expected []codereview.SubmitReviewComment
 	}{
 		{
-			name: "returns selected file-backed findings",
+			name: "prefixes selected file-backed findings from severity",
 			findings: []models.CodeReviewFinding{
 				{
 					Path:      &path,
 					StartLine: &line,
 					Summary:   "summary",
 					Body:      "body",
+					Severity:  models.CodeReviewFindingSeverityHigh,
 				},
 			},
 			expected: []codereview.SubmitReviewComment{
-				{Path: path, Line: line, Body: "body"},
+				{Path: path, Line: line, Body: "[P1] body"},
 			},
 		},
 		{
-			name: "falls back to summary when body is empty",
+			name: "falls back to prefixed summary when body is empty",
 			findings: []models.CodeReviewFinding{
 				{
 					Path:      &path,
 					StartLine: &line,
 					Summary:   "summary",
+					Severity:  models.CodeReviewFindingSeverityCritical,
 				},
 			},
 			expected: []codereview.SubmitReviewComment{
-				{Path: path, Line: line, Body: "summary"},
+				{Path: path, Line: line, Body: "[P0] summary"},
+			},
+		},
+		{
+			name: "normalizes an existing mismatched priority prefix",
+			findings: []models.CodeReviewFinding{
+				{
+					Path:      &path,
+					StartLine: &line,
+					Body:      "[P3] body",
+					Severity:  models.CodeReviewFindingSeverityMedium,
+				},
+			},
+			expected: []codereview.SubmitReviewComment{
+				{Path: path, Line: line, Body: "[P2] body"},
+			},
+		},
+		{
+			name: "retains a matching low priority prefix",
+			findings: []models.CodeReviewFinding{
+				{
+					Path:      &path,
+					StartLine: &line,
+					Body:      "[P3] body",
+					Severity:  models.CodeReviewFindingSeverityLow,
+				},
+			},
+			expected: []codereview.SubmitReviewComment{
+				{Path: path, Line: line, Body: "[P3] body"},
 			},
 		},
 		{
