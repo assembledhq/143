@@ -13,6 +13,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -166,6 +167,34 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 	require.NotContains(t, logOutput.String(), config.ReviewInstructions, "policy logs should never contain review-instruction text")
 	require.NotContains(t, logOutput.String(), config.AutomatedApprovalPolicy, "policy logs should never contain approval-policy text")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCodeReviewStore_RunWithStatusCommentLock(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+	lockKey := "code_review_status_comment:" + orgID.String() + ":" + pullRequestID.String()
+	mock.ExpectBegin()
+	mock.ExpectExec("SELECT pg_advisory_xact_lock").
+		WithArgs(pgx.NamedArgs{"lock_key": lockKey}).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectCommit()
+
+	called := false
+	err = NewCodeReviewStore(mock).RunWithStatusCommentLock(context.Background(), orgID, pullRequestID, func(_ context.Context, lockDB DBTX) error {
+		require.NotNil(t, lockDB, "status comment lock should expose its transaction-bound database handle")
+		called = true
+		return nil
+	})
+
+	require.NoError(t, err, "status comment lock should commit after the protected GitHub operation")
+	require.True(t, called, "status comment lock should execute the protected operation")
+	require.NoError(t, mock.ExpectationsWereMet(), "status comment lock should use one transaction-scoped advisory lock")
 }
 
 func TestCodeReviewStore_CreatePromptArtifactPreservesEffectivePrompt(t *testing.T) {
@@ -355,6 +384,43 @@ func TestCodeReviewStore_CreateSessionMetadataReusesOutputKey(t *testing.T) {
 	require.Equal(t, metadataID, metadata.ID, "CreateSessionMetadata should scan metadata id")
 	require.True(t, metadata.FromFork, "CreateSessionMetadata should persist fork source evidence")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCodeReviewStore_CreateSessionMetadataClassifiesActiveHeadConflict(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	insertArgs := make([]any, 27)
+	for index := range insertArgs {
+		insertArgs[index] = pgxmock.AnyArg()
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("INSERT INTO code_review_session_metadata")).
+		WithArgs(insertArgs...).
+		WillReturnError(&pgconn.PgError{
+			Code:           "23505",
+			ConstraintName: codeReviewActiveHeadConstraint,
+			Message:        "duplicate key value violates unique constraint",
+		})
+	metadata := &models.CodeReviewSessionMetadata{
+		OrgID:           uuid.New(),
+		SessionID:       uuid.New(),
+		RepositoryID:    uuid.New(),
+		PullRequestID:   uuid.New(),
+		PolicyID:        uuid.New(),
+		BaseSHA:         "base",
+		HeadSHA:         "head",
+		TriggerSource:   models.CodeReviewTriggerSourceAppReviewer,
+		Status:          models.CodeReviewSessionStatusQueued,
+		ReviewOutputKey: "delivery-specific-output",
+	}
+
+	err = NewCodeReviewStore(mock).CreateSessionMetadata(context.Background(), metadata)
+
+	require.ErrorIs(t, err, ErrCodeReviewActiveHeadConflict, "active-head uniqueness races should be classified for lifecycle deferral")
+	require.NoError(t, mock.ExpectationsWereMet(), "metadata insert should be attempted once")
 }
 
 func TestCodeReviewStore_SetWaitingForGitHubPersistsOperationalState(t *testing.T) {

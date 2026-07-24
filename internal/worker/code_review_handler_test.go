@@ -50,7 +50,8 @@ func TestStartCodeReviewReassessmentHandlerDefersBehindOlderAssessment(t *testin
 	lifecycle := &codeReviewLifecycleStub{result: codereview.ReviewRequestedResult{Processed: true, Reused: true, Deferred: true}}
 	payload, err := json.Marshal(codereview.ReviewChangedInput{
 		OrgID: orgID, RepositoryID: repoID, PullRequestID: prID, PriorSessionID: priorSessionID,
-		HeadSHA: "event-head", ChangeKey: "pull_request:delivery-143", ChangeReason: "pull_request.edited",
+		HeadSHA: "event-head", ChangeKey: "review_requested:delivery-143", ChangeReason: "pull_request.review_requested",
+		GitHubDeliveryID: "delivery-143", RequestedTeamSlug: "143-code-reviewer", ExplicitRequest: true,
 	})
 	require.NoError(t, err, "reassessment starter payload should marshal")
 
@@ -66,6 +67,9 @@ func TestStartCodeReviewReassessmentHandlerDefersBehindOlderAssessment(t *testin
 	require.True(t, retryable.BypassMaxRetryDuration, "durable follow-up should survive long-running reviewer agents")
 	require.Equal(t, "current-head", lifecycle.input.HeadSHA, "starter should reassess the current mirrored PR head")
 	require.Equal(t, priorSessionID, lifecycle.input.PriorSessionID, "starter should preserve event ordering against the prior assessment")
+	require.True(t, lifecycle.input.ExplicitRequest, "starter should preserve the explicit request contract")
+	require.Equal(t, "delivery-143", lifecycle.input.GitHubDeliveryID, "starter should preserve GitHub delivery identity")
+	require.Equal(t, "143-code-reviewer", lifecycle.input.RequestedTeamSlug, "starter should preserve reviewer cleanup context")
 	require.NoError(t, mock.ExpectationsWereMet(), "starter should load the current pull request with org isolation")
 }
 
@@ -330,6 +334,30 @@ func TestCodeReviewTerminalFailureStatus(t *testing.T) {
 			require.Equal(t, tt.expectedCode, code, "terminal status should use the stable operational code")
 			require.Equal(t, tt.expectRetry, retryable, "terminal status should expose retry eligibility accurately")
 			require.Contains(t, message, tt.expectedAction, "terminal status should contain a concise operator action")
+		})
+	}
+}
+
+func TestCodeReviewSubmitDecision(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		decision models.CodeReviewDecision
+		expected codereview.SubmitReviewDecision
+	}{
+		{name: "approved", decision: models.CodeReviewDecisionApproved, expected: codereview.SubmitReviewDecisionApproved},
+		{name: "comment only", decision: models.CodeReviewDecisionCommentOnly, expected: codereview.SubmitReviewDecisionCommentOnly},
+		{name: "needs human review", decision: models.CodeReviewDecisionNeedsHumanReview, expected: codereview.SubmitReviewDecisionNeedsHumanReview},
+		{name: "blocked", decision: models.CodeReviewDecisionBlocked, expected: codereview.SubmitReviewDecisionBlocked},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := codeReviewSubmitDecision(tt.decision)
+
+			require.Equal(t, tt.expected, actual, "GitHub submission should retain the exact 143 decision while mapping non-approvals to comment reviews")
 		})
 	}
 }

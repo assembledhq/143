@@ -21,7 +21,7 @@ Implemented:
 - typed Go models and `pgx` stores for policies, review metadata, agent evidence, and findings
 - deterministic acceptable-risk evaluator, starter policy templates, final-review body rendering, and inline finding selection helpers
 - GitHub `review_requested` webhook adapter for configured bot reviewer identities, including local PR mirror creation for human-authored PRs
-- event-driven reassessment after the initial reviewer request when the PR head changes, with durable follow-up jobs and a terminal stop once 143 approves; PR metadata, readiness, human reviews/comments/threads, checks, and commit statuses continue to synchronize without starting reviewer sessions
+- event-driven reassessment after the initial reviewer request when the PR head changes, plus delivery-keyed explicit rerequests that can reassess the same head after a non-approval; durable follow-up jobs serialize requests behind active work and a terminal stop applies once 143 approves, while PR metadata, readiness, human reviews/comments/threads, checks, and commit statuses continue to synchronize without starting reviewer sessions
 - service-layer code review request orchestration that resolves/materializes policy, marks stale older heads, reuses running sessions, creates normal code-review sessions, and enqueues `run_code_review`
 - `run_code_review` worker handler that loads the captured policy version, fans out read-only reviewer threads running native `/review`, synthesizes via an orchestrator thread, records agent results, submits a GitHub review when the worker has GitHub credentials, and stores the GitHub review id/url
 - live reviewer/orchestrator evidence ingestion harvested from running review threads rather than pre-existing stored result rows
@@ -30,8 +30,9 @@ Implemented:
 - prompt artifact storage and recovery for rendered reviewer/orchestrator prompts and their structured outputs
 - inline-comment posting with marker-based dedupe/update and posted-comment id persistence
 - GitHub changed-file fetch support for PR file/line threshold and coarse risk-category evaluation
-- GitHub review submission as the sole GitHub result surface, avoiding a redundant commit status that could be mistaken for a required CI check
-- in-place GitHub review-summary refresh for reassessments, with prior inline findings updated by stable markers and each assessment retained as a separate auditable 143 session
+- one rolling PR conversation comment that links to the active session while review is running and is replaced with the result when it completes, alongside the formal GitHub review and without a redundant commit status that could be mistaken for a required CI check
+- durable per-PR storage of that rolling comment's GitHub ID, using direct updates normally and an app-authored marker scan only to recover a missing or deleted comment
+- in-place GitHub review-summary refresh for reassessments, with visible latest-assessment commit/time provenance, prior inline findings updated by stable markers, and each assessment retained as a separate auditable 143 session
 - stale requested-reviewer cleanup after final review submission for reviewer-login and team-slug triggers carried in the durable job payload
 - productized GitHub team-trigger setup that creates or repairs the `143-code-reviewer` org team, grants repository read access, and persists repo-scoped active trigger settings
 - final-review template rendering from persisted policy data with safe fallback to the built-in body
@@ -81,7 +82,7 @@ Recommended v1 scope:
 - Each reviewer has a policy-versioned reasoning-effort value aligned by index with `reviewers` and `reviewer_models`; the orchestrator keeps its own `reasoning_effort`. Omitted legacy reviewer values inherit the former roster-wide value, or `high` when that value is also absent.
 - GitHub final review with summary body and a configurable number of inline comments.
 - Approval only for acceptable PRs; otherwise comment with escalation reasons.
-- Idempotent reruns for duplicate requests, stale heads, and GitHub review retries.
+- Delivery-idempotent explicit requests, stale-head reruns, and GitHub review retries.
 - Top-level `Code reviews` surface for filtered sessions and configuration.
 
 Defer:
@@ -104,6 +105,9 @@ Developer requests "143 Code Reviewer" in GitHub
 143 receives review_requested webhook and creates a code review session
         |
         v
+Best-effort async job creates or refreshes one PR comment linked to the session
+        |
+        v
 Run configured review agents against the PR diff and context
         |
         v
@@ -120,9 +124,14 @@ Else:
   submit a GitHub review comment with escalation reasons
         |
         v
-Until approval, later commits automatically rerun the assessment and update
-the existing GitHub review summary. Other webhook activity only synchronizes
-PR state. Approval is final.
+Replace the rolling PR comment with the result
+        |
+        v
+Until approval, later commits automatically rerun the assessment, and a new
+explicit reviewer request reruns it even at the same head. Both update the
+existing GitHub review summary and rolling PR comment. Equivalent webhook
+deliveries are idempotent; other webhook activity only synchronizes PR state.
+Approval is final.
 ```
 
 Reviewer assignment should be explicit in v1. Auto-running can come later after teams trust the signal.
@@ -136,7 +145,9 @@ Primary interaction:
 - A 143 admin creates or repairs the `143-code-reviewer` GitHub team from the Code reviews configuration page.
 - 143 grants that team read access to the selected repository and stores the team slug as the repo's active trigger.
 - A user requests `@org/143-code-reviewer` as a team reviewer on a PR.
+- 143 asynchronously creates or refreshes one PR conversation comment that links to the running review session.
 - The bot submits a final GitHub review with a summary body and a configurable number of inline comments on changed lines; it does not publish a separate commit status.
+- The rolling conversation comment is replaced with that result, and later review passes reuse the same comment.
 
 This does not use CODEOWNERS and does not auto-request reviews on PR open. The team is only the selectable GitHub reviewer trigger; normal review submission still uses the installed GitHub App.
 
@@ -424,19 +435,20 @@ Every approval stores the policy version and reviewed head SHA. The GitHub revie
 
 ## Rerun And Idempotency Behavior
 
-Code review sessions are keyed to a PR head SHA. Each head is a separate reviewable revision.
+Automatic commit reassessments use the PR head SHA and captured policy as their base identity. Explicit requests instead reserve a PR-and-GitHub-delivery identity before resolving mutable head or policy state, while each resulting session still captures the head and policy it actually assesses.
 
 Rules:
 
-- If the bot is requested while a review is already running for the same PR head SHA, reuse the existing session and update the pending GitHub status/comment instead of starting another session.
-- After the first explicit reviewer request, only new commits automatically enqueue a fresh assessment until 143 approves. Human review submissions/edits/dismissals, inline review comment changes, review thread changes, PR title/description edits, readiness changes, completed checks, and commit-status updates do not enqueue reviewer sessions.
+- Redelivery of the same GitHub `review_requested` event reuses the assessment keyed to that delivery ID even if head or policy state changed afterward. A genuinely new explicit request after a non-approval creates a distinct assessment even for the same PR head SHA. If the original attempt never reached the durable worker queue, redelivery creates one immutable replacement attempt under the same delivery identity.
+- If a new explicit request arrives while a review is already running for the same PR head SHA, retain a durable starter job until the active assessment finishes, then create the requested assessment. The request carries reviewer/team identity through the worker so GitHub assignment cleanup still occurs.
+- After the first explicit reviewer request, new commits automatically enqueue a fresh assessment until 143 approves. Human review submissions/edits/dismissals, inline review comment changes, review thread changes, PR title/description edits, readiness changes, completed checks, and commit-status updates do not enqueue reviewer sessions; after a description-only edit, the author explicitly requests 143 again.
 - If the PR receives new commits while review is running, mark the running session stale, stop before approval, and enqueue a new session for the new head SHA.
 - If new commits arrive while agents are running, retain a durable starter job until the older assessment finishes. Re-read mutable PR metadata and check gates immediately before every final recommendation, but do not queue a new session solely because metadata, human review activity, or CI changed. A newer head coalesces duplicate webhook deliveries for that commit.
 - A submitted 143 approval is monotonic for the PR. Later webhook changes and explicit reviewer rerequests are ignored so automation never dismisses or contradicts an approval that has already occurred.
-- Reassessments update the original GitHub review summary in place so the PR has one current 143 recommendation; the backing 143 sessions remain immutable audit history.
+- Reassessments update the original GitHub review summary in place so the PR has one current 143 recommendation; the body identifies the latest assessed commit and UTC assessment time, and the backing 143 sessions remain immutable audit history.
 - When a previously non-approved sticky summary becomes acceptable, update that summary and submit a separate, marker-only formal GitHub approval for the current head. Editing a submitted review body alone never represents a review-state transition.
-- New-commit webhook deliveries are keyed by the PR head SHA so equivalent deliveries reuse the same assessment.
-- If the final GitHub review submission fails after session completion, retry idempotently using a stable review-output key for the session/head SHA/policy version.
+- New-commit webhook deliveries are keyed by the PR head SHA, while explicit requests are keyed by GitHub delivery ID, so equivalent deliveries reuse the same assessment without collapsing distinct user requests.
+- If the final GitHub review submission fails after session completion, retry idempotently using the assessment's stable review-output key; automatic keys capture head/policy state and explicit-request keys remain rooted in delivery identity.
 - If inline comments were already posted for the same head SHA, update or supersede them where GitHub permits; otherwise avoid posting duplicate line comments.
 - If policy changes while a review is running, finish under the policy version captured at session start unless an admin explicitly cancels and reruns.
 - GitHub rate limits keep the attempt running in `waiting_for_github` with the worker's scheduled `retry_at`; the UI shows automatic recovery and does not offer a competing manual retry.

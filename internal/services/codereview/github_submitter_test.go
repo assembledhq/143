@@ -1,16 +1,189 @@
 package codereview
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+func TestGitHubSubmitter_UpsertReviewStatusCommentCreatesThenUpdatesStickyComment(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu         sync.Mutex
+		storedBody string
+		listCalls  int
+		postCalls  int
+		patchCalls int
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/issues/42/comments":
+			listCalls++
+			if storedBody == "" {
+				if err := json.NewEncoder(w).Encode([]any{}); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+				}
+				return
+			}
+			if err := json.NewEncoder(w).Encode([]map[string]any{{"id": int64(7331), "body": storedBody}}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/repo/issues/42/comments":
+			var payload map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			postCalls++
+			storedBody = payload["body"]
+			if err := json.NewEncoder(w).Encode(map[string]any{"id": int64(7331), "body": storedBody}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+		case r.Method == http.MethodPatch && r.URL.Path == "/repos/acme/repo/issues/comments/7331":
+			var payload map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			patchCalls++
+			storedBody = payload["body"]
+			if err := json.NewEncoder(w).Encode(map[string]any{"id": int64(7331), "body": storedBody}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
+	request := UpsertReviewStatusCommentRequest{
+		InstallationID: 99,
+		Repository:     "acme/repo",
+		PullNumber:     42,
+		Body:           "143 Code Reviewer has started.\n\n[Follow the review session](https://143.test/sessions/one)",
+	}
+	commentID, err := submitter.UpsertReviewStatusComment(context.Background(), request)
+	require.NoError(t, err, "first status sync should create the rolling PR comment")
+	require.Equal(t, int64(7331), commentID, "created status sync should return the issue comment id")
+
+	request.Body = "143 Code Reviewer approved this PR.\n\n[View the full review](https://143.test/sessions/two)"
+	request.ExistingCommentID = &commentID
+	commentID, err = submitter.UpsertReviewStatusComment(context.Background(), request)
+	require.NoError(t, err, "subsequent review status should update the marker-backed comment")
+	require.Equal(t, int64(7331), commentID, "subsequent review should preserve the same issue comment id")
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, 1, listCalls, "only the first status sync should scan PR comments")
+	require.Equal(t, 1, postCalls, "the PR should receive exactly one rolling status comment")
+	require.Equal(t, 1, patchCalls, "the durable comment id should update the existing status comment directly")
+	require.Contains(t, storedBody, codeReviewStatusCommentMarker, "the rolling comment should retain its recovery marker")
+	require.Contains(t, storedBody, "approved this PR", "the rolling comment should contain the latest review result")
+}
+
+func TestGitHubSubmitter_UpsertReviewStatusCommentRecoversStaleIDFromAppAuthoredMarker(t *testing.T) {
+	t.Parallel()
+
+	var patchedCommentID int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPatch && r.URL.Path == "/repos/acme/repo/issues/comments/7000":
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/issues/42/comments":
+			require.NoError(t, json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"id":                       int64(8000),
+					"body":                     codeReviewStatusCommentMarker + "\n\nHuman-authored marker",
+					"performed_via_github_app": map[string]any{"id": int64(999)},
+				},
+				{
+					"id":                       int64(8001),
+					"body":                     codeReviewStatusCommentMarker + "\n\nOld app status",
+					"performed_via_github_app": map[string]any{"id": int64(143)},
+				},
+			}), "marker recovery response should encode")
+		case r.Method == http.MethodPatch && r.URL.Path == "/repos/acme/repo/issues/comments/8001":
+			patchedCommentID = 8001
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"id": patchedCommentID}), "marker recovery update should encode")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	staleCommentID := int64(7000)
+	submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token", appID: 143}, WithGitHubSubmitterBaseURL(server.URL))
+	commentID, err := submitter.UpsertReviewStatusComment(context.Background(), UpsertReviewStatusCommentRequest{
+		InstallationID:    99,
+		Repository:        "acme/repo",
+		PullNumber:        42,
+		Body:              "143 Code Reviewer completed its review.",
+		ExistingCommentID: &staleCommentID,
+	})
+
+	require.NoError(t, err, "a deleted durable comment should recover through the app-authored marker")
+	require.Equal(t, int64(8001), commentID, "marker recovery should return the replacement durable comment id")
+	require.Equal(t, int64(8001), patchedCommentID, "marker recovery must ignore a marker authored by another GitHub app")
+}
+
+func TestGitHubSubmitter_EmitsInstallationTelemetry(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/repos/acme/repo/pulls/42/files", r.URL.Path, "file lookup should use the expected GitHub route")
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode([]PullRequestFile{}), "test response should encode")
+	}))
+	defer server.Close()
+
+	var logs bytes.Buffer
+	client := githubtelemetry.NewHTTPClient(time.Second, zerolog.New(&logs))
+	submitter := NewGitHubSubmitter(
+		&tokenStub{token: "ghs_token"},
+		WithGitHubSubmitterBaseURL(server.URL),
+		WithGitHubSubmitterHTTPClient(client),
+	)
+
+	files, err := submitter.ListPullRequestFiles(context.Background(), PullRequestFilesRequest{
+		InstallationID: 99,
+		Repository:     "acme/repo",
+		PullNumber:     42,
+	})
+
+	require.NoError(t, err, "file lookup should succeed")
+	require.Equal(t, []PullRequestFile{}, files, "file lookup should preserve the empty GitHub response")
+	var event map[string]any
+	require.NoError(t, json.Unmarshal(logs.Bytes(), &event), "GitHub telemetry should be valid JSON")
+	delete(event, "github_duration_ms")
+	require.Equal(t, map[string]any{
+		"level":                  "info",
+		"message":                "github api request",
+		"github_method":          http.MethodGet,
+		"github_route":           "/repos/:owner/:repo/pulls/:id/files",
+		"github_auth_type":       githubtelemetry.AuthTypeAppInstallation,
+		"github_status_code":     float64(http.StatusOK),
+		"github_status_class":    "2xx",
+		"github_result":          "success",
+		"github_rate_limited":    false,
+		"github_repository":      "acme/repo",
+		"github_installation_id": float64(99),
+	}, event, "submitter requests should emit bounded installation-scoped telemetry")
+}
 
 func TestGitHubSubmitter_SubmitReview(t *testing.T) {
 	t.Parallel()
@@ -57,6 +230,7 @@ func TestGitHubSubmitter_SubmitReview(t *testing.T) {
 	require.NoError(t, err, "SubmitReview should post a GitHub review")
 	require.Equal(t, int64(123), result.ID, "SubmitReview should return review id")
 	require.Equal(t, "https://github.com/acme/repo/pull/42#pullrequestreview-123", result.URL, "SubmitReview should return review URL")
+	require.Equal(t, "143 Code Reviewer approved this PR", result.Body, "SubmitReview should return the visible body persisted for future history updates")
 	require.Equal(t, []SubmitReviewPostedComment{
 		{ID: 456, Path: "src/auth/session.go", Line: 42, Body: "Check this edge case."},
 	}, result.Comments, "SubmitReview should recover posted inline comment ids")
@@ -159,6 +333,7 @@ func TestGitHubSubmitter_SubmitReviewReturnsExistingMarkedReview(t *testing.T) {
 func TestGitHubSubmitter_SubmitReviewUpdatesExistingAssessment(t *testing.T) {
 	t.Parallel()
 
+	previousDecidedAt := time.Date(2026, time.July, 22, 19, 14, 8, 0, time.FixedZone("PDT", -7*60*60))
 	var (
 		reviewUpdate  map[string]string
 		commentUpdate map[string]string
@@ -199,6 +374,9 @@ func TestGitHubSubmitter_SubmitReviewUpdatesExistingAssessment(t *testing.T) {
 		ExistingReviewID:  143,
 		ExistingReviewURL: "https://github.com/acme/repo/pull/42#pullrequestreview-143",
 		Decision:          SubmitReviewDecisionCommentOnly,
+		PreviousDecision:  SubmitReviewDecisionBlocked,
+		PreviousDecidedAt: previousDecidedAt,
+		PreviousBody:      "143 Code Reviewer did not approve this PR\n\nWhy: blocking findings remained.",
 		Body:              "143 Code Reviewer did not approve this PR\n\nWhy: required checks are failing.",
 		Comments: []SubmitReviewComment{{
 			Path: "src/auth/session.go", Line: 42, Body: "Updated finding.", DedupeKey: "finding-key",
@@ -208,8 +386,10 @@ func TestGitHubSubmitter_SubmitReviewUpdatesExistingAssessment(t *testing.T) {
 	require.NoError(t, err, "SubmitReview should update an existing GitHub assessment")
 	require.Equal(t, int64(143), result.ID, "updated assessment should retain the original review id")
 	require.Equal(t, "https://github.com/acme/repo/pull/42#pullrequestreview-143", result.URL, "updated assessment should retain the original review URL")
-	require.Contains(t, reviewUpdate["body"], "required checks are failing", "review summary should contain the updated pass assessment")
-	require.Contains(t, reviewUpdate["body"], codeReviewOutputMarker("updated-output"), "review summary should carry the new idempotency marker")
+	expectedVisibleBody := "143 Code Reviewer did not approve this PR\n\nWhy: required checks are failing.\n\n" +
+		codeReviewHistoryStartMarker + "\nPrevious 143 code reviews:\n- `2026-07-23T02:14:08Z` — **Not approved — blocked**\n" + codeReviewHistoryEndMarker
+	require.Equal(t, expectedVisibleBody, result.Body, "updated assessment should return the visible review body with prior decision history")
+	require.Equal(t, withCodeReviewOutputMarker(expectedVisibleBody, "updated-output"), reviewUpdate["body"], "review summary update should retain one timestamped line for the prior decision")
 	require.Equal(t, withCodeReviewFindingMarker("Updated finding.", "finding-key"), commentUpdate["body"], "matching prior inline finding should be updated in place with a stable reassessment marker")
 	require.Equal(t, []SubmitReviewPostedComment{{
 		ID: 456, Path: "src/auth/session.go", Line: 42,
@@ -311,12 +491,96 @@ func TestIsCodeReviewAuthoredBody(t *testing.T) {
 	}{
 		{name: "review summary marker", body: "result\n\n" + codeReviewOutputMarker("output"), expected: true},
 		{name: "inline finding marker", body: withCodeReviewFindingMarker("finding", "key"), expected: true},
+		{name: "rolling status marker", body: codeReviewStatusCommentMarker + "\n\nReviewing", expected: true},
 		{name: "human review", body: "Please add a regression test.", expected: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tt.expected, IsCodeReviewAuthoredBody(tt.body), "marker detection should classify review authorship")
+		})
+	}
+}
+
+func TestWithCodeReviewHistory(t *testing.T) {
+	t.Parallel()
+
+	firstDecisionAt := time.Date(2026, time.July, 20, 10, 30, 0, 0, time.UTC)
+	secondDecisionAt := time.Date(2026, time.July, 21, 15, 45, 12, 0, time.UTC)
+	firstHistory := codeReviewHistoryStartMarker + "\nPrevious 143 code reviews:\n" +
+		"- `2026-07-20T10:30:00Z` — **Not approved — needs human review**\n" + codeReviewHistoryEndMarker
+	tests := []struct {
+		name         string
+		body         string
+		previousBody string
+		decision     SubmitReviewDecision
+		decidedAt    time.Time
+		expected     string
+	}{
+		{
+			name:         "leaves current body unchanged without a complete prior decision",
+			body:         "Current assessment.",
+			previousBody: "Prior assessment.",
+			expected:     "Current assessment.",
+		},
+		{
+			name:         "adds one timestamped line for the prior decision",
+			body:         "Current assessment.",
+			previousBody: "Prior assessment.",
+			decision:     SubmitReviewDecisionNeedsHumanReview,
+			decidedAt:    firstDecisionAt,
+			expected:     "Current assessment.\n\n" + firstHistory,
+		},
+		{
+			name:         "preserves earlier history when another assessment replaces the comment",
+			body:         "Newest assessment.",
+			previousBody: "Prior assessment.\n\n" + firstHistory,
+			decision:     SubmitReviewDecisionCommentOnly,
+			decidedAt:    secondDecisionAt,
+			expected: "Newest assessment.\n\n" + codeReviewHistoryStartMarker + "\nPrevious 143 code reviews:\n" +
+				"- `2026-07-20T10:30:00Z` — **Not approved — needs human review**\n" +
+				"- `2026-07-21T15:45:12Z` — **Not approved**\n" + codeReviewHistoryEndMarker,
+		},
+		{
+			name:         "does not duplicate an entry when publishing is retried",
+			body:         "Current assessment.",
+			previousBody: "Prior assessment.\n\n" + firstHistory,
+			decision:     SubmitReviewDecisionNeedsHumanReview,
+			decidedAt:    firstDecisionAt,
+			expected:     "Current assessment.\n\n" + firstHistory,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := withCodeReviewHistory(tt.body, tt.previousBody, tt.decision, tt.decidedAt)
+
+			require.Equal(t, tt.expected, actual, "history rendering should preserve the current assessment and expected prior-decision lines")
+		})
+	}
+}
+
+func TestCodeReviewDecisionLabel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		decision SubmitReviewDecision
+		expected string
+	}{
+		{name: "approved", decision: SubmitReviewDecisionApproved, expected: "Approved"},
+		{name: "comment only", decision: SubmitReviewDecisionCommentOnly, expected: "Not approved"},
+		{name: "needs human review", decision: SubmitReviewDecisionNeedsHumanReview, expected: "Not approved — needs human review"},
+		{name: "blocked", decision: SubmitReviewDecisionBlocked, expected: "Not approved — blocked"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := codeReviewDecisionLabel(tt.decision)
+
+			require.Equal(t, tt.expected, actual, "history should use an approval-oriented label for every decision")
 		})
 	}
 }
@@ -690,8 +954,16 @@ func TestGitHubSubmitter_SubmitReviewRejectsInvalidInput(t *testing.T) {
 
 type tokenStub struct {
 	token string
+	appID int64
 }
 
 func (s *tokenStub) GetInstallationToken(context.Context, int64) (string, error) {
 	return s.token, nil
+}
+
+func (s *tokenStub) GitHubAppID() int64 {
+	if s.appID > 0 {
+		return s.appID
+	}
+	return 143
 }

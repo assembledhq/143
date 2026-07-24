@@ -1884,6 +1884,7 @@ func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testi
 	require.True(t, dashboardNames["primary-operations.json"], "primary operations dashboard should be provisioned from the repo")
 	require.True(t, dashboardNames["preview-health.json"], "preview health dashboard should be provisioned from the repo")
 	require.True(t, dashboardNames["worker-runtime.json"], "worker runtime dashboard should be provisioned from the repo")
+	require.True(t, dashboardNames["github-api-health.json"], "GitHub API health dashboard should be provisioned from the repo")
 
 	for _, dashboardFile := range dashboardFiles {
 		if dashboardFile.IsDir() || !strings.HasSuffix(dashboardFile.Name(), ".json") {
@@ -1932,6 +1933,76 @@ func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testi
 			}
 		}
 	}
+}
+
+func TestGitHubAPIHealthDashboardUsesFocusedStructuredTelemetry(t *testing.T) {
+	t.Parallel()
+
+	rawDashboard, err := os.ReadFile("../deploy/grafana/provisioning/dashboards/github-api-health.json")
+	require.NoError(t, err, "test should read the GitHub API health dashboard")
+
+	var dashboard struct {
+		Title   string `json:"title"`
+		Refresh string `json:"refresh"`
+		Time    struct {
+			From string `json:"from"`
+		} `json:"time"`
+		Panels []struct {
+			Type        string `json:"type"`
+			Title       string `json:"title"`
+			Description string `json:"description"`
+			Targets     []struct {
+				Expr string `json:"expr"`
+			} `json:"targets"`
+		} `json:"panels"`
+	}
+	require.NoError(t, json.Unmarshal(rawDashboard, &dashboard), "GitHub API health dashboard should be valid JSON")
+	require.Equal(t, "GitHub API Health", dashboard.Title, "dashboard should have the stable operator-facing title")
+	require.Equal(t, "1m", dashboard.Refresh, "dashboard should refresh frequently enough for quota incidents without creating continuous churn")
+	require.Equal(t, "now-6h", dashboard.Time.From, "dashboard should default to a focused operational time window")
+
+	expectedPanels := map[string]bool{
+		"API requests":                                false,
+		"Rate limits hit":                             false,
+		"Upstream / transport failures":               false,
+		"Lowest quota headroom":                       false,
+		"Request volume by result":                    false,
+		"Rate-limit rejections by kind":               false,
+		"Quota headroom by installation and resource": false,
+		"GitHub API latency":                          false,
+		"Top API routes":                              false,
+		"Rate-limit sources":                          false,
+		"Recent rate-limit responses":                 false,
+	}
+	nonRowPanels := 0
+	for _, panel := range dashboard.Panels {
+		if panel.Type == "row" {
+			continue
+		}
+		nonRowPanels++
+		require.NotEmpty(t, panel.Description, "panel %q should explain how operators should interpret it", panel.Title)
+		if _, ok := expectedPanels[panel.Title]; ok {
+			expectedPanels[panel.Title] = true
+		}
+		for _, target := range panel.Targets {
+			require.Contains(t, target.Expr, `_msg:"github api request"`, "panel %q should use the canonical structured telemetry event", panel.Title)
+			require.NotContains(t, target.Expr, "API rate limit exceeded", "panel %q should not scrape unstable GitHub error prose", panel.Title)
+		}
+	}
+	require.Equal(t, 11, nonRowPanels, "dashboard should stay focused instead of accumulating low-value panels")
+	require.Equal(t, map[string]bool{
+		"API requests":                                true,
+		"Rate limits hit":                             true,
+		"Upstream / transport failures":               true,
+		"Lowest quota headroom":                       true,
+		"Request volume by result":                    true,
+		"Rate-limit rejections by kind":               true,
+		"Quota headroom by installation and resource": true,
+		"GitHub API latency":                          true,
+		"Top API routes":                              true,
+		"Rate-limit sources":                          true,
+		"Recent rate-limit responses":                 true,
+	}, expectedPanels, "dashboard should contain the complete curated panel set")
 }
 
 func TestPreviewHealthDashboardStaysFocused(t *testing.T) {
@@ -2146,6 +2217,9 @@ func TestProductionAlertsUseValidLogsQLRangeFilters(t *testing.T) {
 	alertConfig := string(alerts)
 	require.NotContains(t, alertConfig, "status:[", "VictoriaLogs numeric ranges should use field:range[...] syntax so vmalert can parse the rules")
 	require.GreaterOrEqual(t, strings.Count(alertConfig, "status:range[500,599]"), 3, "API 5xx alert rules should filter inclusive 500-599 statuses with valid LogsQL range syntax")
+	require.Contains(t, alertConfig, "GitHubAPIRateLimitSustained", "production alerts should detect sustained GitHub throttling")
+	require.Contains(t, alertConfig, `_msg:"github api request" AND github_rate_limited:true`, "GitHub alert should use the canonical structured rate-limit signal")
+	require.Contains(t, alertConfig, "for: 5m", "GitHub rate-limit alert should require sustained impact to avoid paging on one transient rejection")
 }
 
 func TestLoggingDesignDocsTrackProvisionedDashboardsAndAlerts(t *testing.T) {

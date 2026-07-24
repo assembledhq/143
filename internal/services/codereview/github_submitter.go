@@ -14,16 +14,22 @@ import (
 	"time"
 
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 )
 
 type InstallationTokenProvider interface {
 	GetInstallationToken(ctx context.Context, installationID int64) (string, error)
 }
 
+type githubAppIDProvider interface {
+	GitHubAppID() int64
+}
+
 type GitHubSubmitter struct {
 	tokens  InstallationTokenProvider
 	client  *http.Client
 	baseURL string
+	appID   int64
 }
 
 type GitHubSubmitterOption func(*GitHubSubmitter)
@@ -51,14 +57,27 @@ func NewGitHubSubmitter(tokens InstallationTokenProvider, opts ...GitHubSubmitte
 	for _, opt := range opts {
 		opt(s)
 	}
+	if provider, ok := tokens.(githubAppIDProvider); ok {
+		s.appID = provider.GitHubAppID()
+	}
 	return s
+}
+
+func withGitHubInstallationTelemetry(ctx context.Context, installationID int64) context.Context {
+	return githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
+		Kind:           githubtelemetry.RequestKindAPI,
+		AuthType:       githubtelemetry.AuthTypeAppInstallation,
+		InstallationID: installationID,
+	})
 }
 
 type SubmitReviewDecision string
 
 const (
-	SubmitReviewDecisionApproved    SubmitReviewDecision = "approved"
-	SubmitReviewDecisionCommentOnly SubmitReviewDecision = "comment_only"
+	SubmitReviewDecisionApproved         SubmitReviewDecision = "approved"
+	SubmitReviewDecisionCommentOnly      SubmitReviewDecision = "comment_only"
+	SubmitReviewDecisionNeedsHumanReview SubmitReviewDecision = "needs_human_review"
+	SubmitReviewDecisionBlocked          SubmitReviewDecision = "blocked"
 )
 
 type SubmitReviewRequest struct {
@@ -71,6 +90,9 @@ type SubmitReviewRequest struct {
 	ExistingReviewID  int64
 	ExistingReviewURL string
 	Decision          SubmitReviewDecision
+	PreviousDecision  SubmitReviewDecision
+	PreviousDecidedAt time.Time
+	PreviousBody      string
 	Body              string
 	Comments          []SubmitReviewComment
 }
@@ -85,6 +107,7 @@ type SubmitReviewComment struct {
 type SubmitReviewResult struct {
 	ID       int64
 	URL      string
+	Body     string
 	Comments []SubmitReviewPostedComment
 }
 
@@ -94,6 +117,14 @@ type SubmitReviewPostedComment struct {
 	Line      int
 	Body      string
 	DedupeKey string
+}
+
+type UpsertReviewStatusCommentRequest struct {
+	InstallationID    int64
+	Repository        string
+	PullNumber        int
+	Body              string
+	ExistingCommentID *int64
 }
 
 type PullRequestFilesRequest struct {
@@ -130,6 +161,57 @@ type RequestedReviewersRequest struct {
 	TeamReviewers  []string
 }
 
+const codeReviewStatusCommentMarker = "<!-- 143-code-review-status -->"
+
+// UpsertReviewStatusComment maintains one marker-backed issue comment on the
+// pull request. Looking up the marker lets later review sessions recover the
+// same comment without coupling its lifetime to any one session row.
+func (s *GitHubSubmitter) UpsertReviewStatusComment(ctx context.Context, req UpsertReviewStatusCommentRequest) (int64, error) {
+	if s == nil || s.tokens == nil {
+		return 0, fmt.Errorf("github submitter is not configured")
+	}
+	owner, repo, ok := strings.Cut(req.Repository, "/")
+	if !ok || owner == "" || repo == "" {
+		return 0, fmt.Errorf("repository must be owner/name")
+	}
+	if req.PullNumber <= 0 {
+		return 0, fmt.Errorf("pull number is required")
+	}
+	if req.InstallationID == 0 {
+		return 0, fmt.Errorf("installation id is required")
+	}
+	body := strings.TrimSpace(req.Body)
+	if body == "" {
+		return 0, fmt.Errorf("status comment body is required")
+	}
+	token, err := s.tokens.GetInstallationToken(ctx, req.InstallationID)
+	if err != nil {
+		return 0, fmt.Errorf("get installation token: %w", err)
+	}
+	markedBody := codeReviewStatusCommentMarker + "\n\n" + body
+	if req.ExistingCommentID != nil && *req.ExistingCommentID > 0 {
+		if err := s.updateIssueComment(ctx, token, owner, repo, *req.ExistingCommentID, markedBody); err == nil {
+			return *req.ExistingCommentID, nil
+		} else if !githubStatusCode(err, http.StatusNotFound) {
+			return 0, err
+		}
+	}
+	existing, found, err := s.findReviewStatusComment(ctx, token, owner, repo, req.PullNumber)
+	if err != nil {
+		return 0, err
+	}
+	if found {
+		if strings.TrimSpace(existing.Body) == strings.TrimSpace(markedBody) {
+			return existing.ID, nil
+		}
+		if err := s.updateIssueComment(ctx, token, owner, repo, existing.ID, markedBody); err != nil {
+			return 0, err
+		}
+		return existing.ID, nil
+	}
+	return s.createIssueComment(ctx, token, owner, repo, req.PullNumber, markedBody)
+}
+
 func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequest) (SubmitReviewResult, error) {
 	if s == nil || s.tokens == nil {
 		return SubmitReviewResult{}, fmt.Errorf("github submitter is not configured")
@@ -150,20 +232,27 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 	if err := req.Decision.validate(); err != nil {
 		return SubmitReviewResult{}, err
 	}
+	ctx = withGitHubInstallationTelemetry(ctx, req.InstallationID)
 	token, err := s.tokens.GetInstallationToken(ctx, req.InstallationID)
 	if err != nil {
 		return SubmitReviewResult{}, fmt.Errorf("get installation token: %w", err)
 	}
-	reviewBody := withCodeReviewOutputMarker(req.Body, req.OutputKey)
+	visibleReviewBody := strings.TrimSpace(req.Body)
 	if req.ExistingReviewID > 0 {
-		return s.updateExistingReview(ctx, token, owner, repo, req, reviewBody)
+		visibleReviewBody = withCodeReviewHistory(visibleReviewBody, req.PreviousBody, req.PreviousDecision, req.PreviousDecidedAt)
+		reviewBody := withCodeReviewOutputMarker(visibleReviewBody, req.OutputKey)
+		result, err := s.updateExistingReview(ctx, token, owner, repo, req, reviewBody)
+		result.Body = visibleReviewBody
+		return result, err
 	}
+	reviewBody := withCodeReviewOutputMarker(visibleReviewBody, req.OutputKey)
 	if strings.TrimSpace(req.OutputKey) != "" {
 		existing, found, err := s.findExistingReview(ctx, token, owner, repo, req.PullNumber, req.OutputKey)
 		if err != nil {
 			return SubmitReviewResult{}, err
 		}
 		if found {
+			existing.Body = visibleReviewBody
 			return existing, nil
 		}
 	}
@@ -252,7 +341,7 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		return SubmitReviewResult{}, fmt.Errorf("decode GitHub review response: %w", err)
 	}
-	result := SubmitReviewResult{ID: decoded.ID, URL: decoded.HTMLURL}
+	result := SubmitReviewResult{ID: decoded.ID, URL: decoded.HTMLURL, Body: visibleReviewBody}
 	result.Comments = append(result.Comments, knownPostedComments...)
 	if decoded.ID != 0 && len(req.Comments) > 0 {
 		if comments, commentsErr := s.listReviewComments(ctx, token, owner, repo, req.PullNumber, decoded.ID); commentsErr == nil {
@@ -512,6 +601,100 @@ type githubReviewCommentItem struct {
 	Body string `json:"body"`
 }
 
+type githubIssueCommentItem struct {
+	ID                    int64              `json:"id"`
+	Body                  string             `json:"body"`
+	PerformedViaGitHubApp *githubAppIdentity `json:"performed_via_github_app"`
+}
+
+type githubAppIdentity struct {
+	ID int64 `json:"id"`
+}
+
+func (s *GitHubSubmitter) findReviewStatusComment(ctx context.Context, token, owner, repo string, pullNumber int) (githubIssueCommentItem, bool, error) {
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments?per_page=100", url.PathEscape(owner), url.PathEscape(repo), pullNumber)
+	for path != "" {
+		var comments []githubIssueCommentItem
+		nextPath, err := s.getGitHubJSONPage(ctx, token, path, &comments)
+		if err != nil {
+			return githubIssueCommentItem{}, false, fmt.Errorf("list GitHub pull request issue comments: %w", err)
+		}
+		for _, comment := range comments {
+			if comment.ID != 0 &&
+				comment.PerformedViaGitHubApp != nil &&
+				comment.PerformedViaGitHubApp.ID == s.appID &&
+				strings.Contains(comment.Body, codeReviewStatusCommentMarker) {
+				return comment, true, nil
+			}
+		}
+		path = nextPath
+	}
+	return githubIssueCommentItem{}, false, nil
+}
+
+func (s *GitHubSubmitter) createIssueComment(ctx context.Context, token, owner, repo string, pullNumber int, body string) (int64, error) {
+	payload, err := json.Marshal(map[string]string{"body": body})
+	if err != nil {
+		return 0, fmt.Errorf("marshal review status comment: %w", err)
+	}
+	commentURL := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", s.baseURL, url.PathEscape(owner), url.PathEscape(repo), pullNumber)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, commentURL, bytes.NewReader(payload))
+	if err != nil {
+		return 0, fmt.Errorf("create review status comment request: %w", err)
+	}
+	setGitHubJSONHeaders(httpReq, token)
+	resp, err := s.client.Do(httpReq)
+	if err != nil {
+		return 0, fmt.Errorf("create GitHub review status comment: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0, fmt.Errorf("create GitHub review status comment: %w", readGitHubAPIResponseError(httpReq, resp))
+	}
+	var comment githubIssueCommentItem
+	if err := json.NewDecoder(resp.Body).Decode(&comment); err != nil {
+		return 0, fmt.Errorf("decode GitHub review status comment: %w", err)
+	}
+	if comment.ID == 0 {
+		return 0, fmt.Errorf("create GitHub review status comment: response is missing comment id")
+	}
+	return comment.ID, nil
+}
+
+func (s *GitHubSubmitter) updateIssueComment(ctx context.Context, token, owner, repo string, commentID int64, body string) error {
+	payload, err := json.Marshal(map[string]string{"body": body})
+	if err != nil {
+		return fmt.Errorf("marshal review status comment update: %w", err)
+	}
+	commentURL := fmt.Sprintf("%s/repos/%s/%s/issues/comments/%d", s.baseURL, url.PathEscape(owner), url.PathEscape(repo), commentID)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPatch, commentURL, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("create review status comment update request: %w", err)
+	}
+	setGitHubJSONHeaders(httpReq, token)
+	resp, err := s.client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("update GitHub review status comment: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("update GitHub review status comment: %w", readGitHubAPIResponseError(httpReq, resp))
+	}
+	return nil
+}
+
+func setGitHubJSONHeaders(req *http.Request, token string) {
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+}
+
+func githubStatusCode(err error, statusCode int) bool {
+	var apiErr *ghservice.GitHubAPIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == statusCode
+}
+
 func (s *GitHubSubmitter) findExistingReview(ctx context.Context, token, owner, repo string, pullNumber int, outputKey string) (SubmitReviewResult, bool, error) {
 	marker := codeReviewOutputMarker(outputKey)
 	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews?per_page=100", url.PathEscape(owner), url.PathEscape(repo), pullNumber)
@@ -769,6 +952,7 @@ func (s *GitHubSubmitter) RemoveRequestedReviewers(ctx context.Context, req Requ
 	if len(reviewers) == 0 && len(teams) == 0 {
 		return nil
 	}
+	ctx = withGitHubInstallationTelemetry(ctx, req.InstallationID)
 	token, err := s.tokens.GetInstallationToken(ctx, req.InstallationID)
 	if err != nil {
 		return fmt.Errorf("get installation token: %w", err)
@@ -817,6 +1001,7 @@ func (s *GitHubSubmitter) ListPullRequestFiles(ctx context.Context, req PullRequ
 	if req.InstallationID <= 0 {
 		return nil, fmt.Errorf("installation id is required")
 	}
+	ctx = withGitHubInstallationTelemetry(ctx, req.InstallationID)
 	token, err := s.tokens.GetInstallationToken(ctx, req.InstallationID)
 	if err != nil {
 		return nil, fmt.Errorf("get installation token: %w", err)
@@ -848,6 +1033,7 @@ func (s *GitHubSubmitter) ListReviewContext(ctx context.Context, req ReviewConte
 	if req.InstallationID <= 0 {
 		return ReviewContext{}, fmt.Errorf("installation id is required")
 	}
+	ctx = withGitHubInstallationTelemetry(ctx, req.InstallationID)
 	token, err := s.tokens.GetInstallationToken(ctx, req.InstallationID)
 	if err != nil {
 		return ReviewContext{}, fmt.Errorf("get installation token: %w", err)
@@ -1007,6 +1193,100 @@ func withCodeReviewFindingMarker(body, markerKey string) string {
 	return body + "\n\n" + marker
 }
 
+const (
+	codeReviewHistoryStartMarker = "<!-- 143-code-review-history:start -->"
+	codeReviewHistoryEndMarker   = "<!-- 143-code-review-history:end -->"
+)
+
+func withCodeReviewHistory(body, previousBody string, decision SubmitReviewDecision, decidedAt time.Time) string {
+	body = stripCodeReviewHistory(body)
+	entries := codeReviewHistoryEntries(previousBody)
+	if entry := codeReviewHistoryEntry(decision, decidedAt); entry != "" && !containsString(entries, entry) {
+		entries = append(entries, entry)
+	}
+	if len(entries) == 0 {
+		return body
+	}
+	history := codeReviewHistoryStartMarker + "\nPrevious 143 code reviews:\n" + strings.Join(entries, "\n") + "\n" + codeReviewHistoryEndMarker
+	if body == "" {
+		return history
+	}
+	return body + "\n\n" + history
+}
+
+func codeReviewHistoryEntries(body string) []string {
+	start := strings.Index(body, codeReviewHistoryStartMarker)
+	if start < 0 {
+		return nil
+	}
+	rest := body[start+len(codeReviewHistoryStartMarker):]
+	end := strings.Index(rest, codeReviewHistoryEndMarker)
+	if end < 0 {
+		return nil
+	}
+	lines := strings.Split(rest[:end], "\n")
+	entries := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "- ") {
+			entries = append(entries, line)
+		}
+	}
+	return entries
+}
+
+func stripCodeReviewHistory(body string) string {
+	start := strings.Index(body, codeReviewHistoryStartMarker)
+	if start < 0 {
+		return strings.TrimSpace(body)
+	}
+	rest := body[start+len(codeReviewHistoryStartMarker):]
+	end := strings.Index(rest, codeReviewHistoryEndMarker)
+	if end < 0 {
+		return strings.TrimSpace(body)
+	}
+	before := strings.TrimSpace(body[:start])
+	after := strings.TrimSpace(rest[end+len(codeReviewHistoryEndMarker):])
+	if before == "" {
+		return after
+	}
+	if after == "" {
+		return before
+	}
+	return before + "\n\n" + after
+}
+
+func codeReviewHistoryEntry(decision SubmitReviewDecision, decidedAt time.Time) string {
+	if decidedAt.IsZero() || decision.validate() != nil {
+		return ""
+	}
+	return fmt.Sprintf("- `%s` — **%s**", decidedAt.UTC().Format(time.RFC3339), codeReviewDecisionLabel(decision))
+}
+
+func codeReviewDecisionLabel(decision SubmitReviewDecision) string {
+	switch decision {
+	case SubmitReviewDecisionApproved:
+		return "Approved"
+	case SubmitReviewDecisionCommentOnly:
+		return "Not approved"
+	case SubmitReviewDecisionNeedsHumanReview:
+		return "Not approved — needs human review"
+	case SubmitReviewDecisionBlocked:
+		return "Not approved — blocked"
+	default:
+		return string(decision)
+	}
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
 func codeReviewOutputMarker(outputKey string) string {
 	return "<!-- 143-code-review-output:" + codeReviewMarkerDigest(outputKey) + " -->"
 }
@@ -1065,7 +1345,8 @@ func extractCodeReviewFindingMarker(body string) string {
 // review and inline-comment writes.
 func IsCodeReviewAuthoredBody(body string) bool {
 	return strings.Contains(body, "<!-- 143-code-review-output:") ||
-		strings.Contains(body, "<!-- 143-code-review-finding:")
+		strings.Contains(body, "<!-- 143-code-review-finding:") ||
+		strings.Contains(body, codeReviewStatusCommentMarker)
 }
 
 func githubReviewEvent(decision SubmitReviewDecision) string {
@@ -1077,7 +1358,8 @@ func githubReviewEvent(decision SubmitReviewDecision) string {
 
 func (d SubmitReviewDecision) validate() error {
 	switch d {
-	case SubmitReviewDecisionApproved, SubmitReviewDecisionCommentOnly:
+	case SubmitReviewDecisionApproved, SubmitReviewDecisionCommentOnly,
+		SubmitReviewDecisionNeedsHumanReview, SubmitReviewDecisionBlocked:
 		return nil
 	default:
 		return fmt.Errorf("invalid submit review decision: %q", d)

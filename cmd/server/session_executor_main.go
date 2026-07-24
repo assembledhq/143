@@ -287,7 +287,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 	if services == nil {
 		return nil, shutdown, fmt.Errorf("worker services unavailable")
 	}
-	services.CodeReviewLifecycle = codereviewsvc.NewService(
+	codeReviewLifecycle := codereviewsvc.NewService(
 		codeReviewStore,
 		codeReviewStore,
 		sessionStore,
@@ -299,6 +299,8 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 			TeamSlugs:         cfg.CodeReviewTeamSlugs,
 		},
 	)
+	codeReviewLifecycle.SetReviewStatusCommentJobs(jobStore)
+	services.CodeReviewLifecycle = codeReviewLifecycle
 
 	stores := buildSessionExecutorStores(sessionExecutorStoreDeps{
 		Pool:                pool,

@@ -20,6 +20,21 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 		expected string
 	}{
 		{
+			name: "identifies the latest in-place assessment",
+			input: CodeReviewFinalReviewInput{
+				Decision:   CodeReviewDecisionNeedsHumanReview,
+				Acceptable: false,
+				HeadSHA:    "696c4a26d6fb28f0cc2299d3d0b3a9b912b4f40b",
+				AssessedAt: time.Date(2026, time.July, 22, 23, 42, 57, 0, time.UTC),
+				SessionURL: "https://143.dev/sessions/sess_latest",
+			},
+			expected: "143 Code Reviewer did not approve this PR\n\n" +
+				"Why: The available review evidence did not meet the configured approval policy.\n\n" +
+				"Address the items above and request another review, or ask a human reviewer to decide.\n\n" +
+				"Latest assessment: `696c4a2` at 2026-07-22T23:42:57Z\n\n" +
+				"[View the full review](https://143.dev/sessions/sess_latest)",
+		},
+		{
 			name: "uses generated narrative with typed policy blockers",
 			input: CodeReviewFinalReviewInput{
 				Decision:   CodeReviewDecisionNeedsHumanReview,

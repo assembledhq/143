@@ -3,6 +3,7 @@ package models
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 type CodeReviewFinalReviewInput struct {
@@ -23,6 +24,8 @@ type CodeReviewFinalReviewInput struct {
 	ReviewerQuorum            int
 	RequiredReviewerQuorum    int
 	ReviewerQuorumWaived      bool
+	HeadSHA                   string
+	AssessedAt                time.Time
 }
 
 func BuildCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) string {
@@ -87,10 +90,29 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 	if !input.Acceptable && generatedSummary == "" {
 		paragraphs = append(paragraphs, "Address the items above and request another review, or ask a human reviewer to decide.")
 	}
+	if assessment := codeReviewAssessmentSummary(input.HeadSHA, input.AssessedAt); assessment != "" {
+		paragraphs = append(paragraphs, assessment)
+	}
 	if input.SessionURL != "" {
 		paragraphs = append(paragraphs, "[View the full review]("+input.SessionURL+")")
 	}
 	return strings.Join(paragraphs, "\n\n")
+}
+
+func codeReviewAssessmentSummary(headSHA string, assessedAt time.Time) string {
+	headSHA = strings.TrimSpace(headSHA)
+	if headSHA == "" {
+		return ""
+	}
+	shortSHA := headSHA
+	if len(shortSHA) > 7 {
+		shortSHA = shortSHA[:7]
+	}
+	summary := "Latest assessment: `" + shortSHA + "`"
+	if !assessedAt.IsZero() {
+		summary += " at " + assessedAt.UTC().Format(time.RFC3339)
+	}
+	return summary
 }
 
 func codeReviewGeneratedSummary(value string) string {

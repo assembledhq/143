@@ -512,6 +512,7 @@ func (h *WebhookHandler) handleCodeReviewRequested(w http.ResponseWriter, r *htt
 		FromFork:          event.PullRequest.Head.Repo.Fork,
 		RequestedLogin:    requestedLogin,
 		RequestedTeam:     requestedTeam,
+		DeliveryID:        strings.TrimSpace(r.Header.Get("X-GitHub-Delivery")),
 	})
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REQUEST_FAILED", "failed to process code review request", err)
@@ -668,6 +669,7 @@ func (h *WebhookHandler) handleStatus(w http.ResponseWriter, r *http.Request, bo
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse status event")
 		return
 	}
+	event.DeliveryID = strings.TrimSpace(r.Header.Get("X-GitHub-Delivery"))
 	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
 	if !ok {
 		return

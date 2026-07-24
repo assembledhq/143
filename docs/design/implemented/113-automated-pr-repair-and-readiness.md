@@ -106,7 +106,7 @@ Readiness evaluates the current session revision/snapshot. If a new turn changes
 
 ### Auto-Repair
 
-Evaluate after a successful `continue_session` completion when the session has a linked open PR, and after a GitHub event produces a successful `sync_pull_request_state` health refresh. Both paths delegate to the same auto-repair coordinator; health synchronization resolves the PR's linked session before evaluation. This closes the window where CI fails only after the session turn and PR publication have completed.
+Evaluate after a successful `continue_session` completion when the session has a linked open PR, and after either full GitHub reconciliation or the DB-only webhook check projection produces a successful health refresh. Both paths delegate to the same auto-repair coordinator; health synchronization resolves the PR's linked session before evaluation. This closes the window where CI fails only after the session turn and PR publication have completed without requiring a GitHub read for each check webhook.
 
 Because this hook runs on the hot path of session completion, do cheap local checks before calling `GetPullRequestHealth` or GitHub: policy enabled, linked open PR present, automatic budget available, and session idle/resumable. Only then read fresh enough PR health.
 

@@ -2645,9 +2645,8 @@ func TestIntegrationHandler_StartGitHubOAuth_AppSlugSetsStateCookie(t *testing.T
 func TestIntegrationHandler_ListInstallationRepos_FollowsPagination(t *testing.T) {
 	t.Parallel()
 
-	handler := NewIntegrationHandler(nil, nil, "", "", "http://localhost:8080", "http://localhost:3000")
 	requested := make([]string, 0, 2)
-	handler.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	githubClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		requested = append(requested, req.URL.String())
 		switch len(requested) {
 		case 1:
@@ -2671,8 +2670,20 @@ func TestIntegrationHandler_ListInstallationRepos_FollowsPagination(t *testing.T
 			return nil, errors.New("unexpected request")
 		}
 	})}
+	handler := NewIntegrationHandler(
+		nil,
+		nil,
+		"",
+		"",
+		"http://localhost:8080",
+		"http://localhost:3000",
+		WithGitHubHTTPClient(githubClient),
+	)
+	handler.client = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return nil, errors.New("generic provider client should not handle GitHub requests")
+	})}
 
-	repos, err := handler.listInstallationRepos(context.Background(), "installation-token")
+	repos, err := handler.listInstallationRepos(context.Background(), "installation-token", 123)
 
 	require.NoError(t, err, "listInstallationRepos should read every GitHub page")
 	require.Equal(t, []githubInstallationRepo{
