@@ -267,6 +267,16 @@ func TestFinalizeTokenUsage_DerivesPublishedRateModels(t *testing.T) {
 		field string
 	}{
 		{
+			name: "claude opus 5 derives usd",
+			hint: TokenUsageHint{
+				AgentType:      models.AgentTypeClaudeCode,
+				EffectiveModel: models.ClaudeCodeModelOpus5,
+				BillingMode:    TokenBillingModeAPIKey,
+			},
+			unit:  TokenCostUnitUSD,
+			field: "cost",
+		},
+		{
 			name: "claude opus 4.6 derives usd",
 			hint: TokenUsageHint{
 				AgentType:      models.AgentTypeClaudeCode,
