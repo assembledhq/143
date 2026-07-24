@@ -47,6 +47,7 @@ type runCodeReviewPayload struct {
 }
 
 const codeReviewRawOutputInlineLimit = 32 * 1024
+const codeReviewOrchestratorSynthesisRepairLimit = 1
 
 type codeReviewDescriptionEvaluation struct {
 	Passed               bool
@@ -659,6 +660,7 @@ type codeReviewOrchestratorStructuredResult struct {
 	RawArtifactKey       string                          `json:"raw_artifact_key,omitempty"`
 	Synthesis            codeReviewOrchestratorSynthesis `json:"synthesis,omitempty"`
 	SynthesisValidated   bool                            `json:"synthesis_validated,omitempty"`
+	SynthesisRepairCount int                             `json:"synthesis_repair_count,omitempty"`
 	ReadOnly             bool                            `json:"read_only,omitempty"`
 	ReadOnlyViolation    bool                            `json:"read_only_violation,omitempty"`
 	Reverted             bool                            `json:"reverted,omitempty"`
@@ -1564,6 +1566,21 @@ func codeReviewOrchestratorReviewSummary(synthesis codeReviewOrchestratorSynthes
 	return strings.TrimSpace(synthesis.Summary)
 }
 
+func codeReviewOrchestratorRepairPrompt(validationErr error, policy models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile) string {
+	return strings.TrimSpace(prompts.CodeReviewOrchestratorRepairPrompt(prompts.CodeReviewOrchestratorRepairPromptData{
+		ValidationError:         validationErr.Error(),
+		DescriptionRequirements: codeReviewDescriptionRequirementsForPrompt(policy, changedFiles),
+	}))
+}
+
+func codeReviewOrchestratorCombinedOutput(previous *string, current string, repairCount int) string {
+	current = strings.TrimSpace(current)
+	if repairCount <= 0 || previous == nil || strings.TrimSpace(*previous) == "" {
+		return current
+	}
+	return strings.TrimSpace(*previous) + "\n\n--- synthesis repair response ---\n\n" + current
+}
+
 func extractCodeReviewJSON(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -1581,6 +1598,89 @@ func extractCodeReviewJSON(raw string) string {
 		return strings.TrimSpace(raw[start : end+1])
 	}
 	return raw
+}
+
+type codeReviewOrchestratorRepairSender interface {
+	SendMessage(context.Context, threadsvc.SendMessageInput) (*threadsvc.SendMessageResult, error)
+}
+
+func requestCodeReviewOrchestratorSynthesisRepair(
+	ctx context.Context,
+	stores *Stores,
+	sender codeReviewOrchestratorRepairSender,
+	logger zerolog.Logger,
+	job runCodeReviewPayload,
+	policy models.CodeReviewPolicyConfig,
+	changedFiles []codereviewsvc.PullRequestFile,
+	result models.CodeReviewAgentResult,
+	state codeReviewOrchestratorStructuredResult,
+	raw string,
+	validationErr error,
+) (bool, bool, error) {
+	if state.SynthesisRepairCount >= codeReviewOrchestratorSynthesisRepairLimit {
+		return false, false, nil
+	}
+	threadID, err := uuid.Parse(strings.TrimSpace(state.ThreadID))
+	if err != nil {
+		return false, false, fmt.Errorf("parse orchestrator thread id for synthesis repair: %w", err)
+	}
+
+	nextState := state
+	nextState.Synthesis = codeReviewOrchestratorSynthesis{}
+	nextState.SynthesisValidated = false
+	nextState.SynthesisRepairCount++
+	nextState.Error = "repairing invalid orchestrator synthesis: " + validationErr.Error()
+	nextState.CompletedAt = ""
+
+	rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, raw)
+	if err != nil {
+		return false, false, err
+	}
+	nextState.RawArtifactKey = rawArtifactKey
+	if _, err := stores.CodeReviews.UpdateAgentResultOutcome(
+		ctx,
+		job.OrgID,
+		result.ID,
+		models.CodeReviewAgentResultStatusRunning,
+		rawOutput,
+		marshalCodeReviewOrchestratorStructuredResult(nextState),
+	); err != nil {
+		return false, false, fmt.Errorf("record orchestrator synthesis repair: %w", err)
+	}
+
+	if _, err := sender.SendMessage(ctx, threadsvc.SendMessageInput{
+		SessionID:     job.SessionID,
+		OrgID:         job.OrgID,
+		ThreadID:      threadID,
+		Message:       codeReviewOrchestratorRepairPrompt(validationErr, policy, changedFiles),
+		MessageSource: models.SessionMessageSourceAgentTool,
+	}); err != nil {
+		failedState := nextState
+		failedState.Error = "request orchestrator synthesis repair: " + err.Error()
+		failedState.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+		if _, updateErr := stores.CodeReviews.UpdateAgentResultOutcome(
+			ctx,
+			job.OrgID,
+			result.ID,
+			models.CodeReviewAgentResultStatusFailed,
+			rawOutput,
+			marshalCodeReviewOrchestratorStructuredResult(failedState),
+		); updateErr != nil {
+			return false, false, fmt.Errorf("record failed orchestrator synthesis repair after %v: %w", err, updateErr)
+		}
+		logger.Warn().Err(err).
+			Str("session_id", job.SessionID.String()).
+			Str("thread_id", nextState.ThreadID).
+			Msg("failed to request orchestrator synthesis repair")
+		return true, false, nil
+	}
+
+	logger.Info().
+		Str("session_id", job.SessionID.String()).
+		Str("thread_id", nextState.ThreadID).
+		Int("repair_count", nextState.SynthesisRepairCount).
+		Msg("requested orchestrator synthesis repair")
+	return true, true, nil
 }
 
 func codeReviewReviewerResultTerminal(status models.CodeReviewAgentResultStatus) bool {
@@ -2053,26 +2153,53 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			}
 			continue
 		}
+		combinedRaw := codeReviewOrchestratorCombinedOutput(result.RawOutput, raw, state.SynthesisRepairCount)
 		synthesis, synthesisErr := parseCodeReviewOrchestratorSynthesis(raw)
 		if synthesisErr == nil {
 			_, synthesisErr = codeReviewDescriptionEvaluationFromSynthesis(policy.Config(), changedFiles, synthesis)
 		}
 		if synthesisErr != nil {
+			threads := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
+			repairHandled, repairStarted, repairErr := requestCodeReviewOrchestratorSynthesisRepair(
+				ctx,
+				stores,
+				threads,
+				logger,
+				job,
+				policy.Config(),
+				changedFiles,
+				result,
+				state,
+				combinedRaw,
+				synthesisErr,
+			)
+			if repairErr != nil {
+				return repairErr
+			}
+			if repairStarted {
+				return codeReviewWaitingForOrchestrator(policy.Config())
+			}
+			if repairHandled {
+				continue
+			}
+
 			state.Synthesis = codeReviewOrchestratorSynthesis{}
 			state.SynthesisValidated = false
 			state.Error = "invalid orchestrator synthesis: " + synthesisErr.Error()
 			state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
-			rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, raw)
+			rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, combinedRaw)
 			if err != nil {
 				return err
 			}
-			state.RawArtifactKey = rawArtifactKey
+			if rawArtifactKey != "" {
+				state.RawArtifactKey = rawArtifactKey
+			}
 			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, rawOutput, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
 				return fmt.Errorf("mark malformed orchestrator synthesis failed: %w", err)
 			}
 			continue
 		}
-		findings := parseCodeReviewFindings(raw, changedPaths)
+		findings := parseCodeReviewFindings(combinedRaw, changedPaths)
 		for i := range findings {
 			findings[i].OrgID = job.OrgID
 			findings[i].SessionID = job.SessionID
@@ -2085,11 +2212,14 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 		state.SynthesisValidated = true
 		state.FindingCount = len(findings)
 		state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
-		rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, raw)
+		state.Error = ""
+		rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, combinedRaw)
 		if err != nil {
 			return err
 		}
-		state.RawArtifactKey = rawArtifactKey
+		if rawArtifactKey != "" {
+			state.RawArtifactKey = rawArtifactKey
+		}
 		if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusCompleted, rawOutput, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
 			return fmt.Errorf("mark orchestrator completed: %w", err)
 		}

@@ -15,6 +15,7 @@ import (
 	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services/codereview"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	threadsvc "github.com/assembledhq/143/internal/services/thread"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
@@ -1493,6 +1494,130 @@ func (validatedOrchestratorResultArg) Match(value any) bool {
 	return ok && state.SynthesisValidated && codeReviewOrchestratorSynthesisUsable(state.Synthesis)
 }
 
+type repairingOrchestratorResultArg struct{}
+
+func (repairingOrchestratorResultArg) Match(value any) bool {
+	var raw json.RawMessage
+	switch typed := value.(type) {
+	case json.RawMessage:
+		raw = typed
+	case []byte:
+		raw = typed
+	case string:
+		raw = json.RawMessage(typed)
+	default:
+		return false
+	}
+	state, ok := parseCodeReviewOrchestratorStructuredResult(raw)
+	return ok &&
+		!state.SynthesisValidated &&
+		state.SynthesisRepairCount == 1 &&
+		strings.Contains(state.Error, "missing required fields")
+}
+
+type codeReviewOrchestratorRepairSenderStub struct {
+	inputs []threadsvc.SendMessageInput
+}
+
+func (s *codeReviewOrchestratorRepairSenderStub) SendMessage(_ context.Context, input threadsvc.SendMessageInput) (*threadsvc.SendMessageResult, error) {
+	s.inputs = append(s.inputs, input)
+	return &threadsvc.SendMessageResult{}, nil
+}
+
+func TestRequestCodeReviewOrchestratorSynthesisRepair(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	resultID := uuid.New()
+	now := time.Now().UTC()
+	rawReview := "```json\n{\"summary\":\"The change is focused.\"}\n```"
+	state := codeReviewOrchestratorStructuredResult{
+		ThreadID:             threadID.String(),
+		DescriptionInputHash: "description-hash",
+	}
+	mock.ExpectQuery("UPDATE code_review_agent_results").
+		WithArgs(models.CodeReviewAgentResultStatusRunning, &rawReview, repairingOrchestratorResultArg{}, orgID, resultID).
+		WillReturnRows(newCodeReviewAgentResultRows().
+			AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleOrchestrator, models.CodeReviewAgentResultStatusRunning, &rawReview, marshalCodeReviewOrchestratorStructuredResult(state), now))
+
+	sender := &codeReviewOrchestratorRepairSenderStub{}
+	stores := &Stores{CodeReviews: db.NewCodeReviewStore(mock)}
+	handled, started, err := requestCodeReviewOrchestratorSynthesisRepair(
+		context.Background(),
+		stores,
+		sender,
+		zerolog.Nop(),
+		runCodeReviewPayload{OrgID: orgID, SessionID: sessionID},
+		models.DefaultCodeReviewPolicyConfig(),
+		[]codereview.PullRequestFile{{Filename: "internal/worker/code_review_handler.go"}},
+		models.CodeReviewAgentResult{
+			ID:            resultID,
+			OrgID:         orgID,
+			SessionID:     sessionID,
+			AgentProvider: "codex",
+			Role:          models.CodeReviewAgentRoleOrchestrator,
+		},
+		state,
+		rawReview,
+		errors.New("orchestrator synthesis is missing required fields"),
+	)
+
+	require.NoError(t, err, "repair request should be persisted and dispatched")
+	require.True(t, handled, "repair request should handle the malformed synthesis")
+	require.True(t, started, "repair request should start one bounded correction turn")
+	require.Len(t, sender.inputs, 1, "repair request should dispatch exactly one correction message")
+	require.Equal(t, threadID, sender.inputs[0].ThreadID, "repair request should continue the existing orchestrator thread")
+	require.Contains(t, sender.inputs[0].Message, `"approval_recommended": false`, "correction message should require the omitted approval field with valid JSON")
+	require.NoError(t, mock.ExpectationsWereMet(), "repair request should preserve the invalid output and increment the durable repair count")
+}
+
+func TestCodeReviewOrchestratorCombinedOutputPreservesFindingsAfterRepair(t *testing.T) {
+	t.Parallel()
+
+	original := `::code-comment{title="[P2] Test the short circuit" body="Assert the database is not queried." file="internal/worker/code_review_handler.go" start=42 end=42 priority=2}
+
+` + "```json" + `
+{"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":true,"prompt_injection_detected":false,"summary":"Moves validation earlier.","review_summary":"The implementation is focused but needs a direct short-circuit test.","risk_notes":["Regression coverage is incomplete."]}
+` + "```"
+	repaired := "```json\n" +
+		`{"approval_recommended":false,"description_assessments":[],"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":true,"prompt_injection_detected":false,"summary":"Moves validation earlier.","review_summary":"The implementation is focused but needs a direct short-circuit test.","risk_notes":["Regression coverage is incomplete."]}` +
+		"\n```"
+	combined := codeReviewOrchestratorCombinedOutput(&original, repaired, 1)
+
+	synthesis, err := parseCodeReviewOrchestratorSynthesis(combined)
+	require.NoError(t, err, "the corrected final JSON should validate when stored with the original response")
+	require.Equal(t, codeReviewOrchestratorSynthesis{
+		ApprovalRecommended:     false,
+		DescriptionAssessments:  []codeReviewDescriptionAssessment{},
+		Summary:                 "Moves validation earlier.",
+		ReviewSummary:           "The implementation is focused but needs a direct short-circuit test.",
+		RiskNotes:               []string{"Regression coverage is incomplete."},
+		ScopeMismatch:           false,
+		UnresolvedUncertainty:   false,
+		ReviewerDisagreement:    true,
+		PromptInjectionDetected: false,
+	}, synthesis, "the corrected synthesis should preserve every current-schema field")
+
+	path := "internal/worker/code_review_handler.go"
+	line := 42
+	require.Equal(t, []models.CodeReviewFinding{{
+		DedupeKey:  codeReviewFindingDedupeKey(path, line, line, "Test the short circuit"),
+		Severity:   models.CodeReviewFindingSeverityMedium,
+		Confidence: models.CodeReviewFindingConfidenceHigh,
+		Path:       &path,
+		StartLine:  &line,
+		EndLine:    &line,
+		Summary:    "Test the short circuit",
+		Body:       "Assert the database is not queried.",
+	}}, parseCodeReviewFindings(combined, []string{path}), "the correction turn should not discard inline findings from the original response")
+}
+
 func TestParseCodeReviewOrchestratorSynthesis(t *testing.T) {
 	t.Parallel()
 
@@ -1600,7 +1725,8 @@ func TestHarvestCodeReviewOrchestratorResultRejectsMalformedSynthesis(t *testing
 	now := time.Now().UTC()
 	rawReview := "I reviewed the code and found no issues."
 	state := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
-		ThreadID: threadID.String(),
+		ThreadID:             threadID.String(),
+		SynthesisRepairCount: codeReviewOrchestratorSynthesisRepairLimit,
 	})
 
 	mock.ExpectQuery("(?s)SELECT .*FROM code_review_agent_results").

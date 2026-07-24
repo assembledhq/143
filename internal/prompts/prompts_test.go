@@ -636,8 +636,26 @@ func TestCodeReviewPolicyPromptComposition(t *testing.T) {
 			require.Contains(t, orchestrator, "You own the substantive approve-or-escalate recommendation", "coding-agent orchestrator should own the substantive approval recommendation")
 			require.Contains(t, orchestrator, "Comment-only ESLint cleanup", "orchestrator should receive the pull-request description as evidence")
 			require.Contains(t, orchestrator, "Screenshots are not required for non-visible or comment-only changes.", "orchestrator should receive the trusted description rubric")
-			require.Contains(t, orchestrator, `"approval_recommended": true|false`, "orchestrator output contract should include the approval recommendation")
+			require.Contains(t, orchestrator, `"approval_recommended": false`, "orchestrator output contract should include a valid JSON approval recommendation example")
 			require.Contains(t, orchestrator, `"description_assessments":`, "orchestrator output contract should include structured description assessments")
+			require.Contains(t, orchestrator, "the review fails if any top-level key above is absent", "orchestrator output contract should explicitly reject omitted schema fields")
 		})
 	}
+}
+
+func TestCodeReviewOrchestratorRepairPrompt(t *testing.T) {
+	t.Parallel()
+
+	result := CodeReviewOrchestratorRepairPrompt(CodeReviewOrchestratorRepairPromptData{
+		ValidationError: "orchestrator synthesis is missing required fields",
+		DescriptionRequirements: []CodeReviewDescriptionRequirementPromptData{{
+			Key:    "testing",
+			Prompt: "Explain how the change was tested.",
+		}},
+	})
+
+	require.Contains(t, result, "Return exactly one fenced `json` object and nothing else.", "repair prompt should request an isolated machine-readable response")
+	require.Contains(t, result, `"approval_recommended": false`, "repair prompt should require the approval recommendation with valid JSON")
+	require.Contains(t, result, `"description_assessments":`, "repair prompt should require description assessments")
+	require.Contains(t, result, "testing: Explain how the change was tested.", "repair prompt should enumerate every required description assessment")
 }
