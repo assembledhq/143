@@ -65,6 +65,33 @@ func TestPullRequestCheckCategoryValidate(t *testing.T) {
 	}
 }
 
+func TestPullRequestCheckSourceValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		source    PullRequestCheckSource
+		expectErr bool
+	}{
+		{name: "check run", source: PullRequestCheckSourceCheckRun},
+		{name: "commit status", source: PullRequestCheckSourceCommitStatus},
+		{name: "invalid", source: PullRequestCheckSource("oops"), expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.source.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "Validate should reject unsupported check sources")
+				return
+			}
+			require.NoError(t, err, "Validate should accept supported check sources")
+		})
+	}
+}
+
 func TestPullRequestHealthEnrichmentStatusValidate(t *testing.T) {
 	t.Parallel()
 

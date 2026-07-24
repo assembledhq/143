@@ -15,6 +15,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
@@ -67,7 +68,7 @@ func NewGitHubTriggerSetupService(triggers GitHubTriggerStore, repos GitHubTrigg
 		triggers:    triggers,
 		repos:       repos,
 		appUserAuth: appUserAuth,
-		httpClient:  &http.Client{Timeout: 15 * time.Second},
+		httpClient:  githubtelemetry.NewHTTPClient(15*time.Second, logger),
 		apiBaseURL:  defaultGitHubAPIBaseURL,
 		logger:      logger,
 	}
@@ -242,6 +243,10 @@ func (s *GitHubTriggerSetupService) grantTeamRepository(ctx context.Context, tok
 }
 
 func (s *GitHubTriggerSetupService) githubJSON(ctx context.Context, method, path, token string, body any, expectedStatus int, out any) error {
+	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
+		Kind:     githubtelemetry.RequestKindAPI,
+		AuthType: githubtelemetry.AuthTypeUser,
+	})
 	var reader io.Reader
 	if body != nil {
 		payload, err := json.Marshal(body)

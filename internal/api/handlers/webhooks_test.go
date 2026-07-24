@@ -656,6 +656,7 @@ func TestWebhook_HandleCodeReviewRequestedCreatesMirrorWithBody(t *testing.T) {
 		}
 	}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(string(body)))
+	req.Header.Set("X-GitHub-Delivery", "delivery-create")
 	rr := httptest.NewRecorder()
 
 	ok := handler.handleCodeReviewRequested(rr, req, body, db.GitHubRepoOwner{
@@ -668,6 +669,7 @@ func TestWebhook_HandleCodeReviewRequestedCreatesMirrorWithBody(t *testing.T) {
 	require.True(t, ok, "review_requested webhook should be processed: %s", rr.Body.String())
 	require.Equal(t, prID, jobs.payload.PullRequestID, "code review job should use the created pull request mirror")
 	require.Equal(t, "anya", jobs.payload.PullRequestAuthor, "code review job should preserve the GitHub PR author")
+	require.Contains(t, jobs.payload.OutputKey, ":review-request:", "webhook delivery identity should participate in policy-independent output dedupe")
 	require.NoError(t, mock.ExpectationsWereMet(), "pull request mirror should be created with the webhook PR body")
 }
 
@@ -686,7 +688,12 @@ func TestWebhook_HandleCodeReviewRequestedRefreshesExistingMirror(t *testing.T) 
 	now := time.Now().UTC()
 	cfg := models.DefaultCodeReviewPolicyConfig()
 	policies := &codeReviewWebhookPolicyStore{policyID: policyID, config: cfg}
-	metadata := &codeReviewWebhookMetadataStore{}
+	priorReviewID := int64(143)
+	priorReviewURL := "https://github.com/assembledhq/143/pull/42#pullrequestreview-143"
+	metadata := &codeReviewWebhookMetadataStore{latest: models.CodeReviewSessionMetadata{
+		ID: uuid.New(), SessionID: uuid.New(), Status: models.CodeReviewSessionStatusCompleted,
+		ReviewOutputKey: "prior-output", GitHubReviewID: &priorReviewID, GitHubReviewURL: &priorReviewURL,
+	}}
 	sessions := &codeReviewWebhookSessionStore{}
 	jobs := &codeReviewWebhookJobStore{jobID: jobID}
 	codeReviews := codereviewsvc.NewService(policies, metadata, sessions, jobs, zerolog.Nop(), codereviewsvc.Config{
@@ -739,6 +746,7 @@ func TestWebhook_HandleCodeReviewRequestedRefreshesExistingMirror(t *testing.T) 
 		}
 	}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(string(body)))
+	req.Header.Set("X-GitHub-Delivery", "delivery-refresh")
 	rr := httptest.NewRecorder()
 
 	ok := handler.handleCodeReviewRequested(rr, req, body, db.GitHubRepoOwner{
@@ -751,6 +759,9 @@ func TestWebhook_HandleCodeReviewRequestedRefreshesExistingMirror(t *testing.T) 
 	require.True(t, ok, "review_requested webhook should be processed: %s", rr.Body.String())
 	require.Equal(t, prID, jobs.payload.PullRequestID, "code review job should use the existing pull request mirror")
 	require.Equal(t, "fresh-head", jobs.payload.HeadSHA, "code review job should target the fresh webhook head SHA")
+	require.Contains(t, jobs.payload.OutputKey, ":review-request:", "refreshed mirror review should be keyed independently by the delivery identity")
+	require.Equal(t, &priorReviewID, jobs.payload.ExistingGitHubReviewID, "explicit request with review history should update the existing GitHub review")
+	require.Equal(t, "prior-output", jobs.payload.PreviousOutputKey, "explicit request with review history should preserve prior inline-comment markers")
 	require.NoError(t, mock.ExpectationsWereMet(), "existing pull request mirror should be refreshed from the webhook payload")
 }
 

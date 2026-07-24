@@ -51,6 +51,7 @@ import { getActiveOrgId } from "@/lib/active-org";
 import { buildCodeReviewStreamURL, SSE_EVENT } from "@/lib/sse";
 import { useResourceSSE } from "@/lib/use-resource-sse";
 import { pollMs } from "@/lib/poll-intervals";
+import { cn } from "@/lib/utils";
 import { useAutosave, type UseAutosaveResult } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
@@ -279,14 +280,16 @@ function ReviewActions({
   canRetry,
   isRetrying,
   onRetry,
+  className,
 }: {
   review: CodeReviewListItem;
   canRetry: boolean;
   isRetrying: boolean;
   onRetry: () => void;
+  className?: string;
 }) {
   return (
-    <div className="flex w-full gap-1 md:w-auto md:justify-end">
+    <div className={cn("flex w-full gap-1 md:w-auto md:justify-end", className)}>
       {canRetry && reviewCanBeRetried(review) ? (
         <Button
           className="min-h-11 flex-1 justify-center md:min-h-0 md:flex-none"
@@ -893,48 +896,58 @@ export default function CodeReviewsPage() {
                 {reviews.map((review) => (
                   <ResourceRow
                     key={review.id}
-                        title={
-                      <span className="break-words text-sm">
+                    title={
+                      <span className="break-words text-sm leading-5">
                         <ReviewTitle review={review} />
                       </span>
-                        }
-                        metadata={
+                    }
+                    metadata={
                       <span>
                         {review.repository_name || review.github_repo} · {review.pull_request_author || "Unknown author"} · {review.head_sha.slice(0, 7)}
                       </span>
-                        }
-                        status={
-                          <ReviewOperationalStatus review={review} nowMs={countdownNowMs} />
-                        }
-                        detail={
-                      <div className="space-y-2">
-                        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-foreground">
+                    }
+                    detail={
+                      <div className="space-y-2.5 pt-1">
+                        <ReviewOperationalStatus review={review} nowMs={countdownNowMs} />
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                          <StatusLabel
+                            label={decisionLabel(review)}
+                            tone={reviewDecisionTone(review)}
+                            indicator={false}
+                          />
+                          {review.completed_at ? (
+                            <span className="text-foreground">{formatDate(review.completed_at)}</span>
+                          ) : null}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                          <span className="text-muted-foreground">Risk</span>
                           <StatusLabel
                             label={review.acceptable ? "Acceptable" : "Review needed"}
                             tone={reviewRiskTone(review)}
                             indicator={false}
                           />
-                              <span>Completed {formatDate(review.completed_at)}</span>
-                            </div>
-                            <ReviewOutcome
-                              review={review}
-                              selected={selectedEvidenceSessionId === review.session_id}
-                              onToggleEvidence={() => setSelectedEvidenceSessionId((current) => (current === review.session_id ? null : review.session_id))}
-                      />
-                    </div>
-                        }
-                        actions={
-                          <ReviewActions
-                            review={review}
-                            canRetry={canRetryReviews}
-                            isRetrying={retryingReviewSessionIds.has(review.session_id)}
-                            onRetry={() => retryReview.mutate(review.session_id)}
-                          />
-                        }
-                        className="[&_[data-slot=resource-row-actions]]:ml-0"
-                      />
-                    ))}
-                  </Card>
+                        </div>
+                      </div>
+                    }
+                    actions={
+                      <div className="flex w-full flex-wrap items-center gap-2">
+                        <EvidenceButton
+                          selected={selectedEvidenceSessionId === review.session_id}
+                          onToggleEvidence={() => setSelectedEvidenceSessionId((current) => (current === review.session_id ? null : review.session_id))}
+                        />
+                        <ReviewActions
+                          review={review}
+                          canRetry={canRetryReviews}
+                          isRetrying={retryingReviewSessionIds.has(review.session_id)}
+                          onRetry={() => retryReview.mutate(review.session_id)}
+                          className="ml-auto w-auto"
+                        />
+                      </div>
+                    }
+                    className="px-4 py-3.5 [&_[data-slot=resource-row-actions]]:ml-0"
+                  />
+                ))}
+              </Card>
                   <CodeReviewEvidenceSheet
                     review={selectedEvidenceReview}
                     evidence={evidenceQuery.data?.data}

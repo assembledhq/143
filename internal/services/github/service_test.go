@@ -82,6 +82,61 @@ func TestNewService(t *testing.T) {
 	}
 }
 
+func TestServiceInstallationIDForToken(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                   string
+		service                *Service
+		token                  string
+		expectedInstallationID int64
+		expectedFound          bool
+	}{
+		{
+			name: "finds standard installation token",
+			service: &Service{
+				cache: map[int64]*cachedToken{42: {Token: "standard-token"}},
+			},
+			token:                  "standard-token",
+			expectedInstallationID: 42,
+			expectedFound:          true,
+		},
+		{
+			name: "finds sandbox-scoped installation token",
+			service: &Service{
+				sandboxCache: map[sandboxTokenCacheKey]*cachedToken{
+					{InstallationID: 73, RepositoryID: 99, Action: "api"}: {Token: "sandbox-token"},
+				},
+			},
+			token:                  "sandbox-token",
+			expectedInstallationID: 73,
+			expectedFound:          true,
+		},
+		{
+			name:          "does not guess an unknown token",
+			service:       &Service{cache: map[int64]*cachedToken{42: {Token: "known-token"}}},
+			token:         "unknown-token",
+			expectedFound: false,
+		},
+		{
+			name:          "nil service is safe",
+			service:       nil,
+			token:         "token",
+			expectedFound: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actualInstallationID, actualFound := tt.service.installationIDForToken(tt.token)
+			require.Equal(t, tt.expectedInstallationID, actualInstallationID, "token lookup should return the expected installation ID")
+			require.Equal(t, tt.expectedFound, actualFound, "token lookup should report whether the installation is known")
+		})
+	}
+}
+
 func TestService_ListOrgMembers_ReturnsBodyCloseError(t *testing.T) {
 	t.Parallel()
 

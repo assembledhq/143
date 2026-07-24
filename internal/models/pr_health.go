@@ -75,6 +75,22 @@ func (s PullRequestCheckStatus) Validate() error {
 	}
 }
 
+type PullRequestCheckSource string
+
+const (
+	PullRequestCheckSourceCheckRun     PullRequestCheckSource = "check_run"
+	PullRequestCheckSourceCommitStatus PullRequestCheckSource = "commit_status"
+)
+
+func (s PullRequestCheckSource) Validate() error {
+	switch s {
+	case PullRequestCheckSourceCheckRun, PullRequestCheckSourceCommitStatus:
+		return nil
+	default:
+		return fmt.Errorf("invalid PullRequestCheckSource: %q", s)
+	}
+}
+
 type PullRequestHealthEnrichmentStatus string
 
 const (
@@ -183,12 +199,44 @@ type PullRequestCheckSummary struct {
 	Summary    string                   `json:"summary,omitempty"`
 }
 
+type PullRequestCheckState struct {
+	OrgID             uuid.UUID                `db:"org_id" json:"org_id"`
+	PullRequestID     uuid.UUID                `db:"pull_request_id" json:"pull_request_id"`
+	HeadSHA           string                   `db:"head_sha" json:"head_sha"`
+	Source            PullRequestCheckSource   `db:"source" json:"source"`
+	ExternalKey       string                   `db:"external_key" json:"external_key"`
+	Name              string                   `db:"name" json:"name"`
+	Category          PullRequestCheckCategory `db:"category" json:"category"`
+	Status            PullRequestCheckStatus   `db:"status" json:"status"`
+	Provider          string                   `db:"provider" json:"provider,omitempty"`
+	DetailsURL        string                   `db:"details_url" json:"details_url,omitempty"`
+	Summary           string                   `db:"summary" json:"summary,omitempty"`
+	ProviderEventID   string                   `db:"provider_event_id" json:"provider_event_id,omitempty"`
+	ProviderSequence  int64                    `db:"provider_sequence" json:"provider_sequence"`
+	ProviderUpdatedAt time.Time                `db:"provider_updated_at" json:"provider_updated_at"`
+	ProjectionVersion int64                    `db:"projection_version" json:"projection_version"`
+	CreatedAt         time.Time                `db:"created_at" json:"created_at"`
+	UpdatedAt         time.Time                `db:"updated_at" json:"updated_at"`
+}
+
+func (s PullRequestCheckState) CheckSummary() PullRequestCheckSummary {
+	return PullRequestCheckSummary{
+		Name:       s.Name,
+		Category:   s.Category,
+		Status:     s.Status,
+		Provider:   s.Provider,
+		DetailsURL: s.DetailsURL,
+		Summary:    s.Summary,
+	}
+}
+
 type PullRequestHealthSummary struct {
 	MergeState       PullRequestMergeState     `json:"merge_state"`
 	HasConflicts     bool                      `json:"has_conflicts"`
 	FailingTestCount int                       `json:"failing_test_count"`
 	NeedsAgentAction bool                      `json:"needs_agent_action"`
 	ChecksConfirmed  bool                      `json:"checks_confirmed,omitempty"`
+	CheckSetComplete *bool                     `json:"check_set_complete,omitempty"`
 	Checks           []PullRequestCheckSummary `json:"checks,omitempty"`
 }
 
@@ -217,6 +265,7 @@ type PullRequestHealthCurrent struct {
 	SummaryPreviewJSON json.RawMessage                   `db:"summary_preview_json" json:"summary_preview_json,omitempty"`
 	EnrichmentStatus   PullRequestHealthEnrichmentStatus `db:"enrichment_status" json:"enrichment_status"`
 	EnrichedAt         *time.Time                        `db:"enriched_at" json:"enriched_at,omitempty"`
+	CheckStateVersion  int64                             `db:"check_state_version" json:"check_state_version"`
 	CreatedAt          time.Time                         `db:"created_at" json:"created_at"`
 	UpdatedAt          time.Time                         `db:"updated_at" json:"updated_at"`
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/email"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 )
 
 // teamUserStore is the interface the team handler depends on for user lookups.
@@ -123,6 +124,14 @@ func (h *TeamHandler) SetCLITokenStore(cliTokens teamCLITokenStore) {
 func (h *TeamHandler) SetGitHubIntegration(integrations teamIntegrationStore, ghSvc teamGitHubService) {
 	h.integrations = integrations
 	h.githubSvc = ghSvc
+}
+
+// SetGitHubHTTPClient wires the instrumented client used for server-owned
+// GitHub API requests. Tests may continue to use the constructor default.
+func (h *TeamHandler) SetGitHubHTTPClient(client *http.Client) {
+	if client != nil {
+		h.httpClient = client
+	}
 }
 
 func (h *TeamHandler) SetRepositoryStore(repositories teamRepositoryStore) {
@@ -785,7 +794,12 @@ func (h *TeamHandler) SearchGitHubUsers(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	users, err := h.searchGitHubUsers(r.Context(), token, q)
+	githubCtx := githubtelemetry.WithRequestMetadata(r.Context(), githubtelemetry.RequestMetadata{
+		Kind:           githubtelemetry.RequestKindAPI,
+		AuthType:       githubtelemetry.AuthTypeAppInstallation,
+		InstallationID: installationID,
+	})
+	users, err := h.searchGitHubUsers(githubCtx, token, q)
 	if err != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(err).Str("query", q).Msg("failed to search github users")
 		writeError(w, r, http.StatusBadGateway, "GITHUB_SEARCH_FAILED", "failed to search github users")

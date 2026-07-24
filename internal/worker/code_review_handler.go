@@ -25,22 +25,25 @@ import (
 )
 
 type runCodeReviewPayload struct {
-	OrgID                   uuid.UUID `json:"org_id"`
-	SessionID               uuid.UUID `json:"session_id"`
-	MetadataID              uuid.UUID `json:"metadata_id"`
-	RepositoryID            uuid.UUID `json:"repository_id"`
-	PullRequestID           uuid.UUID `json:"pull_request_id"`
-	PolicyID                uuid.UUID `json:"policy_id"`
-	PolicyVersion           int       `json:"policy_version"`
-	HeadSHA                 string    `json:"head_sha"`
-	FromFork                bool      `json:"from_fork"`
-	PullRequestAuthor       string    `json:"pull_request_author,omitempty"`
-	OutputKey               string    `json:"review_output_key"`
-	RequestedReviewerLogin  string    `json:"requested_reviewer_login,omitempty"`
-	RequestedTeamSlug       string    `json:"requested_team_slug,omitempty"`
-	PreviousOutputKey       string    `json:"previous_review_output_key,omitempty"`
-	ExistingGitHubReviewID  *int64    `json:"existing_github_review_id,omitempty"`
-	ExistingGitHubReviewURL *string   `json:"existing_github_review_url,omitempty"`
+	OrgID                   uuid.UUID                  `json:"org_id"`
+	SessionID               uuid.UUID                  `json:"session_id"`
+	MetadataID              uuid.UUID                  `json:"metadata_id"`
+	RepositoryID            uuid.UUID                  `json:"repository_id"`
+	PullRequestID           uuid.UUID                  `json:"pull_request_id"`
+	PolicyID                uuid.UUID                  `json:"policy_id"`
+	PolicyVersion           int                        `json:"policy_version"`
+	HeadSHA                 string                     `json:"head_sha"`
+	FromFork                bool                       `json:"from_fork"`
+	PullRequestAuthor       string                     `json:"pull_request_author,omitempty"`
+	OutputKey               string                     `json:"review_output_key"`
+	RequestedReviewerLogin  string                     `json:"requested_reviewer_login,omitempty"`
+	RequestedTeamSlug       string                     `json:"requested_team_slug,omitempty"`
+	PreviousOutputKey       string                     `json:"previous_review_output_key,omitempty"`
+	PreviousReviewDecision  *models.CodeReviewDecision `json:"previous_review_decision,omitempty"`
+	PreviousReviewDecidedAt *time.Time                 `json:"previous_review_decided_at,omitempty"`
+	PreviousReviewBody      *string                    `json:"previous_review_body,omitempty"`
+	ExistingGitHubReviewID  *int64                     `json:"existing_github_review_id,omitempty"`
+	ExistingGitHubReviewURL *string                    `json:"existing_github_review_url,omitempty"`
 }
 
 const codeReviewRawOutputInlineLimit = 32 * 1024
@@ -292,6 +295,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			ChangedFilesAvailable: changedFilesAvailable,
 			DescriptionEvaluation: descriptionEvaluation,
 			OrchestratorSynthesis: codeReviewOrchestratorSynthesisFromResults(agentResults),
+			AssessedAt:            time.Now().UTC(),
 		})
 		if err := ensureCodeReviewInlineSelection(ctx, stores.CodeReviews, job, findings, changedFiles, policy.Config().InlineCommentLimit); err != nil {
 			return fmt.Errorf("select code review inline findings: %w", err)
@@ -306,6 +310,10 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			return err
 		}
+		finalReviewBody := body
+		if strings.TrimSpace(submission.FinalReviewBody) != "" {
+			finalReviewBody = submission.FinalReviewBody
+		}
 		removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
 		if _, err := stores.CodeReviews.CompleteReview(ctx, job.OrgID, db.CompleteCodeReviewParams{
 			SessionID:       job.SessionID,
@@ -313,7 +321,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			Acceptable:      decision.Acceptable,
 			GitHubReviewID:  submission.GitHubReviewID,
 			GitHubReviewURL: submission.GitHubReviewURL,
-			FinalReviewBody: body,
+			FinalReviewBody: finalReviewBody,
 		}); err != nil {
 			return fmt.Errorf("complete code review: %w", err)
 		}
@@ -2285,6 +2293,7 @@ func codeReviewWaitingForOrchestrator(policy models.CodeReviewPolicyConfig) erro
 type codeReviewSubmission struct {
 	GitHubReviewID  *int64
 	GitHubReviewURL *string
+	FinalReviewBody string
 }
 
 type codeReviewRequestedReviewerRemover interface {
@@ -2303,6 +2312,7 @@ type liveCodeReviewOutcomeInput struct {
 	ChangedFilesAvailable bool
 	DescriptionEvaluation codeReviewDescriptionEvaluation
 	OrchestratorSynthesis codeReviewOrchestratorSynthesis
+	AssessedAt            time.Time
 }
 
 func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.CodeReviewDecisionEvaluation, string) {
@@ -2360,6 +2370,8 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		ReviewerQuorum:            reviewerQuorum,
 		RequiredReviewerQuorum:    requiredReviewerQuorum,
 		ReviewerQuorumWaived:      reviewerQuorumWaived,
+		HeadSHA:                   input.Job.HeadSHA,
+		AssessedAt:                input.AssessedAt,
 	})
 	return decision, body
 }
@@ -3344,6 +3356,7 @@ func submitCodeReviewToGitHub(ctx context.Context, stores *Stores, services *Ser
 		return codeReviewSubmission{
 			GitHubReviewID:  metadata.GitHubReviewID,
 			GitHubReviewURL: metadata.GitHubReviewURL,
+			FinalReviewBody: stringPtrValue(metadata.FinalReviewBody),
 		}, false, nil
 	}
 
@@ -3378,19 +3391,27 @@ func submitCodeReviewToGitHub(ctx context.Context, stores *Stores, services *Ser
 		ExistingReviewID:  int64PtrValue(job.ExistingGitHubReviewID),
 		ExistingReviewURL: stringPtrValue(job.ExistingGitHubReviewURL),
 		Decision:          codeReviewSubmitDecision(decision),
+		PreviousDecision:  codeReviewSubmitDecisionPtr(job.PreviousReviewDecision),
+		PreviousDecidedAt: timePtrValue(job.PreviousReviewDecidedAt),
+		PreviousBody:      stringPtrValue(job.PreviousReviewBody),
 		Body:              body,
 		Comments:          comments,
 	})
 	if err != nil {
 		return codeReviewSubmission{}, false, classifyGitHubJobError(fmt.Errorf("submit code review to GitHub: %w", err), job.SessionID.String())
 	}
-	if _, err := stores.CodeReviews.RecordGitHubReview(ctx, job.OrgID, job.SessionID, result.ID, result.URL, body); err != nil {
+	finalReviewBody := strings.TrimSpace(result.Body)
+	if finalReviewBody == "" {
+		finalReviewBody = body
+	}
+	if _, err := stores.CodeReviews.RecordGitHubReview(ctx, job.OrgID, job.SessionID, result.ID, result.URL, finalReviewBody); err != nil {
 		return codeReviewSubmission{}, true, fmt.Errorf("record submitted code review: %w", err)
 	}
 	markPostedCodeReviewFindings(ctx, stores.CodeReviews, job.OrgID, findings, result.Comments)
 	return codeReviewSubmission{
 		GitHubReviewID:  &result.ID,
 		GitHubReviewURL: &result.URL,
+		FinalReviewBody: finalReviewBody,
 	}, true, nil
 }
 
@@ -3402,10 +3423,21 @@ func int64PtrValue(value *int64) int64 {
 }
 
 func codeReviewSubmitDecision(decision models.CodeReviewDecision) codereviewsvc.SubmitReviewDecision {
-	if decision == models.CodeReviewDecisionApproved {
-		return codereviewsvc.SubmitReviewDecisionApproved
+	return codereviewsvc.SubmitReviewDecision(decision)
+}
+
+func codeReviewSubmitDecisionPtr(decision *models.CodeReviewDecision) codereviewsvc.SubmitReviewDecision {
+	if decision == nil {
+		return ""
 	}
-	return codereviewsvc.SubmitReviewDecisionCommentOnly
+	return codeReviewSubmitDecision(*decision)
+}
+
+func timePtrValue(value *time.Time) time.Time {
+	if value == nil {
+		return time.Time{}
+	}
+	return *value
 }
 
 func codeReviewInlineComments(findings []models.CodeReviewFinding) []codereviewsvc.SubmitReviewComment {
