@@ -2824,7 +2824,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 				},
 			},
 			expected:     models.CodeReviewDecisionApproved,
-			bodyContains: "Why: The router update is focused, and both review agents found no blocking issues.",
+			bodyContains: "**Why:** The router update is focused, and both review agents found no blocking issues.",
 		},
 		{
 			name: "withholds approval when orchestrator synthesis is malformed",
@@ -2964,7 +2964,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			},
 			expected:     models.CodeReviewDecisionNeedsHumanReview,
 			reason:       "reviewer quorum 1 is below policy requirement 2",
-			bodyContains: "Reviewer evidence: Codex found no blocking issues; Claude Code failed",
+			bodyContains: "**Reviewer evidence:** Codex found no blocking issues; Claude Code failed",
 		},
 		{
 			name: "explains a description requirement the coding agent marked missing",
