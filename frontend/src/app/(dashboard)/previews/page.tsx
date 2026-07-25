@@ -17,8 +17,7 @@ import {
 } from "lucide-react";
 
 import { EmptyState } from "@/components/empty-state";
-import { PageContainer } from "@/components/page-container";
-import { PageHeader } from "@/components/page-header";
+import { ListPage } from "@/components/list-page";
 import { ResourceRow } from "@/components/resource-row";
 import { SectionGroup } from "@/components/section-group";
 import { CreatePreviewDialog } from "@/components/preview/create-preview-dialog";
@@ -520,7 +519,6 @@ function SectionRows({
       renderMobileItem={(preview) => (
         <PreviewMobileRow preview={preview} {...actionProps} />
       )}
-      className="rounded-md"
     />
   );
 }
@@ -726,135 +724,131 @@ export default function PreviewsPage() {
   });
 
   return (
-    <PageContainer size="default">
-      <div className="space-y-6">
-        <PageHeader
-          title="Previews"
-          description="See running previews, resume warm ones, and review recent activity."
+    <ListPage
+      title="Previews"
+      description="See running previews, resume warm ones, and review recent activity."
+      action={
+        canMutate ? (
+          <Button type="button" onClick={() => setCreateOpen(true)}>
+            <MonitorPlay className="h-4 w-4" />
+            New preview
+          </Button>
+        ) : null
+      }
+    >
+      <div className="grid gap-3 md:grid-cols-[1fr_260px]">
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search branch, repo, or PR"
+            className="pl-9"
+          />
+        </div>
+        <Select value={repositoryId} onValueChange={setRepositoryId}>
+          <SelectTrigger aria-label="Repository">
+            <SelectValue placeholder="Repository" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All repositories</SelectItem>
+            {repositories.map((repo) => (
+              <SelectItem key={repo.id} value={repo.id}>
+                {repo.full_name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      {!previewSectionsSettled ? (
+        <div className="min-h-48" aria-hidden="true" />
+      ) : allEmpty ? (
+        <EmptyState
+          icon={MonitorPlay}
+          title="No previews yet"
+          description="Previews let anyone see a branch or PR running in the browser."
           action={
-            canMutate ? (
-              <Button type="button" onClick={() => setCreateOpen(true)}>
-                <MonitorPlay className="h-4 w-4" />
-                New preview
-              </Button>
-            ) : null
+            canMutate
+              ? {
+                  label: isAdmin
+                    ? "Create your first preview"
+                    : "Create preview",
+                  onClick: () => setCreateOpen(true),
+                }
+              : undefined
           }
         />
-
-        <div className="grid gap-3 md:grid-cols-[1fr_260px]">
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search branch, repo, or PR"
-              className="pl-9"
-            />
-          </div>
-          <Select value={repositoryId} onValueChange={setRepositoryId}>
-            <SelectTrigger aria-label="Repository">
-              <SelectValue placeholder="Repository" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All repositories</SelectItem>
-              {repositories.map((repo) => (
-                <SelectItem key={repo.id} value={repo.id}>
-                  {repo.full_name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
-        {!previewSectionsSettled ? (
-          <div className="min-h-48" aria-hidden="true" />
-        ) : allEmpty ? (
-          <EmptyState
-            icon={MonitorPlay}
-            title="No previews yet"
-            description="Previews let anyone see a branch or PR running in the browser."
-            action={
-              canMutate
-                ? {
-                    label: isAdmin
-                      ? "Create your first preview"
-                      : "Create preview",
-                    onClick: () => setCreateOpen(true),
+      ) : (
+        <div className="space-y-7">
+          {SECTIONS.map((section, index) => {
+            const sectionQuery = visibleSectionQueries[index];
+            const sectionPreviews = previewsByScope[section.scope];
+            const count = sectionPreviews.length;
+            return (
+              <SectionGroup
+                key={section.scope}
+                aria-label={`${section.title} previews`}
+                title={(
+                  <span className="inline-flex items-center gap-2">
+                    {section.scope === "running" ? (
+                      <MonitorPlay className="h-4 w-4 text-muted-foreground" />
+                    ) : section.scope === "attention" ? (
+                      <AlertTriangle className="h-4 w-4 text-muted-foreground" />
+                    ) : section.scope === "resumable" ? (
+                      <Play className="h-4 w-4 text-muted-foreground" />
+                    ) : (
+                      <GitBranch className="h-4 w-4 text-muted-foreground" />
+                    )}
+                    {section.title} ({count})
+                  </span>
+                )}
+                action={section.scope === "running" && firstMeta?.pool ? (
+                  <p className="text-xs text-muted-foreground">
+                    Pool: {firstMeta.pool.user_active + firstMeta.pool.auto_active} of{" "}
+                    {firstMeta.pool.user_max + firstMeta.pool.auto_max} previews
+                  </p>
+                ) : section.scope === "resumable" ? (
+                  <p className="text-xs text-muted-foreground">warm - resumes in ~30s</p>
+                ) : undefined}
+              >
+                <SectionRows
+                  scope={section.scope}
+                  previews={
+                    sectionPreviews
                   }
-                : undefined
-            }
-          />
-        ) : (
-          <div className="space-y-7">
-            {SECTIONS.map((section, index) => {
-              const sectionQuery = visibleSectionQueries[index];
-              const sectionPreviews = previewsByScope[section.scope];
-              const count = sectionPreviews.length;
-              return (
-                <SectionGroup
-                  key={section.scope}
-                  aria-label={`${section.title} previews`}
-                  title={(
-                    <span className="inline-flex items-center gap-2">
-                      {section.scope === "running" ? (
-                        <MonitorPlay className="h-4 w-4 text-muted-foreground" />
-                      ) : section.scope === "attention" ? (
-                        <AlertTriangle className="h-4 w-4 text-muted-foreground" />
-                      ) : section.scope === "resumable" ? (
-                        <Play className="h-4 w-4 text-muted-foreground" />
-                      ) : (
-                        <GitBranch className="h-4 w-4 text-muted-foreground" />
-                      )}
-                      {section.title} ({count})
-                    </span>
-                  )}
-                  action={section.scope === "running" && firstMeta?.pool ? (
-                    <p className="text-xs text-muted-foreground">
-                      Pool: {firstMeta.pool.user_active + firstMeta.pool.auto_active} of{" "}
-                      {firstMeta.pool.user_max + firstMeta.pool.auto_max} previews
-                    </p>
-                  ) : section.scope === "resumable" ? (
-                    <p className="text-xs text-muted-foreground">warm - resumes in ~30s</p>
-                  ) : undefined}
-                >
-                  <SectionRows
-                    scope={section.scope}
-                    previews={
-                      sectionPreviews
-                    }
-                    isLoading={
-                      sectionQuery.isLoading && !sectionFailed(sectionQuery)
-                    }
-                    isError={sectionFailed(sectionQuery)}
-                    onRetry={() => sectionQuery.refetch()}
-                    canMutate={canMutate}
-                    onStop={(preview) => stopPreview.mutate(preview)}
-                    onRestart={(preview) => restartPreview.mutate(preview)}
-                    onStartLatest={(preview) => startLatest.mutate(preview)}
-                    isRestartPending={(preview) =>
-                      pendingRestartIds.has(preview.preview_group_id)
-                    }
-                    isStartLatestPending={(preview) =>
-                      pendingStartLatestIds.has(preview.preview_group_id)
-                    }
-                  />
-                </SectionGroup>
-              );
-            })}
-          </div>
-        )}
-        {canMutate ? (
-          <CreatePreviewDialog
-            open={createOpen}
-            onOpenChange={setCreateOpen}
-            initialRepositoryId={repositoryFilter}
-            initialBranch={branchParam ?? undefined}
-            onCreated={() => {
-              void queryClient.invalidateQueries({ queryKey: ["previews"] });
-            }}
-          />
-        ) : null}
-      </div>
-    </PageContainer>
+                  isLoading={
+                    sectionQuery.isLoading && !sectionFailed(sectionQuery)
+                  }
+                  isError={sectionFailed(sectionQuery)}
+                  onRetry={() => sectionQuery.refetch()}
+                  canMutate={canMutate}
+                  onStop={(preview) => stopPreview.mutate(preview)}
+                  onRestart={(preview) => restartPreview.mutate(preview)}
+                  onStartLatest={(preview) => startLatest.mutate(preview)}
+                  isRestartPending={(preview) =>
+                    pendingRestartIds.has(preview.preview_group_id)
+                  }
+                  isStartLatestPending={(preview) =>
+                    pendingStartLatestIds.has(preview.preview_group_id)
+                  }
+                />
+              </SectionGroup>
+            );
+          })}
+        </div>
+      )}
+      {canMutate ? (
+        <CreatePreviewDialog
+          open={createOpen}
+          onOpenChange={setCreateOpen}
+          initialRepositoryId={repositoryFilter}
+          initialBranch={branchParam ?? undefined}
+          onCreated={() => {
+            void queryClient.invalidateQueries({ queryKey: ["previews"] });
+          }}
+        />
+      ) : null}
+    </ListPage>
   );
 }
