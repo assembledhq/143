@@ -169,7 +169,7 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestCodeReviewStore_RunWithStatusCommentLock(t *testing.T) {
+func TestCodeReviewStore_RunWithGitHubPublicationLock(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -186,15 +186,15 @@ func TestCodeReviewStore_RunWithStatusCommentLock(t *testing.T) {
 	mock.ExpectCommit()
 
 	called := false
-	err = NewCodeReviewStore(mock).RunWithStatusCommentLock(context.Background(), orgID, pullRequestID, func(_ context.Context, lockDB DBTX) error {
-		require.NotNil(t, lockDB, "status comment lock should expose its transaction-bound database handle")
+	err = NewCodeReviewStore(mock).RunWithGitHubPublicationLock(context.Background(), orgID, pullRequestID, func(_ context.Context, lockDB DBTX) error {
+		require.NotNil(t, lockDB, "GitHub publication lock should expose its transaction-bound database handle")
 		called = true
 		return nil
 	})
 
-	require.NoError(t, err, "status comment lock should commit after the protected GitHub operation")
-	require.True(t, called, "status comment lock should execute the protected operation")
-	require.NoError(t, mock.ExpectationsWereMet(), "status comment lock should use one transaction-scoped advisory lock")
+	require.NoError(t, err, "GitHub publication lock should commit after the protected operation")
+	require.True(t, called, "GitHub publication lock should execute the protected operation")
+	require.NoError(t, mock.ExpectationsWereMet(), "GitHub publication lock should use one transaction-scoped advisory lock")
 }
 
 func TestCodeReviewStore_CreatePromptArtifactPreservesEffectivePrompt(t *testing.T) {

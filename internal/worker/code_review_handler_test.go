@@ -364,13 +364,95 @@ func TestCodeReviewSubmitDecision(t *testing.T) {
 	}
 }
 
+func TestSubmitCodeReviewToGitHubUsesPublicationLock(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repositoryID := uuid.New()
+	pullRequestID := uuid.New()
+	policyID := uuid.New()
+	metadataID := uuid.New()
+	now := time.Now().UTC()
+	reviewID := int64(9001)
+	reviewURL := "https://github.com/acme/repo/pull/42#pullrequestreview-9001"
+	finalBody := "Visible fallback summary"
+
+	mock.ExpectQuery("(?s)FROM repositories.*WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgx.NamedArgs{"id": repositoryID, "org_id": orgID}).
+		WillReturnRows(workerRepositoryRows(models.Repository{
+			ID: repositoryID, OrgID: orgID, IntegrationID: uuid.New(), FullName: "acme/repo",
+			InstallationID: 143, Status: models.RepositoryStatusActive, Settings: json.RawMessage(`{}`),
+			CreatedAt: now, UpdatedAt: now,
+		}))
+	mock.ExpectQuery("(?s)FROM pull_requests.*WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(workerPullRequestColumns).
+			AddRow(workerPullRequestRow(pullRequestID, sessionID, orgID, "acme/repo", "feature/review", now)...))
+	mock.ExpectQuery("(?s)FROM code_review_findings.*selected_for_inline").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "selected_only": true}).
+		WillReturnRows(newCodeReviewFindingRows())
+	mock.ExpectBegin()
+	mock.ExpectExec("SELECT pg_advisory_xact_lock").
+		WithArgs(pgx.NamedArgs{"lock_key": "code_review_status_comment:" + orgID.String() + ":" + pullRequestID.String()}).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectCommit()
+	mock.ExpectQuery("(?s)UPDATE code_review_session_metadata.*github_review_id = @github_review_id").
+		WithArgs(pgx.NamedArgs{
+			"org_id":            orgID,
+			"session_id":        sessionID,
+			"github_review_id":  int64(9001),
+			"github_review_url": reviewURL,
+			"final_review_body": finalBody,
+		}).
+		WillReturnRows(newCodeReviewMetadataRows().AddRow(
+			metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
+			"base", "head", false, models.CodeReviewTriggerSourceTeamReviewer,
+			models.CodeReviewSessionStatusCompleted, nil, nil, nil, nil, nil, false, nil, nil,
+			false, nil, "output-key", nil, &reviewID, &reviewURL, &finalBody, nil, &now, now,
+		))
+
+	submitter := &capturingCodeReviewSubmitter{
+		submitResult: codereview.SubmitReviewResult{ID: 9001, URL: reviewURL, Body: finalBody},
+	}
+	submission, submitted, err := submitCodeReviewToGitHub(
+		context.Background(),
+		&Stores{
+			CodeReviews:  db.NewCodeReviewStore(mock),
+			Repositories: db.NewRepositoryStore(mock),
+			PullRequests: db.NewPullRequestStore(mock),
+		},
+		&Services{CodeReviews: submitter},
+		runCodeReviewPayload{
+			OrgID: orgID, SessionID: sessionID, RepositoryID: repositoryID, PullRequestID: pullRequestID,
+			HeadSHA: "head", OutputKey: "output-key",
+		},
+		models.CodeReviewSessionMetadata{},
+		models.CodeReviewDecisionCommentOnly,
+		finalBody,
+	)
+
+	require.NoError(t, err, "GitHub review submission should succeed under the publication lock")
+	require.True(t, submitted, "GitHub review submission should report a new review")
+	require.Equal(t, int64(9001), *submission.GitHubReviewID, "submission should return the persisted GitHub review id")
+	require.Equal(t, "output-key", submitter.submitRequest.OutputKey, "submission should retain the stable output marker")
+	require.NoError(t, mock.ExpectationsWereMet(), "formal review submission should use the same per-PR advisory lock as status publication")
+}
+
 type capturingCodeReviewSubmitter struct {
 	removeRequests   []codereview.RequestedReviewersRequest
 	fileListRequests []codereview.PullRequestFilesRequest
+	submitRequest    codereview.SubmitReviewRequest
+	submitResult     codereview.SubmitReviewResult
 }
 
-func (s *capturingCodeReviewSubmitter) SubmitReview(context.Context, codereview.SubmitReviewRequest) (codereview.SubmitReviewResult, error) {
-	return codereview.SubmitReviewResult{}, nil
+func (s *capturingCodeReviewSubmitter) SubmitReview(_ context.Context, req codereview.SubmitReviewRequest) (codereview.SubmitReviewResult, error) {
+	s.submitRequest = req
+	return s.submitResult, nil
 }
 
 func (s *capturingCodeReviewSubmitter) RemoveRequestedReviewers(_ context.Context, req codereview.RequestedReviewersRequest) error {
