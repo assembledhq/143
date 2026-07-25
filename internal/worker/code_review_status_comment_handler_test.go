@@ -64,6 +64,17 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			hideErr:                   errors.New("github unavailable"),
 			expectErr:                 true,
 		},
+		{
+			name:                      "hides a published fallback when the review later fails",
+			initialStatus:             models.CodeReviewSessionStatusRunning,
+			lockedStatus:              models.CodeReviewSessionStatusFailed,
+			lockedFinalBody:           statusCommentStringPtr("Stale visible recommendation."),
+			lockedReviewID:            statusCommentInt64Ptr(143),
+			storedCommentID:           int64(7331),
+			expectedExistingCommentID: statusCommentInt64Ptr(7331),
+			expectedBody:              "143 Code Reviewer could not complete this review.",
+			expectedCalls:             []string{"upsert", "hide"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

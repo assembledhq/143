@@ -105,7 +105,7 @@ func newSyncCodeReviewStatusCommentHandler(stores *Stores, services *Services, l
 			}
 			status = lockedLatest.Status
 			if updateErr == nil &&
-				lockedLatest.Status == models.CodeReviewSessionStatusCompleted &&
+				codeReviewMetadataTerminal(lockedLatest.Status) &&
 				lockedLatest.GitHubReviewID != nil {
 				reviewID = *lockedLatest.GitHubReviewID
 				updateErr = updater.HideReviewSummary(lockCtx, codereviewsvc.HideReviewSummaryRequest{
