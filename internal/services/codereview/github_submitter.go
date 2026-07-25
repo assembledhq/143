@@ -229,6 +229,9 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 	if strings.TrimSpace(req.HeadSHA) == "" {
 		return SubmitReviewResult{}, fmt.Errorf("head SHA is required")
 	}
+	if strings.TrimSpace(req.OutputKey) == "" {
+		return SubmitReviewResult{}, fmt.Errorf("output key is required")
+	}
 	if err := req.Decision.validate(); err != nil {
 		return SubmitReviewResult{}, err
 	}
@@ -240,21 +243,22 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 	visibleReviewBody := strings.TrimSpace(req.Body)
 	if req.ExistingReviewID > 0 {
 		visibleReviewBody = withCodeReviewHistory(visibleReviewBody, req.PreviousBody, req.PreviousDecision, req.PreviousDecidedAt)
-		reviewBody := withCodeReviewOutputMarker(visibleReviewBody, req.OutputKey)
+		reviewBody := withCodeReviewOutputMarker("", req.OutputKey)
 		result, err := s.updateExistingReview(ctx, token, owner, repo, req, reviewBody)
 		result.Body = visibleReviewBody
 		return result, err
 	}
-	reviewBody := withCodeReviewOutputMarker(visibleReviewBody, req.OutputKey)
-	if strings.TrimSpace(req.OutputKey) != "" {
-		existing, found, err := s.findExistingReview(ctx, token, owner, repo, req.PullNumber, req.OutputKey)
-		if err != nil {
-			return SubmitReviewResult{}, err
-		}
-		if found {
-			existing.Body = visibleReviewBody
-			return existing, nil
-		}
+	// The marker-backed PR conversation comment is the canonical visible
+	// summary. The formal GitHub review remains marker-only so approval state
+	// and inline findings do not duplicate that summary in the timeline.
+	reviewBody := withCodeReviewOutputMarker("", req.OutputKey)
+	existing, found, err := s.findExistingReview(ctx, token, owner, repo, req.PullNumber, req.OutputKey)
+	if err != nil {
+		return SubmitReviewResult{}, err
+	}
+	if found {
+		existing.Body = visibleReviewBody
+		return existing, nil
 	}
 	payload := map[string]any{
 		"commit_id": req.HeadSHA,
