@@ -31,10 +31,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { PageContainer } from "@/components/page-container";
-import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
 import { InteractiveCard } from "@/components/interactive-card";
+import { ListPage } from "@/components/list-page";
 import { ResourceRow } from "@/components/resource-row";
 import { ResponsiveResourceList, type ResponsiveResourceListColumn } from "@/components/responsive-resource-list";
 import { SectionGroup } from "@/components/section-group";
@@ -611,31 +610,27 @@ export default function AutomationsPage() {
   const paused = useMemo(() => automations.filter((a) => !a.enabled), [automations]);
 
   return (
-    <PageContainer size="default">
-      <div className="space-y-8">
-        <PageHeader
-          title="Automations"
-          description="Recurring agents that run on a schedule for your team."
-          action={canManage ? (
-            <Button asChild>
-              <Link href="/automations/new">
-                <Plus className="h-4 w-4" />
-                New automation
-              </Link>
-            </Button>
-          ) : undefined}
-        />
+    <ListPage
+      title="Automations"
+      description="Recurring agents that run on a schedule for your team."
+      action={canManage ? (
+        <Button asChild>
+          <Link href="/automations/new">
+            <Plus className="h-4 w-4" />
+            New automation
+          </Link>
+        </Button>
+      ) : undefined}
+    >
+      {isLoading && <AutomationsPageSkeleton />}
 
-        {isLoading && <AutomationsPageSkeleton />}
+      {!isLoading && (
+        <AutomationsWorkspace enabled={enabled} paused={paused} canManage={canManage} />
+      )}
 
-        {!isLoading && (
-          <AutomationsWorkspace enabled={enabled} paused={paused} canManage={canManage} />
-        )}
-
-        {!isLoading && (
-          <AutomationTemplateGallery canManage={canManage} />
-        )}
-      </div>
-    </PageContainer>
+      {!isLoading && (
+        <AutomationTemplateGallery canManage={canManage} />
+      )}
+    </ListPage>
   );
 }

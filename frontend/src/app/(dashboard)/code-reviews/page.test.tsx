@@ -359,6 +359,9 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     expect(await screen.findByRole("heading", { name: "Code reviews" })).toBeInTheDocument();
+    const page = screen.getByRole("heading", { level: 1, name: "Code reviews" })
+      .closest('[data-slot="list-page"]');
+    expect(page?.parentElement).toHaveClass("max-w-7xl");
     expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
     expect(screen.getAllByText("Acceptable")).toHaveLength(2);
     expect(screen.getAllByText("Approved")).toHaveLength(2);

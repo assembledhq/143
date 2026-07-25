@@ -27,6 +27,9 @@ describe("AutomationsPage", () => {
     renderWithProviders(<AutomationsPage />);
 
     expect(await screen.findByPlaceholderText("Search templates...")).toBeInTheDocument();
+    const page = screen.getByRole("heading", { level: 1, name: "Automations" })
+      .closest('[data-slot="list-page"]');
+    expect(page?.parentElement).toHaveClass("max-w-7xl");
     expect(screen.getByRole("heading", { name: "Template library" })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Start from blank/i })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: /^New automation$/i })).toHaveAttribute("href", "/automations/new");

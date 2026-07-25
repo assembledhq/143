@@ -187,6 +187,22 @@ Available sizes:
 
 Use `size="default"` for most pages. Use `size="wide"` for pages dominated by data tables or tabular content. The outer `<div className="space-y-6">` is mandatory for consistent vertical rhythm.
 
+### List Pages
+
+Use `ListPage` (`src/components/list-page.tsx`) for every dashboard page centered on resource lists or tables. It owns the canonical wide `PageContainer`, `PageHeader`, and `space-y-6` rhythm, so new list pages must not rebuild that shell:
+
+```tsx
+<ListPage
+  title="Automations"
+  description="Recurring agents that run on a schedule for your team."
+  action={<Button>New automation</Button>}
+>
+  {/* filters, sections, and resource lists */}
+</ListPage>
+```
+
+Use `ResponsiveResourceList` for a primary resource table that also needs a stacked mobile representation. Define page-specific columns and row content, but keep the shared card, table header, row, and mobile-list structure in the component.
+
 ### Page Header
 
 Use `PageHeader` (`src/components/page-header.tsx`) for ALL page titles:

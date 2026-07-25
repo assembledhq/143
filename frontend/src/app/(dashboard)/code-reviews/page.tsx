@@ -19,9 +19,13 @@ import {
   Trash2,
   Users,
 } from "lucide-react";
-import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
+import { ListPage } from "@/components/list-page";
 import { ResourceRow } from "@/components/resource-row";
+import {
+  ResponsiveResourceList,
+  type ResponsiveResourceListColumn,
+} from "@/components/responsive-resource-list";
 import { SectionGroup } from "@/components/section-group";
 import { StatusLabel, type StatusTone } from "@/components/status-label";
 import { Button } from "@/components/ui/button";
@@ -753,12 +757,83 @@ export default function CodeReviewsPage() {
     });
   };
 
-  return (
-    <main className="min-h-full bg-background">
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
-        <PageHeader title="Code reviews" description="Bot-requested PR reviews, acceptable-risk policy, and review outcomes." />
+  const reviewColumns: ResponsiveResourceListColumn<CodeReviewListItem>[] = [
+    {
+      id: "pull-request",
+      header: "PR",
+      cellClassName: "min-w-[18rem]",
+      render: (review) => (
+        <>
+          <div className="font-medium text-foreground">
+            <ReviewTitle review={review} />
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            {review.pull_request_author || "Unknown author"} · {review.head_sha.slice(0, 7)}
+          </div>
+        </>
+      ),
+    },
+    {
+      id: "repository",
+      header: "Repo",
+      render: (review) => review.repository_name || review.github_repo,
+    },
+    {
+      id: "risk",
+      header: "Risk",
+      render: (review) => (
+        <StatusLabel
+          label={review.acceptable ? "Acceptable" : "Review needed"}
+          tone={reviewRiskTone(review)}
+          indicator={false}
+        />
+      ),
+    },
+    {
+      id: "outcome",
+      header: "Outcome",
+      render: (review) => (
+        <ReviewOutcome
+          review={review}
+          selected={selectedEvidenceSessionId === review.session_id}
+          onToggleEvidence={() => setSelectedEvidenceSessionId((current) => (
+            current === review.session_id ? null : review.session_id
+          ))}
+        />
+      ),
+    },
+    {
+      id: "run-status",
+      header: "Run status",
+      render: (review) => <ReviewOperationalStatus review={review} nowMs={countdownNowMs} />,
+    },
+    {
+      id: "completed",
+      header: "Completed",
+      render: (review) => formatDate(review.completed_at),
+    },
+    {
+      id: "actions",
+      header: <span className="sr-only">Actions</span>,
+      className: "text-right",
+      cellClassName: "text-right",
+      render: (review) => (
+        <ReviewActions
+          review={review}
+          canRetry={canRetryReviews}
+          isRetrying={retryingReviewSessionIds.has(review.session_id)}
+          onRetry={() => retryReview.mutate(review.session_id)}
+        />
+      ),
+    },
+  ];
 
-        <Tabs defaultValue="reviews" className="space-y-4">
+  return (
+    <ListPage
+      title="Code reviews"
+      description="Bot-requested PR reviews, acceptable-risk policy, and review outcomes."
+    >
+      <Tabs defaultValue="reviews" className="space-y-4">
           <TabsList>
             <TabsTrigger value="reviews">
               <ClipboardCheck className="h-4 w-4" />
@@ -834,68 +909,15 @@ export default function CodeReviewsPage() {
               />
             ) : (
               <>
-              <Card className="hidden md:flex">
-                <CardContent className="p-0">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>PR</TableHead>
-                        <TableHead>Repo</TableHead>
-                        <TableHead>Risk</TableHead>
-                        <TableHead>Outcome</TableHead>
-                        <TableHead>Run status</TableHead>
-                        <TableHead>Completed</TableHead>
-                        <TableHead className="text-right">Actions</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {reviews.map((review) => (
-                        <TableRow key={review.id}>
-                          <TableCell className="min-w-[18rem]">
-                            <div className="font-medium text-foreground">
-                              <ReviewTitle review={review} />
-                            </div>
-                            <div className="mt-1 text-xs text-muted-foreground">
-                              {review.pull_request_author || "Unknown author"} · {review.head_sha.slice(0, 7)}
-                            </div>
-                          </TableCell>
-                          <TableCell>{review.repository_name || review.github_repo}</TableCell>
-                          <TableCell>
-                            <StatusLabel
-                              label={review.acceptable ? "Acceptable" : "Review needed"}
-                              tone={reviewRiskTone(review)}
-                              indicator={false}
-                            />
-                          </TableCell>
-                          <TableCell>
-                            <ReviewOutcome
-                              review={review}
-                              selected={selectedEvidenceSessionId === review.session_id}
-                                  onToggleEvidence={() => setSelectedEvidenceSessionId((current) => (current === review.session_id ? null : review.session_id))}
-                            />
-                          </TableCell>
-                          <TableCell>
-                            <ReviewOperationalStatus review={review} nowMs={countdownNowMs} />
-                          </TableCell>
-                          <TableCell>{formatDate(review.completed_at)}</TableCell>
-                          <TableCell>
-                            <ReviewActions
-                              review={review}
-                              canRetry={canRetryReviews}
-                              isRetrying={retryingReviewSessionIds.has(review.session_id)}
-                              onRetry={() => retryReview.mutate(review.session_id)}
-                            />
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </CardContent>
-              </Card>
-              <Card className="divide-y divide-border/70 md:hidden" aria-label="Code review activity">
-                {reviews.map((review) => (
+                <ResponsiveResourceList
+                  ariaLabel="Code reviews"
+                  mobileAriaLabel="Code review activity"
+                  items={reviews}
+                  getItemKey={(review) => review.id}
+                  columns={reviewColumns}
+                  emptyState="No code review sessions."
+                  renderMobileItem={(review) => (
                   <ResourceRow
-                    key={review.id}
                     title={
                       <span className="break-words text-sm leading-5">
                         <ReviewTitle review={review} />
@@ -946,26 +968,26 @@ export default function CodeReviewsPage() {
                     }
                     className="px-4 py-3.5 [&_[data-slot=resource-row-actions]]:ml-0"
                   />
-                ))}
-              </Card>
-                  <CodeReviewEvidenceSheet
-                    review={selectedEvidenceReview}
-                    evidence={evidenceQuery.data?.data}
-                    isLoading={evidenceQuery.isLoading}
-                    error={evidenceQuery.error}
-                    nowMs={countdownNowMs}
-                    canRetryReview={canRetryReviews}
-                    isRetryingReview={Boolean(selectedEvidenceReview && retryingReviewSessionIds.has(selectedEvidenceReview.session_id))}
-                    onRetryEvidence={() => void evidenceQuery.refetch()}
-                    onRetryReview={() => {
-                      if (selectedEvidenceReview) retryReview.mutate(selectedEvidenceReview.session_id);
-                    }}
-                    open={Boolean(selectedEvidenceReview)}
-                    onOpenChange={(open) => {
-                      if (!open) setSelectedEvidenceSessionId(null);
-                    }}
-                  />
-                </>
+                  )}
+                />
+                <CodeReviewEvidenceSheet
+                  review={selectedEvidenceReview}
+                  evidence={evidenceQuery.data?.data}
+                  isLoading={evidenceQuery.isLoading}
+                  error={evidenceQuery.error}
+                  nowMs={countdownNowMs}
+                  canRetryReview={canRetryReviews}
+                  isRetryingReview={Boolean(selectedEvidenceReview && retryingReviewSessionIds.has(selectedEvidenceReview.session_id))}
+                  onRetryEvidence={() => void evidenceQuery.refetch()}
+                  onRetryReview={() => {
+                    if (selectedEvidenceReview) retryReview.mutate(selectedEvidenceReview.session_id);
+                  }}
+                  open={Boolean(selectedEvidenceReview)}
+                  onOpenChange={(open) => {
+                    if (!open) setSelectedEvidenceSessionId(null);
+                  }}
+                />
+              </>
               )}
             </SectionGroup>
           </TabsContent>
@@ -1108,9 +1130,8 @@ export default function CodeReviewsPage() {
               }}
             />
           </TabsContent>
-        </Tabs>
-      </div>
-    </main>
+      </Tabs>
+    </ListPage>
   );
 }
 

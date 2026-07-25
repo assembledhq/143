@@ -199,6 +199,9 @@ describe("AutopilotPage", () => {
     renderWithProviders(<AutopilotPage />);
 
     expect(await screen.findByText("Run analysis")).toBeInTheDocument();
+    const page = screen.getByRole("heading", { level: 1, name: "Autopilot" })
+      .closest('[data-slot="list-page"]');
+    expect(page?.parentElement).toHaveClass("max-w-7xl");
     expect((await screen.findAllByText("TypeError: Cannot read properties of undefined")).length).toBeGreaterThan(0);
     expect(screen.getAllByText("Missing retry copy in payment flow")).toHaveLength(2);
     expect(screen.getByText("Auto-runnable now")).toBeInTheDocument();

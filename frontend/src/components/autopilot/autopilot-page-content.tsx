@@ -6,9 +6,12 @@ import { useRouter } from "next/navigation";
 import { parseAsString, useQueryState } from "nuqs";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, ArrowUpRight, Clock3, GitPullRequest, Loader2, Play, RotateCcw, Search, SlidersHorizontal } from "lucide-react";
-import { PageContainer } from "@/components/page-container";
-import { PageHeader } from "@/components/page-header";
+import { ListPage } from "@/components/list-page";
 import { ResourceRow } from "@/components/resource-row";
+import {
+  ResponsiveResourceList,
+  type ResponsiveResourceListColumn,
+} from "@/components/responsive-resource-list";
 import { SectionGroup } from "@/components/section-group";
 import { StatusLabel, type StatusTone } from "@/components/status-label";
 import { AutopilotConfigFooter } from "./autopilot-config-footer";
@@ -26,7 +29,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAuth } from "@/hooks/use-auth";
@@ -134,9 +136,9 @@ export function AutopilotPageContent() {
 
   if (isLoading || !isSetupComplete) {
     return (
-      <PageContainer size="wide">
+      <ListPage title="Autopilot">
         <p className="text-sm text-muted-foreground">Loading Autopilot...</p>
-      </PageContainer>
+      </ListPage>
     );
   }
 
@@ -145,19 +147,16 @@ export function AutopilotPageContent() {
   const statusLine = buildStatusLine(viewModel.statusLine, summary);
 
   return (
-    <PageContainer size="wide">
-      <TooltipProvider>
-      <div className="space-y-6">
-        <PageHeader
-          title="Autopilot"
-          subtitle={statusLine}
-          action={isAdmin ? (
-            <Button className="min-h-11 w-full sm:min-h-0 sm:w-auto" onClick={handleAnalyze} disabled={isAnalyzing || isPending}>
-              {isAnalyzing || isPending ? "Running..." : "Run analysis"}
-            </Button>
-          ) : undefined}
-        />
-
+    <TooltipProvider>
+      <ListPage
+        title="Autopilot"
+        subtitle={statusLine}
+        action={isAdmin ? (
+          <Button className="min-h-11 w-full sm:min-h-0 sm:w-auto" onClick={handleAnalyze} disabled={isAnalyzing || isPending}>
+            {isAnalyzing || isPending ? "Running..." : "Run analysis"}
+          </Button>
+        ) : undefined}
+      >
         <SummaryStrip summary={summary} />
 
         <SectionGroup
@@ -230,9 +229,8 @@ export function AutopilotPageContent() {
             }
           }}
         />
-      </div>
-      </TooltipProvider>
-    </PageContainer>
+      </ListPage>
+    </TooltipProvider>
   );
 }
 
@@ -372,65 +370,99 @@ function QueueTable({
     );
   }
 
+  const columns: ResponsiveResourceListColumn<AutopilotQueueRow>[] = [
+    {
+      id: "rank",
+      header: "Rank",
+      className: "w-14",
+      cellClassName: "text-xs font-medium text-muted-foreground",
+      render: (row) => `#${row.rank}`,
+    },
+    {
+      id: "issue",
+      header: "Issue",
+      className: "w-[34%]",
+      cellClassName: "whitespace-normal",
+      render: (row) => (
+        <>
+          <IssueTitle row={row} />
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <span>{row.repo?.name ?? "No repo"}</span>
+            <span>{row.issue_status}</span>
+            {row.low_hanging_fruit.cluster_size > 1 && <span>{row.low_hanging_fruit.cluster_size} related</span>}
+          </div>
+        </>
+      ),
+    },
+    {
+      id: "source",
+      header: "Source",
+      className: "w-24",
+      render: (row) => <SourceBadge row={row} />,
+    },
+    {
+      id: "customer-impact",
+      header: "Customer impact",
+      className: "w-32",
+      render: (row) => (
+        <MetricBadge label={row.customer_impact.label} detail={String(row.customer_impact.count)} />
+      ),
+    },
+    {
+      id: "ease",
+      header: "Ease",
+      className: "w-24",
+      render: (row) => <MetricBadge label={row.implementation_ease} />,
+    },
+    {
+      id: "priority-fit",
+      header: "Priority fit",
+      className: "w-28",
+      render: (row) => (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge variant={fruitBadgeVariant(row.low_hanging_fruit.label)}>{row.low_hanging_fruit.label}</Badge>
+          </TooltipTrigger>
+          <TooltipContent>
+            <div className="max-w-56 text-xs">{row.low_hanging_fruit.reasons.join(", ") || "No ranking details yet"}</div>
+          </TooltipContent>
+        </Tooltip>
+      ),
+    },
+    {
+      id: "run-state",
+      header: "Run state",
+      className: "w-36",
+      render: (row) => <RunState row={row} />,
+    },
+    {
+      id: "action",
+      header: <span className="sr-only">Action</span>,
+      className: "w-28 text-right",
+      cellClassName: "text-right",
+      render: (row) => (
+        <RowAction
+          row={row}
+          onStartRun={onStartRun}
+          canOverrideBlocked={canOverrideBlocked}
+          canMutate={canMutate}
+        />
+      ),
+    },
+  ];
+
   return (
     <div className="space-y-3">
-      <Card className="hidden overflow-hidden border-border/70 md:flex">
-        <Table className="w-full min-w-[64rem] table-auto">
-          <TableHeader>
-            <TableRow>
-              <TableHead className="w-14">Rank</TableHead>
-              <TableHead className="w-[34%]">Issue</TableHead>
-              <TableHead className="w-24">Source</TableHead>
-              <TableHead className="w-32">Customer impact</TableHead>
-              <TableHead className="w-24">Ease</TableHead>
-              <TableHead className="w-28">Priority fit</TableHead>
-              <TableHead className="w-36">Run state</TableHead>
-              <TableHead className="w-28 text-right">Action</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((row) => (
-              <TableRow
-                key={row.id}
-                data-testid="autopilot-queue-row"
-              >
-                <TableCell className="text-xs font-medium text-muted-foreground">#{row.rank}</TableCell>
-                <TableCell className="whitespace-normal">
-                  <IssueTitle row={row} />
-                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                    <span>{row.repo?.name ?? "No repo"}</span>
-                    <span>{row.issue_status}</span>
-                    {row.low_hanging_fruit.cluster_size > 1 && <span>{row.low_hanging_fruit.cluster_size} related</span>}
-                  </div>
-                </TableCell>
-                <TableCell><SourceBadge row={row} /></TableCell>
-                <TableCell>
-                  <MetricBadge label={row.customer_impact.label} detail={String(row.customer_impact.count)} />
-                </TableCell>
-                <TableCell>
-                  <MetricBadge label={row.implementation_ease} />
-                </TableCell>
-                <TableCell>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Badge variant={fruitBadgeVariant(row.low_hanging_fruit.label)}>{row.low_hanging_fruit.label}</Badge>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <div className="max-w-56 text-xs">{row.low_hanging_fruit.reasons.join(", ") || "No ranking details yet"}</div>
-                    </TooltipContent>
-                  </Tooltip>
-                </TableCell>
-                <TableCell><RunState row={row} /></TableCell>
-                <TableCell className="text-right"><RowAction row={row} onStartRun={onStartRun} canOverrideBlocked={canOverrideBlocked} canMutate={canMutate} /></TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </Card>
-      <Card className="divide-y divide-border/70 md:hidden" aria-label="Ranked issue queue">
-        {rows.map((row) => (
+      <ResponsiveResourceList
+        ariaLabel="Ranked issue queue"
+        items={rows}
+        getItemKey={(row) => row.id}
+        columns={columns}
+        emptyState="No ranked issues right now."
+        tableClassName="min-w-[64rem] table-auto"
+        getDesktopRowProps={() => ({ "data-testid": "autopilot-queue-row" })}
+        renderMobileItem={(row) => (
           <ResourceRow
-            key={row.id}
             data-testid="autopilot-queue-mobile-row"
             leading={<span className="font-medium">#{row.rank}</span>}
             title={<IssueTitle row={row} />}
@@ -455,8 +487,8 @@ function QueueTable({
               </div>
             )}
           />
-        ))}
-      </Card>
+        )}
+      />
       {hasNextPage && (
         <div className="flex justify-center">
           <Button className="min-h-11 sm:min-h-0" variant="outline" onClick={onLoadMore} disabled={loadingNextPage}>

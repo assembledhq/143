@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import type { HTMLAttributes, ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -20,6 +20,10 @@ export type ResponsiveResourceListColumn<TItem> = {
   render: (item: TItem) => ReactNode;
 };
 
+type ResponsiveResourceListRowProps = HTMLAttributes<HTMLTableRowElement> & {
+  [attribute: `data-${string}`]: string | number | boolean | undefined;
+};
+
 type ResponsiveResourceListProps<TItem> = {
   items: TItem[];
   getItemKey: (item: TItem) => string;
@@ -27,7 +31,10 @@ type ResponsiveResourceListProps<TItem> = {
   renderMobileItem: (item: TItem) => ReactNode;
   emptyState: ReactNode;
   ariaLabel: string;
+  mobileAriaLabel?: string;
   className?: string;
+  tableClassName?: string;
+  getDesktopRowProps?: (item: TItem) => ResponsiveResourceListRowProps;
 };
 
 export function ResponsiveResourceList<TItem>({
@@ -37,7 +44,10 @@ export function ResponsiveResourceList<TItem>({
   renderMobileItem,
   emptyState,
   ariaLabel,
+  mobileAriaLabel,
   className,
+  tableClassName,
+  getDesktopRowProps,
 }: ResponsiveResourceListProps<TItem>) {
   if (items.length === 0) {
     return (
@@ -53,7 +63,7 @@ export function ResponsiveResourceList<TItem>({
     <Card className={cn("overflow-hidden border-border/80 bg-card", className)}>
       <CardContent className="p-0">
         <div className="hidden md:block">
-          <Table aria-label={ariaLabel}>
+          <Table aria-label={ariaLabel} className={tableClassName}>
             <TableHeader>
               <TableRow>
                 {columns.map((column) => (
@@ -65,7 +75,10 @@ export function ResponsiveResourceList<TItem>({
             </TableHeader>
             <TableBody>
               {items.map((item) => (
-                <TableRow key={getItemKey(item)}>
+                <TableRow
+                  key={getItemKey(item)}
+                  {...getDesktopRowProps?.(item)}
+                >
                   {columns.map((column) => (
                     <TableCell key={column.id} className={column.cellClassName}>
                       {column.render(item)}
@@ -77,9 +90,15 @@ export function ResponsiveResourceList<TItem>({
           </Table>
         </div>
 
-        <div className="divide-y divide-border/60 md:hidden">
+        <div
+          role="list"
+          aria-label={mobileAriaLabel ?? `${ariaLabel} mobile list`}
+          className="divide-y divide-border/60 md:hidden"
+        >
           {items.map((item) => (
-            <div key={getItemKey(item)}>{renderMobileItem(item)}</div>
+            <div key={getItemKey(item)} role="listitem">
+              {renderMobileItem(item)}
+            </div>
           ))}
         </div>
       </CardContent>
