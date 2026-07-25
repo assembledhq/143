@@ -11,6 +11,7 @@ import {
   CircleHelp,
   ClipboardCheck,
   FileSearch,
+  MessageSquareText,
   Plus,
   PowerOff,
   RefreshCw,
@@ -249,29 +250,12 @@ function EvidenceButton({
     <Button
       variant={selected ? "secondary" : "ghost"}
       size="sm"
-      className="-ml-2 min-h-8 px-2 text-muted-foreground"
+      className="h-7 px-2 text-muted-foreground hover:text-foreground"
       onClick={onToggleEvidence}
     >
       <FileSearch className="h-4 w-4" />
       Evidence
     </Button>
-  );
-}
-
-function ReviewOutcome({
-  review,
-  selected,
-  onToggleEvidence,
-}: {
-  review: CodeReviewListItem;
-  selected: boolean;
-  onToggleEvidence: () => void;
-}) {
-  return (
-    <div className="space-y-1">
-      <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} indicator={false} />
-      <EvidenceButton selected={selected} onToggleEvidence={onToggleEvidence} />
-    </div>
   );
 }
 
@@ -283,17 +267,22 @@ function ReviewActions({
   review,
   canRetry,
   isRetrying,
+  evidenceSelected,
   onRetry,
+  onToggleEvidence,
   className,
 }: {
   review: CodeReviewListItem;
   canRetry: boolean;
   isRetrying: boolean;
+  evidenceSelected: boolean;
   onRetry: () => void;
+  onToggleEvidence: () => void;
   className?: string;
 }) {
   return (
-    <div className={cn("flex w-full gap-1 md:w-auto md:justify-end", className)}>
+    <div className={cn("flex w-full items-center gap-1 md:w-auto md:justify-end", className)}>
+      <EvidenceButton selected={evidenceSelected} onToggleEvidence={onToggleEvidence} />
       {canRetry && reviewCanBeRetried(review) ? (
         <Button
           className="min-h-11 flex-1 justify-center md:min-h-0 md:flex-none"
@@ -306,8 +295,11 @@ function ReviewActions({
           {isRetrying ? "Retrying…" : "Retry review"}
         </Button>
       ) : null}
-      <Button className="min-h-11 flex-1 justify-center md:min-h-0 md:flex-none" variant="ghost" size="sm" asChild>
-        <Link href={`/sessions/${review.session_id}`}>Session</Link>
+      <Button className="h-7 min-h-11 flex-1 justify-center px-2 text-muted-foreground hover:text-foreground md:min-h-0 md:flex-none" variant="ghost" size="sm" asChild>
+        <Link href={`/sessions/${review.session_id}`}>
+          <MessageSquareText className="h-3.5 w-3.5" />
+          Session
+        </Link>
       </Button>
     </div>
   );
@@ -774,9 +766,11 @@ export default function CodeReviewsPage() {
       ),
     },
     {
-      id: "repository",
-      header: "Repo",
-      render: (review) => review.repository_name || review.github_repo,
+      id: "outcome",
+      header: "Outcome",
+      render: (review) => (
+        <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} indicator={false} />
+      ),
     },
     {
       id: "risk",
@@ -790,22 +784,14 @@ export default function CodeReviewsPage() {
       ),
     },
     {
-      id: "outcome",
-      header: "Outcome",
-      render: (review) => (
-        <ReviewOutcome
-          review={review}
-          selected={selectedEvidenceSessionId === review.session_id}
-          onToggleEvidence={() => setSelectedEvidenceSessionId((current) => (
-            current === review.session_id ? null : review.session_id
-          ))}
-        />
-      ),
-    },
-    {
       id: "run-status",
       header: "Run status",
       render: (review) => <ReviewOperationalStatus review={review} nowMs={countdownNowMs} />,
+    },
+    {
+      id: "repository",
+      header: "Repo",
+      render: (review) => review.repository_name || review.github_repo,
     },
     {
       id: "completed",
@@ -822,7 +808,11 @@ export default function CodeReviewsPage() {
           review={review}
           canRetry={canRetryReviews}
           isRetrying={retryingReviewSessionIds.has(review.session_id)}
+          evidenceSelected={selectedEvidenceSessionId === review.session_id}
           onRetry={() => retryReview.mutate(review.session_id)}
+          onToggleEvidence={() => setSelectedEvidenceSessionId((current) => (
+            current === review.session_id ? null : review.session_id
+          ))}
         />
       ),
     },
@@ -953,15 +943,15 @@ export default function CodeReviewsPage() {
                     }
                     actions={
                       <div className="flex w-full flex-wrap items-center gap-2">
-                        <EvidenceButton
-                          selected={selectedEvidenceSessionId === review.session_id}
-                          onToggleEvidence={() => setSelectedEvidenceSessionId((current) => (current === review.session_id ? null : review.session_id))}
-                        />
                         <ReviewActions
                           review={review}
                           canRetry={canRetryReviews}
                           isRetrying={retryingReviewSessionIds.has(review.session_id)}
+                          evidenceSelected={selectedEvidenceSessionId === review.session_id}
                           onRetry={() => retryReview.mutate(review.session_id)}
+                          onToggleEvidence={() => setSelectedEvidenceSessionId((current) => (
+                            current === review.session_id ? null : review.session_id
+                          ))}
                           className="ml-auto w-auto"
                         />
                       </div>
