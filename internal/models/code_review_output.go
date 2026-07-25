@@ -35,11 +35,11 @@ func BuildCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) string {
 func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) string {
 	paragraphs := make([]string, 0, 9)
 	if input.Decision == CodeReviewDecisionApproved {
-		paragraphs = append(paragraphs, "143 Code Reviewer approved this PR")
+		paragraphs = append(paragraphs, "✅ **143 Code Reviewer approved this PR**")
 	} else if input.Acceptable {
-		paragraphs = append(paragraphs, "143 Code Reviewer completed its review without approving this PR")
+		paragraphs = append(paragraphs, "❌ **143 Code Reviewer completed its review without approving this PR**")
 	} else {
-		paragraphs = append(paragraphs, "143 Code Reviewer did not approve this PR")
+		paragraphs = append(paragraphs, "❌ **143 Code Reviewer did not approve this PR**")
 	}
 
 	generatedSummary := codeReviewGeneratedSummary(input.GeneratedSummary)
@@ -47,12 +47,12 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 	if explanation == "" {
 		explanation = codeReviewDecisionExplanation(input)
 	}
-	paragraphs = append(paragraphs, "Why: "+explanation)
+	paragraphs = append(paragraphs, "**Why:** "+explanation)
 
 	if generatedSummary != "" && !input.Acceptable {
 		if blockers := codeReviewRiskReasonExplanations(input.RiskReasons, input.DescriptionIssues); len(blockers) > 0 {
 			var policyBlockers strings.Builder
-			policyBlockers.WriteString("Policy blockers:\n")
+			policyBlockers.WriteString("**Policy blockers:**\n")
 			for _, blocker := range blockers {
 				policyBlockers.WriteString("- " + blocker + "\n")
 			}
@@ -62,22 +62,22 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 
 	if generatedSummary != "" {
 		if facts := codeReviewFacts(input); len(facts) > 0 {
-			paragraphs = append(paragraphs, "Review facts: "+strings.Join(facts, " · "))
+			paragraphs = append(paragraphs, "**Review facts:** "+strings.Join(facts, " · "))
 		}
 	}
 	if agentSummaries := nonEmptyStrings(input.AgentSummaries); len(agentSummaries) > 0 {
 		for i := range agentSummaries {
 			agentSummaries[i] = strings.TrimRight(agentSummaries[i], ".")
 		}
-		paragraphs = append(paragraphs, "Reviewer evidence: "+strings.Join(agentSummaries, "; ")+".")
+		paragraphs = append(paragraphs, "**Reviewer evidence:** "+strings.Join(agentSummaries, "; ")+".")
 	}
 
 	if len(input.Findings) > 0 {
 		var findings strings.Builder
 		if input.Acceptable {
-			findings.WriteString("Review notes:\n")
+			findings.WriteString("**Review notes:**\n")
 		} else {
-			findings.WriteString("Review findings:\n")
+			findings.WriteString("**Review findings:**\n")
 		}
 		for _, finding := range groupedCodeReviewFindings(input.Findings) {
 			findings.WriteString("- " + finding + "\n")
@@ -85,10 +85,10 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 		paragraphs = append(paragraphs, strings.TrimSpace(findings.String()))
 	}
 	if reviewers := nonEmptyStrings(input.RecommendedHumanReviewers); len(reviewers) > 0 {
-		paragraphs = append(paragraphs, "Suggested human reviewers: "+strings.Join(reviewers, ", "))
+		paragraphs = append(paragraphs, "**Suggested human reviewers:** "+strings.Join(reviewers, ", "))
 	}
 	if !input.Acceptable && generatedSummary == "" {
-		paragraphs = append(paragraphs, "Address the items above and request another review, or ask a human reviewer to decide.")
+		paragraphs = append(paragraphs, "**Next steps:** Address the items above and request another review, or ask a human reviewer to decide.")
 	}
 	if assessment := codeReviewAssessmentSummary(input.HeadSHA, input.AssessedAt); assessment != "" {
 		paragraphs = append(paragraphs, assessment)
@@ -108,7 +108,7 @@ func codeReviewAssessmentSummary(headSHA string, assessedAt time.Time) string {
 	if len(shortSHA) > 7 {
 		shortSHA = shortSHA[:7]
 	}
-	summary := "Latest assessment: `" + shortSHA + "`"
+	summary := "**Latest assessment:** `" + shortSHA + "`"
 	if !assessedAt.IsZero() {
 		summary += " at " + assessedAt.UTC().Format(time.RFC3339)
 	}
