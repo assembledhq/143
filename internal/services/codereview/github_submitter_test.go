@@ -141,6 +141,33 @@ func TestGitHubSubmitter_UpsertReviewStatusCommentRecoversStaleIDFromAppAuthored
 	require.Equal(t, int64(8001), patchedCommentID, "marker recovery must ignore a marker authored by another GitHub app")
 }
 
+func TestGitHubSubmitter_HideReviewSummaryReplacesFallbackBodyWithMarker(t *testing.T) {
+	t.Parallel()
+
+	var gotBody map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodPut, r.Method, "summary hiding should update the existing review")
+		require.Equal(t, "/repos/acme/repo/pulls/42/reviews/143", r.URL.Path, "summary hiding should target the persisted review")
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody), "summary update body should decode")
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"id":143,"html_url":"https://github.com/acme/repo/pull/42#pullrequestreview-143"}`))
+		require.NoError(t, err, "test response should write the updated review")
+	}))
+	defer server.Close()
+
+	submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
+	err := submitter.HideReviewSummary(context.Background(), HideReviewSummaryRequest{
+		InstallationID: 99,
+		Repository:     "acme/repo",
+		PullNumber:     42,
+		ReviewID:       143,
+		OutputKey:      "review-output",
+	})
+
+	require.NoError(t, err, "HideReviewSummary should replace the fallback summary")
+	require.Equal(t, codeReviewOutputMarker("review-output"), gotBody["body"], "hidden review body should retain only the idempotency marker")
+}
+
 func TestGitHubSubmitter_EmitsInstallationTelemetry(t *testing.T) {
 	t.Parallel()
 
@@ -247,7 +274,7 @@ func TestGitHubSubmitter_SubmitReview(t *testing.T) {
 	require.Equal(t, "/repos/acme/repo/pulls/42/reviews", gotPath, "SubmitReview should call pull review endpoint")
 	require.Equal(t, "APPROVE", gotPayload["event"], "approved decision should map to GitHub approval event")
 	require.Equal(t, "abc123", gotPayload["commit_id"], "SubmitReview should pin reviewed head SHA")
-	require.Equal(t, codeReviewOutputMarker("review-output"), gotPayload["body"], "formal review should contain only the hidden idempotency marker")
+	require.Equal(t, withCodeReviewOutputMarker("143 Code Reviewer approved this PR", "review-output"), gotPayload["body"], "formal review should retain the visible fallback until the rolling comment is published")
 	comments, ok := gotPayload["comments"].([]any)
 	require.True(t, ok, "comments should be an array")
 	require.Len(t, comments, 1, "one inline comment should be submitted")
@@ -397,7 +424,7 @@ func TestGitHubSubmitter_SubmitReviewUpdatesExistingAssessment(t *testing.T) {
 	expectedVisibleBody := "143 Code Reviewer did not approve this PR\n\nWhy: required checks are failing.\n\n" +
 		codeReviewHistoryStartMarker + "\nPrevious 143 code reviews:\n- `2026-07-23T02:14:08Z` — **Not approved — blocked**\n" + codeReviewHistoryEndMarker
 	require.Equal(t, expectedVisibleBody, result.Body, "updated assessment should return the visible review body with prior decision history")
-	require.Equal(t, codeReviewOutputMarker("updated-output"), reviewUpdate["body"], "formal review update should contain only the hidden idempotency marker")
+	require.Equal(t, withCodeReviewOutputMarker(expectedVisibleBody, "updated-output"), reviewUpdate["body"], "formal review update should retain the visible fallback until the rolling comment is published")
 	require.Equal(t, withCodeReviewFindingMarker("Updated finding.", "finding-key"), commentUpdate["body"], "matching prior inline finding should be updated in place with a stable reassessment marker")
 	require.Equal(t, []SubmitReviewPostedComment{{
 		ID: 456, Path: "src/auth/session.go", Line: 42,
@@ -469,7 +496,7 @@ func TestGitHubSubmitter_SubmitReviewPromotesUpdatedAssessmentWithFormalApproval
 
 	require.NoError(t, err, "passing reassessment should update the sticky assessment and submit a formal approval")
 	require.Equal(t, int64(143), result.ID, "sticky assessment should remain the persisted review reference")
-	require.Equal(t, codeReviewOutputMarker("approved-output"), reviewUpdate["body"], "formal review update should remain marker-only while the rolling comment carries the result")
+	require.Equal(t, withCodeReviewOutputMarker("143 Code Reviewer approved this PR.", "approved-output"), reviewUpdate["body"], "formal review update should retain the visible fallback until the rolling comment is published")
 	require.Equal(t, "APPROVE", approvalPost["event"], "passing reassessment should create a real GitHub approval")
 	require.Equal(t, "new-head", approvalPost["commit_id"], "formal approval should target the reassessed head")
 	require.Contains(t, approvalPost["body"], "143-code-review-output", "formal approval should carry a loop-suppression marker")
@@ -653,7 +680,7 @@ func TestGitHubSubmitter_SubmitReviewUpdatesExistingMarkedInlineComment(t *testi
 
 	require.NoError(t, err, "SubmitReview should update a matching marked inline comment")
 	require.Equal(t, int64(123), result.ID, "SubmitReview should still submit the formal GitHub review")
-	require.Equal(t, codeReviewOutputMarker(outputKey), postBody["body"], "formal review should contain only the hidden idempotency marker")
+	require.Equal(t, withCodeReviewOutputMarker("Review complete.", outputKey), postBody["body"], "formal review should retain the visible fallback until the rolling comment is published")
 	require.Equal(t, withCodeReviewFindingMarker("New body.", codeReviewFindingMarkerKey(outputKey, "finding-key")), patchBody["body"], "SubmitReview should update the stale inline comment body")
 	require.NotContains(t, postBody, "comments", "SubmitReview should not post a duplicate inline comment when an existing marker was updated")
 	require.Equal(t, []SubmitReviewPostedComment{
@@ -724,7 +751,7 @@ func TestGitHubSubmitter_SubmitReviewDoesNotReuseMarkedInlineCommentFromDifferen
 
 	require.NoError(t, err, "SubmitReview should post a fresh inline comment when only old-output markers exist")
 	require.False(t, patchCalled, "SubmitReview should not patch comments marked for a different review output")
-	require.Equal(t, codeReviewOutputMarker(outputKey), postBody["body"], "formal review should contain only the hidden idempotency marker")
+	require.Equal(t, withCodeReviewOutputMarker("Review complete.", outputKey), postBody["body"], "formal review should retain the visible fallback until the rolling comment is published")
 	comments, ok := postBody["comments"].([]any)
 	require.True(t, ok, "new review payload should include inline comments")
 	require.Len(t, comments, 1, "new review payload should include the finding for the new output")

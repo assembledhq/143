@@ -792,6 +792,7 @@ type codeReviewSubmitter interface {
 
 type codeReviewStatusCommentUpdater interface {
 	UpsertReviewStatusComment(ctx context.Context, req codereviewsvc.UpsertReviewStatusCommentRequest) (int64, error)
+	HideReviewSummary(ctx context.Context, req codereviewsvc.HideReviewSummaryRequest) error
 }
 
 type codeReviewLifecycle interface {

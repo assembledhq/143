@@ -127,6 +127,14 @@ type UpsertReviewStatusCommentRequest struct {
 	ExistingCommentID *int64
 }
 
+type HideReviewSummaryRequest struct {
+	InstallationID int64
+	Repository     string
+	PullNumber     int
+	ReviewID       int64
+	OutputKey      string
+}
+
 type PullRequestFilesRequest struct {
 	InstallationID int64
 	Repository     string
@@ -212,6 +220,48 @@ func (s *GitHubSubmitter) UpsertReviewStatusComment(ctx context.Context, req Ups
 	return s.createIssueComment(ctx, token, owner, repo, req.PullNumber, markedBody)
 }
 
+// HideReviewSummary removes the visible fallback from a formal review after
+// the rolling PR comment has durably received the same result.
+func (s *GitHubSubmitter) HideReviewSummary(ctx context.Context, req HideReviewSummaryRequest) error {
+	if s == nil || s.tokens == nil {
+		return fmt.Errorf("github submitter is not configured")
+	}
+	owner, repo, ok := strings.Cut(req.Repository, "/")
+	if !ok || owner == "" || repo == "" {
+		return fmt.Errorf("repository must be owner/name")
+	}
+	if req.PullNumber <= 0 {
+		return fmt.Errorf("pull number is required")
+	}
+	if req.InstallationID <= 0 {
+		return fmt.Errorf("installation id is required")
+	}
+	if req.ReviewID <= 0 {
+		return fmt.Errorf("review id is required")
+	}
+	if strings.TrimSpace(req.OutputKey) == "" {
+		return fmt.Errorf("output key is required")
+	}
+	ctx = withGitHubInstallationTelemetry(ctx, req.InstallationID)
+	token, err := s.tokens.GetInstallationToken(ctx, req.InstallationID)
+	if err != nil {
+		return fmt.Errorf("get installation token: %w", err)
+	}
+	_, err = s.updateReviewSummary(
+		ctx,
+		token,
+		owner,
+		repo,
+		req.PullNumber,
+		req.ReviewID,
+		withCodeReviewOutputMarker("", req.OutputKey),
+	)
+	if err != nil {
+		return fmt.Errorf("hide GitHub review summary: %w", err)
+	}
+	return nil
+}
+
 func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequest) (SubmitReviewResult, error) {
 	if s == nil || s.tokens == nil {
 		return SubmitReviewResult{}, fmt.Errorf("github submitter is not configured")
@@ -243,15 +293,14 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 	visibleReviewBody := strings.TrimSpace(req.Body)
 	if req.ExistingReviewID > 0 {
 		visibleReviewBody = withCodeReviewHistory(visibleReviewBody, req.PreviousBody, req.PreviousDecision, req.PreviousDecidedAt)
-		reviewBody := withCodeReviewOutputMarker("", req.OutputKey)
+		reviewBody := withCodeReviewOutputMarker(visibleReviewBody, req.OutputKey)
 		result, err := s.updateExistingReview(ctx, token, owner, repo, req, reviewBody)
 		result.Body = visibleReviewBody
 		return result, err
 	}
-	// The marker-backed PR conversation comment is the canonical visible
-	// summary. The formal GitHub review remains marker-only so approval state
-	// and inline findings do not duplicate that summary in the timeline.
-	reviewBody := withCodeReviewOutputMarker("", req.OutputKey)
+	// Keep a visible fallback on the formal review until the rolling PR
+	// comment is updated. The status-comment job removes it afterward.
+	reviewBody := withCodeReviewOutputMarker(visibleReviewBody, req.OutputKey)
 	existing, found, err := s.findExistingReview(ctx, token, owner, repo, req.PullNumber, req.OutputKey)
 	if err != nil {
 		return SubmitReviewResult{}, err

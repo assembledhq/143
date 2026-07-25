@@ -71,8 +71,9 @@ func newSyncCodeReviewStatusCommentHandler(stores *Stores, services *Services, l
 			commentID int64
 			status    models.CodeReviewSessionStatus
 			updated   bool
+			reviewID  int64
 		)
-		err = stores.CodeReviews.RunWithStatusCommentLock(ctx, job.OrgID, metadata.PullRequestID, func(lockCtx context.Context, lockDB db.DBTX) error {
+		err = stores.CodeReviews.RunWithGitHubPublicationLock(ctx, job.OrgID, metadata.PullRequestID, func(lockCtx context.Context, lockDB db.DBTX) error {
 			lockedCodeReviews := db.NewCodeReviewStore(lockDB)
 			lockedPullRequests := db.NewPullRequestStore(lockDB)
 			lockedLatest, latestErr := lockedCodeReviews.GetLatestByPullRequest(lockCtx, job.OrgID, metadata.PullRequestID)
@@ -103,11 +104,26 @@ func newSyncCodeReviewStatusCommentHandler(stores *Stores, services *Services, l
 				updateErr = lockedPullRequests.SetCodeReviewStatusCommentID(lockCtx, job.OrgID, metadata.PullRequestID, commentID)
 			}
 			status = lockedLatest.Status
+			if updateErr == nil &&
+				codeReviewMetadataTerminal(lockedLatest.Status) &&
+				lockedLatest.GitHubReviewID != nil {
+				reviewID = *lockedLatest.GitHubReviewID
+				updateErr = updater.HideReviewSummary(lockCtx, codereviewsvc.HideReviewSummaryRequest{
+					InstallationID: repository.InstallationID,
+					Repository:     repositoryName,
+					PullNumber:     pullRequest.GitHubPRNumber,
+					ReviewID:       reviewID,
+					OutputKey:      lockedLatest.ReviewOutputKey,
+				})
+				if updateErr != nil {
+					return fmt.Errorf("hide code review fallback summary: %w", updateErr)
+				}
+			}
 			updated = updateErr == nil
 			return updateErr
 		})
 		if err != nil {
-			return classifyGitHubJobError(fmt.Errorf("upsert code review status comment: %w", err), metadata.SessionID.String())
+			return classifyGitHubJobError(fmt.Errorf("synchronize code review GitHub publication: %w", err), metadata.SessionID.String())
 		}
 		if !updated {
 			return nil
@@ -116,6 +132,7 @@ func newSyncCodeReviewStatusCommentHandler(stores *Stores, services *Services, l
 			Str("org_id", job.OrgID.String()).
 			Str("session_id", job.SessionID.String()).
 			Int64("github_comment_id", commentID).
+			Bool("github_review_summary_hidden", reviewID > 0).
 			Str("review_status", string(status)).
 			Msg("synchronized code review status comment")
 		return nil

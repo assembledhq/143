@@ -1452,30 +1452,32 @@ func (s *CodeReviewStore) MarkFindingsSelectedForInline(ctx context.Context, org
 	return tag.RowsAffected(), nil
 }
 
-// RunWithStatusCommentLock serializes marker lookup plus create/update for one
-// pull request across workers. Without the transaction-scoped advisory lock,
-// a delayed kickoff and a fast terminal sync could both observe no marker and
-// create duplicate rolling comments. The callback receives the transaction so
-// its locked reads and writes do not acquire a second pool connection.
-func (s *CodeReviewStore) RunWithStatusCommentLock(ctx context.Context, orgID, pullRequestID uuid.UUID, fn func(context.Context, DBTX) error) error {
+// RunWithGitHubPublicationLock serializes formal review body updates and rolling
+// status comment writes for one pull request across workers. This prevents a
+// delayed terminal sync from hiding the visible fallback for a newer review.
+// The callback receives the transaction so its locked reads and writes do not
+// acquire a second pool connection.
+func (s *CodeReviewStore) RunWithGitHubPublicationLock(ctx context.Context, orgID, pullRequestID uuid.UUID, fn func(context.Context, DBTX) error) error {
 	txStarter, ok := s.db.(TxStarter)
 	if !ok {
-		return fmt.Errorf("code review status comment lock requires transaction support")
+		return fmt.Errorf("code review GitHub publication lock requires transaction support")
 	}
 	tx, err := txStarter.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin code review status comment lock: %w", err)
+		return fmt.Errorf("begin code review GitHub publication lock: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Keep the legacy key prefix so old and new workers coordinate during a
+	// rolling deployment.
 	lockKey := fmt.Sprintf("code_review_status_comment:%s:%s", orgID, pullRequestID)
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended(@lock_key, 0))`, pgx.NamedArgs{"lock_key": lockKey}); err != nil {
-		return fmt.Errorf("acquire code review status comment lock: %w", err)
+		return fmt.Errorf("acquire code review GitHub publication lock: %w", err)
 	}
 	if err := fn(ctx, tx); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit code review status comment lock: %w", err)
+		return fmt.Errorf("commit code review GitHub publication lock: %w", err)
 	}
 	return nil
 }
