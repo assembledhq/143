@@ -528,3 +528,227 @@ func TestGitHubEventTriggerService_NilServiceIsNoop(t *testing.T) {
 	})
 	require.NoError(t, err, "nil service should be a no-op and not panic")
 }
+
+type fakeGitHubLabelResolver struct {
+	labels []string
+	err    error
+	calls  int
+}
+
+func (f *fakeGitHubLabelResolver) ResolvePullRequestLabels(_ context.Context, _, _ uuid.UUID, _ int) ([]string, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.labels, nil
+}
+
+func newLabelFilterAutomation(orgID, repoID uuid.UUID, filters json.RawMessage) models.Automation {
+	return models.Automation{
+		ID: uuid.New(), OrgID: orgID, RepositoryID: &repoID, Name: "Frontend review", Goal: "Review frontend PRs",
+		ExecutionMode: models.AutomationExecutionModeSequential, MaxConcurrent: 1,
+		IdentityScope: models.AutomationIdentityScopeOrg, GitHubEventFilters: filters,
+	}
+}
+
+func TestGitHubEventTriggerService_LabelFilter(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		filters     json.RawMessage
+		labels      []string
+		labelsKnown bool
+		expectRuns  int
+	}{
+		{
+			name:        "runs when the pull request carries the configured label",
+			filters:     json.RawMessage(`{"labels":["frontend"]}`),
+			labels:      []string{"frontend", "needs-design"},
+			labelsKnown: true,
+			expectRuns:  1,
+		},
+		{
+			name:        "matches labels case-insensitively",
+			filters:     json.RawMessage(`{"labels":["Frontend"]}`),
+			labels:      []string{"frontend"},
+			labelsKnown: true,
+			expectRuns:  1,
+		},
+		{
+			name:        "runs when any configured label matches",
+			filters:     json.RawMessage(`{"labels":["backend","frontend"]}`),
+			labels:      []string{"frontend"},
+			labelsKnown: true,
+			expectRuns:  1,
+		},
+		{
+			name:        "skips when the pull request carries no configured label",
+			filters:     json.RawMessage(`{"labels":["frontend"]}`),
+			labels:      []string{"backend"},
+			labelsKnown: true,
+			expectRuns:  0,
+		},
+		{
+			name:        "skips an unlabelled pull request",
+			filters:     json.RawMessage(`{"labels":["frontend"]}`),
+			labels:      []string{},
+			labelsKnown: true,
+			expectRuns:  0,
+		},
+		{
+			name:        "skips when labels could not be determined",
+			filters:     json.RawMessage(`{"labels":["frontend"]}`),
+			labels:      nil,
+			labelsKnown: false,
+			expectRuns:  0,
+		},
+		{
+			name:        "labels on the event do not block an automation without a label filter",
+			filters:     json.RawMessage(`{"base_branches":["main"]}`),
+			labels:      []string{"frontend"},
+			labelsKnown: true,
+			expectRuns:  1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			repoID := uuid.New()
+			store := &fakeGitHubAutomationStore{automations: []models.Automation{
+				newLabelFilterAutomation(orgID, repoID, tt.filters),
+			}}
+			runs := &fakeGitHubAutomationRunStore{}
+			jobs := &fakeGitHubAutomationJobStore{}
+			service := newTestService(store, runs, jobs)
+
+			err := service.TriggerGitHubEvent(context.Background(), GitHubEventTriggerRequest{
+				OrgID: orgID, RepositoryID: repoID,
+				Event:      models.AutomationGitHubEventPullRequestReadyForReview,
+				Repository: "acme/api", PullRequestNumber: 42, Actor: "octocat",
+				EventID: "pull_request:ready_for_review:42", BaseBranch: "main",
+				Labels: tt.labels, LabelsKnown: tt.labelsKnown,
+			})
+			require.NoError(t, err, "label filtering should not error")
+			require.Len(t, runs.runs, tt.expectRuns, "label filter should decide whether the automation runs")
+		})
+	}
+}
+
+func TestGitHubEventTriggerService_ResolvesLabelsWhenPayloadOmitsThem(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		filters      json.RawMessage
+		resolver     *fakeGitHubLabelResolver
+		expectCalls  int
+		expectRuns   int
+		expectLabels []string
+	}{
+		{
+			name:         "resolves labels for a check event when an automation filters on labels",
+			filters:      json.RawMessage(`{"labels":["frontend"]}`),
+			resolver:     &fakeGitHubLabelResolver{labels: []string{"frontend"}},
+			expectCalls:  1,
+			expectRuns:   1,
+			expectLabels: []string{"frontend"},
+		},
+		{
+			name:        "does not call the GitHub API when no automation filters on labels",
+			filters:     json.RawMessage(`{"base_branches":["main"]}`),
+			resolver:    &fakeGitHubLabelResolver{labels: []string{"frontend"}},
+			expectCalls: 0,
+			expectRuns:  1,
+		},
+		{
+			name:        "skips the run when label resolution fails",
+			filters:     json.RawMessage(`{"labels":["frontend"]}`),
+			resolver:    &fakeGitHubLabelResolver{err: errors.New("github unavailable")},
+			expectCalls: 1,
+			expectRuns:  0,
+		},
+		{
+			name:        "skips the run when the resolved labels do not match",
+			filters:     json.RawMessage(`{"labels":["frontend"]}`),
+			resolver:    &fakeGitHubLabelResolver{labels: []string{"backend"}},
+			expectCalls: 1,
+			expectRuns:  0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			repoID := uuid.New()
+			store := &fakeGitHubAutomationStore{automations: []models.Automation{
+				newLabelFilterAutomation(orgID, repoID, tt.filters),
+			}}
+			runs := &fakeGitHubAutomationRunStore{}
+			jobs := &fakeGitHubAutomationJobStore{}
+			service := newTestService(store, runs, jobs)
+			service.SetLabelResolver(tt.resolver)
+
+			err := service.TriggerGitHubEvent(context.Background(), GitHubEventTriggerRequest{
+				OrgID: orgID, RepositoryID: repoID,
+				Event:      models.AutomationGitHubEventCheckSuiteCompleted,
+				Repository: "acme/api", PullRequestNumber: 42, Actor: "github",
+				BaseBranch: "main", ProviderEventID: "delivery-1",
+				// Labels intentionally omitted — check_suite payloads carry none.
+			})
+			require.NoError(t, err, "label resolution should not error the trigger")
+			require.Equal(t, tt.expectCalls, tt.resolver.calls, "label resolver should only be consulted when a label filter exists")
+			require.Len(t, runs.runs, tt.expectRuns, "resolved labels should decide whether the automation runs")
+			if tt.expectRuns > 0 && len(tt.expectLabels) > 0 {
+				var snapshot struct {
+					GitHub struct {
+						Labels []string `json:"labels"`
+					} `json:"github"`
+				}
+				require.NoError(t, json.Unmarshal(runs.runs[0].ConfigSnapshot, &snapshot), "config snapshot should be valid JSON")
+				require.Equal(t, tt.expectLabels, snapshot.GitHub.Labels, "resolved labels should be recorded on the run snapshot")
+			}
+		})
+	}
+}
+
+func TestGitHubEventTriggerService_ReadyForReviewSnapshot(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	store := &fakeGitHubAutomationStore{automations: []models.Automation{
+		newLabelFilterAutomation(orgID, repoID, json.RawMessage(`{}`)),
+	}}
+	runs := &fakeGitHubAutomationRunStore{}
+	jobs := &fakeGitHubAutomationJobStore{}
+	service := newTestService(store, runs, jobs)
+
+	err := service.TriggerGitHubEvent(context.Background(), GitHubEventTriggerRequest{
+		OrgID: orgID, RepositoryID: repoID,
+		Event:      models.AutomationGitHubEventPullRequestReadyForReview,
+		Repository: "acme/api", PullRequestNumber: 42, Actor: "octocat",
+		EventID: "pull_request:ready_for_review:42",
+		Labels:  []string{"frontend", " "}, LabelsKnown: true,
+	})
+	require.NoError(t, err, "ready-for-review trigger should not error")
+	require.Len(t, runs.runs, 1, "ready-for-review event should create a run")
+
+	var snapshot struct {
+		Trigger string `json:"github_trigger"`
+		Event   string `json:"github_event"`
+		GitHub  struct {
+			Labels []string `json:"labels"`
+		} `json:"github"`
+	}
+	require.NoError(t, json.Unmarshal(runs.runs[0].ConfigSnapshot, &snapshot), "config snapshot should be valid JSON")
+	require.Equal(t, "PR ready for review", snapshot.Trigger, "ready-for-review should get its own human-readable trigger label")
+	require.Equal(t, "github.pull_request.ready_for_review", snapshot.Event, "snapshot should record the raw event")
+	require.Equal(t, []string{"frontend"}, snapshot.GitHub.Labels, "blank label names should be dropped from the snapshot")
+	require.Contains(t, runs.runs[0].GoalSnapshot, "- Labels: frontend", "goal snapshot should describe the PR labels")
+}
