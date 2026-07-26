@@ -34,6 +34,7 @@ export type AutomationFormState = {
   triggerBaseBranches: string;
   triggerAuthors: string;
   triggerPaths: string;
+  triggerLabels: string;
   triggerFeedbackTypes: string;
   triggerReviewStates: string;
   pagerDutyEnabled: boolean;
@@ -77,6 +78,7 @@ type DraftStorageOptions = {
 const productTriggerValues = new Set<AutomationProductTrigger>([
   "github.pr.opened",
   "github.pr.updated",
+  "github.pr.ready_for_review",
   "github.pr.feedback",
   "github.checks.completed",
   "github.pr.merged",
@@ -124,6 +126,7 @@ export function defaultAutomationFormState(
     triggerBaseBranches: "",
     triggerAuthors: "",
     triggerPaths: "",
+    triggerLabels: "",
     triggerFeedbackTypes: "",
     triggerReviewStates: "",
     pagerDutyEnabled: false,
@@ -184,6 +187,7 @@ export function automationFormStateFromDraft(
     triggerBaseBranches: stringOr(parsed.triggerBaseBranches, ""),
     triggerAuthors: stringOr(parsed.triggerAuthors, ""),
     triggerPaths: stringOr(parsed.triggerPaths, ""),
+    triggerLabels: stringOr(parsed.triggerLabels, ""),
     triggerFeedbackTypes: stringOr(parsed.triggerFeedbackTypes, ""),
     triggerReviewStates: stringOr(parsed.triggerReviewStates, ""),
     pagerDutyEnabled: parsed.pagerDutyEnabled === true,
@@ -315,6 +319,7 @@ function isEmptyDraft(draft: AutomationDraft): boolean {
     && draft.triggerBaseBranches.length === 0
     && draft.triggerAuthors.length === 0
     && draft.triggerPaths.length === 0
+    && draft.triggerLabels.length === 0
     && draft.triggerFeedbackTypes.length === 0
     && draft.triggerReviewStates.length === 0
     && !draft.pagerDutyEnabled

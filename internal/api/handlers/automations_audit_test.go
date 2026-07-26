@@ -248,6 +248,7 @@ func TestAutomationProductTriggerSummary(t *testing.T) {
 			events: []models.AutomationGitHubEvent{
 				models.AutomationGitHubEventPullRequestOpened,
 				models.AutomationGitHubEventPullRequestUpdated,
+				models.AutomationGitHubEventPullRequestReadyForReview,
 				models.AutomationGitHubEventIssueCommentCreated,
 				models.AutomationGitHubEventPullRequestReviewSubmitted,
 				models.AutomationGitHubEventPullRequestReviewCommentCreated,
@@ -257,6 +258,7 @@ func TestAutomationProductTriggerSummary(t *testing.T) {
 			want: []string{
 				string(models.AutomationProductTriggerPROpened),
 				string(models.AutomationProductTriggerPRUpdated),
+				string(models.AutomationProductTriggerPRReadyForReview),
 				string(models.AutomationProductTriggerPRFeedback),
 				string(models.AutomationProductTriggerChecksCompleted),
 				string(models.AutomationProductTriggerPRMerged),
