@@ -388,13 +388,22 @@ describe("CodeReviewsPage", () => {
     const reviewRow = within(reviewTable).getByRole("row", {
       name: /#428 Fix invoice rounding/i,
     });
+    expect(within(reviewTable).getAllByRole("columnheader").map((header) => header.textContent)).toEqual([
+      "PR",
+      "Outcome",
+      "Risk",
+      "Run status",
+      "Repo",
+      "Completed",
+      "Actions",
+    ]);
     const reviewCells = within(reviewRow).getAllByRole("cell");
     expect(within(reviewCells[2]).getByText("Acceptable").closest('[data-slot="status-label"]')).not.toBeNull();
-    expect(within(reviewCells[3]).getByText("Approved").closest('[data-slot="status-label"]')).not.toBeNull();
-    expect(within(reviewCells[3]).getByRole("button", { name: "Evidence" })).toBeInTheDocument();
-    expect(within(reviewCells[4]).getByText("Completed").closest('[data-slot="status-label"]')).not.toBeNull();
+    expect(within(reviewCells[1]).getByText("Approved").closest('[data-slot="status-label"]')).not.toBeNull();
+    expect(within(reviewCells[3]).getByText("Completed").closest('[data-slot="status-label"]')).not.toBeNull();
     expect(reviewCells[2].querySelector('[aria-hidden="true"]')).toBeNull();
-    expect(within(reviewCells[6]).queryByRole("button", { name: "Evidence" })).not.toBeInTheDocument();
+    expect(within(reviewCells[6]).getByRole("button", { name: "Evidence" })).toBeInTheDocument();
+    expect(within(reviewCells[6]).getByRole("link", { name: "Session" }).querySelector("svg")).toBeInTheDocument();
     await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
     const evidenceSheet = await screen.findByRole("dialog", {
       name: /Evidence for #428/i,
