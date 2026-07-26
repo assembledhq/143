@@ -172,6 +172,9 @@ function SettingsTab({
   const [triggerPaths, setTriggerPaths] = useState(
     (automation.github_event_filters?.paths ?? []).join(", "),
   );
+  const [triggerLabels, setTriggerLabels] = useState(
+    (automation.github_event_filters?.labels ?? []).join(", "),
+  );
   const [triggerFeedbackTypes, setTriggerFeedbackTypes] = useState(
     (automation.github_event_filters?.feedback_types ?? []).join(", "),
   );
@@ -265,6 +268,7 @@ function SettingsTab({
       base_branches: commaList(triggerBaseBranches),
       authors: commaList(triggerAuthors),
       paths: commaList(triggerPaths),
+      labels: commaList(triggerLabels),
       feedback_types: commaList(triggerFeedbackTypes),
       review_states: commaList(triggerReviewStates),
     }),
@@ -272,6 +276,7 @@ function SettingsTab({
       triggerAuthors,
       triggerBaseBranches,
       triggerFeedbackTypes,
+      triggerLabels,
       triggerPaths,
       triggerReviewStates,
     ],
@@ -660,6 +665,19 @@ function SettingsTab({
                 />
               </div>
               <div className="space-y-1.5">
+                <Label htmlFor="trigger-labels">PR labels</Label>
+                <Input
+                  id="trigger-labels"
+                  value={triggerLabels}
+                  onChange={(e) => setTriggerLabels(e.target.value)}
+                  placeholder="frontend, backend"
+                  disabled={!canManage}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Runs only when the PR carries one of these labels.
+                </p>
+              </div>
+              <div className="space-y-1.5">
                 <Label htmlFor="trigger-feedback-types">Feedback types</Label>
                 <Input
                   id="trigger-feedback-types"
@@ -668,7 +686,7 @@ function SettingsTab({
                   disabled={!canManage}
                 />
               </div>
-              <div className="space-y-1.5 sm:col-span-2">
+              <div className="space-y-1.5">
                 <Label htmlFor="trigger-review-states">Review states</Label>
                 <Input
                   id="trigger-review-states"

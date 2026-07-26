@@ -514,10 +514,11 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 
 	tests := []struct {
 		name           string
-		event          models.AutomationGitHubEvent
+		events         []models.AutomationGitHubEvent
 		withPR         bool
 		run            func(*testing.T, *PRService, uuid.UUID, int64, string)
 		wantActor      string
+		wantLabels     []string
 		wantBody       string
 		wantEventID    string
 		wantGroupID    string
@@ -528,8 +529,11 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 		wantActorType  string
 	}{
 		{
-			name:   "pull request opened",
-			event:  models.AutomationGitHubEventPullRequestOpened,
+			name: "pull request opened",
+			events: []models.AutomationGitHubEvent{
+				models.AutomationGitHubEventPullRequestOpened,
+				models.AutomationGitHubEventPullRequestReadyForReview,
+			},
 			withPR: true,
 			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
 				t.Helper()
@@ -542,16 +546,45 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 				event.PR.Title = "Add checkout"
 				event.PR.Body = "Please review"
 				event.PR.Head.SHA = "head-123"
+				event.PR.Labels = []githubLabelRef{{Name: "frontend"}}
 				require.NoError(t, svc.HandlePullRequestEvent(context.Background(), event), "opened PR webhook should not fail")
 			},
 			wantActor:   "octocat",
 			wantBody:    "Add checkout\n\nPlease review",
 			wantEventID: "pull_request:opened:42",
+			wantLabels:  []string{"frontend"},
+			wantURL:     "https://github.com/acme/app/pull/42", wantTitle: "Add checkout", wantHeadSHA: "head-123", wantActorType: "User",
+		},
+		{
+			name: "pull request marked ready for review",
+			events: []models.AutomationGitHubEvent{
+				models.AutomationGitHubEventPullRequestUpdated,
+				models.AutomationGitHubEventPullRequestReadyForReview,
+			},
+			withPR: true,
+			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
+				t.Helper()
+				event := PullRequestEvent{Action: "ready_for_review", Number: 42, OwnerOrgID: &orgID, DeliveryID: "delivery-123"}
+				event.Sender.Login = "octocat"
+				event.Sender.Type = "User"
+				event.Repository.ID = githubRepoID
+				event.Repository.FullName = fullName
+				event.PR.HTMLURL = "https://github.com/acme/app/pull/42"
+				event.PR.Title = "Add checkout"
+				event.PR.Body = "Please review"
+				event.PR.Head.SHA = "head-123"
+				event.PR.Labels = []githubLabelRef{{Name: "frontend"}, {Name: "needs-design"}}
+				require.NoError(t, svc.HandlePullRequestEvent(context.Background(), event), "ready-for-review PR webhook should not fail")
+			},
+			wantActor:   "octocat",
+			wantBody:    "Add checkout\n\nPlease review",
+			wantEventID: "pull_request:ready_for_review:42",
+			wantLabels:  []string{"frontend", "needs-design"},
 			wantURL:     "https://github.com/acme/app/pull/42", wantTitle: "Add checkout", wantHeadSHA: "head-123", wantActorType: "User",
 		},
 		{
 			name:   "pull request updated",
-			event:  models.AutomationGitHubEventPullRequestUpdated,
+			events: []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestUpdated},
 			withPR: true,
 			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
 				t.Helper()
@@ -569,11 +602,12 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			wantActor:   "octocat",
 			wantBody:    "Add checkout\n\nNew commits",
 			wantEventID: "pull_request:synchronize:42",
+			wantLabels:  []string{},
 			wantURL:     "https://github.com/acme/app/pull/42", wantTitle: "Add checkout", wantHeadSHA: "head-123", wantActorType: "User",
 		},
 		{
 			name:   "pull request merged",
-			event:  models.AutomationGitHubEventPullRequestMerged,
+			events: []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestMerged},
 			withPR: true,
 			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
 				t.Helper()
@@ -592,11 +626,12 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			wantActor:   "octocat",
 			wantBody:    "Add checkout\n\nMerged",
 			wantEventID: "pull_request:closed:42",
+			wantLabels:  []string{},
 			wantURL:     "https://github.com/acme/app/pull/42", wantTitle: "Add checkout", wantHeadSHA: "head-123", wantActorType: "User",
 		},
 		{
 			name:   "check suite completed",
-			event:  models.AutomationGitHubEventCheckSuiteCompleted,
+			events: []models.AutomationGitHubEvent{models.AutomationGitHubEventCheckSuiteCompleted},
 			withPR: true,
 			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
 				t.Helper()
@@ -623,7 +658,7 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 		},
 		{
 			name:   "check run completed",
-			event:  models.AutomationGitHubEventCheckRunCompleted,
+			events: []models.AutomationGitHubEvent{models.AutomationGitHubEventCheckRunCompleted},
 			withPR: true,
 			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
 				t.Helper()
@@ -651,8 +686,8 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			wantHeadSHA:    "head-123", wantActorType: "System",
 		},
 		{
-			name:  "issue comment on pull request",
-			event: models.AutomationGitHubEventIssueCommentCreated,
+			name:   "issue comment on pull request",
+			events: []models.AutomationGitHubEvent{models.AutomationGitHubEventIssueCommentCreated},
 			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
 				t.Helper()
 				event := IssueCommentEvent{Action: "created", OwnerOrgID: &orgID, DeliveryID: "delivery-123"}
@@ -671,12 +706,13 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			wantActor:      "commenter",
 			wantBody:       "Can you handle this?",
 			wantEventID:    "issue_comment:901",
+			wantLabels:     []string{},
 			wantBaseBranch: "main",
 			wantURL:        "https://github.com/acme/app/pull/42", wantTitle: "Add checkout", wantHeadSHA: "head-123", wantActorType: "User",
 		},
 		{
 			name:   "pull request review submitted",
-			event:  models.AutomationGitHubEventPullRequestReviewSubmitted,
+			events: []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestReviewSubmitted},
 			withPR: true,
 			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
 				t.Helper()
@@ -697,12 +733,13 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			wantActor:   "reviewer",
 			wantBody:    "Looks close",
 			wantEventID: "review:902",
+			wantLabels:  []string{},
 			wantGroupID: "review:902",
 			wantURL:     "https://github.com/acme/app/pull/42", wantTitle: "Add checkout", wantHeadSHA: "head-123", wantActorType: "User",
 		},
 		{
 			name:   "inline pull request review comment",
-			event:  models.AutomationGitHubEventPullRequestReviewCommentCreated,
+			events: []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestReviewCommentCreated},
 			withPR: true,
 			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
 				t.Helper()
@@ -724,6 +761,7 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			wantActor:   "inline-reviewer",
 			wantBody:    "Please adjust this line",
 			wantEventID: "review_comment:903",
+			wantLabels:  []string{},
 			wantGroupID: "review:902",
 			wantURL:     "https://github.com/acme/app/pull/42", wantTitle: "Add checkout", wantHeadSHA: "head-123", wantActorType: "User",
 		},
@@ -766,8 +804,12 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 
 			tt.run(t, svc, orgID, githubRepoID, fullName)
 
-			require.Len(t, triggerer.calls, 1, "webhook should trigger exactly one automation event")
-			require.Equal(t, tt.event, triggerer.calls[0].Event, "webhook should map to the expected automation event")
+			gotEvents := make([]models.AutomationGitHubEvent, 0, len(triggerer.calls))
+			for _, call := range triggerer.calls {
+				gotEvents = append(gotEvents, call.Event)
+			}
+			require.Equal(t, tt.events, gotEvents, "webhook should map to the expected automation events")
+			require.Equal(t, tt.wantLabels, triggerer.calls[0].Labels, "automation trigger should carry the PR labels from the webhook payload")
 			require.Equal(t, orgID, triggerer.calls[0].OrgID, "automation trigger should use the resolved repository org")
 			require.Equal(t, repoID, triggerer.calls[0].RepositoryID, "automation trigger should use the resolved repository id")
 			require.Equal(t, fullName, triggerer.calls[0].Repository, "automation trigger should include repository name")
@@ -3904,4 +3946,133 @@ func TestSyncPRPreviewSurfaces_SkipsDraftPullRequests(t *testing.T) {
 	require.NoError(t, err, "SyncPRPreviewSurfaces should return nil for draft PRs without error")
 	require.NoError(t, repoMock.ExpectationsWereMet(), "repository lookup should be called")
 	require.NoError(t, previewMock.ExpectationsWereMet(), "policy lookup should be called")
+}
+
+func TestAutomationGitHubEventsForPullRequest(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		action string
+		draft  bool
+		merged bool
+		want   []models.AutomationGitHubEvent
+	}{
+		{
+			name:   "non-draft opened is both opened and ready for review",
+			action: "opened",
+			want: []models.AutomationGitHubEvent{
+				models.AutomationGitHubEventPullRequestOpened,
+				models.AutomationGitHubEventPullRequestReadyForReview,
+			},
+		},
+		{
+			name:   "draft opened is only opened",
+			action: "opened",
+			draft:  true,
+			want:   []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestOpened},
+		},
+		{
+			name:   "ready_for_review stays an update and adds ready for review",
+			action: "ready_for_review",
+			want: []models.AutomationGitHubEvent{
+				models.AutomationGitHubEventPullRequestUpdated,
+				models.AutomationGitHubEventPullRequestReadyForReview,
+			},
+		},
+		{
+			name:   "non-draft reopened is an update and ready for review",
+			action: "reopened",
+			want: []models.AutomationGitHubEvent{
+				models.AutomationGitHubEventPullRequestUpdated,
+				models.AutomationGitHubEventPullRequestReadyForReview,
+			},
+		},
+		{
+			name:   "draft reopened is only an update",
+			action: "reopened",
+			draft:  true,
+			want:   []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestUpdated},
+		},
+		{
+			name:   "synchronize is only an update",
+			action: "synchronize",
+			want:   []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestUpdated},
+		},
+		{
+			name:   "converted_to_draft is only an update",
+			action: "converted_to_draft",
+			want:   []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestUpdated},
+		},
+		{
+			name:   "edited is only an update",
+			action: "edited",
+			want:   []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestUpdated},
+		},
+		{
+			name:   "merged close is a merge event",
+			action: "closed",
+			merged: true,
+			want:   []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestMerged},
+		},
+		{
+			name:   "unmerged close produces no events",
+			action: "closed",
+			want:   nil,
+		},
+		{
+			name:   "unrelated action produces no events",
+			action: "labeled",
+			want:   nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			event := PullRequestEvent{Action: tt.action}
+			event.PR.Draft = tt.draft
+			event.PR.Merged = tt.merged
+			require.Equal(t, tt.want, automationGitHubEventsForPullRequest(event), "webhook action should map to the expected automation events")
+		})
+	}
+}
+
+func TestGitHubLabelNames(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		labels []githubLabelRef
+		want   []string
+	}{
+		{
+			name:   "extracts label names in payload order",
+			labels: []githubLabelRef{{Name: "frontend"}, {Name: "needs-design"}},
+			want:   []string{"frontend", "needs-design"},
+		},
+		{
+			name:   "drops blank names",
+			labels: []githubLabelRef{{Name: " "}, {Name: "backend"}},
+			want:   []string{"backend"},
+		},
+		{
+			name:   "trims surrounding whitespace",
+			labels: []githubLabelRef{{Name: "  frontend  "}},
+			want:   []string{"frontend"},
+		},
+		{
+			name:   "an unlabelled PR yields a known-empty set",
+			labels: nil,
+			want:   []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, githubLabelNames(tt.labels), "webhook labels should flatten to trimmed names")
+		})
+	}
 }

@@ -72,6 +72,7 @@ func TestAutomationProductTriggerValidate(t *testing.T) {
 		expectErr bool
 	}{
 		{name: "pr opened", trigger: AutomationProductTriggerPROpened},
+		{name: "pr ready for review", trigger: AutomationProductTriggerPRReadyForReview},
 		{name: "checks completed", trigger: AutomationProductTriggerChecksCompleted},
 		{name: "raw github event is not a valid product trigger", trigger: AutomationProductTrigger("github.check_suite.completed"), expectErr: true},
 	}
@@ -419,6 +420,7 @@ func TestAutomationGitHubEventValidate(t *testing.T) {
 	}{
 		{name: "pull request opened", event: AutomationGitHubEventPullRequestOpened},
 		{name: "pull request updated", event: AutomationGitHubEventPullRequestUpdated},
+		{name: "pull request ready for review", event: AutomationGitHubEventPullRequestReadyForReview},
 		{name: "pull request merged", event: AutomationGitHubEventPullRequestMerged},
 		{name: "check suite completed", event: AutomationGitHubEventCheckSuiteCompleted},
 		{name: "check run completed", event: AutomationGitHubEventCheckRunCompleted},

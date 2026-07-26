@@ -161,6 +161,11 @@ func TestResolveAutomationGitHubEventTriggers(t *testing.T) {
 			},
 		},
 		{
+			name:            "expands the ready-for-review trigger",
+			productTriggers: []models.AutomationProductTrigger{models.AutomationProductTriggerPRReadyForReview},
+			expected:        []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestReadyForReview},
+		},
+		{
 			name:      "accepts raw events for compatibility",
 			rawEvents: []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestOpened},
 			expected:  []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestOpened},
@@ -190,13 +195,14 @@ func TestResolveAutomationGitHubEventTriggers(t *testing.T) {
 func TestValidateAutomationGitHubEventFilters(t *testing.T) {
 	t.Parallel()
 
-	got, err := validateAutomationGitHubEventFilters(json.RawMessage(`{"base_branches":[" main ","main"],"authors":["octocat"],"paths":["src/"]}`))
+	got, err := validateAutomationGitHubEventFilters(json.RawMessage(`{"base_branches":[" main ","main"],"authors":["octocat"],"paths":["src/"],"labels":[" frontend ","Frontend","backend",""]}`))
 	require.NoError(t, err, "valid filters should pass")
 	var decoded models.AutomationGitHubEventFilters
 	require.NoError(t, json.Unmarshal(got, &decoded), "normalized filters should be valid JSON")
 	require.Equal(t, []string{"main"}, decoded.BaseBranches, "filters should trim and deduplicate branches")
 	require.Equal(t, []string{"octocat"}, decoded.Authors, "filters should preserve authors")
 	require.Equal(t, []string{"src/"}, decoded.Paths, "filters should preserve paths")
+	require.Equal(t, []string{"frontend", "backend"}, decoded.Labels, "filters should trim labels and deduplicate them case-insensitively")
 
 	_, err = validateAutomationGitHubEventFilters(json.RawMessage(`[`))
 	require.Error(t, err, "invalid filter JSON should fail")

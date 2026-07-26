@@ -20,6 +20,7 @@ describe("automation trigger mapping", () => {
       automationProductTriggersToGitHubEvents([
         "github.pr.opened",
         "github.pr.updated",
+        "github.pr.ready_for_review",
         "github.pr.feedback",
         "github.checks.completed",
         "github.pr.merged",
@@ -27,6 +28,7 @@ describe("automation trigger mapping", () => {
     ).toEqual([
       "github.pull_request.opened",
       "github.pull_request.updated",
+      "github.pull_request.ready_for_review",
       "github.issue_comment.created",
       "github.pull_request_review.submitted",
       "github.pull_request_review_comment.created",
@@ -59,6 +61,29 @@ describe("automation trigger mapping", () => {
         "github.pull_request.merged",
       ]),
     ).toEqual(["github.pr.feedback", "github.pr.merged"]);
+  });
+
+  it("maps the ready-for-review product trigger to its own GitHub event", () => {
+    expect(
+      automationProductTriggersToGitHubEvents(["github.pr.ready_for_review"]),
+    ).toEqual(["github.pull_request.ready_for_review"]);
+  });
+
+  it("coalesces the raw ready-for-review event back into its product trigger", () => {
+    expect(
+      githubEventsToAutomationProductTriggers([
+        "github.pull_request.ready_for_review",
+      ]),
+    ).toEqual(["github.pr.ready_for_review"]);
+  });
+
+  it("keeps ready-for-review distinct from updated when both are configured", () => {
+    expect(
+      githubEventsToAutomationProductTriggers([
+        "github.pull_request.updated",
+        "github.pull_request.ready_for_review",
+      ]),
+    ).toEqual(["github.pr.ready_for_review", "github.pr.updated"]);
   });
 
   it("coalesces either GitHub checks event into the checks product trigger", () => {

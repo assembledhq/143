@@ -111,6 +111,9 @@ func automationProductTriggerSummary(events []models.AutomationGitHubEvent) []st
 	if _, ok := eventSet[models.AutomationGitHubEventPullRequestUpdated]; ok {
 		out = append(out, string(models.AutomationProductTriggerPRUpdated))
 	}
+	if _, ok := eventSet[models.AutomationGitHubEventPullRequestReadyForReview]; ok {
+		out = append(out, string(models.AutomationProductTriggerPRReadyForReview))
+	}
 	if _, ok := eventSet[models.AutomationGitHubEventIssueCommentCreated]; ok {
 		out = append(out, string(models.AutomationProductTriggerPRFeedback))
 	} else if _, ok := eventSet[models.AutomationGitHubEventPullRequestReviewSubmitted]; ok {

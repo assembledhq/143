@@ -1427,7 +1427,7 @@ describe("NewAutomationPage", () => {
     });
   }, 20000);
 
-  it("submits selected pull request triggers as product triggers", async () => {
+  it("submits selected pull request triggers as product triggers, including a label-filtered ready-for-review trigger", async () => {
     const user = userEvent.setup();
     let requestBody: Record<string, unknown> | null = null;
 
@@ -1489,16 +1489,32 @@ describe("NewAutomationPage", () => {
       screen.getByRole("checkbox", { name: "When a PR is opened" }),
     );
     await user.click(
+      screen.getByRole("checkbox", {
+        name: "When a PR is marked ready for review",
+      }),
+    );
+    await user.click(
       screen.getByRole("checkbox", { name: "When there is new PR feedback" }),
     );
+    await user.click(screen.getByRole("button", { name: "Advanced options" }));
+    await user.type(
+      await screen.findByLabelText("PR labels"),
+      "frontend, Backend",
+    );
+    await user.keyboard("{Escape}");
     await user.click(screen.getByRole("button", { name: "Create automation" }));
 
     await waitFor(() => {
       expect(requestBody).toMatchObject({
-        triggers: ["github.pr.opened", "github.pr.feedback"],
+        triggers: [
+          "github.pr.opened",
+          "github.pr.ready_for_review",
+          "github.pr.feedback",
+        ],
+        github_event_filters: { labels: ["frontend", "Backend"] },
       });
     });
-  });
+  }, 20000);
 
   it("submits pre-PR review disabled when the default agent does not support native review", async () => {
     const user = userEvent.setup();
