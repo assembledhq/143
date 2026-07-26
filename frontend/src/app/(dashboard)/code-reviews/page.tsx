@@ -34,6 +34,7 @@ import { ExternalLink } from "@/components/ui/external-link";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import { Badge } from "@/components/ui/badge";
+import { Card, CardContent } from "@/components/ui/card";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -989,9 +990,11 @@ export default function CodeReviewsPage() {
               className="max-w-5xl"
             >
               {!canManagePolicy ? (
-                <div className="rounded-md bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
-                  You have view-only access to this policy. An organization administrator can change review behavior and GitHub setup.
-                </div>
+                <Card variant="recessed">
+                  <CardContent className="px-4 py-3 text-sm text-muted-foreground">
+                    You have view-only access to this policy. An organization administrator can change review behavior and GitHub setup.
+                  </CardContent>
+                </Card>
               ) : null}
               <fieldset disabled={!canManagePolicy} className="space-y-6">
                 <section className="space-y-4" aria-labelledby="review-behavior-heading">
