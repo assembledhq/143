@@ -1,0 +1,4 @@
+interface:
+  display_name: "Implement Design Doc"
+  short_description: "Implement specs completely and review rigorously"
+  default_prompt: "Use $implement-design-doc to implement this design document completely and verify the result."
