@@ -5,7 +5,7 @@ import { server } from "@/test/mocks/server";
 import { NoReposWarning } from "./no-repos-warning";
 
 vi.mock("next/navigation", () => ({
-  usePathname: () => "/autopilot",
+  usePathname: () => "/sessions",
   useRouter: () => ({
     push: vi.fn(),
     replace: vi.fn(),

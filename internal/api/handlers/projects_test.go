@@ -24,19 +24,6 @@ var projectTaskHandlerColumns = []string{
 	"retry_count", "max_retries", "created_at", "updated_at", "completed_at",
 }
 
-func TestProjectHandler_RunNowIsDisabled(t *testing.T) {
-	t.Parallel()
-
-	handler := &ProjectHandler{}
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+uuid.NewString()+"/run", nil)
-	rr := httptest.NewRecorder()
-
-	handler.RunNow(rr, req)
-
-	require.Equal(t, http.StatusGone, rr.Code, "project planning cycle should be unavailable during PM shutdown")
-	require.Contains(t, rr.Body.String(), "PM_DISABLED", "response should explain that PM is disabled")
-}
-
 func newProjectTaskHandlerRow(taskID, projectID, orgID uuid.UUID, status models.ProjectTaskStatus, now time.Time) []interface{} {
 	return []interface{}{
 		taskID, projectID, orgID, "Task title", nil, nil, nil,

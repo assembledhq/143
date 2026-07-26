@@ -18,6 +18,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// pmDocTestColumns matches the column order in db/pm_documents.go.
+var pmDocTestColumns = []string{
+	"id", "org_id", "title", "content", "doc_type", "sort_order",
+	"source_type", "source_url", "source_id", "source_meta", "last_synced_at",
+	"active", "logical_id", "content_hash",
+	"created_by", "created_at", "updated_at",
+}
+
 func TestPMDocumentHandler_ListVersions(t *testing.T) {
 	t.Parallel()
 

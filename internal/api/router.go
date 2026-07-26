@@ -84,7 +84,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	integrationStore := db.NewIntegrationStore(pool)
 	githubInstallationStore := db.NewGitHubInstallationStore(pool)
 	issueStore := db.NewIssueStore(pool)
-	autopilotQueueStore := db.NewAutopilotQueueStore(pool)
 	sessionStore := db.NewSessionStore(pool)
 	sessionIssueLinkStore := db.NewSessionIssueLinkStore(pool)
 	sessionIssueSnapshotStore := db.NewSessionTurnIssueSnapshotStore(pool)
@@ -120,9 +119,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if redisClient != nil {
 		jobStore.SetNotifier(cache.NewJobNotifier(redisClient, logger))
 	}
-	pmPlanStore := db.NewPMPlanStore(pool)
-	pmDecisionLogStore := db.NewPMDecisionLogStore(pool)
-
 	priorityScoreStore := db.NewPriorityScoreStore(pool)
 	complexityEstimateStore := db.NewComplexityEstimateStore(pool)
 	deployStore := db.NewDeployStore(pool)
@@ -349,7 +345,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	})
 	settingsHandler.SetRuntimeStatusCounters(sessionStore, previewStore)
 	issueHandler := handlers.NewIssueHandler(issueStore)
-	autopilotHandler := handlers.NewAutopilotHandler(autopilotQueueStore)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
 	sessionThreadStore.SetLogger(logger)
 	if sessionStreams != nil {
@@ -551,7 +546,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		Threads:  threadSvc,
 	}, reviewloopservice.WithAutoReadinessDependencies(orgStore, userStore, pool, jobStore))
 	reviewLoopHandler := handlers.NewReviewLoopHandler(reviewLoopSvc, reviewLoopStore)
-	pmHandler := handlers.NewPMHandler(pmPlanStore, pmDecisionLogStore, jobStore, orgStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
 	pagerDutyWebhookHandler := handlers.NewPagerDutyWebhookHandler(handlers.PagerDutyWebhookHandlerConfig{
@@ -659,7 +653,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	}
 
 	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore, projectAttachmentStore, projectSpecStore)
-	projectHandler.SetJobStore(jobStore)
 	projectHandler.SetRepositoryStore(repoStore)
 
 	automationStore := db.NewAutomationStore(pool)
@@ -736,8 +729,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	previewSecretBundleHandler.SetAuditEmitter(auditEmitter)
 	projectHandler.SetAuditEmitter(auditEmitter)
 	automationHandler.SetAuditEmitter(auditEmitter)
-	pmHandler.SetAuditEmitter(auditEmitter)
-	pmHandler.SetPMDocumentStore(pmDocumentStore)
 	projectAttachmentHandler := handlers.NewProjectAttachmentHandler(projectAttachmentStore, projectStore)
 	projectSpecHandler := handlers.NewProjectSpecHandler(projectSpecStore, projectStore)
 	projectAnalysisHandler := handlers.NewProjectAnalysisHandler(projectStore, projectSpecStore, projectAttachmentStore, projectTaskStore)
@@ -1288,7 +1279,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/integrations/pagerduty/mappings", pagerDutyIntegrationHandler.ListMappings)
 				r.Get("/api/v1/integrations/pagerduty/incidents", pagerDutyIntegrationHandler.ListIncidents)
 				r.Get("/api/v1/integrations/pagerduty/incidents/{incident_id}", pagerDutyIntegrationHandler.GetIncident)
-				r.Get("/api/v1/autopilot/queue", autopilotHandler.Queue)
 				r.Get("/api/v1/issues", issueHandler.List)
 				r.Get("/api/v1/issues/{id}", issueHandler.Get)
 				r.Get("/api/v1/issues/{id}/priority", priorityHandler.GetPriorityScore)
@@ -1362,12 +1352,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/settings/opencode-models", settingsHandler.GetOpenCodeModels)
 				r.Get("/api/v1/agent-capabilities", agentCapabilitiesHandler.Catalog)
 				r.Get("/api/v1/settings/agent/capabilities", agentCapabilitiesHandler.GetSessionDefault)
-				r.Get("/api/v1/pm/current", pmHandler.Current)
-				r.Get("/api/v1/pm/plans", pmHandler.List)
-				r.Get("/api/v1/pm/plans/{id}", pmHandler.Get)
-				r.Get("/api/v1/pm/plans/latest", pmHandler.Latest)
-				r.Get("/api/v1/pm/decisions", pmHandler.Decisions)
-				r.Get("/api/v1/pm/status", pmHandler.Status)
 				// Automations (read-only)
 				r.Get("/api/v1/automations", automationHandler.List)
 				r.Get("/api/v1/automations/{id}", automationHandler.Get)
@@ -1380,10 +1364,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/automations/goal-improvements/{improvement_id}", automationHandler.GetGoalImprovement)
 
 				r.Get("/api/v1/projects", projectHandler.List)
-				r.Get("/api/v1/projects/proposals/summary", projectHandler.ProposalSummary)
 				r.Get("/api/v1/projects/{id}", projectHandler.Get)
-				r.Get("/api/v1/projects/{id}/cycles", projectHandler.ListCycles)
-				r.Get("/api/v1/projects/{id}/cycles/{cycleId}", projectHandler.GetCycle)
 				r.Get("/api/v1/projects/{id}/attachments", projectAttachmentHandler.List)
 				r.Get("/api/v1/projects/{id}/specs", projectSpecHandler.List)
 				r.Get("/api/v1/projects/{id}/specs/{specId}", projectSpecHandler.Get)
@@ -1629,7 +1610,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/projects/{id}/start", projectHandler.Start)
 				r.Post("/api/v1/projects/{id}/archive", projectHandler.Archive)
 				r.Post("/api/v1/projects/{id}/unarchive", projectHandler.Unarchive)
-				r.Post("/api/v1/projects/{id}/run", projectHandler.RunNow)
 				r.Post("/api/v1/projects/{id}/tasks", projectHandler.CreateTask)
 				r.Patch("/api/v1/projects/{id}/tasks/{taskId}", projectHandler.UpdateTask)
 				r.Delete("/api/v1/projects/{id}/tasks/{taskId}", projectHandler.DeleteTask)
@@ -1658,9 +1638,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 				r.Delete("/api/v1/repositories/{id}", repoHandler.Delete)
 				r.Post("/api/v1/issues/{id}/reprioritize", priorityHandler.Reprioritize)
-				r.Post("/api/v1/pm/analyze", pmHandler.Analyze)
-				r.Post("/api/v1/pm/bootstrap", pmHandler.Bootstrap)
-				r.Post("/api/v1/pm/refresh", pmHandler.Refresh)
 				r.Get("/api/v1/previews/policies", branchPreviewHandler.ListPolicies)
 				r.Put("/api/v1/code-review-policies", codeReviewHandler.PutPolicy)
 				r.Post("/api/v1/code-review-github-trigger/setup", codeReviewHandler.SetupGitHubTrigger)
@@ -1682,9 +1659,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/preview-secret-bundles/{id}", previewSecretBundleHandler.DeleteByID)
 				r.Post("/api/v1/preview-secret-bundles/{id}/test", previewSecretBundleHandler.Test)
 				r.Post("/api/v1/preview-secret-bundles/{id}/reveal", previewSecretBundleHandler.Reveal)
-				r.Get("/api/v1/pm/context/pending", pmHandler.ListPendingRefreshes)
-				r.Post("/api/v1/pm/context/{id}/accept", pmHandler.AcceptRefresh)
-				r.Delete("/api/v1/pm/context/{id}/reject", pmHandler.RejectRefresh)
 				r.Patch("/api/v1/settings", settingsHandler.Update)
 				r.Patch("/api/v1/settings/agent/capabilities", agentCapabilitiesHandler.PatchSessionDefault)
 				r.Post("/api/v1/memories", memoryHandler.Create)

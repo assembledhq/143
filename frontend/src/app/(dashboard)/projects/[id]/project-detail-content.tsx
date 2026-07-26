@@ -206,7 +206,7 @@ export function ProjectDetailContent({ id }: { id: string }) {
     );
   }
 
-  const { project, tasks, recent_cycles, attachments, specs } = detail;
+  const { project, tasks, attachments, specs } = detail;
   const status = projectStatusConfig[project.status] || projectStatusConfig.draft;
   const isActive = project.status === "active";
 
@@ -308,7 +308,7 @@ export function ProjectDetailContent({ id }: { id: string }) {
         </TabsContent>
 
         <TabsContent value="work">
-          <WorkTab project={project} tasks={tasks} cycles={recent_cycles} />
+          <WorkTab project={project} tasks={tasks} />
         </TabsContent>
 
         <TabsContent value="settings">

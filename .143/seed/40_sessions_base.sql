@@ -186,7 +186,7 @@ VALUES
     '00000000-0000-4000-a000-000000000001'::uuid,
     '00000000-0000-4000-a000-000000000300'::uuid,
     1,
-    '[{"id":"00000000-0000-4000-a000-000000000604","role":"primary","title":"Consolidate preview failure copy across panels","source":"pm_agent","severity":"medium"}]'::jsonb,
+    '[{"id":"00000000-0000-4000-a000-000000000604","role":"primary","title":"Consolidate preview failure copy across panels","source":"manual","severity":"medium"}]'::jsonb,
     now() - interval '34 minutes'
   ),
   (

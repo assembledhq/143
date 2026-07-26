@@ -1132,104 +1132,12 @@ export interface Issue {
   updated_at: string;
 }
 
-export type AutopilotRunState =
-  | "not_started"
-  | "queued"
-  | "running"
-  | "awaiting_input"
-  | "needs_review"
-  | "pr_open"
-  | "merged"
-  | "failed"
-  | "skipped";
-
 export type PullRequestStatus = "open" | "closed" | "merged";
 export type PullRequestReviewStatus =
   | "pending"
   | "approved"
   | "changes_requested";
 export type PullRequestCIStatus = "" | "success" | "failure" | "pending";
-
-export type AutopilotQueueAction =
-  | "start_run"
-  | "view_run"
-  | "review"
-  | "open_pr"
-  | "retry"
-  | "blocked";
-
-export interface AutopilotQueueRow {
-  id: string;
-  rank: number;
-  source: { type: string; key: string };
-  title: string;
-  issue_url?: string;
-  repo?: { id: string; name: string };
-  issue_status: string;
-  customer_impact: { label: string; count: number };
-  implementation_ease: string;
-  low_hanging_fruit: {
-    label: string;
-    reasons: string[];
-    cluster_size: number;
-  };
-  display_run_state: AutopilotRunState;
-  latest_session?: {
-    id: string;
-    title: string;
-    updated_at: string;
-  };
-  latest_agent_run?: {
-    id: string;
-    status: string;
-    trigger_mode: "auto" | "manual";
-    started_at?: string;
-  };
-  latest_pr?: {
-    id: string;
-    number: number;
-    url: string;
-    status: PullRequestStatus;
-    merged_at?: string;
-  };
-  latest_preview?: {
-    target_id: string;
-    preview_id?: string;
-    status:
-      | "target_created"
-      | "starting"
-      | "ready"
-      | "partially_ready"
-      | "unhealthy"
-      | "stopped"
-      | "failed"
-      | "expired"
-      | "unavailable";
-    commit_sha: string;
-    latest_commit_sha?: string;
-    new_commits_available: boolean;
-  };
-  available_action: AutopilotQueueAction;
-  action_disabled_reason?: string | null;
-}
-
-export interface AutopilotQueueSummary {
-  top_issue_id?: string;
-  autorunnable_count: number;
-  needs_review_count: number;
-  open_pr_count: number;
-  active_run_count: number;
-  ranked_issue_count: number;
-  analyzed_at?: string;
-}
-
-export interface AutopilotQueueResponse {
-  data: AutopilotQueueRow[];
-  meta: {
-    next_cursor?: string;
-    summary: AutopilotQueueSummary;
-  };
-}
 
 export interface Session {
   id: string;
@@ -2405,66 +2313,6 @@ export interface ProductContext {
   avoid_areas?: string[];
 }
 
-/** Per-repository PM agent overrides. All fields are optional — omitted means "inherit from org". */
-export interface RepoPMSettings {
-  product_context?: ProductContext;
-  pm_schedule_hours?: number;
-  pm_model?: string;
-  priority_weights?: {
-    customer_impact?: number;
-    severity?: number;
-    recency?: number;
-    revenue_risk?: number;
-  };
-  min_priority_threshold?: number;
-}
-
-/** Strongly-typed repository settings JSONB. */
-export interface RepoSettings {
-  pm?: RepoPMSettings;
-}
-
-export interface PMTask {
-  rank: number;
-  issue_ids: string[];
-  title: string;
-  reasoning: string;
-  approach: string;
-  risk: string;
-  complexity: string;
-  confidence: string;
-  session_id?: string;
-  status?: string;
-}
-
-export interface PMCluster {
-  issue_ids: string[];
-  root_cause: string;
-  strategy: string;
-}
-
-export interface PMSkipEntry {
-  issue_id: string;
-  reason: string;
-  detail: string;
-}
-
-export interface PMPlan {
-  id: string;
-  org_id: string;
-  status: string;
-  analysis: string;
-  tasks: PMTask[];
-  clusters: PMCluster[];
-  skipped_issues: PMSkipEntry[];
-  issues_reviewed: number;
-  product_context_snapshot?: ProductContext;
-  token_usage?: Record<string, unknown>;
-  triggered_by: string;
-  created_at: string;
-  completed_at?: string;
-}
-
 export type SessionStatus =
   | "pending"
   | "running"
@@ -2476,78 +2324,6 @@ export type SessionStatus =
   | "failed"
   | "cancelled"
   | "skipped";
-export type PMTaskComplexity = "trivial" | "simple" | "moderate" | "complex";
-export type PMTaskConfidence = "high" | "medium" | "low";
-export type PMTaskStatus = "pending" | "delegated" | "skipped_capacity";
-
-// PM Decision types for the decisions view
-export type PMDecisionType = "delegate" | "skip" | "cluster";
-export type PMDecisionOutcome = "succeeded" | "failed" | "still_open";
-
-export interface PMDecisionView {
-  id: string;
-  plan_id: string;
-  issue_id?: string;
-  issue_title?: string;
-  project_id?: string;
-  project_title?: string;
-  decision: PMDecisionType;
-  reasoning: string;
-  outcome?: PMDecisionOutcome;
-  created_at: string;
-}
-
-export interface PMDecisionSummary {
-  total_delegated: number;
-  succeeded: number;
-  failed: number;
-  still_open: number;
-}
-
-export interface PMDecisionsResponse {
-  data: PMDecisionView[];
-  summary: PMDecisionSummary;
-  meta: { next_cursor?: string };
-}
-
-// Presentation-friendly recommendation from /api/v1/pm/current
-export interface PMCurrentRecommendation {
-  analysis: string;
-  tasks: PMTask[];
-  clusters: PMCluster[];
-  skipped_issues: PMSkipEntry[];
-  context_stats: PMContextStats;
-  decision_summary: PMDecisionSummary;
-  analyzed_at: string;
-  completed_at?: string;
-  status: string;
-  triggered_by: string;
-}
-
-export interface PMContextStats {
-  issues_reviewed: number;
-  in_flight_runs_checked: number;
-  past_outcomes_reviewed: number;
-  recent_prs_checked: number;
-  past_decisions_reviewed: number;
-  commits_analyzed: number;
-}
-
-export interface PMStatus {
-  is_running: boolean;
-  last_run_at?: string;
-  last_run_status?: string;
-  issues_reviewed: number;
-  success_rate: number;
-  success_count: number;
-  total_delegated: number;
-  next_run_in?: string;
-  next_run_at?: string;
-  last_error?: string;
-  last_failed_at?: string;
-  last_failed_session_id?: string;
-}
-
 export interface SessionsListResponse {
   data: Session[];
   meta: { next_cursor?: string };

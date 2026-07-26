@@ -7,7 +7,6 @@ import {
   RotateCcw,
   ExternalLink,
   GitPullRequest,
-  ArrowUpRight,
 } from "lucide-react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
@@ -16,8 +15,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
-import type { Project, ProjectTask, ProjectCycle } from "@/lib/types";
-import { CollapsibleSection, taskStatusConfig, formatTimestamp } from "./shared";
+import type { Project, ProjectTask } from "@/lib/types";
+import { CollapsibleSection, taskStatusConfig } from "./shared";
 
 function BoardSection({
   project,
@@ -81,7 +80,7 @@ function BoardSection({
 
       {tasks.length === 0 && !showAddForm ? (
         <p className="text-xs text-muted-foreground py-4 text-center">
-          No tasks yet. Add tasks or let the PM agent plan them.
+          No tasks yet. Add a task to start planning the work.
         </p>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -184,46 +183,19 @@ function PRsSection({ tasks }: { tasks: ProjectTask[] }) {
   );
 }
 
-function TimelineSection({ cycles }: { cycles: ProjectCycle[] }) {
-  if (cycles.length === 0) return null;
-
-  return (
-    <CollapsibleSection title="Planning cycles" icon={ArrowUpRight} count={cycles.length} defaultOpen={false}>
-      <div className="space-y-3">
-        {cycles.map((cycle) => (
-          <div key={cycle.id} className="border-l-2 border-muted pl-3 py-1">
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-semibold">Cycle #{cycle.cycle_number}</span>
-              <span className="text-xs text-muted-foreground">{formatTimestamp(cycle.created_at)}</span>
-            </div>
-            <p className="text-xs mt-1">{cycle.analysis}</p>
-            <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground">
-              {cycle.progress_pct != null && <span>{cycle.progress_pct}% done</span>}
-              <span className="text-success">{cycle.tasks_completed_this_cycle} completed</span>
-              {cycle.tasks_failed_this_cycle > 0 && <span className="text-destructive">{cycle.tasks_failed_this_cycle} failed</span>}
-              {cycle.tasks_created_this_cycle > 0 && <span>{cycle.tasks_created_this_cycle} created</span>}
-            </div>
-          </div>
-        ))}
-      </div>
-    </CollapsibleSection>
-  );
-}
-
 export function WorkTab({
   project,
   tasks,
-  cycles,
 }: {
   project: Project;
   tasks: ProjectTask[];
-  cycles: ProjectCycle[];
+  /** Legacy test/data callers may still supply archived cycle data; it is intentionally not rendered. */
+  cycles?: unknown[];
 }) {
   return (
     <div className="space-y-2 divide-y divide-border">
       <BoardSection project={project} tasks={tasks} />
       <PRsSection tasks={tasks} />
-      <TimelineSection cycles={cycles} />
     </div>
   );
 }

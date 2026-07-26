@@ -7,7 +7,6 @@ import { MonitorPlay } from "lucide-react";
 import { api } from "@/lib/api";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
-import { RepoPMSettingsEditor } from "@/components/repo-pm-settings";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { usePageTitle } from "@/hooks/use-page-title";
@@ -56,7 +55,7 @@ export function RepositoryDetailContent({ id }: { id: string }) {
       <div className="space-y-6">
         <PageHeader
           title={repo.full_name}
-          description="Repository settings and PM agent configuration."
+          description="Repository details and preview configuration."
           action={
             <div className="flex items-center gap-2">
               <Badge variant={repo.status === "active" ? "default" : "secondary"}>
@@ -71,14 +70,6 @@ export function RepositoryDetailContent({ id }: { id: string }) {
             </div>
           }
         />
-
-        <section className="space-y-3">
-          <h2 className="text-xs font-medium text-foreground">PM agent settings</h2>
-          <p className="text-xs text-muted-foreground">
-            Customize how the PM agent behaves for this repository, or use your organization defaults.
-          </p>
-          <RepoPMSettingsEditor repository={repo} />
-        </section>
       </div>
     </PageContainer>
   );

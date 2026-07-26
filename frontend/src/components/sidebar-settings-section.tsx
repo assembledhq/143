@@ -8,7 +8,6 @@ import {
   Plug,
   Bot,
   Sparkles,
-  Target,
   Activity,
   Users,
   ScrollText,
@@ -67,7 +66,6 @@ const settingsGroups: SettingsGroup[] = [
     items: [
       { label: "Coding agents", icon: Bot, href: "/settings/agent", hideForRoles: ["viewer"] },
       { label: "App LLM", icon: Sparkles, href: "/settings/llm", adminOnly: true },
-      { label: "Autopilot", icon: Target, href: "/settings/autopilot", adminOnly: true },
     ],
   },
   {

@@ -3,7 +3,6 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 
 	"github.com/assembledhq/143/internal/api/middleware"
@@ -21,7 +20,6 @@ type ProjectHandler struct {
 	projectCycleStore *db.ProjectCycleStore
 	attachmentStore   *db.ProjectAttachmentStore
 	specStore         *db.ProjectSpecStore
-	jobStore          *db.JobStore
 	repoStore         *db.RepositoryStore
 	audit             *db.AuditEmitter
 }
@@ -45,11 +43,6 @@ func NewProjectHandler(
 		attachmentStore:   attachmentStore,
 		specStore:         specStore,
 	}
-}
-
-// SetJobStore injects the job store for enqueuing project_cycle jobs.
-func (h *ProjectHandler) SetJobStore(jobStore *db.JobStore) {
-	h.jobStore = jobStore
 }
 
 // SetRepositoryStore injects the repository store so create flows can reject
@@ -529,58 +522,6 @@ func (h *ProjectHandler) Unarchive(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": string(project.Status)})
 }
 
-// RunNow enqueues an immediate project_cycle job for the project.
-func (h *ProjectHandler) RunNow(w http.ResponseWriter, r *http.Request) {
-	const projectCyclesEnabled = false
-	if !projectCyclesEnabled {
-		writeError(w, r, http.StatusGone, "PM_DISABLED", "project planning cycles are no longer available")
-		return
-	}
-	if h.jobStore == nil {
-		writeError(w, r, http.StatusServiceUnavailable, "NOT_CONFIGURED", "job store not configured")
-		return
-	}
-
-	orgID := middleware.OrgIDFromContext(r.Context())
-	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
-		return
-	}
-
-	project, err := h.projectStore.GetByID(r.Context(), orgID, projectID)
-	if err != nil {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "project not found")
-		return
-	}
-
-	if project.Status != models.ProjectStatusActive {
-		writeError(w, r, http.StatusBadRequest, "INVALID_STATUS", "project must be active to run")
-		return
-	}
-
-	dedupeKey := fmt.Sprintf("project_cycle:%s", projectID.String())
-	payload := map[string]string{
-		"org_id":     orgID.String(),
-		"project_id": projectID.String(),
-	}
-	jobID, err := h.jobStore.Enqueue(r.Context(), orgID, "default", models.JobTypeProjectCycle, payload, 5, &dedupeKey)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue project cycle job", err)
-		return
-	}
-
-	runNowProjIDStr := projectID.String()
-	runDetails := projectAuditSnapshot(&project)
-	runDetails["job_id"] = jobID.String()
-	runDetails["job_type"] = models.JobTypeProjectCycle
-	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectRunTriggered, models.AuditResourceProject, &runNowProjIDStr, nil, &projectID,
-		marshalAuditDetails(*zerolog.Ctx(r.Context()), runDetails))
-	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{
-		Data: map[string]string{"job_id": jobID.String()},
-	})
-}
-
 func (h *ProjectHandler) transitionStatus(w http.ResponseWriter, r *http.Request, target models.ProjectStatus) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -883,67 +824,4 @@ func (h *ProjectHandler) RetryTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.ProjectTask]{Data: task})
-}
-
-// Cycle endpoints
-
-func (h *ProjectHandler) ListCycles(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
-		return
-	}
-
-	limit := queryInt(r, "limit", 20)
-
-	cycles, err := h.projectCycleStore.ListByProject(r.Context(), orgID, projectID, limit)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list cycles", err)
-		return
-	}
-	if cycles == nil {
-		cycles = []models.ProjectCycle{}
-	}
-
-	writeJSON(w, http.StatusOK, models.ListResponse[models.ProjectCycle]{
-		Data: cycles,
-		Meta: models.PaginationMeta{},
-	})
-}
-
-func (h *ProjectHandler) GetCycle(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-	cycleID, err := uuid.Parse(chi.URLParam(r, "cycleId"))
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid cycle ID")
-		return
-	}
-
-	cycle, err := h.projectCycleStore.GetByID(r.Context(), orgID, cycleID)
-	if err != nil {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "cycle not found")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.ProjectCycle]{Data: cycle})
-}
-
-// ProposalSummary returns a count of PM-proposed draft projects for the org.
-// GET /api/v1/projects/proposals/summary
-func (h *ProjectHandler) ProposalSummary(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-
-	pmTrue := true
-	count, err := h.projectStore.Count(r.Context(), orgID, db.ProjectFilters{Status: string(models.ProjectStatusDraft), ProposedByPM: &pmTrue})
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "COUNT_FAILED", "failed to count proposals", err)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"data": map[string]int{
-			"count": count,
-		},
-	})
 }

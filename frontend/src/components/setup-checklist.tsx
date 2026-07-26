@@ -224,7 +224,7 @@ export function SetupChecklist() {
   const githubReady = githubConnected && repositories.length > 0;
 
   return (
-    <div id="autopilot-setup" className="space-y-6">
+    <div id="initial-setup" className="space-y-6">
       <StepSection step={1} title="Coding agent" completed={agentConnected}>
         <AgentSelectionSection onConnectedChange={setAgentConnected} />
       </StepSection>

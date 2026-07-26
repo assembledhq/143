@@ -22,7 +22,7 @@ export const platformLayers = [
       "Codex, Claude Code, OpenCode, and more",
       "Cloud sandboxes with previews",
       "Mobile-friendly job controls",
-      "Autopilot from issues and errors",
+      "Sessions from issues and errors",
     ],
   },
   {
@@ -100,7 +100,7 @@ export const integrations = [
   {
     name: "Linear",
     logo: "/integrations/linear.svg",
-    description: "Issues, projects, priorities, and autopilot triggers.",
+    description: "Issues, projects, priorities, and automation triggers.",
   },
   {
     name: "Slack",

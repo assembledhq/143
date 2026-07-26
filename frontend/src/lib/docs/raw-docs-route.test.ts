@@ -8,11 +8,11 @@ describe("getRawDocsStaticParams", () => {
       getRawDocsStaticParams([
         { slugs: [] },
         { slugs: ["guides"] },
-        { slugs: ["guides", "autopilot"] },
+        { slugs: ["guides", "automations"] },
       ]),
     ).toEqual([
       { slug: ["guides"] },
-      { slug: ["guides", "autopilot"] },
+      { slug: ["guides", "automations"] },
     ]);
   });
 });
