@@ -540,6 +540,20 @@ Preferred approach:
 4. remove handlers and constants only after old pending jobs have been
    drained or cancelled.
 
+PR 1 implements the transition as a database-enforced rollout barrier:
+
+- migration `000259` refuses to proceed while any PM or Project-cycle job is
+  still running, so operators must let those jobs finish or drain their old
+  workers before retrying the deployment;
+- the same migration installs a temporary `jobs` trigger that rejects new
+  `pm_analyze`, `pm_bootstrap`, `pm_context_refresh`, and `project_cycle`
+  inserts from old API or scheduler processes during rolling replacement;
+- after installing the trigger, the migration marks pending jobs of those
+  exact types `cancelled` without deleting their history.
+
+The temporary trigger remains through the compatibility window and should be
+removed with the obsolete job types in the follow-up removal.
+
 Do not delete job rows. Preserve them for audit and queue history.
 
 ### Running Jobs And Sandboxes

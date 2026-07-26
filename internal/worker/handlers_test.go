@@ -4730,6 +4730,8 @@ type mockPMService struct {
 	calledProjectID uuid.UUID
 	trigger         models.PMTrigger
 	agentType       *models.AgentType
+	analyzeCalls    int
+	projectCalls    int
 }
 
 type stubPRService struct {
@@ -4860,6 +4862,7 @@ func (s *stubPRService) SyncPRPreviewSurfaces(ctx context.Context, payload ghser
 func (s *stubPRService) WaitForPostPRSnapshotUploads() {}
 
 func (m *mockPMService) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID, agentTypeOverride *models.AgentType) (*pm.Plan, error) {
+	m.analyzeCalls++
 	m.calledOrgID = orgID
 	m.trigger = trigger
 	m.agentType = agentTypeOverride
@@ -6784,6 +6787,7 @@ func TestShouldDeadLetterPRError(t *testing.T) {
 }
 
 func (m *mockPMService) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID) error {
+	m.projectCalls++
 	m.calledOrgID = orgID
 	m.calledProjectID = projectID
 	return nil
@@ -9299,9 +9303,19 @@ func TestRegisterHandlers_WithOnlyPM(t *testing.T) {
 	w := New(nil, logger, "test-node")
 	RegisterHandlers(w, stores, services, DataRetentionConfig{}, logger)
 
-	_, ok := w.handlers["pm_analyze"]
-	require.True(t, ok, "pm_analyze handler should be registered")
-	_, ok = w.handlers["prioritize"]
+	for _, jobType := range []string{
+		models.JobTypePMAnalyze,
+		models.JobTypePMBootstrap,
+		models.JobTypePMContextRefresh,
+		models.JobTypeProjectCycle,
+	} {
+		handler, ok := w.handlers[jobType]
+		require.True(t, ok, "disabled PM compatibility handler should remain registered")
+		require.NoError(t, handler(context.Background(), jobType, json.RawMessage(`{bad`)), "stale PM jobs should be discarded without parsing or execution")
+	}
+	require.Zero(t, services.PM.(*mockPMService).analyzeCalls, "stale jobs must not invoke PM analysis")
+	require.Zero(t, services.PM.(*mockPMService).projectCalls, "stale jobs must not invoke project analysis")
+	_, ok := w.handlers["prioritize"]
 	require.False(t, ok, "prioritize handler should not be registered without prioritization service")
 }
 

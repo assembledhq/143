@@ -127,6 +127,8 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"AgentCapabilitiesHandler.Catalog":     "returns static capability catalog",
 		"ProjectGenerateHandler.Generate":      "calls LLM only, no org-scoped data",
 		"GitHubStatusHandler.StartConnect":     "OAuth redirect only, no store calls",
+		"PMHandler.Analyze":                    "shutdown compatibility endpoint returns gone without accessing org data",
+		"ProjectHandler.RunNow":                "shutdown compatibility endpoint returns gone without accessing org data",
 
 		// OAuth start handlers — just redirect to external provider, no org data access.
 		"IntegrationHandler.StartLinearOAuth":  "OAuth redirect only",
@@ -140,8 +142,8 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"InternalSlackMessageHandler.Send":     "internal sandbox route resolves org from the signed session-scoped internal token",
 
 		// Thin wrappers that delegate to a helper which calls OrgIDFromContext.
-		"PMHandler.Bootstrap":                      "delegates to enqueueAndRespond which uses OrgIDFromContext",
-		"PMHandler.Refresh":                        "delegates to enqueueAndRespond which uses OrgIDFromContext",
+		"PMHandler.Bootstrap":                      "shutdown compatibility endpoint returns gone without accessing org data",
+		"PMHandler.Refresh":                        "shutdown compatibility endpoint returns gone without accessing org data",
 		"ProjectHandler.Start":                     "delegates to transitionStatus which uses OrgIDFromContext",
 		"RepositoryHandler.Disconnect":             "delegates to setRepoStatus which uses OrgIDFromContext",
 		"RepositoryHandler.Reconnect":              "delegates to setRepoStatus which uses OrgIDFromContext",

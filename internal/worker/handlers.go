@@ -451,10 +451,10 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("prioritize", newPrioritizeHandler(stores, services, logger))
 	}
 	if services != nil && services.PM != nil {
-		w.Register(models.JobTypePMAnalyze, newPMAnalyzeHandler(stores, services, logger))
-		w.Register(models.JobTypeProjectCycle, newProjectCycleHandler(services, logger))
-		w.Register(models.JobTypePMBootstrap, newOrgIDJobHandler("pm_bootstrap", services.PM.RunBootstrap, logger))
-		w.Register(models.JobTypePMContextRefresh, newOrgIDJobHandler("pm_context_refresh", services.PM.RunRefresh, logger))
+		w.Register(models.JobTypePMAnalyze, newDisabledPMJobHandler(logger))
+		w.Register(models.JobTypeProjectCycle, newDisabledPMJobHandler(logger))
+		w.Register(models.JobTypePMBootstrap, newDisabledPMJobHandler(logger))
+		w.Register(models.JobTypePMContextRefresh, newDisabledPMJobHandler(logger))
 	}
 	if stores.Automations != nil && stores.AutomationRuns != nil {
 		w.Register(models.JobTypeAutomationRun, newAutomationRunHandler(stores, services, logger))
@@ -2142,6 +2142,13 @@ func newPagerDutySyncHandler(syncer pagerDutySyncer, logger zerolog.Logger) JobH
 			Int("integrations", result.IntegrationCount).
 			Int("incidents", result.IncidentCount).
 			Msg("PagerDuty reconciliation complete")
+		return nil
+	}
+}
+
+func newDisabledPMJobHandler(logger zerolog.Logger) JobHandler {
+	return func(_ context.Context, jobType string, _ json.RawMessage) error {
+		logger.Info().Str("job_type", jobType).Msg("discarding disabled PM job")
 		return nil
 	}
 }

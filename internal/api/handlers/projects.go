@@ -531,6 +531,11 @@ func (h *ProjectHandler) Unarchive(w http.ResponseWriter, r *http.Request) {
 
 // RunNow enqueues an immediate project_cycle job for the project.
 func (h *ProjectHandler) RunNow(w http.ResponseWriter, r *http.Request) {
+	const projectCyclesEnabled = false
+	if !projectCyclesEnabled {
+		writeError(w, r, http.StatusGone, "PM_DISABLED", "project planning cycles are no longer available")
+		return
+	}
 	if h.jobStore == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "NOT_CONFIGURED", "job store not configured")
 		return

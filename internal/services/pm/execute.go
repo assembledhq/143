@@ -11,6 +11,11 @@ import (
 )
 
 func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan, settings models.OrgSettings, productContext *models.ProductContext) error {
+	// A plan produced by a worker that began before shutdown must not dispatch
+	// coding sessions after the new process is deployed.
+	if !analysisEnabled {
+		return nil
+	}
 	maxConcurrent := settings.MaxConcurrentRuns
 	if maxConcurrent <= 0 {
 		maxConcurrent = models.DefaultMaxConcurrentRuns

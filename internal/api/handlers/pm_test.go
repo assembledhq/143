@@ -29,7 +29,7 @@ var pmPlanColumnsWithContext = []string{
 	"created_at", "completed_at",
 }
 
-func TestPMHandler_AnalyzeEnqueuesJob(t *testing.T) {
+func TestPMHandler_AnalyzeIsDisabled(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -42,24 +42,17 @@ func TestPMHandler_AnalyzeEnqueuesJob(t *testing.T) {
 	handler := NewPMHandler(planStore, decisionLogStore, jobStore, nil)
 
 	orgID := uuid.New()
-	jobID := uuid.New()
-
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/pm/analyze", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
 	rr := httptest.NewRecorder()
 
 	handler.Analyze(rr, req)
 
-	require.Equal(t, http.StatusAccepted, rr.Code, "should return accepted")
-	require.Contains(t, rr.Body.String(), jobID.String(), "response should include job ID")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	require.Equal(t, http.StatusGone, rr.Code, "disabled PM analysis should return gone")
+	require.Contains(t, rr.Body.String(), "PM_DISABLED", "response should explain that PM is disabled")
 }
 
-func TestPMHandler_AnalyzeEnqueuesJobWithAgentTypeOverride(t *testing.T) {
+func TestPMHandler_AnalyzeWithAgentTypeIsDisabled(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -72,21 +65,14 @@ func TestPMHandler_AnalyzeEnqueuesJobWithAgentTypeOverride(t *testing.T) {
 	handler := NewPMHandler(planStore, decisionLogStore, jobStore, nil)
 
 	orgID := uuid.New()
-	jobID := uuid.New()
-
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/pm/analyze", bytes.NewBufferString(`{"agent_type":"pi"}`))
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
 	rr := httptest.NewRecorder()
 
 	handler.Analyze(rr, req)
 
-	require.Equal(t, http.StatusAccepted, rr.Code, "should return accepted when agent_type override is provided")
-	require.Contains(t, rr.Body.String(), jobID.String(), "response should include job ID when agent_type override is provided")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met for agent_type override")
+	require.Equal(t, http.StatusGone, rr.Code, "agent override must not bypass the PM shutdown")
+	require.Contains(t, rr.Body.String(), "PM_DISABLED", "response should explain that PM is disabled")
 }
 
 func TestPMHandler_ListPlans(t *testing.T) {
@@ -419,7 +405,7 @@ var pmDocTestColumns = []string{
 	"created_by", "created_at", "updated_at",
 }
 
-func TestPMHandler_BootstrapEnqueuesJob(t *testing.T) {
+func TestPMHandler_BootstrapIsDisabled(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -430,24 +416,17 @@ func TestPMHandler_BootstrapEnqueuesJob(t *testing.T) {
 	handler := NewPMHandler(db.NewPMPlanStore(mock), db.NewPMDecisionLogStore(mock), jobStore, nil)
 
 	orgID := uuid.New()
-	jobID := uuid.New()
-
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/pm/bootstrap", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
 	rr := httptest.NewRecorder()
 
 	handler.Bootstrap(rr, req)
 
-	require.Equal(t, http.StatusAccepted, rr.Code)
-	require.Contains(t, rr.Body.String(), jobID.String())
-	require.NoError(t, mock.ExpectationsWereMet())
+	require.Equal(t, http.StatusGone, rr.Code, "disabled PM bootstrap should return gone")
+	require.Contains(t, rr.Body.String(), "PM_DISABLED", "response should explain that PM is disabled")
 }
 
-func TestPMHandler_RefreshEnqueuesJob(t *testing.T) {
+func TestPMHandler_RefreshIsDisabled(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -458,21 +437,14 @@ func TestPMHandler_RefreshEnqueuesJob(t *testing.T) {
 	handler := NewPMHandler(db.NewPMPlanStore(mock), db.NewPMDecisionLogStore(mock), jobStore, nil)
 
 	orgID := uuid.New()
-	jobID := uuid.New()
-
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/pm/refresh", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
 	rr := httptest.NewRecorder()
 
 	handler.Refresh(rr, req)
 
-	require.Equal(t, http.StatusAccepted, rr.Code)
-	require.Contains(t, rr.Body.String(), jobID.String())
-	require.NoError(t, mock.ExpectationsWereMet())
+	require.Equal(t, http.StatusGone, rr.Code, "disabled PM refresh should return gone")
+	require.Contains(t, rr.Body.String(), "PM_DISABLED", "response should explain that PM is disabled")
 }
 
 func TestPMHandler_ListPendingRefreshes(t *testing.T) {

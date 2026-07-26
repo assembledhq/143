@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -45,36 +44,7 @@ func NewPMHandler(planStore *db.PMPlanStore, decisionLogStore *db.PMDecisionLogS
 // Analyze enqueues a PM analysis job. Accepts an optional agent_type in the
 // request body to override the org's default agent for this run only.
 func (h *PMHandler) Analyze(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-
-	var body struct {
-		AgentType string `json:"agent_type"`
-	}
-	// Best-effort decode — empty body is fine (all fields are optional).
-	_ = json.NewDecoder(r.Body).Decode(&body)
-
-	payload := map[string]string{
-		"org_id":  orgID.String(),
-		"trigger": string(models.PMTriggerManual),
-	}
-	if body.AgentType != "" {
-		payload["agent_type"] = body.AgentType
-	}
-	jobID, err := h.jobStore.Enqueue(r.Context(), orgID, "default", models.JobTypePMAnalyze, payload, 5, nil)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue pm analyze job", err)
-		return
-	}
-
-	emitUserAudit(h.audit, r, models.AuditActionPMAnalysisTriggered, models.AuditResourcePMPlan, nil,
-		marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{
-			"job_id":   jobID.String(),
-			"job_type": models.JobTypePMAnalyze,
-			"trigger":  string(models.PMTriggerManual),
-		}))
-	writeJSON(w, http.StatusAccepted, map[string]any{
-		"data": map[string]string{"job_id": jobID.String()},
-	})
+	writeError(w, r, http.StatusGone, "PM_DISABLED", "PM analysis is no longer available")
 }
 
 func (h *PMHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -352,33 +322,7 @@ func (h *PMHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 
 // enqueueAndRespond enqueues a job with the org ID payload and writes the accepted response.
 func (h *PMHandler) enqueueAndRespond(w http.ResponseWriter, r *http.Request, jobType string) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-	payload := map[string]string{"org_id": orgID.String()}
-	dedupeKey := fmt.Sprintf("%s:%s", jobType, orgID.String())
-	jobID, err := h.jobStore.Enqueue(r.Context(), orgID, "default", jobType, payload, 3, &dedupeKey)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", fmt.Sprintf("failed to enqueue %s job", jobType), err)
-		return
-	}
-
-	var auditAction models.AuditAction
-	switch jobType {
-	case models.JobTypePMBootstrap:
-		auditAction = models.AuditActionPMBootstrapTriggered
-	case models.JobTypePMContextRefresh:
-		auditAction = models.AuditActionPMRefreshTriggered
-	}
-	if auditAction != "" {
-		emitUserAudit(h.audit, r, auditAction, models.AuditResourcePMDocument, nil,
-			marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{
-				"job_id":   jobID.String(),
-				"job_type": jobType,
-			}))
-	}
-
-	writeJSON(w, http.StatusAccepted, map[string]any{
-		"data": map[string]string{"job_id": jobID.String()},
-	})
+	writeError(w, r, http.StatusGone, "PM_DISABLED", fmt.Sprintf("%s is no longer available", jobType))
 }
 
 // ListPendingRefreshes returns pending PM context refresh suggestions.

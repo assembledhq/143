@@ -1144,7 +1144,7 @@ func TestProjectHandler_GetCycle_InvalidID(t *testing.T) {
 
 // --- RunNow handler tests ---
 
-func TestProjectHandler_RunNow_Success(t *testing.T) {
+func TestProjectHandler_RunNow_PreviouslyValidRequestIsDisabled(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -1155,19 +1155,6 @@ func TestProjectHandler_RunNow_Success(t *testing.T) {
 	handler.SetJobStore(db.NewJobStore(mock))
 	orgID := uuid.New()
 	projectID := uuid.New()
-	repoID := uuid.New()
-	now := time.Now()
-
-	// GetByID returns an active project
-	mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusActive, now)...))
-
-	// Enqueue job
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID.String()+"/run", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -1176,12 +1163,12 @@ func TestProjectHandler_RunNow_Success(t *testing.T) {
 
 	handler.RunNow(rr, req)
 
-	require.Equal(t, http.StatusOK, rr.Code)
-	require.Contains(t, rr.Body.String(), "job_id")
+	require.Equal(t, http.StatusGone, rr.Code)
+	require.Contains(t, rr.Body.String(), "PM_DISABLED")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestProjectHandler_RunNow_NotActive(t *testing.T) {
+func TestProjectHandler_RunNow_DraftRequestIsDisabled(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -1192,14 +1179,6 @@ func TestProjectHandler_RunNow_NotActive(t *testing.T) {
 	handler.SetJobStore(db.NewJobStore(mock))
 	orgID := uuid.New()
 	projectID := uuid.New()
-	repoID := uuid.New()
-	now := time.Now()
-
-	// GetByID returns a draft project (not active)
-	mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusDraft, now)...))
-
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID.String()+"/run", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
 	req = req.WithContext(withProjectRouteParam(req.Context(), projectID))
@@ -1207,8 +1186,8 @@ func TestProjectHandler_RunNow_NotActive(t *testing.T) {
 
 	handler.RunNow(rr, req)
 
-	require.Equal(t, http.StatusBadRequest, rr.Code)
-	require.Contains(t, rr.Body.String(), "INVALID_STATUS")
+	require.Equal(t, http.StatusGone, rr.Code)
+	require.Contains(t, rr.Body.String(), "PM_DISABLED")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -1225,8 +1204,8 @@ func TestProjectHandler_RunNow_NoJobStore(t *testing.T) {
 
 	handler.RunNow(rr, req)
 
-	require.Equal(t, http.StatusServiceUnavailable, rr.Code)
-	require.Contains(t, rr.Body.String(), "NOT_CONFIGURED")
+	require.Equal(t, http.StatusGone, rr.Code)
+	require.Contains(t, rr.Body.String(), "PM_DISABLED")
 }
 
 func TestProjectHandler_RunNow_InvalidID(t *testing.T) {
@@ -1249,6 +1228,6 @@ func TestProjectHandler_RunNow_InvalidID(t *testing.T) {
 
 	handler.RunNow(rr, req)
 
-	require.Equal(t, http.StatusBadRequest, rr.Code)
-	require.Contains(t, rr.Body.String(), "INVALID_ID")
+	require.Equal(t, http.StatusGone, rr.Code)
+	require.Contains(t, rr.Body.String(), "PM_DISABLED")
 }
