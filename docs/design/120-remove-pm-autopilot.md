@@ -1,6 +1,6 @@
 # 120 - Remove PM Agent And Autopilot
 
-> **Status:** Backlog | **Last reviewed:** 2026-07-26
+> **Status:** Partially Implemented | **Last reviewed:** 2026-07-26
 >
 > **Applies to:** Autopilot UI, PM analysis and context jobs, PM-driven issue
 > and project creation, prioritization, organization and repository PM
@@ -9,6 +9,10 @@
 ## Decision Summary
 
 Remove the PM Agent and Autopilot product from 143.
+
+PR 1 and PR 2 are implemented: the product is inert and its UI, feature APIs,
+settings surfaces, public documentation, Project run action, and dedicated
+Autopilot queue code are removed. PR 3 backend and schema cleanup remains.
 
 The current feature has not proven effective enough to justify its product
 surface, background compute, automatic work creation, or backend complexity.

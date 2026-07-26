@@ -67,7 +67,7 @@ describe("OnboardingPageContent verify-email banner", () => {
     renderWithProviders(<OnboardingPageContent />);
 
     await waitFor(() => {
-      expect(screen.getByText(/Autopilot needs a few connections/)).toBeInTheDocument();
+      expect(screen.getByText(/Connect a coding agent and GitHub repositories/)).toBeInTheDocument();
     });
     expect(screen.queryByTestId("onboarding-verify-email-banner")).not.toBeInTheDocument();
   });
@@ -78,7 +78,7 @@ describe("OnboardingPageContent verify-email banner", () => {
     renderWithProviders(<OnboardingPageContent />);
 
     await waitFor(() => {
-      expect(screen.getByText(/Autopilot needs a few connections/)).toBeInTheDocument();
+      expect(screen.getByText(/Connect a coding agent and GitHub repositories/)).toBeInTheDocument();
     });
     expect(screen.queryByTestId("onboarding-verify-email-banner")).not.toBeInTheDocument();
   });

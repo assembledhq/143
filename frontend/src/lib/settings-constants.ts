@@ -1,6 +1,6 @@
 /**
  * UI bounds for org settings forms. Kept in one place so the agent and
- * autopilot pages can't drift apart while editing the same server field.
+ * settings pages can't drift apart while editing the same server field.
  *
  * Server-side values live in `internal/models/org_settings.go`:
  * - `DefaultMaxConcurrentRuns` / `OrgSize.MaxConcurrentRuns()` — the UI

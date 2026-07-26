@@ -197,13 +197,10 @@ func TestCurrentSeedCoversRepresentativeProductTables(t *testing.T) {
 		"INSERT INTO agent_capability_policies",
 		"INSERT INTO automation_goal_improvements",
 		"INSERT INTO pm_documents",
-		"INSERT INTO pm_plans",
-		"INSERT INTO pm_decision_log",
 		"INSERT INTO project_tasks",
 		"INSERT INTO project_task_dependencies",
 		"INSERT INTO project_specs",
 		"INSERT INTO project_attachments",
-		"INSERT INTO project_cycles",
 		"INSERT INTO project_source_issues",
 		"INSERT INTO code_review_session_metadata",
 		"INSERT INTO code_review_agent_results",
@@ -241,6 +238,19 @@ func TestCurrentSeedUsesConvergentConflictHandlers(t *testing.T) {
 	}
 	for _, columnAssignment := range requiredIssueColumns {
 		require.Contains(t, issueBlock, columnAssignment, "issue seed conflict handler should converge canonical issue fields")
+	}
+	require.NotContains(t, seed, `"pm_proposal"`, "demo priority factors should not retain PM provenance")
+
+	goalImprovementStart := strings.Index(seed, "INSERT INTO automation_goal_improvements")
+	require.NotEqual(t, -1, goalImprovementStart, "seed should include automation goal improvements")
+	goalImprovementBlock := seed[goalImprovementStart:]
+	for _, columnAssignment := range []string{
+		"input_name = EXCLUDED.input_name",
+		"input_goal = EXCLUDED.input_goal",
+		"input_config = EXCLUDED.input_config",
+		"base_goal_hash = EXCLUDED.base_goal_hash",
+	} {
+		require.Contains(t, goalImprovementBlock, columnAssignment, "automation improvement seed should converge renamed neutral inputs")
 	}
 
 	previewBlock := seedBlock(t, seed, "DELETE FROM preview_links", "-- A seeded \"ready\" preview instance")

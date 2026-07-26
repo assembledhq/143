@@ -12,7 +12,7 @@ const { replaceMock, logoutMock, useAuthMock } = vi.hoisted(() => ({
   useAuthMock: vi.fn(),
 }));
 
-let mockPathname = "/autopilot";
+let mockPathname = "/sessions";
 
 vi.mock("next/navigation", () => ({
   usePathname: () => mockPathname,
@@ -41,7 +41,7 @@ const memberUser = {
 };
 
 beforeEach(() => {
-  mockPathname = "/autopilot";
+  mockPathname = "/sessions";
   useAuthMock.mockReturnValue({
     user: adminUser,
     isLoading: false,
@@ -62,14 +62,14 @@ describe("AuthenticatedLayout", () => {
     expect(screen.queryByRole("link", { name: "Projects" })).not.toBeInTheDocument();
   });
 
-  it("shows Autopilot in the primary navigation", () => {
+  it("does not show Autopilot in the primary navigation", () => {
     renderWithProviders(
       <AuthenticatedLayout>
         <div>content</div>
       </AuthenticatedLayout>
     );
 
-    expect(screen.getAllByRole("link", { name: "Autopilot" }).find((link) => link.getAttribute("href") === "/autopilot")).toBeDefined();
+    expect(screen.queryByRole("link", { name: "Autopilot" })).not.toBeInTheDocument();
   });
 
   it("does not fetch preview counts for the primary navigation", async () => {
@@ -338,7 +338,6 @@ describe("AuthenticatedLayout", () => {
     expect(screen.getByRole("link", { name: "Integrations" })).toHaveAttribute("href", "/settings/integrations");
     expect(screen.getByRole("link", { name: "Coding agents" })).toHaveAttribute("href", "/settings/agent");
     expect(screen.getByRole("link", { name: "App LLM" })).toHaveAttribute("href", "/settings/llm");
-    expect(screen.getAllByRole("link", { name: "Autopilot" }).find((link) => link.getAttribute("href") === "/settings/autopilot")).toBeDefined();
     expect(screen.getByRole("link", { name: "Sandboxes" })).toHaveAttribute("href", "/settings/runtime");
     expect(screen.getByRole("link", { name: "Team" })).toHaveAttribute("href", "/settings/team");
     expect(screen.getByRole("link", { name: "Audit log" })).toHaveAttribute("href", "/settings/audit-log");
@@ -391,7 +390,7 @@ describe("AuthenticatedLayout", () => {
     expect(screen.queryByRole("link", { name: "Usage" })).not.toBeInTheDocument();
   });
 
-  it("hides Autopilot settings from non-admin users", async () => {
+  it("does not expose removed Autopilot settings", async () => {
     useAuthMock.mockReturnValue({
       user: memberUser,
       isLoading: false,
@@ -653,7 +652,7 @@ describe("AuthenticatedLayout", () => {
     });
 
     it("returns null for everything that is not /sessions/<uuid>", () => {
-      expect(sessionDetailRouteId("/autopilot")).toBeNull();
+      expect(sessionDetailRouteId("/automations")).toBeNull();
       expect(sessionDetailRouteId("/sessions")).toBeNull();
       expect(sessionDetailRouteId("/sessions/new")).toBeNull();
       expect(sessionDetailRouteId("/sessions/not-a-uuid")).toBeNull();
