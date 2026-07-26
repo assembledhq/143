@@ -17,6 +17,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+//nolint:paralleltest // mutates analysisEnabled so production-disabled behavior can be tested without racing legacy PM tests
 func TestProductionShutdownGuards(t *testing.T) {
 	analysisEnabled = false
 	t.Cleanup(func() {
