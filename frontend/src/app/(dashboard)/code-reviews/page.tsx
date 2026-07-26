@@ -34,7 +34,6 @@ import { ExternalLink } from "@/components/ui/external-link";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -983,17 +982,20 @@ export default function CodeReviewsPage() {
           </TabsContent>
 
           <TabsContent value="config" className="space-y-4">
-            <Card>
-              <CardHeader className="space-y-1">
-                <div className="flex items-center justify-between gap-3">
-                  <CardTitle>Review policy</CardTitle>
-                  <AutosaveIndicator status={autosave.status} />
+            <SectionGroup
+              title="Review policy"
+              description="Set how reviews run, what guidance they follow, and when approval is allowed."
+              action={<AutosaveIndicator status={autosave.status} />}
+              className="max-w-5xl"
+            >
+              {!canManagePolicy ? (
+                <div className="rounded-md bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
+                  You have view-only access to this policy. An organization administrator can change review behavior and GitHub setup.
                 </div>
-              </CardHeader>
-              <CardContent className="space-y-5">
-                {!canManagePolicy ? <Card className="rounded-md bg-muted/30 shadow-none"><CardContent className="p-3 text-sm text-muted-foreground">You have view-only access to this policy. An organization administrator can change review behavior and GitHub setup.</CardContent></Card> : null}
-                <fieldset disabled={!canManagePolicy} className="space-y-5">
-                <PolicyBehaviorSection
+              ) : null}
+              <fieldset disabled={!canManagePolicy} className="space-y-6">
+                <section className="space-y-4" aria-labelledby="review-behavior-heading">
+                  <PolicyBehaviorSection
                       config={config}
                   onChange={(outcome) => {
                     const prior = policyOutcome(config);
@@ -1008,20 +1010,31 @@ export default function CodeReviewsPage() {
                     if (outcome !== "disabled" && outcome !== prior) trackCodeReviewPolicyEvent({ event: "code_review_approval_mode_changed", scope: "organization", configured: true });
                   }}
                     />
-
-                <PolicyPromptComposers
-                  config={config}
-                  autosave={autosave}
-                  commitPolicy={commitPolicy}
-                  examples={promptExamplesQuery.data?.data}
-                  examplesError={apiErrorMessage(promptExamplesQuery.error) ?? undefined}
-                  onRetryExamples={() => void promptExamplesQuery.refetch()}
-                  onChooseExample={(field, example) => { setPromptExample({ field, example }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_example_previewed", scope: "organization", example_key: example.key, configured: true }); }}
-                  onDraftHandle={registerPromptDraft}
-                  invalidPolicyField={invalidPolicyField}
-                />
-                </fieldset>
-
+                  <PolicySummary config={config} />
+                </section>
+                <SectionGroup
+                  title="Review instructions"
+                  description="Guide what reviewers focus on and how the orchestrator decides whether to approve."
+                  className="border-t border-border pt-6"
+                >
+                  <PolicyPromptComposers
+                    config={config}
+                    autosave={autosave}
+                    commitPolicy={commitPolicy}
+                    examples={promptExamplesQuery.data?.data}
+                    examplesError={apiErrorMessage(promptExamplesQuery.error) ?? undefined}
+                    onRetryExamples={() => void promptExamplesQuery.refetch()}
+                    onChooseExample={(field, example) => { setPromptExample({ field, example }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_example_previewed", scope: "organization", example_key: example.key, configured: true }); }}
+                    onDraftHandle={registerPromptDraft}
+                    invalidPolicyField={invalidPolicyField}
+                  />
+                </SectionGroup>
+              </fieldset>
+              <SectionGroup
+                title="GitHub setup"
+                description="Choose a repository and manage the reviewer entry point used to request reviews."
+                className="border-t border-border pt-6"
+              >
                 <div className="space-y-2">
                   <div className="w-full sm:max-w-sm">
                     <FilterSelect
@@ -1049,11 +1062,9 @@ export default function CodeReviewsPage() {
                     onDelete={() => githubRepositorySelected && deleteGitHubTrigger.mutate(githubRepositoryId)}
                   />
                 </div>
-
-                <PolicySummary config={config} repositorySelected={githubRepositorySelected} githubTriggerStatus={githubTriggerQuery.data?.data?.status} />
-
-                <fieldset disabled={!canManagePolicy}>
-                  <AdvancedPolicySettings
+              </SectionGroup>
+              <fieldset disabled={!canManagePolicy} className="border-t border-border pt-2">
+                <AdvancedPolicySettings
                     selectedTemplateKey={selectedTemplateKey}
                     setSelectedTemplateKey={setSelectedTemplateKey}
                     templates={templates}
@@ -1070,16 +1081,14 @@ export default function CodeReviewsPage() {
                     setEditingRequirementKey={setEditingRequirementKey}
                     invalidPolicyField={invalidPolicyField}
                     analyticsScope="organization"
-                  />
-                </fieldset>
-
-                <AuditLogTrigger
-                  filters={{ resource_type: "code_review_policy" }}
-                  title="Review policy history"
-                  variant="footer"
                 />
-              </CardContent>
-            </Card>
+              </fieldset>
+              <AuditLogTrigger
+                filters={{ resource_type: "code_review_policy" }}
+                title="Review policy history"
+                variant="footer"
+              />
+            </SectionGroup>
             <CodeReviewPromptExampleDialog
               selection={promptExample}
               currentConfig={config}
@@ -1149,7 +1158,7 @@ function PolicyPromptComposers({
   invalidPolicyField: string | null;
 }) {
   return (
-    <div className="space-y-4">
+    <div className="divide-y divide-border">
       {examplesError ? <ErrorNotice title="Could not load prompt examples" description={examplesError} action={{ label: "Retry", onClick: onRetryExamples }} /> : null}
       <CodeReviewAutomatedApprovalPolicyComposer
         value={config?.automated_approval_policy ?? ""}
@@ -1224,7 +1233,7 @@ function CodeReviewPromptComposerBase({ title, description, tooltip, value, disa
   const count = [...field.value.trim()].length;
   const invalid = count > CODE_REVIEW_PROMPT_MAX_LENGTH || Boolean(required && !field.value.trim());
   return (
-    <section className={`${hidden ? "hidden" : ""} space-y-2 rounded-md border border-border p-4 ${secondary ? "bg-muted/10" : "bg-card shadow-sm"}`} aria-label={title}>
+    <section className={`${hidden ? "hidden" : ""} space-y-2 py-4 first:pt-0 last:pb-0`} aria-label={title}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-1.5"><Label htmlFor={`prompt-${title.replaceAll(" ", "-")}`}>{title}</Label><SettingInfoTooltip label={title} description={tooltip} /></div>
         <div className="flex flex-wrap items-center justify-end gap-1" role="group" aria-label={`${title} actions`}>
@@ -1305,7 +1314,7 @@ function AdvancedPolicySettings({
   return (
                 <AdvancedPolicyControls forceOpen={Boolean(invalidPolicyField && ["risk_policy", "inline_comment_limit", "agent_roster", "description_policy"].includes(invalidPolicyField))} onOpened={() => trackCodeReviewPolicyEvent({ event: "code_review_advanced_opened", scope: analyticsScope, subsection: "all", configured: true })}>
                   {invalidPolicyField ? <ErrorNotice title="Could not save this policy setting" description={`Correct the highlighted ${invalidPolicyField.replaceAll("_", " ")} setting and try again.`} /> : null}
-                  <div className="grid gap-3 rounded-md border border-border p-4 md:grid-cols-[1fr_auto] md:items-end">
+                  <div className="grid gap-3 bg-muted/30 px-4 py-3 md:grid-cols-[1fr_auto] md:items-end">
                     <FilterSelect
                       label="Advanced policy preset"
                       value={selectedTemplateKey}
@@ -1354,9 +1363,9 @@ function AdvancedPolicySettings({
                     </p>
                   </div>
 
-                <div className="space-y-3">
+                <div>
                   <div className="text-sm font-medium text-foreground">Fine-tuning</div>
-
+                  <div className="mt-2 divide-y divide-border border-y border-border">
                   <FineTuningSection title="Approval criteria" summary="Size thresholds, limits, timeout, and reviewer quorum" forceOpen={invalidPolicyField === "risk_policy" || invalidPolicyField === "inline_comment_limit"} onOpened={() => trackCodeReviewPolicyEvent({ event: "code_review_advanced_opened", scope: analyticsScope, subsection: "approval_criteria", configured: true })}>
                     <div className="grid gap-3 md:grid-cols-3">
                       <NumberPolicyInput
@@ -1552,7 +1561,7 @@ function AdvancedPolicySettings({
                       }}
                     />
                   </FineTuningSection>
-
+                  </div>
                 </div>
                 </AdvancedPolicyControls>
   );
@@ -1561,12 +1570,12 @@ function AdvancedPolicySettings({
 function AdvancedPolicyControls({ children, forceOpen, onOpened }: { children: ReactNode; forceOpen: boolean; onOpened: () => void }) {
   const [open, setOpen] = useState(false);
   return (
-    <Collapsible open={open || forceOpen} onOpenChange={(next) => { setOpen(next); if (next) onOpened(); }} className="rounded-md border border-border">
+    <Collapsible open={open || forceOpen} onOpenChange={(next) => { setOpen(next); if (next) onOpened(); }}>
       <div className="flex items-center gap-1 border-border pr-3">
         <CollapsibleTrigger asChild>
           <Button variant="ghost" className="group h-auto min-w-0 flex-1 justify-between whitespace-normal rounded-md p-4 text-left sm:h-auto" aria-label="Advanced controls">
             <span className="min-w-0">
-              <span className="block text-sm font-medium text-foreground">Advanced controls</span>
+              <span className="block font-display text-lg font-semibold tracking-[-0.025em] text-foreground">Advanced settings</span>
               <span className="mt-0.5 block text-xs font-normal text-muted-foreground">Safety gates, paths, agents, limits, and structured checks</span>
             </span>
             <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
@@ -1577,7 +1586,7 @@ function AdvancedPolicyControls({ children, forceOpen, onOpened }: { children: R
           description="Contains deterministic approval safeguards, reviewer configuration, limits, structured PR-description checks, and whole-policy presets. Defaults remain enforced while this section is closed."
         />
       </div>
-      <CollapsibleContent className="space-y-4 border-t border-border p-4">{children}</CollapsibleContent>
+      <CollapsibleContent className="space-y-5 border-t border-border pt-5">{children}</CollapsibleContent>
     </Collapsible>
   );
 }
@@ -1587,30 +1596,19 @@ function policyOutcome(config: CodeReviewPolicyConfig | null): "disabled" | "com
   return config.approval_mode === "approve_acceptable" ? "approve" : "comment";
 }
 
-function capitalizeSummaryItem(item: string): string {
-  return item.charAt(0).toUpperCase() + item.slice(1);
-}
-
 function PolicySummary({
   config,
-  repositorySelected,
-  githubTriggerStatus,
 }: {
   config: CodeReviewPolicyConfig | null;
-  repositorySelected: boolean;
-  githubTriggerStatus?: CodeReviewGitHubTriggerResponse["status"];
 }) {
   if (!config) {
-    return <div className="rounded-md border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">Loading review policy...</div>;
+    return <p className="text-sm text-muted-foreground">Loading review policy...</p>;
   }
 
   const outcome = policyOutcome(config);
   const reviewers = config.agent_roster.reviewers.length;
   const summaryItems = [
     outcome === "disabled" ? "Reviews paused" : outcome === "approve" ? "Comments + eligible approval" : "Comments only",
-    repositorySelected
-      ? `GitHub reviewer ${githubTriggerStatusLabel(githubTriggerStatus ?? "unconfigured").toLowerCase()}`
-      : "Select a repository for GitHub setup",
     `${reviewers} ${reviewers === 1 ? "reviewer" : "reviewers"}`,
     `quorum ${config.agent_roster.require_reviewer_quorum}`,
   ];
@@ -1620,19 +1618,10 @@ function PolicySummary({
   if (config.risk_policy.exclude_sensitive_paths) summaryItems.push("sensitive paths need human review");
 
   return (
-    <div className="rounded-md border border-border bg-muted/30 px-4 py-3">
-      <div className="text-sm font-medium text-foreground">Current behavior</div>
-      <div className="mt-2 flex flex-wrap gap-2">
-        {summaryItems.map((item) => {
-          const label = capitalizeSummaryItem(item);
-          return (
-            <Badge key={label} variant="outline">
-              {label}
-            </Badge>
-          );
-        })}
-      </div>
-    </div>
+    <p className="text-sm leading-6 text-muted-foreground">
+      <span className="font-medium text-foreground">Current behavior:</span>{" "}
+      {summaryItems.join(" · ")}
+    </p>
   );
 }
 
@@ -1644,12 +1633,12 @@ function PolicyBehaviorSection({
   onChange: (outcome: "disabled" | "comment" | "approve") => void;
 }) {
   return (
-    <section className="space-y-3" aria-labelledby="review-behavior-heading">
-      <div id="review-behavior-heading" className="text-sm font-medium text-foreground">
+    <div className="space-y-3">
+      <div id="review-behavior-heading" className="font-display text-lg font-semibold tracking-[-0.025em] text-foreground">
         Review behavior
       </div>
       <OutcomeControl config={config} disabled={!config} onChange={onChange} />
-    </section>
+    </div>
   );
 }
 
@@ -2878,15 +2867,15 @@ function FineTuningSection({ title, summary, defaultOpen = false, forceOpen = fa
   const triggerRef = useRef<HTMLButtonElement>(null);
   useEffect(() => { if (forceOpen) triggerRef.current?.focus(); }, [forceOpen]);
   return (
-    <Collapsible open={open || forceOpen} onOpenChange={(next) => { setOpen(next); if (next) onOpened?.(); }} className="rounded-md border border-border">
-      <CollapsibleTrigger ref={triggerRef} className="group flex w-full items-center justify-between gap-3 rounded-md p-4 text-left hover:bg-muted/40">
+    <Collapsible open={open || forceOpen} onOpenChange={(next) => { setOpen(next); if (next) onOpened?.(); }}>
+      <CollapsibleTrigger ref={triggerRef} className="group flex w-full items-center justify-between gap-3 px-1 py-4 text-left hover:bg-muted/40">
         <div className="min-w-0">
           <div className="text-sm font-medium text-foreground">{title}</div>
           {summary ? <div className="mt-0.5 text-xs text-muted-foreground">{summary}</div> : null}
         </div>
         <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
       </CollapsibleTrigger>
-      <CollapsibleContent className="space-y-3 border-t border-border p-4">{children}</CollapsibleContent>
+      <CollapsibleContent className="space-y-3 border-t border-border px-1 py-4">{children}</CollapsibleContent>
     </Collapsible>
   );
 }

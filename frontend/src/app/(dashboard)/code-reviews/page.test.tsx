@@ -420,21 +420,8 @@ describe("CodeReviewsPage", () => {
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
 
     // The current behavior, outcome, and selected repository trigger are visible without expanding anything.
-    expect(screen.getByText("Current behavior")).toBeInTheDocument();
-    expect(screen.getByText("Comments only")).toBeInTheDocument();
-    expect(screen.getByText("GitHub reviewer ready")).toBeInTheDocument();
-    expect(screen.getByText("2 reviewers")).toBeInTheDocument();
-    expect(screen.getByText("Quorum 2")).toBeInTheDocument();
-    expect(screen.getByText("Passing checks required")).toBeInTheDocument();
-    expect(screen.getByText("Disagreement blocks approval")).toBeInTheDocument();
-    expect(screen.getByText("Sensitive paths need human review")).toBeInTheDocument();
-
-    const currentBehaviorCard = screen.getByText("Current behavior").parentElement;
-    expect(currentBehaviorCard).not.toBeNull();
-    const summaryBadges = currentBehaviorCard?.querySelectorAll('[data-slot="badge"]') ?? [];
-    for (const badge of summaryBadges) {
-      expect(badge.textContent).toMatch(/^[A-Z0-9]/);
-    }
+    expect(screen.getByText("Current behavior:")).toBeInTheDocument();
+    expect(screen.getByText(/Comments only · 2 reviewers · quorum 2 · passing checks required · disagreement blocks approval · sensitive paths need human review/i)).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /Comment only/i })).toBeChecked();
     expect(screen.getByRole("region", { name: "Additional review instructions (optional)" })).toBeInTheDocument();
     expect(screen.getByText(/native \/review behavior without extra guidance/i)).toBeInTheDocument();
@@ -889,15 +876,15 @@ describe("CodeReviewsPage", () => {
     });
     const githubHeading = screen.getByText("GitHub reviewer");
     const instructionsHeading = screen.getByText("Additional review instructions (optional)");
-    const summaryHeading = screen.getByText("Current behavior");
+    const summaryHeading = screen.getByText("Current behavior:");
     const advancedTrigger = screen.getByRole("button", {
       name: "Advanced controls",
     });
     expect(advancedTrigger).toHaveClass("h-auto", "p-4", "sm:h-auto");
-    expect(enablement.compareDocumentPosition(instructionsHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(enablement.compareDocumentPosition(summaryHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(summaryHeading.compareDocumentPosition(instructionsHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(instructionsHeading.compareDocumentPosition(githubHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(githubHeading.compareDocumentPosition(summaryHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(summaryHeading.compareDocumentPosition(advancedTrigger) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(githubHeading.compareDocumentPosition(advancedTrigger) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     const outcomeInfo = screen.getByRole("button", {
       name: "About Review outcome",
@@ -1682,7 +1669,7 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
     await user.click(await screen.findByRole("tab", { name: "Policy" }));
     const viewOnlyNotice = await screen.findByText(/view-only access/i);
-    expect(viewOnlyNotice.closest('[data-slot="card"]')).toBeInTheDocument();
+    expect(viewOnlyNotice).toHaveClass("bg-muted/40");
     expect(screen.getByRole("switch", { name: "Code reviews enabled" })).toBeDisabled();
     expect(screen.getByRole("textbox", { name: "Additional review instructions (optional)" })).toBeDisabled();
 
