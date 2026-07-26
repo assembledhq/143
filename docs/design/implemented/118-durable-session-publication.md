@@ -213,6 +213,107 @@ Alert on a sustained reconciliation error rate, growth in stale nonterminal
 rows, or `terminal_failed` spikes by source. IDs belong in logs and traces, not
 metric labels.
 
+## Pull-request breakout
+
+The implementation should land as four pull requests. Each PR is independently
+deployable, keeps the legacy publication path working until the durable path is
+ready, and leaves schema changes additive until the final rollout.
+
+### PR 1 — Make publication identity and branch outcomes authoritative
+
+**Purpose:** remove the two ambiguities that caused the incident without yet
+changing the publication owner or persistence model.
+
+- Add the token-scoped `POST /api/v1/internal/session/pr` route and make the
+  explicit-session route reject an ID that does not match the signed token.
+- Change `143-tools pr create` to use the token-scoped route by default while
+  retaining explicit `session_id` compatibility.
+- Split sandbox installation-token permissions by action: write access for
+  branch pushes and read-only access for GitHub API/PR discovery. Remove
+  `pull_requests: write` from sandbox-issued tokens and preserve the initiating
+  user's attribution separately.
+- Return typed branch outcomes (`created_remote_branch`,
+  `updated_remote_branch`, and `already_at_desired_head`) and treat
+  `HEAD == upstream` as success. Keep the true empty-replay path as the only
+  no-op result.
+- Add focused handler, CLI, sandbox-auth, identity, and branch-publish tests.
+
+This PR changes no publication tables and can be rolled back without data
+migration. Its branch outcome contract is the prerequisite for PR 2.
+
+### PR 2 — Add the durable ledger and make the worker use it
+
+**Purpose:** establish one idempotent, server-owned publication operation for
+the normal PR-creation path.
+
+- Add the tenant-scoped `session_publications` table, typed model enums, store,
+  transition validation, uniqueness on `(org_id, changeset_id)`, request
+  generation, payload-first-write behavior, and checkpoint timestamps.
+- Introduce the publication service that ensures a request, starts an attempt,
+  publishes or verifies the branch, discovers or creates the GitHub PR,
+  records the local PR, and completes the session/changeset side effects.
+- Add the hidden session/changeset marker and exact-head PR lookup. Adopt a
+  local row when the webhook wins the GitHub-number uniqueness race, while
+  enforcing one PR per changeset.
+- Route user, automation, review-loop, and agent-tool `open_pr` jobs through
+  the service. Preserve the original queue and full request payload, and keep
+  `session_publish_state` as the UI compatibility lifecycle.
+- Cover state transitions, generation ordering, tenant isolation, checkpoint
+  ordering, replay after every checkpoint, PR uniqueness races, guarded worker
+  payloads, and stack/queue affinity.
+
+The worker should write the ledger for all new requests after deploy, but the
+legacy UI remains usable. Recovery scanning and historical backfill wait for
+PR 3 so this change has a bounded operational surface.
+
+### PR 3 — Converge webhooks, retries, and historical failures
+
+**Purpose:** make partially completed and out-of-band publication repair
+itself.
+
+- Teach opened, reopened, ready-for-review, and synchronize webhooks to recover
+  unknown or unowned PRs using a validated marker or an exact owned `143/`
+  branch. Fail closed on repository, org, session, changeset, or head-repository
+  mismatches.
+- Add the bounded oldest-first publication reconciler. It adopts a local PR
+  before checking the review gate, re-enqueues the stored request on its
+  original queue, and advances failed candidates so one bad row cannot starve
+  the batch.
+- Implement `retryable_failed`, terminal replay short-circuiting, completion
+  resumption, and strictly newer explicit-request reopening for
+  `completed_noop` and `terminal_failed`.
+- Add the historical false-“No changes” backfill migration and require
+  reconciliation to verify current GitHub state before associating a PR.
+- Test malformed and cross-tenant markers, authorship recovery, review-gate
+  bypass visibility, stale-row fairness, remote-already-at-HEAD retries,
+  completed post-publication resumption, and backfill selection.
+
+Deploy the migration before enabling the reconciler. Start with a conservative
+batch size and confirm that stale nonterminal counts converge without a rise in
+GitHub API or terminal-failure errors.
+
+### PR 4 — Expose status and close the operational loop
+
+**Purpose:** make durable publication understandable to users and operators,
+then retire reliance on legacy failure text.
+
+- Include publication rows in session detail responses and add typed frontend
+  response models.
+- Render review-pending, publishing, retrying, failed, no-op, and completed
+  states in the session header; poll only while a publication is nonterminal.
+- Emit structured checkpoint/reconciliation logs and the bounded-cardinality
+  transition and reconciliation metrics described above.
+- Add the production queries and alerting for stale nonterminal rows,
+  reconciliation errors, and terminal failures. Update public agent-tool and
+  review/ship documentation for the server-owned flow.
+- Add API response, frontend rendering/polling, and metric-label tests, plus a
+  deployment smoke test that retries one already-published branch and observes
+  the existing PR become locally recorded.
+
+After this PR has been observed in production, `session_publish_state` can
+remain as an action-state compatibility projection, but it must no longer be
+used for recovery decisions or incident diagnosis.
+
 ## Verification
 
 The regression suite covers:
