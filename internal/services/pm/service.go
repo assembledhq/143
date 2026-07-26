@@ -515,7 +515,15 @@ func (s *Service) selectRepo(ctx context.Context, orgID uuid.UUID, repoID *uuid.
 	return repo, nil
 }
 
+// analysisEnabled remains false throughout the compatibility shutdown. It is
+// a variable (rather than a build-time constant) so the guarded legacy code
+// remains type-checked until it is deleted in the follow-up removal PR.
+var analysisEnabled = false
+
 func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID, agentTypeOverride *models.AgentType) (*Plan, error) {
+	if !analysisEnabled {
+		return nil, fmt.Errorf("PM analysis is disabled")
+	}
 	if s.sandbox == nil || s.env == nil {
 		return nil, fmt.Errorf("pm sandbox or env helper not configured")
 	}
@@ -613,6 +621,9 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		return nil, failSession("agent auth preflight", err)
 	}
 
+	if !analysisEnabled {
+		return nil, failSession("create sandbox", fmt.Errorf("PM analysis is disabled"))
+	}
 	sb, err := s.sandbox.Create(ctx, sbCfg)
 	if err != nil {
 		return nil, failSession("create sandbox", err)
@@ -785,15 +796,6 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	if err := s.executePlan(ctx, orgID, plan, ctxBundle.settings, ctxBundle.productContext); err != nil {
 		exitReason = containerExitReason(ctx, err)
 		return nil, failSession("execute plan", err)
-	}
-
-	// Execute project plans if projects feature is enabled.
-	if s.projects != nil && s.projectTasks != nil && s.projectCycles != nil {
-		for _, pp := range plan.ProjectPlans {
-			if err := s.executeProjectPlan(ctx, orgID, &pp, ctxBundle.settings, plan.ID); err != nil {
-				s.logger.Error().Err(err).Str("project_id", pp.ProjectID.String()).Msg("failed to execute project plan")
-			}
-		}
 	}
 
 	plan.Status = models.PMPlanStatusCompleted

@@ -4548,3 +4548,37 @@ func TestSlackChannelSettingsPatchRequestApplyPreservesOmittedFields(t *testing.
 func boolPtr(v bool) *bool {
 	return &v
 }
+
+type disabledPMTriggerJobs struct {
+	calls int
+}
+
+func (s *disabledPMTriggerJobs) Enqueue(context.Context, uuid.UUID, string, string, any, int, *string) (uuid.UUID, error) {
+	s.calls++
+	return uuid.New(), nil
+}
+
+type disabledPMTriggerDocs struct {
+	calls int
+}
+
+func (s *disabledPMTriggerDocs) GetByOrgAndSourceType(context.Context, uuid.UUID, string) (models.PMDocument, error) {
+	s.calls++
+	return models.PMDocument{}, nil
+}
+
+func TestIntegrationHandler_PMContextAutoTriggerIsDisabled(t *testing.T) {
+	t.Parallel()
+
+	jobs := &disabledPMTriggerJobs{}
+	docs := &disabledPMTriggerDocs{}
+	handler := &IntegrationHandler{
+		pmAutoTriggerJobs: jobs,
+		pmAutoTriggerDocs: docs,
+	}
+
+	handler.maybeEnqueuePMContext(context.Background(), uuid.New())
+
+	require.Zero(t, docs.calls, "disabled integration hook should not inspect PM documents")
+	require.Zero(t, jobs.calls, "disabled integration hook should not enqueue PM context work")
+}
