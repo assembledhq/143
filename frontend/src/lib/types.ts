@@ -3404,6 +3404,7 @@ export type AutomationPublishPolicy = "pull_request" | "none";
 export type AutomationGitHubEvent =
   | "github.pull_request.opened"
   | "github.pull_request.updated"
+  | "github.pull_request.ready_for_review"
   | "github.pull_request.merged"
   | "github.check_suite.completed"
   | "github.check_run.completed"
@@ -3509,6 +3510,7 @@ export interface AutomationGitHubEventFilters {
   base_branches?: string[];
   authors?: string[];
   paths?: string[];
+  labels?: string[];
   feedback_types?: string[];
   review_states?: string[];
 }

@@ -1315,6 +1315,8 @@ func resolveAutomationGitHubEventTriggers(productTriggers []models.AutomationPro
 			events = append(events, models.AutomationGitHubEventPullRequestOpened)
 		case models.AutomationProductTriggerPRUpdated:
 			events = append(events, models.AutomationGitHubEventPullRequestUpdated)
+		case models.AutomationProductTriggerPRReadyForReview:
+			events = append(events, models.AutomationGitHubEventPullRequestReadyForReview)
 		case models.AutomationProductTriggerPRFeedback:
 			events = append(events,
 				models.AutomationGitHubEventIssueCommentCreated,
@@ -1361,6 +1363,7 @@ func validateAutomationGitHubEventFilters(raw json.RawMessage) (json.RawMessage,
 	filters.BaseBranches = normalize(filters.BaseBranches)
 	filters.Authors = normalize(filters.Authors)
 	filters.Paths = normalize(filters.Paths)
+	filters.Labels = normalize(filters.Labels)
 	filters.FeedbackTypes = normalize(filters.FeedbackTypes)
 	filters.ReviewStates = normalize(filters.ReviewStates)
 	out, err := json.Marshal(filters)
