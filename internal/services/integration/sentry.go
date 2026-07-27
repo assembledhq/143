@@ -19,7 +19,7 @@ import (
 //
 // The ingestion layer (ingestion.SentryAPIClient) handles paginated issue
 // syncing with rate limiting and retry logic. This tracker shares the same
-// Sentry REST API but serves a different purpose: PM-level querying vs
+// Sentry REST API but serves a different purpose: agent-facing querying vs
 // bulk data ingestion. The two use the same credential (models.SentryConfig
 // from org_credentials) and the same base issue type (ingestion.SentryIssue).
 type SentryErrorTracker struct {

@@ -151,7 +151,7 @@ func (g *GitHubCodeReviewSource) ListRecentPRs(ctx context.Context, filter PRFil
 		// Note: additions, deletions, and changed_files are NOT populated
 		// from the list endpoint — the GitHub /pulls list API does not return
 		// these fields. They are only available via the single-PR endpoint.
-		// The PM agent can drill into specific PRs for change stats.
+		// Agents can drill into specific PRs for change stats.
 		if pr.MergedAt != nil {
 			summary.State = "merged"
 			summary.MergedAt = *pr.MergedAt
@@ -324,7 +324,7 @@ func parseLinkNext(header string) string {
 // reviewDecision returns a simple summary based on review comment count.
 // The list endpoint doesn't include the actual review decision (approved,
 // changes_requested), so we can only distinguish "has reviews" vs "no reviews".
-// The PM agent can drill into specific PRs via GetPRReviews for full decisions.
+// Agents can drill into specific PRs via GetPRReviews for full decisions.
 func reviewDecision(reviewComments int) string {
 	if reviewComments > 0 {
 		return "has_reviews"

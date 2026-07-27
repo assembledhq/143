@@ -619,29 +619,6 @@ This command queues the durable 143 publication workflow; it does not call the
 GitHub PR API from the sandbox. Sandbox GitHub API access is read-only for pull
 requests, while git push uses a separate repository-bound contents token.
 
-### `project propose`
-
-Propose a repo-scoped project for human review.
-
-| Flag | Type | Required | Description |
-|---|---|---:|---|
-| `--repository_id` | string | Yes | Target repository UUID. |
-| `--title` | string | Yes | Project title. |
-| `--goal` | string | Yes | What success looks like. |
-| `--reasoning` | string | Yes | Why this project should exist. |
-| `--scope` | string | No | What is in and out of bounds. |
-| `--completion_criteria` | string | No | How to know when done. |
-| `--source_issue_ids` | string | No | Comma-separated motivating issue UUIDs. |
-| `--priority` | number | No | Priority from `0` to `100`. Defaults to `50`. |
-| `--tasks` | string | No | JSON array of seed task specs: `[{"title":"...","description":"...","approach":"...","complexity":"...","confidence":"..."}]`. |
-| `--similar_project_ids` | string | No | Comma-separated same-repo project UUIDs considered non-duplicate. |
-
-Common use: turn repeated findings across issues into a reviewed project proposal.
-
-```bash
-143-tools project propose --repository_id 00000000-0000-0000-0000-000000000000 --title "Harden webhook delivery" --goal "Retries preserve idempotency and surface permanent failures" --reasoning "Recent production errors share the same delivery path."
-```
-
 ### `eval add`
 
 Add a candidate eval task from a session launched by the eval settings bootstrap flow. This namespace is not exposed to ordinary coding sessions.

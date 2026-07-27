@@ -24,7 +24,6 @@ const nodeTestFiles = [
   'src/lib/tool-label.test.ts',
   'src/lib/use-eval-sse.test.ts',
   'src/lib/utils.test.ts',
-  'src/components/autopilot/autopilot-helpers.test.ts',
   'src/components/command-palette/command-palette-actions.test.ts',
   'src/components/code-review/index.test.ts',
   'src/app/(dashboard)/automations/[id]/automation-stats-card.test.tsx',

@@ -1746,16 +1746,9 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 		AutonomyLevel string `json:"autonomy_level"`
 		TokenMode     string `json:"token_mode"`
 		Message       string `json:"message"`
-		// Force allows an admin to kick off a session even when the autopilot
-		// state is blocked, failed, or skipped. Rejected for non-admins.
-		Force bool `json:"force"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body", err)
-		return
-	}
-	if body.Force && middleware.ActiveRoleFromContext(r.Context()) != string(models.RoleAdmin) {
-		writeError(w, r, http.StatusForbidden, "FORBIDDEN", "admin role required to force-start a session")
 		return
 	}
 	const maxMessageLength = 10000

@@ -24,17 +24,17 @@ paths.
 
 The removal used four pull requests:
 
-1. **Make PM and Autopilot inert.** Stop every automatic PM job and every
+1. **Completed — Make PM and Autopilot inert.** Stop every automatic PM job and every
    PM-owned path that can create or dispatch work. Preserve compatibility with
    the existing UI and historical data during this safety deployment.
-2. **Make PM and Autopilot absent.** Remove the UI, feature API, settings
+2. **Completed — Make PM and Autopilot absent.** Remove the UI, feature API, settings
    surfaces, documentation, and dedicated Autopilot queue implementation while
    retaining historical records.
-3. **Remove obsolete machinery.** Simplify the backend and data model after the
+3. **Completed — Remove obsolete machinery.** Simplify the backend and data model after the
    shutdown has been deployed and observed. Retain standalone priority scoring,
    preserve eval reference-document pins under neutral names, remove PM Project
    planning, and neutralize shared session-context names.
-4. **Contract rollout compatibility.** Promote the neutral schema projections
+4. **Completed — Contract rollout compatibility.** Promote the neutral schema projections
    to base tables, remove legacy dual-write columns and triggers, retire the
    temporary disabled-job barrier, and remove PM-only Project provenance.
 
@@ -638,9 +638,9 @@ Historical implemented design docs remain historical records. They do not need
 to be rewritten, but the architecture map should point to this removal design
 and stop describing Autopilot as current behavior.
 
-## Three-PR Implementation Plan
+## Completed Four-PR Implementation
 
-### PR 1 - Make PM And Autopilot Inert
+### PR 1 - Make PM And Autopilot Inert — Completed
 
 **Purpose:** stop compute and side effects with the smallest safe,
 backward-compatible deployment.
@@ -691,7 +691,7 @@ backward-compatible deployment.
 
 Deploy PR 1 independently and observe job/session creation before merging PR 2.
 
-### PR 2 - Make PM And Autopilot Absent
+### PR 2 - Make PM And Autopilot Absent — Completed
 
 **Purpose:** remove the product and dedicated feature code after it is inert.
 
@@ -741,7 +741,7 @@ Deploy PR 1 independently and observe job/session creation before merging PR 2.
   and navigation change broadly.
 - Focused backend tests plus full tenancy lints.
 
-### PR 3 - Remove Obsolete Machinery
+### PR 3 - Remove Obsolete Machinery — Completed
 
 **Purpose:** capture backend simplification after the shutdown is proven.
 
@@ -788,7 +788,7 @@ views or synchronized columns while legacy tables and columns remain available
 to draining binaries. Destructive contraction is intentionally deferred until
 the whole fleet has run neutral code through a complete deployment.
 
-### PR 4 - Contract Rollout Compatibility
+### PR 4 - Contract Rollout Compatibility — Completed
 
 **Purpose:** remove the expand-phase compatibility layer after the fleet has
 completed a deployment on neutral application contracts.
@@ -852,24 +852,24 @@ Four PRs provide the clearest invariants:
 
 ## Acceptance Criteria
 
-The removal is complete when:
+All acceptance criteria are satisfied:
 
-1. No scheduled, integration-triggered, or manual general PM analysis can run.
-2. No PM path can create a coding session or enqueue `run_agent`.
-3. PM analysis cannot create internal issues or use internal issue creation to
+- [x] No scheduled, integration-triggered, or manual general PM analysis can run.
+- [x] No PM path can create a coding session or enqueue `run_agent`.
+- [x] PM analysis cannot create internal issues or use internal issue creation to
    start work; non-PM internal issue behavior remains unchanged.
-4. Automatic PM project proposals cannot be created.
-5. Autopilot has no UI route, navigation entry, command, settings page, public
+- [x] Automatic PM project proposals cannot be created.
+- [x] Autopilot has no UI route, navigation entry, command, settings page, public
    guide, onboarding dependency, or homepage positioning.
-6. `/api/v1/autopilot/queue` and its dedicated store/model stack are gone.
-7. Manual Sessions, explicit issue starts, user-authored Projects, and
+- [x] `/api/v1/autopilot/queue` and its dedicated store/model stack are gone.
+- [x] Manual Sessions, explicit issue starts, user-authored Projects, and
    user-authored Automations continue to work.
-8. Runtime concurrency limits remain enforced.
-9. Historical PM-created sessions, issues, projects, PRs, usage, and audits
+- [x] Runtime concurrency limits remain enforced.
+- [x] Historical PM-created sessions, issues, projects, PRs, usage, and audits
    remain readable.
-10. Eval reproducibility remains intact.
-11. Priority scoring, reference documents, and session execution context have
+- [x] Eval reproducibility remains intact.
+- [x] Priority scoring, reference documents, and session execution context have
     explicit non-Autopilot ownership.
-12. Architecture and public documentation describe the post-removal product.
-13. Project `Run now`, `project_cycle`, and PM project proposals are removed
+- [x] Architecture and public documentation describe the post-removal product.
+- [x] Project `Run now`, `project_cycle`, and PM project proposals are removed
     while human-authored Project management remains functional.

@@ -2,13 +2,11 @@
 // sources (error trackers, task managers, document stores, message sources).
 //
 // These interfaces are consumed by:
-//   - The PM agent's context gatherer for enriched issue analysis
 //   - MCP servers that expose tools to coding agents at runtime
 //   - Static context writers that pre-populate sandbox files
 //
-// Each interface is designed around the queries that are most useful to a PM
-// agent reasoning about what to work on, how to prioritize, and how to
-// coordinate across tools.
+// Each interface is designed around queries useful to agents reasoning about
+// operational state and coordinating work across tools.
 package integration
 
 import (
@@ -22,29 +20,23 @@ import (
 // ErrorTracker — Sentry, Datadog, Bugsnag, etc.
 // --------------------------------------------------------------------------
 
-// ErrorTracker provides access to error monitoring systems. The PM agent uses
-// this to understand error impact, identify root causes across multiple errors,
-// and assess whether errors are trending up or stabilizing.
+// ErrorTracker provides access to error monitoring systems.
 type ErrorTracker interface {
 	// Name returns the provider identifier (e.g. "sentry").
 	Name() string
 
 	// ListErrors returns unresolved errors matching the given filter.
-	// The PM agent uses this to discover new errors and re-assess known ones.
 	ListErrors(ctx context.Context, filter ErrorFilter) ([]ErrorSummary, error)
 
 	// GetError returns full details for a single error, including the stack
-	// trace and occurrence timeline. The PM agent uses this to understand
-	// root cause and assess customer impact.
+	// trace and occurrence timeline.
 	GetError(ctx context.Context, errorID string) (*ErrorDetail, error)
 
-	// GetTrend returns occurrence counts over time for an error. The PM agent
-	// uses this to decide urgency — a flat trend is less urgent than a spike.
+	// GetTrend returns occurrence counts over time for an error.
 	GetTrend(ctx context.Context, errorID string, period time.Duration) (*ErrorTrend, error)
 
 	// FindRelated returns errors that likely share a root cause with the given
-	// error (e.g. same stack trace prefix, same culprit module). The PM agent
-	// uses this to cluster errors and create unified fix tasks.
+	// error (e.g. same stack trace prefix, same culprit module).
 	FindRelated(ctx context.Context, errorID string) ([]ErrorSummary, error)
 }
 
@@ -152,7 +144,7 @@ type OnCall struct {
 }
 
 // ErrorSummary is a compact representation of an error for list views and
-// PM-level reasoning. It contains enough to prioritize without fetching details.
+// prioritization without fetching details.
 type ErrorSummary struct {
 	ID            string    `json:"id"`
 	Title         string    `json:"title"`
@@ -167,7 +159,7 @@ type ErrorSummary struct {
 }
 
 // ErrorDetail is the full representation of an error, including the stack trace
-// and rich metadata the PM agent needs for root cause analysis.
+// and rich metadata needed for root cause analysis.
 type ErrorDetail struct {
 	ErrorSummary
 
@@ -194,7 +186,7 @@ type StackTrace struct {
 	// Ordered most-recent-first.
 	AppFrames []StackFrame `json:"app_frames"`
 
-	// Summary is a human-readable condensed form suitable for PM-level analysis
+	// Summary is a human-readable condensed form suitable for agent analysis.
 	// (e.g. "TypeError at handlers/auth.go:42 → middleware/session.go:18").
 	Summary string `json:"summary"`
 }
@@ -227,34 +219,27 @@ type TrendDataPoint struct {
 // TaskManager — Linear, Jira, GitHub Issues, etc.
 // --------------------------------------------------------------------------
 
-// TaskManager provides access to issue/task tracking systems. The PM agent uses
-// this to understand current workload, identify stale tasks, cross-reference
-// errors with existing tickets, and manage task lifecycle.
+// TaskManager provides access to issue and task tracking systems.
 type TaskManager interface {
 	// Name returns the provider identifier (e.g. "linear").
 	Name() string
 
 	// ListTasks returns tasks matching the given filter.
-	// The PM agent uses this to understand the current backlog and workload.
 	ListTasks(ctx context.Context, filter TaskFilter) ([]TaskSummary, error)
 
 	// GetTask returns full details for a single task, including comments
-	// and linked items. The PM agent uses this to understand context and
-	// decide whether to assign work or re-prioritize.
+	// and linked items.
 	GetTask(ctx context.Context, taskID string) (*TaskDetail, error)
 
 	// FindRelated returns tasks that are related to the given task (linked
-	// issues, sub-issues, or tasks in the same project/epic). The PM agent
-	// uses this to identify duplicate work and coordinate fixes.
+	// issues, sub-issues, or tasks in the same project/epic).
 	FindRelated(ctx context.Context, taskID string) ([]TaskSummary, error)
 
 	// UpdateTask applies a change to a task (re-prioritize, re-label,
-	// add comment, change state). The PM agent uses this to keep Linear
-	// in sync with its decisions.
+	// add comment, change state).
 	UpdateTask(ctx context.Context, taskID string, update TaskUpdate) error
 
-	// CreateTask creates a new task. The PM agent uses this when it
-	// identifies work that doesn't have a corresponding ticket.
+	// CreateTask creates a new task.
 	CreateTask(ctx context.Context, spec TaskCreateSpec) (*TaskSummary, error)
 }
 
@@ -369,18 +354,14 @@ type Document struct {
 // --------------------------------------------------------------------------
 
 // CodeReviewSource provides access to code review data from pull/merge requests.
-// The PM agent uses this to identify recurring review themes, quality patterns,
-// and areas of the codebase that consistently generate review friction.
 type CodeReviewSource interface {
 	// Name returns the provider identifier (e.g. "github").
 	Name() string
 
 	// ListRecentPRs returns recently merged pull requests matching the filter.
-	// The PM agent uses this to understand what's shipping and identify review patterns.
 	ListRecentPRs(ctx context.Context, filter PRFilter) ([]PRSummary, error)
 
 	// GetPRReviews returns all review comments and review decisions for a PR.
-	// The PM agent uses this to extract quality signals and recurring feedback themes.
 	GetPRReviews(ctx context.Context, prNumber int) ([]PRReview, error)
 }
 
@@ -442,9 +423,7 @@ func (s *StubCodeReviewSource) GetPRReviews(_ context.Context, _ int) ([]PRRevie
 // MessageSource — Slack, Discord, Teams, etc.
 // --------------------------------------------------------------------------
 
-// MessageSource provides access to team communication channels. The PM agent
-// uses this to find discussions about bugs, understand user-reported issues,
-// and identify context that didn't make it into formal tickets.
+// MessageSource provides access to team communication channels.
 type MessageSource interface {
 	// Name returns the provider identifier (e.g. "slack").
 	Name() string
@@ -453,7 +432,6 @@ type MessageSource interface {
 	SearchMessages(ctx context.Context, query string, filter MessageFilter) ([]MessageSummary, error)
 
 	// GetThread returns a full conversation thread given a message ID.
-	// The PM agent uses this to understand the full discussion around an issue.
 	GetThread(ctx context.Context, messageID string) (*Thread, error)
 }
 
@@ -518,7 +496,6 @@ func (s *StubMessageSender) SendMessage(context.Context, SendMessageParams) (*Se
 // --------------------------------------------------------------------------
 
 // IssueCreator allows agents to create first-class issues in the 143 database.
-// This is used by the PM agent when it identifies new work that should be tracked.
 type IssueCreator interface {
 	// Name returns the provider identifier (e.g. "143").
 	Name() string
