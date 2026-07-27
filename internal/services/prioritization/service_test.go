@@ -53,27 +53,6 @@ func (f *fakeComplexityStore) Upsert(ctx context.Context, est *models.Complexity
 	return nil
 }
 
-type fakeSessionStore struct {
-	countRunningByOrgFn func(ctx context.Context, orgID uuid.UUID) (int, error)
-	createFn            func(ctx context.Context, run *models.Session) error
-	createdRuns         []*models.Session
-}
-
-func (f *fakeSessionStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
-	if f.countRunningByOrgFn != nil {
-		return f.countRunningByOrgFn(ctx, orgID)
-	}
-	return 0, nil
-}
-
-func (f *fakeSessionStore) Create(ctx context.Context, run *models.Session) error {
-	f.createdRuns = append(f.createdRuns, run)
-	if f.createFn != nil {
-		return f.createFn(ctx, run)
-	}
-	return nil
-}
-
 type fakeOrgStore struct {
 	getByIDFn func(ctx context.Context, id uuid.UUID) (models.Organization, error)
 }
@@ -83,19 +62,6 @@ func (f *fakeOrgStore) GetByID(ctx context.Context, id uuid.UUID) (models.Organi
 		return f.getByIDFn(ctx, id)
 	}
 	return models.Organization{}, nil
-}
-
-type fakeJobStore struct {
-	enqueueFn func(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
-	enqueueN  int
-}
-
-func (f *fakeJobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
-	f.enqueueN++
-	if f.enqueueFn != nil {
-		return f.enqueueFn(ctx, orgID, queue, jobType, payload, priority, dedupeKey)
-	}
-	return uuid.New(), nil
 }
 
 type fakeLLMClient struct {
