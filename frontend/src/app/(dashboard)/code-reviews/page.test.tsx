@@ -416,10 +416,7 @@ describe("CodeReviewsPage", () => {
     await user.click(within(evidenceSheet).getByRole("button", { name: "Close" }));
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("combobox", { name: "GitHub reviewer repository" }));
-    await user.click(await screen.findByRole("option", { name: "acme/api" }));
-
-    // The current behavior, outcome, and selected repository trigger are visible without expanding anything.
+    // The current behavior, outcome, and repository trigger are visible without expanding anything.
     expect(screen.getByText("Current behavior:")).toBeInTheDocument();
     expect(screen.getByText(/Comments only · 2 reviewers · quorum 2 · passing checks required · disagreement blocks approval · sensitive paths need human review/i)).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /Comment only/i })).toBeChecked();
@@ -863,8 +860,7 @@ describe("CodeReviewsPage", () => {
       "Review outcome",
       "Automated approval policy",
       "Additional review instructions (optional)",
-      "GitHub reviewer repository",
-      "GitHub reviewer",
+      "acme/api GitHub reviewer",
       "Advanced controls",
     ];
     for (const label of topLevelGuidance) {
@@ -874,7 +870,7 @@ describe("CodeReviewsPage", () => {
     const enablement = screen.getByRole("switch", {
       name: "Code reviews enabled",
     });
-    const githubHeading = screen.getByText("GitHub reviewer");
+    const githubHeading = screen.getByText("acme/api");
     const instructionsHeading = screen.getByText("Additional review instructions (optional)");
     const summaryHeading = screen.getByText("Current behavior:");
     const advancedTrigger = screen.getByRole("button", {
@@ -910,8 +906,6 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findByRole("tooltip")).toHaveTextContent(/cannot bypass hard safeguards/i);
     act(() => approvalInfo.blur());
 
-    await user.click(screen.getByRole("combobox", { name: "GitHub reviewer repository" }));
-    await user.click(await screen.findByRole("option", { name: "acme/api" }));
     const manage = await screen.findByRole("button", { name: "Manage" });
     expect(manage).toHaveAttribute("aria-expanded", "false");
     await user.click(manage);
@@ -1578,11 +1572,47 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("combobox", { name: "GitHub reviewer repository" }));
-    await user.click(await screen.findByRole("option", { name: "acme/api" }));
-
     expect(await screen.findByText("Needs GitHub account")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Connect GitHub/i })).toBeInTheDocument();
+  });
+
+  it("shows reviewer setup status for every connected repository", async () => {
+    const secondRepo: Repository = {
+      ...repo,
+      id: "repo-2",
+      github_id: 144,
+      full_name: "acme/web",
+      clone_url: "https://github.com/acme/web.git",
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({ data: [repo, secondRepo], meta: {} } satisfies ListResponse<Repository>),
+      ),
+      http.get("/api/v1/code-review-github-trigger", ({ request }) => {
+        const repositoryID = new URL(request.url).searchParams.get("repository_id");
+        const trigger: CodeReviewGitHubTriggerResponse = repositoryID === secondRepo.id
+          ? {
+              ...githubTriggerReady,
+              status: "unconfigured",
+              repository_id: secondRepo.id,
+              repository_full_name: secondRepo.full_name,
+              trigger: undefined,
+            }
+          : githubTriggerReady;
+        return HttpResponse.json({ data: trigger } satisfies SingleResponse<CodeReviewGitHubTriggerResponse>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+    await userEvent.click(await screen.findByRole("tab", { name: /Policy/i }));
+
+    const apiRepository = await screen.findByRole("region", { name: "acme/api GitHub reviewer" });
+    const webRepository = await screen.findByRole("region", { name: "acme/web GitHub reviewer" });
+    expect(within(apiRepository).getByText("Ready")).toBeInTheDocument();
+    expect(within(apiRepository).getByText("@acme/143-code-reviewer")).toBeInTheDocument();
+    expect(within(webRepository).getByText("Not configured")).toBeInTheDocument();
+    expect(within(webRepository).getByRole("button", { name: "Set up GitHub reviewer" })).toBeEnabled();
   });
 
   it("explains why GitHub reviewer setup is disabled", async () => {
@@ -1602,9 +1632,6 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("combobox", { name: "GitHub reviewer repository" }));
-    await user.click(await screen.findByRole("option", { name: "acme/api" }));
-
     const setupButton = await screen.findByRole("button", {
       name: /Set up GitHub reviewer/i,
     });
@@ -1650,8 +1677,6 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("combobox", { name: "GitHub reviewer repository" }));
-    await user.click(await screen.findByRole("option", { name: "acme/api" }));
     const setupButton = await screen.findByRole("button", { name: /Set up GitHub reviewer/i });
     await waitFor(() => expect(setupButton).toBeEnabled());
     await user.click(setupButton);
@@ -1673,10 +1698,6 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByRole("switch", { name: "Code reviews enabled" })).toBeDisabled();
     expect(screen.getByRole("textbox", { name: "Additional review instructions (optional)" })).toBeDisabled();
 
-    const repositorySelect = screen.getByRole("combobox", { name: "GitHub reviewer repository" });
-    expect(repositorySelect).toBeEnabled();
-    await user.click(repositorySelect);
-    await user.click(await screen.findByRole("option", { name: "acme/api" }));
     expect(await screen.findByText("@acme/143-code-reviewer")).toBeInTheDocument();
     const manageButton = screen.getByRole("button", { name: "Manage" });
     expect(manageButton).toBeEnabled();
