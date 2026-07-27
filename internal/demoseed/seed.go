@@ -460,6 +460,11 @@ func AssertDemoSeedState(ctx context.Context, pool seedDB) error {
 			expected: 2,
 		},
 		{
+			name:     "demo code review policy matches current schema",
+			query:    `SELECT count(*) FROM code_review_policies WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id = '00000000-0000-4000-a000-000000000900'::uuid AND repository_id IS NULL AND active = true AND review_instructions IS NOT NULL AND automated_approval_policy <> ''`,
+			expected: 1,
+		},
+		{
 			name:     "demo code review metadata exists",
 			query:    `SELECT count(*) FROM code_review_session_metadata WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000902'::uuid, '00000000-0000-4000-a000-000000000903'::uuid)`,
 			expected: 2,
