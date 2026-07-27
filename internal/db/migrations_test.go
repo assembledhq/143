@@ -474,33 +474,74 @@ func TestRemovePMMachineryMigrationPostgresBehavior(t *testing.T) {
 	require.NoError(t, err, "test should isolate migration objects to the test schema")
 
 	_, err = conn.Exec(ctx, `
+		CREATE TABLE organizations (id uuid PRIMARY KEY);
+		CREATE TABLE users (id uuid PRIMARY KEY);
+		CREATE TABLE sessions (id uuid PRIMARY KEY);
+		CREATE TABLE project_tasks (id uuid PRIMARY KEY);
+		CREATE TABLE pm_plans (id uuid PRIMARY KEY);
 		CREATE TABLE session_pm_context (
-			session_id uuid PRIMARY KEY,
-			org_id uuid NOT NULL,
-			pm_plan_id uuid,
+			session_id uuid PRIMARY KEY REFERENCES sessions(id),
+			org_id uuid NOT NULL REFERENCES organizations(id),
+			pm_plan_id uuid REFERENCES pm_plans(id),
 			pm_approach text,
 			pm_reasoning text,
-			project_task_id uuid,
+			project_task_id uuid REFERENCES project_tasks(id),
 			created_at timestamptz NOT NULL DEFAULT now(),
-			updated_at timestamptz NOT NULL DEFAULT now()
+			updated_at timestamptz NOT NULL DEFAULT now(),
+			CONSTRAINT chk_session_pm_context_has_data CHECK (
+				pm_plan_id IS NOT NULL
+				OR pm_approach IS NOT NULL
+				OR pm_reasoning IS NOT NULL
+				OR project_task_id IS NOT NULL
+			)
 		);
+		CREATE UNIQUE INDEX idx_session_pm_context_org_session
+			ON session_pm_context (org_id, session_id);
+		CREATE INDEX idx_session_pm_context_project_task
+			ON session_pm_context (org_id, project_task_id)
+			WHERE project_task_id IS NOT NULL;
 		CREATE TABLE pm_documents (
 			id uuid PRIMARY KEY,
-			org_id uuid NOT NULL,
-			title text NOT NULL
+			org_id uuid NOT NULL REFERENCES organizations(id),
+			title text NOT NULL,
+			doc_type text NOT NULL DEFAULT 'context',
+			source_type text NOT NULL DEFAULT 'manual',
+			source_id text,
+			active boolean NOT NULL DEFAULT true,
+			logical_id uuid NOT NULL DEFAULT gen_random_uuid(),
+			created_by uuid REFERENCES users(id),
+			CONSTRAINT chk_pm_documents_doc_type CHECK (doc_type IN ('roadmap', 'context')),
+			CONSTRAINT chk_pm_documents_source_type CHECK (source_type IN ('manual', 'url'))
 		);
+		CREATE INDEX idx_pm_documents_org ON pm_documents(org_id);
+		CREATE INDEX idx_pm_documents_source
+			ON pm_documents(org_id, source_type, source_id)
+			WHERE source_id IS NOT NULL;
+		CREATE UNIQUE INDEX idx_pm_documents_active_logical
+			ON pm_documents(org_id, logical_id)
+			WHERE active = true;
 		CREATE TABLE pm_document_set_pins (
 			id uuid PRIMARY KEY,
-			org_id uuid NOT NULL
+			org_id uuid NOT NULL REFERENCES organizations(id)
 		);
+		CREATE INDEX idx_pm_document_set_pins_org ON pm_document_set_pins(org_id);
 		CREATE TABLE pm_document_set_pin_members (
 			pin_id uuid NOT NULL REFERENCES pm_document_set_pins(id),
 			document_id uuid NOT NULL REFERENCES pm_documents(id),
 			PRIMARY KEY (pin_id, document_id)
 		);
-		CREATE TABLE pm_plans (id uuid PRIMARY KEY);
-		CREATE TABLE pm_decision_log (id uuid PRIMARY KEY);
-		CREATE TABLE project_cycles (id uuid PRIMARY KEY);
+		CREATE TABLE pm_decision_log (
+			id uuid PRIMARY KEY,
+			plan_id uuid NOT NULL REFERENCES pm_plans(id)
+		);
+		CREATE TABLE project_cycles (
+			id uuid PRIMARY KEY,
+			pm_plan_id uuid REFERENCES pm_plans(id)
+		);
+		CREATE TABLE jobs (
+			id uuid PRIMARY KEY,
+			job_type text NOT NULL
+		);
 		CREATE TABLE eval_tasks (
 			id uuid PRIMARY KEY,
 			pm_document_set_pin_id uuid REFERENCES pm_document_set_pins(id)
@@ -516,6 +557,40 @@ func TestRemovePMMachineryMigrationPostgresBehavior(t *testing.T) {
 				source IN ('sentry', 'linear', 'pagerduty', 'manual', 'pm_agent')
 			)
 		);
+		CREATE TABLE projects (
+			id uuid PRIMARY KEY,
+			proposed_by_pm boolean NOT NULL DEFAULT false,
+			source_issue_ids uuid[],
+			proposal_reasoning text
+		);
+		CREATE TABLE project_source_issues (
+			project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			issue_id uuid NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+			PRIMARY KEY (project_id, issue_id)
+		);
+		CREATE FUNCTION reject_legacy_array_write()
+		RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			RAISE EXCEPTION 'legacy array is frozen';
+		END
+		$$;
+		CREATE TRIGGER trg_freeze_source_issue_ids
+		BEFORE UPDATE OF source_issue_ids ON projects
+		FOR EACH ROW
+		WHEN (OLD.source_issue_ids IS DISTINCT FROM NEW.source_issue_ids)
+		EXECUTE FUNCTION reject_legacy_array_write();
+		CREATE FUNCTION reject_disabled_pm_jobs()
+		RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			IF NEW.job_type = 'pm_analyze' THEN
+				RAISE EXCEPTION 'disabled';
+			END IF;
+			RETURN NEW;
+		END
+		$$;
+		CREATE TRIGGER trg_reject_disabled_pm_jobs
+		BEFORE INSERT OR UPDATE OF job_type ON jobs
+		FOR EACH ROW EXECUTE FUNCTION reject_disabled_pm_jobs();
 	`)
 	require.NoError(t, err, "test should create the pre-migration compatibility schema")
 
@@ -526,11 +601,24 @@ func TestRemovePMMachineryMigrationPostgresBehavior(t *testing.T) {
 
 	orgID := uuid.New()
 	sessionID := uuid.New()
+	planOnlySessionID := uuid.New()
+	planArchiveID := uuid.New()
+	_, err = conn.Exec(ctx, `INSERT INTO organizations (id) VALUES ($1)`, orgID)
+	require.NoError(t, err, "test should seed the organization referenced by retained rows")
+	_, err = conn.Exec(ctx, `INSERT INTO sessions (id) VALUES ($1), ($2)`, sessionID, planOnlySessionID)
+	require.NoError(t, err, "test should seed sessions referenced by execution context")
+	_, err = conn.Exec(ctx, `INSERT INTO pm_plans (id) VALUES ($1)`, planArchiveID)
+	require.NoError(t, err, "test should seed a historical PM plan")
 	_, err = conn.Exec(ctx, `
 		INSERT INTO session_execution_context (session_id, org_id, execution_brief)
 		VALUES ($1, $2, 'neutral brief')
 	`, sessionID, orgID)
 	require.NoError(t, err, "new code should write through the neutral session view")
+	_, err = conn.Exec(ctx, `
+		INSERT INTO session_pm_context (session_id, org_id, pm_plan_id)
+		VALUES ($1, $2, $3)
+	`, planOnlySessionID, orgID, planArchiveID)
+	require.NoError(t, err, "test should seed historical context containing only the retired plan link")
 	var legacyBrief string
 	err = conn.QueryRow(ctx, `SELECT pm_approach FROM session_pm_context WHERE session_id = $1`, sessionID).Scan(&legacyBrief)
 	require.NoError(t, err, "old code should read the row written through the neutral view")
@@ -582,6 +670,159 @@ func TestRemovePMMachineryMigrationPostgresBehavior(t *testing.T) {
 	require.NoError(t, err, "test should read synchronized eval-run pin columns")
 	require.Equal(t, pinID, legacyPinID, "neutral eval-run writes should synchronize the legacy pin column")
 	require.Equal(t, pinID, neutralPinID, "neutral eval-run writes should preserve the neutral pin column")
+
+	decisionArchiveID := uuid.New()
+	cycleArchiveID := uuid.New()
+	_, err = conn.Exec(ctx, `
+		INSERT INTO pm_decision_log (id, plan_id) VALUES ($1, $2)
+	`, decisionArchiveID, planArchiveID)
+	require.NoError(t, err, "test should seed a historical PM decision")
+	_, err = conn.Exec(ctx, `
+		INSERT INTO project_cycles (id, pm_plan_id) VALUES ($1, $2)
+	`, cycleArchiveID, planArchiveID)
+	require.NoError(t, err, "test should seed a historical Project cycle")
+
+	contractionUpSQL, err := os.ReadFile("../../migrations/000261_contract_pm_compatibility.up.sql")
+	require.NoError(t, err, "test should read the PM compatibility contraction up migration")
+	_, err = conn.Exec(ctx, string(contractionUpSQL))
+	require.NoError(t, err, "contraction up migration should promote neutral objects")
+
+	var physicalNeutralTables int
+	err = conn.QueryRow(ctx, `
+		SELECT count(*)
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = current_schema()
+		  AND c.relkind = 'r'
+		  AND c.relname IN (
+		      'session_execution_context',
+		      'reference_documents',
+		      'reference_context_set_pins',
+		      'reference_context_set_pin_members'
+		  )
+	`).Scan(&physicalNeutralTables)
+	require.NoError(t, err, "test should inspect neutral relation kinds")
+	require.Equal(t, 4, physicalNeutralTables, "contraction should promote every neutral projection to a physical table")
+
+	var archivedRows int
+	err = conn.QueryRow(ctx, `
+		SELECT
+		    (SELECT count(*) FROM pm_plan_archive WHERE id = $1)
+		  + (SELECT count(*) FROM pm_decision_archive WHERE id = $2)
+		  + (SELECT count(*) FROM project_cycle_archive WHERE id = $3)
+	`, planArchiveID, decisionArchiveID, cycleArchiveID).Scan(&archivedRows)
+	require.NoError(t, err, "test should read renamed planning archives")
+	require.Equal(t, 3, archivedRows, "contraction should preserve every historical planning archive row")
+
+	_, err = conn.Exec(ctx, `
+		INSERT INTO pm_decision_archive (id, plan_id) VALUES ($1, $2)
+	`, uuid.New(), uuid.New())
+	require.Error(t, err, "archived PM decisions should retain their plan foreign key")
+	_, err = conn.Exec(ctx, `
+		INSERT INTO project_cycle_archive (id, pm_plan_id) VALUES ($1, $2)
+	`, uuid.New(), uuid.New())
+	require.Error(t, err, "archived Project cycles should retain their plan foreign key")
+
+	var contractedBrief string
+	err = conn.QueryRow(ctx, `
+		SELECT execution_brief
+		FROM session_execution_context
+		WHERE session_id = $1
+	`, sessionID).Scan(&contractedBrief)
+	require.NoError(t, err, "contracted session table should retain execution context")
+	require.Equal(t, "neutral brief", contractedBrief, "contraction should preserve session context data")
+
+	var planOnlyContextCount int
+	err = conn.QueryRow(ctx, `
+		SELECT count(*) FROM session_execution_context WHERE session_id = $1
+	`, planOnlySessionID).Scan(&planOnlyContextCount)
+	require.NoError(t, err, "test should inspect plan-only execution context after contraction")
+	require.Equal(t, 0, planOnlyContextCount, "plan-only context should be removed when its retired link is dropped")
+
+	_, err = conn.Exec(ctx, `
+		INSERT INTO session_execution_context (session_id, org_id)
+		VALUES ($1, $2)
+	`, planOnlySessionID, orgID)
+	require.Error(t, err, "contracted execution context should reject rows without neutral context")
+
+	var retainedDocumentID uuid.UUID
+	err = conn.QueryRow(ctx, `
+		SELECT reference_document_id
+		FROM reference_context_set_pin_members
+		WHERE pin_id = $1
+	`, pinID).Scan(&retainedDocumentID)
+	require.NoError(t, err, "contracted reference tables should retain pin membership")
+	require.Equal(t, documentID, retainedDocumentID, "contraction should preserve pinned reference documents")
+
+	var legacyColumnCount int
+	err = conn.QueryRow(ctx, `
+		SELECT count(*)
+		FROM information_schema.columns
+		WHERE table_schema = current_schema()
+		  AND table_name IN ('eval_tasks', 'eval_runs')
+		  AND column_name = 'pm_document_set_pin_id'
+	`).Scan(&legacyColumnCount)
+	require.NoError(t, err, "test should inspect contracted eval columns")
+	require.Equal(t, 0, legacyColumnCount, "contraction should remove both legacy eval pin columns")
+
+	_, err = conn.Exec(ctx, `
+		INSERT INTO eval_tasks (id, reference_context_set_pin_id) VALUES ($1, $2)
+	`, uuid.New(), uuid.New())
+	require.Error(t, err, "eval tasks should retain their neutral reference-context pin foreign key")
+	_, err = conn.Exec(ctx, `
+		INSERT INTO eval_runs (id, reference_context_set_pin_id) VALUES ($1, $2)
+	`, uuid.New(), uuid.New())
+	require.Error(t, err, "eval runs should retain their neutral reference-context pin foreign key")
+
+	var pmNamedNeutralObjects int
+	err = conn.QueryRow(ctx, `
+		SELECT count(*)
+		FROM (
+			SELECT indexname AS object_name
+			FROM pg_indexes
+			WHERE schemaname = current_schema()
+			  AND tablename IN (
+			      'session_execution_context',
+			      'reference_documents',
+			      'reference_context_set_pins',
+			      'reference_context_set_pin_members'
+			  )
+			UNION ALL
+			SELECT conname AS object_name
+			FROM pg_constraint c
+			JOIN pg_class r ON r.oid = c.conrelid
+			JOIN pg_namespace n ON n.oid = r.relnamespace
+			WHERE n.nspname = current_schema()
+			  AND r.relname IN (
+			      'session_execution_context',
+			      'reference_documents',
+			      'reference_context_set_pins',
+			      'reference_context_set_pin_members'
+			  )
+		) objects
+		WHERE object_name LIKE '%pm%'
+	`).Scan(&pmNamedNeutralObjects)
+	require.NoError(t, err, "test should inspect neutral table object names")
+	require.Equal(t, 0, pmNamedNeutralObjects, "neutral tables should not retain PM-named indexes or constraints")
+
+	_, err = conn.Exec(ctx, `INSERT INTO jobs (id, job_type) VALUES ($1, 'pm_analyze')`, uuid.New())
+	require.NoError(t, err, "retired job barrier should no longer own queue validation")
+
+	contractionDownSQL, err := os.ReadFile("../../migrations/000261_contract_pm_compatibility.down.sql")
+	require.NoError(t, err, "test should read the PM compatibility contraction down migration")
+	_, err = conn.Exec(ctx, string(contractionDownSQL))
+	require.NoError(t, err, "contraction down migration should restore expand-phase compatibility")
+
+	var restoredLegacyColumns int
+	err = conn.QueryRow(ctx, `
+		SELECT count(*)
+		FROM information_schema.columns
+		WHERE table_schema = current_schema()
+		  AND table_name IN ('eval_tasks', 'eval_runs')
+		  AND column_name = 'pm_document_set_pin_id'
+	`).Scan(&restoredLegacyColumns)
+	require.NoError(t, err, "test should inspect restored eval compatibility columns")
+	require.Equal(t, 2, restoredLegacyColumns, "down migration should restore both legacy eval pin columns")
 
 	downSQL, err := os.ReadFile("../../migrations/000260_remove_pm_machinery.down.sql")
 	require.NoError(t, err, "test should read the PM machinery down migration")
