@@ -209,6 +209,7 @@ func (s *SessionActivityPhaseStore) ListStrandedRunning(ctx context.Context, org
 	return phases, nil
 }
 
+// ListStrandedRunningAcrossOrgs scans a bounded set of stranded phases for the system reaper.
 // lint:allow-no-orgid reason="system reaper scans bounded stranded phases across organizations"
 func (s *SessionActivityPhaseStore) ListStrandedRunningAcrossOrgs(ctx context.Context, leaseExpiredBefore time.Time, limit int) ([]models.SessionActivityPhase, error) {
 	if limit <= 0 || limit > 500 {
@@ -340,6 +341,7 @@ func (s *SessionActivityPhaseStore) ReconcileStrandedPhase(ctx context.Context, 
 	return tag.RowsAffected() == 1, nil
 }
 
+// ReconcileAbandonedInboxBatchesAcrossOrgs atomically abandons a bounded set of acknowledged batches after runtime loss.
 // lint:allow-no-orgid reason="system reaper atomically abandons bounded acknowledged batches after runtime loss"
 func (s *SessionActivityPhaseStore) ReconcileAbandonedInboxBatchesAcrossOrgs(ctx context.Context, leaseExpiredBefore, abandonedAt time.Time, limit int) ([]models.ThreadInboxDeliveryBatch, error) {
 	if limit <= 0 || limit > 500 {
