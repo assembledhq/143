@@ -16,7 +16,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const maxBrowserStorageStateBytes = 1024 * 1024
+const (
+	maxBrowserStorageStateBytes      = 1024 * 1024
+	previewBrowserObservationTimeout = 45 * time.Second
+)
 
 var (
 	ErrBrowserUnavailable   = errors.New("preview browser unavailable")
@@ -109,10 +112,16 @@ type BrowserSessionPolicy struct {
 }
 
 type BrowserSessionService struct {
-	store     BrowserSessionStore
-	inspector SessionBrowserInspector
-	locksMu   sync.Mutex
-	locks     map[uuid.UUID]*browserSessionLock
+	store              BrowserSessionStore
+	inspector          SessionBrowserInspector
+	accessTokenMinter  BrowserAccessTokenMinter
+	observationTimeout time.Duration
+	locksMu            sync.Mutex
+	locks              map[uuid.UUID]*browserSessionLock
+}
+
+type BrowserAccessTokenMinter interface {
+	MintBrowserAccessToken(ctx context.Context, orgID, sessionID, previewID uuid.UUID) (string, error)
 }
 
 type browserSessionLock struct {
@@ -120,8 +129,14 @@ type browserSessionLock struct {
 	refs int
 }
 
-func NewBrowserSessionService(store BrowserSessionStore, inspector SessionBrowserInspector) *BrowserSessionService {
-	return &BrowserSessionService{store: store, inspector: inspector, locks: make(map[uuid.UUID]*browserSessionLock)}
+func NewBrowserSessionService(store BrowserSessionStore, inspector SessionBrowserInspector, accessTokenMinter BrowserAccessTokenMinter) *BrowserSessionService {
+	return &BrowserSessionService{
+		store:              store,
+		inspector:          inspector,
+		accessTokenMinter:  accessTokenMinter,
+		observationTimeout: previewBrowserObservationTimeout,
+		locks:              make(map[uuid.UUID]*browserSessionLock),
+	}
 }
 
 func (s *BrowserSessionService) EnsureIdentity(ctx context.Context, orgID, sessionID, previewID uuid.UUID, policy BrowserSessionPolicy) (*models.PreviewBrowserContextStatus, error) {
@@ -181,26 +196,63 @@ func (s *BrowserSessionService) prepare(ctx context.Context, orgID, sessionID, p
 	if err != nil {
 		return target, nil, models.PreviewBrowserRestorationUnavailable, "browser session persistence failed", fmt.Errorf("ensure browser session: %w", err)
 	}
-	if s.inspector.HasContext(target) {
+	hadContext := s.inspector.HasContext(target)
+	if err := s.ensurePreviewAccess(ctx, orgID, sessionID, previewID, target); err != nil {
+		return target, record, models.PreviewBrowserRestorationUnavailable, "preview browser access could not be established", err
+	}
+	if hadContext {
 		return target, record, models.PreviewBrowserRestorationPreserved, "live browser context reused", nil
 	}
 	if !policy.PersistSession || len(record.StorageState) == 0 || string(record.StorageState) == "{}" {
 		return target, record, models.PreviewBrowserRestorationReset, "no restorable browser state was available", nil
 	}
 	if err := s.inspector.RestoreStorage(ctx, target, record.StorageState); err != nil {
+		if accessErr := s.ensurePreviewAccess(ctx, orgID, sessionID, previewID, target); accessErr != nil {
+			return target, record, models.PreviewBrowserRestorationUnavailable, "preview browser access could not be re-established after restore failure", errors.Join(err, accessErr)
+		}
 		return target, record, models.PreviewBrowserRestorationReset, "stored browser state was incompatible or could not be restored", nil
 	}
 	return target, record, models.PreviewBrowserRestorationRestored, "stored browser state restored", nil
 }
 
+func (s *BrowserSessionService) ensurePreviewAccess(ctx context.Context, orgID, sessionID, previewID uuid.UUID, target models.BrowserTarget) error {
+	if s.accessTokenMinter == nil {
+		return nil
+	}
+	accessInspector, ok := s.inspector.(SessionBrowserAccessInspector)
+	if !ok {
+		return fmt.Errorf("%w: inspector does not support preview gateway access", ErrBrowserUnavailable)
+	}
+	if accessInspector.HasPreviewAccess(target) {
+		return nil
+	}
+	token, err := s.accessTokenMinter.MintBrowserAccessToken(ctx, orgID, sessionID, previewID)
+	if err != nil {
+		return fmt.Errorf("mint preview browser access: %w", err)
+	}
+	if strings.TrimSpace(token) == "" {
+		return fmt.Errorf("mint preview browser access: empty token")
+	}
+	if err := accessInspector.BootstrapPreviewAccess(ctx, target, token); err != nil {
+		return fmt.Errorf("bootstrap preview browser access: %w", err)
+	}
+	return nil
+}
+
 func (s *BrowserSessionService) Observe(ctx context.Context, orgID, sessionID, previewID uuid.UUID, policy BrowserSessionPolicy, opts models.PreviewObservationOpts) (*models.PreviewObservation, error) {
+	timeout := s.observationTimeout
+	if timeout <= 0 {
+		timeout = previewBrowserObservationTimeout
+	}
+	observeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	if opts.Path == "" {
-		return s.observe(ctx, orgID, sessionID, previewID, policy, opts)
+		return s.observe(observeCtx, orgID, sessionID, previewID, policy, opts)
 	}
 	var result *models.PreviewObservation
-	err := s.RunAgentOperation(ctx, orgID, sessionID, 5*time.Minute, func() error {
+	err := s.RunAgentOperation(observeCtx, orgID, sessionID, 5*time.Minute, func() error {
 		var observeErr error
-		result, observeErr = s.observe(ctx, orgID, sessionID, previewID, policy, opts)
+		result, observeErr = s.observe(observeCtx, orgID, sessionID, previewID, policy, opts)
 		return observeErr
 	})
 	return result, err

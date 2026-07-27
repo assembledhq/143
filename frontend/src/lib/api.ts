@@ -116,8 +116,9 @@ function timeoutSignal(timeoutMs: number, parent?: AbortSignal): AbortSignal {
   return controller.signal;
 }
 
-function post<T>(path: string, body?: unknown): Promise<T> {
+function post<T>(path: string, body?: unknown, options?: RequestInit): Promise<T> {
   return request<T>(path, {
+    ...options,
     method: 'POST',
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -735,8 +736,12 @@ export const api = {
       inspect: (sessionId: string, x: number, y: number) =>
         post<import('./types').SingleResponse<import('./preview-types').ElementInfo>>(`/api/v1/sessions/${sessionId}/preview/inspect`, { x, y })
           .then(r => r.data),
-      observeBrowser: (sessionId: string) =>
-        post<import('./types').SingleResponse<import('./preview-types').PreviewBrowserObservation>>(`/api/v1/sessions/${sessionId}/preview/watch`, {})
+      observeBrowser: (sessionId: string, opts?: { signal?: AbortSignal; timeoutMs?: number }) =>
+        post<import('./types').SingleResponse<import('./preview-types').PreviewBrowserObservation>>(
+          `/api/v1/sessions/${sessionId}/preview/watch`,
+          {},
+          { signal: timeoutSignal(opts?.timeoutMs ?? 55_000, opts?.signal) },
+        )
           .then(r => r.data),
       browserControl: (sessionId: string) =>
         get<import('./types').SingleResponse<import('./preview-types').PreviewBrowserControlStatus>>(`/api/v1/sessions/${sessionId}/preview/control`)

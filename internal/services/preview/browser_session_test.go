@@ -91,7 +91,7 @@ func (s *fakeBrowserSessionStore) SaveState(_ context.Context, _, _ uuid.UUID, c
 func TestBrowserSessionService_PersistsViewportAction(t *testing.T) {
 	t.Parallel()
 	store := &fakeBrowserSessionStore{}
-	service := NewBrowserSessionService(store, &fakeSessionBrowserInspector{hasContext: true})
+	service := NewBrowserSessionService(store, &fakeSessionBrowserInspector{hasContext: true}, nil)
 	_, err := service.Act(context.Background(), uuid.New(), uuid.New(), uuid.New(), BrowserSessionPolicy{PersistSession: true}, []models.InteractionStep{{Action: "viewport", Value: "390x844"}}, models.PreviewObservationOpts{})
 	require.NoError(t, err, "viewport action should succeed")
 	var viewport models.ViewportSpec
@@ -103,7 +103,7 @@ func TestBrowserSessionService_ControlHandoffLifecycle(t *testing.T) {
 	t.Parallel()
 	store := &fakeBrowserSessionStore{}
 	orgID, sessionID, previewID, userID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
-	service := NewBrowserSessionService(store, &fakeSessionBrowserInspector{hasContext: true})
+	service := NewBrowserSessionService(store, &fakeSessionBrowserInspector{hasContext: true}, nil)
 	_, err := service.EnsureIdentity(context.Background(), orgID, sessionID, previewID, BrowserSessionPolicy{})
 	require.NoError(t, err, "browser identity should be created before control transitions")
 	waiting, err := service.RequestHandoff(context.Background(), orgID, sessionID, "MFA is required")
@@ -120,7 +120,7 @@ func TestBrowserSessionService_ControlHandoffLifecycle(t *testing.T) {
 func TestBrowserSessionService_AgentActionFailsWhileHumanControls(t *testing.T) {
 	t.Parallel()
 	store := &fakeBrowserSessionStore{record: &models.PreviewBrowserSession{ControlState: models.PreviewBrowserControlHuman}}
-	service := NewBrowserSessionService(store, &fakeSessionBrowserInspector{hasContext: true})
+	service := NewBrowserSessionService(store, &fakeSessionBrowserInspector{hasContext: true}, nil)
 	_, err := service.Act(context.Background(), uuid.New(), uuid.New(), uuid.New(), BrowserSessionPolicy{}, []models.InteractionStep{{Action: "press", Value: "Enter"}}, models.PreviewObservationOpts{})
 	require.ErrorIs(t, err, ErrBrowserControlHeld, "agent actions should fail while a human lease is active")
 }
@@ -129,7 +129,7 @@ func TestBrowserSessionService_HumanActionRequiresExactLeaseOwner(t *testing.T) 
 	t.Parallel()
 	ownerID := uuid.New()
 	store := &fakeBrowserSessionStore{record: &models.PreviewBrowserSession{ControlState: models.PreviewBrowserControlHuman, ControlLeaseOwnerID: &ownerID}}
-	service := NewBrowserSessionService(store, &fakeSessionBrowserInspector{hasContext: true})
+	service := NewBrowserSessionService(store, &fakeSessionBrowserInspector{hasContext: true}, nil)
 	_, err := service.ActAsHuman(context.Background(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), BrowserSessionPolicy{}, []models.InteractionStep{{Action: "press", Value: "Enter"}}, models.PreviewObservationOpts{})
 	require.ErrorIs(t, err, ErrBrowserControlHeld, "a different human must not use another user's browser lease")
 }
@@ -138,7 +138,7 @@ func TestBrowserSessionService_AgentResumesSameContextAfterHumanHandoff(t *testi
 	t.Parallel()
 	store := &fakeBrowserSessionStore{}
 	inspector := &fakeSessionBrowserInspector{hasContext: true}
-	service := NewBrowserSessionService(store, inspector)
+	service := NewBrowserSessionService(store, inspector, nil)
 	orgID, sessionID, previewID, userID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	_, err := service.EnsureIdentity(context.Background(), orgID, sessionID, previewID, BrowserSessionPolicy{PersistSession: true})
 	require.NoError(t, err, "shared browser identity should initialize")
@@ -158,7 +158,7 @@ func TestBrowserSessionService_EnsureIdentityWithoutLocalInspector(t *testing.T)
 	t.Parallel()
 	store := &fakeBrowserSessionStore{}
 	sessionID := uuid.New()
-	service := NewBrowserSessionService(store, nil)
+	service := NewBrowserSessionService(store, nil, nil)
 	status, err := service.EnsureIdentity(context.Background(), uuid.New(), sessionID, uuid.New(), BrowserSessionPolicy{PersistSession: true})
 	require.NoError(t, err, "API nodes should persist browser identity without a local inspector")
 	require.Equal(t, "session:"+sessionID.String(), status.ContextKey, "ensure should create the stable session context key")
@@ -168,7 +168,7 @@ func TestBrowserSessionService_EnsureIdentityWithoutLocalInspector(t *testing.T)
 func TestBrowserSessionService_RejectsOversizedStorageState(t *testing.T) {
 	t.Parallel()
 	inspector := &fakeSessionBrowserInspector{hasContext: true, storage: json.RawMessage(bytes.Repeat([]byte("x"), maxBrowserStorageStateBytes+1))}
-	service := NewBrowserSessionService(&fakeBrowserSessionStore{}, inspector)
+	service := NewBrowserSessionService(&fakeBrowserSessionStore{}, inspector, nil)
 	_, err := service.Observe(context.Background(), uuid.New(), uuid.New(), uuid.New(), BrowserSessionPolicy{PersistSession: true}, models.PreviewObservationOpts{ScreenshotOpts: models.ScreenshotOpts{Path: "/"}})
 	require.Error(t, err, "oversized browser state should not be persisted")
 	require.Contains(t, err.Error(), "exceeds", "oversized state error should explain the configured bound")
@@ -177,22 +177,26 @@ func TestBrowserSessionService_RejectsOversizedStorageState(t *testing.T) {
 func TestBrowserSessionService_ReadOnlyObservationAvoidsPersistenceWrites(t *testing.T) {
 	t.Parallel()
 	store := &fakeBrowserSessionStore{}
-	service := NewBrowserSessionService(store, &fakeSessionBrowserInspector{hasContext: true})
+	service := NewBrowserSessionService(store, &fakeSessionBrowserInspector{hasContext: true}, nil)
 	_, err := service.Observe(context.Background(), uuid.New(), uuid.New(), uuid.New(), BrowserSessionPolicy{PersistSession: true}, models.PreviewObservationOpts{ReadOnly: true, SkipSemantic: true})
 	require.NoError(t, err, "read-only watch observation should succeed")
 	require.Equal(t, 0, store.saves, "high-frequency preview-panel observations should not write browser state")
 }
 
 type fakeSessionBrowserInspector struct {
-	mu         sync.Mutex
-	hasContext bool
-	restores   int
-	acts       int
-	active     int
-	maxActive  int
-	delay      time.Duration
-	storage    json.RawMessage
-	restoreErr error
+	mu                   sync.Mutex
+	hasContext           bool
+	authorizedPreviewID  string
+	bootstrapTokens      []string
+	bootstrapErr         error
+	restores             int
+	acts                 int
+	active               int
+	maxActive            int
+	delay                time.Duration
+	observeUntilCanceled bool
+	storage              json.RawMessage
+	restoreErr           error
 }
 
 func (i *fakeSessionBrowserInspector) HasContext(models.BrowserTarget) bool {
@@ -200,10 +204,31 @@ func (i *fakeSessionBrowserInspector) HasContext(models.BrowserTarget) bool {
 	defer i.mu.Unlock()
 	return i.hasContext
 }
-func (i *fakeSessionBrowserInspector) Observe(_ context.Context, target models.BrowserTarget, opts models.PreviewObservationOpts) (*models.PreviewObservation, error) {
+func (i *fakeSessionBrowserInspector) HasPreviewAccess(target models.BrowserTarget) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.hasContext && i.authorizedPreviewID == target.PreviewID
+}
+func (i *fakeSessionBrowserInspector) BootstrapPreviewAccess(_ context.Context, target models.BrowserTarget, token string) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.bootstrapTokens = append(i.bootstrapTokens, token)
+	if i.bootstrapErr != nil {
+		return i.bootstrapErr
+	}
+	i.hasContext = true
+	i.authorizedPreviewID = target.PreviewID
+	return nil
+}
+func (i *fakeSessionBrowserInspector) Observe(ctx context.Context, target models.BrowserTarget, opts models.PreviewObservationOpts) (*models.PreviewObservation, error) {
 	i.mu.Lock()
 	i.hasContext = true
+	waitForCancellation := i.observeUntilCanceled
 	i.mu.Unlock()
+	if waitForCancellation {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	now := time.Now()
 	return &models.PreviewObservation{URL: "https://preview.test/app", Title: "App", Viewport: models.ViewportSpec{Width: opts.ViewportW, Height: opts.ViewportH}, CapturedAt: now, ConsoleCursor: 4, Ready: true, Context: models.PreviewBrowserContextStatus{ContextKey: target.ContextKey}}, nil
 }
@@ -238,6 +263,129 @@ func (i *fakeSessionBrowserInspector) RestoreStorage(context.Context, models.Bro
 	return i.restoreErr
 }
 
+type fakeBrowserAccessTokenMinter struct {
+	mu        sync.Mutex
+	token     string
+	err       error
+	calls     int
+	orgID     uuid.UUID
+	sessionID uuid.UUID
+	previewID uuid.UUID
+}
+
+func (m *fakeBrowserAccessTokenMinter) MintBrowserAccessToken(_ context.Context, orgID, sessionID, previewID uuid.UUID) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	m.orgID = orgID
+	m.sessionID = sessionID
+	m.previewID = previewID
+	return m.token, m.err
+}
+
+func TestBrowserSessionService_BootstrapsPreviewAccess(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                  string
+		hasContext            bool
+		authorizedPreviewID   string
+		expectedBootstrapCall int
+		expectedRestoration   models.PreviewBrowserRestorationStatus
+	}{
+		{name: "fresh browser context", expectedBootstrapCall: 1, expectedRestoration: models.PreviewBrowserRestorationReset},
+		{name: "existing unauthenticated context", hasContext: true, expectedBootstrapCall: 1, expectedRestoration: models.PreviewBrowserRestorationPreserved},
+		{name: "existing authorized context", hasContext: true, authorizedPreviewID: "active", expectedRestoration: models.PreviewBrowserRestorationPreserved},
+		{name: "replacement preview origin", hasContext: true, authorizedPreviewID: "replaced", expectedBootstrapCall: 1, expectedRestoration: models.PreviewBrowserRestorationPreserved},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID, sessionID, previewID := uuid.New(), uuid.New(), uuid.New()
+			authorizedPreviewID := tt.authorizedPreviewID
+			if authorizedPreviewID == "active" {
+				authorizedPreviewID = previewID.String()
+			}
+			inspector := &fakeSessionBrowserInspector{
+				hasContext:          tt.hasContext,
+				authorizedPreviewID: authorizedPreviewID,
+			}
+			minter := &fakeBrowserAccessTokenMinter{token: "browser-token"}
+			service := NewBrowserSessionService(&fakeBrowserSessionStore{}, inspector, minter)
+
+			observation, err := service.Observe(
+				context.Background(),
+				orgID,
+				sessionID,
+				previewID,
+				BrowserSessionPolicy{PersistSession: true},
+				models.PreviewObservationOpts{ScreenshotOpts: models.ScreenshotOpts{Path: "/"}},
+			)
+
+			require.NoError(t, err, "authenticated browser observation should succeed")
+			require.Equal(t, tt.expectedRestoration, observation.Context.Restoration, "observation should preserve the browser restoration result")
+			require.Equal(t, tt.expectedBootstrapCall, minter.calls, "access tokens should be minted only when the preview origin lacks authorization")
+			require.Len(t, inspector.bootstrapTokens, tt.expectedBootstrapCall, "browser bootstrap should match access-token minting")
+			if tt.expectedBootstrapCall == 1 {
+				require.Equal(t, "browser-token", inspector.bootstrapTokens[0], "browser should exchange the minted access token")
+				require.Equal(t, orgID, minter.orgID, "access token minting should preserve org scope")
+				require.Equal(t, sessionID, minter.sessionID, "access token minting should preserve session scope")
+				require.Equal(t, previewID, minter.previewID, "access token minting should preserve preview scope")
+			}
+		})
+	}
+}
+
+func TestBrowserSessionService_FailsClosedWhenPreviewAccessCannotBeEstablished(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		minterErr     error
+		bootstrapErr  error
+		expectedError string
+	}{
+		{name: "token mint fails", minterErr: context.DeadlineExceeded, expectedError: "mint preview browser access"},
+		{name: "token exchange fails", bootstrapErr: context.DeadlineExceeded, expectedError: "bootstrap preview browser access"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			inspector := &fakeSessionBrowserInspector{bootstrapErr: tt.bootstrapErr}
+			minter := &fakeBrowserAccessTokenMinter{token: "browser-token", err: tt.minterErr}
+			service := NewBrowserSessionService(&fakeBrowserSessionStore{}, inspector, minter)
+
+			_, err := service.Observe(
+				context.Background(),
+				uuid.New(),
+				uuid.New(),
+				uuid.New(),
+				BrowserSessionPolicy{},
+				models.PreviewObservationOpts{ScreenshotOpts: models.ScreenshotOpts{Path: "/"}},
+			)
+
+			require.Error(t, err, "observation should fail without an authorized preview context")
+			require.Contains(t, err.Error(), tt.expectedError, "access setup failure should identify the failed stage")
+		})
+	}
+}
+
+func TestBrowserSessionService_BoundsObservationDuration(t *testing.T) {
+	t.Parallel()
+	inspector := &fakeSessionBrowserInspector{hasContext: true, observeUntilCanceled: true}
+	service := NewBrowserSessionService(&fakeBrowserSessionStore{}, inspector, nil)
+	service.observationTimeout = 10 * time.Millisecond
+
+	_, err := service.Observe(
+		context.Background(),
+		uuid.New(),
+		uuid.New(),
+		uuid.New(),
+		BrowserSessionPolicy{},
+		models.PreviewObservationOpts{ReadOnly: true},
+	)
+
+	require.ErrorIs(t, err, context.DeadlineExceeded, "browser observation should return at its service deadline")
+}
+
 func TestBrowserSessionService_ObserveLifecycle(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -263,7 +411,7 @@ func TestBrowserSessionService_ObserveLifecycle(t *testing.T) {
 				store.record = &models.PreviewBrowserSession{ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ContextKey: "session:" + sessionID.String(), Viewport: raw, StorageState: tt.storage}
 			}
 			inspector := &fakeSessionBrowserInspector{hasContext: tt.existingContext}
-			service := NewBrowserSessionService(store, inspector)
+			service := NewBrowserSessionService(store, inspector, nil)
 			result, err := service.Observe(context.Background(), orgID, sessionID, previewID, BrowserSessionPolicy{PersistSession: tt.persist, AllowedPaths: []string{"/app/**"}}, models.PreviewObservationOpts{})
 			require.NoError(t, err, "observe should complete")
 			require.Equal(t, tt.expected, result.Context.Restoration, "observe should report the browser restoration outcome")
@@ -278,7 +426,7 @@ func TestBrowserSessionService_ReportsRestoreFailure(t *testing.T) {
 	orgID, sessionID, previewID := uuid.New(), uuid.New(), uuid.New()
 	viewport, _ := json.Marshal(models.ViewportSpec{Width: 1440, Height: 900})
 	store := &fakeBrowserSessionStore{record: &models.PreviewBrowserSession{ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ContextKey: "session:" + sessionID.String(), Viewport: viewport, StorageState: json.RawMessage(`{"cookies":[]}`)}}
-	service := NewBrowserSessionService(store, &fakeSessionBrowserInspector{restoreErr: context.DeadlineExceeded})
+	service := NewBrowserSessionService(store, &fakeSessionBrowserInspector{restoreErr: context.DeadlineExceeded}, nil)
 	observation, err := service.Observe(context.Background(), orgID, sessionID, previewID, BrowserSessionPolicy{PersistSession: true}, models.PreviewObservationOpts{ScreenshotOpts: models.ScreenshotOpts{Path: "/"}})
 	require.NoError(t, err, "restore failure should reset to a fresh browser instead of failing observation")
 	require.Equal(t, models.PreviewBrowserRestorationReset, observation.Context.Restoration, "restore failure should be reported as a reset")
@@ -311,7 +459,7 @@ func TestBrowserSessionService_ActRejectsDisallowedNavigation(t *testing.T) {
 	t.Parallel()
 	store := &fakeBrowserSessionStore{}
 	inspector := &fakeSessionBrowserInspector{}
-	service := NewBrowserSessionService(store, inspector)
+	service := NewBrowserSessionService(store, inspector, nil)
 	_, err := service.Act(context.Background(), uuid.New(), uuid.New(), uuid.New(), BrowserSessionPolicy{AllowedPaths: []string{"/app/**"}}, []models.InteractionStep{{Action: "navigate", Value: "/admin"}}, models.PreviewObservationOpts{})
 	require.ErrorIs(t, err, ErrNavigationNotAllowed, "act should reject navigation outside configured paths")
 	require.Equal(t, 0, inspector.acts, "rejected navigation should not reach the browser")
@@ -321,7 +469,7 @@ func TestBrowserSessionService_SerializesActions(t *testing.T) {
 	t.Parallel()
 	store := &fakeBrowserSessionStore{}
 	inspector := &fakeSessionBrowserInspector{hasContext: true, delay: 20 * time.Millisecond}
-	service := NewBrowserSessionService(store, inspector)
+	service := NewBrowserSessionService(store, inspector, nil)
 	orgID, sessionID, previewID := uuid.New(), uuid.New(), uuid.New()
 	start := make(chan struct{})
 	done := make(chan error, 2)
@@ -341,7 +489,7 @@ func TestBrowserSessionService_SerializesActions(t *testing.T) {
 
 func TestBrowserSessionService_IsolatesSessionContextKeys(t *testing.T) {
 	t.Parallel()
-	service := NewBrowserSessionService(&fakeBrowserSessionStore{}, &fakeSessionBrowserInspector{})
+	service := NewBrowserSessionService(&fakeBrowserSessionStore{}, &fakeSessionBrowserInspector{}, nil)
 	orgID, previewID := uuid.New(), uuid.New()
 	first, err := service.Observe(context.Background(), orgID, uuid.New(), previewID, BrowserSessionPolicy{PersistSession: true}, models.PreviewObservationOpts{ScreenshotOpts: models.ScreenshotOpts{Path: "/"}})
 	require.NoError(t, err, "first session observation should succeed")

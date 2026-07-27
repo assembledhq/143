@@ -57,7 +57,7 @@ func TestBrowserVerificationObserverUsesSessionPolicyAndLease(t *testing.T) {
 				ContextKey: "session:" + sessionID.String(), ControlState: tt.control,
 			}}
 			observer := browserVerificationObserver{
-				browser: NewBrowserSessionService(store, &fakeSessionBrowserInspector{}),
+				browser: NewBrowserSessionService(store, &fakeSessionBrowserInspector{}, nil),
 				orgID:   orgID, sessionID: sessionID, previewID: previewID,
 				policy: BrowserSessionPolicy{PersistSession: true, AllowedPaths: []string{"/safe"}},
 			}

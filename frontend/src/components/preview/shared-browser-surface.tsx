@@ -33,7 +33,7 @@ export function SharedBrowserSurface({ sessionId }: { sessionId: string }) {
   });
   const observation = useQuery({
     queryKey: ["preview-browser-observation", sessionId],
-    queryFn: () => api.sessions.preview.observeBrowser(sessionId),
+    queryFn: ({ signal }) => api.sessions.preview.observeBrowser(sessionId, { signal }),
     refetchInterval: 1500,
   });
   const refresh = useCallback(() => {

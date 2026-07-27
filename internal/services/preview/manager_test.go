@@ -601,6 +601,60 @@ func TestMintBootstrapToken_InactivePreview(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestMintBrowserAccessToken_RequiresExactSessionScope(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		matching    bool
+		expectError bool
+	}{
+		{name: "matching session", matching: true},
+		{name: "different session", expectError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "preview store mock should initialize")
+			defer mock.Close()
+
+			mgr := newTestManager(mock, &mockProvider{})
+			orgID, ownerID, previewID := uuid.New(), uuid.New(), uuid.New()
+			instanceSessionID, requestedSessionID := uuid.New(), uuid.New()
+			if tt.matching {
+				requestedSessionID = instanceSessionID
+			}
+			now := time.Now()
+
+			mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(
+					pgxmock.NewRows(previewInstanceTestCols).
+						AddRow(newPreviewInstanceRow(previewID, instanceSessionID, orgID, ownerID, models.PreviewStatusReady, "handle-abc", now)...),
+				)
+			if !tt.expectError {
+				mock.ExpectQuery("INSERT INTO preview_access_sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(previewAccessSessionTestCols).
+							AddRow(newAccessSessionRow(uuid.New(), orgID, ownerID, previewID, "somehash", now.Add(5*time.Minute), nil, now)...),
+					)
+			}
+
+			token, mintErr := mgr.MintBrowserAccessToken(context.Background(), orgID, requestedSessionID, previewID)
+			if tt.expectError {
+				require.Error(t, mintErr, "a preview from another session must not mint browser access")
+				require.Contains(t, mintErr.Error(), "session", "scope mismatch should identify the session boundary")
+				require.Empty(t, token, "scope mismatch must not return an access token")
+			} else {
+				require.NoError(t, mintErr, "matching session preview should mint browser access")
+				require.Len(t, token, 64, "browser access token should use the standard random token format")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all scoped preview-store expectations should be met")
+		})
+	}
+}
+
 // =============================================================================
 // ValidateBootstrapToken tests
 // =============================================================================

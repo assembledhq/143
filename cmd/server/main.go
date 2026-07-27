@@ -537,7 +537,7 @@ func main() {
 						concreteOrchestrator.SetSuccessfulTurnVerifier(preview.NewSuccessfulTurnVerifier(
 							previewManager,
 							previewStore,
-							preview.NewBrowserSessionService(db.NewPreviewBrowserSessionStore(pool), sessionBrowserInspector),
+							preview.NewBrowserSessionService(db.NewPreviewBrowserSessionStore(pool), sessionBrowserInspector, previewManager),
 							db.NewPreviewVerificationRunStore(pool),
 						))
 					}

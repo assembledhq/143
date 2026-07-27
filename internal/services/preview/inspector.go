@@ -69,6 +69,15 @@ type SessionBrowserInspector interface {
 	RestoreStorage(ctx context.Context, target models.BrowserTarget, state json.RawMessage) error
 }
 
+// SessionBrowserAccessInspector establishes the platform preview-gateway
+// session in the same browser context used for observation and interaction.
+// The gateway remains the only path to preview content; workers never receive
+// direct runtime URLs or bypass credentials.
+type SessionBrowserAccessInspector interface {
+	HasPreviewAccess(target models.BrowserTarget) bool
+	BootstrapPreviewAccess(ctx context.Context, target models.BrowserTarget, token string) error
+}
+
 // =============================================================================
 // Supporting types
 // =============================================================================

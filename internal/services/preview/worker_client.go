@@ -24,6 +24,7 @@ const previewWorkerTokenTTL = 30 * time.Second
 // probes, each defaulting to 90s) or the API gives up before the worker
 // finishes, surfacing as "context canceled" on a readiness probe.
 const previewWorkerHTTPTimeout = 10 * time.Minute
+const previewWorkerObservationTimeout = 50 * time.Second
 
 const PreviewSoftRestartUnsupportedCode = "PREVIEW_SOFT_RESTART_UNSUPPORTED"
 
@@ -488,7 +489,9 @@ func (c *WorkerPreviewClient) ExecuteInteraction(ctx context.Context, worker Wor
 }
 
 func (c *WorkerPreviewClient) Observe(ctx context.Context, worker WorkerNode, orgID, sessionID, previewID uuid.UUID, body RemoteObserveRequest) (*models.PreviewObservation, error) {
-	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/observe", worker.BaseURL, previewID), auth.PreviewTokenClaims{OrgID: orgID, TargetNodeID: worker.ID, PreviewID: &previewID, SessionID: &sessionID, Action: "observe", ExpiresAt: time.Now().Add(previewWorkerTokenTTL)}, body)
+	observeCtx, cancel := context.WithTimeout(ctx, previewWorkerObservationTimeout)
+	defer cancel()
+	req, err := c.newRequest(observeCtx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/observe", worker.BaseURL, previewID), auth.PreviewTokenClaims{OrgID: orgID, TargetNodeID: worker.ID, PreviewID: &previewID, SessionID: &sessionID, Action: "observe", ExpiresAt: time.Now().Add(previewWorkerTokenTTL)}, body)
 	if err != nil {
 		return nil, err
 	}

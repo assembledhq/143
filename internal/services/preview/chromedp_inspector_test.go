@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/chromedp/cdproto/network"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -29,9 +30,12 @@ func TestChromeDPInspector_BindAdoptsRawContext(t *testing.T) {
 	// creates a second Chrome tab, orphaning (and leaking) this one.
 	cancelled := false
 	inspector.previews["preview-1"] = &previewContext{cancel: func() { cancelled = true }}
+	inspector.previewAccess["preview-1"] = "preview-1"
 	inspector.BindSessionBrowser("preview-1", "session-1")
 	require.NotContains(t, inspector.previews, "preview-1", "raw-keyed context should be reconciled away")
 	require.Contains(t, inspector.previews, "session:session-1", "context should be adopted under the session key")
+	require.Equal(t, "preview-1", inspector.previewAccess["session:session-1"], "adopted context should retain its gateway authorization")
+	require.NotContains(t, inspector.previewAccess, "preview-1", "raw-keyed gateway authorization should be reconciled away")
 	require.False(t, cancelled, "adopted context must not be torn down")
 }
 
@@ -67,6 +71,18 @@ func TestCompatiblePreviewRestoreURL(t *testing.T) {
 			require.Equal(t, tt.expectedURL, url, "compatible restore should retain the stored path on the active origin")
 		})
 	}
+}
+
+func TestPersistableBrowserCookiesExcludesPreviewGatewaySessions(t *testing.T) {
+	t.Parallel()
+	cookies := []*network.Cookie{
+		{Name: "__Host-preview_session", Value: "secure-gateway"},
+		{Name: "preview_session", Value: "local-gateway"},
+		{Name: "app_session", Value: "application"},
+	}
+	expected := []*network.Cookie{{Name: "app_session", Value: "application"}}
+
+	require.Equal(t, expected, persistableBrowserCookies(cookies), "persisted application state must not retain platform preview-access cookies")
 }
 
 func TestConsoleMessagesAfter(t *testing.T) {

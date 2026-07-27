@@ -919,7 +919,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if resolved, ok := previewInspector.(preview.SessionBrowserInspector); ok {
 		browserInspector = resolved
 	}
-	previewHandler.SetBrowserSessionService(preview.NewBrowserSessionService(previewBrowserSessionStore, browserInspector))
+	previewHandler.SetBrowserSessionService(preview.NewBrowserSessionService(previewBrowserSessionStore, browserInspector, previewManager))
 	branchPreviewHandler := handlers.NewBranchPreviewHandler(previewStore, repoStore, prService, previewManager, cfg.FrontendURL, cfg.PreviewOriginTemplate)
 	previewHandler.SetAuditEmitter(auditEmitter)
 	branchPreviewHandler.SetAuditEmitter(auditEmitter)
