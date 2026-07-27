@@ -99,6 +99,9 @@ func (r *webhookAutomationEventRecorder) TriggerGitHubEvent(_ context.Context, r
 	return nil
 }
 
+func (r *webhookAutomationEventRecorder) RememberKnownLabels(_ automationevents.GitHubEventTriggerRequest) {
+}
+
 func computeTestSignature(secret string, payload []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(payload)

@@ -1,3 +1,21 @@
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM automations
+        WHERE github_event_triggers
+            && ARRAY['github.pull_request.ready_for_review']::text[]
+          AND cardinality(array_remove(
+              github_event_triggers,
+              'github.pull_request.ready_for_review'
+          )) = 0
+    ) THEN
+        RAISE EXCEPTION
+            'cannot roll back ready-for-review trigger while an automation uses it as its only trigger';
+    END IF;
+END
+$$;
+
 UPDATE automations
     SET github_event_triggers = array_remove(
         github_event_triggers,
