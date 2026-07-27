@@ -11,6 +11,7 @@ type CodeReviewFinalReviewInput struct {
 	Acceptable                bool
 	RiskReasons               []CodeReviewRiskReason
 	GeneratedSummary          string
+	OperationalSummary        string
 	SessionURL                string
 	DescriptionPassed         *bool
 	DescriptionIssues         []string
@@ -39,18 +40,26 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 	} else if input.Acceptable {
 		paragraphs = append(paragraphs, "❌ **143 Code Reviewer completed its review without approving this PR**")
 	} else {
-		paragraphs = append(paragraphs, "❌ **143 Code Reviewer did not approve this PR**")
+		paragraphs = append(paragraphs, "❌ **143 Code Reviewer needs human review**")
 	}
 
 	generatedSummary := codeReviewGeneratedSummary(input.GeneratedSummary)
-	explanation := generatedSummary
+	operationalSummary := codeReviewGeneratedSummary(input.OperationalSummary)
+	explanation := operationalSummary
+	if explanation == "" {
+		explanation = generatedSummary
+	}
 	if explanation == "" {
 		explanation = codeReviewDecisionExplanation(input)
 	}
 	paragraphs = append(paragraphs, "**Why:** "+explanation)
 
-	if generatedSummary != "" && !input.Acceptable {
-		if blockers := codeReviewRiskReasonExplanations(input.RiskReasons, input.DescriptionIssues); len(blockers) > 0 {
+	if (generatedSummary != "" || operationalSummary != "") && !input.Acceptable {
+		riskReasons := input.RiskReasons
+		if operationalSummary != "" {
+			riskReasons = codeReviewRiskReasonsWithout(riskReasons, CodeReviewRiskReasonOrchestratorSynthesisInvalid)
+		}
+		if blockers := codeReviewRiskReasonExplanations(riskReasons, input.DescriptionIssues); len(blockers) > 0 {
 			var policyBlockers strings.Builder
 			policyBlockers.WriteString("**Policy blockers:**\n")
 			for _, blocker := range blockers {
@@ -60,7 +69,7 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 		}
 	}
 
-	if generatedSummary != "" {
+	if generatedSummary != "" && operationalSummary == "" {
 		if facts := codeReviewFacts(input); len(facts) > 0 {
 			paragraphs = append(paragraphs, "**Review facts:** "+strings.Join(facts, " · "))
 		}
@@ -87,8 +96,12 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 	if reviewers := nonEmptyStrings(input.RecommendedHumanReviewers); len(reviewers) > 0 {
 		paragraphs = append(paragraphs, "**Suggested human reviewers:** "+strings.Join(reviewers, ", "))
 	}
-	if !input.Acceptable && generatedSummary == "" {
-		paragraphs = append(paragraphs, "**Next steps:** Address the items above and request another review, or ask a human reviewer to decide.")
+	if !input.Acceptable {
+		if operationalSummary != "" {
+			paragraphs = append(paragraphs, "**Next steps:** Retry the automated review to regenerate the final synthesis, or ask a human reviewer to review the available evidence directly.")
+		} else {
+			paragraphs = append(paragraphs, "**Next steps:** Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.")
+		}
 	}
 	if assessment := codeReviewAssessmentSummary(input.HeadSHA, input.AssessedAt); assessment != "" {
 		paragraphs = append(paragraphs, assessment)
@@ -97,6 +110,16 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 		paragraphs = append(paragraphs, "[View the full review]("+input.SessionURL+")")
 	}
 	return strings.Join(paragraphs, "\n\n")
+}
+
+func codeReviewRiskReasonsWithout(reasons []CodeReviewRiskReason, excluded CodeReviewRiskReasonCode) []CodeReviewRiskReason {
+	filtered := make([]CodeReviewRiskReason, 0, len(reasons))
+	for _, reason := range reasons {
+		if reason.Code != excluded {
+			filtered = append(filtered, reason)
+		}
+	}
+	return filtered
 }
 
 func codeReviewAssessmentSummary(headSHA string, assessedAt time.Time) string {

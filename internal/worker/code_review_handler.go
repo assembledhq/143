@@ -923,7 +923,8 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 	if err != nil {
 		return fmt.Errorf("list code review reviewer results for harvest: %w", err)
 	}
-	timedOut := codeReviewReviewTimedOut(policy.Config(), metadata)
+	deadline := codeReviewReviewDeadline(policy.Config(), metadata)
+	timedOut := time.Now().After(deadline)
 	changedPaths := codeReviewChangedPaths(changedFiles)
 	for _, result := range results {
 		if result.Role != models.CodeReviewAgentRoleReviewer || codeReviewReviewerResultTerminal(result.Status) {
@@ -945,27 +946,32 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 			}
 			continue
 		}
-		if timedOut {
-			raw := "reviewer timed out before producing a completed turn"
+		thread, err := stores.SessionThreads.GetByID(ctx, job.OrgID, threadID)
+		if err != nil {
+			return fmt.Errorf("load code review reviewer thread: %w", err)
+		}
+		state.CostCents = thread.CostCents
+		// The worker may resume after the deadline even though the thread
+		// completed on time. Preserve terminal output and apply the timeout only
+		// when the persisted completion time does not prove it finished in time.
+		if timedOut && !codeReviewThreadCompletedByDeadline(thread, deadline) {
+			raw := "reviewer did not produce a completed turn before the review deadline"
 			state.Error = raw
-			if thread, cancelErr := cancelCodeReviewThread(ctx, stores, logger, job, threadID); cancelErr == nil {
-				state.CostCents = thread.CostCents
-			} else {
-				logger.Warn().Err(cancelErr).
-					Str("session_id", job.SessionID.String()).
-					Str("thread_id", threadID.String()).
-					Msg("failed to cancel timed-out code review reviewer thread")
+			if codeReviewThreadStillRunning(thread.Status) {
+				if cancelledThread, cancelErr := cancelCodeReviewThread(ctx, stores, logger, job, threadID); cancelErr == nil {
+					state.CostCents = cancelledThread.CostCents
+				} else {
+					logger.Warn().Err(cancelErr).
+						Str("session_id", job.SessionID.String()).
+						Str("thread_id", threadID.String()).
+						Msg("failed to cancel timed-out code review reviewer thread")
+				}
 			}
 			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusTimedOut, &raw, marshalCodeReviewReviewerStructuredResult(state)); err != nil {
 				return fmt.Errorf("mark reviewer timed out: %w", err)
 			}
 			continue
 		}
-		thread, err := stores.SessionThreads.GetByID(ctx, job.OrgID, threadID)
-		if err != nil {
-			return fmt.Errorf("load code review reviewer thread: %w", err)
-		}
-		state.CostCents = thread.CostCents
 		if codeReviewThreadStillRunning(thread.Status) {
 			continue
 		}
@@ -1561,6 +1567,50 @@ func codeReviewOrchestratorEvidence(results []models.CodeReviewAgentResult) (pre
 	return present, usable
 }
 
+func codeReviewOrchestratorOperationalSummary(results []models.CodeReviewAgentResult, reasons []models.CodeReviewRiskReason) string {
+	if !codeReviewRiskReasonsContain(reasons, models.CodeReviewRiskReasonOrchestratorSynthesisInvalid) {
+		return ""
+	}
+
+	for _, result := range results {
+		if result.Role != models.CodeReviewAgentRoleOrchestrator {
+			continue
+		}
+		switch result.Status {
+		case models.CodeReviewAgentResultStatusTimedOut:
+			return "143 could not complete the final synthesis because the orchestration step timed out. The automated review is incomplete; this is not a code-quality finding."
+		case models.CodeReviewAgentResultStatusFailed:
+			state, _ := parseCodeReviewOrchestratorStructuredResult(result.StructuredResult)
+			detail := strings.ToLower(strings.TrimSpace(state.Error))
+			if detail == "" && result.RawOutput != nil {
+				detail = strings.ToLower(strings.TrimSpace(*result.RawOutput))
+			}
+			if strings.Contains(detail, "no authenticated coding agent") {
+				return "143 could not run the final synthesis because no authenticated orchestrator was available. The automated review is incomplete; this is a configuration issue, not a code-quality finding."
+			}
+			if strings.Contains(detail, "synthesis") || strings.Contains(detail, "required field") || strings.Contains(detail, "valid json") {
+				return "143 received reviewer output, but the final synthesis did not match the required response format. The automated review is incomplete; this is not a code-quality finding."
+			}
+			return "143 could not complete the final synthesis because the orchestration step failed. The automated review is incomplete; this is not a code-quality finding."
+		case models.CodeReviewAgentResultStatusCompleted:
+			return "143 received reviewer output, but the final synthesis did not match the required response format. The automated review is incomplete; this is not a code-quality finding."
+		default:
+			return "143 could not complete the final synthesis because the orchestration step did not finish. The automated review is incomplete; this is not a code-quality finding."
+		}
+	}
+
+	return "143 could not complete the final synthesis because the orchestration step did not return a usable result. The automated review is incomplete; this is not a code-quality finding."
+}
+
+func codeReviewRiskReasonsContain(reasons []models.CodeReviewRiskReason, expected models.CodeReviewRiskReasonCode) bool {
+	for _, reason := range reasons {
+		if reason.Code == expected {
+			return true
+		}
+	}
+	return false
+}
+
 func codeReviewOrchestratorReviewSummary(synthesis codeReviewOrchestratorSynthesis) string {
 	if summary := strings.TrimSpace(synthesis.ReviewSummary); summary != "" {
 		return summary
@@ -1817,11 +1867,21 @@ func codeReviewInFlightAgentPhaseFromState(policy models.CodeReviewPolicyConfig,
 }
 
 func codeReviewReviewTimedOut(policy models.CodeReviewPolicyConfig, metadata models.CodeReviewSessionMetadata) bool {
+	return time.Now().After(codeReviewReviewDeadline(policy, metadata))
+}
+
+func codeReviewReviewDeadline(policy models.CodeReviewPolicyConfig, metadata models.CodeReviewSessionMetadata) time.Time {
 	timeout := time.Duration(policy.AgentRoster.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = 30 * time.Minute
 	}
-	return time.Since(metadata.CreatedAt) > timeout
+	return metadata.CreatedAt.Add(timeout)
+}
+
+func codeReviewThreadCompletedByDeadline(thread models.SessionThread, deadline time.Time) bool {
+	return !codeReviewThreadStillRunning(thread.Status) &&
+		thread.CompletedAt != nil &&
+		!thread.CompletedAt.After(deadline)
 }
 
 func codeReviewThreadStillRunning(status models.ThreadStatus) bool {
@@ -2108,7 +2168,8 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 	if err != nil {
 		return fmt.Errorf("list code review orchestrator results for harvest: %w", err)
 	}
-	timedOut := codeReviewReviewTimedOut(policy.Config(), metadata)
+	deadline := codeReviewReviewDeadline(policy.Config(), metadata)
+	timedOut := time.Now().After(deadline)
 	changedPaths := codeReviewChangedPaths(changedFiles)
 	for _, result := range results {
 		if result.Role != models.CodeReviewAgentRoleOrchestrator || codeReviewReviewerResultTerminal(result.Status) {
@@ -2130,25 +2191,29 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			}
 			continue
 		}
-		if timedOut {
-			raw := "orchestrator timed out before producing a completed turn"
-			state.Error = raw
-			if thread, cancelErr := cancelCodeReviewThread(ctx, stores, logger, job, threadID); cancelErr == nil {
-				state.CostCents = thread.CostCents
-			} else {
-				logger.Warn().Err(cancelErr).Str("thread_id", threadID.String()).Msg("failed to cancel timed-out code review orchestrator thread")
-			}
-			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusTimedOut, &raw, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
-				return fmt.Errorf("mark orchestrator timed out: %w", err)
-			}
-			continue
-		}
 		thread, err := stores.SessionThreads.GetByID(ctx, job.OrgID, threadID)
 		if err != nil {
 			return fmt.Errorf("load code review orchestrator thread: %w", err)
 		}
 		state.CostCents = thread.CostCents
 		state = codeReviewOrchestratorObserveRepairCompletion(state, thread.CurrentTurn)
+		// A terminal synthesis is useful evidence even when a delayed job resume
+		// observes it after the deadline, but only if it completed in time.
+		if timedOut && !codeReviewThreadCompletedByDeadline(thread, deadline) {
+			raw := "orchestrator did not produce a completed turn before the review deadline"
+			state.Error = raw
+			if codeReviewThreadStillRunning(thread.Status) {
+				if cancelledThread, cancelErr := cancelCodeReviewThread(ctx, stores, logger, job, threadID); cancelErr == nil {
+					state.CostCents = cancelledThread.CostCents
+				} else {
+					logger.Warn().Err(cancelErr).Str("thread_id", threadID.String()).Msg("failed to cancel timed-out code review orchestrator thread")
+				}
+			}
+			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusTimedOut, &raw, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
+				return fmt.Errorf("mark orchestrator timed out: %w", err)
+			}
+			continue
+		}
 		if codeReviewThreadStillRunning(thread.Status) {
 			continue
 		}
@@ -2366,6 +2431,7 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		Acceptable:                decision.Acceptable,
 		RiskReasons:               decision.RiskReasonDetails,
 		GeneratedSummary:          codeReviewOrchestratorReviewSummary(input.OrchestratorSynthesis),
+		OperationalSummary:        codeReviewOrchestratorOperationalSummary(input.AgentResults, decision.RiskReasonDetails),
 		SessionURL:                input.SessionURL,
 		DescriptionPassed:         descriptionPassed,
 		DescriptionIssues:         codeReviewFailedDescriptionRequirements(descriptionEvaluation.RequirementSummaries),

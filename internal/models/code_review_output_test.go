@@ -28,9 +28,9 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 				AssessedAt: time.Date(2026, time.July, 22, 23, 42, 57, 0, time.UTC),
 				SessionURL: "https://143.dev/sessions/sess_latest",
 			},
-			expected: "❌ **143 Code Reviewer did not approve this PR**\n\n" +
+			expected: "❌ **143 Code Reviewer needs human review**\n\n" +
 				"**Why:** The available review evidence did not meet the configured approval policy.\n\n" +
-				"**Next steps:** Address the items above and request another review, or ask a human reviewer to decide.\n\n" +
+				"**Next steps:** Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.\n\n" +
 				"**Latest assessment:** `696c4a2` at 2026-07-22T23:42:57Z\n\n" +
 				"[View the full review](https://143.dev/sessions/sess_latest)",
 		},
@@ -52,7 +52,7 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 				},
 				AgentSummaries: []string{"Codex found no blocking issues", "Claude Code timed out"},
 			},
-			expected: `❌ **143 Code Reviewer did not approve this PR**
+			expected: `❌ **143 Code Reviewer needs human review**
 
 **Why:** The change is focused, but the description does not explain the testing evidence and only one review agent returned usable output. Add that context and rerun the missing review before asking for approval.
 
@@ -62,7 +62,46 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 
 **Reviewer evidence:** Codex found no blocking issues; Claude Code timed out.
 
+**Next steps:** Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.
+
 [View the full review](https://143.dev/sessions/sess_123)`,
+		},
+		{
+			name: "explains an incomplete review when final synthesis times out",
+			input: CodeReviewFinalReviewInput{
+				Decision:           CodeReviewDecisionNeedsHumanReview,
+				Acceptable:         false,
+				RiskReasons:        []CodeReviewRiskReason{{Code: CodeReviewRiskReasonOrchestratorSynthesisInvalid}},
+				OperationalSummary: "143 could not complete the final synthesis because the orchestration step timed out. The automated review is incomplete; this is not a code-quality finding.",
+				AgentSummaries:     []string{"Codex found no blocking issues", "Claude Code found no blocking issues"},
+			},
+			expected: `❌ **143 Code Reviewer needs human review**
+
+**Why:** 143 could not complete the final synthesis because the orchestration step timed out. The automated review is incomplete; this is not a code-quality finding.
+
+**Reviewer evidence:** Codex found no blocking issues; Claude Code found no blocking issues.
+
+**Next steps:** Retry the automated review to regenerate the final synthesis, or ask a human reviewer to review the available evidence directly.`,
+		},
+		{
+			name: "keeps real policy blockers alongside an operational failure",
+			input: CodeReviewFinalReviewInput{
+				Decision:   CodeReviewDecisionNeedsHumanReview,
+				Acceptable: false,
+				RiskReasons: []CodeReviewRiskReason{
+					{Code: CodeReviewRiskReasonOrchestratorSynthesisInvalid},
+					{Code: CodeReviewRiskReasonChecksFailing},
+				},
+				OperationalSummary: "143 received reviewer output, but the final synthesis did not match the required response format. The automated review is incomplete; this is not a code-quality finding.",
+			},
+			expected: `❌ **143 Code Reviewer needs human review**
+
+**Why:** 143 received reviewer output, but the final synthesis did not match the required response format. The automated review is incomplete; this is not a code-quality finding.
+
+**Policy blockers:**
+- Required GitHub checks are not passing.
+
+**Next steps:** Retry the automated review to regenerate the final synthesis, or ask a human reviewer to review the available evidence directly.`,
 		},
 		{
 			name: "uses generated approval narrative with compact review facts",
@@ -117,7 +156,7 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 				}},
 				RecommendedHumanReviewers: []string{"security/platform"},
 			},
-			expected: `❌ **143 Code Reviewer did not approve this PR**
+			expected: `❌ **143 Code Reviewer needs human review**
 
 **Why:** Review agents reported blocking findings.
 
@@ -126,7 +165,7 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 
 **Suggested human reviewers:** security/platform
 
-**Next steps:** Address the items above and request another review, or ask a human reviewer to decide.`,
+**Next steps:** Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.`,
 		},
 		{
 			name: "makes scope limits easy to compare",
@@ -138,11 +177,11 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 					{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: 34, Limit: 20},
 				},
 			},
-			expected: `❌ **143 Code Reviewer did not approve this PR**
+			expected: `❌ **143 Code Reviewer needs human review**
 
 **Why:** This change has 1842 changed lines; the policy limit is 1000. This change touches 34 files; the policy limit is 20.
 
-**Next steps:** Address the items above and request another review, or ask a human reviewer to decide.`,
+**Next steps:** Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.`,
 		},
 	}
 
