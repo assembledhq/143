@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { APIClient, APIToken, AuthProviders, CliToken, EvalReleaseGate, Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail, AutopilotQueueResponse, SessionTranscriptWindowResponse, AgentCapabilityDefinition, AgentCapabilityPolicyResponse, JoinToken, JoinTokenLink, OpenCodeModelInfo } from '@/lib/types';
+import type { APIClient, APIToken, AuthProviders, CliToken, EvalReleaseGate, Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, Project, ProjectDetail, SessionTranscriptWindowResponse, AgentCapabilityDefinition, AgentCapabilityPolicyResponse, JoinToken, JoinTokenLink, OpenCodeModelInfo } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -201,75 +201,6 @@ export const mockProjects: Project[] = [
   },
 ];
 
-export const mockPMStatus: PMStatus = {
-  is_running: false,
-  issues_reviewed: 0,
-  success_rate: 0,
-  success_count: 0,
-  total_delegated: 0,
-};
-
-export const mockAutopilotQueue: AutopilotQueueResponse = {
-  data: [
-    {
-      id: 'issue-1',
-      rank: 1,
-      source: { type: 'sentry', key: 'SENTRY-123' },
-      title: 'TypeError: Cannot read properties of undefined',
-      repo: { id: 'repo-1', name: 'example/repo' },
-      issue_status: 'triaged',
-      customer_impact: { label: 'High', count: 23 },
-      implementation_ease: 'High',
-      low_hanging_fruit: {
-        label: 'Very high',
-        reasons: ['high customer impact', 'straightforward implementation', 'recent activity'],
-        cluster_size: 2,
-      },
-      display_run_state: 'running',
-      latest_session: {
-        id: 'session-abcdef12-3456-7890',
-        title: 'Fix TypeError',
-        updated_at: '2026-02-17T07:05:30Z',
-      },
-      latest_agent_run: {
-        id: 'session-abcdef12-3456-7890',
-        status: 'running',
-        trigger_mode: 'auto',
-        started_at: '2026-02-17T07:00:00Z',
-      },
-      available_action: 'view_run',
-    },
-    {
-      id: 'issue-2',
-      rank: 2,
-      source: { type: 'linear', key: 'VIR-101' },
-      title: 'Missing retry copy in payment flow',
-      repo: { id: 'repo-1', name: 'example/repo' },
-      issue_status: 'open',
-      customer_impact: { label: 'Medium', count: 5 },
-      implementation_ease: 'High',
-      low_hanging_fruit: {
-        label: 'High',
-        reasons: ['straightforward implementation', 'eligible for automation'],
-        cluster_size: 1,
-      },
-      display_run_state: 'not_started',
-      available_action: 'start_run',
-    },
-  ],
-  meta: {
-    summary: {
-      top_issue_id: 'issue-1',
-      autorunnable_count: 1,
-      needs_review_count: 0,
-      open_pr_count: 0,
-      active_run_count: 1,
-      ranked_issue_count: 2,
-      analyzed_at: '2026-02-17T07:05:30Z',
-    },
-  },
-};
-
 export const mockOpenCodeModels: OpenCodeModelInfo[] = [];
 
 export const mockMembers: User[] = [
@@ -359,10 +290,6 @@ export const handlers = [
       data: mockIssues,
       meta: {},
     } satisfies ListResponse<Issue>);
-  }),
-
-  http.get('/api/v1/autopilot/queue', () => {
-    return HttpResponse.json(mockAutopilotQueue);
   }),
 
   http.get('/api/v1/settings/opencode-models', () => {
@@ -841,14 +768,6 @@ export const handlers = [
     return HttpResponse.json({ data: mockProjectDetail } satisfies SingleResponse<ProjectDetail>);
   }),
 
-  http.get('/api/v1/pm/status', () => {
-    return HttpResponse.json({ data: mockPMStatus } satisfies SingleResponse<PMStatus>);
-  }),
-
-  http.post('/api/v1/pm/analyze', () => {
-    return HttpResponse.json({ data: { job_id: 'job-1' } });
-  }),
-
   http.get('/api/v1/team/members', () => {
     return HttpResponse.json({
       data: mockMembers,
@@ -1143,14 +1062,6 @@ export const handlers = [
       data: [],
       meta: {},
     });
-  }),
-
-  http.get('/api/v1/pm/decisions', () => {
-    return HttpResponse.json({
-      data: [],
-      summary: { total_delegated: 0, succeeded: 0, failed: 0, still_open: 0 },
-      meta: {},
-    } satisfies PMDecisionsResponse);
   }),
 
   http.get('/api/v1/issues/:id', ({ params }) => {

@@ -20,8 +20,8 @@ describe("sidebarLabelForPageTreeFile", () => {
   });
 
   it("keeps normal document labels", () => {
-    expect(sidebarLabelForPageTreeFile("guides/autopilot.mdx", "Autopilot")).toBe(
-      "Autopilot",
+    expect(sidebarLabelForPageTreeFile("guides/automations.mdx", "Automations")).toBe(
+      "Automations",
     );
   });
 });

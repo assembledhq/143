@@ -21,6 +21,6 @@ Fragment map:
 - `72_provider_issues.sql` - provider-sourced issues, priority scores, complexity estimates, and incidents.
 - `73_automation_runs.sql` - automations, triggers, runs, and capability policies.
 - `74_high_impact_sessions.sql` - high-impact sessions plus Slack and Linear surfaces linked to them.
-- `75_pm_projects.sql` - PM documents, plans, project tasks, specs, attachments, cycles, and improvements.
+- `75_pm_projects.sql` - Legacy-named seed for reference-document pins, human-authored project details, automation improvements, and cleanup of obsolete PM demo rows.
 - `76_code_review.sql` - code review policy, sessions, reviewer output, findings, and prompt artifacts.
 - `77_usage_rollups.sql` - seeded usage rollups for dashboards.

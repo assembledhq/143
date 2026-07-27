@@ -81,7 +81,7 @@ export function OnboardingPageContent() {
         <div className="space-y-8">
           <PageHeader
             title="Welcome to 143"
-            description="Set up your connections to get started with Autopilot."
+            description="Set up your connections to start running sessions."
           />
           <p className="text-sm text-muted-foreground">Loading setup status...</p>
         </div>
@@ -98,14 +98,13 @@ export function OnboardingPageContent() {
       <div className="space-y-8">
         <PageHeader
           title="Welcome to 143"
-          description="Set up your connections to get started with Autopilot."
+          description="Set up your connections to start running sessions."
         />
 
         <VerifyEmailBanner />
 
         <p className="text-sm text-muted-foreground">
-          Autopilot needs a few connections before it can start analyzing.
-          Connect a coding agent and GitHub repositories, then run the first analysis.
+          Connect a coding agent and GitHub repositories, then start your first session.
         </p>
 
         <SetupChecklist />

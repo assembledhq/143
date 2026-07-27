@@ -28,10 +28,10 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 				AssessedAt: time.Date(2026, time.July, 22, 23, 42, 57, 0, time.UTC),
 				SessionURL: "https://143.dev/sessions/sess_latest",
 			},
-			expected: "143 Code Reviewer needs human review\n\n" +
-				"Why: The available review evidence did not meet the configured approval policy.\n\n" +
-				"Next step: Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.\n\n" +
-				"Latest assessment: `696c4a2` at 2026-07-22T23:42:57Z\n\n" +
+			expected: "❌ **143 Code Reviewer needs human review**\n\n" +
+				"**Why:** The available review evidence did not meet the configured approval policy.\n\n" +
+				"**Next steps:** Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.\n\n" +
+				"**Latest assessment:** `696c4a2` at 2026-07-22T23:42:57Z\n\n" +
 				"[View the full review](https://143.dev/sessions/sess_latest)",
 		},
 		{
@@ -52,17 +52,17 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 				},
 				AgentSummaries: []string{"Codex found no blocking issues", "Claude Code timed out"},
 			},
-			expected: `143 Code Reviewer needs human review
+			expected: `❌ **143 Code Reviewer needs human review**
 
-Why: The change is focused, but the description does not explain the testing evidence and only one review agent returned usable output. Add that context and rerun the missing review before asking for approval.
+**Why:** The change is focused, but the description does not explain the testing evidence and only one review agent returned usable output. Add that context and rerun the missing review before asking for approval.
 
-Policy blockers:
+**Policy blockers:**
 - The PR description did not meet the configured requirements: Testing evidence (say how the change was tested); Screenshots or preview link (add a before/after screenshot).
 - Only 1 of 2 required review agents completed a usable review.
 
-Reviewer evidence: Codex found no blocking issues; Claude Code timed out.
+**Reviewer evidence:** Codex found no blocking issues; Claude Code timed out.
 
-Next step: Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.
+**Next steps:** Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.
 
 [View the full review](https://143.dev/sessions/sess_123)`,
 		},
@@ -75,13 +75,13 @@ Next step: Review the explanation and evidence above, address any blockers, then
 				OperationalSummary: "143 could not complete the final synthesis because the orchestration step timed out. The automated review is incomplete; this is not a code-quality finding.",
 				AgentSummaries:     []string{"Codex found no blocking issues", "Claude Code found no blocking issues"},
 			},
-			expected: `143 Code Reviewer needs human review
+			expected: `❌ **143 Code Reviewer needs human review**
 
-Why: 143 could not complete the final synthesis because the orchestration step timed out. The automated review is incomplete; this is not a code-quality finding.
+**Why:** 143 could not complete the final synthesis because the orchestration step timed out. The automated review is incomplete; this is not a code-quality finding.
 
-Reviewer evidence: Codex found no blocking issues; Claude Code found no blocking issues.
+**Reviewer evidence:** Codex found no blocking issues; Claude Code found no blocking issues.
 
-Next step: Retry the automated review to regenerate the final synthesis, or ask a human reviewer to review the available evidence directly.`,
+**Next steps:** Retry the automated review to regenerate the final synthesis, or ask a human reviewer to review the available evidence directly.`,
 		},
 		{
 			name: "keeps real policy blockers alongside an operational failure",
@@ -94,14 +94,14 @@ Next step: Retry the automated review to regenerate the final synthesis, or ask 
 				},
 				OperationalSummary: "143 received reviewer output, but the final synthesis did not match the required response format. The automated review is incomplete; this is not a code-quality finding.",
 			},
-			expected: `143 Code Reviewer needs human review
+			expected: `❌ **143 Code Reviewer needs human review**
 
-Why: 143 received reviewer output, but the final synthesis did not match the required response format. The automated review is incomplete; this is not a code-quality finding.
+**Why:** 143 received reviewer output, but the final synthesis did not match the required response format. The automated review is incomplete; this is not a code-quality finding.
 
-Policy blockers:
+**Policy blockers:**
 - Required GitHub checks are not passing.
 
-Next step: Retry the automated review to regenerate the final synthesis, or ask a human reviewer to review the available evidence directly.`,
+**Next steps:** Retry the automated review to regenerate the final synthesis, or ask a human reviewer to review the available evidence directly.`,
 		},
 		{
 			name: "uses generated approval narrative with compact review facts",
@@ -119,13 +119,13 @@ Next step: Retry the automated review to regenerate the final synthesis, or ask 
 				ReviewerQuorum:         2,
 				RequiredReviewerQuorum: 2,
 			},
-			expected: `143 Code Reviewer approved this PR
+			expected: `✅ **143 Code Reviewer approved this PR**
 
-Why: The settings update is narrowly scoped and both review agents found no blocking issues. The description and test evidence are sufficient for an engineer to verify the change quickly.
+**Why:** The settings update is narrowly scoped and both review agents found no blocking issues. The description and test evidence are sufficient for an engineer to verify the change quickly.
 
-Review facts: 180 changed lines across 4 files · required checks passed · reviewer quorum 2/2
+**Review facts:** 180 changed lines across 4 files · required checks passed · reviewer quorum 2/2
 
-Reviewer evidence: Codex found no blocking issues; Claude Code found no blocking issues.
+**Reviewer evidence:** Codex found no blocking issues; Claude Code found no blocking issues.
 
 [View the full review](https://143.dev/sessions/sess_approved)`,
 		},
@@ -138,9 +138,9 @@ Reviewer evidence: Codex found no blocking issues; Claude Code found no blocking
 				ReviewerQuorum:         1,
 				RequiredReviewerQuorum: 1,
 			},
-			expected: `143 Code Reviewer completed its review without approving this PR
+			expected: `❌ **143 Code Reviewer completed its review without approving this PR**
 
-Why: It met the configured policy: the PR description passed and 1 usable reviewer report met the required quorum of 1. Automated approval is disabled by organization policy.`,
+**Why:** It met the configured policy: the PR description passed and 1 usable reviewer report met the required quorum of 1. Automated approval is disabled by organization policy.`,
 		},
 		{
 			name: "keeps actionable findings and reviewer recommendation",
@@ -156,16 +156,16 @@ Why: It met the configured policy: the PR description passed and 1 usable review
 				}},
 				RecommendedHumanReviewers: []string{"security/platform"},
 			},
-			expected: `143 Code Reviewer needs human review
+			expected: `❌ **143 Code Reviewer needs human review**
 
-Why: Review agents reported blocking findings.
+**Why:** Review agents reported blocking findings.
 
-Review findings:
+**Review findings:**
 - high: src/auth/session.go:88 - Authorization edge case
 
-Suggested human reviewers: security/platform
+**Suggested human reviewers:** security/platform
 
-Next step: Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.`,
+**Next steps:** Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.`,
 		},
 		{
 			name: "makes scope limits easy to compare",
@@ -177,11 +177,11 @@ Next step: Review the explanation and evidence above, address any blockers, then
 					{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: 34, Limit: 20},
 				},
 			},
-			expected: `143 Code Reviewer needs human review
+			expected: `❌ **143 Code Reviewer needs human review**
 
-Why: This change has 1842 changed lines; the policy limit is 1000. This change touches 34 files; the policy limit is 20.
+**Why:** This change has 1842 changed lines; the policy limit is 1000. This change touches 34 files; the policy limit is 20.
 
-Next step: Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.`,
+**Next steps:** Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.`,
 		},
 	}
 

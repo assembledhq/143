@@ -31,10 +31,6 @@ vi.mock('next/link', () => ({
   ),
 }));
 
-vi.mock('@/components/pm/pm-status-banner', () => ({
-  PMStatusBanner: () => <div data-testid="pm-status-banner" />,
-}));
-
 const preloadSessionDetailContent = vi.hoisted(() => vi.fn());
 
 vi.mock('./[id]/session-detail-page-client', () => ({

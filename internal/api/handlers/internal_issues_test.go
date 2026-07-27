@@ -190,6 +190,55 @@ func TestInternalIssueHandler_RateLimited(t *testing.T) {
 	require.Equal(t, http.StatusTooManyRequests, rec.Code)
 }
 
+func TestInternalIssueHandler_NonPMCallerStillCreatesAndDispatchesIssue(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "mock pool should be created")
+	defer mock.Close()
+
+	handler := newInternalIssueHandler(t, mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	now := time.Now()
+	token, err := auth.GenerateSessionThreadTokenWithClaims(
+		handler.signingSecret,
+		orgID,
+		repoID,
+		uuid.New(),
+		nil,
+		[]string{"issues:create"},
+		string(models.SessionOriginManual),
+		nil,
+		time.Minute,
+	)
+	require.NoError(t, err, "ordinary session token should be generated")
+
+	mock.ExpectQuery("INSERT INTO issues").
+		WithArgs(sessionAnyArgs(16)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(issueID, now, now))
+	mock.ExpectQuery("SELECT id, name, settings, created_at, updated_at").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+			AddRow(orgID, "test", []byte(`{}`), now, now))
+	expectIssueSessionCreate(mock, sessionID, now)
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(sessionAnyArgs(6)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/internal/issues", bytes.NewBufferString(`{"title":"ordinary work","description":"keep this capability"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	handler.Create(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code, "non-PM internal issue creation should remain available")
+	require.Contains(t, rec.Body.String(), sessionID.String(), "successful creation should return the dispatched session")
+	require.NoError(t, mock.ExpectationsWereMet(), "issue, session, link, and run_agent enqueue should all occur")
+}
+
 func TestIncrementAndCheck(t *testing.T) {
 	t.Parallel()
 

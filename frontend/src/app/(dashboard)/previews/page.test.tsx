@@ -193,9 +193,10 @@ describe("PreviewsPage", () => {
 
     renderWithProviders(<PreviewsPage />);
 
-    expect(
-      await screen.findByRole("heading", { level: 1, name: "Previews" }),
-    ).toBeInTheDocument();
+    const heading = await screen.findByRole("heading", { level: 1, name: "Previews" });
+    expect(heading).toBeInTheDocument();
+    const page = heading.closest('[data-slot="list-page"]');
+    expect(page?.parentElement).toHaveClass("max-w-7xl");
     expect(await screen.findAllByText("PR #42 - feature/live-preview")).toHaveLength(2);
     expect(
       screen.getByRole("heading", { level: 2, name: "Running (1)" }),

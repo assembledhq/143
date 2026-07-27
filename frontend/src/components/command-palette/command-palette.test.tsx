@@ -44,7 +44,7 @@ describe("CommandPalette", () => {
     renderPalette();
     expect(await screen.findByText("Sessions")).toBeInTheDocument();
     expect(screen.getByText("Projects")).toBeInTheDocument();
-    expect(screen.getAllByText("Autopilot")).toHaveLength(2);
+    expect(screen.queryByText("Autopilot")).not.toBeInTheDocument();
   });
 
   it("renders settings items", async () => {
@@ -76,7 +76,7 @@ describe("CommandPalette", () => {
     await screen.findByText("Account");
     expect(screen.queryByText("General")).not.toBeInTheDocument();
     expect(screen.queryByText("Audit log")).not.toBeInTheDocument();
-    expect(screen.getAllByText("Autopilot")).toHaveLength(1);
+    expect(screen.queryByText("Autopilot")).not.toBeInTheDocument();
   });
 
   it("excludes write quick actions for viewers", async () => {
@@ -98,10 +98,10 @@ describe("CommandPalette", () => {
     const user = userEvent.setup();
     renderPalette();
 
-    const [autopilotItem] = await screen.findAllByText("Autopilot");
-    await user.click(autopilotItem);
+    const sessionsItem = await screen.findByText("Sessions");
+    await user.click(sessionsItem);
 
-    expect(pushMock).toHaveBeenCalledWith("/autopilot");
+    expect(pushMock).toHaveBeenCalledWith("/sessions");
   });
 
   it("calls logout when Log out is selected", async () => {

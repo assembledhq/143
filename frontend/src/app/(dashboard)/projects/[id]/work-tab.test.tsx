@@ -156,11 +156,13 @@ describe("WorkTab", () => {
     expect(screen.getByText("Pull requests")).toBeInTheDocument();
   });
 
-  it("renders planning cycles timeline", () => {
+  it("does not render legacy planning cycle data", () => {
     renderWithProviders(
       <WorkTab project={mockProject} tasks={mockTasks} cycles={mockCycles} />,
     );
-    expect(screen.getByText("Planning cycles")).toBeInTheDocument();
+    expect(screen.queryByText("Planning cycles")).not.toBeInTheDocument();
+    expect(screen.queryByText("Cycle #1")).not.toBeInTheDocument();
+    expect(screen.queryByText("First planning cycle analysis")).not.toBeInTheDocument();
   });
 
   it("does not render PR section when no tasks have PRs", () => {
@@ -294,22 +296,5 @@ describe("WorkTab", () => {
 
     const runLink = screen.getByText("Session").closest("a");
     expect(runLink).toHaveAttribute("href", "/sessions/run-123");
-  });
-
-  it("renders planning cycle details when expanded", async () => {
-    const user = userEvent.setup();
-
-    renderWithProviders(
-      <WorkTab project={mockProject} tasks={mockTasks} cycles={mockCycles} />,
-    );
-
-    // Planning Cycles section is collapsed by default (defaultOpen={false})
-    await user.click(screen.getByText("Planning cycles"));
-
-    expect(screen.getByText("Cycle #1")).toBeInTheDocument();
-    expect(screen.getByText("First planning cycle analysis")).toBeInTheDocument();
-    expect(screen.getByText("25% done")).toBeInTheDocument();
-    expect(screen.getByText("1 completed")).toBeInTheDocument();
-    expect(screen.getByText("4 created")).toBeInTheDocument();
   });
 });

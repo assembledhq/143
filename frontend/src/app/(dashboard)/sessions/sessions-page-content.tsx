@@ -16,8 +16,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { PageHeader } from "@/components/page-header";
 import { PeopleFilter } from "@/components/people-filter";
-import { PMStatusBanner } from "@/components/pm/pm-status-banner";
-import { DecisionsView } from "@/components/pm/decisions-view";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -47,12 +45,10 @@ import { getCountForTab, renderCount } from "@/lib/session-counts";
 const filterTabs = [
   { value: "all", label: "All" },
   { value: "active", label: "Active" },
-  { value: "decisions", label: "Decisions" },
 ];
 
-/** Wrapper that also passes through "decisions" as a client-only filter. */
 function filterToStatusParam(filter: string | null): string | undefined {
-  return baseFilterToStatusParam(filter, ["decisions"]);
+  return baseFilterToStatusParam(filter);
 }
 
 // ---------------------------------------------------------------------------
@@ -213,7 +209,6 @@ export function SessionsPageContent() {
   }, [checkOverflow]);
 
   const currentFilter = activeFilter ?? "all";
-  const showDecisions = currentFilter === "decisions";
   const statusParam = filterToStatusParam(currentFilter);
 
   // Pagination state. Once the user clicks "Show more" we stop polling entirely
@@ -251,8 +246,8 @@ export function SessionsPageContent() {
   const { data: listData, isLoading, error } = useQuery({
     queryKey: [...queryKeys.sessions.list(repo), "filtered", currentFilter, serializedPeopleParam],
     queryFn: () => api.sessions.list(listParams),
-    refetchInterval: isPaginated || showDecisions || isTableHovered ? false : 10000,
-    enabled: !showDecisions && isResolved,
+    refetchInterval: isPaginated || isTableHovered ? false : 10000,
+    enabled: isResolved,
   });
 
   // Tab badge counts.
@@ -263,8 +258,8 @@ export function SessionsPageContent() {
         repository_id: repo ?? undefined,
         triggered_by_user_ids: scopedUserIDs,
       }),
-    refetchInterval: showDecisions ? false : 10000,
-    enabled: !showDecisions && isResolved,
+    refetchInterval: 10000,
+    enabled: isResolved,
   });
 
   const { data: membersData } = useQuery({
@@ -274,7 +269,7 @@ export function SessionsPageContent() {
   });
 
   const members = useMemo(() => membersData?.data ?? [], [membersData?.data]);
-  const isPendingScope = !showDecisions && (!isResolved || isLoading);
+  const isPendingScope = !isResolved || isLoading;
 
   const firstPage = useMemo(() => listData?.data ?? [], [listData?.data]);
   const firstPageCursor = listData?.meta?.next_cursor || undefined;
@@ -290,12 +285,10 @@ export function SessionsPageContent() {
   });
 
   const filteredSessions = useMemo(() => {
-    if (showDecisions) return [];
     return [firstPage, ...extraPages].flat();
-  }, [firstPage, extraPages, showDecisions]);
+  }, [firstPage, extraPages]);
 
   const counts = countsData?.data;
-  const workingCount = counts?.active ?? 0;
 
   // Total for the currently-visible tab (used for "Showing N of M" footer).
   // Falls back to loaded length when counts haven't arrived yet or when the cap
@@ -325,8 +318,6 @@ export function SessionsPageContent() {
         description="Each agent execution creates a session."
       />
 
-      <PMStatusBanner hasActivePlanSession={workingCount > 0} canMutate={canCreateSession} />
-
       {/* ── Tab filters ────────────────────────────────────────────── */}
       <div className="relative flex items-center border-b border-border">
         <div ref={tabsRef} className={`flex flex-nowrap items-center overflow-x-auto overflow-y-hidden scrollbar-hide min-w-0 ${tabsOverflow ? "mask-fade-r" : ""}`}>
@@ -335,7 +326,7 @@ export function SessionsPageContent() {
             const count = getCountForTab(tab.value, counts);
             const label = renderCount(count, counts);
             // Active uses the existing attention-grabbing pill; All gets a muted
-            // inline number. Decisions is a client-only view with no count.
+            // inline number.
             // Zero buckets render nothing — a "0" badge is noise.
             const isActivePill = tab.value === "active" && count !== undefined && count > 0;
             const isMutedNumber = !isActivePill && label !== undefined && count !== undefined && count > 0;
@@ -377,9 +368,6 @@ export function SessionsPageContent() {
         />
       </div>
 
-      {/* ── Decisions tab ──────────────────────────────────────────── */}
-      {showDecisions && <DecisionsView />}
-
       {/* ── Loading / error / empty states ─────────────────────────── */}
       {isPendingScope && (
         <div className="py-16 text-center text-xs text-muted-foreground">
@@ -387,13 +375,13 @@ export function SessionsPageContent() {
         </div>
       )}
 
-      {!isPendingScope && !showDecisions && error && (
+      {!isPendingScope && error && (
         <div className="py-16 text-center text-xs text-muted-foreground">
           Failed to load sessions. Make sure the backend is running.
         </div>
       )}
 
-      {!isPendingScope && !showDecisions && !error && counts?.all === 0 && (
+      {!isPendingScope && !error && counts?.all === 0 && (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12">
             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-muted">
@@ -401,14 +389,14 @@ export function SessionsPageContent() {
             </div>
             <p className="mt-4 text-xs font-medium text-foreground">No sessions yet</p>
             <p className="mt-1 max-w-sm text-center text-xs text-muted-foreground">
-              The PM agent runs automatically on a schedule. Click <span className="font-medium text-foreground">Run now</span> above to start it immediately, or create a <span className="font-medium text-foreground">manual session</span> for a specific issue.
+              Start a session for a specific issue or task.
             </p>
             {canCreateSession && (
               <div className="flex items-center gap-2 mt-4">
                 <Button variant="outline" size="sm" asChild>
                   <Link href="/sessions/new">
                     <Plus className="mr-1.5 h-3.5 w-3.5" />
-                    Manual session
+                    New session
                   </Link>
                 </Button>
               </div>
@@ -418,7 +406,7 @@ export function SessionsPageContent() {
       )}
 
       {/* ── Data table ─────────────────────────────────────────────── */}
-      {!isPendingScope && !showDecisions && !error && counts?.all !== 0 && (
+      {!isPendingScope && !error && counts?.all !== 0 && (
         <div
           className="rounded-lg border border-border bg-card overflow-hidden"
           onPointerEnter={() => setIsTableHovered(true)}

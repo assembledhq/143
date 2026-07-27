@@ -14,25 +14,25 @@ Open-source coding agent infrastructure for teams.
 
 Coding agents can fix real product issues now — often faster when the person closest to the customer spots the problem. But most agent tooling still assumes one engineer at a time, each with their own terminal, credentials, and automations nobody else can see.
 
-143 runs that work as shared team infrastructure: one workspace for sessions, automations, Autopilot runs, prompts, and history. Engineers can keep full control while builders on support, product, and other teams get scoped workflows with review safeguards. The agent stays close to the tools you already trust: GitHub, PR review, CI, and merge rules.
+143 runs that work as shared team infrastructure: one workspace for sessions, automations, prompts, and history. Engineers can keep full control while builders on support, product, and other teams get scoped workflows with review safeguards. The agent stays close to the tools you already trust: GitHub, PR review, CI, and merge rules.
 
 ## What it does
 
-- **Team-owned agent work:** automations, sessions, Autopilot runs, and history live in one shared workspace.
+- **Team-owned agent work:** automations, sessions, and history live in one shared workspace.
 - **Context from your existing tools:** GitHub, Linear, Sentry, Slack, Notion, PagerDuty, and more can feed agents the context they need to do the work.
 - **Cloud execution:** agents run in isolated sandboxes (Docker/gVisor), so anyone can start work from a browser, Slack, or their phone without keeping a laptop awake.
 - **PRs and previews:** output becomes a branch or PR, with a live preview when the repo supports it.
 - **Bring the agent you prefer:** 143 is built around coding-agent adapters (Codex, Claude Code, OpenCode, Amp, Pi), so it isn't tied to one model vendor.
 - **Review loops before humans step in:** agents can repair failing tests, respond to review feedback, and iterate inside guardrails first.
 
-A common first setup is the smallest one: connect GitHub, choose an agent, connect Linear or Sentry, and run a single issue-to-PR flow. Add automations, previews, and Autopilot when you need them.
+A common first setup is the smallest one: connect GitHub, choose an agent, connect Linear or Sentry, and run a single issue-to-PR flow. Add automations and previews when you need them.
 
 ## How it works
 
 The fastest way to get started and try it out is our managed service on [143.dev](https://www.143.dev). Sign up, connect GitHub and your tools, and you're running without provisioning workers, sandboxes, or infrastructure yourself. Self-hosting follows the same flow; see [Self-hosting](#self-hosting) below.
 
 1. Connect GitHub repos and the tools that carry product or production context.
-2. Start a session manually, schedule an automation, or let Autopilot pick up an eligible issue.
+2. Start a session manually or schedule an automation.
 3. 143 spins up an isolated sandbox, checks out the repo, and runs your chosen agent.
 4. The agent produces a diff, runs any repo-defined checks, and can launch a preview.
 5. 143 opens a branch or PR for normal human review and CI.

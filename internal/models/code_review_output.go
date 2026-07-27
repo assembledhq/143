@@ -36,11 +36,11 @@ func BuildCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) string {
 func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) string {
 	paragraphs := make([]string, 0, 9)
 	if input.Decision == CodeReviewDecisionApproved {
-		paragraphs = append(paragraphs, "143 Code Reviewer approved this PR")
+		paragraphs = append(paragraphs, "✅ **143 Code Reviewer approved this PR**")
 	} else if input.Acceptable {
-		paragraphs = append(paragraphs, "143 Code Reviewer completed its review without approving this PR")
+		paragraphs = append(paragraphs, "❌ **143 Code Reviewer completed its review without approving this PR**")
 	} else {
-		paragraphs = append(paragraphs, "143 Code Reviewer needs human review")
+		paragraphs = append(paragraphs, "❌ **143 Code Reviewer needs human review**")
 	}
 
 	generatedSummary := codeReviewGeneratedSummary(input.GeneratedSummary)
@@ -52,7 +52,7 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 	if explanation == "" {
 		explanation = codeReviewDecisionExplanation(input)
 	}
-	paragraphs = append(paragraphs, "Why: "+explanation)
+	paragraphs = append(paragraphs, "**Why:** "+explanation)
 
 	if (generatedSummary != "" || operationalSummary != "") && !input.Acceptable {
 		riskReasons := input.RiskReasons
@@ -61,7 +61,7 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 		}
 		if blockers := codeReviewRiskReasonExplanations(riskReasons, input.DescriptionIssues); len(blockers) > 0 {
 			var policyBlockers strings.Builder
-			policyBlockers.WriteString("Policy blockers:\n")
+			policyBlockers.WriteString("**Policy blockers:**\n")
 			for _, blocker := range blockers {
 				policyBlockers.WriteString("- " + blocker + "\n")
 			}
@@ -71,22 +71,22 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 
 	if generatedSummary != "" && operationalSummary == "" {
 		if facts := codeReviewFacts(input); len(facts) > 0 {
-			paragraphs = append(paragraphs, "Review facts: "+strings.Join(facts, " · "))
+			paragraphs = append(paragraphs, "**Review facts:** "+strings.Join(facts, " · "))
 		}
 	}
 	if agentSummaries := nonEmptyStrings(input.AgentSummaries); len(agentSummaries) > 0 {
 		for i := range agentSummaries {
 			agentSummaries[i] = strings.TrimRight(agentSummaries[i], ".")
 		}
-		paragraphs = append(paragraphs, "Reviewer evidence: "+strings.Join(agentSummaries, "; ")+".")
+		paragraphs = append(paragraphs, "**Reviewer evidence:** "+strings.Join(agentSummaries, "; ")+".")
 	}
 
 	if len(input.Findings) > 0 {
 		var findings strings.Builder
 		if input.Acceptable {
-			findings.WriteString("Review notes:\n")
+			findings.WriteString("**Review notes:**\n")
 		} else {
-			findings.WriteString("Review findings:\n")
+			findings.WriteString("**Review findings:**\n")
 		}
 		for _, finding := range groupedCodeReviewFindings(input.Findings) {
 			findings.WriteString("- " + finding + "\n")
@@ -94,13 +94,13 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 		paragraphs = append(paragraphs, strings.TrimSpace(findings.String()))
 	}
 	if reviewers := nonEmptyStrings(input.RecommendedHumanReviewers); len(reviewers) > 0 {
-		paragraphs = append(paragraphs, "Suggested human reviewers: "+strings.Join(reviewers, ", "))
+		paragraphs = append(paragraphs, "**Suggested human reviewers:** "+strings.Join(reviewers, ", "))
 	}
 	if !input.Acceptable {
 		if operationalSummary != "" {
-			paragraphs = append(paragraphs, "Next step: Retry the automated review to regenerate the final synthesis, or ask a human reviewer to review the available evidence directly.")
+			paragraphs = append(paragraphs, "**Next steps:** Retry the automated review to regenerate the final synthesis, or ask a human reviewer to review the available evidence directly.")
 		} else {
-			paragraphs = append(paragraphs, "Next step: Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.")
+			paragraphs = append(paragraphs, "**Next steps:** Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.")
 		}
 	}
 	if assessment := codeReviewAssessmentSummary(input.HeadSHA, input.AssessedAt); assessment != "" {
@@ -131,7 +131,7 @@ func codeReviewAssessmentSummary(headSHA string, assessedAt time.Time) string {
 	if len(shortSHA) > 7 {
 		shortSHA = shortSHA[:7]
 	}
-	summary := "Latest assessment: `" + shortSHA + "`"
+	summary := "**Latest assessment:** `" + shortSHA + "`"
 	if !assessedAt.IsZero() {
 		summary += " at " + assessedAt.UTC().Format(time.RFC3339)
 	}

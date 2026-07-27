@@ -346,8 +346,7 @@ func TestScheduler_ScheduleContextRefreshes_StaleDoc(t *testing.T) {
 	}
 
 	s.scheduleContextRefreshes(context.Background(), []uuid.UUID{orgID}, orgSettings, now)
-	require.Len(t, jobs.enqueued, 1, "should enqueue one refresh job")
-	require.Equal(t, models.JobTypePMContextRefresh, jobs.enqueued[0])
+	require.Empty(t, jobs.enqueued, "disabled compatibility helper must not enqueue a refresh job")
 }
 
 func TestScheduler_ScheduleContextRefreshes_NilLastSyncedAt(t *testing.T) {

@@ -247,7 +247,7 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
                 See every run in one workspace.
               </h2>
               <p className={`${type.body} ${layout.copyBody} ${body}`}>
-                Sessions, autopilot jobs, previews, PR state, usage, and audit
+                Sessions, automation jobs, previews, PR state, usage, and audit
                 logs stay visible to the team. Engineers keep full control;
                 builders get scoped workflows with review safeguards.
               </p>

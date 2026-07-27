@@ -26,7 +26,7 @@ describe("resolvePageTitle", () => {
   it("returns explicit titles for primary routes", () => {
     expect(resolvePageTitle("/sessions")).toBe("Sessions");
     expect(resolvePageTitle("/sessions/new")).toBe("New session");
-    expect(resolvePageTitle("/autopilot/decisions")).toBe("Autopilot decisions");
+    expect(resolvePageTitle("/future-feature")).toBe("Future feature");
     expect(resolvePageTitle("/settings/audit-log")).toBe("Audit log");
     expect(resolvePageTitle("/settings/runtime")).toBe("Runtime settings");
     expect(resolvePageTitle("/settings/integrations/github/setup")).toBe("GitHub setup");

@@ -161,7 +161,7 @@ func TestSchedulerRunOnce(t *testing.T) {
 			expectedRelease: 1,
 		},
 		{
-			name:         "enqueues PM job only for orgs due by schedule",
+			name:         "keeps maintenance jobs and never enqueues PM work",
 			lock:         &schedulerRuntimeLockMock{acquired: true},
 			integrations: &schedulerRuntimeIntegrationStoreMock{orgIDs: []uuid.UUID{oldOrgID, newOrgID}},
 			orgs: &schedulerRuntimeOrgStoreMock{orgByID: map[uuid.UUID]models.Organization{
@@ -178,7 +178,7 @@ func TestSchedulerRunOnce(t *testing.T) {
 			},
 			repos:           &schedulerRuntimeRepoStoreMock{},
 			jobs:            &schedulerRuntimeJobsMock{},
-			expectedEnqueue: 12, // 2 orgs get recurring maintenance jobs (incl. Linear team-key refresh, PagerDuty sync, and PR-health reconciliation); only the org with no prior PM plan is due for pm_analyze under the 24h default
+			expectedEnqueue: 12,
 			expectedRelease: 1,
 		},
 	}
@@ -199,7 +199,15 @@ func TestSchedulerRunOnce(t *testing.T) {
 			}
 
 			s.runOnce(context.Background())
-			require.Equal(t, tt.expectedEnqueue, len(tt.jobs.enqueued), "runOnce should enqueue the expected number of PM jobs")
+			require.Equal(t, tt.expectedEnqueue, len(tt.jobs.enqueued), "runOnce should enqueue the expected maintenance jobs")
+			for _, enqueued := range tt.jobs.enqueued {
+				require.NotContains(t, enqueued, models.JobTypePMAnalyze, "scheduler must not enqueue PM analysis")
+				require.NotContains(t, enqueued, models.JobTypePMBootstrap, "scheduler must not enqueue PM bootstrap")
+				require.NotContains(t, enqueued, models.JobTypePMContextRefresh, "scheduler must not enqueue PM context refresh")
+			}
+			if len(tt.integrations.orgIDs) > 0 {
+				require.Contains(t, tt.jobs.enqueued[0], "sync_slack", "Slack sync should remain scheduled independently")
+			}
 			require.Equal(t, tt.expectedRelease, tt.lock.releaseCalls, "runOnce should release the lock when acquired")
 		})
 	}

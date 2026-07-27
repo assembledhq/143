@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -24,24 +25,55 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 		initialStatus             models.CodeReviewSessionStatus
 		lockedStatus              models.CodeReviewSessionStatus
 		lockedFinalBody           *string
+		lockedReviewID            *int64
 		storedCommentID           any
 		expectedExistingCommentID *int64
 		expectedBody              string
+		expectedCalls             []string
+		hideErr                   error
+		expectErr                 bool
 	}{
 		{
 			name:          "announces running review with session link",
 			initialStatus: models.CodeReviewSessionStatusRunning,
 			lockedStatus:  models.CodeReviewSessionStatusRunning,
 			expectedBody:  "143 Code Reviewer has started reviewing this pull request.",
+			expectedCalls: []string{"upsert"},
 		},
 		{
 			name:                      "refreshes state under lock before publishing completed result",
 			initialStatus:             models.CodeReviewSessionStatusRunning,
 			lockedStatus:              models.CodeReviewSessionStatusCompleted,
 			lockedFinalBody:           statusCommentStringPtr("143 Code Reviewer approved this PR.\n\nWhy: The change met policy."),
+			lockedReviewID:            statusCommentInt64Ptr(143),
 			storedCommentID:           int64(7331),
 			expectedExistingCommentID: statusCommentInt64Ptr(7331),
 			expectedBody:              "143 Code Reviewer approved this PR.",
+			expectedCalls:             []string{"upsert", "hide"},
+		},
+		{
+			name:                      "retries when hiding fallback summary fails after publishing completed result",
+			initialStatus:             models.CodeReviewSessionStatusRunning,
+			lockedStatus:              models.CodeReviewSessionStatusCompleted,
+			lockedFinalBody:           statusCommentStringPtr("143 Code Reviewer did not approve this PR."),
+			lockedReviewID:            statusCommentInt64Ptr(143),
+			storedCommentID:           int64(7331),
+			expectedExistingCommentID: statusCommentInt64Ptr(7331),
+			expectedBody:              "143 Code Reviewer did not approve this PR.",
+			expectedCalls:             []string{"upsert", "hide"},
+			hideErr:                   errors.New("github unavailable"),
+			expectErr:                 true,
+		},
+		{
+			name:                      "hides a published fallback when the review later fails",
+			initialStatus:             models.CodeReviewSessionStatusRunning,
+			lockedStatus:              models.CodeReviewSessionStatusFailed,
+			lockedFinalBody:           statusCommentStringPtr("Stale visible recommendation."),
+			lockedReviewID:            statusCommentInt64Ptr(143),
+			storedCommentID:           int64(7331),
+			expectedExistingCommentID: statusCommentInt64Ptr(7331),
+			expectedBody:              "143 Code Reviewer could not complete this review.",
+			expectedCalls:             []string{"upsert", "hide"},
 		},
 	}
 	for _, tt := range tests {
@@ -59,7 +91,7 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			policyID := uuid.New()
 			metadataID := uuid.New()
 			now := time.Now().UTC()
-			metadataRows := func(status models.CodeReviewSessionStatus, finalBody *string) *pgxmock.Rows {
+			metadataRows := func(status models.CodeReviewSessionStatus, finalBody *string, reviewID *int64) *pgxmock.Rows {
 				var completedAt *time.Time
 				if status == models.CodeReviewSessionStatusCompleted {
 					completedAt = &now
@@ -68,15 +100,15 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 					metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
 					"base", "head", false, models.CodeReviewTriggerSourceTeamReviewer,
 					status, nil, nil, nil, nil, nil, false, nil, nil, false, nil,
-					"output-key", nil, nil, nil, finalBody, nil, completedAt, now,
+					"output-key", nil, reviewID, nil, finalBody, nil, completedAt, now,
 				)
 			}
 			mock.ExpectQuery("(?s)SELECT .*FROM code_review_session_metadata").
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
-				WillReturnRows(metadataRows(tt.initialStatus, nil))
+				WillReturnRows(metadataRows(tt.initialStatus, nil, nil))
 			mock.ExpectQuery("(?s)FROM code_review_session_metadata.*pull_request_id = @pull_request_id").
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
-				WillReturnRows(metadataRows(tt.initialStatus, nil))
+				WillReturnRows(metadataRows(tt.initialStatus, nil, nil))
 			repository := models.Repository{
 				ID: repositoryID, OrgID: orgID, IntegrationID: uuid.New(), FullName: "acme/repo",
 				InstallationID: 99, Status: models.RepositoryStatusActive, Settings: json.RawMessage(`{}`),
@@ -95,16 +127,20 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 				WillReturnResult(pgxmock.NewResult("SELECT", 1))
 			mock.ExpectQuery("(?s)FROM code_review_session_metadata.*pull_request_id = @pull_request_id").
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
-				WillReturnRows(metadataRows(tt.lockedStatus, tt.lockedFinalBody))
+				WillReturnRows(metadataRows(tt.lockedStatus, tt.lockedFinalBody, tt.lockedReviewID))
 			mock.ExpectQuery("SELECT code_review_status_comment_id").
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "id": pullRequestID}).
 				WillReturnRows(pgxmock.NewRows([]string{"code_review_status_comment_id"}).AddRow(tt.storedCommentID))
 			mock.ExpectQuery("(?s)UPDATE pull_requests.*code_review_status_comment_id = @comment_id").
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "id": pullRequestID, "comment_id": int64(7331)}).
 				WillReturnRows(pgxmock.NewRows([]string{"code_review_status_comment_id"}).AddRow(int64(7331)))
-			mock.ExpectCommit()
+			if tt.expectErr {
+				mock.ExpectRollback()
+			} else {
+				mock.ExpectCommit()
+			}
 
-			submitter := &statusCommentSubmitterStub{commentID: 7331}
+			submitter := &statusCommentSubmitterStub{commentID: 7331, hideErr: tt.hideErr}
 			payload, err := json.Marshal(codereviewsvc.SyncReviewStatusCommentJobPayload{
 				OrgID: orgID, SessionID: sessionID, RepositoryID: repositoryID, PullRequestID: pullRequestID,
 			})
@@ -119,13 +155,27 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 				FrontendURL: "https://143.test",
 			}, zerolog.Nop())(context.Background(), models.JobTypeSyncCodeReviewStatusComment, payload)
 
-			require.NoError(t, err, "status comment handler should synchronize the current review state")
+			if tt.expectErr {
+				require.Error(t, err, "status comment handler should retry when fallback summary hiding fails")
+			} else {
+				require.NoError(t, err, "status comment handler should synchronize the current review state")
+			}
 			require.Equal(t, int64(99), submitter.request.InstallationID, "status comment should use the repository installation")
 			require.Equal(t, "acme/repo", submitter.request.Repository, "status comment should target the pull request repository")
 			require.Equal(t, 42, submitter.request.PullNumber, "status comment should target the pull request number")
 			require.Equal(t, tt.expectedExistingCommentID, submitter.request.ExistingCommentID, "status comment should use the durable GitHub comment id when available")
 			require.Contains(t, submitter.request.Body, tt.expectedBody, "status comment should render the current durable outcome")
 			require.Contains(t, submitter.request.Body, "https://143.test/sessions/"+sessionID.String(), "status comment should link to the review session")
+			require.Equal(t, tt.expectedCalls, submitter.calls, "fallback summary should only be hidden after the rolling comment is published")
+			if tt.lockedReviewID != nil {
+				require.Equal(t, codereviewsvc.HideReviewSummaryRequest{
+					InstallationID: 99,
+					Repository:     "acme/repo",
+					PullNumber:     42,
+					ReviewID:       *tt.lockedReviewID,
+					OutputKey:      "output-key",
+				}, submitter.hideRequest, "completed review should hide the persisted fallback summary")
+			}
 			require.NoError(t, mock.ExpectationsWereMet(), "status comment handler should use org-scoped review, repository, and pull request reads")
 		})
 	}
@@ -178,9 +228,12 @@ func TestSyncCodeReviewStatusCommentHandlerSkipsSupersededSession(t *testing.T) 
 }
 
 type statusCommentSubmitterStub struct {
-	request   codereviewsvc.UpsertReviewStatusCommentRequest
-	commentID int64
-	err       error
+	request     codereviewsvc.UpsertReviewStatusCommentRequest
+	hideRequest codereviewsvc.HideReviewSummaryRequest
+	commentID   int64
+	err         error
+	hideErr     error
+	calls       []string
 }
 
 func (s *statusCommentSubmitterStub) SubmitReview(context.Context, codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, error) {
@@ -189,7 +242,14 @@ func (s *statusCommentSubmitterStub) SubmitReview(context.Context, codereviewsvc
 
 func (s *statusCommentSubmitterStub) UpsertReviewStatusComment(_ context.Context, request codereviewsvc.UpsertReviewStatusCommentRequest) (int64, error) {
 	s.request = request
+	s.calls = append(s.calls, "upsert")
 	return s.commentID, s.err
+}
+
+func (s *statusCommentSubmitterStub) HideReviewSummary(_ context.Context, request codereviewsvc.HideReviewSummaryRequest) error {
+	s.hideRequest = request
+	s.calls = append(s.calls, "hide")
+	return s.hideErr
 }
 
 func statusCommentStringPtr(value string) *string {

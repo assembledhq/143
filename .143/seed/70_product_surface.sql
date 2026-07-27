@@ -1,6 +1,6 @@
 -- High-impact product surface data for the dogfood preview. Everything here
 -- is synthetic and safe to publish, but the shapes mirror real records closely
--- enough for project, automation, autopilot, code review, usage, and provider
+-- enough for project, automation, code review, usage, and provider
 -- integration pages to render non-empty workflows.
 
 UPDATE organizations

@@ -451,10 +451,9 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("prioritize", newPrioritizeHandler(stores, services, logger))
 	}
 	if services != nil && services.PM != nil {
-		w.Register(models.JobTypePMAnalyze, newPMAnalyzeHandler(stores, services, logger))
-		w.Register(models.JobTypeProjectCycle, newProjectCycleHandler(services, logger))
-		w.Register(models.JobTypePMBootstrap, newOrgIDJobHandler("pm_bootstrap", services.PM.RunBootstrap, logger))
-		w.Register(models.JobTypePMContextRefresh, newOrgIDJobHandler("pm_context_refresh", services.PM.RunRefresh, logger))
+		w.Register(models.JobTypePMAnalyze, newDisabledPMJobHandler(logger))
+		w.Register(models.JobTypePMBootstrap, newDisabledPMJobHandler(logger))
+		w.Register(models.JobTypePMContextRefresh, newDisabledPMJobHandler(logger))
 	}
 	if stores.Automations != nil && stores.AutomationRuns != nil {
 		w.Register(models.JobTypeAutomationRun, newAutomationRunHandler(stores, services, logger))
@@ -792,6 +791,7 @@ type codeReviewSubmitter interface {
 
 type codeReviewStatusCommentUpdater interface {
 	UpsertReviewStatusComment(ctx context.Context, req codereviewsvc.UpsertReviewStatusCommentRequest) (int64, error)
+	HideReviewSummary(ctx context.Context, req codereviewsvc.HideReviewSummaryRequest) error
 }
 
 type codeReviewLifecycle interface {
@@ -2145,6 +2145,13 @@ func newPagerDutySyncHandler(syncer pagerDutySyncer, logger zerolog.Logger) JobH
 	}
 }
 
+func newDisabledPMJobHandler(logger zerolog.Logger) JobHandler {
+	return func(_ context.Context, jobType string, _ json.RawMessage) error {
+		logger.Info().Str("job_type", jobType).Msg("discarding disabled PM job")
+		return nil
+	}
+}
+
 func newPMAnalyzeHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
@@ -2194,31 +2201,6 @@ func newPMAnalyzeHandler(stores *Stores, services *Services, logger zerolog.Logg
 			return &FatalError{Err: err}
 		}
 		return nil
-	}
-}
-
-// project_cycle handler runs a focused PM analysis for a single scheduled project.
-func newProjectCycleHandler(services *Services, logger zerolog.Logger) JobHandler {
-	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
-		var input struct {
-			OrgID     string `json:"org_id"`
-			ProjectID string `json:"project_id"`
-		}
-		if err := json.Unmarshal(payload, &input); err != nil {
-			return fmt.Errorf("unmarshal project_cycle payload: %w", err)
-		}
-
-		orgID, err := parseOrgID(input.OrgID, ctx)
-		if err != nil {
-			return fmt.Errorf("parse org ID: %w", err)
-		}
-		projectID, err := uuid.Parse(input.ProjectID)
-		if err != nil {
-			return fmt.Errorf("parse project ID: %w", err)
-		}
-
-		logger.Info().Str("org_id", orgID.String()).Str("project_id", projectID.String()).Msg("running project_cycle job")
-		return services.PM.AnalyzeProject(ctx, orgID, projectID)
 	}
 }
 

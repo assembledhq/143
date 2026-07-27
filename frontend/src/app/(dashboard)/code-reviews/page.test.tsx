@@ -359,6 +359,9 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     expect(await screen.findByRole("heading", { name: "Code reviews" })).toBeInTheDocument();
+    const page = screen.getByRole("heading", { level: 1, name: "Code reviews" })
+      .closest('[data-slot="list-page"]');
+    expect(page?.parentElement).toHaveClass("max-w-7xl");
     expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
     expect(screen.getAllByText("Acceptable")).toHaveLength(2);
     expect(screen.getAllByText("Approved")).toHaveLength(2);
@@ -385,13 +388,22 @@ describe("CodeReviewsPage", () => {
     const reviewRow = within(reviewTable).getByRole("row", {
       name: /#428 Fix invoice rounding/i,
     });
+    expect(within(reviewTable).getAllByRole("columnheader").map((header) => header.textContent)).toEqual([
+      "PR",
+      "Outcome",
+      "Risk",
+      "Run status",
+      "Repo",
+      "Completed",
+      "Actions",
+    ]);
     const reviewCells = within(reviewRow).getAllByRole("cell");
     expect(within(reviewCells[2]).getByText("Acceptable").closest('[data-slot="status-label"]')).not.toBeNull();
-    expect(within(reviewCells[3]).getByText("Approved").closest('[data-slot="status-label"]')).not.toBeNull();
-    expect(within(reviewCells[3]).getByRole("button", { name: "Evidence" })).toBeInTheDocument();
-    expect(within(reviewCells[4]).getByText("Completed").closest('[data-slot="status-label"]')).not.toBeNull();
+    expect(within(reviewCells[1]).getByText("Approved").closest('[data-slot="status-label"]')).not.toBeNull();
+    expect(within(reviewCells[3]).getByText("Completed").closest('[data-slot="status-label"]')).not.toBeNull();
     expect(reviewCells[2].querySelector('[aria-hidden="true"]')).toBeNull();
-    expect(within(reviewCells[6]).queryByRole("button", { name: "Evidence" })).not.toBeInTheDocument();
+    expect(within(reviewCells[6]).getByRole("button", { name: "Evidence" })).toBeInTheDocument();
+    expect(within(reviewCells[6]).getByRole("link", { name: "Session" }).querySelector("svg")).toBeInTheDocument();
     await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
     const evidenceSheet = await screen.findByRole("dialog", {
       name: /Evidence for #428/i,
@@ -408,21 +420,8 @@ describe("CodeReviewsPage", () => {
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
 
     // The current behavior, outcome, and selected repository trigger are visible without expanding anything.
-    expect(screen.getByText("Current behavior")).toBeInTheDocument();
-    expect(screen.getByText("Comments only")).toBeInTheDocument();
-    expect(screen.getByText("GitHub reviewer ready")).toBeInTheDocument();
-    expect(screen.getByText("2 reviewers")).toBeInTheDocument();
-    expect(screen.getByText("Quorum 2")).toBeInTheDocument();
-    expect(screen.getByText("Passing checks required")).toBeInTheDocument();
-    expect(screen.getByText("Disagreement blocks approval")).toBeInTheDocument();
-    expect(screen.getByText("Sensitive paths need human review")).toBeInTheDocument();
-
-    const currentBehaviorCard = screen.getByText("Current behavior").parentElement;
-    expect(currentBehaviorCard).not.toBeNull();
-    const summaryBadges = currentBehaviorCard?.querySelectorAll('[data-slot="badge"]') ?? [];
-    for (const badge of summaryBadges) {
-      expect(badge.textContent).toMatch(/^[A-Z0-9]/);
-    }
+    expect(screen.getByText("Current behavior:")).toBeInTheDocument();
+    expect(screen.getByText(/Comments only · 2 reviewers · quorum 2 · passing checks required · disagreement blocks approval · sensitive paths need human review/i)).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /Comment only/i })).toBeChecked();
     expect(screen.getByRole("region", { name: "Additional review instructions (optional)" })).toBeInTheDocument();
     expect(screen.getByText(/native \/review behavior without extra guidance/i)).toBeInTheDocument();
@@ -877,15 +876,15 @@ describe("CodeReviewsPage", () => {
     });
     const githubHeading = screen.getByText("GitHub reviewer");
     const instructionsHeading = screen.getByText("Additional review instructions (optional)");
-    const summaryHeading = screen.getByText("Current behavior");
+    const summaryHeading = screen.getByText("Current behavior:");
     const advancedTrigger = screen.getByRole("button", {
       name: "Advanced controls",
     });
     expect(advancedTrigger).toHaveClass("h-auto", "p-4", "sm:h-auto");
-    expect(enablement.compareDocumentPosition(instructionsHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(enablement.compareDocumentPosition(summaryHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(summaryHeading.compareDocumentPosition(instructionsHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(instructionsHeading.compareDocumentPosition(githubHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(githubHeading.compareDocumentPosition(summaryHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(summaryHeading.compareDocumentPosition(advancedTrigger) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(githubHeading.compareDocumentPosition(advancedTrigger) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     const outcomeInfo = screen.getByRole("button", {
       name: "About Review outcome",
@@ -1670,7 +1669,7 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
     await user.click(await screen.findByRole("tab", { name: "Policy" }));
     const viewOnlyNotice = await screen.findByText(/view-only access/i);
-    expect(viewOnlyNotice.closest('[data-slot="card"]')).toBeInTheDocument();
+    expect(viewOnlyNotice).toHaveClass("bg-muted/40");
     expect(screen.getByRole("switch", { name: "Code reviews enabled" })).toBeDisabled();
     expect(screen.getByRole("textbox", { name: "Additional review instructions (optional)" })).toBeDisabled();
 

@@ -3495,7 +3495,7 @@ func submitCodeReviewToGitHub(ctx context.Context, stores *Stores, services *Ser
 		return codeReviewSubmission{}, false, fmt.Errorf("list selected code review findings: %w", err)
 	}
 	comments := codeReviewInlineComments(findings)
-	result, err := services.CodeReviews.SubmitReview(ctx, codereviewsvc.SubmitReviewRequest{
+	submitRequest := codereviewsvc.SubmitReviewRequest{
 		InstallationID:    repo.InstallationID,
 		Repository:        repository,
 		PullNumber:        pr.GitHubPRNumber,
@@ -3510,6 +3510,12 @@ func submitCodeReviewToGitHub(ctx context.Context, stores *Stores, services *Ser
 		PreviousBody:      stringPtrValue(job.PreviousReviewBody),
 		Body:              body,
 		Comments:          comments,
+	}
+	var result codereviewsvc.SubmitReviewResult
+	err = stores.CodeReviews.RunWithGitHubPublicationLock(ctx, job.OrgID, job.PullRequestID, func(lockCtx context.Context, _ db.DBTX) error {
+		var submitErr error
+		result, submitErr = services.CodeReviews.SubmitReview(lockCtx, submitRequest)
+		return submitErr
 	})
 	if err != nil {
 		return codeReviewSubmission{}, false, classifyGitHubJobError(fmt.Errorf("submit code review to GitHub: %w", err), job.SessionID.String())

@@ -69,6 +69,62 @@ func TestNewRouter_EncryptionKeyValidation(t *testing.T) {
 	}
 }
 
+func TestInternalProjectProposalRouteIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{}
+	codexSvc := codexauth.NewService(nil, zerolog.Nop())
+	claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	require.NoError(t, err, "router should build for route availability test")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/internal/projects/propose", bytes.NewBufferString(`{}`))
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusNotFound, rr.Code, "PM-only internal project proposal endpoint should be absent")
+}
+
+func TestRemovedPMAutopilotRoutesAreUnavailable(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "autopilot queue", method: http.MethodGet, path: "/api/v1/autopilot/queue"},
+		{name: "PM status", method: http.MethodGet, path: "/api/v1/pm/status"},
+		{name: "PM analysis", method: http.MethodPost, path: "/api/v1/pm/analyze"},
+		{name: "project run", method: http.MethodPost, path: "/api/v1/projects/" + uuid.NewString() + "/run"},
+		{name: "project cycles", method: http.MethodGet, path: "/api/v1/projects/" + uuid.NewString() + "/cycles"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := &config.Config{}
+			router, _, _, _, _, err := NewRouter(
+				cfg,
+				nil,
+				zerolog.Nop(),
+				nil,
+				codexauth.NewService(nil, zerolog.Nop()),
+				claudecodeauth.NewService(nil, zerolog.Nop()),
+				nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+			)
+			require.NoError(t, err, "router should build for removed route test")
+
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			rr := httptest.NewRecorder()
+			router.ServeHTTP(rr, req)
+
+			require.Equal(t, http.StatusNotFound, rr.Code, "removed product route should be absent")
+		})
+	}
+}
+
 func TestSessionThreadPatchRouteIsBuilderWorkflowOnly(t *testing.T) {
 	t.Parallel()
 

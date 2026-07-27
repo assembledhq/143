@@ -99,21 +99,21 @@ VALUES
   (
     '00000000-0000-4000-a000-000000000604'::uuid,
     '00000000-0000-4000-a000-000000000001'::uuid,
-    'pm-agent-preview-copy',
-    'pm_agent',
+    'manual-preview-copy',
+    'manual',
     NULL,
     '00000000-0000-4000-a000-000000000100'::uuid,
     'Consolidate preview failure copy across panels',
-    'Synthetic PM proposal: make preview failure reasons consistent between list, detail, and PR surfaces.',
-    '{"proposal_source":"seeded_pm_agent","confidence":"medium"}'::jsonb,
+    'Synthetic issue: make preview failure reasons consistent between list, detail, and PR surfaces.',
+    '{"created_by":"demo_seed","confidence":"medium"}'::jsonb,
     'open',
     now() - interval '2 days',
     now() - interval '30 minutes',
     2,
     0,
     'medium',
-    ARRAY['pm_agent','preview','copy'],
-    'demo:pm-agent:preview-failure-copy',
+    ARRAY['manual','preview','copy'],
+    'demo:manual:preview-failure-copy',
     '00000000-0000-4000-a000-000000000200'::uuid,
     now() - interval '2 days',
     now() - interval '30 minutes'
@@ -149,7 +149,7 @@ VALUES
   ('00000000-0000-4000-a000-000000000611'::uuid, '00000000-0000-4000-a000-000000000601'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 74, 12, 20, 17, 5, 20, '{"signals":["in_progress","reliability"]}'::jsonb, true, now() - interval '1 hour'),
   ('00000000-0000-4000-a000-000000000612'::uuid, '00000000-0000-4000-a000-000000000602'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 69, 0, 30, 19, 0, 20, '{"signals":["manual_triage","preview_surface"]}'::jsonb, true, now() - interval '3 hours'),
   ('00000000-0000-4000-a000-000000000613'::uuid, '00000000-0000-4000-a000-000000000603'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 35, 5, 10, 5, 0, 15, '{"signals":["fixed","low_severity"]}'::jsonb, false, now() - interval '1 day'),
-  ('00000000-0000-4000-a000-000000000614'::uuid, '00000000-0000-4000-a000-000000000604'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 61, 0, 20, 16, 0, 25, '{"signals":["pm_proposal","demo_polish"]}'::jsonb, true, now() - interval '30 minutes')
+  ('00000000-0000-4000-a000-000000000614'::uuid, '00000000-0000-4000-a000-000000000604'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 61, 0, 20, 16, 0, 25, '{"signals":["manual_triage","demo_polish"]}'::jsonb, true, now() - interval '30 minutes')
 ON CONFLICT (issue_id) DO UPDATE
 SET score = EXCLUDED.score,
     customer_impact_score = EXCLUDED.customer_impact_score,

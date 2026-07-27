@@ -140,8 +140,6 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"InternalSlackMessageHandler.Send":     "internal sandbox route resolves org from the signed session-scoped internal token",
 
 		// Thin wrappers that delegate to a helper which calls OrgIDFromContext.
-		"PMHandler.Bootstrap":                      "delegates to enqueueAndRespond which uses OrgIDFromContext",
-		"PMHandler.Refresh":                        "delegates to enqueueAndRespond which uses OrgIDFromContext",
 		"ProjectHandler.Start":                     "delegates to transitionStatus which uses OrgIDFromContext",
 		"RepositoryHandler.Disconnect":             "delegates to setRepoStatus which uses OrgIDFromContext",
 		"RepositoryHandler.Reconnect":              "delegates to setRepoStatus which uses OrgIDFromContext",

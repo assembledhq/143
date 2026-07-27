@@ -19,6 +19,9 @@ import (
 // with a project-focused prompt, and calls executeProjectPlan to create tasks
 // and dispatch runs. This is the entry point for the project_cycle job.
 func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID) error {
+	if !analysisEnabled {
+		return fmt.Errorf("PM project analysis is disabled")
+	}
 	if s.sandbox == nil || s.env == nil {
 		return fmt.Errorf("pm sandbox or env helper not configured")
 	}

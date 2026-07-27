@@ -99,12 +99,7 @@ export const queryKeys = {
     detail: (id: string) => ["automation", id] as const,
     eventTriggers: (id: string) => ["automations", id, "event-triggers"] as const,
   },
-  autopilot: {
-    queue: (params: Record<string, string | number | null | undefined>) => ["autopilot", "queue", params] as const,
-  },
   pm: {
-    status: ["pm", "status"] as const,
-    latest: ["pm", "latest"] as const,
     documents: ["pm", "documents"] as const,
   },
   team: {

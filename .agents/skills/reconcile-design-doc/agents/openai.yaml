@@ -1,0 +1,4 @@
+interface:
+  display_name: "Reconcile Design Doc"
+  short_description: "Align an existing implementation with its design"
+  default_prompt: "Use $reconcile-design-doc to audit this design against the implementation, explain the gaps, and implement and verify fixes until they agree."

@@ -4730,6 +4730,8 @@ type mockPMService struct {
 	calledProjectID uuid.UUID
 	trigger         models.PMTrigger
 	agentType       *models.AgentType
+	analyzeCalls    int
+	projectCalls    int
 }
 
 type stubPRService struct {
@@ -4860,6 +4862,7 @@ func (s *stubPRService) SyncPRPreviewSurfaces(ctx context.Context, payload ghser
 func (s *stubPRService) WaitForPostPRSnapshotUploads() {}
 
 func (m *mockPMService) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID, agentTypeOverride *models.AgentType) (*pm.Plan, error) {
+	m.analyzeCalls++
 	m.calledOrgID = orgID
 	m.trigger = trigger
 	m.agentType = agentTypeOverride
@@ -6784,6 +6787,7 @@ func TestShouldDeadLetterPRError(t *testing.T) {
 }
 
 func (m *mockPMService) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID) error {
+	m.projectCalls++
 	m.calledOrgID = orgID
 	m.calledProjectID = projectID
 	return nil
@@ -6851,51 +6855,6 @@ func TestPMAnalyzeHandler_PassesAgentTypeOverride(t *testing.T) {
 	require.Equal(t, models.PMTriggerManual, pmSvc.trigger, "pm_analyze handler should preserve the requested trigger with an agent_type override")
 }
 
-func TestProjectCycleHandler_InvalidJSON(t *testing.T) {
-	t.Parallel()
-
-	logger := zerolog.Nop()
-	services := &Services{PM: &mockPMService{}}
-	handler := newProjectCycleHandler(services, logger)
-
-	err := handler(context.Background(), "project_cycle", json.RawMessage(`{bad`))
-	require.Error(t, err, "project_cycle handler should return error for invalid JSON")
-	require.Contains(t, err.Error(), "unmarshal")
-}
-
-func TestProjectCycleHandler_InvalidProjectID(t *testing.T) {
-	t.Parallel()
-
-	logger := zerolog.Nop()
-	services := &Services{PM: &mockPMService{}}
-	handler := newProjectCycleHandler(services, logger)
-
-	orgID := uuid.New()
-	ctx := withJobOrgID(context.Background(), orgID)
-	err := handler(ctx, "project_cycle", json.RawMessage(`{"org_id":"`+orgID.String()+`","project_id":"not-a-uuid"}`))
-	require.Error(t, err, "project_cycle handler should return error for invalid project ID")
-	require.Contains(t, err.Error(), "parse project ID")
-}
-
-func TestProjectCycleHandler_Success(t *testing.T) {
-	t.Parallel()
-
-	logger := zerolog.Nop()
-	pmSvc := &mockPMService{}
-	services := &Services{PM: pmSvc}
-	handler := newProjectCycleHandler(services, logger)
-
-	orgID := uuid.New()
-	projectID := uuid.New()
-	ctx := withJobOrgID(context.Background(), orgID)
-	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","project_id":"` + projectID.String() + `"}`)
-
-	err := handler(ctx, "project_cycle", payload)
-	require.NoError(t, err, "project_cycle handler should succeed")
-	require.Equal(t, orgID, pmSvc.calledOrgID, "should pass org ID to AnalyzeProject")
-	require.Equal(t, projectID, pmSvc.calledProjectID, "should pass project ID to AnalyzeProject")
-}
-
 func TestRegisterHandlers_AllRegistered(t *testing.T) {
 	t.Parallel()
 
@@ -6917,23 +6876,24 @@ func TestRegisterHandlers_AllRegistered(t *testing.T) {
 		require.True(t, ok, "%s handler should be registered", name)
 	}
 
-	// pm_analyze and project_cycle should not be registered without PM service
+	// PM compatibility handlers should not be registered without PM service.
 	unexpectedWithoutPM := []string{
 		"pm_analyze",
-		"project_cycle",
 	}
 	for _, name := range unexpectedWithoutPM {
 		_, ok := w.handlers[name]
 		require.False(t, ok, "%s handler should not be registered without PM service", name)
 	}
 
-	// Now test with PM service — pm_analyze and project_cycle should be registered
+	// The remaining stale-job compatibility handlers are registered with the PM service.
 	w2 := New(nil, logger, "test-node")
 	RegisterHandlers(w2, stores, &Services{PM: &mockPMService{}}, DataRetentionConfig{}, logger)
-	for _, name := range []string{"pm_analyze", "project_cycle"} {
+	for _, name := range []string{"pm_analyze"} {
 		_, ok := w2.handlers[name]
 		require.True(t, ok, "%s handler should be registered with PM service", name)
 	}
+	_, projectCycleRegistered := w2.handlers["project_cycle"]
+	require.False(t, projectCycleRegistered, "project_cycle handler should be absent")
 
 	unexpectedHandlers := []string{
 		"prioritize",
@@ -9299,9 +9259,20 @@ func TestRegisterHandlers_WithOnlyPM(t *testing.T) {
 	w := New(nil, logger, "test-node")
 	RegisterHandlers(w, stores, services, DataRetentionConfig{}, logger)
 
-	_, ok := w.handlers["pm_analyze"]
-	require.True(t, ok, "pm_analyze handler should be registered")
-	_, ok = w.handlers["prioritize"]
+	for _, jobType := range []string{
+		models.JobTypePMAnalyze,
+		models.JobTypePMBootstrap,
+		models.JobTypePMContextRefresh,
+	} {
+		handler, ok := w.handlers[jobType]
+		require.True(t, ok, "disabled PM compatibility handler should remain registered")
+		require.NoError(t, handler(context.Background(), jobType, json.RawMessage(`{bad`)), "stale PM jobs should be discarded without parsing or execution")
+	}
+	_, projectCycleRegistered := w.handlers[models.JobTypeProjectCycle]
+	require.False(t, projectCycleRegistered, "project_cycle compatibility handler should be removed")
+	require.Zero(t, services.PM.(*mockPMService).analyzeCalls, "stale jobs must not invoke PM analysis")
+	require.Zero(t, services.PM.(*mockPMService).projectCalls, "stale jobs must not invoke project analysis")
+	_, ok := w.handlers["prioritize"]
 	require.False(t, ok, "prioritize handler should not be registered without prioritization service")
 }
 
