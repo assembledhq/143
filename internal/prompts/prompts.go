@@ -101,8 +101,7 @@ func PRFeedbackResponsePrompt() string { return render("pr_feedback_response.tem
 
 // ─── Agent ───────────────────────────────────────────────────────────────────
 
-// CodingTaskPreamble returns the preamble injected into coding agent system prompts
-// when a PM agent assigns a task to a coding agent.
+// CodingTaskPreamble returns the preamble injected into coding-agent system prompts.
 func CodingTaskPreamble() string {
 	return render("coding_task_preamble.template", nil)
 }

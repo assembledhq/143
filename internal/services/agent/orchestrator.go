@@ -8733,12 +8733,6 @@ func codingProviderForAgent(agentType models.AgentType) models.ProviderName {
 	}
 }
 
-// CodingProviderForAgent exposes the provider mapping for PM/autopilot
-// execution paths that invoke adapters directly.
-func CodingProviderForAgent(agentType models.AgentType) models.ProviderName {
-	return codingProviderForAgent(agentType)
-}
-
 // isRateLimitedError matches the same surface as the failure classifier so
 // shedding stays consistent with the user-facing api_error category.
 func isRateLimitedError(errMsg string) bool {

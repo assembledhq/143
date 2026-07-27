@@ -175,6 +175,7 @@ describe("public docs source", () => {
     expect(raw.content).toContain("### `linear list_tasks`");
     expect(raw.content).toContain("`--team`");
     expect(raw.content).toContain("### `pr create`");
+    expect(raw.content).not.toContain("### `project propose`");
     expect(raw.content).toContain("### `circleci get_recent_test_failures`");
     expect(raw.content).toContain("### `logs query`");
   });
