@@ -37,8 +37,9 @@ type PreviewStopper interface {
 }
 
 // SessionReaper periodically cleans up stale sessions and expired snapshots
-// in seven phases:
+// in ordered phases:
 //   - Phase 0a: Reclaim expired thread-runtime leases and reset in-flight inbox delivery
+//   - Phase 0b: Reconcile activity phases stranded by runtime loss
 //   - Phase 0: Fail sessions stuck in pending for longer than maxPendingAge
 //   - Phase 0.4: Fail sessions whose runtime controller missed an already
 //     expired soft deadline or left a stop request in-flight past its grace
@@ -62,6 +63,7 @@ type SessionReaper struct {
 	previewStopper   PreviewStopper // nil-safe — if unset, reaper skips preview teardown before snapshot expiry
 	runtimeJobs      RuntimeJobTerminalizer
 	runtimeLeases    ThreadRuntimeLeaseReclaimer
+	activityPhases   ActivityPhaseReconciler
 	maxIdleAge       time.Duration
 	maxPendingAge    time.Duration
 	runtimeStallAge  time.Duration
@@ -103,6 +105,11 @@ type ThreadRuntimeLeaseReclaimResult = db.ThreadRuntimeReclaimResult
 
 type ThreadRuntimeLeaseReclaimer interface {
 	ReclaimExpiredLeases(ctx context.Context, expiredBefore time.Time, limit int) (ThreadRuntimeLeaseReclaimResult, error)
+}
+
+type ActivityPhaseReconciler interface {
+	ReconcileAllStrandedPhases(ctx context.Context, leaseExpiredBefore time.Time, limit int) (int, error)
+	ReconcileAbandonedInboxBatches(ctx context.Context, leaseExpiredBefore time.Time, limit int) (int, error)
 }
 
 type runtimeStalledThreadFailer interface {
@@ -149,6 +156,10 @@ func WithThreadRuntimeLeaseReclaimer(t ThreadRuntimeLeaseReclaimer) SessionReape
 	return func(r *SessionReaper) { r.runtimeLeases = t }
 }
 
+func WithActivityPhaseReconciler(reconciler ActivityPhaseReconciler) SessionReaperOption {
+	return func(r *SessionReaper) { r.activityPhases = reconciler }
+}
+
 // NewSessionReaper creates a reaper that runs every interval, cleaning up
 // sessions idle for longer than maxIdleAge and snapshots older than maxSnapshotAge.
 // defaultMaxPendingAge is the maximum time a session can stay in "pending"
@@ -158,6 +169,7 @@ const defaultMaxPendingAge = 10 * time.Minute
 const defaultRuntimeStallAge = 2 * time.Minute
 
 const defaultThreadRuntimeReclaimBatchSize = 100
+const defaultActivityPhaseReconcileBatchSize = 100
 
 // reaperPreviewStopTimeout is the deadline the reaper gives
 // StopActivePreviewForSession before moving on to delete the snapshot blob.
@@ -290,6 +302,25 @@ func (r *SessionReaper) reap(ctx context.Context) {
 				Int64("reset_inbox_entries", reclaimed.ResetInboxEntries).
 				Int64("unknown_delivery_entries", reclaimed.UnknownDeliveryEntries).
 				Msg("reaper: reclaimed expired thread runtime leases")
+		}
+	}
+	if r.activityPhases != nil {
+		cutoff := time.Now().Add(-r.runtimeStallAge)
+		reconciled, err := r.activityPhases.ReconcileAllStrandedPhases(ctx, cutoff, defaultActivityPhaseReconcileBatchSize)
+		if err != nil {
+			r.logger.Error().Err(err).Msg("reaper: failed to reconcile stranded activity phases")
+		} else if reconciled > 0 {
+			r.logger.Warn().
+				Int("reconciled_activity_phases", reconciled).
+				Msg("reaper: reconciled stranded activity phases")
+		}
+		abandoned, err := r.activityPhases.ReconcileAbandonedInboxBatches(ctx, cutoff, defaultActivityPhaseReconcileBatchSize)
+		if err != nil {
+			r.logger.Error().Err(err).Msg("reaper: failed to reconcile acknowledged inbox delivery batches")
+		} else if abandoned > 0 {
+			r.logger.Warn().
+				Int("abandoned_inbox_delivery_batches", abandoned).
+				Msg("reaper: abandoned acknowledged inbox delivery batches whose runtimes cannot resume")
 		}
 	}
 

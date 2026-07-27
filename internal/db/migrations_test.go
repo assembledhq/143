@@ -1349,3 +1349,38 @@ func TestSingleCodeReviewPolicyMigrationPreservesHistoryAndPreventsActiveOverrid
 	require.Contains(t, sql, "active = false OR repository_id IS NULL", "constraint should allow historical repository policy rows while requiring active policies to be organization scoped")
 	require.NotContains(t, strings.ToUpper(sql), "DELETE FROM CODE_REVIEW_POLICIES", "migration should preserve policy versions referenced by historical reviews")
 }
+
+func TestSessionActivityPhaseMigrationEnforcesLifecycleAndDeliveryIdentity(t *testing.T) {
+	t.Parallel()
+
+	upBody, err := os.ReadFile("../../migrations/000260_session_activity_phases.up.sql")
+	require.NoError(t, err, "test should read the activity phase up migration")
+	downBody, err := os.ReadFile("../../migrations/000260_session_activity_phases.down.sql")
+	require.NoError(t, err, "test should read the activity phase down migration")
+
+	upSQL := string(upBody)
+	requiredFragments := []string{
+		"ADD COLUMN applied_at timestamptz",
+		"chk_session_activity_phases_lifecycle",
+		"chk_session_activity_phases_time_order",
+		"chk_session_activity_phases_status_reason",
+		"chk_session_activity_phases_trigger_range",
+		"uq_session_activity_phase_number",
+		"idx_session_activity_phases_one_running",
+		"idx_session_activity_phases_trigger_batch",
+		"uq_thread_inbox_delivery_batches_range",
+	}
+	for _, fragment := range requiredFragments {
+		require.Contains(t, upSQL, fragment, "activity phase migration should enforce every durable lifecycle invariant")
+	}
+
+	downSQL := string(downBody)
+	phaseDrop := strings.Index(downSQL, "DROP TABLE IF EXISTS session_activity_phases")
+	batchDrop := strings.Index(downSQL, "DROP TABLE IF EXISTS thread_inbox_delivery_batches")
+	columnDrop := strings.Index(downSQL, "DROP COLUMN IF EXISTS applied_at")
+	require.NotEqual(t, -1, phaseDrop, "down migration should remove activity phases")
+	require.NotEqual(t, -1, batchDrop, "down migration should remove delivery batches")
+	require.NotEqual(t, -1, columnDrop, "down migration should remove inbox applied timestamps")
+	require.Less(t, phaseDrop, batchDrop, "down migration should remove the dependent phase table before delivery batches")
+	require.Less(t, batchDrop, columnDrop, "down migration should remove delivery batches before the inbox column")
+}

@@ -2222,6 +2222,18 @@ func TestProductionAlertsUseValidLogsQLRangeFilters(t *testing.T) {
 	require.Contains(t, alertConfig, "for: 5m", "GitHub rate-limit alert should require sustained impact to avoid paging on one transient rejection")
 }
 
+func TestActivityPhaseReconciliationAlertCoversEveryFailurePath(t *testing.T) {
+	t.Parallel()
+
+	alerts, err := os.ReadFile("../deploy/vmalert/rules/production-alerts.yml")
+	require.NoError(t, err, "test should read production vmalert rules")
+
+	alertConfig := string(alerts)
+	require.Contains(t, alertConfig, `_msg:"failed to reconcile stranded activity phase"`, "activity phase alert should match individual transition failures")
+	require.Contains(t, alertConfig, `_msg:"reaper: failed to reconcile stranded activity phases"`, "activity phase alert should match candidate-list and aggregate reconciliation failures")
+	require.Contains(t, alertConfig, `_msg:"reaper: failed to reconcile acknowledged inbox delivery batches"`, "activity phase alert should match acknowledged-batch reconciliation failures")
+}
+
 func TestLoggingDesignDocsTrackProvisionedDashboardsAndAlerts(t *testing.T) {
 	t.Parallel()
 
