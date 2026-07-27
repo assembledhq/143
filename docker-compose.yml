@@ -36,6 +36,7 @@ services:
       sh -c "apt-get update &&
              apt-get install -y --no-install-recommends libheif-examples &&
              rm -rf /var/lib/apt/lists/* &&
+             chmod 0750 /var/lib/docker/volumes/143_sandbox_auth/_data &&
              go install github.com/air-verse/air@latest &&
              go run cmd/migrate/main.go up &&
              air"
@@ -55,6 +56,12 @@ services:
       PREVIEW_ORIGIN_TEMPLATE: "http://{id}.preview.localhost:9090"
       PREVIEW_GATEWAY_PORT: "9090"
       CHROME_WS_URL: "ws://chrome:9222"
+      # This is the Docker VM's backing path for the named volume below.
+      # It must be visible to both this server (where listeners are created)
+      # and the daemon (which bind-mounts a session directory into sandboxes).
+      # A Docker-managed volume is intentional: macOS shared folders reject
+      # chmod on Unix sockets, which the credential bridge requires.
+      SANDBOX_AUTH_SOCKET_DIR: /var/lib/docker/volumes/143_sandbox_auth/_data
     ports:
       - "8080:8080"
       - "9090:9090"
@@ -64,6 +71,9 @@ services:
       - go_build_cache:/root/.cache/go-build
       - go_bin_cache:/go/bin  # cache compiled binaries (e.g. air) across restarts
       - /var/run/docker.sock:/var/run/docker.sock  # allow server to create sandbox containers
+      # Keep session credential sockets in the Docker VM so the Docker daemon
+      # can bind-mount each session directory into its sandbox container.
+      - sandbox_auth:/var/lib/docker/volumes/143_sandbox_auth/_data
     networks:
       - default
       - preview-net
@@ -122,6 +132,9 @@ volumes:
   go_build_cache:
   go_bin_cache:            # persists compiled Go tool binaries (air, etc.)
   frontend_node_modules:   # persists node_modules between container restarts
+  # Explicit name keeps the configured daemon-visible socket path stable.
+  sandbox_auth:
+    name: 143_sandbox_auth
 
 networks:
   # preview-net is the shared Docker bridge that hosts the sandbox and all
