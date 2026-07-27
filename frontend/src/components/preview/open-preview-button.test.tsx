@@ -138,6 +138,69 @@ describe("OpenPreviewButton", () => {
     );
   });
 
+  it("resets cleanly when a cross-origin popup rejects listener cleanup", async () => {
+    const user = userEvent.setup();
+    const popupListeners = new Map<string, EventListener>();
+    const popup = {
+      opener: window,
+      close: vi.fn(),
+      document: {
+        write: vi.fn(),
+        close: vi.fn(),
+      },
+      location: {
+        href: "",
+      },
+      addEventListener: vi.fn((type: string, listener: EventListener) => {
+        popupListeners.set(type, listener);
+      }),
+      removeEventListener: vi.fn(() => {
+        throw new DOMException(
+          "Blocked a frame with origin from accessing a cross-origin frame.",
+          "SecurityError",
+        );
+      }),
+    } as unknown as Window;
+    vi.spyOn(window, "open").mockReturnValue(popup);
+
+    renderWithProviders(
+      <OpenPreviewButton
+        previewId="prev-1"
+        previewUrl="https://prev-1.preview.143.dev"
+        bootstrapPreview={() => Promise.resolve({ token: "tok-1" })}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Open preview" }));
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          origin: "https://prev-1.preview.143.dev",
+          data: { type: "preview_bootstrap_ready" },
+        }),
+      );
+    });
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          origin: "https://prev-1.preview.143.dev",
+          data: { type: "preview_bootstrap_complete" },
+        }),
+      );
+    });
+    await waitFor(() => {
+      expect(popupListeners.has("load")).toBe(true);
+    });
+
+    await expect(
+      act(async () => {
+        popupListeners.get("load")?.(new Event("load"));
+      }),
+    ).resolves.toBeUndefined();
+    expect(screen.getByRole("button", { name: "Open preview" })).toBeEnabled();
+    expect(popup.removeEventListener).toHaveBeenCalledTimes(1);
+  });
+
   it("recovers if the popup closes before the preview load event", async () => {
     const user = userEvent.setup();
     const popup = {

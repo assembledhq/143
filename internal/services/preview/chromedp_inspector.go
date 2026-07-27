@@ -13,6 +13,7 @@ import (
 	"image/gif"
 	"image/png"
 	"math"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -54,6 +55,7 @@ func mergeContexts(primary, caller context.Context) (context.Context, context.Ca
 const (
 	browserIdleTimeout    = 5 * time.Minute
 	defaultOpTimeout      = 30 * time.Second
+	browserResetTimeout   = 5 * time.Second
 	maxInteractionSteps   = 20
 	maxInteractionTimeout = 60 * time.Second
 	maxViewports          = 5
@@ -129,10 +131,11 @@ type ChromeDPInspector struct {
 	idleTimer     *time.Timer
 	running       bool
 
-	previews    map[string]*previewContext
-	contextKeys map[string]string
-	screencasts map[string]*screencastSession
-	closed      bool
+	previews      map[string]*previewContext
+	contextKeys   map[string]string
+	previewAccess map[string]string
+	screencasts   map[string]*screencastSession
+	closed        bool
 }
 
 // NewChromeDPInspector creates a new ChromeDPInspector.
@@ -141,11 +144,12 @@ func NewChromeDPInspector(cfg ChromeDPInspectorConfig, logger zerolog.Logger) *C
 		cfg.PreviewURLTemplate = "http://{{.PreviewID}}.preview.localhost:9090{{.Path}}"
 	}
 	return &ChromeDPInspector{
-		cfg:         cfg,
-		logger:      logger.With().Str("component", "chromedp_inspector").Logger(),
-		previews:    make(map[string]*previewContext),
-		contextKeys: make(map[string]string),
-		screencasts: make(map[string]*screencastSession),
+		cfg:           cfg,
+		logger:        logger.With().Str("component", "chromedp_inspector").Logger(),
+		previews:      make(map[string]*previewContext),
+		contextKeys:   make(map[string]string),
+		previewAccess: make(map[string]string),
+		screencasts:   make(map[string]*screencastSession),
 	}
 }
 
@@ -176,10 +180,15 @@ func (c *ChromeDPInspector) BindSessionBrowser(previewID, sessionID string) {
 		// leftover — release it instead of leaking it.
 		raw.cancel()
 		delete(c.previews, previewID)
+		delete(c.previewAccess, previewID)
 		return
 	}
 	c.previews[sessionKey] = raw
 	delete(c.previews, previewID)
+	if authorizedPreviewID := c.previewAccess[previewID]; authorizedPreviewID != "" {
+		c.previewAccess[sessionKey] = authorizedPreviewID
+		delete(c.previewAccess, previewID)
+	}
 }
 
 // =============================================================================
@@ -291,6 +300,7 @@ func (c *ChromeDPInspector) resetIdleTimer() {
 			if pc.lastUsed.Before(cutoff) {
 				pc.cancel()
 				delete(c.previews, key)
+				delete(c.previewAccess, key)
 			}
 		}
 		for previewID, key := range c.contextKeys {
@@ -629,7 +639,9 @@ func (c *ChromeDPInspector) Observe(ctx context.Context, target models.BrowserTa
 	if err := validateObservationOrigin(screenshot.URL, expectedOrigin); err != nil {
 		if pc, contextErr := c.getOrCreatePreviewCtx(target.PreviewID); contextErr == nil {
 			merged, cancel := mergeContexts(pc.ctx, ctx)
-			blankErr := chromedp.Run(merged, chromedp.Navigate("about:blank"))
+			resetCtx, resetCancel := context.WithTimeout(merged, browserResetTimeout)
+			blankErr := chromedp.Run(resetCtx, chromedp.Navigate("about:blank"))
+			resetCancel()
 			cancel()
 			if blankErr != nil {
 				return nil, errors.Join(err, fmt.Errorf("reset browser after unauthorized navigation: %w", blankErr))
@@ -717,17 +729,90 @@ func consoleMessagesAfter(messages []ConsoleMessage, cursor int64) []models.Cons
 }
 
 func (c *ChromeDPInspector) HasContext(target models.BrowserTarget) bool {
-	key := target.ContextKey
-	if key == "" && target.SessionID != "" {
-		key = "session:" + target.SessionID
-	}
-	if key == "" {
-		key = target.PreviewID
-	}
+	key := browserTargetContextKey(target)
 	c.mu.Lock()
 	_, ok := c.previews[key]
 	c.mu.Unlock()
 	return ok
+}
+
+func (c *ChromeDPInspector) HasPreviewAccess(target models.BrowserTarget) bool {
+	if target.SessionID != "" {
+		c.BindSessionBrowser(target.PreviewID, target.SessionID)
+	}
+	key := browserTargetContextKey(target)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, hasContext := c.previews[key]
+	return hasContext && c.previewAccess[key] == target.PreviewID
+}
+
+func (c *ChromeDPInspector) BootstrapPreviewAccess(ctx context.Context, target models.BrowserTarget, token string) error {
+	if strings.TrimSpace(token) == "" {
+		return fmt.Errorf("preview bootstrap token is required")
+	}
+	if target.SessionID != "" {
+		c.BindSessionBrowser(target.PreviewID, target.SessionID)
+	}
+	bootstrapURL, err := c.previewURL(target.PreviewID, "/bootstrap")
+	if err != nil {
+		return fmt.Errorf("resolve preview bootstrap URL: %w", err)
+	}
+	previewURL, err := c.previewURL(target.PreviewID, "/")
+	if err != nil {
+		return fmt.Errorf("resolve preview URL: %w", err)
+	}
+	pc, err := c.getOrCreatePreviewCtx(target.PreviewID)
+	if err != nil {
+		return err
+	}
+	merged, mergeCancel := mergeContexts(pc.ctx, ctx)
+	defer mergeCancel()
+	timeoutCtx, cancel := context.WithTimeout(merged, defaultOpTimeout)
+	defer cancel()
+
+	var exchangeStatus int
+	exchangeScript := fmt.Sprintf(`(async () => {
+		const response = await fetch("/bootstrap/exchange", {
+			method: "POST",
+			headers: {"Content-Type": "application/json"},
+			body: JSON.stringify({token: %s}),
+			credentials: "same-origin"
+		});
+		return response.status;
+	})()`, strconv.Quote(token))
+	if err := chromedp.Run(
+		timeoutCtx,
+		chromedp.Navigate(bootstrapURL),
+		chromedp.WaitReady("body", chromedp.ByQuery),
+		chromedp.Evaluate(exchangeScript, &exchangeStatus),
+	); err != nil {
+		c.dropBrowserContext(target)
+		return fmt.Errorf("exchange preview browser access: %w", err)
+	}
+	if exchangeStatus < http.StatusOK || exchangeStatus >= http.StatusMultipleChoices {
+		c.dropBrowserContext(target)
+		return fmt.Errorf("exchange preview browser access returned status %d", exchangeStatus)
+	}
+	var currentURL string
+	if err := chromedp.Run(
+		timeoutCtx,
+		chromedp.Navigate(previewURL),
+		chromedp.WaitReady("body", chromedp.ByQuery),
+		chromedp.Location(&currentURL),
+	); err != nil {
+		c.dropBrowserContext(target)
+		return fmt.Errorf("open authenticated preview: %w", err)
+	}
+	if err := validateObservationOrigin(currentURL, previewURL); err != nil {
+		c.dropBrowserContext(target)
+		return fmt.Errorf("authenticated preview left its authorized origin: %w", err)
+	}
+	key := browserTargetContextKey(target)
+	c.mu.Lock()
+	c.previewAccess[key] = target.PreviewID
+	c.mu.Unlock()
+	return nil
 }
 
 func (c *ChromeDPInspector) Act(ctx context.Context, target models.BrowserTarget, steps []models.InteractionStep, opts models.PreviewObservationOpts) (*models.PreviewActResult, error) {
@@ -765,7 +850,7 @@ func (c *ChromeDPInspector) ExportStorage(ctx context.Context, target models.Bro
 	var state browserStorageState
 	if err := chromedp.Run(merged, chromedp.Location(&state.URL), chromedp.Evaluate(`Object.fromEntries(Object.entries(localStorage))`, &state.LocalStorage), chromedp.ActionFunc(func(runCtx context.Context) error {
 		cookies, cookieErr := network.GetCookies().Do(runCtx)
-		state.Cookies = cookies
+		state.Cookies = persistableBrowserCookies(cookies)
 		return cookieErr
 	})); err != nil {
 		return nil, fmt.Errorf("export browser storage: %w", err)
@@ -811,6 +896,9 @@ func (c *ChromeDPInspector) RestoreStorage(ctx context.Context, target models.Br
 	newURL, _ := url.Parse(destinationURL)
 	err = chromedp.Run(merged, chromedp.ActionFunc(func(runCtx context.Context) error {
 		for _, cookie := range state.Cookies {
+			if cookie == nil || isPreviewGatewaySessionCookie(cookie.Name) {
+				continue
+			}
 			domain := cookie.Domain
 			if strings.TrimPrefix(domain, ".") == oldURL.Hostname() {
 				domain = newURL.Hostname()
@@ -830,19 +918,39 @@ func (c *ChromeDPInspector) RestoreStorage(ctx context.Context, target models.Br
 }
 
 func (c *ChromeDPInspector) dropBrowserContext(target models.BrowserTarget) {
-	key := target.ContextKey
-	if key == "" && target.SessionID != "" {
-		key = "session:" + target.SessionID
-	}
-	if key == "" {
-		key = target.PreviewID
-	}
+	key := browserTargetContextKey(target)
 	c.mu.Lock()
 	if pc := c.previews[key]; pc != nil {
 		pc.cancel()
 		delete(c.previews, key)
 	}
+	delete(c.previewAccess, key)
 	c.mu.Unlock()
+}
+
+func browserTargetContextKey(target models.BrowserTarget) string {
+	if target.ContextKey != "" {
+		return target.ContextKey
+	}
+	if target.SessionID != "" {
+		return "session:" + target.SessionID
+	}
+	return target.PreviewID
+}
+
+func persistableBrowserCookies(cookies []*network.Cookie) []*network.Cookie {
+	result := make([]*network.Cookie, 0, len(cookies))
+	for _, cookie := range cookies {
+		if cookie == nil || isPreviewGatewaySessionCookie(cookie.Name) {
+			continue
+		}
+		result = append(result, cookie)
+	}
+	return result
+}
+
+func isPreviewGatewaySessionCookie(name string) bool {
+	return name == "__Host-preview_session" || name == "preview_session"
 }
 
 func compatiblePreviewRestoreURL(stored, active string) (bool, string) {
@@ -2260,6 +2368,7 @@ func (c *ChromeDPInspector) Close() error {
 	for id, pc := range c.previews {
 		pc.cancel()
 		delete(c.previews, id)
+		delete(c.previewAccess, id)
 	}
 
 	// Shut down the browser.

@@ -1867,6 +1867,24 @@ func (m *Manager) MintBootstrapToken(ctx context.Context, orgID, userID, preview
 		return "", fmt.Errorf("get preview instance: %w", err)
 	}
 
+	return m.mintBootstrapTokenForInstance(ctx, instance, userID)
+}
+
+// MintBrowserAccessToken creates preview-gateway access for the durable
+// session-owned browser. The instance must belong to the exact requested
+// session so an internal browser request cannot cross session boundaries.
+func (m *Manager) MintBrowserAccessToken(ctx context.Context, orgID, sessionID, previewID uuid.UUID) (string, error) {
+	instance, err := m.store.GetPreviewInstance(ctx, orgID, previewID)
+	if err != nil {
+		return "", fmt.Errorf("get preview instance: %w", err)
+	}
+	if instance.SessionID == uuid.Nil || instance.SessionID != sessionID {
+		return "", fmt.Errorf("preview does not belong to requested session")
+	}
+	return m.mintBootstrapTokenForInstance(ctx, instance, instance.UserID)
+}
+
+func (m *Manager) mintBootstrapTokenForInstance(ctx context.Context, instance *models.PreviewInstance, userID uuid.UUID) (string, error) {
 	if !instance.Status.IsActive() {
 		return "", fmt.Errorf("preview is not active (status=%s)", instance.Status)
 	}
@@ -1879,9 +1897,9 @@ func (m *Manager) MintBootstrapToken(ctx context.Context, orgID, userID, preview
 	tokenHash := hashToken(token)
 
 	sess := &models.PreviewAccessSession{
-		OrgID:             orgID,
+		OrgID:             instance.OrgID,
 		UserID:            userID,
-		PreviewInstanceID: previewID,
+		PreviewInstanceID: instance.ID,
 		SessionTokenHash:  tokenHash,
 		// Deliberately short: this initial window only needs to cover token
 		// redemption. The gateway extends the session to its full sliding

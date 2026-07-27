@@ -90,10 +90,23 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
     }
   }, []);
 
+  const clearPopupLoadListener = useCallback(() => {
+    const cleanup = popupLoadCleanupRef.current;
+    popupLoadCleanupRef.current = null;
+    if (!cleanup) return;
+    try {
+      cleanup();
+    } catch {
+      // Once the popup reaches the preview origin, its WindowProxy is
+      // cross-origin and some browsers reject even removeEventListener.
+      // The listener is registered with { once: true }, so clearing our local
+      // reference is sufficient and must never take down the opener UI.
+    }
+  }, []);
+
   const resetPendingOpen = useCallback(() => {
     clearTimeoutRef();
-    popupLoadCleanupRef.current?.();
-    popupLoadCleanupRef.current = null;
+    clearPopupLoadListener();
     if (popupNavigationPollRef.current !== null) {
       window.clearInterval(popupNavigationPollRef.current);
       popupNavigationPollRef.current = null;
@@ -105,11 +118,11 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
     pendingRef.current = null;
     setIframeSrc(undefined);
     setIsOpening(false);
-  }, [clearTimeoutRef]);
+  }, [clearPopupLoadListener, clearTimeoutRef]);
 
   const completeOpenWhenPopupLoads = useCallback(
     (popup: Window) => {
-      popupLoadCleanupRef.current?.();
+      clearPopupLoadListener();
 
       const onLoad = () => {
         resetPendingOpen();
@@ -137,7 +150,7 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
         resetPendingOpen();
       }, POPUP_NAVIGATION_TIMEOUT_MS);
     },
-    [resetPendingOpen],
+    [clearPopupLoadListener, resetPendingOpen],
   );
 
   const failOpen = useCallback(
@@ -269,8 +282,7 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
   useEffect(() => {
     return () => {
       clearTimeoutRef();
-      popupLoadCleanupRef.current?.();
-      popupLoadCleanupRef.current = null;
+      clearPopupLoadListener();
       if (popupNavigationPollRef.current !== null) {
         window.clearInterval(popupNavigationPollRef.current);
         popupNavigationPollRef.current = null;
@@ -284,7 +296,7 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
       }
       pendingRef.current = null;
     };
-  }, [clearTimeoutRef]);
+  }, [clearPopupLoadListener, clearTimeoutRef]);
 
   const bootstrapFrame = iframeSrc ? (
     <iframe
