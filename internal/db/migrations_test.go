@@ -1353,9 +1353,9 @@ func TestSingleCodeReviewPolicyMigrationPreservesHistoryAndPreventsActiveOverrid
 func TestSessionActivityPhaseMigrationEnforcesLifecycleAndDeliveryIdentity(t *testing.T) {
 	t.Parallel()
 
-	upBody, err := os.ReadFile("../../migrations/000260_session_activity_phases.up.sql")
+	upBody, err := os.ReadFile("../../migrations/000261_session_activity_phases.up.sql")
 	require.NoError(t, err, "test should read the activity phase up migration")
-	downBody, err := os.ReadFile("../../migrations/000260_session_activity_phases.down.sql")
+	downBody, err := os.ReadFile("../../migrations/000261_session_activity_phases.down.sql")
 	require.NoError(t, err, "test should read the activity phase down migration")
 
 	upSQL := string(upBody)
