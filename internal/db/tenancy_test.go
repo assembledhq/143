@@ -21,8 +21,6 @@ func TestMultiTenancyAudit(t *testing.T) {
 	multiTenantTables := []string{
 		"issues",
 		"sessions",
-		"pm_plans",
-		"pm_decision_log",
 		"webhook_deliveries",
 		"jobs",
 		"repositories",

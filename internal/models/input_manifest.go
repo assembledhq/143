@@ -14,8 +14,8 @@ type InputManifest struct {
 	// To get exact text: git show <sha>:internal/prompts/templates/<name>.template
 	ServerDeploySHA string `json:"server_deploy_sha"`
 
-	// PMDocumentSetPinID references the frozen set of PM documents.
-	PMDocumentSetPinID *uuid.UUID `json:"pm_document_set_pin_id,omitempty"`
+	// ReferenceContextSetPinID references the frozen set of reference documents.
+	ReferenceContextSetPinID *uuid.UUID `json:"reference_context_set_pin_id,omitempty"`
 
 	// OrgSettingsVersionID is the row ID of the active org settings at run time.
 	OrgSettingsVersionID *uuid.UUID `json:"org_settings_version_id,omitempty"`

@@ -411,7 +411,6 @@ export type AgentCapabilityID =
   | 'slack_notifications'
   | 'automation_management'
   | 'code_review_policy_management'
-  | 'project_proposals'
   | 'eval_authoring'
   | 'publishing';
 
@@ -1158,10 +1157,9 @@ export interface Session {
   failure_next_steps?: string[];
   failure_retry_advised?: boolean;
   parent_session_id?: string;
-  pm_plan_id?: string;
   title?: string;
-  pm_approach?: string;
-  pm_reasoning?: string;
+  execution_brief?: string;
+  planning_reasoning?: string;
   project_task_id?: string;
   model_override?: string;
   reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max";
@@ -2153,23 +2151,17 @@ export interface Memory {
 }
 
 export interface OrgSettings {
-  autonomy_level?: "manual" | "auto_simple" | "auto_all";
-  execution_aggressiveness?: number;
   max_concurrent_runs?: number;
   max_session_duration_seconds?: number;
   preview_max_previews_per_user?: number;
   preview_auto_pool_max_active?: number;
   preview_session_prewarm_max_active?: number;
-  pm_schedule_hours?: number;
-  pm_model?: string;
   priority_weights?: {
     customer_impact?: number;
     severity?: number;
     recency?: number;
     revenue_risk?: number;
   };
-  min_priority_threshold?: number;
-  product_direction?: string;
   product_context?: ProductContext;
   llm_model?: string;
   llm_reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max" | "";
@@ -2646,7 +2638,6 @@ export interface PriorityScore {
   revenue_risk_score: number;
   direction_alignment: number;
   factors?: Record<string, unknown>;
-  eligible_for_agent: boolean;
   computed_at: string;
 }
 
@@ -2706,27 +2697,11 @@ export interface Project {
   total_tasks: number;
   completed_tasks: number;
   failed_tasks: number;
-  proposed_by_pm: boolean;
-  source_issue_ids?: string[];
-  proposal_reasoning?: string;
-  similar_projects?: ProposalOverlap[];
   created_by?: string;
   created_at: string;
   updated_at: string;
   completed_at?: string;
   archived_at?: string;
-}
-
-export interface ProposalOverlap {
-  project_id: string;
-  title: string;
-  overlap_score: number;
-  overlap_type: string;
-  explanation: string;
-}
-
-export interface ProposalSummary {
-  count: number;
 }
 
 export interface ProjectTask {
@@ -2753,21 +2728,6 @@ export interface ProjectTask {
   created_at: string;
   updated_at: string;
   completed_at?: string;
-}
-
-export interface ProjectCycle {
-  id: string;
-  project_id: string;
-  org_id: string;
-  pm_plan_id?: string;
-  cycle_number: number;
-  analysis: string;
-  decisions: Record<string, unknown>;
-  progress_pct?: number;
-  tasks_completed_this_cycle: number;
-  tasks_failed_this_cycle: number;
-  tasks_created_this_cycle: number;
-  created_at: string;
 }
 
 export interface ProjectAttachment {
@@ -2801,7 +2761,7 @@ export interface ProjectSpec {
   updated_at: string;
 }
 
-export interface PMDocument {
+export interface ReferenceDocument {
   id: string;
   org_id: string;
   title: string;
@@ -2914,8 +2874,8 @@ export type AuditResourceType =
   | "api_client"
   | "api_token"
   | "session_review_comment"
-  | "pm_document"
-  | "pm_document_set"
+  | "reference_document"
+  | "reference_document_set"
   | "eval_task"
   | "eval_run"
   | "eval_batch"
@@ -2952,7 +2912,6 @@ export interface AuditLog {
 export interface ProjectDetail {
   project: Project;
   tasks: ProjectTask[];
-  recent_cycles: ProjectCycle[];
   attachments: ProjectAttachment[];
   specs: ProjectSpec[];
 }
@@ -3054,7 +3013,7 @@ export interface EvalTask {
   issue_description: string;
   issue_context?: Record<string, unknown>;
   server_deploy_sha?: string;
-  pm_document_set_pin_id?: string;
+  reference_context_set_pin_id?: string;
   org_settings_version_id?: string;
   memory_snapshot?: Record<string, unknown>;
   sandbox_image_digest?: string;
@@ -3082,7 +3041,7 @@ export interface EvalRun {
   input_manifest?: Record<string, unknown>;
   model: string;
   server_deploy_sha?: string;
-  pm_document_set_pin_id?: string;
+  reference_context_set_pin_id?: string;
   config_ref?: string;
   context_overrides?: Record<string, unknown>;
   agent_diff?: string;

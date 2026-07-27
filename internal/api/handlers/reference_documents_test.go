@@ -18,7 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// pmDocTestColumns matches the column order in db/pm_documents.go.
+// pmDocTestColumns matches the column order in db/reference_documents.go.
 var pmDocTestColumns = []string{
 	"id", "org_id", "title", "content", "doc_type", "sort_order",
 	"source_type", "source_url", "source_id", "source_meta", "last_synced_at",
@@ -26,22 +26,22 @@ var pmDocTestColumns = []string{
 	"created_by", "created_at", "updated_at",
 }
 
-func TestPMDocumentHandler_ListVersions(t *testing.T) {
+func TestReferenceDocumentHandler_ListVersions(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	store := db.NewPMDocumentStore(mock)
-	handler := NewPMDocumentHandler(store, nil)
+	store := db.NewReferenceDocumentStore(mock)
+	handler := NewReferenceDocumentHandler(store, nil)
 
 	orgID := uuid.New()
 	docID := uuid.New()
 	logicalID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM pm_documents").
+	mock.ExpectQuery("SELECT .+ FROM reference_documents").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmDocTestColumns).
@@ -57,7 +57,7 @@ func TestPMDocumentHandler_ListVersions(t *testing.T) {
 
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("docId", docID.String())
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/pm/documents/"+docID.String()+"/versions", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/reference-documents/"+docID.String()+"/versions", nil)
 	req = req.WithContext(context.WithValue(middleware.WithOrgID(req.Context(), orgID), chi.RouteCtxKey, rctx))
 	rr := httptest.NewRecorder()
 
@@ -65,7 +65,7 @@ func TestPMDocumentHandler_ListVersions(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rr.Code)
 
-	var resp models.ListResponse[models.PMDocument]
+	var resp models.ListResponse[models.ReferenceDocument]
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	require.Len(t, resp.Data, 2)
 	require.True(t, resp.Data[0].Active)
@@ -73,22 +73,22 @@ func TestPMDocumentHandler_ListVersions(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPMDocumentHandler_ListVersions_WithLimit(t *testing.T) {
+func TestReferenceDocumentHandler_ListVersions_WithLimit(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	store := db.NewPMDocumentStore(mock)
-	handler := NewPMDocumentHandler(store, nil)
+	store := db.NewReferenceDocumentStore(mock)
+	handler := NewReferenceDocumentHandler(store, nil)
 
 	orgID := uuid.New()
 	docID := uuid.New()
 	logicalID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM pm_documents").
+	mock.ExpectQuery("SELECT .+ FROM reference_documents").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmDocTestColumns).
@@ -100,7 +100,7 @@ func TestPMDocumentHandler_ListVersions_WithLimit(t *testing.T) {
 
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("docId", docID.String())
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/pm/documents/"+docID.String()+"/versions?limit=1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/reference-documents/"+docID.String()+"/versions?limit=1", nil)
 	req = req.WithContext(context.WithValue(middleware.WithOrgID(req.Context(), orgID), chi.RouteCtxKey, rctx))
 	rr := httptest.NewRecorder()
 
@@ -108,21 +108,21 @@ func TestPMDocumentHandler_ListVersions_WithLimit(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rr.Code)
 
-	var resp models.ListResponse[models.PMDocument]
+	var resp models.ListResponse[models.ReferenceDocument]
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	require.Len(t, resp.Data, 1)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPMDocumentHandler_RestoreVersion(t *testing.T) {
+func TestReferenceDocumentHandler_RestoreVersion(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	store := db.NewPMDocumentStore(mock)
-	handler := NewPMDocumentHandler(store, nil)
+	store := db.NewReferenceDocumentStore(mock)
+	handler := NewReferenceDocumentHandler(store, nil)
 
 	orgID := uuid.New()
 	activeDocID := uuid.New()
@@ -132,7 +132,7 @@ func TestPMDocumentHandler_RestoreVersion(t *testing.T) {
 	now := time.Now()
 
 	// GetByID for the URL param doc.
-	mock.ExpectQuery("SELECT .+ FROM pm_documents WHERE id .+ AND org_id").
+	mock.ExpectQuery("SELECT .+ FROM reference_documents WHERE id .+ AND org_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmDocTestColumns).
@@ -143,7 +143,7 @@ func TestPMDocumentHandler_RestoreVersion(t *testing.T) {
 		)
 
 	// GetByID for restore_from_id validation.
-	mock.ExpectQuery("SELECT .+ FROM pm_documents WHERE id .+ AND org_id").
+	mock.ExpectQuery("SELECT .+ FROM reference_documents WHERE id .+ AND org_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmDocTestColumns).
@@ -154,7 +154,7 @@ func TestPMDocumentHandler_RestoreVersion(t *testing.T) {
 		)
 
 	// GetActiveByLogicalID.
-	mock.ExpectQuery("SELECT .+ FROM pm_documents WHERE org_id .+ AND logical_id .+ AND active = true").
+	mock.ExpectQuery("SELECT .+ FROM reference_documents WHERE org_id .+ AND logical_id .+ AND active = true").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmDocTestColumns).
@@ -166,7 +166,7 @@ func TestPMDocumentHandler_RestoreVersion(t *testing.T) {
 
 	// Restore transaction.
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT .+ FROM pm_documents WHERE id .+ AND org_id").
+	mock.ExpectQuery("SELECT .+ FROM reference_documents WHERE id .+ AND org_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmDocTestColumns).
@@ -175,10 +175,10 @@ func TestPMDocumentHandler_RestoreVersion(t *testing.T) {
 					false, logicalID, "",
 					nil, now.Add(-time.Hour), now.Add(-time.Hour)),
 		)
-	mock.ExpectQuery("UPDATE pm_documents SET active = false").
+	mock.ExpectQuery("UPDATE reference_documents SET active = false").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"logical_id"}).AddRow(logicalID))
-	mock.ExpectQuery("INSERT INTO pm_documents").
+	mock.ExpectQuery("INSERT INTO reference_documents").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -195,7 +195,7 @@ func TestPMDocumentHandler_RestoreVersion(t *testing.T) {
 	body := `{"restore_from_id":"` + oldVersionID.String() + `"}`
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("docId", activeDocID.String())
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/pm/documents/"+activeDocID.String()+"/restore", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/reference-documents/"+activeDocID.String()+"/restore", strings.NewReader(body))
 	req = req.WithContext(context.WithValue(middleware.WithOrgID(req.Context(), orgID), chi.RouteCtxKey, rctx))
 	rr := httptest.NewRecorder()
 
@@ -206,15 +206,15 @@ func TestPMDocumentHandler_RestoreVersion(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPMDocumentHandler_RestoreVersion_LogicalIDMismatch(t *testing.T) {
+func TestReferenceDocumentHandler_RestoreVersion_LogicalIDMismatch(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	store := db.NewPMDocumentStore(mock)
-	handler := NewPMDocumentHandler(store, nil)
+	store := db.NewReferenceDocumentStore(mock)
+	handler := NewReferenceDocumentHandler(store, nil)
 
 	orgID := uuid.New()
 	docID := uuid.New()
@@ -224,7 +224,7 @@ func TestPMDocumentHandler_RestoreVersion_LogicalIDMismatch(t *testing.T) {
 	now := time.Now()
 
 	// GetByID for URL param doc.
-	mock.ExpectQuery("SELECT .+ FROM pm_documents WHERE id .+ AND org_id").
+	mock.ExpectQuery("SELECT .+ FROM reference_documents WHERE id .+ AND org_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmDocTestColumns).
@@ -235,7 +235,7 @@ func TestPMDocumentHandler_RestoreVersion_LogicalIDMismatch(t *testing.T) {
 		)
 
 	// GetByID for restore_from_id — belongs to different logical document.
-	mock.ExpectQuery("SELECT .+ FROM pm_documents WHERE id .+ AND org_id").
+	mock.ExpectQuery("SELECT .+ FROM reference_documents WHERE id .+ AND org_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmDocTestColumns).
@@ -248,7 +248,7 @@ func TestPMDocumentHandler_RestoreVersion_LogicalIDMismatch(t *testing.T) {
 	body := `{"restore_from_id":"` + otherDocID.String() + `"}`
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("docId", docID.String())
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/pm/documents/"+docID.String()+"/restore", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/reference-documents/"+docID.String()+"/restore", strings.NewReader(body))
 	req = req.WithContext(context.WithValue(middleware.WithOrgID(req.Context(), orgID), chi.RouteCtxKey, rctx))
 	rr := httptest.NewRecorder()
 
@@ -259,30 +259,30 @@ func TestPMDocumentHandler_RestoreVersion_LogicalIDMismatch(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPMDocumentHandler_CreateDocumentSetPin(t *testing.T) {
+func TestReferenceDocumentHandler_CreateDocumentSetPin(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	store := db.NewPMDocumentStore(mock)
-	handler := NewPMDocumentHandler(store, nil)
+	store := db.NewReferenceDocumentStore(mock)
+	handler := NewReferenceDocumentHandler(store, nil)
 
 	orgID := uuid.New()
 	pinID := uuid.New()
 	now := time.Now()
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO pm_document_set_pins").
+	mock.ExpectQuery("INSERT INTO reference_context_set_pins").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "created_at"}).AddRow(pinID, orgID, now))
-	mock.ExpectExec("INSERT INTO pm_document_set_pin_members").
+	mock.ExpectExec("INSERT INTO reference_context_set_pin_members").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 2))
 	mock.ExpectCommit()
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/pm/document-set-pins", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/reference-context-set-pins", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
 	rr := httptest.NewRecorder()
 
@@ -293,15 +293,15 @@ func TestPMDocumentHandler_CreateDocumentSetPin(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPMDocumentHandler_Update_InactiveVersion(t *testing.T) {
+func TestReferenceDocumentHandler_Update_InactiveVersion(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	store := db.NewPMDocumentStore(mock)
-	handler := NewPMDocumentHandler(store, nil)
+	store := db.NewReferenceDocumentStore(mock)
+	handler := NewReferenceDocumentHandler(store, nil)
 
 	orgID := uuid.New()
 	docID := uuid.New()
@@ -309,7 +309,7 @@ func TestPMDocumentHandler_Update_InactiveVersion(t *testing.T) {
 	now := time.Now()
 
 	// GetByID returns an inactive version.
-	mock.ExpectQuery("SELECT .+ FROM pm_documents WHERE id .+ AND org_id").
+	mock.ExpectQuery("SELECT .+ FROM reference_documents WHERE id .+ AND org_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmDocTestColumns).
@@ -322,7 +322,7 @@ func TestPMDocumentHandler_Update_InactiveVersion(t *testing.T) {
 	body := `{"title":"New Title"}`
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("docId", docID.String())
-	req := httptest.NewRequest(http.MethodPatch, "/api/v1/pm/documents/"+docID.String(), strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/reference-documents/"+docID.String(), strings.NewReader(body))
 	req = req.WithContext(context.WithValue(middleware.WithOrgID(req.Context(), orgID), chi.RouteCtxKey, rctx))
 	rr := httptest.NewRecorder()
 

@@ -8,25 +8,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// AutonomyLevel controls when the system auto-triggers agent runs.
-type AutonomyLevel string
-
-const (
-	AutonomyLevelManual     AutonomyLevel = "manual"
-	AutonomyLevelAutoSimple AutonomyLevel = "auto_simple"
-	AutonomyLevelAutoAll    AutonomyLevel = "auto_all"
-)
-
-// Validate returns an error if the autonomy level is not a recognized value.
-func (a AutonomyLevel) Validate() error {
-	switch a {
-	case AutonomyLevelManual, AutonomyLevelAutoSimple, AutonomyLevelAutoAll:
-		return nil
-	default:
-		return fmt.Errorf("invalid autonomy level: %q", a)
-	}
-}
-
 // AgentType identifies a coding agent backend.
 type AgentType string
 
@@ -128,8 +109,7 @@ func (a AgentType) SupportsReasoningEffortLevel(level ReasoningEffort) bool {
 }
 
 // OrgSize classifies an organization by volume of issues and activity.
-// It drives default context limits to ensure the PM agent gets sufficient
-// signal for prioritization without blowing token budgets.
+// It drives runtime concurrency and agent token defaults.
 type OrgSize string
 
 const (
@@ -149,21 +129,10 @@ func (s OrgSize) Validate() error {
 	}
 }
 
-// ContextLimits controls how much data is gathered for PM and agent contexts.
+// ContextLimits controls agent token limits.
 // All fields are configurable per-org; zero values are replaced with
 // size-appropriate defaults in ParseOrgSettings.
 type ContextLimits struct {
-	// PM context gathering limits
-	MaxOpenIssues       int `json:"max_open_issues"`       // max open issues fetched for PM
-	MaxTriagedIssues    int `json:"max_triaged_issues"`    // max triaged issues fetched for PM
-	MaxInFlightRuns     int `json:"max_in_flight_runs"`    // max in-flight sessions shown to PM
-	MaxRecentOutcomes   int `json:"max_recent_outcomes"`   // max recent completed/failed runs
-	MaxRecentPRs        int `json:"max_recent_prs"`        // max recent PRs shown to PM
-	MaxDecisionHistory  int `json:"max_decision_history"`  // max past decisions shown to PM
-	IssueDescriptionMax int `json:"issue_description_max"` // max chars per issue description
-
-	// Token limits for agents
-	PMMaxTokens       int `json:"pm_max_tokens"`        // max tokens for PM agent context
 	AgentLowTokenMax  int `json:"agent_low_token_max"`  // token limit for low-complexity tasks
 	AgentHighTokenMax int `json:"agent_high_token_max"` // token limit for high-complexity tasks
 }
@@ -173,30 +142,6 @@ type ContextLimits struct {
 // ContextLimits returns an identical copy.
 func (c ContextLimits) WithDefaults(defaults ContextLimits) ContextLimits {
 	out := c
-	if out.MaxOpenIssues == 0 {
-		out.MaxOpenIssues = defaults.MaxOpenIssues
-	}
-	if out.MaxTriagedIssues == 0 {
-		out.MaxTriagedIssues = defaults.MaxTriagedIssues
-	}
-	if out.MaxInFlightRuns == 0 {
-		out.MaxInFlightRuns = defaults.MaxInFlightRuns
-	}
-	if out.MaxRecentOutcomes == 0 {
-		out.MaxRecentOutcomes = defaults.MaxRecentOutcomes
-	}
-	if out.MaxRecentPRs == 0 {
-		out.MaxRecentPRs = defaults.MaxRecentPRs
-	}
-	if out.MaxDecisionHistory == 0 {
-		out.MaxDecisionHistory = defaults.MaxDecisionHistory
-	}
-	if out.IssueDescriptionMax == 0 {
-		out.IssueDescriptionMax = defaults.IssueDescriptionMax
-	}
-	if out.PMMaxTokens == 0 {
-		out.PMMaxTokens = defaults.PMMaxTokens
-	}
 	if out.AgentLowTokenMax == 0 {
 		out.AgentLowTokenMax = defaults.AgentLowTokenMax
 	}
@@ -230,30 +175,22 @@ func (p PRAuthorship) Validate() error {
 
 // OrgSettings is the strongly-typed representation of organizations.settings JSONB.
 type OrgSettings struct {
-	AutonomyLevel              AutonomyLevel             `json:"autonomy_level"`
-	Aggressiveness             int                       `json:"execution_aggressiveness"`
-	MaxConcurrentRuns          int                       `json:"max_concurrent_runs"`
-	AgentAutonomy              string                    `json:"agent_autonomy"`
-	PriorityWeights            PriorityWeights           `json:"priority_weights"`
-	MinPriorityThreshold       float64                   `json:"min_priority_threshold"`
-	ProductDirection           string                    `json:"product_direction"`
-	ProductContext             *ProductContext           `json:"product_context,omitempty"`
-	PMScheduleHours            int                       `json:"pm_schedule_hours"`
-	PMModel                    string                    `json:"pm_model"`
-	LLMModel                   string                    `json:"llm_model"`
-	LLMReasoningEffort         ReasoningEffort           `json:"llm_reasoning_effort,omitempty"`
-	AgentConfig                AgentEnvConfig            `json:"agent_config,omitempty"`
-	DefaultAgentType           AgentType                 `json:"default_agent_type,omitempty"`
-	AuditRetentionDays         int                       `json:"audit_retention_days,omitempty"`
-	ContextRefreshIntervalDays int                       `json:"context_refresh_interval_days,omitempty"`
-	OrgSize                    OrgSize                   `json:"org_size,omitempty"`
-	ContextLimits              ContextLimits             `json:"context_limits,omitempty"`
-	PRAuthorship               PRAuthorship              `json:"pr_authorship,omitempty"`
-	PRDraftDefault             bool                      `json:"pr_draft_default,omitempty"`
-	AutoArchiveOnPRClose       *bool                     `json:"auto_archive_on_pr_close,omitempty"`
-	DefaultWorkRepositoryID    *uuid.UUID                `json:"default_work_repository_id,omitempty"`
-	SandboxNetwork             SandboxNetworkSettings    `json:"sandbox_network,omitempty"`
-	SessionAutomation          SessionAutomationSettings `json:"session_automation,omitempty"`
+	MaxConcurrentRuns       int                       `json:"max_concurrent_runs"`
+	PriorityWeights         PriorityWeights           `json:"priority_weights"`
+	ProductContext          *ProductContext           `json:"product_context,omitempty"`
+	LLMModel                string                    `json:"llm_model"`
+	LLMReasoningEffort      ReasoningEffort           `json:"llm_reasoning_effort,omitempty"`
+	AgentConfig             AgentEnvConfig            `json:"agent_config,omitempty"`
+	DefaultAgentType        AgentType                 `json:"default_agent_type,omitempty"`
+	AuditRetentionDays      int                       `json:"audit_retention_days,omitempty"`
+	OrgSize                 OrgSize                   `json:"org_size,omitempty"`
+	ContextLimits           ContextLimits             `json:"context_limits,omitempty"`
+	PRAuthorship            PRAuthorship              `json:"pr_authorship,omitempty"`
+	PRDraftDefault          bool                      `json:"pr_draft_default,omitempty"`
+	AutoArchiveOnPRClose    *bool                     `json:"auto_archive_on_pr_close,omitempty"`
+	DefaultWorkRepositoryID *uuid.UUID                `json:"default_work_repository_id,omitempty"`
+	SandboxNetwork          SandboxNetworkSettings    `json:"sandbox_network,omitempty"`
+	SessionAutomation       SessionAutomationSettings `json:"session_automation,omitempty"`
 	// CodingAgentTabToolsEnabled controls whether sandbox agents may use
 	// 143-tools to view/create/message tabs in their current session. Pointer
 	// typed so absent settings default on without losing explicit false.
@@ -660,11 +597,7 @@ func (s LinearAgentSettings) EffectiveAppUserHandle() string {
 }
 
 // Agent autonomy mode constants.
-const (
-	AgentAutonomyConservative = "conservative"
-	AgentAutonomyBalanced     = "balanced"
-	AgentAutonomyAggressive   = "aggressive"
-)
+const ()
 
 // PriorityWeights controls how priority scores are computed.
 type PriorityWeights struct {
@@ -676,21 +609,14 @@ type PriorityWeights struct {
 
 // Default values for org settings.
 const (
-	DefaultAutonomyLevel  AutonomyLevel = AutonomyLevelAutoSimple
-	DefaultAggressiveness               = 5
 	// DefaultMaxConcurrentRuns is the fallback concurrency cap when an org has
 	// no size-derived value. Kept deliberately low so a freshly created org
 	// (and, on an open-signup deployment, an anonymous one) cannot saturate
 	// shared capacity; admins raise it per-org in settings for trusted teams.
-	DefaultMaxConcurrentRuns                    = 3
-	DefaultAgentAutonomy                        = AgentAutonomyAggressive
-	DefaultMinPriorityThreshold                 = 30.0
-	DefaultDefaultAgentType           AgentType = AgentTypeCodex
-	DefaultPMScheduleHours                      = 24
-	DefaultPMModel                              = DefaultCodexModel
-	DefaultAuditRetentionDays                   = 90
-	DefaultContextRefreshIntervalDays           = 14
-	DefaultOrgSize                    OrgSize   = OrgSizeMedium
+	DefaultMaxConcurrentRuns            = 3
+	DefaultDefaultAgentType   AgentType = AgentTypeCodex
+	DefaultAuditRetentionDays           = 90
+	DefaultOrgSize            OrgSize   = OrgSizeMedium
 
 	DefaultWeightCustomerImpact = 0.35
 	DefaultWeightSeverity       = 0.25
@@ -762,80 +688,29 @@ const (
 )
 
 // ContextLimits returns the default context limits for this org size.
-// These presets balance signal quality against token costs:
-//   - Small orgs: minimal context, all issues fit easily
-//   - Medium orgs: moderate context (current defaults)
-//   - Large orgs: expanded context, more frequent PM runs, higher token budgets
-//   - Enterprise orgs: maximum context for comprehensive prioritization
+// These presets balance agent capacity against token costs.
 func (s OrgSize) ContextLimits() ContextLimits {
 	switch s {
 	case OrgSizeSmall:
 		return ContextLimits{
-			MaxOpenIssues:       50,
-			MaxTriagedIssues:    50,
-			MaxInFlightRuns:     20,
-			MaxRecentOutcomes:   10,
-			MaxRecentPRs:        10,
-			MaxDecisionHistory:  25,
-			IssueDescriptionMax: 500,
-			PMMaxTokens:         30_000,
-			AgentLowTokenMax:    50_000,
-			AgentHighTokenMax:   200_000,
+			AgentLowTokenMax:  50_000,
+			AgentHighTokenMax: 200_000,
 		}
 	case OrgSizeLarge:
 		return ContextLimits{
-			MaxOpenIssues:       300,
-			MaxTriagedIssues:    200,
-			MaxInFlightRuns:     100,
-			MaxRecentOutcomes:   50,
-			MaxRecentPRs:        40,
-			MaxDecisionHistory:  100,
-			IssueDescriptionMax: 400,
-			PMMaxTokens:         100_000,
-			AgentLowTokenMax:    50_000,
-			AgentHighTokenMax:   200_000,
+			AgentLowTokenMax:  50_000,
+			AgentHighTokenMax: 200_000,
 		}
 	case OrgSizeEnterprise:
 		return ContextLimits{
-			MaxOpenIssues:       500,
-			MaxTriagedIssues:    300,
-			MaxInFlightRuns:     150,
-			MaxRecentOutcomes:   75,
-			MaxRecentPRs:        60,
-			MaxDecisionHistory:  150,
-			IssueDescriptionMax: 300,
-			PMMaxTokens:         150_000,
-			AgentLowTokenMax:    75_000,
-			AgentHighTokenMax:   250_000,
+			AgentLowTokenMax:  75_000,
+			AgentHighTokenMax: 250_000,
 		}
 	default: // medium (current defaults)
 		return ContextLimits{
-			MaxOpenIssues:       100,
-			MaxTriagedIssues:    100,
-			MaxInFlightRuns:     50,
-			MaxRecentOutcomes:   20,
-			MaxRecentPRs:        20,
-			MaxDecisionHistory:  50,
-			IssueDescriptionMax: 500,
-			PMMaxTokens:         50_000,
-			AgentLowTokenMax:    50_000,
-			AgentHighTokenMax:   200_000,
+			AgentLowTokenMax:  50_000,
+			AgentHighTokenMax: 200_000,
 		}
-	}
-}
-
-// PMScheduleHours returns the recommended PM schedule interval for this org size.
-// Larger orgs benefit from more frequent PM runs to keep up with higher issue volume.
-func (s OrgSize) PMScheduleHours() int {
-	switch s {
-	case OrgSizeSmall:
-		return 6
-	case OrgSizeLarge:
-		return 2
-	case OrgSizeEnterprise:
-		return 1
-	default: // medium
-		return 24
 	}
 }
 
@@ -857,7 +732,7 @@ func (s OrgSize) MaxConcurrentRuns() int {
 	}
 }
 
-// ProductContext captures the strategic context for the PM agent.
+// ProductContext captures strategic product guidance for coding workflows.
 type ProductContext struct {
 	Philosophy string   `json:"philosophy"`
 	Direction  string   `json:"direction"`
@@ -875,12 +750,6 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 		}
 	}
 
-	if s.AutonomyLevel == "" {
-		s.AutonomyLevel = DefaultAutonomyLevel
-	}
-	if s.Aggressiveness == 0 {
-		s.Aggressiveness = DefaultAggressiveness
-	}
 	// Resolve org size early so size-aware defaults can be applied below.
 	effectiveSize := s.OrgSize
 	if effectiveSize == "" {
@@ -889,18 +758,6 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 
 	if s.MaxConcurrentRuns == 0 {
 		s.MaxConcurrentRuns = effectiveSize.MaxConcurrentRuns()
-	}
-	if s.AgentAutonomy == "" {
-		s.AgentAutonomy = DefaultAgentAutonomy
-	}
-	if s.MinPriorityThreshold == 0 {
-		s.MinPriorityThreshold = DefaultMinPriorityThreshold
-	}
-	if s.PMScheduleHours == 0 {
-		s.PMScheduleHours = effectiveSize.PMScheduleHours()
-	}
-	if s.PMModel == "" {
-		s.PMModel = DefaultPMModel
 	}
 	if s.PriorityWeights == (PriorityWeights{}) {
 		s.PriorityWeights = PriorityWeights{
@@ -916,15 +773,6 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 	if s.AuditRetentionDays == 0 {
 		s.AuditRetentionDays = DefaultAuditRetentionDays
 	}
-	if s.ContextRefreshIntervalDays == 0 {
-		s.ContextRefreshIntervalDays = DefaultContextRefreshIntervalDays
-	}
-	if s.ProductContext == nil && s.ProductDirection != "" {
-		s.ProductContext = &ProductContext{
-			Direction: s.ProductDirection,
-		}
-	}
-
 	// Apply org-size-aware defaults for context limits.
 	s.ContextLimits = s.ContextLimits.WithDefaults(effectiveSize.ContextLimits())
 

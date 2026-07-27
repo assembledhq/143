@@ -179,11 +179,7 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 		// issue_source.go
 		"issues_source": toStrings(
 			IssueSourceSentry, IssueSourceLinear, IssueSourcePagerDuty,
-			IssueSourceManual, IssueSourcePMAgent,
-		),
-		// pm_enums.go
-		"pm_plans_status": toStrings(
-			PMPlanStatusExecuting, PMPlanStatusCompleted, PMPlanStatusFailed,
+			IssueSourceManual, IssueSourceAgent, IssueSourcePMAgent,
 		),
 		// organization_domain.go
 		"organization_domains_status": toStrings(

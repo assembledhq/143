@@ -178,7 +178,7 @@ func TestInternalIssueHandler_RateLimited(t *testing.T) {
 
 	// Exhaust the rate limit.
 	tokenHash := hashToken(token)
-	for i := 0; i < maxIssuesPerPMRun; i++ {
+	for i := 0; i < maxIssuesPerAgentRun; i++ {
 		require.True(t, handler.incrementAndCheck(tokenHash))
 	}
 
@@ -247,7 +247,7 @@ func TestIncrementAndCheck(t *testing.T) {
 	}
 
 	tokenHash := "test-hash"
-	for i := 0; i < maxIssuesPerPMRun; i++ {
+	for i := 0; i < maxIssuesPerAgentRun; i++ {
 		require.True(t, handler.incrementAndCheck(tokenHash), "should allow issue %d", i+1)
 	}
 	require.False(t, handler.incrementAndCheck(tokenHash), "should reject after limit")

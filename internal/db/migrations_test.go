@@ -448,6 +448,152 @@ func TestPreviewPolicyUntrustedForkRepairMigrationIsForwardCompatible(t *testing
 		"repair migration should allow missing-path prewarm skips on databases that applied the older 000208")
 }
 
+func TestRemovePMMachineryMigrationPostgresBehavior(t *testing.T) {
+	t.Parallel()
+
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set TEST_DATABASE_URL to run the PostgreSQL migration behavior test")
+	}
+
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, databaseURL)
+	require.NoError(t, err, "test should connect to TEST_DATABASE_URL")
+	defer func() {
+		require.NoError(t, conn.Close(context.Background()), "test should close the PostgreSQL connection")
+	}()
+
+	schema := "test_remove_pm_" + strings.ReplaceAll(uuid.NewString(), "-", "_")
+	_, err = conn.Exec(ctx, `CREATE SCHEMA `+schema)
+	require.NoError(t, err, "test should create an isolated schema")
+	defer func() {
+		_, cleanupErr := conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS `+schema+` CASCADE`)
+		require.NoError(t, cleanupErr, "test should remove the isolated schema")
+	}()
+	_, err = conn.Exec(ctx, `SET search_path TO `+schema+`, public`)
+	require.NoError(t, err, "test should isolate migration objects to the test schema")
+
+	_, err = conn.Exec(ctx, `
+		CREATE TABLE session_pm_context (
+			session_id uuid PRIMARY KEY,
+			org_id uuid NOT NULL,
+			pm_plan_id uuid,
+			pm_approach text,
+			pm_reasoning text,
+			project_task_id uuid,
+			created_at timestamptz NOT NULL DEFAULT now(),
+			updated_at timestamptz NOT NULL DEFAULT now()
+		);
+		CREATE TABLE pm_documents (
+			id uuid PRIMARY KEY,
+			org_id uuid NOT NULL,
+			title text NOT NULL
+		);
+		CREATE TABLE pm_document_set_pins (
+			id uuid PRIMARY KEY,
+			org_id uuid NOT NULL
+		);
+		CREATE TABLE pm_document_set_pin_members (
+			pin_id uuid NOT NULL REFERENCES pm_document_set_pins(id),
+			document_id uuid NOT NULL REFERENCES pm_documents(id),
+			PRIMARY KEY (pin_id, document_id)
+		);
+		CREATE TABLE pm_plans (id uuid PRIMARY KEY);
+		CREATE TABLE pm_decision_log (id uuid PRIMARY KEY);
+		CREATE TABLE project_cycles (id uuid PRIMARY KEY);
+		CREATE TABLE eval_tasks (
+			id uuid PRIMARY KEY,
+			pm_document_set_pin_id uuid REFERENCES pm_document_set_pins(id)
+		);
+		CREATE TABLE eval_runs (
+			id uuid PRIMARY KEY,
+			pm_document_set_pin_id uuid REFERENCES pm_document_set_pins(id)
+		);
+		CREATE TABLE issues (
+			id uuid PRIMARY KEY,
+			source text NOT NULL,
+			CONSTRAINT chk_issues_source CHECK (
+				source IN ('sentry', 'linear', 'pagerduty', 'manual', 'pm_agent')
+			)
+		);
+	`)
+	require.NoError(t, err, "test should create the pre-migration compatibility schema")
+
+	upSQL, err := os.ReadFile("../../migrations/000260_remove_pm_machinery.up.sql")
+	require.NoError(t, err, "test should read the PM machinery up migration")
+	_, err = conn.Exec(ctx, string(upSQL))
+	require.NoError(t, err, "up migration should apply to the compatibility schema")
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	_, err = conn.Exec(ctx, `
+		INSERT INTO session_execution_context (session_id, org_id, execution_brief)
+		VALUES ($1, $2, 'neutral brief')
+	`, sessionID, orgID)
+	require.NoError(t, err, "new code should write through the neutral session view")
+	var legacyBrief string
+	err = conn.QueryRow(ctx, `SELECT pm_approach FROM session_pm_context WHERE session_id = $1`, sessionID).Scan(&legacyBrief)
+	require.NoError(t, err, "old code should read the row written through the neutral view")
+	require.Equal(t, "neutral brief", legacyBrief, "neutral writes should remain visible through the legacy column")
+
+	documentID := uuid.New()
+	pinID := uuid.New()
+	_, err = conn.Exec(ctx, `INSERT INTO reference_documents (id, org_id, title) VALUES ($1, $2, 'Reference')`, documentID, orgID)
+	require.NoError(t, err, "new code should insert through the neutral document view")
+	_, err = conn.Exec(ctx, `INSERT INTO pm_document_set_pins (id, org_id) VALUES ($1, $2)`, pinID, orgID)
+	require.NoError(t, err, "legacy code should insert a pin")
+	_, err = conn.Exec(ctx, `
+		INSERT INTO reference_context_set_pin_members (pin_id, reference_document_id)
+		VALUES ($1, $2)
+	`, pinID, documentID)
+	require.NoError(t, err, "new code should insert through the aliased pin-member view")
+
+	newTaskID := uuid.New()
+	legacyTaskID := uuid.New()
+	_, err = conn.Exec(ctx, `INSERT INTO eval_tasks (id, reference_context_set_pin_id) VALUES ($1, $2)`, newTaskID, pinID)
+	require.NoError(t, err, "new eval writers should remain valid")
+	_, err = conn.Exec(ctx, `INSERT INTO eval_tasks (id, pm_document_set_pin_id) VALUES ($1, $2)`, legacyTaskID, pinID)
+	require.NoError(t, err, "legacy eval writers should remain valid")
+
+	var legacyPinID, neutralPinID uuid.UUID
+	err = conn.QueryRow(ctx, `
+		SELECT pm_document_set_pin_id, reference_context_set_pin_id
+		FROM eval_tasks WHERE id = $1
+	`, newTaskID).Scan(&legacyPinID, &neutralPinID)
+	require.NoError(t, err, "test should read synchronized pin columns for a neutral write")
+	require.Equal(t, pinID, legacyPinID, "neutral writes should synchronize the legacy pin column")
+	require.Equal(t, pinID, neutralPinID, "neutral writes should preserve the neutral pin column")
+
+	err = conn.QueryRow(ctx, `
+		SELECT pm_document_set_pin_id, reference_context_set_pin_id
+		FROM eval_tasks WHERE id = $1
+	`, legacyTaskID).Scan(&legacyPinID, &neutralPinID)
+	require.NoError(t, err, "test should read synchronized pin columns for a legacy write")
+	require.Equal(t, pinID, legacyPinID, "legacy writes should preserve the legacy pin column")
+	require.Equal(t, pinID, neutralPinID, "legacy writes should synchronize the neutral pin column")
+
+	runID := uuid.New()
+	_, err = conn.Exec(ctx, `INSERT INTO eval_runs (id, reference_context_set_pin_id) VALUES ($1, $2)`, runID, pinID)
+	require.NoError(t, err, "new eval-run writers should remain valid")
+	err = conn.QueryRow(ctx, `
+		SELECT pm_document_set_pin_id, reference_context_set_pin_id
+		FROM eval_runs WHERE id = $1
+	`, runID).Scan(&legacyPinID, &neutralPinID)
+	require.NoError(t, err, "test should read synchronized eval-run pin columns")
+	require.Equal(t, pinID, legacyPinID, "neutral eval-run writes should synchronize the legacy pin column")
+	require.Equal(t, pinID, neutralPinID, "neutral eval-run writes should preserve the neutral pin column")
+
+	downSQL, err := os.ReadFile("../../migrations/000260_remove_pm_machinery.down.sql")
+	require.NoError(t, err, "test should read the PM machinery down migration")
+	_, err = conn.Exec(ctx, string(downSQL))
+	require.NoError(t, err, "down migration should remove only neutral compatibility objects")
+
+	var retainedBrief string
+	err = conn.QueryRow(ctx, `SELECT pm_approach FROM session_pm_context WHERE session_id = $1`, sessionID).Scan(&retainedBrief)
+	require.NoError(t, err, "down migration should preserve legacy session data")
+	require.Equal(t, "neutral brief", retainedBrief, "rolling compatibility data should survive rollback")
+}
+
 func TestCodingCredentialsVersioningMigrationPostgresBehavior(t *testing.T) {
 	t.Parallel()
 

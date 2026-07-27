@@ -8,55 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ─── System Prompts ──────────────────────────────────────────────────────────
-
-func TestPMSystemPrompt(t *testing.T) {
-	t.Parallel()
-
-	result := PMSystemPrompt(PMSystemPromptData{
-		AvailableSlots:     5,
-		MaxConcurrent:      3,
-		ActiveProjectCount: 2,
-	})
-	assert.Contains(t, result, "<constraints>")
-	assert.Contains(t, result, "</constraints>")
-	assert.Contains(t, result, "5")
-	assert.Contains(t, result, "3")
-	assert.NotEmpty(t, result)
-}
-
-func TestPMBootstrapPrompt(t *testing.T) {
-	t.Parallel()
-
-	result := PMBootstrapPrompt(PMBootstrapPromptData{
-		SkillsDoc: "tool: list_issues",
-		HasNotion: true,
-		HasLinear: false,
-		HasSentry: true,
-		HasGitHub: true,
-	})
-	assert.Contains(t, result, "bootstrapping the PM context")
-	assert.Contains(t, result, "CONTEXT.md")
-	assert.NotEmpty(t, result)
-}
-
-func TestPMRefreshPrompt(t *testing.T) {
-	t.Parallel()
-
-	result := PMRefreshPrompt(PMRefreshPromptData{
-		SkillsDoc:    "tool: list_issues",
-		HasNotion:    false,
-		HasLinear:    true,
-		HasSentry:    false,
-		HasGitHub:    true,
-		LastSyncedAt: "2026-01-01T00:00:00Z",
-	})
-	assert.Contains(t, result, "refreshing the PM context")
-	assert.Contains(t, result, "2026-01-01T00:00:00Z")
-	assert.Contains(t, result, "CONTEXT.md")
-	assert.NotEmpty(t, result)
-}
-
 func TestSlackSummarizerPrompt(t *testing.T) {
 	t.Parallel()
 
@@ -287,18 +238,6 @@ func TestLinkedIssuesContext_EscapesTrustFenceBreakouts(t *testing.T) {
 	assert.Contains(t, result, "&quot;")
 }
 
-func TestProjectGeneratePrompt(t *testing.T) {
-	t.Parallel()
-
-	result := ProjectGeneratePrompt()
-	assert.NotEmpty(t, result)
-	assert.Contains(t, result, "<guidelines>")
-	assert.Contains(t, result, "</guidelines>")
-	assert.Contains(t, result, "<response_format>")
-	assert.Contains(t, result, "</response_format>")
-	assert.Contains(t, result, "execution_mode")
-}
-
 func TestAutomationGoalImprovementPrompts(t *testing.T) {
 	t.Parallel()
 
@@ -322,31 +261,6 @@ func TestAutomationGoalImprovementPrompts(t *testing.T) {
 	require.Contains(t, deep, "Do not create commits, branches, pull requests, issues, or external tasks.", "deep prompt should prohibit side-effecting delivery")
 	require.Contains(t, deep, "untrusted evidence", "deep prompt should fence prior run and repository text")
 	require.Contains(t, deep, "143-tools automation-goal-improvement complete", "deep prompt should instruct the agent to publish a structured proposal")
-}
-
-// ─── Project Cycle System Prompt ─────────────────────────────────────────────
-
-func TestProjectCycleSystemPrompt(t *testing.T) {
-	t.Parallel()
-
-	result := ProjectCycleSystemPrompt(ProjectCycleSystemPromptData{
-		Title: "Auth Refactor",
-		Goal:  "Modernize the auth stack",
-		ID:    "proj-123",
-	})
-	assert.Contains(t, result, "<project_title>")
-	assert.Contains(t, result, "Auth Refactor")
-	assert.Contains(t, result, "</project_title>")
-	assert.Contains(t, result, "<goal>")
-	assert.Contains(t, result, "Modernize the auth stack")
-	assert.Contains(t, result, "</goal>")
-	assert.Contains(t, result, "proj-123")
-	assert.Contains(t, result, "<analysis_instructions>")
-	assert.Contains(t, result, "</analysis_instructions>")
-	assert.Contains(t, result, "<response_format>")
-	assert.Contains(t, result, "</response_format>")
-	assert.Contains(t, result, "cycle_analysis")
-	assert.Contains(t, result, "new_tasks")
 }
 
 // ─── User Prompts ────────────────────────────────────────────────────────────

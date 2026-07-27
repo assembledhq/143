@@ -15,13 +15,12 @@ import (
 )
 
 type ProjectHandler struct {
-	projectStore      *db.ProjectStore
-	projectTaskStore  *db.ProjectTaskStore
-	projectCycleStore *db.ProjectCycleStore
-	attachmentStore   *db.ProjectAttachmentStore
-	specStore         *db.ProjectSpecStore
-	repoStore         *db.RepositoryStore
-	audit             *db.AuditEmitter
+	projectStore     *db.ProjectStore
+	projectTaskStore *db.ProjectTaskStore
+	attachmentStore  *db.ProjectAttachmentStore
+	specStore        *db.ProjectSpecStore
+	repoStore        *db.RepositoryStore
+	audit            *db.AuditEmitter
 }
 
 // SetAuditEmitter injects the audit emitter for logging project events.
@@ -32,16 +31,14 @@ func (h *ProjectHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 func NewProjectHandler(
 	projectStore *db.ProjectStore,
 	projectTaskStore *db.ProjectTaskStore,
-	projectCycleStore *db.ProjectCycleStore,
 	attachmentStore *db.ProjectAttachmentStore,
 	specStore *db.ProjectSpecStore,
 ) *ProjectHandler {
 	return &ProjectHandler{
-		projectStore:      projectStore,
-		projectTaskStore:  projectTaskStore,
-		projectCycleStore: projectCycleStore,
-		attachmentStore:   attachmentStore,
-		specStore:         specStore,
+		projectStore:     projectStore,
+		projectTaskStore: projectTaskStore,
+		attachmentStore:  attachmentStore,
+		specStore:        specStore,
 	}
 }
 
@@ -52,13 +49,12 @@ func (h *ProjectHandler) SetRepositoryStore(repoStore *db.RepositoryStore) {
 	h.repoStore = repoStore
 }
 
-// ProjectDetailResponse combines a project with its tasks, cycles, attachments, and specs.
+// ProjectDetailResponse combines a project with its tasks, attachments, and specs.
 type ProjectDetailResponse struct {
-	Project      models.Project             `json:"project"`
-	Tasks        []models.ProjectTask       `json:"tasks"`
-	RecentCycles []models.ProjectCycle      `json:"recent_cycles"`
-	Attachments  []models.ProjectAttachment `json:"attachments"`
-	Specs        []models.ProjectSpec       `json:"specs"`
+	Project     models.Project             `json:"project"`
+	Tasks       []models.ProjectTask       `json:"tasks"`
+	Attachments []models.ProjectAttachment `json:"attachments"`
+	Specs       []models.ProjectSpec       `json:"specs"`
 }
 
 // validStatusTransition checks whether a project status transition is allowed.
@@ -87,11 +83,6 @@ func (h *ProjectHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	if search := r.URL.Query().Get("search"); search != "" {
 		filters.Search = search
-	}
-
-	if v := r.URL.Query().Get("proposed_by_pm"); v == "true" || v == "false" {
-		b := v == "true"
-		filters.ProposedByPM = &b
 	}
 
 	if repoIDStr := r.URL.Query().Get("repository_id"); repoIDStr != "" {
@@ -163,15 +154,6 @@ func (h *ProjectHandler) Get(w http.ResponseWriter, r *http.Request) {
 		tasks = []models.ProjectTask{}
 	}
 
-	cycles, err := h.projectCycleStore.ListByProject(r.Context(), orgID, projectID, 10)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "LIST_CYCLES_FAILED", "failed to list project cycles", err)
-		return
-	}
-	if cycles == nil {
-		cycles = []models.ProjectCycle{}
-	}
-
 	var attachments []models.ProjectAttachment
 	if h.attachmentStore != nil {
 		attachments, err = h.attachmentStore.ListByProject(r.Context(), orgID, projectID)
@@ -198,11 +180,10 @@ func (h *ProjectHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[ProjectDetailResponse]{
 		Data: ProjectDetailResponse{
-			Project:      project,
-			Tasks:        tasks,
-			RecentCycles: cycles,
-			Attachments:  attachments,
-			Specs:        specs,
+			Project:     project,
+			Tasks:       tasks,
+			Attachments: attachments,
+			Specs:       specs,
 		},
 	})
 }

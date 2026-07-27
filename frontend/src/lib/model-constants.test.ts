@@ -11,7 +11,6 @@ import {
   AVAILABLE_PI_MODELS,
   DEFAULT_CLAUDE_CODE_MODEL,
   DEFAULT_CODEX_MODEL,
-  DEFAULT_PM_MODEL,
   DEFAULT_LLM_MODEL,
   CLAUDE_CODE_MODEL_OPUS_5,
   CODEX_MODEL_GPT_5_6_SOL,
@@ -21,9 +20,8 @@ import {
 } from "./model-constants";
 
 describe("model constants", () => {
-  it("uses GPT 5.6 Sol as the Codex and PM default", () => {
+  it("uses GPT 5.6 Sol as the Codex default", () => {
     expect(DEFAULT_CODEX_MODEL).toBe(CODEX_MODEL_GPT_5_6_SOL);
-    expect(DEFAULT_PM_MODEL).toBe(DEFAULT_CODEX_MODEL);
   });
 
   it("uses Opus 5 as the Claude Code default", () => {

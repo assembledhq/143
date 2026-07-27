@@ -311,10 +311,9 @@ type Session struct {
 	Error               *string          `db:"error" json:"error,omitempty"`
 	ResultSummary       *string          `db:"result_summary" json:"result_summary,omitempty"`
 	Diff                *string          `db:"diff" json:"diff,omitempty"`
-	PMPlanID            *uuid.UUID       `db:"pm_plan_id" json:"pm_plan_id,omitempty"`
 	Title               *string          `db:"title" json:"title,omitempty"`
-	PMApproach          *string          `db:"pm_approach" json:"pm_approach,omitempty"`
-	PMReasoning         *string          `db:"pm_reasoning" json:"pm_reasoning,omitempty"`
+	ExecutionBrief      *string          `db:"execution_brief" json:"execution_brief,omitempty"`
+	PlanningReasoning   *string          `db:"planning_reasoning" json:"planning_reasoning,omitempty"`
 	ProjectTaskID       *uuid.UUID       `db:"project_task_id" json:"project_task_id,omitempty"`
 	ModelOverride       *string          `db:"model_override" json:"model_override,omitempty"`
 	ReasoningEffort     *ReasoningEffort `db:"reasoning_effort" json:"reasoning_effort,omitempty"`
@@ -1012,7 +1011,6 @@ type PriorityScore struct {
 	RevenueRiskScore    float64         `db:"revenue_risk_score" json:"revenue_risk_score"`
 	DirectionAlignment  float64         `db:"direction_alignment" json:"direction_alignment"`
 	Factors             json.RawMessage `db:"factors" json:"factors,omitempty"`
-	EligibleForAgent    bool            `db:"eligible_for_agent" json:"eligible_for_agent"`
 	ComputedAt          time.Time       `db:"computed_at" json:"computed_at"`
 }
 
@@ -1072,10 +1070,6 @@ type LatestJobError struct {
 
 // Job type constants for async work queue items.
 const (
-	JobTypePMAnalyze                     = "pm_analyze"
-	JobTypePMBootstrap                   = "pm_bootstrap"
-	JobTypePMContextRefresh              = "pm_context_refresh"
-	JobTypeProjectCycle                  = "project_cycle"
 	JobTypeAutomationRun                 = "automation_run"
 	JobTypeStartPreview                  = "start_preview"
 	JobTypeStartBranchPreview            = "start_branch_preview"

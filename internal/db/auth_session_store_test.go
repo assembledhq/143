@@ -21,7 +21,7 @@ var sessionColumns = []string{
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
-	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
+	"title", "execution_brief", "planning_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at",
 	"sandbox_state", "workspace_generation", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
@@ -51,7 +51,7 @@ func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 		nil, nil, false, nil, nil, json.RawMessage(`{}`),
 		nil, nil, []string{}, false,
 		nil, json.RawMessage(`{}`), nil, nil, nil,
-		nil, nil, nil, nil,
+		nil, nil, nil,
 		nil,      // project_task_id
 		nil,      // model_override
 		nil,      // reasoning_effort
@@ -172,19 +172,6 @@ func TestSessionStore_ListByOrg(t *testing.T) {
 					)
 			},
 			expected: 2,
-		},
-		{
-			name:    "returns only ad-hoc runs when AdHocOnly is true",
-			filters: SessionFilters{AdHocOnly: true},
-			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ AND NOT EXISTS .+ session_pm_context").
-					WithArgs(pgxmock.AnyArg()).
-					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).
-							AddRow(newSessionRow(runID1, issueID, orgID, now)...),
-					)
-			},
-			expected: 1,
 		},
 	}
 
@@ -526,7 +513,7 @@ func TestSessionStore_GetByID_PreservesPersistedPolicy(t *testing.T) {
 	row[3] = models.SessionOriginIssueTrigger
 	row[4] = models.SessionInteractionModeSingleRun
 	row[5] = models.SessionValidationPolicyOnTurnComplete
-	row[33] = &userID
+	row[32] = &userID
 
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).

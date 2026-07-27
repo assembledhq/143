@@ -48,8 +48,8 @@ func TestPriorityHandler_GetPriorityScore_Success(t *testing.T) {
 			pgxmock.NewRows([]string{
 				"id", "issue_id", "org_id", "score", "customer_impact_score", "severity_score",
 				"recency_score", "revenue_risk_score", "direction_alignment", "factors",
-				"eligible_for_agent", "computed_at",
-			}).AddRow(scoreID, issueID, orgID, 85.5, 20.0, 30.0, 15.0, 10.0, 10.5, nil, true, now),
+				"computed_at",
+			}).AddRow(scoreID, issueID, orgID, 85.5, 20.0, 30.0, 15.0, 10.0, 10.5, nil, now),
 		)
 
 	store := db.NewPriorityScoreStore(mock)
@@ -102,7 +102,7 @@ func TestPriorityHandler_GetPriorityScore_NotFound(t *testing.T) {
 			pgxmock.NewRows([]string{
 				"id", "issue_id", "org_id", "score", "customer_impact_score", "severity_score",
 				"recency_score", "revenue_risk_score", "direction_alignment", "factors",
-				"eligible_for_agent", "computed_at",
+				"computed_at",
 			}),
 		)
 
@@ -221,10 +221,10 @@ func TestPriorityHandler_ListPriorityScores_Success(t *testing.T) {
 			pgxmock.NewRows([]string{
 				"id", "issue_id", "org_id", "score", "customer_impact_score", "severity_score",
 				"recency_score", "revenue_risk_score", "direction_alignment", "factors",
-				"eligible_for_agent", "computed_at",
+				"computed_at",
 			}).
-				AddRow(uuid.New(), uuid.New(), orgID, 90.0, 25.0, 30.0, 15.0, 10.0, 10.0, nil, true, now).
-				AddRow(uuid.New(), uuid.New(), orgID, 70.0, 15.0, 20.0, 15.0, 10.0, 10.0, nil, false, now),
+				AddRow(uuid.New(), uuid.New(), orgID, 90.0, 25.0, 30.0, 15.0, 10.0, 10.0, nil, now).
+				AddRow(uuid.New(), uuid.New(), orgID, 70.0, 15.0, 20.0, 15.0, 10.0, 10.0, nil, now),
 		)
 
 	store := db.NewPriorityScoreStore(mock)
@@ -257,7 +257,7 @@ func TestPriorityHandler_ListPriorityScores_Empty(t *testing.T) {
 			pgxmock.NewRows([]string{
 				"id", "issue_id", "org_id", "score", "customer_impact_score", "severity_score",
 				"recency_score", "revenue_risk_score", "direction_alignment", "factors",
-				"eligible_for_agent", "computed_at",
+				"computed_at",
 			}),
 		)
 

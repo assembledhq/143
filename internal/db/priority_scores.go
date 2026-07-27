@@ -22,10 +22,10 @@ func (s *PriorityScoreStore) Upsert(ctx context.Context, score *models.PriorityS
 	query := `
 		INSERT INTO priority_scores (issue_id, org_id, score, customer_impact_score,
 		            severity_score, recency_score, revenue_risk_score, direction_alignment,
-		            factors, eligible_for_agent, computed_at)
+		            factors, computed_at)
 		VALUES (@issue_id, @org_id, @score, @customer_impact_score,
 		        @severity_score, @recency_score, @revenue_risk_score, @direction_alignment,
-		        @factors, @eligible_for_agent, @computed_at)
+		        @factors, @computed_at)
 		ON CONFLICT (issue_id) DO UPDATE
 		SET score = EXCLUDED.score,
 		    customer_impact_score = EXCLUDED.customer_impact_score,
@@ -34,7 +34,6 @@ func (s *PriorityScoreStore) Upsert(ctx context.Context, score *models.PriorityS
 		    revenue_risk_score = EXCLUDED.revenue_risk_score,
 		    direction_alignment = EXCLUDED.direction_alignment,
 		    factors = EXCLUDED.factors,
-		    eligible_for_agent = EXCLUDED.eligible_for_agent,
 		    computed_at = EXCLUDED.computed_at
 		RETURNING id`
 
@@ -48,7 +47,6 @@ func (s *PriorityScoreStore) Upsert(ctx context.Context, score *models.PriorityS
 		"revenue_risk_score":    score.RevenueRiskScore,
 		"direction_alignment":   score.DirectionAlignment,
 		"factors":               score.Factors,
-		"eligible_for_agent":    score.EligibleForAgent,
 		"computed_at":           score.ComputedAt,
 	}
 
@@ -60,7 +58,7 @@ func (s *PriorityScoreStore) GetByIssueID(ctx context.Context, orgID, issueID uu
 	query := `
 		SELECT id, issue_id, org_id, score, customer_impact_score, severity_score,
 		       recency_score, revenue_risk_score, direction_alignment, factors,
-		       eligible_for_agent, computed_at
+		       computed_at
 		FROM priority_scores
 		WHERE issue_id = @issue_id AND org_id = @org_id`
 
@@ -74,19 +72,15 @@ func (s *PriorityScoreStore) GetByIssueID(ctx context.Context, orgID, issueID uu
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PriorityScore])
 }
 
-func (s *PriorityScoreStore) ListByOrg(ctx context.Context, orgID uuid.UUID, onlyEligible bool, limit int) ([]models.PriorityScore, error) {
+func (s *PriorityScoreStore) ListByOrg(ctx context.Context, orgID uuid.UUID, limit int) ([]models.PriorityScore, error) {
 	query := `
 		SELECT id, issue_id, org_id, score, customer_impact_score, severity_score,
 		       recency_score, revenue_risk_score, direction_alignment, factors,
-		       eligible_for_agent, computed_at
+		       computed_at
 		FROM priority_scores
 		WHERE org_id = @org_id`
 
 	args := pgx.NamedArgs{"org_id": orgID}
-
-	if onlyEligible {
-		query += ` AND eligible_for_agent = true`
-	}
 
 	query += ` ORDER BY score DESC`
 

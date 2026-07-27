@@ -151,17 +151,14 @@ func (h *RepositoryHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Settings != nil {
-		// Validate PM settings if present.
-		repoSettings, parseErr := models.ParseRepoSettings(*req.Settings)
-		if parseErr != nil {
+		var settings map[string]json.RawMessage
+		if parseErr := json.Unmarshal(*req.Settings, &settings); parseErr != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_SETTINGS", "invalid settings JSON")
 			return
 		}
-		if repoSettings.PM != nil {
-			if err := models.ValidateRepoPMSettings(*repoSettings.PM); err != nil {
-				writeError(w, r, http.StatusBadRequest, "INVALID_SETTINGS", err.Error())
-				return
-			}
+		if _, hasLegacyPMSettings := settings["pm"]; hasLegacyPMSettings {
+			writeError(w, r, http.StatusBadRequest, "REMOVED_SETTINGS", "repository PM settings are no longer supported")
+			return
 		}
 		repo.Settings = *req.Settings
 	}

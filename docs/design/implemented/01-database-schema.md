@@ -1,6 +1,6 @@
 # Design: Database Schema
 
-> **Status:** Implemented | **Last reviewed:** 2026-06-26
+> **Status:** Implemented | **Last reviewed:** 2026-07-26
 
 This document defines the PostgreSQL schema for 143.dev. All entities flow through the pipeline: ingestion -> prioritization -> agent run -> validation -> PR -> deploy -> observation.
 
@@ -18,7 +18,7 @@ Multi-tenancy root. Each self-hosted instance has at least one org.
 |--------|------|-------|
 | id | uuid | PK |
 | name | text | |
-| settings | jsonb | org-wide config (autonomy level, token budget, product direction, execution aggressiveness, issue type overrides, etc.) |
+| settings | jsonb | org-wide runtime, agent, product-context, preview, and integration configuration |
 | created_at | timestamptz | |
 | updated_at | timestamptz | |
 
@@ -172,12 +172,10 @@ Computed priority for each issue. Recalculated periodically or on new events.
 | revenue_risk_score | float | optional, from CRM integration |
 | direction_alignment | float | how well this aligns with product direction (-1 to 1) |
 | factors | jsonb | breakdown of scoring factors for explainability |
-| eligible_for_agent | boolean | passes product direction filter |
 | computed_at | timestamptz | |
 
 **Indexes:**
 - `(org_id, score DESC)` — top issues query
-- `(org_id, eligible_for_agent, score DESC)` — agent-eligible issues
 
 ### `priority_overrides`
 
@@ -271,24 +269,26 @@ Each attempt to fix an issue via a coding agent.
 **Constraints:**
 - `parent_run_id` is a self-referential FK: `FOREIGN KEY (parent_run_id) REFERENCES agent_runs(id)`. This prevents orphaned revision runs and enforces referential integrity for the revision chain.
 
-### `session_pm_context`
+### `session_execution_context`
 
-PM and project execution context for a coding session. These fields are hydrated into session API responses, but they are stored outside the core `sessions` row so PM/project metadata does not widen the execution-state table.
+Planning and project execution context for a coding session. These fields are hydrated into session API responses, but they are stored outside the core `sessions` row so optional context does not widen the execution-state table.
+
+During the migration-260 rolling-compatibility window this name is an
+automatically updatable view over `session_pm_context`; the neutral columns map
+to the retained legacy columns until a later fleet-safe contraction.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | session_id | uuid | PK, FK -> sessions ON DELETE CASCADE |
 | org_id | uuid | FK -> organizations |
-| pm_plan_id | uuid | FK -> pm_plans, nullable |
-| pm_approach | text | PM or automation prompt seed/guidance |
-| pm_reasoning | text | PM reasoning shown in context UI |
+| execution_brief | text | automation or explicit execution guidance |
+| planning_reasoning | text | planning rationale shown in context UI |
 | project_task_id | uuid | FK -> project_tasks, nullable |
 | created_at | timestamptz | |
 | updated_at | timestamptz | |
 
 **Indexes:**
 - `(org_id, session_id)` — tenant-scoped point lookup
-- `(org_id, pm_plan_id)` where `pm_plan_id IS NOT NULL` — PM plan sessions
 - `(org_id, project_task_id)` where `project_task_id IS NOT NULL` — project task sessions
 
 ### `session_automation_links`

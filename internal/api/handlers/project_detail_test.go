@@ -15,11 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var projectCycleHandlerColumns = []string{
-	"id", "project_id", "org_id", "pm_plan_id", "cycle_number", "analysis", "decisions", "progress_pct",
-	"tasks_completed_this_cycle", "tasks_failed_this_cycle", "tasks_created_this_cycle", "created_at",
-}
-
 func TestProjectHandler_Get_FailsWhenAttachmentsQueryFails(t *testing.T) {
 	t.Parallel()
 
@@ -29,10 +24,9 @@ func TestProjectHandler_Get_FailsWhenAttachmentsQueryFails(t *testing.T) {
 
 	projectStore := db.NewProjectStore(mock)
 	taskStore := db.NewProjectTaskStore(mock)
-	cycleStore := db.NewProjectCycleStore(mock)
 	attachmentStore := db.NewProjectAttachmentStore(mock)
 	specStore := db.NewProjectSpecStore(mock)
-	handler := NewProjectHandler(projectStore, taskStore, cycleStore, attachmentStore, specStore)
+	handler := NewProjectHandler(projectStore, taskStore, attachmentStore, specStore)
 
 	orgID := uuid.New()
 	projectID := uuid.New()
@@ -48,9 +42,6 @@ func TestProjectHandler_Get_FailsWhenAttachmentsQueryFails(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM project_tasks WHERE project_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(projectTaskHandlerColumns))
-	mock.ExpectQuery("SELECT .+ FROM project_cycles WHERE project_id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(projectCycleHandlerColumns))
 	mock.ExpectQuery("SELECT .+ FROM project_attachments WHERE project_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(fmt.Errorf("attachments query failed"))

@@ -185,7 +185,7 @@ func handleLinearAgentCreated(
 
 	// 7. Build the session. Origin=IssueTrigger so PM / automations
 	// hooks know it's an external trigger, not a user-initiated run.
-	// PMApproach carries the issue body so run_agent has all the
+	// ExecutionBrief carries the issue body so run_agent has all the
 	// context it needs without re-fetching Linear data.
 	agentType, err := resolveLinearAgentSessionAgentType(ctx, deps, orgID)
 	if err != nil {
@@ -428,10 +428,10 @@ func createAndAttachLinearAgentSession(ctx context.Context, stores *Stores, orgI
 }
 
 func createInitialLinearAgentSessionMessage(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, session *models.Session) error {
-	if session == nil || session.PMApproach == nil {
+	if session == nil || session.ExecutionBrief == nil {
 		return nil
 	}
-	content := strings.TrimSpace(*session.PMApproach)
+	content := strings.TrimSpace(*session.ExecutionBrief)
 	if content == "" {
 		return nil
 	}

@@ -164,7 +164,7 @@ var sessionColumns = []string{
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
-	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
+	"title", "execution_brief", "planning_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "workspace_generation", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
@@ -301,7 +301,7 @@ func TestPreLinearSessionColumnsLenStaysInSync(t *testing.T) {
 	require.Equal(t, preLinearSessionColumnsLen+pendingSnapshotFieldsAdded+unpushedChangesFieldAdded+workspaceRevisionFieldsAdded+linearFieldsAdded+capabilitySnapshotFieldsAdded+identityFieldsAdded+prPushFieldsAdded+branchCreationFieldsAdded, sessionColumnsWithLegacyResultConfidenceLen,
 		"sessionColumns shifted; bump preLinearSessionColumnsLen, pendingSnapshotFieldsAdded, "+
 			"unpushedChangesFieldAdded, workspaceRevisionFieldsAdded, linearFieldsAdded, capabilitySnapshotFieldsAdded, identityFieldsAdded, prPushFieldsAdded, or branchCreationFieldsAdded if a new migration added more session columns")
-	require.Equal(t, len(sessionColumns)+3, sessionColumnsWithLegacyResultConfidenceLen+workspaceGenerationFieldAdded, "legacy confidence columns should stay isolated to test fixtures")
+	require.Equal(t, len(sessionColumns)+4, sessionColumnsWithLegacyResultConfidenceLen+workspaceGenerationFieldAdded, "legacy confidence and removed PM plan columns should stay isolated to test fixtures")
 }
 
 // linearSessionDefaults returns the placeholder values for the derived
@@ -537,6 +537,9 @@ func sessionTestRow(values ...interface{}) []interface{} {
 		row = stripLegacySessionResultConfidence(row)
 	}
 	row = padSessionWorkspaceGeneration(row)
+	if len(row) == len(sessionColumns)+1 {
+		row = append(row[:26], row[27:]...)
+	}
 	return row
 }
 
@@ -785,10 +788,9 @@ func retrySessionRow(sessionID, orgID uuid.UUID, status models.SessionStatus, sn
 		"error":                          nil,
 		"result_summary":                 nil,
 		"diff":                           ptr("diff --git a/file b/file"),
-		"pm_plan_id":                     nil,
 		"title":                          nil,
-		"pm_approach":                    nil,
-		"pm_reasoning":                   nil,
+		"execution_brief":                nil,
+		"planning_reasoning":             nil,
 		"project_task_id":                nil,
 		"model_override":                 nil,
 		"reasoning_effort":               nil,
@@ -8984,10 +8986,9 @@ func pushSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time, opts pus
 		"error":                          nil,
 		"result_summary":                 nil,
 		"diff":                           opts.diff,
-		"pm_plan_id":                     nil,
 		"title":                          nil,
-		"pm_approach":                    nil,
-		"pm_reasoning":                   nil,
+		"execution_brief":                nil,
+		"planning_reasoning":             nil,
 		"project_task_id":                nil,
 		"model_override":                 nil,
 		"reasoning_effort":               nil,

@@ -1162,8 +1162,8 @@ describe('SessionSidebar', () => {
     serveSessions([
       makeSession({
         id: 's1',
+        agent_type: 'pm_agent',
         result_summary: 'PM session',
-        pm_plan_id: 'plan-123',
         triggered_by_user_id: undefined,
       }),
     ]);
@@ -1177,8 +1177,8 @@ describe('SessionSidebar', () => {
     serveSessions([
       makeSession({
         id: 's1',
+        agent_type: 'pm_agent',
         result_summary: 'User PM session',
-        pm_plan_id: 'plan-123',
         triggered_by_user_id: 'user-1',
       }),
     ]);
@@ -1291,8 +1291,8 @@ describe('SessionSidebar', () => {
     serveSessions([
       makeSession({
         id: 's1',
+        agent_type: 'pm_agent',
         result_summary: 'Overflow session',
-        pm_plan_id: 'plan-123',
         triggered_by_user_id: undefined,
         linear_identifier_hint: 'ENG-1234',
         pr_summary: { status: 'merged', ci_status: '', number: 9, url: '#' },

@@ -14,7 +14,7 @@ import (
 var priorityScoreColumns = []string{
 	"id", "issue_id", "org_id", "score", "customer_impact_score", "severity_score",
 	"recency_score", "revenue_risk_score", "direction_alignment", "factors",
-	"eligible_for_agent", "computed_at",
+	"computed_at",
 }
 
 func TestPriorityScoreStore_Upsert_Success(t *testing.T) {
@@ -36,15 +36,14 @@ func TestPriorityScoreStore_Upsert_Success(t *testing.T) {
 		RecencyScore:        15.0,
 		RevenueRiskScore:    10.0,
 		DirectionAlignment:  10.5,
-		EligibleForAgent:    true,
 		ComputedAt:          time.Now(),
 	}
 
-	// Upsert uses 11 named args
+	// Upsert uses 10 named args.
 	mock.ExpectQuery("INSERT INTO priority_scores").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(generatedID))
 
 	err = store.Upsert(context.Background(), score)
@@ -71,7 +70,7 @@ func TestPriorityScoreStore_GetByIssueID_Success(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(priorityScoreColumns).
-				AddRow(scoreID, issueID, orgID, 85.5, 20.0, 30.0, 15.0, 10.0, 10.5, nil, true, now),
+				AddRow(scoreID, issueID, orgID, 85.5, 20.0, 30.0, 15.0, 10.0, 10.5, nil, now),
 		)
 
 	result, err := store.GetByIssueID(context.Background(), orgID, issueID)
@@ -80,7 +79,6 @@ func TestPriorityScoreStore_GetByIssueID_Success(t *testing.T) {
 	require.Equal(t, issueID, result.IssueID, "should return the correct issue ID")
 	require.Equal(t, orgID, result.OrgID, "should return the correct org ID")
 	require.Equal(t, 85.5, result.Score, "should return the correct score")
-	require.Equal(t, true, result.EligibleForAgent, "should return the correct eligible_for_agent value")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -113,16 +111,16 @@ func TestPriorityScoreStore_ListByOrg_Success(t *testing.T) {
 	orgID := uuid.New()
 	now := time.Now()
 
-	// ListByOrg with onlyEligible=false uses 1 named arg: org_id
+	// ListByOrg uses one named argument: org_id.
 	mock.ExpectQuery("SELECT .+ FROM priority_scores WHERE").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(priorityScoreColumns).
-				AddRow(uuid.New(), uuid.New(), orgID, 90.0, 25.0, 30.0, 15.0, 10.0, 10.0, nil, true, now).
-				AddRow(uuid.New(), uuid.New(), orgID, 70.0, 15.0, 20.0, 15.0, 10.0, 10.0, nil, false, now),
+				AddRow(uuid.New(), uuid.New(), orgID, 90.0, 25.0, 30.0, 15.0, 10.0, 10.0, nil, now).
+				AddRow(uuid.New(), uuid.New(), orgID, 70.0, 15.0, 20.0, 15.0, 10.0, 10.0, nil, now),
 		)
 
-	results, err := store.ListByOrg(context.Background(), orgID, false, 10)
+	results, err := store.ListByOrg(context.Background(), orgID, 10)
 	require.NoError(t, err, "should list scores without error")
 	require.Len(t, results, 2, "should return 2 scores")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
@@ -141,7 +139,7 @@ func TestPriorityScoreStore_ListByOrg_Empty(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(priorityScoreColumns))
 
-	results, err := store.ListByOrg(context.Background(), uuid.New(), false, 10)
+	results, err := store.ListByOrg(context.Background(), uuid.New(), 10)
 	require.NoError(t, err, "should list scores without error for empty result")
 	require.Empty(t, results, "should return empty results")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
@@ -161,7 +159,7 @@ func TestPriorityScoreStore_ListByOrg_DefaultLimit(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(priorityScoreColumns))
 
 	// Pass invalid limit (0) - should default to 50 internally
-	results, err := store.ListByOrg(context.Background(), uuid.New(), false, 0)
+	results, err := store.ListByOrg(context.Background(), uuid.New(), 0)
 	require.NoError(t, err, "should list scores without error with default limit")
 	require.Empty(t, results, "should return empty results")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")

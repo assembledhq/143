@@ -5062,7 +5062,7 @@ func (h *SessionHandler) createManual(w http.ResponseWriter, r *http.Request, or
 		ReasoningEffort:         reasoningOverride,
 		TriggeredByUserID:       manualTriggeredByUserID,
 		Title:                   &title,
-		PMApproach:              &title,
+		ExecutionBrief:          &title,
 		TargetBranch:            targetBranch,
 		RepositoryID:            repoID,
 		LinearPrivate:           body.LinearPrivate,

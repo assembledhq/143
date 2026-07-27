@@ -805,7 +805,7 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
   const triggeredByMember = session.triggered_by_user_id
     ? members.find((m) => m.id === session.triggered_by_user_id)
     : undefined;
-  const triggeredByLabel = session.pm_plan_id && !session.triggered_by_user_id
+  const triggeredByLabel = session.agent_type === 'pm_agent' && !session.triggered_by_user_id
     ? "PM Agent"
     : session.triggered_by_user_id
       ? triggeredByMember?.name || triggeredByMember?.github_login || "Unknown user"
@@ -1041,23 +1041,23 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
         </div>
       </div>
 
-      {/* PM context */}
-      {session.pm_plan_id && (session.pm_reasoning || session.pm_approach) && (
+      {/* Execution context */}
+      {(session.planning_reasoning || session.execution_brief) && (
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-xs">PM context</CardTitle>
+            <CardTitle className="text-xs">Execution context</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3 text-xs">
-            {session.pm_reasoning && (
+            {session.planning_reasoning && (
               <div>
-                <p className="text-xs font-medium text-muted-foreground">Why this was prioritized</p>
-                <p className="break-words">{session.pm_reasoning}</p>
+                <p className="text-xs font-medium text-muted-foreground">Planning reasoning</p>
+                <p className="break-words">{session.planning_reasoning}</p>
               </div>
             )}
-            {session.pm_approach && (
+            {session.execution_brief && (
               <div>
-                <p className="text-xs font-medium text-muted-foreground">Suggested approach</p>
-                <p className="break-words">{session.pm_approach}</p>
+                <p className="text-xs font-medium text-muted-foreground">Execution brief</p>
+                <p className="break-words">{session.execution_brief}</p>
               </div>
             )}
           </CardContent>

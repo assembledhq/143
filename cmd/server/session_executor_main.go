@@ -236,12 +236,8 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 	deployStore := db.NewDeployStore(pool)
 	priorityScoreStore := db.NewPriorityScoreStore(pool)
 	complexityEstimateStore := db.NewComplexityEstimateStore(pool)
-	pmPlanStore := db.NewPMPlanStore(pool)
-	pmDecisionLogStore := db.NewPMDecisionLogStore(pool)
 	projectStore := db.NewProjectStore(pool)
 	projectTaskStore := db.NewProjectTaskStore(pool)
-	projectCycleStore := db.NewProjectCycleStore(pool)
-	pmDocumentStore := db.NewPMDocumentStore(pool)
 	automationRunStore := db.NewAutomationRunStore(pool)
 	evalBootstrapStore := db.NewEvalBootstrapStore(pool)
 	orgSettingsCache := agent.NewOrgSettingsCache(agent.DefaultOrgSettingsCacheTTL)
@@ -264,12 +260,8 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		deployStore,
 		priorityScoreStore,
 		complexityEstimateStore,
-		pmPlanStore,
-		pmDecisionLogStore,
 		projectStore,
 		projectTaskStore,
-		projectCycleStore,
-		pmDocumentStore,
 		integrationStore,
 		sessionMessageStore,
 		automationRunStore,

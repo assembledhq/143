@@ -25,9 +25,9 @@ import (
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	linearservice "github.com/assembledhq/143/internal/services/linear"
-	"github.com/assembledhq/143/internal/services/pm"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/prioritization"
+	projectservice "github.com/assembledhq/143/internal/services/projects"
 	reviewloopsvc "github.com/assembledhq/143/internal/services/reviewloop"
 	slackbotsvc "github.com/assembledhq/143/internal/services/slackbot"
 	"github.com/google/uuid"
@@ -2600,7 +2600,7 @@ var workerSessionColumns = []string{
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
-	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
+	"title", "execution_brief", "planning_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "workspace_generation", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
@@ -2883,6 +2883,9 @@ func workerSessionTestRow(values ...any) []any {
 		row = stripLegacyWorkerSessionResultConfidence(row)
 	}
 	row = padWorkerWorkspaceGeneration(row)
+	if len(row) == len(workerSessionColumns)+1 {
+		row = append(row[:26], row[27:]...)
+	}
 	return row
 }
 
@@ -4510,66 +4513,6 @@ func TestSyncSentryHandler(t *testing.T) {
 	}
 }
 
-func TestNewOrgIDJobHandler(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		payload   json.RawMessage
-		expectErr bool
-		errSubstr string
-	}{
-		{
-			name:      "invalid JSON returns unmarshal error",
-			payload:   json.RawMessage(`{invalid json}`),
-			expectErr: true,
-			errSubstr: "unmarshal pm_bootstrap payload",
-		},
-		{
-			name:      "invalid org ID returns parse error",
-			payload:   json.RawMessage(`{"org_id":"not-a-uuid"}`),
-			expectErr: true,
-			errSubstr: "parse org ID",
-		},
-		{
-			name:      "valid org ID invokes callback",
-			payload:   nil,
-			expectErr: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			logger := zerolog.Nop()
-			expectedOrgID := uuid.New()
-			payload := tt.payload
-			if payload == nil {
-				payload = json.RawMessage(`{"org_id":"` + expectedOrgID.String() + `"}`)
-			}
-
-			called := false
-			handler := newOrgIDJobHandler("pm_bootstrap", func(ctx context.Context, orgID uuid.UUID) error {
-				called = true
-				require.Equal(t, expectedOrgID, orgID, "newOrgIDJobHandler should pass the parsed org ID to the callback")
-				return nil
-			}, logger)
-
-			err := handler(context.Background(), "pm_bootstrap", payload)
-			if tt.expectErr {
-				require.Error(t, err, "newOrgIDJobHandler should return an error for invalid input")
-				require.Contains(t, err.Error(), tt.errSubstr, "error should contain the expected substring")
-				require.False(t, called, "newOrgIDJobHandler should not invoke the callback when input is invalid")
-				return
-			}
-
-			require.NoError(t, err, "newOrgIDJobHandler should succeed for valid input")
-			require.True(t, called, "newOrgIDJobHandler should invoke the callback for valid input")
-		})
-	}
-}
-
 func TestParseSlackTimestamp(t *testing.T) {
 	t.Parallel()
 
@@ -4725,15 +4668,6 @@ func TestAnalyzeFailureHandler_UsesJobOrgIDWhenPayloadMissingOrgID(t *testing.T)
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-type mockPMService struct {
-	calledOrgID     uuid.UUID
-	calledProjectID uuid.UUID
-	trigger         models.PMTrigger
-	agentType       *models.AgentType
-	analyzeCalls    int
-	projectCalls    int
-}
-
 type stubPRService struct {
 	preparePublicationAttemptFn    func(context.Context, *models.Session, models.SessionChangeset, ghservice.CreatePRParams) (ghservice.PublicationAttempt, error)
 	createPRFn                     func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
@@ -4860,14 +4794,6 @@ func (s *stubPRService) SyncPRPreviewSurfaces(ctx context.Context, payload ghser
 // no real upload goroutines to drain, the method exists only to satisfy
 // the prCreator interface used by the server's shutdown path.
 func (s *stubPRService) WaitForPostPRSnapshotUploads() {}
-
-func (m *mockPMService) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID, agentTypeOverride *models.AgentType) (*pm.Plan, error) {
-	m.analyzeCalls++
-	m.calledOrgID = orgID
-	m.trigger = trigger
-	m.agentType = agentTypeOverride
-	return &pm.Plan{}, nil
-}
 
 func newWorkerSessionRow(sessionID, orgID uuid.UUID, now time.Time, snapshotKey *string) []any {
 	return workerSessionTestRow(
@@ -6786,75 +6712,6 @@ func TestShouldDeadLetterPRError(t *testing.T) {
 	}
 }
 
-func (m *mockPMService) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID) error {
-	m.projectCalls++
-	m.calledOrgID = orgID
-	m.calledProjectID = projectID
-	return nil
-}
-
-func (m *mockPMService) RunBootstrap(ctx context.Context, orgID uuid.UUID) error {
-	m.calledOrgID = orgID
-	return nil
-}
-
-func (m *mockPMService) RunRefresh(ctx context.Context, orgID uuid.UUID) error {
-	m.calledOrgID = orgID
-	return nil
-}
-
-func TestPMAnalyzeHandler_InvalidJSON(t *testing.T) {
-	t.Parallel()
-
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-	logger := zerolog.Nop()
-
-	services := &Services{PM: &mockPMService{}}
-	handler := newPMAnalyzeHandler(stores, services, logger)
-
-	err := handler(context.Background(), "pm_analyze", json.RawMessage(`{bad`))
-	require.Error(t, err, "pm_analyze handler should return error for invalid JSON")
-}
-
-func TestPMAnalyzeHandler_UsesJobOrgID(t *testing.T) {
-	t.Parallel()
-
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-	logger := zerolog.Nop()
-
-	pmSvc := &mockPMService{}
-	services := &Services{PM: pmSvc}
-	handler := newPMAnalyzeHandler(stores, services, logger)
-
-	orgID := uuid.New()
-	ctx := withJobOrgID(context.Background(), orgID)
-
-	err := handler(ctx, "pm_analyze", json.RawMessage(`{"trigger":"cron"}`))
-	require.NoError(t, err, "pm_analyze handler should succeed")
-	require.Equal(t, orgID, pmSvc.calledOrgID, "should use org ID from job context")
-	require.Equal(t, models.PMTriggerCron, pmSvc.trigger, "should pass trigger through")
-}
-
-func TestPMAnalyzeHandler_PassesAgentTypeOverride(t *testing.T) {
-	t.Parallel()
-
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-	logger := zerolog.Nop()
-
-	pmSvc := &mockPMService{}
-	services := &Services{PM: pmSvc}
-	handler := newPMAnalyzeHandler(stores, services, logger)
-
-	err := handler(context.Background(), "pm_analyze", json.RawMessage(`{"org_id":"`+uuid.New().String()+`","trigger":"manual","agent_type":"pi"}`))
-	require.NoError(t, err, "pm_analyze handler should succeed when agent_type override is provided")
-	require.NotNil(t, pmSvc.agentType, "pm_analyze handler should pass the agent_type override to the PM service")
-	require.Equal(t, models.AgentTypePi, *pmSvc.agentType, "pm_analyze handler should pass through the parsed agent_type override")
-	require.Equal(t, models.PMTriggerManual, pmSvc.trigger, "pm_analyze handler should preserve the requested trigger with an agent_type override")
-}
-
 func TestRegisterHandlers_AllRegistered(t *testing.T) {
 	t.Parallel()
 
@@ -6875,25 +6732,6 @@ func TestRegisterHandlers_AllRegistered(t *testing.T) {
 		_, ok := w.handlers[name]
 		require.True(t, ok, "%s handler should be registered", name)
 	}
-
-	// PM compatibility handlers should not be registered without PM service.
-	unexpectedWithoutPM := []string{
-		"pm_analyze",
-	}
-	for _, name := range unexpectedWithoutPM {
-		_, ok := w.handlers[name]
-		require.False(t, ok, "%s handler should not be registered without PM service", name)
-	}
-
-	// The remaining stale-job compatibility handlers are registered with the PM service.
-	w2 := New(nil, logger, "test-node")
-	RegisterHandlers(w2, stores, &Services{PM: &mockPMService{}}, DataRetentionConfig{}, logger)
-	for _, name := range []string{"pm_analyze"} {
-		_, ok := w2.handlers[name]
-		require.True(t, ok, "%s handler should be registered with PM service", name)
-	}
-	_, projectCycleRegistered := w2.handlers["project_cycle"]
-	require.False(t, projectCycleRegistered, "project_cycle handler should be absent")
 
 	unexpectedHandlers := []string{
 		"prioritize",
@@ -8167,7 +8005,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 		// 4. Create the session. The context-table CTE writes automation_run_id
 		// as side-table context near the end of the argument list; asserting that specific value here
 		// proves the handler linked the session back to the run it's servicing.
-	// pm_approach must carry the run's goal_snapshot; without that,
+	// execution_brief must carry the run's goal_snapshot; without that,
 	// promptSeedForSession synthesizes an empty "Session task" seed and the
 	// agent silently ignores everything the user wrote in the automation goal.
 	expectedGoal := fmt.Sprintf("goal\n\nAutomation run context\n- Current automation run triggered at: %s\n- Previous automation run: %s",
@@ -8175,7 +8013,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 	expectedReasoning := models.ReasoningEffortXHigh
 	createSessionArgs := workerAnyArgs(39)
 	createSessionArgs[10] = &expectedReasoning
-	createSessionArgs[20] = &expectedGoal
+	createSessionArgs[19] = &expectedGoal
 	createSessionArgs[23] = &runID
 	mock.ExpectBegin()
 	mock.ExpectQuery(`INSERT INTO sessions`).
@@ -8252,7 +8090,7 @@ func TestAutomationRunHandler_UsesRepositoryOverrideFromTriggerContext(t *testin
 		now.UTC().Format(time.RFC3339))
 	createSessionArgs := workerAnyArgs(39)
 	createSessionArgs[14] = &overrideRepoID
-	createSessionArgs[20] = &expectedGoal
+	createSessionArgs[19] = &expectedGoal
 	createSessionArgs[23] = &runID
 	mock.ExpectBegin()
 	mock.ExpectQuery(`INSERT INTO sessions`).
@@ -8521,7 +8359,7 @@ func TestAutomationRunHandler_PersonalAutomationRunsAsCreator(t *testing.T) {
 		now.UTC().Format(time.RFC3339))
 	createSessionArgs := workerAnyArgs(39)
 	createSessionArgs[11] = &creatorID
-	createSessionArgs[20] = &expectedGoal
+	createSessionArgs[19] = &expectedGoal
 	createSessionArgs[23] = &runID
 	mock.ExpectBegin()
 	mock.ExpectQuery(`INSERT INTO sessions`).
@@ -8594,7 +8432,7 @@ func TestAutomationRunHandler_OrgAutomationIgnoresManualClickerForSessionIdentit
 		now.UTC().Format(time.RFC3339))
 	createSessionArgs := workerAnyArgs(39)
 	createSessionArgs[11] = (*uuid.UUID)(nil)
-	createSessionArgs[20] = &expectedGoal
+	createSessionArgs[19] = &expectedGoal
 	createSessionArgs[23] = &runID
 	mock.ExpectBegin()
 	mock.ExpectQuery(`INSERT INTO sessions`).
@@ -8673,7 +8511,7 @@ func TestAutomationRunHandler_UsesIdentityScopeFromRunSnapshot(t *testing.T) {
 		now.UTC().Format(time.RFC3339))
 	createSessionArgs := workerAnyArgs(39)
 	createSessionArgs[11] = &creatorID
-	createSessionArgs[20] = &expectedGoal
+	createSessionArgs[19] = &expectedGoal
 	createSessionArgs[23] = &runID
 	mock.ExpectBegin()
 	mock.ExpectQuery(`INSERT INTO sessions`).
@@ -9170,7 +9008,6 @@ func TestRegisterHandlers_WithAllServices(t *testing.T) {
 		SandboxProvider: &stubSandboxProvider{},
 		Prioritization:  &prioritization.Service{},
 		Feedback:        feedback.NewService(&testFeedbackCommentStore{}, &testFeedbackMemoryStore{}, &testFeedbackJobStore{}, nil, zerolog.Nop()),
-		PM:              &mockPMService{},
 		Linear:          linearservice.NewService(linearservice.Config{}),
 	}
 
@@ -9182,7 +9019,6 @@ func TestRegisterHandlers_WithAllServices(t *testing.T) {
 		"sync_sentry",
 		"sync_slack",
 		"prioritize",
-		"pm_analyze",
 		"run_agent",
 		"open_pr",
 		"analyze_failure",
@@ -9244,175 +9080,6 @@ func TestRegisterHandlers_WithOnlyFeedback(t *testing.T) {
 	_, ok = w.handlers["prioritize"]
 	require.False(t, ok, "prioritize handler should not be registered without prioritization service")
 }
-
-func TestRegisterHandlers_WithOnlyPM(t *testing.T) {
-	t.Parallel()
-
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-	logger := zerolog.Nop()
-
-	services := &Services{
-		PM: &mockPMService{},
-	}
-
-	w := New(nil, logger, "test-node")
-	RegisterHandlers(w, stores, services, DataRetentionConfig{}, logger)
-
-	for _, jobType := range []string{
-		models.JobTypePMAnalyze,
-		models.JobTypePMBootstrap,
-		models.JobTypePMContextRefresh,
-	} {
-		handler, ok := w.handlers[jobType]
-		require.True(t, ok, "disabled PM compatibility handler should remain registered")
-		require.NoError(t, handler(context.Background(), jobType, json.RawMessage(`{bad`)), "stale PM jobs should be discarded without parsing or execution")
-	}
-	_, projectCycleRegistered := w.handlers[models.JobTypeProjectCycle]
-	require.False(t, projectCycleRegistered, "project_cycle compatibility handler should be removed")
-	require.Zero(t, services.PM.(*mockPMService).analyzeCalls, "stale jobs must not invoke PM analysis")
-	require.Zero(t, services.PM.(*mockPMService).projectCalls, "stale jobs must not invoke project analysis")
-	_, ok := w.handlers["prioritize"]
-	require.False(t, ok, "prioritize handler should not be registered without prioritization service")
-}
-
-// ---------------------------------------------------------------------------
-// Additional PMAnalyze handler tests
-// ---------------------------------------------------------------------------
-
-func TestPMAnalyzeHandler_InvalidTrigger(t *testing.T) {
-	t.Parallel()
-
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-	logger := zerolog.Nop()
-
-	pmSvc := &mockPMService{}
-	services := &Services{PM: pmSvc}
-	handler := newPMAnalyzeHandler(stores, services, logger)
-
-	orgID := uuid.New()
-	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","trigger":"invalid_trigger"}`)
-	err := handler(context.Background(), "pm_analyze", payload)
-	require.Error(t, err, "pm_analyze handler should return error for invalid trigger")
-	require.Contains(t, err.Error(), "invalid trigger", "error should mention invalid trigger")
-}
-
-func TestPMAnalyzeHandler_WithRepoID(t *testing.T) {
-	t.Parallel()
-
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-	logger := zerolog.Nop()
-
-	pmSvc := &mockPMService{}
-	services := &Services{PM: pmSvc}
-	handler := newPMAnalyzeHandler(stores, services, logger)
-
-	orgID := uuid.New()
-	repoID := uuid.New()
-	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","trigger":"manual","repo_id":"` + repoID.String() + `"}`)
-	err := handler(context.Background(), "pm_analyze", payload)
-	require.NoError(t, err, "pm_analyze handler should succeed with repo ID")
-	require.Equal(t, orgID, pmSvc.calledOrgID, "should pass org ID through")
-	require.Equal(t, models.PMTriggerManual, pmSvc.trigger, "should pass manual trigger through")
-}
-
-func TestPMAnalyzeHandler_InvalidRepoID(t *testing.T) {
-	t.Parallel()
-
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-	logger := zerolog.Nop()
-
-	pmSvc := &mockPMService{}
-	services := &Services{PM: pmSvc}
-	handler := newPMAnalyzeHandler(stores, services, logger)
-
-	orgID := uuid.New()
-	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","trigger":"cron","repo_id":"not-a-uuid"}`)
-	err := handler(context.Background(), "pm_analyze", payload)
-	require.Error(t, err, "pm_analyze handler should return error for invalid repo ID")
-	require.Contains(t, err.Error(), "parse repo ID", "error should mention repo ID")
-}
-
-func TestPMAnalyzeHandler_DefaultTrigger(t *testing.T) {
-	t.Parallel()
-
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-	logger := zerolog.Nop()
-
-	pmSvc := &mockPMService{}
-	services := &Services{PM: pmSvc}
-	handler := newPMAnalyzeHandler(stores, services, logger)
-
-	orgID := uuid.New()
-	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `"}`)
-	err := handler(context.Background(), "pm_analyze", payload)
-	require.NoError(t, err, "pm_analyze handler should succeed with default trigger")
-	require.Equal(t, models.PMTriggerCron, pmSvc.trigger, "empty trigger should default to cron")
-}
-
-func TestPMAnalyzeHandler_MissingOrgID(t *testing.T) {
-	t.Parallel()
-
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-	logger := zerolog.Nop()
-
-	pmSvc := &mockPMService{}
-	services := &Services{PM: pmSvc}
-	handler := newPMAnalyzeHandler(stores, services, logger)
-
-	payload := json.RawMessage(`{"trigger":"cron"}`)
-	err := handler(context.Background(), "pm_analyze", payload)
-	require.Error(t, err, "pm_analyze handler should return error when org ID is missing")
-	require.Contains(t, err.Error(), "parse org ID", "error should mention org ID")
-}
-
-type mockPMServiceError struct{}
-
-func (m *mockPMServiceError) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID, agentTypeOverride *models.AgentType) (*pm.Plan, error) {
-	return nil, errors.New("pm analysis failed")
-}
-
-func (m *mockPMServiceError) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID) error {
-	return errors.New("project analysis failed")
-}
-
-func (m *mockPMServiceError) RunBootstrap(ctx context.Context, orgID uuid.UUID) error {
-	return errors.New("bootstrap failed")
-}
-
-func (m *mockPMServiceError) RunRefresh(ctx context.Context, orgID uuid.UUID) error {
-	return errors.New("refresh failed")
-}
-
-func TestPMAnalyzeHandler_ServiceError(t *testing.T) {
-	t.Parallel()
-
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-	logger := zerolog.Nop()
-
-	services := &Services{PM: &mockPMServiceError{}}
-	handler := newPMAnalyzeHandler(stores, services, logger)
-
-	orgID := uuid.New()
-	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","trigger":"cron"}`)
-	err := handler(context.Background(), "pm_analyze", payload)
-	require.Error(t, err, "pm_analyze handler should return error when service fails")
-	require.Contains(t, err.Error(), "pm analysis failed", "error should contain service error message")
-
-	// PM analyze errors should be wrapped as FatalError to prevent retries.
-	var fatal *FatalError
-	require.ErrorAs(t, err, &fatal, "pm_analyze errors should be wrapped as FatalError")
-}
-
-// ---------------------------------------------------------------------------
-// Additional ProcessReviewComment handler tests
-// ---------------------------------------------------------------------------
 
 func TestProcessReviewCommentHandler_InvalidJSON(t *testing.T) {
 	t.Parallel()
@@ -10246,7 +9913,7 @@ func TestRunAgentHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t *testi
 	var logBuf bytes.Buffer
 	handler := newRunAgentHandler(stores, &Services{
 		Orchestrator:   orch,
-		ProjectTasks:   pm.NewProjectHooks(stores.ProjectTasks, stores.Projects, zerolog.New(&logBuf)),
+		ProjectTasks:   projectservice.NewHooks(stores.ProjectTasks, stores.Projects, zerolog.New(&logBuf)),
 		AutomationRuns: automations.NewAutomationHooks(stores.AutomationRuns, zerolog.New(&logBuf)),
 	}, zerolog.New(&logBuf))
 	handlerCtx := jobctx.WithDeadLetterHooks(context.Background())
@@ -10354,7 +10021,7 @@ func TestRunAgentHandler_SystemInterruptDeadLetterFailsSessionAndThread(t *testi
 	var logBuf bytes.Buffer
 	handler := newRunAgentHandler(stores, &Services{
 		Orchestrator:   orch,
-		ProjectTasks:   pm.NewProjectHooks(stores.ProjectTasks, stores.Projects, zerolog.New(&logBuf)),
+		ProjectTasks:   projectservice.NewHooks(stores.ProjectTasks, stores.Projects, zerolog.New(&logBuf)),
 		AutomationRuns: automations.NewAutomationHooks(stores.AutomationRuns, zerolog.New(&logBuf)),
 	}, zerolog.New(&logBuf))
 	handlerCtx := jobctx.WithDeadLetterHooks(context.Background())
@@ -12398,7 +12065,7 @@ func TestDataRetentionHandler_RedactsSlackInboundPayloadsByOrg(t *testing.T) {
 var evalRunTestCols = []string{
 	"id", "task_id", "org_id", "batch_id",
 	"session_id", "thread_id",
-	"input_manifest", "model", "server_deploy_sha", "pm_document_set_pin_id",
+	"input_manifest", "model", "server_deploy_sha", "reference_context_set_pin_id",
 	"config_ref", "context_overrides",
 	"agent_diff", "agent_trace", "token_usage",
 	"criterion_results", "final_score", "passed",

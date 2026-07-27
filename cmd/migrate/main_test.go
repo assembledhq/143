@@ -157,6 +157,43 @@ func TestHotTableFKRemovalDownMigrationIsExplicitNoop(t *testing.T) {
 	require.NotContains(t, sql, "ADD CONSTRAINT", "down migration should not recreate reviewed hot-table FK exceptions")
 }
 
+func TestRemovePMMachineryMigrationIsRollingCompatible(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000260_remove_pm_machinery.up.sql"))
+	require.NoError(t, err, "PM machinery migration should be readable")
+	sql := strings.ToUpper(stripSQLLineComments(string(body)))
+
+	required := []string{
+		"CREATE VIEW SESSION_EXECUTION_CONTEXT",
+		"CREATE VIEW REFERENCE_DOCUMENTS",
+		"CREATE VIEW REFERENCE_CONTEXT_SET_PINS",
+		"CREATE VIEW REFERENCE_CONTEXT_SET_PIN_MEMBERS",
+		"ADD COLUMN REFERENCE_CONTEXT_SET_PIN_ID",
+		"CREATE FUNCTION SYNC_REFERENCE_CONTEXT_SET_PIN_COLUMNS",
+		"TRG_EVAL_TASKS_SYNC_REFERENCE_CONTEXT_SET_PIN",
+		"TRG_EVAL_RUNS_SYNC_REFERENCE_CONTEXT_SET_PIN",
+	}
+	for _, fragment := range required {
+		require.Contains(t, sql, fragment, "migration should expose the neutral schema while legacy binaries remain active")
+	}
+
+	forbidden := []string{
+		"ALTER TABLE SESSION_PM_CONTEXT RENAME",
+		"ALTER TABLE PM_DOCUMENTS RENAME",
+		"ALTER TABLE PM_DOCUMENT_SET_PINS RENAME",
+		"ALTER TABLE EVAL_TASKS RENAME COLUMN",
+		"ALTER TABLE EVAL_RUNS RENAME COLUMN",
+		"DROP TABLE PROJECT_SOURCE_ISSUES",
+		"DROP COLUMN PROPOSED_BY_PM",
+		"DROP COLUMN ELIGIBLE_FOR_AGENT",
+		"DROP TRIGGER IF EXISTS TRG_REJECT_DISABLED_PM_JOBS",
+	}
+	for _, fragment := range forbidden {
+		require.NotContains(t, sql, fragment, "expand migration should not invalidate old API or worker binaries")
+	}
+}
+
 func stripSQLLineComments(contents string) string {
 	lines := strings.Split(contents, "\n")
 	for i, line := range lines {

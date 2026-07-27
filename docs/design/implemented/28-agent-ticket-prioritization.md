@@ -778,8 +778,8 @@ func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan) 
             AutonomyLevel: settings.AutonomyLevel,
             TokenMode:     tokenModeFromComplexity(task.Complexity),
             PMPlanID:      &plan.ID,
-            PMApproach:    &task.Approach,
-            PMReasoning:   &task.Reasoning,
+            ExecutionBrief:    &task.Approach,
+            PlanningReasoning:   &task.Reasoning,
         }
         if err := s.agentRuns.Create(ctx, run); err != nil {
             s.logger.Error().Err(err).Msg("failed to create agent run from PM plan")
@@ -904,7 +904,7 @@ w.Register("pm_analyze", newPMAnalyzeHandler(stores, services, logger))
 
 #### Agent Run Model (`internal/models/models.go`)
 
-Add PM-linkage fields to `AgentRun`/`Session` responses. These fields are still part of the API model, but the current database implementation hydrates them from `session_pm_context` rather than storing them directly on `sessions`.
+Add PM-linkage fields to `AgentRun`/`Session` responses. These fields are still part of the API model, but the current database implementation hydrates them from `session_execution_context` rather than storing them directly on `sessions`.
 
 ```go
 type AgentRun struct {
@@ -912,8 +912,8 @@ type AgentRun struct {
 
     // PM agent context (set when the run was created by the PM agent)
     PMPlanID    *uuid.UUID `json:"pm_plan_id,omitempty" db:"pm_plan_id"`
-    PMApproach  *string    `json:"pm_approach,omitempty" db:"pm_approach"`
-    PMReasoning *string    `json:"pm_reasoning,omitempty" db:"pm_reasoning"`
+    ExecutionBrief  *string    `json:"execution_brief,omitempty" db:"execution_brief"`
+    PlanningReasoning *string    `json:"planning_reasoning,omitempty" db:"planning_reasoning"`
 }
 ```
 
@@ -950,12 +950,12 @@ See the "Decision Log: Institutional Memory" section below for the full table de
 #### Session PM Context
 
 ```sql
-CREATE TABLE session_pm_context (
+CREATE TABLE session_execution_context (
     session_id      UUID PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
     org_id          UUID NOT NULL REFERENCES organizations(id),
     pm_plan_id      UUID REFERENCES pm_plans(id),
-    pm_approach     TEXT,
-    pm_reasoning    TEXT,
+    execution_brief     TEXT,
+    planning_reasoning    TEXT,
     project_task_id UUID REFERENCES project_tasks(id)
 );
 ```
@@ -969,7 +969,7 @@ CREATE TABLE session_pm_context (
 | `GET` | `/api/v1/pm/plans/{id}` | viewer+ | Get a specific plan with tasks, clusters, skips |
 | `GET` | `/api/v1/pm/plans/latest` | viewer+ | Get the most recent plan |
 
-Existing endpoints are unchanged. The `GET /api/v1/runs/{id}` response gains the `pm_approach` and `pm_reasoning` fields.
+Existing endpoints are unchanged. The `GET /api/v1/runs/{id}` response gains the `execution_brief` and `planning_reasoning` fields.
 
 ### 8. Org Settings
 
@@ -1126,8 +1126,8 @@ To transition cleanly from the current system:
 | `internal/worker/handlers.go` | Add `pm_analyze` handler; remove `CheckAutoTrigger` call from `prioritize` handler |
 | `internal/services/agent/adapter.go` | Add `PMTaskContext` type to `AgentInput` |
 | `internal/services/agent/adapters/claude_code.go` | Inject PM context into prompts |
-| `internal/services/agent/orchestrator.go` | Read `PMApproach`/`PMReasoning` from run, populate `AgentInput.PMContext` |
-| `internal/models/models.go` | Add `PMPlanID`, `PMApproach`, `PMReasoning` fields to `AgentRun` |
+| `internal/services/agent/orchestrator.go` | Read `ExecutionBrief`/`PlanningReasoning` from run, populate `AgentInput.PMContext` |
+| `internal/models/models.go` | Add `PMPlanID`, `ExecutionBrief`, `PlanningReasoning` fields to `AgentRun` |
 | `internal/cluster/scheduler_lock.go` | Add `pm_analyze` cron task |
 | `internal/api/router.go` | Add PM routes |
 | `internal/models/org_settings.go` | Add `ProductContext` struct, `PMScheduleHours`, `PMModel` settings; migration from `ProductDirection` |

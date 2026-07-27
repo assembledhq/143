@@ -467,18 +467,17 @@ export const api = {
     triggerFix: (issueId: string, options?: { agent_type?: string; autonomy_level?: string; token_mode?: string; message?: string; force?: boolean }) =>
       post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/issues/${issueId}/fix`, options),
   },
-  pm: {
-    // Documents
+  referenceDocuments: {
     listDocuments: () =>
-      get<import('./types').ListResponse<import('./types').PMDocument>>('/api/v1/pm/documents'),
+      get<import('./types').ListResponse<import('./types').ReferenceDocument>>('/api/v1/reference-documents'),
     getDocument: (docId: string) =>
-      get<import('./types').SingleResponse<import('./types').PMDocument>>(`/api/v1/pm/documents/${docId}`),
+      get<import('./types').SingleResponse<import('./types').ReferenceDocument>>(`/api/v1/reference-documents/${docId}`),
     createDocument: (body: { title: string; content?: string; doc_type?: string; source_type?: string; source_url?: string; source_id?: string; source_meta?: Record<string, unknown> }) =>
-      post<import('./types').SingleResponse<import('./types').PMDocument>>('/api/v1/pm/documents', body),
+      post<import('./types').SingleResponse<import('./types').ReferenceDocument>>('/api/v1/reference-documents', body),
     updateDocument: (docId: string, body: Record<string, unknown>) =>
-      patch<import('./types').SingleResponse<import('./types').PMDocument>>(`/api/v1/pm/documents/${docId}`, body),
+      patch<import('./types').SingleResponse<import('./types').ReferenceDocument>>(`/api/v1/reference-documents/${docId}`, body),
     deleteDocument: (docId: string) =>
-      del(`/api/v1/pm/documents/${docId}`),
+      del(`/api/v1/reference-documents/${docId}`),
   },
   sessions: {
     list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; triggered_by_user_id?: string; triggered_by_user_ids?: string[]; search?: string; include_archived?: boolean; only_archived?: boolean }) => {

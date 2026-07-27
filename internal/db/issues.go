@@ -173,8 +173,11 @@ func (s *IssueStore) UpdateRepositoryID(ctx context.Context, orgID, issueID uuid
 }
 
 func (s *IssueStore) Upsert(ctx context.Context, issue *models.Issue) error {
-	conflictTarget := "(org_id, source, external_id)"
 	if issue.Source == models.IssueSourcePMAgent {
+		return fmt.Errorf("new pm_agent issues are no longer supported")
+	}
+	conflictTarget := "(org_id, source, external_id)"
+	if issue.Source == models.IssueSourceAgent {
 		conflictTarget = "(org_id, fingerprint)"
 	}
 	query := fmt.Sprintf(`

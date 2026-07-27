@@ -306,13 +306,7 @@ export function openCodeTransportLabelForModel(model: string): string | null {
   return null;
 }
 
-export const DEFAULT_PM_MODEL = DEFAULT_CODEX_MODEL;
-
-// PM and session model dropdowns are both built from the AGENTS registry in
-// @/lib/agents (see availableAgentModelGroups). Keeping a second PM-only list
-// here would drift away from the session picker.
-
-// General-purpose LLM models (used by validation, prioritization, PM services).
+// General-purpose LLM models (used by validation and prioritization).
 // NOTE: This is a static fallback. The frontend should prefer fetching models
 // from GET /api/v1/settings/llm-models (served by models.LLMModelsByProvider()
 // in internal/models/agent_model_constants.go). Keep both in sync.

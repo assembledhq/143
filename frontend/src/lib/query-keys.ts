@@ -99,8 +99,8 @@ export const queryKeys = {
     detail: (id: string) => ["automation", id] as const,
     eventTriggers: (id: string) => ["automations", id, "event-triggers"] as const,
   },
-  pm: {
-    documents: ["pm", "documents"] as const,
+  referenceDocuments: {
+    all: ["reference-documents"] as const,
   },
   team: {
     members: ["team", "members"] as const,

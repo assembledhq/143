@@ -1107,19 +1107,6 @@ func (m *mockFileReader) ReadFileContext(ctx context.Context, containerID, workD
 	return sandbox.FileContextResult{}, errors.New("read file context not stubbed")
 }
 
-// mockDecisionLogStore implements agent.DecisionLogStore.
-type mockDecisionLogStore struct {
-	mu       sync.Mutex
-	outcomes []models.PMDecisionOutcome
-}
-
-func (m *mockDecisionLogStore) UpdateOutcome(ctx context.Context, orgID, planID, issueID uuid.UUID, outcome models.PMDecisionOutcome) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.outcomes = append(m.outcomes, outcome)
-	return nil
-}
-
 type mockProjectTaskUpdater struct {
 	mu       sync.Mutex
 	statuses []string
@@ -1364,7 +1351,6 @@ type testDeps struct {
 	questions        *mockSessionQuestionStore
 	humanInputs      *mockSessionHumanInputRequestStore
 	messages         *mockSessionMessageStore
-	decisions        *mockDecisionLogStore
 	jobs             *mockJobStore
 	github           *mockGitHubTokenProvider
 	codexAuth        agent.CodexAuthProvider
@@ -1564,7 +1550,6 @@ func defaultDeps() testDeps {
 			requests: make([]models.HumanInputRequest, 0),
 		},
 		messages:  &mockSessionMessageStore{},
-		decisions: &mockDecisionLogStore{},
 		jobs:      &mockJobStore{},
 		github:    &mockGitHubTokenProvider{token: "ghp_test123"},
 		codexAuth: nil,
@@ -1655,7 +1640,6 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		SessionQuestions:   d.questions,
 		HumanInputRequests: d.humanInputs,
 		SessionMessages:    d.messages,
-		DecisionLog:        d.decisions,
 		ProjectTasks:       d.projects,
 		AutomationRuns:     d.automationRuns,
 		Issues:             d.issues,
@@ -2210,7 +2194,6 @@ func TestRunAgent_LogsDuplicateMarkerFailureAndSucceeds(t *testing.T) {
 		SessionLogs:       d.logs,
 		SessionQuestions:  d.questions,
 		SessionMessages:   d.messages,
-		DecisionLog:       d.decisions,
 		ProjectTasks:      d.projects,
 		Issues:            d.issues,
 		Repositories:      d.repos,
@@ -2412,7 +2395,6 @@ func TestRecoverSession_RestartsWithoutCountingOwnRunningSlot(t *testing.T) {
 		SessionLogs:       d.logs,
 		SessionQuestions:  d.questions,
 		SessionMessages:   d.messages,
-		DecisionLog:       d.decisions,
 		ProjectTasks:      d.projects,
 		Issues:            d.issues,
 		Repositories:      d.repos,
@@ -3613,7 +3595,7 @@ func TestRunAgent_ExecuteErrorUpdatesProjectTask(t *testing.T) {
 	require.Equal(t, []string{"failed"}, d.projects.getStatuses(), "project task hook should be called with failed status on execute error")
 }
 
-func TestRunAgent_PopulatesPMContext(t *testing.T) {
+func TestRunAgent_PopulatesExecutionContext(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
@@ -3626,14 +3608,14 @@ func TestRunAgent_PopulatesPMContext(t *testing.T) {
 	pmReasoning := "High impact"
 
 	run := &models.Session{
-		ID:             runID,
-		PrimaryIssueID: &issueID,
-		OrgID:          orgID,
-		AgentType:      "claude_code",
-		Status:         "pending",
-		TokenMode:      "low",
-		PMApproach:     &pmApproach,
-		PMReasoning:    &pmReasoning,
+		ID:                runID,
+		PrimaryIssueID:    &issueID,
+		OrgID:             orgID,
+		AgentType:         "claude_code",
+		Status:            "pending",
+		TokenMode:         "low",
+		ExecutionBrief:    &pmApproach,
+		PlanningReasoning: &pmReasoning,
 	}
 
 	mockRuns := &mockSessionStore{}
@@ -3649,7 +3631,6 @@ func TestRunAgent_PopulatesPMContext(t *testing.T) {
 	mockJobs := &mockJobStore{}
 	mockLogs := &mockSessionLogStore{}
 	mockQuestions := &mockSessionQuestionStore{}
-	mockDecisions := &mockDecisionLogStore{}
 	mockGH := &mockGitHubTokenProvider{token: "token"}
 	sandboxProvider := testutil.NewMockSandboxProvider()
 
@@ -3661,7 +3642,6 @@ func TestRunAgent_PopulatesPMContext(t *testing.T) {
 		Sessions:         mockRuns,
 		SessionLogs:      mockLogs,
 		SessionQuestions: mockQuestions,
-		DecisionLog:      mockDecisions,
 		Issues:           mockIssues,
 		Repositories:     mockRepos,
 		Orgs:             mockOrgs,
@@ -3689,9 +3669,9 @@ func TestRunAgent_PopulatesPMContext(t *testing.T) {
 	err := orchestrator.RunAgent(context.Background(), run)
 	require.NoError(t, err, "RunAgent should succeed")
 	require.NotNil(t, capAdapter.captured, "adapter should capture input")
-	require.NotNil(t, capAdapter.captured.PMContext, "PMContext should be populated")
-	require.Equal(t, pmApproach, capAdapter.captured.PMContext.Approach, "PMContext should include approach")
-	require.Equal(t, pmReasoning, capAdapter.captured.PMContext.Reasoning, "PMContext should include reasoning")
+	require.NotNil(t, capAdapter.captured.ExecutionContext, "ExecutionContext should be populated")
+	require.Equal(t, pmApproach, capAdapter.captured.ExecutionContext.ExecutionBrief, "ExecutionContext should include the execution brief")
+	require.Equal(t, pmReasoning, capAdapter.captured.ExecutionContext.PlanningReasoning, "ExecutionContext should include planning reasoning")
 	require.WithinDuration(t, now, time.Now(), time.Minute, "sanity check")
 }
 
@@ -3711,7 +3691,7 @@ func TestRunAgent_UsesRawTaskPromptStyleForAutomation(t *testing.T) {
 		TokenMode:       "low",
 		RepositoryID:    &repoID,
 		AutomationRunID: func() *uuid.UUID { id := uuid.New(); return &id }(),
-		PMApproach:      &goal,
+		ExecutionBrief:  &goal,
 	}
 
 	mockRuns := &mockSessionStore{}
@@ -3726,7 +3706,6 @@ func TestRunAgent_UsesRawTaskPromptStyleForAutomation(t *testing.T) {
 	mockJobs := &mockJobStore{}
 	mockLogs := &mockSessionLogStore{}
 	mockQuestions := &mockSessionQuestionStore{}
-	mockDecisions := &mockDecisionLogStore{}
 	mockGH := &mockGitHubTokenProvider{token: "token"}
 	sandboxProvider := testutil.NewMockSandboxProvider()
 
@@ -3738,7 +3717,6 @@ func TestRunAgent_UsesRawTaskPromptStyleForAutomation(t *testing.T) {
 		Sessions:         mockRuns,
 		SessionLogs:      mockLogs,
 		SessionQuestions: mockQuestions,
-		DecisionLog:      mockDecisions,
 		Repositories:     mockRepos,
 		Orgs:             mockOrgs,
 		Jobs:             mockJobs,
@@ -3767,7 +3745,7 @@ func TestRunAgent_UsesRawTaskPromptStyleForAutomation(t *testing.T) {
 	require.NotNil(t, capAdapter.captured, "adapter should capture input")
 	require.Equal(t, agent.PromptStyleRawTask, capAdapter.captured.PromptStyle, "automation sessions should use the raw-task prompt style")
 	require.Equal(t, goal, capAdapter.captured.UserMessage, "automation sessions should pass the stored goal through as the raw task text")
-	require.Nil(t, capAdapter.captured.PMContext, "automation sessions should not wrap the goal into PM analysis context")
+	require.Nil(t, capAdapter.captured.ExecutionContext, "automation sessions should not wrap the goal into execution context")
 }
 
 func TestRunAgent_UsesAnswerOnlyPromptStyleForSlackAnswerOnly(t *testing.T) {
@@ -3780,15 +3758,15 @@ func TestRunAgent_UsesAnswerOnlyPromptStyleForSlackAnswerOnly(t *testing.T) {
 	message := "Slack question body"
 
 	run := &models.Session{
-		ID:            runID,
-		OrgID:         orgID,
-		Origin:        models.SessionOriginSlack,
-		AgentType:     "claude_code",
-		Status:        "pending",
-		TokenMode:     "low",
-		RepositoryID:  &repoID,
-		PMApproach:    &pmApproach,
-		InputManifest: json.RawMessage(`{"slack":{"routing_mode":"answer_only","routing_reason":"question asking for information"}}`),
+		ID:             runID,
+		OrgID:          orgID,
+		Origin:         models.SessionOriginSlack,
+		AgentType:      "claude_code",
+		Status:         "pending",
+		TokenMode:      "low",
+		RepositoryID:   &repoID,
+		ExecutionBrief: &pmApproach,
+		InputManifest:  json.RawMessage(`{"slack":{"routing_mode":"answer_only","routing_reason":"question asking for information"}}`),
 	}
 
 	mockRuns := &mockSessionStore{}
@@ -3810,7 +3788,6 @@ func TestRunAgent_UsesAnswerOnlyPromptStyleForSlackAnswerOnly(t *testing.T) {
 	mockJobs := &mockJobStore{}
 	mockLogs := &mockSessionLogStore{}
 	mockQuestions := &mockSessionQuestionStore{}
-	mockDecisions := &mockDecisionLogStore{}
 	mockGH := &mockGitHubTokenProvider{token: "token"}
 	sandboxProvider := testutil.NewMockSandboxProvider()
 
@@ -3823,7 +3800,6 @@ func TestRunAgent_UsesAnswerOnlyPromptStyleForSlackAnswerOnly(t *testing.T) {
 		SessionLogs:      mockLogs,
 		SessionQuestions: mockQuestions,
 		SessionMessages:  mockMessages,
-		DecisionLog:      mockDecisions,
 		Repositories:     mockRepos,
 		Orgs:             mockOrgs,
 		Jobs:             mockJobs,
@@ -3852,7 +3828,7 @@ func TestRunAgent_UsesAnswerOnlyPromptStyleForSlackAnswerOnly(t *testing.T) {
 	require.NotNil(t, capAdapter.captured, "adapter should capture input")
 	require.Equal(t, agent.PromptStyleAnswerOnly, capAdapter.captured.PromptStyle, "Slack answer-only sessions should use answer-only prompt style")
 	require.Equal(t, message, capAdapter.captured.UserMessage, "Slack answer-only sessions should pass through the latest Slack message")
-	require.Nil(t, capAdapter.captured.PMContext, "Slack answer-only sessions should not include PM implementation framing")
+	require.Nil(t, capAdapter.captured.ExecutionContext, "Slack answer-only sessions should not include execution planning")
 }
 
 func TestRunAgent_LegacySyntheticManualSessionUsesManualModeAndFallbackReferences(t *testing.T) {
@@ -3890,7 +3866,6 @@ func TestRunAgent_LegacySyntheticManualSessionUsesManualModeAndFallbackReference
 	mockLogs := &mockSessionLogStore{}
 	mockQuestions := &mockSessionQuestionStore{}
 	mockMessages := &mockSessionMessageStore{}
-	mockDecisions := &mockDecisionLogStore{}
 	mockGitHub := &mockGitHubTokenProvider{token: "ghp_test123"}
 	mockSnapshots := &mockSnapshotStore{}
 	sandboxProvider := testutil.NewMockSandboxProvider()
@@ -3906,7 +3881,6 @@ func TestRunAgent_LegacySyntheticManualSessionUsesManualModeAndFallbackReference
 		SessionLogs:      mockLogs,
 		SessionQuestions: mockQuestions,
 		SessionMessages:  mockMessages,
-		DecisionLog:      mockDecisions,
 		Issues:           mockIssues,
 		Repositories:     mockRepos,
 		Orgs:             mockOrgs,
@@ -6105,7 +6079,6 @@ func TestRunAgent_AgentCredentialsInjected(t *testing.T) {
 		Sessions:          d.sessions,
 		SessionLogs:       d.logs,
 		SessionQuestions:  d.questions,
-		DecisionLog:       d.decisions,
 		Issues:            d.issues,
 		Repositories:      d.repos,
 		Jobs:              d.jobs,
@@ -6339,7 +6312,6 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 		Sessions:          d.sessions,
 		SessionLogs:       d.logs,
 		SessionQuestions:  d.questions,
-		DecisionLog:       d.decisions,
 		Issues:            d.issues,
 		Repositories:      d.repos,
 		Jobs:              d.jobs,
@@ -9395,7 +9367,6 @@ func TestResolveSessionTimeout_UsesOrgOverride(t *testing.T) {
 		SessionLogs:       d.logs,
 		SessionQuestions:  d.questions,
 		SessionMessages:   d.messages,
-		DecisionLog:       d.decisions,
 		ProjectTasks:      d.projects,
 		Issues:            d.issues,
 		Repositories:      d.repos,
@@ -9432,7 +9403,6 @@ func TestResolveSessionTimeout_ClampsBelowFloor(t *testing.T) {
 		SessionLogs:       d.logs,
 		SessionQuestions:  d.questions,
 		SessionMessages:   d.messages,
-		DecisionLog:       d.decisions,
 		ProjectTasks:      d.projects,
 		Issues:            d.issues,
 		Repositories:      d.repos,
@@ -9463,7 +9433,6 @@ func TestResolveSessionTimeout_FallsBackWhenOrgStoreErrors(t *testing.T) {
 		SessionLogs:       d.logs,
 		SessionQuestions:  d.questions,
 		SessionMessages:   d.messages,
-		DecisionLog:       d.decisions,
 		ProjectTasks:      d.projects,
 		Issues:            d.issues,
 		Repositories:      d.repos,
@@ -9492,7 +9461,6 @@ func TestResolveSessionTimeout_FallsBackWhenOrgStoreNil(t *testing.T) {
 		SessionLogs:      d.logs,
 		SessionQuestions: d.questions,
 		SessionMessages:  d.messages,
-		DecisionLog:      d.decisions,
 		ProjectTasks:     d.projects,
 		Issues:           d.issues,
 		Repositories:     d.repos,
@@ -10320,7 +10288,6 @@ func TestRunAgent_AmpCredentialEnv(t *testing.T) {
 		Sessions:          d.sessions,
 		SessionLogs:       d.logs,
 		SessionQuestions:  d.questions,
-		DecisionLog:       d.decisions,
 		Issues:            d.issues,
 		Repositories:      d.repos,
 		Orgs:              orgs,
@@ -10378,7 +10345,6 @@ func TestRunAgent_PiDedicatedCredentialEnv(t *testing.T) {
 		Sessions:          d.sessions,
 		SessionLogs:       d.logs,
 		SessionQuestions:  d.questions,
-		DecisionLog:       d.decisions,
 		Issues:            d.issues,
 		Repositories:      d.repos,
 		Orgs:              orgs,
@@ -10427,7 +10393,6 @@ func TestRunAgent_AmpMissingAPIKeyFailsFast(t *testing.T) {
 		Sessions:         d.sessions,
 		SessionLogs:      d.logs,
 		SessionQuestions: d.questions,
-		DecisionLog:      d.decisions,
 		Issues:           d.issues,
 		Repositories:     d.repos,
 		// Orgs intentionally omitted to simulate "no Amp/Pi default settings source".
@@ -10531,7 +10496,6 @@ func TestRunAgent_PiModelOverrideReachesSandbox(t *testing.T) {
 		Sessions:          d.sessions,
 		SessionLogs:       d.logs,
 		SessionQuestions:  d.questions,
-		DecisionLog:       d.decisions,
 		Issues:            d.issues,
 		Repositories:      d.repos,
 		Orgs:              orgs,
@@ -10629,7 +10593,6 @@ func TestRunAgent_PiMissingCredentialFailsFast(t *testing.T) {
 		Sessions:         d.sessions,
 		SessionLogs:      d.logs,
 		SessionQuestions: d.questions,
-		DecisionLog:      d.decisions,
 		Issues:           d.issues,
 		Repositories:     d.repos,
 		// Orgs and credentials intentionally empty — no Pi credential anywhere.
@@ -10708,7 +10671,6 @@ func TestRunAgent_AmpAgentConfigCached(t *testing.T) {
 		Sessions:          d.sessions,
 		SessionLogs:       d.logs,
 		SessionQuestions:  d.questions,
-		DecisionLog:       d.decisions,
 		Issues:            d.issues,
 		Repositories:      d.repos,
 		Orgs:              orgs,
@@ -10802,7 +10764,6 @@ func TestRunAgent_AmpAgentConfigCacheTTLExpires(t *testing.T) {
 		Sessions:          d.sessions,
 		SessionLogs:       d.logs,
 		SessionQuestions:  d.questions,
-		DecisionLog:       d.decisions,
 		Issues:            d.issues,
 		Repositories:      d.repos,
 		Orgs:              orgs,

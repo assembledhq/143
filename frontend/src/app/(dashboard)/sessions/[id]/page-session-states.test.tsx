@@ -538,12 +538,12 @@ describe('SessionDetailPage session states', () => {
     expect(screen.getByText('Stopped. You can send a follow-up when ready.')).toBeInTheDocument();
   });
 
-  it('shows PM context when pm_plan_id is set', async () => {
+  it('shows historical planning fields as neutral execution context', async () => {
     const sessionWithPM: Session = {
       ...mockSessions[0],
-      pm_plan_id: 'plan-1',
-      pm_reasoning: 'High impact bug',
-      pm_approach: 'Quick null check fix',
+      agent_type: 'pm_agent',
+      planning_reasoning: 'High impact bug',
+      execution_brief: 'Quick null check fix',
     };
 
     server.use(
@@ -553,7 +553,9 @@ describe('SessionDetailPage session states', () => {
     );
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
-    await screen.findByText('PM context');
+    await screen.findByText('Execution context');
+    expect(screen.getByText('Planning reasoning')).toBeInTheDocument();
+    expect(screen.getByText('Execution brief')).toBeInTheDocument();
     expect(screen.getByText('High impact bug')).toBeInTheDocument();
     expect(screen.getAllByText('Quick null check fix').length).toBeGreaterThanOrEqual(1);
   });
@@ -637,10 +639,10 @@ describe('SessionDetailPage session states', () => {
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
   });
 
-  it('shows PM Agent as trigger label when pm_plan_id is set without user', async () => {
+  it('shows PM Agent as trigger label for a historical PM session without user', async () => {
     const pmTriggeredSession: Session = {
       ...mockSessions[0],
-      pm_plan_id: 'plan-1',
+      agent_type: 'pm_agent',
     };
 
     server.use(
@@ -651,7 +653,7 @@ describe('SessionDetailPage session states', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
-    expect(screen.getByText('PM Agent')).toBeInTheDocument();
+    expect(screen.getAllByText('PM Agent').length).toBeGreaterThanOrEqual(1);
   });
 
   it('shows "Started" timestamp for in-progress session without completed_at', async () => {

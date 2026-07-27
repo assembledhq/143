@@ -507,6 +507,7 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 	setPRHealthSessionRowValue(sessionRow, "autonomy_level", "full")
 	setPRHealthSessionRowValue(sessionRow, "sandbox_state", "snapshot")
 	setPRHealthSessionRowValue(sessionRow, "snapshot_key", &snapshotKey)
+	require.Len(t, sessionRow, len(prHealthSessionColumns), "session fixture should match the current session projection")
 
 	sessionMock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).

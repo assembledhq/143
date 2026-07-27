@@ -28,7 +28,6 @@ type ProjectFilters struct {
 	CreatedBy       uuid.UUID
 	CreatedByIDs    []uuid.UUID
 	Search          string // When non-empty, filter projects by title or goal (case-insensitive substring match).
-	ProposedByPM    *bool  // When non-nil, filter by proposed_by_pm flag.
 	IncludeArchived bool
 	OnlyArchived    bool
 }
@@ -38,21 +37,17 @@ const projectColumns = `id, org_id, repository_id, title, goal, scope, completio
 	status, priority, execution_mode, max_concurrent, auto_merge, base_branch,
 	current_phase, lessons_learned, approach_history,
 	total_tasks, completed_tasks, failed_tasks,
-	proposed_by_pm, source_issue_ids, proposal_reasoning, similar_projects,
 	agent_type, model_override,
 	created_by, deleted_at, created_at, updated_at, completed_at, archived_at`
 
 func scanProject(row pgx.Row) (models.Project, error) {
 	var p models.Project
 	var lessonsRaw, approachRaw []byte
-	var sourceIssueIDs []uuid.UUID
-
 	err := row.Scan(
 		&p.ID, &p.OrgID, &p.RepositoryID, &p.Title, &p.Goal, &p.Scope, &p.CompletionCriteria,
 		&p.Status, &p.Priority, &p.ExecutionMode, &p.MaxConcurrent, &p.AutoMerge, &p.BaseBranch,
 		&p.CurrentPhase, &lessonsRaw, &approachRaw,
 		&p.TotalTasks, &p.CompletedTasks, &p.FailedTasks,
-		&p.ProposedByPM, &sourceIssueIDs, &p.ProposalReasoning, &p.SimilarProjects,
 		&p.AgentType, &p.ModelOverride,
 		&p.CreatedBy, &p.DeletedAt, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt, &p.ArchivedAt,
 	)
@@ -70,8 +65,6 @@ func scanProject(row pgx.Row) (models.Project, error) {
 			return models.Project{}, fmt.Errorf("unmarshal approach_history: %w", err)
 		}
 	}
-	p.SourceIssueIDs = sourceIssueIDs
-
 	return p, nil
 }
 
@@ -80,14 +73,11 @@ func scanProjects(rows pgx.Rows) ([]models.Project, error) {
 	for rows.Next() {
 		var p models.Project
 		var lessonsRaw, approachRaw []byte
-		var sourceIssueIDs []uuid.UUID
-
 		err := rows.Scan(
 			&p.ID, &p.OrgID, &p.RepositoryID, &p.Title, &p.Goal, &p.Scope, &p.CompletionCriteria,
 			&p.Status, &p.Priority, &p.ExecutionMode, &p.MaxConcurrent, &p.AutoMerge, &p.BaseBranch,
 			&p.CurrentPhase, &lessonsRaw, &approachRaw,
 			&p.TotalTasks, &p.CompletedTasks, &p.FailedTasks,
-			&p.ProposedByPM, &sourceIssueIDs, &p.ProposalReasoning, &p.SimilarProjects,
 			&p.AgentType, &p.ModelOverride,
 			&p.CreatedBy, &p.DeletedAt, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt, &p.ArchivedAt,
 		)
@@ -105,8 +95,6 @@ func scanProjects(rows pgx.Rows) ([]models.Project, error) {
 				return nil, fmt.Errorf("unmarshal approach_history: %w", err)
 			}
 		}
-		p.SourceIssueIDs = sourceIssueIDs
-
 		projects = append(projects, p)
 	}
 	if err := rows.Err(); err != nil {
@@ -124,35 +112,24 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 	if err != nil || p.ApproachHistory == nil {
 		approachJSON = []byte("[]")
 	}
-	similarJSON := p.SimilarProjects
-	if len(similarJSON) == 0 {
-		similarJSON = []byte("[]")
-	}
-
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
 	query := `
 		INSERT INTO projects (
 			org_id, repository_id, title, goal, scope, completion_criteria,
 			status, priority, execution_mode, max_concurrent, auto_merge, base_branch,
 			current_phase, lessons_learned, approach_history,
-			proposed_by_pm, source_issue_ids, proposal_reasoning, similar_projects, created_by,
+			created_by,
 			agent_type, model_override
 		)
 		VALUES (
 			@org_id, @repository_id, @title, @goal, @scope, @completion_criteria,
 			@status, @priority, @execution_mode, @max_concurrent, @auto_merge, @base_branch,
 			@current_phase, @lessons_learned, @approach_history,
-			@proposed_by_pm, @source_issue_ids, @proposal_reasoning, @similar_projects, @created_by,
+			@created_by,
 			@agent_type, @model_override
 		)
 		RETURNING id, created_at, updated_at`
 
-	row := tx.QueryRow(ctx, query, pgx.NamedArgs{
+	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"org_id":              p.OrgID,
 		"repository_id":       p.RepositoryID,
 		"title":               p.Title,
@@ -168,10 +145,6 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 		"current_phase":       p.CurrentPhase,
 		"lessons_learned":     lessonsJSON,
 		"approach_history":    approachJSON,
-		"proposed_by_pm":      p.ProposedByPM,
-		"source_issue_ids":    p.SourceIssueIDs,
-		"proposal_reasoning":  p.ProposalReasoning,
-		"similar_projects":    similarJSON,
 		"created_by":          p.CreatedBy,
 		"agent_type":          p.AgentType,
 		"model_override":      p.ModelOverride,
@@ -180,16 +153,7 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 		return err
 	}
 
-	// Dual-write: populate the join table for source issue references.
-	for _, issueID := range p.SourceIssueIDs {
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO project_source_issues (project_id, issue_id) VALUES (@project_id, @issue_id) ON CONFLICT DO NOTHING`,
-			pgx.NamedArgs{"project_id": p.ID, "issue_id": issueID}); err != nil {
-			return fmt.Errorf("sync source issue: %w", err)
-		}
-	}
-
-	return tx.Commit(ctx)
+	return nil
 }
 
 func (s *ProjectStore) GetByID(ctx context.Context, orgID, projectID uuid.UUID) (models.Project, error) {
@@ -219,10 +183,6 @@ func applyProjectFilters(query string, args pgx.NamedArgs, filters ProjectFilter
 	} else if filters.CreatedBy != uuid.Nil {
 		query += ` AND created_by = @created_by`
 		args["created_by"] = filters.CreatedBy
-	}
-	if filters.ProposedByPM != nil {
-		query += ` AND proposed_by_pm = @proposed_by_pm`
-		args["proposed_by_pm"] = *filters.ProposedByPM
 	}
 	if filters.Search != "" {
 		query += ` AND (title ILIKE @search OR goal ILIKE @search)`
@@ -288,11 +248,6 @@ func (s *ProjectStore) Update(ctx context.Context, p *models.Project) error {
 	if err != nil || p.ApproachHistory == nil {
 		approachJSON = []byte("[]")
 	}
-	similarJSON := p.SimilarProjects
-	if len(similarJSON) == 0 {
-		similarJSON = []byte("[]")
-	}
-
 	query := `
 		UPDATE projects SET
 			title = @title, goal = @goal, scope = @scope, completion_criteria = @completion_criteria,
@@ -300,7 +255,6 @@ func (s *ProjectStore) Update(ctx context.Context, p *models.Project) error {
 			max_concurrent = @max_concurrent, auto_merge = @auto_merge, base_branch = @base_branch,
 			current_phase = @current_phase, lessons_learned = @lessons_learned,
 			approach_history = @approach_history,
-			similar_projects = @similar_projects,
 			total_tasks = @total_tasks, completed_tasks = @completed_tasks, failed_tasks = @failed_tasks,
 			completed_at = @completed_at, updated_at = now()
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
@@ -321,7 +275,6 @@ func (s *ProjectStore) Update(ctx context.Context, p *models.Project) error {
 		"current_phase":       p.CurrentPhase,
 		"lessons_learned":     lessonsJSON,
 		"approach_history":    approachJSON,
-		"similar_projects":    similarJSON,
 		"total_tasks":         p.TotalTasks,
 		"completed_tasks":     p.CompletedTasks,
 		"failed_tasks":        p.FailedTasks,

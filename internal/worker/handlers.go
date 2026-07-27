@@ -36,7 +36,6 @@ import (
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/linear"
 	pagerdutysvc "github.com/assembledhq/143/internal/services/pagerduty"
-	"github.com/assembledhq/143/internal/services/pm"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	readinesssvc "github.com/assembledhq/143/internal/services/readiness"
@@ -450,11 +449,6 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	if services != nil && services.Prioritization != nil {
 		w.Register("prioritize", newPrioritizeHandler(stores, services, logger))
 	}
-	if services != nil && services.PM != nil {
-		w.Register(models.JobTypePMAnalyze, newDisabledPMJobHandler(logger))
-		w.Register(models.JobTypePMBootstrap, newDisabledPMJobHandler(logger))
-		w.Register(models.JobTypePMContextRefresh, newDisabledPMJobHandler(logger))
-	}
 	if stores.Automations != nil && stores.AutomationRuns != nil {
 		w.Register(models.JobTypeAutomationRun, newAutomationRunHandler(stores, services, logger))
 	}
@@ -812,7 +806,6 @@ type Services struct {
 	AutomationRuns      agent.AutomationRunUpdater // nil-safe: updates automation runs on terminal session fallback paths
 	Prioritization      *prioritization.Service
 	Feedback            *feedback.Service
-	PM                  pmService
 	Memory              MemoryReinforcer              // optional — enables memory reinforcement on PR approval
 	SlackSummarizer     *ingestion.SlackSummarizer    // nil-safe: Slack summarization disabled if nil
 	LLM                 llmClient                     // nil-safe: needed for eval LLM judge grading
@@ -1306,13 +1299,6 @@ type llmClient interface {
 
 type sessionPrewarmClassifier interface {
 	Classify(ctx context.Context, input previewsvc.SessionPrewarmClassifierInput) previewsvc.SessionPrewarmClassifierResult
-}
-
-type pmService interface {
-	Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID, agentTypeOverride *models.AgentType) (*pm.Plan, error)
-	AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID) error
-	RunBootstrap(ctx context.Context, orgID uuid.UUID) error
-	RunRefresh(ctx context.Context, orgID uuid.UUID) error
 }
 
 // ingest_webhook handler processes a webhook delivery asynchronously.
@@ -1875,8 +1861,8 @@ func sessionPrewarmPreviewHistory(ctx context.Context, stores *Stores, logger ze
 }
 
 func sessionPrewarmPromptSeed(ctx context.Context, stores *Stores, logger zerolog.Logger, session models.Session) string {
-	if session.PMApproach != nil && strings.TrimSpace(*session.PMApproach) != "" {
-		return *session.PMApproach
+	if session.ExecutionBrief != nil && strings.TrimSpace(*session.ExecutionBrief) != "" {
+		return *session.ExecutionBrief
 	}
 	if stores == nil || stores.SessionMessages == nil {
 		return ""
@@ -2145,65 +2131,6 @@ func newPagerDutySyncHandler(syncer pagerDutySyncer, logger zerolog.Logger) JobH
 	}
 }
 
-func newDisabledPMJobHandler(logger zerolog.Logger) JobHandler {
-	return func(_ context.Context, jobType string, _ json.RawMessage) error {
-		logger.Info().Str("job_type", jobType).Msg("discarding disabled PM job")
-		return nil
-	}
-}
-
-func newPMAnalyzeHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
-	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
-		var input struct {
-			OrgID     string `json:"org_id"`
-			Trigger   string `json:"trigger"`
-			RepoID    string `json:"repo_id,omitempty"`
-			AgentType string `json:"agent_type,omitempty"`
-		}
-		if err := json.Unmarshal(payload, &input); err != nil {
-			return fmt.Errorf("unmarshal pm_analyze payload: %w", err)
-		}
-
-		orgID, err := parseOrgID(input.OrgID, ctx)
-		if err != nil {
-			return fmt.Errorf("parse org ID: %w", err)
-		}
-		trigger := models.PMTrigger(input.Trigger)
-		if trigger == "" {
-			trigger = models.PMTriggerCron
-		}
-		if err := trigger.Validate(); err != nil {
-			return fmt.Errorf("invalid trigger: %w", err)
-		}
-
-		var repoID *uuid.UUID
-		if input.RepoID != "" {
-			parsed, err := uuid.Parse(input.RepoID)
-			if err != nil {
-				return fmt.Errorf("parse repo ID: %w", err)
-			}
-			repoID = &parsed
-		}
-
-		var agentTypeOverride *models.AgentType
-		if input.AgentType != "" {
-			at := models.AgentType(input.AgentType)
-			agentTypeOverride = &at
-		}
-
-		logger.Info().Str("org_id", orgID.String()).Str("trigger", string(trigger)).Msg("running pm analyze")
-		_, err = services.PM.Analyze(ctx, orgID, trigger, repoID, agentTypeOverride)
-		if err != nil {
-			// Mark all PM analysis errors as fatal (no retries). Analyze() creates a
-			// new session record before doing any real work, so each retry would produce
-			// a duplicate failed session in the UI. The scheduler will retry at the next
-			// configured interval instead.
-			return &FatalError{Err: err}
-		}
-		return nil
-	}
-}
-
 // newAutomationRunHandler executes a single automation_run job by creating a
 // Session owned by the run and dispatching it through the normal run_agent
 // job pipeline. Completion bubbles back via AutomationRunUpdater on the
@@ -2387,7 +2314,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			targetBranch = &b
 		}
 
-		// Carry the run's GoalSnapshot into PMApproach so promptSeedForSession
+		// Carry the run's GoalSnapshot into ExecutionBrief so promptSeedForSession
 		// surfaces it as the synthesized issue's description. Append run
 		// metadata here because automation goals often scope themselves relative
 		// to the previous execution, and the agent cannot derive that timestamp
@@ -2415,7 +2342,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			TargetBranch:       targetBranch,
 			RepositoryID:       repositoryID,
 			AutomationRunID:    &runID,
-			PMApproach:         &goalSeed,
+			ExecutionBrief:     &goalSeed,
 			CapabilitySnapshot: run.CapabilitySnapshot,
 		}
 		if err := stores.Sessions.Create(ctx, session); err != nil {
@@ -2528,27 +2455,6 @@ func automationExecutionUserID(automation models.Automation, identityScope model
 		return automation.CreatedBy, nil
 	default:
 		return nil, fmt.Errorf("automation has invalid identity_scope %q", identityScope)
-	}
-}
-
-// newOrgIDJobHandler creates a handler that unmarshals an org_id payload and
-// calls the given function. Used for simple jobs like pm_bootstrap and pm_context_refresh.
-func newOrgIDJobHandler(jobName string, fn func(ctx context.Context, orgID uuid.UUID) error, logger zerolog.Logger) JobHandler {
-	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
-		var input struct {
-			OrgID string `json:"org_id"`
-		}
-		if err := json.Unmarshal(payload, &input); err != nil {
-			return fmt.Errorf("unmarshal %s payload: %w", jobName, err)
-		}
-
-		orgID, err := parseOrgID(input.OrgID, ctx)
-		if err != nil {
-			return fmt.Errorf("parse org ID: %w", err)
-		}
-
-		logger.Info().Str("org_id", orgID.String()).Msgf("running %s job", jobName)
-		return fn(ctx, orgID)
 	}
 }
 
@@ -2939,7 +2845,7 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 			TokenMode:         models.SessionTokenModeLow,
 			TriggeredByUserID: mappedUserID,
 			Title:             &title,
-			PMApproach:        &title,
+			ExecutionBrief:    &title,
 		}
 		if stores.SlackChannels != nil {
 			settings, settingsErr := stores.SlackChannels.GetEffectiveByChannel(ctx, orgID, payload.TeamID, payload.ChannelID)
@@ -8675,7 +8581,7 @@ When finished, leave the working tree with only the changes needed to solve the 
 		TokenMode:        models.SessionTokenModeHigh,
 		ModelOverride:    modelOverride,
 		Title:            &title,
-		PMApproach:       &prompt,
+		ExecutionBrief:   &prompt,
 		RepositoryID:     &task.RepoID,
 		BaseCommitSHA:    &baseCommitSHA,
 		InputManifest:    inputManifest,
@@ -8696,7 +8602,7 @@ func legacyEvalBootstrapSession(orgID, repoID uuid.UUID, createdBy *uuid.UUID) *
 		TokenMode:         models.SessionTokenModeLow,
 		TriggeredByUserID: createdBy,
 		Title:             &title,
-		PMApproach:        &prompt,
+		ExecutionBrief:    &prompt,
 		RepositoryID:      &repoID,
 	}
 }

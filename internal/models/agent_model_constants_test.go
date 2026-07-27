@@ -6,22 +6,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPMModelConstants(t *testing.T) {
-	t.Parallel()
-
-	require.Equal(t, DefaultCodexModel, DefaultPMModel, "DefaultPMModel should use the Codex default model")
-
-	// AvailablePMModels mirrors the union of every coding agent's model list,
-	// matching the session picker (frontend availableAgentModelGroups).
-	var expected []string
-	expected = append(expected, AvailableClaudeCodeModels...)
-	expected = append(expected, AvailableCodexModels...)
-	expected = append(expected, AvailableAmpModes...)
-	expected = append(expected, AvailablePiModels...)
-	expected = append(expected, AvailableOpenCodeModels...)
-	require.Equal(t, expected, AvailablePMModels, "AvailablePMModels should include every agent's models")
-}
-
 func TestClaudeCodeModelConstants(t *testing.T) {
 	t.Parallel()
 
@@ -323,23 +307,6 @@ func TestAgentTypeForModel(t *testing.T) {
 	}
 }
 
-func TestValidatePMModel(t *testing.T) {
-	t.Parallel()
-
-	require.NoError(t, ValidatePMModel(""), "empty pm_model is allowed (caller falls back to default)")
-	require.NoError(t, ValidatePMModel(CodexModelGPT54))
-	require.NoError(t, ValidatePMModel(ClaudeCodeModelOpus5), "Opus 5 should be accepted as a PM model")
-	require.NoError(t, ValidatePMModel(AmpModeSmart))
-	require.NoError(t, ValidatePMModel(PiModelClaudeOpus48))
-	require.NoError(t, ValidatePMModel(OpenCodeModelGPT54Mini))
-	// Custom Pi provider/model — accepted with parity to ValidateModelForAgentType.
-	require.NoError(t, ValidatePMModel("xai/grok-code-fast"))
-
-	err := ValidatePMModel("not-a-model")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), `"not-a-model"`)
-}
-
 func TestValidateSettingsModels(t *testing.T) {
 	t.Parallel()
 
@@ -349,49 +316,12 @@ func TestValidateSettingsModels(t *testing.T) {
 		wantErr  bool
 	}{
 		{
-			name: "accepts valid pm and agent models",
+			name: "accepts valid agent models",
 			settings: OrgSettings{
-				PMModel: ClaudeCodeModelSonnet45,
 				AgentConfig: AgentEnvConfig{
 					"codex":       {"OPENAI_MODEL": CodexModelGPT53Codex},
 					"claude_code": {"ANTHROPIC_MODEL": ClaudeCodeModelSonnet45},
 				},
-			},
-		},
-		{
-			name: "accepts claude code model as pm model",
-			settings: OrgSettings{
-				PMModel: ClaudeCodeModelSonnet45,
-			},
-		},
-		{
-			name: "accepts codex model as pm model",
-			settings: OrgSettings{
-				PMModel: CodexModelGPT53Codex,
-			},
-		},
-		{
-			name: "accepts amp mode as pm model",
-			settings: OrgSettings{
-				PMModel: AmpModeSmart,
-			},
-		},
-		{
-			name: "accepts pi model as pm model",
-			settings: OrgSettings{
-				PMModel: PiModelClaudeOpus48,
-			},
-		},
-		{
-			name: "accepts opencode model as pm model",
-			settings: OrgSettings{
-				PMModel: OpenCodeModelGPT54Mini,
-			},
-		},
-		{
-			name: "accepts custom pi provider/model as pm model (parity with sessions)",
-			settings: OrgSettings{
-				PMModel: "xai/grok-code-fast",
 			},
 		},
 		{
@@ -423,13 +353,6 @@ func TestValidateSettingsModels(t *testing.T) {
 			name: "rejects invalid llm model",
 			settings: OrgSettings{
 				LLMModel: "invalid-model",
-			},
-			wantErr: true,
-		},
-		{
-			name: "rejects invalid pm model",
-			settings: OrgSettings{
-				PMModel: "invalid-model",
 			},
 			wantErr: true,
 		},

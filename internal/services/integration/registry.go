@@ -27,7 +27,6 @@ type Registry struct {
 	issueCreators                       map[string]IssueCreator
 	prCreators                          map[string]PullRequestCreator
 	sessionTabManagers                  map[string]SessionTabManager
-	projectProposers                    map[string]ProjectProposer
 	evalReporters                       map[string]EvalCandidateReporter
 	automationManagers                  map[string]AutomationManager
 	automationGoalImprovementCompleters map[string]AutomationGoalImprovementCompleter
@@ -48,7 +47,6 @@ func NewRegistry() *Registry {
 		issueCreators:                       make(map[string]IssueCreator),
 		prCreators:                          make(map[string]PullRequestCreator),
 		sessionTabManagers:                  make(map[string]SessionTabManager),
-		projectProposers:                    make(map[string]ProjectProposer),
 		evalReporters:                       make(map[string]EvalCandidateReporter),
 		automationManagers:                  make(map[string]AutomationManager),
 		automationGoalImprovementCompleters: make(map[string]AutomationGoalImprovementCompleter),
@@ -363,35 +361,6 @@ func (r *Registry) PullRequestCreator(name string) (PullRequestCreator, error) {
 	return pc, nil
 }
 
-// RegisterProjectProposer adds a project proposer (e.g. internal 143 API).
-func (r *Registry) RegisterProjectProposer(provider ProjectProposer) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.projectProposers[provider.Name()] = provider
-}
-
-// ProjectProposers returns all registered project proposers.
-func (r *Registry) ProjectProposers() []ProjectProposer {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	result := make([]ProjectProposer, 0, len(r.projectProposers))
-	for _, pp := range r.projectProposers {
-		result = append(result, pp)
-	}
-	return result
-}
-
-// ProjectProposer returns a specific project proposer by name, or an error if not found.
-func (r *Registry) ProjectProposer(name string) (ProjectProposer, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	pp, ok := r.projectProposers[name]
-	if !ok {
-		return nil, fmt.Errorf("project proposer %q not registered", name)
-	}
-	return pp, nil
-}
-
 // RegisterAutomationManager adds an automation manager (e.g. internal 143 API).
 func (r *Registry) RegisterAutomationManager(provider AutomationManager) {
 	r.mu.Lock()
@@ -493,7 +462,6 @@ func (r *Registry) HasAny() bool {
 		len(r.issueCreators) > 0 ||
 		len(r.prCreators) > 0 ||
 		len(r.sessionTabManagers) > 0 ||
-		len(r.projectProposers) > 0 ||
 		len(r.ciTestInsights) > 0 ||
 		len(r.automationManagers) > 0 ||
 		len(r.logProviders) > 0
@@ -533,9 +501,6 @@ func (r *Registry) Summary() map[string][]string {
 	}
 	for name := range r.sessionTabManagers {
 		m["session_tab_managers"] = append(m["session_tab_managers"], name)
-	}
-	for name := range r.projectProposers {
-		m["project_proposers"] = append(m["project_proposers"], name)
 	}
 	for name := range r.automationManagers {
 		m["automation_managers"] = append(m["automation_managers"], name)

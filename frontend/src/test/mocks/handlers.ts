@@ -146,13 +146,10 @@ export const mockProjectDetail: ProjectDetail = {
     total_tasks: 3,
     completed_tasks: 1,
     failed_tasks: 0,
-    proposed_by_pm: false,
-    source_issue_ids: [],
     created_at: '2026-02-17T08:00:00Z',
     updated_at: '2026-02-17T08:00:00Z',
   },
   tasks: [],
-  recent_cycles: [],
   attachments: [],
   specs: [],
 };
@@ -173,8 +170,6 @@ export const mockProjects: Project[] = [
     total_tasks: 3,
     completed_tasks: 1,
     failed_tasks: 0,
-    proposed_by_pm: false,
-    source_issue_ids: [],
     created_at: '2026-02-17T08:00:00Z',
     updated_at: '2026-02-17T08:00:00Z',
   },
@@ -193,8 +188,6 @@ export const mockProjects: Project[] = [
     total_tasks: 5,
     completed_tasks: 5,
     failed_tasks: 0,
-    proposed_by_pm: true,
-    source_issue_ids: [],
     created_at: '2026-02-10T08:00:00Z',
     updated_at: '2026-02-15T08:00:00Z',
     completed_at: '2026-02-15T08:00:00Z',
@@ -923,9 +916,6 @@ export const handlers = [
         settings: {
           default_agent_type: 'claude_code',
           agent_config: {},
-          autonomy_level: 'auto_simple',
-          pm_schedule_hours: 24,
-          pm_model: 'claude-sonnet-4-5-20250929',
         },
       },
     });
@@ -1057,7 +1047,7 @@ export const handlers = [
     );
   }),
 
-  http.get('/api/v1/pm/documents', () => {
+  http.get('/api/v1/reference-documents', () => {
     return HttpResponse.json({
       data: [],
       meta: {},

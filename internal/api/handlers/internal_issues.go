@@ -18,9 +18,9 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
-// maxIssuesPerPMRun caps how many issues a single PM agent run can create.
+// maxIssuesPerAgentRun caps how many issues a single agent run can create.
 // This prevents a misbehaving agent from flooding the system.
-const maxIssuesPerPMRun = 10
+const maxIssuesPerAgentRun = 10
 
 // InternalIssueHandler handles issue creation from sandbox agents via internal API tokens.
 // When an issue is created, it also creates a coding agent session and enqueues
@@ -93,11 +93,11 @@ func (h *InternalIssueHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rate limit: max issues per PM run (keyed by token hash).
+	// Rate limit: max issues per agent run (keyed by token hash).
 	tokenHash := hashToken(tokenStr)
 	if !h.incrementAndCheck(tokenHash) {
 		writeError(w, r, http.StatusTooManyRequests, "RATE_LIMITED",
-			fmt.Sprintf("issue creation limit reached (%d per PM run)", maxIssuesPerPMRun))
+			fmt.Sprintf("issue creation limit reached (%d per agent run)", maxIssuesPerAgentRun))
 		return
 	}
 
@@ -131,13 +131,13 @@ func (h *InternalIssueHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// Use a hash of title+description for fingerprint to avoid collisions
 	// on title reuse while still deduplicating truly identical issues.
 	fpHash := sha256.Sum256([]byte(req.Title + "\x00" + req.Description))
-	fingerprint := "pm-agent:" + hex.EncodeToString(fpHash[:12])
+	fingerprint := "agent:" + hex.EncodeToString(fpHash[:12])
 
 	description := req.Description
 	issue := &models.Issue{
 		OrgID:           claims.OrgID,
 		ExternalID:      uuid.New().String(),
-		Source:          models.IssueSourcePMAgent,
+		Source:          models.IssueSourceAgent,
 		Title:           req.Title,
 		Description:     &description,
 		Status:          models.IssueStatusTriaged,
@@ -197,11 +197,6 @@ func (h *InternalIssueHandler) dispatchSession(r *http.Request, orgID uuid.UUID,
 		agentType = models.DefaultDefaultAgentType
 	}
 
-	autonomyLevel := string(orgSettings.AutonomyLevel)
-	if autonomyLevel == "" {
-		autonomyLevel = "semi"
-	}
-
 	title := issue.Title
 
 	session := &models.Session{
@@ -212,10 +207,10 @@ func (h *InternalIssueHandler) dispatchSession(r *http.Request, orgID uuid.UUID,
 		ValidationPolicy: models.SessionValidationPolicyOnTurnComplete,
 		AgentType:        agentType,
 		Status:           models.SessionStatusPending,
-		AutonomyLevel:    models.SessionAutonomy(autonomyLevel),
+		AutonomyLevel:    models.DefaultSessionAutonomy,
 		TokenMode:        models.SessionTokenModeLow,
 		Title:            &title,
-		PMApproach:       issue.Description,
+		ExecutionBrief:   issue.Description,
 		RepositoryID:     issue.RepositoryID,
 	}
 	if err := h.sessionStore.Create(r.Context(), session); err != nil {
@@ -237,7 +232,7 @@ func (h *InternalIssueHandler) incrementAndCheck(tokenHash string) bool {
 	h.perTokenMu.Lock()
 	defer h.perTokenMu.Unlock()
 	count := h.perTokenCount[tokenHash]
-	if count >= maxIssuesPerPMRun {
+	if count >= maxIssuesPerAgentRun {
 		return false
 	}
 	h.perTokenCount[tokenHash] = count + 1

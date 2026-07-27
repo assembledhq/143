@@ -19,7 +19,6 @@ func TestInternalIntegrationConstructorsNormalizeBaseURL(t *testing.T) {
 		{name: "slack sender", baseURL: func(raw string) string { return NewInternalSlackMessageSender("token", raw).baseURL }},
 		{name: "automation manager", baseURL: func(raw string) string { return NewInternalAutomationManager("token", raw).baseURL }},
 		{name: "session tabs", baseURL: func(raw string) string { return NewInternalSessionTabManager("token", raw).baseURL }},
-		{name: "project proposer", baseURL: func(raw string) string { return NewInternalProjectProposer("token", raw).baseURL }},
 		{name: "eval reporter", baseURL: func(raw string) string { return NewInternalEvalCandidateReporter("token", raw).baseURL }},
 		{name: "goal improvement completer", baseURL: func(raw string) string { return NewInternalAutomationGoalImprovementCompleter("token", raw).baseURL }},
 	}

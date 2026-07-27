@@ -377,15 +377,6 @@ func TestSettingsHandler_Update(t *testing.T) {
 			expectedBody: "INVALID_JSON",
 		},
 		{
-			name: "returns bad request for invalid pm_model",
-			body: `{"settings":{"pm_model":"bad-model"}}`,
-			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
-				// no DB calls expected
-			},
-			expectedCode: http.StatusBadRequest,
-			expectedBody: "INVALID_SETTINGS",
-		},
-		{
 			name: "returns bad request for invalid llm_model",
 			body: `{"settings":{"llm_model":"bad-model"}}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
@@ -491,29 +482,8 @@ func TestSettingsHandler_Update(t *testing.T) {
 			expectedBody: "INVALID_SETTINGS",
 		},
 		{
-			name: "accepts provider model as pm_model",
-			body: `{"settings":{"pm_model":"claude-sonnet-4-5"}}`,
-			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
-				now := time.Now()
-				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
-					WithArgs(pgxmock.AnyArg()).
-					WillReturnRows(
-						pgxmock.NewRows(orgColumns()).AddRow(
-							orgID, "Test Org", json.RawMessage(`{}`), now, now,
-						),
-					)
-				mock.ExpectQuery("UPDATE organizations").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(
-						pgxmock.NewRows([]string{"updated_at"}).AddRow(now),
-					)
-			},
-			expectedCode: http.StatusOK,
-			expectedBody: "claude-sonnet-4-5",
-		},
-		{
 			name: "updates successfully with supported models",
-			body: `{"settings":{"pm_model":"claude-sonnet-4-5","agent_config":{"codex":{"OPENAI_MODEL":"gpt-5.3-codex"},"claude_code":{"ANTHROPIC_MODEL":"claude-sonnet-4-5"},"opencode":{"OPENCODE_MODEL":"google/gemini-3-flash"}}}}`,
+			body: `{"settings":{"agent_config":{"codex":{"OPENAI_MODEL":"gpt-5.3-codex"},"claude_code":{"ANTHROPIC_MODEL":"claude-sonnet-4-5"},"opencode":{"OPENCODE_MODEL":"google/gemini-3-flash"}}}}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 				now := time.Now()
 				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").

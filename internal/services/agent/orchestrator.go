@@ -694,11 +694,6 @@ type SessionIssueSnapshotStore interface {
 	GetByTurn(ctx context.Context, orgID, sessionID uuid.UUID, turnNumber int) (models.SessionTurnIssueSnapshot, error)
 }
 
-// DecisionLogStore updates PM decision log outcomes.
-type DecisionLogStore interface {
-	UpdateOutcome(ctx context.Context, orgID, planID, issueID uuid.UUID, outcome models.PMDecisionOutcome) error
-}
-
 // OrgStore defines the organization read operations needed for org-level config.
 type OrgStore interface {
 	GetByID(ctx context.Context, orgID uuid.UUID) (models.Organization, error)
@@ -816,7 +811,6 @@ type Orchestrator struct {
 	sessionThreads             SessionThreadStore
 	sessionIssueLinks          SessionIssueLinkStore
 	issueSnapshots             SessionIssueSnapshotStore
-	decisionLog                DecisionLogStore
 	projectTasks               ProjectTaskUpdater               // can be nil
 	automationRuns             AutomationRunUpdater             // can be nil
 	automationGoalImprovements AutomationGoalImprovementUpdater // can be nil
@@ -1319,7 +1313,6 @@ type OrchestratorConfig struct {
 	SessionThreads             SessionThreadStore
 	SessionIssueLinks          SessionIssueLinkStore
 	IssueSnapshots             SessionIssueSnapshotStore
-	DecisionLog                DecisionLogStore
 	ProjectTasks               ProjectTaskUpdater               // optional — updates project tasks on run completion
 	AutomationRuns             AutomationRunUpdater             // optional — updates automation_runs on session completion
 	AutomationGoalImprovements AutomationGoalImprovementUpdater // optional — updates goal-improvement proposals on analysis session completion
@@ -1416,7 +1409,6 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		sessionThreads:             cfg.SessionThreads,
 		sessionIssueLinks:          cfg.SessionIssueLinks,
 		issueSnapshots:             cfg.IssueSnapshots,
-		decisionLog:                cfg.DecisionLog,
 		projectTasks:               cfg.ProjectTasks,
 		automationRuns:             cfg.AutomationRuns,
 		automationGoalImprovements: cfg.AutomationGoalImprovements,
@@ -2586,7 +2578,7 @@ func snapshotEntriesFromLinks(links []models.SessionIssueLink) ([]models.Session
 			IssueID:      link.IssueID,
 			Role:         link.Role,
 			Position:     link.Position,
-			Source:       models.IssueSourcePMAgent,
+			Source:       models.IssueSourceAgent,
 			RepositoryID: link.RepositoryID,
 		}
 		if link.IssueTitle != nil {
@@ -2745,14 +2737,14 @@ func (o *Orchestrator) promptSeedForSession(session *models.Session, latestMessa
 
 	title := syntheticIssueTitleForSession(session, latestMessage)
 	var descriptionParts []string
-	if session.PMApproach != nil && strings.TrimSpace(*session.PMApproach) != "" {
-		descriptionParts = append(descriptionParts, *session.PMApproach)
+	if session.ExecutionBrief != nil && strings.TrimSpace(*session.ExecutionBrief) != "" {
+		descriptionParts = append(descriptionParts, *session.ExecutionBrief)
 	}
-	if session.PMReasoning != nil && strings.TrimSpace(*session.PMReasoning) != "" {
-		descriptionParts = append(descriptionParts, *session.PMReasoning)
+	if session.PlanningReasoning != nil && strings.TrimSpace(*session.PlanningReasoning) != "" {
+		descriptionParts = append(descriptionParts, *session.PlanningReasoning)
 	}
 	issue := &models.Issue{
-		Source:       models.IssueSourcePMAgent,
+		Source:       models.IssueSourceAgent,
 		RepositoryID: session.RepositoryID,
 		Title:        title,
 	}
@@ -2772,13 +2764,13 @@ func syntheticIssueTitleForSession(session *models.Session, latestMessage *model
 			return title
 		}
 	}
-	if session.PMApproach != nil {
-		if title := syntheticIssueTitleFragment(*session.PMApproach); title != "" {
+	if session.ExecutionBrief != nil {
+		if title := syntheticIssueTitleFragment(*session.ExecutionBrief); title != "" {
 			return title
 		}
 	}
-	if session.PMReasoning != nil {
-		if title := syntheticIssueTitleFragment(*session.PMReasoning); title != "" {
+	if session.PlanningReasoning != nil {
+		if title := syntheticIssueTitleFragment(*session.PlanningReasoning); title != "" {
 			return title
 		}
 	}
@@ -3035,8 +3027,8 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			if latestMsg != nil {
 				return latestMsg.Content
 			}
-			if run.AutomationRunID != nil && run.PMApproach != nil {
-				return strings.TrimSpace(*run.PMApproach)
+			if run.AutomationRunID != nil && run.ExecutionBrief != nil {
+				return strings.TrimSpace(*run.ExecutionBrief)
 			}
 			return ""
 		}(),
@@ -3077,15 +3069,15 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 
-	if run.AutomationRunID == nil && sessionPromptStyle(run) != PromptStyleAnswerOnly && (run.PMApproach != nil || run.PMReasoning != nil) {
-		pmCtx := &PMTaskContext{}
-		if run.PMApproach != nil {
-			pmCtx.Approach = *run.PMApproach
+	if run.AutomationRunID == nil && sessionPromptStyle(run) != PromptStyleAnswerOnly && (run.ExecutionBrief != nil || run.PlanningReasoning != nil) {
+		executionContext := &ExecutionContext{}
+		if run.ExecutionBrief != nil {
+			executionContext.ExecutionBrief = *run.ExecutionBrief
 		}
-		if run.PMReasoning != nil {
-			pmCtx.Reasoning = *run.PMReasoning
+		if run.PlanningReasoning != nil {
+			executionContext.PlanningReasoning = *run.PlanningReasoning
 		}
-		input.PMContext = pmCtx
+		input.ExecutionContext = executionContext
 	}
 
 	// 6b. Generate integration skills doc from org credentials.
@@ -3775,19 +3767,6 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 				o.logger.Error().Err(queueErr).Str("changeset_id", changesetID.String()).Msg("failed to enqueue automatic PR creation")
 			} else if !queued {
 				o.logger.Info().Str("changeset_id", changesetID.String()).Msg("automatic PR creation already queued or complete")
-			}
-		}
-	}
-
-	if run.PMPlanID != nil && o.decisionLog != nil {
-		outcome := outcomeFromRunStatus(status)
-		if outcome != "" {
-			if run.PrimaryIssueID != nil {
-				if err := o.decisionLog.UpdateOutcome(ctx, run.OrgID, *run.PMPlanID, *run.PrimaryIssueID, outcome); err != nil {
-					o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update PM decision log outcome")
-				}
-			} else {
-				o.logger.Debug().Str("run_id", run.ID.String()).Msg("skipping PM decision log outcome update because run has no primary issue")
 			}
 		}
 	}
@@ -5553,7 +5532,7 @@ func (o *Orchestrator) setupFreshSandboxForThread(ctx context.Context, session *
 		issue = fetched
 	} else if session.Title != nil {
 		issue = models.Issue{
-			Source:       models.IssueSourcePMAgent,
+			Source:       models.IssueSourceAgent,
 			RepositoryID: session.RepositoryID,
 			Title:        *session.Title,
 		}
@@ -6071,19 +6050,6 @@ func manualSessionReferences(issue *models.Issue) []models.SessionInputReference
 		references = append(references, reference)
 	}
 	return references
-}
-
-func outcomeFromRunStatus(status models.SessionStatus) models.PMDecisionOutcome {
-	switch status {
-	case models.SessionStatusCompleted:
-		return models.PMDecisionOutcomeSucceeded
-	case models.SessionStatusFailed:
-		return models.PMDecisionOutcomeFailed
-	case models.SessionStatusNeedsHumanGuidance:
-		return models.PMDecisionOutcomeStillOpen
-	default:
-		return ""
-	}
 }
 
 // checkConcurrency verifies the org hasn't exceeded its concurrent run limit.

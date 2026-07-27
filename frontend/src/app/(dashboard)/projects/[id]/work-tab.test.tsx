@@ -3,7 +3,7 @@ import { describe, it, expect, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
-import type { Project, ProjectTask, ProjectCycle } from "@/lib/types";
+import type { Project, ProjectTask } from "@/lib/types";
 import { WorkTab } from "./work-tab";
 
 vi.mock("next/link", () => ({
@@ -53,8 +53,6 @@ const mockProject: Project = {
   total_tasks: 4,
   completed_tasks: 1,
   failed_tasks: 1,
-  proposed_by_pm: false,
-  source_issue_ids: [],
   created_at: new Date().toISOString(),
   updated_at: new Date().toISOString(),
 };
@@ -87,20 +85,10 @@ const mockTasks: ProjectTask[] = [
   },
 ];
 
-const mockCycles: ProjectCycle[] = [
-  {
-    id: "cycle-1", project_id: "proj-1", org_id: "org-1",
-    cycle_number: 1, analysis: "First planning cycle analysis",
-    decisions: {}, progress_pct: 25,
-    tasks_completed_this_cycle: 1, tasks_failed_this_cycle: 0, tasks_created_this_cycle: 4,
-    created_at: new Date().toISOString(),
-  },
-];
-
 describe("WorkTab", () => {
   it("renders task board with columns", () => {
     renderWithProviders(
-      <WorkTab project={mockProject} tasks={mockTasks} cycles={mockCycles} />,
+      <WorkTab project={mockProject} tasks={mockTasks} />,
     );
     expect(screen.getByText("Task board")).toBeInTheDocument();
     expect(screen.getByText("To do")).toBeInTheDocument();
@@ -111,7 +99,7 @@ describe("WorkTab", () => {
 
   it("renders task titles in correct columns", () => {
     renderWithProviders(
-      <WorkTab project={mockProject} tasks={mockTasks} cycles={mockCycles} />,
+      <WorkTab project={mockProject} tasks={mockTasks} />,
     );
     expect(screen.getByText("Pending Task")).toBeInTheDocument();
     expect(screen.getByText("Running Task")).toBeInTheDocument();
@@ -122,14 +110,14 @@ describe("WorkTab", () => {
 
   it("shows retry button for failed tasks", () => {
     renderWithProviders(
-      <WorkTab project={mockProject} tasks={mockTasks} cycles={mockCycles} />,
+      <WorkTab project={mockProject} tasks={mockTasks} />,
     );
     expect(screen.getByText("Retry")).toBeInTheDocument();
   });
 
   it("shows PR links for tasks with PR URLs", () => {
     renderWithProviders(
-      <WorkTab project={mockProject} tasks={mockTasks} cycles={mockCycles} />,
+      <WorkTab project={mockProject} tasks={mockTasks} />,
     );
     const prLinks = screen.getAllByText("PR");
     expect(prLinks.length).toBeGreaterThan(0);
@@ -137,28 +125,28 @@ describe("WorkTab", () => {
 
   it("renders empty state when no tasks", () => {
     renderWithProviders(
-      <WorkTab project={mockProject} tasks={[]} cycles={[]} />,
+      <WorkTab project={mockProject} tasks={[]} />,
     );
     expect(screen.getByText(/No tasks yet/)).toBeInTheDocument();
   });
 
   it("shows task description when present", () => {
     renderWithProviders(
-      <WorkTab project={mockProject} tasks={mockTasks} cycles={mockCycles} />,
+      <WorkTab project={mockProject} tasks={mockTasks} />,
     );
     expect(screen.getByText("Doing work")).toBeInTheDocument();
   });
 
   it("renders Pull Requests section for tasks with PRs", () => {
     renderWithProviders(
-      <WorkTab project={mockProject} tasks={mockTasks} cycles={mockCycles} />,
+      <WorkTab project={mockProject} tasks={mockTasks} />,
     );
     expect(screen.getByText("Pull requests")).toBeInTheDocument();
   });
 
   it("does not render legacy planning cycle data", () => {
     renderWithProviders(
-      <WorkTab project={mockProject} tasks={mockTasks} cycles={mockCycles} />,
+      <WorkTab project={mockProject} tasks={mockTasks} />,
     );
     expect(screen.queryByText("Planning cycles")).not.toBeInTheDocument();
     expect(screen.queryByText("Cycle #1")).not.toBeInTheDocument();
@@ -168,14 +156,14 @@ describe("WorkTab", () => {
   it("does not render PR section when no tasks have PRs", () => {
     const tasksWithoutPRs = mockTasks.map((t) => ({ ...t, pr_url: undefined }));
     renderWithProviders(
-      <WorkTab project={mockProject} tasks={tasksWithoutPRs} cycles={[]} />,
+      <WorkTab project={mockProject} tasks={tasksWithoutPRs} />,
     );
     expect(screen.queryByText("Pull requests")).not.toBeInTheDocument();
   });
 
   it("does not render cycles section when no cycles", () => {
     renderWithProviders(
-      <WorkTab project={mockProject} tasks={mockTasks} cycles={[]} />,
+      <WorkTab project={mockProject} tasks={mockTasks} />,
     );
     expect(screen.queryByText("Planning cycles")).not.toBeInTheDocument();
   });
@@ -184,7 +172,7 @@ describe("WorkTab", () => {
     const user = userEvent.setup();
 
     renderWithProviders(
-      <WorkTab project={mockProject} tasks={mockTasks} cycles={[]} />,
+      <WorkTab project={mockProject} tasks={mockTasks} />,
     );
 
     // Click "Add task" to show form
@@ -223,7 +211,7 @@ describe("WorkTab", () => {
     );
 
     renderWithProviders(
-      <WorkTab project={mockProject} tasks={mockTasks} cycles={[]} />,
+      <WorkTab project={mockProject} tasks={mockTasks} />,
     );
 
     await user.click(screen.getByText("Add task"));
@@ -239,7 +227,7 @@ describe("WorkTab", () => {
     const user = userEvent.setup();
 
     renderWithProviders(
-      <WorkTab project={mockProject} tasks={mockTasks} cycles={[]} />,
+      <WorkTab project={mockProject} tasks={mockTasks} />,
     );
 
     await user.click(screen.getByText("Add task"));
@@ -266,7 +254,7 @@ describe("WorkTab", () => {
     ];
 
     renderWithProviders(
-      <WorkTab project={mockProject} tasks={tasksWithComplexity} cycles={[]} />,
+      <WorkTab project={mockProject} tasks={tasksWithComplexity} />,
     );
 
     expect(screen.getByText("hard")).toBeInTheDocument();
@@ -291,7 +279,7 @@ describe("WorkTab", () => {
     ];
 
     renderWithProviders(
-      <WorkTab project={mockProject} tasks={tasksWithRun} cycles={[]} />,
+      <WorkTab project={mockProject} tasks={tasksWithRun} />,
     );
 
     const runLink = screen.getByText("Session").closest("a");

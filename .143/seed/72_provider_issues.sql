@@ -96,12 +96,12 @@ SET org_id = EXCLUDED.org_id,
 INSERT INTO priority_scores (
   id, issue_id, org_id, score, customer_impact_score, severity_score,
   recency_score, revenue_risk_score, direction_alignment, factors,
-  eligible_for_agent, computed_at
+ computed_at
 )
 VALUES
-  ('00000000-0000-4000-a000-000000000615'::uuid, '00000000-0000-4000-a000-000000000605'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 96, 25, 35, 20, 6, 10, '{"signals":["critical_sentry","active_customers","recent_regression"]}'::jsonb, true, now() - interval '8 minutes'),
-  ('00000000-0000-4000-a000-000000000616'::uuid, '00000000-0000-4000-a000-000000000606'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 64, 10, 20, 15, 4, 15, '{"signals":["triaged","provider_payload","integration_reliability"]}'::jsonb, true, now() - interval '45 minutes'),
-  ('00000000-0000-4000-a000-000000000617'::uuid, '00000000-0000-4000-a000-000000000607'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 91, 18, 30, 20, 8, 15, '{"signals":["pagerduty","high_urgency","linked_service"]}'::jsonb, true, now() - interval '6 minutes')
+  ('00000000-0000-4000-a000-000000000615'::uuid, '00000000-0000-4000-a000-000000000605'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 96, 25, 35, 20, 6, 10, '{"signals":["critical_sentry","active_customers","recent_regression"]}'::jsonb, now() - interval '8 minutes'),
+  ('00000000-0000-4000-a000-000000000616'::uuid, '00000000-0000-4000-a000-000000000606'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 64, 10, 20, 15, 4, 15, '{"signals":["triaged","provider_payload","integration_reliability"]}'::jsonb, now() - interval '45 minutes'),
+  ('00000000-0000-4000-a000-000000000617'::uuid, '00000000-0000-4000-a000-000000000607'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 91, 18, 30, 20, 8, 15, '{"signals":["pagerduty","high_urgency","linked_service"]}'::jsonb, now() - interval '6 minutes')
 ON CONFLICT (issue_id) DO UPDATE
 SET score = EXCLUDED.score,
     customer_impact_score = EXCLUDED.customer_impact_score,
@@ -110,7 +110,6 @@ SET score = EXCLUDED.score,
     revenue_risk_score = EXCLUDED.revenue_risk_score,
     direction_alignment = EXCLUDED.direction_alignment,
     factors = EXCLUDED.factors,
-    eligible_for_agent = EXCLUDED.eligible_for_agent,
     computed_at = EXCLUDED.computed_at;
 
 INSERT INTO complexity_estimates (

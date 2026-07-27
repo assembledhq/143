@@ -29,49 +29,6 @@ func render(name string, data any) string {
 	return buf.String()
 }
 
-// ─── PM ──────────────────────────────────────────────────────────────────────
-
-// PMSystemPromptData holds the dynamic values for the PM system prompt.
-type PMSystemPromptData struct {
-	AvailableSlots     int
-	MaxConcurrent      int
-	ActiveProjectCount int
-}
-
-// PMSystemPrompt renders the PM planning session system prompt.
-func PMSystemPrompt(data PMSystemPromptData) string {
-	return render("pm_system_prompt.template", data)
-}
-
-// PMBootstrapPromptData holds the dynamic values for the PM bootstrap prompt.
-type PMBootstrapPromptData struct {
-	SkillsDoc string // CLI skills doc from GenerateSkillsDoc
-	HasNotion bool
-	HasLinear bool
-	HasSentry bool
-	HasGitHub bool
-}
-
-// PMBootstrapPrompt renders the system prompt for the PM context bootstrap agent.
-func PMBootstrapPrompt(data PMBootstrapPromptData) string {
-	return render("pm_bootstrap.template", data)
-}
-
-// PMRefreshPromptData holds the dynamic values for the PM context refresh prompt.
-type PMRefreshPromptData struct {
-	SkillsDoc    string
-	HasNotion    bool
-	HasLinear    bool
-	HasSentry    bool
-	HasGitHub    bool
-	LastSyncedAt string // RFC3339 timestamp of last refresh
-}
-
-// PMRefreshPrompt renders the system prompt for the PM context refresh agent.
-func PMRefreshPrompt(data PMRefreshPromptData) string {
-	return render("pm_context_refresh.template", data)
-}
-
 // ─── Validation ──────────────────────────────────────────────────────────────
 
 // DirectionCheckPrompt returns the system prompt for validating diff alignment.
@@ -409,25 +366,6 @@ func AutomationGoalDeepImprovementPrompt(data AutomationGoalDeepImprovementPromp
 // SlackSummarizerPrompt returns the system prompt for Slack thread analysis.
 func SlackSummarizerPrompt() string {
 	return render("slack_summarizer_prompt.template", nil)
-}
-
-// ─── Project ─────────────────────────────────────────────────────────────────
-
-// ProjectGeneratePrompt returns the system prompt for AI project generation.
-func ProjectGeneratePrompt() string {
-	return render("project_generate_prompt.template", nil)
-}
-
-// ProjectCycleSystemPromptData holds the dynamic values for the project cycle system prompt.
-type ProjectCycleSystemPromptData struct {
-	Title string
-	Goal  string
-	ID    string
-}
-
-// ProjectCycleSystemPrompt renders the system prompt for project-scoped PM cycles.
-func ProjectCycleSystemPrompt(data ProjectCycleSystemPromptData) string {
-	return render("project_cycle_system_prompt.template", data)
 }
 
 // ─── PR Content ──────────────────────────────────────────────────────────────

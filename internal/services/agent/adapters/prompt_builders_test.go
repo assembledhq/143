@@ -15,7 +15,7 @@ import (
 // buildSystemPrompt
 // ---------------------------------------------------------------------------
 
-func TestBuildSystemPrompt_IncludesPMContext(t *testing.T) {
+func TestBuildSystemPrompt_IncludesExecutionContext(t *testing.T) {
 	t.Parallel()
 
 	issue := &models.Issue{
@@ -23,20 +23,23 @@ func TestBuildSystemPrompt_IncludesPMContext(t *testing.T) {
 	}
 	input := &agent.AgentInput{
 		Issue: issue,
-		PMContext: &agent.PMTaskContext{
-			Approach:      "Check handlers/billing.go:42",
-			Risk:          "Be careful with retries",
-			Reasoning:     "High impact",
-			RelatedIssues: []string{"Payment timeout"},
-			RootCause:     "Missing nil check",
+		ExecutionContext: &agent.ExecutionContext{
+			ExecutionBrief:    "Check handlers/billing.go:42",
+			Risk:              "Be careful with retries",
+			PlanningReasoning: "High impact",
+			RelatedIssues:     []string{"Payment timeout"},
+			RootCause:         "Missing nil check",
 		},
 	}
 
 	prompt := buildSystemPrompt(input)
-	require.Contains(t, prompt, "Product Manager Analysis", "system prompt should include PM context header")
-	require.Contains(t, prompt, "High impact", "system prompt should include PM reasoning")
-	require.Contains(t, prompt, "Check handlers/billing.go:42", "system prompt should include PM approach")
-	require.Contains(t, prompt, "Missing nil check", "system prompt should include PM root cause")
+	require.Contains(t, prompt, "Execution Context", "system prompt should include the neutral execution-context header")
+	require.Contains(t, prompt, "Planning reasoning", "system prompt should label planning reasoning neutrally")
+	require.Contains(t, prompt, "High impact", "system prompt should include planning reasoning")
+	require.Contains(t, prompt, "Execution brief", "system prompt should label the execution brief neutrally")
+	require.Contains(t, prompt, "Check handlers/billing.go:42", "system prompt should include the execution brief")
+	require.Contains(t, prompt, "Missing nil check", "system prompt should include the root-cause context")
+	require.NotContains(t, prompt, "Product Manager", "system prompt should not expose removed PM terminology")
 }
 
 func TestBuildSystemPrompt_IncludesRevisionContext(t *testing.T) {
@@ -169,9 +172,9 @@ func TestBuildSystemPrompt_AnswerOnlyUsesAnswerPreamble(t *testing.T) {
 	input := &agent.AgentInput{
 		PromptStyle: agent.PromptStyleAnswerOnly,
 		UserMessage: "does our slack bot post notifications when a job finishes?",
-		PMContext: &agent.PMTaskContext{
-			Approach:  "This should not appear",
-			Reasoning: "Neither should this",
+		ExecutionContext: &agent.ExecutionContext{
+			ExecutionBrief:    "This should not appear",
+			PlanningReasoning: "Neither should this",
 		},
 		ContextDocs: []string{"Use Go 1.24"},
 	}
@@ -182,7 +185,7 @@ func TestBuildSystemPrompt_AnswerOnlyUsesAnswerPreamble(t *testing.T) {
 	require.Contains(t, systemPrompt, "answer-only", "answer-only prompts should use the dedicated answer preamble")
 	require.Contains(t, systemPrompt, "Do not modify files", "answer-only prompts should forbid file modifications")
 	require.NotContains(t, systemPrompt, "Write tests", "answer-only prompts should not include coding-task test instructions")
-	require.NotContains(t, systemPrompt, "Product Manager Analysis", "answer-only prompts should not include PM implementation framing")
+	require.NotContains(t, systemPrompt, "Execution Context", "answer-only prompts should not include execution planning")
 	require.Contains(t, systemPrompt, "Repository Conventions", "answer-only prompts should still include repo conventions")
 	require.Contains(t, systemPrompt, "Use Go 1.24", "answer-only prompts should preserve repository context docs")
 	require.Equal(t, "does our slack bot post notifications when a job finishes?", userPrompt, "answer-only prompts should pass through the raw Slack question")
@@ -284,9 +287,9 @@ func TestBuildSystemPrompt_AutomationRunMatchesSessionStyle(t *testing.T) {
 		UserMessage:       "Update stale dependencies and run the focused test suite.",
 		ContextDocs:       []string{"Use Go 1.24"},
 		IntegrationSkills: "# Integration Tools\n\nUse 143-tools ...",
-		PMContext: &agent.PMTaskContext{
-			Approach:  "This should not appear",
-			Reasoning: "Neither should this",
+		ExecutionContext: &agent.ExecutionContext{
+			ExecutionBrief:    "This should not appear",
+			PlanningReasoning: "Neither should this",
 		},
 		LinkedIssues: []models.SessionIssueSnapshotEntry{
 			{
@@ -304,7 +307,7 @@ func TestBuildSystemPrompt_AutomationRunMatchesSessionStyle(t *testing.T) {
 	require.Contains(t, prompt, "Repository Conventions", "automation runs should keep repository convention docs like normal sessions")
 	require.Contains(t, prompt, "Use Go 1.24", "automation runs should include repository convention content")
 	require.Contains(t, prompt, "# Integration Tools", "automation runs should keep integration skills like normal sessions")
-	require.NotContains(t, prompt, "Product Manager Analysis", "automation runs should not inject a PM analysis wrapper around the goal")
+	require.NotContains(t, prompt, "Execution Context", "automation runs should not inject an execution-context wrapper around the goal")
 }
 
 // ---------------------------------------------------------------------------
@@ -503,9 +506,9 @@ func TestBuildUserPrompt_AutomationRunReturnsRawGoal(t *testing.T) {
 		Issue:       &models.Issue{Title: "Nightly automation"},
 		PromptStyle: agent.PromptStyleRawTask,
 		UserMessage: goal,
-		PMContext: &agent.PMTaskContext{
-			Approach:  goal,
-			Reasoning: "This should not be wrapped into a PM section.",
+		ExecutionContext: &agent.ExecutionContext{
+			ExecutionBrief:    goal,
+			PlanningReasoning: "This should not be wrapped into an execution-context section.",
 		},
 	}
 

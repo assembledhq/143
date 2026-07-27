@@ -189,8 +189,6 @@ export function WorkTab({
 }: {
   project: Project;
   tasks: ProjectTask[];
-  /** Legacy test/data callers may still supply archived cycle data; it is intentionally not rendered. */
-  cycles?: unknown[];
 }) {
   return (
     <div className="space-y-2 divide-y divide-border">
