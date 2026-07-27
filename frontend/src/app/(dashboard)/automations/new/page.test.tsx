@@ -1486,7 +1486,7 @@ describe("NewAutomationPage", () => {
     );
     await user.click(
       screen.getByRole("checkbox", {
-        name: "When a PR is marked ready for review",
+        name: "When a PR is ready for review",
       }),
     );
     await user.click(

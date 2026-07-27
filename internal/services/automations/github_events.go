@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agentcapabilities"
@@ -22,6 +24,7 @@ type githubAutomationStore interface {
 type githubAutomationRunStore interface {
 	CreateRunInTx(ctx context.Context, tx pgx.Tx, run *models.AutomationRun) (bool, error)
 	ClaimTriggerDedupe(ctx context.Context, orgID, automationID uuid.UUID, dedupeKey string, expiresAt time.Time) (bool, error)
+	ClaimTriggerDedupeInTx(ctx context.Context, orgID, automationID uuid.UUID, tx pgx.Tx, dedupeKey string, expiresAt time.Time) (bool, error)
 }
 
 type githubAutomationJobStore interface {
@@ -33,12 +36,15 @@ type githubEventTxStarter interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
+const PullRequestActionOpened = "opened"
+
 type GitHubEventTriggerRequest struct {
 	OrgID             uuid.UUID
 	RepositoryID      uuid.UUID
 	Event             models.AutomationGitHubEvent
 	Repository        string
 	PullRequestNumber int
+	PullRequestAction string
 	PullRequestURL    string
 	PullRequestTitle  string
 	HeadSHA           string
@@ -51,6 +57,15 @@ type GitHubEventTriggerRequest struct {
 	BaseBranch        string
 	Path              string
 	ReviewState       string
+	// RequireLabelFilter marks pull_request labeled deliveries. These
+	// deliveries re-evaluate lifecycle triggers only for automations whose
+	// label filter contains ChangedLabel.
+	RequireLabelFilter bool
+	ChangedLabel       string
+	// TrackLabelFilterLifecycle is set per automation after its filters are
+	// decoded. Normal lifecycle deliveries record a durable seen-marker;
+	// label re-evaluations use that marker to avoid a second run.
+	TrackLabelFilterLifecycle bool
 	// Labels are the pull request's GitHub labels. LabelsKnown distinguishes
 	// "the PR genuinely has no labels" from "this webhook payload does not
 	// carry labels" (check_suite / check_run), which decides whether the label
@@ -68,6 +83,10 @@ type GitHubEventTriggerService struct {
 	labels       githubLabelResolver
 	logger       zerolog.Logger
 	now          func() time.Time
+
+	labelMemoMu sync.Mutex
+	labelMemo   map[githubLabelMemoKey]githubLabelMemoEntry
+	labelGroup  singleflight.Group
 }
 
 type githubCapabilityResolver interface {
@@ -83,7 +102,27 @@ type githubLabelResolver interface {
 	ResolvePullRequestLabels(ctx context.Context, orgID, repositoryID uuid.UUID, pullRequestNumber int) ([]string, error)
 }
 
-const githubFeedbackDebounceWindow = 90 * time.Second
+const (
+	githubFeedbackDebounceWindow = 90 * time.Second
+	// Ninety days comfortably covers delayed human labeling on unusually
+	// long-lived pull requests while keeping lifecycle markers eligible for
+	// routine cleanup instead of growing the dedupe table permanently.
+	githubLifecycleDedupeRetention = 90 * 24 * time.Hour
+	githubLabelMemoTTL             = 30 * time.Second
+	githubLabelMemoMaxEntries      = 256
+)
+
+type githubLabelMemoKey struct {
+	OrgID             uuid.UUID
+	RepositoryID      uuid.UUID
+	PullRequestNumber int
+	HeadSHA           string
+}
+
+type githubLabelMemoEntry struct {
+	labels    []string
+	expiresAt time.Time
+}
 
 func NewGitHubEventTriggerService(automations githubAutomationStore, runs githubAutomationRunStore, jobs githubAutomationJobStore, txStarter githubEventTxStarter, logger zerolog.Logger) *GitHubEventTriggerService {
 	return &GitHubEventTriggerService{
@@ -104,6 +143,15 @@ func (s *GitHubEventTriggerService) SetLabelResolver(resolver githubLabelResolve
 	s.labels = resolver
 }
 
+// RememberKnownLabels refreshes the short-lived PR label memo from an
+// authoritative webhook payload without emitting an automation event.
+func (s *GitHubEventTriggerService) RememberKnownLabels(req GitHubEventTriggerRequest) {
+	if s == nil {
+		return
+	}
+	s.rememberKnownLabels(normalizeGitHubEventTriggerRequest(req))
+}
+
 func (s *GitHubEventTriggerService) TriggerGitHubEvent(ctx context.Context, req GitHubEventTriggerRequest) error {
 	if s == nil || s.automations == nil || s.runs == nil || s.jobs == nil || s.txStarter == nil {
 		return nil
@@ -116,28 +164,41 @@ func (s *GitHubEventTriggerService) TriggerGitHubEvent(ctx context.Context, req 
 	if err != nil {
 		return fmt.Errorf("list github event automations: %w", err)
 	}
-	req = s.withResolvedLabels(ctx, automations, req)
+	s.rememberKnownLabels(req)
+	var resolvedLabelReq *GitHubEventTriggerRequest
 	for _, automation := range automations {
-		if err := s.triggerAutomation(ctx, automation, req); err != nil {
+		filters, err := decodeGitHubEventFilters(automation)
+		if err != nil {
+			return err
+		}
+		if req.RequireLabelFilter && (len(filters.Labels) == 0 || !containsFold(filters.Labels, req.ChangedLabel)) {
+			continue
+		}
+		automationReq := req
+		if len(filters.Labels) > 0 && !req.LabelsKnown {
+			if resolvedLabelReq == nil {
+				resolved := s.withResolvedLabels(ctx, req)
+				resolvedLabelReq = &resolved
+			}
+			automationReq = *resolvedLabelReq
+		}
+		automationReq.TrackLabelFilterLifecycle = len(filters.Labels) > 0 && isPullRequestLifecycleEvent(req.Event)
+		if err := s.triggerAutomation(ctx, automation, automationReq); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// withResolvedLabels fills in PR labels for payloads that omit them, but only
-// when at least one candidate automation filters on labels. A failed lookup
-// leaves LabelsKnown false, which the label filter treats as "no match" — an
-// automation scoped to a label should not fire on a PR we cannot confirm
-// carries it.
-func (s *GitHubEventTriggerService) withResolvedLabels(ctx context.Context, automations []models.Automation, req GitHubEventTriggerRequest) GitHubEventTriggerRequest {
+// withResolvedLabels fills in PR labels for one label-filtered automation.
+// The caller invokes it inside the per-automation loop and reuses the result
+// for other label-filtered siblings; automations without that filter keep the
+// original request and do not receive resolved labels in their snapshots.
+func (s *GitHubEventTriggerService) withResolvedLabels(ctx context.Context, req GitHubEventTriggerRequest) GitHubEventTriggerRequest {
 	if req.LabelsKnown || s.labels == nil || req.PullRequestNumber <= 0 {
 		return req
 	}
-	if !s.anyAutomationFiltersOnLabels(automations) {
-		return req
-	}
-	labels, err := s.labels.ResolvePullRequestLabels(ctx, req.OrgID, req.RepositoryID, req.PullRequestNumber)
+	labels, err := s.resolvePullRequestLabels(ctx, req)
 	if err != nil {
 		s.logger.Warn().
 			Err(err).
@@ -151,23 +212,116 @@ func (s *GitHubEventTriggerService) withResolvedLabels(ctx context.Context, auto
 	return req
 }
 
-func (s *GitHubEventTriggerService) anyAutomationFiltersOnLabels(automations []models.Automation) bool {
-	for _, automation := range automations {
-		filters, err := decodeGitHubEventFilters(automation)
-		if err != nil {
-			// Surfaced properly by triggerAutomation; here a bad filter blob
-			// simply does not warrant an API call.
-			s.logger.Debug().
-				Err(err).
-				Str("automation_id", automation.ID.String()).
-				Msg("skipping label resolution for automation with undecodable github event filters")
-			continue
+func (s *GitHubEventTriggerService) resolvePullRequestLabels(ctx context.Context, req GitHubEventTriggerRequest) ([]string, error) {
+	key, memoizable := githubLabelMemoKeyForRequest(req)
+	if !memoizable {
+		return s.labels.ResolvePullRequestLabels(ctx, req.OrgID, req.RepositoryID, req.PullRequestNumber)
+	}
+	if labels, ok := s.memoizedLabels(key); ok {
+		return labels, nil
+	}
+
+	value, err, _ := s.labelGroup.Do(key.singleflightKey(), func() (any, error) {
+		if labels, ok := s.memoizedLabels(key); ok {
+			return labels, nil
 		}
-		if len(filters.Labels) > 0 {
-			return true
+		labels, err := s.labels.ResolvePullRequestLabels(ctx, req.OrgID, req.RepositoryID, req.PullRequestNumber)
+		if err != nil {
+			return nil, err
+		}
+		labels = normalizeGitHubLabels(labels)
+		s.memoizeLabels(key, labels)
+		return labels, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	labels, ok := value.([]string)
+	if !ok {
+		return nil, fmt.Errorf("resolve pull request labels returned unexpected type %T", value)
+	}
+	return append([]string(nil), labels...), nil
+}
+
+// rememberKnownLabels refreshes the short CI-burst memo from authoritative
+// webhook payloads. The memo deliberately accepts at most 30 seconds of
+// staleness after a label removal: hits never extend the TTL, while the bound
+// avoids repeated PR GETs for the paired check_run/check_suite deliveries
+// GitHub emits for one CI completion. This bounded tradeoff avoids a broader
+// cache or infrastructure dependency on the webhook hot path.
+func (s *GitHubEventTriggerService) rememberKnownLabels(req GitHubEventTriggerRequest) {
+	if !req.LabelsKnown {
+		return
+	}
+	key, ok := githubLabelMemoKeyForRequest(req)
+	if !ok {
+		return
+	}
+	s.memoizeLabels(key, req.Labels)
+}
+
+func githubLabelMemoKeyForRequest(req GitHubEventTriggerRequest) (githubLabelMemoKey, bool) {
+	headSHA := strings.TrimSpace(req.HeadSHA)
+	if req.OrgID == uuid.Nil || req.RepositoryID == uuid.Nil || req.PullRequestNumber <= 0 || headSHA == "" {
+		return githubLabelMemoKey{}, false
+	}
+	return githubLabelMemoKey{
+		OrgID:             req.OrgID,
+		RepositoryID:      req.RepositoryID,
+		PullRequestNumber: req.PullRequestNumber,
+		HeadSHA:           headSHA,
+	}, true
+}
+
+func (k githubLabelMemoKey) singleflightKey() string {
+	return fmt.Sprintf("%s:%s:%d:%s", k.OrgID, k.RepositoryID, k.PullRequestNumber, k.HeadSHA)
+}
+
+func (s *GitHubEventTriggerService) memoizedLabels(key githubLabelMemoKey) ([]string, bool) {
+	s.labelMemoMu.Lock()
+	defer s.labelMemoMu.Unlock()
+
+	entry, ok := s.labelMemo[key]
+	if !ok {
+		return nil, false
+	}
+	if !entry.expiresAt.After(s.now()) {
+		delete(s.labelMemo, key)
+		return nil, false
+	}
+	return append([]string(nil), entry.labels...), true
+}
+
+func (s *GitHubEventTriggerService) memoizeLabels(key githubLabelMemoKey, labels []string) {
+	now := s.now()
+	s.labelMemoMu.Lock()
+	defer s.labelMemoMu.Unlock()
+
+	if s.labelMemo == nil {
+		s.labelMemo = make(map[githubLabelMemoKey]githubLabelMemoEntry)
+	}
+	if _, exists := s.labelMemo[key]; !exists && len(s.labelMemo) >= githubLabelMemoMaxEntries {
+		for memoKey, entry := range s.labelMemo {
+			if !entry.expiresAt.After(now) {
+				delete(s.labelMemo, memoKey)
+			}
+		}
+		if len(s.labelMemo) >= githubLabelMemoMaxEntries {
+			var oldestKey githubLabelMemoKey
+			var oldestExpiry time.Time
+			for memoKey, entry := range s.labelMemo {
+				if oldestExpiry.IsZero() || entry.expiresAt.Before(oldestExpiry) {
+					oldestKey = memoKey
+					oldestExpiry = entry.expiresAt
+				}
+			}
+			delete(s.labelMemo, oldestKey)
 		}
 	}
-	return false
+	s.labelMemo[key] = githubLabelMemoEntry{
+		labels:    append([]string(nil), normalizeGitHubLabels(labels)...),
+		expiresAt: now.Add(githubLabelMemoTTL),
+	}
 }
 
 func (s *GitHubEventTriggerService) triggerAutomation(ctx context.Context, automation models.Automation, req GitHubEventTriggerRequest) error {
@@ -226,6 +380,14 @@ func (s *GitHubEventTriggerService) triggerAutomation(ctx context.Context, autom
 		return fmt.Errorf("begin github automation run tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	lifecycleClaimed, err := s.claimLifecycleDedupeInTx(ctx, tx, automation, req)
+	if err != nil {
+		return err
+	}
+	if !lifecycleClaimed {
+		return nil
+	}
 
 	created, err := s.runs.CreateRunInTx(ctx, tx, &run)
 	if err != nil {
@@ -372,6 +534,7 @@ func githubEventGoalSnapshot(goal string, req GitHubEventTriggerRequest) string 
 
 func normalizeGitHubEventTriggerRequest(req GitHubEventTriggerRequest) GitHubEventTriggerRequest {
 	req.Repository = strings.TrimSpace(req.Repository)
+	req.PullRequestAction = strings.TrimSpace(req.PullRequestAction)
 	req.PullRequestURL = strings.TrimSpace(req.PullRequestURL)
 	if req.PullRequestURL == "" && req.Repository != "" && req.PullRequestNumber > 0 {
 		req.PullRequestURL = fmt.Sprintf("https://github.com/%s/pull/%d", strings.Trim(req.Repository, "/"), req.PullRequestNumber)
@@ -392,6 +555,7 @@ func normalizeGitHubEventTriggerRequest(req GitHubEventTriggerRequest) GitHubEve
 	}
 	req.EventID = strings.TrimSpace(req.EventID)
 	req.DedupeGroupID = strings.TrimSpace(req.DedupeGroupID)
+	req.ChangedLabel = strings.TrimSpace(req.ChangedLabel)
 	req.Labels = normalizeGitHubLabels(req.Labels)
 	return req
 }
@@ -455,6 +619,51 @@ func (s *GitHubEventTriggerService) claimDedupe(ctx context.Context, automation 
 	return claimed, nil
 }
 
+func (s *GitHubEventTriggerService) claimLifecycleDedupeInTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	automation models.Automation,
+	req GitHubEventTriggerRequest,
+) (bool, error) {
+	if !req.TrackLabelFilterLifecycle {
+		return true, nil
+	}
+	claimed, err := s.runs.ClaimTriggerDedupeInTx(
+		ctx,
+		automation.OrgID,
+		automation.ID,
+		tx,
+		githubLifecycleDedupeKey(req),
+		s.now().Add(githubLifecycleDedupeRetention),
+	)
+	if err != nil {
+		return false, fmt.Errorf("claim github lifecycle trigger dedupe: %w", err)
+	}
+	// A labeled replay and the one-shot opened delivery represent the same
+	// lifecycle occurrence, whichever GitHub delivers first. Repeatable
+	// lifecycle actions retain their existing behavior and merely leave the
+	// marker that a later labeled replay consults.
+	if req.RequireLabelFilter || req.PullRequestAction == PullRequestActionOpened {
+		return claimed, nil
+	}
+	return true, nil
+}
+
+func githubLifecycleDedupeKey(req GitHubEventTriggerRequest) string {
+	return fmt.Sprintf("lifecycle:%s:%d", req.RepositoryID, req.PullRequestNumber)
+}
+
+func isPullRequestLifecycleEvent(event models.AutomationGitHubEvent) bool {
+	switch event {
+	case models.AutomationGitHubEventPullRequestOpened,
+		models.AutomationGitHubEventPullRequestUpdated,
+		models.AutomationGitHubEventPullRequestReadyForReview:
+		return true
+	default:
+		return false
+	}
+}
+
 func githubTriggerDedupeKey(req GitHubEventTriggerRequest) string {
 	if !isGitHubFeedbackEvent(req.Event) {
 		return ""
@@ -503,7 +712,7 @@ func automationMatchesGitHubEventFilters(automation models.Automation, req GitHu
 	// Labels are matched strictly: an event whose labels are unknown (payload
 	// carried none and the API lookup was unavailable or failed) cannot satisfy
 	// a label filter.
-	if len(filters.Labels) > 0 && !matchesAnyFold(filters.Labels, req.Labels) {
+	if len(filters.Labels) > 0 && (!req.LabelsKnown || !matchesAnyFold(filters.Labels, req.Labels)) {
 		return false, nil
 	}
 	if len(filters.FeedbackTypes) > 0 && isGitHubFeedbackEvent(req.Event) && !containsFold(filters.FeedbackTypes, githubFeedbackType(req.Event)) {

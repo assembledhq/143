@@ -768,7 +768,15 @@ func (s *AutomationRunStore) CountRecentProviderTriggerRuns(ctx context.Context,
 }
 
 func (s *AutomationRunStore) ClaimTriggerDedupe(ctx context.Context, orgID, automationID uuid.UUID, dedupeKey string, expiresAt time.Time) (bool, error) {
-	row := s.db.QueryRow(ctx, `
+	return claimAutomationTriggerDedupe(ctx, s.db, orgID, automationID, dedupeKey, expiresAt)
+}
+
+func (s *AutomationRunStore) ClaimTriggerDedupeInTx(ctx context.Context, orgID, automationID uuid.UUID, tx pgx.Tx, dedupeKey string, expiresAt time.Time) (bool, error) {
+	return claimAutomationTriggerDedupe(ctx, tx, orgID, automationID, dedupeKey, expiresAt)
+}
+
+func claimAutomationTriggerDedupe(ctx context.Context, q DBTX, orgID, automationID uuid.UUID, dedupeKey string, expiresAt time.Time) (bool, error) {
+	row := q.QueryRow(ctx, `
 		WITH cleanup AS (
 			DELETE FROM automation_trigger_dedupes
 			WHERE expires_at <= now()

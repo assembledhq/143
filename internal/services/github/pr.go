@@ -184,6 +184,7 @@ type LinearMilestoneEnqueuer func(ctx context.Context, orgID, sessionID uuid.UUI
 
 type AutomationEventTriggerer interface {
 	TriggerGitHubEvent(ctx context.Context, req automationevents.GitHubEventTriggerRequest) error
+	RememberKnownLabels(req automationevents.GitHubEventTriggerRequest)
 }
 
 // SetLinearMilestoneEnqueuer wires the Linear post-event hook.
@@ -2479,10 +2480,11 @@ func githubLabelNames(labels []githubLabelRef) []string {
 
 // PullRequestEvent represents a GitHub pull_request webhook event.
 type PullRequestEvent struct {
-	Action     string     `json:"action"`
-	Number     int        `json:"number"`
-	OwnerOrgID *uuid.UUID `json:"-"`
-	DeliveryID string     `json:"-"`
+	Action     string         `json:"action"`
+	Number     int            `json:"number"`
+	OwnerOrgID *uuid.UUID     `json:"-"`
+	DeliveryID string         `json:"-"`
+	Label      githubLabelRef `json:"label"`
 	Sender     struct {
 		Login string `json:"login"`
 		Type  string `json:"type"`
@@ -2490,6 +2492,7 @@ type PullRequestEvent struct {
 	PR struct {
 		Merged         bool       `json:"merged"`
 		Draft          bool       `json:"draft"`
+		State          string     `json:"state"`
 		HTMLURL        string     `json:"html_url"`
 		Title          string     `json:"title"`
 		Body           string     `json:"body"`
@@ -2523,21 +2526,24 @@ type PullRequestEvent struct {
 
 // HandlePullRequestEvent processes pull_request webhook events.
 func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullRequestEvent) error {
-	if automationEvents := automationGitHubEventsForPullRequest(event); len(automationEvents) > 0 {
+	if automationEvents := automationGitHubEventsForPullRequest(event); len(automationEvents) > 0 || event.Action == "unlabeled" {
 		s.triggerGitHubAutomationEvents(ctx, automationevents.GitHubEventTriggerRequest{
-			Repository:        event.Repository.FullName,
-			PullRequestNumber: event.Number,
-			PullRequestURL:    event.PR.HTMLURL,
-			PullRequestTitle:  event.PR.Title,
-			HeadSHA:           event.PR.Head.SHA,
-			Actor:             event.Sender.Login,
-			ActorType:         event.Sender.Type,
-			Body:              githubPullRequestBody(event.PR.Title, event.PR.Body),
-			ProviderEventID:   event.DeliveryID,
-			EventID:           fmt.Sprintf("pull_request:%s:%d", event.Action, event.Number),
-			BaseBranch:        event.PR.Base.Ref,
-			Labels:            githubLabelNames(event.PR.Labels),
-			LabelsKnown:       true,
+			Repository:         event.Repository.FullName,
+			PullRequestNumber:  event.Number,
+			PullRequestAction:  event.Action,
+			PullRequestURL:     event.PR.HTMLURL,
+			PullRequestTitle:   event.PR.Title,
+			HeadSHA:            event.PR.Head.SHA,
+			Actor:              event.Sender.Login,
+			ActorType:          event.Sender.Type,
+			Body:               githubPullRequestBody(event.PR.Title, event.PR.Body),
+			ProviderEventID:    event.DeliveryID,
+			EventID:            fmt.Sprintf("pull_request:%s:%d", event.Action, event.Number),
+			BaseBranch:         event.PR.Base.Ref,
+			Labels:             githubLabelNames(event.PR.Labels),
+			LabelsKnown:        true,
+			RequireLabelFilter: event.Action == "labeled",
+			ChangedLabel:       event.Label.Name,
 		}, automationEvents, event.OwnerOrgID, event.Repository.ID)
 	}
 
@@ -2849,14 +2855,16 @@ func (s *PRService) enqueuePRPreviewSurfaceSyncForRepo(ctx context.Context, repo
 // non-draft "opened" is both "PR opened" and "PR ready for review" (GitHub
 // sends no separate ready_for_review delivery for a PR that opens ready), and
 // "ready_for_review" stays an update so automations that predate the dedicated
-// trigger keep firing.
+// trigger keep firing. Applying a configured label to an open PR re-evaluates
+// these lifecycle events for label-filtered automations; one marker for the
+// PR's lifecycle occurrence prevents that cross-delivery re-evaluation from
+// creating a second run.
 //
-// Emitting several events for one delivery does not multiply runs: automation
-// runs are idempotent on (automation_id, provider, provider_event_id), and all
-// events from one delivery share a provider event ID.
+// Within one delivery, the provider event ID still deduplicates multi-event
+// fan-out for automations subscribed to more than one mapped event.
 func automationGitHubEventsForPullRequest(event PullRequestEvent) []models.AutomationGitHubEvent {
 	switch event.Action {
-	case "opened":
+	case automationevents.PullRequestActionOpened:
 		events := []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestOpened}
 		if !event.PR.Draft {
 			events = append(events, models.AutomationGitHubEventPullRequestReadyForReview)
@@ -2864,8 +2872,8 @@ func automationGitHubEventsForPullRequest(event PullRequestEvent) []models.Autom
 		return events
 	case "ready_for_review":
 		return []models.AutomationGitHubEvent{
-			models.AutomationGitHubEventPullRequestUpdated,
 			models.AutomationGitHubEventPullRequestReadyForReview,
+			models.AutomationGitHubEventPullRequestUpdated,
 		}
 	case "reopened":
 		events := []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestUpdated}
@@ -2875,6 +2883,18 @@ func automationGitHubEventsForPullRequest(event PullRequestEvent) []models.Autom
 		return events
 	case "synchronize", "edited", "converted_to_draft":
 		return []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestUpdated}
+	case "labeled":
+		if event.PR.State != "open" {
+			return nil
+		}
+		events := []models.AutomationGitHubEvent{
+			models.AutomationGitHubEventPullRequestOpened,
+			models.AutomationGitHubEventPullRequestUpdated,
+		}
+		if !event.PR.Draft {
+			events = append(events, models.AutomationGitHubEventPullRequestReadyForReview)
+		}
+		return events
 	case "closed":
 		if event.PR.Merged {
 			return []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestMerged}
@@ -3908,7 +3928,7 @@ func (s *PRService) triggerGitHubAutomations(ctx context.Context, req automation
 // event, for instance. The repository and head lookups are shared across all of
 // them so a single delivery costs a single resolution.
 func (s *PRService) triggerGitHubAutomationEvents(ctx context.Context, req automationevents.GitHubEventTriggerRequest, events []models.AutomationGitHubEvent, ownerOrgID *uuid.UUID, githubRepoID int64) {
-	if s.automationEventTriggers == nil || s.repos == nil || len(events) == 0 {
+	if s.automationEventTriggers == nil || s.repos == nil {
 		return
 	}
 	repo, err := s.repositoryFromWebhookRepo(ctx, ownerOrgID, githubRepoID, req.Repository)
@@ -3921,6 +3941,10 @@ func (s *PRService) triggerGitHubAutomationEvents(ctx context.Context, req autom
 	req.OrgID = repo.OrgID
 	req.RepositoryID = repo.ID
 	s.populateGitHubAutomationHead(ctx, &repo, &req)
+	if len(events) == 0 {
+		s.automationEventTriggers.RememberKnownLabels(req)
+		return
+	}
 	for _, event := range events {
 		eventReq := req
 		eventReq.Event = event
