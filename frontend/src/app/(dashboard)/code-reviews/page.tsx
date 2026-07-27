@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent, ComponentProps, KeyboardEvent, ReactNode } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { parseAsStringLiteral, useQueryState } from "nuqs";
 import {
   AlertTriangle,
@@ -88,7 +88,6 @@ import type {
 } from "@/lib/types";
 
 const ALL_REPOSITORIES = "all";
-const NO_REPOSITORY = "none";
 const ALL_OUTCOMES = "all";
 const ALL_RISKS = "all";
 const ALL_STATUSES = "all";
@@ -433,7 +432,6 @@ export default function CodeReviewsPage() {
   const canManagePolicy = user?.role === "admin";
   const canRetryReviews = user?.role === "admin" || user?.role === "member";
   const [repositoryFilter, setRepositoryFilter] = useState(ALL_REPOSITORIES);
-  const [githubRepositoryId, setGitHubRepositoryId] = useState(NO_REPOSITORY);
   const [outcomeFilter, setOutcomeParam] = useQueryState(
     "outcome",
     parseAsStringLiteral(OUTCOME_FILTER_VALUES).withDefault(ALL_OUTCOMES),
@@ -476,8 +474,6 @@ export default function CodeReviewsPage() {
     }),
     [outcomeFilter, reviewRepositoryId, riskFilter, search, statusFilter],
   );
-  const githubRepositorySelected = githubRepositoryId !== NO_REPOSITORY;
-
   const repositoriesQuery = useQuery({
     queryKey: queryKeys.repositories.all,
     queryFn: () => api.repositories.list(),
@@ -544,10 +540,12 @@ export default function CodeReviewsPage() {
     queryKey: queryKeys.codexAuth.status,
     queryFn: () => api.codexAuth.status(),
   });
-  const githubTriggerQuery = useQuery({
-    queryKey: queryKeys.codeReviews.githubTrigger(githubRepositorySelected ? githubRepositoryId : null),
-    queryFn: () => api.codeReviews.getGitHubTrigger(githubRepositoryId),
-    enabled: githubRepositorySelected,
+  const repositories = repositoriesQuery.data?.data ?? [];
+  const githubTriggerQueries = useQueries({
+    queries: repositories.map((repository) => ({
+      queryKey: queryKeys.codeReviews.githubTrigger(repository.id),
+      queryFn: () => api.codeReviews.getGitHubTrigger(repository.id),
+    })),
   });
   const templatesQuery = useQuery({
     queryKey: queryKeys.codeReviews.templates,
@@ -676,7 +674,6 @@ export default function CodeReviewsPage() {
     () => reviews.find((review) => review.session_id === selectedEvidenceSessionId) ?? null,
     [reviews, selectedEvidenceSessionId],
   );
-  const repositories = repositoriesQuery.data?.data ?? [];
   const templates = templatesQuery.data?.data ?? [];
   const selectedTemplate = templates.find((template) => template.key === selectedTemplateKey);
   const orgSettings = (settingsQuery.data?.data?.settings ?? {}) as OrgSettings;
@@ -1032,35 +1029,36 @@ export default function CodeReviewsPage() {
               </fieldset>
               <SectionGroup
                 title="GitHub setup"
-                description="Choose a repository and manage the reviewer entry point used to request reviews."
+                description="See which repositories can receive review requests from GitHub and manage each reviewer entry point."
                 className="border-t border-border pt-6"
               >
-                <div className="space-y-2">
-                  <div className="w-full sm:max-w-sm">
-                    <FilterSelect
-                      label="GitHub reviewer repository"
-                      value={githubRepositoryId}
-                      onValueChange={setGitHubRepositoryId}
-                      info="Choose a repository to configure its GitHub reviewer entry point. The review policy above remains the same for every repository."
-                    >
-                      <SelectItem value={NO_REPOSITORY}>Select a repository</SelectItem>
-                      {repositories.map((repository) => (
-                        <SelectItem key={repository.id} value={repository.id}>{repository.full_name}</SelectItem>
-                      ))}
-                    </FilterSelect>
-                  </div>
-                  <GitHubTriggerPanel
-                    repositorySelected={githubRepositorySelected}
-                    trigger={githubTriggerQuery.data?.data}
-                    isLoading={githubTriggerQuery.isLoading || githubTriggerQuery.isFetching}
-                    errorMessage={apiErrorMessage(githubTriggerQuery.error)}
-                    setupErrorMessage={apiErrorMessage(setupGitHubTrigger.error)}
-                    setupPending={setupGitHubTrigger.isPending}
-                    deletePending={deleteGitHubTrigger.isPending}
-                    canManage={canManagePolicy}
-                    onSetup={() => githubRepositorySelected && setupGitHubTrigger.mutate(githubRepositoryId)}
-                    onDelete={() => githubRepositorySelected && deleteGitHubTrigger.mutate(githubRepositoryId)}
-                  />
+                <div className="space-y-3" aria-label="GitHub reviewer repositories">
+                  {repositoriesQuery.isLoading ? (
+                    <div className="rounded-md border border-border p-4 text-sm text-muted-foreground">Loading repositories…</div>
+                  ) : repositories.length === 0 ? (
+                    <div className="rounded-md border border-border p-4 text-sm text-muted-foreground">
+                      No GitHub repositories are connected to this organization.
+                    </div>
+                  ) : repositories.map((repository, index) => {
+                    const triggerQuery = githubTriggerQueries[index];
+                    const setupPending = setupGitHubTrigger.isPending && setupGitHubTrigger.variables === repository.id;
+                    const deletePending = deleteGitHubTrigger.isPending && deleteGitHubTrigger.variables === repository.id;
+                    return (
+                      <GitHubTriggerPanel
+                        key={repository.id}
+                        repositoryName={repository.full_name}
+                        trigger={triggerQuery?.data?.data}
+                        isLoading={triggerQuery?.isLoading || triggerQuery?.isFetching}
+                        errorMessage={apiErrorMessage(triggerQuery?.error)}
+                        setupErrorMessage={setupGitHubTrigger.variables === repository.id ? apiErrorMessage(setupGitHubTrigger.error) : null}
+                        setupPending={setupPending}
+                        deletePending={deletePending}
+                        canManage={canManagePolicy}
+                        onSetup={() => setupGitHubTrigger.mutate(repository.id)}
+                        onDelete={() => deleteGitHubTrigger.mutate(repository.id)}
+                      />
+                    );
+                  })}
                 </div>
               </SectionGroup>
               <fieldset disabled={!canManagePolicy} className="border-t border-border pt-2">
@@ -1725,7 +1723,7 @@ function OutcomeControl({
 }
 
 function GitHubTriggerPanel({
-  repositorySelected,
+  repositoryName,
   trigger,
   isLoading,
   errorMessage,
@@ -1736,7 +1734,7 @@ function GitHubTriggerPanel({
   onSetup,
   onDelete,
 }: {
-  repositorySelected: boolean;
+  repositoryName: string;
   trigger?: CodeReviewGitHubTriggerResponse;
   isLoading: boolean;
   errorMessage: string | null;
@@ -1755,7 +1753,6 @@ function GitHubTriggerPanel({
   const reviewer = trigger?.team_reviewer ?? "@org/143-code-reviewer";
   const setupDisabledReason = githubTriggerSetupDisabledReason({
     canManage,
-    repositorySelected,
     authRequired,
     setupPending,
     deletePending,
@@ -1763,39 +1760,21 @@ function GitHubTriggerPanel({
   });
 
   return (
-    <div className="rounded-md border border-border p-4">
+    <div className="rounded-md border border-border p-4" role="region" aria-label={`${repositoryName} GitHub reviewer`}>
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <div className="text-sm font-medium text-foreground">GitHub reviewer</div>
+            <div className="text-sm font-medium text-foreground">{repositoryName}</div>
             <SettingInfoTooltip
-              label="GitHub reviewer"
+              label={`${repositoryName} GitHub reviewer`}
               description="Adds a repository reviewer in GitHub that starts 143 reviews when requested. When unconfigured, no GitHub reviewer request can start a review; organization policy remains stored but inactive for that repository trigger."
             />
             <Badge variant={githubTriggerStatusVariant(status)}>{isLoading ? "Checking" : githubTriggerStatusLabel(status)}</Badge>
             {ready ? <span className="text-xs font-medium text-foreground">{reviewer}</span> : null}
           </div>
           <div className="mt-1 text-xs text-muted-foreground">
-            {repositorySelected
-              ? "People select this team from GitHub's Reviewers menu on a PR to start a 143 code review."
-              : "Select a repository to set up the reviewer that appears in GitHub's Reviewers menu."}
+            People select this team from GitHub&apos;s Reviewers menu on a PR to start a 143 code review.
           </div>
-          {repositorySelected && !ready ? (
-            <div className="mt-3 grid gap-2 text-xs sm:grid-cols-3">
-              <div className="rounded-md bg-muted/40 px-3 py-2">
-                <div className="text-muted-foreground">Menu reviewer</div>
-                <div className="mt-1 truncate font-medium text-foreground">{reviewer}</div>
-              </div>
-              <div className="rounded-md bg-muted/40 px-3 py-2">
-                <div className="text-muted-foreground">Repository access</div>
-                <div className="mt-1 font-medium text-foreground">Read</div>
-              </div>
-              <div className="rounded-md bg-muted/40 px-3 py-2">
-                <div className="text-muted-foreground">Team slug</div>
-                <div className="mt-1 truncate font-medium text-foreground">{trigger?.team_slug ?? "143-code-reviewer"}</div>
-              </div>
-            </div>
-          ) : null}
           {trigger?.message ? (
             <div className="mt-3 flex items-start gap-2 text-xs text-muted-foreground">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -1866,14 +1845,12 @@ function GitHubReviewerManage({ reviewer, teamSlug, deleteDisabled, onDelete }: 
 
 function githubTriggerSetupDisabledReason({
   canManage,
-  repositorySelected,
   authRequired,
   setupPending,
   deletePending,
   isLoading,
 }: {
   canManage: boolean;
-  repositorySelected: boolean;
   authRequired: boolean;
   setupPending: boolean;
   deletePending: boolean;
@@ -1881,9 +1858,6 @@ function githubTriggerSetupDisabledReason({
 }): string | undefined {
   if (!canManage) {
     return "Only organization administrators can configure the GitHub reviewer menu option.";
-  }
-  if (!repositorySelected) {
-    return "Select a repository before setting up the GitHub reviewer menu option.";
   }
   if (authRequired) {
     return "Connect your GitHub account first so 143 can set up the GitHub reviewer menu option.";
