@@ -1,6 +1,6 @@
 -- Reference context, human-authored project data, and automation improvements.
 
-INSERT INTO pm_documents (
+INSERT INTO reference_documents (
   id, org_id, title, content, doc_type, sort_order, source_type,
   source_id, source_meta, last_synced_at, created_by, created_at,
   updated_at, active, logical_id, content_hash
@@ -45,7 +45,7 @@ SET title = EXCLUDED.title,
     content_hash = EXCLUDED.content_hash,
     updated_at = EXCLUDED.updated_at;
 
-INSERT INTO pm_document_set_pins (id, org_id, created_at)
+INSERT INTO reference_context_set_pins (id, org_id, created_at)
 VALUES (
   '00000000-0000-4000-a000-000000000864'::uuid,
   '00000000-0000-4000-a000-000000000001'::uuid,
@@ -53,12 +53,12 @@ VALUES (
 )
 ON CONFLICT (id) DO NOTHING;
 
-INSERT INTO pm_document_set_pin_members (pin_id, document_id)
+INSERT INTO reference_context_set_pin_members (pin_id, reference_document_id)
 VALUES
   ('00000000-0000-4000-a000-000000000864'::uuid, '00000000-0000-4000-a000-000000000860'::uuid)
 ON CONFLICT DO NOTHING;
 
-DELETE FROM session_pm_context
+DELETE FROM session_execution_context
 WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid
   AND project_task_id IN (
     '00000000-0000-4000-a000-000000000880'::uuid,
@@ -388,24 +388,13 @@ SET file_name = EXCLUDED.file_name,
     sort_order = EXCLUDED.sort_order,
     updated_at = EXCLUDED.updated_at;
 
-INSERT INTO project_source_issues (project_id, issue_id)
-VALUES
-  ('00000000-0000-4000-a000-000000000200'::uuid, '00000000-0000-4000-a000-000000000602'::uuid),
-  ('00000000-0000-4000-a000-000000000200'::uuid, '00000000-0000-4000-a000-000000000604'::uuid),
-  ('00000000-0000-4000-a000-000000000200'::uuid, '00000000-0000-4000-a000-000000000605'::uuid),
-  ('00000000-0000-4000-a000-000000000200'::uuid, '00000000-0000-4000-a000-000000000607'::uuid),
-  ('00000000-0000-4000-a000-000000000201'::uuid, '00000000-0000-4000-a000-000000000601'::uuid),
-  ('00000000-0000-4000-a000-000000000201'::uuid, '00000000-0000-4000-a000-000000000606'::uuid)
-ON CONFLICT DO NOTHING;
-
-INSERT INTO session_pm_context (
-  session_id, org_id, pm_plan_id, pm_approach, pm_reasoning,
+INSERT INTO session_execution_context (
+  session_id, org_id, execution_brief, planning_reasoning,
   project_task_id, created_at, updated_at
 )
 VALUES (
   '00000000-0000-4000-a000-000000000305'::uuid,
   '00000000-0000-4000-a000-000000000001'::uuid,
-  NULL,
   'Start from provider incident evidence, inspect gateway timeout paths, then propose the narrowest remediation.',
   'The PagerDuty incident has a repository/service mapping and a bounded investigation path.',
   '00000000-0000-4000-a000-000000000885'::uuid,
@@ -413,39 +402,19 @@ VALUES (
   now() - interval '6 minutes'
 )
 ON CONFLICT (session_id) DO UPDATE
-SET pm_plan_id = EXCLUDED.pm_plan_id,
-    pm_approach = EXCLUDED.pm_approach,
-    pm_reasoning = EXCLUDED.pm_reasoning,
+SET execution_brief = EXCLUDED.execution_brief,
+    planning_reasoning = EXCLUDED.planning_reasoning,
     project_task_id = EXCLUDED.project_task_id,
     updated_at = EXCLUDED.updated_at;
 
 -- Remove legacy PM/Autopilot-only demo artifacts on both fresh and upgraded
 -- demo databases. The manual reference document and its immutable pin remain
 -- because eval reproducibility still owns that data.
-DELETE FROM project_cycles
-WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid
-  AND id IN (
-    '00000000-0000-4000-a000-000000000894'::uuid,
-    '00000000-0000-4000-a000-000000000895'::uuid
-  );
-
-DELETE FROM pm_decision_log
-WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid
-  AND id IN (
-    '00000000-0000-4000-a000-000000000871'::uuid,
-    '00000000-0000-4000-a000-000000000872'::uuid,
-    '00000000-0000-4000-a000-000000000873'::uuid
-  );
-
-DELETE FROM pm_plans
-WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid
-  AND id = '00000000-0000-4000-a000-000000000870'::uuid;
-
-DELETE FROM pm_document_set_pin_members
+DELETE FROM reference_context_set_pin_members
 WHERE pin_id = '00000000-0000-4000-a000-000000000864'::uuid
-  AND document_id = '00000000-0000-4000-a000-000000000862'::uuid;
+  AND reference_document_id = '00000000-0000-4000-a000-000000000862'::uuid;
 
-DELETE FROM pm_documents
+DELETE FROM reference_documents
 WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid
   AND id = '00000000-0000-4000-a000-000000000862'::uuid;
 

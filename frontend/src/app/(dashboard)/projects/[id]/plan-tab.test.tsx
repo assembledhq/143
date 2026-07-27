@@ -68,8 +68,6 @@ const mockProject: Project = {
   total_tasks: 0,
   completed_tasks: 0,
   failed_tasks: 0,
-  proposed_by_pm: false,
-  source_issue_ids: [],
   created_at: new Date().toISOString(),
   updated_at: new Date().toISOString(),
 };

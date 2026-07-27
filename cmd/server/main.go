@@ -51,10 +51,10 @@ import (
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/ownerloss"
 	pagerdutysvc "github.com/assembledhq/143/internal/services/pagerduty"
-	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/preview"
 	previewproviders "github.com/assembledhq/143/internal/services/preview/providers"
 	"github.com/assembledhq/143/internal/services/prioritization"
+	projectservice "github.com/assembledhq/143/internal/services/projects"
 	reviewloopservice "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
@@ -433,12 +433,8 @@ func main() {
 		evalBootstrapStore = db.NewEvalBootstrapStore(pool)
 		priorityScoreStore := db.NewPriorityScoreStore(pool)
 		complexityEstimateStore := db.NewComplexityEstimateStore(pool)
-		pmPlanStore := db.NewPMPlanStore(pool)
-		pmDecisionLogStore := db.NewPMDecisionLogStore(pool)
 		projectStore := db.NewProjectStore(pool)
 		projectTaskStore := db.NewProjectTaskStore(pool)
-		projectCycleStore := db.NewProjectCycleStore(pool)
-		pmDocumentStore := db.NewPMDocumentStore(pool)
 		automationStore := db.NewAutomationStore(pool)
 		automationRunStore := db.NewAutomationRunStore(pool)
 		previewStore := db.NewPreviewStore(pool)
@@ -526,8 +522,8 @@ func main() {
 		if canBuildServices(cfg, logger) {
 			services = buildServices(cfg, pool, logger, codexAuthSvc, claudeCodeAuthSvc, credentialStore, userCredentialStore, codingCredentialStore, issueStore, sessionStore,
 				jobStore, orgStore, repoStore, pullRequestStore,
-				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
-				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
+				deployStore, priorityScoreStore, complexityEstimateStore,
+				projectStore, projectTaskStore, integrationStore,
 				sessionMessageStore, automationRunStore, evalBootstrapStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, sessionStreams, fileReader)
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
@@ -800,11 +796,9 @@ func main() {
 			jobStore,
 			orgStore,
 			integrationStore,
-			pmPlanStore,
 			repoStore,
 			logger,
 		)
-		scheduler.SetPMDocStore(pmDocumentStore)
 		scheduler.SetAutomationStores(automationStore, automationRunStore, pool)
 		scheduler.SetCapabilityResolver(agentcapabilities.NewService(db.NewAgentCapabilityPolicyStore(pool)))
 		scheduler.SetSessionStore(sessionStore)
@@ -1295,12 +1289,8 @@ func buildServices(
 	deployStore *db.DeployStore,
 	priorityScoreStore *db.PriorityScoreStore,
 	complexityEstimateStore *db.ComplexityEstimateStore,
-	pmPlanStore *db.PMPlanStore,
-	pmDecisionLogStore *db.PMDecisionLogStore,
 	projectStore *db.ProjectStore,
 	projectTaskStore *db.ProjectTaskStore,
-	projectCycleStore *db.ProjectCycleStore,
-	pmDocumentStore *db.PMDocumentStore,
 	integrationStore *db.IntegrationStore,
 	sessionMessageStore *db.SessionMessageStore,
 	automationRunStore *db.AutomationRunStore,
@@ -1431,7 +1421,7 @@ func buildServices(
 	threadRuntimeStore := db.NewThreadRuntimeStore(pool)
 	sessionSandboxHolderStore := db.NewSessionSandboxHolderStore(pool)
 	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
-	projectTaskUpdater := pm.NewProjectHooks(projectTaskStore, projectStore, logger)
+	projectTaskUpdater := projectservice.NewHooks(projectTaskStore, projectStore, logger)
 	automationStore := db.NewAutomationStore(pool)
 	automationRunUpdater := automations.NewAutomationHooks(automationRunStore, logger)
 	automationGoalImprovementStore := db.NewAutomationGoalImprovementStore(pool)
@@ -1522,7 +1512,6 @@ func buildServices(
 		SessionThreads:             sessionThreadStore,
 		SessionIssueLinks:          db.NewSessionIssueLinkStore(pool),
 		IssueSnapshots:             db.NewSessionTurnIssueSnapshotStore(pool),
-		DecisionLog:                pmDecisionLogStore,
 		ProjectTasks:               projectTaskUpdater,
 		AutomationRuns:             automationRunUpdater,
 		AutomationGoalImprovements: automationGoalImprovementUpdater,
@@ -1594,32 +1583,8 @@ func buildServices(
 	// Prioritization service.
 	prioritizationSvc := prioritization.NewService(
 		issueStore, priorityScoreStore, complexityEstimateStore,
-		sessionStore, orgStore, jobStore, llmClient, logger,
+		orgStore, llmClient, logger,
 	)
-
-	pmSvc := pm.NewService(
-		issueStore,
-		sessionStore,
-		pullRequestStore,
-		orgStore,
-		repoStore,
-		jobStore,
-		pmPlanStore,
-		pmDecisionLogStore,
-		sandboxProvider,
-		agentAdapters,
-		agentEnv,
-		ghSvc,
-		logger,
-	)
-	pmSvc.SetUsageTracker(usageTracker)
-	pmSvc.SetProjectStores(projectStore, projectTaskStore, projectCycleStore)
-	pmSvc.SetPMDocumentStore(pmDocumentStore)
-	pmSvc.SetSlackStores(integrationStore, credentialStore)
-	pmSvc.SetSessionLogStore(sessionLogStore)
-	pmSvc.SetSessionMessageStore(sessionMessageStore)
-	pmSvc.SetInternalAPI(cfg.BaseURL, cfg.SessionSecret)
-	pmSvc.SetSkillsBuilder(orchestrator)
 	threadSvc := threadservice.NewService(
 		sessionThreadStore,
 		sessionStore,
@@ -1781,7 +1746,6 @@ func buildServices(
 		ProjectTasks:    projectTaskUpdater,
 		AutomationRuns:  automationRunUpdater,
 		Prioritization:  prioritizationSvc,
-		PM:              pmSvc,
 		SlackSummarizer: slackSummarizer,
 		LLM:             llmClient,
 		GitHub:          ghSvc,

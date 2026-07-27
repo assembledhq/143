@@ -180,20 +180,20 @@ func TestAuditDetailHelpers_CoverOptionalFields(t *testing.T) {
 	})
 }
 
-func TestPMDocumentAuditDetails(t *testing.T) {
+func TestReferenceDocumentAuditDetails(t *testing.T) {
 	t.Parallel()
 
 	sourceURL := "https://example.com/context"
 	sourceID := "slack:123"
 	createdBy := uuid.New()
 	lastSyncedAt := time.Date(2026, 4, 21, 16, 0, 0, 0, time.UTC)
-	oldDoc := &models.PMDocument{
+	oldDoc := &models.ReferenceDocument{
 		ID:           uuid.New(),
 		LogicalID:    uuid.New(),
 		Title:        "Old context",
 		Content:      "short",
 		DocType:      "context",
-		SourceType:   models.PMDocSourceURL,
+		SourceType:   models.ReferenceDocSourceURL,
 		SourceURL:    &sourceURL,
 		SourceID:     &sourceID,
 		Active:       true,
@@ -208,7 +208,7 @@ func TestPMDocumentAuditDetails(t *testing.T) {
 	newDoc.SourceURL = &newSourceURL
 	newDoc.SourceID = &newSourceID
 
-	snap := pmDocumentAuditSnapshot(oldDoc)
+	snap := referenceDocumentAuditSnapshot(oldDoc)
 	require.Equal(t, oldDoc.ID.String(), snap["document_id"], "document snapshot should include document ID")
 	require.Equal(t, oldDoc.LogicalID.String(), snap["logical_id"], "document snapshot should include logical ID")
 	require.Equal(t, "Old context", snap["title"], "document snapshot should include title")
@@ -218,7 +218,7 @@ func TestPMDocumentAuditDetails(t *testing.T) {
 	require.Equal(t, createdBy.String(), snap["created_by"], "document snapshot should include creator")
 	require.Equal(t, lastSyncedAt.Format(time.RFC3339Nano), snap["last_synced_at"], "document snapshot should include last sync time")
 
-	changes := pmDocumentAuditDiff(oldDoc, &newDoc)
+	changes := referenceDocumentAuditDiff(oldDoc, &newDoc)
 	require.Equal(t, map[string]any{"before": "Old context", "after": "New context"}, changes["title"], "document diff should include title change")
 	require.Equal(t, map[string]any{"before": len("short"), "after": len("longer content")}, changes["content_length"], "document diff should include content length change")
 	require.Equal(t, map[string]any{"before": sourceURL, "after": newSourceURL}, changes["source_url"], "document diff should include source URL change")
@@ -228,26 +228,26 @@ func TestPMDocumentAuditDetails(t *testing.T) {
 func TestEvalAuditDetails(t *testing.T) {
 	t.Parallel()
 
-	pmDocumentSetPinID := uuid.New()
+	referenceDocumentSetPinID := uuid.New()
 	orgSettingsVersionID := uuid.New()
 	createdBy := uuid.New()
 	task := &models.EvalTask{
-		ID:                   uuid.New(),
-		RepoID:               uuid.New(),
-		Name:                 "Checkout regression",
-		BaseCommitSHA:        "0123456789abcdef0123456789abcdef01234567",
-		SolutionCommitSHA:    strPtr("abcdef0123456789abcdef0123456789abcdef01"),
-		SolutionDiff:         strPtr("diff --git a/file b/file"),
-		PassThreshold:        0.8,
-		Source:               models.EvalTaskSourceManual,
-		SourcePRNumber:       intPtr(42),
-		Complexity:           models.EvalComplexityModerate,
-		Tags:                 []string{"checkout", "regression"},
-		PMDocumentSetPinID:   &pmDocumentSetPinID,
-		OrgSettingsVersionID: &orgSettingsVersionID,
-		CreatedBy:            &createdBy,
-		ContextOverrides:     json.RawMessage(`{"mode":"full"}`),
-		ScoringCriteria:      json.RawMessage(`[{"name":"correctness","weight":1}]`),
+		ID:                       uuid.New(),
+		RepoID:                   uuid.New(),
+		Name:                     "Checkout regression",
+		BaseCommitSHA:            "0123456789abcdef0123456789abcdef01234567",
+		SolutionCommitSHA:        strPtr("abcdef0123456789abcdef0123456789abcdef01"),
+		SolutionDiff:             strPtr("diff --git a/file b/file"),
+		PassThreshold:            0.8,
+		Source:                   models.EvalTaskSourceManual,
+		SourcePRNumber:           intPtr(42),
+		Complexity:               models.EvalComplexityModerate,
+		Tags:                     []string{"checkout", "regression"},
+		ReferenceContextSetPinID: &referenceDocumentSetPinID,
+		OrgSettingsVersionID:     &orgSettingsVersionID,
+		CreatedBy:                &createdBy,
+		ContextOverrides:         json.RawMessage(`{"mode":"full"}`),
+		ScoringCriteria:          json.RawMessage(`[{"name":"correctness","weight":1}]`),
 	}
 	snap := evalTaskAuditSnapshot(task)
 	require.Equal(t, task.ID.String(), snap["eval_task_id"], "eval task snapshot should include task ID")
@@ -255,7 +255,7 @@ func TestEvalAuditDetails(t *testing.T) {
 	require.Equal(t, "Checkout regression", snap["name"], "eval task snapshot should include name")
 	require.Equal(t, true, snap["has_solution_diff"], "eval task snapshot should include solution diff presence without diff content")
 	require.Equal(t, 42, snap["source_pr_number"], "eval task snapshot should include source PR number")
-	require.Equal(t, pmDocumentSetPinID.String(), snap["pm_document_set_pin_id"], "eval task snapshot should include document pin ID")
+	require.Equal(t, referenceDocumentSetPinID.String(), snap["reference_context_set_pin_id"], "eval task snapshot should include document pin ID")
 	require.Equal(t, orgSettingsVersionID.String(), snap["org_settings_version_id"], "eval task snapshot should include org settings version ID")
 	require.Equal(t, createdBy.String(), snap["created_by"], "eval task snapshot should include creator")
 

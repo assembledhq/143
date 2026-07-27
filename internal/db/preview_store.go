@@ -4471,7 +4471,7 @@ func (s *PreviewStore) CountSessionsWithPanelOpenedBySource(ctx context.Context,
 			    OR CASE
 			      WHEN EXISTS (
 			        SELECT 1
-			        FROM session_pm_context spm
+			        FROM session_execution_context spm
 			        WHERE spm.org_id = sess.org_id
 			          AND spm.session_id = sess.id
 			          AND spm.project_task_id IS NOT NULL

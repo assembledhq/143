@@ -177,36 +177,36 @@ func buildSystemPrompt(input *agent.AgentInput) string {
 		b.WriteString("\n\n")
 	}
 
-	// PM context: inject PM guidance when available (never set for manual sessions).
-	if input.PMContext != nil && !usesRawTaskPrompt(input) && input.PromptStyle != agent.PromptStyleAnswerOnly {
-		b.WriteString("## Product Manager Analysis\n\n")
-		if input.PMContext.Reasoning != "" {
-			b.WriteString("**Why this is a priority:** ")
-			b.WriteString(input.PMContext.Reasoning)
+	// Execution context: inject optional planning guidance when available.
+	if input.ExecutionContext != nil && !usesRawTaskPrompt(input) && input.PromptStyle != agent.PromptStyleAnswerOnly {
+		b.WriteString("## Execution Context\n\n")
+		if input.ExecutionContext.PlanningReasoning != "" {
+			b.WriteString("**Planning reasoning:** ")
+			b.WriteString(input.ExecutionContext.PlanningReasoning)
 			b.WriteString("\n\n")
 		}
-		if input.PMContext.Approach != "" {
-			b.WriteString("**Suggested approach:** ")
-			b.WriteString(input.PMContext.Approach)
+		if input.ExecutionContext.ExecutionBrief != "" {
+			b.WriteString("**Execution brief:** ")
+			b.WriteString(input.ExecutionContext.ExecutionBrief)
 			b.WriteString("\n\n")
 		}
-		if input.PMContext.Risk != "" {
+		if input.ExecutionContext.Risk != "" {
 			b.WriteString("**Risk to watch for:** ")
-			b.WriteString(input.PMContext.Risk)
+			b.WriteString(input.ExecutionContext.Risk)
 			b.WriteString("\n\n")
 		}
-		if len(input.PMContext.RelatedIssues) > 0 {
+		if len(input.ExecutionContext.RelatedIssues) > 0 {
 			b.WriteString("**Related issues (same root cause):**\n")
-			for _, issue := range input.PMContext.RelatedIssues {
+			for _, issue := range input.ExecutionContext.RelatedIssues {
 				b.WriteString("- ")
 				b.WriteString(issue)
 				b.WriteString("\n")
 			}
 			b.WriteString("\n")
 		}
-		if input.PMContext.RootCause != "" {
+		if input.ExecutionContext.RootCause != "" {
 			b.WriteString("**Root cause hypothesis:** ")
-			b.WriteString(input.PMContext.RootCause)
+			b.WriteString(input.ExecutionContext.RootCause)
 			b.WriteString("\n\n")
 		}
 	}

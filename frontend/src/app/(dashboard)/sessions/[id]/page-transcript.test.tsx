@@ -172,7 +172,7 @@ describe('SessionDetailPage transcript and scroll', () => {
     expect(await screen.findByText('Alice Smith')).toBeInTheDocument();
   });
 
-  it('shows System when triggered_by_user_id is not set and no pm_plan_id', async () => {
+  it('shows System for a non-PM session without a triggering user', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
     expect(screen.getByText('System')).toBeInTheDocument();

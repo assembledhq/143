@@ -28,7 +28,7 @@ var sessionTestColumns = []string{
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
-	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
+	"title", "execution_brief", "planning_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "workspace_generation", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
@@ -120,7 +120,7 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		nil, nil, false, &startedAt, &completedAt, nil,
 		nil, nil, nil, false,
 		nil, nil, nil, nil, nil,
-		nil, nil, nil, nil,
+		nil, nil, nil,
 		nil, nil, nil, nil,
 		nil, 0, lastActivityAt, "none", int64(0), nil, nil, nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, workspace_generation, snapshot_key, pending_snapshot_key, pending_snapshot_set_at
 		nil,      // runtime_soft_deadline_at
@@ -1919,29 +1919,6 @@ func TestSessionStore_Begin(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "does not support transactions")
 	})
-}
-
-func TestSessionStore_UpdatePMPlanID(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	store := NewSessionStore(mock)
-
-	// Pinned (intentional tripwire): UpdatePMPlanID must bump last_activity_at
-	// and upsert the PM context outside the sessions row. Today's sole caller
-	// also calls UpdateResult immediately before this, so the bump is
-	// technically redundant on the hot path, but removing it couples
-	// correctness to an unwritten caller contract.
-	mock.ExpectExec(`(?s)WITH bumped AS \(\s*UPDATE sessions\s+SET last_activity_at = now\(\).+INSERT INTO session_pm_context`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
-
-	err = store.UpdatePMPlanID(context.Background(), uuid.New(), uuid.New(), uuid.New())
-	require.NoError(t, err)
-	require.NoError(t, mock.ExpectationsWereMet(), "UpdatePMPlanID must bump last_activity_at")
 }
 
 func TestSessionStore_ResetForRetry(t *testing.T) {

@@ -18,7 +18,7 @@ var pmDocTestCols = []string{
 	"created_by", "created_at", "updated_at",
 }
 
-func newPMDocRow(id, orgID, logicalID uuid.UUID, title, content string, active bool, now time.Time) []any {
+func newReferenceDocRow(id, orgID, logicalID uuid.UUID, title, content string, active bool, now time.Time) []any {
 	return []any{
 		id, orgID, title, content, "roadmap", 0,
 		"manual", nil, nil, nil, nil,
@@ -27,19 +27,19 @@ func newPMDocRow(id, orgID, logicalID uuid.UUID, title, content string, active b
 	}
 }
 
-func TestPMDocumentStore_Create(t *testing.T) {
+func TestReferenceDocumentStore_Create(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	store := NewPMDocumentStore(mock)
+	store := NewReferenceDocumentStore(mock)
 	orgID := uuid.New()
 	generatedID := uuid.New()
 	logicalID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("INSERT INTO pm_documents").
+	mock.ExpectQuery("INSERT INTO reference_documents").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -48,7 +48,7 @@ func TestPMDocumentStore_Create(t *testing.T) {
 				AddRow(generatedID, logicalID, now, now),
 		)
 
-	doc := &models.PMDocument{
+	doc := &models.ReferenceDocument{
 		OrgID:   orgID,
 		Title:   "Roadmap Q3",
 		Content: "Ship versioning",
@@ -62,19 +62,19 @@ func TestPMDocumentStore_Create(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPMDocumentStore_Update_NoChange(t *testing.T) {
+func TestReferenceDocumentStore_Update_NoChange(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	store := NewPMDocumentStore(mock)
+	store := NewReferenceDocumentStore(mock)
 	orgID := uuid.New()
 	docID := uuid.New()
 	logicalID := uuid.New()
 	now := time.Now()
 
-	doc := &models.PMDocument{
+	doc := &models.ReferenceDocument{
 		ID: docID, OrgID: orgID,
 		Title: "Roadmap", Content: "content", DocType: "roadmap",
 		SourceType: "manual", LogicalID: logicalID,
@@ -82,11 +82,11 @@ func TestPMDocumentStore_Update_NoChange(t *testing.T) {
 
 	// Transaction: begin, fetch current (identical), commit (no-op).
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT .+ FROM pm_documents WHERE id .+ AND org_id .+ AND active = true FOR UPDATE").
+	mock.ExpectQuery("SELECT .+ FROM reference_documents WHERE id .+ AND org_id .+ AND active = true FOR UPDATE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmDocTestCols).
-				AddRow(newPMDocRow(docID, orgID, logicalID, "Roadmap", "content", true, now)...),
+				AddRow(newReferenceDocRow(docID, orgID, logicalID, "Roadmap", "content", true, now)...),
 		)
 	mock.ExpectCommit()
 
@@ -95,20 +95,20 @@ func TestPMDocumentStore_Update_NoChange(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPMDocumentStore_Update_WithChanges(t *testing.T) {
+func TestReferenceDocumentStore_Update_WithChanges(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	store := NewPMDocumentStore(mock)
+	store := NewReferenceDocumentStore(mock)
 	orgID := uuid.New()
 	docID := uuid.New()
 	newDocID := uuid.New()
 	logicalID := uuid.New()
 	now := time.Now()
 
-	doc := &models.PMDocument{
+	doc := &models.ReferenceDocument{
 		ID: docID, OrgID: orgID,
 		Title: "Updated Roadmap", Content: "new content", DocType: "roadmap",
 		SourceType: "manual", LogicalID: logicalID,
@@ -116,25 +116,25 @@ func TestPMDocumentStore_Update_WithChanges(t *testing.T) {
 
 	mock.ExpectBegin()
 	// Fetch current (different content).
-	mock.ExpectQuery("SELECT .+ FROM pm_documents WHERE id .+ AND org_id .+ AND active = true FOR UPDATE").
+	mock.ExpectQuery("SELECT .+ FROM reference_documents WHERE id .+ AND org_id .+ AND active = true FOR UPDATE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmDocTestCols).
-				AddRow(newPMDocRow(docID, orgID, logicalID, "Roadmap", "old content", true, now)...),
+				AddRow(newReferenceDocRow(docID, orgID, logicalID, "Roadmap", "old content", true, now)...),
 		)
 	// Deactivate.
-	mock.ExpectExec("UPDATE pm_documents SET active = false").
+	mock.ExpectExec("UPDATE reference_documents SET active = false").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	// Insert new version.
-	mock.ExpectQuery("INSERT INTO pm_documents").
+	mock.ExpectQuery("INSERT INTO reference_documents").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmDocTestCols).
-				AddRow(newPMDocRow(newDocID, orgID, logicalID, "Updated Roadmap", "new content", true, now)...),
+				AddRow(newReferenceDocRow(newDocID, orgID, logicalID, "Updated Roadmap", "new content", true, now)...),
 		)
 	mock.ExpectCommit()
 
@@ -145,13 +145,13 @@ func TestPMDocumentStore_Update_WithChanges(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPMDocumentStore_Restore(t *testing.T) {
+func TestReferenceDocumentStore_Restore(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	store := NewPMDocumentStore(mock)
+	store := NewReferenceDocumentStore(mock)
 	orgID := uuid.New()
 	currentID := uuid.New()
 	oldVersionID := uuid.New()
@@ -161,25 +161,25 @@ func TestPMDocumentStore_Restore(t *testing.T) {
 
 	mock.ExpectBegin()
 	// Fetch old version.
-	mock.ExpectQuery("SELECT .+ FROM pm_documents WHERE id .+ AND org_id").
+	mock.ExpectQuery("SELECT .+ FROM reference_documents WHERE id .+ AND org_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmDocTestCols).
-				AddRow(newPMDocRow(oldVersionID, orgID, logicalID, "Old Title", "old content", false, now)...),
+				AddRow(newReferenceDocRow(oldVersionID, orgID, logicalID, "Old Title", "old content", false, now)...),
 		)
 	// Deactivate current.
-	mock.ExpectQuery("UPDATE pm_documents SET active = false").
+	mock.ExpectQuery("UPDATE reference_documents SET active = false").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"logical_id"}).AddRow(logicalID))
 	// Insert restored version.
-	mock.ExpectQuery("INSERT INTO pm_documents").
+	mock.ExpectQuery("INSERT INTO reference_documents").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmDocTestCols).
-				AddRow(newPMDocRow(restoredID, orgID, logicalID, "Old Title", "old content", true, now)...),
+				AddRow(newReferenceDocRow(restoredID, orgID, logicalID, "Old Title", "old content", true, now)...),
 		)
 	mock.ExpectCommit()
 
@@ -192,13 +192,13 @@ func TestPMDocumentStore_Restore(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPMDocumentStore_Restore_LogicalIDMismatch(t *testing.T) {
+func TestReferenceDocumentStore_Restore_LogicalIDMismatch(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	store := NewPMDocumentStore(mock)
+	store := NewReferenceDocumentStore(mock)
 	orgID := uuid.New()
 	currentID := uuid.New()
 	oldVersionID := uuid.New()
@@ -208,14 +208,14 @@ func TestPMDocumentStore_Restore_LogicalIDMismatch(t *testing.T) {
 
 	mock.ExpectBegin()
 	// Fetch old version — belongs to logicalB.
-	mock.ExpectQuery("SELECT .+ FROM pm_documents WHERE id .+ AND org_id").
+	mock.ExpectQuery("SELECT .+ FROM reference_documents WHERE id .+ AND org_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmDocTestCols).
-				AddRow(newPMDocRow(oldVersionID, orgID, logicalB, "Other Doc", "other content", false, now)...),
+				AddRow(newReferenceDocRow(oldVersionID, orgID, logicalB, "Other Doc", "other content", false, now)...),
 		)
 	// Deactivate current — returns logicalA.
-	mock.ExpectQuery("UPDATE pm_documents SET active = false").
+	mock.ExpectQuery("UPDATE reference_documents SET active = false").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"logical_id"}).AddRow(logicalA))
 	mock.ExpectRollback()
@@ -226,24 +226,24 @@ func TestPMDocumentStore_Restore_LogicalIDMismatch(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPMDocumentStore_ListVersions(t *testing.T) {
+func TestReferenceDocumentStore_ListVersions(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	store := NewPMDocumentStore(mock)
+	store := NewReferenceDocumentStore(mock)
 	orgID := uuid.New()
 	docID := uuid.New()
 	logicalID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM pm_documents").
+	mock.ExpectQuery("SELECT .+ FROM reference_documents").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmDocTestCols).
-				AddRow(newPMDocRow(uuid.New(), orgID, logicalID, "V2", "v2 content", true, now)...).
-				AddRow(newPMDocRow(docID, orgID, logicalID, "V1", "v1 content", false, now.Add(-time.Hour))...),
+				AddRow(newReferenceDocRow(uuid.New(), orgID, logicalID, "V2", "v2 content", true, now)...).
+				AddRow(newReferenceDocRow(docID, orgID, logicalID, "V1", "v1 content", false, now.Add(-time.Hour))...),
 		)
 
 	versions, err := store.ListVersions(context.Background(), orgID, docID, 0)
@@ -254,22 +254,22 @@ func TestPMDocumentStore_ListVersions(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPMDocumentStore_CreateDocumentSetPin(t *testing.T) {
+func TestReferenceDocumentStore_CreateDocumentSetPin(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	store := NewPMDocumentStore(mock)
+	store := NewReferenceDocumentStore(mock)
 	orgID := uuid.New()
 	pinID := uuid.New()
 	now := time.Now()
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO pm_document_set_pins").
+	mock.ExpectQuery("INSERT INTO reference_context_set_pins").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "created_at"}).AddRow(pinID, orgID, now))
-	mock.ExpectExec("INSERT INTO pm_document_set_pin_members").
+	mock.ExpectExec("INSERT INTO reference_context_set_pin_members \\(pin_id, reference_document_id\\)").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 3))
 	mock.ExpectCommit()
@@ -281,24 +281,24 @@ func TestPMDocumentStore_CreateDocumentSetPin(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPMDocumentStore_GetPinMembers(t *testing.T) {
+func TestReferenceDocumentStore_GetPinMembers(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	store := NewPMDocumentStore(mock)
+	store := NewReferenceDocumentStore(mock)
 	orgID := uuid.New()
 	pinID := uuid.New()
 	docID := uuid.New()
 	logicalID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM pm_documents d").
+	mock.ExpectQuery("INNER JOIN reference_context_set_pin_members m ON d.id = m.reference_document_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmDocTestCols).
-				AddRow(newPMDocRow(docID, orgID, logicalID, "Pinned Doc", "pinned content", true, now)...),
+				AddRow(newReferenceDocRow(docID, orgID, logicalID, "Pinned Doc", "pinned content", true, now)...),
 		)
 
 	members, err := store.GetPinMembers(context.Background(), orgID, pinID)
@@ -308,50 +308,17 @@ func TestPMDocumentStore_GetPinMembers(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPMDocumentStore_DeleteByOrgAndSourceType_RefreshAllowed(t *testing.T) {
+func TestReferenceDocumentStore_Delete_SoftDelete(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	store := NewPMDocumentStore(mock)
-	orgID := uuid.New()
-
-	mock.ExpectExec("DELETE FROM pm_documents").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("DELETE", 2))
-
-	err = store.DeleteByOrgAndSourceType(context.Background(), orgID, models.PMDocSourceRefresh)
-	require.NoError(t, err)
-	require.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestPMDocumentStore_DeleteByOrgAndSourceType_NonRefreshRejected(t *testing.T) {
-	t.Parallel()
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	store := NewPMDocumentStore(mock)
-	orgID := uuid.New()
-
-	err = store.DeleteByOrgAndSourceType(context.Background(), orgID, models.PMDocSourceManual)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "restricted to ephemeral source types")
-	require.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestPMDocumentStore_Delete_SoftDelete(t *testing.T) {
-	t.Parallel()
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	store := NewPMDocumentStore(mock)
+	store := NewReferenceDocumentStore(mock)
 	orgID := uuid.New()
 	docID := uuid.New()
 
-	mock.ExpectExec("UPDATE pm_documents SET active = false").
+	mock.ExpectExec("UPDATE reference_documents SET active = false").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
@@ -360,23 +327,23 @@ func TestPMDocumentStore_Delete_SoftDelete(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPMDocumentStore_ListByOrg(t *testing.T) {
+func TestReferenceDocumentStore_ListByOrg(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	store := NewPMDocumentStore(mock)
+	store := NewReferenceDocumentStore(mock)
 	orgID := uuid.New()
 	docID := uuid.New()
 	logicalID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM pm_documents WHERE org_id").
+	mock.ExpectQuery("SELECT .+ FROM reference_documents WHERE org_id").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmDocTestCols).
-				AddRow(newPMDocRow(docID, orgID, logicalID, "Doc 1", "content 1", true, now)...),
+				AddRow(newReferenceDocRow(docID, orgID, logicalID, "Doc 1", "content 1", true, now)...),
 		)
 
 	docs, err := store.ListByOrg(context.Background(), orgID)
@@ -386,96 +353,23 @@ func TestPMDocumentStore_ListByOrg(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPMDocumentStore_GetByOrgAndSourceType(t *testing.T) {
+func TestReferenceDocumentStore_GetByID(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	store := NewPMDocumentStore(mock)
+	store := NewReferenceDocumentStore(mock)
 	orgID := uuid.New()
 	docID := uuid.New()
 	logicalID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM pm_documents WHERE org_id .+ source_type").
+	mock.ExpectQuery("SELECT .+ FROM reference_documents WHERE id .+ AND org_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmDocTestCols).
-				AddRow(newPMDocRow(docID, orgID, logicalID, "Auto Doc", "auto content", true, now)...),
-		)
-
-	doc, err := store.GetByOrgAndSourceType(context.Background(), orgID, "autogenerated")
-	require.NoError(t, err)
-	require.Equal(t, "Auto Doc", doc.Title)
-	require.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestPMDocumentStore_ListByOrgAndSourceType(t *testing.T) {
-	t.Parallel()
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	store := NewPMDocumentStore(mock)
-	orgID := uuid.New()
-	now := time.Now()
-
-	mock.ExpectQuery("SELECT .+ FROM pm_documents WHERE org_id .+ source_type").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(pmDocTestCols).
-				AddRow(newPMDocRow(uuid.New(), orgID, uuid.New(), "A", "a", true, now)...).
-				AddRow(newPMDocRow(uuid.New(), orgID, uuid.New(), "B", "b", true, now)...),
-		)
-
-	docs, err := store.ListByOrgAndSourceType(context.Background(), orgID, "notion")
-	require.NoError(t, err)
-	require.Len(t, docs, 2)
-	require.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestPMDocumentStore_ListByOrgExcludeSourceType(t *testing.T) {
-	t.Parallel()
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	store := NewPMDocumentStore(mock)
-	orgID := uuid.New()
-	now := time.Now()
-
-	mock.ExpectQuery("SELECT .+ FROM pm_documents WHERE org_id .+ source_type !=").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(pmDocTestCols).
-				AddRow(newPMDocRow(uuid.New(), orgID, uuid.New(), "Manual Doc", "content", true, now)...),
-		)
-
-	docs, err := store.ListByOrgExcludeSourceType(context.Background(), orgID, "autogenerated", 10)
-	require.NoError(t, err)
-	require.Len(t, docs, 1)
-	require.Equal(t, "Manual Doc", docs[0].Title)
-	require.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestPMDocumentStore_GetByID(t *testing.T) {
-	t.Parallel()
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	store := NewPMDocumentStore(mock)
-	orgID := uuid.New()
-	docID := uuid.New()
-	logicalID := uuid.New()
-	now := time.Now()
-
-	mock.ExpectQuery("SELECT .+ FROM pm_documents WHERE id .+ AND org_id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(pmDocTestCols).
-				AddRow(newPMDocRow(docID, orgID, logicalID, "Fetched", "content", true, now)...),
+				AddRow(newReferenceDocRow(docID, orgID, logicalID, "Fetched", "content", true, now)...),
 		)
 
 	doc, err := store.GetByID(context.Background(), orgID, docID)
@@ -485,23 +379,23 @@ func TestPMDocumentStore_GetByID(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPMDocumentStore_GetActiveByLogicalID(t *testing.T) {
+func TestReferenceDocumentStore_GetActiveByLogicalID(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	store := NewPMDocumentStore(mock)
+	store := NewReferenceDocumentStore(mock)
 	orgID := uuid.New()
 	docID := uuid.New()
 	logicalID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM pm_documents WHERE org_id .+ logical_id .+ active = true").
+	mock.ExpectQuery("SELECT .+ FROM reference_documents WHERE org_id .+ logical_id .+ active = true").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmDocTestCols).
-				AddRow(newPMDocRow(docID, orgID, logicalID, "Active Version", "content", true, now)...),
+				AddRow(newReferenceDocRow(docID, orgID, logicalID, "Active Version", "content", true, now)...),
 		)
 
 	doc, err := store.GetActiveByLogicalID(context.Background(), orgID, logicalID)
@@ -511,18 +405,18 @@ func TestPMDocumentStore_GetActiveByLogicalID(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPMDocumentStore_GetDocumentSetPin(t *testing.T) {
+func TestReferenceDocumentStore_GetDocumentSetPin(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	store := NewPMDocumentStore(mock)
+	store := NewReferenceDocumentStore(mock)
 	orgID := uuid.New()
 	pinID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT id, org_id, created_at FROM pm_document_set_pins WHERE id").
+	mock.ExpectQuery("SELECT id, org_id, created_at FROM reference_context_set_pins WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "org_id", "created_at"}).
@@ -536,18 +430,18 @@ func TestPMDocumentStore_GetDocumentSetPin(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPMDocumentStore_ListDocumentSetPins_DefaultLimit(t *testing.T) {
+func TestReferenceDocumentStore_ListDocumentSetPins_DefaultLimit(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	store := NewPMDocumentStore(mock)
+	store := NewReferenceDocumentStore(mock)
 	orgID := uuid.New()
 	pinID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM pm_document_set_pins").
+	mock.ExpectQuery("SELECT .+ FROM reference_context_set_pins").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "org_id", "created_at"}).

@@ -195,7 +195,6 @@ describe('ProjectSidebar', () => {
             total_tasks: 0,
             completed_tasks: 0,
             failed_tasks: 0,
-            proposed_by_pm: false,
             created_at: '2026-02-17T07:00:00Z',
             updated_at: '2026-02-17T07:00:00Z',
           }],

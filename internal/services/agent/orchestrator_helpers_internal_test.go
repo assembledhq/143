@@ -422,7 +422,7 @@ func TestCreateIssueSnapshotForTurn(t *testing.T) {
 		require.Len(t, issueSnapshots.created, 1, "createIssueSnapshotForTurn should call the snapshot store")
 		require.Len(t, snapshot.LinkedIssues, 2, "createIssueSnapshotForTurn should snapshot all linked issues")
 		require.Equal(t, title, snapshot.LinkedIssues[0].Title, "createIssueSnapshotForTurn should preserve issue titles in the snapshot")
-		require.Equal(t, models.IssueSourcePMAgent, snapshot.LinkedIssues[1].Source, "createIssueSnapshotForTurn should default missing sources to pm_agent")
+		require.Equal(t, models.IssueSourceAgent, snapshot.LinkedIssues[1].Source, "createIssueSnapshotForTurn should default missing sources to agent")
 	})
 
 	t.Run("hydrates linear primary snapshot metadata from provider state", func(t *testing.T) {
@@ -578,7 +578,7 @@ func TestPromptSeedForSession(t *testing.T) {
 		require.Empty(t, gotLinkedIssues, "promptSeedForSession should return no linked issues when no snapshot exists")
 	})
 
-	t.Run("builds a pm-agent issue from session context when there is no linked issue", func(t *testing.T) {
+	t.Run("builds an agent issue from session context when there is no linked issue", func(t *testing.T) {
 		t.Parallel()
 
 		title := "Investigate checkout timeout"
@@ -587,19 +587,19 @@ func TestPromptSeedForSession(t *testing.T) {
 		orchestrator := &Orchestrator{}
 		issue, gotLinkedIssues := orchestrator.promptSeedForSession(
 			&models.Session{
-				Title:        &title,
-				PMApproach:   &approach,
-				PMReasoning:  &reasoning,
-				RepositoryID: &repoID,
+				Title:             &title,
+				ExecutionBrief:    &approach,
+				PlanningReasoning: &reasoning,
+				RepositoryID:      &repoID,
 			},
 			nil,
 			nil,
 		)
 
-		require.NotNil(t, issue, "promptSeedForSession should synthesize an issue from PM context")
-		require.Equal(t, models.IssueSourcePMAgent, issue.Source, "promptSeedForSession should synthesize a pm_agent issue when there is no linked issue")
-		require.NotNil(t, issue.Description, "promptSeedForSession should combine PM approach and reasoning into the description")
-		require.Contains(t, *issue.Description, approach, "promptSeedForSession should preserve the PM approach in the description")
+		require.NotNil(t, issue, "promptSeedForSession should synthesize an issue from execution context")
+		require.Equal(t, models.IssueSourceAgent, issue.Source, "promptSeedForSession should synthesize an agent issue when there is no linked issue")
+		require.NotNil(t, issue.Description, "promptSeedForSession should combine execution brief and reasoning into the description")
+		require.Contains(t, *issue.Description, approach, "promptSeedForSession should preserve the execution brief in the description")
 		require.Contains(t, *issue.Description, reasoning, "promptSeedForSession should preserve the PM reasoning in the description")
 		require.Empty(t, gotLinkedIssues, "promptSeedForSession should not synthesize linked issues when no snapshot exists")
 	})
@@ -612,15 +612,15 @@ func TestPromptSeedForSession(t *testing.T) {
 		orchestrator := &Orchestrator{}
 		issue, gotLinkedIssues := orchestrator.promptSeedForSession(
 			&models.Session{
-				PMApproach:  &approach,
-				PMReasoning: &reasoning,
+				ExecutionBrief:    &approach,
+				PlanningReasoning: &reasoning,
 			},
 			nil,
 			nil,
 		)
 
-		require.NotNil(t, issue, "promptSeedForSession should synthesize an issue when PM context exists without a title")
-		require.Equal(t, approach, issue.Title, "promptSeedForSession should derive the synthetic issue title from the PM approach before falling back to a placeholder")
+		require.NotNil(t, issue, "promptSeedForSession should synthesize an issue when execution context exists without a title")
+		require.Equal(t, approach, issue.Title, "promptSeedForSession should derive the synthetic issue title from the execution brief before falling back to a placeholder")
 		require.NotNil(t, issue.Description, "promptSeedForSession should still include PM details in the description")
 		require.Empty(t, gotLinkedIssues, "promptSeedForSession should not synthesize linked issues when no snapshot exists")
 	})

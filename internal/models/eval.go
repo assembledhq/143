@@ -113,12 +113,12 @@ type EvalTask struct {
 	IssueContext     json.RawMessage `db:"issue_context" json:"issue_context"`
 
 	// Input configuration (frozen references, see doc 43)
-	ServerDeploySHA      *string         `db:"server_deploy_sha" json:"server_deploy_sha,omitempty"`
-	PMDocumentSetPinID   *uuid.UUID      `db:"pm_document_set_pin_id" json:"pm_document_set_pin_id,omitempty"`
-	OrgSettingsVersionID *uuid.UUID      `db:"org_settings_version_id" json:"org_settings_version_id,omitempty"`
-	MemorySnapshot       json.RawMessage `db:"memory_snapshot" json:"memory_snapshot,omitempty"`
-	SandboxImageDigest   *string         `db:"sandbox_image_digest" json:"sandbox_image_digest,omitempty"`
-	ContextOverrides     json.RawMessage `db:"context_overrides" json:"context_overrides"`
+	ServerDeploySHA          *string         `db:"server_deploy_sha" json:"server_deploy_sha,omitempty"`
+	ReferenceContextSetPinID *uuid.UUID      `db:"reference_context_set_pin_id" json:"reference_context_set_pin_id,omitempty"`
+	OrgSettingsVersionID     *uuid.UUID      `db:"org_settings_version_id" json:"org_settings_version_id,omitempty"`
+	MemorySnapshot           json.RawMessage `db:"memory_snapshot" json:"memory_snapshot,omitempty"`
+	SandboxImageDigest       *string         `db:"sandbox_image_digest" json:"sandbox_image_digest,omitempty"`
+	ContextOverrides         json.RawMessage `db:"context_overrides" json:"context_overrides"`
 
 	// Scoring
 	ScoringCriteria json.RawMessage `db:"scoring_criteria" json:"scoring_criteria"`
@@ -157,12 +157,12 @@ type EvalRun struct {
 	ThreadID  *uuid.UUID `db:"thread_id" json:"thread_id,omitempty"`
 
 	// Configuration used
-	InputManifest      json.RawMessage `db:"input_manifest" json:"input_manifest,omitempty"`
-	Model              string          `db:"model" json:"model"`
-	ServerDeploySHA    *string         `db:"server_deploy_sha" json:"server_deploy_sha,omitempty"`
-	PMDocumentSetPinID *uuid.UUID      `db:"pm_document_set_pin_id" json:"pm_document_set_pin_id,omitempty"`
-	ConfigRef          *string         `db:"config_ref" json:"config_ref,omitempty"`
-	ContextOverrides   json.RawMessage `db:"context_overrides" json:"context_overrides"`
+	InputManifest            json.RawMessage `db:"input_manifest" json:"input_manifest,omitempty"`
+	Model                    string          `db:"model" json:"model"`
+	ServerDeploySHA          *string         `db:"server_deploy_sha" json:"server_deploy_sha,omitempty"`
+	ReferenceContextSetPinID *uuid.UUID      `db:"reference_context_set_pin_id" json:"reference_context_set_pin_id,omitempty"`
+	ConfigRef                *string         `db:"config_ref" json:"config_ref,omitempty"`
+	ContextOverrides         json.RawMessage `db:"context_overrides" json:"context_overrides"`
 
 	// Output
 	AgentDiff  *string         `db:"agent_diff" json:"agent_diff,omitempty"`

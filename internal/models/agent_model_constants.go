@@ -6,21 +6,6 @@ import (
 	"strings"
 )
 
-// AvailablePMModels is the union of every coding-agent's model list. It mirrors
-// the model set the session picker offers (frontend lib/agents.ts AGENTS) so
-// admins can pick any model the org could otherwise spin up a session with —
-// including Amp modes ("smart"/"deep"/...) and Pi's curated provider/model
-// strings.
-var AvailablePMModels []string
-
-func init() {
-	AvailablePMModels = append(AvailablePMModels, AvailableClaudeCodeModels...)
-	AvailablePMModels = append(AvailablePMModels, AvailableCodexModels...)
-	AvailablePMModels = append(AvailablePMModels, AvailableAmpModes...)
-	AvailablePMModels = append(AvailablePMModels, AvailablePiModels...)
-	AvailablePMModels = append(AvailablePMModels, AvailableOpenCodeModels...)
-}
-
 // Amp uses agent "modes" (not models) to select model + system prompt + tools.
 // Values map directly to amp's --mode flag.
 const (
@@ -262,22 +247,6 @@ func AgentTypeForModel(model string) AgentType {
 		return AgentTypePi
 	}
 	return ""
-}
-
-// ValidatePMModel validates a pm_model setting using the same rules as
-// session model validation. It resolves the model's agent type via
-// AgentTypeForModel and delegates to ValidateModelForAgentType, so PM
-// accepts every model the session picker accepts — including Pi's
-// arbitrary "provider/model" overrides.
-func ValidatePMModel(model string) error {
-	if model == "" {
-		return nil
-	}
-	agentType := AgentTypeForModel(model)
-	if agentType == "" {
-		return fmt.Errorf("pm_model %q is not recognized — pick a model from any configured coding agent", model)
-	}
-	return ValidateModelForAgentType(agentType, model)
 }
 
 func IsSupportedClaudeCodeModel(model string) bool {
@@ -607,10 +576,6 @@ func ValidateSettingsModels(settings OrgSettings) error {
 	if err := settings.LLMReasoningEffort.Validate(); err != nil {
 		return err
 	}
-	if err := ValidatePMModel(settings.PMModel); err != nil {
-		return err
-	}
-
 	for agentTypeStr, envVars := range settings.AgentConfig {
 		agentType := AgentType(agentTypeStr)
 		if allowed, gated := AllowedAgentConfigKeys[agentType]; gated {

@@ -45,7 +45,6 @@ func projectAuditSnapshot(p *models.Project) map[string]any {
 		"total_tasks":     p.TotalTasks,
 		"completed_tasks": p.CompletedTasks,
 		"failed_tasks":    p.FailedTasks,
-		"proposed_by_pm":  p.ProposedByPM,
 	}
 	if p.RepositoryID != nil {
 		out["repository_id"] = p.RepositoryID.String()
@@ -138,7 +137,7 @@ func projectTaskAuditDiff(old, new_ *models.ProjectTask) map[string]any {
 	return changes
 }
 
-func pmDocumentAuditSnapshot(doc *models.PMDocument) map[string]any {
+func referenceDocumentAuditSnapshot(doc *models.ReferenceDocument) map[string]any {
 	out := map[string]any{
 		"document_id":    doc.ID.String(),
 		"logical_id":     doc.LogicalID.String(),
@@ -164,7 +163,7 @@ func pmDocumentAuditSnapshot(doc *models.PMDocument) map[string]any {
 	return out
 }
 
-func pmDocumentAuditDiff(old, new_ *models.PMDocument) map[string]any {
+func referenceDocumentAuditDiff(old, new_ *models.ReferenceDocument) map[string]any {
 	changes := map[string]any{}
 	addAuditChange(changes, "title", old.Title, new_.Title)
 	addAuditChange(changes, "content_length", len(old.Content), len(new_.Content))
@@ -196,8 +195,8 @@ func evalTaskAuditSnapshot(task *models.EvalTask) map[string]any {
 	if task.SourcePRNumber != nil {
 		out["source_pr_number"] = *task.SourcePRNumber
 	}
-	if task.PMDocumentSetPinID != nil {
-		out["pm_document_set_pin_id"] = task.PMDocumentSetPinID.String()
+	if task.ReferenceContextSetPinID != nil {
+		out["reference_context_set_pin_id"] = task.ReferenceContextSetPinID.String()
 	}
 	if task.OrgSettingsVersionID != nil {
 		out["org_settings_version_id"] = task.OrgSettingsVersionID.String()

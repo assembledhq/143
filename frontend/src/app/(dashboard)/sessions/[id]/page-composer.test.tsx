@@ -856,24 +856,24 @@ describe('SessionDetailPage composer and session metadata', () => {
     expect(await screen.findByRole('heading', { level: 1, name: 'Custom session title' })).toBeInTheDocument();
   });
 
-  it('shows only pm_approach without pm_reasoning in PM context', async () => {
-    const sessionWithPM: Session = {
+  it('shows execution brief without planning reasoning in neutral execution context', async () => {
+    const sessionWithExecutionContext: Session = {
       ...mockSessions[0],
-      pm_plan_id: 'plan-1',
-      pm_reasoning: undefined,
-      pm_approach: 'Direct fix approach',
+      planning_reasoning: undefined,
+      execution_brief: 'Direct fix approach',
     };
 
     server.use(
       http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithPM } satisfies SingleResponse<Session>);
+        return HttpResponse.json({ data: sessionWithExecutionContext } satisfies SingleResponse<Session>);
       }),
     );
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
-    await screen.findByText('PM context');
+    await screen.findByText('Execution context');
     expect(screen.getAllByText('Direct fix approach').length).toBeGreaterThanOrEqual(1);
-    expect(screen.queryByText('Why this was prioritized')).not.toBeInTheDocument();
+    expect(screen.queryByText('Planning reasoning')).not.toBeInTheDocument();
+    expect(screen.getByText('Execution brief')).toBeInTheDocument();
   });
 
   it('clears message after successful send', async () => {

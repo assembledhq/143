@@ -66,7 +66,6 @@ type SessionFilters struct {
 	// so this manifests as occasional reordering, not data loss.
 	CursorTime         *time.Time
 	CursorID           *uuid.UUID
-	AdHocOnly          bool      // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
 	RepositoryID       uuid.UUID // When non-zero, filter sessions by repository via issues table.
 	TriggeredByUserID  uuid.UUID // When non-zero, filter sessions to those triggered by this user.
 	TriggeredByUserIDs []uuid.UUID
@@ -132,23 +131,18 @@ const hasUnpushedChangesColumn = `EXISTS (
 		  )
 	) AS has_unpushed_changes`
 
-const sessionPMPlanIDColumn = `(SELECT spm.pm_plan_id
-		FROM session_pm_context spm
+const sessionExecutionBriefColumn = `(SELECT spm.execution_brief
+		FROM session_execution_context spm
 		WHERE spm.org_id = sessions.org_id AND spm.session_id = sessions.id
-		LIMIT 1) AS pm_plan_id`
+		LIMIT 1) AS execution_brief`
 
-const sessionPMApproachColumn = `(SELECT spm.pm_approach
-		FROM session_pm_context spm
+const sessionPlanningReasoningColumn = `(SELECT spm.planning_reasoning
+		FROM session_execution_context spm
 		WHERE spm.org_id = sessions.org_id AND spm.session_id = sessions.id
-		LIMIT 1) AS pm_approach`
-
-const sessionPMReasoningColumn = `(SELECT spm.pm_reasoning
-		FROM session_pm_context spm
-		WHERE spm.org_id = sessions.org_id AND spm.session_id = sessions.id
-		LIMIT 1) AS pm_reasoning`
+		LIMIT 1) AS planning_reasoning`
 
 const sessionProjectTaskIDColumn = `(SELECT spm.project_task_id
-		FROM session_pm_context spm
+		FROM session_execution_context spm
 		WHERE spm.org_id = sessions.org_id AND spm.session_id = sessions.id
 		LIMIT 1) AS project_task_id`
 
@@ -240,7 +234,7 @@ const sessionSelectColumns = `id,
 	container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, diff,
-	` + sessionPMPlanIDColumn + `, title, ` + sessionPMApproachColumn + `, ` + sessionPMReasoningColumn + `, ` + sessionProjectTaskIDColumn + `,
+	title, ` + sessionExecutionBriefColumn + `, ` + sessionPlanningReasoningColumn + `, ` + sessionProjectTaskIDColumn + `,
 	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
 	sandbox_state, workspace_generation, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
 	runtime_last_progress_at, runtime_last_progress_type, runtime_last_progress_strength,
@@ -277,7 +271,7 @@ const sessionListColumns = `id,
 	container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, NULL::text AS diff,
-	` + sessionPMPlanIDColumn + `, title, ` + sessionPMApproachColumn + `, ` + sessionPMReasoningColumn + `, ` + sessionProjectTaskIDColumn + `,
+	title, ` + sessionExecutionBriefColumn + `, ` + sessionPlanningReasoningColumn + `, ` + sessionProjectTaskIDColumn + `,
 	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
 	sandbox_state, workspace_generation, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
 	runtime_last_progress_at, runtime_last_progress_type, runtime_last_progress_strength,
@@ -300,7 +294,7 @@ const sessionAPIDetailColumns = `id,
 	container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, NULL::text AS diff,
-	` + sessionPMPlanIDColumn + `, title, ` + sessionPMApproachColumn + `, ` + sessionPMReasoningColumn + `, ` + sessionProjectTaskIDColumn + `,
+	title, ` + sessionExecutionBriefColumn + `, ` + sessionPlanningReasoningColumn + `, ` + sessionProjectTaskIDColumn + `,
 	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
 	sandbox_state, workspace_generation, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
 	runtime_last_progress_at, runtime_last_progress_type, runtime_last_progress_strength,
@@ -448,15 +442,6 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 		query += ` AND title ILIKE @search`
 		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(filters.Search)
 		args["search"] = "%" + escaped + "%"
-	}
-	if filters.AdHocOnly {
-		query += ` AND NOT EXISTS (
-			SELECT 1
-			FROM session_pm_context spm
-			WHERE spm.org_id = sessions.org_id
-			  AND spm.session_id = sessions.id
-			  AND spm.pm_plan_id IS NOT NULL
-		)`
 	}
 	if filters.CreatedAfter != nil {
 		query += ` AND created_at >= @created_after`
@@ -880,17 +865,19 @@ func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 			@origin, @interaction_mode, @validation_policy
 		)
 		RETURNING id, org_id, created_at, last_activity_at
-	), inserted_pm_context AS (
-		INSERT INTO session_pm_context (
-			session_id, org_id, pm_plan_id, pm_approach, pm_reasoning, project_task_id
+	), inserted_execution_context AS (
+		INSERT INTO session_execution_context (
+			session_id, org_id, execution_brief, planning_reasoning, project_task_id
 		)
 		SELECT
-			id, org_id, @pm_plan_id, @pm_approach, @pm_reasoning, @project_task_id
+			id, org_id, @execution_brief, @planning_reasoning, @project_task_id
 		FROM inserted
-		WHERE @pm_plan_id::uuid IS NOT NULL
-		   OR @pm_approach::text IS NOT NULL
-		   OR @pm_reasoning::text IS NOT NULL
-		   OR @project_task_id::uuid IS NOT NULL
+		WHERE @has_execution_context::bool
+		  AND (
+		       @execution_brief::text IS NOT NULL
+		    OR @planning_reasoning::text IS NOT NULL
+		    OR @project_task_id::uuid IS NOT NULL
+		  )
 		RETURNING session_id
 		), inserted_automation_link AS (
 			INSERT INTO session_automation_links (
@@ -949,7 +936,7 @@ func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 		)
 		SELECT inserted.id, inserted.created_at, inserted.last_activity_at
 		FROM inserted
-		LEFT JOIN inserted_pm_context ON true
+		LEFT JOIN inserted_execution_context ON true
 		LEFT JOIN inserted_automation_link ON true
 		LEFT JOIN inserted_linear_context ON true
 		LEFT JOIN inserted_publish_state ON true
@@ -964,11 +951,11 @@ func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 		"complexity_tier":            run.ComplexityTier,
 		"parent_session_id":          run.ParentSessionID,
 		"revision_context":           run.RevisionContext,
-		"pm_plan_id":                 run.PMPlanID,
 		"title":                      run.Title,
-		"pm_approach":                run.PMApproach,
-		"pm_reasoning":               run.PMReasoning,
+		"execution_brief":            run.ExecutionBrief,
+		"planning_reasoning":         run.PlanningReasoning,
 		"project_task_id":            run.ProjectTaskID,
+		"has_execution_context":      run.ExecutionBrief != nil || run.PlanningReasoning != nil || run.ProjectTaskID != nil,
 		"model_override":             run.ModelOverride,
 		"reasoning_effort":           run.ReasoningEffort,
 		"triggered_by_user_id":       run.TriggeredByUserID,
@@ -1599,34 +1586,6 @@ func (s *SessionStore) UpdateInputManifest(ctx context.Context, orgID, sessionID
 	hydrateSessionPolicy(&session)
 	s.publishStatus(ctx, &session)
 	return session, nil
-}
-
-// UpdatePMPlanID links a session to a PM plan. Bumps last_activity_at so the
-// method is self-contained — callers do not have to remember to pair it with
-// a separate activity bump. Today's sole caller already calls UpdateResult
-// microseconds earlier, so this is a redundant write on the hot path, but the
-// cost (one UPDATE per plan creation) is negligible versus the coupling risk
-// of a future caller silently skipping the MRU bump.
-func (s *SessionStore) UpdatePMPlanID(ctx context.Context, orgID, runID, planID uuid.UUID) error {
-	query := `
-		WITH bumped AS (
-			UPDATE sessions
-			SET last_activity_at = now()
-			WHERE id = @id AND org_id = @org_id
-			RETURNING id, org_id
-		)
-		INSERT INTO session_pm_context (session_id, org_id, pm_plan_id)
-		SELECT id, org_id, @pm_plan_id
-		FROM bumped
-		ON CONFLICT (session_id) DO UPDATE
-		SET pm_plan_id = EXCLUDED.pm_plan_id,
-		    updated_at = now()`
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"id":         runID,
-		"org_id":     orgID,
-		"pm_plan_id": planID,
-	})
-	return err
 }
 
 // UpdateResult persists a turn result and status transition. Always bumps

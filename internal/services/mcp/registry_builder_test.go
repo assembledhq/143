@@ -43,16 +43,6 @@ func TestBuildRegistryFromEnv_GitHub_LegacyToken(t *testing.T) {
 	require.Equal(t, "github", src.Name())
 }
 
-func TestBuildRegistryFromEnv_DoesNotRegisterPMProjectProposer(t *testing.T) {
-	t.Setenv("INTERNAL_API_TOKEN", "test-token")
-	t.Setenv("INTERNAL_API_URL", "http://internal.example/api/v1/internal")
-	t.Setenv("AUTOMATION_GOAL_IMPROVEMENT_TOOLS_ENABLED", "false")
-
-	reg := BuildRegistryFromEnv(io.Discard)
-
-	require.Empty(t, reg.ProjectProposers(), "PM-only project proposal tool should not be registered")
-}
-
 func TestBuildRegistryFromEnv_GitHub_SocketFallback(t *testing.T) {
 	clearGitHubEnv(t)
 	sockPath := filepath.Join(shortSocketDir(t), "sock")

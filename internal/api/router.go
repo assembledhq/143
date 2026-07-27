@@ -127,10 +127,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	invitationStore := db.NewInvitationStore(pool)
 	projectStore := db.NewProjectStore(pool)
 	projectTaskStore := db.NewProjectTaskStore(pool)
-	projectCycleStore := db.NewProjectCycleStore(pool)
 	projectAttachmentStore := db.NewProjectAttachmentStore(pool)
 	projectSpecStore := db.NewProjectSpecStore(pool)
-	pmDocumentStore := db.NewPMDocumentStore(pool)
+	referenceDocumentStore := db.NewReferenceDocumentStore(pool)
 	evalTaskStore := db.NewEvalTaskStore(pool)
 	evalRunStore := db.NewEvalRunStore(pool)
 	evalBatchStore := db.NewEvalBatchStore(pool)
@@ -264,7 +263,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if appUserAuthSvc != nil {
 		integrationOpts = append(integrationOpts, handlers.WithGitHubAppUserAuth(appUserAuthSvc))
 	}
-	integrationOpts = append(integrationOpts, handlers.WithPMContextAutoTrigger(jobStore, pmDocumentStore, logger))
 	integrationHandler := handlers.NewIntegrationHandler(
 		integrationStore,
 		credentialStore,
@@ -652,7 +650,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		}
 	}
 
-	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore, projectAttachmentStore, projectSpecStore)
+	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectAttachmentStore, projectSpecStore)
 	projectHandler.SetRepositoryStore(repoStore)
 
 	automationStore := db.NewAutomationStore(pool)
@@ -732,11 +730,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	projectAttachmentHandler := handlers.NewProjectAttachmentHandler(projectAttachmentStore, projectStore)
 	projectSpecHandler := handlers.NewProjectSpecHandler(projectSpecStore, projectStore)
 	projectAnalysisHandler := handlers.NewProjectAnalysisHandler(projectStore, projectSpecStore, projectAttachmentStore, projectTaskStore)
-	projectGenerateHandler := handlers.NewProjectGenerateHandler(llmClient)
 	codexAuthHandler := handlers.NewCodexAuthHandler(codexAuthSvc, logger)
 	claudeCodeAuthHandler := handlers.NewClaudeCodeAuthHandler(claudeCodeAuthSvc, logger)
-	pmDocumentHandler := handlers.NewPMDocumentHandler(pmDocumentStore, credentialStore)
-	pmDocumentHandler.SetAuditEmitter(auditEmitter)
+	referenceDocumentHandler := handlers.NewReferenceDocumentHandler(referenceDocumentStore, credentialStore)
+	referenceDocumentHandler.SetAuditEmitter(auditEmitter)
 	evalHandler := handlers.NewEvalHandler(evalTaskStore, evalRunStore, evalBatchStore, evalBootstrapStore, jobStore, pool)
 	evalHandler.SetAuditEmitter(auditEmitter)
 	evalHandler.SetSessionStore(sessionStore)
@@ -1368,11 +1365,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/projects/{id}/attachments", projectAttachmentHandler.List)
 				r.Get("/api/v1/projects/{id}/specs", projectSpecHandler.List)
 				r.Get("/api/v1/projects/{id}/specs/{specId}", projectSpecHandler.Get)
-				r.Get("/api/v1/pm/documents", pmDocumentHandler.List)
-				r.Get("/api/v1/pm/documents/{docId}", pmDocumentHandler.Get)
-				r.Get("/api/v1/pm/documents/{docId}/versions", pmDocumentHandler.ListVersions)
-				r.Get("/api/v1/pm/document-set-pins", pmDocumentHandler.ListDocumentSetPins)
-				r.Get("/api/v1/pm/document-set-pins/{pinId}", pmDocumentHandler.GetDocumentSetPin)
+				r.Get("/api/v1/reference-documents", referenceDocumentHandler.List)
+				r.Get("/api/v1/reference-documents/{docId}", referenceDocumentHandler.Get)
+				r.Get("/api/v1/reference-documents/{docId}/versions", referenceDocumentHandler.ListVersions)
+				r.Get("/api/v1/reference-context-set-pins", referenceDocumentHandler.ListDocumentSetPins)
+				r.Get("/api/v1/reference-context-set-pins/{pinId}", referenceDocumentHandler.GetDocumentSetPin)
 
 			})
 
@@ -1620,15 +1617,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/projects/{id}/specs", projectSpecHandler.Create)
 				r.Patch("/api/v1/projects/{id}/specs/{specId}", projectSpecHandler.Update)
 				r.Delete("/api/v1/projects/{id}/specs/{specId}", projectSpecHandler.Delete)
-				r.Post("/api/v1/projects/ai/generate", projectGenerateHandler.Generate)
 				r.Post("/api/v1/projects/{id}/ai/improve", projectAnalysisHandler.Improve)
-				r.Post("/api/v1/pm/documents", pmDocumentHandler.Create)
-				r.Post("/api/v1/pm/documents/discover/notion", pmDocumentHandler.DiscoverNotion)
-				r.Patch("/api/v1/pm/documents/{docId}", pmDocumentHandler.Update)
-				r.Delete("/api/v1/pm/documents/{docId}", pmDocumentHandler.Delete)
-				r.Post("/api/v1/pm/documents/{docId}/sync", pmDocumentHandler.SyncFromNotion)
-				r.Post("/api/v1/pm/documents/{docId}/restore", pmDocumentHandler.RestoreVersion)
-				r.Post("/api/v1/pm/document-set-pins", pmDocumentHandler.CreateDocumentSetPin)
+				r.Post("/api/v1/reference-documents", referenceDocumentHandler.Create)
+				r.Post("/api/v1/reference-documents/discover/notion", referenceDocumentHandler.DiscoverNotion)
+				r.Patch("/api/v1/reference-documents/{docId}", referenceDocumentHandler.Update)
+				r.Delete("/api/v1/reference-documents/{docId}", referenceDocumentHandler.Delete)
+				r.Post("/api/v1/reference-documents/{docId}/sync", referenceDocumentHandler.SyncFromNotion)
+				r.Post("/api/v1/reference-documents/{docId}/restore", referenceDocumentHandler.RestoreVersion)
+				r.Post("/api/v1/reference-context-set-pins", referenceDocumentHandler.CreateDocumentSetPin)
 			})
 
 			// Admin-only routes

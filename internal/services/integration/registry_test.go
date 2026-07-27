@@ -88,13 +88,6 @@ func (m *mockCodeReviewSrc) GetPRReviews(_ context.Context, _ int) ([]PRReview, 
 	return nil, nil
 }
 
-type mockProjectProposer struct{ name string }
-
-func (m *mockProjectProposer) Name() string { return m.name }
-func (m *mockProjectProposer) ProposeProject(_ context.Context, _ ProposeProjectParams) (*ProposeProjectResult, error) {
-	return &ProposeProjectResult{ID: "proj-1"}, nil
-}
-
 type mockIssueCreator struct {
 	name   string
 	result *CreateIssueResult
@@ -266,30 +259,6 @@ func TestRegistry_CodeReviewSource(t *testing.T) {
 	_, err = r.CodeReviewSource("nonexistent")
 	if err == nil {
 		t.Fatal("expected error for missing code review source")
-	}
-}
-
-func TestRegistry_ProjectProposer(t *testing.T) {
-	t.Parallel()
-	r := NewRegistry()
-	r.RegisterProjectProposer(&mockProjectProposer{name: "project"})
-
-	proposers := r.ProjectProposers()
-	if len(proposers) != 1 {
-		t.Fatalf("expected 1 project proposer, got %d", len(proposers))
-	}
-
-	pp, err := r.ProjectProposer("project")
-	if err != nil {
-		t.Fatalf("ProjectProposer: %v", err)
-	}
-	if pp.Name() != "project" {
-		t.Errorf("expected project, got %s", pp.Name())
-	}
-
-	_, err = r.ProjectProposer("nonexistent")
-	if err == nil {
-		t.Fatal("expected error for missing project proposer")
 	}
 }
 

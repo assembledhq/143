@@ -14,19 +14,12 @@ func TestParseOrgSettings_Defaults(t *testing.T) {
 	s, err := ParseOrgSettings(nil)
 	require.NoError(t, err)
 
-	require.Equal(t, DefaultAutonomyLevel, s.AutonomyLevel, "should default autonomy_level")
-	require.Equal(t, DefaultAggressiveness, s.Aggressiveness, "should default aggressiveness")
 	require.Equal(t, DefaultMaxConcurrentRuns, s.MaxConcurrentRuns, "should default max_concurrent_runs")
-	require.Equal(t, DefaultMinPriorityThreshold, s.MinPriorityThreshold, "should default min_priority_threshold")
 	require.Equal(t, DefaultWeightCustomerImpact, s.PriorityWeights.CustomerImpact, "should default customer_impact weight")
 	require.Equal(t, DefaultWeightSeverity, s.PriorityWeights.Severity, "should default severity weight")
 	require.Equal(t, DefaultWeightRecency, s.PriorityWeights.Recency, "should default recency weight")
 	require.Equal(t, DefaultWeightRevenueRisk, s.PriorityWeights.RevenueRisk, "should default revenue_risk weight")
-	require.Equal(t, DefaultAgentAutonomy, s.AgentAutonomy, "should default agent_autonomy")
 	require.Empty(t, s.LLMModel, "should default llm_model to empty")
-	require.Empty(t, s.ProductDirection, "should default product_direction to empty")
-	require.Equal(t, DefaultPMScheduleHours, s.PMScheduleHours, "should default pm_schedule_hours")
-	require.Equal(t, DefaultPMModel, s.PMModel, "should default pm_model")
 	require.Nil(t, s.ProductContext, "should default product_context to nil")
 	require.True(t, s.EffectiveCodingAgentTabToolsEnabled(), "agent tab tools should default on")
 	require.True(t, s.EffectiveAutoArchiveOnPRClose(), "auto-archive on PR close should default on")
@@ -86,7 +79,6 @@ func TestParseOrgSettings_EmptyJSON(t *testing.T) {
 	s, err := ParseOrgSettings(json.RawMessage(`{}`))
 	require.NoError(t, err)
 
-	require.Equal(t, DefaultAutonomyLevel, s.AutonomyLevel, "should default autonomy_level for empty JSON")
 	require.Equal(t, DefaultMaxConcurrentRuns, s.MaxConcurrentRuns, "should default max_concurrent_runs for empty JSON")
 }
 
@@ -220,14 +212,7 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 	t.Parallel()
 
 	raw := json.RawMessage(`{
-		"autonomy_level": "auto_all",
-		"execution_aggressiveness": 8,
 		"max_concurrent_runs": 10,
-		"min_priority_threshold": 50.0,
-		"agent_autonomy": "conservative",
-		"product_direction": "focus on billing",
-		"pm_schedule_hours": 6,
-		"pm_model": "claude-sonnet-4-5",
 		"product_context": {
 			"philosophy": "Prefer minimal diffs",
 			"direction": "Harden billing",
@@ -249,20 +234,13 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 	s, err := ParseOrgSettings(raw)
 	require.NoError(t, err)
 
-	require.Equal(t, AutonomyLevelAutoAll, s.AutonomyLevel, "should override autonomy_level")
-	require.Equal(t, 8, s.Aggressiveness, "should override aggressiveness")
 	require.Equal(t, 10, s.MaxConcurrentRuns, "should override max_concurrent_runs")
-	require.Equal(t, 50.0, s.MinPriorityThreshold, "should override min_priority_threshold")
-	require.Equal(t, "focus on billing", s.ProductDirection, "should override product_direction")
-	require.Equal(t, 6, s.PMScheduleHours, "should override pm_schedule_hours")
-	require.Equal(t, "claude-sonnet-4-5", s.PMModel, "should override pm_model")
 	require.NotNil(t, s.ProductContext, "should parse product_context")
 	require.Equal(t, "Prefer minimal diffs", s.ProductContext.Philosophy, "should parse product_context.philosophy")
 	require.Equal(t, "Harden billing", s.ProductContext.Direction, "should parse product_context.direction")
 	require.Equal(t, []string{"billing", "api"}, s.ProductContext.FocusAreas, "should parse product_context.focus_areas")
 	require.Equal(t, []string{"legacy-auth"}, s.ProductContext.AvoidAreas, "should parse product_context.avoid_areas")
 	require.Equal(t, "gpt-5.4-mini", s.LLMModel, "should override llm_model")
-	require.Equal(t, "conservative", s.AgentAutonomy, "should override agent_autonomy")
 	require.Equal(t, 0.40, s.PriorityWeights.CustomerImpact, "should override customer_impact")
 	require.Equal(t, 0.30, s.PriorityWeights.Severity, "should override severity")
 	require.Equal(t, 0.15, s.PriorityWeights.Recency, "should override recency")
@@ -273,27 +251,22 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 func TestParseOrgSettings_PartialOverride(t *testing.T) {
 	t.Parallel()
 
-	raw := json.RawMessage(`{"autonomy_level": "auto_simple", "llm_model": "claude-sonnet-4-5"}`)
+	raw := json.RawMessage(`{"llm_model": "claude-sonnet-4-5"}`)
 	s, err := ParseOrgSettings(raw)
 	require.NoError(t, err)
 
-	require.Equal(t, AutonomyLevelAutoSimple, s.AutonomyLevel, "should override autonomy_level")
 	require.Equal(t, "claude-sonnet-4-5", s.LLMModel, "should override llm_model")
-	require.Equal(t, DefaultAggressiveness, s.Aggressiveness, "should default aggressiveness when not provided")
 	require.Equal(t, DefaultMaxConcurrentRuns, s.MaxConcurrentRuns, "should default max_concurrent_runs when not provided")
 }
 
-func TestParseOrgSettings_ProductContextMigration(t *testing.T) {
+func TestParseOrgSettings_LegacyProductDirectionIsInert(t *testing.T) {
 	t.Parallel()
 
 	raw := json.RawMessage(`{"product_direction":"shift to reliability"}`)
 	s, err := ParseOrgSettings(raw)
 	require.NoError(t, err)
 
-	require.Equal(t, "shift to reliability", s.ProductDirection, "should preserve product_direction")
-	require.NotNil(t, s.ProductContext, "should migrate product_direction into product_context")
-	require.Equal(t, "shift to reliability", s.ProductContext.Direction, "should set product_context.direction from product_direction")
-	require.Empty(t, s.ProductContext.Philosophy, "should default product_context.philosophy to empty")
+	require.Nil(t, s.ProductContext, "legacy product_direction should remain inert")
 }
 
 func TestParseOrgSettings_AgentConfig(t *testing.T) {
@@ -331,16 +304,6 @@ func TestParseOrgSettings_InvalidJSON(t *testing.T) {
 	_, err := ParseOrgSettings(json.RawMessage(`{invalid`))
 	require.Error(t, err, "should return error on invalid JSON")
 	require.Contains(t, err.Error(), "unmarshal org settings", "should wrap error")
-}
-
-func TestAutonomyLevel_Validate(t *testing.T) {
-	t.Parallel()
-
-	require.NoError(t, AutonomyLevelManual.Validate())
-	require.NoError(t, AutonomyLevelAutoSimple.Validate())
-	require.NoError(t, AutonomyLevelAutoAll.Validate())
-	require.Error(t, AutonomyLevel("invalid").Validate())
-	require.Error(t, AutonomyLevel("").Validate())
 }
 
 func TestAgentType_Validate(t *testing.T) {
@@ -412,38 +375,13 @@ func TestOrgSize_Validate(t *testing.T) {
 func TestOrgSize_ContextLimits(t *testing.T) {
 	t.Parallel()
 
-	small := OrgSizeSmall.ContextLimits()
-	require.Equal(t, 50, small.MaxOpenIssues, "small orgs should have lower issue limit")
-	require.Equal(t, 30_000, small.PMMaxTokens, "small orgs should have lower PM token limit")
-
 	medium := OrgSizeMedium.ContextLimits()
-	require.Equal(t, 100, medium.MaxOpenIssues, "medium should match previous defaults")
-	require.Equal(t, 50_000, medium.PMMaxTokens, "medium should match previous PM token default")
 	require.Equal(t, 50_000, medium.AgentLowTokenMax, "medium low token should match previous default")
 	require.Equal(t, 200_000, medium.AgentHighTokenMax, "medium high token should match previous default")
 
-	large := OrgSizeLarge.ContextLimits()
-	require.Equal(t, 300, large.MaxOpenIssues, "large orgs should see more issues")
-	require.Equal(t, 100_000, large.PMMaxTokens, "large orgs should have higher PM token limit")
-
 	enterprise := OrgSizeEnterprise.ContextLimits()
-	require.Equal(t, 500, enterprise.MaxOpenIssues, "enterprise orgs should see most issues")
-	require.Equal(t, 150_000, enterprise.PMMaxTokens, "enterprise orgs should have highest PM token limit")
 	require.Equal(t, 75_000, enterprise.AgentLowTokenMax, "enterprise low tokens should be elevated")
 	require.Equal(t, 250_000, enterprise.AgentHighTokenMax, "enterprise high tokens should be elevated")
-
-	// Verify description truncation decreases for larger orgs (more issues = less per-issue budget)
-	require.Greater(t, small.IssueDescriptionMax, enterprise.IssueDescriptionMax,
-		"larger orgs should have shorter per-issue descriptions to fit more issues in context")
-}
-
-func TestOrgSize_PMScheduleHours(t *testing.T) {
-	t.Parallel()
-
-	require.Equal(t, 6, OrgSizeSmall.PMScheduleHours(), "small orgs run PM less often")
-	require.Equal(t, 24, OrgSizeMedium.PMScheduleHours(), "medium orgs should default to daily PM runs")
-	require.Equal(t, 2, OrgSizeLarge.PMScheduleHours(), "large orgs need more frequent PM")
-	require.Equal(t, 1, OrgSizeEnterprise.PMScheduleHours(), "enterprise orgs need hourly PM")
 }
 
 func TestOrgSize_MaxConcurrentRuns(t *testing.T) {
@@ -470,13 +408,10 @@ func TestContextLimits_WithDefaults(t *testing.T) {
 	t.Run("preserves explicit values", func(t *testing.T) {
 		t.Parallel()
 		partial := ContextLimits{
-			MaxOpenIssues: 400,
-			PMMaxTokens:   120_000,
+			AgentLowTokenMax: 120_000,
 		}
 		result := partial.WithDefaults(defaults)
-		require.Equal(t, 400, result.MaxOpenIssues, "explicit value should be preserved")
-		require.Equal(t, 120_000, result.PMMaxTokens, "explicit value should be preserved")
-		require.Equal(t, defaults.MaxTriagedIssues, result.MaxTriagedIssues, "zero field should get default")
+		require.Equal(t, 120_000, result.AgentLowTokenMax, "explicit value should be preserved")
 		require.Equal(t, defaults.AgentHighTokenMax, result.AgentHighTokenMax, "zero field should get default")
 	})
 
@@ -498,9 +433,7 @@ func TestParseOrgSettings_OrgSizeDefaults(t *testing.T) {
 
 	require.Equal(t, OrgSizeLarge, s.OrgSize)
 	require.Equal(t, 15, s.MaxConcurrentRuns, "large org should default to 15 concurrent runs")
-	require.Equal(t, 2, s.PMScheduleHours, "large org should default to 2-hour PM schedule")
-	require.Equal(t, 300, s.ContextLimits.MaxOpenIssues, "large org should see 300 open issues")
-	require.Equal(t, 100_000, s.ContextLimits.PMMaxTokens, "large org should get 100k PM tokens")
+	require.Equal(t, 50_000, s.ContextLimits.AgentLowTokenMax, "large org should retain the standard low token limit")
 }
 
 func TestParseOrgSettings_OrgSizeWithOverrides(t *testing.T) {
@@ -510,21 +443,16 @@ func TestParseOrgSettings_OrgSizeWithOverrides(t *testing.T) {
 	raw := json.RawMessage(`{
 		"org_size": "large",
 		"max_concurrent_runs": 15,
-		"pm_schedule_hours": 3,
 		"context_limits": {
-			"max_open_issues": 400,
-			"pm_max_tokens": 120000
+			"agent_low_token_max": 120000
 		}
 	}`)
 	s, err := ParseOrgSettings(raw)
 	require.NoError(t, err)
 
 	require.Equal(t, 15, s.MaxConcurrentRuns, "explicit override should win over size default")
-	require.Equal(t, 3, s.PMScheduleHours, "explicit override should win over size default")
-	require.Equal(t, 400, s.ContextLimits.MaxOpenIssues, "explicit context limit should win")
-	require.Equal(t, 120_000, s.ContextLimits.PMMaxTokens, "explicit token limit should win")
-	// Non-overridden fields should still get size defaults
-	require.Equal(t, 200, s.ContextLimits.MaxTriagedIssues, "non-overridden should use size default")
+	require.Equal(t, 120_000, s.ContextLimits.AgentLowTokenMax, "explicit token limit should win")
+	require.Equal(t, 200_000, s.ContextLimits.AgentHighTokenMax, "non-overridden token limit should use the size default")
 }
 
 func TestParseOrgSettings_DefaultOrgSizeIsMedium(t *testing.T) {
@@ -535,9 +463,6 @@ func TestParseOrgSettings_DefaultOrgSizeIsMedium(t *testing.T) {
 
 	// With no org_size set, defaults should match medium profile (backward compatible)
 	require.Equal(t, 3, s.MaxConcurrentRuns, "default should match medium concurrent runs")
-	require.Equal(t, 24, s.PMScheduleHours, "default should match medium PM schedule")
-	require.Equal(t, 100, s.ContextLimits.MaxOpenIssues, "default should match medium open issues")
-	require.Equal(t, 50_000, s.ContextLimits.PMMaxTokens, "default should match medium PM tokens")
 	require.Equal(t, 50_000, s.ContextLimits.AgentLowTokenMax, "default should match medium low tokens")
 	require.Equal(t, 200_000, s.ContextLimits.AgentHighTokenMax, "default should match medium high tokens")
 }

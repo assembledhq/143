@@ -48,9 +48,6 @@ func sessionAuditSnapshot(session *models.Session, issue *models.Issue, extra ma
 	if session.ParentSessionID != nil {
 		details["parent_session_id"] = session.ParentSessionID.String()
 	}
-	if session.PMPlanID != nil {
-		details["pm_plan_id"] = session.PMPlanID.String()
-	}
 	if session.ProjectTaskID != nil {
 		details["project_task_id"] = session.ProjectTaskID.String()
 	}

@@ -44,7 +44,7 @@ var evalTaskColumns = []string{
 	"id", "org_id", "repo_id", "name", "description",
 	"base_commit_sha", "solution_commit_sha", "solution_diff",
 	"issue_description", "issue_context",
-	"server_deploy_sha", "pm_document_set_pin_id", "org_settings_version_id",
+	"server_deploy_sha", "reference_context_set_pin_id", "org_settings_version_id",
 	"memory_snapshot", "sandbox_image_digest", "context_overrides",
 	"scoring_criteria", "pass_threshold",
 	"source", "source_pr_number", "complexity", "tags",
@@ -55,7 +55,7 @@ var evalTaskColumns = []string{
 var evalRunColumns = []string{
 	"id", "task_id", "org_id", "batch_id",
 	"session_id", "thread_id",
-	"input_manifest", "model", "server_deploy_sha", "pm_document_set_pin_id",
+	"input_manifest", "model", "server_deploy_sha", "reference_context_set_pin_id",
 	"config_ref", "context_overrides",
 	"agent_diff", "agent_trace", "token_usage",
 	"criterion_results", "final_score", "passed",

@@ -296,7 +296,7 @@ func TestIssueStore_Upsert(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestIssueStore_UpsertPMAgentUsesFingerprintConflictTarget(t *testing.T) {
+func TestIssueStore_UpsertAgentUsesFingerprintConflictTarget(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -309,9 +309,9 @@ func TestIssueStore_UpsertPMAgentUsesFingerprintConflictTarget(t *testing.T) {
 
 	issue := &models.Issue{
 		OrgID:                 uuid.New(),
-		ExternalID:            "pm-agent-generated-id",
-		Source:                models.IssueSourcePMAgent,
-		Title:                 "PM Agent Issue",
+		ExternalID:            "agent-generated-id",
+		Source:                models.IssueSourceAgent,
+		Title:                 "Agent Issue",
 		Status:                "open",
 		RawData:               json.RawMessage(`{"key":"value"}`),
 		FirstSeenAt:           now,
@@ -319,7 +319,7 @@ func TestIssueStore_UpsertPMAgentUsesFingerprintConflictTarget(t *testing.T) {
 		OccurrenceCount:       1,
 		AffectedCustomerCount: 1,
 		Severity:              "medium",
-		Tags:                  []string{"pm"},
+		Tags:                  []string{"agent"},
 		Fingerprint:           "content-derived-fingerprint",
 	}
 
@@ -334,9 +334,26 @@ func TestIssueStore_UpsertPMAgentUsesFingerprintConflictTarget(t *testing.T) {
 		)
 
 	err = store.Upsert(context.Background(), issue)
-	require.NoError(t, err, "Upsert should not return an error for PM agent issues")
-	require.Equal(t, generatedID, issue.ID, "should set the generated ID on the PM agent issue")
+	require.NoError(t, err, "Upsert should not return an error for agent issues")
+	require.Equal(t, generatedID, issue.ID, "should set the generated ID on the agent issue")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestIssueStore_UpsertRejectsNewPMAgentIssue(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewIssueStore(mock)
+	err = store.Upsert(context.Background(), &models.Issue{
+		OrgID:  uuid.New(),
+		Source: models.IssueSourcePMAgent,
+	})
+
+	require.EqualError(t, err, "new pm_agent issues are no longer supported", "Upsert should preserve pm_agent as read-only history")
+	require.NoError(t, mock.ExpectationsWereMet(), "rejecting historical provenance should not query the database")
 }
 
 func TestIssueStore_UpdateStatus(t *testing.T) {

@@ -27,7 +27,6 @@ func projectColumns() []string {
 		"status", "priority", "execution_mode", "max_concurrent", "auto_merge", "base_branch",
 		"current_phase", "lessons_learned", "approach_history",
 		"total_tasks", "completed_tasks", "failed_tasks",
-		"proposed_by_pm", "source_issue_ids", "proposal_reasoning", "similar_projects",
 		"agent_type", "model_override",
 		"created_by", "deleted_at", "created_at", "updated_at", "completed_at", "archived_at",
 	}
@@ -40,7 +39,6 @@ func newProjectRow(id, orgID, repoID uuid.UUID, status models.ProjectStatus, now
 		status, 50, models.ProjectExecModeSequential, 1, false, "main",
 		nil, []byte("[]"), []byte("[]"),
 		0, 0, 0,
-		false, []uuid.UUID{}, nil, json.RawMessage("[]"),
 		nil, nil, // agent_type, model_override
 		&createdBy, (*time.Time)(nil), now, now, nil, nil,
 	}
@@ -88,7 +86,7 @@ func TestProjectHandler_List(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil)
 	orgID := uuid.New()
 
 	mock.ExpectQuery("SELECT .+ FROM projects WHERE org_id").
@@ -101,7 +99,7 @@ func TestProjectHandler_List(t *testing.T) {
 
 	handler.List(rr, req)
 
-	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, http.StatusOK, rr.Code, "update response: %s", rr.Body.String())
 	require.Contains(t, rr.Body.String(), `"data":[]`)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -113,7 +111,7 @@ func TestProjectHandler_List_WithRepositoryID(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil)
 	orgID := uuid.New()
 	repoID := uuid.New()
 
@@ -135,7 +133,7 @@ func TestProjectHandler_List_WithRepositoryID(t *testing.T) {
 func TestProjectHandler_List_InvalidRepositoryID(t *testing.T) {
 	t.Parallel()
 
-	handler := NewProjectHandler(nil, nil, nil, nil, nil)
+	handler := NewProjectHandler(nil, nil, nil, nil)
 	orgID := uuid.New()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects?repository_id=not-a-uuid", nil)
@@ -155,7 +153,7 @@ func TestProjectHandler_List_WithCreatedBy(t *testing.T) {
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil)
 	orgID := uuid.New()
 	userID := uuid.New()
 
@@ -181,7 +179,7 @@ func TestProjectHandler_List_WithCreatedByIDs(t *testing.T) {
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil)
 	orgID := uuid.New()
 	userID1 := uuid.New()
 	userID2 := uuid.New()
@@ -204,7 +202,7 @@ func TestProjectHandler_List_WithCreatedByIDs(t *testing.T) {
 func TestProjectHandler_List_InvalidCreatedBy(t *testing.T) {
 	t.Parallel()
 
-	handler := NewProjectHandler(nil, nil, nil, nil, nil)
+	handler := NewProjectHandler(nil, nil, nil, nil)
 	orgID := uuid.New()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects?created_by=not-a-uuid", nil)
@@ -220,7 +218,7 @@ func TestProjectHandler_List_InvalidCreatedBy(t *testing.T) {
 func TestProjectHandler_List_InvalidCreatedByIDs(t *testing.T) {
 	t.Parallel()
 
-	handler := NewProjectHandler(nil, nil, nil, nil, nil)
+	handler := NewProjectHandler(nil, nil, nil, nil)
 	orgID := uuid.New()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects?created_by_ids=not-a-uuid", nil)
@@ -236,7 +234,7 @@ func TestProjectHandler_List_InvalidCreatedByIDs(t *testing.T) {
 func TestProjectHandler_List_BlankCreatedByIDs(t *testing.T) {
 	t.Parallel()
 
-	handler := NewProjectHandler(nil, nil, nil, nil, nil)
+	handler := NewProjectHandler(nil, nil, nil, nil)
 	orgID := uuid.New()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects?created_by_ids=,,,", nil)
@@ -252,7 +250,7 @@ func TestProjectHandler_List_BlankCreatedByIDs(t *testing.T) {
 func TestProjectHandler_List_EmptyCreatedByIDs(t *testing.T) {
 	t.Parallel()
 
-	handler := NewProjectHandler(nil, nil, nil, nil, nil)
+	handler := NewProjectHandler(nil, nil, nil, nil)
 	orgID := uuid.New()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects?created_by_ids=", nil)
@@ -268,7 +266,7 @@ func TestProjectHandler_List_EmptyCreatedByIDs(t *testing.T) {
 func TestProjectHandler_List_WhitespaceCreatedByIDs(t *testing.T) {
 	t.Parallel()
 
-	handler := NewProjectHandler(nil, nil, nil, nil, nil)
+	handler := NewProjectHandler(nil, nil, nil, nil)
 	orgID := uuid.New()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects?created_by_ids=%20", nil)
@@ -288,7 +286,7 @@ func TestProjectHandler_List_WithOnlyArchived(t *testing.T) {
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil)
 	orgID := uuid.New()
 
 	mock.ExpectQuery("SELECT .+ FROM projects WHERE org_id .+ archived_at IS NOT NULL").
@@ -313,7 +311,7 @@ func TestProjectHandler_Archive(t *testing.T) {
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil)
 	orgID := uuid.New()
 	projectID := uuid.New()
 	repoID := uuid.New()
@@ -345,7 +343,7 @@ func TestProjectHandler_Unarchive(t *testing.T) {
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil)
 	orgID := uuid.New()
 	projectID := uuid.New()
 	repoID := uuid.New()
@@ -381,7 +379,7 @@ func TestProjectHandler_Get_NotFound(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil)
 	orgID := uuid.New()
 	projectID := uuid.New()
 
@@ -411,7 +409,7 @@ func TestProjectHandler_Update(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil)
 	orgID := uuid.New()
 	projectID := uuid.New()
 	repoID := uuid.New()
@@ -422,13 +420,13 @@ func TestProjectHandler_Update(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusDraft, now)...))
 
-	// Update (20 named args)
+	// Update (19 named args)
 	mock.ExpectExec("UPDATE projects SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	body, _ := json.Marshal(map[string]string{"title": "Updated Title"})
@@ -452,7 +450,7 @@ func TestProjectHandler_Update_InvalidTransition(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil)
 	orgID := uuid.New()
 	projectID := uuid.New()
 	repoID := uuid.New()
@@ -487,7 +485,7 @@ func TestProjectHandler_UpdateTask_Success(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), db.NewProjectTaskStore(mock), nil, nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), db.NewProjectTaskStore(mock), nil, nil)
 	orgID := uuid.New()
 	projectID := uuid.New()
 	taskID := uuid.New()
@@ -548,7 +546,7 @@ func TestProjectHandler_DeleteTask_Success(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), db.NewProjectTaskStore(mock), nil, nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), db.NewProjectTaskStore(mock), nil, nil)
 	orgID := uuid.New()
 	projectID := uuid.New()
 	taskID := uuid.New()
@@ -586,7 +584,7 @@ func TestProjectHandler_DeleteTask_Success(t *testing.T) {
 func TestProjectHandler_Get_InvalidID(t *testing.T) {
 	t.Parallel()
 
-	handler := NewProjectHandler(nil, nil, nil, nil, nil)
+	handler := NewProjectHandler(nil, nil, nil, nil)
 
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", "not-a-uuid")
@@ -611,7 +609,7 @@ func TestProjectHandler_Create(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil)
 	handler.SetRepositoryStore(db.NewRepositoryStore(mock))
 	orgID := uuid.New()
 	userID := uuid.New()
@@ -628,16 +626,13 @@ func TestProjectHandler_Create(t *testing.T) {
 				nil, nil, json.RawMessage(`{}`), now, now,
 			),
 		)
-	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO projects").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
-	mock.ExpectCommit()
 
 	body, _ := json.Marshal(map[string]string{
 		"title":         "New Project",
@@ -653,14 +648,14 @@ func TestProjectHandler_Create(t *testing.T) {
 
 	handler.Create(rr, req)
 
-	require.Equal(t, http.StatusCreated, rr.Code)
+	require.Equal(t, http.StatusCreated, rr.Code, "create response: %s", rr.Body.String())
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestProjectHandler_Create_MissingFields(t *testing.T) {
 	t.Parallel()
 
-	handler := NewProjectHandler(nil, nil, nil, nil, nil)
+	handler := NewProjectHandler(nil, nil, nil, nil)
 	orgID := uuid.New()
 
 	body, _ := json.Marshal(map[string]string{"title": "No goal"})
@@ -680,7 +675,7 @@ func TestProjectHandler_Create_MissingFields(t *testing.T) {
 func TestProjectHandler_Create_InvalidJSON(t *testing.T) {
 	t.Parallel()
 
-	handler := NewProjectHandler(nil, nil, nil, nil, nil)
+	handler := NewProjectHandler(nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects", bytes.NewBufferString("{bad json"))
 	ctx := middleware.WithOrgID(req.Context(), uuid.New())
@@ -697,7 +692,7 @@ func TestProjectHandler_Create_InvalidJSON(t *testing.T) {
 func TestProjectHandler_Create_InvalidRepoID(t *testing.T) {
 	t.Parallel()
 
-	handler := NewProjectHandler(nil, nil, nil, nil, nil)
+	handler := NewProjectHandler(nil, nil, nil, nil)
 
 	body, _ := json.Marshal(map[string]string{
 		"title":         "Test",
@@ -724,7 +719,7 @@ func TestProjectHandler_Create_RejectsDisconnectedRepo(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil)
 	handler.SetRepositoryStore(db.NewRepositoryStore(mock))
 	orgID := uuid.New()
 	userID := uuid.New()
@@ -768,7 +763,7 @@ func TestProjectHandler_Create_RepoNotFound(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil)
 	handler.SetRepositoryStore(db.NewRepositoryStore(mock))
 
 	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
@@ -796,7 +791,7 @@ func TestProjectHandler_Create_RepoNotFound(t *testing.T) {
 func TestProjectHandler_Create_RepoStoreUnconfigured(t *testing.T) {
 	t.Parallel()
 
-	handler := NewProjectHandler(nil, nil, nil, nil, nil)
+	handler := NewProjectHandler(nil, nil, nil, nil)
 
 	body, _ := json.Marshal(map[string]string{
 		"title":         "New Project",
@@ -828,7 +823,7 @@ func TestProjectHandler_Delete(t *testing.T) {
 		require.NoError(t, err)
 		defer mock.Close()
 
-		handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+		handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil)
 		orgID := uuid.New()
 		projectID := uuid.New()
 		repoID := uuid.New()
@@ -860,7 +855,7 @@ func TestProjectHandler_Delete(t *testing.T) {
 		require.NoError(t, err)
 		defer mock.Close()
 
-		handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+		handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil)
 		orgID := uuid.New()
 		projectID := uuid.New()
 
@@ -890,7 +885,7 @@ func TestProjectHandler_Start(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil)
 	orgID := uuid.New()
 	projectID := uuid.New()
 	repoID := uuid.New()
@@ -925,7 +920,7 @@ func TestProjectHandler_Start_InvalidTransition(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil)
 	orgID := uuid.New()
 	projectID := uuid.New()
 	repoID := uuid.New()
@@ -957,7 +952,7 @@ func TestProjectHandler_CreateTask(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), db.NewProjectTaskStore(mock), nil, nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), db.NewProjectTaskStore(mock), nil, nil)
 	orgID := uuid.New()
 	projectID := uuid.New()
 	repoID := uuid.New()
@@ -1012,7 +1007,7 @@ func TestProjectHandler_CreateTask_MissingTitle(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil)
 	orgID := uuid.New()
 	projectID := uuid.New()
 	repoID := uuid.New()
@@ -1045,7 +1040,7 @@ func TestProjectHandler_RetryTask_OnlyFailedTasksCanRetry(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), db.NewProjectTaskStore(mock), nil, nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), db.NewProjectTaskStore(mock), nil, nil)
 	orgID := uuid.New()
 	projectID := uuid.New()
 	taskID := uuid.New()

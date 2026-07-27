@@ -108,7 +108,7 @@ func (s *SessionStarter) StartSession(ctx context.Context, input StartSessionInp
 		TokenMode:         models.DefaultSessionTokenMode,
 		TriggeredByUserID: input.UserID,
 		Title:             &title,
-		PMApproach:        &title,
+		ExecutionBrief:        &title,
 		TargetBranch:      input.BaseBranch,
 		RepositoryID:      &input.RepositoryID,
 	}

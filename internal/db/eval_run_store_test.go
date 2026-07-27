@@ -16,7 +16,7 @@ import (
 var evalRunTestColumns = []string{
 	"id", "task_id", "org_id", "batch_id",
 	"session_id", "thread_id",
-	"input_manifest", "model", "server_deploy_sha", "pm_document_set_pin_id",
+	"input_manifest", "model", "server_deploy_sha", "reference_context_set_pin_id",
 	"config_ref", "context_overrides",
 	"agent_diff", "agent_trace", "token_usage",
 	"criterion_results", "final_score", "passed",

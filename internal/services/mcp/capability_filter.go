@@ -97,8 +97,6 @@ func addAllowedToolPaths(allowed map[string]bool, capability models.AgentCapabil
 		add(CLINamespace("slack"), ActionSend)
 	case models.AgentCapabilityAutomationManagement:
 		add(NamespaceAutomation, ActionCreate, ActionUpdate, ActionRun, ActionPause, ActionResume)
-	case models.AgentCapabilityProjectProposals:
-		add(NamespaceProject, ActionPropose)
 	case models.AgentCapabilityEvalAuthoring:
 		add(NamespaceEval, ActionAdd)
 	case models.AgentCapabilityPublishing:

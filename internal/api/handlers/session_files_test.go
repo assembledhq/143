@@ -115,7 +115,7 @@ var sessionColumnsForFiles = []string{
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
-	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
+	"title", "execution_brief", "planning_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "workspace_generation", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
@@ -144,24 +144,24 @@ func sessionFileTestRow(values ...interface{}) []interface{} {
 		row := make([]interface{}, 0, len(values)+13)
 		row = append(row, values[:3]...)
 		row = append(row, "", "", "")
-		// Legacy values[3..38] = agent_type through snapshot_key (36 values).
-		row = append(row, values[3:39]...)
+		// Legacy values[3..37] = agent_type through snapshot_key.
+		row = append(row, values[3:38]...)
 		row = append(row, nil, nil) // pending_snapshot_key, pending_snapshot_set_at
-		// Legacy values[39..len-3] = runtime through latest_diff_snapshot_id.
-		row = append(row, values[39:len(values)-2]...)
+		// Legacy values[38..len-3] = runtime through latest_diff_snapshot_id.
+		row = append(row, values[38:len(values)-2]...)
 		row = append(row, false, false, (*string)(nil), string(models.LinearPrepareStateNone))
 		row = append(row, values[len(values)-2]) // deleted_at
 		row = append(row, nil)                   // capability_snapshot
 		row = append(row, nil, nil)              // git_identity_source, git_identity_user_id
 		row = append(row, values[len(values)-1]) // created_at
-		row = append(row[:38], append([]interface{}{int64(0)}, row[38:]...)...)
+		row = append(row[:37], append([]interface{}{int64(0)}, row[37:]...)...)
 		return row
 	}
 	if len(values) == len(sessionColumnsForFiles)-1 {
 		row := make([]interface{}, 0, len(values)+1)
-		row = append(row, values[:38]...)
+		row = append(row, values[:37]...)
 		row = append(row, int64(0))
-		row = append(row, values[38:]...)
+		row = append(row, values[37:]...)
 		return row
 	}
 	return values
@@ -191,7 +191,7 @@ func setupSessionMockFull(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID,
 				containerID, nil, false, &now, nil, nil, // container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage
 				nil, nil, nil, false, // failure fields
 				nil, nil, nil, nil, nil, // parent_session_id through diff
-				nil, nil, nil, nil, // pm_plan_id through pm_reasoning
+				nil, nil, nil, // title through planning_reasoning
 				nil, nil, nil, nil, // project_task_id, model_override, reasoning_effort, triggered_by_user_id
 				nil, 0, now, "running", snapshotKey, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 				nil,                         // runtime_soft_deadline_at

@@ -131,7 +131,7 @@ func seedSession(t *testing.T, pool *pgxpool.Pool, orgID uuid.UUID, opts session
 		InteractionMode:  opts.Interaction,
 		ValidationPolicy: opts.Validation,
 		Title:            &title,
-		PMApproach:       &title,
+		ExecutionBrief:       &title,
 		RepositoryID:     opts.RepositoryID,
 	}
 	store := db.NewSessionStore(pool)

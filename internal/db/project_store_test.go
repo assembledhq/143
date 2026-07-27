@@ -18,7 +18,6 @@ var projectTestColumns = []string{
 	"status", "priority", "execution_mode", "max_concurrent", "auto_merge", "base_branch",
 	"current_phase", "lessons_learned", "approach_history",
 	"total_tasks", "completed_tasks", "failed_tasks",
-	"proposed_by_pm", "source_issue_ids", "proposal_reasoning", "similar_projects",
 	"agent_type", "model_override",
 	"created_by", "deleted_at", "created_at", "updated_at", "completed_at", "archived_at",
 }
@@ -29,7 +28,6 @@ func newProjectRow(projectID, orgID, repoID uuid.UUID, now time.Time) []interfac
 		"draft", 50, "sequential", 2, false, "main",
 		nil, json.RawMessage(`[]`), json.RawMessage(`[]`),
 		0, 0, 0,
-		false, []uuid.UUID{}, nil, json.RawMessage(`[]`),
 		nil, nil,
 		nil, (*time.Time)(nil), now, now, nil, nil,
 	}
@@ -55,15 +53,10 @@ func TestProjectStore_Create(t *testing.T) {
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
-	// Create wraps insert + join-table writes in a transaction.
-	mock.ExpectBegin()
-	// 22 named args: projects INSERT columns minus the schedule fields that
-	// moved to the automations table in Phase 3 (schedule_enabled,
-	// schedule_interval, schedule_unit, next_run_at).
+	// PM proposal metadata is no longer part of human-authored project creation.
 	mock.ExpectQuery("INSERT INTO projects").
-		WithArgs(anyArgs(22)...).
+		WithArgs(anyArgs(18)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(projectID, now, now))
-	mock.ExpectCommit()
 
 	store := NewProjectStore(mock)
 	project := &models.Project{
@@ -403,10 +396,9 @@ func TestProjectStore_Update(t *testing.T) {
 	orgID := uuid.New()
 	projectID := uuid.New()
 
-	// 20 named args: the projects UPDATE SET list after Phase 3 removed
-	// the four per-project schedule columns.
+	// PM proposal similarity metadata is no longer updated.
 	mock.ExpectExec("UPDATE projects SET").
-		WithArgs(anyArgs(20)...).
+		WithArgs(anyArgs(19)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	project := &models.Project{
@@ -627,41 +619,6 @@ func TestProjectStore_Count(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
-	t.Run("count by status and proposed_by_pm", func(t *testing.T) {
-		t.Parallel()
-		mock, err := pgxmock.NewPool()
-		require.NoError(t, err)
-		defer mock.Close()
-		store := NewProjectStore(mock)
-
-		mock.ExpectQuery("SELECT count").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(2))
-
-		pmTrue := true
-		count, err := store.Count(context.Background(), uuid.New(), ProjectFilters{Status: "draft", ProposedByPM: &pmTrue})
-		require.NoError(t, err)
-		require.Equal(t, 2, count)
-		require.NoError(t, mock.ExpectationsWereMet())
-	})
-
-	t.Run("count by status, repo, and proposed_by_pm", func(t *testing.T) {
-		t.Parallel()
-		mock, err := pgxmock.NewPool()
-		require.NoError(t, err)
-		defer mock.Close()
-		store := NewProjectStore(mock)
-
-		mock.ExpectQuery("SELECT count").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
-
-		pmTrue := true
-		count, err := store.Count(context.Background(), uuid.New(), ProjectFilters{Status: "draft", RepositoryID: uuid.New(), ProposedByPM: &pmTrue})
-		require.NoError(t, err)
-		require.Equal(t, 1, count)
-		require.NoError(t, mock.ExpectationsWereMet())
-	})
 }
 
 func TestProjectStore_ListByOrgRepoStatuses(t *testing.T) {

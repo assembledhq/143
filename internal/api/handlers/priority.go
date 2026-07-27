@@ -63,14 +63,13 @@ func (h *PriorityHandler) GetComplexity(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.ComplexityEstimate]{Data: estimate})
 }
 
-// ListPriorityScores returns priority scores for the org, optionally filtered to eligible-only.
+// ListPriorityScores returns priority scores for the organization.
 func (h *PriorityHandler) ListPriorityScores(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
-	eligibleOnly := r.URL.Query().Get("eligible_only") == "true"
 	limit := queryInt(r, "limit", 50)
 
-	scores, err := h.priorityScores.ListByOrg(r.Context(), orgID, eligibleOnly, limit)
+	scores, err := h.priorityScores.ListByOrg(r.Context(), orgID, limit)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list priority scores", err)
 		return

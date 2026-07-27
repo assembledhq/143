@@ -600,7 +600,7 @@ func (s *GoalImprovementService) startDeepImprovementFromInput(ctx context.Conte
 		TokenMode:          models.SessionTokenModeLow,
 		TriggeredByUserID:  in.CreatedBy,
 		Title:              &title,
-		PMApproach:         &prompt,
+		ExecutionBrief:         &prompt,
 		RepositoryID:       in.RepositoryID,
 		TargetBranch:       in.TargetBranch,
 		ModelOverride:      in.ModelOverride,

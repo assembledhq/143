@@ -17,7 +17,7 @@ var evalTaskTestColumns = []string{
 	"id", "org_id", "repo_id", "name", "description",
 	"base_commit_sha", "solution_commit_sha", "solution_diff",
 	"issue_description", "issue_context",
-	"server_deploy_sha", "pm_document_set_pin_id", "org_settings_version_id",
+	"server_deploy_sha", "reference_context_set_pin_id", "org_settings_version_id",
 	"memory_snapshot", "sandbox_image_digest", "context_overrides",
 	"scoring_criteria", "pass_threshold",
 	"source", "source_pr_number", "complexity", "tags",

@@ -33,18 +33,19 @@ import (
 // truly global or is scoped transitively via a parent FK that already has
 // org_id (defense-in-depth still favors adding org_id directly).
 var allowedNoOrgID = map[string]string{
-	"organizations":               "root tenant table",
-	"schema_migrations":           "golang-migrate library internal",
-	"nodes":                       "cluster/infrastructure registry, not tenant data",
-	"audit_log":                   "legacy table superseded by audit_logs",
-	"preview_services":            "child of preview_instances, scoped via preview_instance_id FK",
-	"preview_infrastructure":      "child of preview_instances, scoped via preview_instance_id FK",
-	"preview_snapshots":           "child of preview_instances, scoped via preview_instance_id FK",
-	"issue_events":                "child of issues, scoped via issue_id FK",
-	"agent_run_logs":              "child of agent_runs, scoped via agent_run_id FK",
-	"pm_document_set_pin_members": "join table, scoped via pin_id -> pm_document_set_pins",
-	"project_task_dependencies":   "self-referential join on project_tasks",
-	"project_source_issues":       "join of projects and issues (both org-scoped)",
+	"organizations":                     "root tenant table",
+	"schema_migrations":                 "golang-migrate library internal",
+	"nodes":                             "cluster/infrastructure registry, not tenant data",
+	"audit_log":                         "legacy table superseded by audit_logs",
+	"preview_services":                  "child of preview_instances, scoped via preview_instance_id FK",
+	"preview_infrastructure":            "child of preview_instances, scoped via preview_instance_id FK",
+	"preview_snapshots":                 "child of preview_instances, scoped via preview_instance_id FK",
+	"issue_events":                      "child of issues, scoped via issue_id FK",
+	"agent_run_logs":                    "child of agent_runs, scoped via agent_run_id FK",
+	"pm_document_set_pin_members":       "historical name for the reference-context pin join table",
+	"reference_context_set_pin_members": "join table, scoped via pin_id -> reference_context_set_pins",
+	"project_task_dependencies":         "self-referential join on project_tasks",
+	"project_source_issues":             "join of projects and issues (both org-scoped)",
 }
 
 // identPattern matches a single SQL identifier: either an unquoted

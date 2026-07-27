@@ -42,7 +42,7 @@ EvalTask {
 
   -- Input configuration (frozen references, see doc 43)
   server_deploy_sha   string          -- pins all prompt templates (they're in the binary)
-  pm_document_set_pin_id *UUID        -- pinned PM document set
+  reference_context_set_pin_id *UUID        -- pinned PM document set
   org_settings_version_id *UUID       -- pinned org settings version
   memory_snapshot     jsonb           -- pinned learned conventions (memory IDs + content)
   sandbox_image_digest *string        -- pinned sandbox container image
@@ -270,7 +270,7 @@ These are covered in detail in [43-prompt-and-input-versioning.md](43-prompt-and
 | Input | Current state | Doc 42 solution |
 |-------|--------------|-----------------|
 | **Prompt templates** (19 templates in `internal/prompts/templates/`) | Embedded in Go binary, identical across all orgs, change only on deploy | `server_deploy_sha` — prompts are code, not config. The deploy SHA pins them all. |
-| **PM documents** (roadmap, philosophy, context) | Overwritten in place, no history | Insert-only versioning on `pm_documents` with `active` flag |
+| **PM documents** (roadmap, philosophy, context) | Overwritten in place, no history | Insert-only versioning on `reference_documents` with `active` flag |
 | **Org settings** (token limits, context limits, autonomy) | Already insert-only versioned | Record active version ID in manifest |
 | **Memory context** (learned conventions from review feedback) | Changes over time, not snapshotted | Snapshot selected memory IDs + content in manifest |
 | **Sandbox image version** | Uses mutable `"143-sandbox:latest"` | Pin to image digest, record in manifest |
@@ -289,7 +289,7 @@ These are covered in detail in [43-prompt-and-input-versioning.md](43-prompt-and
 | Input | Where it lives |
 |-------|---------------|
 | **Issue description + context** | Stored directly on the EvalTask (`issue_description`, `issue_context`) |
-| **PM task guidance** (approach, risk, reasoning) | Stored on session as `PMApproach`/`PMReasoning` — captured in eval task's `context_overrides` |
+| **PM task guidance** (approach, risk, reasoning) | Stored on session as `ExecutionBrief`/`PlanningReasoning` — captured in eval task's `context_overrides` |
 | **Model + model config** | Selected per eval run, stored on EvalRun |
 | **Complexity tier** | Stored on eval task as `complexity` |
 
@@ -415,7 +415,7 @@ EvalRun {
   input_manifest      jsonb           -- complete frozen inputs (see doc 43 §7)
   model               string
   server_deploy_sha   string          -- pins prompt templates
-  pm_document_set_pin_id UUID
+  reference_context_set_pin_id UUID
   config_ref          *string         -- optional: branch/SHA for repo config overlay
   context_overrides   jsonb
 

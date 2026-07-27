@@ -1034,7 +1034,7 @@ export function SessionSidebar() {
                         <span>{displayStatus.label}</span>
                         {displayStatus.animated && <AnimatedEllipsis />}
                       </span>
-                      {session.pm_plan_id && !session.triggered_by_user_id && (
+                      {session.agent_type === 'pm_agent' && !session.triggered_by_user_id && (
                         <span className="inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary shrink-0">
                           PM
                         </span>

@@ -107,7 +107,7 @@ func TestCreateAndAttachLinearAgentSessionUsesSingleTransaction(t *testing.T) {
 			PrimaryIssueID: &issueID,
 		}
 		approach := "Linear issue VIR-102 - Make a full screen mode for the file diff viewer"
-		session.PMApproach = &approach
+		session.ExecutionBrief = &approach
 
 		mock.ExpectBegin()
 		mock.ExpectQuery("INSERT INTO sessions").
@@ -170,7 +170,7 @@ func TestCreateAndAttachLinearAgentSessionUsesSingleTransaction(t *testing.T) {
 			PrimaryIssueID: &issueID,
 		}
 		approach := "Linear issue VIR-102 - Make a full screen mode for the file diff viewer"
-		session.PMApproach = &approach
+		session.ExecutionBrief = &approach
 		attachErr := errors.New("attach failed")
 
 		mock.ExpectBegin()

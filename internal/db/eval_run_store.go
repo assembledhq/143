@@ -21,7 +21,7 @@ func NewEvalRunStore(db DBTX) *EvalRunStore {
 
 const evalRunColumns = `id, task_id, org_id, batch_id,
 	session_id, thread_id,
-	input_manifest, model, server_deploy_sha, pm_document_set_pin_id,
+	input_manifest, model, server_deploy_sha, reference_context_set_pin_id,
 	config_ref, context_overrides,
 	agent_diff, agent_trace, token_usage,
 	criterion_results, final_score, passed,
@@ -33,7 +33,7 @@ func scanEvalRun(row pgx.Row) (models.EvalRun, error) {
 	err := row.Scan(
 		&r.ID, &r.TaskID, &r.OrgID, &r.BatchID,
 		&r.SessionID, &r.ThreadID,
-		&r.InputManifest, &r.Model, &r.ServerDeploySHA, &r.PMDocumentSetPinID,
+		&r.InputManifest, &r.Model, &r.ServerDeploySHA, &r.ReferenceContextSetPinID,
 		&r.ConfigRef, &r.ContextOverrides,
 		&r.AgentDiff, &r.AgentTrace, &r.TokenUsage,
 		&r.CriterionResults, &r.FinalScore, &r.Passed,
@@ -50,7 +50,7 @@ func scanEvalRuns(rows pgx.Rows) ([]models.EvalRun, error) {
 		err := rows.Scan(
 			&r.ID, &r.TaskID, &r.OrgID, &r.BatchID,
 			&r.SessionID, &r.ThreadID,
-			&r.InputManifest, &r.Model, &r.ServerDeploySHA, &r.PMDocumentSetPinID,
+			&r.InputManifest, &r.Model, &r.ServerDeploySHA, &r.ReferenceContextSetPinID,
 			&r.ConfigRef, &r.ContextOverrides,
 			&r.AgentDiff, &r.AgentTrace, &r.TokenUsage,
 			&r.CriterionResults, &r.FinalScore, &r.Passed,
@@ -68,36 +68,36 @@ func scanEvalRuns(rows pgx.Rows) ([]models.EvalRun, error) {
 func (s *EvalRunStore) Create(ctx context.Context, run *models.EvalRun) error {
 	query := fmt.Sprintf(`INSERT INTO eval_runs (
 		task_id, org_id, batch_id,
-		input_manifest, model, server_deploy_sha, pm_document_set_pin_id,
+		input_manifest, model, server_deploy_sha, reference_context_set_pin_id,
 		config_ref, context_overrides
 	) VALUES (
 		@task_id, @org_id, @batch_id,
-		@input_manifest, @model, @server_deploy_sha, @pm_document_set_pin_id,
+		@input_manifest, @model, @server_deploy_sha, @reference_context_set_pin_id,
 		@config_ref, @context_overrides
 	) RETURNING %s`, evalRunColumns)
 	if run.SessionID != nil || run.ThreadID != nil {
 		query = fmt.Sprintf(`INSERT INTO eval_runs (
 			task_id, org_id, batch_id, session_id, thread_id,
-			input_manifest, model, server_deploy_sha, pm_document_set_pin_id,
+			input_manifest, model, server_deploy_sha, reference_context_set_pin_id,
 			config_ref, context_overrides
 		) VALUES (
 			@task_id, @org_id, @batch_id, @session_id, @thread_id,
-			@input_manifest, @model, @server_deploy_sha, @pm_document_set_pin_id,
+			@input_manifest, @model, @server_deploy_sha, @reference_context_set_pin_id,
 			@config_ref, @context_overrides
 		) RETURNING %s`, evalRunColumns)
 	}
 	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
-		"task_id":                run.TaskID,
-		"org_id":                 run.OrgID,
-		"batch_id":               run.BatchID,
-		"session_id":             run.SessionID,
-		"thread_id":              run.ThreadID,
-		"input_manifest":         run.InputManifest,
-		"model":                  run.Model,
-		"server_deploy_sha":      run.ServerDeploySHA,
-		"pm_document_set_pin_id": run.PMDocumentSetPinID,
-		"config_ref":             run.ConfigRef,
-		"context_overrides":      run.ContextOverrides,
+		"task_id":                      run.TaskID,
+		"org_id":                       run.OrgID,
+		"batch_id":                     run.BatchID,
+		"session_id":                   run.SessionID,
+		"thread_id":                    run.ThreadID,
+		"input_manifest":               run.InputManifest,
+		"model":                        run.Model,
+		"server_deploy_sha":            run.ServerDeploySHA,
+		"reference_context_set_pin_id": run.ReferenceContextSetPinID,
+		"config_ref":                   run.ConfigRef,
+		"context_overrides":            run.ContextOverrides,
 	})
 
 	scanned, err := scanEvalRun(row)

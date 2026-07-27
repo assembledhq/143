@@ -1,6 +1,6 @@
 # 120 - Remove PM Agent And Autopilot
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-07-26
+> **Status:** Implemented | **Last reviewed:** 2026-07-26
 >
 > **Applies to:** Autopilot UI, PM analysis and context jobs, PM-driven issue
 > and project creation, prioritization, organization and repository PM
@@ -10,9 +10,10 @@
 
 Remove the PM Agent and Autopilot product from 143.
 
-PR 1 and PR 2 are implemented: the product is inert and its UI, feature APIs,
-settings surfaces, public documentation, Project run action, and dedicated
-Autopilot queue code are removed. PR 3 backend and schema cleanup remains.
+All three PRs are implemented. The product, background execution paths, feature
+APIs, settings, UI, and obsolete backend machinery are removed. Historical PM
+records remain readable, while shared eval and session context use neutral
+reference-document and execution-context contracts.
 
 The current feature has not proven effective enough to justify its product
 surface, background compute, automatic work creation, or backend complexity.
@@ -626,7 +627,7 @@ Update demo and seed data:
 - `.143/seed/30_issues.sql`;
 - `.143/seed/40_sessions_base.sql`;
 - `.143/seed/70_product_surface.sql`;
-- `.143/seed/75_pm_projects.sql`;
+- `.143/seed/75_reference_context_projects.sql`;
 - related provider/session seeds;
 - `internal/demoseed` verification.
 
@@ -776,6 +777,13 @@ Deploy PR 1 independently and observe job/session creation before merging PR 2.
   preserving eval reproducibility.
 - Stop defaulting removed JSON settings and optionally clean legacy keys.
 - Preserve historical `pm_agent` values while preventing new PM writes.
+
+Migration `000260` is an expand step because production applies migrations
+before rolling API containers and rolls workers afterward. Neutral session,
+reference-document, archive, and eval-pin names are exposed through updatable
+views or synchronized columns while legacy tables and columns remain available
+to draining binaries. Destructive contraction is intentionally deferred until
+the whole fleet has run neutral code through a complete deployment.
 
 #### Required Verification
 

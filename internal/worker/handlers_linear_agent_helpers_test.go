@@ -88,8 +88,8 @@ func TestBuildAgentSession(t *testing.T) {
 		"agent-triggered sessions skip the prepare-and-link work; PrepareState must already be ready")
 	require.NotNil(t, session.Title)
 	require.Equal(t, "Fix the thing", *session.Title)
-	require.NotNil(t, session.PMApproach, "PMApproach carries the issue context so run_agent doesn't need a fresh Linear fetch")
-	require.Contains(t, *session.PMApproach, "ACS-42")
+	require.NotNil(t, session.ExecutionBrief, "ExecutionBrief carries the issue context so run_agent doesn't need a fresh Linear fetch")
+	require.Contains(t, *session.ExecutionBrief, "ACS-42")
 }
 
 func TestBuildAgentSession_FallsBackToIdentifierWhenTitleEmpty(t *testing.T) {

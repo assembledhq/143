@@ -762,7 +762,6 @@ describe('api client', () => {
           recency_score: 75,
           revenue_risk_score: 60,
           direction_alignment: 0.9,
-          eligible_for_agent: true,
           computed_at: '2026-02-17T08:00:00Z',
         },
       };
@@ -777,7 +776,6 @@ describe('api client', () => {
       const result = await api.priority.getForIssue('issue-1');
       expect(result.data.id).toBe('ps-1');
       expect(result.data.score).toBe(85.5);
-      expect(result.data.eligible_for_agent).toBe(true);
     });
 
     it('fetches priority scores list', async () => {
@@ -793,7 +791,6 @@ describe('api client', () => {
             recency_score: 75,
             revenue_risk_score: 60,
             direction_alignment: 0.9,
-            eligible_for_agent: true,
             computed_at: '2026-02-17T08:00:00Z',
           },
         ],

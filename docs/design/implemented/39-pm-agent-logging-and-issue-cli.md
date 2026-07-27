@@ -220,8 +220,8 @@ session is a session — it just happens to have `agent_type = "pm-agent"`.
    the PM session *is* the PM plan, not a child of it. Two options:
    - (a) Skip the "PM context" card when `agent_type === "pm-agent"` and
      show a "PM Analysis" card with the plan's `analysis` text instead.
-   - (b) Do nothing — the PM session won't have `pm_reasoning`/
-     `pm_approach` set, so the card simply won't render. The plan analysis
+   - (b) Do nothing — the PM session won't have `planning_reasoning`/
+     `execution_brief` set, so the card simply won't render. The plan analysis
      is visible in the timeline logs.
    **Recommendation:** Option (b) for launch. The timeline itself is the
    primary value. A dedicated PM summary card can be added later.

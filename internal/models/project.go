@@ -28,10 +28,6 @@ type Project struct {
 	TotalTasks         int              `db:"total_tasks" json:"total_tasks"`
 	CompletedTasks     int              `db:"completed_tasks" json:"completed_tasks"`
 	FailedTasks        int              `db:"failed_tasks" json:"failed_tasks"`
-	ProposedByPM       bool             `db:"proposed_by_pm" json:"proposed_by_pm"`
-	SourceIssueIDs     []uuid.UUID      `json:"source_issue_ids,omitempty"`
-	ProposalReasoning  *string          `db:"proposal_reasoning" json:"proposal_reasoning,omitempty"`
-	SimilarProjects    json.RawMessage  `db:"similar_projects" json:"similar_projects,omitempty"`
 	AgentType          *string          `db:"agent_type" json:"agent_type,omitempty"`
 	ModelOverride      *string          `db:"model_override" json:"model_override,omitempty"`
 	CreatedBy          *uuid.UUID       `db:"created_by" json:"created_by,omitempty"`
@@ -44,15 +40,6 @@ type Project struct {
 	// Raw JSONB for store-layer scanning.
 	LessonsLearnedRaw  json.RawMessage `db:"lessons_learned" json:"-"`
 	ApproachHistoryRaw json.RawMessage `db:"approach_history" json:"-"`
-}
-
-// ProposalOverlap describes how a proposed project overlaps with an existing one.
-type ProposalOverlap struct {
-	ProjectID    uuid.UUID `json:"project_id"`
-	Title        string    `json:"title"`
-	OverlapScore float64   `json:"overlap_score"`
-	OverlapType  string    `json:"overlap_type"`
-	Explanation  string    `json:"explanation"`
 }
 
 // ProjectTask is a single work item within a project, created by the PM each cycle.
@@ -80,22 +67,6 @@ type ProjectTask struct {
 	CreatedAt    time.Time         `db:"created_at" json:"created_at"`
 	UpdatedAt    time.Time         `db:"updated_at" json:"updated_at"`
 	CompletedAt  *time.Time        `db:"completed_at" json:"completed_at,omitempty"`
-}
-
-// ProjectCycle records a PM planning cycle for a project.
-type ProjectCycle struct {
-	ID                      uuid.UUID       `db:"id" json:"id"`
-	ProjectID               uuid.UUID       `db:"project_id" json:"project_id"`
-	OrgID                   uuid.UUID       `db:"org_id" json:"org_id"`
-	PMPlanID                *uuid.UUID      `db:"pm_plan_id" json:"pm_plan_id,omitempty"`
-	CycleNumber             int             `db:"cycle_number" json:"cycle_number"`
-	Analysis                string          `db:"analysis" json:"analysis"`
-	Decisions               json.RawMessage `db:"decisions" json:"decisions"`
-	ProgressPct             *int            `db:"progress_pct" json:"progress_pct,omitempty"`
-	TasksCompletedThisCycle int             `db:"tasks_completed_this_cycle" json:"tasks_completed_this_cycle"`
-	TasksFailedThisCycle    int             `db:"tasks_failed_this_cycle" json:"tasks_failed_this_cycle"`
-	TasksCreatedThisCycle   int             `db:"tasks_created_this_cycle" json:"tasks_created_this_cycle"`
-	CreatedAt               time.Time       `db:"created_at" json:"created_at"`
 }
 
 // ApproachRecord tracks what approaches were tried and their outcomes.

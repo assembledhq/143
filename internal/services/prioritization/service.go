@@ -11,7 +11,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
-	"github.com/assembledhq/143/internal/db"
 	llmpkg "github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
@@ -32,41 +31,9 @@ type complexityEstimateStore interface {
 	Upsert(ctx context.Context, est *models.ComplexityEstimate) error
 }
 
-// sessionStore is the subset of db.SessionStore used by the service.
-type sessionStore interface {
-	CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
-	Create(ctx context.Context, run *models.Session) error
-}
-
 // orgStore is the subset of db.OrganizationStore used by the service.
 type orgStore interface {
 	GetByID(ctx context.Context, id uuid.UUID) (models.Organization, error)
-}
-
-// jobStore is the subset of db.JobStore used by the service.
-type jobStore interface {
-	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
-}
-
-// OrgSettings holds the parsed org settings relevant to prioritization.
-// NOTE: This duplicates fields from models.OrgSettings. The two structs use
-// identical JSON tags and must be kept in sync when adding new fields. A full
-// unification is not done because the nested struct shapes differ slightly
-// (e.g. PriorityWeights use inline structs here).
-type OrgSettings struct {
-	AutonomyLevel     string `json:"autonomy_level"`
-	Aggressiveness    int    `json:"execution_aggressiveness"`
-	MaxConcurrentRuns int    `json:"max_concurrent_runs"`
-	AgentAutonomy     string `json:"agent_autonomy"`
-	PriorityWeights   struct {
-		CustomerImpact float64 `json:"customer_impact"`
-		Severity       float64 `json:"severity"`
-		Recency        float64 `json:"recency"`
-		RevenueRisk    float64 `json:"revenue_risk"`
-	} `json:"priority_weights"`
-	MinPriorityThreshold float64 `json:"min_priority_threshold"`
-	ProductDirection     string  `json:"product_direction"`
-	DefaultAgentType     string  `json:"default_agent_type"`
 }
 
 // Default weight values.
@@ -75,22 +42,16 @@ const (
 	defaultWeightSeverity       = 0.25
 	defaultWeightRecency        = 0.20
 	defaultWeightRevenueRisk    = 0.20
-	defaultMaxConcurrentRuns    = 10
-	defaultMinPriorityThreshold = 30.0
-
 	// recencyHalfLifeHours is the half-life in hours for recency decay (1 week).
 	recencyHalfLifeHours = 168.0
 )
 
-// Service computes priority scores and complexity estimates for issues,
-// and optionally auto-triggers agent runs based on org settings.
+// Service computes priority scores and complexity estimates for issues.
 type Service struct {
 	issues     issueStore
 	priorities priorityScoreStore
 	complexity complexityEstimateStore
-	sessions   sessionStore
 	orgs       orgStore
-	jobs       jobStore
 	llm        llmpkg.Client // can be nil
 	logger     zerolog.Logger
 }
@@ -100,9 +61,7 @@ func NewService(
 	issues issueStore,
 	priorities priorityScoreStore,
 	complexity complexityEstimateStore,
-	sessions sessionStore,
 	orgs orgStore,
-	jobs jobStore,
 	llmClient llmpkg.Client,
 	logger zerolog.Logger,
 ) *Service {
@@ -110,9 +69,7 @@ func NewService(
 		issues:     issues,
 		priorities: priorities,
 		complexity: complexity,
-		sessions:   sessions,
 		orgs:       orgs,
-		jobs:       jobs,
 		llm:        llmClient,
 		logger:     logger,
 	}
@@ -148,8 +105,8 @@ func (s *Service) ComputeScore(ctx context.Context, orgID, issueID uuid.UUID) (*
 
 	// Direction alignment via LLM.
 	directionAlignment := 0.0
-	if s.llm != nil && settings.ProductDirection != "" {
-		alignment, err := s.computeDirectionAlignment(ctx, &issue, settings.ProductDirection)
+	if s.llm != nil && settings.ProductContext != nil && settings.ProductContext.Direction != "" {
+		alignment, err := s.computeDirectionAlignment(ctx, &issue, settings.ProductContext.Direction)
 		if err != nil {
 			s.logger.Warn().Err(err).Str("issue_id", issueID.String()).Msg("direction alignment failed, using 0")
 		} else {
@@ -159,12 +116,6 @@ func (s *Service) ComputeScore(ctx context.Context, orgID, issueID uuid.UUID) (*
 
 	// Apply direction modifier: finalScore = score * (1 + 0.3 * directionAlignment)
 	finalScore := score * (1 + 0.3*directionAlignment)
-
-	// Determine eligibility.
-	threshold := defaultOrValue(settings.MinPriorityThreshold, defaultMinPriorityThreshold)
-	eligible := directionAlignment > -0.5 &&
-		(issue.Status == "open" || issue.Status == "triaged") &&
-		finalScore > threshold
 
 	factors, err := json.Marshal(map[string]any{
 		"customer_impact_raw": customerImpact,
@@ -194,7 +145,6 @@ func (s *Service) ComputeScore(ctx context.Context, orgID, issueID uuid.UUID) (*
 		RevenueRiskScore:    revenueRisk,
 		DirectionAlignment:  directionAlignment,
 		Factors:             factors,
-		EligibleForAgent:    eligible,
 		ComputedAt:          time.Now(),
 	}
 
@@ -205,7 +155,6 @@ func (s *Service) ComputeScore(ctx context.Context, orgID, issueID uuid.UUID) (*
 	s.logger.Info().
 		Str("issue_id", issueID.String()).
 		Float64("score", finalScore).
-		Bool("eligible", eligible).
 		Msg("priority score computed")
 
 	return ps, nil
@@ -263,97 +212,6 @@ func (s *Service) EstimateComplexity(ctx context.Context, orgID, issueID uuid.UU
 		Msg("complexity estimated")
 
 	return est, nil
-}
-
-// CheckAutoTrigger checks whether an agent run should be auto-triggered
-// based on org settings, priority score, and complexity estimate.
-func (s *Service) CheckAutoTrigger(ctx context.Context, orgID uuid.UUID, score *models.PriorityScore, estimate *models.ComplexityEstimate, issue *models.Issue) error {
-	org, err := s.orgs.GetByID(ctx, orgID)
-	if err != nil {
-		return fmt.Errorf("fetch org: %w", err)
-	}
-	settings := parseOrgSettings(s.logger, org.Settings)
-
-	// Gate 1: autonomy level.
-	if settings.AutonomyLevel == string(models.AutonomyLevelManual) {
-		s.logger.Debug().Str("org_id", orgID.String()).Msg("auto-trigger skipped: manual mode")
-		return nil
-	}
-
-	// Gate 2: auto_simple mode — only trigger for high severity + high score.
-	if settings.AutonomyLevel == string(models.AutonomyLevelAutoSimple) {
-		if !isHighSeverity(issue.Severity) || score.Score < 60 {
-			s.logger.Debug().
-				Str("org_id", orgID.String()).
-				Str("severity", string(issue.Severity)).
-				Float64("score", score.Score).
-				Msg("auto-trigger skipped: auto_simple gate not met")
-			return nil
-		}
-	}
-
-	// Gate 3: aggressiveness-based tier limit.
-	maxTier := aggressivenessMaxTier(settings.Aggressiveness)
-	if estimate.Tier > maxTier {
-		s.logger.Debug().
-			Str("org_id", orgID.String()).
-			Int("tier", estimate.Tier).
-			Int("max_tier", maxTier).
-			Msg("auto-trigger skipped: complexity tier exceeds aggressiveness limit")
-		return nil
-	}
-
-	// Gate 4: concurrent run limit.
-	maxConcurrent := settings.MaxConcurrentRuns
-	if maxConcurrent <= 0 {
-		maxConcurrent = defaultMaxConcurrentRuns
-	}
-	running, err := s.sessions.CountRunningByOrg(ctx, orgID)
-	if err != nil {
-		return fmt.Errorf("count running agent runs: %w", err)
-	}
-	if running >= maxConcurrent {
-		s.logger.Debug().
-			Str("org_id", orgID.String()).
-			Int("running", running).
-			Int("max", maxConcurrent).
-			Msg("auto-trigger skipped: concurrent run limit reached")
-		return nil
-	}
-
-	// All gates passed — create agent run and enqueue job.
-	agentType := models.AgentType(settings.DefaultAgentType)
-	if agentType == "" {
-		agentType = models.DefaultDefaultAgentType
-	}
-	run := &models.Session{
-		PrimaryIssueID: &issue.ID,
-		OrgID:          orgID,
-		AgentType:      agentType,
-		Status:         models.SessionStatusPending,
-		AutonomyLevel:  models.SessionAutonomy(settings.AutonomyLevel),
-		TokenMode:      models.SessionTokenModeLow,
-		ComplexityTier: &estimate.Tier,
-		RepositoryID:   issue.RepositoryID,
-	}
-	if err := s.sessions.Create(ctx, run); err != nil {
-		return fmt.Errorf("create agent run: %w", err)
-	}
-
-	payload := db.RunAgentPayload(run)
-	dedupeKey := db.RunAgentDedupeKey(run.ID)
-	if _, err := s.jobs.Enqueue(ctx, orgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
-		return fmt.Errorf("enqueue run_agent job: %w", err)
-	}
-
-	s.logger.Info().
-		Str("issue_id", issue.ID.String()).
-		Str("session_id", run.ID.String()).
-		Float64("score", score.Score).
-		Int("tier", estimate.Tier).
-		Msg("auto-triggered agent run")
-
-	return nil
 }
 
 // computeCustomerImpact computes the customer impact sub-score.
@@ -487,8 +345,8 @@ func heuristicComplexity(issue *models.Issue) (tier int, label string, confidenc
 }
 
 // parseOrgSettings parses OrgSettings from raw JSON, returning defaults for missing values.
-func parseOrgSettings(logger zerolog.Logger, raw json.RawMessage) OrgSettings {
-	var settings OrgSettings
+func parseOrgSettings(logger zerolog.Logger, raw json.RawMessage) models.OrgSettings {
+	var settings models.OrgSettings
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &settings); err != nil {
 			logger.Warn().Err(err).Msg("failed to parse org settings for prioritization, using defaults")
@@ -503,27 +361,4 @@ func defaultOrValue(val, def float64) float64 {
 		return def
 	}
 	return val
-}
-
-// isHighSeverity returns true for critical or high severity.
-func isHighSeverity(severity models.IssueSeverity) bool {
-	s := strings.ToLower(string(severity))
-	return s == "critical" || s == "high"
-}
-
-// aggressivenessMaxTier maps the aggressiveness setting to the maximum allowed complexity tier.
-func aggressivenessMaxTier(aggressiveness int) int {
-	switch aggressiveness {
-	case 1: // conservative
-		return 2
-	case 2: // moderate
-		return 3
-	case 3: // aggressive
-		return 4
-	case 4: // maximum
-		return 5
-	default:
-		// Default to moderate if not set.
-		return 3
-	}
 }

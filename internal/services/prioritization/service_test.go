@@ -119,10 +119,9 @@ func TestComputeScore(t *testing.T) {
 		llmResponse       string
 		llmErr            error
 		expectedAlignment float64
-		expectedEligible  bool
 	}{
 		{
-			name: "uses default weights and marks eligible for open issue",
+			name: "uses default weights for open issue",
 			issue: models.Issue{
 				Severity:              "high",
 				OccurrenceCount:       64,
@@ -132,10 +131,9 @@ func TestComputeScore(t *testing.T) {
 			},
 			orgSettings:       json.RawMessage(`{"min_priority_threshold":30}`),
 			expectedAlignment: 0,
-			expectedEligible:  true,
 		},
 		{
-			name: "uses llm alignment and blocks when alignment is too negative",
+			name: "uses product context for llm alignment",
 			issue: models.Issue{
 				Severity:              "critical",
 				OccurrenceCount:       100,
@@ -144,10 +142,9 @@ func TestComputeScore(t *testing.T) {
 				Status:                "open",
 				Title:                 "checkout error",
 			},
-			orgSettings:       json.RawMessage(`{"product_direction":"self-serve onboarding","min_priority_threshold":30}`),
+			orgSettings:       json.RawMessage(`{"product_context":{"direction":"self-serve onboarding"}}`),
 			llmResponse:       `{"alignment":-0.8,"reasoning":"off direction"}`,
 			expectedAlignment: -0.8,
-			expectedEligible:  false,
 		},
 		{
 			name: "falls back to zero alignment when llm errors",
@@ -159,10 +156,9 @@ func TestComputeScore(t *testing.T) {
 				Status:                "triaged",
 				Title:                 "latency spike",
 			},
-			orgSettings:       json.RawMessage(`{"product_direction":"api reliability"}`),
+			orgSettings:       json.RawMessage(`{"product_context":{"direction":"api reliability"}}`),
 			llmErr:            errors.New("provider unavailable"),
 			expectedAlignment: 0,
-			expectedEligible:  true,
 		},
 	}
 
@@ -204,13 +200,12 @@ func TestComputeScore(t *testing.T) {
 				}
 			}
 
-			svc := NewService(issues, priorities, &fakeComplexityStore{}, &fakeSessionStore{}, orgs, &fakeJobStore{}, llm, zerolog.Nop())
+			svc := NewService(issues, priorities, &fakeComplexityStore{}, orgs, llm, zerolog.Nop())
 
 			result, err := svc.ComputeScore(context.Background(), orgID, issueID)
 			require.NoError(t, err, "ComputeScore should succeed for valid issue and org data")
 			require.NotNil(t, result, "ComputeScore should return a populated priority score")
 			require.NotNil(t, priorities.last, "ComputeScore should upsert a priority score")
-			require.Equal(t, tt.expectedEligible, result.EligibleForAgent, "ComputeScore should compute eligibility based on score gates")
 			require.InDelta(t, tt.expectedAlignment, result.DirectionAlignment, 0.0001, "ComputeScore should preserve expected direction alignment value")
 			require.Equal(t, orgID, result.OrgID, "ComputeScore should set the org id on the resulting score")
 			require.Equal(t, issueID, result.IssueID, "ComputeScore should set the issue id on the resulting score")
@@ -291,7 +286,7 @@ func TestEstimateComplexity(t *testing.T) {
 				}}
 			}
 
-			svc := NewService(issues, &fakePriorityStore{}, complexity, &fakeSessionStore{}, &fakeOrgStore{}, &fakeJobStore{}, llm, zerolog.Nop())
+			svc := NewService(issues, &fakePriorityStore{}, complexity, &fakeOrgStore{}, llm, zerolog.Nop())
 
 			var inputIssue *models.Issue
 			if tt.passIssue {
@@ -307,160 +302,6 @@ func TestEstimateComplexity(t *testing.T) {
 			require.NotNil(t, complexity.last, "EstimateComplexity should upsert the computed complexity estimate")
 		})
 	}
-}
-
-func TestCheckAutoTrigger(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name              string
-		settings          json.RawMessage
-		issueSeverity     string
-		score             float64
-		tier              int
-		running           int
-		expectedCreateRun bool
-		expectedEnqueue   int
-	}{
-		{
-			name:              "skips in manual autonomy",
-			settings:          json.RawMessage(`{"autonomy_level":"manual"}`),
-			issueSeverity:     "critical",
-			score:             90,
-			tier:              1,
-			running:           0,
-			expectedCreateRun: false,
-			expectedEnqueue:   0,
-		},
-		{
-			name:              "skips auto_simple for low severity",
-			settings:          json.RawMessage(`{"autonomy_level":"auto_simple"}`),
-			issueSeverity:     "medium",
-			score:             95,
-			tier:              1,
-			running:           0,
-			expectedCreateRun: false,
-			expectedEnqueue:   0,
-		},
-		{
-			name:              "skips when complexity exceeds aggressiveness",
-			settings:          json.RawMessage(`{"autonomy_level":"auto","execution_aggressiveness":1}`),
-			issueSeverity:     "critical",
-			score:             95,
-			tier:              4,
-			running:           0,
-			expectedCreateRun: false,
-			expectedEnqueue:   0,
-		},
-		{
-			name:              "skips when concurrent limit is reached",
-			settings:          json.RawMessage(`{"autonomy_level":"auto","max_concurrent_runs":2}`),
-			issueSeverity:     "critical",
-			score:             95,
-			tier:              2,
-			running:           2,
-			expectedCreateRun: false,
-			expectedEnqueue:   0,
-		},
-		{
-			name:              "creates run and enqueues job when gates pass",
-			settings:          json.RawMessage(`{"autonomy_level":"auto","execution_aggressiveness":3,"default_agent_type":"codex"}`),
-			issueSeverity:     "critical",
-			score:             95,
-			tier:              3,
-			running:           1,
-			expectedCreateRun: true,
-			expectedEnqueue:   1,
-		},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			orgID := uuid.New()
-			issueID := uuid.New()
-			runs := &fakeSessionStore{
-				countRunningByOrgFn: func(ctx context.Context, gotOrgID uuid.UUID) (int, error) {
-					require.Equal(t, orgID, gotOrgID, "CheckAutoTrigger should query running runs using the same org id")
-					return tt.running, nil
-				},
-				createFn: func(ctx context.Context, run *models.Session) error {
-					run.ID = uuid.New()
-					return nil
-				},
-			}
-			jobs := &fakeJobStore{}
-			orgs := &fakeOrgStore{
-				getByIDFn: func(ctx context.Context, id uuid.UUID) (models.Organization, error) {
-					require.Equal(t, orgID, id, "CheckAutoTrigger should fetch org settings for the provided org id")
-					return models.Organization{ID: id, Settings: tt.settings}, nil
-				},
-			}
-
-			svc := NewService(&fakeIssueStore{}, &fakePriorityStore{}, &fakeComplexityStore{}, runs, orgs, jobs, nil, zerolog.Nop())
-
-			err := svc.CheckAutoTrigger(
-				context.Background(),
-				orgID,
-				&models.PriorityScore{Score: tt.score},
-				&models.ComplexityEstimate{Tier: tt.tier},
-				&models.Issue{ID: issueID, Severity: models.IssueSeverity(tt.issueSeverity)},
-			)
-			require.NoError(t, err, "CheckAutoTrigger should not return an error for gate pass or skip paths")
-			require.Equal(t, tt.expectedCreateRun, len(runs.createdRuns) == 1, "CheckAutoTrigger should create a run only when all gates pass")
-			require.Equal(t, tt.expectedEnqueue, jobs.enqueueN, "CheckAutoTrigger should enqueue exactly the expected number of jobs")
-		})
-	}
-}
-
-func TestCheckAutoTrigger_PropagatesIssueRepositoryToSession(t *testing.T) {
-	t.Parallel()
-
-	// After session/issue decoupling, the orchestrator no longer falls back to
-	// issue.RepositoryID when cloning, so CheckAutoTrigger must copy the
-	// issue's repository onto the created session at insert time.
-	orgID := uuid.New()
-	issueID := uuid.New()
-	repoID := uuid.New()
-
-	runs := &fakeSessionStore{
-		countRunningByOrgFn: func(ctx context.Context, gotOrgID uuid.UUID) (int, error) {
-			return 0, nil
-		},
-		createFn: func(ctx context.Context, run *models.Session) error {
-			run.ID = uuid.New()
-			return nil
-		},
-	}
-	jobs := &fakeJobStore{}
-	orgs := &fakeOrgStore{
-		getByIDFn: func(ctx context.Context, id uuid.UUID) (models.Organization, error) {
-			return models.Organization{
-				ID:       id,
-				Settings: json.RawMessage(`{"autonomy_level":"auto","execution_aggressiveness":3,"default_agent_type":"codex"}`),
-			}, nil
-		},
-	}
-
-	svc := NewService(&fakeIssueStore{}, &fakePriorityStore{}, &fakeComplexityStore{}, runs, orgs, jobs, nil, zerolog.Nop())
-
-	err := svc.CheckAutoTrigger(
-		context.Background(),
-		orgID,
-		&models.PriorityScore{Score: 95},
-		&models.ComplexityEstimate{Tier: 2},
-		&models.Issue{ID: issueID, Severity: "critical", RepositoryID: &repoID},
-	)
-	require.NoError(t, err, "CheckAutoTrigger should not return an error when gates pass")
-	require.Len(t, runs.createdRuns, 1, "CheckAutoTrigger should create exactly one session")
-
-	created := runs.createdRuns[0]
-	require.NotNil(t, created.PrimaryIssueID, "created session should record the primary issue id")
-	require.Equal(t, issueID, *created.PrimaryIssueID, "created session should reference the auto-triggered issue")
-	require.NotNil(t, created.RepositoryID, "created session must inherit the issue's repository so the orchestrator can clone")
-	require.Equal(t, repoID, *created.RepositoryID, "created session should copy issue.RepositoryID, not invent a new one")
 }
 
 func TestScoringAndHelpers(t *testing.T) {
@@ -501,21 +342,16 @@ func TestScoringAndHelpers(t *testing.T) {
 			validate: func(t *testing.T) {
 				require.Equal(t, 0.25, defaultOrValue(0, 0.25), "defaultOrValue should return default when value is zero")
 				require.Equal(t, 0.5, defaultOrValue(0.5, 0.25), "defaultOrValue should return value when non-zero")
-				require.True(t, isHighSeverity(models.IssueSeverity("High")), "isHighSeverity should match high severity case-insensitively")
-				require.False(t, isHighSeverity(models.IssueSeverity("medium")), "isHighSeverity should reject medium severity")
-				require.Equal(t, 2, aggressivenessMaxTier(1), "aggressivenessMaxTier should map conservative to tier 2")
-				require.Equal(t, 3, aggressivenessMaxTier(0), "aggressivenessMaxTier should default unknown values to moderate")
 			},
 		},
 		{
 			name: "org settings parsing uses defaults for invalid json",
 			validate: func(t *testing.T) {
-				settings := parseOrgSettings(zerolog.Nop(), json.RawMessage(`{"autonomy_level":"auto","execution_aggressiveness":4}`))
-				require.Equal(t, "auto", settings.AutonomyLevel, "parseOrgSettings should parse autonomy level when provided")
-				require.Equal(t, 4, settings.Aggressiveness, "parseOrgSettings should parse aggressiveness when provided")
+				settings := parseOrgSettings(zerolog.Nop(), json.RawMessage(`{"priority_weights":{"severity":0.5}}`))
+				require.Equal(t, 0.5, settings.PriorityWeights.Severity, "parseOrgSettings should parse scoring configuration")
 
-				badSettings := parseOrgSettings(zerolog.Nop(), json.RawMessage(`{"autonomy_level":`))
-				require.Equal(t, "", badSettings.AutonomyLevel, "parseOrgSettings should return zero values for invalid json")
+				badSettings := parseOrgSettings(zerolog.Nop(), json.RawMessage(`{"priority_weights":`))
+				require.Equal(t, models.PriorityWeights{}, badSettings.PriorityWeights, "parseOrgSettings should return zero values for invalid json")
 			},
 		},
 	}
@@ -570,7 +406,7 @@ func TestLLMResponseParsing(t *testing.T) {
 				return tt.complexityResp, nil
 			}}
 
-			svc := NewService(&fakeIssueStore{}, &fakePriorityStore{}, &fakeComplexityStore{}, &fakeSessionStore{}, &fakeOrgStore{}, &fakeJobStore{}, llm, zerolog.Nop())
+			svc := NewService(&fakeIssueStore{}, &fakePriorityStore{}, &fakeComplexityStore{}, &fakeOrgStore{}, llm, zerolog.Nop())
 			issue := &models.Issue{Title: "nil pointer", Severity: "high"}
 
 			align, alignErr := svc.computeDirectionAlignment(context.Background(), issue, "reduce churn")
@@ -592,94 +428,6 @@ func TestLLMResponseParsing(t *testing.T) {
 
 func ptr[T any](v T) *T {
 	return &v
-}
-
-func TestCheckAutoTriggerReturnsErrors(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name   string
-		setup  func(runs *fakeSessionStore, jobs *fakeJobStore, orgs *fakeOrgStore)
-		assert func(t *testing.T, err error)
-	}{
-		{
-			name: "returns org fetch error",
-			setup: func(runs *fakeSessionStore, jobs *fakeJobStore, orgs *fakeOrgStore) {
-				orgs.getByIDFn = func(ctx context.Context, id uuid.UUID) (models.Organization, error) {
-					return models.Organization{}, errors.New("org unavailable")
-				}
-			},
-			assert: func(t *testing.T, err error) {
-				require.Error(t, err, "CheckAutoTrigger should return an error when org lookup fails")
-				require.Contains(t, err.Error(), "fetch org", "CheckAutoTrigger should wrap org lookup errors")
-			},
-		},
-		{
-			name: "returns count running error",
-			setup: func(runs *fakeSessionStore, jobs *fakeJobStore, orgs *fakeOrgStore) {
-				orgs.getByIDFn = func(ctx context.Context, id uuid.UUID) (models.Organization, error) {
-					return models.Organization{ID: id, Settings: json.RawMessage(`{"autonomy_level":"auto"}`)}, nil
-				}
-				runs.countRunningByOrgFn = func(ctx context.Context, orgID uuid.UUID) (int, error) {
-					return 0, errors.New("count failed")
-				}
-			},
-			assert: func(t *testing.T, err error) {
-				require.Error(t, err, "CheckAutoTrigger should return an error when run counting fails")
-				require.Contains(t, err.Error(), "count running agent runs", "CheckAutoTrigger should wrap running-count errors")
-			},
-		},
-		{
-			name: "returns create run error",
-			setup: func(runs *fakeSessionStore, jobs *fakeJobStore, orgs *fakeOrgStore) {
-				orgs.getByIDFn = func(ctx context.Context, id uuid.UUID) (models.Organization, error) {
-					return models.Organization{ID: id, Settings: json.RawMessage(`{"autonomy_level":"auto"}`)}, nil
-				}
-				runs.countRunningByOrgFn = func(ctx context.Context, orgID uuid.UUID) (int, error) { return 0, nil }
-				runs.createFn = func(ctx context.Context, run *models.Session) error { return errors.New("insert failed") }
-			},
-			assert: func(t *testing.T, err error) {
-				require.Error(t, err, "CheckAutoTrigger should return an error when run creation fails")
-				require.Contains(t, err.Error(), "create agent run", "CheckAutoTrigger should wrap create run errors")
-			},
-		},
-		{
-			name: "returns enqueue error",
-			setup: func(runs *fakeSessionStore, jobs *fakeJobStore, orgs *fakeOrgStore) {
-				orgs.getByIDFn = func(ctx context.Context, id uuid.UUID) (models.Organization, error) {
-					return models.Organization{ID: id, Settings: json.RawMessage(`{"autonomy_level":"auto"}`)}, nil
-				}
-				runs.countRunningByOrgFn = func(ctx context.Context, orgID uuid.UUID) (int, error) { return 0, nil }
-				runs.createFn = func(ctx context.Context, run *models.Session) error {
-					run.ID = uuid.New()
-					return nil
-				}
-				jobs.enqueueFn = func(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
-					return uuid.Nil, errors.New("queue down")
-				}
-			},
-			assert: func(t *testing.T, err error) {
-				require.Error(t, err, "CheckAutoTrigger should return an error when enqueue fails")
-				require.Contains(t, err.Error(), "enqueue run_agent job", "CheckAutoTrigger should wrap enqueue errors")
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			runs := &fakeSessionStore{}
-			jobs := &fakeJobStore{}
-			orgs := &fakeOrgStore{}
-			tt.setup(runs, jobs, orgs)
-
-			svc := NewService(&fakeIssueStore{}, &fakePriorityStore{}, &fakeComplexityStore{}, runs, orgs, jobs, nil, zerolog.Nop())
-			err := svc.CheckAutoTrigger(context.Background(), uuid.New(), &models.PriorityScore{Score: 90}, &models.ComplexityEstimate{Tier: 2}, &models.Issue{ID: uuid.New(), Severity: "critical"})
-			tt.assert(t, err)
-		})
-	}
 }
 
 func TestComputeScoreReturnsErrors(t *testing.T) {
@@ -745,7 +493,7 @@ func TestComputeScoreReturnsErrors(t *testing.T) {
 			orgs := &fakeOrgStore{}
 			tt.setup(issues, priorities, orgs)
 
-			svc := NewService(issues, priorities, &fakeComplexityStore{}, &fakeSessionStore{}, orgs, &fakeJobStore{}, nil, zerolog.Nop())
+			svc := NewService(issues, priorities, &fakeComplexityStore{}, orgs, nil, zerolog.Nop())
 			_, err := svc.ComputeScore(context.Background(), uuid.New(), uuid.New())
 			tt.assert(t, err)
 		})
@@ -793,7 +541,7 @@ func TestEstimateComplexityReturnsErrors(t *testing.T) {
 			complexity := &fakeComplexityStore{}
 			tt.setup(issues, complexity)
 
-			svc := NewService(issues, &fakePriorityStore{}, complexity, &fakeSessionStore{}, &fakeOrgStore{}, &fakeJobStore{}, nil, zerolog.Nop())
+			svc := NewService(issues, &fakePriorityStore{}, complexity, &fakeOrgStore{}, nil, zerolog.Nop())
 			issue := &models.Issue{ID: uuid.New(), Severity: "medium", LastSeenAt: time.Now()}
 			if tt.name == "returns issue fetch error when issue is nil" {
 				issue = nil

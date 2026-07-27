@@ -751,7 +751,7 @@ describe('SessionDetailPage overview and review loop', () => {
           data: {
             ...mockSessions[0],
             title: undefined,
-            pm_approach: 'Quick null check fix',
+            execution_brief: 'Quick null check fix',
             result_summary: 'Fixed TypeError by adding null check',
           },
         } satisfies SingleResponse<Session>);

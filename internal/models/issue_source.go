@@ -10,12 +10,14 @@ const (
 	IssueSourceLinear    IssueSource = "linear"
 	IssueSourcePagerDuty IssueSource = "pagerduty"
 	IssueSourceManual    IssueSource = "manual"
-	IssueSourcePMAgent   IssueSource = "pm_agent"
+	IssueSourceAgent     IssueSource = "agent"
+	// IssueSourcePMAgent is retained only for historical records.
+	IssueSourcePMAgent IssueSource = "pm_agent"
 )
 
 func (s IssueSource) Validate() error {
 	switch s {
-	case IssueSourceSentry, IssueSourceLinear, IssueSourcePagerDuty, IssueSourceManual, IssueSourcePMAgent:
+	case IssueSourceSentry, IssueSourceLinear, IssueSourcePagerDuty, IssueSourceManual, IssueSourceAgent, IssueSourcePMAgent:
 		return nil
 	default:
 		return fmt.Errorf("invalid IssueSource: %q", s)

@@ -14,7 +14,7 @@ export function capitalizeWords(value: string): string {
 
 export function sessionTitle(session: Session): string {
   if (session.title) return session.title;
-  if (session.pm_approach) return session.pm_approach;
+  if (session.execution_brief) return session.execution_brief;
   if (session.result_summary) return session.result_summary;
   return `Session ${session.id.slice(0, 8)}`;
 }

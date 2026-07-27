@@ -15,40 +15,40 @@ import (
 	"github.com/rs/zerolog"
 )
 
-type PMDocumentHandler struct {
-	store       *db.PMDocumentStore
+type ReferenceDocumentHandler struct {
+	store       *db.ReferenceDocumentStore
 	credentials *db.OrgCredentialStore
 	audit       *db.AuditEmitter
 }
 
-// SetAuditEmitter injects the audit emitter for logging PM document events.
-func (h *PMDocumentHandler) SetAuditEmitter(audit *db.AuditEmitter) {
+// SetAuditEmitter injects the audit emitter for logging reference document events.
+func (h *ReferenceDocumentHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 	h.audit = audit
 }
 
-func NewPMDocumentHandler(store *db.PMDocumentStore, credentials *db.OrgCredentialStore) *PMDocumentHandler {
-	return &PMDocumentHandler{store: store, credentials: credentials}
+func NewReferenceDocumentHandler(store *db.ReferenceDocumentStore, credentials *db.OrgCredentialStore) *ReferenceDocumentHandler {
+	return &ReferenceDocumentHandler{store: store, credentials: credentials}
 }
 
-func (h *PMDocumentHandler) List(w http.ResponseWriter, r *http.Request) {
+func (h *ReferenceDocumentHandler) List(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	docs, err := h.store.ListByOrg(r.Context(), orgID)
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list PM documents", err)
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list reference documents", err)
 		return
 	}
 	if docs == nil {
-		docs = []models.PMDocument{}
+		docs = []models.ReferenceDocument{}
 	}
 
-	writeJSON(w, http.StatusOK, models.ListResponse[models.PMDocument]{
+	writeJSON(w, http.StatusOK, models.ListResponse[models.ReferenceDocument]{
 		Data: docs,
 		Meta: models.PaginationMeta{},
 	})
 }
 
-func (h *PMDocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
+func (h *ReferenceDocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	user := middleware.UserFromContext(r.Context())
 
@@ -82,12 +82,12 @@ func (h *PMDocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		content = *req.Content
 	}
 
-	sourceType := models.PMDocSourceManual
+	sourceType := models.ReferenceDocSourceManual
 	if req.SourceType != nil {
 		sourceType = *req.SourceType
 	}
 
-	doc := models.PMDocument{
+	doc := models.ReferenceDocument{
 		OrgID:      orgID,
 		Title:      req.Title,
 		Content:    content,
@@ -100,14 +100,14 @@ func (h *PMDocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.store.Create(r.Context(), &doc); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create PM document", err)
+		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create reference document", err)
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, models.SingleResponse[models.PMDocument]{Data: doc})
+	writeJSON(w, http.StatusCreated, models.SingleResponse[models.ReferenceDocument]{Data: doc})
 }
 
-func (h *PMDocumentHandler) Get(w http.ResponseWriter, r *http.Request) {
+func (h *ReferenceDocumentHandler) Get(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	docID, err := uuid.Parse(chi.URLParam(r, "docId"))
 	if err != nil {
@@ -121,10 +121,10 @@ func (h *PMDocumentHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.PMDocument]{Data: doc})
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.ReferenceDocument]{Data: doc})
 }
 
-func (h *PMDocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
+func (h *ReferenceDocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	docID, err := uuid.Parse(chi.URLParam(r, "docId"))
 	if err != nil {
@@ -181,22 +181,22 @@ func (h *PMDocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.store.Update(r.Context(), &doc); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update PM document", err)
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update reference document", err)
 		return
 	}
 
 	idStr := doc.ID.String()
-	details := pmDocumentAuditSnapshot(&doc)
-	if changes := pmDocumentAuditDiff(&before, &doc); len(changes) > 0 {
+	details := referenceDocumentAuditSnapshot(&doc)
+	if changes := referenceDocumentAuditDiff(&before, &doc); len(changes) > 0 {
 		details["changes"] = changes
 	}
-	emitUserAudit(h.audit, r, models.AuditActionPMDocumentUpdated, models.AuditResourcePMDocument, &idStr,
+	emitUserAudit(h.audit, r, models.AuditActionReferenceDocumentUpdated, models.AuditResourceReferenceDocument, &idStr,
 		marshalAuditDetails(*zerolog.Ctx(r.Context()), details))
 
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.PMDocument]{Data: doc})
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.ReferenceDocument]{Data: doc})
 }
 
-func (h *PMDocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
+func (h *ReferenceDocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	docID, err := uuid.Parse(chi.URLParam(r, "docId"))
 	if err != nil {
@@ -215,7 +215,7 @@ func (h *PMDocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.store.Delete(r.Context(), orgID, docID); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "DELETE_FAILED", "failed to delete PM document", err)
+		writeError(w, r, http.StatusInternalServerError, "DELETE_FAILED", "failed to delete reference document", err)
 		return
 	}
 
@@ -223,7 +223,7 @@ func (h *PMDocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 }
 
 // ListVersions returns all versions of a document (active and inactive), newest first.
-func (h *PMDocumentHandler) ListVersions(w http.ResponseWriter, r *http.Request) {
+func (h *ReferenceDocumentHandler) ListVersions(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	docID, err := uuid.Parse(chi.URLParam(r, "docId"))
 	if err != nil {
@@ -239,17 +239,17 @@ func (h *PMDocumentHandler) ListVersions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if versions == nil {
-		versions = []models.PMDocument{}
+		versions = []models.ReferenceDocument{}
 	}
 
-	writeJSON(w, http.StatusOK, models.ListResponse[models.PMDocument]{
+	writeJSON(w, http.StatusOK, models.ListResponse[models.ReferenceDocument]{
 		Data: versions,
 		Meta: models.PaginationMeta{},
 	})
 }
 
 // RestoreVersion creates a new active version with the content from an old version.
-func (h *PMDocumentHandler) RestoreVersion(w http.ResponseWriter, r *http.Request) {
+func (h *ReferenceDocumentHandler) RestoreVersion(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	docID, err := uuid.Parse(chi.URLParam(r, "docId"))
 	if err != nil {
@@ -302,7 +302,7 @@ func (h *PMDocumentHandler) RestoreVersion(w http.ResponseWriter, r *http.Reques
 	}
 
 	idStr := restored.ID.String()
-	details := pmDocumentAuditSnapshot(&restored)
+	details := referenceDocumentAuditSnapshot(&restored)
 	details["restored_from_id"] = req.RestoreFromID.String()
 	details["previous_active_document_id"] = activeDoc.ID.String()
 	details["changes"] = map[string]any{
@@ -310,14 +310,14 @@ func (h *PMDocumentHandler) RestoreVersion(w http.ResponseWriter, r *http.Reques
 		"content_hash":       auditChange(activeDoc.ContentHash, restored.ContentHash),
 		"content_length":     auditChange(len(activeDoc.Content), len(restored.Content)),
 	}
-	emitUserAudit(h.audit, r, models.AuditActionPMDocumentRestored, models.AuditResourcePMDocument, &idStr,
+	emitUserAudit(h.audit, r, models.AuditActionReferenceDocumentRestored, models.AuditResourceReferenceDocument, &idStr,
 		marshalAuditDetails(*zerolog.Ctx(r.Context()), details))
 
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.PMDocument]{Data: restored})
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.ReferenceDocument]{Data: restored})
 }
 
 // ListDocumentSetPins returns all document set pins for an org.
-func (h *PMDocumentHandler) ListDocumentSetPins(w http.ResponseWriter, r *http.Request) {
+func (h *ReferenceDocumentHandler) ListDocumentSetPins(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	limit := queryInt(r, "limit", 100)
@@ -328,17 +328,17 @@ func (h *PMDocumentHandler) ListDocumentSetPins(w http.ResponseWriter, r *http.R
 		return
 	}
 	if pins == nil {
-		pins = []models.PMDocumentSetPin{}
+		pins = []models.ReferenceContextSetPin{}
 	}
 
-	writeJSON(w, http.StatusOK, models.ListResponse[models.PMDocumentSetPin]{
+	writeJSON(w, http.StatusOK, models.ListResponse[models.ReferenceContextSetPin]{
 		Data: pins,
 		Meta: models.PaginationMeta{},
 	})
 }
 
 // GetDocumentSetPin returns a pin with its member documents.
-func (h *PMDocumentHandler) GetDocumentSetPin(w http.ResponseWriter, r *http.Request) {
+func (h *ReferenceDocumentHandler) GetDocumentSetPin(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	pinID, err := uuid.Parse(chi.URLParam(r, "pinId"))
 	if err != nil {
@@ -358,7 +358,7 @@ func (h *PMDocumentHandler) GetDocumentSetPin(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if members == nil {
-		members = []models.PMDocument{}
+		members = []models.ReferenceDocument{}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -368,7 +368,7 @@ func (h *PMDocumentHandler) GetDocumentSetPin(w http.ResponseWriter, r *http.Req
 }
 
 // CreateDocumentSetPin captures the current active documents as a pin.
-func (h *PMDocumentHandler) CreateDocumentSetPin(w http.ResponseWriter, r *http.Request) {
+func (h *ReferenceDocumentHandler) CreateDocumentSetPin(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	pin, err := h.store.CreateDocumentSetPin(r.Context(), orgID)
@@ -378,18 +378,18 @@ func (h *PMDocumentHandler) CreateDocumentSetPin(w http.ResponseWriter, r *http.
 	}
 
 	idStr := pin.ID.String()
-	emitUserAudit(h.audit, r, models.AuditActionPMDocumentSetPinned, models.AuditResourcePMDocumentSet, &idStr,
+	emitUserAudit(h.audit, r, models.AuditActionReferenceContextSetPinned, models.AuditResourceReferenceDocumentSet, &idStr,
 		marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{
 			"document_set_pin_id": pin.ID.String(),
 			"created_at":          pin.CreatedAt.UTC().Format(time.RFC3339Nano),
 		}))
 
-	writeJSON(w, http.StatusCreated, models.SingleResponse[models.PMDocumentSetPin]{Data: pin})
+	writeJSON(w, http.StatusCreated, models.SingleResponse[models.ReferenceContextSetPin]{Data: pin})
 }
 
 // getNotionStore returns a configured NotionDocumentStore for the org, or
 // writes an error response and returns nil if Notion is not configured.
-func (h *PMDocumentHandler) getNotionStore(w http.ResponseWriter, r *http.Request, orgID uuid.UUID) *integration.NotionDocumentStore {
+func (h *ReferenceDocumentHandler) getNotionStore(w http.ResponseWriter, r *http.Request, orgID uuid.UUID) *integration.NotionDocumentStore {
 	if h.credentials == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "NOT_CONFIGURED", "credential store not available")
 		return nil
@@ -412,9 +412,9 @@ func (h *PMDocumentHandler) getNotionStore(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-// SyncFromNotion re-fetches a PM document's content from Notion using its
+// SyncFromNotion re-fetches a reference document's content from Notion using its
 // source_id (Notion page ID). Updates the local copy with fresh content.
-func (h *PMDocumentHandler) SyncFromNotion(w http.ResponseWriter, r *http.Request) {
+func (h *ReferenceDocumentHandler) SyncFromNotion(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	docID, err := uuid.Parse(chi.URLParam(r, "docId"))
 	if err != nil {
@@ -432,7 +432,7 @@ func (h *PMDocumentHandler) SyncFromNotion(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if doc.SourceType != models.PMDocSourceNotion || doc.SourceID == nil || *doc.SourceID == "" {
+	if doc.SourceType != models.ReferenceDocSourceNotion || doc.SourceID == nil || *doc.SourceID == "" {
 		writeError(w, r, http.StatusBadRequest, "NOT_NOTION_SOURCE", "document is not sourced from Notion")
 		return
 	}
@@ -464,17 +464,17 @@ func (h *PMDocumentHandler) SyncFromNotion(w http.ResponseWriter, r *http.Reques
 	doc.SourceMeta = meta
 
 	if err := h.store.Update(r.Context(), &doc); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update PM document", err)
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update reference document", err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.PMDocument]{Data: doc})
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.ReferenceDocument]{Data: doc})
 }
 
 // DiscoverNotion searches the org's Notion workspace for product-relevant
 // documents (roadmaps, strategy, OKRs, etc.) and returns summaries. Users
-// can then select which ones to import as PM documents.
-func (h *PMDocumentHandler) DiscoverNotion(w http.ResponseWriter, r *http.Request) {
+// can then select which ones to import as reference documents.
+func (h *ReferenceDocumentHandler) DiscoverNotion(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	store := h.getNotionStore(w, r, orgID)

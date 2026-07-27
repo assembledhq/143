@@ -96,6 +96,8 @@ func TestRemovedPMAutopilotRoutesAreUnavailable(t *testing.T) {
 		{name: "autopilot queue", method: http.MethodGet, path: "/api/v1/autopilot/queue"},
 		{name: "PM status", method: http.MethodGet, path: "/api/v1/pm/status"},
 		{name: "PM analysis", method: http.MethodPost, path: "/api/v1/pm/analyze"},
+		{name: "PM document pins list", method: http.MethodGet, path: "/api/v1/pm/document-set-pins"},
+		{name: "PM document pins create", method: http.MethodPost, path: "/api/v1/pm/document-set-pins"},
 		{name: "project run", method: http.MethodPost, path: "/api/v1/projects/" + uuid.NewString() + "/run"},
 		{name: "project cycles", method: http.MethodGet, path: "/api/v1/projects/" + uuid.NewString() + "/cycles"},
 	}

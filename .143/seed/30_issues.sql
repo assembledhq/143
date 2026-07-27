@@ -142,14 +142,14 @@ SET org_id = EXCLUDED.org_id,
 INSERT INTO priority_scores (
   id, issue_id, org_id, score, customer_impact_score, severity_score,
   recency_score, revenue_risk_score, direction_alignment, factors,
-  eligible_for_agent, computed_at
+ computed_at
 )
 VALUES
-  ('00000000-0000-4000-a000-000000000610'::uuid, '00000000-0000-4000-a000-000000000600'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 88, 20, 30, 18, 5, 15, '{"signals":["recent","high_severity","linked_project"]}'::jsonb, true, now() - interval '20 minutes'),
-  ('00000000-0000-4000-a000-000000000611'::uuid, '00000000-0000-4000-a000-000000000601'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 74, 12, 20, 17, 5, 20, '{"signals":["in_progress","reliability"]}'::jsonb, true, now() - interval '1 hour'),
-  ('00000000-0000-4000-a000-000000000612'::uuid, '00000000-0000-4000-a000-000000000602'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 69, 0, 30, 19, 0, 20, '{"signals":["manual_triage","preview_surface"]}'::jsonb, true, now() - interval '3 hours'),
-  ('00000000-0000-4000-a000-000000000613'::uuid, '00000000-0000-4000-a000-000000000603'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 35, 5, 10, 5, 0, 15, '{"signals":["fixed","low_severity"]}'::jsonb, false, now() - interval '1 day'),
-  ('00000000-0000-4000-a000-000000000614'::uuid, '00000000-0000-4000-a000-000000000604'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 61, 0, 20, 16, 0, 25, '{"signals":["manual_triage","demo_polish"]}'::jsonb, true, now() - interval '30 minutes')
+  ('00000000-0000-4000-a000-000000000610'::uuid, '00000000-0000-4000-a000-000000000600'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 88, 20, 30, 18, 5, 15, '{"signals":["recent","high_severity","linked_project"]}'::jsonb, now() - interval '20 minutes'),
+  ('00000000-0000-4000-a000-000000000611'::uuid, '00000000-0000-4000-a000-000000000601'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 74, 12, 20, 17, 5, 20, '{"signals":["in_progress","reliability"]}'::jsonb, now() - interval '1 hour'),
+  ('00000000-0000-4000-a000-000000000612'::uuid, '00000000-0000-4000-a000-000000000602'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 69, 0, 30, 19, 0, 20, '{"signals":["manual_triage","preview_surface"]}'::jsonb, now() - interval '3 hours'),
+  ('00000000-0000-4000-a000-000000000613'::uuid, '00000000-0000-4000-a000-000000000603'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 35, 5, 10, 5, 0, 15, '{"signals":["fixed","low_severity"]}'::jsonb, now() - interval '1 day'),
+  ('00000000-0000-4000-a000-000000000614'::uuid, '00000000-0000-4000-a000-000000000604'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 61, 0, 20, 16, 0, 25, '{"signals":["manual_triage","demo_polish"]}'::jsonb, now() - interval '30 minutes')
 ON CONFLICT (issue_id) DO UPDATE
 SET score = EXCLUDED.score,
     customer_impact_score = EXCLUDED.customer_impact_score,
@@ -158,7 +158,6 @@ SET score = EXCLUDED.score,
     revenue_risk_score = EXCLUDED.revenue_risk_score,
     direction_alignment = EXCLUDED.direction_alignment,
     factors = EXCLUDED.factors,
-    eligible_for_agent = EXCLUDED.eligible_for_agent,
     computed_at = EXCLUDED.computed_at;
 
 INSERT INTO complexity_estimates (

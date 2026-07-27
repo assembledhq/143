@@ -97,16 +97,16 @@ const (
 	AuditActionIssueReprioritized AuditAction = "issue.reprioritized"
 
 	// PM actions
-	AuditActionPMAnalysisTriggered  AuditAction = "pm.analysis_triggered"
-	AuditActionPMPlanCreated        AuditAction = "pm.plan_created"
-	AuditActionPMDecisionMade       AuditAction = "pm.decision_made"
-	AuditActionPMBootstrapTriggered AuditAction = "pm.bootstrap_triggered"
-	AuditActionPMRefreshTriggered   AuditAction = "pm.refresh_triggered"
-	AuditActionPMRefreshAccepted    AuditAction = "pm.refresh_accepted"
-	AuditActionPMRefreshRejected    AuditAction = "pm.refresh_rejected"
-	AuditActionPMDocumentUpdated    AuditAction = "pm_document.updated"
-	AuditActionPMDocumentRestored   AuditAction = "pm_document.restored"
-	AuditActionPMDocumentSetPinned  AuditAction = "pm_document_set.pinned"
+	AuditActionPMAnalysisTriggered       AuditAction = "pm.analysis_triggered"
+	AuditActionPMPlanCreated             AuditAction = "pm.plan_created"
+	AuditActionPMDecisionMade            AuditAction = "pm.decision_made"
+	AuditActionPMBootstrapTriggered      AuditAction = "pm.bootstrap_triggered"
+	AuditActionPMRefreshTriggered        AuditAction = "pm.refresh_triggered"
+	AuditActionPMRefreshAccepted         AuditAction = "pm.refresh_accepted"
+	AuditActionPMRefreshRejected         AuditAction = "pm.refresh_rejected"
+	AuditActionReferenceDocumentUpdated  AuditAction = "reference_document.updated"
+	AuditActionReferenceDocumentRestored AuditAction = "reference_document.restored"
+	AuditActionReferenceContextSetPinned AuditAction = "reference_document_set.pinned"
 
 	// Team & settings actions
 	AuditActionSettingsUpdated           AuditAction = "settings.updated"
@@ -220,7 +220,7 @@ func (a AuditAction) Validate() error {
 		AuditActionPMAnalysisTriggered, AuditActionPMPlanCreated, AuditActionPMDecisionMade,
 		AuditActionPMBootstrapTriggered, AuditActionPMRefreshTriggered,
 		AuditActionPMRefreshAccepted, AuditActionPMRefreshRejected,
-		AuditActionPMDocumentUpdated, AuditActionPMDocumentRestored, AuditActionPMDocumentSetPinned,
+		AuditActionReferenceDocumentUpdated, AuditActionReferenceDocumentRestored, AuditActionReferenceContextSetPinned,
 		AuditActionSettingsUpdated, AuditActionTeamMemberInvited, AuditActionTeamMemberRoleChanged,
 		AuditActionTeamMemberRemoved, AuditActionTeamInvitationRevoked, AuditActionTeamInvitationAccepted,
 		AuditActionTeamInvitationDeclined, AuditActionTeamInvitationClaimFailed,
@@ -272,8 +272,8 @@ const (
 	AuditResourceUser                       AuditResourceType = "user"
 	AuditResourceSessionReviewComment       AuditResourceType = "session_review_comment"
 	AuditResourcePullRequest                AuditResourceType = "pull_request"
-	AuditResourcePMDocument                 AuditResourceType = "pm_document"
-	AuditResourcePMDocumentSet              AuditResourceType = "pm_document_set"
+	AuditResourceReferenceDocument          AuditResourceType = "reference_document"
+	AuditResourceReferenceDocumentSet       AuditResourceType = "reference_document_set"
 	AuditResourceEvalTask                   AuditResourceType = "eval_task"
 	AuditResourceEvalRun                    AuditResourceType = "eval_run"
 	AuditResourceEvalBatch                  AuditResourceType = "eval_batch"
@@ -302,7 +302,7 @@ func (t AuditResourceType) Validate() error {
 		AuditResourceSettings, AuditResourceTeamMember, AuditResourceInvitation,
 		AuditResourceIntegration, AuditResourceExternalUserLink, AuditResourceExternalUserLinkSuggestion,
 		AuditResourceCredential, AuditResourceUser,
-		AuditResourceSessionReviewComment, AuditResourcePullRequest, AuditResourcePMDocument, AuditResourcePMDocumentSet,
+		AuditResourceSessionReviewComment, AuditResourcePullRequest, AuditResourceReferenceDocument, AuditResourceReferenceDocumentSet,
 		AuditResourceEvalTask, AuditResourceEvalRun, AuditResourceEvalBatch,
 		AuditResourceAutomation, AuditResourceOrganization, AuditResourcePreviewSecretBundle, AuditResourcePreviewPolicy, AuditResourcePreview,
 		AuditResourcePRReadinessPolicy, AuditResourcePRReadinessCustomCheck, AuditResourcePRReadinessBypass, AuditResourceCodeReviewPolicy,

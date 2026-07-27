@@ -92,8 +92,7 @@ type AgentInput struct {
 	ComplexityEstimate *ComplexityEstimate
 	ContextDocs        []string // content of CLAUDE.md, AGENTS.md, etc.
 	RevisionContext    *RevisionContext
-	PMContext          *PMTaskContext        // PM guidance for coding agents
-	PMContextJSON      string                // serialized PM context for PM agent runs
+	ExecutionContext   *ExecutionContext     // optional planning guidance for coding agents
 	IntegrationSkills  string                // auto-generated CLI skills doc for integration tools
 	ContextLimits      *models.ContextLimits // org-specific token limits (nil = use defaults)
 }
@@ -110,13 +109,13 @@ type AgentAttachment struct {
 	MessageIndex int
 }
 
-// PMTaskContext carries the PM agent's analysis into the coding agent's prompt.
-type PMTaskContext struct {
-	Approach      string
-	Risk          string
-	Reasoning     string
-	RelatedIssues []string
-	RootCause     string
+// ExecutionContext carries optional planning guidance into the coding agent's prompt.
+type ExecutionContext struct {
+	ExecutionBrief    string
+	Risk              string
+	PlanningReasoning string
+	RelatedIssues     []string
+	RootCause         string
 }
 
 // RevisionContext holds feedback that triggered a revision run.
@@ -492,15 +491,15 @@ type SandboxConfig struct {
 	SessionID string
 	OrgID     string
 	// Purpose describes why the sandbox was created (e.g. "agent_run",
-	// "pm_bootstrap", "preview"). Included in provider logs to disambiguate
-	// sandboxes that aren't attached to a single session (e.g. PM bootstrap).
+	// "preview"). Included in provider logs to disambiguate
+	// sandboxes that aren't attached to a single session.
 	Purpose string
 	// AuthSocketPath is the host-side path of a per-session AF_UNIX socket
 	// the provider should make reachable inside the container. The provider
 	// bind-mounts the socket's parent directory (not the file itself) onto
 	// SandboxSocketDir so the in-container path stays valid across host-side
 	// recreate cycles. Empty means the agent has no GitHub credential helper
-	// wired (preview sandboxes, PM bootstrap, anything not triggered as part
+	// wired (preview sandboxes and anything not triggered as part
 	// of an agent_run).
 	AuthSocketPath string
 }

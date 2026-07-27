@@ -50,7 +50,7 @@ func upsertLinearIssueForAgent(ctx context.Context, stores *Stores, orgID uuid.U
 }
 
 // buildAgentSession assembles the session row written by the worker. The
-// PMApproach carries the issue body so run_agent has all the context it
+// ExecutionBrief carries the issue body so run_agent has all the context it
 // needs without re-fetching Linear data.
 //
 // The Linear AgentSessionID is intentionally NOT a parameter here — it
@@ -80,7 +80,7 @@ func buildAgentSession(orgID uuid.UUID, repo linear.AgentRepoResolveResult, issu
 		Status:               models.SessionStatusPending,
 		Origin:               models.SessionOriginIssueTrigger,
 		Title:                &title,
-		PMApproach:           &approach,
+		ExecutionBrief:       &approach,
 		AutonomyLevel:        models.DefaultSessionAutonomy,
 		TokenMode:            models.DefaultSessionTokenMode,
 		RepositoryID:         &repoID,

@@ -1026,7 +1026,7 @@ When finished, leave the working tree with only the changes needed to solve the 
 		ModelOverride:     modelOverride,
 		TriggeredByUserID: createdBy,
 		Title:             &title,
-		PMApproach:        &prompt,
+		ExecutionBrief:    &prompt,
 		RepositoryID:      &task.RepoID,
 		BaseCommitSHA:     &baseCommitSHA,
 		InputManifest:     inputManifest,
@@ -1543,7 +1543,7 @@ func (h *EvalHandler) bootstrapSessionBacked(w http.ResponseWriter, r *http.Requ
 		TokenMode:         models.SessionTokenModeLow,
 		TriggeredByUserID: createdBy,
 		Title:             &title,
-		PMApproach:        &prompt,
+		ExecutionBrief:    &prompt,
 		RepositoryID:      &repoID,
 	}
 	if err := txSessionStore.CreateInTx(ctx, tx, session); err != nil {

@@ -28,7 +28,6 @@ const (
 	NamespaceLogs                      CLINamespace = "logs"
 	NamespaceIssue                     CLINamespace = "issue"
 	NamespacePR                        CLINamespace = "pr"
-	NamespaceProject                   CLINamespace = "project"
 	NamespaceAutomation                CLINamespace = "automation"
 	NamespaceTabs                      CLINamespace = "session-tabs"
 	NamespaceEval                      CLINamespace = "eval"
@@ -45,7 +44,6 @@ const (
 	ActionGet          CLIAction = "get"
 	ActionList         CLIAction = "list"
 	ActionMessages     CLIAction = "messages"
-	ActionPropose      CLIAction = "propose"
 	ActionUpdate       CLIAction = "update"
 	ActionRun          CLIAction = "run"
 	ActionPause        CLIAction = "pause"
@@ -207,8 +205,6 @@ func cliPathForTool(name string) (CLINamespace, CLIAction, bool) {
 		return NamespacePR, ActionCreate, true
 	case name == "issue_create":
 		return NamespaceIssue, ActionCreate, true
-	case name == "project_propose":
-		return NamespaceProject, ActionPropose, true
 	case name == "automation_create":
 		return NamespaceAutomation, ActionCreate, true
 	case name == "automation_update":
@@ -270,8 +266,6 @@ func cliCategory(namespace CLINamespace, action CLIAction) string {
 		return "143 issues"
 	case NamespacePR:
 		return "143 pull requests"
-	case NamespaceProject:
-		return "143 projects"
 	case NamespaceAutomation:
 		return "143 automations"
 	case NamespaceTabs:
