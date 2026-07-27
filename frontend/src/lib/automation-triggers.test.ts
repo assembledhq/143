@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  automationProductTriggerOptions,
   automationProductTriggersToGitHubEvents,
   githubEventsToAutomationProductTriggers,
 } from "./automation-triggers";
@@ -67,6 +68,14 @@ describe("automation trigger mapping", () => {
     expect(
       automationProductTriggersToGitHubEvents(["github.pr.ready_for_review"]),
     ).toEqual(["github.pull_request.ready_for_review"]);
+  });
+
+  it("describes ready-for-review as a state that includes opened and reopened PRs", () => {
+    expect(
+      automationProductTriggerOptions.find(
+        (option) => option.value === "github.pr.ready_for_review",
+      )?.label,
+    ).toBe("When a PR is ready for review");
   });
 
   it("coalesces the raw ready-for-review event back into its product trigger", () => {

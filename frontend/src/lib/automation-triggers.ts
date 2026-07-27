@@ -30,7 +30,7 @@ export const automationProductTriggerOptions: {
   { value: "github.pr.opened", label: "When a PR is opened" },
   {
     value: "github.pr.ready_for_review",
-    label: "When a PR is marked ready for review",
+    label: "When a PR is ready for review",
   },
   { value: "github.pr.updated", label: "When a PR is updated" },
   { value: "github.pr.feedback", label: "When there is new PR feedback" },
