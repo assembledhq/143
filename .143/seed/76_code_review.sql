@@ -2,17 +2,31 @@
 
 INSERT INTO code_review_policies (
   id, org_id, repository_id, active, version, enabled, approval_mode,
-  description_policy, risk_policy, agent_roster, inline_comment_limit,
-  created_by_user_id, created_at
+  review_instructions, automated_approval_policy, description_policy,
+  risk_policy, agent_roster, inline_comment_limit, created_by_user_id, created_at
 )
 VALUES (
   '00000000-0000-4000-a000-000000000900'::uuid,
   '00000000-0000-4000-a000-000000000001'::uuid,
-  '00000000-0000-4000-a000-000000000100'::uuid,
+  NULL,
   true,
   1,
   true,
   'comment_only',
+  '',
+  $policy$Automatically approve routine changes when:
+- the intent is clear and the change has a small, understandable scope
+- there are no blocking findings
+- the implementation follows established repository patterns
+- the test coverage visible in the code is appropriate for the change
+
+Require human review when:
+- the change affects authentication, billing, permissions, infrastructure, or production data
+- the change introduces a new architectural pattern or crosses unclear ownership boundaries
+- reviewers disagree or the risk cannot be evaluated confidently
+- the intended behavior cannot be determined from the pull request and repository context
+
+Evaluate the pull request independently based on the code itself. Disregard GitHub checks, CI results, build statuses, and other external validation signals, whether passing, failing, or pending; they must not count for or against approval. Also disregard existing human review comments, review decisions, and review threads, whether open or resolved. Unresolved human review threads must not count against approval.$policy$,
   '{"requirements":[{"key":"summary","title":"Clear summary","prompt":"Explain the change and user-visible behavior.","required":true}]}'::jsonb,
   '{"max_files_changed":12,"max_lines_changed":650,"require_passing_checks":true,"exclude_sensitive_paths":true,"sensitive_paths":["deploy/**","migrations/**",".env*"],"exclude_categories":["auth","billing","infra"],"require_up_to_date":false,"allow_forks":false,"allow_policy_changes":false,"low_risk_lane":{"enabled":true,"categories":["docs","copy"],"max_lines_changed":1000,"waive_reviewer_quorum":true}}'::jsonb,
   '{"reviewers":["codex","claude_code"],"orchestrator":"opencode","disagreement_blocks":true,"require_reviewer_quorum":2,"timeout_seconds":1800}'::jsonb,
@@ -21,9 +35,12 @@ VALUES (
   now() - interval '9 days'
 )
 ON CONFLICT (id) DO UPDATE
-SET active = EXCLUDED.active,
+SET repository_id = EXCLUDED.repository_id,
+    active = EXCLUDED.active,
     enabled = EXCLUDED.enabled,
     approval_mode = EXCLUDED.approval_mode,
+    review_instructions = EXCLUDED.review_instructions,
+    automated_approval_policy = EXCLUDED.automated_approval_policy,
     description_policy = EXCLUDED.description_policy,
     risk_policy = EXCLUDED.risk_policy,
     agent_roster = EXCLUDED.agent_roster,

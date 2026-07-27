@@ -223,6 +223,18 @@ func TestCurrentSeedUsesConvergentConflictHandlers(t *testing.T) {
 
 	seed := string(readCurrentSeed(t))
 
+	codeReviewPolicyBlock := seedBlock(t, seed, "INSERT INTO code_review_policies", "INSERT INTO code_review_github_trigger_settings")
+	require.Contains(t, codeReviewPolicyBlock, "review_instructions, automated_approval_policy", "code review policy seed should supply prompt fields whose database columns have no defaults")
+	require.Regexp(t, `(?s)VALUES\s*\(\s*'00000000-0000-4000-a000-000000000900'::uuid,\s*'00000000-0000-4000-a000-000000000001'::uuid,\s*NULL,\s*true,`, codeReviewPolicyBlock, "active code review policy seed should use organization scope")
+	requiredCodeReviewPolicyAssignments := []string{
+		"repository_id = EXCLUDED.repository_id",
+		"review_instructions = EXCLUDED.review_instructions",
+		"automated_approval_policy = EXCLUDED.automated_approval_policy",
+	}
+	for _, columnAssignment := range requiredCodeReviewPolicyAssignments {
+		require.Contains(t, codeReviewPolicyBlock, columnAssignment, "code review policy conflict handler should repair current schema fields")
+	}
+
 	prTemplateBlock := seedBlock(t, seed, "INSERT INTO repository_pr_templates", "INSERT INTO projects")
 	require.Contains(t, prTemplateBlock, "ON CONFLICT (repository_id) DO UPDATE", "repository PR template seed should converge on the table's natural unique key")
 
