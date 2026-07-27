@@ -10,7 +10,7 @@
 
 Remove the PM Agent and Autopilot product from 143.
 
-All three PRs are implemented. The product, background execution paths, feature
+All four PRs are implemented. The product, background execution paths, feature
 APIs, settings, UI, and obsolete backend machinery are removed. Historical PM
 records remain readable, while shared eval and session context use neutral
 reference-document and execution-context contracts.
@@ -22,7 +22,7 @@ started manually, triggered by integration setup, refreshed periodically, and
 can create sessions, issues, and project proposals through several independent
 paths.
 
-The removal will use three pull requests:
+The removal used four pull requests:
 
 1. **Make PM and Autopilot inert.** Stop every automatic PM job and every
    PM-owned path that can create or dispatch work. Preserve compatibility with
@@ -34,6 +34,9 @@ The removal will use three pull requests:
    shutdown has been deployed and observed. Retain standalone priority scoring,
    preserve eval reference-document pins under neutral names, remove PM Project
    planning, and neutralize shared session-context names.
+4. **Contract rollout compatibility.** Promote the neutral schema projections
+   to base tables, remove legacy dual-write columns and triggers, retire the
+   temporary disabled-job barrier, and remove PM-only Project provenance.
 
 This sequencing creates clear rollout and rollback boundaries:
 
@@ -482,7 +485,7 @@ The table cannot be dropped with PM:
   PagerDuty, evals, Automations, internal issues, and other session starts;
 - `pm_reasoning` is used for prompt and session presentation.
 
-PR 3 will perform a neutral rename:
+PR 3 introduces the neutral contract and PR 4 completes the physical rename:
 
 ```text
 session_pm_context      -> session_execution_context
@@ -785,6 +788,23 @@ views or synchronized columns while legacy tables and columns remain available
 to draining binaries. Destructive contraction is intentionally deferred until
 the whole fleet has run neutral code through a complete deployment.
 
+### PR 4 - Contract Rollout Compatibility
+
+**Purpose:** remove the expand-phase compatibility layer after the fleet has
+completed a deployment on neutral application contracts.
+
+- Promote `session_execution_context`, `reference_documents`, and
+  reference-context pin projections to physical tables by renaming the
+  historical base tables.
+- Remove legacy eval pin columns and their synchronization triggers while
+  preserving neutral pin foreign keys and snapshots.
+- Preserve PM plans, decisions, and Project cycles as renamed archive tables.
+- Remove `pm_plan_id` from session execution context and PM-only Project
+  proposal provenance, including the obsolete source-issue join table.
+- Remove the temporary database trigger that rejected retired PM job types.
+- Preserve historical Sessions, Projects, issues, archive rows, reference
+  documents, and eval reproducibility.
+
 #### Required Verification
 
 - Focused store/service tests for every migrated contract.
@@ -809,7 +829,7 @@ That would make it difficult to establish that automatic work has stopped,
 harder to review unrelated regressions, and expensive to roll back if the
 shutdown affects normal session or Automation workflows.
 
-## Why Three PRs Instead Of Two
+## Why Four PRs Instead Of Two
 
 Two PRs are possible:
 
@@ -821,13 +841,14 @@ data-model and shared-contract changes. Eval document pins, Project planning,
 priority sorting, runtime concurrency, and shared session context each require
 separate judgment.
 
-Three PRs provide the clearest invariants:
+Four PRs provide the clearest invariants:
 
 | PR | Invariant after deploy |
 | --- | --- |
 | 1 | PM and Autopilot cannot create work or consume background agent compute. |
 | 2 | Users and API clients can no longer access the PM/Autopilot product. |
 | 3 | Obsolete backend and schema machinery is removed or renamed safely. |
+| 4 | Rolling compatibility objects are contracted after neutral code is fully deployed. |
 
 ## Acceptance Criteria
 
