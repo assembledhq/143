@@ -702,7 +702,7 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	}
 	if err != nil {
 		m.logger.Error().Err(err).Str("preview_id", instance.ID.String()).Msg("failed to update handle in DB, stopping provider")
-		_ = m.provider.StopPreview(ctx, handle.Handle)
+		_ = m.stopViaProviderPrompt(ctx, handle.Handle)
 		return nil, fmt.Errorf("persist preview handle: %w", err)
 	}
 	if stopResourceSampler != nil {
@@ -722,7 +722,7 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 		// Preview was stopped concurrently — clean up the provider.
 		m.logger.Warn().Str("preview_id", instance.ID.String()).Msg("preview was stopped during startup, cleaning up provider")
 		m.stopPreviewResourceSampler(instance.ID)
-		_ = m.provider.StopPreview(ctx, handle.Handle)
+		_ = m.stopViaProviderPrompt(ctx, handle.Handle)
 		return nil, fmt.Errorf("preview was stopped concurrently during startup")
 	}
 	instance.Status = nextStatus
@@ -1748,6 +1748,15 @@ func (m *Manager) stopViaProvider(ctx context.Context, handle string, reason mod
 	return m.provider.StopPreview(ctx, handle)
 }
 
+// stopViaProviderPrompt tears a provider preview down without waiting out an
+// in-flight cache upload. It is for the paths that have no stop reason to
+// consult — launch and recycle cleanups, and the warm-resume failure path —
+// all of which run inside a request a caller is blocked on. Everything except
+// a prewarm stop wants this; see stopBackgroundWaitForReason.
+func (m *Manager) stopViaProviderPrompt(ctx context.Context, handle string) error {
+	return m.stopViaProvider(ctx, handle, models.PreviewStoppedReasonNone)
+}
+
 // StopPreviewWithReason stops a preview, records a stop cause when supplied,
 // and revokes all access sessions.
 func (m *Manager) StopPreviewWithReason(ctx context.Context, orgID, previewID uuid.UUID, reason models.PreviewStoppedReason) error {
@@ -2258,7 +2267,7 @@ func (m *Manager) ResumeStoppedWarmPreview(ctx context.Context, orgID, previewID
 	}
 	if err != nil {
 		m.logger.Error().Err(err).Msg("warm resume: failed to update handle, stopping new preview")
-		if stopErr := m.provider.StopPreview(ctx, handle.Handle); stopErr != nil {
+		if stopErr := m.stopViaProviderPrompt(ctx, handle.Handle); stopErr != nil {
 			m.logger.Warn().Err(stopErr).Str("preview_id", previewID.String()).Msg("warm resume: failed to stop preview after handle persistence error")
 		}
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, "warm resume failed: could not persist new handle"); statusErr != nil {
@@ -2576,7 +2585,7 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 
 	// Stop current processes via provider.
 	if instance.PreviewHandle != "" && m.provider != nil {
-		if err := m.provider.StopPreview(ctx, instance.PreviewHandle); err != nil {
+		if err := m.stopViaProviderPrompt(ctx, instance.PreviewHandle); err != nil {
 			m.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("recycle: provider stop failed")
 		}
 	}
@@ -2639,7 +2648,7 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 	}
 	if err != nil {
 		m.logger.Error().Err(err).Msg("recycle: failed to update handle, stopping new preview")
-		_ = m.provider.StopPreview(ctx, handle.Handle)
+		_ = m.stopViaProviderPrompt(ctx, handle.Handle)
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, "recycle failed: could not persist new handle"); statusErr != nil {
 			m.logger.Warn().Err(statusErr).Msg("recycle: failed to set failed status after handle update error")
 		}

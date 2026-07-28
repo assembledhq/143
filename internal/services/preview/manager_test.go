@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -4356,4 +4357,31 @@ func TestManager_StopViaProviderUsesReasonBudget(t *testing.T) {
 
 	require.NoError(t, m.stopViaProvider(context.Background(), "handle-1", models.PreviewStoppedReasonWarmPolicy))
 	require.Zero(t, recorder.gotWait, "a warm-policy stop should get the full budget")
+}
+
+// Only prewarm stops may wait out an in-flight cache upload; every other path
+// runs inside a request someone is blocked on. That is easy to undo by calling
+// the provider directly, so assert the funnel holds: the sole permitted
+// m.provider.StopPreview call is the fallback inside stopViaProvider itself.
+func TestManagerRoutesProviderStopsThroughWaitBudget(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("manager.go")
+	require.NoError(t, err, "manager.go should be readable")
+
+	var offenders []int
+	inFunnel := false
+	for i, line := range strings.Split(string(src), "\n") {
+		if strings.HasPrefix(line, "func (m *Manager) stopViaProvider(") {
+			inFunnel = true
+		} else if strings.HasPrefix(line, "func ") {
+			inFunnel = false
+		}
+		if !inFunnel && strings.Contains(line, "m.provider.StopPreview(") {
+			offenders = append(offenders, i+1)
+		}
+	}
+	require.Emptyf(t, offenders,
+		"manager.go:%v calls m.provider.StopPreview directly, which takes the full 10-minute "+
+			"background budget; use stopViaProvider or stopViaProviderPrompt instead", offenders)
 }
