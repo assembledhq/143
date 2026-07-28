@@ -411,6 +411,54 @@ func TestSnapshotCache_CreateSnapshotStreamsArchiveToWorker(t *testing.T) {
 	require.Equal(t, archive, written, "the worker blob should hold exactly what the sandbox tar emitted")
 }
 
+// The partial-invalidation patch must reach git over stdin. Writing it to
+// /tmp put up to maxPartialInvalidationDiffBytes into a 256 MiB tmpfs, whose
+// bytes come out of the sandbox's memory cgroup right before it builds.
+func TestSnapshotCache_ApplyPartialInvalidationStreamsDiff(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	cacheDir := t.TempDir()
+	blobPath := filepath.Join(cacheDir, "snapshot.tar.gz")
+	body := []byte("compressed snapshot body")
+	require.NoError(t, os.WriteFile(blobPath, body, 0o600), "snapshot blob should be written")
+
+	executor := &streamingRestoreExecutor{}
+	sc := &SnapshotCache{
+		store:    db.NewPreviewStore(mock),
+		executor: executor,
+		logger:   zerolog.Nop(),
+	}
+	hit := &CacheHit{
+		Entry: models.PreviewStartupCache{
+			ID:          uuid.New(),
+			OrgID:       uuid.New(),
+			SnapshotKey: "snapshot-key",
+			BlobPath:    blobPath,
+			SizeBytes:   int64(len(body)),
+		},
+		BlobPath: blobPath,
+	}
+	mock.ExpectExec("UPDATE preview_startup_cache SET last_used_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	diff := []byte("diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n")
+	err = sc.ApplyPartialInvalidation(context.Background(), &agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"}, hit, diff)
+	require.NoError(t, err, "ApplyPartialInvalidation should apply a streamed diff")
+
+	require.True(t, hasCmdContaining(executor.stdinCmds, "git apply --allow-empty"),
+		"the patch should be piped into git apply over stdin, got %v", executor.stdinCmds)
+	require.Equal(t, diff, executor.written, "git apply should receive the exact diff bytes")
+	require.False(t, executor.writeFileCalled,
+		"ApplyPartialInvalidation must not stage the patch on the sandbox filesystem")
+	require.False(t, hasCmdContaining(executor.execCmds, "/tmp/partial.diff"),
+		"no command should reference the old /tmp patch path, got %v", executor.execCmds)
+}
+
 func TestSnapshotExtraExcludeFlags(t *testing.T) {
 	t.Parallel()
 
