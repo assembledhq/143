@@ -189,7 +189,11 @@ type SharedDependencyCache struct {
 	localMaxBytes int64
 }
 
-type dependencyCacheStdinExecutor interface {
+// sandboxStdinExecutor is the optional streaming-stdin capability a
+// SnapshotExecutor may also implement. Both the dependency cache and the
+// snapshot cache need it to pipe an archive into a sandbox-side `tar xf -`
+// without staging the blob on the sandbox filesystem first.
+type sandboxStdinExecutor interface {
 	ExecWithStdin(ctx context.Context, sb *agent.Sandbox, cmd string, stdin io.Reader, stdout, stderr io.Writer) (int, error)
 }
 
@@ -865,7 +869,7 @@ func dependencyCacheArchiveNameMatchesPath(name, allowed string) bool {
 }
 
 func (c *SharedDependencyCache) extractSandboxArchive(ctx context.Context, sb *agent.Sandbox, root models.PreviewCacheRoot, reader io.Reader, stderr io.Writer) (int, error) {
-	executor, ok := c.executor.(dependencyCacheStdinExecutor)
+	executor, ok := c.executor.(sandboxStdinExecutor)
 	if !ok {
 		return -1, fmt.Errorf("executor does not support streaming dependency cache restore")
 	}
