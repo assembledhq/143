@@ -1345,7 +1345,7 @@ export function ManualSessionComposer({
                 isUploading={isUploading}
                 onRemove={removeAttachment}
                 size="md"
-                className="pt-3 pb-1"
+                className="pt-3"
               />
 
               {showImageInput && (
@@ -1400,7 +1400,10 @@ export function ManualSessionComposer({
                 </div>
               )}
 
-              <div className="pt-2">
+              <div className={cn(
+                "pt-2",
+                (attachments.length > 0 || isUploading) && "pt-1",
+              )}>
                 {isMobile ? (
                   <>
                     <div className="flex items-center gap-2">

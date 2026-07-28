@@ -120,7 +120,7 @@ export function PendingAttachmentStrip({
   return (
     <div className={cn("flex flex-wrap items-center gap-2", className)}>
       {normalizedAttachments.map(({ url, isImage, fileName }) => (
-        <div key={url} className="relative pt-1.5 pr-1.5">
+        <div key={url} className="relative pt-3 pr-2">
           {isImage ? (
             <AttachmentImageTile url={url} fileName={fileName} size={size} />
           ) : (
@@ -137,7 +137,7 @@ export function PendingAttachmentStrip({
           <Button
             type="button"
             variant="outline"
-            size="icon-xs"
+            size="icon-compact"
             onClick={() => onRemove(url)}
             aria-label={`Remove ${fileName}`}
             className={cn(
