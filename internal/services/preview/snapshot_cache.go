@@ -29,11 +29,19 @@ const (
 	// DefaultMaxCacheBytes is 20 GB per worker.
 	DefaultMaxCacheBytes int64 = 20 * 1024 * 1024 * 1024
 
-	// snapshotTmpFile is the temporary path inside the sandbox where the
-	// snapshot archive is staged during create/restore. tar auto-detects the
-	// compression on extract, so the name is cosmetic — it does not have to
-	// match the actual (zstd or legacy gzip) format of the bytes.
-	snapshotTmpFile = "/tmp/snapshot.tar.zst"
+	// legacySnapshotTmpFile is the path inside the sandbox where snapshots used
+	// to be staged before create/restore streamed directly to and from the
+	// worker. Create and restore no longer write it; it is still removed
+	// best-effort so a sandbox that ran an older build (or a create that failed
+	// partway under it) does not keep the file pinned in the tmpfs.
+	//
+	// Staging here was a latent cap on snapshot size: /tmp is a 256 MiB tmpfs
+	// (see the sandbox Tmpfs config in the docker agent provider), so any
+	// workspace whose archive exceeded that filled the mount and zstd died with
+	// "error 70 : Write error : cannot write block" a few seconds in. Because
+	// tmpfs is RAM, it also charged the sandbox's memory cgroup. Both directions
+	// now stream, so neither the size cap nor the memory charge applies.
+	legacySnapshotTmpFile = "/tmp/snapshot.tar.zst"
 )
 
 // =============================================================================
@@ -201,7 +209,7 @@ func (sc *SnapshotCache) CreateSnapshot(
 	log.Info().Msg("creating filesystem snapshot")
 	start := time.Now()
 
-	// 1. Create the archive inside the sandbox.
+	// 1. Build the in-sandbox archive command.
 	//    Using shell tar is significantly faster than Go's archive/tar for
 	//    large node_modules trees (parallel I/O, kernel-level buffering).
 	//    Compression and the base exclude list are shared with the
@@ -209,25 +217,23 @@ func (sc *SnapshotCache) CreateSnapshot(
 	//    preview workspaces rebuild .git from the clone. excludePaths are the
 	//    caller's per-config additions (runtime secret-file destinations and
 	//    separately-restored build caches — see previewSnapshotExcludePaths).
+	//
+	//    `-f -` streams to stdout, which the exec pipes straight to the
+	//    worker-local temp file below. Nothing is staged inside the sandbox:
+	//    the previous two-step form wrote the whole archive to a 256 MiB tmpfs
+	//    first (see legacySnapshotTmpFile), which capped snapshots at that size
+	//    and charged the bytes to the sandbox's memory cgroup. The session
+	//    checkpoint path in the docker agent provider and the dependency cache's
+	//    stageSandboxArchive both already stream this way.
 	tarCmd := fmt.Sprintf(
-		"tar -c %s -f %s -C %s %s%s -- .",
+		"tar -c %s -f - -C %s %s%s -- .",
 		agent.SnapshotTarCompressFlag,
-		snapshotTmpFile,
 		shellQuote(sb.WorkDir),
 		agent.SnapshotTarExcludeFlags(true),
 		snapshotExtraExcludeFlags(excludePaths),
 	)
 
-	var stderr bytes.Buffer
-	exitCode, err := sc.executor.Exec(ctx, sb, tarCmd, io.Discard, &stderr)
-	if err != nil {
-		return fmt.Errorf("snapshot create: exec tar: %w", err)
-	}
-	if exitCode != 0 {
-		return fmt.Errorf("snapshot create: tar exited %d: %s", exitCode, stderr.String())
-	}
-
-	// 2. Stream the tar.gz from the sandbox directly into a worker-local
+	// 2. Stream the archive from the sandbox directly into a worker-local
 	//    temp file. We tee through a SHA-256 hasher so the checksum is
 	//    computed without a second pass, and through a counting writer so
 	//    we can enforce the max blob size mid-stream rather than after
@@ -262,8 +268,7 @@ func (sc *SnapshotCache) CreateSnapshot(
 	// executor will surface back here, short-circuiting the stream.
 	stream := io.MultiWriter(tmp, hasher, counter)
 
-	readCmd := fmt.Sprintf("cat %s", shellQuote(snapshotTmpFile))
-	exitCode, err = sc.executor.Exec(ctx, sb, readCmd, stream, &tarStderr)
+	exitCode, err := sc.executor.Exec(ctx, sb, tarCmd, stream, &tarStderr)
 	// Close the tmp file regardless of outcome so we can rename (or remove) it.
 	if syncErr := tmp.Sync(); syncErr != nil && err == nil {
 		err = fmt.Errorf("sync temp blob: %w", syncErr)
@@ -271,14 +276,18 @@ func (sc *SnapshotCache) CreateSnapshot(
 	if closeErr := tmp.Close(); closeErr != nil && err == nil {
 		err = fmt.Errorf("close temp blob: %w", closeErr)
 	}
+	// Check the size cap before the exec's own error. When the counter trips it
+	// fails the stream write, which surfaces as a generic exec/stderr error and
+	// would otherwise bury the real reason ("too large") under tar's downstream
+	// complaint about a broken pipe.
+	if counter.exceeded {
+		return fmt.Errorf("snapshot create: tar too large (>%d bytes max)", maxCreateBlobBytes)
+	}
 	if err != nil {
 		return fmt.Errorf("snapshot create: stream tar from sandbox: %w", err)
 	}
 	if exitCode != 0 {
-		return fmt.Errorf("snapshot create: cat exited %d: %s", exitCode, tarStderr.String())
-	}
-	if counter.exceeded {
-		return fmt.Errorf("snapshot create: tar too large (>%d bytes max)", maxCreateBlobBytes)
+		return fmt.Errorf("snapshot create: tar exited %d: %s", exitCode, tarStderr.String())
 	}
 
 	if err := os.Chmod(tmpPath, 0o600); err != nil {
@@ -318,8 +327,10 @@ func (sc *SnapshotCache) CreateSnapshot(
 		return fmt.Errorf("snapshot create: upsert db: %w", err)
 	}
 
-	// 5. Clean up the temporary file inside the sandbox.
-	_, _ = sc.executor.Exec(ctx, sb, fmt.Sprintf("rm -f %s", snapshotTmpFile), io.Discard, io.Discard)
+	// 5. Reclaim the legacy staging file if an older build left one behind. The
+	//    streaming create above never writes it, but the sandbox is long-lived
+	//    and 256 MiB of tmpfs held there is 256 MiB off the memory cgroup.
+	sc.removeLegacyStagingFile(ctx, sb)
 
 	// 6. Evict old entries if we are over the size limit.
 	if evictErr := sc.EvictLRU(ctx); evictErr != nil {
@@ -485,7 +496,14 @@ func (sc *SnapshotCache) RestoreSnapshot(
 		}
 	}
 
-	// 2. Write the tar.gz into the sandbox.
+	// 2. Open the blob. It is streamed straight into the sandbox's tar below
+	//    rather than staged to a file inside the sandbox first: the old staging
+	//    path capped restores at the 256 MiB /tmp tmpfs and charged the bytes to
+	//    the sandbox memory cgroup (see legacySnapshotTmpFile).
+	streamExec, ok := sc.executor.(sandboxStdinExecutor)
+	if !ok {
+		return fmt.Errorf("snapshot restore: executor does not support streaming restore")
+	}
 	blob, err := os.Open(hit.BlobPath) // #nosec G304 -- BlobPath was validated by lookup and stat above
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -501,9 +519,6 @@ func (sc *SnapshotCache) RestoreSnapshot(
 			log.Warn().Err(closeErr).Str("blob_path", hit.BlobPath).Msg("failed to close snapshot blob")
 		}
 	}()
-	if err := sc.executor.WriteFileFromReader(ctx, sb, snapshotTmpFile, blob, fi.Size()); err != nil {
-		return fmt.Errorf("snapshot restore: stream tar to sandbox: %w", err)
-	}
 
 	// 3. Remove existing workspace files (except .git which is excluded from
 	//    snapshots and reconstructed separately). Without this, files deleted
@@ -513,26 +528,41 @@ func (sc *SnapshotCache) RestoreSnapshot(
 		shellQuote(sb.WorkDir),
 	)
 	var cleanStderr bytes.Buffer
-	if cleanExit, cleanErr := sc.executor.Exec(ctx, sb, cleanCmd, io.Discard, &cleanStderr); cleanErr != nil || cleanExit != 0 {
+	cleanExit, cleanErr := sc.executor.Exec(ctx, sb, cleanCmd, io.Discard, &cleanStderr)
+	workspaceCleaned := cleanErr == nil && cleanExit == 0
+	if !workspaceCleaned {
 		log.Warn().Err(cleanErr).Int("exit_code", cleanExit).Str("stderr", cleanStderr.String()).
 			Msg("failed to clean workspace before restore — proceeding with overlay extraction")
 	}
 
-	// 4. Extract inside the sandbox. `xf` (not `xzf`) so tar auto-detects the
-	//    compression — restores both new zstd archives and pre-switch gzip ones.
-	extractCmd := fmt.Sprintf("tar xf %s -C %s", snapshotTmpFile, shellQuote(sb.WorkDir))
+	// 4. Stream the blob into tar inside the sandbox. `xf -` (not `xzf`) so tar
+	//    auto-detects the compression — restores both new zstd archives and
+	//    pre-switch gzip ones.
+	extractCmd := fmt.Sprintf("tar xf - -C %s", shellQuote(sb.WorkDir))
 
 	var stderr bytes.Buffer
-	exitCode, err := sc.executor.Exec(ctx, sb, extractCmd, io.Discard, &stderr)
-	if err != nil {
-		return fmt.Errorf("snapshot restore: exec tar: %w", err)
-	}
-	if exitCode != 0 {
+	exitCode, err := streamExec.ExecWithStdin(ctx, sb, extractCmd, blob, io.Discard, &stderr)
+	if err != nil || exitCode != 0 {
+		// The extract now streams, so a failure can land after step 3 wiped the
+		// workspace — where the two-step form always failed before the wipe. The
+		// caller treats a restore error as "launch cold" and keeps using this
+		// sandbox, so put the tree back from the clone (.git survives the clean)
+		// before returning; otherwise the cold launch would build an empty
+		// workspace.
+		if workspaceCleaned {
+			if recoverErr := sc.recoverWorkspaceFromGit(ctx, sb); recoverErr != nil {
+				log.Error().Err(recoverErr).Msg("snapshot restore failed and workspace could not be recovered from git")
+				return fmt.Errorf("snapshot restore: extract failed and workspace recovery failed: %w", recoverErr)
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("snapshot restore: exec tar: %w", err)
+		}
 		return fmt.Errorf("snapshot restore: tar exited %d: %s", exitCode, stderr.String())
 	}
 
-	// 5. Clean up the temporary file inside the sandbox.
-	_, _ = sc.executor.Exec(ctx, sb, fmt.Sprintf("rm -f %s", snapshotTmpFile), io.Discard, io.Discard)
+	// 5. Reclaim the legacy staging file if an older build left one behind.
+	sc.removeLegacyStagingFile(ctx, sb)
 
 	// 6. Touch the cache entry to update LRU ordering.
 	if err := sc.store.TouchCache(ctx, hit.Entry.OrgID, hit.Entry.ID); err != nil {
@@ -544,6 +574,35 @@ func (sc *SnapshotCache) RestoreSnapshot(
 		Dur("elapsed_ms", time.Since(start)).
 		Msg("filesystem snapshot restored")
 
+	return nil
+}
+
+// removeLegacyStagingFile best-effort deletes the pre-streaming staging file
+// from the sandbox. Create and restore no longer write it, but a sandbox that
+// previously ran an older build may still be holding it — and since /tmp is a
+// tmpfs, those bytes sit in the container's memory cgroup until removed.
+func (sc *SnapshotCache) removeLegacyStagingFile(ctx context.Context, sb *agent.Sandbox) {
+	_, _ = sc.executor.Exec(ctx, sb, fmt.Sprintf("rm -f %s", shellQuote(legacySnapshotTmpFile)), io.Discard, io.Discard)
+}
+
+// recoverWorkspaceFromGit rebuilds the working tree from the sandbox's git
+// clone after a failed restore left it wiped or half-extracted. HEAD is the
+// pinned preview commit, checked out earlier in the start flow. It mirrors
+// StartRunner.recoverWorkspaceFromGit, which covers the same hazard on the
+// base-snapshot path.
+func (sc *SnapshotCache) recoverWorkspaceFromGit(ctx context.Context, sb *agent.Sandbox) error {
+	cmd := fmt.Sprintf(
+		"find %s -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} + && cd %s && git checkout -f HEAD -- .",
+		shellQuote(sb.WorkDir), shellQuote(sb.WorkDir),
+	)
+	var stderr bytes.Buffer
+	exitCode, err := sc.executor.Exec(ctx, sb, cmd, io.Discard, &stderr)
+	if err != nil {
+		return fmt.Errorf("exec workspace recovery: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("workspace recovery exited %d: %s", exitCode, stderr.String())
+	}
 	return nil
 }
 

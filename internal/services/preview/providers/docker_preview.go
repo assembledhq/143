@@ -842,10 +842,26 @@ func previewConfigHasInitScripts(cfg *models.PreviewConfig) bool {
 
 // previewStopBackgroundWaitCap bounds how long StopPreview blocks on background
 // work — chiefly the post-ready build-cache uploads it deliberately awaits so a
-// prewarm persists its cache. It sits below the saves' own 10-minute timeout so
-// an interactive stop can't hang on a wedged blob store, yet is generous enough
-// that a normal prewarm save (seconds) completes.
-const previewStopBackgroundWaitCap = 3 * time.Minute
+// prewarm persists its cache. It sits below the saves' own previewCacheSaveTimeout
+// so an interactive stop can't hang on a wedged blob store.
+//
+// The cap must exceed how long a real save takes, or a warm-policy launch — which
+// calls StopPreview the instant the preview is ready — tears the sandbox down
+// mid-archive and the save can never land. At 3 minutes that is exactly what
+// happened: saves of a large monorepo's build tree run 150-330s, so ~88% were
+// killed by teardown (the exec surfaces it as exit 128, or 137 when the SIGKILL
+// wins the race) and the cached blob stayed frozen at whatever content last
+// managed to save. Every subsequent launch then restored a stale cache and
+// rebuilt from near-scratch. 10 minutes clears the observed distribution with
+// headroom.
+const previewStopBackgroundWaitCap = 10 * time.Minute
+
+// previewCacheSaveTimeout is each cache save's own self-timeout, detached from
+// the launch ctx. It stays above previewStopBackgroundWaitCap so the stop path
+// is what gives up first: a save that outlives the cap is abandoned by
+// StopPreview but still gets a window to finish on its own rather than being
+// cancelled at the exact moment the waiter stops watching.
+const previewCacheSaveTimeout = 15 * time.Minute
 
 // waitForGroupBounded blocks until wg is done, ctx is cancelled, or maxWait
 // elapses — whichever first — returning a non-nil error only when it gives up
@@ -1767,7 +1783,7 @@ func (d *DockerPreviewProvider) savePackageManagerCache(ctx context.Context, sta
 		Lockfiles:       lockfiles,
 	}
 	save := func() {
-		saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+		saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), previewCacheSaveTimeout)
 		defer cancel()
 		started := time.Now()
 		result, err := pathCache.SavePathCache(saveCtx, state.sandbox, preview.PreviewPathCacheSaveSpec{
@@ -1823,7 +1839,7 @@ func (d *DockerPreviewProvider) saveDependencyCache(ctx context.Context, state *
 	// invalidation independent.
 	excludePaths, _ := preview.ResolvePreviewBuildCachePaths(install)
 	save := func() {
-		saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+		saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), previewCacheSaveTimeout)
 		defer cancel()
 		started := time.Now()
 		pathCache, hasPathCache := d.dependencyCache.(preview.PreviewPathCache)
@@ -2153,7 +2169,7 @@ func (d *DockerPreviewProvider) saveBuildCacheSet(ctx context.Context, state *pr
 		InstallCommand: append([]string(nil), install.Command...),
 		EffectivePaths: append([]string(nil), paths...),
 	}
-	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), previewCacheSaveTimeout)
 	defer cancel()
 	started := time.Now()
 	result, err := pathCache.SavePathCache(saveCtx, state.sandbox, preview.PreviewPathCacheSaveSpec{
