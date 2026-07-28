@@ -3304,6 +3304,49 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			bodyNotContains: "Add direct parser coverage",
 		},
 		{
+			name: "keeps generated P2 details out of an approved GitHub summary",
+			input: liveCodeReviewOutcomeInput{
+				Policy: policy,
+				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
+				PullRequest: models.PullRequest{
+					OrgID:   orgID,
+					Body:    &prBody,
+					HeadSHA: stringPtr("head"),
+					Status:  models.PullRequestStatusOpen,
+				},
+				Health: &models.PullRequestHealthResponse{
+					HeadSHA:         "head",
+					Status:          models.PullRequestStatusOpen,
+					CanMerge:        true,
+					ChecksConfirmed: true,
+					MergeState:      models.PullRequestMergeStateClean,
+				},
+				AgentResults: []models.CodeReviewAgentResult{
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+				},
+				Findings: []models.CodeReviewFinding{{
+					Severity:   models.CodeReviewFindingSeverityMedium,
+					Confidence: models.CodeReviewFindingConfidenceHigh,
+					Summary:    "Add direct parser coverage",
+					Body:       "A focused regression test would make this behavior easier to maintain.",
+				}},
+				ChangedFiles: []codereview.PullRequestFile{
+					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
+				},
+				ChangedFilesAvailable: true,
+				OrchestratorSynthesis: codeReviewOrchestratorSynthesis{
+					ReviewSummary: "The change is safe, but direct parser coverage remains an advisory follow-up.",
+				},
+			},
+			configureOrchestrator: func(input *liveCodeReviewOutcomeInput) {
+				setCodingAgentDecision(input, true, nil)
+			},
+			expected:        models.CodeReviewDecisionApproved,
+			bodyContains:    "**Advisory notes:** 1 non-blocking observation is available in the full review. P2 and P3 observations do not affect the approval decision.",
+			bodyNotContains: "direct parser coverage remains an advisory follow-up",
+		},
+		{
 			name: "withholds approval for an explicit non-finding human judgment",
 			input: liveCodeReviewOutcomeInput{
 				Policy: policy,
