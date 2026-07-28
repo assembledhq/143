@@ -30,20 +30,6 @@ import (
 const (
 	// DefaultMaxCacheBytes is 20 GB per worker.
 	DefaultMaxCacheBytes int64 = 20 * 1024 * 1024 * 1024
-
-	// legacySnapshotTmpFile is the path inside the sandbox where snapshots used
-	// to be staged before create/restore streamed directly to and from the
-	// worker. Create and restore no longer write it; it is still removed
-	// best-effort so a sandbox that ran an older build (or a create that failed
-	// partway under it) does not keep the file pinned in the tmpfs.
-	//
-	// Staging here was a latent cap on snapshot size: /tmp is a 256 MiB tmpfs
-	// (see the sandbox Tmpfs config in the docker agent provider), so any
-	// workspace whose archive exceeded that filled the mount and zstd died with
-	// "error 70 : Write error : cannot write block" a few seconds in. Because
-	// tmpfs is RAM, it also charged the sandbox's memory cgroup. Both directions
-	// now stream, so neither the size cap nor the memory charge applies.
-	legacySnapshotTmpFile = "/tmp/snapshot.tar.zst"
 )
 
 // ErrPreviewWorkspaceUnrecoverable marks a failure that left the sandbox
@@ -468,10 +454,10 @@ func (sc *SnapshotCache) CreateSnapshot(
 	//
 	//    `-f -` streams to stdout, which the exec pipes straight to the
 	//    worker-local temp file below. Nothing is staged inside the sandbox:
-	//    the previous two-step form wrote the whole archive to a 256 MiB tmpfs
-	//    first (see legacySnapshotTmpFile), which capped snapshots at that size
-	//    and charged the bytes to the sandbox's memory cgroup. The session
-	//    checkpoint path in the docker agent provider and the dependency cache's
+	//    the previous two-step form wrote the whole archive to /tmp — a 256 MiB
+	//    tmpfs — first, which capped snapshots at that size and charged the
+	//    bytes to the sandbox's memory cgroup. The session checkpoint path in
+	//    the docker agent provider and the dependency cache's
 	//    stageSandboxArchive both already stream this way.
 	//
 	//    --ignore-failed-read keeps a file that vanished mid-walk (a dev server
@@ -604,12 +590,7 @@ func (sc *SnapshotCache) CreateSnapshot(
 		return 0, fmt.Errorf("snapshot create: upsert db: %w", err)
 	}
 
-	// 5. Reclaim the legacy staging file if an older build left one behind. The
-	//    streaming create above never writes it, but the sandbox is long-lived
-	//    and 256 MiB of tmpfs held there is 256 MiB off the memory cgroup.
-	sc.removeLegacyStagingFile(ctx, sb)
-
-	// 6. Evict old entries if we are over the size limit.
+	// 5. Evict old entries if we are over the size limit.
 	if evictErr := sc.EvictLRU(ctx); evictErr != nil {
 		log.Warn().Err(evictErr).Msg("post-snapshot LRU eviction failed")
 	}
@@ -776,7 +757,7 @@ func (sc *SnapshotCache) RestoreSnapshot(
 	// 2. Open the blob. It is streamed straight into the sandbox's tar below
 	//    rather than staged to a file inside the sandbox first: the old staging
 	//    path capped restores at the 256 MiB /tmp tmpfs and charged the bytes to
-	//    the sandbox memory cgroup (see legacySnapshotTmpFile).
+	//    the sandbox memory cgroup.
 	streamExec, ok := sc.executor.(sandboxStdinExecutor)
 	if !ok {
 		return fmt.Errorf("snapshot restore: executor does not support streaming restore")
@@ -853,10 +834,7 @@ func (sc *SnapshotCache) RestoreSnapshot(
 			Msg("snapshot extracted with warnings; continuing with the restored workspace")
 	}
 
-	// 5. Reclaim the legacy staging file if an older build left one behind.
-	sc.removeLegacyStagingFile(ctx, sb)
-
-	// 6. Touch the cache entry to update LRU ordering.
+	// 5. Touch the cache entry to update LRU ordering.
 	if err := sc.store.TouchCache(ctx, hit.Entry.OrgID, hit.Entry.ID); err != nil {
 		log.Warn().Err(err).Msg("failed to touch cache entry after restore")
 	}
@@ -867,19 +845,6 @@ func (sc *SnapshotCache) RestoreSnapshot(
 		Msg("filesystem snapshot restored")
 
 	return nil
-}
-
-// removeLegacyStagingFile best-effort deletes the pre-streaming staging file
-// from the sandbox. Create and restore no longer write it, but a sandbox that
-// previously ran an older build may still be holding it — and since /tmp is a
-// tmpfs, those bytes sit in the container's memory cgroup until removed.
-//
-// TODO(2026-08): transitional. Preview sandboxes do not outlive a deploy, so
-// once every worker has run a build containing the streaming create/restore,
-// nothing can be writing this path any more and both this helper and its two
-// call sites should go.
-func (sc *SnapshotCache) removeLegacyStagingFile(ctx context.Context, sb *agent.Sandbox) {
-	_, _ = sc.executor.Exec(ctx, sb, fmt.Sprintf("rm -f %s", shellQuote(legacySnapshotTmpFile)), io.Discard, io.Discard)
 }
 
 // recoverWorkspaceFromGit rebuilds the working tree from the sandbox's git
@@ -946,7 +911,7 @@ func (sc *SnapshotCache) ApplyPartialInvalidation(
 	//    stdin when given no file argument, so the patch never lands on the
 	//    sandbox filesystem — it used to be written to /tmp, a 256 MiB tmpfs
 	//    whose bytes come out of the container's memory cgroup (the same reason
-	//    snapshot archives no longer stage there; see legacySnapshotTmpFile).
+	//    snapshot archives no longer stage there).
 	//    Diffs are capped at maxPartialInvalidationDiffBytes, so this was never
 	//    a correctness limit, only avoidable memory pressure on a sandbox that
 	//    is about to build.
