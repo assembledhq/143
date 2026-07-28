@@ -147,6 +147,7 @@ const (
 	StartupSnapshotSkippedNoLockfiles StartupSnapshotResult = "skipped_no_lockfiles"
 	StartupSnapshotFailed             StartupSnapshotResult = "failed"
 	StartupSnapshotTooLarge           StartupSnapshotResult = "too_large"
+	StartupSnapshotTooSmall           StartupSnapshotResult = "too_small"
 	StartupSnapshotDisabled           StartupSnapshotResult = "disabled"
 )
 
@@ -1990,6 +1991,13 @@ func (r *StartRunner) createSessionPreviewStartupCache(ctx context.Context, orgI
 func startupSnapshotResultForCreateError(err error) StartupSnapshotResult {
 	if err == nil {
 		return StartupSnapshotSaved
+	}
+	// The floor rejects an archive that was produced successfully, so it is its
+	// own outcome rather than a failure — a run of these means the snapshot is
+	// capturing far less than it should, which is worth spotting in the logs
+	// before it looks like the cache "just never warms".
+	if errors.Is(err, ErrSnapshotTooSmall) {
+		return StartupSnapshotTooSmall
 	}
 	msg := err.Error()
 	if strings.Contains(msg, "too large") {

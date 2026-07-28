@@ -1,6 +1,7 @@
 package preview
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -527,6 +528,19 @@ func newCreateSnapshotFixture(t *testing.T, executor SnapshotExecutor, archiveLe
 		"id", "org_id", "repo_id", "snapshot_key", "base_key", "commit_sha", "blob_path",
 		"size_bytes", "worker_node_id", "last_used_at", "created_at",
 	}
+	// The size floor consults the last snapshot for this base key before storing.
+	// Return a small baseline so the shrink rule is satisfied and only the
+	// absolute floor is in play; the shrink rule has its own test.
+	//
+	// WithArgs is required: pgxmock reads a missing WithArgs as "expects zero
+	// arguments", so without it this expectation never matches, stays
+	// unfulfilled, and the next query collides with it.
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(cacheCols).AddRow(
+			uuid.New(), metadata.OrgID, metadata.RepoID, "older-key", metadata.BaseKey, "older-commit",
+			filepath.Join(cacheDir, "older-blob"), int64(1024), "worker-1", time.Now(), time.Now(),
+		))
 	mock.ExpectQuery("INSERT INTO preview_startup_cache").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -541,7 +555,9 @@ func newCreateSnapshotFixture(t *testing.T, executor SnapshotExecutor, archiveLe
 func TestSnapshotCache_CreateSnapshotStreamsArchiveToWorker(t *testing.T) {
 	t.Parallel()
 
-	archive := []byte("streamed archive body")
+	// Above minSnapshotBlobBytes so the size floor lets it through; the floor
+	// itself is covered by TestSnapshotCache_CreateSnapshotRejectsUndersized.
+	archive := bytes.Repeat([]byte("streamed archive body"), 60_000)
 	executor := &streamingRestoreExecutor{stdout: archive}
 	sc, metadata := newCreateSnapshotFixture(t, executor, len(archive), true)
 
@@ -575,7 +591,7 @@ func TestSnapshotCache_CreateSnapshotStreamsArchiveToWorker(t *testing.T) {
 func TestSnapshotCache_CreateSnapshotKeepsArchiveWhenFilesChangedUnderTar(t *testing.T) {
 	t.Parallel()
 
-	archive := []byte("archive from a workspace that moved")
+	archive := bytes.Repeat([]byte("archive from a workspace that moved"), 40_000)
 	executor := &streamingRestoreExecutor{stdout: archive, tarCreateExit: 1}
 	sc, metadata := newCreateSnapshotFixture(t, executor, len(archive), true)
 
@@ -713,4 +729,108 @@ func TestBoundedBuffer_UnderLimitIsVerbatim(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "tar: x: file changed as we read it", b.String(),
 		"output under the limit should carry no suppression note")
+}
+
+// A snapshot is restored by wiping the workspace and unpacking in its place, so
+// storing a degenerate archive poisons every later launch that matches its key.
+// The floor must reject it and leave the staged file behind on disk.
+func TestSnapshotCache_CreateSnapshotRejectsUndersizedArchive(t *testing.T) {
+	t.Parallel()
+
+	archive := []byte("almost nothing")
+	executor := &streamingRestoreExecutor{stdout: archive}
+	sc, metadata := newCreateSnapshotFixture(t, executor, len(archive), false)
+
+	err := sc.CreateSnapshot(context.Background(), &agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"}, "snapshot-key", metadata, nil)
+	require.Error(t, err, "an archive under the floor must not be stored")
+	require.ErrorIs(t, err, ErrSnapshotTooSmall,
+		"the caller needs to tell a rejected archive apart from a failed create")
+
+	blobPath, err := sc.blobPath("snapshot-key")
+	require.NoError(t, err, "blob path should resolve")
+	_, statErr := os.Stat(blobPath)
+	require.True(t, os.IsNotExist(statErr), "a rejected archive must not be left on disk")
+
+	entries, err := os.ReadDir(sc.cacheDir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		require.False(t, strings.HasSuffix(e.Name(), ".tmp"),
+			"the staged temp file should have been cleaned up, found %s", e.Name())
+	}
+}
+
+// The absolute floor cannot catch a snapshot that is large but has lost most of
+// its content. Two snapshots sharing a base key describe the same dependency
+// tree, so a fourfold collapse is damage, not drift.
+func TestUndersizedSnapshotReason_ShrinkAgainstBaseKey(t *testing.T) {
+	t.Parallel()
+
+	orgID, repoID := uuid.New(), uuid.New()
+	cacheCols := []string{
+		"id", "org_id", "repo_id", "snapshot_key", "base_key", "commit_sha", "blob_path",
+		"size_bytes", "worker_node_id", "last_used_at", "created_at",
+	}
+	priorSize := int64(100 << 20) // 100 MiB already stored for this base key
+
+	cases := []struct {
+		name       string
+		sizeBytes  int64
+		wantReject bool
+	}{
+		{"same size", priorSize, false},
+		{"modest shrink is normal drift", priorSize / 2, false},
+		{"just above the threshold", priorSize/4 + 1, false},
+		{"collapsed to a fraction", priorSize / 10, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			mock.ExpectQuery("SELECT").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(cacheCols).AddRow(
+					uuid.New(), orgID, repoID, "older-key", "base", "older-commit",
+					"/cache/older", priorSize, "worker-1", time.Now(), time.Now(),
+				))
+
+			sc := &SnapshotCache{store: db.NewPreviewStore(mock), workerNodeID: "worker-1", logger: zerolog.Nop()}
+			reason := sc.undersizedSnapshotReason(context.Background(),
+				SnapshotMetadata{OrgID: orgID, RepoID: repoID, BaseKey: "base"}, tc.sizeBytes)
+
+			if tc.wantReject {
+				require.NotEmpty(t, reason, "a collapse against the stored baseline should be rejected")
+				require.Contains(t, reason, "already stored for base key")
+			} else {
+				require.Empty(t, reason, "this is plausible drift and must still be cached")
+			}
+		})
+	}
+}
+
+// Without a baseline only the absolute floor applies — a first snapshot must
+// never be blocked by the shrink rule, and a lookup failure must not either.
+func TestUndersizedSnapshotReason_NoBaselineAllowsStore(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+	// No expectation registered: the lookup errors, which must read as "no
+	// baseline" rather than as a reason to discard a good archive.
+	sc := &SnapshotCache{store: db.NewPreviewStore(mock), workerNodeID: "worker-1", logger: zerolog.Nop()}
+
+	require.Empty(t, sc.undersizedSnapshotReason(context.Background(),
+		SnapshotMetadata{OrgID: uuid.New(), RepoID: uuid.New(), BaseKey: "base"}, 50<<20),
+		"a base-key lookup failure must not block caching")
+
+	require.Empty(t, sc.undersizedSnapshotReason(context.Background(),
+		SnapshotMetadata{OrgID: uuid.New(), RepoID: uuid.New()}, 50<<20),
+		"no base key means no baseline to compare against")
+
+	require.NotEmpty(t, sc.undersizedSnapshotReason(context.Background(),
+		SnapshotMetadata{}, minSnapshotBlobBytes-1),
+		"the absolute floor applies with or without a baseline")
 }

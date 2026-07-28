@@ -72,6 +72,60 @@ func tarExitTolerable(exitCode int) bool {
 	return exitCode == 0 || exitCode == 1
 }
 
+// ErrSnapshotTooSmall marks a create rejected by the size floor. It is not a
+// launch failure — the caller logs it and moves on without a warm start — but
+// it is distinct from a create that errored, because it means the archive was
+// produced and deliberately discarded.
+var ErrSnapshotTooSmall = errors.New("snapshot is implausibly small")
+
+// minSnapshotBlobBytes is the absolute floor for a stored snapshot.
+//
+// A snapshot key is only computed when the repo has lockfiles, so every
+// snapshot describes a workspace with dependencies installed. Compressed, that
+// does not fit in a megabyte for any real project. An archive below this either
+// captured almost nothing (an over-broad exclude, a workspace that was not
+// populated when tar ran) or would save so little that restoring it is not
+// worth the round trip.
+const minSnapshotBlobBytes int64 = 1 << 20 // 1 MiB
+
+// snapshotShrinkRejectPercent rejects a snapshot that collapses relative to the
+// last one stored for the same base key.
+//
+// The base key is the lockfiles plus the config digest, so two snapshots
+// sharing one describe the same dependency tree; only source and build output
+// differ between them. Those move a snapshot's size by some percent, not by a
+// factor of four. A collapse this large means content went missing — the kind
+// of damage a torn or truncated archive does — so keep the older snapshot and
+// let the next launch try again rather than overwriting it with a bad one.
+//
+// It is deliberately far below any plausible drift: rejecting a legitimate
+// snapshot keeps a stale one alive, which is the failure this whole change set
+// exists to fix. Better to catch only the unambiguous cases.
+const snapshotShrinkRejectPercent = 25
+
+// undersizedSnapshotReason returns a human-readable reason to discard a freshly
+// staged archive, or "" to keep it.
+func (sc *SnapshotCache) undersizedSnapshotReason(ctx context.Context, metadata SnapshotMetadata, sizeBytes int64) string {
+	if sizeBytes < minSnapshotBlobBytes {
+		return fmt.Sprintf("archive is %d bytes, under the %d-byte floor for a workspace with dependencies installed",
+			sizeBytes, minSnapshotBlobBytes)
+	}
+	if metadata.BaseKey == "" || sc.store == nil {
+		return ""
+	}
+	// Any lookup failure (including the no-rows case for a first snapshot) just
+	// means no baseline to compare against — never a reason to drop the archive.
+	prior, err := sc.store.FindLatestCacheByBaseKey(ctx, metadata.OrgID, metadata.RepoID, metadata.BaseKey, sc.workerNodeID, "")
+	if err != nil || prior == nil || prior.SizeBytes <= 0 {
+		return ""
+	}
+	if sizeBytes*100 < prior.SizeBytes*snapshotShrinkRejectPercent {
+		return fmt.Sprintf("archive is %d bytes, under %d%% of the %d-byte snapshot already stored for base key %s",
+			sizeBytes, snapshotShrinkRejectPercent, prior.SizeBytes, metadata.BaseKey)
+	}
+	return ""
+}
+
 // tarStderrRetained bounds how much of tar's stderr is kept for logging.
 //
 // Tolerating exit 1 turned "tar complained" from a rare fatal into a routine
@@ -381,6 +435,22 @@ func (sc *SnapshotCache) CreateSnapshot(
 			Msg("snapshot archived with warnings from a live workspace; keeping it rather than losing the cache")
 	}
 
+	sizeBytes := counter.count
+
+	// Refuse to store an implausibly small archive. A snapshot is restored by
+	// wiping the workspace and unpacking in its place, so a degenerate one does
+	// not merely fail to help — it poisons every later launch that matches its
+	// key, wiping a good checkout and leaving nothing behind. The deferred
+	// cleanup drops the staged file, so the previous snapshot for this key (if
+	// any) survives untouched and keeps serving.
+	if reason := sc.undersizedSnapshotReason(ctx, metadata, sizeBytes); reason != "" {
+		log.Error().
+			Int64("size_bytes", sizeBytes).
+			Str("reason", reason).
+			Msg("refusing to store an implausibly small snapshot")
+		return fmt.Errorf("snapshot create: %w: %s", ErrSnapshotTooSmall, reason)
+	}
+
 	if err := os.Chmod(tmpPath, 0o600); err != nil {
 		return fmt.Errorf("snapshot create: chmod: %w", err)
 	}
@@ -398,8 +468,6 @@ func (sc *SnapshotCache) CreateSnapshot(
 		_ = os.Remove(blobPath)
 		return fmt.Errorf("snapshot create: write checksum: %w", err)
 	}
-
-	sizeBytes := counter.count
 
 	// 4. Record in database.
 	entry := &models.PreviewStartupCache{
