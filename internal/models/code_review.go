@@ -334,17 +334,13 @@ type CodeReviewDescriptionApplicabilityKind string
 const (
 	CodeReviewDescriptionApplicabilityAll        CodeReviewDescriptionApplicabilityKind = "all"
 	CodeReviewDescriptionApplicabilityNontrivial CodeReviewDescriptionApplicabilityKind = "nontrivial"
-	CodeReviewDescriptionApplicabilityFrontend   CodeReviewDescriptionApplicabilityKind = "frontend_or_ui_visible"
 	CodeReviewDescriptionApplicabilityPaths      CodeReviewDescriptionApplicabilityKind = "paths"
-	CodeReviewDescriptionApplicabilityCategories CodeReviewDescriptionApplicabilityKind = "categories"
-	CodeReviewDescriptionApplicabilityTests      CodeReviewDescriptionApplicabilityKind = "tests_changed"
 )
 
 func (k CodeReviewDescriptionApplicabilityKind) Validate() error {
 	switch k {
 	case "", CodeReviewDescriptionApplicabilityAll, CodeReviewDescriptionApplicabilityNontrivial,
-		CodeReviewDescriptionApplicabilityFrontend, CodeReviewDescriptionApplicabilityPaths,
-		CodeReviewDescriptionApplicabilityCategories, CodeReviewDescriptionApplicabilityTests:
+		CodeReviewDescriptionApplicabilityPaths:
 		return nil
 	default:
 		return fmt.Errorf("invalid CodeReviewDescriptionApplicabilityKind: %q", k)
@@ -352,21 +348,17 @@ func (k CodeReviewDescriptionApplicabilityKind) Validate() error {
 }
 
 type CodeReviewDescriptionApplicability struct {
-	Kind                    CodeReviewDescriptionApplicabilityKind `json:"kind,omitempty"`
-	MinFilesChanged         int                                    `json:"min_files_changed,omitempty"`
-	MinLinesChanged         int                                    `json:"min_lines_changed,omitempty"`
-	PathPatterns            []string                               `json:"path_patterns,omitempty"`
-	Categories              []string                               `json:"categories,omitempty"`
-	RequireTestFilesChanged bool                                   `json:"require_test_files_changed,omitempty"`
+	Kind            CodeReviewDescriptionApplicabilityKind `json:"kind,omitempty"`
+	MinFilesChanged int                                    `json:"min_files_changed,omitempty"`
+	MinLinesChanged int                                    `json:"min_lines_changed,omitempty"`
+	PathPatterns    []string                               `json:"path_patterns,omitempty"`
 }
 
 func (a CodeReviewDescriptionApplicability) Empty() bool {
 	return a.Kind == "" &&
 		a.MinFilesChanged == 0 &&
 		a.MinLinesChanged == 0 &&
-		len(a.PathPatterns) == 0 &&
-		len(a.Categories) == 0 &&
-		!a.RequireTestFilesChanged
+		len(a.PathPatterns) == 0
 }
 
 func (a CodeReviewDescriptionApplicability) Validate() error {
@@ -393,50 +385,17 @@ type CodeReviewDescriptionPolicy struct {
 }
 
 type CodeReviewRiskPolicy struct {
-	MaxFilesChanged       int                   `json:"max_files_changed"`
-	MaxLinesChanged       int                   `json:"max_lines_changed"`
-	RequirePassingChecks  bool                  `json:"require_passing_checks"`
-	ExcludeSensitivePaths bool                  `json:"exclude_sensitive_paths"`
-	SensitivePaths        []string              `json:"sensitive_paths,omitempty"`
-	AllowedPathPatterns   []string              `json:"allowed_path_patterns,omitempty"`
-	BlockedPathPatterns   []string              `json:"blocked_path_patterns,omitempty"`
-	ExcludeCategories     []string              `json:"exclude_categories,omitempty"`
-	RequireUpToDate       bool                  `json:"require_up_to_date"`
-	AllowForks            bool                  `json:"allow_forks"`
-	AllowPolicyChanges    bool                  `json:"allow_policy_changes"`
-	EligibleAuthors       []string              `json:"eligible_authors,omitempty"`
-	RequiredChecks        []string              `json:"required_checks,omitempty"`
-	LowRiskLane           CodeReviewLowRiskLane `json:"low_risk_lane,omitempty"`
-}
-
-// CodeReviewLowRiskLane relaxes a subset of approval prerequisites for changes
-// whose risk categories all fall within a low-risk allowlist (e.g. docs-only
-// changes). It never bypasses the substantive gates (sensitive/blocked paths,
-// description policy, passing checks, mergeability, prompt injection, blocking
-// findings); it only raises the churn ceiling and, optionally, waives the
-// reviewer-quorum requirement so a clean low-risk change can approve on the
-// heuristic gates even when the review agents time out.
-type CodeReviewLowRiskLane struct {
-	Enabled             bool     `json:"enabled"`
-	Categories          []string `json:"categories,omitempty"`
-	MaxLinesChanged     int      `json:"max_lines_changed,omitempty"`
-	WaiveReviewerQuorum bool     `json:"waive_reviewer_quorum,omitempty"`
-}
-
-// CodeReviewLowRiskLaneApplies reports whether the lane is enabled and every
-// risk category present in the change is contained in the lane's allowlist. An
-// empty category set never qualifies — we only relax changes we can positively
-// classify as low risk.
-func CodeReviewLowRiskLaneApplies(lane CodeReviewLowRiskLane, categories []string) bool {
-	if !lane.Enabled || len(lane.Categories) == 0 || len(categories) == 0 {
-		return false
-	}
-	for _, category := range categories {
-		if !stringInSlice(category, lane.Categories) {
-			return false
-		}
-	}
-	return true
+	MaxFilesChanged       int      `json:"max_files_changed"`
+	MaxLinesChanged       int      `json:"max_lines_changed"`
+	RequirePassingChecks  bool     `json:"require_passing_checks"`
+	ExcludeSensitivePaths bool     `json:"exclude_sensitive_paths"`
+	SensitivePaths        []string `json:"sensitive_paths,omitempty"`
+	AllowedPathPatterns   []string `json:"allowed_path_patterns,omitempty"`
+	BlockedPathPatterns   []string `json:"blocked_path_patterns,omitempty"`
+	RequireUpToDate       bool     `json:"require_up_to_date"`
+	AllowForks            bool     `json:"allow_forks"`
+	EligibleAuthors       []string `json:"eligible_authors,omitempty"`
+	RequiredChecks        []string `json:"required_checks,omitempty"`
 }
 
 type CodeReviewAgentRoster struct {
@@ -528,9 +487,9 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 				Key:           "ui_evidence",
 				Title:         "Screenshots or preview link",
 				Required:      true,
-				Applicability: "frontend_or_ui_visible",
+				Applicability: "paths",
 				AppliesWhen: CodeReviewDescriptionApplicability{
-					Kind: CodeReviewDescriptionApplicabilityFrontend,
+					Kind: CodeReviewDescriptionApplicabilityPaths,
 					PathPatterns: []string{
 						"frontend/**",
 						"apps/web/**",
@@ -549,18 +508,10 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 			MaxFilesChanged:       5,
 			MaxLinesChanged:       300,
 			RequirePassingChecks:  false,
-			ExcludeSensitivePaths: true,
-			SensitivePaths:        defaultPRReadinessSensitivePaths(),
-			ExcludeCategories:     []string{"migrations", "dependencies", "auth", "billing", "permissions", "crypto", "infra"},
+			ExcludeSensitivePaths: false,
+			SensitivePaths:        []string{},
 			RequireUpToDate:       false,
 			AllowForks:            false,
-			AllowPolicyChanges:    false,
-			LowRiskLane: CodeReviewLowRiskLane{
-				Enabled:             true,
-				Categories:          []string{"docs"},
-				MaxLinesChanged:     1000,
-				WaiveReviewerQuorum: true,
-			},
 		},
 		AgentRoster: CodeReviewAgentRoster{
 			Reviewers:                []AgentType{AgentTypeCodex, AgentTypeClaudeCode},
@@ -614,25 +565,13 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 	if len(config.RiskPolicy.BlockedPathPatterns) > 0 {
 		defaults.RiskPolicy.BlockedPathPatterns = config.RiskPolicy.BlockedPathPatterns
 	}
-	if len(config.RiskPolicy.ExcludeCategories) > 0 {
-		defaults.RiskPolicy.ExcludeCategories = config.RiskPolicy.ExcludeCategories
-	}
 	defaults.RiskPolicy.RequireUpToDate = config.RiskPolicy.RequireUpToDate
 	defaults.RiskPolicy.AllowForks = config.RiskPolicy.AllowForks
-	defaults.RiskPolicy.AllowPolicyChanges = config.RiskPolicy.AllowPolicyChanges
 	if len(config.RiskPolicy.EligibleAuthors) > 0 {
 		defaults.RiskPolicy.EligibleAuthors = config.RiskPolicy.EligibleAuthors
 	}
 	if len(config.RiskPolicy.RequiredChecks) > 0 {
 		defaults.RiskPolicy.RequiredChecks = config.RiskPolicy.RequiredChecks
-	}
-	// Only override the low-risk lane when the stored policy specifies one;
-	// otherwise inherit the default docs lane so existing policies pick up the
-	// relaxed handling without needing to be re-saved.
-	if config.RiskPolicy.LowRiskLane.Enabled ||
-		len(config.RiskPolicy.LowRiskLane.Categories) > 0 ||
-		config.RiskPolicy.LowRiskLane.MaxLinesChanged != 0 {
-		defaults.RiskPolicy.LowRiskLane = config.RiskPolicy.LowRiskLane
 	}
 	if len(config.AgentRoster.Reviewers) > 0 {
 		defaults.AgentRoster = config.AgentRoster
@@ -658,6 +597,17 @@ func normalizeCodeReviewDescriptionPolicy(policy CodeReviewDescriptionPolicy) Co
 	// normalizing its elements to avoid mutating a caller's shared backing array.
 	policy.Requirements = append([]CodeReviewDescriptionRequirement(nil), policy.Requirements...)
 	for i := range policy.Requirements {
+		appliesWhen := &policy.Requirements[i].AppliesWhen
+		switch string(appliesWhen.Kind) {
+		case "frontend_or_ui_visible":
+			if len(appliesWhen.PathPatterns) > 0 {
+				appliesWhen.Kind = CodeReviewDescriptionApplicabilityPaths
+			} else {
+				*appliesWhen = CodeReviewDescriptionApplicability{Kind: CodeReviewDescriptionApplicabilityAll}
+			}
+		case "categories", "tests_changed":
+			*appliesWhen = CodeReviewDescriptionApplicability{Kind: CodeReviewDescriptionApplicabilityAll}
+		}
 		if !policy.Requirements[i].AppliesWhen.Empty() {
 			continue
 		}
@@ -668,20 +618,8 @@ func normalizeCodeReviewDescriptionPolicy(policy CodeReviewDescriptionPolicy) Co
 				MinFilesChanged: 2,
 				MinLinesChanged: 31,
 			}
-		case "frontend_or_ui_visible", "frontend", "ui":
-			policy.Requirements[i].AppliesWhen = CodeReviewDescriptionApplicability{
-				Kind: CodeReviewDescriptionApplicabilityFrontend,
-				PathPatterns: []string{
-					"frontend/**",
-					"apps/web/**",
-					"**/app/**",
-					"**/components/**",
-					"**/pages/**",
-					"**/*.tsx",
-					"**/*.jsx",
-					"**/*.css",
-				},
-			}
+		case "frontend_or_ui_visible", "frontend", "ui", "categories", "tests_changed":
+			policy.Requirements[i].AppliesWhen = CodeReviewDescriptionApplicability{Kind: CodeReviewDescriptionApplicabilityAll}
 		case "", "all", "always":
 			policy.Requirements[i].AppliesWhen = CodeReviewDescriptionApplicability{Kind: CodeReviewDescriptionApplicabilityAll}
 		}
@@ -1010,9 +948,6 @@ func CodeReviewPolicyTemplates() []CodeReviewTemplateOption {
 			Config: templatePolicy(base, templatePolicyOptions{
 				maxFiles: 8,
 				maxLines: 400,
-				excludedCategories: []string{
-					"dependencies", "auth", "billing", "permissions", "crypto", "infra", "migrations", "generated",
-				},
 				allowedPaths: []string{
 					"docs/**", "**/*.md", "**/*.mdx", "**/*.txt", "**/*.rst", "**/*.adoc", "**/README*", "**/CHANGELOG*",
 				},
@@ -1026,9 +961,6 @@ func CodeReviewPolicyTemplates() []CodeReviewTemplateOption {
 			Config: templatePolicy(base, templatePolicyOptions{
 				maxFiles: 10,
 				maxLines: 500,
-				excludedCategories: []string{
-					"dependencies", "auth", "billing", "permissions", "crypto", "infra", "migrations", "generated",
-				},
 				allowedPaths: []string{
 					"tests/**", "test/**", "**/__tests__/**", "**/*_test.go", "**/*.test.ts", "**/*.test.tsx",
 					"**/*.spec.ts", "**/*.spec.tsx", "fixtures/**", "**/fixtures/**", "testdata/**", "**/testdata/**",
@@ -1041,11 +973,10 @@ func CodeReviewPolicyTemplates() []CodeReviewTemplateOption {
 			Title:       "Small frontend change",
 			Description: "Approve small UI changes with screenshot or preview evidence.",
 			Config: templatePolicy(base, templatePolicyOptions{
-				maxFiles:           5,
-				maxLines:           250,
-				excludedCategories: []string{"auth", "billing", "permissions", "crypto", "infra", "dependencies"},
+				maxFiles: 5,
+				maxLines: 250,
 				blockedPaths: []string{
-					"**/auth/**", "**/*auth*", "**/billing/**", "**/*billing*", "**/api/**", "**/queries/**",
+					"**/auth/**", "**/billing/**", "**/api/**", "**/queries/**",
 					"**/services/**", "**/data/**", "migrations/**",
 				},
 			}),
@@ -1055,10 +986,9 @@ func CodeReviewPolicyTemplates() []CodeReviewTemplateOption {
 			Title:       "Small backend change",
 			Description: "Approve small backend changes outside sensitive packages with test evidence.",
 			Config: templatePolicy(base, templatePolicyOptions{
-				maxFiles:           4,
-				maxLines:           200,
-				excludedCategories: []string{"migrations", "dependencies", "auth", "billing", "permissions", "crypto", "infra"},
-				blockedPaths:       []string{"migrations/**", "**/schema/**", "**/auth/**", "**/billing/**", ".github/**"},
+				maxFiles:     4,
+				maxLines:     200,
+				blockedPaths: []string{"migrations/**", "**/schema/**", "**/auth/**", "**/billing/**", ".github/**"},
 			}),
 		},
 		{
@@ -1066,21 +996,19 @@ func CodeReviewPolicyTemplates() []CodeReviewTemplateOption {
 			Title:       "Small combined feature",
 			Description: "Approve tightly scoped frontend/backend changes with evidence and passing checks.",
 			Config: templatePolicy(base, templatePolicyOptions{
-				maxFiles:           6,
-				maxLines:           250,
-				excludedCategories: []string{"migrations", "dependencies", "auth", "billing", "permissions", "crypto", "infra"},
-				blockedPaths:       []string{"migrations/**", "**/schema/**", "**/auth/**", "**/billing/**", ".github/**", "deploy/**"},
+				maxFiles:     6,
+				maxLines:     250,
+				blockedPaths: []string{"migrations/**", "**/schema/**", "**/auth/**", "**/billing/**", ".github/**", "deploy/**"},
 			}),
 		},
 	}
 }
 
 type templatePolicyOptions struct {
-	maxFiles           int
-	maxLines           int
-	excludedCategories []string
-	allowedPaths       []string
-	blockedPaths       []string
+	maxFiles     int
+	maxLines     int
+	allowedPaths []string
+	blockedPaths []string
 }
 
 func templatePolicy(base CodeReviewPolicyConfig, opts templatePolicyOptions) CodeReviewPolicyConfig {
@@ -1088,7 +1016,6 @@ func templatePolicy(base CodeReviewPolicyConfig, opts templatePolicyOptions) Cod
 	cfg.ApprovalMode = CodeReviewApprovalModeApproveAcceptable
 	cfg.RiskPolicy.MaxFilesChanged = opts.maxFiles
 	cfg.RiskPolicy.MaxLinesChanged = opts.maxLines
-	cfg.RiskPolicy.ExcludeCategories = opts.excludedCategories
 	cfg.RiskPolicy.AllowedPathPatterns = opts.allowedPaths
 	cfg.RiskPolicy.BlockedPathPatterns = opts.blockedPaths
 	return cfg
@@ -1098,7 +1025,6 @@ type CodeReviewRiskInput struct {
 	FilesChanged          int
 	LinesChanged          int
 	ChangedPaths          []string
-	Categories            []string
 	ChecksPassing         bool
 	RequiredChecksPassing map[string]bool
 	DescriptionPassed     bool
@@ -1131,15 +1057,16 @@ const (
 	CodeReviewRiskReasonAuthorIneligible     CodeReviewRiskReasonCode = "author_ineligible"
 	// CodeReviewRiskReasonUnresolvedHumanReview is retained so historical decisions remain renderable.
 	// New risk evaluations deliberately do not emit it.
-	CodeReviewRiskReasonUnresolvedHumanReview        CodeReviewRiskReasonCode = "unresolved_human_review"
-	CodeReviewRiskReasonBlockingFindings             CodeReviewRiskReasonCode = "blocking_findings"
-	CodeReviewRiskReasonReviewerDisagreement         CodeReviewRiskReasonCode = "reviewer_disagreement"
-	CodeReviewRiskReasonScopeMismatch                CodeReviewRiskReasonCode = "scope_mismatch"
-	CodeReviewRiskReasonUnresolvedUncertainty        CodeReviewRiskReasonCode = "unresolved_uncertainty"
-	CodeReviewRiskReasonPromptInjection              CodeReviewRiskReasonCode = "prompt_injection"
-	CodeReviewRiskReasonSensitivePath                CodeReviewRiskReasonCode = "sensitive_path"
-	CodeReviewRiskReasonPathOutsideScope             CodeReviewRiskReasonCode = "path_outside_scope"
-	CodeReviewRiskReasonBlockedPath                  CodeReviewRiskReasonCode = "blocked_path"
+	CodeReviewRiskReasonUnresolvedHumanReview CodeReviewRiskReasonCode = "unresolved_human_review"
+	CodeReviewRiskReasonBlockingFindings      CodeReviewRiskReasonCode = "blocking_findings"
+	CodeReviewRiskReasonReviewerDisagreement  CodeReviewRiskReasonCode = "reviewer_disagreement"
+	CodeReviewRiskReasonScopeMismatch         CodeReviewRiskReasonCode = "scope_mismatch"
+	CodeReviewRiskReasonUnresolvedUncertainty CodeReviewRiskReasonCode = "unresolved_uncertainty"
+	CodeReviewRiskReasonPromptInjection       CodeReviewRiskReasonCode = "prompt_injection"
+	CodeReviewRiskReasonSensitivePath         CodeReviewRiskReasonCode = "sensitive_path"
+	CodeReviewRiskReasonPathOutsideScope      CodeReviewRiskReasonCode = "path_outside_scope"
+	CodeReviewRiskReasonBlockedPath           CodeReviewRiskReasonCode = "blocked_path"
+	// Retained so historical decisions remain renderable; new evaluations do not emit these reasons.
 	CodeReviewRiskReasonPolicyPathChanged            CodeReviewRiskReasonCode = "policy_path_changed"
 	CodeReviewRiskReasonExcludedCategory             CodeReviewRiskReasonCode = "excluded_category"
 	CodeReviewRiskReasonReviewerQuorum               CodeReviewRiskReasonCode = "reviewer_quorum"
@@ -1304,16 +1231,11 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 	if input.HeadSHAChanged {
 		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonHeadChanged})
 	}
-	lowRisk := CodeReviewLowRiskLaneApplies(policy.RiskPolicy.LowRiskLane, input.Categories)
 	if input.FilesChanged > policy.RiskPolicy.MaxFilesChanged {
 		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: input.FilesChanged, Limit: policy.RiskPolicy.MaxFilesChanged})
 	}
-	maxLinesChanged := policy.RiskPolicy.MaxLinesChanged
-	if lowRisk && policy.RiskPolicy.LowRiskLane.MaxLinesChanged > maxLinesChanged {
-		maxLinesChanged = policy.RiskPolicy.LowRiskLane.MaxLinesChanged
-	}
-	if input.LinesChanged > maxLinesChanged {
-		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonLinesLimitExceeded, Actual: input.LinesChanged, Limit: maxLinesChanged})
+	if input.LinesChanged > policy.RiskPolicy.MaxLinesChanged {
+		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonLinesLimitExceeded, Actual: input.LinesChanged, Limit: policy.RiskPolicy.MaxLinesChanged})
 	}
 	if policy.RiskPolicy.RequirePassingChecks && !input.ChecksPassing {
 		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonChecksFailing})
@@ -1369,28 +1291,7 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 			risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonBlockedPath, Subject: path})
 		}
 	}
-	if !policy.RiskPolicy.AllowPolicyChanges {
-		for _, path := range input.ChangedPaths {
-			if isCodeReviewPolicyPath(path) {
-				risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonPolicyPathChanged, Subject: path})
-			}
-		}
-	}
-	for _, category := range input.Categories {
-		if stringInSlice(category, policy.RiskPolicy.ExcludeCategories) {
-			risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonExcludedCategory, Subject: category})
-		}
-	}
 	return risk
-}
-
-func stringInSlice(needle string, haystack []string) bool {
-	for _, item := range haystack {
-		if strings.EqualFold(strings.TrimSpace(item), strings.TrimSpace(needle)) {
-			return true
-		}
-	}
-	return false
 }
 
 func codeReviewAuthorAllowed(author, authorClass string, allowed []string) bool {
@@ -1520,14 +1421,4 @@ func codeReviewPathPatternMatches(pattern, path string) bool {
 		return true
 	}
 	return pattern == path || strings.HasPrefix(path, pattern+"/") || strings.HasPrefix(path, pattern)
-}
-
-func isCodeReviewPolicyPath(path string) bool {
-	return matchesAnyCodeReviewPath(path, []string{
-		"docs/design/future/112-code-reviewer-bot-auto-approval.md",
-		"internal/models/code_review",
-		"internal/db/code_reviews",
-		"internal/api/handlers/code_reviews",
-		"migrations/",
-	})
 }

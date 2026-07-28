@@ -536,7 +536,7 @@ func TestCodeReviewPolicyPromptComposition(t *testing.T) {
 					Key:           "ui_evidence",
 					Title:         "Screenshots or preview link",
 					Prompt:        "Screenshots are not required for non-visible or comment-only changes.",
-					Applicability: "frontend_or_ui_visible",
+					Applicability: "paths",
 				}},
 			})
 			require.Equal(t, 1, strings.Count(orchestrator, reviewInstructions), "orchestrator should receive review instructions exactly once")

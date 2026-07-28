@@ -84,6 +84,8 @@ func TestDefaultCodeReviewPolicyConfig(t *testing.T) {
 	require.Equal(t, 5, config.RiskPolicy.MaxFilesChanged, "default acceptable-risk file threshold should be conservative")
 	require.Equal(t, 300, config.RiskPolicy.MaxLinesChanged, "default acceptable-risk line threshold should be conservative")
 	require.False(t, config.RiskPolicy.RequirePassingChecks, "default approval policy should evaluate code without requiring GitHub checks")
+	require.False(t, config.RiskPolicy.ExcludeSensitivePaths, "default approval policy should not block on unconfigured sensitive paths")
+	require.Empty(t, config.RiskPolicy.SensitivePaths, "default approval policy should not assume repository-specific sensitive paths")
 	require.Equal(t, []AgentType{AgentTypeCodex, AgentTypeClaudeCode}, config.AgentRoster.Reviewers, "default roster should run two reviewers")
 	require.Equal(t, []string{DefaultCodexModel, DefaultClaudeCodeModel}, config.AgentRoster.ReviewerModels, "default roster should pin reviewer models")
 	require.Equal(t, []ReasoningEffort{ReasoningEffortHigh, ReasoningEffortHigh}, config.AgentRoster.ReviewerReasoningEfforts, "each default reviewer should use high reasoning")
@@ -140,6 +142,46 @@ func TestResolveCodeReviewPolicyConfigDoesNotMutateInput(t *testing.T) {
 	require.Equal(t, CodeReviewDescriptionApplicabilityNontrivial, resolved.DescriptionPolicy.Requirements[1].AppliesWhen.Kind, "resolving legacy applicability should populate the typed rule")
 	resolved.DescriptionPolicy.Requirements[1].Title = "changed"
 	require.Equal(t, "Testing evidence", config.DescriptionPolicy.Requirements[1].Title, "the resolved requirements should not share mutable slice storage with the input policy")
+}
+
+func TestResolveCodeReviewPolicyConfigRemovesLegacyFilenameClassifiers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		applicability CodeReviewDescriptionApplicability
+		expected      CodeReviewDescriptionApplicability
+	}{
+		{
+			name:          "frontend classifier becomes explicit paths",
+			applicability: CodeReviewDescriptionApplicability{Kind: "frontend_or_ui_visible", PathPatterns: []string{"web/**"}},
+			expected:      CodeReviewDescriptionApplicability{Kind: CodeReviewDescriptionApplicabilityPaths, PathPatterns: []string{"web/**"}},
+		},
+		{
+			name:          "category classifier becomes universal",
+			applicability: CodeReviewDescriptionApplicability{Kind: "categories"},
+			expected:      CodeReviewDescriptionApplicability{Kind: CodeReviewDescriptionApplicabilityAll},
+		},
+		{
+			name:          "test classifier becomes universal",
+			applicability: CodeReviewDescriptionApplicability{Kind: "tests_changed"},
+			expected:      CodeReviewDescriptionApplicability{Kind: CodeReviewDescriptionApplicabilityAll},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			config := DefaultCodeReviewPolicyConfig()
+			config.DescriptionPolicy.Requirements[0].AppliesWhen = tt.applicability
+
+			resolved := ResolveCodeReviewPolicyConfig(&config)
+
+			require.Equal(t, tt.expected, resolved.DescriptionPolicy.Requirements[0].AppliesWhen, "legacy applicability should resolve without filename inference")
+			require.NoError(t, resolved.Validate(), "resolved legacy policy should remain valid")
+		})
+	}
 }
 
 func TestCodeReviewPolicyConfigValidate(t *testing.T) {
@@ -248,6 +290,8 @@ func TestCodeReviewPolicyTemplates(t *testing.T) {
 			require.NotEmpty(t, template.Title, "template should have a display title")
 			require.Equal(t, CodeReviewApprovalModeApproveAcceptable, template.Config.ApprovalMode, "starter templates should be editable approval policies")
 			require.Contains(t, template.Config.AutomatedApprovalPolicy, "Unresolved human review threads must not count against approval.", "starter templates should require an independent decision")
+			require.NotContains(t, template.Config.RiskPolicy.BlockedPathPatterns, "**/*auth*", "starter templates should not block incidental auth substrings")
+			require.NotContains(t, template.Config.RiskPolicy.BlockedPathPatterns, "**/*billing*", "starter templates should not block incidental billing substrings")
 			require.NoError(t, template.Config.Validate(), "template config should be valid")
 		})
 	}
@@ -278,12 +322,13 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			name: "blocks oversized sensitive fork with agent concerns",
 			mutate: func(c *CodeReviewPolicyConfig) {
 				c.RiskPolicy.RequirePassingChecks = true
+				c.RiskPolicy.ExcludeSensitivePaths = true
+				c.RiskPolicy.SensitivePaths = []string{"internal/auth/**"}
 			},
 			input: CodeReviewRiskInput{
 				FilesChanged:         6,
 				LinesChanged:         350,
 				ChangedPaths:         []string{"internal/auth/session.go"},
-				Categories:           []string{"auth"},
 				ChecksPassing:        false,
 				DescriptionPassed:    false,
 				FromFork:             true,
@@ -299,7 +344,6 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonBlockingFindings},
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonReviewerDisagreement},
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonSensitivePath, Subject: "internal/auth/session.go"},
-				CodeReviewRiskReason{Code: CodeReviewRiskReasonExcludedCategory, Subject: "auth"},
 			),
 		},
 		{
@@ -348,23 +392,6 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			expected: codeReviewRiskEvaluationForTest(),
 		},
 		{
-			name: "blocks policy changes independently from sensitive path exclusions",
-			mutate: func(c *CodeReviewPolicyConfig) {
-				c.RiskPolicy.ExcludeSensitivePaths = false
-			},
-			input: CodeReviewRiskInput{
-				FilesChanged:      1,
-				LinesChanged:      20,
-				ChangedPaths:      []string{"internal/models/code_review.go"},
-				ChecksPassing:     true,
-				DescriptionPassed: true,
-				Author:            "devin",
-			},
-			expected: codeReviewRiskEvaluationForTest(
-				CodeReviewRiskReason{Code: CodeReviewRiskReasonPolicyPathChanged, Subject: "internal/models/code_review.go"},
-			),
-		},
-		{
 			name: "blocks synthesized reviewer risk signals",
 			input: CodeReviewRiskInput{
 				FilesChanged:          1,
@@ -386,7 +413,6 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			name: "blocks paths outside allowed scope",
 			mutate: func(c *CodeReviewPolicyConfig) {
 				c.RiskPolicy.AllowedPathPatterns = []string{"docs/**", "**/*.md"}
-				c.RiskPolicy.ExcludeCategories = nil
 			},
 			input: CodeReviewRiskInput{
 				FilesChanged:      1,
@@ -404,7 +430,6 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			name: "blocks explicit blocked path patterns",
 			mutate: func(c *CodeReviewPolicyConfig) {
 				c.RiskPolicy.BlockedPathPatterns = []string{"**/schema/**"}
-				c.RiskPolicy.ExcludeCategories = nil
 			},
 			input: CodeReviewRiskInput{
 				FilesChanged:      1,
@@ -419,40 +444,11 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			),
 		},
 		{
-			name: "low-risk docs lane raises the churn ceiling",
+			name: "filename does not alter the configured churn ceiling",
 			input: CodeReviewRiskInput{
 				FilesChanged:      1,
 				LinesChanged:      607,
 				ChangedPaths:      []string{"docs/design/future/111-session-changesets-and-stacks.md"},
-				Categories:        []string{"docs"},
-				ChecksPassing:     true,
-				DescriptionPassed: true,
-				Author:            "devin",
-			},
-			expected: codeReviewRiskEvaluationForTest(),
-		},
-		{
-			name: "low-risk docs lane still enforces its own ceiling",
-			input: CodeReviewRiskInput{
-				FilesChanged:      1,
-				LinesChanged:      1200,
-				ChangedPaths:      []string{"docs/huge.md"},
-				Categories:        []string{"docs"},
-				ChecksPassing:     true,
-				DescriptionPassed: true,
-				Author:            "devin",
-			},
-			expected: codeReviewRiskEvaluationForTest(
-				CodeReviewRiskReason{Code: CodeReviewRiskReasonLinesLimitExceeded, Actual: 1200, Limit: 1000},
-			),
-		},
-		{
-			name: "low-risk lane does not apply to mixed docs and code changes",
-			input: CodeReviewRiskInput{
-				FilesChanged:      2,
-				LinesChanged:      607,
-				ChangedPaths:      []string{"docs/x.md", "internal/api/router.go"},
-				Categories:        []string{"docs", "backend"},
 				ChecksPassing:     true,
 				DescriptionPassed: true,
 				Author:            "devin",

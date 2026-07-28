@@ -24,7 +24,6 @@ type CodeReviewFinalReviewInput struct {
 	ChecksRequired            bool
 	ReviewerQuorum            int
 	RequiredReviewerQuorum    int
-	ReviewerQuorumWaived      bool
 	HeadSHA                   string
 	AssessedAt                time.Time
 }
@@ -156,9 +155,7 @@ func codeReviewFacts(input CodeReviewFinalReviewInput) []string {
 	if input.Acceptable && input.ChecksRequired {
 		facts = append(facts, "required checks passed")
 	}
-	if input.Acceptable && input.ReviewerQuorumWaived {
-		facts = append(facts, "reviewer quorum waived for this low-risk change")
-	} else if input.Acceptable && input.RequiredReviewerQuorum > 0 {
+	if input.Acceptable && input.RequiredReviewerQuorum > 0 {
 		facts = append(facts, fmt.Sprintf("reviewer quorum %d/%d", input.ReviewerQuorum, input.RequiredReviewerQuorum))
 	}
 	return facts
@@ -182,9 +179,7 @@ func codeReviewDecisionExplanation(input CodeReviewFinalReviewInput) string {
 		if input.ChecksRequired {
 			evidence = append(evidence, "required checks passed")
 		}
-		if input.ReviewerQuorumWaived {
-			evidence = append(evidence, "reviewer quorum was waived for this low-risk change")
-		} else if input.RequiredReviewerQuorum > 0 {
+		if input.RequiredReviewerQuorum > 0 {
 			evidence = append(evidence, fmt.Sprintf(
 				"%d usable reviewer %s met the required quorum of %d",
 				input.ReviewerQuorum,

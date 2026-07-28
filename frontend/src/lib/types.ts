@@ -146,18 +146,13 @@ export type CodeReviewListOutcome = "automatically_approved" | "completed_not_ap
 export type CodeReviewDescriptionApplicabilityKind =
   | "all"
   | "nontrivial"
-  | "frontend_or_ui_visible"
-  | "paths"
-  | "categories"
-  | "tests_changed";
+  | "paths";
 
 export interface CodeReviewDescriptionApplicability {
   kind?: CodeReviewDescriptionApplicabilityKind;
   min_files_changed?: number;
   min_lines_changed?: number;
   path_patterns?: string[];
-  categories?: string[];
-  require_test_files_changed?: boolean;
 }
 
 export interface CodeReviewDescriptionRequirement {
@@ -185,18 +180,10 @@ export interface CodeReviewPolicyConfig {
     sensitive_paths?: string[];
     allowed_path_patterns?: string[];
     blocked_path_patterns?: string[];
-    exclude_categories?: string[];
     require_up_to_date: boolean;
     allow_forks: boolean;
-    allow_policy_changes: boolean;
     eligible_authors?: string[];
     required_checks?: string[];
-    low_risk_lane?: {
-      enabled: boolean;
-      categories?: string[];
-      max_lines_changed?: number;
-      waive_reviewer_quorum?: boolean;
-    };
   };
   agent_roster: {
     reviewers: string[];

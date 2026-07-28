@@ -275,7 +275,6 @@ type CodeReviewReviewerPromptData struct {
 	SensitivePaths          []string
 	AllowedPathPatterns     []string
 	BlockedPathPatterns     []string
-	ExcludeCategories       []string
 	RequiredChecks          []string
 	ChangedFiles            []string
 }
