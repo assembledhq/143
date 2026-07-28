@@ -553,6 +553,8 @@ func TestCodeReviewPolicyPromptComposition(t *testing.T) {
 			require.Contains(t, orchestrator, "P2 — Normal.", "orchestrator should define the normal priority threshold")
 			require.Contains(t, orchestrator, "P3 — Low.", "orchestrator should define the low priority threshold")
 			require.Contains(t, orchestrator, "You own the substantive approve-or-escalate recommendation", "coding-agent orchestrator should own the substantive approval recommendation")
+			require.Contains(t, orchestrator, "conflict on a key fact or conclusion that could materially change whether the PR is safe to approve", "orchestrator should reserve reviewer disagreement for material approval conflicts")
+			require.Contains(t, orchestrator, "Ignore differences in emphasis, optional cleanup, minor suggestions, and other non-blocking concerns.", "orchestrator should ignore minor reviewer differences")
 			require.Contains(t, orchestrator, "Comment-only ESLint cleanup", "orchestrator should receive the pull-request description as evidence")
 			require.Contains(t, orchestrator, "Screenshots are not required for non-visible or comment-only changes.", "orchestrator should receive the trusted description rubric")
 			require.Contains(t, orchestrator, `"approval_recommended": false`, "orchestrator output contract should include a valid JSON approval recommendation example")
