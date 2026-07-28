@@ -128,10 +128,7 @@ Evaluate the pull request independently based on the code itself. Disregard GitH
 const APPLICABILITY_KIND_LABELS: Record<CodeReviewDescriptionApplicabilityKind, string> = {
   all: "All PRs",
   nontrivial: "Nontrivial",
-  frontend_or_ui_visible: "Frontend/UI",
   paths: "Paths",
-  categories: "Categories",
-  tests_changed: "Tests changed",
 };
 const DEFAULT_NONTRIVIAL_MIN_FILES = 2;
 const DEFAULT_NONTRIVIAL_MIN_LINES = 31;
@@ -144,8 +141,6 @@ const QUALITY_GATE_DESCRIPTIONS = {
     "Treats changes matching sensitive paths as blocking approval. When off, sensitive-path matches do not independently require human review.",
   requireUpToDate:
     "Requires the PR branch to be current with its base branch before approval. When off, branch freshness does not independently block approval.",
-  allowPolicyChanges:
-    "Allows approval of PRs that modify review policy or automation configuration. The safer default is off, which always requires a human for those changes.",
   disagreementBlocks:
     "Blocks approval when reviewer agents disagree. When off, disagreement is still visible but does not independently veto approval unless another safeguard does.",
   allowForks: "Allows approval decisions for PRs opened from forks. The safer default is off, which keeps forked PRs comment-only.",
@@ -1443,13 +1438,6 @@ function AdvancedPolicySettings({
                         onCheckedChange={(checked) => commitPolicy((next) => { next.risk_policy.require_up_to_date = checked; })}
                       />
                       <PolicyToggle
-                        label="Allow policy changes"
-                        description={QUALITY_GATE_DESCRIPTIONS.allowPolicyChanges}
-                        checked={config?.risk_policy.allow_policy_changes ?? false}
-                        disabled={!config}
-                        onCheckedChange={(checked) => commitPolicy((next) => { next.risk_policy.allow_policy_changes = checked; })}
-                      />
-                      <PolicyToggle
                         label="Block reviewer disagreement"
                         description={QUALITY_GATE_DESCRIPTIONS.disagreementBlocks}
                         checked={config?.agent_roster.disagreement_blocks ?? false}
@@ -1497,15 +1485,6 @@ function AdvancedPolicySettings({
                         serverValue={config?.risk_policy.blocked_path_patterns ?? []}
                         disabled={!config}
                         onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.blocked_path_patterns = items; })}
-                      />
-                      <PolicyStringListEditor
-                        label="Excluded categories"
-                        description="Review categories to ignore for this policy."
-                        placeholder="Add category"
-                        emptyText="No excluded categories configured."
-                        serverValue={config?.risk_policy.exclude_categories ?? []}
-                        disabled={!config}
-                        onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.exclude_categories = items; })}
                       />
                       <PolicyStringListEditor
                         label="Required checks"
@@ -1915,14 +1894,8 @@ function formatRequirementApplicability(requirement: DescriptionRequirement): st
       const minLines = appliesWhen?.min_lines_changed ?? DEFAULT_NONTRIVIAL_MIN_LINES;
       return `Nontrivial: ${minFiles}+ files or ${minLines}+ lines`;
     }
-    case "frontend_or_ui_visible":
-      return `Frontend/UI: ${summarizeItems(appliesWhen?.path_patterns, "default UI paths")}`;
     case "paths":
       return `Paths: ${summarizeItems(appliesWhen?.path_patterns, "no paths set")}`;
-    case "categories":
-      return `Categories: ${summarizeItems(appliesWhen?.categories, "no categories set")}`;
-    case "tests_changed":
-      return appliesWhen?.require_test_files_changed ? "When test files changed" : "Tests changed";
     default:
       return "Every PR";
   }
@@ -1936,21 +1909,10 @@ function appliesWhenForKind(kind: CodeReviewDescriptionApplicabilityKind, previo
         min_files_changed: previous?.min_files_changed ?? DEFAULT_NONTRIVIAL_MIN_FILES,
         min_lines_changed: previous?.min_lines_changed ?? DEFAULT_NONTRIVIAL_MIN_LINES,
       };
-    case "frontend_or_ui_visible":
     case "paths":
       return {
         kind,
         path_patterns: previous?.path_patterns ?? [],
-      };
-    case "categories":
-      return {
-        kind,
-        categories: previous?.categories ?? [],
-      };
-    case "tests_changed":
-      return {
-        kind,
-        require_test_files_changed: previous?.require_test_files_changed ?? true,
       };
     default:
       return { kind: "all" };
@@ -2161,7 +2123,7 @@ function DescriptionRequirementSheet({
               </div>
             ) : null}
 
-            {kind === "frontend_or_ui_visible" || kind === "paths" ? (
+            {kind === "paths" ? (
               <ListTextArea
                 label="Path patterns"
                 serverValue={requirement.applies_when?.path_patterns ?? []}
@@ -2173,49 +2135,6 @@ function DescriptionRequirementSheet({
                   }))
                 }
               />
-            ) : null}
-
-            {kind === "categories" ? (
-              <ListTextArea
-                label="Categories"
-                serverValue={requirement.applies_when?.categories ?? []}
-                disabled={disabled}
-                onCommitItems={(items) =>
-                  onCommit((current) => ({
-                    ...current,
-                    applies_when: { kind, categories: items },
-                  }))
-                }
-              />
-            ) : null}
-
-            {kind === "tests_changed" ? (
-              <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
-                <div>
-                  <div className="flex items-center gap-1.5">
-                  <Label className="text-sm text-foreground">Require changed test files</Label>
-                    <SettingInfoTooltip
-                      label="Require changed test files"
-                      description="When on, this description check applies only when test files changed. Turning it off uses the broader tests-changed applicability rule."
-                    />
-                  </div>
-                  <div className="mt-1 text-xs text-muted-foreground">Applies this rule only when the pull request changes test files.</div>
-                </div>
-                <Switch
-                  aria-label="Require changed test files"
-                  checked={requirement.applies_when?.require_test_files_changed ?? true}
-                  disabled={disabled}
-                  onCheckedChange={(checked) =>
-                    onCommit((current) => ({
-                      ...current,
-                      applies_when: {
-                        kind: "tests_changed",
-                        require_test_files_changed: checked,
-                      },
-                    }))
-                  }
-                />
-              </div>
             ) : null}
 
             <div className="space-y-2">

@@ -84,7 +84,6 @@ const policy: CodeReviewResolvedPolicy = {
             kind: "nontrivial",
             min_files_changed: 2,
             min_lines_changed: 31,
-            categories: ["backend"],
           },
         },
       ],
@@ -97,12 +96,10 @@ const policy: CodeReviewResolvedPolicy = {
       sensitive_paths: ["*auth*"],
       allowed_path_patterns: ["internal/**"],
       blocked_path_patterns: ["migrations/**"],
-      exclude_categories: ["auth", "billing"],
       required_checks: ["lint", "test"],
       eligible_authors: ["anya"],
       require_up_to_date: false,
       allow_forks: false,
-      allow_policy_changes: false,
     },
     agent_roster: {
       reviewers: ["codex", "claude_code"],
@@ -440,14 +437,12 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findByText("*auth*")).toBeInTheDocument();
     expect(screen.getByText("internal/**")).toBeInTheDocument();
     expect(screen.getByText("migrations/**")).toBeInTheDocument();
-    expect(screen.getByText("billing")).toBeInTheDocument();
     expect(screen.getByText("lint")).toBeInTheDocument();
     expect(screen.getByText("anya")).toBeInTheDocument();
     expect(screen.getAllByText("1 item").length).toBeGreaterThan(0);
 
     await user.click(screen.getByRole("button", { name: /Quality gates/i }));
     expect(await screen.findByText("Enforce sensitive paths")).toBeInTheDocument();
-    expect(screen.getByText("Allow policy changes")).toBeInTheDocument();
     expect(screen.getByText("Block reviewer disagreement")).toBeInTheDocument();
     await user.hover(screen.getByRole("button", { name: /About Require passing checks/i }));
     expect((await screen.findAllByText(/Blocks approval until the PR's required GitHub checks are passing/i)).length).toBeGreaterThan(0);
@@ -930,7 +925,6 @@ describe("CodeReviewsPage", () => {
       "Sensitive paths",
       "Allowed path patterns",
       "Blocked path patterns",
-      "Excluded categories",
       "Required checks",
       "Eligible authors",
       "Reviewer models",
@@ -948,7 +942,6 @@ describe("CodeReviewsPage", () => {
       "Require passing checks",
       "Enforce sensitive paths",
       "Require up-to-date branch",
-      "Allow policy changes",
       "Block reviewer disagreement",
       "Allow fork PRs",
     ]) {
@@ -1062,16 +1055,8 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByRole("button", { name: "About Path patterns" })).toBeInTheDocument();
     expect(screen.queryByText("Files changed at least")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("combobox", { name: "Requirement applicability" }));
-    await user.click(await screen.findByRole("option", { name: "Categories" }));
-    expect(await screen.findByRole("button", { name: "About Categories" })).toBeInTheDocument();
-
-    await user.click(screen.getByRole("combobox", { name: "Requirement applicability" }));
-    await user.click(await screen.findByRole("option", { name: "Tests changed" }));
-    expect(await screen.findByRole("button", { name: "About Require changed test files" })).toBeInTheDocument();
-
     await user.click(screen.getByRole("button", { name: "Close" }));
-    expect(await screen.findByText("When test files changed")).toBeInTheDocument();
+    expect(await screen.findByText("Paths: no paths set")).toBeInTheDocument();
   });
 
   it("saves outcome choices to the existing policy fields", async () => {
@@ -1431,8 +1416,6 @@ describe("CodeReviewsPage", () => {
     expect(within(requiredChecksEditor as HTMLElement).getByText("lint")).toBeInTheDocument();
     expect(within(requiredChecksEditor as HTMLElement).getByText("test")).toBeInTheDocument();
 
-    // Add-button labels are singularized correctly, including "categories" -> "category".
-    expect(screen.getByRole("button", { name: "Add excluded category" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add required check" })).toBeInTheDocument();
   });
 

@@ -1342,7 +1342,6 @@ func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest
 		FilesChanged:          len(changedFiles),
 		LinesChanged:          codeReviewLinesChanged(changedFiles),
 		ChangedPaths:          codeReviewChangedPaths(changedFiles),
-		Categories:            codeReviewChangedCategories(changedFiles),
 		ChecksPassing:         codeReviewChecksPassing(cfg, health),
 		RequiredChecksPassing: codeReviewRequiredChecksPassing(cfg, health),
 		// The coding-agent orchestrator owns description-policy assessment.
@@ -1359,22 +1358,10 @@ func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest
 		PromptInjectionFound: codeReviewDescriptionPromptInjectionLikely(stringPtrValue(pr.Body)),
 	})
 	requiredReviewerQuorum := codeReviewRequiredReviewerQuorum(cfg, agentResults)
-	if reviewerQuorum < requiredReviewerQuorum && !codeReviewLowRiskQuorumWaived(cfg, changedFiles) {
+	if reviewerQuorum < requiredReviewerQuorum {
 		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonReviewerQuorum, Actual: reviewerQuorum, Limit: requiredReviewerQuorum})
 	}
 	return risk.ReasonDetails
-}
-
-// codeReviewLowRiskQuorumWaived reports whether the resolved policy's low-risk
-// lane waives the reviewer-quorum requirement for this change. It lets a clean
-// low-risk change (e.g. docs-only) approve on the heuristic gates even when the
-// review agents fail or time out, which is otherwise the dominant blocker.
-func codeReviewLowRiskQuorumWaived(policy models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile) bool {
-	lane := models.ResolveCodeReviewPolicyConfig(&policy).RiskPolicy.LowRiskLane
-	if !lane.WaiveReviewerQuorum {
-		return false
-	}
-	return models.CodeReviewLowRiskLaneApplies(lane, codeReviewChangedCategories(changedFiles))
 }
 
 func codeReviewReviewerOutputsForPrompt(results []models.CodeReviewAgentResult) []string {
@@ -2373,7 +2360,6 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 	policy := models.ResolveCodeReviewPolicyConfig(&input.Policy)
 	reviewerQuorum, _ := codeReviewReviewerEvidence(input.AgentResults)
 	requiredReviewerQuorum := codeReviewRequiredReviewerQuorum(policy, input.AgentResults)
-	reviewerQuorumWaived := reviewerQuorum < requiredReviewerQuorum && codeReviewLowRiskQuorumWaived(policy, input.ChangedFiles)
 	blockingFindings := codeReviewBlockingFindings(input.Findings)
 	orchestratorPresent, orchestratorEvidenceUsable := codeReviewOrchestratorEvidence(input.AgentResults)
 	orchestratorSynthesisUsable := codeReviewOrchestratorSynthesisUsable(input.OrchestratorSynthesis)
@@ -2391,7 +2377,6 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		FilesChanged:          len(input.ChangedFiles),
 		LinesChanged:          codeReviewLinesChanged(input.ChangedFiles),
 		ChangedPaths:          codeReviewChangedPaths(input.ChangedFiles),
-		Categories:            codeReviewChangedCategories(input.ChangedFiles),
 		ChecksPassing:         codeReviewChecksPassing(policy, input.Health),
 		RequiredChecksPassing: codeReviewRequiredChecksPassing(policy, input.Health),
 		DescriptionPassed:     !orchestratorFresh || (descriptionEvaluationValid && descriptionEvaluation.Passed),
@@ -2407,7 +2392,7 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		UnresolvedUncertainty: input.OrchestratorSynthesis.UnresolvedUncertainty,
 		PromptInjectionFound:  codeReviewDescriptionPromptInjectionLikely(stringPtrValue(input.PullRequest.Body)) || input.OrchestratorSynthesis.PromptInjectionDetected,
 	})
-	if reviewerQuorum < requiredReviewerQuorum && !reviewerQuorumWaived {
+	if reviewerQuorum < requiredReviewerQuorum {
 		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonReviewerQuorum, Actual: reviewerQuorum, Limit: requiredReviewerQuorum})
 	}
 	if policy.ApprovalMode == models.CodeReviewApprovalModeApproveAcceptable && (!orchestratorPresent || !orchestratorEvidenceUsable || !orchestratorSynthesisUsable) {
@@ -2437,14 +2422,13 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		DescriptionIssues:         codeReviewFailedDescriptionRequirements(descriptionEvaluation.RequirementSummaries),
 		AgentSummaries:            codeReviewAgentSummaries(input.AgentResults, input.Findings),
 		Findings:                  input.Findings,
-		RecommendedHumanReviewers: codeReviewRecommendedHumanReviewers(decision.RiskReasonDetails, input.ChangedFiles),
+		RecommendedHumanReviewers: codeReviewRecommendedHumanReviewers(decision.RiskReasonDetails),
 		ChangeStatsAvailable:      input.ChangedFilesAvailable,
 		FilesChanged:              len(input.ChangedFiles),
 		LinesChanged:              codeReviewLinesChanged(input.ChangedFiles),
 		ChecksRequired:            policy.RiskPolicy.RequirePassingChecks || len(policy.RiskPolicy.RequiredChecks) > 0,
 		ReviewerQuorum:            reviewerQuorum,
 		RequiredReviewerQuorum:    requiredReviewerQuorum,
-		ReviewerQuorumWaived:      reviewerQuorumWaived,
 		HeadSHA:                   input.Job.HeadSHA,
 		AssessedAt:                input.AssessedAt,
 	})
@@ -2678,94 +2662,6 @@ func codeReviewChangedPaths(files []codereviewsvc.PullRequestFile) []string {
 	return paths
 }
 
-func codeReviewChangedCategories(files []codereviewsvc.PullRequestFile) []string {
-	seen := make(map[string]struct{})
-	categories := make([]string, 0)
-	for _, file := range files {
-		for _, category := range codeReviewPathCategories(file.Filename) {
-			if _, ok := seen[category]; ok {
-				continue
-			}
-			seen[category] = struct{}{}
-			categories = append(categories, category)
-		}
-	}
-	return categories
-}
-
-func codeReviewPathCategories(path string) []string {
-	normalized := strings.ToLower(strings.TrimSpace(path))
-	categories := make([]string, 0, 2)
-	if codeReviewDocsPath(normalized) {
-		// Documentation is prose, not code. Returning only "docs" keeps the
-		// substring-based code-risk heuristics below (auth/crypto/permissions/
-		// etc.) from misclassifying a doc whose filename merely contains a
-		// sensitive word, e.g. "111-session-changesets.md" reading as "auth".
-		return []string{"docs"}
-	}
-	if strings.Contains(normalized, "/test/") ||
-		strings.Contains(normalized, "/tests/") ||
-		strings.Contains(normalized, "/__tests__/") ||
-		strings.HasSuffix(normalized, "_test.go") ||
-		strings.Contains(normalized, ".test.") ||
-		strings.Contains(normalized, ".spec.") {
-		categories = append(categories, "tests")
-	}
-	if codeReviewFrontendPath(normalized) {
-		categories = append(categories, "frontend")
-	}
-	if strings.HasSuffix(normalized, ".go") ||
-		strings.Contains(normalized, "internal/") ||
-		strings.Contains(normalized, "cmd/") ||
-		strings.Contains(normalized, "pkg/") {
-		categories = append(categories, "backend")
-	}
-	if strings.Contains(normalized, "generated") ||
-		strings.HasSuffix(normalized, ".pb.go") ||
-		strings.HasSuffix(normalized, ".gen.go") ||
-		strings.HasSuffix(normalized, ".generated.ts") {
-		categories = append(categories, "generated")
-	}
-	switch {
-	case normalized == "go.mod" || normalized == "go.sum" ||
-		strings.HasSuffix(normalized, "package-lock.json") ||
-		strings.HasSuffix(normalized, "pnpm-lock.yaml") ||
-		strings.HasSuffix(normalized, "yarn.lock") ||
-		strings.HasSuffix(normalized, "cargo.lock") ||
-		strings.HasSuffix(normalized, "poetry.lock") ||
-		strings.Contains(normalized, "requirements.txt"):
-		categories = append(categories, "dependencies")
-	}
-	if strings.Contains(normalized, "migration") || strings.Contains(normalized, "/migrations/") {
-		categories = append(categories, "migrations")
-	}
-	if strings.Contains(normalized, "auth") || strings.Contains(normalized, "session") {
-		categories = append(categories, "auth")
-	}
-	if strings.Contains(normalized, "billing") || strings.Contains(normalized, "invoice") || strings.Contains(normalized, "payment") {
-		categories = append(categories, "billing")
-	}
-	if strings.Contains(normalized, "permission") || strings.Contains(normalized, "role") || strings.Contains(normalized, "rbac") {
-		categories = append(categories, "permissions")
-	}
-	if strings.Contains(normalized, "crypto") || strings.Contains(normalized, "secret") || strings.Contains(normalized, "token") {
-		categories = append(categories, "crypto")
-	}
-	if strings.Contains(normalized, ".github/workflows/") || strings.Contains(normalized, "terraform") || strings.Contains(normalized, "deploy") || strings.Contains(normalized, "infra") {
-		categories = append(categories, "infra")
-	}
-	return categories
-}
-
-func codeReviewDocsPath(normalized string) bool {
-	normalized = strings.ToLower(strings.TrimSpace(normalized))
-	return strings.HasPrefix(normalized, "docs/") ||
-		strings.HasSuffix(normalized, ".md") ||
-		strings.HasSuffix(normalized, ".mdx") ||
-		strings.HasSuffix(normalized, ".rst") ||
-		strings.HasSuffix(normalized, ".adoc")
-}
-
 func codeReviewDescriptionRequirementApplies(requirement models.CodeReviewDescriptionRequirement, changedFiles []codereviewsvc.PullRequestFile) bool {
 	if !requirement.AppliesWhen.Empty() {
 		return codeReviewDescriptionApplicabilityApplies(requirement.AppliesWhen, changedFiles)
@@ -2775,20 +2671,6 @@ func codeReviewDescriptionRequirementApplies(requirement models.CodeReviewDescri
 		return true
 	case "nontrivial":
 		return len(changedFiles) > 1 || codeReviewLinesChanged(changedFiles) > 30
-	case "frontend_or_ui_visible", "frontend", "ui":
-		for _, file := range changedFiles {
-			path := strings.ToLower(file.Filename)
-			if strings.Contains(path, "frontend/") ||
-				strings.Contains(path, "app/") ||
-				strings.Contains(path, "components/") ||
-				strings.Contains(path, "pages/") ||
-				strings.Contains(path, ".tsx") ||
-				strings.Contains(path, ".jsx") ||
-				strings.Contains(path, ".css") {
-				return true
-			}
-		}
-		return false
 	default:
 		return true
 	}
@@ -2876,7 +2758,6 @@ func codeReviewDescriptionEvaluationFromSynthesis(policy models.CodeReviewPolicy
 func codeReviewDescriptionApplicabilityApplies(applicability models.CodeReviewDescriptionApplicability, changedFiles []codereviewsvc.PullRequestFile) bool {
 	linesChanged := codeReviewLinesChanged(changedFiles)
 	changedPaths := codeReviewChangedPaths(changedFiles)
-	changedCategories := codeReviewChangedCategories(changedFiles)
 	if applicability.MinFilesChanged > 0 && len(changedFiles) >= applicability.MinFilesChanged {
 		return true
 	}
@@ -2890,34 +2771,13 @@ func codeReviewDescriptionApplicabilityApplies(applicability models.CodeReviewDe
 			}
 		}
 	}
-	if len(applicability.Categories) > 0 {
-		for _, category := range changedCategories {
-			if stringInCodeReviewSlice(category, applicability.Categories) {
-				return true
-			}
-		}
-	}
-	if applicability.RequireTestFilesChanged && codeReviewAnyTestFileChanged(changedPaths) {
-		return true
-	}
 	switch applicability.Kind {
 	case "", models.CodeReviewDescriptionApplicabilityAll:
 		return true
 	case models.CodeReviewDescriptionApplicabilityNontrivial:
 		return len(changedFiles) > 1 || linesChanged > 30
-	case models.CodeReviewDescriptionApplicabilityFrontend:
-		for _, path := range changedPaths {
-			if codeReviewFrontendPath(path) {
-				return true
-			}
-		}
-		return false
 	case models.CodeReviewDescriptionApplicabilityPaths:
 		return len(applicability.PathPatterns) == 0
-	case models.CodeReviewDescriptionApplicabilityCategories:
-		return len(applicability.Categories) == 0
-	case models.CodeReviewDescriptionApplicabilityTests:
-		return codeReviewAnyTestFileChanged(changedPaths)
 	default:
 		return true
 	}
@@ -2950,44 +2810,6 @@ func codeReviewPathMatchesAny(path string, patterns []string) bool {
 		}
 	}
 	return false
-}
-
-func stringInCodeReviewSlice(needle string, values []string) bool {
-	for _, value := range values {
-		if strings.EqualFold(strings.TrimSpace(needle), strings.TrimSpace(value)) {
-			return true
-		}
-	}
-	return false
-}
-
-func codeReviewAnyTestFileChanged(paths []string) bool {
-	for _, path := range paths {
-		normalized := strings.ToLower(filepath.ToSlash(path))
-		if strings.Contains(normalized, "/test/") ||
-			strings.Contains(normalized, "/tests/") ||
-			strings.Contains(normalized, "/__tests__/") ||
-			strings.Contains(normalized, "/fixtures/") ||
-			strings.Contains(normalized, "/testdata/") ||
-			strings.HasSuffix(normalized, "_test.go") ||
-			strings.Contains(normalized, ".test.") ||
-			strings.Contains(normalized, ".spec.") {
-			return true
-		}
-	}
-	return false
-}
-
-func codeReviewFrontendPath(path string) bool {
-	path = strings.ToLower(filepath.ToSlash(path))
-	return strings.Contains(path, "frontend/") ||
-		strings.Contains(path, "apps/web/") ||
-		strings.Contains(path, "/app/") ||
-		strings.Contains(path, "/components/") ||
-		strings.Contains(path, "/pages/") ||
-		strings.HasSuffix(path, ".tsx") ||
-		strings.HasSuffix(path, ".jsx") ||
-		strings.HasSuffix(path, ".css")
 }
 
 func containsAnyFold(haystack string, needles []string) bool {
@@ -3423,7 +3245,7 @@ func codeReviewAgentDisplayName(provider string) string {
 	return strings.Join(words, " ")
 }
 
-func codeReviewRecommendedHumanReviewers(reasons []models.CodeReviewRiskReason, changedFiles []codereviewsvc.PullRequestFile) []string {
+func codeReviewRecommendedHumanReviewers(reasons []models.CodeReviewRiskReason) []string {
 	seen := make(map[string]struct{})
 	out := make([]string, 0)
 	add := func(value string) {
@@ -3440,20 +3262,6 @@ func codeReviewRecommendedHumanReviewers(reasons []models.CodeReviewRiskReason, 
 		switch reason.Code {
 		case models.CodeReviewRiskReasonPromptInjection:
 			add("security/platform")
-		case models.CodeReviewRiskReasonPolicyPathChanged:
-			add("platform")
-		}
-	}
-	for _, category := range codeReviewChangedCategories(changedFiles) {
-		switch category {
-		case "auth", "permissions", "crypto":
-			add("security/platform")
-		case "billing":
-			add("billing")
-		case "infra":
-			add("platform")
-		case "migrations":
-			add("backend/platform")
 		}
 	}
 	return out

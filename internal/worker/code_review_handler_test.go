@@ -622,23 +622,8 @@ func TestCodeReviewDescriptionRequirementAppliesTypedRules(t *testing.T) {
 		expected    bool
 	}{
 		{
-			name:        "matches frontend kind",
-			appliesWhen: models.CodeReviewDescriptionApplicability{Kind: models.CodeReviewDescriptionApplicabilityFrontend},
-			expected:    true,
-		},
-		{
 			name:        "matches path patterns",
 			appliesWhen: models.CodeReviewDescriptionApplicability{Kind: models.CodeReviewDescriptionApplicabilityPaths, PathPatterns: []string{"frontend/**"}},
-			expected:    true,
-		},
-		{
-			name:        "matches risk categories",
-			appliesWhen: models.CodeReviewDescriptionApplicability{Kind: models.CodeReviewDescriptionApplicabilityCategories, Categories: []string{"frontend"}},
-			expected:    true,
-		},
-		{
-			name:        "matches changed test files",
-			appliesWhen: models.CodeReviewDescriptionApplicability{Kind: models.CodeReviewDescriptionApplicabilityTests, RequireTestFilesChanged: true},
 			expected:    true,
 		},
 		{
@@ -3476,37 +3461,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			reason:   "review agents reported blocking findings",
 		},
 		{
-			name: "withholds approval for dependency file category",
-			input: liveCodeReviewOutcomeInput{
-				Policy: policy,
-				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
-				PullRequest: models.PullRequest{
-					OrgID:   orgID,
-					Body:    &prBody,
-					HeadSHA: stringPtr("head"),
-					Status:  models.PullRequestStatusOpen,
-				},
-				Health: &models.PullRequestHealthResponse{
-					HeadSHA:         "head",
-					Status:          models.PullRequestStatusOpen,
-					CanMerge:        true,
-					ChecksConfirmed: true,
-					MergeState:      models.PullRequestMergeStateClean,
-				},
-				AgentResults: []models.CodeReviewAgentResult{
-					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
-					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
-				},
-				ChangedFiles: []codereview.PullRequestFile{
-					{Filename: "go.mod", Additions: 1, Deletions: 0},
-				},
-				ChangedFilesAvailable: true,
-			},
-			expected: models.CodeReviewDecisionNeedsHumanReview,
-			reason:   "excluded risk category changed: dependencies",
-		},
-		{
-			name: "approves large docs-only change through the low-risk lane despite timed-out reviewers",
+			name: "filename does not waive size or reviewer quorum limits",
 			input: liveCodeReviewOutcomeInput{
 				Policy: policy,
 				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
@@ -3534,17 +3489,15 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusTimedOut},
 				},
 				ChangedFiles: []codereview.PullRequestFile{
-					// Filename contains "session" — must not be classified as auth.
-					// 607 lines exceeds the base 300 cap but is under the docs lane cap.
 					{Filename: "docs/design/future/111-session-changesets-and-stacks.md", Additions: 607, Deletions: 0},
 				},
 				ChangedFilesAvailable: true,
 			},
-			expected:     models.CodeReviewDecisionApproved,
-			bodyContains: "reviewer quorum waived for this low-risk change",
+			expected: models.CodeReviewDecisionNeedsHumanReview,
+			reason:   "changed lines 607 exceeds policy limit 300",
 		},
 		{
-			name: "reports satisfied reviewer quorum for a low-risk change with complete reviews",
+			name: "reports satisfied reviewer quorum with complete reviews",
 			input: liveCodeReviewOutcomeInput{
 				Policy: policy,
 				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
@@ -3621,7 +3574,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			bodyContains: "reviewer quorum 1/1",
 		},
 		{
-			name: "still requires human review for a docs change above the low-risk lane ceiling",
+			name: "configured line limit applies regardless of filename",
 			input: liveCodeReviewOutcomeInput{
 				Policy: policy,
 				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
@@ -3651,7 +3604,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 				ChangedFilesAvailable: true,
 			},
 			expected: models.CodeReviewDecisionNeedsHumanReview,
-			reason:   "changed lines 1200 exceeds policy limit 1000",
+			reason:   "changed lines 1200 exceeds policy limit 300",
 		},
 	}
 
@@ -3675,39 +3628,6 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			if tt.bodyContains != "" {
 				require.Contains(t, body, tt.bodyContains, "final review body should include expected evidence")
 			}
-		})
-	}
-}
-
-func TestCodeReviewPathCategoriesDocsOnly(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		path     string
-		expected []string
-	}{
-		{
-			name:     "docs filename containing session is not classified as auth",
-			path:     "docs/design/future/111-session-changesets-and-stacks.md",
-			expected: []string{"docs"},
-		},
-		{
-			name:     "docs filename containing token is not classified as crypto",
-			path:     "docs/auth-token-rotation.md",
-			expected: []string{"docs"},
-		},
-		{
-			name:     "non-docs auth path still classified as auth",
-			path:     "internal/auth/session.go",
-			expected: []string{"backend", "auth"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			require.Equal(t, tt.expected, codeReviewPathCategories(tt.path), "docs prose must not inherit code-risk categories")
 		})
 	}
 }
