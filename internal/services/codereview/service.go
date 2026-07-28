@@ -451,13 +451,6 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 	if !ok {
 		return ReviewRequestedResult{IgnoredReason: "reviewer_not_configured"}, nil
 	}
-	approved, err := s.metadata.HasApprovedByPullRequest(ctx, input.OrgID, input.PullRequestID)
-	if err != nil {
-		return ReviewRequestedResult{}, fmt.Errorf("check prior code review approval: %w", err)
-	}
-	if approved {
-		return ReviewRequestedResult{IgnoredReason: "already_approved", TriggerSource: source}, nil
-	}
 	deliveryID := strings.TrimSpace(input.DeliveryID)
 	if deliveryID == "" {
 		s.logger.Warn().
@@ -484,6 +477,9 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 		changeKey:               changeKey,
 		changeReason:            explicitReviewRequestChangeReason,
 		previousOutputKey:       submitted.ReviewOutputKey,
+		previousReviewDecision:  submitted.Decision,
+		previousReviewDecidedAt: submitted.CompletedAt,
+		previousReviewBody:      submitted.FinalReviewBody,
 		existingGitHubReviewID:  submitted.GitHubReviewID,
 		existingGitHubReviewURL: submitted.GitHubReviewURL,
 	})
@@ -540,7 +536,7 @@ func (s *Service) QueueReviewChanged(ctx context.Context, input ReviewChangedInp
 	if err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("check prior code review approval before queueing reassessment: %w", err)
 	}
-	if approved {
+	if approved && !input.ExplicitRequest {
 		return ReviewRequestedResult{IgnoredReason: "already_approved"}, nil
 	}
 	latest, err := s.metadata.GetLatestByPullRequest(ctx, input.OrgID, input.PullRequestID)
@@ -586,7 +582,7 @@ func (s *Service) HandleReviewChanged(ctx context.Context, input ReviewChangedIn
 	if err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("check prior code review approval before reassessment: %w", err)
 	}
-	if approved {
+	if approved && !input.ExplicitRequest {
 		return ReviewRequestedResult{IgnoredReason: "already_approved"}, nil
 	}
 	latest, err := s.metadata.GetLatestByPullRequest(ctx, input.OrgID, input.PullRequestID)

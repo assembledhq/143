@@ -433,6 +433,59 @@ func TestGitHubSubmitter_SubmitReviewUpdatesExistingAssessment(t *testing.T) {
 	}}, result.Comments, "updated assessment should return the reused inline comment")
 }
 
+func TestGitHubSubmitter_SubmitReviewPreservesExistingApproval(t *testing.T) {
+	t.Parallel()
+
+	previousDecidedAt := time.Date(2026, time.July, 28, 19, 14, 8, 0, time.UTC)
+	var reviewUpdate map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/pulls/42/comments":
+			w.Header().Set("Content-Type", "application/json")
+			_, err := w.Write([]byte(`[]`))
+			require.NoError(t, err, "test response should write no inline comments")
+		case r.Method == http.MethodPut && r.URL.Path == "/repos/acme/repo/pulls/42/reviews/143":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&reviewUpdate), "approved review update should decode")
+			w.Header().Set("Content-Type", "application/json")
+			_, err := w.Write([]byte(`{"id":143,"html_url":"https://github.com/acme/repo/pull/42#pullrequestreview-143"}`))
+			require.NoError(t, err, "test response should write the preserved review")
+		default:
+			http.Error(w, "unexpected approval-changing request", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
+	result, err := submitter.SubmitReview(context.Background(), SubmitReviewRequest{
+		InstallationID:    99,
+		Repository:        "acme/repo",
+		PullNumber:        42,
+		HeadSHA:           "same-head",
+		OutputKey:         "post-approval-output",
+		ExistingReviewID:  143,
+		ExistingReviewURL: "https://github.com/acme/repo/pull/42#pullrequestreview-143",
+		Decision:          SubmitReviewDecisionBlocked,
+		PreviousDecision:  SubmitReviewDecisionApproved,
+		PreviousDecidedAt: previousDecidedAt,
+		PreviousBody:      "143 Code Reviewer approved this PR.",
+		Body:              "143 Code Reviewer did not approve this follow-up review.",
+	})
+
+	require.NoError(t, err, "a non-approving follow-up should update the review without changing its approval state")
+	require.Equal(t, int64(143), result.ID, "follow-up should retain the approved GitHub review id")
+	require.Equal(t, map[string]any{
+		"body": withCodeReviewOutputMarker(
+			withCodeReviewHistory(
+				"143 Code Reviewer did not approve this follow-up review.",
+				"143 Code Reviewer approved this PR.",
+				SubmitReviewDecisionApproved,
+				previousDecidedAt,
+			),
+			"post-approval-output",
+		),
+	}, reviewUpdate, "follow-up should send only a body update and no approval-changing review event")
+}
+
 func TestGitHubSubmitter_SubmitReviewPromotesUpdatedAssessmentWithFormalApproval(t *testing.T) {
 	t.Parallel()
 
