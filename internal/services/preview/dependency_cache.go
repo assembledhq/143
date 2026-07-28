@@ -766,7 +766,7 @@ func (c *SharedDependencyCache) stageSandboxArchiveAttempt(ctx context.Context, 
 		// next launch to rebuild cold.
 		c.logger.Warn().
 			Int("exit_code", exitCode).
-			Str("stderr", dependencyCacheStderrSuffix(stderr.String())).
+			Str("stderr", strings.TrimPrefix(dependencyCacheStderrSuffix(stderr.String()), ": ")).
 			Msg("preview cache archive completed with warnings from a live workspace; keeping it")
 	}
 	if gzErr != nil {

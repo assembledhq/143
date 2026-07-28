@@ -842,8 +842,7 @@ func previewConfigHasInitScripts(cfg *models.PreviewConfig) bool {
 
 // previewStopBackgroundWaitCap bounds how long StopPreview blocks on background
 // work — chiefly the post-ready build-cache uploads it deliberately awaits so a
-// prewarm persists its cache. It sits below the saves' own previewCacheSaveTimeout
-// so an interactive stop can't hang on a wedged blob store.
+// prewarm persists its cache.
 //
 // The cap must exceed how long a real save takes, or a warm-policy launch — which
 // calls StopPreview the instant the preview is ready — tears the sandbox down
@@ -854,7 +853,15 @@ func previewConfigHasInitScripts(cfg *models.PreviewConfig) bool {
 // managed to save. Every subsequent launch then restored a stale cache and
 // rebuilt from near-scratch. 10 minutes clears the observed distribution with
 // headroom.
+//
+// This is the budget for stops nobody is waiting on — a prewarm job whose whole
+// purpose is to leave a warm cache behind. Interactive stops use
+// PreviewStopInteractiveWaitCap instead; see StopPreviewWithBackgroundWait.
 const previewStopBackgroundWaitCap = 10 * time.Minute
+
+// The interactive counterpart lives in the preview package as
+// preview.PreviewStopInteractiveWaitCap, since the manager is what selects
+// between the two and this package imports that one.
 
 // previewCacheSaveTimeout is each cache save's own self-timeout, detached from
 // the launch ctx. It bounds a save that is NOT racing a stop — an interactive
@@ -891,7 +898,17 @@ func waitForGroupBounded(ctx context.Context, wg *sync.WaitGroup, maxWait time.D
 	}
 }
 
+// StopPreview tears the preview down using the full background-work budget. It
+// is the right entry point for prewarm and other machine-driven stops; callers
+// with a human waiting should use StopPreviewWithBackgroundWait.
 func (d *DockerPreviewProvider) StopPreview(ctx context.Context, handle string) error {
+	return d.StopPreviewWithBackgroundWait(ctx, handle, previewStopBackgroundWaitCap)
+}
+
+// StopPreviewWithBackgroundWait is StopPreview with an explicit ceiling on how
+// long it blocks awaiting post-ready cache uploads, so the caller can trade
+// cache warmth against how long it is willing to make someone wait.
+func (d *DockerPreviewProvider) StopPreviewWithBackgroundWait(ctx context.Context, handle string, backgroundWait time.Duration) error {
 	d.mu.RLock()
 	state, ok := d.previews[handle]
 	d.mu.RUnlock()
@@ -900,16 +917,19 @@ func (d *DockerPreviewProvider) StopPreview(ctx context.Context, handle string) 
 		return nil // already stopped — idempotent
 	}
 
+	if backgroundWait <= 0 {
+		backgroundWait = previewStopBackgroundWaitCap
+	}
+
 	// Cancel all service goroutines and wait for background work to finish. The
 	// wait is bounded: it intentionally blocks on the post-ready build-cache
 	// uploads (so a prewarm, which stops the moment the preview is ready,
 	// persists its cache), but an interactive stop must not hang on a slow blob
-	// store. See previewStopBackgroundWaitCap for how the cap is sized against
-	// real save durations; a caller (e.g. a prewarm job) with a longer-lived ctx
-	// still gets the full cap.
+	// store. See previewStopBackgroundWaitCap and PreviewStopInteractiveWaitCap
+	// for how the two budgets are sized.
 	state.cancelFn()
 	d.terminateServiceProcesses(state)
-	if err := waitForGroupBounded(ctx, &state.wg, previewStopBackgroundWaitCap); err != nil {
+	if err := waitForGroupBounded(ctx, &state.wg, backgroundWait); err != nil {
 		d.logger.Warn().Err(err).Str("handle", handle).
 			Msg("stop preview: proceeding before background work finished; an in-flight build cache save may be aborted by teardown")
 	}

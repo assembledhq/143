@@ -1701,6 +1701,53 @@ func (m *Manager) StopPreview(ctx context.Context, orgID, previewID uuid.UUID) e
 	return m.StopPreviewWithReason(ctx, orgID, previewID, models.PreviewStoppedReasonNone)
 }
 
+// PreviewStopInteractiveWaitCap bounds how long a stop with a human waiting on
+// it may block on in-flight cache uploads before tearing the sandbox down.
+//
+// StopPreview is reachable synchronously from the DELETE preview handlers, and
+// app->worker RPCs give up at previewWorkerHTTPTimeout (10 minutes) — the same
+// as the provider's full background budget. Spending that budget on a user's
+// stop would hang the request until the client timed out and then report a
+// failed stop for one that actually succeeded.
+//
+// A few seconds still lets a nearly-finished upload land. Beyond that the cache
+// save is best-effort on this path: losing it costs the next launch a rebuild,
+// which is cheaper than making someone wait out an upload they did not ask for.
+const PreviewStopInteractiveWaitCap = 15 * time.Second
+
+// PreviewStopBackgroundWaiter is implemented by providers that can bound how
+// long StopPreview blocks on post-ready cache uploads. Providers without it get
+// the default budget.
+type PreviewStopBackgroundWaiter interface {
+	StopPreviewWithBackgroundWait(ctx context.Context, handle string, backgroundWait time.Duration) error
+}
+
+// stopBackgroundWaitForReason picks how long the provider may block awaiting
+// in-flight cache uploads before tearing the sandbox down.
+//
+// Prewarm stops exist purely to leave a warm cache behind: nothing is waiting on
+// them, and cutting them short is what left build caches frozen for days. Every
+// other reason can have a human attached — the DELETE preview handlers call this
+// synchronously — so those take the short budget. Cutting an upload short there
+// costs the next launch a rebuild; making a user wait ten minutes for a stop
+// (and then fail, since app->worker RPCs give up at the same ten minutes) costs
+// more.
+func stopBackgroundWaitForReason(reason models.PreviewStoppedReason) time.Duration {
+	switch reason {
+	case models.PreviewStoppedReasonWarmPolicy, models.PreviewStoppedReasonSessionPrewarmPolicy:
+		return 0 // provider default: the full background budget
+	default:
+		return PreviewStopInteractiveWaitCap
+	}
+}
+
+func (m *Manager) stopViaProvider(ctx context.Context, handle string, reason models.PreviewStoppedReason) error {
+	if waiter, ok := m.provider.(PreviewStopBackgroundWaiter); ok {
+		return waiter.StopPreviewWithBackgroundWait(ctx, handle, stopBackgroundWaitForReason(reason))
+	}
+	return m.provider.StopPreview(ctx, handle)
+}
+
 // StopPreviewWithReason stops a preview, records a stop cause when supplied,
 // and revokes all access sessions.
 func (m *Manager) StopPreviewWithReason(ctx context.Context, orgID, previewID uuid.UUID, reason models.PreviewStoppedReason) error {
@@ -1723,9 +1770,11 @@ func (m *Manager) StopPreviewWithReason(ctx context.Context, orgID, previewID uu
 	}
 	m.pollStopMu.Unlock()
 
-	// Stop via provider.
+	// Stop via provider. The provider blocks on in-flight cache uploads before
+	// tearing the sandbox down; how long it may block depends on who is waiting
+	// (see stopBackgroundWaitForReason).
 	if instance.PreviewHandle != "" && m.provider != nil {
-		if err := m.provider.StopPreview(ctx, instance.PreviewHandle); err != nil {
+		if err := m.stopViaProvider(ctx, instance.PreviewHandle, reason); err != nil {
 			m.logger.Error().Err(err).
 				Str("preview_id", previewID.String()).
 				Str("handle", instance.PreviewHandle).

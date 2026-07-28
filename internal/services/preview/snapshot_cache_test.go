@@ -683,3 +683,34 @@ func TestSnapshotExtraExcludeFlags(t *testing.T) {
 		require.NotContains(t, flags, "././", "leading ./ must be trimmed before re-rooting")
 	})
 }
+
+// Tolerating tar exit 1 made "tar complained" a routine success path, and tar
+// emits a warning line per file that moved under it. The stderr we hold in
+// worker memory and ship to the log pipeline has to stay bounded.
+func TestBoundedBuffer_CapsRetainedOutput(t *testing.T) {
+	t.Parallel()
+
+	b := &boundedBuffer{limit: 16}
+	n, err := b.Write([]byte("0123456789"))
+	require.NoError(t, err, "a stderr writer must never error — that would kill the command")
+	require.Equal(t, 10, n, "Write must report full consumption")
+
+	n, err = b.Write([]byte("abcdefghijklmnop"))
+	require.NoError(t, err)
+	require.Equal(t, 16, n, "Write must report full consumption even past the limit")
+
+	got := b.String()
+	require.Contains(t, got, "0123456789abcdef", "the retained prefix should be kept verbatim")
+	require.Contains(t, got, "10 more bytes suppressed", "the dropped count should be surfaced")
+	require.Less(t, len(got), 100, "a runaway stderr must not reach the log intact")
+}
+
+func TestBoundedBuffer_UnderLimitIsVerbatim(t *testing.T) {
+	t.Parallel()
+
+	b := &boundedBuffer{limit: 1024}
+	_, err := b.Write([]byte("tar: x: file changed as we read it"))
+	require.NoError(t, err)
+	require.Equal(t, "tar: x: file changed as we read it", b.String(),
+		"output under the limit should carry no suppression note")
+}
