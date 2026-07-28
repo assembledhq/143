@@ -484,7 +484,12 @@ func (c *SharedDependencyCache) SavePathCache(ctx context.Context, sb *agent.San
 	// compressor off the memory-capped, shared session sandbox trims the
 	// sandbox-side work at save time. The stored blob is still gzip (.tar.gz), so
 	// restore (`tar xzf`) and validation are unchanged.
-	archiveCmd := fmt.Sprintf("cd %s && tar cf - %s-- %s", shellQuote(rootDir), excludeExpr, strings.Join(args, " "))
+	//
+	// --ignore-failed-read keeps a file that disappears mid-walk from aborting
+	// the archive. Saves run against a workspace that is still serving, so a dev
+	// server rotating a log or a build tool sweeping its scratch dir is routine;
+	// tar still exits 1, which stageSandboxArchiveAttempt tolerates.
+	archiveCmd := fmt.Sprintf("cd %s && tar cf - --ignore-failed-read %s-- %s", shellQuote(rootDir), excludeExpr, strings.Join(args, " "))
 	staged, err := c.stageSandboxArchive(ctx, sb, archiveCmd)
 	if err != nil {
 		return DependencyCacheSaveResult{}, err
@@ -748,9 +753,21 @@ func (c *SharedDependencyCache) stageSandboxArchiveAttempt(ctx context.Context, 
 	exitCode, execErr := c.executor.Exec(ctx, sb, archiveCmd, gzw, &stderr)
 	gzErr := gzw.Close()
 	closeErr := file.Close()
-	if execErr != nil || exitCode != 0 {
+	if execErr != nil || !tarExitTolerable(exitCode) {
 		_ = os.RemoveAll(dir)
 		return nil, exitCode, fmt.Errorf("dependency cache save: %w", dependencyCacheExecError("archive stream", exitCode, execErr, stderr.String()))
+	}
+	if exitCode != 0 {
+		// Build-cache saves run against a workspace that is still serving: the
+		// dev server writes logs and the build tool churns its own cache while
+		// tar reads them, and tar exits 1 for that. The archive is complete, and
+		// validateDependencyCacheArchive still checks its structure downstream,
+		// so keeping it is strictly better than dropping the save and forcing the
+		// next launch to rebuild cold.
+		c.logger.Warn().
+			Int("exit_code", exitCode).
+			Str("stderr", dependencyCacheStderrSuffix(stderr.String())).
+			Msg("preview cache archive completed with warnings from a live workspace; keeping it")
 	}
 	if gzErr != nil {
 		_ = os.RemoveAll(dir)

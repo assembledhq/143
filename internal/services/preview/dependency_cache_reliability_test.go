@@ -117,6 +117,27 @@ func TestStageSandboxArchive_RetriesTransientArchiveFailure(t *testing.T) {
 	require.Equal(t, 2, countCalls(exec.calls(), "tar cf -"), "archive should run twice: one transient failure then a success")
 }
 
+// Cache saves archive a workspace that is still serving, so files move under
+// tar as it reads them and tar exits 1. The archive is complete, so keeping it
+// beats dropping the save and making the next launch rebuild cold — which is
+// how the build cache went stale in the first place.
+func TestStageSandboxArchive_KeepsArchiveWhenFilesChangedUnderTar(t *testing.T) {
+	t.Parallel()
+	base := &dependencyCacheExec{payload: makeDependencyCacheTarGz(t, map[string]string{"node_modules/.bin/next": "next"})}
+	exec := newScriptedExec(base)
+	exec.script("tar cf -", scriptedResponse{
+		exitCode: 1,
+		stderr:   "tar: node_modules/.cache/x: file changed as we read it",
+	})
+	cache := newReliabilityTestCache(t, exec)
+
+	blob, err := cache.stageSandboxArchive(context.Background(), &agent.Sandbox{WorkDir: "/workspace/repo"}, "cd '/workspace/repo' && tar cf - -- 'node_modules'")
+	require.NoError(t, err, "a live workspace must not cost us the cache save")
+	require.NotNil(t, blob, "the completed archive should still be staged")
+	defer blob.cleanup()
+	require.Equal(t, 1, countCalls(exec.calls(), "tar cf -"), "a tolerated warning is not a retry case")
+}
+
 // A deterministic archive failure (exit 2) is not retried and surfaces the
 // sandbox stderr instead of a bare "exited 2" with no diagnostic.
 func TestStageSandboxArchive_SurfacesStderrAndDoesNotRetryDeterministicFailure(t *testing.T) {

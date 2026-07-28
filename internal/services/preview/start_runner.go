@@ -1823,6 +1823,18 @@ func (r *StartRunner) maybeRestoreBranchPreviewStartupCache(ctx context.Context,
 		return keys, r.maybeRestoreBaseSnapshot(ctx, orgID, repoID, keys, sb)
 	}
 	if err := r.snapshotCache.RestoreSnapshot(ctx, sb, hit); err != nil {
+		// A restore failure normally just costs us the warm start: the workspace
+		// is still the git checkout, so launching cold produces the right code.
+		// ErrPreviewWorkspaceUnrecoverable is the exception — the tree matches
+		// neither the snapshot nor the checkout, and building it would serve
+		// something that is not this commit. Fail the start instead.
+		if errors.Is(err, ErrPreviewWorkspaceUnrecoverable) {
+			r.logger.Error().Err(err).
+				Str("repository_id", repoID.String()).
+				Str("snapshot_key", keys.SnapshotKey).
+				Msg("branch preview startup cache restore left the workspace unusable; failing the start")
+			return keys, err
+		}
 		r.logger.Warn().Err(err).
 			Str("repository_id", repoID.String()).
 			Str("snapshot_key", keys.SnapshotKey).
