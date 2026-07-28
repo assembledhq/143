@@ -312,6 +312,15 @@ func (s CodeReviewFindingSeverity) Validate() error {
 	}
 }
 
+func (s CodeReviewFindingSeverity) IsBlocking() bool {
+	switch s {
+	case CodeReviewFindingSeverityHigh, CodeReviewFindingSeverityCritical:
+		return true
+	default:
+		return false
+	}
+}
+
 type CodeReviewFindingConfidence string
 
 const (

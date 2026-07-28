@@ -2635,8 +2635,7 @@ func codeReviewReviewerStateHasNoUsableOutput(state codeReviewReviewerStructured
 func codeReviewBlockingFindings(findings []models.CodeReviewFinding) int {
 	count := 0
 	for _, finding := range findings {
-		switch finding.Severity {
-		case models.CodeReviewFindingSeverityHigh, models.CodeReviewFindingSeverityCritical:
+		if finding.Severity.IsBlocking() {
 			count++
 		}
 	}
@@ -2927,7 +2926,7 @@ func ensureCodeReviewInlineSelection(ctx context.Context, store *db.CodeReviewSt
 		return nil
 	}
 	for _, finding := range findings {
-		if finding.SelectedForInline {
+		if finding.SelectedForInline && finding.Severity.IsBlocking() {
 			return nil
 		}
 	}
@@ -3371,6 +3370,9 @@ func timePtrValue(value *time.Time) time.Time {
 func codeReviewInlineComments(findings []models.CodeReviewFinding) []codereviewsvc.SubmitReviewComment {
 	comments := make([]codereviewsvc.SubmitReviewComment, 0, len(findings))
 	for _, finding := range findings {
+		if !finding.Severity.IsBlocking() {
+			continue
+		}
 		if finding.GitHubCommentID != nil {
 			continue
 		}

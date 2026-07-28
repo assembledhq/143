@@ -503,7 +503,7 @@ The final rolling PR comment should include:
 - reasons approval was withheld, when not approved
 - link to the 143 code review session
 
-Inline PR comments are first-class review output. The orchestrator selects the highest-value line-specific findings and submits them with the formal review while the synthesized assessment converges onto the rolling PR comment and the formal body is reduced to its marker. The inline comment cap is configurable per policy, defaults to four, and can be raised up to ten. The orchestrator deduplicates overlapping findings and posts only concrete comments tied to changed lines. The bot never requests changes; non-acceptable PRs receive comment-only output.
+Inline PR comments are first-class review output. The orchestrator selects the highest-value line-specific P0 and P1 findings and submits them with the formal review while the synthesized assessment converges onto the rolling PR comment and the formal body is reduced to its marker. P2 and P3 findings remain available as review evidence but never create inline GitHub comments. The inline comment cap is configurable per policy, defaults to four, and can be raised up to ten. The orchestrator deduplicates overlapping findings and posts only concrete comments tied to changed lines. The bot never requests changes; non-acceptable PRs receive comment-only output.
 
 Example inline comment selection:
 
@@ -517,6 +517,7 @@ Suppressed
 - 4 duplicate comments about the same auth branch
 - 2 broad style suggestions with no specific line
 - 1 low-confidence concern
+- all P2 and P3 findings
 ```
 
 ## Prompt Versioning And Untrusted PR Content

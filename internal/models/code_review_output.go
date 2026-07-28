@@ -369,6 +369,9 @@ func SelectCodeReviewInlineFindings(findings []CodeReviewFinding, limit int) []C
 	selected := make([]CodeReviewFinding, 0, limit)
 	seen := make(map[string]struct{})
 	for _, finding := range findings {
+		if !finding.Severity.IsBlocking() {
+			continue
+		}
 		if finding.Path == nil || finding.StartLine == nil {
 			continue
 		}
