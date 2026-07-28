@@ -374,8 +374,8 @@ func TestSnapshotCache_RestoreSnapshotStreamsBlobToSandbox(t *testing.T) {
 	require.False(t, executor.writeFromReaderCalled,
 		"RestoreSnapshot must not stage the blob on the sandbox filesystem — /tmp is a 256 MiB tmpfs")
 	require.False(t, executor.writeFileCalled, "RestoreSnapshot should not materialize the blob through WriteFile")
-	require.False(t, hasCmdContaining(executor.execCmds, "tar xf "+legacySnapshotTmpFile),
-		"RestoreSnapshot should not extract from the legacy staging file, got %v", executor.execCmds)
+	require.False(t, hasCmdContaining(executor.execCmds, "tar xf /tmp/snapshot.tar.zst"),
+		"RestoreSnapshot should not extract from the pre-streaming staging path, got %v", executor.execCmds)
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -577,7 +577,7 @@ func TestSnapshotCache_CreateSnapshotStreamsArchiveToWorker(t *testing.T) {
 		"CreateSnapshot should archive from the workspace root, got %v", executor.execCmds)
 	require.True(t, hasCmdContaining(executor.execCmds, "--ignore-failed-read"),
 		"a file vanishing mid-walk on a live workspace must not abort the archive, got %v", executor.execCmds)
-	require.False(t, hasCmdContaining(executor.execCmds, "-f "+legacySnapshotTmpFile),
+	require.False(t, hasCmdContaining(executor.execCmds, "-f /tmp/snapshot.tar.zst"),
 		"CreateSnapshot must not stage the archive in the sandbox tmpfs, got %v", executor.execCmds)
 	require.False(t, hasCmdContaining(executor.execCmds, "cat "),
 		"CreateSnapshot should no longer need a second exec to read a staged file, got %v", executor.execCmds)
