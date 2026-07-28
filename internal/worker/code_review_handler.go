@@ -2585,10 +2585,12 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 	}
 	decision := models.EvaluateCodeReviewDecision(policy, risk)
 	generatedSummary := ""
-	// Never let prose based on an opaque negative recommendation explain an
-	// approval. The structured findings, reasons, and hard gates above are the
-	// only decision authority.
-	if decision.Decision == models.CodeReviewDecisionApproved && input.OrchestratorSynthesis.ApprovalRecommended {
+	// Never let generated prose bypass the structured output contract. A model
+	// may restate advisory finding details in its summary, so only publish that
+	// prose for a clean approval with no findings at all.
+	if decision.Decision == models.CodeReviewDecisionApproved &&
+		input.OrchestratorSynthesis.ApprovalRecommended &&
+		len(input.Findings) == 0 {
 		generatedSummary = codeReviewOrchestratorReviewSummary(input.OrchestratorSynthesis)
 	}
 	body := models.BuildCodeReviewFinalReviewBody(models.CodeReviewFinalReviewInput{
