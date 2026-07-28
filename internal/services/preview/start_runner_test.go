@@ -686,6 +686,7 @@ type fakePreviewStartupCache struct {
 	createExclude []string
 	createCalled  bool
 	createErr     error
+	createSize    int64
 	hit           *CacheHit
 
 	baseFindKey   string
@@ -718,12 +719,15 @@ func (f *fakePreviewStartupCache) ApplyPartialInvalidation(_ context.Context, _ 
 	return f.partialErr
 }
 
-func (f *fakePreviewStartupCache) CreateSnapshot(_ context.Context, _ *agent.Sandbox, snapshotKey string, metadata SnapshotMetadata, excludePaths []string) error {
+func (f *fakePreviewStartupCache) CreateSnapshot(_ context.Context, _ *agent.Sandbox, snapshotKey string, metadata SnapshotMetadata, excludePaths []string) (int64, error) {
 	f.createCalled = true
 	f.createKey = snapshotKey
 	f.createMeta = metadata
 	f.createExclude = append([]string(nil), excludePaths...)
-	return f.createErr
+	if f.createErr != nil {
+		return 0, f.createErr
+	}
+	return f.createSize, nil
 }
 
 type fakeStartRunnerSandboxProvider struct {

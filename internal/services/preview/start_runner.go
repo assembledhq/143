@@ -129,7 +129,7 @@ type previewStartupCache interface {
 	FindBaseSnapshot(ctx context.Context, orgID, repoID uuid.UUID, baseKey, excludeCommitSHA string) (*CacheHit, error)
 	RestoreSnapshot(ctx context.Context, sb *agent.Sandbox, hit *CacheHit) error
 	ApplyPartialInvalidation(ctx context.Context, sb *agent.Sandbox, hit *CacheHit, gitDiff []byte) error
-	CreateSnapshot(ctx context.Context, sb *agent.Sandbox, snapshotKey string, metadata SnapshotMetadata, excludePaths []string) error
+	CreateSnapshot(ctx context.Context, sb *agent.Sandbox, snapshotKey string, metadata SnapshotMetadata, excludePaths []string) (int64, error)
 }
 
 // branchPreviewStartupCacheKeys carries the cache keys computed for one branch
@@ -1963,16 +1963,17 @@ func (r *StartRunner) createBranchPreviewStartupCache(ctx context.Context, orgID
 	// Keep runtime secret-file destinations and separately-restored build caches
 	// out of the worker-local blob (see previewSnapshotExcludePaths).
 	excludePaths := previewSnapshotExcludePaths(cfg)
-	if err := r.snapshotCache.CreateSnapshot(cacheCtx, sb, keys.SnapshotKey, metadata, excludePaths); err != nil {
+	sizeBytes, err := r.snapshotCache.CreateSnapshot(cacheCtx, sb, keys.SnapshotKey, metadata, excludePaths)
+	if err != nil {
 		result := startupSnapshotResultForCreateError(err)
 		r.logger.Warn().Err(err).
 			Str("repository_id", repoID.String()).
 			Str("snapshot_key", keys.SnapshotKey).
 			Msg("failed to create branch preview startup cache")
-		r.logBranchPreviewStartupSnapshotResult(repoID, keys.SnapshotKey, result, 0, started, err)
+		r.logBranchPreviewStartupSnapshotResult(repoID, keys.SnapshotKey, result, sizeBytes, started, err)
 		return result
 	}
-	r.logBranchPreviewStartupSnapshotResult(repoID, keys.SnapshotKey, StartupSnapshotSaved, 0, started, nil)
+	r.logBranchPreviewStartupSnapshotResult(repoID, keys.SnapshotKey, StartupSnapshotSaved, sizeBytes, started, nil)
 	return StartupSnapshotSaved
 }
 

@@ -1715,6 +1715,15 @@ func (m *Manager) StopPreview(ctx context.Context, orgID, previewID uuid.UUID) e
 // which is cheaper than making someone wait out an upload they did not ask for.
 const PreviewStopInteractiveWaitCap = 15 * time.Second
 
+// PreviewStopUseProviderBackgroundBudget asks the provider for its full
+// background-work budget rather than naming a duration here. The budget itself
+// lives in the providers package, which imports this one, so it cannot be
+// referenced from this side — hence a sentinel rather than the value.
+//
+// Note this is the opposite of what a bare 0 suggests: it means "wait as long
+// as you normally would", not "do not wait".
+const PreviewStopUseProviderBackgroundBudget time.Duration = 0
+
 // PreviewStopBackgroundWaiter is implemented by providers that can bound how
 // long StopPreview blocks on post-ready cache uploads. Providers without it get
 // the default budget.
@@ -1735,7 +1744,7 @@ type PreviewStopBackgroundWaiter interface {
 func stopBackgroundWaitForReason(reason models.PreviewStoppedReason) time.Duration {
 	switch reason {
 	case models.PreviewStoppedReasonWarmPolicy, models.PreviewStoppedReasonSessionPrewarmPolicy:
-		return 0 // provider default: the full background budget
+		return PreviewStopUseProviderBackgroundBudget
 	default:
 		return PreviewStopInteractiveWaitCap
 	}
