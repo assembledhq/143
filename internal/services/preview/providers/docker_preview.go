@@ -857,10 +857,15 @@ func previewConfigHasInitScripts(cfg *models.PreviewConfig) bool {
 const previewStopBackgroundWaitCap = 10 * time.Minute
 
 // previewCacheSaveTimeout is each cache save's own self-timeout, detached from
-// the launch ctx. It stays above previewStopBackgroundWaitCap so the stop path
-// is what gives up first: a save that outlives the cap is abandoned by
-// StopPreview but still gets a window to finish on its own rather than being
-// cancelled at the exact moment the waiter stops watching.
+// the launch ctx. It bounds a save that is NOT racing a stop — an interactive
+// preview that keeps serving while its cache uploads — so a wedged blob store
+// cannot leak the goroutine indefinitely.
+//
+// It does not extend a save that outruns previewStopBackgroundWaitCap. Once the
+// cap expires, Manager.StopPreviewWithReason destroys the branch preview's
+// sandbox as its next step, so the archive exec dies regardless of how much of
+// this timeout is left. The cap, not this value, is what a warm-policy save has
+// to finish inside.
 const previewCacheSaveTimeout = 15 * time.Minute
 
 // waitForGroupBounded blocks until wg is done, ctx is cancelled, or maxWait
