@@ -4295,3 +4295,65 @@ func TestSoftRestartPreview_StampsRecycleRevisionSource(t *testing.T) {
 	require.True(t, provider.restarted, "provider soft restart should be invoked")
 	require.NoError(t, mock.ExpectationsWereMet(), "soft restart must stamp the recycle revision source before restarting")
 }
+
+// stopWaitRecorder captures the background-wait budget the manager hands the
+// provider for a given stop reason.
+type stopWaitRecorder struct {
+	PreviewCapableProvider
+	gotWait time.Duration
+	called  bool
+}
+
+func (s *stopWaitRecorder) StopPreviewWithBackgroundWait(_ context.Context, _ string, backgroundWait time.Duration) error {
+	s.called = true
+	s.gotWait = backgroundWait
+	return nil
+}
+
+// Prewarm stops exist to leave a warm cache behind and nothing is waiting on
+// them, so they get the provider's full budget (signalled as 0). Every other
+// reason can have a user on the end of a synchronous DELETE, and the app->worker
+// RPC gives up at 10 minutes — the same as the full budget — so those must be
+// capped well short of it.
+func TestStopBackgroundWaitForReason(t *testing.T) {
+	t.Parallel()
+
+	for _, reason := range []models.PreviewStoppedReason{
+		models.PreviewStoppedReasonWarmPolicy,
+		models.PreviewStoppedReasonSessionPrewarmPolicy,
+	} {
+		require.Zero(t, stopBackgroundWaitForReason(reason),
+			"%q is a prewarm stop and must get the provider's full background budget", reason)
+	}
+
+	for _, reason := range []models.PreviewStoppedReason{
+		models.PreviewStoppedReasonUser,
+		models.PreviewStoppedReasonExpired,
+		models.PreviewStoppedReasonPRClosed,
+		models.PreviewStoppedReasonDrain,
+		models.PreviewStoppedReasonError,
+		models.PreviewStoppedReasonNone,
+	} {
+		got := stopBackgroundWaitForReason(reason)
+		require.Equal(t, PreviewStopInteractiveWaitCap, got,
+			"%q may have a caller waiting and must not use the full budget", reason)
+		require.Less(t, got, time.Minute,
+			"%q must stay far below the app->worker RPC timeout", reason)
+	}
+}
+
+// The manager must actually route through the bounded call when the provider
+// supports it, or the reason-based budget above is dead code.
+func TestManager_StopViaProviderUsesReasonBudget(t *testing.T) {
+	t.Parallel()
+
+	recorder := &stopWaitRecorder{}
+	m := &Manager{provider: recorder, logger: zerolog.Nop()}
+
+	require.NoError(t, m.stopViaProvider(context.Background(), "handle-1", models.PreviewStoppedReasonUser))
+	require.True(t, recorder.called, "a capable provider should receive the bounded stop")
+	require.Equal(t, PreviewStopInteractiveWaitCap, recorder.gotWait, "a user stop should be capped")
+
+	require.NoError(t, m.stopViaProvider(context.Background(), "handle-1", models.PreviewStoppedReasonWarmPolicy))
+	require.Zero(t, recorder.gotWait, "a warm-policy stop should get the full budget")
+}

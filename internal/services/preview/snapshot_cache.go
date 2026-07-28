@@ -72,6 +72,46 @@ func tarExitTolerable(exitCode int) bool {
 	return exitCode == 0 || exitCode == 1
 }
 
+// tarStderrRetained bounds how much of tar's stderr is kept for logging.
+//
+// Tolerating exit 1 turned "tar complained" from a rare fatal into a routine
+// success path, and tar emits one warning line per file that moved under it —
+// on a busy monorepo that is thousands of lines per snapshot, held in worker
+// memory and then shipped to the log pipeline. The tail is what diagnoses the
+// failure, so keep a bounded head-plus-count instead of the whole stream.
+const tarStderrRetained = 8 * 1024
+
+// boundedBuffer collects up to limit bytes and counts the rest. Writes always
+// report full consumption and never error: this sits on an exec's stderr, and
+// failing the write would kill the very command whose warnings we are reading.
+type boundedBuffer struct {
+	buf     bytes.Buffer
+	limit   int
+	dropped int
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if room := b.limit - b.buf.Len(); room > 0 {
+		if len(p) <= room {
+			b.buf.Write(p)
+		} else {
+			b.buf.Write(p[:room])
+			b.dropped += len(p) - room
+		}
+	} else {
+		b.dropped += len(p)
+	}
+	return len(p), nil
+}
+
+// String returns the retained output, noting how much was dropped.
+func (b *boundedBuffer) String() string {
+	if b.dropped == 0 {
+		return b.buf.String()
+	}
+	return fmt.Sprintf("%s\n... (%d more bytes suppressed)", b.buf.String(), b.dropped)
+}
+
 // =============================================================================
 // Interfaces
 // =============================================================================
@@ -304,13 +344,13 @@ func (sc *SnapshotCache) CreateSnapshot(
 
 	hasher := sha256.New()
 	counter := &cappedCountingWriter{limit: maxCreateBlobBytes}
-	var tarStderr bytes.Buffer
+	tarStderr := &boundedBuffer{limit: tarStderrRetained}
 	// Multiwriter fans out each chunk to: temp file, SHA-256 hasher, size
 	// counter. If the counter trips, its Write returns an error that the
 	// executor will surface back here, short-circuiting the stream.
 	stream := io.MultiWriter(tmp, hasher, counter)
 
-	exitCode, err := sc.executor.Exec(ctx, sb, tarCmd, stream, &tarStderr)
+	exitCode, err := sc.executor.Exec(ctx, sb, tarCmd, stream, tarStderr)
 	// Close the tmp file regardless of outcome so we can rename (or remove) it.
 	if syncErr := tmp.Sync(); syncErr != nil && err == nil {
 		err = fmt.Errorf("sync temp blob: %w", syncErr)
@@ -591,8 +631,8 @@ func (sc *SnapshotCache) RestoreSnapshot(
 	//    pre-switch gzip ones.
 	extractCmd := fmt.Sprintf("tar xf - -C %s", shellQuote(sb.WorkDir))
 
-	var stderr bytes.Buffer
-	exitCode, err := streamExec.ExecWithStdin(ctx, sb, extractCmd, blob, io.Discard, &stderr)
+	stderr := &boundedBuffer{limit: tarStderrRetained}
+	exitCode, err := streamExec.ExecWithStdin(ctx, sb, extractCmd, blob, io.Discard, stderr)
 	if err != nil || !tarExitTolerable(exitCode) {
 		// The extract now streams, so a failure can land after step 3 wiped the
 		// workspace — where the two-step form always failed before the wipe. The
