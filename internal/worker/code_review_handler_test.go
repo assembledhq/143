@@ -508,21 +508,19 @@ func TestCodeReviewInlineComments(t *testing.T) {
 			},
 		},
 		{
-			name: "normalizes an existing mismatched priority prefix",
+			name: "skips medium priority findings",
 			findings: []models.CodeReviewFinding{
 				{
 					Path:      &path,
 					StartLine: &line,
-					Body:      "[P3] body",
+					Body:      "[P2] body",
 					Severity:  models.CodeReviewFindingSeverityMedium,
 				},
 			},
-			expected: []codereview.SubmitReviewComment{
-				{Path: path, Line: line, Body: "[P2] body"},
-			},
+			expected: []codereview.SubmitReviewComment{},
 		},
 		{
-			name: "retains a matching low priority prefix",
+			name: "skips low priority findings",
 			findings: []models.CodeReviewFinding{
 				{
 					Path:      &path,
@@ -531,18 +529,16 @@ func TestCodeReviewInlineComments(t *testing.T) {
 					Severity:  models.CodeReviewFindingSeverityLow,
 				},
 			},
-			expected: []codereview.SubmitReviewComment{
-				{Path: path, Line: line, Body: "[P3] body"},
-			},
+			expected: []codereview.SubmitReviewComment{},
 		},
 		{
 			name: "skips findings without GitHub comment coordinates",
 			findings: []models.CodeReviewFinding{
-				{Path: nil, StartLine: &line, Summary: "summary"},
-				{Path: &emptyPath, StartLine: &line, Summary: "summary"},
-				{Path: &path, StartLine: nil, Summary: "summary"},
-				{Path: &path, StartLine: &zeroLine, Summary: "summary"},
-				{Path: &path, StartLine: &line},
+				{Severity: models.CodeReviewFindingSeverityHigh, Path: nil, StartLine: &line, Summary: "summary"},
+				{Severity: models.CodeReviewFindingSeverityHigh, Path: &emptyPath, StartLine: &line, Summary: "summary"},
+				{Severity: models.CodeReviewFindingSeverityHigh, Path: &path, StartLine: nil, Summary: "summary"},
+				{Severity: models.CodeReviewFindingSeverityHigh, Path: &path, StartLine: &zeroLine, Summary: "summary"},
+				{Severity: models.CodeReviewFindingSeverityHigh, Path: &path, StartLine: &line},
 			},
 			expected: []codereview.SubmitReviewComment{},
 		},

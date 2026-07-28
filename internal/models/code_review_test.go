@@ -56,6 +56,31 @@ func TestCodeReviewEnumsValidate(t *testing.T) {
 	}
 }
 
+func TestCodeReviewFindingSeverityIsBlocking(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		severity CodeReviewFindingSeverity
+		expected bool
+	}{
+		{name: "critical is P0 blocking", severity: CodeReviewFindingSeverityCritical, expected: true},
+		{name: "high is P1 blocking", severity: CodeReviewFindingSeverityHigh, expected: true},
+		{name: "medium is P2 non-blocking", severity: CodeReviewFindingSeverityMedium, expected: false},
+		{name: "low is P3 non-blocking", severity: CodeReviewFindingSeverityLow, expected: false},
+		{name: "info is non-blocking", severity: CodeReviewFindingSeverityInfo, expected: false},
+		{name: "unknown is non-blocking", severity: CodeReviewFindingSeverity("bogus"), expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, tt.severity.IsBlocking(), "severity should match the P0 and P1 blocking threshold")
+		})
+	}
+}
+
 func TestCodeReviewPolicyPromptValidationIdentifiesField(t *testing.T) {
 	t.Parallel()
 	config := DefaultCodeReviewPolicyConfig()

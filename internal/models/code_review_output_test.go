@@ -202,18 +202,18 @@ func TestSelectCodeReviewInlineFindings(t *testing.T) {
 	path := "src/auth/session.go"
 	line := 42
 	findings := []CodeReviewFinding{
-		{DedupeKey: "a", Confidence: CodeReviewFindingConfidenceHigh, Path: &path, StartLine: &line, Summary: "Auth edge"},
-		{DedupeKey: "a", Confidence: CodeReviewFindingConfidenceHigh, Path: &path, StartLine: &line, Summary: "Duplicate auth edge"},
-		{DedupeKey: "b", Confidence: CodeReviewFindingConfidenceLow, Path: &path, StartLine: &line, Summary: "Low confidence"},
-		{DedupeKey: "c", Confidence: CodeReviewFindingConfidenceMedium, Summary: "Broad concern"},
-		{DedupeKey: "d", Confidence: CodeReviewFindingConfidenceMedium, Path: &path, StartLine: &line, Summary: "Concrete concern"},
+		{DedupeKey: "a", Severity: CodeReviewFindingSeverityHigh, Confidence: CodeReviewFindingConfidenceHigh, Path: &path, StartLine: &line, Summary: "Auth edge"},
+		{DedupeKey: "a", Severity: CodeReviewFindingSeverityHigh, Confidence: CodeReviewFindingConfidenceHigh, Path: &path, StartLine: &line, Summary: "Duplicate auth edge"},
+		{DedupeKey: "b", Severity: CodeReviewFindingSeverityCritical, Confidence: CodeReviewFindingConfidenceLow, Path: &path, StartLine: &line, Summary: "Low confidence"},
+		{DedupeKey: "c", Severity: CodeReviewFindingSeverityHigh, Confidence: CodeReviewFindingConfidenceMedium, Summary: "Broad concern"},
+		{DedupeKey: "d", Severity: CodeReviewFindingSeverityMedium, Confidence: CodeReviewFindingConfidenceMedium, Path: &path, StartLine: &line, Summary: "Concrete concern"},
 	}
 
 	selected := SelectCodeReviewInlineFindings(findings, 1)
 
 	require.Equal(t, []CodeReviewFinding{
-		{DedupeKey: "a", Confidence: CodeReviewFindingConfidenceHigh, Path: &path, StartLine: &line, Summary: "Auth edge", SelectedForInline: true},
-	}, selected, "inline selector should dedupe, skip weak/broad findings, and honor limit")
+		{DedupeKey: "a", Severity: CodeReviewFindingSeverityHigh, Confidence: CodeReviewFindingConfidenceHigh, Path: &path, StartLine: &line, Summary: "Auth edge", SelectedForInline: true},
+	}, selected, "inline selector should dedupe, skip weak, broad, and below-P1 findings, and honor limit")
 }
 
 func TestSelectCodeReviewInlineFindingsPrioritizesSeverityAndConfidence(t *testing.T) {
@@ -226,14 +226,16 @@ func TestSelectCodeReviewInlineFindingsPrioritizesSeverityAndConfidence(t *testi
 	findings := []CodeReviewFinding{
 		{DedupeKey: "medium", Severity: CodeReviewFindingSeverityMedium, Confidence: CodeReviewFindingConfidenceHigh, Path: &path, StartLine: &line, Summary: "Medium", CreatedAt: older},
 		{DedupeKey: "critical", Severity: CodeReviewFindingSeverityCritical, Confidence: CodeReviewFindingConfidenceMedium, Path: &path, StartLine: &line, Summary: "Critical", CreatedAt: newer},
+		{DedupeKey: "high", Severity: CodeReviewFindingSeverityHigh, Confidence: CodeReviewFindingConfidenceMedium, Path: &path, StartLine: &line, Summary: "High", CreatedAt: older},
 		{DedupeKey: "high-low", Severity: CodeReviewFindingSeverityHigh, Confidence: CodeReviewFindingConfidenceLow, Path: &path, StartLine: &line, Summary: "Low confidence", CreatedAt: older},
 	}
 
-	selected := SelectCodeReviewInlineFindings(findings, 1)
+	selected := SelectCodeReviewInlineFindings(findings, 3)
 
 	require.Equal(t, []CodeReviewFinding{
 		{DedupeKey: "critical", Severity: CodeReviewFindingSeverityCritical, Confidence: CodeReviewFindingConfidenceMedium, Path: &path, StartLine: &line, Summary: "Critical", SelectedForInline: true, CreatedAt: newer},
-	}, selected, "inline selector should prefer the most severe concrete finding")
+		{DedupeKey: "high", Severity: CodeReviewFindingSeverityHigh, Confidence: CodeReviewFindingConfidenceMedium, Path: &path, StartLine: &line, Summary: "High", SelectedForInline: true, CreatedAt: older},
+	}, selected, "inline selector should keep only P0 and P1 findings in severity order")
 }
 
 func testCodeReviewTime(hour int) time.Time {
