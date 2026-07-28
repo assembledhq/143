@@ -645,24 +645,29 @@ func (sc *SnapshotCache) ApplyPartialInvalidation(
 		return nil
 	}
 
-	// 3. Write the diff into the sandbox.
-	const diffTmpPath = "/tmp/partial.diff"
-	if err := sc.executor.WriteFile(ctx, sb, diffTmpPath, gitDiff); err != nil {
-		return fmt.Errorf("partial invalidation: write diff: %w", err)
+	// 3. Apply the diff, streamed over stdin. `git apply` reads the patch from
+	//    stdin when given no file argument, so the patch never lands on the
+	//    sandbox filesystem — it used to be written to /tmp, a 256 MiB tmpfs
+	//    whose bytes come out of the container's memory cgroup (the same reason
+	//    snapshot archives no longer stage there; see legacySnapshotTmpFile).
+	//    Diffs are capped at maxPartialInvalidationDiffBytes, so this was never
+	//    a correctness limit, only avoidable memory pressure on a sandbox that
+	//    is about to build.
+	//
+	//    The previous form ran `git apply --stat` first, but its output went to
+	//    io.Discard and a failure there only pre-empted the identical failure
+	//    from the real apply. Dropping it is what makes a single-pass stdin
+	//    stream possible, and costs no diagnostics.
+	//
+	//    --allow-empty tolerates a no-op patch.
+	streamExec, ok := sc.executor.(sandboxStdinExecutor)
+	if !ok {
+		return fmt.Errorf("partial invalidation: executor does not support streaming git apply")
 	}
-
-	// 4. Apply the diff. We use --allow-empty and ignore whitespace issues
-	//    to be resilient to minor formatting changes. The -p1 strip count
-	//    matches the standard `git diff` output format (a/path b/path).
-	applyCmd := fmt.Sprintf(
-		"cd %s && git apply --stat %s && git apply --allow-empty %s",
-		shellQuote(sb.WorkDir),
-		diffTmpPath,
-		diffTmpPath,
-	)
+	applyCmd := fmt.Sprintf("cd %s && git apply --allow-empty", shellQuote(sb.WorkDir))
 
 	var stderr bytes.Buffer
-	exitCode, err := sc.executor.Exec(ctx, sb, applyCmd, io.Discard, &stderr)
+	exitCode, err := streamExec.ExecWithStdin(ctx, sb, applyCmd, bytes.NewReader(gitDiff), io.Discard, &stderr)
 	if err != nil {
 		return fmt.Errorf("partial invalidation: exec git apply: %w", err)
 	}
@@ -670,9 +675,6 @@ func (sc *SnapshotCache) ApplyPartialInvalidation(
 		// If git apply fails, the caller should fall back to a full rebuild.
 		return fmt.Errorf("partial invalidation: git apply exited %d: %s", exitCode, stderr.String())
 	}
-
-	// 5. Clean up.
-	_, _ = sc.executor.Exec(ctx, sb, fmt.Sprintf("rm -f %s", diffTmpPath), io.Discard, io.Discard)
 
 	log.Info().
 		Dur("elapsed_ms", time.Since(start)).

@@ -899,8 +899,9 @@ func (d *DockerPreviewProvider) StopPreview(ctx context.Context, handle string) 
 	// wait is bounded: it intentionally blocks on the post-ready build-cache
 	// uploads (so a prewarm, which stops the moment the preview is ready,
 	// persists its cache), but an interactive stop must not hang on a slow blob
-	// store. The cap sits well under the saves' own 10-minute self-timeout, and a
-	// caller (e.g. a prewarm job) with a longer-lived ctx still gets the full cap.
+	// store. See previewStopBackgroundWaitCap for how the cap is sized against
+	// real save durations; a caller (e.g. a prewarm job) with a longer-lived ctx
+	// still gets the full cap.
 	state.cancelFn()
 	d.terminateServiceProcesses(state)
 	if err := waitForGroupBounded(ctx, &state.wg, previewStopBackgroundWaitCap); err != nil {
