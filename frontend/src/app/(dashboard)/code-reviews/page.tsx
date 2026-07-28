@@ -1194,7 +1194,7 @@ type CodeReviewPromptComposerProps = {
 };
 
 function CodeReviewAutomatedApprovalPolicyComposer(props: CodeReviewPromptComposerProps) {
-  return <CodeReviewPromptComposerBase {...props} title="Automated approval policy" description="Guides the orchestrator's approve-or-escalate recommendation. Deterministic hard safeguards can still block approval." tooltip="Used only by the orchestrator when automatic approval is enabled. It never replaces /review instructions and cannot bypass hard safeguards. A non-empty value is required for automatic approval." required />;
+  return <CodeReviewPromptComposerBase {...props} title="Automated approval policy" description="Guides how the orchestrator classifies findings and explicit human-review reasons. P0/P1 findings and hard safeguards block approval; P2/P3 findings are advisory." tooltip="Used only by the orchestrator when automatic approval is enabled. The backend derives the decision from explicit evidence, and the prompt cannot bypass hard safeguards. A non-empty value is required for automatic approval." required />;
 }
 
 function CodeReviewInstructionsComposer(props: CodeReviewPromptComposerProps) {
@@ -2343,14 +2343,14 @@ function AgentRosterControls({
         <div className="grid items-end gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(10rem,14rem)]">
           <div>
             <Label className="text-xs text-muted-foreground">Orchestrator model</Label>
-            <p className="mt-1 text-xs text-muted-foreground">Synthesizes reviewer evidence and decides the final review outcome.</p>
+            <p className="mt-1 text-xs text-muted-foreground">Synthesizes structured evidence; the backend applies severity rules and safeguards to decide the outcome.</p>
           </div>
           <Label className="text-xs text-muted-foreground">Reasoning level</Label>
         </div>
         <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(10rem,14rem)]">
           <AgentModelSelect
             ariaLabel="Orchestrator model"
-            infoDescription="Chooses the agent and model that combines reviewer evidence. A selection is required; the resolved default remains until changed, and its recommendation remains subject to every deterministic safeguard."
+            infoDescription="Chooses the agent and model that combines reviewer evidence into findings and explicit human-review reasons. A selection is required; the backend applies severity rules and every deterministic safeguard."
             value={selectionValue(config?.agent_roster.orchestrator ?? "", orchestratorModel)}
             modelGroups={modelGroups}
             openCodeAvailability={openCodeAvailability}
@@ -2888,20 +2888,25 @@ function CodeReviewEvidenceSheet({
                 {findings.length === 0 ? (
                   <div className="text-sm text-muted-foreground">No findings recorded.</div>
                 ) : (
-                  findings.map((finding) => (
-                    <div key={finding.id} className="space-y-2 border-t border-border pt-3 first:border-t-0 first:pt-0">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0 space-y-1">
-                          <div className="text-sm font-medium text-foreground">{finding.summary}</div>
-                          <div className="text-xs text-muted-foreground">{formatFindingLocation(finding)}</div>
-                        </div>
-                        <Badge variant={finding.severity === "critical" || finding.severity === "high" ? "destructive" : "outline"}>
-                          {statusLabel(finding.severity)}
-                        </Badge>
-                      </div>
-                      <div className="text-sm leading-6 text-muted-foreground">{finding.body}</div>
+                  <>
+                    <div className="text-xs leading-5 text-muted-foreground">
+                      P0 and P1 findings block approval. P2 and P3 findings are advisory and are not posted as inline GitHub comments.
                     </div>
-                  ))
+                    {findings.map((finding) => (
+                      <div key={finding.id} className="space-y-2 border-t border-border pt-3 first:border-t-0 first:pt-0">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0 space-y-1">
+                            <div className="text-sm font-medium text-foreground">{finding.summary}</div>
+                            <div className="text-xs text-muted-foreground">{formatFindingLocation(finding)}</div>
+                          </div>
+                          <Badge variant={findingBlocksApproval(finding.severity) ? "destructive" : "outline"}>
+                            {findingPriorityLabel(finding.severity)}
+                          </Badge>
+                        </div>
+                        <div className="text-sm leading-6 text-muted-foreground">{finding.body}</div>
+                      </div>
+                    ))}
+                  </>
                 )}
               </section>
 
@@ -2968,4 +2973,22 @@ function formatFindingLocation(finding: NonNullable<CodeReviewEvidence["findings
   }
   if (finding.start_line) return `${finding.path}:${finding.start_line}`;
   return finding.path;
+}
+
+function findingBlocksApproval(severity: NonNullable<CodeReviewEvidence["findings"]>[number]["severity"]): boolean {
+  return severity === "critical" || severity === "high";
+}
+
+function findingPriorityLabel(severity: NonNullable<CodeReviewEvidence["findings"]>[number]["severity"]): string {
+  switch (severity) {
+    case "critical":
+      return "P0 · Blocking";
+    case "high":
+      return "P1 · Blocking";
+    case "medium":
+      return "P2 · Advisory";
+    case "low":
+    case "info":
+      return "P3 · Advisory";
+  }
 }

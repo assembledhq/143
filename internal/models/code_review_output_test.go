@@ -160,12 +160,39 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 
 **Why:** Review agents reported blocking findings.
 
-**Review findings:**
+**Blocking findings:**
 - high: src/auth/session.go:88 - Authorization edge case
 
 **Suggested human reviewers:** security/platform
 
 **Next steps:** Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.`,
+		},
+		{
+			name: "summarizes advisory findings without publishing their details",
+			input: CodeReviewFinalReviewInput{
+				Decision:      CodeReviewDecisionApproved,
+				Acceptable:    true,
+				ChangeSummary: "Adds structured review synthesis.",
+				Findings: []CodeReviewFinding{
+					{
+						Severity: CodeReviewFindingSeverityMedium,
+						Path:     &path,
+						Summary:  "Add direct parser coverage",
+					},
+					{
+						Severity: CodeReviewFindingSeverityLow,
+						Path:     &path,
+						Summary:  "Simplify a helper name",
+					},
+				},
+			},
+			expected: `✅ **143 Code Reviewer approved this PR**
+
+**Why:** It met the configured policy.
+
+**Change:** Adds structured review synthesis.
+
+**Advisory notes:** 2 non-blocking observations are available in the full review. P2 and P3 observations do not affect the approval decision.`,
 		},
 		{
 			name: "makes scope limits easy to compare",

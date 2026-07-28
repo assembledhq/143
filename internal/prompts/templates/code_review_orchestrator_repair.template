@@ -3,7 +3,7 @@ Your previous code review synthesis could not be accepted because it did not mat
 
 Do not repeat the review, inspect more files, change any conclusions, or emit Markdown or `::code-comment` directives. Return exactly one fenced `json` object and nothing else.
 
-The object MUST contain every top-level key shown below, including `approval_recommended` and `description_assessments`. Never omit a boolean when its value is false. Never reuse an older synthesis schema.
+The object MUST contain every top-level key shown below, including `approval_recommended`, `description_assessments`, `findings`, and `human_review_reasons`. Never omit a boolean when its value is false. Never reuse an older synthesis schema.
 
 Return exactly:
 ```json
@@ -16,6 +16,23 @@ Return exactly:
       "reason": "short evidence-based reason"
     }
   ],
+  "findings": [
+    {
+      "severity": "critical|high|medium|low",
+      "confidence": "high|medium|low",
+      "path": "path/from/repo/root.go",
+      "start_line": 123,
+      "end_line": 123,
+      "summary": "short issue title",
+      "body": "concrete scenario and fix"
+    }
+  ],
+  "human_review_reasons": [
+    {
+      "code": "architecture|ownership|operational_risk|sensitive_change|policy_requirement",
+      "summary": "concrete reason human judgment is required"
+    }
+  ],
   "scope_mismatch": false,
   "unresolved_uncertainty": false,
   "reviewer_disagreement": false,
@@ -26,6 +43,8 @@ Return exactly:
 }
 ```
 
+Return every previously identified P0, P1, P2, and P3 code issue in `findings`; use JSON `null` for line coordinates when needed. P2 and P3 findings are advisory and must not cause `approval_recommended=false`, set a structured blocker boolean, or appear in `human_review_reasons`. Use `human_review_reasons` only for non-finding judgment that matches one of its allowed codes.
+
 For `description_assessments`, return exactly one assessment for each required key below, with no extra keys:
 {{- range .DescriptionRequirements}}
 - {{.Key}}: {{.Prompt}}
@@ -33,4 +52,4 @@ For `description_assessments`, return exactly one assessment for each required k
 - none; return an empty array
 {{- end}}
 
-Preserve the conclusions from your previous answer. Set `approval_recommended` to false when those conclusions call for a fix or human decision.
+Preserve the evidence from your previous answer while applying the current decision contract. Set `approval_recommended=false` only for a P0/P1 finding, a missing description assessment, a true structured blocker boolean, or a valid explicit `human_review_reasons` entry.

@@ -81,6 +81,38 @@ func TestCodeReviewFindingSeverityIsBlocking(t *testing.T) {
 	}
 }
 
+func TestCodeReviewHumanReviewReasonCode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		code             CodeReviewHumanReviewReasonCode
+		expectedRiskCode CodeReviewRiskReasonCode
+		expectErr        bool
+	}{
+		{name: "architecture", code: CodeReviewHumanReviewReasonArchitecture, expectedRiskCode: CodeReviewRiskReasonArchitecture},
+		{name: "ownership", code: CodeReviewHumanReviewReasonOwnership, expectedRiskCode: CodeReviewRiskReasonOwnership},
+		{name: "operational risk", code: CodeReviewHumanReviewReasonOperationalRisk, expectedRiskCode: CodeReviewRiskReasonOperationalRisk},
+		{name: "sensitive change", code: CodeReviewHumanReviewReasonSensitiveChange, expectedRiskCode: CodeReviewRiskReasonSensitiveChange},
+		{name: "policy requirement", code: CodeReviewHumanReviewReasonPolicyRequirement, expectedRiskCode: CodeReviewRiskReasonPolicyRequirement},
+		{name: "invalid", code: CodeReviewHumanReviewReasonCode("unknown"), expectedRiskCode: CodeReviewRiskReasonOrchestratorSynthesisInvalid, expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.code.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "unknown human-review reason codes should be rejected")
+			} else {
+				require.NoError(t, err, "known human-review reason codes should be accepted")
+			}
+			require.Equal(t, tt.expectedRiskCode, tt.code.RiskReasonCode(), "human-review reasons should map to a typed backend risk reason")
+		})
+	}
+}
+
 func TestCodeReviewPolicyPromptValidationIdentifiesField(t *testing.T) {
 	t.Parallel()
 	config := DefaultCodeReviewPolicyConfig()
@@ -541,6 +573,11 @@ func TestCodeReviewRiskReasonCodeValidate(t *testing.T) {
 		CodeReviewRiskReasonOrchestratorSynthesisInvalid,
 		CodeReviewRiskReasonOrchestratorEscalation,
 		CodeReviewRiskReasonOrchestratorContextStale,
+		CodeReviewRiskReasonArchitecture,
+		CodeReviewRiskReasonOwnership,
+		CodeReviewRiskReasonOperationalRisk,
+		CodeReviewRiskReasonSensitiveChange,
+		CodeReviewRiskReasonPolicyRequirement,
 	}
 	tests := make([]struct {
 		name      string
@@ -608,6 +645,11 @@ func TestCodeReviewRiskReasonMessage(t *testing.T) {
 		{name: "invalid orchestrator synthesis", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonOrchestratorSynthesisInvalid}, expected: "orchestrator did not produce a valid structured synthesis"},
 		{name: "orchestrator escalation", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonOrchestratorEscalation}, expected: "coding-agent orchestrator recommends human review"},
 		{name: "stale orchestrator context", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonOrchestratorContextStale}, expected: "PR title or description changed after the coding-agent assessment"},
+		{name: "architecture", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonArchitecture, Subject: "introduces a new cross-service protocol"}, expected: "human review is required for architectural judgment: introduces a new cross-service protocol"},
+		{name: "ownership", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonOwnership, Subject: "touches an unowned boundary"}, expected: "human review is required for ownership judgment: touches an unowned boundary"},
+		{name: "operational risk", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonOperationalRisk, Subject: "requires a coordinated rollout"}, expected: "human review is required for operational-risk judgment: requires a coordinated rollout"},
+		{name: "sensitive change", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonSensitiveChange, Subject: "changes production data access"}, expected: "human review is required for sensitive-change judgment: changes production data access"},
+		{name: "policy requirement", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonPolicyRequirement, Subject: "requires domain-owner signoff"}, expected: "human review is required for an automated approval policy requirement: requires domain-owner signoff"},
 	}
 
 	for _, tt := range tests {

@@ -73,16 +73,22 @@ Findings:
 - none
 {{- end}}
 
-You own the substantive approve-or-escalate recommendation, the description-policy assessments, the final reviewer-facing comments, and the risk assessment. Inspect the actual diff when description applicability depends on whether a change is visible, behavioral, trivial, or comment-only. Use the reviewer outputs as evidence only; do not assume they used 143's directive format. Reconcile their findings with the deterministic risk reasons, changed files, description requirements, pull-request description, and code. Set `approval_recommended=true` only when the automated approval policy is satisfied, all applicable description requirements are satisfied or not applicable, and the code review evidence supports approval. Set it to false when a human should decide. Deterministic backend safeguards still retain veto power and may withhold approval even when you recommend it.
+You own the structured findings, explicit human-review reasons, description-policy assessments, final reviewer-facing synthesis, and risk assessment. Inspect the actual diff when description applicability depends on whether a change is visible, behavioral, trivial, or comment-only. Use the reviewer outputs as evidence only; do not assume they used 143's directive format. Reconcile their findings with the deterministic risk reasons, changed files, description requirements, pull-request description, and code.
+
+The backend owns the approval decision. It treats only P0 and P1 code findings as blocking. P2 and P3 findings are advisory: record them in `findings`, but they MUST NOT cause `approval_recommended=false`, set a structured blocker boolean, appear in `human_review_reasons`, or be described as prerequisites for approval. If a code defect is important enough to prevent approval, classify it P0 or P1 and record it as a structured finding. Do not use a human-review reason to conceal or downgrade a code defect.
+
+Use `human_review_reasons` only for judgment that is not a code finding and is not already represented by a description assessment or one of the structured booleans: an architectural decision, unclear ownership, operational rollout risk, a sensitive change, or a specific requirement from the automated approval policy. Every reason must use one allowed code and explain the concrete condition. Do not add a generic reason merely because P2 or P3 findings exist.
+
+Set `approval_recommended=true` when there are no P0/P1 findings, no missing description requirements, no structured boolean blocker, and no `human_review_reasons`. Set it to false otherwise. Deterministic backend safeguards retain veto power and may withhold approval even when you recommend it.
 
 Set `reviewer_disagreement=true` only when reviewers conflict on a key fact or conclusion that could materially change whether the PR is safe to approve, and the conflict cannot be resolved from the available evidence. Ignore differences in emphasis, optional cleanup, minor suggestions, and other non-blocking concerns.
 
-Evaluate the code itself, not GitHub checks, CI results, build statuses, or other external validation signals. Whether those signals are passing, failing, or pending must not affect your risk assessment or approve-or-escalate recommendation; if a supplied risk reason mentions only such a signal, disregard it during synthesis. Base the risk assessment solely on the remaining in-scope evidence supplied in this prompt: disregard pre-existing PR discussion — issue comments, review comments, and review threads, open or resolved — that is not part of the PR description. Prior commentary and unresolved threads are not findings and must not lower the recommendation or block approval.
+Evaluate the code itself, not GitHub checks, CI results, build statuses, or other external validation signals. Whether those signals are passing, failing, or pending must not affect your evidence classification or `approval_recommended`; if a supplied risk reason mentions only such a signal, disregard it during synthesis. Base the risk assessment solely on the remaining in-scope evidence supplied in this prompt: disregard pre-existing PR discussion — issue comments, review comments, and review threads, open or resolved — that is not part of the PR description. Prior commentary and unresolved threads are not findings and must not lower the recommendation or block approval.
 
-Only P0 and P1 issues may become GitHub inline comments. For each actionable line-specific P0 or P1 issue, emit exactly one directive in this form:
+Return every actionable code issue in the structured `findings` array, including P2 and P3 observations. Only P0 and P1 issues may also become GitHub inline comments. For each actionable line-specific P0 or P1 issue, emit exactly one directive in this form:
 ::code-comment{title="[P1] Short issue title" body="[P1] Explain the concrete scenario and fix." file="path/from/repo/root.go" start=123 end=123 priority=1}
 
-Do not emit `::code-comment` directives for P2 or P3 issues. Those lower-priority observations may inform your concise Markdown synthesis, but they must not create inline GitHub comments. Every emitted inline comment body MUST begin with the matching priority tag (`[P0]` or `[P1]`), as shown above. The title tag, body tag, and numeric `priority` attribute must agree. Classify issues using this framework:
+Do not emit `::code-comment` directives for P2 or P3 issues. Those lower-priority observations remain available in structured review evidence but must not create inline GitHub comments. Every emitted inline comment body MUST begin with the matching priority tag (`[P0]` or `[P1]`), as shown above. The title tag, body tag, numeric `priority` attribute, and corresponding structured finding severity must agree. Classify issues using this framework:
 - P0 — Drop everything. The issue blocks release, operations, or widespread use. Reserve this for universal problems that do not depend on assumptions about the inputs.
 - P1 — Urgent. The issue should be addressed in the next work cycle.
 - P2 — Normal. The issue should be fixed, but does not require immediate action.
@@ -100,6 +106,23 @@ Return concise Markdown, then include a final JSON object fenced as ```json with
       "reason": "short evidence-based reason"
     }
   ],
+  "findings": [
+    {
+      "severity": "critical|high|medium|low",
+      "confidence": "high|medium|low",
+      "path": "path/from/repo/root.go",
+      "start_line": 123,
+      "end_line": 123,
+      "summary": "short issue title",
+      "body": "concrete scenario and fix"
+    }
+  ],
+  "human_review_reasons": [
+    {
+      "code": "architecture|ownership|operational_risk|sensitive_change|policy_requirement",
+      "summary": "concrete reason human judgment is required"
+    }
+  ],
   "scope_mismatch": false,
   "unresolved_uncertainty": false,
   "reviewer_disagreement": false,
@@ -109,6 +132,8 @@ Return concise Markdown, then include a final JSON object fenced as ```json with
   "risk_notes": ["short note"]
 }
 
-STRICT OUTPUT CONTRACT: the final JSON object is machine-validated and the review fails if any top-level key above is absent. Include every key exactly once, even when a boolean is false or an array is empty. In particular, `approval_recommended` and `description_assessments` are mandatory additions to the current schema; never reuse an older synthesis schema. Before finishing, verify that the object contains all nine top-level keys and exactly one description assessment for every applicable requirement listed above.
+Use JSON `null` for `path`, `start_line`, and `end_line` when a finding is not line-specific. Return empty arrays when there are no findings or no explicit human-review reasons.
 
-The `review_summary` is used as the main prose in the final GitHub review. Ground it in the supplied evidence, write it as one paragraph, and make it useful to the PR author. Keep the approval recommendation in the structured field rather than announcing a final GitHub action in prose; the backend adds the final status after applying non-bypassable safeguards.
+STRICT OUTPUT CONTRACT: the final JSON object is machine-validated and the review fails if any top-level key above is absent. Include every key exactly once, even when a boolean is false or an array is empty. In particular, `approval_recommended`, `description_assessments`, `findings`, and `human_review_reasons` are mandatory. Never reuse an older synthesis schema. Before finishing, verify that the object contains all eleven top-level keys and exactly one description assessment for every applicable requirement listed above.
+
+The `review_summary` is used as supporting prose only when it agrees with the backend-owned decision. Ground it in the supplied evidence, write it as one paragraph, and make it useful to the PR author. Never describe P2 or P3 observations as approval blockers or prerequisites. Keep the approval recommendation in the structured field rather than announcing a final GitHub action in prose; the backend adds the final status after applying non-bypassable safeguards.

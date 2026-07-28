@@ -1516,11 +1516,10 @@ func TestHarvestCodeReviewOrchestratorResultPreservesCompletedOutputAfterDeadlin
 	now := time.Now().UTC()
 	reviewStartedAt := now.Add(-time.Hour)
 	completedAt := reviewStartedAt.Add(10 * time.Minute)
-	rawReview := `Synthesis found one issue.
-::code-comment{title="[P2] Missing regression coverage" body="The parser behavior changed without a direct regression test." file="internal/worker/code_review_handler.go" start=42 priority=2}
+	rawReview := `Synthesis found one advisory issue.
 
 ` + "```json" + `
-{"approval_recommended":false,"description_assessments":[{"key":"description","status":"satisfied","reason":"The PR intent is clear."}],"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"Adds review handling.","review_summary":"The parser change is focused, but it needs direct regression coverage before approval.","risk_notes":["tests needed"]}
+{"approval_recommended":true,"description_assessments":[{"key":"description","status":"satisfied","reason":"The PR intent is clear."}],"findings":[{"severity":"medium","confidence":"high","path":"internal/worker/code_review_handler.go","start_line":42,"end_line":42,"summary":"Missing regression coverage","body":"The parser behavior changed without a direct regression test."}],"human_review_reasons":[],"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"Adds review handling.","review_summary":"The parser change is focused; direct regression coverage is an advisory follow-up.","risk_notes":["tests would improve coverage"]}
 ` + "```"
 	state := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
 		ThreadID: threadID.String(),
@@ -1761,6 +1760,8 @@ func TestRequestCodeReviewOrchestratorSynthesisRepair(t *testing.T) {
 	require.Len(t, sender.inputs, 1, "repair request should dispatch exactly one correction message")
 	require.Equal(t, threadID, sender.inputs[0].ThreadID, "repair request should continue the existing orchestrator thread")
 	require.Contains(t, sender.inputs[0].Message, `"approval_recommended": false`, "correction message should require the omitted approval field with valid JSON")
+	require.Contains(t, sender.inputs[0].Message, `"findings":`, "correction message should preserve structured findings")
+	require.Contains(t, sender.inputs[0].Message, `"human_review_reasons":`, "correction message should require explicit escalation reasons")
 	require.NoError(t, mock.ExpectationsWereMet(), "repair request should preserve the invalid output as a durable pending repair")
 }
 
@@ -1968,7 +1969,7 @@ func TestCodeReviewOrchestratorCombinedOutputPreservesFindingsAfterRepair(t *tes
 {"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":true,"prompt_injection_detected":false,"summary":"Moves validation earlier.","review_summary":"The implementation is focused but needs a direct short-circuit test.","risk_notes":["Regression coverage is incomplete."]}
 ` + "```"
 	repaired := "```json\n" +
-		`{"approval_recommended":false,"description_assessments":[],"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":true,"prompt_injection_detected":false,"summary":"Moves validation earlier.","review_summary":"The implementation is focused but needs a direct short-circuit test.","risk_notes":["Regression coverage is incomplete."]}` +
+		`{"approval_recommended":false,"description_assessments":[],"findings":[],"human_review_reasons":[],"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":true,"prompt_injection_detected":false,"summary":"Moves validation earlier.","review_summary":"The implementation is focused but needs a direct short-circuit test.","risk_notes":["Regression coverage is incomplete."]}` +
 		"\n```"
 	combined := codeReviewOrchestratorCombinedOutput(&original, repaired, 1)
 
@@ -1977,6 +1978,8 @@ func TestCodeReviewOrchestratorCombinedOutputPreservesFindingsAfterRepair(t *tes
 	require.Equal(t, codeReviewOrchestratorSynthesis{
 		ApprovalRecommended:     false,
 		DescriptionAssessments:  []codeReviewDescriptionAssessment{},
+		Findings:                []codeReviewOrchestratorFinding{},
+		HumanReviewReasons:      []codeReviewOrchestratorHumanReviewReason{},
 		Summary:                 "Moves validation earlier.",
 		ReviewSummary:           "The implementation is focused but needs a direct short-circuit test.",
 		RiskNotes:               []string{"Regression coverage is incomplete."},
@@ -2006,6 +2009,8 @@ func TestParseCodeReviewOrchestratorSynthesis(t *testing.T) {
 	valid := codeReviewOrchestratorSynthesis{
 		ApprovalRecommended:     true,
 		DescriptionAssessments:  []codeReviewDescriptionAssessment{},
+		Findings:                []codeReviewOrchestratorFinding{},
+		HumanReviewReasons:      []codeReviewOrchestratorHumanReviewReason{},
 		Summary:                 "The change is safe to approve.",
 		ReviewSummary:           "The change is focused, and the review evidence supports approval.",
 		RiskNotes:               []string{},
@@ -2022,8 +2027,33 @@ func TestParseCodeReviewOrchestratorSynthesis(t *testing.T) {
 	}{
 		{
 			name:     "accepts complete fenced synthesis",
-			raw:      "Review complete.\n```json\n{\"approval_recommended\":true,\"description_assessments\":[],\"scope_mismatch\":false,\"unresolved_uncertainty\":false,\"reviewer_disagreement\":false,\"prompt_injection_detected\":false,\"summary\":\"The change is safe to approve.\",\"review_summary\":\"The change is focused, and the review evidence supports approval.\",\"risk_notes\":[]}\n```",
+			raw:      "Review complete.\n```json\n{\"approval_recommended\":true,\"description_assessments\":[],\"findings\":[],\"human_review_reasons\":[],\"scope_mismatch\":false,\"unresolved_uncertainty\":false,\"reviewer_disagreement\":false,\"prompt_injection_detected\":false,\"summary\":\"The change is safe to approve.\",\"review_summary\":\"The change is focused, and the review evidence supports approval.\",\"risk_notes\":[]}\n```",
 			expected: valid,
+		},
+		{
+			name: "accepts and normalizes structured advisory findings",
+			raw:  "```json\n" + `{"approval_recommended":true,"description_assessments":[],"findings":[{"severity":"medium","confidence":"high","path":" internal/worker/code_review_handler.go ","start_line":42,"end_line":42,"summary":" Add regression coverage ","body":" Exercise the P2-only approval path. "}],"human_review_reasons":[],"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"The change is safe to approve.","review_summary":"The only finding is advisory and does not block approval.","risk_notes":[]}` + "\n```",
+			expected: codeReviewOrchestratorSynthesis{
+				ApprovalRecommended:    true,
+				DescriptionAssessments: []codeReviewDescriptionAssessment{},
+				Findings: []codeReviewOrchestratorFinding{{
+					Severity:   models.CodeReviewFindingSeverityMedium,
+					Confidence: models.CodeReviewFindingConfidenceHigh,
+					Path:       stringPtr("internal/worker/code_review_handler.go"),
+					StartLine:  intPtr(42),
+					EndLine:    intPtr(42),
+					Summary:    "Add regression coverage",
+					Body:       "Exercise the P2-only approval path.",
+				}},
+				HumanReviewReasons:      []codeReviewOrchestratorHumanReviewReason{},
+				Summary:                 "The change is safe to approve.",
+				ReviewSummary:           "The only finding is advisory and does not block approval.",
+				RiskNotes:               []string{},
+				ScopeMismatch:           false,
+				UnresolvedUncertainty:   false,
+				ReviewerDisagreement:    false,
+				PromptInjectionDetected: false,
+			},
 		},
 		{
 			name:      "rejects prose without JSON",
@@ -2037,12 +2067,22 @@ func TestParseCodeReviewOrchestratorSynthesis(t *testing.T) {
 		},
 		{
 			name:      "rejects empty summary",
-			raw:       `{"approval_recommended":true,"description_assessments":[],"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":" ","review_summary":"The review evidence is otherwise complete.","risk_notes":[]}`,
+			raw:       `{"approval_recommended":true,"description_assessments":[],"findings":[],"human_review_reasons":[],"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":" ","review_summary":"The review evidence is otherwise complete.","risk_notes":[]}`,
 			expectErr: true,
 		},
 		{
 			name:      "rejects missing reviewer-facing summary",
-			raw:       `{"approval_recommended":true,"description_assessments":[],"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"The change is safe to approve.","risk_notes":[]}`,
+			raw:       `{"approval_recommended":true,"description_assessments":[],"findings":[],"human_review_reasons":[],"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"The change is safe to approve.","risk_notes":[]}`,
+			expectErr: true,
+		},
+		{
+			name:      "rejects an unknown human review reason",
+			raw:       `{"approval_recommended":false,"description_assessments":[],"findings":[],"human_review_reasons":[{"code":"code_quality","summary":"The implementation could be improved."}],"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"The change needs work.","review_summary":"The implementation could be improved.","risk_notes":[]}`,
+			expectErr: true,
+		},
+		{
+			name:      "rejects invalid finding coordinates",
+			raw:       `{"approval_recommended":true,"description_assessments":[],"findings":[{"severity":"low","confidence":"medium","path":"internal/worker/code_review_handler.go","start_line":42,"end_line":41,"summary":"Check this edge","body":"The range is deliberately invalid."}],"human_review_reasons":[],"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"The change is safe to approve.","review_summary":"The finding payload is malformed.","risk_notes":[]}`,
 			expectErr: true,
 		},
 	}
@@ -2060,6 +2100,35 @@ func TestParseCodeReviewOrchestratorSynthesis(t *testing.T) {
 			require.Equal(t, tt.expected, actual, "parser should preserve every synthesis field")
 		})
 	}
+}
+
+func TestCodeReviewFindingsFromSynthesis(t *testing.T) {
+	t.Parallel()
+
+	path := "internal/worker/code_review_handler.go"
+	line := 42
+	actual := codeReviewFindingsFromSynthesis(codeReviewOrchestratorSynthesis{
+		Findings: []codeReviewOrchestratorFinding{{
+			Severity:   models.CodeReviewFindingSeverityMedium,
+			Confidence: models.CodeReviewFindingConfidenceHigh,
+			Path:       stringPtr("./" + path),
+			StartLine:  intPtr(line),
+			EndLine:    intPtr(line),
+			Summary:    "Add direct parser coverage",
+			Body:       "Exercise the structured advisory path.",
+		}},
+	}, []string{path})
+
+	require.Equal(t, []models.CodeReviewFinding{{
+		DedupeKey:  codeReviewFindingDedupeKey(path, line, line, "Add direct parser coverage"),
+		Severity:   models.CodeReviewFindingSeverityMedium,
+		Confidence: models.CodeReviewFindingConfidenceHigh,
+		Path:       &path,
+		StartLine:  &line,
+		EndLine:    &line,
+		Summary:    "Add direct parser coverage",
+		Body:       "Exercise the structured advisory path.",
+	}}, actual, "structured findings should persist with normalized paths and coordinates at every supported severity")
 }
 
 func TestCodeReviewOrchestratorReviewSummary(t *testing.T) {
@@ -2951,6 +3020,12 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 		if synthesis.RiskNotes == nil {
 			synthesis.RiskNotes = []string{}
 		}
+		if synthesis.Findings == nil {
+			synthesis.Findings = []codeReviewOrchestratorFinding{}
+		}
+		if synthesis.HumanReviewReasons == nil {
+			synthesis.HumanReviewReasons = []codeReviewOrchestratorHumanReviewReason{}
+		}
 		input.OrchestratorSynthesis = synthesis
 		input.AgentResults = append(input.AgentResults, models.CodeReviewAgentResult{
 			Role:   models.CodeReviewAgentRoleOrchestrator,
@@ -2969,7 +3044,9 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 		configureOrchestrator func(*liveCodeReviewOutcomeInput)
 		expected              models.CodeReviewDecision
 		reason                string
+		riskNotContains       string
 		bodyContains          string
+		bodyNotContains       string
 	}{
 		{
 			name: "approves when live reviewer quorum and PR health satisfy policy",
@@ -3186,7 +3263,48 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			bodyContains: "Understandable description (The coding agent found the required evidence missing.)",
 		},
 		{
-			name: "withholds approval when coding agent recommends human review",
+			name: "approves a P2-only review despite an opaque negative orchestrator recommendation",
+			input: liveCodeReviewOutcomeInput{
+				Policy: policy,
+				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
+				PullRequest: models.PullRequest{
+					OrgID:   orgID,
+					Body:    &prBody,
+					HeadSHA: stringPtr("head"),
+					Status:  models.PullRequestStatusOpen,
+				},
+				Health: &models.PullRequestHealthResponse{
+					HeadSHA:         "head",
+					Status:          models.PullRequestStatusOpen,
+					CanMerge:        true,
+					ChecksConfirmed: true,
+					MergeState:      models.PullRequestMergeStateClean,
+				},
+				AgentResults: []models.CodeReviewAgentResult{
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+				},
+				Findings: []models.CodeReviewFinding{{
+					Severity:   models.CodeReviewFindingSeverityMedium,
+					Confidence: models.CodeReviewFindingConfidenceHigh,
+					Summary:    "Add direct parser coverage",
+					Body:       "A focused regression test would make this behavior easier to maintain.",
+				}},
+				ChangedFiles: []codereview.PullRequestFile{
+					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
+				},
+				ChangedFilesAvailable: true,
+			},
+			configureOrchestrator: func(input *liveCodeReviewOutcomeInput) {
+				setCodingAgentDecision(input, false, nil)
+			},
+			expected:        models.CodeReviewDecisionApproved,
+			riskNotContains: "coding-agent orchestrator recommends human review",
+			bodyContains:    "**Advisory notes:** 1 non-blocking observation is available in the full review. P2 and P3 observations do not affect the approval decision.",
+			bodyNotContains: "Add direct parser coverage",
+		},
+		{
+			name: "withholds approval for an explicit non-finding human judgment",
 			input: liveCodeReviewOutcomeInput{
 				Policy: policy,
 				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
@@ -3211,12 +3329,19 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
 				},
 				ChangedFilesAvailable: true,
+				OrchestratorSynthesis: codeReviewOrchestratorSynthesis{
+					HumanReviewReasons: []codeReviewOrchestratorHumanReviewReason{{
+						Code:    models.CodeReviewHumanReviewReasonArchitecture,
+						Summary: "the change introduces a new cross-service protocol",
+					}},
+				},
 			},
 			configureOrchestrator: func(input *liveCodeReviewOutcomeInput) {
 				setCodingAgentDecision(input, false, nil)
 			},
-			expected: models.CodeReviewDecisionNeedsHumanReview,
-			reason:   "coding-agent orchestrator recommends human review",
+			expected:     models.CodeReviewDecisionNeedsHumanReview,
+			reason:       "human review is required for architectural judgment: the change introduces a new cross-service protocol",
+			bodyContains: "Human review is required for architectural judgment: the change introduces a new cross-service protocol.",
 		},
 		{
 			name: "withholds approval when PR description changed after coding-agent assessment",
@@ -3244,13 +3369,20 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
 				},
 				ChangedFilesAvailable: true,
+				OrchestratorSynthesis: codeReviewOrchestratorSynthesis{
+					HumanReviewReasons: []codeReviewOrchestratorHumanReviewReason{{
+						Code:    models.CodeReviewHumanReviewReasonOwnership,
+						Summary: "the previous description left ownership unclear",
+					}},
+				},
 			},
 			configureOrchestrator: func(input *liveCodeReviewOutcomeInput) {
 				setCodingAgentDecision(input, true, nil)
 				input.OrchestratorSynthesis.DescriptionInputHash = "stale-description-hash"
 			},
-			expected: models.CodeReviewDecisionNeedsHumanReview,
-			reason:   "PR title or description changed after the coding-agent assessment",
+			expected:        models.CodeReviewDecisionNeedsHumanReview,
+			reason:          "PR title or description changed after the coding-agent assessment",
+			riskNotContains: "human review is required for ownership judgment: the previous description left ownership unclear",
 		},
 		{
 			name: "approves comment-only eslint frontend cleanup when coding agent marks screenshots not applicable",
@@ -3621,8 +3753,14 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 				require.Contains(t, decision.RiskReasons, tt.reason, "non-approval should preserve the expected risk reason")
 				require.Contains(t, body, "Why:", "final review body should explain the non-approval reason")
 			}
+			if tt.riskNotContains != "" {
+				require.NotContains(t, decision.RiskReasons, tt.riskNotContains, "approval should not contain an opaque orchestrator veto")
+			}
 			if tt.bodyContains != "" {
 				require.Contains(t, body, tt.bodyContains, "final review body should include expected evidence")
+			}
+			if tt.bodyNotContains != "" {
+				require.NotContains(t, body, tt.bodyNotContains, "GitHub summary should not expose advisory finding details")
 			}
 		})
 	}

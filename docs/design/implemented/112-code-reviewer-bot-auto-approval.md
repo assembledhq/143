@@ -1,6 +1,6 @@
 # Design: Code Reviewer Bot And Acceptable-Risk Auto-Approval
 
-> **Status:** Implemented | **Last reviewed:** 2026-07-24
+> **Status:** Implemented | **Last reviewed:** 2026-07-28
 >
 > **Depends on:** [../overall.md](../overall.md), [78-review-agent-loops.md](78-review-agent-loops.md), [107-pr-readiness-checks.md](107-pr-readiness-checks.md), [61-pr-state-sync-and-repair-actions.md](61-pr-state-sync-and-repair-actions.md), [../backlog/11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md)
 
@@ -26,7 +26,7 @@ Implemented:
 - `run_code_review` worker handler that loads the captured policy version, fans out read-only reviewer threads running native `/review`, synthesizes via an orchestrator thread, records agent results, submits a GitHub review when the worker has GitHub credentials, and stores the GitHub review id/url
 - live reviewer/orchestrator evidence ingestion harvested from running review threads rather than pre-existing stored result rows
 - evidence-gated approval path that evaluates reviewer results, blocking findings, PR health, reviewed head SHA, required check state, changed-file size/path/category context from GitHub, and the captured policy before choosing approval vs comment-only
-- coding-agent orchestrator evaluation of PR description requirements and the substantive approve-or-escalate recommendation, with prompt-injection screening
+- coding-agent orchestrator evaluation of PR description requirements, structured findings at every severity, and typed non-finding human-review reasons, with prompt-injection screening; the backend derives the decision from those explicit signals
 - prompt artifact storage and recovery for rendered reviewer/orchestrator prompts and their structured outputs
 - inline-comment posting with marker-based dedupe/update and posted-comment id persistence
 - GitHub changed-file fetch support for PR file/line threshold and coarse risk-category evaluation
@@ -112,13 +112,14 @@ Run configured review agents against the PR diff and context
         |
         v
 Orchestrator agent inspects the change, evaluates description requirements,
-and synthesizes findings plus an approve-or-escalate recommendation
+and synthesizes structured findings plus explicit human-review reasons
         |
         v
-Backend applies non-bypassable safeguards to the recommendation
+Backend derives the decision from finding severity, typed reasons, and
+non-bypassable safeguards
         |
         v
-If the orchestrator recommends approval and every safeguard passes:
+If there are no blocking signals and every safeguard passes:
   submit a marker-only GitHub approval
 Else:
   submit a marker-only GitHub review comment
@@ -331,10 +332,13 @@ Reviewer agents run in isolated read-only review sandboxes at the PR head SHA. T
 Acceptable risk is fully configurable by org admins with optional repository overrides. 143 ships conservative defaults, but approval always comes from the active org/repo policy.
 
 Risk evaluation combines deterministic safeguards with coding-agent assessments
-and synthesized review findings. The coding-agent orchestrator owns the
-substantive approve-or-escalate recommendation. The backend owns the final
-GitHub action and can only narrow the orchestrator's recommendation by applying
-non-bypassable safeguards.
+and synthesized review findings. The coding-agent orchestrator supplies
+structured evidence; the backend owns both the approval decision and the final
+GitHub action. A P0 or P1 code finding blocks approval. P2 and P3 findings are
+advisory. Non-code judgment calls may block only through a typed,
+reviewer-visible human-review reason. The model's bare
+`approval_recommended` value is supporting output and never acts as an invisible
+veto.
 
 Configurable deterministic signals:
 
@@ -355,6 +359,7 @@ Configurable synthesized signals:
 - orchestrator agrees the change matches the stated intent
 - no reviewer-agent disagreement on severity
 - no meaningful unknowns remain
+- no explicit architecture, ownership, operational-risk, sensitive-change, or policy-requirement judgment remains for a human
 
 Conservative default:
 
@@ -415,8 +420,8 @@ Approval requires all of these by default:
 
 - PR head SHA still matches the reviewed SHA at submission time.
 - No blocking GitHub checks are failing.
-- No reviewer-agent blocking finding exists.
-- Orchestrator classifies the PR as acceptable under the active risk policy.
+- No P0 or P1 finding exists.
+- No explicit typed non-finding human-review reason exists.
 - Policy allows approval for this repository, author class, and changed paths.
 - The bot has not already approved a stale previous head.
 
@@ -471,8 +476,12 @@ Code review session
     - waits for reviewer results or timeout
     - inspects the actual diff to determine whether description evidence is
       satisfied, missing, or not applicable
-    - compares findings against acceptable-risk policy
-    - recommends approval or human review and writes the synthesized review
+    - emits every finding as structured evidence with severity and confidence
+    - emits typed human-review reasons only for non-code judgment such as
+      architecture, ownership, operational risk, sensitive changes, or an
+      explicit policy requirement
+    - writes supporting review prose; the backend derives approval from the
+      structured evidence and hard safeguards
 
   Reviewer tab: Codex
     - runs native /review against the PR diff
@@ -486,24 +495,26 @@ Code review session
 Reviewer agents run native `/review` or the closest equivalent. They inspect and explain; they do not edit files or push commits. The orchestrator preserves raw outputs in the session and produces the GitHub review.
 
 The worker validates that the orchestrator returned exactly one assessment for
-every applicable structured description requirement. Unknown, duplicate, or
-omitted requirement keys make the synthesis unusable for approval. It also
-captures a hash of the PR title and body supplied to the orchestrator; if either
-changes before the final decision, the assessment is stale and approval is
-withheld until a new review runs. These checks prevent malformed or out-of-date
-agent output from becoming approval authority.
+every applicable structured description requirement, plus explicit `findings`
+and `human_review_reasons` arrays. Unknown, duplicate, or omitted requirement
+keys, invalid finding coordinates or enums, and unknown human-review reason
+codes make the synthesis unusable for approval. It also captures a hash of the
+PR title and body supplied to the orchestrator; if either changes before the
+final decision, the assessment is stale and approval is withheld until a new
+review runs. These checks prevent malformed or out-of-date agent output from
+becoming approval authority.
 
 The final rolling PR comment should include:
 
 - decision: approved or comment only
 - acceptable-risk result and policy version
 - short summary of what changed
-- agent findings grouped by severity
-- non-blocking comments that are worth surfacing
+- P0 and P1 blocking findings with actionable details
+- a count of P2 and P3 advisory observations, with their details retained in the linked 143 evidence rather than duplicated on GitHub
 - reasons approval was withheld, when not approved
 - link to the 143 code review session
 
-Inline PR comments are first-class review output. The orchestrator selects the highest-value line-specific P0 and P1 findings and submits them with the formal review while the synthesized assessment converges onto the rolling PR comment and the formal body is reduced to its marker. P2 and P3 findings remain available as review evidence but never create inline GitHub comments. The inline comment cap is configurable per policy, defaults to four, and can be raised up to ten. The orchestrator deduplicates overlapping findings and posts only concrete comments tied to changed lines. The bot never requests changes; non-acceptable PRs receive comment-only output.
+Inline PR comments are first-class review output. The orchestrator selects the highest-value line-specific P0 and P1 findings and submits them with the formal review while the synthesized assessment converges onto the rolling PR comment and the formal body is reduced to its marker. P2 and P3 findings are persisted in 143 as advisory evidence, never affect the approval decision, never create inline GitHub comments, and appear on GitHub only as an advisory count. Any code issue important enough to block must therefore be represented as P0 or P1. The inline comment cap is configurable per policy, defaults to four, and can be raised up to ten. The orchestrator deduplicates overlapping findings and posts only concrete comments tied to changed lines. The bot never requests changes; non-acceptable PRs receive comment-only output.
 
 Example inline comment selection:
 
@@ -545,7 +556,7 @@ PR descriptions, diffs, comments, file contents, and commit messages are untrust
 - secret handling
 - system/developer instructions
 
-Prompt-injection attempts in PR text or code comments should become review findings and make the PR non-acceptable by default unless policy says otherwise.
+Prompt-injection attempts in PR text or code comments are a separate typed hard-risk signal and make the PR non-acceptable by default unless policy says otherwise.
 
 ## Data Model Sketch
 
@@ -663,7 +674,6 @@ Implementation notes:
 
 - Should approval require two clean agents, or should one clean agent be enough for very small docs/test-only PRs?
 - Should 143-authored PRs have stricter defaults than human-authored PRs, or the reverse?
-- How much of the orchestrator synthesis should be stored as structured JSON versus markdown?
 - What is the right reporting metric: approvals issued, human review hours saved, non-approval reasons, or post-approval revert/incident rate?
 
 ## Success Metrics

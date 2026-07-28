@@ -1,6 +1,6 @@
 # Design: Prompt-First Code Review Policy
 
-> **Status:** Implemented | **Last reviewed:** 2026-07-24
+> **Status:** Implemented | **Last reviewed:** 2026-07-28
 >
 > **Depends on:** [../overall.md](../overall.md), [112-code-reviewer-bot-auto-approval.md](112-code-reviewer-bot-auto-approval.md), [../03-frontend.md](../03-frontend.md)
 
@@ -21,7 +21,7 @@ Deterministic safeguards, agent configuration, path rules, thresholds, and struc
 The central mental model is:
 
 - **Review instructions** optionally tell review agents what to investigate and how to communicate findings. Empty means “use the agent's native `/review` behavior without additional team guidance.”
-- **Automated approval policy** tells the orchestrator when to recommend approval versus human review, and is used only when automatic approval is enabled.
+- **Automated approval policy** tells the orchestrator how to classify structured findings and when a non-code judgment needs human review. It is used only when automatic approval is enabled; the backend derives the decision from those explicit signals.
 - **Hard safeguards** establish deterministic approval boundaries and always retain veto power.
 - The platform-owned system prompt and security rules cannot be edited or overridden.
 
@@ -74,7 +74,7 @@ Primary jobs:
 ### Product principles
 
 1. **Native review works out of the box.** Review instructions are optional because supported review agents already have strong built-in `/review` behavior.
-2. **Approval deserves emphasis.** Automated approval policy is the primary prompt because it guides a higher-consequence recommendation.
+2. **Approval deserves emphasis.** Automated approval policy is the primary prompt because it guides the evidence classification for a higher-consequence decision.
 3. **Safe by default.** First-time setup begins comment-only; approval requires an explicit choice.
 4. **Progressive disclosure.** Advanced controls remain closed until needed or until validation requires attention.
 5. **Hard rules stay hard.** Passing checks, paths, risk thresholds, and quorum are not weakened by prompt wording.
@@ -95,12 +95,12 @@ The Code reviews page retains the existing **Reviews** and **Policy** tabs. The 
    - Two outcome choices: `Leave comments` and `Leave comments and approve when acceptable`.
 3. **Automated approval policy composer**
    - Visible and editable when `Leave comments and approve when acceptable` is selected.
-   - Explains when the orchestrator should recommend automatic approval and when it should escalate to a human.
+   - Explains which findings are blocking and which non-code judgments require a human.
    - Has its own examples, character count, save state, and reset action.
    - Is not sent to individual reviewer agents.
 4. **Hard safeguards summary**
    - Compact summary of passing-check, path, size, quorum, and disagreement gates.
-   - Clarifies that safeguards can block approval even when the automated approval policy recommends it.
+   - Clarifies that safeguards can block approval independently of the orchestrator's evidence classification.
 5. **Optional review instructions**
    - Deemphasized beneath approval behavior and safeguards.
    - Copy states that no additional instructions are required and an empty value uses native `/review` behavior.
@@ -145,7 +145,7 @@ Automated approval policy                               Saved
 
 Hard safeguards
 Passing checks required · Sensitive paths blocked · Quorum 2
-Safeguards can block approval even when the policy recommends it.
+Safeguards can block approval independently of the orchestrator's evidence.
 
 Additional review instructions (optional)
 The review agents already know how to review code. Add guidance only for
@@ -192,13 +192,15 @@ Require human review when:
 Evaluate the pull request independently. Disregard existing human review comments, review decisions, and review threads, whether open or resolved. Unresolved human review threads must not count against approval.
 ```
 
-The automated approval policy guides the orchestrator's recommendation. The
-orchestrator also assesses every applicable structured PR-description
-requirement as `satisfied`, `not_applicable`, or `missing` after inspecting the
-pull request and actual diff. It can make the outcome more conservative, but it
-cannot bypass deterministic safeguards. Passing checks, size thresholds,
-sensitive or blocked paths, fork restrictions, reviewer quorum, disagreement
-handling, and every other hard gate retain final veto power.
+The automated approval policy guides the orchestrator's evidence classification.
+The orchestrator assesses every applicable structured PR-description requirement
+as `satisfied`, `not_applicable`, or `missing`, emits every code finding with a
+severity, and uses typed human-review reasons for non-code judgment such as
+architecture or ownership. The backend derives the approval decision: P0 and P1
+findings block, P2 and P3 are advisory, and a bare negative model recommendation
+does not veto approval. Passing checks, size thresholds, sensitive or blocked
+paths, fork restrictions, reviewer quorum, disagreement handling, and every
+other hard gate retain final veto power.
 
 ### Prompt examples
 
@@ -264,14 +266,14 @@ Each tooltip should answer, in concise plain language:
 
 1. what the setting controls;
 2. when it applies;
-3. whether it guides reviewer behavior, guides the automated approval recommendation, or acts as a deterministic hard safeguard;
+3. whether it guides reviewer behavior, guides automated-approval evidence classification, or acts as a deterministic hard safeguard;
 4. what happens when the value is empty, off, or left at its default;
 5. any important interaction with another setting.
 
 Examples:
 
 - **Additional review instructions:** “Optional guidance appended after each agent's native `/review` command. Leave empty to use the agent's built-in review behavior.”
-- **Automated approval policy:** “Guides the orchestrator's approve-or-escalate recommendation when automatic approval is enabled. Hard safeguards can still block approval.”
+- **Automated approval policy:** “Guides how the orchestrator classifies findings and explicit human-review reasons when automatic approval is enabled. P0/P1 findings and hard safeguards block approval; P2/P3 findings are advisory.”
 - **Require passing checks:** “Prevents automatic approval while required GitHub checks are failing or pending. Reviews and comments can still complete.”
 - **Reviewer quorum:** “Minimum number of configured reviewer agents that must return usable results before automatic approval is eligible.”
 - **Sensitive paths:** “Changes matching these patterns require human review when sensitive-path enforcement is enabled.”
@@ -600,7 +602,7 @@ Render this entire organization-instructions section only when `ReviewInstructio
 
 Use Go template escaping appropriate for plain text and do not interpret Markdown, `{{ ... }}`, XML-like tags, or variable syntax inside either prompt. Data values must not be recursively rendered as templates.
 
-The same review instructions should be available to the orchestrator so synthesis respects team priorities. Add both fields to `CodeReviewOrchestratorPromptData`, delimit them separately, and label their purposes. `AutomatedApprovalPolicy` is sent only to the orchestrator and only participates in approval recommendation when `ApprovalMode == approve_acceptable`; individual reviewer agents receive only `ReviewInstructions`.
+The same review instructions should be available to the orchestrator so synthesis respects team priorities. Add both fields to `CodeReviewOrchestratorPromptData`, delimit them separately, and label their purposes. `AutomatedApprovalPolicy` is sent only to the orchestrator and only participates in approval-evidence classification when `ApprovalMode == approve_acceptable`; individual reviewer agents receive only `ReviewInstructions`.
 
 Structured description requirements are also rendered into the orchestrator
 prompt as trusted policy data. The pull request title, body, changed-file
@@ -675,7 +677,7 @@ interface CodeReviewInstructionsComposerProps {
 }
 ```
 
-`CodeReviewAutomatedApprovalPolicyComposer` uses the same base composer behavior and validation. It receives the automated-approval example collection, appears immediately after the approve outcome is selected, and remains mounted or otherwise preserves local text while outcome mode changes. It must clearly state that hard safeguards apply after the prompt-based recommendation.
+`CodeReviewAutomatedApprovalPolicyComposer` uses the same base composer behavior and validation. It receives the automated-approval example collection, appears immediately after the approve outcome is selected, and remains mounted or otherwise preserves local text while outcome mode changes. It must clearly state that the prompt guides structured evidence classification and that the backend applies finding-severity semantics and hard safeguards.
 
 Use local controlled text plus debounced commit so typing is immediate. The component must not replace its local text with stale query data while a save is pending or failed. Character count is based on Unicode code points to match backend validation.
 
@@ -813,7 +815,7 @@ Exit criteria:
 
 ### Phase 2: Add the two first-class prompt composers
 
-**Outcome:** Users can separately edit how agents review and when the orchestrator should recommend automatic approval. Both prompts are versioned and used only by their intended runtime consumers.
+**Outcome:** Users can separately edit how agents review and how the orchestrator should classify approval evidence. Both prompts are versioned and used only by their intended runtime consumers; the backend remains the decision authority.
 
 Implementation items:
 
@@ -871,7 +873,7 @@ Exit criteria:
 
 - Review instructions and automated approval policy are separate top-level fields, not description requirements.
 - Review instructions are optional and empty by default; native `/review` is the recommended baseline.
-- Automated approval policy is the more prominent prompt because it governs the higher-consequence recommendation.
+- Automated approval policy is the more prominent prompt because it governs the evidence used for the higher-consequence approval decision.
 - Both fields are stored in dedicated versioned columns and inherit independently.
 - Prompt examples and whole-policy presets are separate product concepts.
 - Both prompts are editable Markdown but have no template interpolation in this project.
