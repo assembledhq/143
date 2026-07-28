@@ -103,12 +103,35 @@ const minSnapshotBlobBytes int64 = 1 << 20 // 1 MiB
 // exists to fix. Better to catch only the unambiguous cases.
 const snapshotShrinkRejectPercent = 25
 
+// snapshotShrinkBaselineMaxAge stops the shrink rule from wedging a cache key.
+//
+// A rejected snapshot leaves the baseline in place, and the baseline is not
+// evicted while it is being restored (LRU orders on last_used_at, which every
+// restore refreshes). So a baseline that is wrong — or a workspace that
+// genuinely did shrink fourfold — could otherwise reject its replacement
+// forever. Comparing only against a recent baseline bounds that: the rule stops
+// applying once the stored content is this old, and the next snapshot lands.
+//
+// created_at is the right clock, not last_used_at: it tracks when the content
+// was stored and stops advancing on a wedged entry, which is exactly the
+// condition we want to time out.
+const snapshotShrinkBaselineMaxAge = 7 * 24 * time.Hour
+
+// minBlobBytes is the size floor in effect, allowing tests to exercise the
+// reject paths without generating megabyte-scale fixtures.
+func (sc *SnapshotCache) minBlobBytes() int64 {
+	if sc.minSnapshotBytesOverride > 0 {
+		return sc.minSnapshotBytesOverride
+	}
+	return minSnapshotBlobBytes
+}
+
 // undersizedSnapshotReason returns a human-readable reason to discard a freshly
 // staged archive, or "" to keep it.
 func (sc *SnapshotCache) undersizedSnapshotReason(ctx context.Context, metadata SnapshotMetadata, sizeBytes int64) string {
-	if sizeBytes < minSnapshotBlobBytes {
+	if floor := sc.minBlobBytes(); sizeBytes < floor {
 		return fmt.Sprintf("archive is %d bytes, under the %d-byte floor for a workspace with dependencies installed",
-			sizeBytes, minSnapshotBlobBytes)
+			sizeBytes, floor)
 	}
 	if metadata.BaseKey == "" || sc.store == nil {
 		return ""
@@ -119,9 +142,13 @@ func (sc *SnapshotCache) undersizedSnapshotReason(ctx context.Context, metadata 
 	if err != nil || prior == nil || prior.SizeBytes <= 0 {
 		return ""
 	}
+	if age := time.Since(prior.CreatedAt); age > snapshotShrinkBaselineMaxAge {
+		return ""
+	}
 	if sizeBytes*100 < prior.SizeBytes*snapshotShrinkRejectPercent {
-		return fmt.Sprintf("archive is %d bytes, under %d%% of the %d-byte snapshot already stored for base key %s",
-			sizeBytes, snapshotShrinkRejectPercent, prior.SizeBytes, metadata.BaseKey)
+		return fmt.Sprintf("archive is %d bytes, under %d%% of the %d-byte snapshot stored for base key %s %s ago",
+			sizeBytes, snapshotShrinkRejectPercent, prior.SizeBytes, metadata.BaseKey,
+			time.Since(prior.CreatedAt).Round(time.Minute))
 	}
 	return ""
 }
@@ -226,6 +253,10 @@ type SnapshotCache struct {
 	workerNodeID  string
 	cacheDir      string // local disk path for snapshot storage, e.g. /var/cache/143-preview
 	maxCacheBytes int64  // default 20 GB
+	// minSnapshotBytesOverride replaces minSnapshotBlobBytes when positive. Only
+	// tests set it, so they can drive the reject paths with byte-scale fixtures
+	// instead of allocating and streaming a megabyte per case.
+	minSnapshotBytesOverride int64
 }
 
 // SnapshotCacheConfig holds initialization options for SnapshotCache.
@@ -316,7 +347,9 @@ func ComputeSnapshotBaseKey(lockfileContents []byte, configDigest string) string
 // =============================================================================
 
 // CreateSnapshot archives the sandbox workspace into a tar.gz on the worker's
-// local disk and records the metadata in the database.
+// local disk and records the metadata in the database. It returns the stored
+// blob's size so the caller can report it alongside the outcome; the size is
+// zero whenever nothing was stored.
 //
 // This should be called after a preview has started successfully. The snapshot
 // captures the fully-built workspace (installed dependencies, compiled assets,
@@ -330,7 +363,7 @@ func (sc *SnapshotCache) CreateSnapshot(
 	snapshotKey string,
 	metadata SnapshotMetadata,
 	excludePaths []string,
-) error {
+) (int64, error) {
 	log := sc.logger.With().
 		Str("snapshot_key", snapshotKey).
 		Str("sandbox_id", sb.ID).
@@ -378,15 +411,15 @@ func (sc *SnapshotCache) CreateSnapshot(
 
 	blobPath, err := sc.blobPath(snapshotKey)
 	if err != nil {
-		return fmt.Errorf("snapshot create: %w", err)
+		return 0, fmt.Errorf("snapshot create: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(blobPath), 0o750); err != nil {
-		return fmt.Errorf("snapshot create: mkdir: %w", err)
+		return 0, fmt.Errorf("snapshot create: mkdir: %w", err)
 	}
 
 	tmp, err := os.CreateTemp(filepath.Dir(blobPath), ".snapshot-*.tmp")
 	if err != nil {
-		return fmt.Errorf("snapshot create: temp file: %w", err)
+		return 0, fmt.Errorf("snapshot create: temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
 	cleanupTmp := func() {
@@ -417,13 +450,13 @@ func (sc *SnapshotCache) CreateSnapshot(
 	// would otherwise bury the real reason ("too large") under tar's downstream
 	// complaint about a broken pipe.
 	if counter.exceeded {
-		return fmt.Errorf("snapshot create: tar too large (>%d bytes max)", maxCreateBlobBytes)
+		return 0, fmt.Errorf("snapshot create: tar too large (>%d bytes max)", maxCreateBlobBytes)
 	}
 	if err != nil {
-		return fmt.Errorf("snapshot create: stream tar from sandbox: %w", err)
+		return 0, fmt.Errorf("snapshot create: stream tar from sandbox: %w", err)
 	}
 	if !tarExitTolerable(exitCode) {
-		return fmt.Errorf("snapshot create: tar exited %d: %s", exitCode, tarStderr.String())
+		return 0, fmt.Errorf("snapshot create: tar exited %d: %s", exitCode, tarStderr.String())
 	}
 	if exitCode != 0 {
 		// Keep the archive but make the compromise visible: these are the files
@@ -448,14 +481,14 @@ func (sc *SnapshotCache) CreateSnapshot(
 			Int64("size_bytes", sizeBytes).
 			Str("reason", reason).
 			Msg("refusing to store an implausibly small snapshot")
-		return fmt.Errorf("snapshot create: %w: %s", ErrSnapshotTooSmall, reason)
+		return 0, fmt.Errorf("snapshot create: %w: %s", ErrSnapshotTooSmall, reason)
 	}
 
 	if err := os.Chmod(tmpPath, 0o600); err != nil {
-		return fmt.Errorf("snapshot create: chmod: %w", err)
+		return 0, fmt.Errorf("snapshot create: chmod: %w", err)
 	}
 	if err := os.Rename(tmpPath, blobPath); err != nil {
-		return fmt.Errorf("snapshot create: rename temp to final: %w", err)
+		return 0, fmt.Errorf("snapshot create: rename temp to final: %w", err)
 	}
 	// Rename succeeded — prevent deferred cleanup from removing the final file.
 	tmpPath = ""
@@ -466,7 +499,7 @@ func (sc *SnapshotCache) CreateSnapshot(
 		// If checksum write fails, remove the blob so future lookups don't
 		// return an unverifiable entry.
 		_ = os.Remove(blobPath)
-		return fmt.Errorf("snapshot create: write checksum: %w", err)
+		return 0, fmt.Errorf("snapshot create: write checksum: %w", err)
 	}
 
 	// 4. Record in database.
@@ -483,7 +516,7 @@ func (sc *SnapshotCache) CreateSnapshot(
 	if err := sc.store.UpsertStartupCache(ctx, entry); err != nil {
 		// Best-effort cleanup of the blob if DB write fails.
 		_ = os.Remove(blobPath)
-		return fmt.Errorf("snapshot create: upsert db: %w", err)
+		return 0, fmt.Errorf("snapshot create: upsert db: %w", err)
 	}
 
 	// 5. Reclaim the legacy staging file if an older build left one behind. The
@@ -502,7 +535,7 @@ func (sc *SnapshotCache) CreateSnapshot(
 		Str("blob_path", blobPath).
 		Msg("filesystem snapshot created")
 
-	return nil
+	return sizeBytes, nil
 }
 
 // =============================================================================

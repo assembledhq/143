@@ -917,6 +917,8 @@ func (d *DockerPreviewProvider) StopPreviewWithBackgroundWait(ctx context.Contex
 		return nil // already stopped — idempotent
 	}
 
+	// A non-positive budget is the caller asking for the default, not for zero
+	// wait (preview.PreviewStopUseProviderBackgroundBudget).
 	if backgroundWait <= 0 {
 		backgroundWait = previewStopBackgroundWaitCap
 	}
