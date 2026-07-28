@@ -196,27 +196,79 @@ func TestNewSnapshotCache_RequiresExecutor(t *testing.T) {
 	require.Contains(t, err.Error(), "executor must be non-nil")
 }
 
+// An executor that cannot stream stdin must be rejected at construction. Caught
+// at call time instead, it surfaces as a restore error, which the start path
+// swallows into a cold launch — the cache would silently never hit.
+func TestNewSnapshotCache_RequiresStdinCapableExecutor(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewSnapshotCache(SnapshotCacheConfig{
+		Executor:     execWithoutStdin{},
+		CacheDir:     t.TempDir(),
+		WorkerNodeID: "worker-1",
+		Logger:       zerolog.Nop(),
+	})
+	require.Error(t, err, "an executor without ExecWithStdin should fail construction")
+	require.Contains(t, err.Error(), "ExecWithStdin")
+}
+
+func TestSnapshotTarExitTolerable(t *testing.T) {
+	t.Parallel()
+
+	// 0 is success; 1 is "some files differ" — tar still produced a complete
+	// archive, which on a live preview workspace is the common case and is worth
+	// keeping. 2 and up are fatal.
+	require.True(t, tarExitTolerable(0), "success must be tolerable")
+	require.True(t, tarExitTolerable(1), "a live workspace must not cost us the snapshot")
+	require.False(t, tarExitTolerable(2), "a fatal tar error must not be stored")
+	require.False(t, tarExitTolerable(137), "an OOM kill must not be stored")
+}
+
 type streamingRestoreExecutor struct {
 	writeFromReaderCalled bool
 	writeFileCalled       bool
-	written               []byte
 	execCmds              []string
 	stdinCmds             []string
-	// stdinExit and stdinErr let a test force the extract to fail so the
-	// workspace-recovery path can be exercised.
+	// stdinWrites records each stdin stream in call order, so a test that drives
+	// more than one (ApplyPartialInvalidation streams the blob, then the patch)
+	// can assert on the specific one it cares about rather than on whichever
+	// wrote last.
+	stdinWrites [][]byte
+	// stdinExit and stdinErr force the stdin exec to fail, exercising the
+	// workspace-recovery path.
 	stdinExit int
 	stdinErr  error
-	// stdout, when set, is written to the Exec stdout writer. Used by create
-	// tests to simulate the sandbox-side tar emitting the archive.
+	// tarCreateExit is the exit code returned for the create-side `tar -c`,
+	// letting a test drive the exit-1-on-a-live-workspace case.
+	tarCreateExit int
+	// failRecovery makes the git-checkout recovery exec fail, so the
+	// unrecoverable-workspace path can be reached.
+	failRecovery bool
+	// stdout, when set, is written to the Exec stdout writer for the create-side
+	// tar, simulating the sandbox emitting the archive.
 	stdout []byte
+}
+
+// lastStdinWrite returns the most recent stdin stream, or nil if there was none.
+func (e *streamingRestoreExecutor) lastStdinWrite() []byte {
+	if len(e.stdinWrites) == 0 {
+		return nil
+	}
+	return e.stdinWrites[len(e.stdinWrites)-1]
 }
 
 func (e *streamingRestoreExecutor) Exec(_ context.Context, _ *agent.Sandbox, cmd string, stdout, _ io.Writer) (int, error) {
 	e.execCmds = append(e.execCmds, cmd)
-	if len(e.stdout) > 0 && strings.HasPrefix(cmd, "tar -c ") {
-		if _, err := stdout.Write(e.stdout); err != nil {
-			return 1, err
+	if e.failRecovery && strings.Contains(cmd, "git checkout -f HEAD") {
+		return 1, nil
+	}
+	if strings.HasPrefix(cmd, "tar -c ") {
+		if len(e.stdout) > 0 {
+			if _, err := stdout.Write(e.stdout); err != nil {
+				return 2, err
+			}
 		}
+		return e.tarCreateExit, nil
 	}
 	return 0, nil
 }
@@ -225,9 +277,9 @@ func (e *streamingRestoreExecutor) ExecWithStdin(_ context.Context, _ *agent.San
 	e.stdinCmds = append(e.stdinCmds, cmd)
 	body, err := io.ReadAll(stdin)
 	if err != nil {
-		return 1, err
+		return 2, err
 	}
-	e.written = append([]byte(nil), body...)
+	e.stdinWrites = append(e.stdinWrites, append([]byte(nil), body...))
 	if e.stdinErr != nil || e.stdinExit != 0 {
 		return e.stdinExit, e.stdinErr
 	}
@@ -245,11 +297,9 @@ func (e *streamingRestoreExecutor) WriteFile(context.Context, *agent.Sandbox, st
 
 func (e *streamingRestoreExecutor) WriteFileFromReader(_ context.Context, _ *agent.Sandbox, _ string, reader io.Reader, _ int64) error {
 	e.writeFromReaderCalled = true
-	body, err := io.ReadAll(reader)
-	if err != nil {
+	if _, err := io.ReadAll(reader); err != nil {
 		return err
 	}
-	e.written = append([]byte(nil), body...)
 	return nil
 }
 
@@ -261,6 +311,21 @@ func hasCmdContaining(cmds []string, sub string) bool {
 		}
 	}
 	return false
+}
+
+// execWithoutStdin satisfies SnapshotExecutor but deliberately omits
+// ExecWithStdin, so it fails the sandboxStdinExecutor assertion.
+type execWithoutStdin struct{}
+
+func (execWithoutStdin) Exec(context.Context, *agent.Sandbox, string, io.Writer, io.Writer) (int, error) {
+	return 0, nil
+}
+func (execWithoutStdin) ReadFile(context.Context, *agent.Sandbox, string) ([]byte, error) {
+	return nil, nil
+}
+func (execWithoutStdin) WriteFile(context.Context, *agent.Sandbox, string, []byte) error { return nil }
+func (execWithoutStdin) WriteFileFromReader(context.Context, *agent.Sandbox, string, io.Reader, int64) error {
+	return nil
 }
 
 func TestSnapshotCache_RestoreSnapshotStreamsBlobToSandbox(t *testing.T) {
@@ -302,7 +367,7 @@ func TestSnapshotCache_RestoreSnapshotStreamsBlobToSandbox(t *testing.T) {
 
 	err = sc.RestoreSnapshot(context.Background(), &agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"}, hit)
 	require.NoError(t, err, "RestoreSnapshot should restore a valid snapshot")
-	require.Equal(t, body, executor.written, "RestoreSnapshot should stream the exact blob contents")
+	require.Equal(t, body, executor.lastStdinWrite(), "RestoreSnapshot should stream the exact blob contents")
 	require.True(t, hasCmdContaining(executor.stdinCmds, "tar xf - -C '/workspace/repo'"),
 		"RestoreSnapshot should pipe the blob into a sandbox-side tar reading stdin, got %v", executor.stdinCmds)
 	require.False(t, executor.writeFromReaderCalled,
@@ -348,24 +413,102 @@ func TestSnapshotCache_RestoreSnapshotRecoversWorkspaceOnExtractFailure(t *testi
 	}
 
 	err = sc.RestoreSnapshot(context.Background(), &agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"}, hit)
-	require.Error(t, err, "a non-zero extract exit should fail the restore")
+	require.Error(t, err, "a fatal extract exit should fail the restore")
 	require.Contains(t, err.Error(), "tar exited 2", "the error should carry tar's exit code")
 	require.True(t, hasCmdContaining(executor.execCmds, "git checkout -f HEAD -- ."),
 		"a failed extract must rebuild the wiped workspace from the clone, got %v", executor.execCmds)
+	require.NotErrorIs(t, err, ErrPreviewWorkspaceUnrecoverable,
+		"recovery succeeded, so the caller should still be free to launch cold")
 }
 
-// The create path must archive straight to the worker. Staging inside the
-// sandbox capped snapshots at the 256 MiB /tmp tmpfs and charged the bytes to
-// the container's memory cgroup.
-func TestSnapshotCache_CreateSnapshotStreamsArchiveToWorker(t *testing.T) {
+// When recovery itself fails the tree matches neither the snapshot nor the
+// checkout. That is the one case the caller must fail the start on rather than
+// build whatever is left, so it has to be distinguishable.
+func TestSnapshotCache_RestoreSnapshotFlagsUnrecoverableWorkspace(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock pool should be created")
 	defer mock.Close()
 
-	archive := []byte("streamed archive body")
-	executor := &streamingRestoreExecutor{stdout: archive}
+	cacheDir := t.TempDir()
+	blobPath := filepath.Join(cacheDir, "snapshot.tar.gz")
+	body := []byte("compressed snapshot body")
+	require.NoError(t, os.WriteFile(blobPath, body, 0o600), "snapshot blob should be written")
+
+	executor := &streamingRestoreExecutor{stdinExit: 2, failRecovery: true}
+	sc := &SnapshotCache{
+		store:    db.NewPreviewStore(mock),
+		executor: executor,
+		logger:   zerolog.Nop(),
+	}
+	hit := &CacheHit{
+		Entry: models.PreviewStartupCache{
+			ID: uuid.New(), OrgID: uuid.New(), SnapshotKey: "snapshot-key",
+			BlobPath: blobPath, SizeBytes: int64(len(body)),
+		},
+		BlobPath: blobPath,
+	}
+
+	err = sc.RestoreSnapshot(context.Background(), &agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"}, hit)
+	require.Error(t, err, "a failed extract with failed recovery must error")
+	require.ErrorIs(t, err, ErrPreviewWorkspaceUnrecoverable,
+		"the caller needs to tell this apart from an ordinary cold-launch fallback")
+}
+
+// A restore that reports non-fatal warnings still produced a tree. Throwing it
+// away costs a full cold launch, so keep it — a genuinely broken workspace
+// surfaces as a build failure moments later.
+func TestSnapshotCache_RestoreSnapshotToleratesTarWarnings(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	cacheDir := t.TempDir()
+	blobPath := filepath.Join(cacheDir, "snapshot.tar.gz")
+	body := []byte("compressed snapshot body")
+	require.NoError(t, os.WriteFile(blobPath, body, 0o600), "snapshot blob should be written")
+
+	executor := &streamingRestoreExecutor{stdinExit: 1}
+	sc := &SnapshotCache{
+		store:    db.NewPreviewStore(mock),
+		executor: executor,
+		logger:   zerolog.Nop(),
+	}
+	hit := &CacheHit{
+		Entry: models.PreviewStartupCache{
+			ID: uuid.New(), OrgID: uuid.New(), SnapshotKey: "snapshot-key",
+			BlobPath: blobPath, SizeBytes: int64(len(body)),
+		},
+		BlobPath: blobPath,
+	}
+	mock.ExpectExec("UPDATE preview_startup_cache SET last_used_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = sc.RestoreSnapshot(context.Background(), &agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"}, hit)
+	require.NoError(t, err, "tar exit 1 should not throw away a restored workspace")
+	require.False(t, hasCmdContaining(executor.execCmds, "git checkout -f HEAD -- ."),
+		"a tolerated warning must not trigger workspace recovery, got %v", executor.execCmds)
+	require.NoError(t, mock.ExpectationsWereMet(), "the restore should have completed through the LRU touch")
+}
+
+// The create path must archive straight to the worker. Staging inside the
+// sandbox capped snapshots at the 256 MiB /tmp tmpfs and charged the bytes to
+// the container's memory cgroup.
+// newCreateSnapshotFixture wires a SnapshotCache over a pgxmock pool with the
+// upsert and post-create eviction queries stubbed, so create tests only have to
+// vary the executor's behaviour. expectStore=false skips the query expectations
+// for cases that fail before touching the database.
+func newCreateSnapshotFixture(t *testing.T, executor SnapshotExecutor, archiveLen int, expectStore bool) (*SnapshotCache, SnapshotMetadata) {
+	t.Helper()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	t.Cleanup(mock.Close)
+
 	cacheDir := t.TempDir()
 	sc := &SnapshotCache{
 		store:         db.NewPreviewStore(mock),
@@ -375,30 +518,44 @@ func TestSnapshotCache_CreateSnapshotStreamsArchiveToWorker(t *testing.T) {
 		maxCacheBytes: DefaultMaxCacheBytes,
 		logger:        zerolog.Nop(),
 	}
-
 	metadata := SnapshotMetadata{OrgID: uuid.New(), RepoID: uuid.New(), BaseKey: "base", CommitSHA: "abc123"}
+	if !expectStore {
+		return sc, metadata
+	}
+
+	cacheCols := []string{
+		"id", "org_id", "repo_id", "snapshot_key", "base_key", "commit_sha", "blob_path",
+		"size_bytes", "worker_node_id", "last_used_at", "created_at",
+	}
 	mock.ExpectQuery("INSERT INTO preview_startup_cache").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "repo_id", "snapshot_key", "base_key", "commit_sha", "blob_path",
-			"size_bytes", "worker_node_id", "last_used_at", "created_at",
-		}).AddRow(
+		WillReturnRows(pgxmock.NewRows(cacheCols).AddRow(
 			uuid.New(), metadata.OrgID, metadata.RepoID, "snapshot-key", metadata.BaseKey, metadata.CommitSHA,
-			filepath.Join(cacheDir, "blob"), int64(len(archive)), "worker-1", time.Now(), time.Now(),
+			filepath.Join(cacheDir, "blob"), int64(archiveLen), "worker-1", time.Now(), time.Now(),
 		))
-	mock.ExpectQuery("SELECT").WillReturnRows(pgxmock.NewRows([]string{
-		"id", "org_id", "repo_id", "snapshot_key", "base_key", "commit_sha", "blob_path",
-		"size_bytes", "worker_node_id", "last_used_at", "created_at",
-	}))
+	mock.ExpectQuery("SELECT").WillReturnRows(pgxmock.NewRows(cacheCols))
+	return sc, metadata
+}
 
-	err = sc.CreateSnapshot(context.Background(), &agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"}, "snapshot-key", metadata, nil)
+func TestSnapshotCache_CreateSnapshotStreamsArchiveToWorker(t *testing.T) {
+	t.Parallel()
+
+	archive := []byte("streamed archive body")
+	executor := &streamingRestoreExecutor{stdout: archive}
+	sc, metadata := newCreateSnapshotFixture(t, executor, len(archive), true)
+
+	err := sc.CreateSnapshot(context.Background(), &agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"}, "snapshot-key", metadata, nil)
 	require.NoError(t, err, "CreateSnapshot should stream the archive to the worker")
 
 	require.True(t, hasCmdContaining(executor.execCmds, "tar -c "),
 		"CreateSnapshot should run a sandbox-side tar, got %v", executor.execCmds)
-	require.True(t, hasCmdContaining(executor.execCmds, "-f - -C '/workspace/repo'"),
+	require.True(t, hasCmdContaining(executor.execCmds, "-f - "),
 		"CreateSnapshot must archive to stdout, not to a file inside the sandbox, got %v", executor.execCmds)
+	require.True(t, hasCmdContaining(executor.execCmds, "-C '/workspace/repo'"),
+		"CreateSnapshot should archive from the workspace root, got %v", executor.execCmds)
+	require.True(t, hasCmdContaining(executor.execCmds, "--ignore-failed-read"),
+		"a file vanishing mid-walk on a live workspace must not abort the archive, got %v", executor.execCmds)
 	require.False(t, hasCmdContaining(executor.execCmds, "-f "+legacySnapshotTmpFile),
 		"CreateSnapshot must not stage the archive in the sandbox tmpfs, got %v", executor.execCmds)
 	require.False(t, hasCmdContaining(executor.execCmds, "cat "),
@@ -409,6 +566,45 @@ func TestSnapshotCache_CreateSnapshotStreamsArchiveToWorker(t *testing.T) {
 	written, err := os.ReadFile(blobPath) // #nosec G304 -- test-controlled temp dir
 	require.NoError(t, err, "the streamed blob should land on the worker's disk")
 	require.Equal(t, archive, written, "the worker blob should hold exactly what the sandbox tar emitted")
+}
+
+// Snapshots are taken moments after the preview reports ready, so services are
+// actively writing into the tree tar is reading. tar exits 1 for that but still
+// produces a complete archive — discarding it would mean the busiest workspaces,
+// the ones most expensive to rebuild, are exactly the ones that never cache.
+func TestSnapshotCache_CreateSnapshotKeepsArchiveWhenFilesChangedUnderTar(t *testing.T) {
+	t.Parallel()
+
+	archive := []byte("archive from a workspace that moved")
+	executor := &streamingRestoreExecutor{stdout: archive, tarCreateExit: 1}
+	sc, metadata := newCreateSnapshotFixture(t, executor, len(archive), true)
+
+	err := sc.CreateSnapshot(context.Background(), &agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"}, "snapshot-key", metadata, nil)
+	require.NoError(t, err, "tar exit 1 on a live workspace must still produce a usable snapshot")
+
+	blobPath, err := sc.blobPath("snapshot-key")
+	require.NoError(t, err, "blob path should resolve")
+	written, err := os.ReadFile(blobPath) // #nosec G304 -- test-controlled temp dir
+	require.NoError(t, err, "the archive should have been stored despite the warning")
+	require.Equal(t, archive, written, "the stored blob should hold what tar emitted")
+}
+
+// Tolerance stops at exit 1. A fatal tar error means a broken or truncated
+// stream, which must never be stored as a restorable snapshot.
+func TestSnapshotCache_CreateSnapshotRejectsFatalTarExit(t *testing.T) {
+	t.Parallel()
+
+	executor := &streamingRestoreExecutor{stdout: []byte("truncated"), tarCreateExit: 2}
+	sc, metadata := newCreateSnapshotFixture(t, executor, 0, false)
+
+	err := sc.CreateSnapshot(context.Background(), &agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"}, "snapshot-key", metadata, nil)
+	require.Error(t, err, "a fatal tar exit must fail the create")
+	require.Contains(t, err.Error(), "tar exited 2")
+
+	blobPath, err := sc.blobPath("snapshot-key")
+	require.NoError(t, err, "blob path should resolve")
+	_, statErr := os.Stat(blobPath)
+	require.True(t, os.IsNotExist(statErr), "a fatally-failed archive must not be left on disk")
 }
 
 // The partial-invalidation patch must reach git over stdin. Writing it to
@@ -452,7 +648,7 @@ func TestSnapshotCache_ApplyPartialInvalidationStreamsDiff(t *testing.T) {
 
 	require.True(t, hasCmdContaining(executor.stdinCmds, "git apply --allow-empty"),
 		"the patch should be piped into git apply over stdin, got %v", executor.stdinCmds)
-	require.Equal(t, diff, executor.written, "git apply should receive the exact diff bytes")
+	require.Equal(t, diff, executor.lastStdinWrite(), "git apply should receive the exact diff bytes, and it should be the last stream")
 	require.False(t, executor.writeFileCalled,
 		"ApplyPartialInvalidation must not stage the patch on the sandbox filesystem")
 	require.False(t, hasCmdContaining(executor.execCmds, "/tmp/partial.diff"),

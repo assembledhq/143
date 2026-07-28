@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -43,6 +44,33 @@ const (
 	// now stream, so neither the size cap nor the memory charge applies.
 	legacySnapshotTmpFile = "/tmp/snapshot.tar.zst"
 )
+
+// ErrPreviewWorkspaceUnrecoverable marks a failure that left the sandbox
+// workspace in a state matching neither the snapshot nor the git checkout.
+// Every other snapshot error is recoverable by launching cold, so callers
+// swallow them; this one they must fail the start on, because a cold build
+// would produce a preview serving the wrong tree.
+var ErrPreviewWorkspaceUnrecoverable = errors.New("preview workspace is unrecoverable")
+
+// tarExitTolerable reports whether a GNU tar exit code left a usable
+// archive (or a usable extraction) behind.
+//
+// tar exits 1 for "some files differ" — most often "file changed as we read
+// it", plus unreadable entries skipped under --ignore-failed-read. It still
+// writes a complete, structurally valid archive; only the individual entries
+// that moved under it may be torn. Exit 2 and above are fatal: a broken stream,
+// a full disk, a missing binary.
+//
+// Snapshots are created moments after the preview reports ready, so the
+// workspace is live — services are writing logs, caches and build output into
+// the tree the whole time tar reads it. Treating exit 1 as fatal would mean the
+// busiest (and most expensive to rebuild) workspaces are exactly the ones that
+// never get a snapshot. A torn file in a warm-start cache degrades to a build
+// error on the next launch, which is recoverable; never caching at all is a
+// permanent 8-minute tax on every launch. Tolerate it and log loudly.
+func tarExitTolerable(exitCode int) bool {
+	return exitCode == 0 || exitCode == 1
+}
 
 // =============================================================================
 // Interfaces
@@ -123,6 +151,14 @@ type SnapshotCacheConfig struct {
 func NewSnapshotCache(cfg SnapshotCacheConfig) (*SnapshotCache, error) {
 	if cfg.Executor == nil {
 		return nil, fmt.Errorf("snapshot cache: executor must be non-nil")
+	}
+	// Restore and partial invalidation stream over stdin rather than staging a
+	// file in the sandbox. Assert the capability here so a misconfigured
+	// executor fails at startup: checked at call time instead, it would surface
+	// as a restore error, which the start path swallows into a silent cold
+	// launch — the cache would just quietly never hit.
+	if _, ok := cfg.Executor.(sandboxStdinExecutor); !ok {
+		return nil, fmt.Errorf("snapshot cache: executor must support ExecWithStdin for streaming restore")
 	}
 	if cfg.CacheDir == "" {
 		return nil, fmt.Errorf("snapshot cache: cache directory must be specified")
@@ -225,8 +261,14 @@ func (sc *SnapshotCache) CreateSnapshot(
 	//    and charged the bytes to the sandbox's memory cgroup. The session
 	//    checkpoint path in the docker agent provider and the dependency cache's
 	//    stageSandboxArchive both already stream this way.
+	//
+	//    --ignore-failed-read keeps a file that vanished mid-walk (a dev server
+	//    rotating a log, a build tool clearing scratch) from aborting the whole
+	//    archive. It downgrades the read to a warning; tar still exits 1, which
+	//    tarExitTolerable accepts. The session-checkpoint path passes the
+	//    same flag.
 	tarCmd := fmt.Sprintf(
-		"tar -c %s -f - -C %s %s%s -- .",
+		"tar -c %s -f - --ignore-failed-read -C %s %s%s -- .",
 		agent.SnapshotTarCompressFlag,
 		shellQuote(sb.WorkDir),
 		agent.SnapshotTarExcludeFlags(true),
@@ -286,8 +328,17 @@ func (sc *SnapshotCache) CreateSnapshot(
 	if err != nil {
 		return fmt.Errorf("snapshot create: stream tar from sandbox: %w", err)
 	}
-	if exitCode != 0 {
+	if !tarExitTolerable(exitCode) {
 		return fmt.Errorf("snapshot create: tar exited %d: %s", exitCode, tarStderr.String())
+	}
+	if exitCode != 0 {
+		// Keep the archive but make the compromise visible: these are the files
+		// that moved under tar on a live workspace, so a restore of this blob
+		// may carry a torn copy of each one.
+		log.Warn().
+			Int("exit_code", exitCode).
+			Str("stderr", tarStderr.String()).
+			Msg("snapshot archived with warnings from a live workspace; keeping it rather than losing the cache")
 	}
 
 	if err := os.Chmod(tmpPath, 0o600); err != nil {
@@ -542,23 +593,38 @@ func (sc *SnapshotCache) RestoreSnapshot(
 
 	var stderr bytes.Buffer
 	exitCode, err := streamExec.ExecWithStdin(ctx, sb, extractCmd, blob, io.Discard, &stderr)
-	if err != nil || exitCode != 0 {
+	if err != nil || !tarExitTolerable(exitCode) {
 		// The extract now streams, so a failure can land after step 3 wiped the
 		// workspace — where the two-step form always failed before the wipe. The
 		// caller treats a restore error as "launch cold" and keeps using this
 		// sandbox, so put the tree back from the clone (.git survives the clean)
 		// before returning; otherwise the cold launch would build an empty
 		// workspace.
+		//
+		// If recovery itself fails the workspace is neither the snapshot nor the
+		// checkout, and no amount of cold building will produce the right code.
+		// That is the one case worth failing the start over, so it is wrapped in
+		// ErrPreviewWorkspaceUnrecoverable for the caller to distinguish.
 		if workspaceCleaned {
 			if recoverErr := sc.recoverWorkspaceFromGit(ctx, sb); recoverErr != nil {
 				log.Error().Err(recoverErr).Msg("snapshot restore failed and workspace could not be recovered from git")
-				return fmt.Errorf("snapshot restore: extract failed and workspace recovery failed: %w", recoverErr)
+				return fmt.Errorf("snapshot restore: extract failed and workspace recovery failed: %w: %w",
+					ErrPreviewWorkspaceUnrecoverable, recoverErr)
 			}
 		}
 		if err != nil {
 			return fmt.Errorf("snapshot restore: exec tar: %w", err)
 		}
 		return fmt.Errorf("snapshot restore: tar exited %d: %s", exitCode, stderr.String())
+	}
+	if exitCode != 0 {
+		// Same bargain as create: tar reported non-fatal warnings but produced a
+		// tree. Using it beats discarding a warm start over a metadata warning —
+		// and if the tree really is unusable the build fails loudly right after.
+		log.Warn().
+			Int("exit_code", exitCode).
+			Str("stderr", stderr.String()).
+			Msg("snapshot extracted with warnings; continuing with the restored workspace")
 	}
 
 	// 5. Reclaim the legacy staging file if an older build left one behind.
@@ -581,6 +647,11 @@ func (sc *SnapshotCache) RestoreSnapshot(
 // from the sandbox. Create and restore no longer write it, but a sandbox that
 // previously ran an older build may still be holding it — and since /tmp is a
 // tmpfs, those bytes sit in the container's memory cgroup until removed.
+//
+// TODO(2026-08): transitional. Preview sandboxes do not outlive a deploy, so
+// once every worker has run a build containing the streaming create/restore,
+// nothing can be writing this path any more and both this helper and its two
+// call sites should go.
 func (sc *SnapshotCache) removeLegacyStagingFile(ctx context.Context, sb *agent.Sandbox) {
 	_, _ = sc.executor.Exec(ctx, sb, fmt.Sprintf("rm -f %s", shellQuote(legacySnapshotTmpFile)), io.Discard, io.Discard)
 }
