@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -810,7 +811,7 @@ func TestUndersizedSnapshotReason_ShrinkAgainstBaseKey(t *testing.T) {
 				))
 
 			sc := &SnapshotCache{store: db.NewPreviewStore(mock), workerNodeID: "worker-1", logger: zerolog.Nop()}
-			reason := sc.undersizedSnapshotReason(context.Background(),
+			reason := sc.undersizedSnapshotReason(context.Background(), "snapshot-key",
 				SnapshotMetadata{OrgID: orgID, RepoID: repoID, BaseKey: "base"}, tc.sizeBytes)
 
 			if tc.wantReject {
@@ -830,11 +831,11 @@ func TestUndersizedSnapshotReason_AbsoluteFloor(t *testing.T) {
 
 	sc := &SnapshotCache{logger: zerolog.Nop()} // no store: only the floor applies
 
-	require.NotEmpty(t, sc.undersizedSnapshotReason(context.Background(), SnapshotMetadata{}, 0),
+	require.NotEmpty(t, sc.undersizedSnapshotReason(context.Background(), "snapshot-key", SnapshotMetadata{}, 0),
 		"an empty archive must never be stored")
-	require.NotEmpty(t, sc.undersizedSnapshotReason(context.Background(), SnapshotMetadata{}, minSnapshotBlobBytes-1),
+	require.NotEmpty(t, sc.undersizedSnapshotReason(context.Background(), "snapshot-key", SnapshotMetadata{}, minSnapshotBlobBytes-1),
 		"one byte under the floor must be rejected")
-	require.Empty(t, sc.undersizedSnapshotReason(context.Background(), SnapshotMetadata{}, minSnapshotBlobBytes),
+	require.Empty(t, sc.undersizedSnapshotReason(context.Background(), "snapshot-key", SnapshotMetadata{}, minSnapshotBlobBytes),
 		"exactly at the floor is acceptable")
 
 	require.EqualValues(t, 1<<20, minSnapshotBlobBytes,
@@ -857,15 +858,122 @@ func TestUndersizedSnapshotReason_NoBaselineAllowsStore(t *testing.T) {
 	// baseline" rather than as a reason to discard a good archive.
 	sc := &SnapshotCache{store: db.NewPreviewStore(mock), workerNodeID: "worker-1", logger: zerolog.Nop()}
 
-	require.Empty(t, sc.undersizedSnapshotReason(context.Background(),
+	require.Empty(t, sc.undersizedSnapshotReason(context.Background(), "snapshot-key",
 		SnapshotMetadata{OrgID: uuid.New(), RepoID: uuid.New(), BaseKey: "base"}, 50<<20),
 		"a base-key lookup failure must not block caching")
 
-	require.Empty(t, sc.undersizedSnapshotReason(context.Background(),
+	require.Empty(t, sc.undersizedSnapshotReason(context.Background(), "snapshot-key",
 		SnapshotMetadata{OrgID: uuid.New(), RepoID: uuid.New()}, 50<<20),
 		"no base key means no baseline to compare against")
 
-	require.NotEmpty(t, sc.undersizedSnapshotReason(context.Background(),
+	require.NotEmpty(t, sc.undersizedSnapshotReason(context.Background(), "snapshot-key",
 		SnapshotMetadata{}, minSnapshotBlobBytes-1),
 		"the absolute floor applies with or without a baseline")
+}
+
+// The shrink rule keeps a baseline that a rejected snapshot cannot replace, so
+// without an escape hatch a workspace that legitimately got smaller — or one
+// bad baseline — would reject every replacement for as long as the baseline
+// stays fresh. Repetition distinguishes the two: damage does not reproduce at
+// the same size, a genuine shrink does.
+func TestUndersizedSnapshotReason_RepeatedShrinkIsAccepted(t *testing.T) {
+	t.Parallel()
+
+	orgID, repoID := uuid.New(), uuid.New()
+	cacheCols := []string{
+		"id", "org_id", "repo_id", "snapshot_key", "base_key", "commit_sha", "blob_path",
+		"size_bytes", "worker_node_id", "last_used_at", "created_at",
+	}
+	priorSize := int64(100 << 20)
+	shrunk := priorSize / 10
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+	// One baseline row per lookup; the rule consults it on every attempt.
+	for i := 0; i < 3; i++ {
+		mock.ExpectQuery("SELECT").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(cacheCols).AddRow(
+				uuid.New(), orgID, repoID, "older-key", "base", "older-commit",
+				"/cache/older", priorSize, "worker-1", time.Now(), time.Now(),
+			))
+	}
+
+	sc := &SnapshotCache{store: db.NewPreviewStore(mock), workerNodeID: "worker-1", logger: zerolog.Nop()}
+	metadata := SnapshotMetadata{OrgID: orgID, RepoID: repoID, BaseKey: "base"}
+
+	require.NotEmpty(t, sc.undersizedSnapshotReason(context.Background(), "key-a", metadata, shrunk),
+		"the first collapse should be treated as damage and rejected")
+	require.Empty(t, sc.undersizedSnapshotReason(context.Background(), "key-a", metadata, shrunk),
+		"a collapse that reproduces is the new truth and must be stored")
+
+	// Accepting clears the count, so the rule is armed again rather than
+	// permanently disabled for that key.
+	require.NotEmpty(t, sc.undersizedSnapshotReason(context.Background(), "key-a", metadata, shrunk),
+		"the strike count should reset after an acceptance")
+}
+
+// Strikes must be consecutive: a normal-sized snapshot in between means the
+// earlier collapse was transient, so the next one starts from zero.
+func TestUndersizedSnapshotReason_NormalSnapshotResetsStrikes(t *testing.T) {
+	t.Parallel()
+
+	orgID, repoID := uuid.New(), uuid.New()
+	cacheCols := []string{
+		"id", "org_id", "repo_id", "snapshot_key", "base_key", "commit_sha", "blob_path",
+		"size_bytes", "worker_node_id", "last_used_at", "created_at",
+	}
+	priorSize := int64(100 << 20)
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+	for i := 0; i < 3; i++ {
+		mock.ExpectQuery("SELECT").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(cacheCols).AddRow(
+				uuid.New(), orgID, repoID, "older-key", "base", "older-commit",
+				"/cache/older", priorSize, "worker-1", time.Now(), time.Now(),
+			))
+	}
+
+	sc := &SnapshotCache{store: db.NewPreviewStore(mock), workerNodeID: "worker-1", logger: zerolog.Nop()}
+	metadata := SnapshotMetadata{OrgID: orgID, RepoID: repoID, BaseKey: "base"}
+
+	require.NotEmpty(t, sc.undersizedSnapshotReason(context.Background(), "key-b", metadata, priorSize/10),
+		"first collapse rejected")
+	require.Empty(t, sc.undersizedSnapshotReason(context.Background(), "key-b", metadata, priorSize),
+		"a normal-sized snapshot must be stored and clear the strike")
+	require.NotEmpty(t, sc.undersizedSnapshotReason(context.Background(), "key-b", metadata, priorSize/10),
+		"a later collapse starts from zero strikes, not from the earlier one")
+}
+
+// The absolute floor is not a heuristic and gets no escape hatch: an archive
+// that small cannot hold an installed dependency tree however often it repeats.
+func TestUndersizedSnapshotReason_AbsoluteFloorHasNoEscapeHatch(t *testing.T) {
+	t.Parallel()
+
+	sc := &SnapshotCache{logger: zerolog.Nop()}
+	for i := 0; i < snapshotShrinkRejectStrikes+2; i++ {
+		require.NotEmptyf(t, sc.undersizedSnapshotReason(context.Background(), "key-c", SnapshotMetadata{}, 0),
+			"attempt %d: an empty archive must never become acceptable", i+1)
+	}
+}
+
+// The strike map must not grow without bound on a long-lived worker.
+func TestNoteShrinkStrike_BoundsTrackedKeys(t *testing.T) {
+	t.Parallel()
+
+	sc := &SnapshotCache{logger: zerolog.Nop()}
+	for i := 0; i < maxTrackedShrinkStrikes+50; i++ {
+		sc.noteShrinkStrike(fmt.Sprintf("key-%d", i))
+	}
+	require.LessOrEqual(t, len(sc.shrinkStrikes), maxTrackedShrinkStrikes,
+		"the strike map should reset rather than grow forever")
+
+	// An empty key is not trackable and must not create an entry.
+	before := len(sc.shrinkStrikes)
+	require.Zero(t, sc.noteShrinkStrike(""), "an empty snapshot key has nothing to track")
+	require.Equal(t, before, len(sc.shrinkStrikes), "an empty key must not add an entry")
 }

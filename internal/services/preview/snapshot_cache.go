@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -126,13 +127,53 @@ func (sc *SnapshotCache) minBlobBytes() int64 {
 	return minSnapshotBlobBytes
 }
 
+// snapshotShrinkRejectStrikes is how many consecutive shrink rejections a key
+// gets before the shrunk archive is stored anyway.
+//
+// The shrink rule assumes a collapse means damage. That is true of a torn
+// archive, which is transient — the next launch produces a full one. It is not
+// true of a workspace that legitimately got smaller, where every future
+// snapshot is the new size and the rule would reject all of them, keeping a
+// baseline alive that no longer describes reality.
+//
+// Repetition tells the two apart, and needs no extra signal: damage does not
+// reproduce at the same size, a genuine shrink does. Rejecting once and
+// accepting the repeat caps the cost of a false positive at a single cold
+// launch, and makes a permanent wedge impossible rather than merely bounded by
+// snapshotShrinkBaselineMaxAge.
+const snapshotShrinkRejectStrikes = 2
+
 // undersizedSnapshotReason returns a human-readable reason to discard a freshly
 // staged archive, or "" to keep it.
-func (sc *SnapshotCache) undersizedSnapshotReason(ctx context.Context, metadata SnapshotMetadata, sizeBytes int64) string {
+func (sc *SnapshotCache) undersizedSnapshotReason(ctx context.Context, snapshotKey string, metadata SnapshotMetadata, sizeBytes int64) string {
+	// The absolute floor has no escape hatch. An archive this small cannot hold
+	// an installed dependency tree however many times it repeats, so a run of
+	// them means the workspace is wrong, not the rule.
 	if floor := sc.minBlobBytes(); sizeBytes < floor {
 		return fmt.Sprintf("archive is %d bytes, under the %d-byte floor for a workspace with dependencies installed",
 			sizeBytes, floor)
 	}
+
+	reason := sc.shrinkAgainstBaselineReason(ctx, metadata, sizeBytes)
+	if reason == "" {
+		sc.clearShrinkStrike(snapshotKey)
+		return ""
+	}
+	if strikes := sc.noteShrinkStrike(snapshotKey); strikes >= snapshotShrinkRejectStrikes {
+		sc.clearShrinkStrike(snapshotKey)
+		sc.logger.Warn().
+			Str("snapshot_key", snapshotKey).
+			Int("strikes", strikes).
+			Str("reason", reason).
+			Msg("storing a shrunk snapshot after repeated rejections; treating the smaller workspace as the new truth")
+		return ""
+	}
+	return reason
+}
+
+// shrinkAgainstBaselineReason reports whether the archive collapsed relative to
+// the most recent snapshot stored for the same base key.
+func (sc *SnapshotCache) shrinkAgainstBaselineReason(ctx context.Context, metadata SnapshotMetadata, sizeBytes int64) string {
 	if metadata.BaseKey == "" || sc.store == nil {
 		return ""
 	}
@@ -152,6 +193,45 @@ func (sc *SnapshotCache) undersizedSnapshotReason(ctx context.Context, metadata 
 	}
 	return ""
 }
+
+// noteShrinkStrike records a shrink rejection for snapshotKey and returns the
+// running count. Counts are per-worker and in memory: they only need to survive
+// between two launches of the same key, and losing them on restart just costs
+// one more rejection before the shrunk archive is accepted.
+func (sc *SnapshotCache) noteShrinkStrike(snapshotKey string) int {
+	if snapshotKey == "" {
+		return 0
+	}
+	sc.shrinkStrikesMu.Lock()
+	defer sc.shrinkStrikesMu.Unlock()
+	if sc.shrinkStrikes == nil {
+		sc.shrinkStrikes = make(map[string]int)
+	}
+	// A worker sees a bounded set of live keys, but nothing prunes an entry
+	// whose key is never built again. Reset wholesale rather than tracking
+	// eviction: the cost is one extra rejection for whatever was mid-strike.
+	if len(sc.shrinkStrikes) >= maxTrackedShrinkStrikes {
+		sc.shrinkStrikes = make(map[string]int)
+	}
+	sc.shrinkStrikes[snapshotKey]++
+	return sc.shrinkStrikes[snapshotKey]
+}
+
+// clearShrinkStrike forgets a key's strike count once it stores a normal-sized
+// archive, so strikes must be consecutive to add up.
+func (sc *SnapshotCache) clearShrinkStrike(snapshotKey string) {
+	if snapshotKey == "" {
+		return
+	}
+	sc.shrinkStrikesMu.Lock()
+	defer sc.shrinkStrikesMu.Unlock()
+	delete(sc.shrinkStrikes, snapshotKey)
+}
+
+// maxTrackedShrinkStrikes bounds the strike map. Strikes are a two-launch
+// signal, so this only needs to be larger than the number of keys a worker
+// might have mid-strike at once.
+const maxTrackedShrinkStrikes = 1024
 
 // tarStderrRetained bounds how much of tar's stderr is kept for logging.
 //
@@ -257,6 +337,11 @@ type SnapshotCache struct {
 	// tests set it, so they can drive the reject paths with byte-scale fixtures
 	// instead of allocating and streaming a megabyte per case.
 	minSnapshotBytesOverride int64
+	// shrinkStrikes counts consecutive shrink rejections per snapshot key, so a
+	// workspace that genuinely got smaller stops being rejected on its second
+	// attempt. See snapshotShrinkRejectStrikes.
+	shrinkStrikesMu sync.Mutex
+	shrinkStrikes   map[string]int
 }
 
 // SnapshotCacheConfig holds initialization options for SnapshotCache.
@@ -476,7 +561,7 @@ func (sc *SnapshotCache) CreateSnapshot(
 	// key, wiping a good checkout and leaving nothing behind. The deferred
 	// cleanup drops the staged file, so the previous snapshot for this key (if
 	// any) survives untouched and keeps serving.
-	if reason := sc.undersizedSnapshotReason(ctx, metadata, sizeBytes); reason != "" {
+	if reason := sc.undersizedSnapshotReason(ctx, snapshotKey, metadata, sizeBytes); reason != "" {
 		log.Error().
 			Int64("size_bytes", sizeBytes).
 			Str("reason", reason).
