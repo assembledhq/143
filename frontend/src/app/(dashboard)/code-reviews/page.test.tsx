@@ -167,13 +167,13 @@ const evidence: CodeReviewEvidence = {
       session_id: "session-1",
       agent_result_id: "agent-result-1",
       dedupe_key: "src/app.ts:12",
-      severity: "low",
+      severity: "medium",
       confidence: "high",
       path: "src/app.ts",
       start_line: 12,
       summary: "Clarify branch name",
       body: "The branch name could be more descriptive.",
-      selected_for_inline: true,
+      selected_for_inline: false,
       created_at: "2026-06-26T12:04:00Z",
     },
   ],
@@ -408,6 +408,12 @@ describe("CodeReviewsPage", () => {
     expect(evidenceSheet).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("No blocking issues found.")).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("Clarify branch name")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("P2 · Advisory")).toBeInTheDocument();
+    expect(
+      within(evidenceSheet).getByText(
+        "P0 and P1 findings block approval. P2 and P3 findings are advisory and are not posted as inline GitHub comments.",
+      ),
+    ).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("Review this PR.")).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("Completed")).toBeInTheDocument();
     await user.click(within(evidenceSheet).getByRole("button", { name: "Close" }));

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
@@ -48,6 +49,11 @@ type runCodeReviewPayload struct {
 
 const codeReviewRawOutputInlineLimit = 32 * 1024
 const codeReviewOrchestratorSynthesisRepairLimit = 1
+const codeReviewOrchestratorFindingLimit = 50
+const codeReviewOrchestratorHumanReviewReasonLimit = 10
+const codeReviewOrchestratorFindingSummaryLimit = 500
+const codeReviewOrchestratorFindingBodyLimit = 2_000
+const codeReviewOrchestratorHumanReviewSummaryLimit = 500
 
 type codeReviewDescriptionEvaluation struct {
 	Passed               bool
@@ -68,17 +74,36 @@ type codeReviewDescriptionAssessment struct {
 	Reason string                                `json:"reason"`
 }
 
+type codeReviewOrchestratorFinding struct {
+	Severity   models.CodeReviewFindingSeverity   `json:"severity"`
+	Confidence models.CodeReviewFindingConfidence `json:"confidence"`
+	Path       *string                            `json:"path"`
+	StartLine  *int                               `json:"start_line"`
+	EndLine    *int                               `json:"end_line"`
+	Summary    string                             `json:"summary"`
+	Body       string                             `json:"body"`
+}
+
+type codeReviewOrchestratorHumanReviewReason struct {
+	Code    models.CodeReviewHumanReviewReasonCode `json:"code"`
+	Summary string                                 `json:"summary"`
+}
+
 type codeReviewOrchestratorSynthesis struct {
-	ApprovalRecommended     bool                              `json:"approval_recommended"`
-	DescriptionAssessments  []codeReviewDescriptionAssessment `json:"description_assessments"`
-	Summary                 string                            `json:"summary,omitempty"`
-	ReviewSummary           string                            `json:"review_summary,omitempty"`
-	RiskNotes               []string                          `json:"risk_notes,omitempty"`
-	ScopeMismatch           bool                              `json:"scope_mismatch,omitempty"`
-	UnresolvedUncertainty   bool                              `json:"unresolved_uncertainty,omitempty"`
-	ReviewerDisagreement    bool                              `json:"reviewer_disagreement,omitempty"`
-	PromptInjectionDetected bool                              `json:"prompt_injection_detected,omitempty"`
-	DescriptionInputHash    string                            `json:"-"`
+	// ApprovalRecommended is retained as a model self-check and prose guard.
+	// The backend derives the actual decision from the explicit fields below.
+	ApprovalRecommended     bool                                      `json:"approval_recommended"`
+	DescriptionAssessments  []codeReviewDescriptionAssessment         `json:"description_assessments"`
+	Findings                []codeReviewOrchestratorFinding           `json:"findings"`
+	HumanReviewReasons      []codeReviewOrchestratorHumanReviewReason `json:"human_review_reasons"`
+	Summary                 string                                    `json:"summary,omitempty"`
+	ReviewSummary           string                                    `json:"review_summary,omitempty"`
+	RiskNotes               []string                                  `json:"risk_notes,omitempty"`
+	ScopeMismatch           bool                                      `json:"scope_mismatch,omitempty"`
+	UnresolvedUncertainty   bool                                      `json:"unresolved_uncertainty,omitempty"`
+	ReviewerDisagreement    bool                                      `json:"reviewer_disagreement,omitempty"`
+	PromptInjectionDetected bool                                      `json:"prompt_injection_detected,omitempty"`
+	DescriptionInputHash    string                                    `json:"-"`
 }
 
 func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
@@ -1466,21 +1491,25 @@ func parseCodeReviewOrchestratorStructuredResult(raw json.RawMessage) (codeRevie
 
 func parseCodeReviewOrchestratorSynthesis(raw string) (codeReviewOrchestratorSynthesis, error) {
 	var payload struct {
-		ApprovalRecommended     *bool                              `json:"approval_recommended"`
-		DescriptionAssessments  *[]codeReviewDescriptionAssessment `json:"description_assessments"`
-		Summary                 *string                            `json:"summary"`
-		ReviewSummary           *string                            `json:"review_summary"`
-		RiskNotes               *[]string                          `json:"risk_notes"`
-		ScopeMismatch           *bool                              `json:"scope_mismatch"`
-		UnresolvedUncertainty   *bool                              `json:"unresolved_uncertainty"`
-		ReviewerDisagreement    *bool                              `json:"reviewer_disagreement"`
-		PromptInjectionDetected *bool                              `json:"prompt_injection_detected"`
+		ApprovalRecommended     *bool                                      `json:"approval_recommended"`
+		DescriptionAssessments  *[]codeReviewDescriptionAssessment         `json:"description_assessments"`
+		Findings                *[]codeReviewOrchestratorFinding           `json:"findings"`
+		HumanReviewReasons      *[]codeReviewOrchestratorHumanReviewReason `json:"human_review_reasons"`
+		Summary                 *string                                    `json:"summary"`
+		ReviewSummary           *string                                    `json:"review_summary"`
+		RiskNotes               *[]string                                  `json:"risk_notes"`
+		ScopeMismatch           *bool                                      `json:"scope_mismatch"`
+		UnresolvedUncertainty   *bool                                      `json:"unresolved_uncertainty"`
+		ReviewerDisagreement    *bool                                      `json:"reviewer_disagreement"`
+		PromptInjectionDetected *bool                                      `json:"prompt_injection_detected"`
 	}
 	if err := json.Unmarshal([]byte(extractCodeReviewJSON(raw)), &payload); err != nil {
 		return codeReviewOrchestratorSynthesis{}, fmt.Errorf("parse orchestrator synthesis: %w", err)
 	}
 	if payload.ApprovalRecommended == nil ||
 		payload.DescriptionAssessments == nil ||
+		payload.Findings == nil ||
+		payload.HumanReviewReasons == nil ||
 		payload.Summary == nil || strings.TrimSpace(*payload.Summary) == "" ||
 		payload.ReviewSummary == nil || strings.TrimSpace(*payload.ReviewSummary) == "" ||
 		payload.RiskNotes == nil ||
@@ -1502,9 +1531,19 @@ func parseCodeReviewOrchestratorSynthesis(raw string) (codeReviewOrchestratorSyn
 			return codeReviewOrchestratorSynthesis{}, fmt.Errorf("orchestrator description assessment has invalid status %q", assessment.Status)
 		}
 	}
+	findings, err := normalizeCodeReviewOrchestratorFindings(*payload.Findings)
+	if err != nil {
+		return codeReviewOrchestratorSynthesis{}, err
+	}
+	humanReviewReasons, err := normalizeCodeReviewOrchestratorHumanReviewReasons(*payload.HumanReviewReasons)
+	if err != nil {
+		return codeReviewOrchestratorSynthesis{}, err
+	}
 	return codeReviewOrchestratorSynthesis{
 		ApprovalRecommended:     *payload.ApprovalRecommended,
 		DescriptionAssessments:  append([]codeReviewDescriptionAssessment{}, (*payload.DescriptionAssessments)...),
+		Findings:                findings,
+		HumanReviewReasons:      humanReviewReasons,
 		Summary:                 *payload.Summary,
 		ReviewSummary:           *payload.ReviewSummary,
 		RiskNotes:               *payload.RiskNotes,
@@ -1518,7 +1557,87 @@ func parseCodeReviewOrchestratorSynthesis(raw string) (codeReviewOrchestratorSyn
 func codeReviewOrchestratorSynthesisUsable(synthesis codeReviewOrchestratorSynthesis) bool {
 	return strings.TrimSpace(synthesis.Summary) != "" &&
 		strings.TrimSpace(synthesis.ReviewSummary) != "" &&
-		synthesis.DescriptionAssessments != nil
+		synthesis.DescriptionAssessments != nil &&
+		synthesis.Findings != nil &&
+		synthesis.HumanReviewReasons != nil
+}
+
+func normalizeCodeReviewOrchestratorFindings(findings []codeReviewOrchestratorFinding) ([]codeReviewOrchestratorFinding, error) {
+	if len(findings) > codeReviewOrchestratorFindingLimit {
+		return nil, fmt.Errorf("orchestrator synthesis has %d findings; limit is %d", len(findings), codeReviewOrchestratorFindingLimit)
+	}
+	normalized := make([]codeReviewOrchestratorFinding, 0, len(findings))
+	for _, finding := range findings {
+		if err := finding.Severity.Validate(); err != nil {
+			return nil, fmt.Errorf("orchestrator finding severity: %w", err)
+		}
+		if finding.Severity == models.CodeReviewFindingSeverityInfo {
+			return nil, errors.New("orchestrator finding severity must map to P0, P1, P2, or P3")
+		}
+		if err := finding.Confidence.Validate(); err != nil {
+			return nil, fmt.Errorf("orchestrator finding confidence: %w", err)
+		}
+		finding.Summary = strings.TrimSpace(finding.Summary)
+		finding.Body = strings.TrimSpace(finding.Body)
+		if finding.Summary == "" || finding.Body == "" {
+			return nil, errors.New("orchestrator finding is missing summary or body")
+		}
+		if utf8.RuneCountInString(finding.Summary) > codeReviewOrchestratorFindingSummaryLimit {
+			return nil, fmt.Errorf("orchestrator finding summary exceeds %d characters", codeReviewOrchestratorFindingSummaryLimit)
+		}
+		if utf8.RuneCountInString(finding.Body) > codeReviewOrchestratorFindingBodyLimit {
+			return nil, fmt.Errorf("orchestrator finding body exceeds %d characters", codeReviewOrchestratorFindingBodyLimit)
+		}
+		if finding.Path != nil {
+			path := strings.TrimSpace(*finding.Path)
+			if path == "" {
+				finding.Path = nil
+			} else {
+				finding.Path = &path
+			}
+		}
+		if finding.StartLine != nil && *finding.StartLine <= 0 {
+			return nil, errors.New("orchestrator finding start_line must be positive")
+		}
+		if finding.EndLine != nil && *finding.EndLine <= 0 {
+			return nil, errors.New("orchestrator finding end_line must be positive")
+		}
+		if finding.StartLine != nil && finding.Path == nil {
+			return nil, errors.New("orchestrator finding with start_line must include path")
+		}
+		if finding.EndLine != nil && finding.StartLine == nil {
+			return nil, errors.New("orchestrator finding with end_line must include start_line")
+		}
+		if finding.StartLine != nil && finding.EndLine == nil {
+			finding.EndLine = finding.StartLine
+		}
+		if finding.StartLine != nil && finding.EndLine != nil && *finding.EndLine < *finding.StartLine {
+			return nil, errors.New("orchestrator finding end_line must not precede start_line")
+		}
+		normalized = append(normalized, finding)
+	}
+	return normalized, nil
+}
+
+func normalizeCodeReviewOrchestratorHumanReviewReasons(reasons []codeReviewOrchestratorHumanReviewReason) ([]codeReviewOrchestratorHumanReviewReason, error) {
+	if len(reasons) > codeReviewOrchestratorHumanReviewReasonLimit {
+		return nil, fmt.Errorf("orchestrator synthesis has %d human review reasons; limit is %d", len(reasons), codeReviewOrchestratorHumanReviewReasonLimit)
+	}
+	normalized := make([]codeReviewOrchestratorHumanReviewReason, 0, len(reasons))
+	for _, reason := range reasons {
+		if err := reason.Code.Validate(); err != nil {
+			return nil, fmt.Errorf("orchestrator human review reason: %w", err)
+		}
+		reason.Summary = strings.TrimSpace(reason.Summary)
+		if reason.Summary == "" {
+			return nil, errors.New("orchestrator human review reason is missing summary")
+		}
+		if utf8.RuneCountInString(reason.Summary) > codeReviewOrchestratorHumanReviewSummaryLimit {
+			return nil, fmt.Errorf("orchestrator human review reason summary exceeds %d characters", codeReviewOrchestratorHumanReviewSummaryLimit)
+		}
+		normalized = append(normalized, reason)
+	}
+	return normalized, nil
 }
 
 func codeReviewOrchestratorSynthesisFromResults(results []models.CodeReviewAgentResult) codeReviewOrchestratorSynthesis {
@@ -1660,10 +1779,25 @@ func persistCodeReviewOrchestratorFindings(
 	stores *Stores,
 	job runCodeReviewPayload,
 	resultID uuid.UUID,
+	synthesis *codeReviewOrchestratorSynthesis,
 	raw string,
 	changedPaths []string,
 ) (int, error) {
-	findings := parseCodeReviewFindings(raw, changedPaths)
+	findings := make([]models.CodeReviewFinding, 0)
+	if synthesis != nil {
+		findings = codeReviewFindingsFromSynthesis(*synthesis, changedPaths)
+	}
+	seen := make(map[string]struct{}, len(findings))
+	for _, finding := range findings {
+		seen[finding.DedupeKey] = struct{}{}
+	}
+	for _, legacyFinding := range parseCodeReviewFindings(raw, changedPaths) {
+		if _, ok := seen[legacyFinding.DedupeKey]; ok {
+			continue
+		}
+		seen[legacyFinding.DedupeKey] = struct{}{}
+		findings = append(findings, legacyFinding)
+	}
 	for i := range findings {
 		findings[i].OrgID = job.OrgID
 		findings[i].SessionID = job.SessionID
@@ -1673,6 +1807,39 @@ func persistCodeReviewOrchestratorFindings(
 		}
 	}
 	return len(findings), nil
+}
+
+func codeReviewFindingsFromSynthesis(synthesis codeReviewOrchestratorSynthesis, changedPaths []string) []models.CodeReviewFinding {
+	findings := make([]models.CodeReviewFinding, 0, len(synthesis.Findings))
+	for _, structured := range synthesis.Findings {
+		path := ""
+		if structured.Path != nil {
+			path = codeReviewNormalizeFindingPath(*structured.Path, changedPaths)
+		}
+		var pathPtr *string
+		if path != "" {
+			pathPtr = &path
+		}
+		startLine := 0
+		if structured.StartLine != nil {
+			startLine = *structured.StartLine
+		}
+		endLine := startLine
+		if structured.EndLine != nil {
+			endLine = *structured.EndLine
+		}
+		findings = append(findings, models.CodeReviewFinding{
+			DedupeKey:  codeReviewFindingDedupeKey(path, startLine, endLine, structured.Summary),
+			Severity:   structured.Severity,
+			Confidence: structured.Confidence,
+			Path:       pathPtr,
+			StartLine:  structured.StartLine,
+			EndLine:    structured.EndLine,
+			Summary:    structured.Summary,
+			Body:       structured.Body,
+		})
+	}
+	return findings
 }
 
 func requestCodeReviewOrchestratorSynthesisRepair(
@@ -1697,7 +1864,7 @@ func requestCodeReviewOrchestratorSynthesisRepair(
 		return false, false, fmt.Errorf("parse orchestrator thread id for synthesis repair: %w", err)
 	}
 
-	findingCount, err := persistCodeReviewOrchestratorFindings(ctx, stores, job, result.ID, raw, codeReviewChangedPaths(changedFiles))
+	findingCount, err := persistCodeReviewOrchestratorFindings(ctx, stores, job, result.ID, nil, raw, codeReviewChangedPaths(changedFiles))
 	if err != nil {
 		return false, false, err
 	}
@@ -2286,7 +2453,7 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			}
 			continue
 		}
-		findingCount, err := persistCodeReviewOrchestratorFindings(ctx, stores, job, result.ID, combinedRaw, changedPaths)
+		findingCount, err := persistCodeReviewOrchestratorFindings(ctx, stores, job, result.ID, &synthesis, combinedRaw, changedPaths)
 		if err != nil {
 			return err
 		}
@@ -2395,14 +2562,20 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 	if reviewerQuorum < requiredReviewerQuorum {
 		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonReviewerQuorum, Actual: reviewerQuorum, Limit: requiredReviewerQuorum})
 	}
+	if policy.ApprovalMode == models.CodeReviewApprovalModeApproveAcceptable && orchestratorFresh {
+		for _, reason := range input.OrchestratorSynthesis.HumanReviewReasons {
+			risk.AddReason(models.CodeReviewRiskReason{
+				Code:    reason.Code.RiskReasonCode(),
+				Subject: reason.Summary,
+			})
+		}
+	}
 	if policy.ApprovalMode == models.CodeReviewApprovalModeApproveAcceptable && (!orchestratorPresent || !orchestratorEvidenceUsable || !orchestratorSynthesisUsable) {
 		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonOrchestratorSynthesisInvalid})
 	} else if orchestratorSynthesisUsable && !orchestratorFresh {
 		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonOrchestratorContextStale})
 	} else if orchestratorSynthesisUsable && !descriptionEvaluationValid {
 		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonOrchestratorSynthesisInvalid})
-	} else if policy.ApprovalMode == models.CodeReviewApprovalModeApproveAcceptable && !input.OrchestratorSynthesis.ApprovalRecommended {
-		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonOrchestratorEscalation})
 	} else if orchestratorPresent && !orchestratorEvidenceUsable {
 		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonOrchestratorSynthesisInvalid})
 	}
@@ -2411,11 +2584,19 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		descriptionPassed = &descriptionEvaluation.Passed
 	}
 	decision := models.EvaluateCodeReviewDecision(policy, risk)
+	generatedSummary := ""
+	// Never let prose based on an opaque negative recommendation explain an
+	// approval. The structured findings, reasons, and hard gates above are the
+	// only decision authority.
+	if decision.Decision == models.CodeReviewDecisionApproved && input.OrchestratorSynthesis.ApprovalRecommended {
+		generatedSummary = codeReviewOrchestratorReviewSummary(input.OrchestratorSynthesis)
+	}
 	body := models.BuildCodeReviewFinalReviewBody(models.CodeReviewFinalReviewInput{
 		Decision:                  decision.Decision,
 		Acceptable:                decision.Acceptable,
 		RiskReasons:               decision.RiskReasonDetails,
-		GeneratedSummary:          codeReviewOrchestratorReviewSummary(input.OrchestratorSynthesis),
+		GeneratedSummary:          generatedSummary,
+		ChangeSummary:             input.OrchestratorSynthesis.Summary,
 		OperationalSummary:        codeReviewOrchestratorOperationalSummary(input.AgentResults, decision.RiskReasonDetails),
 		SessionURL:                input.SessionURL,
 		DescriptionPassed:         descriptionPassed,

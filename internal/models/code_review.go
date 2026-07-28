@@ -321,6 +321,50 @@ func (s CodeReviewFindingSeverity) IsBlocking() bool {
 	}
 }
 
+// CodeReviewHumanReviewReasonCode identifies a non-finding reason supplied by
+// the orchestrator for requiring human judgment. Code defects belong in
+// CodeReviewFinding instead so severity remains the single source of truth for
+// whether a code finding blocks approval.
+type CodeReviewHumanReviewReasonCode string
+
+const (
+	CodeReviewHumanReviewReasonArchitecture      CodeReviewHumanReviewReasonCode = "architecture"
+	CodeReviewHumanReviewReasonOwnership         CodeReviewHumanReviewReasonCode = "ownership"
+	CodeReviewHumanReviewReasonOperationalRisk   CodeReviewHumanReviewReasonCode = "operational_risk"
+	CodeReviewHumanReviewReasonSensitiveChange   CodeReviewHumanReviewReasonCode = "sensitive_change"
+	CodeReviewHumanReviewReasonPolicyRequirement CodeReviewHumanReviewReasonCode = "policy_requirement"
+)
+
+func (c CodeReviewHumanReviewReasonCode) Validate() error {
+	switch c {
+	case CodeReviewHumanReviewReasonArchitecture,
+		CodeReviewHumanReviewReasonOwnership,
+		CodeReviewHumanReviewReasonOperationalRisk,
+		CodeReviewHumanReviewReasonSensitiveChange,
+		CodeReviewHumanReviewReasonPolicyRequirement:
+		return nil
+	default:
+		return fmt.Errorf("invalid CodeReviewHumanReviewReasonCode: %q", c)
+	}
+}
+
+func (c CodeReviewHumanReviewReasonCode) RiskReasonCode() CodeReviewRiskReasonCode {
+	switch c {
+	case CodeReviewHumanReviewReasonArchitecture:
+		return CodeReviewRiskReasonArchitecture
+	case CodeReviewHumanReviewReasonOwnership:
+		return CodeReviewRiskReasonOwnership
+	case CodeReviewHumanReviewReasonOperationalRisk:
+		return CodeReviewRiskReasonOperationalRisk
+	case CodeReviewHumanReviewReasonSensitiveChange:
+		return CodeReviewRiskReasonSensitiveChange
+	case CodeReviewHumanReviewReasonPolicyRequirement:
+		return CodeReviewRiskReasonPolicyRequirement
+	default:
+		return CodeReviewRiskReasonOrchestratorSynthesisInvalid
+	}
+}
+
 type CodeReviewFindingConfidence string
 
 const (
@@ -1080,8 +1124,16 @@ const (
 	CodeReviewRiskReasonExcludedCategory             CodeReviewRiskReasonCode = "excluded_category"
 	CodeReviewRiskReasonReviewerQuorum               CodeReviewRiskReasonCode = "reviewer_quorum"
 	CodeReviewRiskReasonOrchestratorSynthesisInvalid CodeReviewRiskReasonCode = "orchestrator_synthesis_invalid"
-	CodeReviewRiskReasonOrchestratorEscalation       CodeReviewRiskReasonCode = "orchestrator_escalation"
-	CodeReviewRiskReasonOrchestratorContextStale     CodeReviewRiskReasonCode = "orchestrator_context_stale"
+	// CodeReviewRiskReasonOrchestratorEscalation is retained so historical
+	// decisions remain renderable. Current evaluations require an explicit
+	// structured blocker instead.
+	CodeReviewRiskReasonOrchestratorEscalation   CodeReviewRiskReasonCode = "orchestrator_escalation"
+	CodeReviewRiskReasonOrchestratorContextStale CodeReviewRiskReasonCode = "orchestrator_context_stale"
+	CodeReviewRiskReasonArchitecture             CodeReviewRiskReasonCode = "architecture"
+	CodeReviewRiskReasonOwnership                CodeReviewRiskReasonCode = "ownership"
+	CodeReviewRiskReasonOperationalRisk          CodeReviewRiskReasonCode = "operational_risk"
+	CodeReviewRiskReasonSensitiveChange          CodeReviewRiskReasonCode = "sensitive_change"
+	CodeReviewRiskReasonPolicyRequirement        CodeReviewRiskReasonCode = "policy_requirement"
 )
 
 func (c CodeReviewRiskReasonCode) Validate() error {
@@ -1111,7 +1163,12 @@ func (c CodeReviewRiskReasonCode) Validate() error {
 		CodeReviewRiskReasonReviewerQuorum,
 		CodeReviewRiskReasonOrchestratorSynthesisInvalid,
 		CodeReviewRiskReasonOrchestratorEscalation,
-		CodeReviewRiskReasonOrchestratorContextStale:
+		CodeReviewRiskReasonOrchestratorContextStale,
+		CodeReviewRiskReasonArchitecture,
+		CodeReviewRiskReasonOwnership,
+		CodeReviewRiskReasonOperationalRisk,
+		CodeReviewRiskReasonSensitiveChange,
+		CodeReviewRiskReasonPolicyRequirement:
 		return nil
 	default:
 		return fmt.Errorf("invalid CodeReviewRiskReasonCode: %q", c)
@@ -1179,9 +1236,27 @@ func (r CodeReviewRiskReason) Message() string {
 		return "coding-agent orchestrator recommends human review"
 	case CodeReviewRiskReasonOrchestratorContextStale:
 		return "PR title or description changed after the coding-agent assessment"
+	case CodeReviewRiskReasonArchitecture:
+		return codeReviewHumanReviewReasonMessage("architectural judgment", r.Subject)
+	case CodeReviewRiskReasonOwnership:
+		return codeReviewHumanReviewReasonMessage("ownership judgment", r.Subject)
+	case CodeReviewRiskReasonOperationalRisk:
+		return codeReviewHumanReviewReasonMessage("operational-risk judgment", r.Subject)
+	case CodeReviewRiskReasonSensitiveChange:
+		return codeReviewHumanReviewReasonMessage("sensitive-change judgment", r.Subject)
+	case CodeReviewRiskReasonPolicyRequirement:
+		return codeReviewHumanReviewReasonMessage("an automated approval policy requirement", r.Subject)
 	default:
 		return string(r.Code)
 	}
+}
+
+func codeReviewHumanReviewReasonMessage(kind, detail string) string {
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		return "human review is required for " + kind
+	}
+	return "human review is required for " + kind + ": " + detail
 }
 
 func CodeReviewRiskReasonMessages(reasons []CodeReviewRiskReason) []string {

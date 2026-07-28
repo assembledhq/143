@@ -11,6 +11,7 @@ type CodeReviewFinalReviewInput struct {
 	Acceptable                bool
 	RiskReasons               []CodeReviewRiskReason
 	GeneratedSummary          string
+	ChangeSummary             string
 	OperationalSummary        string
 	SessionURL                string
 	DescriptionPassed         *bool
@@ -53,6 +54,10 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 	}
 	paragraphs = append(paragraphs, "**Why:** "+explanation)
 
+	if changeSummary := codeReviewGeneratedSummary(input.ChangeSummary); changeSummary != "" {
+		paragraphs = append(paragraphs, "**Change:** "+changeSummary)
+	}
+
 	if (generatedSummary != "" || operationalSummary != "") && !input.Acceptable {
 		riskReasons := input.RiskReasons
 		if operationalSummary != "" {
@@ -80,17 +85,21 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 		paragraphs = append(paragraphs, "**Reviewer evidence:** "+strings.Join(agentSummaries, "; ")+".")
 	}
 
-	if len(input.Findings) > 0 {
+	blockingFindings, advisoryFindings := partitionCodeReviewFindings(input.Findings)
+	if len(blockingFindings) > 0 {
 		var findings strings.Builder
-		if input.Acceptable {
-			findings.WriteString("**Review notes:**\n")
-		} else {
-			findings.WriteString("**Review findings:**\n")
-		}
-		for _, finding := range groupedCodeReviewFindings(input.Findings) {
+		findings.WriteString("**Blocking findings:**\n")
+		for _, finding := range groupedCodeReviewFindings(blockingFindings) {
 			findings.WriteString("- " + finding + "\n")
 		}
 		paragraphs = append(paragraphs, strings.TrimSpace(findings.String()))
+	}
+	if len(advisoryFindings) > 0 {
+		paragraphs = append(paragraphs, fmt.Sprintf(
+			"**Advisory notes:** %d non-blocking %s available in the full review. P2 and P3 observations do not affect the approval decision.",
+			len(advisoryFindings),
+			pluralizeCodeReviewWord(len(advisoryFindings), "observation is", "observations are"),
+		))
 	}
 	if reviewers := nonEmptyStrings(input.RecommendedHumanReviewers); len(reviewers) > 0 {
 		paragraphs = append(paragraphs, "**Suggested human reviewers:** "+strings.Join(reviewers, ", "))
@@ -281,9 +290,27 @@ func humanizeCodeReviewRiskReason(reason CodeReviewRiskReason, descriptionIssues
 		return "The coding-agent orchestrator recommends human review."
 	case CodeReviewRiskReasonOrchestratorContextStale:
 		return "The PR title or description changed after the coding-agent assessment, so that recommendation is stale."
+	case CodeReviewRiskReasonArchitecture:
+		return codeReviewExplicitHumanReviewExplanation("architectural judgment", reason.Subject)
+	case CodeReviewRiskReasonOwnership:
+		return codeReviewExplicitHumanReviewExplanation("ownership judgment", reason.Subject)
+	case CodeReviewRiskReasonOperationalRisk:
+		return codeReviewExplicitHumanReviewExplanation("operational-risk judgment", reason.Subject)
+	case CodeReviewRiskReasonSensitiveChange:
+		return codeReviewExplicitHumanReviewExplanation("sensitive-change judgment", reason.Subject)
+	case CodeReviewRiskReasonPolicyRequirement:
+		return codeReviewExplicitHumanReviewExplanation("an automated approval policy requirement", reason.Subject)
 	}
 
 	return codeReviewSentence(reason.Message())
+}
+
+func codeReviewExplicitHumanReviewExplanation(kind, detail string) string {
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		return "Human review is required for " + kind + "."
+	}
+	return "Human review is required for " + kind + ": " + strings.TrimRight(detail, ".") + "."
 }
 
 func codeReviewEnglishList(values []string) string {
@@ -328,6 +355,19 @@ func nonEmptyStrings(values []string) []string {
 		out = append(out, value)
 	}
 	return out
+}
+
+func partitionCodeReviewFindings(findings []CodeReviewFinding) (blocking, advisory []CodeReviewFinding) {
+	blocking = make([]CodeReviewFinding, 0, len(findings))
+	advisory = make([]CodeReviewFinding, 0, len(findings))
+	for _, finding := range findings {
+		if finding.Severity.IsBlocking() {
+			blocking = append(blocking, finding)
+		} else {
+			advisory = append(advisory, finding)
+		}
+	}
+	return blocking, advisory
 }
 
 func groupedCodeReviewFindings(findings []CodeReviewFinding) []string {
