@@ -35,6 +35,7 @@ describe("ResponsiveResourceList", () => {
         getItemKey={(item) => item.id}
         columns={columns}
         emptyState="No automations."
+        footer={<div>Showing 1 of 2</div>}
         tableClassName="min-w-[64rem]"
         getDesktopRowProps={(item) => ({ "aria-label": `Desktop ${item.name}` })}
         renderMobileItem={(item) => <div>Mobile {item.name}</div>}
@@ -48,9 +49,11 @@ describe("ResponsiveResourceList", () => {
     expect(within(table).getByRole("row", { name: "Desktop Release check" })).toBeInTheDocument();
 
     const mobileList = screen.getByRole("list", { name: "Automations mobile list" });
+    const footer = screen.getByText("Showing 1 of 2");
     expect(within(mobileList).getByText("Mobile Release check")).toBeInTheDocument();
     expect(within(mobileList).getByRole("listitem")).toBeInTheDocument();
     expect(table.closest('[data-slot="card"]')).toBe(mobileList.closest('[data-slot="card"]'));
+    expect(table.closest('[data-slot="card"]')).toBe(footer.closest('[data-slot="card"]'));
   });
 
   it("uses the shared card treatment for empty resource lists", () => {
