@@ -18,10 +18,29 @@ describe("LandingPage", () => {
     render(<LandingPage />);
 
     expect(screen.getByTestId("hero-canvas")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Where your whole team builds software together" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Automate code review. Merge without the wait." })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Run any coding agent." })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Connect your engineering tools." })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Put your agents to work." })).toBeInTheDocument();
     expect(screen.queryByText(/mission control/i)).not.toBeInTheDocument();
+  });
+
+  it("puts code review directly below the hero, ahead of the platform story", () => {
+    const { container } = render(<LandingPage />);
+
+    const sectionIds = Array.from(container.querySelectorAll("section")).map(
+      (section) => section.id,
+    );
+
+    expect(sectionIds).toEqual([
+      "code-review",
+      "how-it-works",
+      "integrations",
+    ]);
+    expect(
+      screen.getByRole("heading", {
+        name: "Code review that approves the pull requests it should.",
+      }),
+    ).toBeInTheDocument();
   });
 });

@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import * as landingCopy from "./landing-copy";
 import {
   agentChoiceHighlights,
+  codeReviewApproval,
+  codeReviewEscalation,
+  codeReviewOutcomes,
+  codeReviewSummary,
   codingAgents,
   integrations,
   platformLayers,
@@ -12,12 +16,42 @@ describe("landing copy", () => {
     expect("heroMetrics" in landingCopy).toBe(false);
   });
 
-  it("numbers platform layers after the why-this-matters section", () => {
+  it("numbers platform layers after the code-review and why-this-matters sections", () => {
     expect(platformLayers.map((layer) => `${layer.step} ${layer.title}`)).toEqual([
-      "02 Team context",
-      "03 Cloud execution",
-      "04 Review control",
-      "05 Cloud previews",
+      "03 Team context",
+      "04 Cloud execution",
+      "05 Repair loops",
+      "06 Cloud previews",
+    ]);
+  });
+
+  it("opens the homepage story with code review", () => {
+    expect(`${codeReviewSummary.step} ${codeReviewSummary.kicker}`).toBe(
+      "01 Code review",
+    );
+    expect(codeReviewSummary.heading).toBe(
+      "Code review that approves the pull requests it should.",
+    );
+  });
+
+  it("leads the code review outcomes with speed, policy, and unblocked merges", () => {
+    expect(codeReviewOutcomes.map((outcome) => outcome.title)).toEqual([
+      "Reviews finish in minutes",
+      "Policy is enforced, not remembered",
+      "Review stops blocking the merge",
+    ]);
+  });
+
+  it("shows both the auto-approval and the escalation path", () => {
+    expect(codeReviewApproval.decision).toBe("Approved");
+    expect(codeReviewEscalation.decision).toBe("Needs human review");
+    expect(codeReviewApproval.evidence.map((row) => row.label)).toEqual([
+      "Risk",
+      "Description",
+      "Review agents",
+      "Required checks",
+      "Changed",
+      "Sensitive paths",
     ]);
   });
 
@@ -61,7 +95,7 @@ describe("landing copy", () => {
     expect(platformLayers.map((layer) => layer.heading)).toEqual([
       "Shared context for every run.",
       "Run agents from anywhere.",
-      "Review loops before human review.",
+      "Arrive at review already clean.",
       "Preview every change in the cloud.",
     ]);
   });

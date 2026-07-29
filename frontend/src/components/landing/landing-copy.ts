@@ -1,6 +1,61 @@
+export const codeReviewSummary = {
+  step: "01",
+  kicker: "Code review",
+  heading: "Code review that approves the pull requests it should.",
+  body: "Request 143 Code Reviewer on a pull request and several coding agents review it in parallel. When the change clears your policy and no blocking finding remains, 143 submits a real GitHub approval with the evidence attached. When it does not, the pull request comes back with inline findings and the specific reason a human is still needed.",
+};
+
+export const codeReviewOutcomes = [
+  {
+    title: "Reviews finish in minutes",
+    body: "Assessment starts the moment 143 is requested as a reviewer, and every new commit is reviewed again automatically until the pull request is approved. Nobody has to schedule a review or chase one down.",
+  },
+  {
+    title: "Policy is enforced, not remembered",
+    body: "Size thresholds, sensitive paths, migrations, auth, billing, dependency changes, required checks, and description requirements are evaluated on every pull request the same way — instead of depending on who happens to be reviewing that day.",
+  },
+  {
+    title: "Review stops blocking the merge",
+    body: "Acceptable-risk changes are approved on the spot instead of waiting in someone's queue, so finished work reaches main while reviewers keep their attention for the changes that need judgment.",
+  },
+];
+
+export const codeReviewCapabilities = [
+  "Requested like any other GitHub reviewer",
+  "Reviewer agents run their native /review in parallel",
+  "Approval needs evidence, not a model's opinion",
+  "P0 and P1 findings block approval and post inline",
+  "One versioned policy across every repository",
+  "Every decision links to its session and commit",
+];
+
+export const codeReviewApproval = {
+  title: "143 Code Reviewer approved this PR",
+  decision: "Approved",
+  evidence: [
+    { label: "Risk", value: "Acceptable" },
+    { label: "Description", value: "Passed" },
+    { label: "Review agents", value: "Codex clean, Claude Code clean" },
+    { label: "Required checks", value: "CI green" },
+    { label: "Changed", value: "4 files, 96 lines" },
+    { label: "Sensitive paths", value: "None touched" },
+  ],
+  footer: "Policy v12 · reviewed a91f3c2 · evidence kept in the review session",
+};
+
+export const codeReviewEscalation = {
+  title: "143 Code Reviewer did not approve this PR",
+  decision: "Needs human review",
+  reasons: [
+    "Auth-sensitive paths changed",
+    "Description is missing a testing strategy",
+    "P1 finding posted inline on src/auth/session.go:88",
+  ],
+};
+
 export const platformLayers = [
   {
-    step: "02",
+    step: "03",
     kicker: "Context",
     title: "Team context",
     heading: "Shared context for every run.",
@@ -13,7 +68,7 @@ export const platformLayers = [
     ],
   },
   {
-    step: "03",
+    step: "04",
     kicker: "Execution",
     title: "Cloud execution",
     heading: "Run agents from anywhere.",
@@ -26,11 +81,11 @@ export const platformLayers = [
     ],
   },
   {
-    step: "04",
+    step: "05",
     kicker: "Control",
-    title: "Review control",
-    heading: "Review loops before human review.",
-    body: "Agents can repair failing tests, respond to review feedback, and iterate inside guardrails before a teammate has to step in.",
+    title: "Repair loops",
+    heading: "Arrive at review already clean.",
+    body: "Before a reviewer is ever requested, agents repair failing tests, respond to feedback, and iterate inside guardrails, so the pull request that reaches code review is one that can pass it.",
     components: [
       "PR review and repair loops",
       "Usage and cost analytics",
@@ -39,7 +94,7 @@ export const platformLayers = [
     ],
   },
   {
-    step: "05",
+    step: "06",
     kicker: "Previews",
     title: "Cloud previews",
     heading: "Preview every change in the cloud.",

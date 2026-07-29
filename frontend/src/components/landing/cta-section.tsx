@@ -33,6 +33,15 @@ export default function CtaSection({ isDark }: CtaSectionProps) {
         >
           Put your agents to work.
         </h2>
+        <p
+          className={`mx-auto max-w-xl ${type.body} ${
+            isDark ? "text-[#aaa89f]" : "text-[#6b6b65]"
+          }`}
+        >
+          Connect a repository, request 143 Code Reviewer on your next pull
+          request, and let the changes that clear your policy approve
+          themselves.
+        </p>
         <div className="flex flex-wrap items-center justify-center gap-3">
           <Button
             asChild

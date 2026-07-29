@@ -27,12 +27,13 @@ describe("HeroSection", () => {
     );
   });
 
-  it("preserves the plane-led homepage content while applying the flight-blue visual system", () => {
+  it("leads with automated code review while keeping the plane-led visual system", () => {
     render(<HeroSection isDark={false} />);
 
     expect(screen.getByTestId("hero-canvas")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Where your whole team builds software together" })).toBeInTheDocument();
-    expect(screen.getByText(/Run Codex, Claude Code, and OpenCode in an open-source cloud/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Automate code review. Merge without the wait." })).toBeInTheDocument();
+    expect(screen.getByText(/auto-approves the ones that clear your policy/)).toBeInTheDocument();
+    expect(screen.getByText(/Codex, Claude Code, and OpenCode together/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /get started/i })).toHaveClass("bg-[#315ce8]");
     expect(screen.queryByText(/mission control/i)).not.toBeInTheDocument();
   });

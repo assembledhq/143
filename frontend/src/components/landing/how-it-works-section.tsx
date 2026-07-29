@@ -122,16 +122,17 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
 
       <div className={`${layout.pageShell} space-y-28 sm:space-y-44`}>
         <div className={layout.sectionHeaderGrid}>
-          <p className={`${type.eyebrow} ${label}`}>01 Why this matters</p>
+          <p className={`${type.eyebrow} ${label}`}>02 Why this matters</p>
           <div className="space-y-5">
             <h2 className={`max-w-3xl ${type.sectionTitle} ${heading}`}>
-              Individual coding agents create scattered work. Teams need one
-              place to run, review, and schedule it.
+              Automated review only pays off when the work leading into it is
+              shared, reproducible, and reviewable.
             </h2>
             <p className={`max-w-2xl ${type.body} ${body}`}>
               143 turns scattered local runs and one-off fixes into a shared
-              system with context, previews, review loops, and history the
-              whole team can trust.
+              system with context, previews, repair loops, and history the
+              whole team can trust — the same system the code reviewer draws its
+              evidence from.
             </p>
           </div>
         </div>
@@ -241,7 +242,7 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
           <div className={layout.featureRow}>
             <div className={layout.copyColumn}>
               <p className={`${type.eyebrow} ${label}`}>
-                06 Workspace
+                07 Workspace
               </p>
               <h2 className={`${type.featureTitle} ${heading}`}>
                 See every run in one workspace.
