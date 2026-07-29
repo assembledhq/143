@@ -304,7 +304,7 @@ func newActivityPhasePostgresTestPool(t *testing.T) *pgxpool.Pool {
 		)`)
 	require.NoError(t, err, "test should create the pre-migration activity lifecycle schema")
 
-	migration, err := os.ReadFile("../../migrations/000261_session_activity_phases.up.sql")
+	migration, err := os.ReadFile("../../migrations/000262_session_activity_phases.up.sql")
 	require.NoError(t, err, "test should read the activity phase migration")
 	_, err = pool.Exec(ctx, string(migration))
 	require.NoError(t, err, "test should apply the activity phase migration")
