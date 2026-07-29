@@ -12,9 +12,15 @@ the highest-signal data the system could collect about its own policy — is
 discarded, and the org never learns which of its rules are actually miscalibrated.
 
 This document proposes a **decision feedback loop**: a first-class way to
-contest a code review decision, a durable record of that contest, corroboration
-against what actually happened to the PR, and an automated engine that turns
-recurring corroborated disputes into concrete, reviewable policy changes.
+contest a code review decision in plain language, a durable record of that
+contest, an automated triage step that can immediately rerun the review when the
+objection carries new information, corroboration against what actually happened
+to the PR, and an engine that turns recurring corroborated disputes into
+concrete, reviewable policy changes.
+
+Disagreeing must cost nothing. There is no command syntax and no form: a
+developer replies to the bot the way they would reply to a human reviewer, and
+143 works out what they meant.
 
 Doc 112 explicitly deferred "automatic policy learning from past approvals" and
 "aggregate reporting/insights across reviews." This document fills both gaps and
@@ -115,6 +121,14 @@ comments, threads, checks, and merge state. For a disputed non-approval:
 | Reverted, or linked to an incident within N days of merge | **Strongly refutes** — feeds the false-approval metric in doc 112 |
 | Still open past the window | **Inconclusive** — expires, never counted |
 
+**Reassessment outcome (automatic, immediate).** When triage reruns the review
+(below) and the rerun approves the same head SHA under the same policy version,
+the original decision was demonstrably wrong on its own terms — the strongest and
+fastest corroboration available, and the only one that does not require waiting
+for the PR to reach a terminal state. A rerun that reaches the same conclusion is
+not by itself a refutation; it is `inconclusive`, because a rerun cannot fix a
+threshold that is genuinely miscalibrated.
+
 **Explicit adjudication (human, authoritative).** A policy owner — not the PR
 author — marks a dispute `upheld` or `rejected`. Adjudication always overrides
 telemetry.
@@ -147,8 +161,11 @@ from reason-code frequency and tune policy by hand.
 
 ### Option B — Structured disputes plus a deterministic auto-tuner
 
-Add a dispute record. When N disputes cluster on the same *deterministic* reason
-code in the same repo, a rules engine proposes a mechanical adjustment —
+Add a dispute record with the same free-text intake as Option C, but no
+reassessment and no agent proposals — the options differ in what happens to a
+dispute, not in how one is filed. When N disputes cluster on the same
+*deterministic* reason code in the same repo, a rules engine proposes a
+mechanical adjustment —
 `files_limit_exceeded` with disputed `Actual` values consistently at 7 against a
 `Limit` of 5 proposes raising the limit to 8.
 
@@ -170,19 +187,28 @@ code in the same repo, a rules engine proposes a mechanical adjustment —
 
 ### Option C — Disputes, corroboration, and agent-authored proposals (recommended)
 
-Capture disputes as first-class records attributed to specific reason codes.
-Corroborate each against PR outcome telemetry and optional human adjudication.
-Cluster the survivors. When a cluster crosses a threshold, a scheduled 143
-session reads the cluster, its evidence, and the current policy, and emits a
-**proposed policy version** with a concrete diff and a rationale citing the
-sessions behind it. An admin reviews and activates it in one click; activation
-creates the next insert-only version and an audit event.
+Capture disagreement as free-text replies, triage it with one LLM pass that
+attributes it to the decision's own reason codes and decides whether a rerun
+could change the answer, and rerun the review when it could. Corroborate each
+dispute against the reassessment outcome, PR outcome telemetry, and optional
+human adjudication. Cluster the survivors. When a cluster crosses a threshold, a
+scheduled 143 session reads the cluster, its evidence, and the current policy,
+and emits a **proposed policy version** with a concrete diff and a rationale
+citing the sessions behind it. An admin reviews and activates it in one click;
+activation creates the next insert-only version and an audit event.
 
 **Pros**
 - Handles both halves: deterministic dimensions get mechanical proposals, prompt
   and rubric text gets agent-authored edits. Judgment reasons become tunable.
+- Two response times. A wrong judgment call is fixed in minutes by a rerun; a
+  wrong policy rule is fixed in the next tuning cycle. Options A and B can only
+  ever do the slow one, which is why they read as unresponsive to the developer
+  who is blocked right now.
 - The corroboration gate means only disputes that reality agreed with can move
   policy.
+- Free-text intake means the feature has no adoption curve — nobody has to learn
+  or remember a command to use it, and objections filed before it shipped are
+  still parseable.
 - Human activation keeps the security boundary intact — the system proposes,
   a person disposes — while removing essentially all of the analysis toil.
 - Reuses infrastructure wholesale: 143 sessions for the proposal agent, the job
@@ -201,6 +227,14 @@ creates the next insert-only version and an audit event.
   activation, this needs the same untrusted-input discipline doc 112 applies to
   PR content: dispute text is written by the people the bot blocked and must be
   treated as evidence, never as instructions.
+- Free-text intake means a classifier decides what counts as a dispute. A missed
+  dispute is silent, which is the failure mode this whole document exists to fix,
+  so triage must bias toward recording. Over-recording is cheap; the routing step
+  and the corroboration gate both filter downstream.
+- Dispute-triggered reruns cost agent time and create a reroll surface. Bounded
+  by the per-head cap and by deterministic gates being non-waivable, but the
+  reassessment-flip rate needs watching: if reruns frequently flip the outcome on
+  identical inputs, the problem is judgment-layer variance, not policy.
 
 ### Option D — Policy-as-code with proposal PRs
 
@@ -283,34 +317,96 @@ detail view:
 Phase 0 alone likely resolves a large share of "I'm not sure why," and every
 later phase depends on the reason-code grouping it introduces.
 
-### Phase 1 — Capture and corroborate
+### Phase 1 — Capture, triage, and corroborate
 
-Two capture surfaces, one record:
+Two capture surfaces, one record, no syntax:
 
-- **GitHub-native (primary).** Reply to the rolling comment with
-  `@143-code-reviewer disagree: <reason>`. The `issue_comment` and
-  `pull_request_review_comment` webhooks are already routed
-  (`internal/api/handlers/webhooks.go`); this adds a command parser. Disputes are
-  filed where the frustration happens, with no context switch.
+- **GitHub-native (primary).** The developer replies in plain language, either
+  in the thread rooted on the bot's rolling comment or by mentioning
+  `@143-code-reviewer` anywhere on a PR the bot reviewed. No command, no prefix,
+  no structured form. "this is test-only, why is it blocked?", "the migration is
+  additive so there's no risk here", and "I think this should have been approved"
+  are all valid disputes. The `issue_comment` and `pull_request_review_comment`
+  webhooks are already routed (`internal/api/handlers/webhooks.go`).
 - **143-native (secondary).** A "Disagree with this decision" action on the code
-  review session detail, with a reason-code multi-select prefilled from the
-  decision's actual blockers. The rolling comment links to it.
+  review session detail opening a free-text box. The reason codes from the actual
+  decision are shown for reference and can optionally be ticked, but nothing is
+  required beyond prose. The rolling comment links here.
 
-Both write `code_review_decision_disputes`, attributed to the session, the policy
-version, the reviewed head SHA, and the specific contested reason codes.
+Both write a `code_review_decision_disputes` row attributed to the session, the
+policy version, and the reviewed head SHA, with `intake_status = 'pending'`.
 
-A light LLM classification pass maps free text to a `dispute_kind`
-(`threshold_too_strict`, `path_rule_too_broad`, `description_requirement_wrong`,
-`finding_incorrect`, `judgment_overreach`, `bot_correct`, `other`). Classification
-is advisory metadata for clustering; it never decides anything on its own.
+Capture is deliberately over-inclusive and triage is where meaning gets assigned.
+It is much better to record a comment that turns out to be a question than to
+drop a real objection because it did not match a pattern.
 
-A scheduled `corroborate_code_review_dispute` job resolves telemetry per the
-table above, once the PR reaches a terminal state or the window expires.
+**Intake and routing.** Every captured comment enqueues
+`triage_code_review_dispute`, a single LLM pass that reads the comment, the
+decision it is responding to, the reason codes that decision emitted, the diff
+summary, and the thread it sits in. It produces:
 
-Ship the `Insights` tab here (Option A's content, plus dispute rate and
-corroboration rate by reason code), and a weekly digest to policy owners over the
-existing notification path — this is the "store the data and send the results"
-half of the ask, and it is independently valuable.
+| Field | Meaning |
+| --- | --- |
+| `is_dispute` | Does this actually contest the decision? Questions, thanks, unrelated chatter, and comments aimed at other bots are not disputes |
+| `contested_reason_codes` | Which of the decision's actual reason codes the objection targets, inferred from prose. Empty when the objection is general |
+| `dispute_kind` | `threshold_too_strict`, `path_rule_too_broad`, `description_requirement_wrong`, `finding_incorrect`, `judgment_overreach`, `bot_correct`, `other` |
+| `asserts_new_information` | Does the comment supply a fact the review did not have — "that path isn't auth-sensitive, it's a fixture", "the generated file is checked in but not executed" |
+| `routing` | `reassess`, `policy_signal_only`, `answer_only`, or `not_a_dispute` |
+
+Routing is the useful part, because the two kinds of objection need opposite
+responses:
+
+- **`reassess`** — the objection asserts new information or contests an
+  agent-judgment reason (`blocking_findings`, `scope_mismatch`,
+  `unresolved_uncertainty`, `architecture`, and the other typed human-review
+  reasons). A rerun can genuinely reach a different conclusion, so triage
+  enqueues one immediately.
+- **`policy_signal_only`** — the objection contests a deterministic gate
+  (`files_limit_exceeded`, `sensitive_path`, `required_check_failing`). Rerunning
+  is pointless: the threshold will evaluate identically. The bot replies saying
+  exactly that, names the policy setting and its current value, links to it, and
+  records the dispute for clustering. This is the honest answer to "why won't you
+  approve this," and it is the case that most needs Phase 2.
+- **`answer_only`** — a question rather than a disagreement. The bot answers from
+  the existing session evidence. No dispute record survives triage.
+- **`not_a_dispute`** — recorded as `discarded`, no reply, no clustering weight.
+
+**Dispute-triggered reassessment.** A `reassess` routing enqueues the normal code
+review request path with a new trigger source `dispute_reassessment`, keyed by
+dispute id. This fits doc 112's existing idempotency model without changing it:
+doc 112 already specifies that a genuinely new explicit request after a
+non-approval creates a distinct assessment even at the same head SHA, and that
+requests arriving while a review is running are held behind a durable starter job.
+A dispute is one more kind of explicit request.
+
+The dispute text enters the reassessment as **untrusted evidence**, under exactly
+the screening doc 112 applies to PR descriptions and diffs. It is a claim by the
+author to be verified against the code, never an instruction. "Approve this" and
+"ignore your policy" are prompt injection, not information, and are handled as
+doc 112 already handles them.
+
+Bounds, so that disputing is cheap but rerolling is not a strategy:
+
+- Deterministic gates are re-evaluated from source on every reassessment and can
+  never be waived by a dispute. Only the agent-judgment half of the decision can
+  move.
+- A configurable cap on dispute-triggered reassessments per PR head SHA
+  (default 2). Beyond it, further disputes are recorded and clustered but do not
+  rerun; the bot says so and points at human review.
+- Approval remains monotonic, and each reassessment remains an immutable session,
+  so the full history of "blocked, disputed, reassessed, approved" is auditable.
+- Reassessments triggered by a dispute are labelled as such in Insights, so a
+  repo where they routinely flip the outcome is visibly a repo with an unreliable
+  judgment layer.
+
+**Corroboration.** A scheduled `corroborate_code_review_dispute` job resolves
+each dispute per the corroboration table once the reassessment settles, the PR
+reaches a terminal state, or the window expires.
+
+Ship the `Insights` tab here (Option A's content, plus dispute rate,
+corroboration rate, and reassessment-flip rate by reason code), and a weekly
+digest to policy owners over the existing notification path — this is the "store
+the data and send the results" half of the ask, and it is independently valuable.
 
 ### Phase 2 — Propose
 
@@ -368,15 +464,27 @@ CREATE TABLE code_review_decision_disputes (
     source                 text NOT NULL CHECK (source IN ('github_comment','app_ui','api')),
     github_comment_id      bigint,
     github_delivery_id     text,
+    github_thread_root_comment_id bigint,
+    -- Verbatim natural-language objection. No command syntax is parsed from it.
     body                   text NOT NULL DEFAULT '',
-    -- Reason codes from the disputed decision that this dispute contests.
+    -- Everything below is inferred by triage, not supplied by the filer.
+    -- The app UI may pre-tick reason codes, but never requires them.
     contested_reason_codes text[] NOT NULL DEFAULT '{}',
     dispute_kind           text CHECK (dispute_kind IS NULL OR dispute_kind IN (
                                'threshold_too_strict','path_rule_too_broad',
                                'description_requirement_wrong','finding_incorrect',
                                'judgment_overreach','bot_correct','other')),
-    classification_status  text NOT NULL DEFAULT 'pending'
-                               CHECK (classification_status IN ('pending','classified','failed','skipped')),
+    asserts_new_information boolean NOT NULL DEFAULT false,
+    routing                text CHECK (routing IS NULL OR routing IN (
+                               'reassess','policy_signal_only','answer_only','not_a_dispute')),
+    intake_status          text NOT NULL DEFAULT 'pending'
+                               CHECK (intake_status IN ('pending','triaged','discarded','failed')),
+    intake_confidence      text CHECK (intake_confidence IS NULL OR intake_confidence IN ('low','medium','high')),
+    -- Reassessment kicked off by this dispute, when routing = 'reassess'.
+    reassessment_session_id uuid REFERENCES sessions(id) ON DELETE SET NULL,
+    reassessment_decision   text,
+    reassessment_flipped    boolean NOT NULL DEFAULT false,
+    reply_comment_id        bigint,
     -- Ground truth. Only 'upheld' or 'corroborated' feed the tuning engine.
     corroboration_status   text NOT NULL DEFAULT 'pending'
                                CHECK (corroboration_status IN (
@@ -391,17 +499,27 @@ CREATE TABLE code_review_decision_disputes (
     updated_at             timestamptz NOT NULL DEFAULT now()
 );
 
--- One dispute per filer per review session; re-filing updates in place.
-CREATE UNIQUE INDEX idx_cr_disputes_session_filer
-    ON code_review_decision_disputes (session_id, COALESCE(filed_by_user_id::text, filed_by_login));
+-- Each GitHub comment yields at most one dispute; webhook redelivery and comment
+-- edits update in place rather than filing a second objection. Deliberately not
+-- unique per (session, filer): one person may raise two distinct objections, and
+-- collapsing them would lose a signal.
+CREATE UNIQUE INDEX idx_cr_disputes_github_comment
+    ON code_review_decision_disputes (github_comment_id) WHERE github_comment_id IS NOT NULL;
 CREATE UNIQUE INDEX idx_cr_disputes_delivery
     ON code_review_decision_disputes (github_delivery_id) WHERE github_delivery_id IS NOT NULL;
 CREATE INDEX idx_cr_disputes_cluster
     ON code_review_decision_disputes (org_id, repository_id, cluster_key, created_at DESC)
     WHERE corroboration_status IN ('corroborated','upheld');
+CREATE INDEX idx_cr_disputes_intake
+    ON code_review_decision_disputes (org_id, intake_status, created_at)
+    WHERE intake_status = 'pending';
 CREATE INDEX idx_cr_disputes_pending
     ON code_review_decision_disputes (org_id, corroboration_status, created_at)
-    WHERE corroboration_status = 'pending';
+    WHERE corroboration_status = 'pending' AND intake_status = 'triaged';
+-- Enforces the per-head reassessment cap without a table scan.
+CREATE INDEX idx_cr_disputes_reassessments
+    ON code_review_decision_disputes (pull_request_id, reviewed_head_sha)
+    WHERE reassessment_session_id IS NOT NULL;
 
 CREATE TABLE code_review_policy_proposals (
     id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -456,18 +574,47 @@ CREATE INDEX idx_cr_outcomes_org_repo ON code_review_decision_outcomes (org_id, 
 CREATE INDEX idx_cr_outcomes_reason_codes ON code_review_decision_outcomes USING gin (reason_codes);
 ```
 
+The reassessment path needs a new trigger source on existing tables:
+
+```sql
+-- internal/models/code_review.go gains CodeReviewTriggerSourceDisputeReassessment.
+ALTER TABLE code_review_session_metadata
+    DROP CONSTRAINT chk_code_review_session_metadata_trigger_source,
+    ADD CONSTRAINT chk_code_review_session_metadata_trigger_source
+        CHECK (trigger_source IN ('app_reviewer','alias_reviewer','team_reviewer',
+                                  'slash_command','auto_policy','dispute_reassessment'));
+
+-- Links a reassessment session back to the objection that caused it.
+ALTER TABLE code_review_session_metadata
+    ADD COLUMN triggering_dispute_id uuid REFERENCES code_review_decision_disputes(id);
+```
+
 New job types on the existing queue:
 
 | Job type | Queue | Trigger |
 | --- | --- | --- |
-| `classify_code_review_dispute` | `feedback` | Dispute created |
-| `corroborate_code_review_dispute` | `feedback` | PR reaches terminal state, or corroboration window expires |
+| `triage_code_review_dispute` | `feedback` | Comment captured on a reviewed PR, or a dispute filed in the app |
+| `run_code_review` (existing) | `agent` | Triage routed `reassess`; enqueued with `trigger_source = 'dispute_reassessment'`, deduped on dispute id |
+| `reply_code_review_dispute` | `feedback` | Triage routed `policy_signal_only` or `answer_only`, or a reassessment completed |
+| `corroborate_code_review_dispute` | `feedback` | Reassessment settles, PR reaches terminal state, or corroboration window expires |
 | `cluster_code_review_disputes` | `feedback` | Scheduled, hourly per org with new corroborated disputes |
 | `generate_code_review_policy_proposal` | `agent` | Cluster crosses threshold |
 | `digest_code_review_insights` | `feedback` | Scheduled, weekly per org |
 
-New audit actions: `code_review_dispute.filed`, `code_review_dispute.adjudicated`,
-`code_review_policy_proposal.activated`, `code_review_policy_proposal.dismissed`.
+Reassessment reuses the existing `run_code_review` handler unchanged; only the
+request-orchestration path in `internal/services/codereview` learns the new
+trigger source and the per-head cap.
+
+Two new policy knobs, versioned with the rest of `code_review_policies`:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `dispute_reassessment_enabled` | `true` | Whether a dispute may rerun the review at all |
+| `max_dispute_reassessments_per_head` | `2` | Cap per PR head SHA before disputes become record-only |
+
+New audit actions: `code_review_dispute.filed`, `code_review_dispute.reassessed`,
+`code_review_dispute.adjudicated`, `code_review_policy_proposal.activated`,
+`code_review_policy_proposal.dismissed`.
 
 ## API Contract
 
@@ -477,13 +624,15 @@ admin-level.
 
 ```
 POST   /api/v1/code-reviews/{session_id}/disputes
-       body:    { "body": string, "contested_reason_codes": string[] }
-       201 ->   CodeReviewDispute
-       errors:  404 review not found · 409 already filed by this user
-                422 reason code not present on the disputed decision
+       body:    { "body": string,                        // required, free text
+                  "contested_reason_codes": string[]? }  // optional hint; triage may override
+       201 ->   CodeReviewDispute   // intake_status "pending"; triage runs async
+       errors:  404 review not found · 422 empty body
+       note:    No 409. Multiple distinct objections on one review are legitimate;
+                only GitHub-sourced disputes dedupe, on comment id.
 
 GET    /api/v1/code-reviews/{session_id}/disputes
-       200 ->   { "data": CodeReviewDispute[] }
+       200 ->   { "data": CodeReviewDispute[] }   // includes routing, reassessment linkage
 
 PATCH  /api/v1/code-review-disputes/{id}            (admin)
        body:    { "corroboration_status": "upheld" | "rejected", "adjudication_note": string? }
@@ -516,10 +665,12 @@ POST   /api/v1/code-review-policy-proposals/{id}/dismiss       (admin)
        200 ->   CodeReviewPolicyProposal
 ```
 
-The GitHub command path adds no route: `@143-code-reviewer disagree: <reason>`
-is parsed in the existing `issue_comment` and `pull_request_review_comment`
-webhook handlers and creates the same record with `source = 'github_comment'`,
-deduplicated on `github_delivery_id`.
+The GitHub path adds no route and parses no syntax. The existing `issue_comment`
+and `pull_request_review_comment` webhook handlers capture replies in the bot's
+rolling-comment thread and comments mentioning the bot on any PR it has reviewed,
+create the record with `source = 'github_comment'` deduplicated on
+`github_delivery_id`, and enqueue triage. Whether a captured comment is a dispute
+at all is decided by triage, not by the handler.
 
 Activation validates the delta against the same policy validation used by
 `PUT /api/v1/code-review-policies`, then writes a new insert-only version. It
@@ -528,8 +679,18 @@ version that produced them.
 
 ## Success Metrics
 
-- Share of non-approvals where the author files a dispute — the miscalibration
-  signal that does not exist today.
+- Share of non-approvals where someone objects — the miscalibration signal that
+  does not exist today. Expect this to rise when intake becomes free-text, which
+  is the feature working, not the bot getting worse.
+- Triage accuracy, sampled by hand: objections recorded as `not_a_dispute` are
+  the silent failure this document exists to prevent, and matter far more than
+  the reverse error.
+- Reassessment flip rate, split by whether the dispute asserted new information.
+  Flips on genuinely new facts are the loop working. Flips on identical inputs
+  mean the judgment layer is non-deterministic, which is a different bug and
+  should be fixed rather than tuned around.
+- Median time from objection to a substantive reply, and to a flipped decision
+  where one occurs — the developer-facing latency this feature is judged on.
 - Corroboration rate of disputes, by reason code. A reason code with a high
   dispute rate *and* high corroboration is a genuinely miscalibrated rule; high
   dispute rate with low corroboration means the explanation is unclear, not the
@@ -544,10 +705,14 @@ version that produced them.
   filed by a third party, or is corroboration sufficient to handle bias alone?
 - What is the right corroboration window? 7 days captures most merges; revert and
   incident signal needs 30.
-- Should filing a dispute trigger an immediate re-review under the same policy
-  (cheap, sometimes resolves flaky judgment reasons), or is that an invitation to
-  reroll until the bot approves? Leaning: no automatic re-review, since approval
-  is monotonic and re-rolling a stochastic judge is exactly the gaming path.
+- Is 2 the right per-head reassessment cap? Too low and a legitimate two-round
+  clarification hits the wall; too high and rerolling becomes viable. Instrument
+  the flip rate by attempt number before settling it.
+- Should a reassessment that flips to approval require the new information to be
+  verifiable in the diff, rather than merely asserted by the author? Stricter and
+  safer, but it narrows the cases a rerun can resolve.
+- Should triage treat a dispute from someone other than the PR author as
+  `reassess`-eligible on a wider set of reason codes, given the weaker bias?
 - Should Insights be org-wide only, or per-repository with its own tuning
   thresholds?
 - Do dismissed proposals suppress the cluster permanently, or decay back after a
