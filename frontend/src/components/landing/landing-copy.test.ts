@@ -5,6 +5,7 @@ import {
   codeReviewApproval,
   codeReviewEscalation,
   codeReviewOutcomes,
+  codeReviewPressures,
   codeReviewSummary,
   codingAgents,
   integrations,
@@ -30,16 +31,27 @@ describe("landing copy", () => {
       "01 Code review",
     );
     expect(codeReviewSummary.heading).toBe(
-      "Code review that approves the pull requests it should.",
+      "Agents made code faster to write. Review is where it piles up.",
     );
   });
 
-  it("leads the code review outcomes with speed, policy, and unblocked merges", () => {
+  it("names the review bottlenecks agent-written code creates", () => {
+    expect(codeReviewPressures.map((pressure) => pressure.title)).toEqual([
+      "More pull requests",
+      "Larger, less cohesive changes",
+      "Authors who don't review code",
+      "Stacks stuck for days",
+    ]);
+  });
+
+  it("answers each pressure with a code review outcome", () => {
     expect(codeReviewOutcomes.map((outcome) => outcome.title)).toEqual([
-      "Reviews finish in minutes",
+      "Reviews finish in minutes, not days",
       "Policy is enforced, not remembered",
+      "Hard feedback without the interpersonal cost",
       "Review stops blocking the merge",
     ]);
+    expect(codeReviewOutcomes).toHaveLength(codeReviewPressures.length);
   });
 
   it("shows both the auto-approval and the escalation path", () => {
