@@ -162,36 +162,15 @@ describe("AutomationDetailPage", () => {
 
     const timezoneButton = screen.getByTitle("UTC");
     const scheduleRow = timezoneButton.parentElement;
-    const runEveryText = screen.getByText("Run every");
-    const atText = screen.getByText("At");
+    const everyText = screen.getByText("Every");
     const intervalUnitTrigger = screen.getByLabelText("Interval unit");
-    const hourTrigger = screen.getByLabelText("Run at hour");
-    const minuteTrigger = screen.getByLabelText("Run at minute");
 
-    expect(scheduleRow).not.toHaveClass("flex-wrap");
-    expect(timezoneButton).toHaveClass("w-[12.5rem]", "max-w-full");
-    expect(intervalUnitTrigger).toHaveClass(
-      "h-9",
-      "type-dense",
-      "max-sm:text-base",
-    );
-    expect(hourTrigger).toHaveClass("h-9", "type-dense", "max-sm:text-base");
-    expect(minuteTrigger).toHaveClass("h-9", "type-dense", "max-sm:text-base");
+    expect(scheduleRow).toHaveClass("flex-wrap");
+    expect(everyText).toHaveClass("text-muted-foreground");
+    expect(intervalUnitTrigger).toHaveClass("h-9");
     expect(timezoneButton).toHaveClass("h-9", "type-dense", "max-sm:text-base");
     expect(intervalUnitTrigger).not.toHaveClass("text-base");
     expect(timezoneButton).not.toHaveClass("text-base");
-    expect(runEveryText).toHaveClass(
-      "text-xs",
-      "font-medium",
-      "leading-none",
-      "text-muted-foreground",
-    );
-    expect(atText).toHaveClass(
-      "text-xs",
-      "font-medium",
-      "leading-none",
-      "text-muted-foreground",
-    );
     expect(screen.queryByText(/Run time is in/i)).not.toBeInTheDocument();
   });
 
@@ -400,12 +379,367 @@ describe("AutomationDetailPage", () => {
     await user.tab();
 
     expect(intervalInput).toHaveValue(1);
-    expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
+    const saveButton = screen.getByRole("button", { name: "Save changes" });
+    await waitFor(() => expect(saveButton).toBeEnabled());
+    await user.click(saveButton);
+
+    // Blur restored the stored value, so the schedule ends up untouched and no
+    // schedule fields are sent — clearing the box must not be enough to make
+    // PATCH recompute next_run_at.
+    await waitFor(() => expect(updateBody).not.toBeNull());
+    expect(updateBody).not.toHaveProperty("interval_value");
+    expect(updateBody).not.toHaveProperty("timezone");
+  });
+
+  it("sends the interval when the value actually changes", async () => {
+    const user = userEvent.setup();
+    let updateBody: Record<string, unknown> | null = null;
+
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({
+          data: {
+            id: "auto-1",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Weekly audit",
+            goal: "Check release health",
+            scope: "",
+            interval_value: 1,
+            interval_unit: "hours",
+            base_branch: "main",
+            enabled: true,
+            timezone: "UTC",
+            last_run_at: null,
+            next_run_at: null,
+            priority: 50,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.get("*/api/v1/automations/auto-1/stats*", () =>
+        HttpResponse.json({
+          data: {
+            since: "2026-01-01T00:00:00Z",
+            until: "2026-01-31T00:00:00Z",
+            buckets: [],
+            totals: {
+              total: 0,
+              completed: 0,
+              completed_noop: 0,
+              failed: 0,
+              skipped: 0,
+              running: 0,
+              pending: 0,
+              success_rate: 0,
+              avg_duration_seconds: 0,
+            },
+          },
+        }),
+      ),
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        updateBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    const intervalInput = screen.getByLabelText("Interval value");
+    await user.clear(intervalInput);
+    await user.type(intervalInput, "6");
+    expect(intervalInput).toHaveValue(6);
+
+    // The preview is debounced; validity (and therefore the save button) only
+    // settles once it resolves for the edited draft.
+    await screen.findByText(/Next run:/);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Save changes" }),
+      ).toBeEnabled(),
+    );
     await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
-      expect(updateBody).toMatchObject({ interval_value: 1 });
+      expect(updateBody).toMatchObject({
+        schedule_type: "interval",
+        interval_value: 6,
+        interval_unit: "hours",
+        interval_run_at: "",
+        timezone: "UTC",
+      });
     });
+  });
+
+  it("clears a stored run time when the cadence drops below a day", async () => {
+    const user = userEvent.setup();
+    let updateBody: Record<string, unknown> | null = null;
+
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({
+          data: {
+            id: "auto-1",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Weekly audit",
+            goal: "Check release health",
+            scope: "",
+            schedule_type: "interval",
+            interval_value: 3,
+            interval_unit: "days",
+            interval_run_at: "09:00",
+            base_branch: "main",
+            enabled: true,
+            timezone: "UTC",
+            last_run_at: null,
+            next_run_at: null,
+            priority: 50,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.get("*/api/v1/automations/auto-1/stats*", () =>
+        HttpResponse.json({
+          data: {
+            since: "2026-01-01T00:00:00Z",
+            until: "2026-01-31T00:00:00Z",
+            buckets: [],
+            totals: {
+              total: 0,
+              completed: 0,
+              completed_noop: 0,
+              failed: 0,
+              skipped: 0,
+              running: 0,
+              pending: 0,
+              success_rate: 0,
+              avg_duration_seconds: 0,
+            },
+          },
+        }),
+      ),
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        updateBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.click(screen.getByRole("combobox", { name: "Interval unit" }));
+    await user.click(await screen.findByRole("option", { name: "hours" }));
+
+    // A sub-day cadence has no wall clock, so the editor stops showing one.
+    expect(
+      screen.queryByRole("combobox", { name: "Run time" }),
+    ).not.toBeInTheDocument();
+
+    const saveButton = screen.getByRole("button", { name: "Save changes" });
+    await waitFor(() => expect(saveButton).toBeEnabled());
+    await user.click(saveButton);
+
+    // PATCH treats an absent interval_run_at as "unchanged", so an explicit ""
+    // is the only thing that actually unanchors the stored schedule.
+    await waitFor(() => {
+      expect(updateBody).toMatchObject({
+        schedule_type: "interval",
+        interval_unit: "hours",
+        interval_run_at: "",
+      });
+    });
+  });
+
+  it("sends no schedule fields when the schedule is untouched", async () => {
+    const user = userEvent.setup();
+    let updateBody: Record<string, unknown> | null = null;
+
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({
+          data: {
+            id: "auto-1",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Weekly audit",
+            goal: "Check release health",
+            scope: "",
+            schedule_type: "cron",
+            // Sunday-as-7 and an unsorted day list both round-trip to a
+            // different-but-equivalent expression, so an untouched schedule
+            // must not be regenerated from the parsed draft. PATCH also
+            // recomputes next_run_at whenever any schedule field is present,
+            // so the safe thing is to send none of them.
+            cron_expression: "0 9 * * 4,7",
+            base_branch: "main",
+            enabled: true,
+            timezone: "UTC",
+            last_run_at: null,
+            next_run_at: null,
+            priority: 50,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.get("*/api/v1/automations/auto-1/stats*", () =>
+        HttpResponse.json({
+          data: {
+            since: "2026-01-01T00:00:00Z",
+            until: "2026-01-31T00:00:00Z",
+            buckets: [],
+            totals: {
+              total: 0,
+              completed: 0,
+              completed_noop: 0,
+              failed: 0,
+              skipped: 0,
+              running: 0,
+              pending: 0,
+              success_rate: 0,
+              avg_duration_seconds: 0,
+            },
+          },
+        }),
+      ),
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        updateBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    const saveButton = screen.getByRole("button", { name: "Save changes" });
+    await waitFor(() => expect(saveButton).toBeEnabled());
+    await user.click(saveButton);
+
+    await waitFor(() => expect(updateBody).not.toBeNull());
+    // Not just cron_expression: timezone alone is enough to make PATCH
+    // recompute next_run_at, which would push an interval automation's next
+    // run out by a full interval every time an unrelated field is saved.
+    for (const field of [
+      "schedule_type",
+      "cron_expression",
+      "interval_value",
+      "interval_unit",
+      "interval_run_at",
+      "timezone",
+    ]) {
+      expect(updateBody).not.toHaveProperty(field);
+    }
+  });
+
+  it("does not disturb an interval automation's next run when saving other fields", async () => {
+    const user = userEvent.setup();
+    let updateBody: Record<string, unknown> | null = null;
+
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({
+          data: {
+            id: "auto-1",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Weekly audit",
+            goal: "Check release health",
+            scope: "",
+            schedule_type: "interval",
+            interval_value: 3,
+            interval_unit: "days",
+            interval_run_at: "09:00",
+            base_branch: "main",
+            enabled: true,
+            timezone: "UTC",
+            last_run_at: null,
+            next_run_at: "2026-01-02T09:00:00Z",
+            priority: 50,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.get("*/api/v1/automations/auto-1/stats*", () =>
+        HttpResponse.json({
+          data: {
+            since: "2026-01-01T00:00:00Z",
+            until: "2026-01-31T00:00:00Z",
+            buckets: [],
+            totals: {
+              total: 0,
+              completed: 0,
+              completed_noop: 0,
+              failed: 0,
+              skipped: 0,
+              running: 0,
+              pending: 0,
+              success_rate: 0,
+              avg_duration_seconds: 0,
+            },
+          },
+        }),
+      ),
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        updateBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText(/^Scope/), {
+      target: { value: "src/" },
+    });
+
+    const saveButton = screen.getByRole("button", { name: "Save changes" });
+    await waitFor(() => expect(saveButton).toBeEnabled());
+    await user.click(saveButton);
+
+    await waitFor(() => expect(updateBody).not.toBeNull());
+    expect(updateBody).toMatchObject({ scope: "src/" });
+    for (const field of [
+      "schedule_type",
+      "interval_value",
+      "interval_unit",
+      "interval_run_at",
+      "timezone",
+    ]) {
+      expect(updateBody).not.toHaveProperty(field);
+    }
   });
 
   it("shows readable metadata and run actions in the details rail", async () => {
@@ -1723,7 +2057,7 @@ describe("AutomationDetailPage", () => {
     });
 
     await user.click(screen.getByRole("button", { name: "Edit" }));
-    await user.click(screen.getByRole("checkbox", { name: "On a schedule" }));
+    await user.click(screen.getByRole("button", { name: "Remove schedule" }));
     await user.click(
       screen.getByRole("checkbox", { name: "When a PR is merged" }),
     );

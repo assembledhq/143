@@ -51,8 +51,19 @@ import {
 } from "@/components/automation-capabilities-editor";
 import { BranchPicker } from "@/components/branch-picker";
 import { AutomationModelSelect } from "@/components/automation-model-select";
+import {
+  AutomationScheduleEditor,
+  AutomationScheduleSummary,
+} from "@/components/automation-schedule-editor";
 import { api } from "@/lib/api";
-import { parseAutomationIntervalInput } from "@/lib/automation-draft";
+import {
+  automationScheduleTimezone,
+  automationToScheduleDraft,
+  formatAutomationSchedule,
+  sameScheduleDraft,
+  scheduleDraftToAPI,
+  type ScheduleDraft,
+} from "@/lib/automation-schedule";
 import {
   removeAutomationFromListCaches,
   upsertAutomationInListCaches,
@@ -85,14 +96,7 @@ import {
   type CodingAgentReasoningEffort,
 } from "@/lib/coding-agent-reasoning";
 import { DecisionHistory } from "./decision-history";
-import {
-  browserTimezone,
-  formatAutomationSchedule,
-  hourOptions,
-  minuteOptions,
-  splitRunAt,
-} from "../schedule-time";
-import { TimezonePicker } from "../timezone-picker";
+import { browserTimezone } from "../schedule-time";
 import { AutomationEmojiPicker } from "@/components/automation-emoji-picker";
 
 // Defer recharts (the only dep here that's expensive) into its own chunk.
@@ -108,16 +112,6 @@ const AutomationStatsCard = dynamic(
     ),
   },
 );
-
-// Single source of truth for interval unit values. Kept as a tuple so we can
-// derive the union type for state AND runtime-validate incoming Select values
-// without an unsafe `as` cast. Adding a unit means updating this tuple only.
-const INTERVAL_UNITS = ["hours", "days", "weeks"] as const;
-type IntervalUnit = (typeof INTERVAL_UNITS)[number];
-const toIntervalUnit = (v: string, fallback: IntervalUnit): IntervalUnit =>
-  (INTERVAL_UNITS as readonly string[]).includes(v)
-    ? (v as IntervalUnit)
-    : fallback;
 
 function commaList(value: string): string[] {
   return value
@@ -135,27 +129,24 @@ function SettingsTab({
 }) {
   const queryClient = useQueryClient();
   const [scope, setScope] = useState(automation.scope ?? "");
-  const [intervalValue, setIntervalValue] = useState(
-    String(automation.interval_value ?? 1),
-  );
-  const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>(
-    toIntervalUnit(automation.interval_unit ?? "days", "days"),
-  );
   // Form state is seeded from the automation prop on first mount only. The
   // parent polls every 10s and may refetch into a new `automation` object.
   // Keep this local draft mounted while the sheet is open so unrelated inline
   // title/goal autosaves cannot discard mechanics edits in progress.
-  const initialRunAt = splitRunAt(automation.interval_run_at ?? "09:00");
-  const [intervalRunHour, setIntervalRunHour] = useState(initialRunAt.hour);
-  const [intervalRunMinute, setIntervalRunMinute] = useState(
-    initialRunAt.minute,
+  const [scheduleDraft, setScheduleDraft] = useState<ScheduleDraft | null>(
+    () => automationToScheduleDraft(automation),
   );
-  const [timezone, setTimezone] = useState<string>(
-    automation.timezone || "UTC",
-  );
-  const [scheduleEnabled, setScheduleEnabled] = useState(
+  // Snapshot the seed draft so the mutation can tell an edited schedule from an
+  // untouched one and send no schedule fields at all in the latter case. That
+  // matters beyond avoiding a cron rewrite: PATCH recomputes next_run_at
+  // whenever any schedule field (timezone included) is present, so re-sending
+  // an unchanged schedule while saving a goal would push an interval
+  // automation's next run out by a full interval.
+  const initialScheduleDraftRef = useRef(scheduleDraft);
+  const [scheduleValid, setScheduleValid] = useState(
     automation.schedule_type !== "none",
   );
+  const scheduleEnabled = scheduleDraft !== null;
   const [productTriggers, setProductTriggers] = useState<
     AutomationProductTrigger[]
   >(() =>
@@ -254,12 +245,6 @@ function SettingsTab({
     [automationCapabilityResponse?.data?.capabilities, capabilityCatalog],
   );
   const capabilityGrants = capabilityDraft ?? savedCapabilityGrants;
-  const parsedIntervalValue = Number(intervalValue.trim());
-  const intervalValueIsValid =
-    intervalValue.trim() !== "" &&
-    Number.isInteger(parsedIntervalValue) &&
-    parsedIntervalValue >= 1 &&
-    parsedIntervalValue <= 365;
   const githubEventFilters: AutomationGitHubEventFilters = useMemo(
     () => ({
       base_branches: commaList(triggerBaseBranches),
@@ -294,15 +279,9 @@ function SettingsTab({
     mutationFn: () =>
       api.automations.update(automation.id, {
         scope: scope.trim() || undefined,
-        schedule_type: scheduleEnabled ? "interval" : "none",
-        ...(scheduleEnabled
-          ? {
-              interval_value: parsedIntervalValue,
-              interval_unit: intervalUnit,
-              interval_run_at: `${intervalRunHour}:${intervalRunMinute}`,
-            }
-          : {}),
-        timezone,
+        ...(sameScheduleDraft(scheduleDraft, initialScheduleDraftRef.current)
+          ? {}
+          : scheduleDraftToAPI(scheduleDraft, automation.timezone)),
         triggers: productTriggers,
         github_event_filters: githubEventFilters,
         model: model ?? "",
@@ -369,105 +348,20 @@ function SettingsTab({
       <div className="space-y-2">
         <Label>Triggers</Label>
         <div className="space-y-3 rounded-md border border-border p-3">
-          <Label className="flex min-h-7 cursor-pointer items-start gap-2 text-sm font-normal">
-            <Checkbox
-              checked={scheduleEnabled}
-              onCheckedChange={(checked) =>
-                setScheduleEnabled(checked === true)
-              }
-              aria-label="On a schedule"
-              disabled={!canManage}
+          {canManage ? (
+            <AutomationScheduleEditor
+              value={scheduleDraft}
+              onChange={setScheduleDraft}
+              detectedTimezone={detectedTimezone}
+              onValidityChange={setScheduleValid}
             />
-            <span className="pt-0.5">On a schedule</span>
-          </Label>
-          {scheduleEnabled ? (
-            <div className="grid gap-3 pl-6 md:grid-cols-2">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-medium leading-none text-muted-foreground">
-                  Run every
-                </span>
-                <Input
-                  id="interval-value"
-                  aria-label="Interval value"
-                  type="number"
-                  min={1}
-                  max={365}
-                  value={intervalValue}
-                  onChange={(e) => setIntervalValue(e.target.value)}
-                  onBlur={() =>
-                    setIntervalValue(
-                      String(parseAutomationIntervalInput(intervalValue)),
-                    )
-                  }
-                  aria-invalid={!intervalValueIsValid}
-                  className="w-20"
-                />
-                <Select
-                  value={intervalUnit}
-                  onValueChange={(v) =>
-                    setIntervalUnit(toIntervalUnit(v, intervalUnit))
-                  }
-                >
-                  <SelectTrigger
-                    className="h-9 w-28"
-                    aria-label="Interval unit"
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="hours">hours</SelectItem>
-                    <SelectItem value="days">days</SelectItem>
-                    <SelectItem value="weeks">weeks</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="grid grid-cols-[auto_5rem_auto_5rem_minmax(0,12.5rem)] items-center gap-2">
-                <span className="text-xs font-medium leading-none text-muted-foreground">
-                  At
-                </span>
-                <Select
-                  value={intervalRunHour}
-                  onValueChange={setIntervalRunHour}
-                >
-                  <SelectTrigger className="h-9 w-20" aria-label="Run at hour">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {hourOptions.map((h) => (
-                      <SelectItem key={h} value={h}>
-                        {h}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <span className="text-sm text-muted-foreground">:</span>
-                <Select
-                  value={intervalRunMinute}
-                  onValueChange={setIntervalRunMinute}
-                >
-                  <SelectTrigger
-                    className="h-9 w-20"
-                    aria-label="Run at minute"
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {minuteOptions.map((m) => (
-                      <SelectItem key={m} value={m}>
-                        {m}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <TimezonePicker
-                  value={timezone}
-                  onChange={setTimezone}
-                  detected={detectedTimezone}
-                  className="w-[12.5rem] max-w-full"
-                />
-              </div>
-            </div>
-          ) : null}
+          ) : (
+            <AutomationScheduleSummary
+              schedule={scheduleDraft}
+              nextRunAt={automation.next_run_at}
+              enabled={automation.enabled}
+            />
+          )}
           <div className="space-y-2">
             <span className="text-xs font-medium leading-none text-muted-foreground">
               Pull requests
@@ -736,7 +630,7 @@ function SettingsTab({
             disabled={
               updateMutation.isPending ||
               !hasTrigger ||
-              (scheduleEnabled && !intervalValueIsValid)
+              (scheduleEnabled && !scheduleValid)
             }
           >
             {updateMutation.isPending && (
@@ -1114,7 +1008,13 @@ export default function AutomationDetailPage() {
     );
   }
 
-  const schedule = formatAutomationSchedule(automation);
+  // The sentence renders a wall clock in the automation's zone using the
+  // reader's locale, so the IANA zone has to travel with it here — a reader in
+  // another zone would otherwise read "9:00 AM" as their own local time.
+  const scheduleTimezone = automationScheduleTimezone(automation);
+  const schedule = `${formatAutomationSchedule(automation)}${
+    scheduleTimezone ? ` (${scheduleTimezone})` : ""
+  }`;
 
   const headerDescription = automation.enabled
     ? automation.next_run_at

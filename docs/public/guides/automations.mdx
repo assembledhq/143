@@ -18,6 +18,17 @@ Use automations for work that should start from a repeatable schedule or a repos
 
 An automation can run on a schedule, a supported integration event, or GitHub pull-request activity. GitHub triggers include PR creation and updates, completed checks, review submissions, inline review comments, and issue comments on a PR.
 
+Scheduled automations use a sentence-style editor. Choose **Daily**,
+**Weekdays**, **Weekly**, or **Monthly**, then select the local run time and IANA
+time zone. Weekly schedules can run on more than one day, such as Monday and
+Thursday. The editor shows the next concrete run before the schedule is saved.
+
+Use an interval for elapsed-time work such as every six hours. Calendar
+schedules such as every Monday stay anchored to the selected time zone,
+including across daylight-saving changes. Monthly schedules on the 29th, 30th,
+or 31st skip months that do not contain that date. Existing advanced cron
+schedules remain editable without being converted to a simpler schedule.
+
 Filters such as base branch, author, path, feedback type, and review state reduce unnecessary runs. Keep filters as specific as the workflow allows; an automation that reacts to every comment and every check can evaluate the same revision several times.
 
 ## Read PR decisions
@@ -55,4 +66,3 @@ A completed run means the automation infrastructure finished. It does not, by it
 Switch to **Raw runs** when you need every execution attempt, session failure details, or retry history. This view is intentionally operational: statuses such as completed, failed, skipped, and no-op describe execution, not the business decision about a PR.
 
 If structured decisions are not available on a deployment yet, the page falls back to execution history and displays this distinction inline.
-

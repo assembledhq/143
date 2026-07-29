@@ -3304,6 +3304,9 @@ export interface UsageBreakdownRow {
 
 // Automation types
 export type AutomationScheduleType = "interval" | "cron" | "none";
+export interface AutomationSchedulePreview {
+  next_run_at: string;
+}
 export type AutomationRunStatus =
   | "pending"
   | "running"

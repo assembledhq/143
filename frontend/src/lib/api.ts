@@ -1225,6 +1225,8 @@ export const api = {
       get<import('./types').SingleResponse<import('./types').Automation>>(`/api/v1/automations/${id}`),
     create: (body: Record<string, unknown>) =>
       post<import('./types').SingleResponse<import('./types').Automation>>('/api/v1/automations', body),
+    previewSchedule: (body: Record<string, unknown>) =>
+      post<import('./types').SingleResponse<import('./types').AutomationSchedulePreview>>('/api/v1/automations/schedule-preview', body),
     update: (id: string, body: Record<string, unknown>) =>
       patch<import('./types').SingleResponse<import('./types').Automation>>(`/api/v1/automations/${id}`, body),
     improveGoalDraft: (body: {

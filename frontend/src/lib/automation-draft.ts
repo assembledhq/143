@@ -1,5 +1,6 @@
 import { toCodingAgentReasoningEffort, type CodingAgentReasoningEffort } from "@/lib/coding-agent-reasoning";
 import type { AutomationProductTrigger } from "@/lib/automation-triggers";
+import { isScheduleDraft, type ScheduleDraft } from "@/lib/automation-schedule";
 import type {
   AgentCapabilityGrant,
   AutomationPublishPolicy,
@@ -16,12 +17,18 @@ export type AutomationFormState = {
   iconValue: string;
   scope: string;
   selectedRepoId: string;
+  // scheduleDraft is the live schedule. The five fields below it are legacy:
+  // they exist only so drafts persisted before the sentence builder shipped can
+  // still be rehydrated (see legacyIntervalScheduleDraft on the create page).
+  // Nothing writes them as a source of truth any more, and they can be dropped
+  // once no stored draft predates SCHEMA_VERSION 2.
   intervalValue: number;
   intervalUnit: "hours" | "days" | "weeks";
   intervalRunHour: string;
   intervalRunMinute: string;
   timezone: string;
   scheduleEnabled: boolean;
+  scheduleDraft: ScheduleDraft | null;
   productTriggers: AutomationProductTrigger[];
   triggerBaseBranches: string;
   triggerAuthors: string;
@@ -96,11 +103,6 @@ function getStorage(): Storage | null {
   }
 }
 
-export function parseAutomationIntervalInput(value: string): number {
-  const parsed = parseInt(value, 10);
-  return Number.isNaN(parsed) ? 1 : clampInteger(parsed, 1, 365, 1);
-}
-
 export function defaultAutomationFormState(
   overrides: Partial<AutomationFormState> = {},
 ): AutomationFormState {
@@ -116,6 +118,7 @@ export function defaultAutomationFormState(
     intervalRunMinute: "00",
     timezone: "",
     scheduleEnabled: true,
+    scheduleDraft: null,
     productTriggers: [],
     triggerBaseBranches: "",
     triggerAuthors: "",
@@ -173,6 +176,9 @@ export function automationFormStateFromDraft(
         ? parsed.timezone
         : (options.defaultTimezone ?? ""),
     scheduleEnabled: parsed.scheduleEnabled !== false,
+    scheduleDraft: isScheduleDraft(parsed.scheduleDraft)
+      ? parsed.scheduleDraft
+      : null,
     productTriggers: validArray(parsed.productTriggers, productTriggerValues),
     triggerBaseBranches: stringOr(parsed.triggerBaseBranches, ""),
     triggerAuthors: stringOr(parsed.triggerAuthors, ""),
