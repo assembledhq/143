@@ -18,7 +18,7 @@ describe("LandingPage", () => {
     render(<LandingPage />);
 
     expect(screen.getByTestId("hero-canvas")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Automate code review. Merge without the wait." })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Where your whole team builds software together" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Run any coding agent." })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Connect your engineering tools." })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Put your agents to work." })).toBeInTheDocument();

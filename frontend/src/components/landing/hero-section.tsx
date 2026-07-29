@@ -84,16 +84,14 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
               isDark ? "text-[#f4f3ee]" : "text-[#1b1b19]"
             }`}
           >
-            Automate code review. Merge without the wait.
+            Where your whole team builds software together
           </h1>
 
           <p
             className={`max-w-2xl ${type.heroBody} ${isDark ? "text-[#aaa89f]" : "text-[#6b6b65]"}`}
           >
-            143 reviews every pull request with multiple coding agents and
-            auto-approves the ones that clear your policy. It is also the
-            open-source cloud where your whole team runs Codex, Claude Code, and
-            OpenCode together.
+            Run Codex, Claude Code, and OpenCode in an open-source cloud with
+            shared context, previews, review loops, and automations.
           </p>
 
           <div className="flex flex-wrap gap-4 pt-1 pointer-events-auto">
