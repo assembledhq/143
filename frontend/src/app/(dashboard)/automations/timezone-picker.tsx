@@ -62,6 +62,8 @@ interface TimezonePickerProps {
   onChange: (value: string) => void;
   detected: string;
   className?: string;
+  ariaLabel?: string;
+  disabled?: boolean;
 }
 
 export function TimezonePicker({
@@ -69,6 +71,8 @@ export function TimezonePicker({
   onChange,
   detected,
   className,
+  ariaLabel = "Time zone",
+  disabled = false,
 }: TimezonePickerProps) {
   const [open, setOpen] = useState(false);
   // When the Detected group is rendered, the detected zone also appears in
@@ -90,7 +94,9 @@ export function TimezonePicker({
           type="button"
           variant="outline"
           role="combobox"
+          aria-label={ariaLabel}
           aria-expanded={open}
+          disabled={disabled}
           // Match the sibling SelectTrigger so the trio in
           // the schedule row lines up visually.
           className={cn("h-9 min-w-0 justify-between type-dense max-sm:text-base font-normal", className)}

@@ -62,6 +62,7 @@ import {
   normalizeCapabilityGrants,
 } from "@/components/automation-capabilities-editor";
 import { AutomationModelSelect } from "@/components/automation-model-select";
+import { AutomationScheduleEditor } from "@/components/automation-schedule-editor";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { PageContainer } from "@/components/page-container";
@@ -81,11 +82,17 @@ import {
   clearAutomationDraft,
   defaultAutomationFormState,
   loadAutomationDraft,
-  parseAutomationIntervalInput,
   saveAutomationDraft,
   type AutomationFormState,
 } from "@/lib/automation-draft";
 import { upsertAutomationInListCaches } from "@/lib/automation-list-cache";
+import {
+  defaultRunAt,
+  defaultScheduleDraft,
+  intervalHasRunAt,
+  scheduleDraftToAPI,
+  type ScheduleDraft,
+} from "@/lib/automation-schedule";
 import type {
   AgentCapabilityDefinition,
   AutomationEventTriggerInput,
@@ -97,8 +104,7 @@ import type {
   PagerDutyEventTriggerFilter,
 } from "@/lib/types";
 import { queryKeys } from "@/lib/query-keys";
-import { browserTimezone, hourOptions, minuteOptions } from "../schedule-time";
-import { TimezonePicker } from "../timezone-picker";
+import { browserTimezone } from "../schedule-time";
 
 const pagerDutyEventTypeOptions: Array<{
   value: PagerDutyEventType;
@@ -149,44 +155,39 @@ const linearEventTypeOptions: Array<{
   },
 ];
 
-function formatWeeklyRunHint(
-  intervalValue: number,
-  intervalRunHour: string,
-  intervalRunMinute: string,
+// Templates express their cadence as an elapsed interval.
+function templateScheduleDraft(
+  template: AutomationTemplate,
   timezone: string,
-  now = new Date(),
-): string {
-  const weeks = Math.max(1, intervalValue);
-  const localParts = new Intl.DateTimeFormat(undefined, {
-    timeZone: timezone || "UTC",
-    weekday: "long",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(now);
-  const weekday = localParts.find((part) => part.type === "weekday")?.value;
-  const localHour = Number(
-    localParts.find((part) => part.type === "hour")?.value ?? "0",
-  );
-  const localMinute = Number(
-    localParts.find((part) => part.type === "minute")?.value ?? "0",
-  );
-  const selectedHour = Number(intervalRunHour);
-  const selectedMinute = Number(intervalRunMinute);
-  const selectedBeforeNow =
-    selectedHour < localHour ||
-    (selectedHour === localHour && selectedMinute < localMinute);
-  const nextCalendarDay = new Date(now);
-  nextCalendarDay.setDate(nextCalendarDay.getDate() + 1);
-  const anchor = selectedBeforeNow
-    ? new Intl.DateTimeFormat(undefined, {
-        timeZone: timezone || "UTC",
-        weekday: "long",
-      }).format(nextCalendarDay)
-    : weekday;
-  const unitLabel = weeks === 1 ? "week" : "weeks";
+): ScheduleDraft | null {
+  if (!template.scheduleEnabled) return null;
+  const { defaultInterval: value, defaultUnit: unit } = template;
+  return {
+    frequency: "interval",
+    value,
+    unit,
+    ...(intervalHasRunAt(value, unit) ? { time: defaultRunAt } : {}),
+    timezone,
+  };
+}
 
-  return `First run anchors on ${anchor ?? "the selected weekday"}, then repeats every ${weeks} ${unitLabel}.`;
+// Drafts persisted before the sentence builder shipped only carry the legacy
+// interval fields, so rebuild an equivalent draft rather than dropping the
+// user's in-progress schedule.
+function legacyIntervalScheduleDraft(
+  draft: AutomationFormState,
+  fallbackTimezone: string,
+): ScheduleDraft {
+  const { intervalValue: value, intervalUnit: unit } = draft;
+  return {
+    frequency: "interval",
+    value,
+    unit,
+    ...(intervalHasRunAt(value, unit)
+      ? { time: `${draft.intervalRunHour}:${draft.intervalRunMinute}` }
+      : {}),
+    timezone: draft.timezone || fallbackTimezone,
+  };
 }
 
 export default function NewAutomationPage() {
@@ -213,19 +214,28 @@ export default function NewAutomationPage() {
   }, [canManage, isLoading, router]);
 
   const [detectedTimezone] = useState<string>(() => browserTimezone());
+  // Seeded once and shared by the form state and the live editor state: if the
+  // two disagreed, a saved-and-restored draft would silently come back with a
+  // different default schedule than the one the page first rendered.
+  const [initialScheduleDraft] = useState<ScheduleDraft | null>(() =>
+    initialTemplate
+      ? templateScheduleDraft(initialTemplate, detectedTimezone)
+      : defaultScheduleDraft(detectedTimezone),
+  );
   const [form, setForm] = useState<AutomationFormState>(() =>
     defaultAutomationFormState({
       name: initialTemplate?.name ?? "",
       goal: initialTemplate?.goal ?? "",
       intervalValue: initialTemplate?.defaultInterval ?? 1,
       intervalUnit: initialTemplate?.defaultUnit ?? "days",
-      scheduleEnabled: initialTemplate?.scheduleEnabled ?? true,
+      scheduleEnabled: initialScheduleDraft !== null,
+      scheduleDraft: initialScheduleDraft,
       timezone: detectedTimezone,
     }),
   );
-  const [intervalValueInput, setIntervalValueInput] = useState(
-    String(initialTemplate?.defaultInterval ?? 1),
-  );
+  const [scheduleDraft, setScheduleDraftState] =
+    useState<ScheduleDraft | null>(initialScheduleDraft);
+  const [scheduleValid, setScheduleValid] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [templateOpen, setTemplateOpen] = useState(false);
   const [redirecting, setRedirecting] = useState(false);
@@ -242,6 +252,17 @@ export default function NewAutomationPage() {
     },
     [],
   );
+  const setScheduleDraft = useCallback(
+    (value: ScheduleDraft | null) => {
+      setScheduleDraftState(value);
+      setForm((current) => ({
+        ...current,
+        scheduleDraft: value,
+        scheduleEnabled: value !== null,
+      }));
+    },
+    [],
+  );
 
   const {
     name,
@@ -249,12 +270,6 @@ export default function NewAutomationPage() {
     iconValue,
     scope,
     selectedRepoId,
-    intervalValue,
-    intervalUnit,
-    intervalRunHour,
-    intervalRunMinute,
-    timezone,
-    scheduleEnabled,
     productTriggers,
     triggerBaseBranches,
     triggerAuthors,
@@ -290,6 +305,7 @@ export default function NewAutomationPage() {
     priority,
     capabilityOverride,
   } = form;
+  const scheduleEnabled = scheduleDraft !== null;
 
   const { data: settingsResponse } = useQuery({
     queryKey: ["settings"],
@@ -383,10 +399,6 @@ export default function NewAutomationPage() {
   }, [form]);
 
   useEffect(() => {
-    setIntervalValueInput(String(intervalValue));
-  }, [intervalValue]);
-
-  useEffect(() => {
     draftHydratedRef.current = draftHydrated;
   }, [draftHydrated]);
 
@@ -409,7 +421,17 @@ export default function NewAutomationPage() {
         setDraftHydrated(true);
         return;
       }
-      setForm(draft);
+      const restoredSchedule =
+        draft.scheduleDraft ??
+        (draft.scheduleEnabled
+          ? legacyIntervalScheduleDraft(draft, detectedTimezone)
+          : null);
+      setForm({
+        ...draft,
+        scheduleDraft: restoredSchedule,
+        scheduleEnabled: restoredSchedule !== null,
+      });
+      setScheduleDraftState(restoredSchedule);
       setDraftHydrated(true);
     });
 
@@ -458,13 +480,12 @@ export default function NewAutomationPage() {
   );
 
   const applyTemplate = (template: AutomationTemplate) => {
-    setIntervalValueInput(String(template.defaultInterval));
+    // setScheduleDraft owns scheduleDraft and scheduleEnabled; patchForm must
+    // not write them again or the two would be free to disagree.
+    setScheduleDraft(templateScheduleDraft(template, detectedTimezone));
     patchForm({
       name: template.name,
       goal: template.goal,
-      intervalValue: template.defaultInterval,
-      intervalUnit: template.defaultUnit,
-      scheduleEnabled: template.scheduleEnabled,
       productTriggers: [],
       triggerBaseBranches: "",
       triggerAuthors: "",
@@ -590,15 +611,7 @@ export default function NewAutomationPage() {
         icon_value: iconValue,
         repository_id: repoId,
         scope: scope.trim() || undefined,
-        schedule_type: scheduleEnabled ? "interval" : "none",
-        ...(scheduleEnabled
-          ? {
-              interval_value: intervalValue,
-              interval_unit: intervalUnit,
-              interval_run_at: `${intervalRunHour}:${intervalRunMinute}`,
-            }
-          : {}),
-        timezone,
+        ...scheduleDraftToAPI(scheduleDraft, detectedTimezone),
         triggers: productTriggers,
         github_event_filters: githubEventFilters,
         ...(eventTriggers.length > 0
@@ -658,7 +671,7 @@ export default function NewAutomationPage() {
     repoId.length > 0 &&
     pagerDutyTriggerValid &&
     linearTriggerValid &&
-    (!scheduleEnabled || intervalValueInput.trim().length > 0) &&
+    (!scheduleEnabled || scheduleValid) &&
     (scheduleEnabled || hasEventTriggers);
   const submitDisabledReason = createMutation.isPending || redirecting
     ? undefined
@@ -670,7 +683,7 @@ export default function NewAutomationPage() {
         pagerDutyTriggerValid,
         linearTriggerValid,
         scheduleEnabled,
-        intervalValueValid: intervalValueInput.trim().length > 0,
+        scheduleValid,
         hasEventTriggers,
       });
 
@@ -702,7 +715,7 @@ export default function NewAutomationPage() {
               repositoryId={repoId || undefined}
               scope={scope.trim() || undefined}
               config={{
-                schedule_type: scheduleEnabled ? "interval" : "none",
+                ...scheduleDraftToAPI(scheduleDraft, detectedTimezone),
                 triggers: productTriggers,
                 github_event_filters: githubEventFilters,
                 event_triggers: eventTriggers,
@@ -747,125 +760,13 @@ export default function NewAutomationPage() {
                     <span className="text-sm font-medium leading-none text-muted-foreground">
                       Triggers
                     </span>
-                    <Label className="flex min-h-7 cursor-pointer items-center gap-2 text-sm font-normal">
-                      <Checkbox
-                        checked={scheduleEnabled}
-                        onCheckedChange={(checked) =>
-                          setFormField("scheduleEnabled", checked === true)
-                        }
-                        aria-label="On a schedule"
-                      />
-                      <span className="block">on a schedule</span>
-                    </Label>
                   </div>
-                  {scheduleEnabled ? (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-sm font-medium leading-none text-muted-foreground">
-                        Run every
-                      </span>
-                      <Input
-                        id="interval-value"
-                        aria-label="Interval value"
-                        type="number"
-                        min={1}
-                        max={365}
-                        value={intervalValueInput}
-                        onChange={(e) => {
-                          const nextValue = e.target.value;
-                          setIntervalValueInput(nextValue);
-                          if (nextValue.trim().length > 0) {
-                            setFormField(
-                              "intervalValue",
-                              parseAutomationIntervalInput(nextValue),
-                            );
-                          }
-                        }}
-                        onBlur={() => {
-                          const normalized =
-                            parseAutomationIntervalInput(intervalValueInput);
-                          setIntervalValueInput(String(normalized));
-                          setFormField("intervalValue", normalized);
-                        }}
-                        className="h-8 w-20 px-2 text-base sm:text-xs"
-                      />
-                      <Select
-                        value={intervalUnit}
-                        onValueChange={(v) => {
-                          if (v === "hours" || v === "days" || v === "weeks") {
-                            setFormField("intervalUnit", v);
-                          }
-                        }}
-                      >
-                        <SelectTrigger
-                          className="h-8 w-24 text-base sm:text-xs"
-                          aria-label="Interval unit"
-                        >
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="hours">hours</SelectItem>
-                          <SelectItem value="days">days</SelectItem>
-                          <SelectItem value="weeks">weeks</SelectItem>
-                        </SelectContent>
-                      </Select>
-                      <span className="text-sm font-medium leading-none text-muted-foreground">
-                        at
-                      </span>
-                      <Select
-                        value={intervalRunHour}
-                        onValueChange={(value) => setFormField("intervalRunHour", value)}
-                      >
-                        <SelectTrigger
-                          className="h-8 w-20 text-base sm:text-xs"
-                          aria-label="Run at hour"
-                        >
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {hourOptions.map((h) => (
-                            <SelectItem key={h} value={h}>
-                              {h}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      <span className="text-sm text-muted-foreground">:</span>
-                      <Select
-                        value={intervalRunMinute}
-                        onValueChange={(value) => setFormField("intervalRunMinute", value)}
-                      >
-                        <SelectTrigger
-                          className="h-8 w-20 text-base sm:text-xs"
-                          aria-label="Run at minute"
-                        >
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {minuteOptions.map((m) => (
-                            <SelectItem key={m} value={m}>
-                              {m}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      <TimezonePicker
-                        value={timezone}
-                        onChange={(value) => setFormField("timezone", value)}
-                        detected={detectedTimezone}
-                        className="w-full sm:w-auto"
-                      />
-                      {intervalUnit === "weeks" ? (
-                        <p className="basis-full text-xs text-muted-foreground">
-                          {formatWeeklyRunHint(
-                            intervalValue,
-                            intervalRunHour,
-                            intervalRunMinute,
-                            timezone,
-                          )}
-                        </p>
-                      ) : null}
-                    </div>
-                  ) : null}
+                  <AutomationScheduleEditor
+                    value={scheduleDraft}
+                    onChange={setScheduleDraft}
+                    detectedTimezone={detectedTimezone}
+                    onValidityChange={setScheduleValid}
+                  />
                   <div className="space-y-1">
                     <span className="text-xs font-medium text-muted-foreground">
                       Pull request events
@@ -1549,7 +1450,7 @@ function getCreateDisabledReason({
   pagerDutyTriggerValid,
   linearTriggerValid,
   scheduleEnabled,
-  intervalValueValid,
+  scheduleValid,
   hasEventTriggers,
 }: {
   name: string;
@@ -1559,7 +1460,7 @@ function getCreateDisabledReason({
   pagerDutyTriggerValid: boolean;
   linearTriggerValid: boolean;
   scheduleEnabled: boolean;
-  intervalValueValid: boolean;
+  scheduleValid: boolean;
   hasEventTriggers: boolean;
 }): string | undefined {
   if (!name && !goal) {
@@ -1580,8 +1481,8 @@ function getCreateDisabledReason({
   if (!scheduleEnabled && !hasEventTriggers) {
     return "Select at least one trigger before creating the automation.";
   }
-  if (scheduleEnabled && !intervalValueValid) {
-    return "Add a schedule interval before creating the automation.";
+  if (scheduleEnabled && !scheduleValid) {
+    return "Finish setting up the schedule before creating the automation.";
   }
   if (!pagerDutyTriggerValid) {
     return "Add at least one PagerDuty service ID before creating the automation.";

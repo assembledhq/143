@@ -78,23 +78,13 @@ describe("NewAutomationPage", () => {
 
     const timezoneButton = await screen.findByTitle(expectedTimezone);
     const scheduleRow = timezoneButton.parentElement;
-    const runEveryText = screen.getByText("Run every");
+    const everyText = screen.getByText("Every");
     const atText = screen.getByText("at");
 
     expect(scheduleRow).toHaveClass("flex-wrap");
-    expect(timezoneButton).toHaveClass("w-full", "sm:w-auto");
-    expect(runEveryText).toHaveClass(
-      "text-sm",
-      "font-medium",
-      "leading-none",
-      "text-muted-foreground",
-    );
-    expect(atText).toHaveClass(
-      "text-sm",
-      "font-medium",
-      "leading-none",
-      "text-muted-foreground",
-    );
+    expect(timezoneButton).toHaveClass("max-w-60");
+    expect(everyText).toHaveClass("text-sm", "text-muted-foreground");
+    expect(atText).toHaveClass("text-sm", "text-muted-foreground");
     expect(screen.queryByText(/Run time is in/i)).not.toBeInTheDocument();
   });
 
@@ -132,13 +122,9 @@ describe("NewAutomationPage", () => {
     await user.click(screen.getByRole("option", { name: "weeks" }));
 
     expect(screen.getByText("at")).toBeInTheDocument();
-    expect(screen.getByText(/first run anchors on/i)).toBeInTheDocument();
-    expect(screen.getByText(/then repeats every \d+ weeks?/i)).toBeInTheDocument();
-    expect(screen.queryByText("At")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Interval value")).toHaveClass("h-8");
-    expect(screen.getByRole("combobox", { name: "Interval unit" })).toHaveClass("h-8");
-    expect(screen.getByRole("combobox", { name: "Run at hour" })).toHaveClass("h-8");
-    expect(screen.getByRole("combobox", { name: "Run at minute" })).toHaveClass("h-8");
+    expect(screen.getByLabelText("Interval value")).toHaveClass("h-9");
+    expect(screen.getByRole("combobox", { name: "Interval unit" })).toHaveClass("h-9");
+    expect(screen.getByRole("combobox", { name: "Run time" })).toHaveClass("h-9");
   });
 
   it("keeps timezone in the primary schedule controls and moves execution defaults into advanced settings", async () => {
@@ -268,7 +254,7 @@ describe("NewAutomationPage", () => {
     expect(triggerGroup).toHaveClass("rounded-lg", "bg-muted/25");
     expect(triggerGroup).not.toHaveClass("border-border", "bg-background");
     expect(screen.getByText("Pull request events")).toBeInTheDocument();
-    expect(screen.getByLabelText("On a schedule")).toBeChecked();
+    expect(screen.getByLabelText("Remove schedule")).toBeInTheDocument();
     expect(screen.getByLabelText("When checks finish")).not.toBeChecked();
     expect(screen.getByLabelText("When a PR is opened")).not.toBeChecked();
     expect(
@@ -278,7 +264,7 @@ describe("NewAutomationPage", () => {
     expect(screen.queryByText("Also trigger on")).not.toBeInTheDocument();
     expect(screen.queryByText("Pull requests")).not.toBeInTheDocument();
     expect(screen.getByText("Triggers").parentElement).toHaveClass("flex-wrap");
-    expect(screen.getByText("on a schedule")).toHaveClass("block");
+    expect(screen.getByLabelText("Schedule frequency")).toBeInTheDocument();
   });
 
   it("explains why the create button is disabled even when schedule triggering is selected", async () => {
@@ -315,7 +301,7 @@ describe("NewAutomationPage", () => {
     const createButton = await screen.findByRole("button", {
       name: "Create automation",
     });
-    expect(screen.getByLabelText("On a schedule")).toBeChecked();
+    expect(screen.getByLabelText("Remove schedule")).toBeInTheDocument();
     expect(createButton).toBeDisabled();
 
     const tooltipWrapper = createButton.parentElement;
@@ -394,9 +380,11 @@ describe("NewAutomationPage", () => {
     fireEvent.change(screen.getByLabelText("Goal"), {
       target: { value: "Respond to new PR feedback." },
     });
-    await user.click(screen.getByLabelText("On a schedule"));
+    await user.click(screen.getByLabelText("Remove schedule"));
     await user.click(screen.getByLabelText("When there is new PR feedback"));
-    await user.click(screen.getByRole("button", { name: "Create automation" }));
+    const createButton = screen.getByRole("button", { name: "Create automation" });
+    await waitFor(() => expect(createButton).toBeEnabled());
+    await user.click(createButton);
 
     await waitFor(() => {
       expect(pushMock).toHaveBeenCalledWith("/automations/automation-1");
@@ -504,7 +492,7 @@ describe("NewAutomationPage", () => {
     fireEvent.change(screen.getByLabelText("Goal"), {
       target: { value: "Respond to new PR feedback." },
     });
-    await user.click(screen.getByLabelText("On a schedule"));
+    await user.click(screen.getByLabelText("Remove schedule"));
     await user.click(screen.getByLabelText("When there is new PR feedback"));
     await user.click(screen.getByRole("button", { name: "Create automation" }));
 
@@ -608,7 +596,7 @@ describe("NewAutomationPage", () => {
     fireEvent.change(screen.getByLabelText("Goal"), {
       target: { value: "Investigate triggered PagerDuty incidents." },
     });
-    await user.click(screen.getByLabelText("On a schedule"));
+    await user.click(screen.getByLabelText("Remove schedule"));
     await user.click(screen.getByLabelText("PagerDuty incidents"));
     await user.click(screen.getByLabelText("PagerDuty annotated events"));
     fireEvent.change(screen.getByLabelText("PagerDuty service IDs"), {
@@ -761,19 +749,21 @@ describe("NewAutomationPage", () => {
     renderWithProviders(<NewAutomationPage />);
 
     await screen.findByLabelText("Name");
-    await user.click(screen.getByLabelText("On a schedule"));
+    await user.click(screen.getByLabelText("Remove schedule"));
     await user.click(screen.getByLabelText("When a PR is updated"));
-    expect(screen.getByLabelText("On a schedule")).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "Add schedule" })).toBeInTheDocument();
     expect(screen.getByLabelText("When a PR is updated")).toBeChecked();
 
     await user.click(screen.getByRole("button", { name: "Templates" }));
     await user.click(await screen.findByText("Security sweep"));
 
     expect(screen.getByDisplayValue("Security sweep")).toBeInTheDocument();
-    expect(screen.getByLabelText("On a schedule")).toBeChecked();
+    expect(screen.getByLabelText("Remove schedule")).toBeInTheDocument();
     expect(screen.getByLabelText("When a PR is updated")).not.toBeChecked();
 
-    await user.click(screen.getByRole("button", { name: "Create automation" }));
+    const createButton = screen.getByRole("button", { name: "Create automation" });
+    await waitFor(() => expect(createButton).toBeEnabled());
+    await user.click(createButton);
 
     await waitFor(() => {
       expect(requestBody).toMatchObject({

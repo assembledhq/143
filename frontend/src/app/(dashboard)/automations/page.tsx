@@ -20,7 +20,10 @@ import {
   type AutomationTemplate,
   type AutomationTemplateCategoryID,
 } from "@/lib/automation-templates";
-import { formatAutomationSchedule } from "./schedule-time";
+import {
+  automationScheduleTimezone,
+  formatAutomationSchedule,
+} from "@/lib/automation-schedule";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -89,16 +92,6 @@ function formatAutomationRunDate(value?: string) {
 
 function automationStatus(automation: Automation) {
   return automation.enabled ? "Enabled" : "Paused";
-}
-
-// formatAutomationSchedule already appends "(timezone)" for cron and run-at
-// schedules, so only surface a standalone timezone line when it isn't already
-// part of the schedule label (e.g. sub-24h interval cadences).
-function automationScheduleTimezone(automation: Automation) {
-  if (!automation.timezone) return null;
-  return formatAutomationSchedule(automation).includes(automation.timezone)
-    ? null
-    : automation.timezone;
 }
 
 function automationStatusBadge(automation: Automation) {

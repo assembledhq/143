@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { Automation } from "@/lib/types";
-import { formatAutomationSchedule } from "./schedule-time";
+import {
+  automationScheduleTimezone,
+  formatAutomationSchedule,
+} from "./automation-schedule";
 
 function automation(overrides: Partial<Automation>): Automation {
   return {
@@ -66,7 +69,7 @@ describe("formatAutomationSchedule", () => {
         interval_run_at: "10:00",
         timezone: "America/New_York",
       }),
-      expected: "Daily at 10:00 AM (America/New_York)",
+      expected: "Every 24 hours at 10:00 AM",
     },
     {
       name: "formats one day as daily with the run time",
@@ -76,7 +79,7 @@ describe("formatAutomationSchedule", () => {
         interval_run_at: "09:15",
         timezone: "America/Los_Angeles",
       }),
-      expected: "Daily at 9:15 AM (America/Los_Angeles)",
+      expected: "Every day at 9:15 AM",
     },
     {
       name: "formats multi-day intervals with the run time",
@@ -86,7 +89,7 @@ describe("formatAutomationSchedule", () => {
         interval_run_at: "09:15",
         timezone: "America/Los_Angeles",
       }),
-      expected: "Every 2 days at 9:15 AM (America/Los_Angeles)",
+      expected: "Every 2 days at 9:15 AM",
     },
     {
       name: "formats weekly intervals with the run time",
@@ -96,18 +99,34 @@ describe("formatAutomationSchedule", () => {
         interval_run_at: "09:15",
         timezone: "UTC",
       }),
-      expected: "Every week at 9:15 AM (UTC)",
+      expected: "Every week at 9:15 AM",
     },
     {
-      name: "keeps cron expressions explicit",
+      name: "formats friendly cron expressions",
       input: automation({
         schedule_type: "cron",
         cron_expression: "0 9 * * 1",
         timezone: "UTC",
       }),
-      expected: "cron: 0 9 * * 1 (UTC)",
+      expected: "Every week on Monday at 9:00 AM",
     },
   ])("$name", ({ input, expected }) => {
     expect(formatAutomationSchedule(input)).toBe(expected);
+  });
+});
+
+describe("automationScheduleTimezone", () => {
+  it("surfaces the IANA zone the sentence is expressed in", () => {
+    expect(
+      automationScheduleTimezone(
+        automation({ interval_unit: "days", timezone: "America/Los_Angeles" }),
+      ),
+    ).toBe("America/Los_Angeles");
+  });
+
+  it("has nothing to qualify without a schedule", () => {
+    expect(
+      automationScheduleTimezone(automation({ schedule_type: "none" })),
+    ).toBeNull();
   });
 });

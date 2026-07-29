@@ -455,6 +455,243 @@ func TestAutomationHandler_Create_BadJSON(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 }
 
+// resolveAutomationSchedule is the single validator behind both Create and
+// PreviewSchedule. Pinning its defaults and error codes here is what keeps a
+// preview from accepting or rejecting anything Create would not.
+func TestResolveAutomationSchedule(t *testing.T) {
+	t.Parallel()
+
+	unit := func(u models.ScheduleUnit) *models.ScheduleUnit { return &u }
+	str := func(s string) *string { return &s }
+	num := func(n int) *int { return &n }
+
+	t.Run("defaults a bare interval schedule to one day", func(t *testing.T) {
+		t.Parallel()
+
+		resolved, code, err := resolveAutomationSchedule(models.AutomationScheduleInterval, nil, nil, nil, nil)
+		require.NoError(t, err)
+		require.Empty(t, code)
+		require.Equal(t, 1, *resolved.IntervalValue)
+		require.Equal(t, models.ScheduleUnitDays, *resolved.IntervalUnit)
+		require.Nil(t, resolved.IntervalRunAt, "no run-at was supplied, so the interval stays unanchored")
+		require.Nil(t, resolved.CronExpression)
+	})
+
+	t.Run("trims a cron expression without normalising it", func(t *testing.T) {
+		t.Parallel()
+
+		resolved, _, err := resolveAutomationSchedule(models.AutomationScheduleCron, nil, nil, nil, str("  0 9 * * 4,7 "))
+		require.NoError(t, err)
+		require.Equal(t, "0 9 * * 4,7", *resolved.CronExpression, "day order and Sunday-as-7 must survive verbatim")
+	})
+
+	t.Run("treats an empty interval_run_at as unset", func(t *testing.T) {
+		t.Parallel()
+
+		resolved, _, err := resolveAutomationSchedule(models.AutomationScheduleInterval, num(6), unit(models.ScheduleUnitHours), str(""), nil)
+		require.NoError(t, err)
+		require.Nil(t, resolved.IntervalRunAt, "clearing the run-at must unanchor the interval, not fail validation")
+	})
+
+	t.Run("rejects invalid input with stable codes", func(t *testing.T) {
+		t.Parallel()
+
+		for _, tc := range []struct {
+			name         string
+			scheduleType models.AutomationScheduleType
+			value        *int
+			unit         *models.ScheduleUnit
+			runAt        *string
+			cron         *string
+			expectedCode string
+		}{
+			{"interval out of range", models.AutomationScheduleInterval, num(0), nil, nil, nil, "INVALID_INTERVAL"},
+			{"interval too large", models.AutomationScheduleInterval, num(366), nil, nil, nil, "INVALID_INTERVAL"},
+			{"unknown unit", models.AutomationScheduleInterval, num(1), unit("fortnights"), nil, nil, "INVALID_INTERVAL_UNIT"},
+			{"unaligned run at", models.AutomationScheduleInterval, num(1), nil, str("09:07"), nil, "INVALID_INTERVAL_RUN_AT"},
+			{"missing cron", models.AutomationScheduleCron, nil, nil, nil, str("   "), "MISSING_CRON_EXPRESSION"},
+			{"malformed cron", models.AutomationScheduleCron, nil, nil, nil, str("not a cron"), "INVALID_CRON_EXPRESSION"},
+			{"cross typed", models.AutomationScheduleCron, num(1), nil, nil, str("0 9 * * *"), "INVALID_SCHEDULE"},
+			{"fields set on none", models.AutomationScheduleNone, num(1), nil, nil, nil, "INVALID_SCHEDULE"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				_, code, err := resolveAutomationSchedule(tc.scheduleType, tc.value, tc.unit, tc.runAt, tc.cron)
+				require.Error(t, err)
+				require.Equal(t, tc.expectedCode, code)
+			})
+		}
+	})
+}
+
+func TestAutomationHandler_PreviewSchedule(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		body         any
+		expectedCode int
+		expectedErr  string
+		// assert checks the concrete occurrence. Previews are computed from
+		// time.Now(), so assertions describe the schedule's wall-clock
+		// contract rather than a fixed instant.
+		assert func(t *testing.T, nextRunAt time.Time)
+	}{
+		{
+			name: "previews weekly cron in the requested timezone",
+			body: map[string]any{
+				"schedule_type":   "cron",
+				"cron_expression": "0 9 * * 1,4",
+				"timezone":        "America/Los_Angeles",
+			},
+			expectedCode: http.StatusOK,
+			assert: func(t *testing.T, nextRunAt time.Time) {
+				loc, err := time.LoadLocation("America/Los_Angeles")
+				require.NoError(t, err)
+				local := nextRunAt.In(loc)
+				require.Equal(t, 9, local.Hour(), "cron previews must resolve in the requested timezone, not UTC")
+				require.Equal(t, 0, local.Minute())
+				require.Contains(t, []time.Weekday{time.Monday, time.Thursday}, local.Weekday())
+			},
+		},
+		{
+			name: "previews elapsed interval",
+			body: map[string]any{
+				"schedule_type":  "interval",
+				"interval_value": 6,
+				"interval_unit":  "hours",
+				"timezone":       "UTC",
+			},
+			expectedCode: http.StatusOK,
+			assert: func(t *testing.T, nextRunAt time.Time) {
+				require.WithinDuration(t, time.Now().UTC().Add(6*time.Hour), nextRunAt, time.Minute)
+			},
+		},
+		{
+			name: "defaults interval fields exactly like create",
+			body: map[string]any{
+				"schedule_type": "interval",
+				"timezone":      "UTC",
+			},
+			expectedCode: http.StatusOK,
+			assert: func(t *testing.T, nextRunAt time.Time) {
+				// Create defaults a bare interval schedule to 1 day; the
+				// preview must accept the same payload rather than 400.
+				require.WithinDuration(t, time.Now().UTC().Add(24*time.Hour), nextRunAt, time.Minute)
+			},
+		},
+		{
+			name: "ignores an empty cron expression on an interval schedule",
+			body: map[string]any{
+				"schedule_type":   "interval",
+				"interval_value":  2,
+				"interval_unit":   "days",
+				"cron_expression": "",
+				"timezone":        "UTC",
+			},
+			expectedCode: http.StatusOK,
+			assert: func(t *testing.T, nextRunAt time.Time) {
+				require.WithinDuration(t, time.Now().UTC().Add(48*time.Hour), nextRunAt, time.Minute)
+			},
+		},
+		{
+			name: "honours interval_run_at as a wall clock in the timezone",
+			body: map[string]any{
+				"schedule_type":   "interval",
+				"interval_value":  3,
+				"interval_unit":   "days",
+				"interval_run_at": "09:15",
+				"timezone":        "America/Los_Angeles",
+			},
+			expectedCode: http.StatusOK,
+			assert: func(t *testing.T, nextRunAt time.Time) {
+				loc, err := time.LoadLocation("America/Los_Angeles")
+				require.NoError(t, err)
+				local := nextRunAt.In(loc)
+				require.Equal(t, 9, local.Hour())
+				require.Equal(t, 15, local.Minute())
+			},
+		},
+		{
+			name: "rejects invalid timezone",
+			body: map[string]any{
+				"schedule_type":   "cron",
+				"cron_expression": "0 9 * * *",
+				"timezone":        "Mars/Olympus",
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedErr:  "INVALID_TIMEZONE",
+		},
+		{
+			name: "rejects cross typed fields",
+			body: map[string]any{
+				"schedule_type":   "cron",
+				"cron_expression": "0 9 * * *",
+				"interval_value":  1,
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedErr:  "INVALID_SCHEDULE",
+		},
+		{
+			name: "rejects an out of range interval value",
+			body: map[string]any{
+				"schedule_type":  "interval",
+				"interval_value": 400,
+				"interval_unit":  "days",
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedErr:  "INVALID_INTERVAL",
+		},
+		{
+			name: "rejects a cron expression with no future occurrence",
+			body: map[string]any{
+				"schedule_type":   "cron",
+				"cron_expression": "0 0 31 2 *",
+				"timezone":        "UTC",
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedErr:  "INVALID_SCHEDULE",
+		},
+		{
+			name:         "rejects missing schedule type",
+			body:         map[string]any{},
+			expectedCode: http.StatusBadRequest,
+			expectedErr:  "INVALID_SCHEDULE_TYPE",
+		},
+		{
+			name:         "rejects schedule_type none",
+			body:         map[string]any{"schedule_type": "none"},
+			expectedCode: http.StatusBadRequest,
+			expectedErr:  "INVALID_SCHEDULE",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := NewAutomationHandler(nil, nil)
+			req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations/schedule-preview", tt.body, uuid.New(), uuid.New(), nil)
+			recorder := httptest.NewRecorder()
+
+			handler.PreviewSchedule(recorder, req)
+
+			require.Equal(t, tt.expectedCode, recorder.Code, "preview should return the expected status")
+			if tt.expectedErr != "" {
+				require.Contains(t, recorder.Body.String(), tt.expectedErr, "preview should return the expected error code")
+				return
+			}
+			var response models.SingleResponse[automationSchedulePreviewResponse]
+			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response), "preview response should be valid JSON")
+			require.True(t, response.Data.NextRunAt.After(time.Now().Add(-time.Second)), "preview should return a future occurrence")
+			if tt.assert != nil {
+				tt.assert(t, response.Data.NextRunAt)
+			}
+		})
+	}
+}
+
 func TestAutomationHandler_Create_OK(t *testing.T) {
 	t.Parallel()
 

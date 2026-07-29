@@ -446,70 +446,26 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Reject cross-typed schedule fields up front rather than silently dropping
-	// them: a cron payload that also includes interval_value almost certainly
-	// reflects a client bug, and silent normalisation would mask it.
-	if scheduleType == models.AutomationScheduleCron && (req.IntervalValue != nil || req.IntervalUnit != nil || req.IntervalRunAt != nil) {
-		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "interval_value, interval_unit, and interval_run_at must not be set for cron schedules")
-		return
-	}
-	if scheduleType == models.AutomationScheduleInterval && req.CronExpression != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "cron_expression must not be set for interval schedules")
-		return
-	}
-	if scheduleType == models.AutomationScheduleNone && (req.IntervalValue != nil || req.IntervalUnit != nil || req.IntervalRunAt != nil || req.CronExpression != nil) {
-		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "schedule fields must not be set when schedule_type is none")
-		return
-	}
-
 	// Interval fields are only meaningful for interval schedules; cron schedules
 	// persist them as NULL. The DB CHECK constraint
 	// (chk_automations_schedule_fields) also enforces this XOR relationship.
-	var intervalValuePtr *int
-	var intervalUnitPtr *models.ScheduleUnit
-	var intervalRunAtPtr *string
-	if scheduleType == models.AutomationScheduleInterval {
-		intervalValue := 1
-		intervalUnit := models.ScheduleUnitDays
-		if req.IntervalValue != nil {
-			if *req.IntervalValue <= 0 || *req.IntervalValue > 365 {
-				writeError(w, r, http.StatusBadRequest, "INVALID_INTERVAL", "interval_value must be between 1 and 365")
-				return
-			}
-			intervalValue = *req.IntervalValue
-		}
-		if req.IntervalUnit != nil && *req.IntervalUnit != "" {
-			if err := req.IntervalUnit.Validate(); err != nil {
-				writeError(w, r, http.StatusBadRequest, "INVALID_INTERVAL_UNIT", err.Error())
-				return
-			}
-			intervalUnit = *req.IntervalUnit
-		}
-		intervalValuePtr = &intervalValue
-		intervalUnitPtr = &intervalUnit
-		if req.IntervalRunAt != nil && strings.TrimSpace(*req.IntervalRunAt) != "" {
-			runAt := strings.TrimSpace(*req.IntervalRunAt)
-			if err := models.ValidateIntervalRunAt(runAt); err != nil {
-				writeError(w, r, http.StatusBadRequest, "INVALID_INTERVAL_RUN_AT", err.Error())
-				return
-			}
-			intervalRunAtPtr = &runAt
-		}
+	// resolveAutomationSchedule is shared with PreviewSchedule so a previewed
+	// schedule is a faithful dry run of what Create would store.
+	resolved, code, err := resolveAutomationSchedule(
+		scheduleType,
+		req.IntervalValue,
+		req.IntervalUnit,
+		req.IntervalRunAt,
+		req.CronExpression,
+	)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, code, err.Error())
+		return
 	}
-
-	var cronExpressionPtr *string
-	if scheduleType == models.AutomationScheduleCron {
-		if req.CronExpression == nil || strings.TrimSpace(*req.CronExpression) == "" {
-			writeError(w, r, http.StatusBadRequest, "MISSING_CRON_EXPRESSION", "cron_expression is required for cron schedules")
-			return
-		}
-		expr := strings.TrimSpace(*req.CronExpression)
-		if err := models.ValidateCronExpression(expr); err != nil {
-			writeError(w, r, http.StatusBadRequest, "INVALID_CRON_EXPRESSION", err.Error())
-			return
-		}
-		cronExpressionPtr = &expr
-	}
+	intervalValuePtr := resolved.IntervalValue
+	intervalUnitPtr := resolved.IntervalUnit
+	intervalRunAtPtr := resolved.IntervalRunAt
+	cronExpressionPtr := resolved.CronExpression
 
 	execMode := models.AutomationExecutionModeSequential
 	if req.ExecutionMode != nil && *req.ExecutionMode != "" {
@@ -819,6 +775,174 @@ type automationEventTriggerInput struct {
 	Filter       json.RawMessage                `json:"filter"`
 	RepositoryID *uuid.UUID                     `json:"repository_id"`
 	Enabled      *bool                          `json:"enabled"`
+}
+
+type automationScheduleInput struct {
+	ScheduleType   models.AutomationScheduleType `json:"schedule_type"`
+	IntervalValue  *int                          `json:"interval_value"`
+	IntervalUnit   *models.ScheduleUnit          `json:"interval_unit"`
+	IntervalRunAt  *string                       `json:"interval_run_at"`
+	CronExpression *string                       `json:"cron_expression"`
+	Timezone       string                        `json:"timezone"`
+}
+
+// hasCronExpression reports whether a cron_expression pointer carries an actual
+// expression. An explicit empty string means "unset" everywhere the schedule
+// fields are validated, so a client that clears the field is not treated as
+// having supplied a cross-typed value.
+func hasCronExpression(cronExpression *string) bool {
+	return cronExpression != nil && strings.TrimSpace(*cronExpression) != ""
+}
+
+func validateAutomationScheduleFieldCompatibility(
+	scheduleType models.AutomationScheduleType,
+	intervalValue *int,
+	intervalUnit *models.ScheduleUnit,
+	intervalRunAt *string,
+	cronExpression *string,
+) error {
+	if scheduleType == models.AutomationScheduleCron && (intervalValue != nil || intervalUnit != nil || intervalRunAt != nil) {
+		return fmt.Errorf("interval_value, interval_unit, and interval_run_at must not be set for cron schedules")
+	}
+	if scheduleType == models.AutomationScheduleInterval && hasCronExpression(cronExpression) {
+		return fmt.Errorf("cron_expression must not be set for interval schedules")
+	}
+	if scheduleType == models.AutomationScheduleNone &&
+		(intervalValue != nil || intervalUnit != nil || intervalRunAt != nil || hasCronExpression(cronExpression)) {
+		return fmt.Errorf("schedule fields must not be set when schedule_type is none")
+	}
+	return nil
+}
+
+// resolveAutomationSchedule validates a *complete* schedule specification and
+// returns the fields to persist, with the same defaults and error codes the
+// public create route has always applied.
+//
+// Create and PreviewSchedule both take a whole schedule rather than a partial
+// patch, so they must agree field for field — sharing this function is what
+// makes a preview a faithful dry run instead of a second implementation that
+// can drift. Update deliberately does not use it: its per-field optionality
+// ("absent means unchanged", empty interval_run_at means clear) is different
+// validation, not the same validation applied twice.
+func resolveAutomationSchedule(
+	scheduleType models.AutomationScheduleType,
+	intervalValue *int,
+	intervalUnit *models.ScheduleUnit,
+	intervalRunAt *string,
+	cronExpression *string,
+) (models.Automation, string, error) {
+	// Reject cross-typed schedule fields up front rather than silently dropping
+	// them: a cron payload that also includes interval_value almost certainly
+	// reflects a client bug, and silent normalisation would mask it.
+	if err := validateAutomationScheduleFieldCompatibility(
+		scheduleType,
+		intervalValue,
+		intervalUnit,
+		intervalRunAt,
+		cronExpression,
+	); err != nil {
+		return models.Automation{}, "INVALID_SCHEDULE", err
+	}
+
+	resolved := models.Automation{ScheduleType: scheduleType}
+	switch scheduleType {
+	case models.AutomationScheduleCron:
+		if !hasCronExpression(cronExpression) {
+			return models.Automation{}, "MISSING_CRON_EXPRESSION", fmt.Errorf("cron_expression is required for cron schedules")
+		}
+		expression := strings.TrimSpace(*cronExpression)
+		if err := models.ValidateCronExpression(expression); err != nil {
+			return models.Automation{}, "INVALID_CRON_EXPRESSION", err
+		}
+		resolved.CronExpression = &expression
+	case models.AutomationScheduleInterval:
+		value := 1
+		unit := models.ScheduleUnitDays
+		if intervalValue != nil {
+			if *intervalValue <= 0 || *intervalValue > 365 {
+				return models.Automation{}, "INVALID_INTERVAL", fmt.Errorf("interval_value must be between 1 and 365")
+			}
+			value = *intervalValue
+		}
+		if intervalUnit != nil && *intervalUnit != "" {
+			if err := intervalUnit.Validate(); err != nil {
+				return models.Automation{}, "INVALID_INTERVAL_UNIT", err
+			}
+			unit = *intervalUnit
+		}
+		resolved.IntervalValue = &value
+		resolved.IntervalUnit = &unit
+		if intervalRunAt != nil && strings.TrimSpace(*intervalRunAt) != "" {
+			runAt := strings.TrimSpace(*intervalRunAt)
+			if err := models.ValidateIntervalRunAt(runAt); err != nil {
+				return models.Automation{}, "INVALID_INTERVAL_RUN_AT", err
+			}
+			resolved.IntervalRunAt = &runAt
+		}
+	}
+	return resolved, "", nil
+}
+
+func automationFromScheduleInput(input automationScheduleInput) (models.Automation, string, error) {
+	if err := input.ScheduleType.Validate(); err != nil {
+		return models.Automation{}, "INVALID_SCHEDULE_TYPE", err
+	}
+	if input.ScheduleType == models.AutomationScheduleNone {
+		return models.Automation{}, "INVALID_SCHEDULE", fmt.Errorf("schedule_type=none has no next run")
+	}
+	// Field validation runs before the timezone check so a body with both
+	// problems reports the same code Create would report for it.
+	automation, code, err := resolveAutomationSchedule(
+		input.ScheduleType,
+		input.IntervalValue,
+		input.IntervalUnit,
+		input.IntervalRunAt,
+		input.CronExpression,
+	)
+	if err != nil {
+		return models.Automation{}, code, err
+	}
+	timezone := strings.TrimSpace(input.Timezone)
+	if timezone == "" {
+		timezone = "UTC"
+	}
+	if err := validateTimezone(timezone); err != nil {
+		return models.Automation{}, "INVALID_TIMEZONE", err
+	}
+	automation.Timezone = timezone
+	return automation, "", nil
+}
+
+// automationSchedulePreviewResponse is the PreviewSchedule payload. It is a
+// named struct rather than a map so the wire shape is checked at compile time
+// alongside the rest of the automation responses.
+type automationSchedulePreviewResponse struct {
+	NextRunAt time.Time `json:"next_run_at"`
+}
+
+// PreviewSchedule computes the next occurrence through the same model path used
+// by persisted automations and the scheduler. It is read-only, requires no
+// store access, and therefore takes no org-scoped value: the route's auth and
+// RBAC middleware already bound the request to a tenant.
+func (h *AutomationHandler) PreviewSchedule(w http.ResponseWriter, r *http.Request) {
+	var input automationScheduleInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	automation, code, err := automationFromScheduleInput(input)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, code, err.Error())
+		return
+	}
+	nextRunAt, err := automation.ComputeNextRunAt(time.Now().UTC())
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[automationSchedulePreviewResponse]{
+		Data: automationSchedulePreviewResponse{NextRunAt: nextRunAt},
+	})
 }
 
 func validateAutomationEventTriggerInputs(inputs []automationEventTriggerInput) ([]models.AutomationEventTrigger, error) {
@@ -1527,17 +1651,14 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 		effectiveScheduleType = *req.ScheduleType
 	}
-	if effectiveScheduleType == models.AutomationScheduleCron && (req.IntervalValue != nil || req.IntervalUnit != nil || req.IntervalRunAt != nil) {
-		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "interval_value, interval_unit, and interval_run_at must not be set for cron schedules")
-		return
-	}
-	if effectiveScheduleType == models.AutomationScheduleInterval && req.CronExpression != nil && strings.TrimSpace(*req.CronExpression) != "" {
-		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "cron_expression must not be set for interval schedules")
-		return
-	}
-	if effectiveScheduleType == models.AutomationScheduleNone &&
-		(req.IntervalValue != nil || req.IntervalUnit != nil || req.IntervalRunAt != nil || req.CronExpression != nil) {
-		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "schedule fields must not be set when schedule_type is none")
+	if err := validateAutomationScheduleFieldCompatibility(
+		effectiveScheduleType,
+		req.IntervalValue,
+		req.IntervalUnit,
+		req.IntervalRunAt,
+		req.CronExpression,
+	); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", err.Error())
 		return
 	}
 	if effectiveScheduleType == models.AutomationScheduleNone && len(automation.GitHubEventTriggers) == 0 {

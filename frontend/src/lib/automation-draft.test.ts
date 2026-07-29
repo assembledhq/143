@@ -5,7 +5,6 @@ import {
   clearAutomationDraft,
   defaultAutomationFormState,
   loadAutomationDraft,
-  parseAutomationIntervalInput,
   saveAutomationDraft,
   type AutomationFormState,
 } from "./automation-draft";
@@ -49,6 +48,7 @@ const FORM_STATE_KEYS = [
   "productTriggers",
   "publishPolicy",
   "reasoningEffort",
+  "scheduleDraft",
   "scheduleEnabled",
   "scope",
   "selectedRepoId",
@@ -245,11 +245,38 @@ describe("automation-draft storage", () => {
     );
   });
 
-  it("normalizes interval input to the supported range", () => {
-    expect(parseAutomationIntervalInput("")).toBe(1);
-    expect(parseAutomationIntervalInput("0")).toBe(1);
-    expect(parseAutomationIntervalInput("14")).toBe(14);
-    expect(parseAutomationIntervalInput("999")).toBe(365);
+  it("drops a malformed persisted schedule instead of rehydrating it", () => {
+    // A truncated draft used to survive the guard and then throw while the
+    // create page rendered it. Falling back to no schedule keeps the page up.
+    for (const scheduleDraft of [
+      { frequency: "weekly", timezone: "UTC" },
+      { frequency: "advanced", timezone: "UTC" },
+      { frequency: "interval", value: 3, unit: "fortnights", timezone: "UTC" },
+      "weekly",
+    ]) {
+      expect(
+        automationFormStateFromDraft(
+          { scheduleDraft } as Partial<AutomationFormState>,
+          {},
+        ).scheduleDraft,
+      ).toBeNull();
+    }
+  });
+
+  it("rehydrates a complete persisted schedule", () => {
+    const scheduleDraft = {
+      frequency: "weekly",
+      weekdays: ["monday", "thursday"],
+      time: "09:00",
+      timezone: "America/Los_Angeles",
+    };
+
+    expect(
+      automationFormStateFromDraft(
+        { scheduleDraft } as Partial<AutomationFormState>,
+        {},
+      ).scheduleDraft,
+    ).toEqual(scheduleDraft);
   });
 
   it("clears the stored draft", () => {

@@ -191,6 +191,7 @@ Only routes in this table accept external API tokens. Other protected app/admin 
 | `/api/v1/automations` | `GET` | `automations:read` | `automations:all` |
 | `/api/v1/automations/{id}` and nested read routes | `GET` | `automations:read` | `automations:all` |
 | `/api/v1/automations` | `POST` | `automations:create` | `automations:all` |
+| `/api/v1/automations/schedule-preview` | `POST` | `automations:read` | `automations:all` |
 | `/api/v1/automations/{id}` | `PATCH`, `DELETE` | `automations:write` | `automations:all` |
 | `/api/v1/automations/{id}/pause` | `POST` | `automations:write` | `automations:all` |
 | `/api/v1/automations/{id}/resume` | `POST` | `automations:write` | `automations:all` |
