@@ -1,13 +1,17 @@
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { act } from "react";
 import { http, HttpResponse } from "msw";
-import { fireEvent, renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
+import { createTestQueryClient, fireEvent, renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
+import { queryKeys } from "@/lib/query-keys";
 
 const toast = vi.hoisted(() => ({
   success: vi.fn(),
   info: vi.fn(),
   error: vi.fn(),
+}));
+const sse = vi.hoisted(() => ({
+  onEvent: undefined as undefined | (() => void),
 }));
 
 vi.mock("@/lib/notify", () => ({ notify: toast }));
@@ -21,7 +25,10 @@ vi.mock("@/lib/use-resource-sse", async () => {
   const actual = await vi.importActual<typeof import("@/lib/use-resource-sse")>("@/lib/use-resource-sse");
   return {
     ...actual,
-    useResourceSSE: () => ({ healthy: true }),
+    useResourceSSE: ({ onEvent }: { onEvent: () => void }) => {
+      sse.onEvent = onEvent;
+      return { healthy: true };
+    },
   };
 });
 import type {
@@ -251,7 +258,7 @@ function mockCodeReviewBaseHandlers(
     http.get("/api/v1/code-reviews", () =>
       HttpResponse.json({
         data: [review],
-        meta: {},
+        meta: { total_count: 1 },
       } satisfies ListResponse<CodeReviewListItem>),
     ),
     http.get("/api/v1/code-reviews/session-1/evidence", () =>
@@ -350,6 +357,7 @@ describe("CodeReviewsPage", () => {
     toast.success.mockReset();
     toast.info.mockReset();
     toast.error.mockReset();
+    sse.onEvent = undefined;
   });
 
   it("renders review sessions and policy configuration", async () => {
@@ -384,6 +392,7 @@ describe("CodeReviewsPage", () => {
     expect(filterToggle).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("textbox", { name: "Search code reviews" })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Open pull request" })).not.toBeInTheDocument();
+    expect(screen.getByText("Showing 1 of 1")).toBeInTheDocument();
     const reviewTable = screen.getByRole("table");
     const reviewRow = within(reviewTable).getByRole("row", {
       name: /#428 Fix invoice rounding/i,
@@ -521,6 +530,163 @@ describe("CodeReviewsPage", () => {
 
     expect(await within(evidenceSheet).findByText("No blocking issues found.")).toBeInTheDocument();
     expect(evidenceRequests).toBe(2);
+  });
+
+  it("loads the next cursor page and updates the visible count", async () => {
+    const secondReview = {
+      ...review,
+      id: "review-2",
+      session_id: "session-2",
+      github_pr_number: 429,
+      pull_request_title: "Fix tax rounding",
+    };
+    const requestedCursors: Array<string | null> = [];
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get("cursor");
+        requestedCursors.push(cursor);
+        return HttpResponse.json(cursor
+          ? { data: [secondReview], meta: { total_count: 2 } }
+          : { data: [review], meta: { next_cursor: "review-1", total_count: 2 } });
+      }),
+    );
+    renderWithProviders(<CodeReviewsPage />);
+
+    expect(await screen.findByText("Showing 1 of 2")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Show 50 more" }));
+
+    expect(await screen.findByText("Showing 2 of 2")).toBeInTheDocument();
+    expect(screen.getAllByText("#429 Fix tax rounding")).toHaveLength(2);
+    expect(requestedCursors).toContain("review-1");
+    expect(screen.queryByRole("button", { name: "Show 50 more" })).not.toBeInTheDocument();
+  });
+
+  it("preserves loaded history and offers a refresh when a live review arrives", async () => {
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", ({ request }) =>
+        HttpResponse.json(new URL(request.url).searchParams.has("cursor")
+          ? { data: [], meta: { total_count: 2 } }
+          : { data: [review], meta: { next_cursor: "review-1", total_count: 2 } })),
+    );
+    renderWithProviders(<CodeReviewsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Show 50 more" }));
+
+    act(() => sse.onEvent?.());
+
+    expect(await screen.findByText("New reviews are available.")).toBeInTheDocument();
+    expect(screen.getAllByText("#428 Fix invoice rounding")).toHaveLength(2);
+    await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(screen.queryByText("New reviews are available.")).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Show 50 more" })).toBeInTheDocument();
+  });
+
+  it("does not replace the first page when another feature invalidates review lists", async () => {
+    const queryClient = createTestQueryClient();
+    let firstPageRequests = 0;
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", ({ request }) => {
+        if (new URL(request.url).searchParams.has("cursor")) {
+          return HttpResponse.json({ data: [], meta: { total_count: 2 } });
+        }
+        firstPageRequests += 1;
+        return HttpResponse.json({
+          data: [review],
+          meta: { next_cursor: "review-1", total_count: 2 },
+        });
+      }),
+    );
+    renderWithProviders(<CodeReviewsPage />, { queryClient });
+    await userEvent.click(await screen.findByRole("button", { name: "Show 50 more" }));
+
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.lists() });
+    });
+
+    expect(firstPageRequests).toBe(1);
+    expect(screen.getAllByText("#428 Fix invoice rounding")).toHaveLength(2);
+  });
+
+  it("does not append an in-flight history page after the filter scope changes", async () => {
+    const staleReview = {
+      ...review,
+      id: "review-stale",
+      session_id: "session-stale",
+      github_pr_number: 429,
+      pull_request_title: "Stale history result",
+    };
+    let resolveHistory: (() => void) | undefined;
+    const historyGate = new Promise<void>((resolve) => {
+      resolveHistory = resolve;
+    });
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", async ({ request }) => {
+        const params = new URL(request.url).searchParams;
+        if (params.has("cursor")) {
+          await historyGate;
+          return HttpResponse.json({ data: [staleReview], meta: { total_count: 2 } });
+        }
+        return HttpResponse.json({
+          data: [review],
+          meta: params.get("decision") === "blocked"
+            ? { total_count: 1 }
+            : { next_cursor: "review-1", total_count: 2 },
+        });
+      }),
+    );
+    renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
+    await userEvent.click(await screen.findByRole("button", { name: "Show 50 more" }));
+    await userEvent.click(screen.getByRole("combobox", { name: "Outcome" }));
+    await userEvent.click(await screen.findByRole("option", { name: "Blocked" }));
+
+    act(() => resolveHistory?.());
+
+    await waitFor(() => {
+      expect(screen.queryByText("#429 Stale history result")).not.toBeInTheDocument();
+      expect(screen.getByText("Showing 1 of 1")).toBeInTheDocument();
+    });
+  });
+
+  it("preserves loaded reviews and allows retry after a history-page failure", async () => {
+    const secondReview = {
+      ...review,
+      id: "review-2",
+      session_id: "session-2",
+      github_pr_number: 429,
+      pull_request_title: "Recovered history page",
+    };
+    let historyAttempts = 0;
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", ({ request }) => {
+        if (!new URL(request.url).searchParams.has("cursor")) {
+          return HttpResponse.json({
+            data: [review],
+            meta: { next_cursor: "review-1", total_count: 2 },
+          });
+        }
+        historyAttempts += 1;
+        if (historyAttempts === 1) {
+          return HttpResponse.json(
+            { error: { code: "CODE_REVIEWS_LOAD_FAILED", message: "temporary failure" } },
+            { status: 500 },
+          );
+        }
+        return HttpResponse.json({ data: [secondReview], meta: { total_count: 2 } });
+      }),
+    );
+    renderWithProviders(<CodeReviewsPage />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Show 50 more" }));
+    expect(await screen.findByText("Couldn't load more reviews.")).toBeInTheDocument();
+    expect(screen.getAllByText("#428 Fix invoice rounding")).toHaveLength(2);
+
+    await userEvent.click(screen.getByRole("button", { name: "Show 50 more" }));
+    expect(await screen.findByText("Showing 2 of 2")).toBeInTheDocument();
+    expect(screen.getAllByText("#429 Recovered history page")).toHaveLength(2);
   });
 
   it("omits the mobile completion timestamp until a review completes", async () => {
@@ -1016,6 +1182,59 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
     await waitFor(() => {
       expect(requestedOutcomes).toContain("automatically_approved");
+    });
+  });
+
+  it("restores every review filter from the URL and sends the complete filtered request", async () => {
+    const requests: URLSearchParams[] = [];
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", ({ request }) => {
+        requests.push(new URL(request.url).searchParams);
+        return HttpResponse.json({ data: [review], meta: { total_count: 1 } });
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, {
+      searchParams: {
+        repository: repo.id,
+        outcome: "blocked",
+        risk: "needs_review",
+        status: "completed",
+        search: "invoice",
+      },
+    });
+
+    expect(await screen.findByRole("textbox", { name: "Search code reviews" })).toHaveValue("invoice");
+    await waitFor(() => {
+      expect(requests.some((params) =>
+        params.get("repository_id") === repo.id
+        && params.get("decision") === "blocked"
+        && params.get("risk") === "needs_review"
+        && params.get("status") === "completed"
+        && params.get("search") === "invoice"
+        && params.get("limit") === "50",
+      )).toBe(true);
+    });
+  });
+
+  it("distinguishes a filtered empty result and clears the active filters", async () => {
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", () =>
+        HttpResponse.json({ data: [], meta: { total_count: 0 } })),
+    );
+    renderWithProviders(<CodeReviewsPage />, {
+      searchParams: { outcome: "blocked", search: "missing" },
+      nuqsHasMemory: true,
+    });
+
+    expect(await screen.findByText("No reviews match these filters")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("textbox", { name: "Search code reviews" })).toHaveValue("");
+      expect(screen.getByRole("combobox", { name: "Outcome" })).toHaveTextContent("All outcomes");
     });
   });
 

@@ -2611,6 +2611,7 @@ export interface ListResponse<T> {
   data: T[];
   meta: {
     next_cursor?: string;
+    total_count?: number;
     default_repository_id?: string;
   };
 }

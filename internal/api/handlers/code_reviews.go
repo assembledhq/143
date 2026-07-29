@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -36,6 +38,76 @@ type codeReviewMembershipStore interface {
 
 type codeReviewRetryService interface {
 	RetryReview(ctx context.Context, input codereviewsvc.RetryReviewInput) (codereviewsvc.RetryReviewResult, error)
+}
+
+type codeReviewListCursor struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	Scope     [32]byte  `json:"scope"`
+}
+
+type codeReviewCursorScope struct {
+	OrgID         uuid.UUID                       `json:"org_id"`
+	RepositoryID  *uuid.UUID                      `json:"repository_id,omitempty"`
+	Decision      *models.CodeReviewDecision      `json:"decision,omitempty"`
+	Outcome       *models.CodeReviewListOutcome   `json:"outcome,omitempty"`
+	Status        *models.CodeReviewSessionStatus `json:"status,omitempty"`
+	Acceptable    *bool                           `json:"acceptable,omitempty"`
+	Search        string                          `json:"search,omitempty"`
+	CreatedAfter  *time.Time                      `json:"created_after,omitempty"`
+	CreatedBefore *time.Time                      `json:"created_before,omitempty"`
+}
+
+func codeReviewListCursorScopeHash(orgID uuid.UUID, filters db.CodeReviewListFilters) ([32]byte, error) {
+	encoded, err := json.Marshal(codeReviewCursorScope{
+		OrgID:         orgID,
+		RepositoryID:  filters.RepositoryID,
+		Decision:      filters.Decision,
+		Outcome:       filters.Outcome,
+		Status:        filters.Status,
+		Acceptable:    filters.Acceptable,
+		Search:        strings.TrimSpace(filters.Search),
+		CreatedAfter:  filters.CreatedAfter,
+		CreatedBefore: filters.CreatedBefore,
+	})
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return sha256.Sum256(encoded), nil
+}
+
+func encodeCodeReviewListCursor(orgID uuid.UUID, filters db.CodeReviewListFilters, id uuid.UUID, createdAt time.Time) (string, error) {
+	scope, err := codeReviewListCursorScopeHash(orgID, filters)
+	if err != nil {
+		return "", err
+	}
+	encoded, err := json.Marshal(codeReviewListCursor{ID: id, CreatedAt: createdAt, Scope: scope})
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(encoded), nil
+}
+
+func decodeCodeReviewListCursor(raw string, orgID uuid.UUID, filters db.CodeReviewListFilters) (uuid.UUID, time.Time, error) {
+	encoded, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return uuid.Nil, time.Time{}, err
+	}
+	var cursor codeReviewListCursor
+	if err := json.Unmarshal(encoded, &cursor); err != nil {
+		return uuid.Nil, time.Time{}, err
+	}
+	if cursor.ID == uuid.Nil || cursor.CreatedAt.IsZero() {
+		return uuid.Nil, time.Time{}, errors.New("cursor anchor is incomplete")
+	}
+	scope, err := codeReviewListCursorScopeHash(orgID, filters)
+	if err != nil {
+		return uuid.Nil, time.Time{}, err
+	}
+	if cursor.Scope != scope {
+		return uuid.Nil, time.Time{}, errors.New("cursor does not match the active filters")
+	}
+	return cursor.ID, cursor.CreatedAt, nil
 }
 
 type CodeReviewHandler struct {
@@ -192,6 +264,7 @@ func (h *CodeReviewHandler) List(w http.ResponseWriter, r *http.Request) {
 		Search:       strings.TrimSpace(r.URL.Query().Get("search")),
 		Limit:        limit,
 	}
+	rawCursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
 	if raw := strings.TrimSpace(r.URL.Query().Get("decision")); raw != "" {
 		decision := models.CodeReviewDecision(raw)
 		if err := decision.Validate(); err != nil {
@@ -229,12 +302,37 @@ func (h *CodeReviewHandler) List(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	reviews, err := h.store.ListReviews(r.Context(), orgID, filters)
+	if rawCursor != "" {
+		cursorID, cursorCreatedAt, err := decodeCodeReviewListCursor(rawCursor, orgID, filters)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "cursor is invalid or does not match the active filters")
+			return
+		}
+		filters.Cursor = &cursorID
+		filters.CursorCreatedAt = &cursorCreatedAt
+	}
+	page, err := h.store.ListReviewsPage(r.Context(), orgID, filters)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEWS_LOAD_FAILED", "failed to load code reviews", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, models.ListResponse[models.CodeReviewListItem]{Data: reviews})
+	nextCursor := ""
+	if page.NextCursor != "" {
+		cursorID, err := uuid.Parse(page.NextCursor)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEWS_LOAD_FAILED", "failed to encode code review cursor", err)
+			return
+		}
+		nextCursor, err = encodeCodeReviewListCursor(orgID, filters, cursorID, page.NextCursorCreatedAt)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEWS_LOAD_FAILED", "failed to encode code review cursor", err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.CodeReviewListItem]{
+		Data: page.Items,
+		Meta: models.PaginationMeta{NextCursor: nextCursor, TotalCount: &page.TotalCount},
+	})
 }
 
 func (h *CodeReviewHandler) Templates(w http.ResponseWriter, r *http.Request) {

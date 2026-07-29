@@ -273,6 +273,7 @@ export const api = {
       risk?: "acceptable" | "needs_review";
       search?: string;
       limit?: number;
+      cursor?: string;
     }) => {
       const searchParams = new URLSearchParams();
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
@@ -282,6 +283,7 @@ export const api = {
       if (params?.risk) searchParams.set('risk', params.risk);
       if (params?.search) searchParams.set('search', params.search);
       if (params?.limit) searchParams.set('limit', String(params.limit));
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').CodeReviewListItem>>(`/api/v1/code-reviews${qs ? `?${qs}` : ''}`);
     },

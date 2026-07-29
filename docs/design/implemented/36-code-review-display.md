@@ -1,6 +1,6 @@
 # 36 - Code Review Display
 
-> **Status:** Implemented | **Last reviewed:** 2026-05-06
+> **Status:** Implemented | **Last reviewed:** 2026-07-28
 >
 > **Implementation notes:** The rich diff viewer is shipped: parsed file/hunk rendering, unified and split modes, syntax highlighting, file tree navigation, inline review comments, keyboard navigation, repo explorer integration, basic between-hunk context expansion, and scroll-synced active-file highlighting between the diff pane and file tree. PR creation has also moved onto snapshot-backed workspace pushes. The two remaining design-area concerns — (1) GitHub-style incremental context navigation from the current diff position and (2) stronger diff provenance so the rendered diff is explicitly tied to an immutable branch basis instead of an ad hoc stored patch — were spun out into [55-code-diff-context-navigation.md](55-code-diff-context-navigation.md).
 
@@ -19,6 +19,25 @@ For a tool targeting developers, the code review surface is the highest-leverage
 3. **Comments are commands** — Every inline comment is a directive to the agent. The review UI is the steering wheel, not just a read-only display.
 4. **Keyboard-first** — File navigation, comment creation, and approval should all be possible without touching a mouse.
 5. **Progressive disclosure** — Start with the diff summary, expand to file-level detail, drill into full repo exploration. Never force all the complexity up front.
+
+## Code Reviews Activity List
+
+The dashboard Code reviews activity list is a newest-first, cursor-paginated
+operational feed. The public list API returns at most 50 rows by default,
+an exact `meta.total_count` for the complete filtered collection, and
+`meta.next_cursor` when more history exists. The cursor follows the stable
+`(created_at DESC, id DESC)` ordering and is scoped to the active organization.
+Reusing a cursor with a different filter collection is rejected.
+
+Repository, outcome, risk, status, and search filters are URL-backed so views
+are shareable and browser-navigation safe. The UI presents `Showing N of M`
+and loads history explicitly in batches of 50 rather than using automatic
+infinite scrolling.
+
+Live SSE refreshes update the newest page automatically. After a user loads
+older pages, automatic replacement pauses to preserve the cursor snapshot;
+subsequent events show a “New reviews are available” action that returns the
+list to a freshly loaded newest page.
 
 ---
 
