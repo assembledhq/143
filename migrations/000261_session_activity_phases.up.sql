@@ -6,7 +6,7 @@ CREATE TABLE thread_inbox_delivery_batches (
     org_id uuid NOT NULL REFERENCES organizations(id),
     session_id uuid NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     thread_id uuid NOT NULL REFERENCES session_threads(id) ON DELETE CASCADE,
-    runtime_id uuid NOT NULL REFERENCES thread_runtimes(id) ON DELETE CASCADE,
+    runtime_id uuid NOT NULL REFERENCES thread_runtimes(id) ON DELETE RESTRICT,
     sequence_start bigint NOT NULL,
     sequence_end bigint NOT NULL,
     status text NOT NULL,

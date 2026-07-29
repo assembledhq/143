@@ -1373,6 +1373,18 @@ func TestSessionActivityPhaseMigrationEnforcesLifecycleAndDeliveryIdentity(t *te
 	for _, fragment := range requiredFragments {
 		require.Contains(t, upSQL, fragment, "activity phase migration should enforce every durable lifecycle invariant")
 	}
+	require.Contains(
+		t,
+		upSQL,
+		"runtime_id uuid NOT NULL REFERENCES thread_runtimes(id) ON DELETE RESTRICT",
+		"delivery batches should prevent runtime deletion from silently removing durable acknowledgment identity",
+	)
+	require.NotContains(
+		t,
+		upSQL,
+		"runtime_id uuid NOT NULL REFERENCES thread_runtimes(id) ON DELETE CASCADE",
+		"delivery batches should never be cascade-deleted with their runtime",
+	)
 
 	downSQL := string(downBody)
 	phaseDrop := strings.Index(downSQL, "DROP TABLE IF EXISTS session_activity_phases")
