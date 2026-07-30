@@ -87,6 +87,7 @@ import type {
   AutomationGitHubEventFilters,
   AutomationRun,
   ListResponse,
+  Repository,
 } from "@/lib/types";
 import { cn, formatDateTime, formatTimeAgo } from "@/lib/utils";
 import {
@@ -128,6 +129,9 @@ function SettingsTab({
   canManage: boolean;
 }) {
   const queryClient = useQueryClient();
+  const [repositoryId, setRepositoryId] = useState(
+    automation.repository_id ?? "",
+  );
   const [scope, setScope] = useState(automation.scope ?? "");
   // Form state is seeded from the automation prop on first mount only. The
   // parent polls every 10s and may refetch into a new `automation` object.
@@ -191,6 +195,18 @@ function SettingsTab({
   const [capabilityDraft, setCapabilityDraft] = useState<
     AgentCapabilityGrant[] | null
   >(null);
+
+  const { data: repositoriesResponse } = useQuery<ListResponse<Repository>>({
+    queryKey: queryKeys.repositories.all,
+    queryFn: () => api.repositories.list(),
+  });
+  const repositories = useMemo(
+    () => repositoriesResponse?.data ?? [],
+    [repositoriesResponse?.data],
+  );
+  const selectedRepository = repositories.find(
+    (repository) => repository.id === repositoryId,
+  );
 
   const { data: settingsResponse } = useQuery({
     queryKey: ["settings"],
@@ -278,6 +294,9 @@ function SettingsTab({
   const updateMutation = useMutation({
     mutationFn: () =>
       api.automations.update(automation.id, {
+        ...(repositoryId === (automation.repository_id ?? "")
+          ? {}
+          : { repository_id: repositoryId }),
         scope: scope.trim() || undefined,
         ...(sameScheduleDraft(scheduleDraft, initialScheduleDraftRef.current)
           ? {}
@@ -314,6 +333,37 @@ function SettingsTab({
 
   return (
     <div className="space-y-4 rounded-lg border border-border bg-card p-5">
+      <div className="space-y-1.5">
+        <Label htmlFor="automation-repository">Repository</Label>
+        <Select
+          value={repositoryId}
+          onValueChange={(nextRepositoryId) => {
+            setRepositoryId(nextRepositoryId);
+            const nextRepository = repositories.find(
+              (repository) => repository.id === nextRepositoryId,
+            );
+            if (nextRepository) {
+              setBaseBranch(nextRepository.default_branch);
+            }
+          }}
+          disabled={!canManage || repositories.length === 0}
+        >
+          <SelectTrigger id="automation-repository" aria-label="Repository">
+            <SelectValue placeholder="Select repository" />
+          </SelectTrigger>
+          <SelectContent>
+            {repositories.map((repository) => (
+              <SelectItem key={repository.id} value={repository.id}>
+                {repository.full_name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          Changing the repository resets the base branch to that
+          repository&apos;s default.
+        </p>
+      </div>
       <div className="space-y-1.5">
         <Label htmlFor="scope">
           Scope{" "}
@@ -443,9 +493,11 @@ function SettingsTab({
           <div className="space-y-1.5">
             <Label>Base branch</Label>
             <BranchPicker
-              repositoryId={automation.repository_id ?? ""}
+              repositoryId={repositoryId}
               value={baseBranch}
-              defaultBranch={automation.base_branch}
+              defaultBranch={
+                selectedRepository?.default_branch ?? automation.base_branch
+              }
               onValueChange={setBaseBranch}
               label="Base branch"
               buttonClassName="w-full justify-between"
