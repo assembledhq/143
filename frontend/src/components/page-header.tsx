@@ -10,8 +10,8 @@ interface PageHeaderProps {
 export function PageHeader({ title, description, subtitle, action }: PageHeaderProps) {
   return (
     <div data-slot="page-header" className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-      <div>
-        <h1 className="font-display text-2xl leading-[1.25] font-semibold tracking-[-0.035em] text-foreground sm:text-[1.75rem] sm:leading-[2.125rem]">{title}</h1>
+      <div className="min-w-0 flex-1">
+        <h1 className="w-full font-display text-2xl leading-[1.25] font-semibold tracking-[-0.035em] text-foreground sm:text-[1.75rem] sm:leading-[2.125rem]">{title}</h1>
         {description && (
           <p className="mt-1.5 max-w-2xl text-sm leading-5 text-muted-foreground">{description}</p>
         )}
