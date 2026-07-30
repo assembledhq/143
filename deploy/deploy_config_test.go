@@ -2350,6 +2350,90 @@ func TestDeployPrunesDockerArtifactsAfterSuccessfulRollout(t *testing.T) {
 	require.Contains(t, deployText, `DEPLOY_DOCKER_PRUNE=0`, "operators should have an explicit escape hatch for incident response or rollback-cache preservation")
 }
 
+func TestDeployRetriesRegistryPulls(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy script")
+	deployText := string(deployScript)
+	retryFn := extractShellFunction(t, deployText, "pull_with_retry", "prune_docker_deploy_artifacts")
+
+	require.Contains(t, deployText, `remote_env_assignment DEPLOY_DOCKER_PULL_ATTEMPTS "${DEPLOY_DOCKER_PULL_ATTEMPTS:-}"`,
+		"deploy should forward the image pull attempt override to the remote host")
+	require.Contains(t, deployText, `remote_env_assignment DEPLOY_DOCKER_PULL_RETRY_DELAY_SECONDS "${DEPLOY_DOCKER_PULL_RETRY_DELAY_SECONDS:-}"`,
+		"deploy should forward the image pull retry delay override to the remote host")
+	require.Contains(t, retryFn, `DEPLOY_DOCKER_PULL_ATTEMPTS:-2`,
+		"deploy should default to one registry pull retry after the initial attempt")
+	require.Contains(t, deployText, `pull_with_retry "compose images" docker compose -f "$COMPOSE_FILE" pull --ignore-buildable`,
+		"deploy should retry the compose image pull when a registry request fails transiently")
+	require.Contains(t, deployText, `pull_with_retry "sandbox image $sandbox_image" docker pull "$sandbox_image"`,
+		"worker deploy should retry its separately referenced sandbox image pull")
+
+	tests := []struct {
+		name             string
+		succeedOnAttempt int
+		expectedAttempts string
+		expectError      bool
+	}{
+		{
+			name:             "succeeds after transient failures",
+			succeedOnAttempt: 3,
+			expectedAttempts: "3",
+		},
+		{
+			name:             "fails after bounded attempts",
+			succeedOnAttempt: 0,
+			expectedAttempts: "3",
+			expectError:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tempDir := t.TempDir()
+			countFile := filepath.Join(tempDir, "attempts")
+			fakePull := filepath.Join(tempDir, "fake-pull")
+			require.NoError(t, os.WriteFile(fakePull, []byte(`#!/usr/bin/env bash
+set -euo pipefail
+count=0
+if [ -f "$COUNT_FILE" ]; then
+  count="$(cat "$COUNT_FILE")"
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$COUNT_FILE"
+if [ "$SUCCEED_ON_ATTEMPT" -gt 0 ] && [ "$count" -ge "$SUCCEED_ON_ATTEMPT" ]; then
+  exit 0
+fi
+exit 1
+`), 0o755), "test should create a fake registry pull command")
+
+			script := retryFn + `
+pull_with_retry "test image" "$FAKE_PULL"
+`
+			cmd := exec.Command("bash", "-c", script)
+			cmd.Env = append(os.Environ(),
+				"COUNT_FILE="+countFile,
+				fmt.Sprintf("SUCCEED_ON_ATTEMPT=%d", tt.succeedOnAttempt),
+				"FAKE_PULL="+fakePull,
+				"DEPLOY_DOCKER_PULL_ATTEMPTS=3",
+				"DEPLOY_DOCKER_PULL_RETRY_DELAY_SECONDS=0",
+			)
+			output, err := cmd.CombinedOutput()
+			if tt.expectError {
+				require.Error(t, err, "pull retry helper should fail after exhausting its bounded attempts: %s", string(output))
+			} else {
+				require.NoError(t, err, "pull retry helper should recover from transient registry failures: %s", string(output))
+			}
+
+			attempts, readErr := os.ReadFile(countFile)
+			require.NoError(t, readErr, "test should read the fake pull attempt count")
+			require.Equal(t, tt.expectedAttempts, string(attempts), "pull retry helper should execute the expected number of attempts")
+		})
+	}
+}
+
 func TestWorkerDrainMonitorDeduplicatesPerContainer(t *testing.T) {
 	t.Parallel()
 

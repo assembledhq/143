@@ -865,6 +865,8 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "$(remote_env_assignment DEPLOY_DOCKER_PRUNE "${DEPLOY_DOCKER_PRUNE:-1}")" \
   "$(remote_env_assignment DOCKER_PRUNE_UNTIL "${DOCKER_PRUNE_UNTIL:-24h}")" \
   "$(remote_env_assignment DEPLOY_DOCKER_VOLUME_PRUNE "${DEPLOY_DOCKER_VOLUME_PRUNE:-0}")" \
+  "$(remote_env_assignment DEPLOY_DOCKER_PULL_ATTEMPTS "${DEPLOY_DOCKER_PULL_ATTEMPTS:-}")" \
+  "$(remote_env_assignment DEPLOY_DOCKER_PULL_RETRY_DELAY_SECONDS "${DEPLOY_DOCKER_PULL_RETRY_DELAY_SECONDS:-}")" \
   "$(remote_env_assignment WORKER_HOST_RUNTIME_FINGERPRINT_FILES "$WORKER_HOST_RUNTIME_FINGERPRINT_FILES")" \
   "$(remote_env_assignment WORKER_DOCKER_DAEMON_FINGERPRINT_FILES "$WORKER_DOCKER_DAEMON_FINGERPRINT_FILES")" \
   "$(remote_env_assignment WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES "$WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES")" \
@@ -2183,6 +2185,42 @@ SELECT COUNT(*) FROM endpoint_blockers;"
     fi
   }
 
+  # Registry token and layer requests occasionally fail during a parallel
+  # fleet rollout even though the images and credentials are valid. Retry the
+  # pull as a whole: Docker keeps completed layers, so a later attempt resumes
+  # cheaply while permanent auth/tag errors still fail after a bounded window.
+  pull_with_retry() {
+    local description="$1"
+    shift
+    local attempts="${DEPLOY_DOCKER_PULL_ATTEMPTS:-2}"
+    local retry_delay="${DEPLOY_DOCKER_PULL_RETRY_DELAY_SECONDS:-5}"
+
+    if ! [[ "$attempts" =~ ^[1-9][0-9]*$ ]]; then
+      echo "ERROR: DEPLOY_DOCKER_PULL_ATTEMPTS must be a positive integer, got '$attempts'." >&2
+      return 1
+    fi
+    if ! [[ "$retry_delay" =~ ^[0-9]+$ ]]; then
+      echo "ERROR: DEPLOY_DOCKER_PULL_RETRY_DELAY_SECONDS must be a non-negative integer, got '$retry_delay'." >&2
+      return 1
+    fi
+
+    local attempt
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+      if "$@"; then
+        if [ "$attempt" -gt 1 ]; then
+          echo "Pulled $description successfully on attempt $attempt."
+        fi
+        return 0
+      fi
+      if [ "$attempt" -ge "$attempts" ]; then
+        echo "ERROR: failed to pull $description after $attempts attempt(s)." >&2
+        return 1
+      fi
+      echo "WARNING: failed to pull $description (attempt $attempt/$attempts); retrying in ${retry_delay}s..." >&2
+      sleep "$retry_delay"
+    done
+  }
+
   # prune_docker_deploy_artifacts ROLE — reclaim Docker cache after a
   # successful rollout. Runs only after the new service is healthy so the
   # freshly pulled image is protected by a running container. Detached worker
@@ -2214,7 +2252,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
       local sandbox_image="ghcr.io/assembledhq/143-sandbox:$IMAGE_TAG"
       if ! docker image inspect "$sandbox_image" >/dev/null 2>&1; then
         echo "Re-pulling required sandbox image after prune: $sandbox_image"
-        docker pull "$sandbox_image"
+        pull_with_retry "sandbox image $sandbox_image" docker pull "$sandbox_image"
       fi
     fi
     if [ "$role" = "worker" ] && [ "${DEPLOY_DOCKER_VOLUME_PRUNE:-0}" = "1" ]; then
@@ -2364,13 +2402,14 @@ SELECT COUNT(*) FROM endpoint_blockers;"
     promote_staged_app_compose
   fi
 
-  docker compose -f "$COMPOSE_FILE" pull --ignore-buildable
+  pull_with_retry "compose images" docker compose -f "$COMPOSE_FILE" pull --ignore-buildable
 
   # The sandbox image is referenced via SANDBOX_IMAGE env var, not as a compose
   # service, so `docker compose pull` doesn't fetch it. Pull it explicitly —
   # ContainerCreate doesn't auto-pull, so the worker would fail on first launch.
   if [ "$ROLE" = "worker" ]; then
-    docker pull "ghcr.io/assembledhq/143-sandbox:$IMAGE_TAG"
+    sandbox_image="ghcr.io/assembledhq/143-sandbox:$IMAGE_TAG"
+    pull_with_retry "sandbox image $sandbox_image" docker pull "$sandbox_image"
     if [ "${DEPLOY_MODE:-routine}" = "routine" ]; then
       if ! docker image inspect 143-sandbox-dns:local >/dev/null 2>&1; then
         echo "sandbox-dns image missing; building local support image for routine worker deploy..."
@@ -2465,7 +2504,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
       cat > "$rollover_script" <<EOS
 #!/bin/bash
 set -euo pipefail
-$(declare -f resolve_worker_drain_timeout_seconds drain_worker_service drain_worker_containers_blocking read_worker_env_value load_worker_endpoint_check_env sanitize_compose_project list_running_worker_containers worker_container_node_id worker_database_url first_running_worker_node_id run_worker_deployctl wait_worker_db_heartbeat worker_port_in_use worker_runtime_endpoint_in_use worker_blue_green_extra_ports_configured worker_host_capacity_preflight fingerprint_files compose_service_fingerprint worker_process_config_fingerprint worker_support_service_fingerprint worker_host_runtime_fingerprint worker_docker_daemon_fingerprint ensure_routine_worker_fingerprints_compatible worker_expected_schema_version protect_active_executor_images find_free_worker_port start_worker_generation drain_old_worker_containers deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)
+$(declare -f resolve_worker_drain_timeout_seconds drain_worker_service drain_worker_containers_blocking read_worker_env_value load_worker_endpoint_check_env sanitize_compose_project list_running_worker_containers worker_container_node_id worker_database_url first_running_worker_node_id run_worker_deployctl wait_worker_db_heartbeat worker_port_in_use worker_runtime_endpoint_in_use worker_blue_green_extra_ports_configured worker_host_capacity_preflight fingerprint_files compose_service_fingerprint worker_process_config_fingerprint worker_support_service_fingerprint worker_host_runtime_fingerprint worker_docker_daemon_fingerprint ensure_routine_worker_fingerprints_compatible worker_expected_schema_version protect_active_executor_images find_free_worker_port start_worker_generation pull_with_retry drain_old_worker_containers deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)
 COMPOSE_FILE='$COMPOSE_FILE'
 HEALTH_SERVICE='$HEALTH_SERVICE'
 STATUS_FILE='$status_file'
@@ -2478,6 +2517,8 @@ DB_PASSWORD=$(printf '%q' "$(read_worker_env_value DB_PASSWORD)")
 DEPLOY_DOCKER_PRUNE='${DEPLOY_DOCKER_PRUNE:-1}'
 DOCKER_PRUNE_UNTIL='${DOCKER_PRUNE_UNTIL:-24h}'
 DEPLOY_DOCKER_VOLUME_PRUNE='${DEPLOY_DOCKER_VOLUME_PRUNE:-0}'
+DEPLOY_DOCKER_PULL_ATTEMPTS='${DEPLOY_DOCKER_PULL_ATTEMPTS:-}'
+DEPLOY_DOCKER_PULL_RETRY_DELAY_SECONDS='${DEPLOY_DOCKER_PULL_RETRY_DELAY_SECONDS:-}'
 WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS='${WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS:-}'
 WORKER_BLUE_GREEN_PORT_START='${WORKER_BLUE_GREEN_PORT_START:-}'
 WORKER_BLUE_GREEN_PORT_END='${WORKER_BLUE_GREEN_PORT_END:-}'
