@@ -244,32 +244,45 @@ func (h *CodeReviewHandler) streamOrgIDFromRequest(r *http.Request) (uuid.UUID, 
 	return requestedOrgID, nil
 }
 
-func (h *CodeReviewHandler) List(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
+func parseCodeReviewTimeFilters(w http.ResponseWriter, r *http.Request) (*time.Time, *time.Time, bool) {
+	var createdAfter, createdBefore *time.Time
+	if raw := r.URL.Query().Get("created_after"); raw != "" {
+		parsed, ok := parseOptionalRFC3339(w, r, &raw)
+		if !ok {
+			return nil, nil, false
+		}
+		createdAfter = parsed
+	}
+	if raw := r.URL.Query().Get("created_before"); raw != "" {
+		parsed, ok := parseOptionalRFC3339(w, r, &raw)
+		if !ok {
+			return nil, nil, false
+		}
+		createdBefore = parsed
+	}
+	return createdAfter, createdBefore, true
+}
+
+func parseCodeReviewFilters(w http.ResponseWriter, r *http.Request) (db.CodeReviewListFilters, bool) {
 	repositoryID, ok := parseOptionalUUIDQuery(w, r, "repository_id")
 	if !ok {
-		return
+		return db.CodeReviewListFilters{}, false
 	}
-	limit := 50
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 1 || parsed > 100 {
-			writeError(w, r, http.StatusBadRequest, "INVALID_LIMIT", "limit must be between 1 and 100")
-			return
-		}
-		limit = parsed
+	createdAfter, createdBefore, ok := parseCodeReviewTimeFilters(w, r)
+	if !ok {
+		return db.CodeReviewListFilters{}, false
 	}
 	filters := db.CodeReviewListFilters{
-		RepositoryID: repositoryID,
-		Search:       strings.TrimSpace(r.URL.Query().Get("search")),
-		Limit:        limit,
+		RepositoryID:  repositoryID,
+		Search:        strings.TrimSpace(r.URL.Query().Get("search")),
+		CreatedAfter:  createdAfter,
+		CreatedBefore: createdBefore,
 	}
-	rawCursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
 	if raw := strings.TrimSpace(r.URL.Query().Get("decision")); raw != "" {
 		decision := models.CodeReviewDecision(raw)
 		if err := decision.Validate(); err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_DECISION", "invalid decision")
-			return
+			return db.CodeReviewListFilters{}, false
 		}
 		filters.Decision = &decision
 	}
@@ -277,7 +290,7 @@ func (h *CodeReviewHandler) List(w http.ResponseWriter, r *http.Request) {
 		outcome := models.CodeReviewListOutcome(raw)
 		if err := outcome.Validate(); err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_OUTCOME", "invalid outcome")
-			return
+			return db.CodeReviewListFilters{}, false
 		}
 		filters.Outcome = &outcome
 	}
@@ -285,7 +298,7 @@ func (h *CodeReviewHandler) List(w http.ResponseWriter, r *http.Request) {
 		status := models.CodeReviewSessionStatus(raw)
 		if err := status.Validate(); err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_STATUS", "invalid status")
-			return
+			return db.CodeReviewListFilters{}, false
 		}
 		filters.Status = &status
 	}
@@ -299,9 +312,29 @@ func (h *CodeReviewHandler) List(w http.ResponseWriter, r *http.Request) {
 			filters.Acceptable = &acceptable
 		default:
 			writeError(w, r, http.StatusBadRequest, "INVALID_RISK", "risk must be acceptable or needs_review")
-			return
+			return db.CodeReviewListFilters{}, false
 		}
 	}
+	return filters, true
+}
+
+func (h *CodeReviewHandler) List(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	filters, ok := parseCodeReviewFilters(w, r)
+	if !ok {
+		return
+	}
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 100 {
+			writeError(w, r, http.StatusBadRequest, "INVALID_LIMIT", "limit must be between 1 and 100")
+			return
+		}
+		limit = parsed
+	}
+	filters.Limit = limit
+	rawCursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
 	if rawCursor != "" {
 		cursorID, cursorCreatedAt, err := decodeCodeReviewListCursor(rawCursor, orgID, filters)
 		if err != nil {
@@ -333,6 +366,29 @@ func (h *CodeReviewHandler) List(w http.ResponseWriter, r *http.Request) {
 		Data: page.Items,
 		Meta: models.PaginationMeta{NextCursor: nextCursor, TotalCount: &page.TotalCount},
 	})
+}
+
+func (h *CodeReviewHandler) Stats(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	filters, ok := parseCodeReviewFilters(w, r)
+	if !ok {
+		return
+	}
+	stats, err := h.store.GetReviewStats(r.Context(), orgID, db.CodeReviewStatsFilters{
+		RepositoryID:  filters.RepositoryID,
+		Decision:      filters.Decision,
+		Outcome:       filters.Outcome,
+		Status:        filters.Status,
+		Acceptable:    filters.Acceptable,
+		Search:        filters.Search,
+		CreatedAfter:  filters.CreatedAfter,
+		CreatedBefore: filters.CreatedBefore,
+	})
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_STATS_LOAD_FAILED", "failed to load code review stats", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewStats]{Data: stats})
 }
 
 func (h *CodeReviewHandler) Templates(w http.ResponseWriter, r *http.Request) {

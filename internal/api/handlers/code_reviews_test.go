@@ -308,6 +308,96 @@ func TestCodeReviewHandler_ListReturnsPaginationMetadata(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "the handler should execute count and page queries")
 }
 
+func TestCodeReviewHandler_ListAppliesTimeWindow(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery(`SELECT COUNT\(\*\).*m\.created_at >= @created_after`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(0)))
+	mock.ExpectQuery(`m\.created_at >= @created_after`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), 51).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
+			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message",
+			"retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
+			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id",
+			"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at", "retry_eligible",
+			"session_title", "repository_name", "github_repo", "github_pr_number", "github_pr_url",
+			"pull_request_title", "pull_request_author",
+		}))
+	handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-reviews?created_after=2026-06-01T00:00:00Z", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.List(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "list should accept an RFC3339 time-window boundary")
+	require.NoError(t, mock.ExpectationsWereMet(), "count and rows should share the time-window boundary")
+}
+
+func TestCodeReviewHandler_StatsReturnsFilteredAggregates(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repositoryID := uuid.New()
+	medianTurnaround := 480.0
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery(`(?s)FROM code_review_session_metadata m.*m\.repository_id = @repository_id.*m\.decision = @decision.*m\.status = @status.*m\.acceptable = @acceptable.*m\.created_at >= @created_after.*pr\.title ILIKE @search`).
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"reviews_completed",
+			"automatically_approved",
+			"needs_human_review",
+			"median_turnaround_seconds",
+		}).AddRow(128, 92, 21, medianTurnaround))
+	handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v1/code-reviews/stats?repository_id="+repositoryID.String()+
+			"&decision=needs_human_review&status=completed&risk=needs_review&search=auth&created_after=2026-06-01T00:00:00Z",
+		nil,
+	)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.Stats(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "stats should return filtered aggregate metrics")
+	var response models.SingleResponse[models.CodeReviewStats]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response), "stats response should be valid JSON")
+	require.Equal(t, models.CodeReviewStats{
+		ReviewsCompleted:        128,
+		AutomaticallyApproved:   92,
+		NeedsHumanReview:        21,
+		MedianTurnaroundSeconds: &medianTurnaround,
+	}, response.Data, "stats should return all four overview metrics")
+	require.NoError(t, mock.ExpectationsWereMet(), "stats should apply all whole-page filters")
+}
+
+func TestCodeReviewHandler_StatsRejectsInvalidTimeWindow(t *testing.T) {
+	t.Parallel()
+
+	handler := NewCodeReviewHandler(nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-reviews/stats?created_after=not-a-time", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	rr := httptest.NewRecorder()
+
+	handler.Stats(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "stats should reject an invalid time-window boundary")
+	require.Contains(t, rr.Body.String(), "INVALID_TIMESTAMP", "invalid time windows should use the shared timestamp error")
+}
+
 func TestCodeReviewHandler_ListRejectsCursorOutsideOrganization(t *testing.T) {
 	t.Parallel()
 

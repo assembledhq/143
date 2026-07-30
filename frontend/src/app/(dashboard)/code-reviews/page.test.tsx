@@ -39,6 +39,7 @@ import type {
   CodeReviewPolicyConfig,
   CodeReviewPolicyRecord,
   CodeReviewResolvedPolicy,
+  CodeReviewStats,
   CodeReviewTemplateOption,
   CodeReviewPromptExamplesResponse,
   AuditLog,
@@ -198,6 +199,13 @@ const evidence: CodeReviewEvidence = {
   ],
 };
 
+const reviewStats: CodeReviewStats = {
+  reviews_completed: 128,
+  automatically_approved: 92,
+  needs_human_review: 21,
+  median_turnaround_seconds: 480,
+};
+
 const template: CodeReviewTemplateOption = {
   key: "small_backend_change",
   title: "Small backend change",
@@ -236,6 +244,12 @@ const githubTriggerReady: CodeReviewGitHubTriggerResponse = {
   },
 };
 
+function expectCreatedAfterDaysAgo(value: string | undefined, days: number): void {
+  expect(value).toBeTruthy();
+  const ageMs = Date.now() - Date.parse(value ?? "");
+  expect(Math.abs(ageMs - days * 24 * 60 * 60 * 1000)).toBeLessThan(5 * 60 * 1000);
+}
+
 function mockCodeReviewBaseHandlers(
   trigger: CodeReviewGitHubTriggerResponse = githubTriggerReady,
   onPolicyUpdate?: (config: CodeReviewPolicyConfig, source?: string) => void,
@@ -257,6 +271,11 @@ function mockCodeReviewBaseHandlers(
         data: [review],
         meta: { total_count: 1 },
       } satisfies ListResponse<CodeReviewListItem>),
+    ),
+    http.get("/api/v1/code-reviews/stats", () =>
+      HttpResponse.json({
+        data: reviewStats,
+      } satisfies SingleResponse<CodeReviewStats>),
     ),
     http.get("/api/v1/code-reviews/session-1/evidence", () =>
       HttpResponse.json({
@@ -367,6 +386,18 @@ describe("CodeReviewsPage", () => {
     const page = screen.getByRole("heading", { level: 1, name: "Code reviews" })
       .closest('[data-slot="list-page"]');
     expect(page?.parentElement).toHaveClass("max-w-7xl");
+    const stats = await screen.findByRole("region", { name: "Code review statistics" });
+    expect(within(stats).getByText("Reviews completed")).toBeInTheDocument();
+    expect(within(stats).getByText("128")).toBeInTheDocument();
+    expect(within(stats).getByText("Automatically approved")).toBeInTheDocument();
+    expect(within(stats).getByText("92")).toBeInTheDocument();
+    expect(within(stats).getByText("72% of completed reviews")).toBeInTheDocument();
+    expect(within(stats).getByText("Needs human review")).toBeInTheDocument();
+    expect(within(stats).getByText("21")).toBeInTheDocument();
+    expect(within(stats).getByText("16% of completed reviews")).toBeInTheDocument();
+    expect(within(stats).getByText("Median turnaround")).toBeInTheDocument();
+    expect(within(stats).getByText("8m")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Time window" })).toHaveTextContent("Last 30 days");
     expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
     expect(screen.getAllByText("Acceptable")).toHaveLength(2);
     expect(screen.getAllByText("Approved")).toHaveLength(2);
@@ -493,6 +524,228 @@ describe("CodeReviewsPage", () => {
     await user.click(screen.getByRole("button", { name: /Add requirement/i }));
     expect(await screen.findByDisplayValue("Custom requirement")).toBeInTheDocument();
   }, 30_000);
+
+  it("applies time, repository, outcome, risk, status, and search filters to rows and stats", async () => {
+    const user = userEvent.setup();
+    const listRequests: URLSearchParams[] = [];
+    const statsRequests: URLSearchParams[] = [];
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", ({ request }) => {
+        listRequests.push(new URL(request.url).searchParams);
+        return HttpResponse.json({
+          data: [review],
+          meta: {},
+        } satisfies ListResponse<CodeReviewListItem>);
+      }),
+      http.get("/api/v1/code-reviews/stats", ({ request }) => {
+        statsRequests.push(new URL(request.url).searchParams);
+        return HttpResponse.json({
+          data: reviewStats,
+        } satisfies SingleResponse<CodeReviewStats>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
+
+    expect(await screen.findByRole("combobox", { name: "Time window" })).toHaveTextContent("Last 30 days");
+    await waitFor(() => {
+      expect(listRequests.at(-1)?.get("created_after")).toBeTruthy();
+      expect(statsRequests.at(-1)?.get("created_after")).toBeTruthy();
+    });
+    const initialListCreatedAfter = listRequests.at(-1)?.get("created_after");
+    const initialStatsCreatedAfter = statsRequests.at(-1)?.get("created_after");
+
+    await user.click(screen.getByRole("combobox", { name: "Time window" }));
+    await user.click(await screen.findByRole("option", { name: "Last 7 days" }));
+
+    expect(await screen.findByRole("combobox", { name: "Time window" })).toHaveTextContent("Last 7 days");
+    await waitFor(() => {
+      expect(listRequests.at(-1)?.get("created_after")).not.toBe(initialListCreatedAfter);
+      expect(statsRequests.at(-1)?.get("created_after")).not.toBe(initialStatsCreatedAfter);
+    });
+    expectCreatedAfterDaysAgo(listRequests.at(-1)?.get("created_after") ?? undefined, 7);
+    expectCreatedAfterDaysAgo(statsRequests.at(-1)?.get("created_after") ?? undefined, 7);
+
+    await user.click(screen.getByRole("button", { name: /Filter reviews/i }));
+    await user.click(screen.getByRole("combobox", { name: "Repository" }));
+    await user.click(await screen.findByRole("option", { name: "acme/api" }));
+    await user.click(screen.getByRole("combobox", { name: "Outcome" }));
+    await user.click(await screen.findByRole("option", { name: "Blocked" }));
+    await user.click(screen.getByRole("combobox", { name: "Risk" }));
+    await user.click(await screen.findByRole("option", { name: "Needs review" }));
+    await user.click(screen.getByRole("combobox", { name: "Status" }));
+    await user.click(await screen.findByRole("option", { name: "Completed" }));
+    await user.type(screen.getByRole("textbox", { name: "Search code reviews" }), "invoice");
+
+    await waitFor(() => {
+      const listParams = listRequests.at(-1);
+      const statsParams = statsRequests.at(-1);
+      for (const params of [listParams, statsParams]) {
+        expect(params?.get("repository_id")).toBe(repo.id);
+        expect(params?.get("decision")).toBe("blocked");
+        expect(params?.get("risk")).toBe("needs_review");
+        expect(params?.get("status")).toBe("completed");
+        expect(params?.get("search")).toBe("invoice");
+        expectCreatedAfterDaysAgo(params?.get("created_after") ?? undefined, 7);
+      }
+    });
+    expect(
+      [...new Set(listRequests.flatMap((params) => params.has("search") ? [params.get("search")] : []))],
+    ).toEqual(["invoice"]);
+    expect(
+      [...new Set(statsRequests.flatMap((params) => params.has("search") ? [params.get("search")] : []))],
+    ).toEqual(["invoice"]);
+  });
+
+  it("clears the whole-page time window from the filtered empty state", async () => {
+    const user = userEvent.setup();
+    const listCreatedAfterValues: Array<string | null> = [];
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", ({ request }) => {
+        const createdAfter = new URL(request.url).searchParams.get("created_after");
+        listCreatedAfterValues.push(createdAfter);
+        return HttpResponse.json({
+          data: createdAfter ? [] : [review],
+          meta: {},
+        } satisfies ListResponse<CodeReviewListItem>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
+
+    expect(await screen.findByText("No reviews match these filters")).toBeInTheDocument();
+    expect(listCreatedAfterValues.at(-1)).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Clear filters" }));
+
+    expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
+    await waitFor(() => expect(listCreatedAfterValues.at(-1)).toBeNull());
+    expect(screen.getByRole("combobox", { name: "Time window" })).toHaveTextContent("All time");
+  });
+
+  it("keeps rows and metrics visible while the rolling window refreshes", async () => {
+    const originalSetInterval = globalThis.setInterval.bind(globalThis);
+    let refreshRollingWindow: (() => void) | undefined;
+    const intervalSpy = vi.spyOn(globalThis, "setInterval").mockImplementation((handler, timeout) => {
+      if (timeout === 60_000) {
+        refreshRollingWindow = () => handler();
+        return originalSetInterval(() => undefined, timeout);
+      }
+      return originalSetInterval(handler, timeout);
+    });
+    const createdAfterValues: string[] = [];
+    let blockListRefresh = false;
+    let blockStatsRefresh = false;
+    let releaseListRefresh: (() => void) | undefined;
+    let releaseStatsRefresh: (() => void) | undefined;
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", async ({ request }) => {
+        createdAfterValues.push(new URL(request.url).searchParams.get("created_after") ?? "");
+        if (blockListRefresh) {
+          blockListRefresh = false;
+          await new Promise<void>((resolve) => {
+            releaseListRefresh = resolve;
+          });
+        }
+        return HttpResponse.json({
+          data: [review],
+          meta: {},
+        } satisfies ListResponse<CodeReviewListItem>);
+      }),
+      http.get("/api/v1/code-reviews/stats", async () => {
+        if (blockStatsRefresh) {
+          blockStatsRefresh = false;
+          await new Promise<void>((resolve) => {
+            releaseStatsRefresh = resolve;
+          });
+        }
+        return HttpResponse.json({
+          data: reviewStats,
+        } satisfies SingleResponse<CodeReviewStats>);
+      }),
+    );
+
+    try {
+      renderWithProviders(<CodeReviewsPage />);
+
+      expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
+      const stats = await screen.findByRole("region", { name: "Code review statistics" });
+      expect(await within(stats).findByText("128")).toBeInTheDocument();
+      expect(refreshRollingWindow).toBeTypeOf("function");
+      const initialCreatedAfter = createdAfterValues.at(-1);
+
+      blockListRefresh = true;
+      blockStatsRefresh = true;
+      const nowSpy = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
+      act(() => refreshRollingWindow?.());
+      nowSpy.mockRestore();
+
+      await waitFor(() => {
+        expect(releaseListRefresh).toBeTypeOf("function");
+        expect(releaseStatsRefresh).toBeTypeOf("function");
+      });
+      expect(screen.getAllByText("#428 Fix invoice rounding")).toHaveLength(2);
+      expect(within(stats).getByText("128")).toBeInTheDocument();
+      expect(screen.queryByText("No reviews match these filters")).not.toBeInTheDocument();
+
+      act(() => {
+        releaseListRefresh?.();
+        releaseStatsRefresh?.();
+      });
+      await waitFor(() => expect(createdAfterValues.at(-1)).not.toBe(initialCreatedAfter));
+    } finally {
+      releaseListRefresh?.();
+      releaseStatsRefresh?.();
+      intervalSpy.mockRestore();
+    }
+  });
+
+  it("labels cached metrics as stale when a background refresh fails", async () => {
+    const user = userEvent.setup();
+    const queryClient = createTestQueryClient();
+    let statsRequests = 0;
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews/stats", () => {
+        statsRequests += 1;
+        if (statsRequests === 2) {
+          return HttpResponse.json(
+            {
+              error: {
+                code: "CODE_REVIEW_STATS_LOAD_FAILED",
+                message: "failed to load code review stats",
+              },
+            },
+            { status: 503 },
+          );
+        }
+        return HttpResponse.json({
+          data: reviewStats,
+        } satisfies SingleResponse<CodeReviewStats>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, { queryClient });
+
+    const stats = await screen.findByRole("region", { name: "Code review statistics" });
+    expect(await within(stats).findByText("128")).toBeInTheDocument();
+
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.stats() });
+    });
+
+    const staleNotice = await within(stats).findByRole("alert");
+    expect(staleNotice).toHaveTextContent("Metrics may be out of date");
+    expect(staleNotice).toHaveTextContent("Showing the last successful result");
+    expect(within(stats).getByText("128")).toBeInTheDocument();
+
+    await user.click(within(staleNotice).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(within(stats).queryByRole("alert")).not.toBeInTheDocument());
+    expect(statsRequests).toBeGreaterThanOrEqual(3);
+  });
 
   it("uses the standard error notice and retries evidence loading", async () => {
     const user = userEvent.setup();
