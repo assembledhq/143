@@ -47,28 +47,30 @@ type codeReviewListCursor struct {
 }
 
 type codeReviewCursorScope struct {
-	OrgID         uuid.UUID                       `json:"org_id"`
-	RepositoryID  *uuid.UUID                      `json:"repository_id,omitempty"`
-	Decision      *models.CodeReviewDecision      `json:"decision,omitempty"`
-	Outcome       *models.CodeReviewListOutcome   `json:"outcome,omitempty"`
-	Status        *models.CodeReviewSessionStatus `json:"status,omitempty"`
-	Acceptable    *bool                           `json:"acceptable,omitempty"`
-	Search        string                          `json:"search,omitempty"`
-	CreatedAfter  *time.Time                      `json:"created_after,omitempty"`
-	CreatedBefore *time.Time                      `json:"created_before,omitempty"`
+	OrgID          uuid.UUID                        `json:"org_id"`
+	RepositoryID   *uuid.UUID                       `json:"repository_id,omitempty"`
+	Decision       *models.CodeReviewDecision       `json:"decision,omitempty"`
+	Outcome        *models.CodeReviewListOutcome    `json:"outcome,omitempty"`
+	ActivityStatus *models.CodeReviewActivityStatus `json:"activity_status,omitempty"`
+	Status         *models.CodeReviewSessionStatus  `json:"status,omitempty"`
+	Acceptable     *bool                            `json:"acceptable,omitempty"`
+	Search         string                           `json:"search,omitempty"`
+	CreatedAfter   *time.Time                       `json:"created_after,omitempty"`
+	CreatedBefore  *time.Time                       `json:"created_before,omitempty"`
 }
 
 func codeReviewListCursorScopeHash(orgID uuid.UUID, filters db.CodeReviewListFilters) ([32]byte, error) {
 	encoded, err := json.Marshal(codeReviewCursorScope{
-		OrgID:         orgID,
-		RepositoryID:  filters.RepositoryID,
-		Decision:      filters.Decision,
-		Outcome:       filters.Outcome,
-		Status:        filters.Status,
-		Acceptable:    filters.Acceptable,
-		Search:        strings.TrimSpace(filters.Search),
-		CreatedAfter:  filters.CreatedAfter,
-		CreatedBefore: filters.CreatedBefore,
+		OrgID:          orgID,
+		RepositoryID:   filters.RepositoryID,
+		Decision:       filters.Decision,
+		Outcome:        filters.Outcome,
+		ActivityStatus: filters.ActivityStatus,
+		Status:         filters.Status,
+		Acceptable:     filters.Acceptable,
+		Search:         strings.TrimSpace(filters.Search),
+		CreatedAfter:   filters.CreatedAfter,
+		CreatedBefore:  filters.CreatedBefore,
 	})
 	if err != nil {
 		return [32]byte{}, err
@@ -294,6 +296,14 @@ func parseCodeReviewFilters(w http.ResponseWriter, r *http.Request) (db.CodeRevi
 		}
 		filters.Outcome = &outcome
 	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("activity_status")); raw != "" {
+		activityStatus := models.CodeReviewActivityStatus(raw)
+		if err := activityStatus.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_ACTIVITY_STATUS", "invalid activity status")
+			return db.CodeReviewListFilters{}, false
+		}
+		filters.ActivityStatus = &activityStatus
+	}
 	if raw := strings.TrimSpace(r.URL.Query().Get("status")); raw != "" {
 		status := models.CodeReviewSessionStatus(raw)
 		if err := status.Validate(); err != nil {
@@ -375,14 +385,15 @@ func (h *CodeReviewHandler) Stats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stats, err := h.store.GetReviewStats(r.Context(), orgID, db.CodeReviewStatsFilters{
-		RepositoryID:  filters.RepositoryID,
-		Decision:      filters.Decision,
-		Outcome:       filters.Outcome,
-		Status:        filters.Status,
-		Acceptable:    filters.Acceptable,
-		Search:        filters.Search,
-		CreatedAfter:  filters.CreatedAfter,
-		CreatedBefore: filters.CreatedBefore,
+		RepositoryID:   filters.RepositoryID,
+		Decision:       filters.Decision,
+		Outcome:        filters.Outcome,
+		ActivityStatus: filters.ActivityStatus,
+		Status:         filters.Status,
+		Acceptable:     filters.Acceptable,
+		Search:         filters.Search,
+		CreatedAfter:   filters.CreatedAfter,
+		CreatedBefore:  filters.CreatedBefore,
 	})
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_STATS_LOAD_FAILED", "failed to load code review stats", err)

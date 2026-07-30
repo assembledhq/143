@@ -1085,6 +1085,68 @@ func TestCodeReviewStore_ListReviewsAppliesCursorAndTimeFilters(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "cursor pagination should add the keyset comparison")
 }
 
+func TestCodeReviewActivityStatusPredicate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		status    models.CodeReviewActivityStatus
+		expected  string
+		expectErr bool
+	}{
+		{
+			name:     "current excludes stale and replaced attempts",
+			status:   models.CodeReviewActivityStatusCurrent,
+			expected: ` AND m.status <> 'stale' AND m.superseded_by_session_id IS NULL`,
+		},
+		{
+			name:     "completed scopes current attempts to successful runs",
+			status:   models.CodeReviewActivityStatusCompleted,
+			expected: ` AND m.status <> 'stale' AND m.superseded_by_session_id IS NULL AND m.status = 'completed'`,
+		},
+		{
+			name:     "in progress groups queued and running current attempts",
+			status:   models.CodeReviewActivityStatusInProgress,
+			expected: ` AND m.status <> 'stale' AND m.superseded_by_session_id IS NULL AND m.status IN ('queued', 'running')`,
+		},
+		{
+			name:     "failed excludes failures that already have replacements",
+			status:   models.CodeReviewActivityStatusFailed,
+			expected: ` AND m.status <> 'stale' AND m.superseded_by_session_id IS NULL AND m.status = 'failed'`,
+		},
+		{
+			name:     "superseded includes stale and explicitly replaced attempts",
+			status:   models.CodeReviewActivityStatusSuperseded,
+			expected: ` AND (m.status = 'stale' OR m.superseded_by_session_id IS NOT NULL)`,
+		},
+		{
+			name:     "all preserves complete attempt history",
+			status:   models.CodeReviewActivityStatusAll,
+			expected: "",
+		},
+		{
+			name:      "invalid activity status is rejected",
+			status:    models.CodeReviewActivityStatus("bogus"),
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual, err := codeReviewActivityStatusPredicate(&tt.status)
+
+			if tt.expectErr {
+				require.Error(t, err, "invalid activity status should be rejected before building a query")
+				return
+			}
+			require.NoError(t, err, "valid activity status should produce a SQL predicate")
+			require.Equal(t, tt.expected, actual, "activity status should use the expected review-attempt population")
+		})
+	}
+}
+
 func TestCodeReviewStore_GetReviewStatsScopesToRepositoryAndTimeWindow(t *testing.T) {
 	t.Parallel()
 
@@ -1094,6 +1156,7 @@ func TestCodeReviewStore_GetReviewStatsScopesToRepositoryAndTimeWindow(t *testin
 	createdBefore := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 	medianTurnaround := 480.0
 	decision := models.CodeReviewDecisionNeedsHumanReview
+	activityStatus := models.CodeReviewActivityStatusCurrent
 	status := models.CodeReviewSessionStatusCompleted
 	acceptable := false
 
@@ -1101,7 +1164,7 @@ func TestCodeReviewStore_GetReviewStatsScopesToRepositoryAndTimeWindow(t *testin
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
 
-	mock.ExpectQuery(`(?s)COUNT\(\*\) FILTER \(WHERE m\.status = 'completed'\).*percentile_cont\(0\.5\).*FROM code_review_session_metadata m.*WHERE m\.org_id = @org_id.*AND m\.repository_id = @repository_id.*AND m\.decision = @decision.*AND m\.status = @status.*AND m\.acceptable = @acceptable.*AND m\.created_at >= @created_after.*AND m\.created_at <= @created_before.*pr\.title ILIKE @search`).
+	mock.ExpectQuery(`(?s)COUNT\(\*\) FILTER \(WHERE m\.status = 'completed'\).*percentile_cont\(0\.5\).*FROM code_review_session_metadata m.*WHERE m\.org_id = @org_id.*AND m\.repository_id = @repository_id.*AND m\.decision = @decision.*m\.status <> 'stale'.*m\.superseded_by_session_id IS NULL.*AND m\.status = @status.*AND m\.acceptable = @acceptable.*AND m\.created_at >= @created_after.*AND m\.created_at <= @created_before.*pr\.title ILIKE @search`).
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -1114,13 +1177,14 @@ func TestCodeReviewStore_GetReviewStatsScopesToRepositoryAndTimeWindow(t *testin
 		}).AddRow(21, 0, 21, medianTurnaround))
 
 	stats, err := NewCodeReviewStore(mock).GetReviewStats(context.Background(), orgID, CodeReviewStatsFilters{
-		RepositoryID:  &repositoryID,
-		Decision:      &decision,
-		Status:        &status,
-		Acceptable:    &acceptable,
-		Search:        "auth",
-		CreatedAfter:  &createdAfter,
-		CreatedBefore: &createdBefore,
+		RepositoryID:   &repositoryID,
+		Decision:       &decision,
+		ActivityStatus: &activityStatus,
+		Status:         &status,
+		Acceptable:     &acceptable,
+		Search:         "auth",
+		CreatedAfter:   &createdAfter,
+		CreatedBefore:  &createdBefore,
 	})
 
 	require.NoError(t, err, "GetReviewStats should return aggregate metrics for the selected scope")
@@ -1184,14 +1248,15 @@ func TestCodeReviewStore_ListReviewsPageReturnsExactCountForEmptyPage(t *testing
 	t.Parallel()
 
 	orgID := uuid.New()
+	activityStatus := models.CodeReviewActivityStatusCurrent
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
 
-	mock.ExpectQuery(`SELECT COUNT\(\*\).*WHERE m\.org_id = @org_id`).
+	mock.ExpectQuery(`SELECT COUNT\(\*\).*WHERE m\.org_id = @org_id.*m\.status <> 'stale'.*m\.superseded_by_session_id IS NULL`).
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(0)))
-	mock.ExpectQuery(`ORDER BY m\.created_at DESC, m\.id DESC`).
+	mock.ExpectQuery(`m\.status <> 'stale'.*m\.superseded_by_session_id IS NULL.*ORDER BY m\.created_at DESC, m\.id DESC`).
 		WithArgs(pgxmock.AnyArg(), 51).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
@@ -1203,7 +1268,9 @@ func TestCodeReviewStore_ListReviewsPageReturnsExactCountForEmptyPage(t *testing
 			"github_pr_url", "pull_request_title", "pull_request_author",
 		}))
 
-	page, err := NewCodeReviewStore(mock).ListReviewsPage(context.Background(), orgID, CodeReviewListFilters{})
+	page, err := NewCodeReviewStore(mock).ListReviewsPage(context.Background(), orgID, CodeReviewListFilters{
+		ActivityStatus: &activityStatus,
+	})
 
 	require.NoError(t, err, "ListReviewsPage should return an empty first page")
 	require.Equal(t, int64(0), page.TotalCount, "ListReviewsPage should return the exact zero count")
