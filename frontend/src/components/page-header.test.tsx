@@ -15,7 +15,10 @@ describe("PageHeader", () => {
 
     const actionButton = screen.getByRole("button", { name: "Invite" });
     const actionWrapper = actionButton.parentElement;
+    const title = screen.getByRole("heading", { name: "Settings" });
 
+    expect(title).toHaveClass("w-full");
+    expect(title.parentElement).toHaveClass("min-w-0", "flex-1");
     expect(actionWrapper).toHaveClass("w-full");
     expect(actionWrapper).toHaveClass("sm:w-auto");
     expect(actionWrapper).toHaveClass("[&>*]:w-full");

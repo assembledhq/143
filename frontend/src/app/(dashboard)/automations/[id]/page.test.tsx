@@ -1198,6 +1198,126 @@ describe("AutomationDetailPage", () => {
     });
   });
 
+  it("updates the repository and resets the base branch to its default", async () => {
+    const user = userEvent.setup();
+    let updateBody: Record<string, unknown> | null = null;
+
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({
+          data: {
+            id: "auto-1",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Weekly audit",
+            goal: "Check release health",
+            scope: "",
+            interval_value: 1,
+            interval_unit: "weeks",
+            base_branch: "main",
+            enabled: true,
+            timezone: "UTC",
+            last_run_at: null,
+            next_run_at: null,
+            priority: 50,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        }),
+      ),
+      http.get("*/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "repo-1",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 1,
+              full_name: "acme/repo",
+              default_branch: "main",
+              private: false,
+              clone_url: "https://github.com/acme/repo.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-01-01T00:00:00Z",
+              updated_at: "2026-01-01T00:00:00Z",
+            },
+            {
+              id: "repo-2",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 2,
+              full_name: "acme/worker",
+              default_branch: "trunk",
+              private: false,
+              clone_url: "https://github.com/acme/worker.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-01-01T00:00:00Z",
+              updated_at: "2026-01-01T00:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.get("*/api/v1/automations/auto-1/stats*", () =>
+        HttpResponse.json({
+          data: {
+            since: "2026-01-01T00:00:00Z",
+            until: "2026-01-31T00:00:00Z",
+            buckets: [],
+            totals: {
+              total: 0,
+              completed: 0,
+              completed_noop: 0,
+              failed: 0,
+              skipped: 0,
+              running: 0,
+              pending: 0,
+              success_rate: 0,
+              avg_duration_seconds: 0,
+            },
+          },
+        }),
+      ),
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        updateBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.click(screen.getByRole("combobox", { name: "Repository" }));
+    await user.click(
+      await screen.findByRole("option", { name: "acme/worker" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Advanced settings" }));
+
+    expect(
+      screen.getByRole("button", { name: "Base branch" }),
+    ).toHaveTextContent("trunk");
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(updateBody).toMatchObject({
+        repository_id: "repo-2",
+        base_branch: "trunk",
+      });
+    });
+  });
+
   it("saves the selected personal automation identity scope", async () => {
     const user = userEvent.setup();
     let updateBody: Record<string, unknown> | null = null;

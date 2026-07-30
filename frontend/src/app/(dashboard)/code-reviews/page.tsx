@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent, ComponentProps, KeyboardEvent, ReactNode } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { parseAsString, parseAsStringLiteral, useQueryState } from "nuqs";
+import { createParser, parseAsString, parseAsStringLiteral, useQueryState } from "nuqs";
 import {
   AlertTriangle,
   ChartNoAxesColumnIncreasing,
@@ -73,6 +73,7 @@ import type {
   CodingCredentialSummary,
   CodeReviewAnalytics,
   CodeReviewApprovalMode,
+  CodeReviewActivityStatus,
   CodeReviewDecision,
   CodeReviewDescriptionApplicabilityKind,
   CodeReviewEvidence,
@@ -95,7 +96,6 @@ import type {
 const ALL_REPOSITORIES = "all";
 const ALL_OUTCOMES = "all";
 const ALL_RISKS = "all";
-const ALL_STATUSES = "all";
 type CodeReviewTab = "reviews" | "analytics" | "policy";
 const TIME_RANGE_FILTER_VALUES = ["7d", "30d", "90d", "all"] as const;
 type TimeRangeFilter = (typeof TIME_RANGE_FILTER_VALUES)[number];
@@ -105,7 +105,18 @@ const COMPLETED_NOT_APPROVED = "completed_not_approved" satisfies CodeReviewList
 const OUTCOME_FILTER_VALUES = [ALL_OUTCOMES, AUTOMATICALLY_APPROVED, COMPLETED_NOT_APPROVED, "needs_human_review", "comment_only", "blocked"] as const;
 type OutcomeFilter = (typeof OUTCOME_FILTER_VALUES)[number];
 const RISK_FILTER_VALUES = [ALL_RISKS, "acceptable", "needs_review"] as const;
-const STATUS_FILTER_VALUES = [ALL_STATUSES, "queued", "running", "completed", "failed", "stale", "cancelled"] as const;
+const STATUS_FILTER_VALUES = ["current", "completed", "in_progress", "failed", "cancelled", "superseded", "all"] as const;
+type StatusFilter = (typeof STATUS_FILTER_VALUES)[number];
+const DEFAULT_STATUS_FILTER = "current" satisfies StatusFilter;
+const STATUS_FILTER_PARSER = createParser<StatusFilter>({
+  parse: (value) => {
+    if ((STATUS_FILTER_VALUES as readonly string[]).includes(value)) return value as StatusFilter;
+    if (value === "queued" || value === "running") return "in_progress";
+    if (value === "stale") return "superseded";
+    return null;
+  },
+  serialize: (value) => value,
+}).withDefault(DEFAULT_STATUS_FILTER);
 const NO_TEMPLATE = "none";
 // Coalesce a burst of SSE lifecycle events into a single list refetch.
 const CODE_REVIEW_INVALIDATE_COALESCE_MS = 300;
@@ -218,7 +229,12 @@ function wasAutomaticallyApproved(review: CodeReviewListItem): boolean {
   return review.status === "completed" && review.decision === "approved" && Boolean(review.github_review_id);
 }
 
+function isSupersededReview(review: CodeReviewListItem): boolean {
+  return review.stale || review.status === "stale" || Boolean(review.superseded_by_session_id);
+}
+
 function decisionLabel(review: CodeReviewListItem): string {
+  if (isSupersededReview(review)) return "No outcome";
   if (wasAutomaticallyApproved(review)) return "Approved";
   if (review.decision === "approved") return "Approval not posted";
   if (review.decision === "needs_human_review") return "Review needed";
@@ -235,6 +251,7 @@ function statusLabel(status: string): string {
 }
 
 function reviewDecisionTone(review: CodeReviewListItem): StatusTone {
+  if (isSupersededReview(review)) return "neutral";
   if (wasAutomaticallyApproved(review)) return "success";
   if (review.decision === "blocked") return "destructive";
   if (review.decision === "needs_human_review") return "warning";
@@ -243,13 +260,19 @@ function reviewDecisionTone(review: CodeReviewListItem): StatusTone {
 
 function reviewStatusTone(status: string): StatusTone {
   if (status === "completed") return "success";
-  if (status === "failed" || status === "stale") return "destructive";
+  if (status === "failed") return "destructive";
   if (status === "running" || status === "queued") return "primary";
   return "neutral";
 }
 
 function reviewRiskTone(review: CodeReviewListItem): StatusTone {
+  if (isSupersededReview(review)) return "neutral";
   return review.acceptable ? "success" : "warning";
+}
+
+function reviewRiskLabel(review: CodeReviewListItem): string {
+  if (isSupersededReview(review)) return "Not applicable";
+  return review.acceptable ? "Acceptable" : "Review needed";
 }
 
 function ReviewTitle({ review }: { review: CodeReviewListItem }) {
@@ -342,7 +365,7 @@ const CODE_REVIEW_PHASE_LABELS: Record<NonNullable<CodeReviewListItem["phase"]>,
 };
 
 function reviewStatusLabel(review: CodeReviewListItem): string {
-  if (review.stale || review.status === "stale") return "Stale";
+  if (isSupersededReview(review)) return "Superseded";
   if (review.status === "completed") return "Completed";
   if (review.status === "failed") return "Failed";
   if ((review.status === "running" || review.status === "queued") && review.phase) return CODE_REVIEW_PHASE_LABELS[review.phase];
@@ -380,7 +403,7 @@ function ReviewOperationalStatus({ review, nowMs }: { review: CodeReviewListItem
     <div className="max-w-sm space-y-1">
       <StatusLabel
         label={reviewStatusLabel(review)}
-        tone={waitingForGitHub ? "warning" : reviewStatusTone(review.stale ? "stale" : review.status)}
+        tone={waitingForGitHub ? "warning" : reviewStatusTone(isSupersededReview(review) ? "superseded" : review.status)}
         active={active}
         indicator={false}
       />
@@ -554,7 +577,10 @@ export default function CodeReviewsPage() {
   );
   const timeRangeAnchorMsRef = useRef(Date.now());
   const [riskFilter, setRiskFilter] = useQueryState("risk", parseAsStringLiteral(RISK_FILTER_VALUES).withDefault(ALL_RISKS));
-  const [statusFilter, setStatusFilter] = useQueryState("status", parseAsStringLiteral(STATUS_FILTER_VALUES).withDefault(ALL_STATUSES));
+  const [statusFilter, setStatusFilter] = useQueryState(
+    "status",
+    STATUS_FILTER_PARSER,
+  );
   const [searchParam, setSearchParam] = useQueryState("search", parseAsString.withDefault(""));
   const [search, setSearch] = useState(searchParam);
   useEffect(() => {
@@ -593,7 +619,7 @@ export default function CodeReviewsPage() {
     promptDraftsRef.current[field] = handle;
   }, []);
   const reviewRepositoryId = repositoryFilter === ALL_REPOSITORIES ? undefined : repositoryFilter;
-  const baseReviewScopeFilters = useMemo(
+  const baseReviewFilters = useMemo(
     () => ({
       repository_id: reviewRepositoryId,
       decision:
@@ -602,17 +628,36 @@ export default function CodeReviewsPage() {
           : undefined,
       outcome: outcomeFilter === AUTOMATICALLY_APPROVED || outcomeFilter === COMPLETED_NOT_APPROVED ? (outcomeFilter as CodeReviewListOutcome) : undefined,
       risk: riskFilter === ALL_RISKS ? undefined : (riskFilter as "acceptable" | "needs_review"),
-      status: statusFilter === ALL_STATUSES ? undefined : (statusFilter as CodeReviewSessionStatus),
       search: searchParam.trim() || undefined,
     }),
-    [outcomeFilter, reviewRepositoryId, riskFilter, searchParam, statusFilter],
+    [outcomeFilter, reviewRepositoryId, riskFilter, searchParam],
+  );
+  const listReviewFilters = useMemo(
+    () => statusFilter === "cancelled"
+      ? {
+          ...baseReviewFilters,
+          activity_status: DEFAULT_STATUS_FILTER as CodeReviewActivityStatus,
+          status: "cancelled" as CodeReviewSessionStatus,
+        }
+      : {
+          ...baseReviewFilters,
+          activity_status: statusFilter as CodeReviewActivityStatus,
+        },
+    [baseReviewFilters, statusFilter],
+  );
+  const statsReviewFilters = useMemo(
+    () => ({
+      ...baseReviewFilters,
+      activity_status: DEFAULT_STATUS_FILTER as CodeReviewActivityStatus,
+    }),
+    [baseReviewFilters],
   );
   const reviewScopeQueryKey = useMemo(
     () => ({
-      ...baseReviewScopeFilters,
+      ...listReviewFilters,
       time_range: timeRangeFilter,
     }),
-    [baseReviewScopeFilters, timeRangeFilter],
+    [listReviewFilters, timeRangeFilter],
   );
   const analyticsScopeQueryKey = useMemo(
     () => ({
@@ -621,15 +666,32 @@ export default function CodeReviewsPage() {
     }),
     [reviewRepositoryId, timeRangeFilter],
   );
-  const currentReviewScopeFilters = useCallback(
+  const statsScopeQueryKey = useMemo(
     () => ({
-      ...baseReviewScopeFilters,
+      ...statsReviewFilters,
+      time_range: timeRangeFilter,
+    }),
+    [statsReviewFilters, timeRangeFilter],
+  );
+  const currentListReviewFilters = useCallback(
+    () => ({
+      ...listReviewFilters,
       created_after: createdAfterForTimeRange(
         timeRangeFilter,
         new Date(timeRangeAnchorMsRef.current),
       ),
     }),
-    [baseReviewScopeFilters, timeRangeFilter],
+    [listReviewFilters, timeRangeFilter],
+  );
+  const currentStatsReviewFilters = useCallback(
+    () => ({
+      ...statsReviewFilters,
+      created_after: createdAfterForTimeRange(
+        timeRangeFilter,
+        new Date(timeRangeAnchorMsRef.current),
+      ),
+    }),
+    [statsReviewFilters, timeRangeFilter],
   );
   const currentAnalyticsFilters = useCallback(
     () => ({
@@ -652,7 +714,7 @@ export default function CodeReviewsPage() {
     reviewRepositoryId
     || outcomeFilter !== ALL_OUTCOMES
     || riskFilter !== ALL_RISKS
-    || statusFilter !== ALL_STATUSES
+    || statusFilter !== DEFAULT_STATUS_FILTER
     || searchParam.trim()
     || timeRangeFilter !== "all"
   );
@@ -744,7 +806,7 @@ export default function CodeReviewsPage() {
   const reviewsQuery = useQuery({
     queryKey: queryKeys.codeReviews.list(reviewFiltersQueryKey),
     queryFn: () => api.codeReviews.list({
-      ...currentReviewScopeFilters(),
+      ...currentListReviewFilters(),
       limit: CODE_REVIEW_PAGE_SIZE,
     }),
     // A loaded history window must remain a coherent cursor snapshot. Disabling
@@ -754,8 +816,8 @@ export default function CodeReviewsPage() {
     refetchInterval: isViewingReviewHistory ? false : (codeReviewStreamHealthy ? pollMs(30_000) : pollMs(5_000)),
   });
   const statsQuery = useQuery({
-    queryKey: queryKeys.codeReviews.stat(reviewScopeQueryKey),
-    queryFn: () => api.codeReviews.stats(currentReviewScopeFilters()),
+    queryKey: queryKeys.codeReviews.stat(statsScopeQueryKey),
+    queryFn: () => api.codeReviews.stats(currentStatsReviewFilters()),
     refetchInterval: isViewingReviewHistory ? false : (codeReviewStreamHealthy ? pollMs(30_000) : pollMs(5_000)),
   });
   const analyticsQuery = useQuery<SingleResponse<CodeReviewAnalytics>>({
@@ -927,7 +989,7 @@ export default function CodeReviewsPage() {
   const totalReviewCount = reviewsQuery.data?.meta?.total_count;
   const loadMoreReviews = useMutation({
     mutationFn: (request: {
-      filters: ReturnType<typeof currentReviewScopeFilters> & { limit: number };
+      filters: ReturnType<typeof currentListReviewFilters> & { limit: number };
       cursor: string;
       scopeKey: string;
     }) => api.codeReviews.list({ ...request.filters, cursor: request.cursor }),
@@ -1060,7 +1122,7 @@ export default function CodeReviewsPage() {
       header: "Risk",
       render: (review) => (
         <StatusLabel
-          label={review.acceptable ? "Acceptable" : "Review needed"}
+          label={reviewRiskLabel(review)}
           tone={reviewRiskTone(review)}
           indicator={false}
         />
@@ -1107,32 +1169,22 @@ export default function CodeReviewsPage() {
       description="Bot-requested PR reviews, acceptable-risk policy, and review outcomes."
     >
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
-          <TabsList>
-            <TabsTrigger value="reviews">
-              <ClipboardCheck className="h-4 w-4" />
-              Reviews
-            </TabsTrigger>
-            <TabsTrigger value="analytics">
-              <ChartNoAxesColumnIncreasing className="h-4 w-4" />
-              Analytics
-            </TabsTrigger>
-            <TabsTrigger value="policy">
-              <Settings2 className="h-4 w-4" />
-              Policy
-            </TabsTrigger>
-          </TabsList>
+        <TabsList>
+          <TabsTrigger value="reviews">
+            <ClipboardCheck className="h-4 w-4" />
+            Reviews
+          </TabsTrigger>
+          <TabsTrigger value="analytics">
+            <ChartNoAxesColumnIncreasing className="h-4 w-4" />
+            Analytics
+          </TabsTrigger>
+          <TabsTrigger value="policy">
+            <Settings2 className="h-4 w-4" />
+            Policy
+          </TabsTrigger>
+        </TabsList>
 
-          <TabsContent value="reviews" className="space-y-3">
-            <div className="flex justify-end">
-              <div className="w-full sm:w-44">
-                <FilterSelect label="Time window" value={timeRangeFilter} onValueChange={setTimeRangeFilter}>
-                  <SelectItem value="7d">Last 7 days</SelectItem>
-                  <SelectItem value="30d">Last 30 days</SelectItem>
-                  <SelectItem value="90d">Last 90 days</SelectItem>
-                  <SelectItem value="all">All time</SelectItem>
-                </FilterSelect>
-              </div>
-            </div>
+        <TabsContent value="reviews" className="space-y-3">
             <CodeReviewStatsCards
               stats={statsQuery.data?.data}
               isLoading={statsQuery.isLoading}
@@ -1156,7 +1208,7 @@ export default function CodeReviewsPage() {
             </Button>
             <div
               id="code-review-filters"
-              className={`${mobileFiltersOpen ? "grid" : "hidden"} gap-3 rounded-xl border border-border bg-card p-3 shadow-sm md:grid md:grid-cols-2 md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none lg:grid-cols-3 xl:grid-cols-[minmax(12rem,18rem)_repeat(3,minmax(9rem,11rem))_1fr]`}
+              className={`${mobileFiltersOpen ? "grid" : "hidden"} gap-3 rounded-xl border border-border bg-card p-3 shadow-sm md:grid md:grid-cols-2 md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none lg:grid-cols-3 xl:grid-cols-[minmax(12rem,18rem)_repeat(3,minmax(9rem,11rem))_minmax(12rem,1fr)_minmax(9rem,11rem)]`}
             >
               <FilterSelect label="Repository" value={repositoryFilter} onValueChange={(value) => void setRepositoryFilter(value === ALL_REPOSITORIES ? null : value)}>
                 <SelectItem value={ALL_REPOSITORIES}>All repositories</SelectItem>
@@ -1179,32 +1231,32 @@ export default function CodeReviewsPage() {
                 <SelectItem value="acceptable">Acceptable</SelectItem>
                 <SelectItem value="needs_review">Needs review</SelectItem>
               </FilterSelect>
-              <FilterSelect label="Status" value={statusFilter} onValueChange={(value) => void setStatusFilter(value === ALL_STATUSES ? null : value as (typeof STATUS_FILTER_VALUES)[number])}>
-                <SelectItem value={ALL_STATUSES}>All statuses</SelectItem>
-                <SelectItem value="queued">Queued</SelectItem>
-                <SelectItem value="running">Running</SelectItem>
+              <FilterSelect label="Status" value={statusFilter} onValueChange={(value) => void setStatusFilter(value === DEFAULT_STATUS_FILTER ? null : value as StatusFilter)}>
+                <SelectItem value="current">Current reviews</SelectItem>
                 <SelectItem value="completed">Completed</SelectItem>
+                <SelectItem value="in_progress">In progress</SelectItem>
                 <SelectItem value="failed">Failed</SelectItem>
-                <SelectItem value="stale">Stale</SelectItem>
                 <SelectItem value="cancelled">Cancelled</SelectItem>
+                <SelectItem value="superseded">Superseded history</SelectItem>
+                <SelectItem value="all">All attempts</SelectItem>
               </FilterSelect>
               <div className="flex flex-col gap-2">
                 <Label className="text-xs text-muted-foreground">Search</Label>
                 <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="PR, repo, or title" aria-label="Search code reviews" />
               </div>
+              <FilterSelect
+                label="Time window"
+                value={timeRangeFilter}
+                onValueChange={setTimeRangeFilter}
+              >
+                <SelectItem value="7d">Last 7 days</SelectItem>
+                <SelectItem value="30d">Last 30 days</SelectItem>
+                <SelectItem value="90d">Last 90 days</SelectItem>
+                <SelectItem value="all">All time</SelectItem>
+              </FilterSelect>
             </div>
             <SectionGroup
-              title={
-                <span className="flex items-baseline gap-2">
-                  Review activity
-                  {totalReviewCount !== undefined ? (
-                    <span className="text-sm font-normal tabular-nums text-muted-foreground">
-                      {totalReviewCount} {hasActiveReviewFilters ? "matching " : ""}
-                      {totalReviewCount === 1 ? "review" : "reviews"}
-                    </span>
-                  ) : null}
-                </span>
-              }
+              title="Review activity"
               description="Pull requests reviewed by the team policy and their current outcome."
             >
               {newReviewsAvailable ? (
@@ -1254,7 +1306,7 @@ export default function CodeReviewsPage() {
                             size="sm"
                             onClick={() => loadMoreReviews.mutate({
                               filters: {
-                                ...currentReviewScopeFilters(),
+                                ...currentListReviewFilters(),
                                 limit: CODE_REVIEW_PAGE_SIZE,
                               },
                               cursor: nextReviewCursor,
@@ -1296,7 +1348,7 @@ export default function CodeReviewsPage() {
                         <div className="flex flex-wrap items-center gap-2 text-xs">
                           <span className="text-muted-foreground">Risk</span>
                           <StatusLabel
-                            label={review.acceptable ? "Acceptable" : "Review needed"}
+                            label={reviewRiskLabel(review)}
                             tone={reviewRiskTone(review)}
                             indicator={false}
                           />
@@ -3214,7 +3266,7 @@ function CodeReviewEvidenceSheet({
           </div>
         </SheetHeader>
         <div className="space-y-6 px-6 py-5">
-          {review?.status === "failed" ? (
+          {review?.status === "failed" && !isSupersededReview(review) ? (
             <div className="space-y-3">
               <ErrorNotice
                 title="Code review failed"

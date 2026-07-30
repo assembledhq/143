@@ -32,6 +32,13 @@ Once 143 submits an approval, that approval is final for the PR: later changes a
 
 The **Reviews** tab reports the current stage of each active attempt: syncing with GitHub, reviewing, synthesizing, or publishing. If GitHub rate-limits an operation, the attempt moves to **Waiting for GitHub** and shows when automatic processing will resume. You do not need to start another review while that countdown is active.
 
+The default **Current reviews** view and its headline metrics omit attempts
+superseded by a newer commit or replacement run. Use **Superseded history** to
+inspect those neutral audit records, or **All attempts** to include every
+historical attempt. Superseded attempts remain available for evidence and
+debugging, but they do not inflate ordinary review totals or outcome
+percentages.
+
 When automatic recovery is exhausted, the failed attempt keeps a concise error and recommended action in its row and evidence panel. Organization admins and members can select **Retry review** for failures marked retryable. A retry creates a new session against the pull request's current head and current policy; it never rewrites the failed session or its evidence. The original attempt links to the replacement for audit history.
 
 A retry is rejected if the pull request has moved to another commit, is no longer open, already has a 143 approval, already has a newer replacement, or the current code review policy is disabled.

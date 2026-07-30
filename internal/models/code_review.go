@@ -149,6 +149,31 @@ func (o CodeReviewListOutcome) Validate() error {
 	}
 }
 
+// CodeReviewActivityStatus is the dashboard-facing status scope for review
+// activity. Unlike CodeReviewSessionStatus, it can group persisted statuses
+// and distinguish current review work from immutable superseded history.
+type CodeReviewActivityStatus string
+
+const (
+	CodeReviewActivityStatusCurrent    CodeReviewActivityStatus = "current"
+	CodeReviewActivityStatusCompleted  CodeReviewActivityStatus = "completed"
+	CodeReviewActivityStatusInProgress CodeReviewActivityStatus = "in_progress"
+	CodeReviewActivityStatusFailed     CodeReviewActivityStatus = "failed"
+	CodeReviewActivityStatusSuperseded CodeReviewActivityStatus = "superseded"
+	CodeReviewActivityStatusAll        CodeReviewActivityStatus = "all"
+)
+
+func (s CodeReviewActivityStatus) Validate() error {
+	switch s {
+	case CodeReviewActivityStatusCurrent, CodeReviewActivityStatusCompleted,
+		CodeReviewActivityStatusInProgress, CodeReviewActivityStatusFailed,
+		CodeReviewActivityStatusSuperseded, CodeReviewActivityStatusAll:
+		return nil
+	default:
+		return fmt.Errorf("invalid CodeReviewActivityStatus: %q", s)
+	}
+}
+
 // CodeReviewUpdatedEvent is fanned out over the org-scoped code review SSE
 // stream whenever a review row is created or its status/decision changes. The
 // frontend treats it as a "the list moved, refetch" signal rather than reading
