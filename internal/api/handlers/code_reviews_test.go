@@ -261,6 +261,20 @@ func TestCodeReviewHandler_ListRejectsInvalidOutcome(t *testing.T) {
 	require.Contains(t, rr.Body.String(), "INVALID_OUTCOME", "the response should identify the invalid outcome filter")
 }
 
+func TestCodeReviewHandler_ListRejectsInvalidActivityStatus(t *testing.T) {
+	t.Parallel()
+
+	handler := NewCodeReviewHandler(nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-reviews?activity_status=bogus", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	rr := httptest.NewRecorder()
+
+	handler.List(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "an invalid activity status should return a bad request")
+	require.Contains(t, rr.Body.String(), "INVALID_ACTIVITY_STATUS", "the response should identify the invalid activity status")
+}
+
 func TestCodeReviewHandler_ListRejectsInvalidCursor(t *testing.T) {
 	t.Parallel()
 
@@ -282,10 +296,10 @@ func TestCodeReviewHandler_ListReturnsPaginationMetadata(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
-	mock.ExpectQuery(`SELECT COUNT\(\*\)`).
+	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\).*m\.status <> 'stale'.*m\.superseded_by_session_id IS NULL`).
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(0)))
-	mock.ExpectQuery(`ORDER BY m\.created_at DESC, m\.id DESC`).
+	mock.ExpectQuery(`(?s)m\.status <> 'stale'.*m\.superseded_by_session_id IS NULL.*ORDER BY m\.created_at DESC, m\.id DESC`).
 		WithArgs(pgxmock.AnyArg(), 51).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
@@ -297,7 +311,7 @@ func TestCodeReviewHandler_ListReturnsPaginationMetadata(t *testing.T) {
 			"github_pr_url", "pull_request_title", "pull_request_author",
 		}))
 	handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-reviews", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-reviews?activity_status=current", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
 	rr := httptest.NewRecorder()
 
@@ -349,7 +363,7 @@ func TestCodeReviewHandler_StatsReturnsFilteredAggregates(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
-	mock.ExpectQuery(`(?s)FROM code_review_session_metadata m.*m\.repository_id = @repository_id.*m\.decision = @decision.*m\.status = @status.*m\.acceptable = @acceptable.*m\.created_at >= @created_after.*pr\.title ILIKE @search`).
+	mock.ExpectQuery(`(?s)FROM code_review_session_metadata m.*m\.repository_id = @repository_id.*m\.decision = @decision.*m\.status <> 'stale'.*m\.superseded_by_session_id IS NULL.*m\.status = @status.*m\.acceptable = @acceptable.*m\.created_at >= @created_after.*pr\.title ILIKE @search`).
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -364,7 +378,7 @@ func TestCodeReviewHandler_StatsReturnsFilteredAggregates(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodGet,
 		"/api/v1/code-reviews/stats?repository_id="+repositoryID.String()+
-			"&decision=needs_human_review&status=completed&risk=needs_review&search=auth&created_after=2026-06-01T00:00:00Z",
+			"&decision=needs_human_review&activity_status=current&status=completed&risk=needs_review&search=auth&created_after=2026-06-01T00:00:00Z",
 		nil,
 	)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -441,6 +455,12 @@ func TestCodeReviewListCursorRejectsChangedFilterButAllowsMutableRowChanges(t *t
 	changedFilters.Search = "payments"
 	_, _, err = decodeCodeReviewListCursor(cursor, orgID, changedFilters)
 	require.Error(t, err, "a cursor reused with a different filter collection should be rejected")
+
+	current := models.CodeReviewActivityStatusCurrent
+	changedFilters = filters
+	changedFilters.ActivityStatus = &current
+	_, _, err = decodeCodeReviewListCursor(cursor, orgID, changedFilters)
+	require.Error(t, err, "a cursor reused with a different activity status should be rejected")
 }
 
 func TestCodeReviewHandler_Retry(t *testing.T) {

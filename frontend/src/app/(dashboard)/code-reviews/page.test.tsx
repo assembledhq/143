@@ -402,6 +402,8 @@ describe("CodeReviewsPage", () => {
     const filters = timeWindow.closest("#code-review-filters");
     expect(filters).toContainElement(screen.getByRole("combobox", { name: "Repository" }));
     expect(filters?.lastElementChild).toContainElement(timeWindow);
+    expect(screen.getByRole("heading", { level: 2, name: "Review activity" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Status" })).toHaveTextContent("Current reviews");
     expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
     expect(screen.getAllByText("Acceptable")).toHaveLength(2);
     expect(screen.getAllByText("Approved")).toHaveLength(2);
@@ -529,7 +531,7 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findByDisplayValue("Custom requirement")).toBeInTheDocument();
   }, 30_000);
 
-  it("applies time, repository, outcome, risk, status, and search filters to rows and stats", async () => {
+  it("applies shared filters to rows and stats while status scopes review activity only", async () => {
     const user = userEvent.setup();
     const listRequests: URLSearchParams[] = [];
     const statsRequests: URLSearchParams[] = [];
@@ -556,6 +558,8 @@ describe("CodeReviewsPage", () => {
     await waitFor(() => {
       expect(listRequests.at(-1)?.get("created_after")).toBeTruthy();
       expect(statsRequests.at(-1)?.get("created_after")).toBeTruthy();
+      expect(listRequests.at(-1)?.get("activity_status")).toBe("current");
+      expect(statsRequests.at(-1)?.get("activity_status")).toBe("current");
     });
     const initialListCreatedAfter = listRequests.at(-1)?.get("created_after");
     const initialStatsCreatedAfter = statsRequests.at(-1)?.get("created_after");
@@ -589,10 +593,13 @@ describe("CodeReviewsPage", () => {
         expect(params?.get("repository_id")).toBe(repo.id);
         expect(params?.get("decision")).toBe("blocked");
         expect(params?.get("risk")).toBe("needs_review");
-        expect(params?.get("status")).toBe("completed");
         expect(params?.get("search")).toBe("invoice");
         expectCreatedAfterDaysAgo(params?.get("created_after") ?? undefined, 7);
       }
+      expect(listParams?.get("activity_status")).toBe("completed");
+      expect(statsParams?.get("activity_status")).toBe("current");
+      expect(listParams?.get("status")).toBeNull();
+      expect(statsParams?.get("status")).toBeNull();
     });
     expect(
       [...new Set(listRequests.flatMap((params) => params.has("search") ? [params.get("search")] : []))],
@@ -600,6 +607,46 @@ describe("CodeReviewsPage", () => {
     expect(
       [...new Set(statsRequests.flatMap((params) => params.has("search") ? [params.get("search")] : []))],
     ).toEqual(["invoice"]);
+  });
+
+  it("keeps superseded history out of headline metrics and ordinary activity by default", async () => {
+    const user = userEvent.setup();
+    const listStatuses: string[] = [];
+    const statsStatuses: string[] = [];
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", ({ request }) => {
+        listStatuses.push(new URL(request.url).searchParams.get("activity_status") ?? "");
+        return HttpResponse.json({ data: [review], meta: { total_count: 1 } });
+      }),
+      http.get("/api/v1/code-reviews/stats", ({ request }) => {
+        statsStatuses.push(new URL(request.url).searchParams.get("activity_status") ?? "");
+        return HttpResponse.json({ data: reviewStats });
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
+
+    await waitFor(() => {
+      expect(listStatuses).toContain("current");
+      expect(statsStatuses.length).toBeGreaterThan(0);
+      expect(new Set(statsStatuses)).toEqual(new Set(["current"]));
+    });
+    const statsRequestCount = statsStatuses.length;
+
+    await user.click(screen.getByRole("combobox", { name: "Status" }));
+    await user.click(await screen.findByRole("option", { name: "Superseded history" }));
+    await waitFor(() => {
+      expect(listStatuses).toContain("superseded");
+      expect(statsStatuses).toHaveLength(statsRequestCount);
+    });
+
+    await user.click(screen.getByRole("combobox", { name: "Status" }));
+    await user.click(await screen.findByRole("option", { name: "All attempts" }));
+    await waitFor(() => {
+      expect(listStatuses).toContain("all");
+      expect(statsStatuses).toHaveLength(statsRequestCount);
+    });
   });
 
   it("clears the whole-page time window from the filtered empty state", async () => {
@@ -972,6 +1019,38 @@ describe("CodeReviewsPage", () => {
     const mobileActivity = await screen.findByLabelText("Code review activity");
     expect(within(mobileActivity).getByText("Queued")).toBeInTheDocument();
     expect(within(mobileActivity).queryByText("-")).not.toBeInTheDocument();
+  });
+
+  it("presents superseded attempts as neutral history rather than failures", async () => {
+    const supersededReview: CodeReviewListItem = {
+      ...review,
+      status: "stale",
+      stale: true,
+      superseded_by_session_id: "replacement-session",
+      decision: "blocked",
+      acceptable: false,
+      github_review_id: undefined,
+      github_review_url: undefined,
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", () =>
+        HttpResponse.json({ data: [supersededReview], meta: { total_count: 1 } } satisfies ListResponse<CodeReviewListItem>),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, {
+      searchParams: { status: "superseded" },
+    });
+
+    const supersededLabels = await screen.findAllByText("Superseded");
+    expect(supersededLabels).toHaveLength(2);
+    expect(screen.getAllByText("No outcome")).toHaveLength(2);
+    expect(screen.getAllByText("Not applicable")).toHaveLength(2);
+    for (const label of supersededLabels) {
+      expect(label).toHaveClass("text-muted-foreground");
+      expect(label).not.toHaveClass("text-destructive");
+    }
   });
 
   it("shows operational phases and the automatic GitHub retry countdown without a manual retry action", async () => {
@@ -1467,12 +1546,64 @@ describe("CodeReviewsPage", () => {
         params.get("repository_id") === repo.id
         && params.get("decision") === "blocked"
         && params.get("risk") === "needs_review"
-        && params.get("status") === "completed"
+        && params.get("activity_status") === "completed"
+        && params.get("status") === null
         && params.get("search") === "invoice"
         && params.get("limit") === "50",
       )).toBe(true);
     });
   });
+
+  it.each([
+    {
+      legacyStatus: "queued",
+      displayedStatus: "In progress",
+      activityStatus: "in_progress",
+      sessionStatus: null,
+    },
+    {
+      legacyStatus: "running",
+      displayedStatus: "In progress",
+      activityStatus: "in_progress",
+      sessionStatus: null,
+    },
+    {
+      legacyStatus: "stale",
+      displayedStatus: "Superseded history",
+      activityStatus: "superseded",
+      sessionStatus: null,
+    },
+    {
+      legacyStatus: "cancelled",
+      displayedStatus: "Cancelled",
+      activityStatus: "current",
+      sessionStatus: "cancelled",
+    },
+  ])(
+    "preserves the legacy $legacyStatus status URL",
+    async ({ legacyStatus, displayedStatus, activityStatus, sessionStatus }) => {
+      const requests: URLSearchParams[] = [];
+      mockCodeReviewBaseHandlers();
+      server.use(
+        http.get("/api/v1/code-reviews", ({ request }) => {
+          requests.push(new URL(request.url).searchParams);
+          return HttpResponse.json({ data: [review], meta: { total_count: 1 } });
+        }),
+      );
+
+      renderWithProviders(<CodeReviewsPage />, {
+        searchParams: { status: legacyStatus },
+      });
+
+      expect(await screen.findByRole("combobox", { name: "Status" })).toHaveTextContent(displayedStatus);
+      await waitFor(() => {
+        expect(requests.some((params) =>
+          params.get("activity_status") === activityStatus
+          && params.get("status") === sessionStatus,
+        )).toBe(true);
+      });
+    },
+  );
 
   it("distinguishes a filtered empty result and clears the active filters", async () => {
     mockCodeReviewBaseHandlers();

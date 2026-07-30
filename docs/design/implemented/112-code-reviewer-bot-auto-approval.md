@@ -465,7 +465,16 @@ Rules:
 - When a retryable failure becomes terminal, an admin or member may call `POST /api/v1/code-reviews/{session_id}/retry`. The API validates the live PR head and monotonic-approval guard, creates a new immutable session/job under the current policy, and compare-and-set links the failed attempt through `superseded_by_session_id`. Completed, non-retryable, stale, cancelled, superseded, non-latest, closed-PR, and changed-head attempts return `409 Conflict`.
 - If job dispatch fails after the replacement session is created, the service terminalizes that replacement as retryable, links it to the original attempt, records a failed-dispatch audit event, and returns an error. The UI refreshes to expose the replacement's retry action; no terminal attempt is reopened or deleted.
 
-The Code reviews list should show stale and superseded sessions distinctly from failed sessions. Stale means "reviewed a head that is no longer current," not "the agents failed."
+The Code reviews dashboard treats stale or explicitly replaced attempts as
+superseded audit history, not failed or current review work. Its default
+`activity_status=current` scope excludes rows whose status is `stale` or whose
+`superseded_by_session_id` is set from both activity totals and headline
+metrics. The activity status control can narrow current work to completed,
+in-progress, failed, or cancelled attempts; **Superseded history** includes
+stale attempts and failed attempts that already have replacements, while
+**All attempts** restores the complete immutable history. Superseded rows use
+neutral presentation and remain linked to their replacement rather than being
+rewritten or deleted.
 
 ## Review Orchestration
 

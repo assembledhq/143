@@ -95,6 +95,36 @@ describe('api client', () => {
     });
   });
 
+  describe('code reviews', () => {
+    it('sends the activity status for list and stats requests', async () => {
+      const capturedUrls: string[] = [];
+      server.use(
+        http.get('/api/v1/code-reviews', ({ request }) => {
+          capturedUrls.push(request.url);
+          return HttpResponse.json({ data: [], meta: { total_count: 0 } });
+        }),
+        http.get('/api/v1/code-reviews/stats', ({ request }) => {
+          capturedUrls.push(request.url);
+          return HttpResponse.json({
+            data: {
+              reviews_completed: 0,
+              automatically_approved: 0,
+              needs_human_review: 0,
+              median_turnaround_seconds: null,
+            },
+          });
+        }),
+      );
+
+      await api.codeReviews.list({ activity_status: 'superseded' });
+      await api.codeReviews.stats({ activity_status: 'current' });
+
+      expect(capturedUrls).toHaveLength(2);
+      expect(new URL(capturedUrls[0]).searchParams.get('activity_status')).toBe('superseded');
+      expect(new URL(capturedUrls[1]).searchParams.get('activity_status')).toBe('current');
+    });
+  });
+
   describe('Slack integrations', () => {
     it('fetches Slack health', async () => {
       const health = {

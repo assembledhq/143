@@ -269,6 +269,7 @@ export const api = {
       repository_id?: string;
       decision?: import('./types').CodeReviewDecision;
       outcome?: import('./types').CodeReviewListOutcome;
+      activity_status?: import('./types').CodeReviewActivityStatus;
       status?: import('./types').CodeReviewSessionStatus;
       risk?: "acceptable" | "needs_review";
       search?: string;
@@ -281,6 +282,7 @@ export const api = {
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
       if (params?.decision) searchParams.set('decision', params.decision);
       if (params?.outcome) searchParams.set('outcome', params.outcome);
+      if (params?.activity_status) searchParams.set('activity_status', params.activity_status);
       if (params?.status) searchParams.set('status', params.status);
       if (params?.risk) searchParams.set('risk', params.risk);
       if (params?.search) searchParams.set('search', params.search);
@@ -295,6 +297,7 @@ export const api = {
       repository_id?: string;
       decision?: import('./types').CodeReviewDecision;
       outcome?: import('./types').CodeReviewListOutcome;
+      activity_status?: import('./types').CodeReviewActivityStatus;
       status?: import('./types').CodeReviewSessionStatus;
       risk?: "acceptable" | "needs_review";
       search?: string;
@@ -305,6 +308,7 @@ export const api = {
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
       if (params?.decision) searchParams.set('decision', params.decision);
       if (params?.outcome) searchParams.set('outcome', params.outcome);
+      if (params?.activity_status) searchParams.set('activity_status', params.activity_status);
       if (params?.status) searchParams.set('status', params.status);
       if (params?.risk) searchParams.set('risk', params.risk);
       if (params?.search) searchParams.set('search', params.search);

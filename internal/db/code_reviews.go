@@ -1109,15 +1109,16 @@ func (s *CodeReviewStore) GetListItemBySessionID(ctx context.Context, orgID, ses
 }
 
 type CodeReviewListFilters struct {
-	RepositoryID  *uuid.UUID
-	Decision      *models.CodeReviewDecision
-	Outcome       *models.CodeReviewListOutcome
-	Status        *models.CodeReviewSessionStatus
-	Acceptable    *bool
-	Search        string
-	Limit         int
-	CreatedAfter  *time.Time
-	CreatedBefore *time.Time
+	RepositoryID   *uuid.UUID
+	Decision       *models.CodeReviewDecision
+	Outcome        *models.CodeReviewListOutcome
+	ActivityStatus *models.CodeReviewActivityStatus
+	Status         *models.CodeReviewSessionStatus
+	Acceptable     *bool
+	Search         string
+	Limit          int
+	CreatedAfter   *time.Time
+	CreatedBefore  *time.Time
 	// Cursor is the metadata row ID of the last item from the previous page.
 	// Rows strictly after it in the (created_at DESC, id DESC) order are
 	// returned, matching the session-history keyset pagination contract.
@@ -1130,6 +1131,30 @@ type CodeReviewPage struct {
 	NextCursor          string
 	NextCursorCreatedAt time.Time
 	TotalCount          int64
+}
+
+func codeReviewActivityStatusPredicate(status *models.CodeReviewActivityStatus) (string, error) {
+	if status == nil || *status == models.CodeReviewActivityStatusAll {
+		return "", nil
+	}
+	if err := status.Validate(); err != nil {
+		return "", err
+	}
+	current := ` AND m.status <> 'stale' AND m.superseded_by_session_id IS NULL`
+	switch *status {
+	case models.CodeReviewActivityStatusCurrent:
+		return current, nil
+	case models.CodeReviewActivityStatusCompleted:
+		return current + ` AND m.status = 'completed'`, nil
+	case models.CodeReviewActivityStatusInProgress:
+		return current + ` AND m.status IN ('queued', 'running')`, nil
+	case models.CodeReviewActivityStatusFailed:
+		return current + ` AND m.status = 'failed'`, nil
+	case models.CodeReviewActivityStatusSuperseded:
+		return ` AND (m.status = 'stale' OR m.superseded_by_session_id IS NOT NULL)`, nil
+	default:
+		return "", fmt.Errorf("unsupported code review activity status: %q", *status)
+	}
 }
 
 func codeReviewListWhere(orgID uuid.UUID, filters CodeReviewListFilters, includeCursor bool) (string, pgx.NamedArgs, error) {
@@ -1157,6 +1182,11 @@ func codeReviewListWhere(orgID uuid.UUID, filters CodeReviewListFilters, include
 			query += ` AND m.status = 'completed' AND (m.decision IS DISTINCT FROM 'approved' OR m.github_review_id IS NULL)`
 		}
 	}
+	activityPredicate, err := codeReviewActivityStatusPredicate(filters.ActivityStatus)
+	if err != nil {
+		return "", nil, err
+	}
+	query += activityPredicate
 	if filters.Status != nil {
 		if err := filters.Status.Validate(); err != nil {
 			return "", nil, err
@@ -1216,14 +1246,15 @@ func (s *CodeReviewStore) listReviews(ctx context.Context, orgID uuid.UUID, filt
 }
 
 type CodeReviewStatsFilters struct {
-	RepositoryID  *uuid.UUID
-	Decision      *models.CodeReviewDecision
-	Outcome       *models.CodeReviewListOutcome
-	Status        *models.CodeReviewSessionStatus
-	Acceptable    *bool
-	Search        string
-	CreatedAfter  *time.Time
-	CreatedBefore *time.Time
+	RepositoryID   *uuid.UUID
+	Decision       *models.CodeReviewDecision
+	Outcome        *models.CodeReviewListOutcome
+	ActivityStatus *models.CodeReviewActivityStatus
+	Status         *models.CodeReviewSessionStatus
+	Acceptable     *bool
+	Search         string
+	CreatedAfter   *time.Time
+	CreatedBefore  *time.Time
 }
 
 func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filters CodeReviewListFilters) ([]models.CodeReviewListItem, error) {
@@ -1318,6 +1349,11 @@ func (s *CodeReviewStore) GetReviewStats(ctx context.Context, orgID uuid.UUID, f
 		       OR m.github_review_id IS NULL)`
 		}
 	}
+	activityPredicate, err := codeReviewActivityStatusPredicate(filters.ActivityStatus)
+	if err != nil {
+		return models.CodeReviewStats{}, err
+	}
+	query += activityPredicate
 	if filters.Status != nil {
 		if err := filters.Status.Validate(); err != nil {
 			return models.CodeReviewStats{}, err
