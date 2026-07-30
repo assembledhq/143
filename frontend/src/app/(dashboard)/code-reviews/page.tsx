@@ -7,6 +7,7 @@ import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/rea
 import { parseAsString, parseAsStringLiteral, useQueryState } from "nuqs";
 import {
   AlertTriangle,
+  ChartNoAxesColumnIncreasing,
   ChevronDown,
   CircleHelp,
   ClipboardCheck,
@@ -64,11 +65,13 @@ import { useOpenCodeAvailability, type OpenCodeModelAvailability } from "@/hooks
 import { useAuth } from "@/hooks/use-auth";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
+import { CodeReviewAnalyticsReport } from "@/components/code-review-analytics";
 import { applyCodeReviewPolicyOptimistic, coalesceCodeReviewPolicy } from "@/lib/code-review-autosave";
 import { getCodingAgentReasoningOptions } from "@/lib/coding-agent-reasoning";
 import { AGENTS_BY_KEY, availableAgentModelGroups, modelOptionLabel, pmUsableResolvedCredentials, type AgentModelGroup } from "@/lib/agents";
 import type {
   CodingCredentialSummary,
+  CodeReviewAnalytics,
   CodeReviewApprovalMode,
   CodeReviewDecision,
   CodeReviewDescriptionApplicabilityKind,
@@ -93,6 +96,7 @@ const ALL_REPOSITORIES = "all";
 const ALL_OUTCOMES = "all";
 const ALL_RISKS = "all";
 const ALL_STATUSES = "all";
+type CodeReviewTab = "reviews" | "analytics" | "policy";
 const TIME_RANGE_FILTER_VALUES = ["7d", "30d", "90d", "all"] as const;
 type TimeRangeFilter = (typeof TIME_RANGE_FILTER_VALUES)[number];
 const DEFAULT_TIME_RANGE = "30d" satisfies TimeRangeFilter;
@@ -532,6 +536,13 @@ export default function CodeReviewsPage() {
   const { user } = useAuth();
   const canManagePolicy = user?.role === "admin";
   const canRetryReviews = user?.role === "admin" || user?.role === "member";
+  const [activeTab, setActiveTabState] = useState<CodeReviewTab>("reviews");
+  const setActiveTab = useCallback(
+    (value: string) => {
+      setActiveTabState(value as CodeReviewTab);
+    },
+    [],
+  );
   const [repositoryFilter, setRepositoryFilter] = useQueryState("repository", parseAsString.withDefault(ALL_REPOSITORIES));
   const [outcomeFilter, setOutcomeParam] = useQueryState(
     "outcome",
@@ -603,6 +614,13 @@ export default function CodeReviewsPage() {
     }),
     [baseReviewScopeFilters, timeRangeFilter],
   );
+  const analyticsScopeQueryKey = useMemo(
+    () => ({
+      repository_id: reviewRepositoryId,
+      time_range: timeRangeFilter,
+    }),
+    [reviewRepositoryId, timeRangeFilter],
+  );
   const currentReviewScopeFilters = useCallback(
     () => ({
       ...baseReviewScopeFilters,
@@ -612,6 +630,16 @@ export default function CodeReviewsPage() {
       ),
     }),
     [baseReviewScopeFilters, timeRangeFilter],
+  );
+  const currentAnalyticsFilters = useCallback(
+    () => ({
+      repository_id: reviewRepositoryId,
+      created_after: createdAfterForTimeRange(
+        timeRangeFilter,
+        new Date(timeRangeAnchorMsRef.current),
+      ),
+    }),
+    [reviewRepositoryId, timeRangeFilter],
   );
   const reviewFiltersQueryKey = useMemo(
     () => ({
@@ -662,15 +690,18 @@ export default function CodeReviewsPage() {
     void queryClient.invalidateQueries({
       queryKey: queryKeys.codeReviews.stats(),
     });
+    void queryClient.invalidateQueries({
+      queryKey: queryKeys.codeReviews.analytics(),
+    });
   }, [queryClient]);
   useEffect(() => {
-    if (timeRangeFilter === "all" || isViewingReviewHistory) return;
+    if (timeRangeFilter === "all" || (isViewingReviewHistory && activeTab === "reviews")) return;
     const timer = window.setInterval(
       refreshRollingReviewWindow,
       CODE_REVIEW_TIME_WINDOW_REFRESH_MS,
     );
     return () => window.clearInterval(timer);
-  }, [isViewingReviewHistory, refreshRollingReviewWindow, timeRangeFilter]);
+  }, [activeTab, isViewingReviewHistory, refreshRollingReviewWindow, timeRangeFilter]);
   // The reviews list refreshes live via the org-scoped SSE stream below; the
   // polling backstop only kicks in (faster) while the stream is unhealthy so a
   // Redis hiccup still surfaces new reviews. Replaces the old manual Refresh
@@ -689,7 +720,7 @@ export default function CodeReviewsPage() {
   // coalesce bursts into one refetch per window rather than one per event.
   const invalidateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onCodeReviewEvent = useCallback(() => {
-    if (isViewingReviewHistory) {
+    if (isViewingReviewHistory && activeTab === "reviews") {
       setNewReviewsAvailable(true);
       return;
     }
@@ -698,7 +729,7 @@ export default function CodeReviewsPage() {
       invalidateTimerRef.current = null;
       refreshRollingReviewWindow();
     }, pollMs(CODE_REVIEW_INVALIDATE_COALESCE_MS));
-  }, [isViewingReviewHistory, refreshRollingReviewWindow]);
+  }, [activeTab, isViewingReviewHistory, refreshRollingReviewWindow]);
   useEffect(
     () => () => {
       if (invalidateTimerRef.current) clearTimeout(invalidateTimerRef.current);
@@ -726,6 +757,14 @@ export default function CodeReviewsPage() {
     queryKey: queryKeys.codeReviews.stat(reviewScopeQueryKey),
     queryFn: () => api.codeReviews.stats(currentReviewScopeFilters()),
     refetchInterval: isViewingReviewHistory ? false : (codeReviewStreamHealthy ? pollMs(30_000) : pollMs(5_000)),
+  });
+  const analyticsQuery = useQuery<SingleResponse<CodeReviewAnalytics>>({
+    queryKey: queryKeys.codeReviews.analyticsReport(analyticsScopeQueryKey),
+    queryFn: () => api.codeReviews.analytics(currentAnalyticsFilters()),
+    enabled: activeTab === "analytics",
+    refetchInterval: activeTab !== "analytics"
+      ? false
+      : (codeReviewStreamHealthy ? pollMs(30_000) : pollMs(5_000)),
   });
   const policyQuery = useQuery({
     queryKey: queryKeys.codeReviews.policy,
@@ -1067,13 +1106,17 @@ export default function CodeReviewsPage() {
       title="Code reviews"
       description="Bot-requested PR reviews, acceptable-risk policy, and review outcomes."
     >
-      <Tabs defaultValue="reviews" className="space-y-4">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
           <TabsList>
             <TabsTrigger value="reviews">
               <ClipboardCheck className="h-4 w-4" />
               Reviews
             </TabsTrigger>
-            <TabsTrigger value="config">
+            <TabsTrigger value="analytics">
+              <ChartNoAxesColumnIncreasing className="h-4 w-4" />
+              Analytics
+            </TabsTrigger>
+            <TabsTrigger value="policy">
               <Settings2 className="h-4 w-4" />
               Policy
             </TabsTrigger>
@@ -1301,7 +1344,36 @@ export default function CodeReviewsPage() {
             </SectionGroup>
           </TabsContent>
 
-          <TabsContent value="config" className="space-y-4">
+          <TabsContent value="analytics" className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-2 sm:justify-end lg:ml-auto lg:max-w-md">
+              <FilterSelect
+                label="Repository"
+                value={repositoryFilter}
+                onValueChange={(value) => void setRepositoryFilter(value === ALL_REPOSITORIES ? null : value)}
+              >
+                <SelectItem value={ALL_REPOSITORIES}>All repositories</SelectItem>
+                {repositories.map((repo) => (
+                  <SelectItem key={repo.id} value={repo.id}>
+                    {repo.full_name}
+                  </SelectItem>
+                ))}
+              </FilterSelect>
+              <FilterSelect label="Time window" value={timeRangeFilter} onValueChange={setTimeRangeFilter}>
+                <SelectItem value="7d">Last 7 days</SelectItem>
+                <SelectItem value="30d">Last 30 days</SelectItem>
+                <SelectItem value="90d">Last 90 days</SelectItem>
+                <SelectItem value="all">All time</SelectItem>
+              </FilterSelect>
+            </div>
+            <CodeReviewAnalyticsReport
+              analytics={analyticsQuery.data?.data}
+              isLoading={analyticsQuery.isLoading}
+              isError={analyticsQuery.isError}
+              onRetry={() => void analyticsQuery.refetch()}
+            />
+          </TabsContent>
+
+          <TabsContent value="policy" className="space-y-4">
             <SectionGroup
               title="Review policy"
               description="Set how reviews run, what guidance they follow, and when approval is allowed."

@@ -33,6 +33,7 @@ vi.mock("@/lib/use-resource-sse", async () => {
 });
 import type {
   CodingCredentialSummary,
+  CodeReviewAnalytics,
   CodeReviewEvidence,
   CodeReviewGitHubTriggerResponse,
   CodeReviewListItem,
@@ -206,6 +207,76 @@ const reviewStats: CodeReviewStats = {
   median_turnaround_seconds: 480,
 };
 
+const reviewAnalytics: CodeReviewAnalytics = {
+  summary: {
+    reviews_requested: 32,
+    reviews_completed: 28,
+    automatically_approved: 17,
+    not_approved: 11,
+    needs_human_review: 8,
+    comment_only: 2,
+    blocked: 0,
+    approval_not_posted: 1,
+    failed_reviews: 2,
+    stale_reviews: 2,
+    reviews_with_size_data: 24,
+    reviews_with_change_breakdown: 20,
+    average_lines_changed: 143,
+    median_lines_changed: 96,
+    average_additions: 105,
+    median_additions: 70,
+    average_deletions: 38,
+    median_deletions: 26,
+    average_files_changed: 4,
+    median_files_changed: 3,
+    reviews_above_size_limit: 5,
+    approvals_above_size_limit: 0,
+    reviews_with_findings: 9,
+    reviews_with_blocking_findings: 3,
+    total_findings: 14,
+  },
+  authors: [
+    {
+      author: "anya",
+      reviews_completed: 12,
+      automatically_approved: 9,
+      not_approved: 3,
+      reviews_with_size_data: 10,
+      reviews_with_change_breakdown: 9,
+      average_lines_changed: 88,
+      median_lines_changed: 72,
+      average_additions: 60,
+      median_additions: 52,
+      average_deletions: 28,
+      median_deletions: 20,
+    },
+    {
+      author: "sam",
+      reviews_completed: 8,
+      automatically_approved: 3,
+      not_approved: 5,
+      reviews_with_size_data: 7,
+      reviews_with_change_breakdown: 6,
+      average_lines_changed: 225,
+      median_lines_changed: 190,
+      average_additions: 150,
+      median_additions: 130,
+      average_deletions: 75,
+      median_deletions: 60,
+    },
+  ],
+  size_buckets: [
+    { bucket: "0_49", reviews_completed: 8, automatically_approved: 7 },
+    { bucket: "50_199", reviews_completed: 12, automatically_approved: 8 },
+    { bucket: "200_499", reviews_completed: 3, automatically_approved: 2 },
+    { bucket: "500_plus", reviews_completed: 1, automatically_approved: 0 },
+  ],
+  non_approval_reasons: [
+    { code: "lines_limit_exceeded", reviews: 5 },
+    { code: "blocking_findings", reviews: 3 },
+  ],
+};
+
 const template: CodeReviewTemplateOption = {
   key: "small_backend_change",
   title: "Small backend change",
@@ -276,6 +347,11 @@ function mockCodeReviewBaseHandlers(
       HttpResponse.json({
         data: reviewStats,
       } satisfies SingleResponse<CodeReviewStats>),
+    ),
+    http.get("/api/v1/code-reviews/analytics", () =>
+      HttpResponse.json({
+        data: reviewAnalytics,
+      } satisfies SingleResponse<CodeReviewAnalytics>),
     ),
     http.get("/api/v1/code-reviews/session-1/evidence", () =>
       HttpResponse.json({
@@ -524,6 +600,51 @@ describe("CodeReviewsPage", () => {
     await user.click(screen.getByRole("button", { name: /Add requirement/i }));
     expect(await screen.findByDisplayValue("Custom requirement")).toBeInTheDocument();
   }, 30_000);
+
+  it("reports approval usage, PR size, authors, and policy signals in Analytics", async () => {
+    const user = userEvent.setup();
+    const analyticsRequests: URLSearchParams[] = [];
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews/analytics", ({ request }) => {
+        analyticsRequests.push(new URL(request.url).searchParams);
+        return HttpResponse.json({
+          data: reviewAnalytics,
+        } satisfies SingleResponse<CodeReviewAnalytics>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
+    await user.click(await screen.findByRole("tab", { name: "Analytics" }));
+
+    expect(await screen.findByText("Usage by PR author")).toBeInTheDocument();
+    expect(screen.getByText("PR size and policy fit")).toBeInTheDocument();
+    expect(screen.getByText("Why reviews were not approved")).toBeInTheDocument();
+    expect(screen.getByText("Review findings")).toBeInTheDocument();
+    expect(screen.getByText(/20 of 28 completed reviews with a captured breakdown/)).toBeInTheDocument();
+    expect(screen.getByText(/total-line and file data is available for 24 reviews/)).toBeInTheDocument();
+    expect(screen.getByText("Line-count limit exceeded")).toBeInTheDocument();
+    expect(screen.getByText("Reviewers found a blocking issue")).toBeInTheDocument();
+    expect(screen.getByText("500+ total lines")).toBeInTheDocument();
+
+    const authorTable = screen.getByRole("table", { name: "Code review analytics by PR author" });
+    const anyaRow = within(authorTable).getByRole("row", { name: /anya/i });
+    expect(within(anyaRow).getAllByRole("cell").map((cell) => cell.textContent)).toEqual([
+      "anya",
+      "12",
+      "9",
+      "3",
+      "75%",
+      "9 / 12",
+      "60",
+      "52",
+      "28",
+      "20",
+    ]);
+    await waitFor(() => expect(analyticsRequests).toHaveLength(1));
+    expectCreatedAfterDaysAgo(analyticsRequests[0]?.get("created_after") ?? undefined, 30);
+    expect(analyticsRequests[0]?.has("repository_id")).toBe(false);
+  });
 
   it("applies time, repository, outcome, risk, status, and search filters to rows and stats", async () => {
     const user = userEvent.setup();

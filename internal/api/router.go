@@ -1241,6 +1241,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/version", healthHandler.Version)
 				r.Get("/api/v1/code-reviews", codeReviewHandler.List)
 				r.Get("/api/v1/code-reviews/stats", codeReviewHandler.Stats)
+				r.Get("/api/v1/code-reviews/analytics", codeReviewHandler.Analytics)
 				r.Get("/api/v1/code-reviews/stream", codeReviewHandler.StreamUpdates)
 				r.Get("/api/v1/code-reviews/templates", codeReviewHandler.Templates)
 				r.Get("/api/v1/code-reviews/prompt-examples", codeReviewHandler.PromptExamples)

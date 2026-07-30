@@ -610,6 +610,50 @@ func TestCodeReviewFindingsOnChangedLines(t *testing.T) {
 	require.Equal(t, []models.CodeReviewFinding{findings[0]}, filtered, "inline selection should keep only findings attached to added diff lines")
 }
 
+func TestCodeReviewLineChangesKeepsAdditionsAndDeletionsSeparate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		files             []codereview.PullRequestFile
+		expectedAdditions int
+		expectedDeletions int
+	}{
+		{
+			name: "aggregates both sides across files",
+			files: []codereview.PullRequestFile{
+				{Filename: "frontend/src/Chart.tsx", Additions: 12, Deletions: 1},
+				{Filename: "internal/db/users_test.go", Additions: 4},
+			},
+			expectedAdditions: 16,
+			expectedDeletions: 1,
+		},
+		{
+			name:              "preserves deletion-only changes",
+			files:             []codereview.PullRequestFile{{Filename: "legacy.go", Deletions: 21}},
+			expectedAdditions: 0,
+			expectedDeletions: 21,
+		},
+		{
+			name:              "returns zeroes without changed files",
+			files:             []codereview.PullRequestFile{},
+			expectedAdditions: 0,
+			expectedDeletions: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			additions, deletions := codeReviewLineChanges(tt.files)
+
+			require.Equal(t, tt.expectedAdditions, additions, "line-change aggregation should return exact additions")
+			require.Equal(t, tt.expectedDeletions, deletions, "line-change aggregation should return exact deletions")
+		})
+	}
+}
+
 func TestCodeReviewDescriptionRequirementAppliesTypedRules(t *testing.T) {
 	t.Parallel()
 

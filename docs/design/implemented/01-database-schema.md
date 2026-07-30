@@ -1,6 +1,6 @@
 # Design: Database Schema
 
-> **Status:** Implemented | **Last reviewed:** 2026-07-26
+> **Status:** Implemented | **Last reviewed:** 2026-07-30
 
 This document defines the PostgreSQL schema for 143.dev. All entities flow through the pipeline: ingestion -> prioritization -> agent run -> validation -> PR -> deploy -> observation.
 
@@ -515,6 +515,56 @@ Results of the validation step for an agent run.
 | merged_at | timestamptz | |
 | created_at | timestamptz | |
 | updated_at | timestamptz | |
+
+### `code_review_session_metadata`
+
+Durable assessment state for the Code Reviewer bot. Each row belongs to a
+normal `sessions` record and captures the policy and PR head used for that
+specific assessment. Reassessments create new rows so historical analytics can
+compare decisions against the policy active at the time.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | uuid | PK |
+| org_id | uuid | FK -> organizations |
+| session_id | uuid | FK -> sessions; assessment session |
+| repository_id | uuid | FK -> repositories |
+| pull_request_id | uuid | FK -> pull_requests |
+| policy_id | uuid | FK -> code_review_policies; immutable policy version used by the assessment |
+| base_sha | text | Reviewed base commit |
+| head_sha | text | Reviewed PR head commit |
+| from_fork | boolean | Whether the PR originated from a fork |
+| trigger_source | text | Explicit reviewer or reserved automatic trigger source |
+| status | text | `queued`, `running`, `completed`, `failed`, `stale`, `cancelled` |
+| phase | text | Current operational phase while active |
+| status_code | text | Machine-readable retry/failure state |
+| status_message | text | Operator-facing operational detail |
+| retry_at | timestamptz | Next automatic retry time |
+| last_error_at | timestamptz | Most recent operational failure |
+| retryable_failure | boolean | Whether retry is currently eligible |
+| decision | text | `approved`, `comment_only`, `needs_human_review`, `blocked` |
+| acceptable | boolean | Deterministic acceptable-risk result |
+| stale | boolean | Whether a newer PR head superseded the assessment |
+| superseded_by_session_id | uuid | FK -> sessions for an explicit retry/replacement |
+| review_output_key | text | Idempotency key for the review output |
+| prompt_artifact_key | text | Stored prompt/output artifact key |
+| github_review_id | bigint | Posted GitHub review id, nullable |
+| github_review_url | text | Posted GitHub review URL |
+| final_review_body | text | Persisted synthesized review body |
+| failure_reason | text | Terminal failure detail |
+| files_changed | integer | Captured PR file count for completed-review analytics, nullable for unavailable historical data |
+| additions | integer | Captured added-line count for completed-review analytics, nullable when the historical split is unavailable |
+| deletions | integer | Captured deleted-line count for completed-review analytics, nullable when the historical split is unavailable |
+| lines_changed | integer | Captured added-plus-deleted line count for completed-review analytics, nullable for unavailable historical data |
+| risk_reason_details | jsonb | Structured risk/policy reasons used by non-approval analytics |
+| completed_at | timestamptz | |
+| created_at | timestamptz | |
+
+**Indexes:**
+- `(org_id, review_output_key)` unique — output idempotency
+- `(org_id, pull_request_id, head_sha, policy_id)` unique while queued/running — one active assessment per captured PR state
+- `(org_id, repository_id, created_at DESC)` — repository review history
+- `(org_id, created_at DESC)` where `status = 'completed'` — organization analytics windows
 
 ### `deploys`
 
