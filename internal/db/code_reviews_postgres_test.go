@@ -92,7 +92,7 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 		INSERT INTO code_review_policies (id, org_id, risk_policy)
 		VALUES
 			($1, $2, '{"max_lines_changed":200,"max_files_changed":5}'),
-			($3, $4, '{"max_lines_changed":500,"max_files_changed":20}')`,
+			($3, $4, '{"max_lines_changed":3000000000,"max_files_changed":3000000000}')`,
 		policyID, orgID, otherPolicyID, otherOrgID,
 	)
 	require.NoError(t, err, "test should insert captured analytics policies")
@@ -257,6 +257,55 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 			{Code: models.CodeReviewRiskReasonLinesLimitExceeded, Reviews: 1},
 		},
 	}, analytics, "analytics should preserve outcome, author, size, reason, finding, time, and tenancy semantics")
+
+	otherLines := float64(smallLines)
+	otherAdditions := float64(smallAdditions)
+	otherDeletions := float64(smallDeletions)
+	otherFiles := float64(smallFiles)
+	otherOrgAnalytics, err := NewCodeReviewStore(conn).GetReviewAnalytics(ctx, otherOrgID, CodeReviewAnalyticsFilters{
+		RepositoryID: &otherRepositoryID,
+	})
+
+	require.NoError(t, err, "analytics should accept captured policy limits larger than a PostgreSQL integer")
+	require.Equal(t, models.CodeReviewAnalytics{
+		Summary: models.CodeReviewAnalyticsSummary{
+			ReviewsRequested:            1,
+			ReviewsCompleted:            1,
+			AutomaticallyApproved:       1,
+			ReviewsWithSizeData:         1,
+			ReviewsWithChangeBreakdown:  1,
+			AverageLinesChanged:         &otherLines,
+			MedianLinesChanged:          &otherLines,
+			AverageAdditions:            &otherAdditions,
+			MedianAdditions:             &otherAdditions,
+			AverageDeletions:            &otherDeletions,
+			MedianDeletions:             &otherDeletions,
+			AverageFilesChanged:         &otherFiles,
+			MedianFilesChanged:          &otherFiles,
+			ReviewsWithFindings:         1,
+			ReviewsWithBlockingFindings: 1,
+			TotalFindings:               1,
+		},
+		Authors: []models.CodeReviewAuthorAnalytics{
+			{
+				Author:                     "other",
+				ReviewsCompleted:           1,
+				AutomaticallyApproved:      1,
+				ReviewsWithSizeData:        1,
+				ReviewsWithChangeBreakdown: 1,
+				AverageLinesChanged:        &otherLines,
+				MedianLinesChanged:         &otherLines,
+				AverageAdditions:           &otherAdditions,
+				MedianAdditions:            &otherAdditions,
+				AverageDeletions:           &otherDeletions,
+				MedianDeletions:            &otherDeletions,
+			},
+		},
+		SizeBuckets: []models.CodeReviewSizeBucketAnalytics{
+			{Bucket: models.CodeReviewSizeBucketSmall, ReviewsCompleted: 1, AutomaticallyApproved: 1},
+		},
+		NonApprovalReasons: []models.CodeReviewNonApprovalReasonAnalytics{},
+	}, otherOrgAnalytics, "large captured limits should remain usable in every analytics section")
 
 	emptyAnalytics, err := NewCodeReviewStore(conn).GetReviewAnalytics(ctx, uuid.New(), CodeReviewAnalyticsFilters{})
 

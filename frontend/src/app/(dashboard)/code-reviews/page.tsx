@@ -720,9 +720,9 @@ export default function CodeReviewsPage() {
   // coalesce bursts into one refetch per window rather than one per event.
   const invalidateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onCodeReviewEvent = useCallback(() => {
-    if (isViewingReviewHistory && activeTab === "reviews") {
+    if (isViewingReviewHistory) {
       setNewReviewsAvailable(true);
-      return;
+      if (activeTab === "reviews") return;
     }
     if (invalidateTimerRef.current) return;
     invalidateTimerRef.current = setTimeout(() => {

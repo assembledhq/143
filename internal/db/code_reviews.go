@@ -1465,8 +1465,8 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 				m.files_changed,
 				m.risk_reason_details,
 				COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), 'Unknown') AS author,
-				COALESCE(NULLIF(p.risk_policy->>'max_lines_changed', '')::integer, 2147483647) AS max_lines_changed,
-				COALESCE(NULLIF(p.risk_policy->>'max_files_changed', '')::integer, 2147483647) AS max_files_changed
+				COALESCE(NULLIF(p.risk_policy->>'max_lines_changed', '')::bigint, 9223372036854775807) AS max_lines_changed,
+				COALESCE(NULLIF(p.risk_policy->>'max_files_changed', '')::bigint, 9223372036854775807) AS max_files_changed
 			FROM code_review_session_metadata m
 			JOIN sessions s ON s.id = m.session_id AND s.org_id = m.org_id
 			JOIN code_review_policies p ON p.id = m.policy_id AND p.org_id = m.org_id` + where + `

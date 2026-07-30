@@ -646,6 +646,58 @@ describe("CodeReviewsPage", () => {
     expect(analyticsRequests[0]?.has("repository_id")).toBe(false);
   });
 
+  it("shows failed and stale attempts when no review completed", async () => {
+    const user = userEvent.setup();
+    const failedOnlyAnalytics: CodeReviewAnalytics = {
+      summary: {
+        reviews_requested: 5,
+        reviews_completed: 0,
+        automatically_approved: 0,
+        not_approved: 0,
+        needs_human_review: 0,
+        comment_only: 0,
+        blocked: 0,
+        approval_not_posted: 0,
+        failed_reviews: 4,
+        stale_reviews: 1,
+        reviews_with_size_data: 0,
+        reviews_with_change_breakdown: 0,
+        average_lines_changed: null,
+        median_lines_changed: null,
+        average_additions: null,
+        median_additions: null,
+        average_deletions: null,
+        median_deletions: null,
+        average_files_changed: null,
+        median_files_changed: null,
+        reviews_above_size_limit: 0,
+        approvals_above_size_limit: 0,
+        reviews_with_findings: 0,
+        reviews_with_blocking_findings: 0,
+        total_findings: 0,
+      },
+      authors: [],
+      size_buckets: [],
+      non_approval_reasons: [],
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews/analytics", () =>
+        HttpResponse.json({
+          data: failedOnlyAnalytics,
+        } satisfies SingleResponse<CodeReviewAnalytics>),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
+    await user.click(await screen.findByRole("tab", { name: "Analytics" }));
+
+    expect(await screen.findByText("5 total attempts")).toBeInTheDocument();
+    expect(screen.getByText("4 failed · 1 stale")).toBeInTheDocument();
+    expect(screen.getByText("No completed reviews in this time window")).toBeInTheDocument();
+    expect(screen.getByText(/failed or became stale before reaching an approval decision/)).toBeInTheDocument();
+  });
+
   it("applies time, repository, outcome, risk, status, and search filters to rows and stats", async () => {
     const user = userEvent.setup();
     const listRequests: URLSearchParams[] = [];
@@ -955,6 +1007,26 @@ describe("CodeReviewsPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
     expect(screen.queryByText("New reviews are available.")).not.toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "Show 50 more" })).toBeInTheDocument();
+  });
+
+  it("keeps the loaded-history refresh signal when an event arrives on Analytics", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", ({ request }) =>
+        HttpResponse.json(new URL(request.url).searchParams.has("cursor")
+          ? { data: [], meta: { total_count: 2 } }
+          : { data: [review], meta: { next_cursor: "review-1", total_count: 2 } })),
+    );
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("button", { name: "Show 50 more" }));
+    await user.click(screen.getByRole("tab", { name: "Analytics" }));
+
+    act(() => sse.onEvent?.());
+
+    await user.click(screen.getByRole("tab", { name: "Reviews" }));
+    expect(await screen.findByText("New reviews are available.")).toBeInTheDocument();
+    expect(screen.getAllByText("#428 Fix invoice rounding")).toHaveLength(2);
   });
 
   it("does not replace the first page when another feature invalidates review lists", async () => {

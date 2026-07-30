@@ -96,6 +96,33 @@ function LoadingReport() {
   );
 }
 
+function ApprovalOutcomeCards({ summary }: { summary: CodeReviewAnalytics["summary"] }) {
+  return (
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Approval outcomes">
+      <MetricCard
+        label="Reviews completed"
+        value={summary.reviews_completed.toLocaleString()}
+        context={`${summary.reviews_requested.toLocaleString()} total attempts`}
+      />
+      <MetricCard
+        label="Automatically approved"
+        value={summary.automatically_approved.toLocaleString()}
+        context={`${percentage(summary.automatically_approved, summary.reviews_completed)} of completed reviews`}
+      />
+      <MetricCard
+        label="Not approved"
+        value={summary.not_approved.toLocaleString()}
+        context={`${percentage(summary.not_approved, summary.reviews_completed)} of completed reviews`}
+      />
+      <MetricCard
+        label="Approval rate"
+        value={percentage(summary.automatically_approved, summary.reviews_completed)}
+        context={`${summary.failed_reviews.toLocaleString()} failed · ${summary.stale_reviews.toLocaleString()} stale`}
+      />
+    </div>
+  );
+}
+
 export function CodeReviewAnalyticsReport({
   analytics,
   isLoading,
@@ -121,7 +148,7 @@ export function CodeReviewAnalyticsReport({
   }
 
   const { summary } = analytics;
-  if (summary.reviews_completed === 0) {
+  if (summary.reviews_requested === 0) {
     return (
       <div className="space-y-3">
         {isError ? (
@@ -133,8 +160,28 @@ export function CodeReviewAnalyticsReport({
         ) : null}
         <EmptyState
           icon={ChartNoAxesColumnIncreasing}
-          title="No completed reviews in this time window"
+          title="No review attempts in this time window"
           description="Choose a longer time window or another repository to analyze approval behavior."
+        />
+      </div>
+    );
+  }
+
+  if (summary.reviews_completed === 0) {
+    return (
+      <div className="space-y-6" aria-busy={isLoading}>
+        {isError ? (
+          <ErrorNotice
+            title="Analytics may be out of date"
+            description="Showing the last successful report because the latest refresh failed."
+            action={{ label: "Retry", onClick: onRetry }}
+          />
+        ) : null}
+        <ApprovalOutcomeCards summary={summary} />
+        <EmptyState
+          icon={ChartNoAxesColumnIncreasing}
+          title="No completed reviews in this time window"
+          description="The attempts in this window failed or became stale before reaching an approval decision."
         />
       </div>
     );
@@ -150,28 +197,7 @@ export function CodeReviewAnalyticsReport({
         />
       ) : null}
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Approval outcomes">
-        <MetricCard
-          label="Reviews completed"
-          value={summary.reviews_completed.toLocaleString()}
-          context={`${summary.reviews_requested.toLocaleString()} total attempts`}
-        />
-        <MetricCard
-          label="Automatically approved"
-          value={summary.automatically_approved.toLocaleString()}
-          context={`${percentage(summary.automatically_approved, summary.reviews_completed)} of completed reviews`}
-        />
-        <MetricCard
-          label="Not approved"
-          value={summary.not_approved.toLocaleString()}
-          context={`${percentage(summary.not_approved, summary.reviews_completed)} of completed reviews`}
-        />
-        <MetricCard
-          label="Approval rate"
-          value={percentage(summary.automatically_approved, summary.reviews_completed)}
-          context={`${summary.failed_reviews.toLocaleString()} failed · ${summary.stale_reviews.toLocaleString()} stale`}
-        />
-      </div>
+      <ApprovalOutcomeCards summary={summary} />
 
       <SectionGroup
         title="Usage by PR author"
