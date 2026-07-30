@@ -70,6 +70,8 @@ func requiredAPIScope(method, path string) string {
 		return "automations:read"
 	case method == http.MethodPost && path == "/api/v1/automations":
 		return "automations:create"
+	case method == http.MethodPost && path == "/api/v1/automations/schedule-preview":
+		return "automations:read"
 	case (method == http.MethodPatch || method == http.MethodDelete) && strings.HasPrefix(path, "/api/v1/automations/"):
 		return "automations:write"
 	case method == http.MethodPost && strings.HasSuffix(path, "/run") && strings.HasPrefix(path, "/api/v1/automations/"):

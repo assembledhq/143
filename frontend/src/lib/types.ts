@@ -2605,6 +2605,7 @@ export interface ListResponse<T> {
   data: T[];
   meta: {
     next_cursor?: string;
+    total_count?: number;
     default_repository_id?: string;
   };
 }
@@ -3298,6 +3299,9 @@ export interface UsageBreakdownRow {
 
 // Automation types
 export type AutomationScheduleType = "interval" | "cron" | "none";
+export interface AutomationSchedulePreview {
+  next_run_at: string;
+}
 export type AutomationRunStatus =
   | "pending"
   | "running"

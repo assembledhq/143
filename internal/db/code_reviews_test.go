@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"testing"
 	"time"
@@ -1177,6 +1178,177 @@ func TestCodeReviewStore_GetReviewStatsAppliesOutcomeFilters(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "the stats outcome filter should add the expected SQL conditions")
 		})
 	}
+}
+
+func TestCodeReviewStore_ListReviewsPageReturnsExactCountForEmptyPage(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery(`SELECT COUNT\(\*\).*WHERE m\.org_id = @org_id`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(0)))
+	mock.ExpectQuery(`ORDER BY m\.created_at DESC, m\.id DESC`).
+		WithArgs(pgxmock.AnyArg(), 51).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
+			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code",
+			"status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
+			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id",
+			"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
+			"retry_eligible", "session_title", "repository_name", "github_repo", "github_pr_number",
+			"github_pr_url", "pull_request_title", "pull_request_author",
+		}))
+
+	page, err := NewCodeReviewStore(mock).ListReviewsPage(context.Background(), orgID, CodeReviewListFilters{})
+
+	require.NoError(t, err, "ListReviewsPage should return an empty first page")
+	require.Equal(t, int64(0), page.TotalCount, "ListReviewsPage should return the exact zero count")
+	require.Equal(t, []models.CodeReviewListItem{}, page.Items, "ListReviewsPage should normalize an empty result")
+	require.Empty(t, page.NextCursor, "an empty page should not return a next cursor")
+	require.NoError(t, mock.ExpectationsWereMet(), "count and page queries should both be executed")
+}
+
+func TestCodeReviewStore_ListReviewsPageUsesImmutableCursorAnchorWithMutableFilters(t *testing.T) {
+	t.Parallel()
+
+	orgID, cursor := uuid.New(), uuid.New()
+	cursorCreatedAt := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	status := models.CodeReviewSessionStatusRunning
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery(`SELECT COUNT\(\*\).*m\.status = @status`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(0)))
+	mock.ExpectQuery(`\(m\.created_at, m\.id\) < \(@cursor_created_at, @cursor\)`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), 51).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
+			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code",
+			"status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
+			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id",
+			"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
+			"retry_eligible", "session_title", "repository_name", "github_repo", "github_pr_number",
+			"github_pr_url", "pull_request_title", "pull_request_author",
+		}))
+
+	page, err := NewCodeReviewStore(mock).ListReviewsPage(context.Background(), orgID, CodeReviewListFilters{
+		Status:          &status,
+		Cursor:          &cursor,
+		CursorCreatedAt: &cursorCreatedAt,
+	})
+
+	require.NoError(t, err, "an immutable cursor anchor should not depend on the cursor row still matching mutable filters")
+	require.Empty(t, page.Items, "the mocked continuation page should be empty")
+	require.NoError(t, mock.ExpectationsWereMet(), "the page query should compare directly with the immutable cursor anchor")
+}
+
+func TestCodeReviewStore_ListReviewsPageAppliesOutcomeToCountAndRows(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		outcome models.CodeReviewListOutcome
+		pattern string
+	}{
+		{
+			name:    "automatically approved",
+			outcome: models.CodeReviewListOutcomeAutomaticallyApproved,
+			pattern: `m\.status = 'completed' AND m\.decision = 'approved' AND m\.github_review_id IS NOT NULL`,
+		},
+		{
+			name:    "completed not approved",
+			outcome: models.CodeReviewListOutcomeCompletedNotApproved,
+			pattern: `m\.status = 'completed' AND \(m\.decision IS DISTINCT FROM 'approved' OR m\.github_review_id IS NULL\)`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock should initialize for each outcome")
+			defer mock.Close()
+			mock.ExpectQuery(`(?s)SELECT COUNT\(\*\).*` + tt.pattern).
+				WithArgs(pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(0)))
+			mock.ExpectQuery(tt.pattern).
+				WithArgs(pgxmock.AnyArg(), 51).
+				WillReturnRows(pgxmock.NewRows([]string{
+					"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
+					"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code",
+					"status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
+					"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id",
+					"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
+					"retry_eligible", "session_title", "repository_name", "github_repo", "github_pr_number",
+					"github_pr_url", "pull_request_title", "pull_request_author",
+				}))
+
+			page, err := NewCodeReviewStore(mock).ListReviewsPage(context.Background(), orgID, CodeReviewListFilters{
+				Outcome: &tt.outcome,
+			})
+
+			require.NoError(t, err, "ListReviewsPage should accept the selected outcome")
+			require.Equal(t, int64(0), page.TotalCount, "the filtered count should be returned")
+			require.NoError(t, mock.ExpectationsWereMet(), "count and rows should use the same outcome predicate")
+		})
+	}
+}
+
+func TestCodeReviewStore_ListReviewsPageUsesExtraRowForNextCursor(t *testing.T) {
+	t.Parallel()
+
+	orgID, repoID, policyID, prID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	firstID, secondID := uuid.New(), uuid.New()
+	firstSessionID, secondSessionID := uuid.New(), uuid.New()
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	repositoryName := "acme/repo"
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery(`SELECT COUNT\(\*\)`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(2)))
+	rows := pgxmock.NewRows([]string{
+		"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
+		"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code",
+		"status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
+		"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id",
+		"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
+		"retry_eligible", "session_title", "repository_name", "github_repo", "github_pr_number",
+		"github_pr_url", "pull_request_title", "pull_request_author",
+	})
+	addRow := func(id, sessionID uuid.UUID, createdAt time.Time, number int) {
+		rows.AddRow(
+			id, orgID, sessionID, repoID, prID, policyID,
+			"base", "head", false, models.CodeReviewTriggerSourceAppReviewer,
+			models.CodeReviewSessionStatusCompleted, nil, nil, nil, nil, nil, false,
+			nil, nil, false, nil, "output", nil, nil, nil, nil, nil, &createdAt, createdAt,
+			false, nil, &repositoryName, "acme/repo", number,
+			fmt.Sprintf("https://github.com/acme/repo/pull/%d", number), "Review", "dev",
+		)
+	}
+	addRow(firstID, firstSessionID, now, 2)
+	addRow(secondID, secondSessionID, now.Add(-time.Minute), 1)
+	mock.ExpectQuery(`ORDER BY m\.created_at DESC, m\.id DESC`).
+		WithArgs(pgxmock.AnyArg(), 2).
+		WillReturnRows(rows)
+
+	page, err := NewCodeReviewStore(mock).ListReviewsPage(context.Background(), orgID, CodeReviewListFilters{Limit: 1})
+
+	require.NoError(t, err, "ListReviewsPage should load one requested row plus one sentinel row")
+	require.Equal(t, int64(2), page.TotalCount, "the page should retain the exact filtered total")
+	require.Len(t, page.Items, 1, "the sentinel row should be removed from the response")
+	require.Equal(t, firstID, page.Items[0].ID, "the newest requested row should be returned")
+	require.Equal(t, firstID.String(), page.NextCursor, "the next cursor should identify the final returned row")
+	require.NoError(t, mock.ExpectationsWereMet(), "the page query should request limit plus one rows")
 }
 
 func TestCodeReviewStore_GetListItemBySessionIDScopesByOrgAndSession(t *testing.T) {

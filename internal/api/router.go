@@ -1587,6 +1587,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 				// Automations (write)
 				r.Post("/api/v1/automations", automationHandler.CreatePublic)
+				r.Post("/api/v1/automations/schedule-preview", automationHandler.PreviewSchedule)
 				goalImproveLimit := middleware.RateLimit(middleware.RateLimitConfig{OrgRequestsPerSecond: 2, IPRequestsPerSecond: 2})
 				goalImproveApplyLimit := middleware.RateLimit(middleware.RateLimitConfig{OrgRequestsPerSecond: 10, IPRequestsPerSecond: 5})
 				r.With(goalImproveLimit).Post("/api/v1/automations/goal-improvements", automationHandler.CreateDraftGoalImprovement)

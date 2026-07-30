@@ -1081,6 +1081,12 @@ const codeReviewListItemSelect = `
 			LEFT JOIN pull_request_health_current current_health
 			       ON current_health.pull_request_id = m.pull_request_id AND current_health.org_id = m.org_id`
 
+const codeReviewListCountFrom = `
+		FROM code_review_session_metadata m
+		JOIN sessions s ON s.id = m.session_id AND s.org_id = m.org_id
+		JOIN repositories r ON r.id = m.repository_id AND r.org_id = m.org_id
+		JOIN pull_requests pr ON pr.id = m.pull_request_id AND pr.org_id = m.org_id`
+
 // GetListItemBySessionID returns one review with the same joined pull request
 // and repository context as ListReviews rows. Used by the internal (sandbox)
 // code review history API where agents need PR context alongside the review.
@@ -1115,7 +1121,98 @@ type CodeReviewListFilters struct {
 	// Cursor is the metadata row ID of the last item from the previous page.
 	// Rows strictly after it in the (created_at DESC, id DESC) order are
 	// returned, matching the session-history keyset pagination contract.
-	Cursor *uuid.UUID
+	Cursor          *uuid.UUID
+	CursorCreatedAt *time.Time
+}
+
+type CodeReviewPage struct {
+	Items               []models.CodeReviewListItem
+	NextCursor          string
+	NextCursorCreatedAt time.Time
+	TotalCount          int64
+}
+
+func codeReviewListWhere(orgID uuid.UUID, filters CodeReviewListFilters, includeCursor bool) (string, pgx.NamedArgs, error) {
+	args := pgx.NamedArgs{"org_id": orgID}
+	query := ` WHERE m.org_id = @org_id`
+	if filters.RepositoryID != nil {
+		query += ` AND m.repository_id = @repository_id`
+		args["repository_id"] = *filters.RepositoryID
+	}
+	if filters.Decision != nil {
+		if err := filters.Decision.Validate(); err != nil {
+			return "", nil, err
+		}
+		query += ` AND m.decision = @decision`
+		args["decision"] = *filters.Decision
+	}
+	if filters.Outcome != nil {
+		if err := filters.Outcome.Validate(); err != nil {
+			return "", nil, err
+		}
+		switch *filters.Outcome {
+		case models.CodeReviewListOutcomeAutomaticallyApproved:
+			query += ` AND m.status = 'completed' AND m.decision = 'approved' AND m.github_review_id IS NOT NULL`
+		case models.CodeReviewListOutcomeCompletedNotApproved:
+			query += ` AND m.status = 'completed' AND (m.decision IS DISTINCT FROM 'approved' OR m.github_review_id IS NULL)`
+		}
+	}
+	if filters.Status != nil {
+		if err := filters.Status.Validate(); err != nil {
+			return "", nil, err
+		}
+		query += ` AND m.status = @status`
+		args["status"] = *filters.Status
+	}
+	if filters.Acceptable != nil {
+		query += ` AND m.acceptable = @acceptable`
+		args["acceptable"] = *filters.Acceptable
+	}
+	if filters.CreatedAfter != nil {
+		query += ` AND m.created_at >= @created_after`
+		args["created_after"] = *filters.CreatedAfter
+	}
+	if filters.CreatedBefore != nil {
+		query += ` AND m.created_at <= @created_before`
+		args["created_before"] = *filters.CreatedBefore
+	}
+	if includeCursor && filters.Cursor != nil {
+		args["cursor"] = *filters.Cursor
+		if filters.CursorCreatedAt != nil {
+			query += ` AND (m.created_at, m.id) < (@cursor_created_at, @cursor)`
+			args["cursor_created_at"] = *filters.CursorCreatedAt
+		} else {
+			// Internal callers predating the opaque HTTP cursor still pass only
+			// the row ID. Keep that contract while public pagination uses the
+			// immutable timestamp embedded in its cursor.
+			query += ` AND (m.created_at, m.id) < (
+				SELECT created_at, id FROM code_review_session_metadata
+				WHERE id = @cursor AND org_id = @org_id
+			)`
+		}
+	}
+	if search := strings.TrimSpace(filters.Search); search != "" {
+		query += ` AND (pr.title ILIKE @search OR pr.github_repo ILIKE @search OR pr.github_pr_number::text = @search_exact OR COALESCE(s.title, '') ILIKE @search)`
+		args["search"] = "%" + search + "%"
+		args["search_exact"] = strings.TrimPrefix(search, "#")
+	}
+	return query, args, nil
+}
+
+func (s *CodeReviewStore) listReviews(ctx context.Context, orgID uuid.UUID, filters CodeReviewListFilters, limit int) ([]models.CodeReviewListItem, error) {
+	where, args, err := codeReviewListWhere(orgID, filters, true)
+	if err != nil {
+		return nil, err
+	}
+	args["limit"] = limit
+	query := codeReviewListItemSelect + where + `
+		ORDER BY m.created_at DESC, m.id DESC
+		LIMIT @limit`
+	rows, err := s.db.Query(ctx, query, args)
+	if err != nil {
+		return nil, fmt.Errorf("query code review list: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.CodeReviewListItem])
 }
 
 type CodeReviewStatsFilters struct {
@@ -1134,87 +1231,33 @@ func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filt
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	args := pgx.NamedArgs{
-		"org_id": orgID,
-		"limit":  limit,
+	return s.listReviews(ctx, orgID, filters, limit)
+}
+
+func (s *CodeReviewStore) ListReviewsPage(ctx context.Context, orgID uuid.UUID, filters CodeReviewListFilters) (CodeReviewPage, error) {
+	limit := filters.Limit
+	if limit <= 0 || limit > 100 {
+		limit = 50
 	}
-	query := codeReviewListItemSelect + `
-			WHERE m.org_id = @org_id`
-	if filters.RepositoryID != nil {
-		query += `
-			  AND m.repository_id = @repository_id`
-		args["repository_id"] = *filters.RepositoryID
-	}
-	if filters.Decision != nil {
-		if err := filters.Decision.Validate(); err != nil {
-			return nil, err
-		}
-		query += `
-			  AND m.decision = @decision`
-		args["decision"] = *filters.Decision
-	}
-	if filters.Outcome != nil {
-		if err := filters.Outcome.Validate(); err != nil {
-			return nil, err
-		}
-		switch *filters.Outcome {
-		case models.CodeReviewListOutcomeAutomaticallyApproved:
-			query += `
-			  AND m.status = 'completed'
-			  AND m.decision = 'approved'
-			  AND m.github_review_id IS NOT NULL`
-		case models.CodeReviewListOutcomeCompletedNotApproved:
-			query += `
-			  AND m.status = 'completed'
-			  AND (m.decision IS DISTINCT FROM 'approved'
-			       OR m.github_review_id IS NULL)`
-		}
-	}
-	if filters.Status != nil {
-		if err := filters.Status.Validate(); err != nil {
-			return nil, err
-		}
-		query += `
-			  AND m.status = @status`
-		args["status"] = *filters.Status
-	}
-	if filters.Acceptable != nil {
-		query += `
-			  AND m.acceptable = @acceptable`
-		args["acceptable"] = *filters.Acceptable
-	}
-	if filters.CreatedAfter != nil {
-		query += `
-			  AND m.created_at >= @created_after`
-		args["created_after"] = *filters.CreatedAfter
-	}
-	if filters.CreatedBefore != nil {
-		query += `
-			  AND m.created_at <= @created_before`
-		args["created_before"] = *filters.CreatedBefore
-	}
-	if filters.Cursor != nil {
-		query += `
-			  AND (m.created_at, m.id) < (
-			    SELECT created_at, id FROM code_review_session_metadata
-			    WHERE id = @cursor AND org_id = @org_id
-			  )`
-		args["cursor"] = *filters.Cursor
-	}
-	if search := strings.TrimSpace(filters.Search); search != "" {
-		query += `
-			  AND (pr.title ILIKE @search OR pr.github_repo ILIKE @search OR pr.github_pr_number::text = @search_exact OR COALESCE(s.title, '') ILIKE @search)`
-		args["search"] = "%" + search + "%"
-		args["search_exact"] = strings.TrimPrefix(search, "#")
-	}
-	query += `
-			ORDER BY m.created_at DESC, m.id DESC
-			LIMIT @limit`
-	rows, err := s.db.Query(ctx, query, args)
+	where, args, err := codeReviewListWhere(orgID, filters, false)
 	if err != nil {
-		return nil, fmt.Errorf("query code review list: %w", err)
+		return CodeReviewPage{}, err
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.CodeReviewListItem])
+	var total int64
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*)`+codeReviewListCountFrom+where, args).Scan(&total); err != nil {
+		return CodeReviewPage{}, fmt.Errorf("count code reviews: %w", err)
+	}
+	items, err := s.listReviews(ctx, orgID, filters, limit+1)
+	if err != nil {
+		return CodeReviewPage{}, err
+	}
+	page := CodeReviewPage{Items: items, TotalCount: total}
+	if len(items) > limit {
+		page.Items = items[:limit]
+		page.NextCursor = page.Items[len(page.Items)-1].ID.String()
+		page.NextCursorCreatedAt = page.Items[len(page.Items)-1].CreatedAt
+	}
+	return page, nil
 }
 
 func (s *CodeReviewStore) GetReviewStats(ctx context.Context, orgID uuid.UUID, filters CodeReviewStatsFilters) (models.CodeReviewStats, error) {

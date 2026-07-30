@@ -111,3 +111,14 @@ func TestRequiredAPIScope_SessionTitleRegeneration(t *testing.T) {
 
 	require.Equal(t, "sessions:write", requiredAPIScope(http.MethodPost, "/api/v1/sessions/00000000-0000-0000-0000-000000000001/title/regenerate"), "explicit title regeneration should require session write scope")
 }
+
+func TestRequiredAPIScope_AutomationSchedulePreview(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(
+		t,
+		"automations:read",
+		requiredAPIScope(http.MethodPost, "/api/v1/automations/schedule-preview"),
+		"schedule preview should require read-only automation scope",
+	)
+}

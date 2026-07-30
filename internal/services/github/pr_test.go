@@ -284,6 +284,68 @@ func (p *prTestSandboxProvider) ExecStream(context.Context, *agent.Sandbox, stri
 	return 0, nil
 }
 
+func TestGetCodeReviewPullRequestSnapshot(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/repos/assembledhq/assembled/pulls/54903", r.URL.Path, "snapshot loader should request the tagged pull request")
+		require.Equal(t, "token installation-token", r.Header.Get("Authorization"), "snapshot loader should use the repository installation token")
+		_, err := fmt.Fprint(w, `{
+			"number": 54903,
+			"html_url": "https://github.com/assembledhq/assembled/pull/54903",
+			"title": "Fix Slack notification fallback",
+			"body": "Restore rows when auth is unavailable.",
+			"state": "open",
+			"user": {"login": "assembled-author"},
+			"head": {"ref": "fix/slack-fallback", "sha": "head-sha", "repo": {"fork": true}},
+			"base": {"ref": "main", "sha": "base-sha"}
+		}`)
+		require.NoError(t, err, "GitHub test response should be written")
+	}))
+	t.Cleanup(server.Close)
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+	orgID := uuid.New()
+	repositoryID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+	mock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+		WithArgs(pgx.NamedArgs{"id": repositoryID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
+			repositoryID, orgID, integrationID, int64(1001), "assembledhq/assembled", "main",
+			false, nil, nil, "https://github.com/assembledhq/assembled.git", int64(456), "active",
+			nil, nil, []byte(`{}`), now, now,
+		))
+	svc := &PRService{
+		tokenProvider: &Service{cache: map[int64]*cachedToken{
+			456: {Token: "installation-token", ExpiresAt: time.Now().Add(time.Hour)},
+		}},
+		repos:      db.NewRepositoryStore(mock),
+		logger:     zerolog.Nop(),
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+	}
+
+	snapshot, err := svc.GetCodeReviewPullRequestSnapshot(context.Background(), orgID, repositoryID, 54903)
+
+	require.NoError(t, err, "snapshot loader should return the current pull request")
+	require.Equal(t, CodeReviewPullRequestSnapshot{
+		Number:      54903,
+		HTMLURL:     "https://github.com/assembledhq/assembled/pull/54903",
+		Title:       "Fix Slack notification fallback",
+		Body:        "Restore rows when auth is unavailable.",
+		State:       "open",
+		AuthorLogin: "assembled-author",
+		HeadSHA:     "head-sha",
+		HeadRef:     "fix/slack-fallback",
+		BaseSHA:     "base-sha",
+		FromFork:    true,
+	}, snapshot, "snapshot loader should preserve review-relevant GitHub fields")
+	require.NoError(t, mock.ExpectationsWereMet(), "snapshot loader should use an org-scoped repository lookup")
+}
+
 func TestFormatPRTitle(t *testing.T) {
 	t.Parallel()
 

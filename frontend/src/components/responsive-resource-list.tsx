@@ -32,6 +32,7 @@ type ResponsiveResourceListProps<TItem> = {
   emptyState: ReactNode;
   ariaLabel: string;
   mobileAriaLabel?: string;
+  footer?: ReactNode;
   className?: string;
   tableClassName?: string;
   getDesktopRowProps?: (item: TItem) => ResponsiveResourceListRowProps;
@@ -45,6 +46,7 @@ export function ResponsiveResourceList<TItem>({
   emptyState,
   ariaLabel,
   mobileAriaLabel,
+  footer,
   className,
   tableClassName,
   getDesktopRowProps,
@@ -101,6 +103,7 @@ export function ResponsiveResourceList<TItem>({
             </div>
           ))}
         </div>
+        {footer}
       </CardContent>
     </Card>
   );

@@ -170,12 +170,15 @@ describe("AutomationsPage", () => {
     expect(screen.getAllByLabelText("Automation icon for Weekly release hardening sweep for mobile checkout reliability")[0]).toHaveTextContent("🧪");
     expect(screen.getAllByText("Enabled").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Paused").length).toBeGreaterThan(0);
-    // The schedule label already carries the timezone, so it must not be
-    // duplicated as a standalone line.
+    // The sentence renders a wall clock in the automation's zone using the
+    // reader's locale, so the IANA zone is surfaced alongside it rather than
+    // embedded in the label.
     expect(
-      screen.getAllByText(/Every 2 weeks at .*\(America\/Los_Angeles\)/).length,
+      screen.getAllByText(/^Every 2 weeks at [\d:]+ [AP]M$/).length,
     ).toBeGreaterThan(0);
-    expect(screen.queryByText("America/Los_Angeles")).not.toBeInTheDocument();
+    expect(
+      screen.getAllByText("America/Los_Angeles").length,
+    ).toBeGreaterThan(0);
 
     const menuButtons = screen.getAllByRole("button", {
       name: "More options for Weekly release hardening sweep for mobile checkout reliability",

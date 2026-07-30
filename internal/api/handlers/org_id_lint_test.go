@@ -126,6 +126,7 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"SettingsHandler.GetOpenCodeModels":    "returns the static OpenCode model registry",
 		"AgentCapabilitiesHandler.Catalog":     "returns static capability catalog",
 		"ProjectGenerateHandler.Generate":      "calls LLM only, no org-scoped data",
+		"AutomationHandler.PreviewSchedule":    "pure schedule computation over the request body; makes no store calls",
 		"GitHubStatusHandler.StartConnect":     "OAuth redirect only, no store calls",
 
 		// OAuth start handlers — just redirect to external provider, no org data access.

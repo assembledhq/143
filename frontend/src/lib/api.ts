@@ -275,6 +275,7 @@ export const api = {
       created_after?: string;
       created_before?: string;
       limit?: number;
+      cursor?: string;
     }) => {
       const searchParams = new URLSearchParams();
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
@@ -286,6 +287,7 @@ export const api = {
       if (params?.created_after) searchParams.set('created_after', params.created_after);
       if (params?.created_before) searchParams.set('created_before', params.created_before);
       if (params?.limit) searchParams.set('limit', String(params.limit));
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').CodeReviewListItem>>(`/api/v1/code-reviews${qs ? `?${qs}` : ''}`);
     },
@@ -1251,6 +1253,8 @@ export const api = {
       get<import('./types').SingleResponse<import('./types').Automation>>(`/api/v1/automations/${id}`),
     create: (body: Record<string, unknown>) =>
       post<import('./types').SingleResponse<import('./types').Automation>>('/api/v1/automations', body),
+    previewSchedule: (body: Record<string, unknown>) =>
+      post<import('./types').SingleResponse<import('./types').AutomationSchedulePreview>>('/api/v1/automations/schedule-preview', body),
     update: (id: string, body: Record<string, unknown>) =>
       patch<import('./types').SingleResponse<import('./types').Automation>>(`/api/v1/automations/${id}`, body),
     improveGoalDraft: (body: {

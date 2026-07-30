@@ -237,6 +237,11 @@ export const mockAPITokens: APIToken[] = [
 ];
 
 export const handlers = [
+  http.post('/api/v1/automations/schedule-preview', () => {
+    return HttpResponse.json({
+      data: { next_run_at: '2026-08-03T16:00:00Z' },
+    });
+  }),
   http.get('/api/v1/auth/providers', () => {
     return HttpResponse.json({
       data: {

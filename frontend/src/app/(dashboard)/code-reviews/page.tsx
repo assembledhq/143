@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent, ComponentProps, KeyboardEvent, ReactNode } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { parseAsStringLiteral, useQueryState } from "nuqs";
+import { parseAsString, parseAsStringLiteral, useQueryState } from "nuqs";
 import {
   AlertTriangle,
   ChevronDown,
@@ -100,10 +100,13 @@ const AUTOMATICALLY_APPROVED = "automatically_approved" satisfies CodeReviewList
 const COMPLETED_NOT_APPROVED = "completed_not_approved" satisfies CodeReviewListOutcome;
 const OUTCOME_FILTER_VALUES = [ALL_OUTCOMES, AUTOMATICALLY_APPROVED, COMPLETED_NOT_APPROVED, "needs_human_review", "comment_only", "blocked"] as const;
 type OutcomeFilter = (typeof OUTCOME_FILTER_VALUES)[number];
+const RISK_FILTER_VALUES = [ALL_RISKS, "acceptable", "needs_review"] as const;
+const STATUS_FILTER_VALUES = [ALL_STATUSES, "queued", "running", "completed", "failed", "stale", "cancelled"] as const;
 const NO_TEMPLATE = "none";
 // Coalesce a burst of SSE lifecycle events into a single list refetch.
 const CODE_REVIEW_INVALIDATE_COALESCE_MS = 300;
-const CODE_REVIEW_SEARCH_DEBOUNCE_MS = 250;
+const CODE_REVIEW_PAGE_SIZE = 50;
+const CODE_REVIEW_SEARCH_DEBOUNCE_MS = 300;
 const CODE_REVIEW_TIME_WINDOW_REFRESH_MS = 60_000;
 const MAX_REVIEWER_MODELS = 3;
 const CODE_REVIEW_REASONING_OPTIONS = [
@@ -529,7 +532,7 @@ export default function CodeReviewsPage() {
   const { user } = useAuth();
   const canManagePolicy = user?.role === "admin";
   const canRetryReviews = user?.role === "admin" || user?.role === "member";
-  const [repositoryFilter, setRepositoryFilter] = useState(ALL_REPOSITORIES);
+  const [repositoryFilter, setRepositoryFilter] = useQueryState("repository", parseAsString.withDefault(ALL_REPOSITORIES));
   const [outcomeFilter, setOutcomeParam] = useQueryState(
     "outcome",
     parseAsStringLiteral(OUTCOME_FILTER_VALUES).withDefault(ALL_OUTCOMES),
@@ -539,10 +542,19 @@ export default function CodeReviewsPage() {
     parseAsStringLiteral(TIME_RANGE_FILTER_VALUES).withDefault(DEFAULT_TIME_RANGE),
   );
   const timeRangeAnchorMsRef = useRef(Date.now());
-  const [riskFilter, setRiskFilter] = useState(ALL_RISKS);
-  const [statusFilter, setStatusFilter] = useState(ALL_STATUSES);
-  const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [riskFilter, setRiskFilter] = useQueryState("risk", parseAsStringLiteral(RISK_FILTER_VALUES).withDefault(ALL_RISKS));
+  const [statusFilter, setStatusFilter] = useQueryState("status", parseAsStringLiteral(STATUS_FILTER_VALUES).withDefault(ALL_STATUSES));
+  const [searchParam, setSearchParam] = useQueryState("search", parseAsString.withDefault(""));
+  const [search, setSearch] = useState(searchParam);
+  useEffect(() => {
+    setSearch(searchParam);
+  }, [searchParam]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void setSearchParam(search.trim() || null);
+    }, CODE_REVIEW_SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [search, setSearchParam]);
   const [selectedTemplateKey, setSelectedTemplateKey] = useState(NO_TEMPLATE);
   const [pendingTemplateApply, setPendingTemplateApply] = useState<{ key: string; title: string } | null>(null);
   const [selectedEvidenceSessionId, setSelectedEvidenceSessionId] = useState<string | null>(null);
@@ -566,13 +578,6 @@ export default function CodeReviewsPage() {
     },
     [setTimeRangeParam],
   );
-  useEffect(() => {
-    const timer = window.setTimeout(
-      () => setDebouncedSearch(search.trim()),
-      CODE_REVIEW_SEARCH_DEBOUNCE_MS,
-    );
-    return () => window.clearTimeout(timer);
-  }, [search]);
   const registerPromptDraft = useCallback((field: "review_instructions" | "automated_approval_policy", handle: PromptDraftHandle) => {
     promptDraftsRef.current[field] = handle;
   }, []);
@@ -587,9 +592,9 @@ export default function CodeReviewsPage() {
       outcome: outcomeFilter === AUTOMATICALLY_APPROVED || outcomeFilter === COMPLETED_NOT_APPROVED ? (outcomeFilter as CodeReviewListOutcome) : undefined,
       risk: riskFilter === ALL_RISKS ? undefined : (riskFilter as "acceptable" | "needs_review"),
       status: statusFilter === ALL_STATUSES ? undefined : (statusFilter as CodeReviewSessionStatus),
-      search: debouncedSearch || undefined,
+      search: searchParam.trim() || undefined,
     }),
-    [debouncedSearch, outcomeFilter, reviewRepositoryId, riskFilter, statusFilter],
+    [outcomeFilter, reviewRepositoryId, riskFilter, searchParam, statusFilter],
   );
   const reviewScopeQueryKey = useMemo(
     () => ({
@@ -611,26 +616,40 @@ export default function CodeReviewsPage() {
   const reviewFiltersQueryKey = useMemo(
     () => ({
       ...reviewScopeQueryKey,
-      limit: 100,
+      limit: CODE_REVIEW_PAGE_SIZE,
     }),
     [reviewScopeQueryKey],
   );
-  const hasActiveReviewFilters =
-    repositoryFilter !== ALL_REPOSITORIES ||
-    outcomeFilter !== ALL_OUTCOMES ||
-    riskFilter !== ALL_RISKS ||
-    statusFilter !== ALL_STATUSES ||
-    search.trim() !== "" ||
-    timeRangeFilter !== "all";
+  const hasActiveReviewFilters = Boolean(
+    reviewRepositoryId
+    || outcomeFilter !== ALL_OUTCOMES
+    || riskFilter !== ALL_RISKS
+    || statusFilter !== ALL_STATUSES
+    || searchParam.trim()
+    || timeRangeFilter !== "all"
+  );
   const clearReviewFilters = useCallback(() => {
-    setRepositoryFilter(ALL_REPOSITORIES);
-    setOutcomeFilter(ALL_OUTCOMES);
-    setRiskFilter(ALL_RISKS);
-    setStatusFilter(ALL_STATUSES);
+    void setRepositoryFilter(null);
+    void setOutcomeParam(null);
+    void setRiskFilter(null);
+    void setStatusFilter(null);
     setSearch("");
-    setDebouncedSearch("");
+    void setSearchParam(null);
     setTimeRangeFilter("all");
-  }, [setOutcomeFilter, setTimeRangeFilter]);
+  }, [setOutcomeParam, setRepositoryFilter, setRiskFilter, setSearchParam, setStatusFilter, setTimeRangeFilter]);
+  const reviewScopeKey = JSON.stringify(reviewFiltersQueryKey);
+  const [extraReviewPages, setExtraReviewPages] = useState<CodeReviewListItem[][]>([]);
+  const [loadMoreCursor, setLoadMoreCursor] = useState<string | undefined>();
+  const [newReviewsAvailable, setNewReviewsAvailable] = useState(false);
+  const isViewingReviewHistory = extraReviewPages.length > 0;
+  const [previousReviewScopeKey, setPreviousReviewScopeKey] = useState(reviewScopeKey);
+  if (previousReviewScopeKey !== reviewScopeKey) {
+    setPreviousReviewScopeKey(reviewScopeKey);
+    setExtraReviewPages([]);
+    setLoadMoreCursor(undefined);
+    setNewReviewsAvailable(false);
+    setSelectedEvidenceSessionId(null);
+  }
   const repositoriesQuery = useQuery({
     queryKey: queryKeys.repositories.all,
     queryFn: () => api.repositories.list(),
@@ -645,13 +664,13 @@ export default function CodeReviewsPage() {
     });
   }, [queryClient]);
   useEffect(() => {
-    if (timeRangeFilter === "all") return;
+    if (timeRangeFilter === "all" || isViewingReviewHistory) return;
     const timer = window.setInterval(
       refreshRollingReviewWindow,
       CODE_REVIEW_TIME_WINDOW_REFRESH_MS,
     );
     return () => window.clearInterval(timer);
-  }, [refreshRollingReviewWindow, timeRangeFilter]);
+  }, [isViewingReviewHistory, refreshRollingReviewWindow, timeRangeFilter]);
   // The reviews list refreshes live via the org-scoped SSE stream below; the
   // polling backstop only kicks in (faster) while the stream is unhealthy so a
   // Redis hiccup still surfaces new reviews. Replaces the old manual Refresh
@@ -670,12 +689,16 @@ export default function CodeReviewsPage() {
   // coalesce bursts into one refetch per window rather than one per event.
   const invalidateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onCodeReviewEvent = useCallback(() => {
+    if (isViewingReviewHistory) {
+      setNewReviewsAvailable(true);
+      return;
+    }
     if (invalidateTimerRef.current) return;
     invalidateTimerRef.current = setTimeout(() => {
       invalidateTimerRef.current = null;
       refreshRollingReviewWindow();
     }, pollMs(CODE_REVIEW_INVALIDATE_COALESCE_MS));
-  }, [refreshRollingReviewWindow]);
+  }, [isViewingReviewHistory, refreshRollingReviewWindow]);
   useEffect(
     () => () => {
       if (invalidateTimerRef.current) clearTimeout(invalidateTimerRef.current);
@@ -691,14 +714,18 @@ export default function CodeReviewsPage() {
     queryKey: queryKeys.codeReviews.list(reviewFiltersQueryKey),
     queryFn: () => api.codeReviews.list({
       ...currentReviewScopeFilters(),
-      limit: 100,
+      limit: CODE_REVIEW_PAGE_SIZE,
     }),
-    refetchInterval: codeReviewStreamHealthy ? pollMs(30_000) : pollMs(5_000),
+    // A loaded history window must remain a coherent cursor snapshot. Disabling
+    // the observer blocks reconnects and unrelated broad invalidations from
+    // replacing page one while the older pages remain appended.
+    enabled: !isViewingReviewHistory,
+    refetchInterval: isViewingReviewHistory ? false : (codeReviewStreamHealthy ? pollMs(30_000) : pollMs(5_000)),
   });
   const statsQuery = useQuery({
     queryKey: queryKeys.codeReviews.stat(reviewScopeQueryKey),
     queryFn: () => api.codeReviews.stats(currentReviewScopeFilters()),
-    refetchInterval: codeReviewStreamHealthy ? pollMs(30_000) : pollMs(5_000),
+    refetchInterval: isViewingReviewHistory ? false : (codeReviewStreamHealthy ? pollMs(30_000) : pollMs(5_000)),
   });
   const policyQuery = useQuery({
     queryKey: queryKeys.codeReviews.policy,
@@ -825,13 +852,19 @@ export default function CodeReviewsPage() {
     },
     onSuccess: (_result, sessionId) => {
       setSelectedEvidenceSessionId((current) => (current === sessionId ? null : current));
-      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.lists() });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.stats() });
+      if (isViewingReviewHistory) setNewReviewsAvailable(true);
+      else {
+        void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.lists() });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.stats() });
+      }
       toast.success("Code review retry started");
     },
     onError: (error) => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.lists() });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.stats() });
+      if (isViewingReviewHistory) setNewReviewsAvailable(true);
+      else {
+        void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.lists() });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.stats() });
+      }
       toast.error("Code review could not be retried", {
         description: apiErrorMessage(error) ?? "Try again after checking the review failure details.",
       });
@@ -844,7 +877,40 @@ export default function CodeReviewsPage() {
       });
     },
   });
-  const reviews = useMemo(() => reviewsQuery.data?.data ?? [], [reviewsQuery.data?.data]);
+  const firstReviewPage = useMemo(() => reviewsQuery.data?.data ?? [], [reviewsQuery.data?.data]);
+  const reviews = useMemo(() => {
+    const byID = new Map<string, CodeReviewListItem>();
+    for (const review of [firstReviewPage, ...extraReviewPages].flat()) byID.set(review.id, review);
+    return [...byID.values()];
+  }, [extraReviewPages, firstReviewPage]);
+  const firstReviewCursor = reviewsQuery.data?.meta?.next_cursor || undefined;
+  const nextReviewCursor = isViewingReviewHistory ? loadMoreCursor : firstReviewCursor;
+  const totalReviewCount = reviewsQuery.data?.meta?.total_count;
+  const loadMoreReviews = useMutation({
+    mutationFn: (request: {
+      filters: ReturnType<typeof currentReviewScopeFilters> & { limit: number };
+      cursor: string;
+      scopeKey: string;
+    }) => api.codeReviews.list({ ...request.filters, cursor: request.cursor }),
+    onSuccess: (response, request) => {
+      if (request.scopeKey !== reviewScopeKey) return;
+      setExtraReviewPages((pages) => [...pages, response.data ?? []]);
+      setLoadMoreCursor(response.meta?.next_cursor || undefined);
+    },
+  });
+  useEffect(() => {
+    loadMoreReviews.reset();
+  // reset is stable for the lifetime of the mutation observer.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reviewScopeKey]);
+  const refreshNewestReviews = useCallback(() => {
+    timeRangeAnchorMsRef.current = Date.now();
+    setExtraReviewPages([]);
+    setLoadMoreCursor(undefined);
+    setNewReviewsAvailable(false);
+    void reviewsQuery.refetch();
+    void statsQuery.refetch();
+  }, [reviewsQuery, statsQuery]);
   const [countdownNowMs, setCountdownNowMs] = useState(() => Date.now());
   const hasScheduledReviewRetry = reviews.some((item) => Boolean(item.retry_at));
   useEffect(() => {
@@ -1049,7 +1115,7 @@ export default function CodeReviewsPage() {
               id="code-review-filters"
               className={`${mobileFiltersOpen ? "grid" : "hidden"} gap-3 rounded-xl border border-border bg-card p-3 shadow-sm md:grid md:grid-cols-2 md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none lg:grid-cols-3 xl:grid-cols-[minmax(12rem,18rem)_repeat(3,minmax(9rem,11rem))_1fr]`}
             >
-              <FilterSelect label="Repository" value={repositoryFilter} onValueChange={setRepositoryFilter}>
+              <FilterSelect label="Repository" value={repositoryFilter} onValueChange={(value) => void setRepositoryFilter(value === ALL_REPOSITORIES ? null : value)}>
                 <SelectItem value={ALL_REPOSITORIES}>All repositories</SelectItem>
                 {repositories.map((repo) => (
                   <SelectItem key={repo.id} value={repo.id}>
@@ -1065,12 +1131,12 @@ export default function CodeReviewsPage() {
                 <SelectItem value="comment_only">Comment-only decision</SelectItem>
                 <SelectItem value="blocked">Blocked</SelectItem>
               </FilterSelect>
-              <FilterSelect label="Risk" value={riskFilter} onValueChange={setRiskFilter}>
+              <FilterSelect label="Risk" value={riskFilter} onValueChange={(value) => void setRiskFilter(value === ALL_RISKS ? null : value as (typeof RISK_FILTER_VALUES)[number])}>
                 <SelectItem value={ALL_RISKS}>All risk</SelectItem>
                 <SelectItem value="acceptable">Acceptable</SelectItem>
                 <SelectItem value="needs_review">Needs review</SelectItem>
               </FilterSelect>
-              <FilterSelect label="Status" value={statusFilter} onValueChange={setStatusFilter}>
+              <FilterSelect label="Status" value={statusFilter} onValueChange={(value) => void setStatusFilter(value === ALL_STATUSES ? null : value as (typeof STATUS_FILTER_VALUES)[number])}>
                 <SelectItem value={ALL_STATUSES}>All statuses</SelectItem>
                 <SelectItem value="queued">Queued</SelectItem>
                 <SelectItem value="running">Running</SelectItem>
@@ -1084,20 +1150,43 @@ export default function CodeReviewsPage() {
                 <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="PR, repo, or title" aria-label="Search code reviews" />
               </div>
             </div>
-            <SectionGroup title="Review activity" description="Pull requests reviewed by the team policy and their current outcome.">
-            {reviews.length === 0 ? (
-              <EmptyState
-                icon={ClipboardCheck}
-                title={hasActiveReviewFilters ? "No reviews match this view" : "No code review sessions"}
-                description={
-                  hasActiveReviewFilters
-                    ? "Try widening the time window or clearing filters to see more review activity."
-                    : "Reviews will appear here after the GitHub reviewer bot is requested on a pull request."
-                }
-                action={hasActiveReviewFilters ? { label: "Clear filters", onClick: clearReviewFilters } : undefined}
-              />
-            ) : (
-              <>
+            <SectionGroup
+              title={
+                <span className="flex items-baseline gap-2">
+                  Review activity
+                  {totalReviewCount !== undefined ? (
+                    <span className="text-sm font-normal tabular-nums text-muted-foreground">
+                      {totalReviewCount} {hasActiveReviewFilters ? "matching " : ""}
+                      {totalReviewCount === 1 ? "review" : "reviews"}
+                    </span>
+                  ) : null}
+                </span>
+              }
+              description="Pull requests reviewed by the team policy and their current outcome."
+            >
+              {newReviewsAvailable ? (
+                <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm">
+                  <span>New reviews are available.</span>
+                  <Button variant="outline" size="sm" onClick={refreshNewestReviews}>Refresh</Button>
+                </div>
+              ) : null}
+              {reviewsQuery.isLoading ? (
+                <div className="py-12 text-center text-sm text-muted-foreground">Loading code reviews…</div>
+              ) : reviewsQuery.isError ? (
+                <ErrorNotice
+                  title="Code reviews could not be loaded"
+                  description="Try again to load review activity."
+                  action={{ label: "Retry", onClick: () => void reviewsQuery.refetch() }}
+                />
+              ) : reviews.length === 0 ? (
+                <EmptyState
+                  icon={ClipboardCheck}
+                  title={hasActiveReviewFilters ? "No reviews match these filters" : "No code review sessions"}
+                  description={hasActiveReviewFilters ? "Adjust or clear the filters to see more review activity." : "Reviews will appear here after the GitHub reviewer bot is requested on a pull request."}
+                  action={hasActiveReviewFilters ? { label: "Clear filters", onClick: clearReviewFilters } : undefined}
+                />
+              ) : (
+                <>
                 <ResponsiveResourceList
                   ariaLabel="Code reviews"
                   mobileAriaLabel="Code review activity"
@@ -1105,6 +1194,37 @@ export default function CodeReviewsPage() {
                   getItemKey={(review) => review.id}
                   columns={reviewColumns}
                   emptyState="No code review sessions."
+                  footer={
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/50 bg-muted/20 px-4 py-2.5">
+                      <span className="text-xs tabular-nums text-muted-foreground" aria-live="polite">
+                        {totalReviewCount !== undefined
+                          ? `Showing ${reviews.length} of ${totalReviewCount}`
+                          : `${reviews.length} review${reviews.length === 1 ? "" : "s"}`}
+                      </span>
+                      <div className="flex items-center gap-3">
+                        {loadMoreReviews.isError ? (
+                          <span className="text-xs text-destructive">Couldn&apos;t load more reviews.</span>
+                        ) : null}
+                        {nextReviewCursor ? (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => loadMoreReviews.mutate({
+                              filters: {
+                                ...currentReviewScopeFilters(),
+                                limit: CODE_REVIEW_PAGE_SIZE,
+                              },
+                              cursor: nextReviewCursor,
+                              scopeKey: reviewScopeKey,
+                            })}
+                            disabled={loadMoreReviews.isPending}
+                          >
+                            {loadMoreReviews.isPending ? "Loading…" : "Show 50 more"}
+                          </Button>
+                        ) : null}
+                      </div>
+                    </div>
+                  }
                   renderMobileItem={(review) => (
                   <ResourceRow
                     title={
@@ -1176,7 +1296,7 @@ export default function CodeReviewsPage() {
                     if (!open) setSelectedEvidenceSessionId(null);
                   }}
                 />
-              </>
+                </>
               )}
             </SectionGroup>
           </TabsContent>

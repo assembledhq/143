@@ -36,6 +36,7 @@ type ErrorDetail struct {
 // PaginationMeta contains cursor-based pagination info.
 type PaginationMeta struct {
 	NextCursor          string `json:"next_cursor,omitempty"`
+	TotalCount          *int64 `json:"total_count,omitempty"`
 	DefaultRepositoryID string `json:"default_repository_id,omitempty"`
 	Counts              any    `json:"counts,omitempty"`
 	Pool                any    `json:"pool,omitempty"`
