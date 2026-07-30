@@ -1130,28 +1130,18 @@ export default function CodeReviewsPage() {
       description="Bot-requested PR reviews, acceptable-risk policy, and review outcomes."
     >
       <Tabs defaultValue="reviews" className="space-y-4">
-          <TabsList>
-            <TabsTrigger value="reviews">
-              <ClipboardCheck className="h-4 w-4" />
-              Reviews
-            </TabsTrigger>
-            <TabsTrigger value="config">
-              <Settings2 className="h-4 w-4" />
-              Policy
-            </TabsTrigger>
-          </TabsList>
+        <TabsList>
+          <TabsTrigger value="reviews">
+            <ClipboardCheck className="h-4 w-4" />
+            Reviews
+          </TabsTrigger>
+          <TabsTrigger value="config">
+            <Settings2 className="h-4 w-4" />
+            Policy
+          </TabsTrigger>
+        </TabsList>
 
-          <TabsContent value="reviews" className="space-y-3">
-            <div className="flex justify-end">
-              <div className="w-full sm:w-44">
-                <FilterSelect label="Time window" value={timeRangeFilter} onValueChange={setTimeRangeFilter}>
-                  <SelectItem value="7d">Last 7 days</SelectItem>
-                  <SelectItem value="30d">Last 30 days</SelectItem>
-                  <SelectItem value="90d">Last 90 days</SelectItem>
-                  <SelectItem value="all">All time</SelectItem>
-                </FilterSelect>
-              </div>
-            </div>
+        <TabsContent value="reviews" className="space-y-3">
             <CodeReviewStatsCards
               stats={statsQuery.data?.data}
               isLoading={statsQuery.isLoading}
@@ -1175,7 +1165,7 @@ export default function CodeReviewsPage() {
             </Button>
             <div
               id="code-review-filters"
-              className={`${mobileFiltersOpen ? "grid" : "hidden"} gap-3 rounded-xl border border-border bg-card p-3 shadow-sm md:grid md:grid-cols-2 md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none lg:grid-cols-3 xl:grid-cols-[minmax(12rem,18rem)_repeat(3,minmax(9rem,11rem))_1fr]`}
+              className={`${mobileFiltersOpen ? "grid" : "hidden"} gap-3 rounded-xl border border-border bg-card p-3 shadow-sm md:grid md:grid-cols-2 md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none lg:grid-cols-3 xl:grid-cols-[minmax(12rem,18rem)_repeat(3,minmax(9rem,11rem))_minmax(12rem,1fr)_minmax(9rem,11rem)]`}
             >
               <FilterSelect label="Repository" value={repositoryFilter} onValueChange={(value) => void setRepositoryFilter(value === ALL_REPOSITORIES ? null : value)}>
                 <SelectItem value={ALL_REPOSITORIES}>All repositories</SelectItem>
@@ -1211,6 +1201,16 @@ export default function CodeReviewsPage() {
                 <Label className="text-xs text-muted-foreground">Search</Label>
                 <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="PR, repo, or title" aria-label="Search code reviews" />
               </div>
+              <FilterSelect
+                label="Time window"
+                value={timeRangeFilter}
+                onValueChange={setTimeRangeFilter}
+              >
+                <SelectItem value="7d">Last 7 days</SelectItem>
+                <SelectItem value="30d">Last 30 days</SelectItem>
+                <SelectItem value="90d">Last 90 days</SelectItem>
+                <SelectItem value="all">All time</SelectItem>
+              </FilterSelect>
             </div>
             <SectionGroup
               title="Review activity"
