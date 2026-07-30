@@ -480,7 +480,7 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 // must match the mentioned organization so an identically named team in a
 // different organization cannot trigger a review.
 func (s *Service) HandleReviewMentioned(ctx context.Context, input ReviewMentionedInput) (ReviewRequestedResult, error) {
-	team, source, matched, err := s.matchReviewMention(
+	team, _, matched, err := s.matchReviewMention(
 		ctx,
 		input.OrgID,
 		input.RepositoryID,
@@ -502,14 +502,13 @@ func (s *Service) HandleReviewMentioned(ctx context.Context, input ReviewMention
 		Body:        input.CommentBody,
 		URL:         input.CommentURL,
 	})
-	validatedSource, stillMatched, err := s.validateAndMatchReviewRequest(ctx, requested)
+	source, stillMatched, err := s.validateAndMatchReviewRequest(ctx, requested)
 	if err != nil {
 		return ReviewRequestedResult{}, err
 	}
 	if !stillMatched {
 		return ReviewRequestedResult{IgnoredReason: "reviewer_not_mentioned"}, nil
 	}
-	source = validatedSource
 	requestKey := strings.TrimSpace(requested.DeliveryID)
 	if requestKey == "" && input.CommentID > 0 {
 		requestKey = fmt.Sprintf("issue_comment:%d", input.CommentID)
