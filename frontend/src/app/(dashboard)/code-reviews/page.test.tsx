@@ -397,7 +397,11 @@ describe("CodeReviewsPage", () => {
     expect(within(stats).getByText("16% of completed reviews")).toBeInTheDocument();
     expect(within(stats).getByText("Median turnaround")).toBeInTheDocument();
     expect(within(stats).getByText("8m")).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Time window" })).toHaveTextContent("Last 30 days");
+    const timeWindow = screen.getByRole("combobox", { name: "Time window" });
+    expect(timeWindow).toHaveTextContent("Last 30 days");
+    const filters = timeWindow.closest("#code-review-filters");
+    expect(filters).toContainElement(screen.getByRole("combobox", { name: "Repository" }));
+    expect(filters?.lastElementChild).toContainElement(timeWindow);
     expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
     expect(screen.getAllByText("Acceptable")).toHaveLength(2);
     expect(screen.getAllByText("Approved")).toHaveLength(2);
