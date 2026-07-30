@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent, ComponentProps, KeyboardEvent, ReactNode } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { parseAsString, parseAsStringLiteral, useQueryState } from "nuqs";
+import { createParser, parseAsString, parseAsStringLiteral, useQueryState } from "nuqs";
 import {
   AlertTriangle,
   ChevronDown,
@@ -83,6 +83,7 @@ import type {
   CodeReviewPromptExampleOption,
   CodeReviewAutomatedApprovalExampleOption,
   CodeReviewResolvedPolicy,
+  CodeReviewSessionStatus,
   CodeReviewStats,
   ListResponse,
   OrgSettings,
@@ -100,9 +101,18 @@ const COMPLETED_NOT_APPROVED = "completed_not_approved" satisfies CodeReviewList
 const OUTCOME_FILTER_VALUES = [ALL_OUTCOMES, AUTOMATICALLY_APPROVED, COMPLETED_NOT_APPROVED, "needs_human_review", "comment_only", "blocked"] as const;
 type OutcomeFilter = (typeof OUTCOME_FILTER_VALUES)[number];
 const RISK_FILTER_VALUES = [ALL_RISKS, "acceptable", "needs_review"] as const;
-const STATUS_FILTER_VALUES = ["current", "completed", "in_progress", "failed", "superseded", "all"] as const satisfies readonly CodeReviewActivityStatus[];
+const STATUS_FILTER_VALUES = ["current", "completed", "in_progress", "failed", "cancelled", "superseded", "all"] as const;
 type StatusFilter = (typeof STATUS_FILTER_VALUES)[number];
 const DEFAULT_STATUS_FILTER = "current" satisfies StatusFilter;
+const STATUS_FILTER_PARSER = createParser<StatusFilter>({
+  parse: (value) => {
+    if ((STATUS_FILTER_VALUES as readonly string[]).includes(value)) return value as StatusFilter;
+    if (value === "queued" || value === "running") return "in_progress";
+    if (value === "stale") return "superseded";
+    return null;
+  },
+  serialize: (value) => value,
+}).withDefault(DEFAULT_STATUS_FILTER);
 const NO_TEMPLATE = "none";
 // Coalesce a burst of SSE lifecycle events into a single list refetch.
 const CODE_REVIEW_INVALIDATE_COALESCE_MS = 300;
@@ -558,7 +568,7 @@ export default function CodeReviewsPage() {
   const [riskFilter, setRiskFilter] = useQueryState("risk", parseAsStringLiteral(RISK_FILTER_VALUES).withDefault(ALL_RISKS));
   const [statusFilter, setStatusFilter] = useQueryState(
     "status",
-    parseAsStringLiteral(STATUS_FILTER_VALUES).withDefault(DEFAULT_STATUS_FILTER),
+    STATUS_FILTER_PARSER,
   );
   const [searchParam, setSearchParam] = useQueryState("search", parseAsString.withDefault(""));
   const [search, setSearch] = useState(searchParam);
@@ -612,10 +622,16 @@ export default function CodeReviewsPage() {
     [outcomeFilter, reviewRepositoryId, riskFilter, searchParam],
   );
   const listReviewFilters = useMemo(
-    () => ({
-      ...baseReviewFilters,
-      activity_status: statusFilter as CodeReviewActivityStatus,
-    }),
+    () => statusFilter === "cancelled"
+      ? {
+          ...baseReviewFilters,
+          activity_status: DEFAULT_STATUS_FILTER as CodeReviewActivityStatus,
+          status: "cancelled" as CodeReviewSessionStatus,
+        }
+      : {
+          ...baseReviewFilters,
+          activity_status: statusFilter as CodeReviewActivityStatus,
+        },
     [baseReviewFilters, statusFilter],
   );
   const statsReviewFilters = useMemo(
@@ -1187,6 +1203,7 @@ export default function CodeReviewsPage() {
                 <SelectItem value="completed">Completed</SelectItem>
                 <SelectItem value="in_progress">In progress</SelectItem>
                 <SelectItem value="failed">Failed</SelectItem>
+                <SelectItem value="cancelled">Cancelled</SelectItem>
                 <SelectItem value="superseded">Superseded history</SelectItem>
                 <SelectItem value="all">All attempts</SelectItem>
               </FilterSelect>

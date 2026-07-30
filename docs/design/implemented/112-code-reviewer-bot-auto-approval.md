@@ -470,11 +470,11 @@ superseded audit history, not failed or current review work. Its default
 `activity_status=current` scope excludes rows whose status is `stale` or whose
 `superseded_by_session_id` is set from both activity totals and headline
 metrics. The activity status control can narrow current work to completed,
-in-progress, or failed attempts; **Superseded history** includes stale attempts
-and failed attempts that already have replacements, while **All attempts**
-restores the complete immutable history. Superseded rows use neutral
-presentation and remain linked to their replacement rather than being rewritten
-or deleted.
+in-progress, failed, or cancelled attempts; **Superseded history** includes
+stale attempts and failed attempts that already have replacements, while
+**All attempts** restores the complete immutable history. Superseded rows use
+neutral presentation and remain linked to their replacement rather than being
+rewritten or deleted.
 
 ## Review Orchestration
 

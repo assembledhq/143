@@ -1550,6 +1550,57 @@ describe("CodeReviewsPage", () => {
     });
   });
 
+  it.each([
+    {
+      legacyStatus: "queued",
+      displayedStatus: "In progress",
+      activityStatus: "in_progress",
+      sessionStatus: null,
+    },
+    {
+      legacyStatus: "running",
+      displayedStatus: "In progress",
+      activityStatus: "in_progress",
+      sessionStatus: null,
+    },
+    {
+      legacyStatus: "stale",
+      displayedStatus: "Superseded history",
+      activityStatus: "superseded",
+      sessionStatus: null,
+    },
+    {
+      legacyStatus: "cancelled",
+      displayedStatus: "Cancelled",
+      activityStatus: "current",
+      sessionStatus: "cancelled",
+    },
+  ])(
+    "preserves the legacy $legacyStatus status URL",
+    async ({ legacyStatus, displayedStatus, activityStatus, sessionStatus }) => {
+      const requests: URLSearchParams[] = [];
+      mockCodeReviewBaseHandlers();
+      server.use(
+        http.get("/api/v1/code-reviews", ({ request }) => {
+          requests.push(new URL(request.url).searchParams);
+          return HttpResponse.json({ data: [review], meta: { total_count: 1 } });
+        }),
+      );
+
+      renderWithProviders(<CodeReviewsPage />, {
+        searchParams: { status: legacyStatus },
+      });
+
+      expect(await screen.findByRole("combobox", { name: "Status" })).toHaveTextContent(displayedStatus);
+      await waitFor(() => {
+        expect(requests.some((params) =>
+          params.get("activity_status") === activityStatus
+          && params.get("status") === sessionStatus,
+        )).toBe(true);
+      });
+    },
+  );
+
   it("distinguishes a filtered empty result and clears the active filters", async () => {
     mockCodeReviewBaseHandlers();
     server.use(
