@@ -34,6 +34,7 @@ import { ExternalLink } from "@/components/ui/external-link";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import { Badge } from "@/components/ui/badge";
+import { Card, CardContent } from "@/components/ui/card";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -82,6 +83,7 @@ import type {
   CodeReviewAutomatedApprovalExampleOption,
   CodeReviewResolvedPolicy,
   CodeReviewSessionStatus,
+  CodeReviewStats,
   ListResponse,
   OrgSettings,
   SingleResponse,
@@ -91,6 +93,9 @@ const ALL_REPOSITORIES = "all";
 const ALL_OUTCOMES = "all";
 const ALL_RISKS = "all";
 const ALL_STATUSES = "all";
+const TIME_RANGE_FILTER_VALUES = ["7d", "30d", "90d", "all"] as const;
+type TimeRangeFilter = (typeof TIME_RANGE_FILTER_VALUES)[number];
+const DEFAULT_TIME_RANGE = "30d" satisfies TimeRangeFilter;
 const AUTOMATICALLY_APPROVED = "automatically_approved" satisfies CodeReviewListOutcome;
 const COMPLETED_NOT_APPROVED = "completed_not_approved" satisfies CodeReviewListOutcome;
 const OUTCOME_FILTER_VALUES = [ALL_OUTCOMES, AUTOMATICALLY_APPROVED, COMPLETED_NOT_APPROVED, "needs_human_review", "comment_only", "blocked"] as const;
@@ -98,6 +103,8 @@ type OutcomeFilter = (typeof OUTCOME_FILTER_VALUES)[number];
 const NO_TEMPLATE = "none";
 // Coalesce a burst of SSE lifecycle events into a single list refetch.
 const CODE_REVIEW_INVALIDATE_COALESCE_MS = 300;
+const CODE_REVIEW_SEARCH_DEBOUNCE_MS = 250;
+const CODE_REVIEW_TIME_WINDOW_REFRESH_MS = 60_000;
 const MAX_REVIEWER_MODELS = 3;
 const CODE_REVIEW_REASONING_OPTIONS = [
   { value: "low", label: "Low" },
@@ -164,6 +171,27 @@ function formatDate(value?: string): string {
     hour: "numeric",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+function createdAfterForTimeRange(range: TimeRangeFilter, anchor: Date): string | undefined {
+  if (range === "all") return undefined;
+  const days = Number.parseInt(range, 10);
+  return new Date(anchor.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function formatReviewTurnaround(seconds: number | null): string {
+  if (seconds === null || !Number.isFinite(seconds)) return "—";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes === 0 ? `${hours}h` : `${hours}h ${remainingMinutes}m`;
+}
+
+function percentageContext(value: number, total: number): string {
+  if (total === 0) return "No completed reviews";
+  return `${Math.round((value / total) * 100)}% of completed reviews`;
 }
 
 function trackCodeReviewPolicyEvent(event: CodeReviewPolicyAnalyticsEvent): void {
@@ -421,6 +449,81 @@ function normalizeOrchestratorReasoningEffort(config: CodeReviewPolicyConfig): v
   );
 }
 
+function CodeReviewStatsCards({
+  stats,
+  isLoading,
+  isError,
+  onRetry,
+}: {
+  stats?: CodeReviewStats;
+  isLoading: boolean;
+  isError: boolean;
+  onRetry: () => void;
+}) {
+  const unavailableContext = isError ? "Metrics unavailable" : "Loading selected time window";
+  const cards = stats
+    ? [
+        {
+          label: "Reviews completed",
+          value: stats.reviews_completed.toLocaleString(),
+          context: "In selected time window",
+        },
+        {
+          label: "Automatically approved",
+          value: stats.automatically_approved.toLocaleString(),
+          context: percentageContext(stats.automatically_approved, stats.reviews_completed),
+        },
+        {
+          label: "Needs human review",
+          value: stats.needs_human_review.toLocaleString(),
+          context: percentageContext(stats.needs_human_review, stats.reviews_completed),
+        },
+        {
+          label: "Median turnaround",
+          value: formatReviewTurnaround(stats.median_turnaround_seconds),
+          context: "Queued to completed",
+        },
+      ]
+    : [
+        { label: "Reviews completed", value: "—", context: unavailableContext },
+        { label: "Automatically approved", value: "—", context: unavailableContext },
+        { label: "Needs human review", value: "—", context: unavailableContext },
+        { label: "Median turnaround", value: "—", context: unavailableContext },
+      ];
+
+  return (
+    <div
+      className="space-y-3"
+      role="region"
+      aria-label="Code review statistics"
+      aria-busy={isLoading}
+    >
+      {isError ? (
+        <ErrorNotice
+          title={stats ? "Metrics may be out of date" : "Metrics unavailable"}
+          description={
+            stats
+              ? "Showing the last successful result because the latest refresh failed."
+              : "The selected review metrics could not be loaded."
+          }
+          action={{ label: "Retry", onClick: onRetry }}
+        />
+      ) : null}
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {cards.map((card) => (
+          <Card key={card.label}>
+            <CardContent className="space-y-1.5">
+              <p className="text-xs font-medium text-muted-foreground">{card.label}</p>
+              <p className="text-2xl font-semibold tabular-nums text-foreground">{card.value}</p>
+              <p className="text-xs text-muted-foreground">{card.context}</p>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function CodeReviewsPage() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
@@ -431,9 +534,15 @@ export default function CodeReviewsPage() {
     "outcome",
     parseAsStringLiteral(OUTCOME_FILTER_VALUES).withDefault(ALL_OUTCOMES),
   );
+  const [timeRangeFilter, setTimeRangeParam] = useQueryState(
+    "range",
+    parseAsStringLiteral(TIME_RANGE_FILTER_VALUES).withDefault(DEFAULT_TIME_RANGE),
+  );
+  const timeRangeAnchorMsRef = useRef(Date.now());
   const [riskFilter, setRiskFilter] = useState(ALL_RISKS);
   const [statusFilter, setStatusFilter] = useState(ALL_STATUSES);
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [selectedTemplateKey, setSelectedTemplateKey] = useState(NO_TEMPLATE);
   const [pendingTemplateApply, setPendingTemplateApply] = useState<{ key: string; title: string } | null>(null);
   const [selectedEvidenceSessionId, setSelectedEvidenceSessionId] = useState<string | null>(null);
@@ -450,11 +559,25 @@ export default function CodeReviewsPage() {
     },
     [setOutcomeParam],
   );
+  const setTimeRangeFilter = useCallback(
+    (value: string) => {
+      timeRangeAnchorMsRef.current = Date.now();
+      void setTimeRangeParam(value as TimeRangeFilter);
+    },
+    [setTimeRangeParam],
+  );
+  useEffect(() => {
+    const timer = window.setTimeout(
+      () => setDebouncedSearch(search.trim()),
+      CODE_REVIEW_SEARCH_DEBOUNCE_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [search]);
   const registerPromptDraft = useCallback((field: "review_instructions" | "automated_approval_policy", handle: PromptDraftHandle) => {
     promptDraftsRef.current[field] = handle;
   }, []);
   const reviewRepositoryId = repositoryFilter === ALL_REPOSITORIES ? undefined : repositoryFilter;
-  const reviewFilters = useMemo(
+  const baseReviewScopeFilters = useMemo(
     () => ({
       repository_id: reviewRepositoryId,
       decision:
@@ -464,15 +587,71 @@ export default function CodeReviewsPage() {
       outcome: outcomeFilter === AUTOMATICALLY_APPROVED || outcomeFilter === COMPLETED_NOT_APPROVED ? (outcomeFilter as CodeReviewListOutcome) : undefined,
       risk: riskFilter === ALL_RISKS ? undefined : (riskFilter as "acceptable" | "needs_review"),
       status: statusFilter === ALL_STATUSES ? undefined : (statusFilter as CodeReviewSessionStatus),
-      search: search.trim() || undefined,
+      search: debouncedSearch || undefined,
+    }),
+    [debouncedSearch, outcomeFilter, reviewRepositoryId, riskFilter, statusFilter],
+  );
+  const reviewScopeQueryKey = useMemo(
+    () => ({
+      ...baseReviewScopeFilters,
+      time_range: timeRangeFilter,
+    }),
+    [baseReviewScopeFilters, timeRangeFilter],
+  );
+  const currentReviewScopeFilters = useCallback(
+    () => ({
+      ...baseReviewScopeFilters,
+      created_after: createdAfterForTimeRange(
+        timeRangeFilter,
+        new Date(timeRangeAnchorMsRef.current),
+      ),
+    }),
+    [baseReviewScopeFilters, timeRangeFilter],
+  );
+  const reviewFiltersQueryKey = useMemo(
+    () => ({
+      ...reviewScopeQueryKey,
       limit: 100,
     }),
-    [outcomeFilter, reviewRepositoryId, riskFilter, search, statusFilter],
+    [reviewScopeQueryKey],
   );
+  const hasActiveReviewFilters =
+    repositoryFilter !== ALL_REPOSITORIES ||
+    outcomeFilter !== ALL_OUTCOMES ||
+    riskFilter !== ALL_RISKS ||
+    statusFilter !== ALL_STATUSES ||
+    search.trim() !== "" ||
+    timeRangeFilter !== "all";
+  const clearReviewFilters = useCallback(() => {
+    setRepositoryFilter(ALL_REPOSITORIES);
+    setOutcomeFilter(ALL_OUTCOMES);
+    setRiskFilter(ALL_RISKS);
+    setStatusFilter(ALL_STATUSES);
+    setSearch("");
+    setDebouncedSearch("");
+    setTimeRangeFilter("all");
+  }, [setOutcomeFilter, setTimeRangeFilter]);
   const repositoriesQuery = useQuery({
     queryKey: queryKeys.repositories.all,
     queryFn: () => api.repositories.list(),
   });
+  const refreshRollingReviewWindow = useCallback(() => {
+    timeRangeAnchorMsRef.current = Date.now();
+    void queryClient.invalidateQueries({
+      queryKey: queryKeys.codeReviews.lists(),
+    });
+    void queryClient.invalidateQueries({
+      queryKey: queryKeys.codeReviews.stats(),
+    });
+  }, [queryClient]);
+  useEffect(() => {
+    if (timeRangeFilter === "all") return;
+    const timer = window.setInterval(
+      refreshRollingReviewWindow,
+      CODE_REVIEW_TIME_WINDOW_REFRESH_MS,
+    );
+    return () => window.clearInterval(timer);
+  }, [refreshRollingReviewWindow, timeRangeFilter]);
   // The reviews list refreshes live via the org-scoped SSE stream below; the
   // polling backstop only kicks in (faster) while the stream is unhealthy so a
   // Redis hiccup still surfaces new reviews. Replaces the old manual Refresh
@@ -494,11 +673,9 @@ export default function CodeReviewsPage() {
     if (invalidateTimerRef.current) return;
     invalidateTimerRef.current = setTimeout(() => {
       invalidateTimerRef.current = null;
-      void queryClient.invalidateQueries({
-        queryKey: queryKeys.codeReviews.lists(),
-      });
+      refreshRollingReviewWindow();
     }, pollMs(CODE_REVIEW_INVALIDATE_COALESCE_MS));
-  }, [queryClient]);
+  }, [refreshRollingReviewWindow]);
   useEffect(
     () => () => {
       if (invalidateTimerRef.current) clearTimeout(invalidateTimerRef.current);
@@ -511,8 +688,16 @@ export default function CodeReviewsPage() {
     onEvent: onCodeReviewEvent,
   });
   const reviewsQuery = useQuery({
-    queryKey: queryKeys.codeReviews.list(reviewFilters),
-    queryFn: () => api.codeReviews.list(reviewFilters),
+    queryKey: queryKeys.codeReviews.list(reviewFiltersQueryKey),
+    queryFn: () => api.codeReviews.list({
+      ...currentReviewScopeFilters(),
+      limit: 100,
+    }),
+    refetchInterval: codeReviewStreamHealthy ? pollMs(30_000) : pollMs(5_000),
+  });
+  const statsQuery = useQuery({
+    queryKey: queryKeys.codeReviews.stat(reviewScopeQueryKey),
+    queryFn: () => api.codeReviews.stats(currentReviewScopeFilters()),
     refetchInterval: codeReviewStreamHealthy ? pollMs(30_000) : pollMs(5_000),
   });
   const policyQuery = useQuery({
@@ -641,10 +826,12 @@ export default function CodeReviewsPage() {
     onSuccess: (_result, sessionId) => {
       setSelectedEvidenceSessionId((current) => (current === sessionId ? null : current));
       void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.lists() });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.stats() });
       toast.success("Code review retry started");
     },
     onError: (error) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.lists() });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.stats() });
       toast.error("Code review could not be retried", {
         description: apiErrorMessage(error) ?? "Try again after checking the review failure details.",
       });
@@ -827,6 +1014,22 @@ export default function CodeReviewsPage() {
           </TabsList>
 
           <TabsContent value="reviews" className="space-y-3">
+            <div className="flex justify-end">
+              <div className="w-full sm:w-44">
+                <FilterSelect label="Time window" value={timeRangeFilter} onValueChange={setTimeRangeFilter}>
+                  <SelectItem value="7d">Last 7 days</SelectItem>
+                  <SelectItem value="30d">Last 30 days</SelectItem>
+                  <SelectItem value="90d">Last 90 days</SelectItem>
+                  <SelectItem value="all">All time</SelectItem>
+                </FilterSelect>
+              </div>
+            </div>
+            <CodeReviewStatsCards
+              stats={statsQuery.data?.data}
+              isLoading={statsQuery.isLoading}
+              isError={statsQuery.isError}
+              onRetry={() => void statsQuery.refetch()}
+            />
             <Button
               type="button"
               variant="outline"
@@ -844,7 +1047,7 @@ export default function CodeReviewsPage() {
             </Button>
             <div
               id="code-review-filters"
-              className={`${mobileFiltersOpen ? "grid" : "hidden"} gap-3 rounded-xl border border-border bg-card p-3 shadow-sm md:grid md:grid-cols-[minmax(12rem,18rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_1fr] md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none`}
+              className={`${mobileFiltersOpen ? "grid" : "hidden"} gap-3 rounded-xl border border-border bg-card p-3 shadow-sm md:grid md:grid-cols-2 md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none lg:grid-cols-3 xl:grid-cols-[minmax(12rem,18rem)_repeat(3,minmax(9rem,11rem))_1fr]`}
             >
               <FilterSelect label="Repository" value={repositoryFilter} onValueChange={setRepositoryFilter}>
                 <SelectItem value={ALL_REPOSITORIES}>All repositories</SelectItem>
@@ -885,8 +1088,13 @@ export default function CodeReviewsPage() {
             {reviews.length === 0 ? (
               <EmptyState
                 icon={ClipboardCheck}
-                title="No code review sessions"
-                description="Reviews will appear here after the GitHub reviewer bot is requested on a pull request."
+                title={hasActiveReviewFilters ? "No reviews match this view" : "No code review sessions"}
+                description={
+                  hasActiveReviewFilters
+                    ? "Try widening the time window or clearing filters to see more review activity."
+                    : "Reviews will appear here after the GitHub reviewer bot is requested on a pull request."
+                }
+                action={hasActiveReviewFilters ? { label: "Clear filters", onClick: clearReviewFilters } : undefined}
               />
             ) : (
               <>

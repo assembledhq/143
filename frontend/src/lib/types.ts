@@ -316,6 +316,13 @@ export interface CodeReviewListItem {
   pull_request_author: string;
 }
 
+export interface CodeReviewStats {
+  reviews_completed: number;
+  automatically_approved: number;
+  needs_human_review: number;
+  median_turnaround_seconds: number | null;
+}
+
 export type CodeReviewPhase =
   | "syncing_github"
   | "waiting_for_github"

@@ -1084,6 +1084,101 @@ func TestCodeReviewStore_ListReviewsAppliesCursorAndTimeFilters(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "cursor pagination should add the keyset comparison")
 }
 
+func TestCodeReviewStore_GetReviewStatsScopesToRepositoryAndTimeWindow(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repositoryID := uuid.New()
+	createdAfter := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	createdBefore := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	medianTurnaround := 480.0
+	decision := models.CodeReviewDecisionNeedsHumanReview
+	status := models.CodeReviewSessionStatusCompleted
+	acceptable := false
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery(`(?s)COUNT\(\*\) FILTER \(WHERE m\.status = 'completed'\).*percentile_cont\(0\.5\).*FROM code_review_session_metadata m.*WHERE m\.org_id = @org_id.*AND m\.repository_id = @repository_id.*AND m\.decision = @decision.*AND m\.status = @status.*AND m\.acceptable = @acceptable.*AND m\.created_at >= @created_after.*AND m\.created_at <= @created_before.*pr\.title ILIKE @search`).
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"reviews_completed",
+			"automatically_approved",
+			"needs_human_review",
+			"median_turnaround_seconds",
+		}).AddRow(21, 0, 21, medianTurnaround))
+
+	stats, err := NewCodeReviewStore(mock).GetReviewStats(context.Background(), orgID, CodeReviewStatsFilters{
+		RepositoryID:  &repositoryID,
+		Decision:      &decision,
+		Status:        &status,
+		Acceptable:    &acceptable,
+		Search:        "auth",
+		CreatedAfter:  &createdAfter,
+		CreatedBefore: &createdBefore,
+	})
+
+	require.NoError(t, err, "GetReviewStats should return aggregate metrics for the selected scope")
+	require.Equal(t, int64(21), stats.ReviewsCompleted, "GetReviewStats should return the completed review count")
+	require.Equal(t, int64(0), stats.AutomaticallyApproved, "GetReviewStats should return posted automatic approvals")
+	require.Equal(t, int64(21), stats.NeedsHumanReview, "GetReviewStats should return human review decisions")
+	require.Equal(t, &medianTurnaround, stats.MedianTurnaroundSeconds, "GetReviewStats should return the median queue-to-completion duration")
+	require.NoError(t, mock.ExpectationsWereMet(), "stats query should apply every whole-page filter")
+}
+
+func TestCodeReviewStore_GetReviewStatsAppliesOutcomeFilters(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		outcome         models.CodeReviewListOutcome
+		expectedPattern string
+	}{
+		{
+			name:            "automatically approved requires a completed posted approval",
+			outcome:         models.CodeReviewListOutcomeAutomaticallyApproved,
+			expectedPattern: `m\.status = 'completed'\s+AND m\.decision = 'approved'\s+AND m\.github_review_id IS NOT NULL`,
+		},
+		{
+			name:            "completed not approved includes approval decisions that were not posted",
+			outcome:         models.CodeReviewListOutcomeCompletedNotApproved,
+			expectedPattern: `m\.status = 'completed'\s+AND \(m\.decision IS DISTINCT FROM 'approved'\s+OR m\.github_review_id IS NULL\)`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock should initialize for each stats outcome filter")
+			defer mock.Close()
+
+			mock.ExpectQuery(tt.expectedPattern).
+				WithArgs(pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{
+					"reviews_completed",
+					"automatically_approved",
+					"needs_human_review",
+					"median_turnaround_seconds",
+				}).AddRow(0, 0, 0, -1))
+
+			stats, err := NewCodeReviewStore(mock).GetReviewStats(context.Background(), orgID, CodeReviewStatsFilters{
+				Outcome: &tt.outcome,
+			})
+
+			require.NoError(t, err, "GetReviewStats should accept the selected outcome filter")
+			require.Equal(t, models.CodeReviewStats{}, stats, "empty filtered stats should return zero counts and no median")
+			require.NoError(t, mock.ExpectationsWereMet(), "the stats outcome filter should add the expected SQL conditions")
+		})
+	}
+}
+
 func TestCodeReviewStore_GetListItemBySessionIDScopesByOrgAndSession(t *testing.T) {
 	t.Parallel()
 

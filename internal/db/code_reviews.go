@@ -1118,6 +1118,17 @@ type CodeReviewListFilters struct {
 	Cursor *uuid.UUID
 }
 
+type CodeReviewStatsFilters struct {
+	RepositoryID  *uuid.UUID
+	Decision      *models.CodeReviewDecision
+	Outcome       *models.CodeReviewListOutcome
+	Status        *models.CodeReviewSessionStatus
+	Acceptable    *bool
+	Search        string
+	CreatedAfter  *time.Time
+	CreatedBefore *time.Time
+}
+
 func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filters CodeReviewListFilters) ([]models.CodeReviewListItem, error) {
 	limit := filters.Limit
 	if limit <= 0 || limit > 100 {
@@ -1204,6 +1215,110 @@ func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filt
 		return nil, fmt.Errorf("query code review list: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.CodeReviewListItem])
+}
+
+func (s *CodeReviewStore) GetReviewStats(ctx context.Context, orgID uuid.UUID, filters CodeReviewStatsFilters) (models.CodeReviewStats, error) {
+	args := pgx.NamedArgs{"org_id": orgID}
+	query := `
+		SELECT
+			COUNT(*) FILTER (WHERE m.status = 'completed')::bigint AS reviews_completed,
+			COUNT(*) FILTER (
+				WHERE m.status = 'completed'
+				  AND m.decision = 'approved'
+				  AND m.github_review_id IS NOT NULL
+			)::bigint AS automatically_approved,
+			COUNT(*) FILTER (
+				WHERE m.status = 'completed'
+				  AND m.decision = 'needs_human_review'
+			)::bigint AS needs_human_review,
+			COALESCE(
+				percentile_cont(0.5) WITHIN GROUP (
+					ORDER BY EXTRACT(EPOCH FROM (m.completed_at - m.created_at))
+				) FILTER (
+					WHERE m.status = 'completed'
+					  AND m.completed_at IS NOT NULL
+					  AND m.completed_at >= m.created_at
+				),
+				-1
+			)::double precision AS median_turnaround_seconds
+		FROM code_review_session_metadata m
+		JOIN sessions s ON s.id = m.session_id AND s.org_id = m.org_id
+		JOIN pull_requests pr ON pr.id = m.pull_request_id AND pr.org_id = m.org_id
+		WHERE m.org_id = @org_id`
+	if filters.RepositoryID != nil {
+		query += `
+		  AND m.repository_id = @repository_id`
+		args["repository_id"] = *filters.RepositoryID
+	}
+	if filters.Decision != nil {
+		if err := filters.Decision.Validate(); err != nil {
+			return models.CodeReviewStats{}, err
+		}
+		query += `
+		  AND m.decision = @decision`
+		args["decision"] = *filters.Decision
+	}
+	if filters.Outcome != nil {
+		if err := filters.Outcome.Validate(); err != nil {
+			return models.CodeReviewStats{}, err
+		}
+		switch *filters.Outcome {
+		case models.CodeReviewListOutcomeAutomaticallyApproved:
+			query += `
+		  AND m.status = 'completed'
+		  AND m.decision = 'approved'
+		  AND m.github_review_id IS NOT NULL`
+		case models.CodeReviewListOutcomeCompletedNotApproved:
+			query += `
+		  AND m.status = 'completed'
+		  AND (m.decision IS DISTINCT FROM 'approved'
+		       OR m.github_review_id IS NULL)`
+		}
+	}
+	if filters.Status != nil {
+		if err := filters.Status.Validate(); err != nil {
+			return models.CodeReviewStats{}, err
+		}
+		query += `
+		  AND m.status = @status`
+		args["status"] = *filters.Status
+	}
+	if filters.Acceptable != nil {
+		query += `
+		  AND m.acceptable = @acceptable`
+		args["acceptable"] = *filters.Acceptable
+	}
+	if filters.CreatedAfter != nil {
+		query += `
+		  AND m.created_at >= @created_after`
+		args["created_after"] = *filters.CreatedAfter
+	}
+	if filters.CreatedBefore != nil {
+		query += `
+		  AND m.created_at <= @created_before`
+		args["created_before"] = *filters.CreatedBefore
+	}
+	if search := strings.TrimSpace(filters.Search); search != "" {
+		query += `
+		  AND (pr.title ILIKE @search OR pr.github_repo ILIKE @search OR pr.github_pr_number::text = @search_exact OR COALESCE(s.title, '') ILIKE @search)`
+		args["search"] = "%" + search + "%"
+		args["search_exact"] = strings.TrimPrefix(search, "#")
+	}
+
+	var stats models.CodeReviewStats
+	var medianTurnaroundSeconds float64
+	if err := s.db.QueryRow(ctx, query, args).Scan(
+		&stats.ReviewsCompleted,
+		&stats.AutomaticallyApproved,
+		&stats.NeedsHumanReview,
+		&medianTurnaroundSeconds,
+	); err != nil {
+		return models.CodeReviewStats{}, fmt.Errorf("query code review stats: %w", err)
+	}
+	if medianTurnaroundSeconds >= 0 {
+		stats.MedianTurnaroundSeconds = &medianTurnaroundSeconds
+	}
+	return stats, nil
 }
 
 func (s *CodeReviewStore) CreateAgentResult(ctx context.Context, result *models.CodeReviewAgentResult) error {

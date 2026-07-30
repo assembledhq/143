@@ -917,6 +917,13 @@ type CodeReviewListItem struct {
 	PullRequestAuthor string  `db:"pull_request_author" json:"pull_request_author"`
 }
 
+type CodeReviewStats struct {
+	ReviewsCompleted        int64    `json:"reviews_completed"`
+	AutomaticallyApproved   int64    `json:"automatically_approved"`
+	NeedsHumanReview        int64    `json:"needs_human_review"`
+	MedianTurnaroundSeconds *float64 `json:"median_turnaround_seconds"`
+}
+
 type CodeReviewEvidence struct {
 	AgentResults    []CodeReviewAgentResult    `json:"agent_results"`
 	Findings        []CodeReviewFinding        `json:"findings"`

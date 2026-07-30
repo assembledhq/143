@@ -272,6 +272,8 @@ export const api = {
       status?: import('./types').CodeReviewSessionStatus;
       risk?: "acceptable" | "needs_review";
       search?: string;
+      created_after?: string;
+      created_before?: string;
       limit?: number;
     }) => {
       const searchParams = new URLSearchParams();
@@ -281,9 +283,33 @@ export const api = {
       if (params?.status) searchParams.set('status', params.status);
       if (params?.risk) searchParams.set('risk', params.risk);
       if (params?.search) searchParams.set('search', params.search);
+      if (params?.created_after) searchParams.set('created_after', params.created_after);
+      if (params?.created_before) searchParams.set('created_before', params.created_before);
       if (params?.limit) searchParams.set('limit', String(params.limit));
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').CodeReviewListItem>>(`/api/v1/code-reviews${qs ? `?${qs}` : ''}`);
+    },
+    stats: (params?: {
+      repository_id?: string;
+      decision?: import('./types').CodeReviewDecision;
+      outcome?: import('./types').CodeReviewListOutcome;
+      status?: import('./types').CodeReviewSessionStatus;
+      risk?: "acceptable" | "needs_review";
+      search?: string;
+      created_after?: string;
+      created_before?: string;
+    }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
+      if (params?.decision) searchParams.set('decision', params.decision);
+      if (params?.outcome) searchParams.set('outcome', params.outcome);
+      if (params?.status) searchParams.set('status', params.status);
+      if (params?.risk) searchParams.set('risk', params.risk);
+      if (params?.search) searchParams.set('search', params.search);
+      if (params?.created_after) searchParams.set('created_after', params.created_after);
+      if (params?.created_before) searchParams.set('created_before', params.created_before);
+      const qs = searchParams.toString();
+      return get<import('./types').SingleResponse<import('./types').CodeReviewStats>>(`/api/v1/code-reviews/stats${qs ? `?${qs}` : ''}`);
     },
     templates: () => get<import('./types').ListResponse<import('./types').CodeReviewTemplateOption>>('/api/v1/code-reviews/templates'),
     promptExamples: () => get<import('./types').SingleResponse<import('./types').CodeReviewPromptExamplesResponse>>('/api/v1/code-reviews/prompt-examples'),
