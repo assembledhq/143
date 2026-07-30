@@ -3460,9 +3460,10 @@ type IssueCommentEvent struct {
 		Type  string `json:"type"`
 	} `json:"sender"`
 	Comment struct {
-		ID   int64  `json:"id"`
-		Body string `json:"body"`
-		User struct {
+		ID      int64  `json:"id"`
+		Body    string `json:"body"`
+		HTMLURL string `json:"html_url"`
+		User    struct {
 			Login string `json:"login"`
 			Type  string `json:"type"`
 		} `json:"user"`
@@ -3999,6 +4000,66 @@ type PullRequestHead struct {
 	Branch     string
 	SHA        string
 	BaseBranch string
+}
+
+// CodeReviewPullRequestSnapshot is the current GitHub state needed to create
+// or refresh a pull request mirror before an issue-comment mention starts a
+// code review.
+type CodeReviewPullRequestSnapshot struct {
+	Number      int
+	HTMLURL     string
+	Title       string
+	Body        string
+	State       string
+	AuthorLogin string
+	HeadSHA     string
+	HeadRef     string
+	BaseSHA     string
+	FromFork    bool
+}
+
+// GetCodeReviewPullRequestSnapshot loads the authoritative PR revision for an
+// issue_comment webhook, whose payload does not include head/base commit data.
+func (s *PRService) GetCodeReviewPullRequestSnapshot(ctx context.Context, orgID, repositoryID uuid.UUID, number int) (CodeReviewPullRequestSnapshot, error) {
+	if s == nil || s.repos == nil {
+		return CodeReviewPullRequestSnapshot{}, fmt.Errorf("repository store is unavailable")
+	}
+	if orgID == uuid.Nil || repositoryID == uuid.Nil || number <= 0 {
+		return CodeReviewPullRequestSnapshot{}, fmt.Errorf("org_id, repository_id, and positive pull request number are required")
+	}
+	repository, err := s.repos.GetByID(ctx, orgID, repositoryID)
+	if err != nil {
+		return CodeReviewPullRequestSnapshot{}, fmt.Errorf("load repository for code review mention: %w", err)
+	}
+	token, err := s.getInstallationTokenForRepo(ctx, orgID, &repository)
+	if err != nil {
+		return CodeReviewPullRequestSnapshot{}, fmt.Errorf("load installation token for code review mention: %w", err)
+	}
+	owner, repo := splitRepo(repository.FullName)
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number)
+	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
+	if err != nil {
+		return CodeReviewPullRequestSnapshot{}, fmt.Errorf("load pull request for code review mention: %w", err)
+	}
+	var details gitHubPullRequestDetails
+	if err := json.Unmarshal(body, &details); err != nil {
+		return CodeReviewPullRequestSnapshot{}, fmt.Errorf("decode pull request for code review mention: %w", err)
+	}
+	if details.Head.SHA == "" {
+		return CodeReviewPullRequestSnapshot{}, fmt.Errorf("pull request head SHA is missing")
+	}
+	return CodeReviewPullRequestSnapshot{
+		Number:      details.Number,
+		HTMLURL:     details.HTMLURL,
+		Title:       details.Title,
+		Body:        details.Body,
+		State:       details.State,
+		AuthorLogin: details.User.Login,
+		HeadSHA:     details.Head.SHA,
+		HeadRef:     details.Head.Ref,
+		BaseSHA:     details.Base.SHA,
+		FromFork:    details.Head.Repo.Fork,
+	}, nil
 }
 
 // GetPullRequestHead returns the current head branch/SHA for a pull request.

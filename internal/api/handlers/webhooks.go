@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -30,6 +31,11 @@ type WebhookHandler struct {
 	prService           *ghservice.PRService
 	pullRequests        *db.PullRequestStore
 	codeReviews         *codereviewsvc.Service
+	codeReviewPRs       codeReviewPullRequestLoader
+}
+
+type codeReviewPullRequestLoader interface {
+	GetCodeReviewPullRequestSnapshot(ctx context.Context, orgID, repositoryID uuid.UUID, number int) (ghservice.CodeReviewPullRequestSnapshot, error)
 }
 
 func NewWebhookHandler(cfg *config.Config, orgStore *db.OrganizationStore, userStore *db.UserStore, repoStore *db.RepositoryStore, integrationStore *db.IntegrationStore, prService *ghservice.PRService) *WebhookHandler {
@@ -40,6 +46,7 @@ func NewWebhookHandler(cfg *config.Config, orgStore *db.OrganizationStore, userS
 		repoStore:        repoStore,
 		integrationStore: integrationStore,
 		prService:        prService,
+		codeReviewPRs:    prService,
 	}
 }
 
@@ -157,8 +164,134 @@ func (h *WebhookHandler) handleIssueComment(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, http.StatusInternalServerError, "ISSUE_COMMENT_EVENT_FAILED", "failed to process issue_comment event", err)
 		return
 	}
+	if event.Action == "created" && event.Issue.PullRequest != nil && h.codeReviews != nil && h.pullRequests != nil {
+		if ok := h.handleCodeReviewMentioned(w, r, event, owner); !ok {
+			return
+		}
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
+}
+
+func (h *WebhookHandler) handleCodeReviewMentioned(w http.ResponseWriter, r *http.Request, event ghservice.IssueCommentEvent, owner db.GitHubRepoOwner) bool {
+	if !codereviewsvc.HasGitHubTeamMention(event.Comment.Body) {
+		return true
+	}
+	if !codeReviewMentionAuthorTrusted(event) {
+		return true
+	}
+	repo := strings.TrimSpace(event.Repository.FullName)
+	if repo == "" {
+		repo = owner.FullName
+	}
+	matched, err := h.codeReviews.MatchesReviewMention(r.Context(), owner.OrgID, owner.RepositoryID, repo, event.Comment.Body)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_MENTION_MATCH_FAILED", "failed to match code review mention", err)
+		return false
+	}
+	if !matched {
+		return true
+	}
+	if h.codeReviewPRs == nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_PR_LOAD_FAILED", "failed to load pull request for code review mention")
+		return false
+	}
+	remote, err := h.codeReviewPRs.GetCodeReviewPullRequestSnapshot(r.Context(), owner.OrgID, owner.RepositoryID, event.Issue.Number)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_PR_LOAD_FAILED", "failed to load pull request for code review mention", err)
+		return false
+	}
+	if state := strings.TrimSpace(remote.State); state != "" && !strings.EqualFold(state, "open") {
+		return true
+	}
+	number := remote.Number
+	if number <= 0 {
+		number = event.Issue.Number
+	}
+	snapshot := db.PullRequestGitHubSnapshot{
+		GitHubPRURL: remote.HTMLURL,
+		Title:       remote.Title,
+		Body:        nilIfEmpty(remote.Body),
+		HeadSHA:     nilIfEmpty(remote.HeadSHA),
+		HeadRef:     nilIfEmpty(remote.HeadRef),
+		BaseSHA:     nilIfEmpty(remote.BaseSHA),
+	}
+	pr, err := h.pullRequests.GetByOrgRepoAndNumber(r.Context(), owner.OrgID, repo, number)
+	if errors.Is(err, pgx.ErrNoRows) {
+		created := &models.PullRequest{
+			OrgID:          owner.OrgID,
+			GitHubPRNumber: number,
+			GitHubPRURL:    snapshot.GitHubPRURL,
+			GitHubRepo:     repo,
+			Title:          snapshot.Title,
+			Body:           snapshot.Body,
+			Status:         models.PullRequestStatusOpen,
+			ReviewStatus:   models.PullRequestReviewStatusPending,
+			AuthoredBy:     models.GitIdentitySourceUser,
+			HeadSHA:        snapshot.HeadSHA,
+			HeadRef:        snapshot.HeadRef,
+			BaseSHA:        snapshot.BaseSHA,
+		}
+		if err := h.pullRequests.Create(r.Context(), created); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "PR_MIRROR_CREATE_FAILED", "failed to create pull request mirror", err)
+			return false
+		}
+		pr = *created
+	} else if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PR_LOAD_FAILED", "failed to load pull request mirror", err)
+		return false
+	} else {
+		if err := h.pullRequests.UpdateGitHubSnapshot(r.Context(), owner.OrgID, pr.ID, snapshot); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "PR_MIRROR_UPDATE_FAILED", "failed to update pull request mirror", err)
+			return false
+		}
+		pr.GitHubPRURL = snapshot.GitHubPRURL
+		pr.Title = snapshot.Title
+		pr.Body = snapshot.Body
+		pr.HeadSHA = snapshot.HeadSHA
+		pr.HeadRef = snapshot.HeadRef
+		pr.BaseSHA = snapshot.BaseSHA
+	}
+
+	_, err = h.codeReviews.HandleReviewMentioned(r.Context(), codereviewsvc.ReviewMentionedInput{
+		ReviewRequestedInput: codereviewsvc.ReviewRequestedInput{
+			OrgID:             owner.OrgID,
+			RepositoryID:      owner.RepositoryID,
+			PullRequestID:     pr.ID,
+			GitHubRepo:        repo,
+			GitHubPRNumber:    number,
+			GitHubPRURL:       remote.HTMLURL,
+			PullRequestTitle:  remote.Title,
+			PullRequestAuthor: remote.AuthorLogin,
+			BaseSHA:           remote.BaseSHA,
+			HeadSHA:           remote.HeadSHA,
+			FromFork:          remote.FromFork,
+			DeliveryID:        event.DeliveryID,
+		},
+		CommentID:     event.Comment.ID,
+		CommentAuthor: event.Comment.User.Login,
+		CommentBody:   event.Comment.Body,
+		CommentURL:    event.Comment.HTMLURL,
+	})
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REQUEST_FAILED", "failed to process code review mention", err)
+		return false
+	}
+	return true
+}
+
+func codeReviewMentionAuthorTrusted(event ghservice.IssueCommentEvent) bool {
+	if event.Comment.PerformedViaGitHubApp != nil ||
+		strings.EqualFold(strings.TrimSpace(event.Comment.User.Type), "bot") ||
+		strings.EqualFold(strings.TrimSpace(event.Sender.Type), "bot") {
+		return false
+	}
+	switch strings.ToUpper(strings.TrimSpace(event.Comment.AuthorAssociation)) {
+	case "OWNER", "MEMBER", "COLLABORATOR":
+		return true
+	default:
+		return false
+	}
 }
 
 func (h *WebhookHandler) verifySignature(payload []byte, signature string) bool {

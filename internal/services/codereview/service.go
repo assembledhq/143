@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -61,8 +62,12 @@ const (
 	codeReviewJobMaxAttempts          = 8
 	codeReviewJobEnqueueGracePeriod   = time.Minute
 	explicitReviewRequestChangeReason = "pull_request.review_requested"
+	commentMentionChangeReason        = "issue_comment.mentioned"
 	codeReviewUndispatchedReason      = "code review job was not queued"
+	reviewRequestContextMaxRunes      = 4_000
 )
+
+var githubTeamMentionPattern = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])@([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)/([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)`)
 
 type Service struct {
 	policies          PolicyStore
@@ -98,6 +103,25 @@ type ReviewRequestedInput struct {
 	RequestedLogin    string
 	RequestedTeam     string
 	DeliveryID        string
+	RequestContext    *ReviewRequestContext
+}
+
+// ReviewRequestContext is the human-authored GitHub comment that explicitly
+// requested a review. It is carried only to the orchestrator synthesis prompt;
+// reviewer agents still inspect the PR independently.
+type ReviewRequestContext struct {
+	Source      string `json:"source"`
+	AuthorLogin string `json:"author_login,omitempty"`
+	Body        string `json:"body"`
+	URL         string `json:"url,omitempty"`
+}
+
+type ReviewMentionedInput struct {
+	ReviewRequestedInput
+	CommentID     int64
+	CommentAuthor string
+	CommentBody   string
+	CommentURL    string
 }
 
 // ReviewChangedInput describes a new externally-observed state or explicit
@@ -122,6 +146,7 @@ type ReviewChangedInput struct {
 	GitHubDeliveryID       string                         `json:"github_delivery_id,omitempty"`
 	RequestedReviewerLogin string                         `json:"requested_reviewer_login,omitempty"`
 	RequestedTeamSlug      string                         `json:"requested_team_slug,omitempty"`
+	RequestContext         *ReviewRequestContext          `json:"request_context,omitempty"`
 	ExplicitRequest        bool                           `json:"explicit_request,omitempty"`
 	TriggerSource          models.CodeReviewTriggerSource `json:"trigger_source,omitempty"`
 }
@@ -183,6 +208,7 @@ type RunCodeReviewJobPayload struct {
 	OutputKey               string                     `json:"review_output_key"`
 	RequestedReviewerLogin  string                     `json:"requested_reviewer_login,omitempty"`
 	RequestedTeamSlug       string                     `json:"requested_team_slug,omitempty"`
+	RequestContext          *ReviewRequestContext      `json:"request_context,omitempty"`
 	PreviousOutputKey       string                     `json:"previous_review_output_key,omitempty"`
 	PreviousReviewDecision  *models.CodeReviewDecision `json:"previous_review_decision,omitempty"`
 	PreviousReviewDecidedAt *time.Time                 `json:"previous_review_decided_at,omitempty"`
@@ -314,6 +340,7 @@ func (s *Service) RetryReview(ctx context.Context, input RetryReviewInput) (Retr
 		FromFork:          failed.FromFork,
 		RequestedLogin:    codeReviewRevisionContextString(priorSession.RevisionContext, "requested_reviewer_login"),
 		RequestedTeam:     codeReviewRevisionContextString(priorSession.RevisionContext, "requested_team_slug"),
+		RequestContext:    codeReviewRevisionRequestContext(priorSession.RevisionContext),
 	}
 	submitted := failed
 	if submitted.GitHubReviewID == nil {
@@ -438,19 +465,125 @@ func retryReviewResult(previousSessionID uuid.UUID, started ReviewRequestedResul
 }
 
 func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequestedInput) (ReviewRequestedResult, error) {
-	if input.OrgID == uuid.Nil || input.RepositoryID == uuid.Nil || input.PullRequestID == uuid.Nil {
-		return ReviewRequestedResult{}, fmt.Errorf("org_id, repository_id, and pull_request_id are required")
-	}
-	if strings.TrimSpace(input.HeadSHA) == "" {
-		return ReviewRequestedResult{}, fmt.Errorf("head_sha is required")
-	}
-	source, ok, err := s.matchRequestedReviewer(ctx, input)
+	source, ok, err := s.validateAndMatchReviewRequest(ctx, input)
 	if err != nil {
 		return ReviewRequestedResult{}, err
 	}
 	if !ok {
 		return ReviewRequestedResult{IgnoredReason: "reviewer_not_configured"}, nil
 	}
+	return s.handleExplicitReviewRequest(ctx, input, source, explicitReviewRequestChangeReason, explicitReviewRequestChangeKey(input.DeliveryID))
+}
+
+// HandleReviewMentioned starts a fresh explicit assessment when a PR issue
+// comment mentions the configured GitHub reviewer team. The repository owner
+// must match the mentioned organization so an identically named team in a
+// different organization cannot trigger a review.
+func (s *Service) HandleReviewMentioned(ctx context.Context, input ReviewMentionedInput) (ReviewRequestedResult, error) {
+	team, source, matched, err := s.matchReviewMention(
+		ctx,
+		input.OrgID,
+		input.RepositoryID,
+		input.GitHubRepo,
+		input.CommentBody,
+	)
+	if err != nil {
+		return ReviewRequestedResult{}, err
+	}
+	if !matched {
+		return ReviewRequestedResult{IgnoredReason: "reviewer_not_mentioned"}, nil
+	}
+	requested := input.ReviewRequestedInput
+	requested.RequestedLogin = ""
+	requested.RequestedTeam = team
+	requested.RequestContext = normalizeReviewRequestContext(&ReviewRequestContext{
+		Source:      "issue_comment",
+		AuthorLogin: input.CommentAuthor,
+		Body:        input.CommentBody,
+		URL:         input.CommentURL,
+	})
+	validatedSource, stillMatched, err := s.validateAndMatchReviewRequest(ctx, requested)
+	if err != nil {
+		return ReviewRequestedResult{}, err
+	}
+	if !stillMatched {
+		return ReviewRequestedResult{IgnoredReason: "reviewer_not_mentioned"}, nil
+	}
+	source = validatedSource
+	requestKey := strings.TrimSpace(requested.DeliveryID)
+	if requestKey == "" && input.CommentID > 0 {
+		requestKey = fmt.Sprintf("issue_comment:%d", input.CommentID)
+		requested.DeliveryID = requestKey
+	}
+	return s.handleExplicitReviewRequest(
+		ctx,
+		requested,
+		source,
+		commentMentionChangeReason,
+		"issue_comment_mentioned:"+requestKey,
+	)
+}
+
+// MatchesReviewMention reports whether a PR conversation comment mentions the
+// configured reviewer team for the repository.
+func (s *Service) MatchesReviewMention(ctx context.Context, orgID, repositoryID uuid.UUID, githubRepo, body string) (bool, error) {
+	_, _, matched, err := s.matchReviewMention(ctx, orgID, repositoryID, githubRepo, body)
+	return matched, err
+}
+
+func (s *Service) matchReviewMention(
+	ctx context.Context,
+	orgID uuid.UUID,
+	repositoryID uuid.UUID,
+	githubRepo string,
+	body string,
+) (string, models.CodeReviewTriggerSource, bool, error) {
+	if orgID == uuid.Nil || repositoryID == uuid.Nil {
+		return "", "", false, fmt.Errorf("org_id and repository_id are required")
+	}
+	repositoryOwner, _, ok := strings.Cut(strings.TrimSpace(githubRepo), "/")
+	if !ok || repositoryOwner == "" {
+		return "", "", false, fmt.Errorf("github_repo must use owner/name format")
+	}
+	for _, mention := range githubTeamMentions(body) {
+		if !strings.EqualFold(repositoryOwner, mention.Owner) {
+			continue
+		}
+		source, matched, err := s.matchRequestedReviewer(ctx, ReviewRequestedInput{
+			OrgID: orgID, RepositoryID: repositoryID, RequestedTeam: mention.Team,
+		})
+		if err != nil {
+			return "", "", false, err
+		}
+		if matched {
+			return mention.Team, source, true, nil
+		}
+	}
+	return "", "", false, nil
+}
+
+func (s *Service) validateAndMatchReviewRequest(ctx context.Context, input ReviewRequestedInput) (models.CodeReviewTriggerSource, bool, error) {
+	if input.OrgID == uuid.Nil || input.RepositoryID == uuid.Nil || input.PullRequestID == uuid.Nil {
+		return "", false, fmt.Errorf("org_id, repository_id, and pull_request_id are required")
+	}
+	if strings.TrimSpace(input.HeadSHA) == "" {
+		return "", false, fmt.Errorf("head_sha is required")
+	}
+	source, ok, err := s.matchRequestedReviewer(ctx, input)
+	if err != nil {
+		return "", false, err
+	}
+	return source, ok, nil
+}
+
+func (s *Service) handleExplicitReviewRequest(
+	ctx context.Context,
+	input ReviewRequestedInput,
+	source models.CodeReviewTriggerSource,
+	changeReason string,
+	changeKey string,
+) (ReviewRequestedResult, error) {
+	input.RequestContext = normalizeReviewRequestContext(input.RequestContext)
 	deliveryID := strings.TrimSpace(input.DeliveryID)
 	if deliveryID == "" {
 		s.logger.Warn().
@@ -458,6 +591,9 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 			Str("pull_request_id", input.PullRequestID.String()).
 			Msg("code review request is missing GitHub delivery identity; preserving same-head reuse behavior")
 		return s.startReview(ctx, input, reviewStartOptions{triggerSource: source})
+	}
+	if strings.TrimSpace(changeKey) == "" {
+		changeKey = explicitReviewRequestChangeKey(deliveryID)
 	}
 
 	submitted, err := s.metadata.GetLatestSubmittedByPullRequest(ctx, input.OrgID, input.PullRequestID)
@@ -467,7 +603,6 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 	if errors.Is(err, pgx.ErrNoRows) {
 		submitted = models.CodeReviewSessionMetadata{}
 	}
-	changeKey := explicitReviewRequestChangeKey(deliveryID)
 	// A policy-independent delivery key distinguishes an intentional rerequest
 	// from a GitHub redelivery. If another assessment is active, startReview
 	// returns Deferred and the durable starter below serializes this request.
@@ -475,7 +610,7 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 		triggerSource:           source,
 		forceReassessment:       true,
 		changeKey:               changeKey,
-		changeReason:            explicitReviewRequestChangeReason,
+		changeReason:            changeReason,
 		previousOutputKey:       submitted.ReviewOutputKey,
 		previousReviewDecision:  submitted.Decision,
 		previousReviewDecidedAt: submitted.CompletedAt,
@@ -500,10 +635,11 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 		HeadSHA:                input.HeadSHA,
 		FromFork:               input.FromFork,
 		ChangeKey:              changeKey,
-		ChangeReason:           explicitReviewRequestChangeReason,
+		ChangeReason:           changeReason,
 		GitHubDeliveryID:       deliveryID,
 		RequestedReviewerLogin: input.RequestedLogin,
 		RequestedTeamSlug:      input.RequestedTeam,
+		RequestContext:         input.RequestContext,
 		ExplicitRequest:        true,
 		TriggerSource:          source,
 	})
@@ -634,6 +770,7 @@ func (s *Service) HandleReviewChanged(ctx context.Context, input ReviewChangedIn
 		RequestedLogin:    input.RequestedReviewerLogin,
 		RequestedTeam:     input.RequestedTeamSlug,
 		DeliveryID:        input.GitHubDeliveryID,
+		RequestContext:    input.RequestContext,
 	}
 	triggerSource := latest.TriggerSource
 	if input.TriggerSource != "" {
@@ -663,6 +800,19 @@ func codeReviewRevisionContextString(raw json.RawMessage, key string) string {
 	}
 	value, _ := values[key].(string)
 	return strings.TrimSpace(value)
+}
+
+func codeReviewRevisionRequestContext(raw json.RawMessage) *ReviewRequestContext {
+	if len(raw) == 0 {
+		return nil
+	}
+	var values struct {
+		RequestContext *ReviewRequestContext `json:"request_context"`
+	}
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return nil
+	}
+	return normalizeReviewRequestContext(values.RequestContext)
 }
 
 func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, opts reviewStartOptions) (ReviewRequestedResult, error) {
@@ -805,6 +955,7 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 		"change_reason":            strings.TrimSpace(opts.changeReason),
 		"change_key":               strings.TrimSpace(opts.changeKey),
 		"github_delivery_id":       strings.TrimSpace(input.DeliveryID),
+		"request_context":          normalizeReviewRequestContext(input.RequestContext),
 	})
 	if err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("marshal code review revision context: %w", err)
@@ -883,6 +1034,7 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 		OutputKey:               outputKey,
 		RequestedReviewerLogin:  input.RequestedLogin,
 		RequestedTeamSlug:       input.RequestedTeam,
+		RequestContext:          normalizeReviewRequestContext(input.RequestContext),
 		PreviousOutputKey:       opts.previousOutputKey,
 		PreviousReviewDecision:  opts.previousReviewDecision,
 		PreviousReviewDecidedAt: opts.previousReviewDecidedAt,
@@ -1060,6 +1212,60 @@ func containsFold(values []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+type githubTeamMention struct {
+	Owner string
+	Team  string
+}
+
+func githubTeamMentions(body string) []githubTeamMention {
+	matches := githubTeamMentionPattern.FindAllStringSubmatch(body, -1)
+	mentions := make([]githubTeamMention, 0, len(matches))
+	seen := make(map[string]struct{}, len(matches))
+	for _, match := range matches {
+		if len(match) != 3 {
+			continue
+		}
+		owner := strings.ToLower(strings.TrimSpace(match[1]))
+		team := strings.ToLower(strings.TrimSpace(match[2]))
+		key := owner + "/" + team
+		if owner == "" || team == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		mentions = append(mentions, githubTeamMention{Owner: owner, Team: team})
+	}
+	return mentions
+}
+
+// HasGitHubTeamMention reports whether a comment contains a syntactically
+// valid GitHub organization/team mention.
+func HasGitHubTeamMention(body string) bool {
+	return len(githubTeamMentions(body)) > 0
+}
+
+func normalizeReviewRequestContext(input *ReviewRequestContext) *ReviewRequestContext {
+	if input == nil {
+		return nil
+	}
+	normalized := &ReviewRequestContext{
+		Source:      strings.TrimSpace(input.Source),
+		AuthorLogin: strings.TrimSpace(input.AuthorLogin),
+		Body:        strings.TrimSpace(input.Body),
+		URL:         strings.TrimSpace(input.URL),
+	}
+	if normalized.Body == "" {
+		return nil
+	}
+	runes := []rune(normalized.Body)
+	if len(runes) > reviewRequestContextMaxRunes {
+		normalized.Body = string(runes[:reviewRequestContextMaxRunes]) + "\n…(truncated)"
+	}
+	return normalized
 }
 
 var _ PolicyStore = (*db.CodeReviewStore)(nil)

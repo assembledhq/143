@@ -26,25 +26,26 @@ import (
 )
 
 type runCodeReviewPayload struct {
-	OrgID                   uuid.UUID                  `json:"org_id"`
-	SessionID               uuid.UUID                  `json:"session_id"`
-	MetadataID              uuid.UUID                  `json:"metadata_id"`
-	RepositoryID            uuid.UUID                  `json:"repository_id"`
-	PullRequestID           uuid.UUID                  `json:"pull_request_id"`
-	PolicyID                uuid.UUID                  `json:"policy_id"`
-	PolicyVersion           int                        `json:"policy_version"`
-	HeadSHA                 string                     `json:"head_sha"`
-	FromFork                bool                       `json:"from_fork"`
-	PullRequestAuthor       string                     `json:"pull_request_author,omitempty"`
-	OutputKey               string                     `json:"review_output_key"`
-	RequestedReviewerLogin  string                     `json:"requested_reviewer_login,omitempty"`
-	RequestedTeamSlug       string                     `json:"requested_team_slug,omitempty"`
-	PreviousOutputKey       string                     `json:"previous_review_output_key,omitempty"`
-	PreviousReviewDecision  *models.CodeReviewDecision `json:"previous_review_decision,omitempty"`
-	PreviousReviewDecidedAt *time.Time                 `json:"previous_review_decided_at,omitempty"`
-	PreviousReviewBody      *string                    `json:"previous_review_body,omitempty"`
-	ExistingGitHubReviewID  *int64                     `json:"existing_github_review_id,omitempty"`
-	ExistingGitHubReviewURL *string                    `json:"existing_github_review_url,omitempty"`
+	OrgID                   uuid.UUID                           `json:"org_id"`
+	SessionID               uuid.UUID                           `json:"session_id"`
+	MetadataID              uuid.UUID                           `json:"metadata_id"`
+	RepositoryID            uuid.UUID                           `json:"repository_id"`
+	PullRequestID           uuid.UUID                           `json:"pull_request_id"`
+	PolicyID                uuid.UUID                           `json:"policy_id"`
+	PolicyVersion           int                                 `json:"policy_version"`
+	HeadSHA                 string                              `json:"head_sha"`
+	FromFork                bool                                `json:"from_fork"`
+	PullRequestAuthor       string                              `json:"pull_request_author,omitempty"`
+	OutputKey               string                              `json:"review_output_key"`
+	RequestedReviewerLogin  string                              `json:"requested_reviewer_login,omitempty"`
+	RequestedTeamSlug       string                              `json:"requested_team_slug,omitempty"`
+	RequestContext          *codereviewsvc.ReviewRequestContext `json:"request_context,omitempty"`
+	PreviousOutputKey       string                              `json:"previous_review_output_key,omitempty"`
+	PreviousReviewDecision  *models.CodeReviewDecision          `json:"previous_review_decision,omitempty"`
+	PreviousReviewDecidedAt *time.Time                          `json:"previous_review_decided_at,omitempty"`
+	PreviousReviewBody      *string                             `json:"previous_review_body,omitempty"`
+	ExistingGitHubReviewID  *int64                              `json:"existing_github_review_id,omitempty"`
+	ExistingGitHubReviewURL *string                             `json:"existing_github_review_url,omitempty"`
 }
 
 const codeReviewRawOutputInlineLimit = 32 * 1024
@@ -1355,6 +1356,9 @@ func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullReques
 		ReviewerOutputs:            codeReviewReviewerOutputsForPrompt(agentResults),
 		Findings:                   codeReviewFindingsForPrompt(findings),
 		ChangedFiles:               codeReviewChangedPaths(changedFiles),
+		RequestContextAuthor:       codeReviewRequestContextAuthor(job.RequestContext),
+		RequestContextBody:         codeReviewRequestContextBody(job.RequestContext),
+		RequestContextURL:          codeReviewRequestContextURL(job.RequestContext),
 		ReviewInstructions:         cfg.ReviewInstructions,
 		AutomatedApprovalPolicy:    cfg.AutomatedApprovalPolicy,
 		UseAutomatedApprovalPolicy: cfg.ApprovalMode == models.CodeReviewApprovalModeApproveAcceptable,
@@ -1380,7 +1384,7 @@ func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest
 		HeadSHAChanged:       codeReviewHeadChanged(job.HeadSHA, pr, health),
 		BlockingFindings:     codeReviewBlockingFindings(findings),
 		ReviewerDisagreement: false,
-		PromptInjectionFound: codeReviewDescriptionPromptInjectionLikely(stringPtrValue(pr.Body)),
+		PromptInjectionFound: codeReviewPromptInjectionLikely(stringPtrValue(pr.Body), job.RequestContext),
 	})
 	requiredReviewerQuorum := codeReviewRequiredReviewerQuorum(cfg, agentResults)
 	if reviewerQuorum < requiredReviewerQuorum {
@@ -1439,8 +1443,8 @@ func codeReviewDescriptionInputHash(pr models.PullRequest) string {
 	return fmt.Sprintf("%x", sum[:])
 }
 
-func codeReviewDescriptionPromptInjectionLikely(body string) bool {
-	return containsAnyFold(body, []string{
+func codeReviewPromptInjectionLikely(prBody string, requestContext *codereviewsvc.ReviewRequestContext) bool {
+	patterns := []string{
 		"ignore previous instructions",
 		"ignore all previous instructions",
 		"disregard previous instructions",
@@ -1448,7 +1452,9 @@ func codeReviewDescriptionPromptInjectionLikely(body string) bool {
 		"system prompt",
 		"developer message",
 		"approval policy does not apply",
-	})
+	}
+	return containsAnyFold(prBody, patterns) ||
+		containsAnyFold(codeReviewRequestContextBody(requestContext), patterns)
 }
 
 func marshalCodeReviewReviewerStructuredResult(state codeReviewReviewerStructuredResult) json.RawMessage {
@@ -2557,7 +2563,7 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		ReviewerDisagreement:  input.OrchestratorSynthesis.ReviewerDisagreement,
 		ScopeMismatch:         input.OrchestratorSynthesis.ScopeMismatch,
 		UnresolvedUncertainty: input.OrchestratorSynthesis.UnresolvedUncertainty,
-		PromptInjectionFound:  codeReviewDescriptionPromptInjectionLikely(stringPtrValue(input.PullRequest.Body)) || input.OrchestratorSynthesis.PromptInjectionDetected,
+		PromptInjectionFound:  codeReviewPromptInjectionLikely(stringPtrValue(input.PullRequest.Body), input.Job.RequestContext) || input.OrchestratorSynthesis.PromptInjectionDetected,
 	})
 	if reviewerQuorum < requiredReviewerQuorum {
 		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonReviewerQuorum, Actual: reviewerQuorum, Limit: requiredReviewerQuorum})
@@ -3091,6 +3097,27 @@ func codeReviewAuthor(job runCodeReviewPayload, pr models.PullRequest) string {
 		return author
 	}
 	return string(pr.AuthoredBy)
+}
+
+func codeReviewRequestContextAuthor(request *codereviewsvc.ReviewRequestContext) string {
+	if request == nil {
+		return ""
+	}
+	return request.AuthorLogin
+}
+
+func codeReviewRequestContextBody(request *codereviewsvc.ReviewRequestContext) string {
+	if request == nil {
+		return ""
+	}
+	return request.Body
+}
+
+func codeReviewRequestContextURL(request *codereviewsvc.ReviewRequestContext) string {
+	if request == nil {
+		return ""
+	}
+	return request.URL
 }
 
 func codeReviewAuthorClass(pr models.PullRequest) string {

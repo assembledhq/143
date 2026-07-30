@@ -20,13 +20,13 @@ Implemented:
 - code review session metadata, agent result, finding, and prompt-artifact tables tied to normal `sessions`
 - typed Go models and `pgx` stores for policies, review metadata, agent evidence, and findings
 - deterministic acceptable-risk evaluator, starter policy templates, final-review body rendering, and inline finding selection helpers
-- GitHub `review_requested` webhook adapter for configured bot reviewer identities, including local PR mirror creation for human-authored PRs
+- GitHub `review_requested` and PR issue-comment mention webhook adapters for configured bot reviewer identities, including authoritative PR snapshot loading and local mirror creation for human-authored PRs
 - event-driven reassessment after the initial reviewer request when the PR head changes, plus delivery-keyed explicit rerequests that can reassess the same head after a non-approval; durable follow-up jobs serialize requests behind active work and a terminal stop applies once 143 approves, while PR metadata, readiness, human reviews/comments/threads, checks, and commit statuses continue to synchronize without starting reviewer sessions
 - service-layer code review request orchestration that resolves/materializes policy, marks stale older heads, reuses running sessions, creates normal code-review sessions, and enqueues `run_code_review`
 - `run_code_review` worker handler that loads the captured policy version, fans out read-only reviewer threads running native `/review`, synthesizes via an orchestrator thread, records agent results, submits a GitHub review when the worker has GitHub credentials, and stores the GitHub review id/url
 - live reviewer/orchestrator evidence ingestion harvested from running review threads rather than pre-existing stored result rows
 - evidence-gated approval path that evaluates reviewer results, blocking findings, PR health, reviewed head SHA, required check state, changed-file size/path/category context from GitHub, and the captured policy before choosing approval vs comment-only
-- coding-agent orchestrator evaluation of PR description requirements, structured findings at every severity, and typed non-finding human-review reasons, with prompt-injection screening; the backend derives the decision from those explicit signals
+- coding-agent orchestrator evaluation of PR description requirements, structured findings at every severity, and typed non-finding human-review reasons, with prompt-injection screening; an explicit issue-comment trigger is supplied as bounded, untrusted request context, and the backend derives the decision from the resulting explicit signals
 - prompt artifact storage and recovery for rendered reviewer/orchestrator prompts and their structured outputs
 - inline-comment posting with marker-based dedupe/update and posted-comment id persistence
 - GitHub changed-file fetch support for PR file/line threshold and coarse risk-category evaluation
@@ -41,7 +41,7 @@ Implemented:
 
 Deferred:
 
-- always-on auto-review and slash-command triggers (the `slash_command` and `auto_policy` trigger sources are reserved but unwired; only explicit `review_requested` assignment runs the bot)
+- always-on auto-review and slash-command triggers (the `slash_command` and `auto_policy` trigger sources are reserved but unwired; only explicit reviewer assignment or an explicit configured-team mention in a PR conversation comment runs the bot)
 - structural review-depth behavior (quick/standard/deep is passed to reviewer/orchestrator prompts but does not change fan-out)
 - aggregate reporting/insights across reviews
 
@@ -70,12 +70,13 @@ This feature fills the post-PR slot: reviewer automation in GitHub, where teams 
 
 ## Recommendation
 
-Ship **Reviewer Bot With 143 Code Review Sessions**, triggered by explicit GitHub reviewer assignment in v1.
+Ship **Reviewer Bot With 143 Code Review Sessions**, triggered by explicit GitHub reviewer assignment or configured-team mention.
 
 Recommended v1 scope:
 
 - GitHub team trigger (`@org/143-code-reviewer`) backed by GitHub App-authored final reviews.
 - `review_requested` trigger for selected repositories.
+- `issue_comment` trigger when a PR conversation comment mentions the configured team, with the bounded comment supplied to the orchestrator as untrusted request context.
 - Normal 143 code review sessions keyed by org, repository, PR, head SHA, and policy version.
 - Editable PR-description policy and acceptable-risk starter templates.
 - Two reviewer agents plus one orchestrator by default.
@@ -99,10 +100,11 @@ Defer:
 Developer opens PR
         |
         v
-Developer requests "143 Code Reviewer" in GitHub
+Developer requests "143 Code Reviewer" in GitHub, either through the reviewer
+picker or by mentioning the configured team in a PR conversation comment
         |
         v
-143 receives review_requested webhook and creates a code review session
+143 receives the explicit-request webhook and creates a code review session
         |
         v
 Best-effort async job creates or refreshes one PR comment linked to the session
@@ -129,8 +131,9 @@ Replace the rolling PR comment with the result
         |
         v
 Until approval, later commits automatically rerun the assessment, and a new
-explicit reviewer request reruns it even at the same head. Both update the
-existing formal-review marker and rolling PR comment. Equivalent webhook
+explicit reviewer request reruns it even at the same head. A triggering comment
+is included only in orchestrator synthesis as untrusted guidance. Both update
+the existing formal-review marker and rolling PR comment. Equivalent webhook
 deliveries are idempotent; other webhook activity only synchronizes PR state.
 Approval is final.
 ```
@@ -146,6 +149,7 @@ Primary interaction:
 - A 143 admin creates or repairs the `143-code-reviewer` GitHub team from the Code reviews configuration page.
 - 143 grants that team read access to the selected repository and stores the team slug as the repo's active trigger.
 - A user requests `@org/143-code-reviewer` as a team reviewer on a PR.
+- Alternatively, a repository owner, organization member, or collaborator mentions `@org/143-code-reviewer` in a PR conversation comment; this starts a fresh review and carries that comment into orchestrator synthesis as escaped, untrusted context. External users, bots, and GitHub Apps cannot start reviews through comments.
 - 143 asynchronously creates or refreshes one PR conversation comment that links to the running review session.
 - The bot submits a formal GitHub review for approval state and a configurable number of inline comments on changed lines. Its body keeps the visible result as a fallback until the rolling comment update succeeds, then becomes marker-only; it does not publish a commit status.
 - The rolling conversation comment is replaced with the visible result, and later review passes reuse the same comment.
@@ -445,8 +449,9 @@ Automatic commit reassessments use the PR head SHA and captured policy as their 
 Rules:
 
 - Redelivery of the same GitHub `review_requested` event reuses the assessment keyed to that delivery ID even if head or policy state changed afterward. A genuinely new explicit request after a non-approval creates a distinct assessment even for the same PR head SHA. If the original attempt never reached the durable worker queue, redelivery creates one immutable replacement attempt under the same delivery identity.
+- A created PR issue comment that mentions the configured reviewer team follows the same explicit-request lifecycle. The comment ID provides a stable fallback identity when delivery metadata is unavailable, and the request context is bounded before it enters durable session/job state.
 - If a new explicit request arrives while a review is already running for the same PR head SHA, retain a durable starter job until the active assessment finishes, then create the requested assessment. The request carries reviewer/team identity through the worker so GitHub assignment cleanup still occurs.
-- After the first explicit reviewer request, new commits automatically enqueue a fresh assessment until 143 approves. Human review submissions/edits/dismissals, inline review comment changes, review thread changes, PR title/description edits, readiness changes, completed checks, and commit-status updates do not enqueue reviewer sessions; after a description-only edit, the author explicitly requests 143 again.
+- After the first explicit reviewer request, new commits automatically enqueue a fresh assessment until 143 approves. Human review submissions/edits/dismissals, ordinary issue and inline review comment changes, review thread changes, PR title/description edits, readiness changes, completed checks, and commit-status updates do not enqueue reviewer sessions; the exception is a newly created PR conversation comment that explicitly mentions the configured reviewer team.
 - If the PR receives new commits while review is running, mark the running session stale, stop before approval, and enqueue a new session for the new head SHA.
 - If new commits arrive while agents are running, retain a durable starter job until the older assessment finishes. Re-read mutable PR metadata and check gates immediately before every final recommendation, but do not queue a new session solely because metadata, human review activity, or CI changed. A newer head coalesces duplicate webhook deliveries for that commit.
 - A submitted 143 approval is monotonic for the PR. Later webhook changes and explicit reviewer rerequests are ignored so automation never dismisses or contradicts an approval that has already occurred.

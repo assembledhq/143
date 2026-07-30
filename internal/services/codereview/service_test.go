@@ -420,6 +420,91 @@ func TestService_HandleReviewRequested(t *testing.T) {
 	}
 }
 
+func TestService_HandleReviewMentioned(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		repository      string
+		body            string
+		configuredTeam  string
+		expectProcessed bool
+	}{
+		{
+			name:            "starts contextual review for configured team mention",
+			repository:      "assembledhq/assembled",
+			body:            "@assembledhq/143-code-reviewer Review again. This behavior is not a true visual change.",
+			configuredTeam:  "143-code-reviewer",
+			expectProcessed: true,
+		},
+		{
+			name:           "ignores same team slug from a different organization",
+			repository:     "assembledhq/assembled",
+			body:           "@other-org/143-code-reviewer review this",
+			configuredTeam: "143-code-reviewer",
+		},
+		{
+			name:           "ignores an unrelated team mention",
+			repository:     "assembledhq/assembled",
+			body:           "@assembledhq/platform-reviewers review this",
+			configuredTeam: "143-code-reviewer",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			requested := newReviewRequestedInput(func(input *ReviewRequestedInput) {
+				input.GitHubRepo = tt.repository
+				input.RequestedLogin = ""
+				input.DeliveryID = "delivery-comment-143"
+			})
+			policies := newPolicyStub()
+			metadata := &metadataStub{}
+			sessions := &sessionStub{}
+			jobs := &jobStub{jobID: uuid.New(), active: true}
+			triggers := &triggerStub{setting: models.CodeReviewGitHubTriggerSetting{
+				OrgID: requested.OrgID, RepositoryID: requested.RepositoryID, TeamSlug: tt.configuredTeam,
+			}}
+			svc := NewService(policies, metadata, sessions, jobs, zerolog.Nop(), Config{})
+			svc.SetGitHubTriggerStore(triggers)
+
+			result, err := svc.HandleReviewMentioned(context.Background(), ReviewMentionedInput{
+				ReviewRequestedInput: requested,
+				CommentID:            5124237355,
+				CommentAuthor:        "assembled-matthew",
+				CommentBody:          tt.body,
+				CommentURL:           "https://github.com/assembledhq/assembled/pull/54903#issuecomment-5124237355",
+			})
+
+			require.NoError(t, err, "HandleReviewMentioned should process valid comment input without error")
+			require.Equal(t, tt.expectProcessed, result.Processed, "mention processing should match the configured repository team")
+			if !tt.expectProcessed {
+				require.Equal(t, "reviewer_not_mentioned", result.IgnoredReason, "ignored comment should explain that no configured reviewer was mentioned")
+				require.Equal(t, 0, sessions.createCalls, "ignored comment should not create a review session")
+				require.Equal(t, 0, jobs.enqueueCalls, "ignored comment should not enqueue review work")
+				return
+			}
+
+			require.Equal(t, models.CodeReviewTriggerSourceTeamReviewer, result.TriggerSource, "comment mention should retain the team reviewer trigger source")
+			require.Equal(t, 1, sessions.createCalls, "configured mention should create a fresh review session")
+			require.Equal(t, 1, jobs.enqueueCalls, "configured mention should enqueue one review job")
+			require.Equal(t, tt.configuredTeam, jobs.payload.RequestedTeamSlug, "review job should retain the mentioned team for GitHub cleanup")
+			require.NotNil(t, jobs.payload.RequestContext, "review job should carry the human request into orchestration")
+			require.Equal(t, tt.body, jobs.payload.RequestContext.Body, "review job should preserve the complete comment body")
+			require.Equal(t, "assembled-matthew", jobs.payload.RequestContext.AuthorLogin, "review job should preserve the comment author")
+
+			var revisionContext struct {
+				ChangeReason   string                `json:"change_reason"`
+				RequestContext *ReviewRequestContext `json:"request_context"`
+			}
+			require.NoError(t, json.Unmarshal(sessions.created.RevisionContext, &revisionContext), "review session should retain auditable mention context")
+			require.Equal(t, commentMentionChangeReason, revisionContext.ChangeReason, "review session should identify the issue-comment trigger")
+			require.Equal(t, jobs.payload.RequestContext, revisionContext.RequestContext, "session and worker should share the same request context")
+		})
+	}
+}
+
 func TestService_ReviewStatusCommentDispatchIsAsynchronousAndBestEffort(t *testing.T) {
 	t.Parallel()
 
