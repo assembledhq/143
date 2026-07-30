@@ -347,14 +347,29 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if strings.TrimSpace(submission.FinalReviewBody) != "" {
 			finalReviewBody = submission.FinalReviewBody
 		}
+		var filesChanged, additions, deletions, linesChanged *int
+		if changedFilesAvailable {
+			fileCount := len(changedFiles)
+			additionCount, deletionCount := codeReviewLineChanges(changedFiles)
+			lineCount := additionCount + deletionCount
+			filesChanged = &fileCount
+			additions = &additionCount
+			deletions = &deletionCount
+			linesChanged = &lineCount
+		}
 		removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
 		if _, err := stores.CodeReviews.CompleteReview(ctx, job.OrgID, db.CompleteCodeReviewParams{
-			SessionID:       job.SessionID,
-			Decision:        decision.Decision,
-			Acceptable:      decision.Acceptable,
-			GitHubReviewID:  submission.GitHubReviewID,
-			GitHubReviewURL: submission.GitHubReviewURL,
-			FinalReviewBody: finalReviewBody,
+			SessionID:         job.SessionID,
+			Decision:          decision.Decision,
+			Acceptable:        decision.Acceptable,
+			GitHubReviewID:    submission.GitHubReviewID,
+			GitHubReviewURL:   submission.GitHubReviewURL,
+			FinalReviewBody:   finalReviewBody,
+			FilesChanged:      filesChanged,
+			Additions:         additions,
+			Deletions:         deletions,
+			LinesChanged:      linesChanged,
+			RiskReasonDetails: decision.RiskReasonDetails,
 		}); err != nil {
 			return fmt.Errorf("complete code review: %w", err)
 		}
@@ -2832,11 +2847,18 @@ func codeReviewBlockingFindings(findings []models.CodeReviewFinding) int {
 }
 
 func codeReviewLinesChanged(files []codereviewsvc.PullRequestFile) int {
-	lines := 0
+	additions, deletions := codeReviewLineChanges(files)
+	return additions + deletions
+}
+
+func codeReviewLineChanges(files []codereviewsvc.PullRequestFile) (int, int) {
+	additions := 0
+	deletions := 0
 	for _, file := range files {
-		lines += file.Additions + file.Deletions
+		additions += file.Additions
+		deletions += file.Deletions
 	}
-	return lines
+	return additions, deletions
 }
 
 func codeReviewChangedPaths(files []codereviewsvc.PullRequestFile) []string {

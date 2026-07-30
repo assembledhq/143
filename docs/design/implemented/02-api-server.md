@@ -1,6 +1,6 @@
 # Design: Go API Server
 
-> **Status:** Implemented | **Last reviewed:** 2026-03-25
+> **Status:** Implemented | **Last reviewed:** 2026-07-30
 
 This document describes the Go backend architecture for 143.dev.
 
@@ -285,6 +285,16 @@ Using `chi` for the HTTP router. All API routes are under `/api/v1/`.
 ├── /pull-requests
 │   ├── GET    /                    # list PRs
 │   └── GET    /:id                 # get PR details + validation results
+│
+├── /code-reviews
+│   ├── GET    /                    # list code review assessments
+│   ├── GET    /stats               # compact review outcome summary
+│   ├── GET    /analytics           # time/repository-scoped approval, author, size, finding, and reason report
+│   ├── GET    /stream              # org-scoped lifecycle event stream
+│   ├── GET    /templates           # starter policy templates
+│   ├── GET    /prompt-examples     # policy prompt examples
+│   ├── GET    /:id/evidence        # agent results, findings, and prompt artifacts
+│   └── POST   /:id/retry           # retry an eligible failed assessment
 │
 ├── /experiments
 │   ├── GET    /                    # list deploy impact experiments

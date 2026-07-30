@@ -412,6 +412,105 @@ func TestCodeReviewHandler_StatsRejectsInvalidTimeWindow(t *testing.T) {
 	require.Contains(t, rr.Body.String(), "INVALID_TIMESTAMP", "invalid time windows should use the shared timestamp error")
 }
 
+func TestCodeReviewHandler_AnalyticsReturnsReport(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repositoryID := uuid.New()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery(`(?s)WITH filtered_reviews AS MATERIALIZED.*m\.repository_id = @repository_id.*finding_rollup AS.*FROM summary`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"reviews_requested", "reviews_completed", "automatically_approved", "not_approved",
+			"needs_human_review", "comment_only", "blocked", "approval_not_posted",
+			"failed_reviews", "stale_reviews", "reviews_with_size_data",
+			"reviews_with_change_breakdown", "average_lines_changed", "median_lines_changed",
+			"average_additions", "median_additions", "average_deletions", "median_deletions",
+			"average_files_changed", "median_files_changed",
+			"reviews_above_size_limit", "approvals_above_size_limit", "reviews_with_findings",
+			"reviews_with_blocking_findings", "total_findings", "authors", "size_buckets",
+			"non_approval_reasons",
+		}).AddRow(
+			6, 5, 3, 2, 2, 0, 0, 0, 1, 0, 0,
+			0, -1, -1, -1, -1, -1, -1, -1, -1,
+			0, 0, 1, 1, 2, []byte(`[]`), []byte(`[]`), []byte(`[]`),
+		))
+	handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-reviews/analytics?repository_id="+repositoryID.String(), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.Analytics(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "analytics should return the selected report")
+	require.JSONEq(t, `{
+		"data": {
+			"summary": {
+				"reviews_requested": 6,
+				"reviews_completed": 5,
+				"automatically_approved": 3,
+				"not_approved": 2,
+				"needs_human_review": 2,
+				"comment_only": 0,
+				"blocked": 0,
+				"approval_not_posted": 0,
+				"failed_reviews": 1,
+				"stale_reviews": 0,
+				"reviews_with_size_data": 0,
+				"reviews_with_change_breakdown": 0,
+				"average_lines_changed": null,
+				"median_lines_changed": null,
+				"average_additions": null,
+				"median_additions": null,
+				"average_deletions": null,
+				"median_deletions": null,
+				"average_files_changed": null,
+				"median_files_changed": null,
+				"reviews_above_size_limit": 0,
+				"approvals_above_size_limit": 0,
+				"reviews_with_findings": 1,
+				"reviews_with_blocking_findings": 1,
+				"total_findings": 2
+			},
+			"authors": [],
+			"size_buckets": [],
+			"non_approval_reasons": []
+		}
+	}`, rr.Body.String(), "analytics should return exact nullable metrics and empty breakdowns")
+	require.NoError(t, mock.ExpectationsWereMet(), "analytics handler should apply the repository scope to every query")
+}
+
+func TestCodeReviewHandler_AnalyticsRejectsInvalidFilters(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		query        string
+		expectedCode string
+	}{
+		{name: "repository", query: "?repository_id=invalid", expectedCode: "INVALID_REPOSITORY_ID"},
+		{name: "time window", query: "?created_after=invalid", expectedCode: "INVALID_TIMESTAMP"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := NewCodeReviewHandler(nil, nil)
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/code-reviews/analytics"+tt.query, nil)
+			req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+			rr := httptest.NewRecorder()
+
+			handler.Analytics(rr, req)
+
+			require.Equal(t, http.StatusBadRequest, rr.Code, "invalid analytics filters should return a bad request")
+			require.Contains(t, rr.Body.String(), tt.expectedCode, "analytics should identify the invalid filter")
+		})
+	}
+}
+
 func TestCodeReviewHandler_ListRejectsCursorOutsideOrganization(t *testing.T) {
 	t.Parallel()
 

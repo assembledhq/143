@@ -43,6 +43,19 @@ When automatic recovery is exhausted, the failed attempt keeps a concise error a
 
 A retry is rejected if the pull request has moved to another commit, is no longer open, already has a 143 approval, already has a newer replacement, or the current code review policy is disabled.
 
+## Evaluate approval behavior
+
+Use the **Analytics** tab to evaluate a repository or the organization over the last 7, 30, or 90 days, or across all recorded reviews. It reports completed automatic approvals and non-approvals, approval rate, usage by pull request author, average and median additions, deletions, and file counts, approval rate by total pull request size, finding rates, historical size-limit hits, and the most common structured reasons reviews required human judgment.
+
+The change and file summaries show their captured sample size. New reviews persist additions and deletions separately, plus their added-plus-deleted total and structured non-approval reasons used for the decision. Older reviews are included when their stored review result contains recoverable total-line and file statistics, but the historical review body does not preserve the additions/deletions split and may not contribute to the non-approval-reason breakdown. Treat a small historical sample as directional rather than representative.
+
+Use the report to tune policy deliberately:
+
+- A high approval rate on large pull requests may justify tighter size or path limits.
+- Frequent size-limit non-approvals may mean the limit is intentionally protective or unrealistically low for the team's normal work.
+- Frequent blocking findings point to code-quality concerns, while description, check, quorum, or sensitive-path reasons point to specific deterministic safeguards.
+- PR-author totals show whose pull requests receive automated reviews; they do not claim who clicked or mentioned the reviewer.
+
 ## Separate guidance from safeguards
 
 **Additional review instructions** are optional team guidance for priorities, domain risks, and comment style. They are appended after each agent's native `/review` command. Leave them empty to use built-in reviewer behavior.

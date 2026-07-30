@@ -317,6 +317,18 @@ export const api = {
       const qs = searchParams.toString();
       return get<import('./types').SingleResponse<import('./types').CodeReviewStats>>(`/api/v1/code-reviews/stats${qs ? `?${qs}` : ''}`);
     },
+    analytics: (params?: {
+      repository_id?: string;
+      created_after?: string;
+      created_before?: string;
+    }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
+      if (params?.created_after) searchParams.set('created_after', params.created_after);
+      if (params?.created_before) searchParams.set('created_before', params.created_before);
+      const qs = searchParams.toString();
+      return get<import('./types').SingleResponse<import('./types').CodeReviewAnalytics>>(`/api/v1/code-reviews/analytics${qs ? `?${qs}` : ''}`);
+    },
     templates: () => get<import('./types').ListResponse<import('./types').CodeReviewTemplateOption>>('/api/v1/code-reviews/templates'),
     promptExamples: () => get<import('./types').SingleResponse<import('./types').CodeReviewPromptExamplesResponse>>('/api/v1/code-reviews/prompt-examples'),
     policyEvent: (body: import('./types').CodeReviewPolicyAnalyticsEvent) => post<void>('/api/v1/code-reviews/policy-events', body),

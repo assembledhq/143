@@ -402,6 +402,40 @@ func (h *CodeReviewHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewStats]{Data: stats})
 }
 
+func parseCodeReviewAnalyticsFilters(w http.ResponseWriter, r *http.Request) (db.CodeReviewAnalyticsFilters, bool) {
+	createdAfter, createdBefore, ok := parseCodeReviewTimeFilters(w, r)
+	if !ok {
+		return db.CodeReviewAnalyticsFilters{}, false
+	}
+	filters := db.CodeReviewAnalyticsFilters{
+		CreatedAfter:  createdAfter,
+		CreatedBefore: createdBefore,
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("repository_id")); raw != "" {
+		repositoryID, err := uuid.Parse(raw)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
+			return db.CodeReviewAnalyticsFilters{}, false
+		}
+		filters.RepositoryID = &repositoryID
+	}
+	return filters, true
+}
+
+func (h *CodeReviewHandler) Analytics(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	filters, ok := parseCodeReviewAnalyticsFilters(w, r)
+	if !ok {
+		return
+	}
+	analytics, err := h.store.GetReviewAnalytics(r.Context(), orgID, filters)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_ANALYTICS_LOAD_FAILED", "failed to load code review analytics", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewAnalytics]{Data: analytics})
+}
+
 func (h *CodeReviewHandler) Templates(w http.ResponseWriter, r *http.Request) {
 	_ = middleware.OrgIDFromContext(r.Context())
 	writeJSON(w, http.StatusOK, models.ListResponse[models.CodeReviewTemplateOption]{Data: models.CodeReviewPolicyTemplates()})

@@ -69,6 +69,133 @@ func TestAutomationNoChangeBackfillPinsSafeNoopPredicates(t *testing.T) {
 	require.Contains(t, sql, "session_publish_state update trigger mirrors this reset", "migration should document the existing primary-changeset mirror contract")
 }
 
+func TestCodeReviewAnalyticsMigrationPinsSafeHistoricalStatsBackfill(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000263_code_review_analytics.up.sql")
+	require.NoError(t, err, "test should read the code review analytics migration")
+	sql := string(body)
+
+	require.Contains(t, sql, "WITH matched AS MATERIALIZED", "backfill should evaluate the generated review fact once")
+	require.Contains(t, sql, "Review facts:[*][*]", "backfill should only parse the generated review facts paragraph")
+	require.Contains(t, sql, "Why:[*][*] It met the configured policy:", "backfill should support the deterministic legacy approval explanation")
+	require.Contains(t, sql, "change_stats[1]::numeric", "backfill should parse untrusted historical digits without narrowing directly to integer")
+	require.Contains(t, sql, "lines_changed BETWEEN 0 AND 2147483647", "backfill should only narrow values that fit the destination column")
+	require.NotContains(t, sql, "'([0-9]+) changed lines? across ([0-9]+) files?'", "backfill should not extract change counts from arbitrary review prose")
+}
+
+func TestCodeReviewAnalyticsMigrationPostgresBehavior(t *testing.T) {
+	t.Parallel()
+
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set TEST_DATABASE_URL to run the PostgreSQL analytics migration behavior test")
+	}
+
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, databaseURL)
+	require.NoError(t, err, "test should connect to TEST_DATABASE_URL")
+	defer func() {
+		require.NoError(t, conn.Close(context.Background()), "test should close the PostgreSQL connection")
+	}()
+
+	schema := "test_code_review_analytics_migration_" + strings.ReplaceAll(uuid.NewString(), "-", "_")
+	_, err = conn.Exec(ctx, `CREATE SCHEMA `+schema)
+	require.NoError(t, err, "test should create an isolated schema")
+	defer func() {
+		_, cleanupErr := conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS `+schema+` CASCADE`)
+		require.NoError(t, cleanupErr, "test should remove the isolated schema")
+	}()
+	_, err = conn.Exec(ctx, `SET search_path TO `+schema+`, public`)
+	require.NoError(t, err, "test should isolate migration objects to the test schema")
+
+	_, err = conn.Exec(ctx, `
+		CREATE TABLE code_review_session_metadata (
+			id uuid PRIMARY KEY,
+			org_id uuid NOT NULL,
+			status text NOT NULL,
+			final_review_body text,
+			created_at timestamptz NOT NULL,
+			test_case text NOT NULL
+		)
+	`)
+	require.NoError(t, err, "test should create the pre-migration review metadata schema")
+
+	tests := []struct {
+		name                 string
+		body                 string
+		expectedLinesChanged int
+		expectedFilesChanged int
+	}{
+		{
+			name:                 "generated review facts",
+			body:                 "**Review facts:** 180 changed lines across 4 files · required checks passed",
+			expectedLinesChanged: 180,
+			expectedFilesChanged: 4,
+		},
+		{
+			name:                 "deterministic approval explanation",
+			body:                 "**Why:** It met the configured policy: 1 changed line across 1 file.",
+			expectedLinesChanged: 1,
+			expectedFilesChanged: 1,
+		},
+		{
+			name: "model prose before generated review facts",
+			body: "**Change:** The migration rewrites 7 changed lines across 2 files.\n\n" +
+				"**Review facts:** 250 changed lines across 8 files · reviewer quorum 2/2",
+			expectedLinesChanged: 250,
+			expectedFilesChanged: 8,
+		},
+		{
+			name:                 "model prose only",
+			body:                 "**Change:** The migration rewrites 7 changed lines across 2 files.",
+			expectedLinesChanged: -1,
+			expectedFilesChanged: -1,
+		},
+		{
+			name:                 "generated fact outside integer range",
+			body:                 "**Review facts:** 99999999999999999999 changed lines across 1 file",
+			expectedLinesChanged: -1,
+			expectedFilesChanged: -1,
+		},
+	}
+	orgID := uuid.New()
+	for _, tt := range tests {
+		_, err = conn.Exec(ctx, `
+			INSERT INTO code_review_session_metadata
+				(id, org_id, status, final_review_body, created_at, test_case)
+			VALUES ($1, $2, 'completed', $3, now(), $4)
+		`, uuid.New(), orgID, tt.body, tt.name)
+		require.NoError(t, err, "test should seed a historical review body")
+	}
+
+	body, err := os.ReadFile("../../migrations/000263_code_review_analytics.up.sql")
+	require.NoError(t, err, "test should read the code review analytics migration")
+	_, err = conn.Exec(ctx, string(body))
+	require.NoError(t, err, "analytics migration should safely backfill historical review statistics")
+
+	actual := make(map[string][2]int, len(tests))
+	rows, err := conn.Query(ctx, `
+		SELECT test_case, COALESCE(lines_changed, -1), COALESCE(files_changed, -1)
+		FROM code_review_session_metadata
+	`)
+	require.NoError(t, err, "test should query the backfilled review statistics")
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		var linesChanged, filesChanged int
+		require.NoError(t, rows.Scan(&name, &linesChanged, &filesChanged), "test should scan a backfilled review row")
+		actual[name] = [2]int{linesChanged, filesChanged}
+	}
+	require.NoError(t, rows.Err(), "test should finish reading the backfilled review statistics")
+
+	expected := make(map[string][2]int, len(tests))
+	for _, tt := range tests {
+		expected[tt.name] = [2]int{tt.expectedLinesChanged, tt.expectedFilesChanged}
+	}
+	require.Equal(t, expected, actual, "backfill should use only generated facts and ignore unsafe or model-authored values")
+}
+
 func TestSessionChangesetsMigrationPostgresBehavior(t *testing.T) {
 	t.Parallel()
 

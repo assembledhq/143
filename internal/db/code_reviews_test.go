@@ -525,7 +525,8 @@ func TestCodeReviewStore_CompleteReviewPublishesUpdate(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("UPDATE code_review_session_metadata")).
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
@@ -558,6 +559,95 @@ func TestCodeReviewStore_CompleteReviewPublishesUpdate(t *testing.T) {
 			return false
 		}
 	}, 2*time.Second, 20*time.Millisecond, "CompleteReview should publish a code review update event to subscribers")
+}
+
+func TestCodeReviewStore_CompleteReviewRejectsInvalidChangeBreakdown(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		params        func() CompleteCodeReviewParams
+		expectedError string
+	}{
+		{
+			name: "negative additions",
+			params: func() CompleteCodeReviewParams {
+				additions, deletions, linesChanged := -1, 2, 1
+				return CompleteCodeReviewParams{
+					Decision:     models.CodeReviewDecisionApproved,
+					Additions:    &additions,
+					Deletions:    &deletions,
+					LinesChanged: &linesChanged,
+				}
+			},
+			expectedError: "additions must be non-negative",
+		},
+		{
+			name: "negative deletions",
+			params: func() CompleteCodeReviewParams {
+				additions, deletions, linesChanged := 2, -1, 1
+				return CompleteCodeReviewParams{
+					Decision:     models.CodeReviewDecisionApproved,
+					Additions:    &additions,
+					Deletions:    &deletions,
+					LinesChanged: &linesChanged,
+				}
+			},
+			expectedError: "deletions must be non-negative",
+		},
+		{
+			name: "only one side of breakdown",
+			params: func() CompleteCodeReviewParams {
+				additions, linesChanged := 2, 2
+				return CompleteCodeReviewParams{
+					Decision:     models.CodeReviewDecisionApproved,
+					Additions:    &additions,
+					LinesChanged: &linesChanged,
+				}
+			},
+			expectedError: "additions and deletions must be provided together",
+		},
+		{
+			name: "breakdown without total",
+			params: func() CompleteCodeReviewParams {
+				additions, deletions := 2, 1
+				return CompleteCodeReviewParams{
+					Decision:  models.CodeReviewDecisionApproved,
+					Additions: &additions,
+					Deletions: &deletions,
+				}
+			},
+			expectedError: "lines_changed is required with additions and deletions",
+		},
+		{
+			name: "breakdown does not match total",
+			params: func() CompleteCodeReviewParams {
+				additions, deletions, linesChanged := 2, 1, 4
+				return CompleteCodeReviewParams{
+					Decision:     models.CodeReviewDecisionApproved,
+					Additions:    &additions,
+					Deletions:    &deletions,
+					LinesChanged: &linesChanged,
+				}
+			},
+			expectedError: "lines_changed must equal additions plus deletions",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock should initialize")
+			defer mock.Close()
+
+			_, err = NewCodeReviewStore(mock).CompleteReview(context.Background(), uuid.New(), tt.params())
+
+			require.EqualError(t, err, tt.expectedError, "CompleteReview should reject inconsistent change metrics before querying")
+			require.NoError(t, mock.ExpectationsWereMet(), "invalid change metrics should not issue a database query")
+		})
+	}
 }
 
 // TestCodeReviewStore_MarkStaleForPullRequestExceptHeadPublishesUpdate covers
@@ -850,7 +940,8 @@ func TestCodeReviewStore_CompleteReviewStoresGitHubReviewEvidence(t *testing.T) 
 	mock.ExpectQuery("UPDATE code_review_session_metadata").
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
@@ -858,13 +949,22 @@ func TestCodeReviewStore_CompleteReviewStoresGitHubReviewEvidence(t *testing.T) 
 			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id", "github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
 		}).AddRow(metadataID, orgID, sessionID, repoID, prID, policyID, "base", "head", false, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusCompleted, nil, nil, nil, nil, nil, false, &decision, &acceptable, false, nil, "key", nil, &reviewID, &reviewURL, &body, nil, &now, now))
 
+	filesChanged := 4
+	additions := 125
+	deletions := 55
+	linesChanged := 180
 	metadata, err := NewCodeReviewStore(mock).CompleteReview(context.Background(), orgID, CompleteCodeReviewParams{
-		SessionID:       sessionID,
-		Decision:        models.CodeReviewDecisionApproved,
-		Acceptable:      true,
-		GitHubReviewID:  &reviewID,
-		GitHubReviewURL: &reviewURL,
-		FinalReviewBody: body,
+		SessionID:         sessionID,
+		Decision:          models.CodeReviewDecisionApproved,
+		Acceptable:        true,
+		GitHubReviewID:    &reviewID,
+		GitHubReviewURL:   &reviewURL,
+		FinalReviewBody:   body,
+		FilesChanged:      &filesChanged,
+		Additions:         &additions,
+		Deletions:         &deletions,
+		LinesChanged:      &linesChanged,
+		RiskReasonDetails: []models.CodeReviewRiskReason{},
 	})
 
 	require.NoError(t, err, "CompleteReview should persist final review evidence")
@@ -1242,6 +1342,134 @@ func TestCodeReviewStore_GetReviewStatsAppliesOutcomeFilters(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "the stats outcome filter should add the expected SQL conditions")
 		})
 	}
+}
+
+func TestCodeReviewStore_GetReviewAnalyticsReturnsDecisionReport(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repositoryID := uuid.New()
+	createdAfter := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	averageLines := 142.5
+	medianLines := 96.0
+	averageAdditions := 100.5
+	medianAdditions := 70.0
+	averageDeletions := 42.0
+	medianDeletions := 26.0
+	averageFiles := 4.25
+	medianFiles := 3.0
+	authorAverage := 88.0
+	authorMedian := 72.0
+	authorAverageAdditions := 60.0
+	authorMedianAdditions := 50.0
+	authorAverageDeletions := 28.0
+	authorMedianDeletions := 22.0
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery(`(?s)WITH filtered_reviews AS MATERIALIZED.*m\.repository_id = @repository_id.*m\.created_at >= @created_after.*finding_rollup AS.*SELECT DISTINCT session_id.*FROM filtered_reviews.*FROM summary`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"reviews_requested", "reviews_completed", "automatically_approved", "not_approved",
+			"needs_human_review", "comment_only", "blocked", "approval_not_posted",
+			"failed_reviews", "stale_reviews", "reviews_with_size_data",
+			"reviews_with_change_breakdown", "average_lines_changed", "median_lines_changed",
+			"average_additions", "median_additions", "average_deletions", "median_deletions",
+			"average_files_changed", "median_files_changed",
+			"reviews_above_size_limit", "approvals_above_size_limit", "reviews_with_findings",
+			"reviews_with_blocking_findings", "total_findings", "authors", "size_buckets",
+			"non_approval_reasons",
+		}).AddRow(
+			32, 28, 17, 11, 8, 2, 0, 1, 2, 2, 24,
+			20, averageLines, medianLines, averageAdditions, medianAdditions,
+			averageDeletions, medianDeletions, averageFiles, medianFiles,
+			5, 0, 9, 3, 14,
+			[]byte(`[{
+				"author":"anya",
+				"reviews_completed":12,
+				"automatically_approved":9,
+				"not_approved":3,
+				"reviews_with_size_data":10,
+				"reviews_with_change_breakdown":9,
+				"average_lines_changed":88,
+				"median_lines_changed":72,
+				"average_additions":60,
+				"median_additions":50,
+				"average_deletions":28,
+				"median_deletions":22
+			}]`),
+			[]byte(`[
+				{"bucket":"0_49","reviews_completed":8,"automatically_approved":7},
+				{"bucket":"50_199","reviews_completed":12,"automatically_approved":8}
+			]`),
+			[]byte(`[
+				{"code":"lines_limit_exceeded","reviews":5},
+				{"code":"blocking_findings","reviews":3}
+			]`),
+		))
+
+	analytics, err := NewCodeReviewStore(mock).GetReviewAnalytics(context.Background(), orgID, CodeReviewAnalyticsFilters{
+		RepositoryID: &repositoryID,
+		CreatedAfter: &createdAfter,
+	})
+
+	require.NoError(t, err, "GetReviewAnalytics should return the selected report")
+	require.Equal(t, models.CodeReviewAnalytics{
+		Summary: models.CodeReviewAnalyticsSummary{
+			ReviewsRequested:            32,
+			ReviewsCompleted:            28,
+			AutomaticallyApproved:       17,
+			NotApproved:                 11,
+			NeedsHumanReview:            8,
+			CommentOnly:                 2,
+			Blocked:                     0,
+			ApprovalNotPosted:           1,
+			FailedReviews:               2,
+			StaleReviews:                2,
+			ReviewsWithSizeData:         24,
+			ReviewsWithChangeBreakdown:  20,
+			AverageLinesChanged:         &averageLines,
+			MedianLinesChanged:          &medianLines,
+			AverageAdditions:            &averageAdditions,
+			MedianAdditions:             &medianAdditions,
+			AverageDeletions:            &averageDeletions,
+			MedianDeletions:             &medianDeletions,
+			AverageFilesChanged:         &averageFiles,
+			MedianFilesChanged:          &medianFiles,
+			ReviewsAboveSizeLimit:       5,
+			ApprovalsAboveSizeLimit:     0,
+			ReviewsWithFindings:         9,
+			ReviewsWithBlockingFindings: 3,
+			TotalFindings:               14,
+		},
+		Authors: []models.CodeReviewAuthorAnalytics{
+			{
+				Author:                     "anya",
+				ReviewsCompleted:           12,
+				AutomaticallyApproved:      9,
+				NotApproved:                3,
+				ReviewsWithSizeData:        10,
+				ReviewsWithChangeBreakdown: 9,
+				AverageLinesChanged:        &authorAverage,
+				MedianLinesChanged:         &authorMedian,
+				AverageAdditions:           &authorAverageAdditions,
+				MedianAdditions:            &authorMedianAdditions,
+				AverageDeletions:           &authorAverageDeletions,
+				MedianDeletions:            &authorMedianDeletions,
+			},
+		},
+		SizeBuckets: []models.CodeReviewSizeBucketAnalytics{
+			{Bucket: models.CodeReviewSizeBucketSmall, ReviewsCompleted: 8, AutomaticallyApproved: 7},
+			{Bucket: models.CodeReviewSizeBucketMedium, ReviewsCompleted: 12, AutomaticallyApproved: 8},
+		},
+		NonApprovalReasons: []models.CodeReviewNonApprovalReasonAnalytics{
+			{Code: models.CodeReviewRiskReasonLinesLimitExceeded, Reviews: 5},
+			{Code: models.CodeReviewRiskReasonBlockingFindings, Reviews: 3},
+		},
+	}, analytics, "GetReviewAnalytics should return exact summary, author, size, and reason metrics")
+	require.NoError(t, mock.ExpectationsWereMet(), "the single analytics query should remain org and filter scoped")
 }
 
 func TestCodeReviewStore_ListReviewsPageReturnsExactCountForEmptyPage(t *testing.T) {
