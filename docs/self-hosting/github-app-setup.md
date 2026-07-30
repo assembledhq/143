@@ -111,7 +111,7 @@ Under **Subscribe to events**, check:
 - [x] **Pull request** — track PR lifecycle (merge, close)
 - [x] **Pull request review** — capture review decisions (approved, changes requested)
 - [x] **Pull request review comment** — capture inline review comments
-- [x] **Issue comment** — trigger automations from PR conversation comments
+- [x] **Issue comment** — trigger automations and explicit Code Reviewer re-reviews from PR conversation comments
 - [x] **Deployment status** — detect deploys after merge
 - [x] **Organization** — keep GitHub organization auto-join rosters current when members are added, removed, or the org is renamed
 
@@ -184,7 +184,7 @@ Once configured, the flow is:
 2. **Admin installs the GitHub App** on their org — 143 receives the `installation` webhook and stores the installation ID + repo list
 3. **When 143 needs to act** (create a PR, push a commit), it signs a JWT with the App's private key, exchanges it for a short-lived installation token (valid 1 hour), and uses that token for API calls
 4. **When a user wants a PR created as themselves**, 143 sends them through the GitHub App user authorization flow at `/api/v1/users/me/github/callback`, stores a GitHub App user token, and then reuses or refreshes that token for future PRs
-5. **When an admin sets up the 143 Code Reviewer trigger team**, 143 uses that admin's GitHub App user token to create or repair the `143-code-reviewer` team and grant it read access to selected repositories. Humans can then manually request `@org/143-code-reviewer` on a PR to start a review.
+5. **When an admin sets up the 143 Code Reviewer trigger team**, 143 uses that admin's GitHub App user token to create or repair the `143-code-reviewer` team and grant it read access to selected repositories. Humans can then request the team through GitHub's reviewer picker. Repository owners, organization members, and collaborators can also mention `@org/143-code-reviewer` in a PR conversation comment to start a fresh review; external users, bots, and GitHub Apps cannot. The triggering comment is supplied to the review orchestrator as escaped, untrusted context, so requests such as “review again” or clarifications about expected behavior can guide the new synthesis without overriding review policy.
 6. **GitHub sends webhooks** when PRs are reviewed, merged, or closed — 143 updates its records and triggers follow-up actions (deploy detection, review feedback loops, etc.)
 
 ## Local development tips

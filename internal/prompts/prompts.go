@@ -307,12 +307,18 @@ type CodeReviewOrchestratorPromptData struct {
 	ReviewerOutputs            []string
 	Findings                   []string
 	ChangedFiles               []string
+	RequestContextAuthor       string
+	RequestContextBody         string
+	RequestContextURL          string
 	ReviewInstructions         string
 	AutomatedApprovalPolicy    string
 	UseAutomatedApprovalPolicy bool
 }
 
 func CodeReviewOrchestratorPrompt(data CodeReviewOrchestratorPromptData) string {
+	data.RequestContextAuthor = sanitizeUntrustedXML(data.RequestContextAuthor)
+	data.RequestContextBody = sanitizeUntrustedXML(data.RequestContextBody)
+	data.RequestContextURL = sanitizeUntrustedXML(data.RequestContextURL)
 	return render("code_review_orchestrator.template", data)
 }
 
