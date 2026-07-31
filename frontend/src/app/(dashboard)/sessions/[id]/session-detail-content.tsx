@@ -6834,7 +6834,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           )}
           {selectedIsPrimary && canManageSession && !hasPR && hasSessionChanges ? (
             <Card className="border-border/60">
-              <CardContent className="space-y-3 p-4">
+              <CardContent className="@container/readiness space-y-3 p-4">
                 <div className="flex flex-col gap-3">
                   <div className="flex min-w-0 flex-1 items-start gap-2">
                     <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
@@ -6854,7 +6854,10 @@ export function SessionDetailContent({ id }: { id: string }) {
                     </div>
                   </div>
                   {readinessPrimaryAction || readinessSecondaryReviewAction ? (
-                    <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
+                    <div
+                      className="grid shrink-0 grid-cols-1 gap-2 @min-[24rem]/readiness:grid-cols-[max-content_max-content] @min-[24rem]/readiness:items-center"
+                      data-testid="readiness-actions"
+                    >
                       {readinessPrimaryAction ? (
                         readinessPrimaryAction.label === "Review & fix" ? (
                           <DisabledTooltip disabled={readinessPrimaryAction.disabled} content={reviewActionDisabledReason}>
