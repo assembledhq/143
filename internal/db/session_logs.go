@@ -62,10 +62,41 @@ func (s *SessionLogStore) Create(ctx context.Context, log *models.SessionLog) er
 		"metadata":    log.Metadata,
 		"turn_number": log.TurnNumber,
 	}
+	if log.ActivityPhaseID != nil {
+		// The phase must belong to the same org, session, thread, and turn as the
+		// log line. Phase status is deliberately not constrained: an entry that
+		// closes a phase (final output, human input) can be persisted after the
+		// phase reaches its terminal status and still belongs to it.
+		query = `
+			INSERT INTO session_logs (session_id, org_id, thread_id, level, message, metadata, turn_number, activity_phase_id)
+			SELECT @session_id, @org_id, @thread_id, @level, @message, @metadata, @turn_number, @activity_phase_id
+			FROM sessions s
+			JOIN session_activity_phases p
+			  ON p.id = @activity_phase_id AND p.org_id = @org_id
+			 AND p.session_id = @session_id
+			 AND p.thread_id IS NOT DISTINCT FROM @thread_id
+			 AND p.turn_number = @turn_number
+			WHERE s.id = @session_id AND s.org_id = @org_id
+			RETURNING id, timestamp`
+		args["activity_phase_id"] = log.ActivityPhaseID
+	}
 
 	row := s.db.QueryRow(ctx, query, args)
 	if err := row.Scan(&log.ID, &log.Timestamp); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			// A phase-carrying insert can miss for two unrelated reasons: the
+			// session/org pair is invalid, or the phase does not belong to it.
+			// Only claim a phase mismatch once the session/org pair checks out,
+			// so a tenant isolation violation is never masked by the phase.
+			if log.ActivityPhaseID != nil {
+				var sessionInOrg bool
+				if checkErr := s.db.QueryRow(ctx,
+					`SELECT EXISTS(SELECT 1 FROM sessions WHERE id = @id AND org_id = @org_id)`,
+					pgx.NamedArgs{"id": log.SessionID, "org_id": log.OrgID},
+				).Scan(&sessionInOrg); checkErr == nil && sessionInOrg {
+					return wrapPhaseOwnershipError("create session log", log.ActivityPhaseID, err)
+				}
+			}
 			// Distinguish an org_id mismatch (tenant isolation violation) from a
 			// genuinely missing session, so callers and logs can treat them
 			// differently.
@@ -124,7 +155,7 @@ func (s *SessionLogStore) MarkAssistantTranscriptDuplicate(ctx context.Context, 
 
 func (s *SessionLogStore) ListByRunID(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionLog, error) {
 	query := `
-		SELECT sl.id, sl.session_id, sl.org_id, sl.thread_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number
+		SELECT sl.id, sl.session_id, sl.org_id, sl.thread_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number, sl.activity_phase_id
 		FROM session_logs sl
 		WHERE sl.session_id = @session_id AND sl.org_id = @org_id
 		ORDER BY sl.id ASC`
@@ -136,12 +167,12 @@ func (s *SessionLogStore) ListByRunID(ctx context.Context, orgID, sessionID uuid
 	if err != nil {
 		return nil, fmt.Errorf("query session logs: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionLog])
+	return pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.SessionLog])
 }
 
 func (s *SessionLogStore) GetByID(ctx context.Context, orgID, sessionID uuid.UUID, logID int64) (models.SessionLog, error) {
 	query := `
-		SELECT sl.id, sl.session_id, sl.org_id, sl.thread_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number
+		SELECT sl.id, sl.session_id, sl.org_id, sl.thread_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number, sl.activity_phase_id
 		FROM session_logs sl
 		WHERE sl.id = @id AND sl.session_id = @session_id AND sl.org_id = @org_id`
 
@@ -153,7 +184,7 @@ func (s *SessionLogStore) GetByID(ctx context.Context, orgID, sessionID uuid.UUI
 	if err != nil {
 		return models.SessionLog{}, fmt.Errorf("query session log: %w", err)
 	}
-	log, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionLog])
+	log, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.SessionLog])
 	if err != nil {
 		return models.SessionLog{}, err
 	}
@@ -162,7 +193,7 @@ func (s *SessionLogStore) GetByID(ctx context.Context, orgID, sessionID uuid.UUI
 
 func (s *SessionLogStore) ListByRunIDSince(ctx context.Context, orgID, sessionID uuid.UUID, sinceID int64) ([]models.SessionLog, error) {
 	query := `
-		SELECT sl.id, sl.session_id, sl.org_id, sl.thread_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number
+		SELECT sl.id, sl.session_id, sl.org_id, sl.thread_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number, sl.activity_phase_id
 		FROM session_logs sl
 		WHERE sl.session_id = @session_id AND sl.org_id = @org_id AND sl.id > @since_id
 		ORDER BY sl.id ASC`
@@ -175,12 +206,12 @@ func (s *SessionLogStore) ListByRunIDSince(ctx context.Context, orgID, sessionID
 	if err != nil {
 		return nil, fmt.Errorf("query session logs since: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionLog])
+	return pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.SessionLog])
 }
 
 func (s *SessionLogStore) ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error) {
 	query := `
-		SELECT sl.id, sl.session_id, sl.org_id, sl.thread_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number
+		SELECT sl.id, sl.session_id, sl.org_id, sl.thread_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number, sl.activity_phase_id
 		FROM session_logs sl
 		WHERE sl.thread_id = @thread_id AND sl.org_id = @org_id
 		ORDER BY sl.id ASC`
@@ -192,7 +223,7 @@ func (s *SessionLogStore) ListByThread(ctx context.Context, orgID, threadID uuid
 	if err != nil {
 		return nil, fmt.Errorf("query thread logs: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionLog])
+	return pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.SessionLog])
 }
 
 func (s *SessionLogStore) ListByThreadTurns(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error) {
@@ -210,7 +241,7 @@ func (s *SessionLogStore) ListByThreadTurns(ctx context.Context, orgID, threadID
 		return []models.SessionLog{}, nil
 	}
 	query := `
-		SELECT sl.id, sl.session_id, sl.org_id, sl.thread_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number
+		SELECT sl.id, sl.session_id, sl.org_id, sl.thread_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number, sl.activity_phase_id
 		FROM session_logs sl
 		WHERE sl.thread_id = @thread_id AND sl.org_id = @org_id
 		  AND sl.turn_number = ANY(@turn_numbers::int[])
@@ -224,7 +255,7 @@ func (s *SessionLogStore) ListByThreadTurns(ctx context.Context, orgID, threadID
 	if err != nil {
 		return nil, fmt.Errorf("query thread logs by turns: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionLog])
+	return pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.SessionLog])
 }
 
 // ListByThreadLatestTurns returns the thread's logs for its latestTurns
@@ -235,7 +266,7 @@ func (s *SessionLogStore) ListByThreadLatestTurns(ctx context.Context, orgID, th
 		return []models.SessionLog{}, nil
 	}
 	query := `
-		SELECT sl.id, sl.session_id, sl.org_id, sl.thread_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number
+		SELECT sl.id, sl.session_id, sl.org_id, sl.thread_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number, sl.activity_phase_id
 		FROM session_logs sl
 		WHERE sl.thread_id = @thread_id AND sl.org_id = @org_id
 		  AND sl.turn_number > (
@@ -253,7 +284,7 @@ func (s *SessionLogStore) ListByThreadLatestTurns(ctx context.Context, orgID, th
 	if err != nil {
 		return nil, fmt.Errorf("query thread logs by latest turns: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionLog])
+	return pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.SessionLog])
 }
 
 // DeleteExpired removes session logs older than the given number of days.

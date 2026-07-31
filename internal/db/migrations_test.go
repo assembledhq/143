@@ -1396,3 +1396,41 @@ func TestSessionActivityPhaseMigrationEnforcesLifecycleAndDeliveryIdentity(t *te
 	require.Less(t, phaseDrop, batchDrop, "down migration should remove the dependent phase table before delivery batches")
 	require.Less(t, batchDrop, columnDrop, "down migration should remove delivery batches before the inbox column")
 }
+
+func TestActivityPhaseTranscriptAssociationMigration(t *testing.T) {
+	t.Parallel()
+
+	upBody, err := os.ReadFile("../../migrations/000265_activity_phase_transcript_associations.up.sql")
+	require.NoError(t, err, "test should read the transcript association up migration")
+	downBody, err := os.ReadFile("../../migrations/000265_activity_phase_transcript_associations.down.sql")
+	require.NoError(t, err, "test should read the transcript association down migration")
+
+	upSQL := string(upBody)
+	requiredFragments := []string{
+		"ALTER TABLE session_logs\n    ADD COLUMN activity_phase_id uuid;",
+		"ALTER TABLE session_messages\n    ADD COLUMN activity_phase_id uuid;",
+		"REFERENCES session_activity_phases(id) ON DELETE SET NULL",
+		"idx_session_logs_activity_phase",
+		"idx_session_messages_activity_phase",
+		"idx_session_human_input_requests_activity_phase",
+	}
+	for _, fragment := range requiredFragments {
+		require.Contains(t, upSQL, fragment, "transcript association migration should add every phase column and index")
+	}
+	require.Equal(
+		t,
+		3,
+		strings.Count(upSQL, "WHERE activity_phase_id IS NOT NULL"),
+		"every phase index should be partial so unassociated historical rows stay out of it",
+	)
+
+	downSQL := string(downBody)
+	for _, table := range []string{"session_logs", "session_messages", "session_human_input_requests"} {
+		require.Contains(
+			t,
+			downSQL,
+			"ALTER TABLE "+table+" DROP COLUMN IF EXISTS activity_phase_id",
+			"down migration should remove the phase column from every transcript table",
+		)
+	}
+}

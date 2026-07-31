@@ -470,9 +470,9 @@ describe("CodeReviewsPage", () => {
     expect(within(stats).getByText("Automatically approved")).toBeInTheDocument();
     expect(within(stats).getByText("92")).toBeInTheDocument();
     expect(within(stats).getByText("72% of completed reviews")).toBeInTheDocument();
-    expect(within(stats).getByText("Needs human review")).toBeInTheDocument();
-    expect(within(stats).getByText("21")).toBeInTheDocument();
-    expect(within(stats).getByText("16% of completed reviews")).toBeInTheDocument();
+    expect(within(stats).getByText("Approval rate")).toBeInTheDocument();
+    expect(within(stats).getByText("72%")).toBeInTheDocument();
+    expect(within(stats).getByText("21 need human review")).toBeInTheDocument();
     expect(within(stats).getByText("Median turnaround")).toBeInTheDocument();
     expect(within(stats).getByText("8m")).toBeInTheDocument();
     const timeWindow = screen.getByRole("combobox", { name: "Time window" });
@@ -626,6 +626,16 @@ describe("CodeReviewsPage", () => {
     await user.click(await screen.findByRole("tab", { name: "Analytics" }));
 
     expect(await screen.findByText("Usage by PR author")).toBeInTheDocument();
+    // The headline cards have to come from the same report as the tables below
+    // them. The stats endpoint answers a different question (current activity
+    // only, ignoring the status filter) and reports 128/92 for this fixture.
+    expect(screen.queryByRole("region", { name: "Code review statistics" })).not.toBeInTheDocument();
+    const approvalOutcomes = screen.getByLabelText("Approval outcomes");
+    expect(within(approvalOutcomes).getByText("28")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByText("32 total attempts")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByText("17")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByText("11")).toBeInTheDocument();
+    expect(within(approvalOutcomes).queryByText("128")).not.toBeInTheDocument();
     expect(screen.getByText("PR size and policy fit")).toBeInTheDocument();
     expect(screen.getByText("Why reviews were not approved")).toBeInTheDocument();
     expect(screen.getByText("Review findings")).toBeInTheDocument();
@@ -657,6 +667,23 @@ describe("CodeReviewsPage", () => {
       "+52",
       "-20",
     ]);
+    const overallRow = within(authorTable).getByRole("row", { name: /Overall/i });
+    expect(overallRow.closest("tfoot")).not.toBeNull();
+    expect(within(overallRow).getByRole("rowheader")).toHaveTextContent("Overall");
+    expect(within(overallRow).getAllByRole("cell").map((cell) => cell.textContent)).toEqual([
+      "28",
+      "17",
+      "11",
+      "61%",
+      "3",
+      "+70",
+      "-26",
+    ]);
+    expect(within(overallRow).queryByRole("link")).not.toBeInTheDocument();
+    expect(within(overallRow).getByRole("cell", { name: "3 median files changed overall" })).toBeInTheDocument();
+    expect(within(overallRow).getByRole("cell", { name: "+70 median additions overall" })).toBeInTheDocument();
+    expect(within(overallRow).getByRole("cell", { name: "-26 median deletions overall" })).toBeInTheDocument();
+    expect(within(overallRow).getByRole("button", { name: "About this summary" })).toBeInTheDocument();
     expect(within(anyaRow).getByRole("link", { name: "12 completed reviews by anya" })).toHaveAttribute(
       "href",
       "/code-reviews?tab=reviews&author=anya&status=completed&range=30d",
@@ -672,6 +699,32 @@ describe("CodeReviewsPage", () => {
     await waitFor(() => expect(analyticsRequests).toHaveLength(1));
     expectCreatedAfterDaysAgo(analyticsRequests[0]?.get("created_after") ?? undefined, 30);
     expect(analyticsRequests[0]?.has("repository_id")).toBe(false);
+    await user.click(within(authorTable).getByRole("button", { name: "Sort by PR author ascending" }));
+    await waitFor(() => expect(analyticsRequests.at(-1)?.get("author_sort_by")).toBe("author"));
+    expect(analyticsRequests.at(-1)?.get("author_sort_order")).toBe("asc");
+  });
+
+  it("sorts PR author analytics by median files changed", async () => {
+    const user = userEvent.setup();
+    const analyticsRequests: URLSearchParams[] = [];
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews/analytics", ({ request }) => {
+        analyticsRequests.push(new URL(request.url).searchParams);
+        return HttpResponse.json({ data: reviewAnalytics } satisfies SingleResponse<CodeReviewAnalytics>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, {
+      nuqsHasMemory: true,
+      searchParams: { tab: "analytics" },
+    });
+
+    const authorTable = await screen.findByRole("table", { name: "Code review analytics by PR author" });
+    await user.click(within(authorTable).getByRole("button", { name: "Sort by Median files changed ascending" }));
+
+    await waitFor(() => expect(analyticsRequests.at(-1)?.get("author_sort_by")).toBe("median_files_changed"));
+    expect(analyticsRequests.at(-1)?.get("author_sort_order")).toBe("asc");
   });
 
   it("restores the analytics section from the URL", async () => {
@@ -687,6 +740,62 @@ describe("CodeReviewsPage", () => {
 
     expect(await screen.findByRole("tab", { name: "Analytics" })).toHaveAttribute("data-state", "active");
     expect(await screen.findByText("Usage by PR author")).toBeInTheDocument();
+  });
+
+  it("marks overall medians as unavailable when no change breakdown was captured", async () => {
+    // Author and summary medians come from percentile_cont over the same
+    // filtered set, so an absent breakdown has to be absent at both levels.
+    const analyticsWithoutMedians: CodeReviewAnalytics = {
+      ...reviewAnalytics,
+      summary: {
+        ...reviewAnalytics.summary,
+        reviews_with_change_breakdown: 0,
+        average_additions: null,
+        median_additions: null,
+        average_deletions: null,
+        median_deletions: null,
+      },
+      authors: reviewAnalytics.authors.map((author) => ({
+        ...author,
+        reviews_with_change_breakdown: 0,
+        average_additions: null,
+        median_additions: null,
+        average_deletions: null,
+        median_deletions: null,
+      })),
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews/analytics", () =>
+        HttpResponse.json({ data: analyticsWithoutMedians } satisfies SingleResponse<CodeReviewAnalytics>)),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, { searchParams: { tab: "analytics" } });
+
+    const authorTable = await screen.findByRole("table", { name: "Code review analytics by PR author" });
+    const overallRow = within(authorTable).getByRole("row", { name: /Overall/i });
+    expect(within(overallRow).getAllByRole("cell").map((cell) => cell.textContent)).toEqual([
+      "28",
+      "17",
+      "11",
+      "61%",
+      "3",
+      "—",
+      "—",
+    ]);
+    expect(within(overallRow).getByRole("cell", { name: "No median additions data overall" })).toBeInTheDocument();
+    expect(within(overallRow).getByRole("cell", { name: "No median deletions data overall" })).toBeInTheDocument();
+    const anyaRow = within(authorTable).getByRole("row", { name: /anya/i });
+    expect(within(anyaRow).getAllByRole("cell").map((cell) => cell.textContent)).toEqual([
+      "anya",
+      "12",
+      "9",
+      "3",
+      "75%",
+      "3",
+      "—",
+      "—",
+    ]);
   });
 
   it("shows failed and stale attempts when no review completed", async () => {
@@ -771,6 +880,16 @@ describe("CodeReviewsPage", () => {
       expect(listRequests.at(-1)?.get("activity_status")).toBe("current");
       expect(statsRequests.at(-1)?.get("activity_status")).toBe("current");
     });
+    await user.click(screen.getByRole("button", { name: "Sort by Repo ascending" }));
+    await waitFor(() => expect(listRequests.at(-1)?.get("sort_by")).toBe("repository"));
+    expect(listRequests.at(-1)?.get("sort_order")).toBe("asc");
+    await user.click(screen.getByRole("button", { name: "Sort by Repo descending" }));
+    await waitFor(() => expect(listRequests.at(-1)?.get("sort_order")).toBe("desc"));
+    // A third click has to reach the default newest-first order again;
+    // otherwise the two-state cycle strands the user in an explicit sort.
+    await user.click(screen.getByRole("button", { name: "Stop sorting by Repo" }));
+    await waitFor(() => expect(listRequests.at(-1)?.has("sort_by")).toBe(false));
+    expect(listRequests.at(-1)?.has("sort_order")).toBe(false);
     const initialListCreatedAfter = listRequests.at(-1)?.get("created_after");
     const initialStatsCreatedAfter = statsRequests.at(-1)?.get("created_after");
 
