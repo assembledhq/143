@@ -52,6 +52,24 @@ beforeEach(() => {
 });
 
 describe("AuthenticatedLayout", () => {
+  it("orders the primary navigation by workflow", () => {
+    const { container } = renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    const sidebar = container.querySelector("[data-testid='app-sidebar']");
+    const primaryNav = sidebar?.querySelector("nav");
+    const primaryHrefs = new Set(["/sessions", "/code-reviews", "/automations", "/previews"]);
+    const primaryLabels = within(primaryNav as HTMLElement)
+      .getAllByRole("link")
+      .filter((link) => primaryHrefs.has(link.getAttribute("href") ?? ""))
+      .map((link) => link.textContent);
+
+    expect(primaryLabels).toEqual(["Sessions", "Code reviews", "Automations", "Previews"]);
+  });
+
   it("hides projects from the primary navigation", () => {
     renderWithProviders(
       <AuthenticatedLayout>
