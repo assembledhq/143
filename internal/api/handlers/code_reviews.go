@@ -63,6 +63,7 @@ type codeReviewCursorScope struct {
 	ActivityStatus *models.CodeReviewActivityStatus `json:"activity_status,omitempty"`
 	Status         *models.CodeReviewSessionStatus  `json:"status,omitempty"`
 	Acceptable     *bool                            `json:"acceptable,omitempty"`
+	Author         string                           `json:"author,omitempty"`
 	Search         string                           `json:"search,omitempty"`
 	CreatedAfter   *time.Time                       `json:"created_after,omitempty"`
 	CreatedBefore  *time.Time                       `json:"created_before,omitempty"`
@@ -79,6 +80,7 @@ func codeReviewListCursorScopeHash(orgID uuid.UUID, filters db.CodeReviewListFil
 		ActivityStatus: filters.ActivityStatus,
 		Status:         filters.Status,
 		Acceptable:     filters.Acceptable,
+		Author:         strings.TrimSpace(filters.Author),
 		Search:         strings.TrimSpace(filters.Search),
 		CreatedAfter:   filters.CreatedAfter,
 		CreatedBefore:  filters.CreatedBefore,
@@ -363,6 +365,7 @@ func parseCodeReviewFilters(w http.ResponseWriter, r *http.Request) (db.CodeRevi
 	}
 	filters := db.CodeReviewListFilters{
 		RepositoryID:  repositoryID,
+		Author:        strings.TrimSpace(r.URL.Query().Get("author")),
 		Search:        strings.TrimSpace(r.URL.Query().Get("search")),
 		CreatedAfter:  createdAfter,
 		CreatedBefore: createdBefore,
@@ -520,6 +523,7 @@ func (h *CodeReviewHandler) Stats(w http.ResponseWriter, r *http.Request) {
 		ActivityStatus: filters.ActivityStatus,
 		Status:         filters.Status,
 		Acceptable:     filters.Acceptable,
+		Author:         filters.Author,
 		Search:         filters.Search,
 		CreatedAfter:   filters.CreatedAfter,
 		CreatedBefore:  filters.CreatedBefore,

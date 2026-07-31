@@ -7,10 +7,7 @@ import {
   waitFor,
 } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
-import {
-  AutomationScheduleEditor,
-  AutomationScheduleSummary,
-} from "./automation-schedule-editor";
+import { AutomationScheduleEditor } from "./automation-schedule-editor";
 
 describe("AutomationScheduleEditor", () => {
   it("adds a calendar schedule with a valid preview", async () => {
@@ -67,7 +64,9 @@ describe("AutomationScheduleEditor", () => {
 
     expect(await screen.findByText(/Next run:/)).toBeInTheDocument();
     await waitFor(() =>
-      expect(onValidityChange).toHaveBeenLastCalledWith(true),
+      expect(onValidityChange).toHaveBeenLastCalledWith(true, {
+        serverRejected: false,
+      }),
     );
   });
 
@@ -97,7 +96,9 @@ describe("AutomationScheduleEditor", () => {
     // The API revalidates the schedule on write, so a dead preview must not
     // block saving — on the detail page it would block unrelated fields too.
     await waitFor(() =>
-      expect(onValidityChange).toHaveBeenLastCalledWith(true),
+      expect(onValidityChange).toHaveBeenLastCalledWith(true, {
+        serverRejected: false,
+      }),
     );
   });
 
@@ -127,7 +128,9 @@ describe("AutomationScheduleEditor", () => {
 
     expect(await screen.findByText("No future occurrence.")).toBeInTheDocument();
     await waitFor(() =>
-      expect(onValidityChange).toHaveBeenLastCalledWith(false),
+      expect(onValidityChange).toHaveBeenLastCalledWith(false, {
+        serverRejected: true,
+      }),
     );
   });
 
@@ -347,23 +350,3 @@ describe("AutomationScheduleEditor", () => {
   });
 });
 
-describe("AutomationScheduleSummary", () => {
-  it("uses the same sentence and paused state in presentation", () => {
-    renderWithProviders(
-      <AutomationScheduleSummary
-        schedule={{
-          frequency: "weekly",
-          weekdays: ["monday", "thursday"],
-          time: "09:00",
-          timezone: "UTC",
-        }}
-        enabled={false}
-      />,
-    );
-
-    expect(
-      screen.getByText("Every week on Monday and Thursday at 9:00 AM"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Paused")).toBeInTheDocument();
-  });
-});

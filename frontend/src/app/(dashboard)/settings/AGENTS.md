@@ -65,6 +65,20 @@ handler that flushes on Tab-away — wire that directly to the input
 composite controls (e.g. the "Done" button on a sheet) that need to force a
 flush outside of blur.
 
+> **Pass `flushOnUnmount: true` for any field that can be unmounted mid-edit** —
+> inside a popover, a collapsible, a sheet, or a tab. Removing a focused input
+> from the DOM does *not* dispatch `focusout`, so `onBlur` never fires and the
+> debounced edit is dropped with no toast, no indicator, and no visible change.
+> The autosave scope outlives the field, so the dispatch still lands after the
+> field is gone.
+>
+> It defaults to off only to keep the blast radius of the change that introduced
+> it contained — *not* because off is the safer behaviour. The flush fires only
+> when a debounce timer is actually armed, so it is inert for a field that never
+> unmounts mid-edit; `true` would arguably be the better default. If you are
+> touching these hooks broadly, flipping the default and making the opt-*out*
+> explicit is worth considering.
+
 ### Optimistic update helpers
 
 For org-level settings, use the helpers in `@/lib/settings-autosave`:

@@ -101,7 +101,8 @@ import type {
   SingleResponse,
 } from "@/lib/types";
 
-type CodeReviewTab = "reviews" | "analytics" | "policy";
+const CODE_REVIEW_TAB_VALUES = ["reviews", "analytics", "policy"] as const;
+type CodeReviewTab = (typeof CODE_REVIEW_TAB_VALUES)[number];
 const TIME_RANGE_FILTER_VALUES = ["7d", "30d", "90d", "all"] as const;
 type TimeRangeFilter = (typeof TIME_RANGE_FILTER_VALUES)[number];
 const DEFAULT_TIME_RANGE = "30d" satisfies TimeRangeFilter;
@@ -476,7 +477,14 @@ export default function CodeReviewsPage() {
   const { user } = useAuth();
   const canManagePolicy = user?.role === "admin";
   const canRetryReviews = user?.role === "admin" || user?.role === "member";
-  const [activeTab, setActiveTabState] = useState<CodeReviewTab>("reviews");
+  const [tabParam] = useQueryState(
+    "tab",
+    parseAsStringLiteral(CODE_REVIEW_TAB_VALUES).withDefault("reviews"),
+  );
+  const [activeTab, setActiveTabState] = useState<CodeReviewTab>(tabParam);
+  useEffect(() => {
+    setActiveTabState(tabParam);
+  }, [tabParam]);
   const setActiveTab = useCallback(
     (value: string) => {
       setActiveTabState(value as CodeReviewTab);
@@ -498,6 +506,7 @@ export default function CodeReviewsPage() {
     "status",
     STATUS_FILTER_PARSER,
   );
+  const [authorFilter, setAuthorFilter] = useQueryState("author", parseAsString.withDefault(""));
   const [searchParam, setSearchParam] = useQueryState("search", parseAsString.withDefault(""));
   const [reviewSort, setReviewSort] = useQueryState("sort", parseAsStringLiteral(REVIEW_SORT_VALUES));
   const [reviewSortOrder, setReviewSortOrder] = useQueryState("order", parseAsStringLiteral(["asc", "desc"] as const).withDefault("asc"));
@@ -549,9 +558,10 @@ export default function CodeReviewsPage() {
           : undefined,
       outcome: outcomeFilter === AUTOMATICALLY_APPROVED || outcomeFilter === COMPLETED_NOT_APPROVED ? (outcomeFilter as CodeReviewListOutcome) : undefined,
       risk: riskFilter === ALL_RISKS ? undefined : (riskFilter as "acceptable" | "needs_review"),
+      author: authorFilter.trim() || undefined,
       search: searchParam.trim() || undefined,
     }),
-    [outcomeFilter, reviewRepositoryId, riskFilter, searchParam],
+    [authorFilter, outcomeFilter, reviewRepositoryId, riskFilter, searchParam],
   );
   // Which review attempts are in scope. The analytics report answers questions
   // about the same set, so it shares this; the ordering below is list-only.
@@ -652,6 +662,7 @@ export default function CodeReviewsPage() {
     || outcomeFilter !== ALL_OUTCOMES
     || riskFilter !== ALL_RISKS
     || statusFilter !== DEFAULT_STATUS_FILTER
+    || authorFilter.trim()
     || searchParam.trim()
     || timeRangeFilter !== "all"
   );
@@ -660,10 +671,11 @@ export default function CodeReviewsPage() {
     void setOutcomeParam(null);
     void setRiskFilter(null);
     void setStatusFilter(null);
+    void setAuthorFilter(null);
     setSearch("");
     void setSearchParam(null);
     setTimeRangeFilter("all");
-  }, [setOutcomeParam, setRepositoryFilter, setRiskFilter, setSearchParam, setStatusFilter, setTimeRangeFilter]);
+  }, [setAuthorFilter, setOutcomeParam, setRepositoryFilter, setRiskFilter, setSearchParam, setStatusFilter, setTimeRangeFilter]);
   const reviewScopeKey = JSON.stringify(reviewFiltersQueryKey);
   const [extraReviewPages, setExtraReviewPages] = useState<CodeReviewListItem[][]>([]);
   const [loadMoreCursor, setLoadMoreCursor] = useState<string | undefined>();
@@ -1126,6 +1138,7 @@ export default function CodeReviewsPage() {
     outcome: outcomeFilter,
     risk: riskFilter,
     status: statusFilter,
+    author: authorFilter,
     search,
     timeRange: timeRangeFilter,
   };
@@ -1142,6 +1155,9 @@ export default function CodeReviewsPage() {
         break;
       case "status":
         void setStatusFilter(value === DEFAULT_STATUS_FILTER ? null : value as StatusFilter);
+        break;
+      case "author":
+        void setAuthorFilter(value || null);
         break;
       case "search":
         setSearch(value);
@@ -1335,6 +1351,11 @@ export default function CodeReviewsPage() {
                 void setAuthorSort(sort);
                 void setAuthorSortOrder(order);
               }}
+              reviewLinkFilters={{
+                repository: reviewRepositoryId,
+                range: timeRangeFilter,
+              }}
+              onNavigateToReviews={() => setActiveTab("reviews")}
             />
           </TabsContent>
 

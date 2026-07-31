@@ -363,10 +363,11 @@ func TestCodeReviewHandler_StatsReturnsFilteredAggregates(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
-	mock.ExpectQuery(`(?s)FROM code_review_session_metadata m.*m\.repository_id = @repository_id.*m\.decision = @decision.*m\.status <> 'stale'.*m\.superseded_by_session_id IS NULL.*m\.status = @status.*m\.acceptable = @acceptable.*m\.created_at >= @created_after.*pr\.title ILIKE @search`).
+	mock.ExpectQuery(`(?s)FROM code_review_session_metadata m.*m\.repository_id = @repository_id.*m\.decision = @decision.*m\.status <> 'stale'.*m\.superseded_by_session_id IS NULL.*m\.status = @status.*m\.acceptable = @acceptable.*LOWER\(COALESCE\(NULLIF\(s\.revision_context->>'pull_request_author', ''\), 'Unknown'\)\) = LOWER\(@author\).*m\.created_at >= @created_after.*pr\.title ILIKE @search`).
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"reviews_completed",
@@ -378,7 +379,7 @@ func TestCodeReviewHandler_StatsReturnsFilteredAggregates(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodGet,
 		"/api/v1/code-reviews/stats?repository_id="+repositoryID.String()+
-			"&decision=needs_human_review&activity_status=current&status=completed&risk=needs_review&search=auth&created_after=2026-06-01T00:00:00Z",
+			"&decision=needs_human_review&activity_status=current&status=completed&risk=needs_review&author=Anya&search=auth&created_after=2026-06-01T00:00:00Z",
 		nil,
 	)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -542,7 +543,7 @@ func TestCodeReviewListCursorRejectsChangedFilterButAllowsMutableRowChanges(t *t
 	orgID := uuid.New()
 	running := models.CodeReviewSessionStatusRunning
 	filters := db.CodeReviewListFilters{
-		Status: &running, Search: "invoice", Limit: 50,
+		Status: &running, Author: "anya", Search: "invoice", Limit: 50,
 		SortBy: "repository", SortOrder: "asc",
 	}
 	id := uuid.New()
@@ -573,6 +574,11 @@ func TestCodeReviewListCursorRejectsChangedFilterButAllowsMutableRowChanges(t *t
 	changedFilters.SortOrder = "desc"
 	_, err = decodeCodeReviewListCursor(cursor, orgID, changedFilters)
 	require.Error(t, err, "a cursor reused with a different backend sort should be rejected")
+
+	changedFilters = filters
+	changedFilters.Author = "sam"
+	_, err = decodeCodeReviewListCursor(cursor, orgID, changedFilters)
+	require.Error(t, err, "a cursor reused with a different author should be rejected")
 }
 
 func TestCodeReviewSortCursorRoundTripsEveryListSort(t *testing.T) {

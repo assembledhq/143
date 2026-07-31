@@ -114,6 +114,7 @@ export interface CodeReviewFilterValues {
   outcome: string;
   risk: string;
   status: string;
+  author: string;
   search: string;
   timeRange: string;
 }
@@ -166,6 +167,10 @@ export function CodeReviewFilters({
           <SelectItem value="superseded">Superseded history</SelectItem>
           <SelectItem value="all">All attempts</SelectItem>
         </FilterSelect>
+        <div className="flex flex-col gap-2">
+          <Label className="text-xs text-muted-foreground">PR author</Label>
+          <Input value={values.author} onChange={(event) => onChange("author", event.target.value)} placeholder="GitHub handle" aria-label="PR author" />
+        </div>
         <div className="flex flex-col gap-2">
           <Label className="text-xs text-muted-foreground">Search</Label>
           <Input value={values.search} onChange={(event) => onChange("search", event.target.value)} placeholder="PR, repo, or title" aria-label="Search code reviews" />

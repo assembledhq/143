@@ -268,6 +268,93 @@ describe("useDebouncedTextField", () => {
     expect(result.current.value).toBe("Escalate uncertain changes");
   });
 
+  it("drops a pending edit on unmount by default", async () => {
+    const onCommit: Mock<(value: string) => void> = vi.fn();
+    const { result, unmount } = renderHook(() =>
+      useDebouncedTextField({ serverValue: "", onCommit, debounceMs: 5_000 }),
+    );
+
+    act(() => result.current.onChange("typed"));
+    unmount();
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  it("commits a pending edit on unmount when flushOnUnmount is set", async () => {
+    // Removing a focused input from the DOM does not dispatch focusout, so a
+    // field inside a popover/collapsible/sheet never gets its onBlur. Without
+    // this flush the edit is lost with no error and no visible change.
+    const onCommit: Mock<(value: string) => void> = vi.fn();
+    const { result, unmount } = renderHook(() =>
+      useDebouncedTextField({
+        serverValue: "",
+        onCommit,
+        debounceMs: 5_000,
+        flushOnUnmount: true,
+      }),
+    );
+
+    act(() => result.current.onChange("typed"));
+    unmount();
+
+    expect(onCommit).toHaveBeenCalledTimes(1);
+    expect(onCommit).toHaveBeenCalledWith("typed");
+  });
+
+  it("does not flush on unmount when nothing is pending", () => {
+    // Also what keeps StrictMode's simulated cleanup inert: no user event has
+    // run, so no timer is armed and there is nothing to send.
+    const onCommit: Mock<(value: string) => void> = vi.fn();
+    const { unmount } = renderHook(() =>
+      useDebouncedTextField({
+        serverValue: "saved",
+        onCommit,
+        flushOnUnmount: true,
+      }),
+    );
+
+    unmount();
+
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  it("does not flush a rejected value on unmount", () => {
+    const onCommit: Mock<(value: string) => void> = vi.fn();
+    const { result, unmount } = renderHook(() =>
+      useDebouncedTextField({
+        serverValue: "saved",
+        onCommit,
+        debounceMs: 5_000,
+        flushOnUnmount: true,
+        rejectValue: (value) => value.trim() === "",
+      }),
+    );
+
+    act(() => result.current.onChange("   "));
+    unmount();
+
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  it("does not flush an already-committed value on unmount", async () => {
+    const onCommit: Mock<(value: string) => void> = vi.fn();
+    const { result, unmount } = renderHook(() =>
+      useDebouncedTextField({
+        serverValue: "",
+        onCommit,
+        debounceMs: 20,
+        flushOnUnmount: true,
+      }),
+    );
+
+    act(() => result.current.onChange("typed"));
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
+    unmount();
+
+    expect(onCommit).toHaveBeenCalledTimes(1);
+  });
+
   it("replaces local text immediately and cancels a pending commit", async () => {
     const onCommit: Mock<(value: string) => void> = vi.fn();
     const { result } = renderHook(() => useDebouncedTextField({ serverValue: "repository", onCommit, debounceMs: 30 }));

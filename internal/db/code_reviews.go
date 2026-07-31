@@ -1166,6 +1166,7 @@ type CodeReviewListFilters struct {
 	ActivityStatus  *models.CodeReviewActivityStatus
 	Status          *models.CodeReviewSessionStatus
 	Acceptable      *bool
+	Author          string
 	Search          string
 	Limit           int
 	CreatedAfter    *time.Time
@@ -1260,6 +1261,10 @@ func codeReviewListWhere(orgID uuid.UUID, filters CodeReviewListFilters, include
 	if filters.Acceptable != nil {
 		query += ` AND m.acceptable = @acceptable`
 		args["acceptable"] = *filters.Acceptable
+	}
+	if author := strings.TrimSpace(filters.Author); author != "" {
+		query += ` AND LOWER(COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), 'Unknown')) = LOWER(@author)`
+		args["author"] = author
 	}
 	if filters.CreatedAfter != nil {
 		query += ` AND m.created_at >= @created_after`
@@ -1530,6 +1535,7 @@ type CodeReviewStatsFilters struct {
 	ActivityStatus *models.CodeReviewActivityStatus
 	Status         *models.CodeReviewSessionStatus
 	Acceptable     *bool
+	Author         string
 	Search         string
 	CreatedAfter   *time.Time
 	CreatedBefore  *time.Time
@@ -1658,6 +1664,11 @@ func (s *CodeReviewStore) GetReviewStats(ctx context.Context, orgID uuid.UUID, f
 		query += `
 		  AND m.acceptable = @acceptable`
 		args["acceptable"] = *filters.Acceptable
+	}
+	if author := strings.TrimSpace(filters.Author); author != "" {
+		query += `
+		  AND LOWER(COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), 'Unknown')) = LOWER(@author)`
+		args["author"] = author
 	}
 	if filters.CreatedAfter != nil {
 		query += `
