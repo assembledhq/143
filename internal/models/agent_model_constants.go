@@ -92,6 +92,24 @@ var AvailableCodexModels = []string{
 	CodexModelGPT53CodexSpark,
 }
 
+// DefaultCodingAgentModelDefaults and DefaultCodingAgentReasoningDefaults are
+// the organization-level coding-agent defaults applied to sessions when neither
+// the request, the member, nor the org picked something else. They are the one
+// source of truth: ParseOrgSettings back-fills absent org settings from them,
+// DefaultNewOrganizationSettings seeds new orgs from them, and the frontend
+// mirrors them in src/lib/org-coding-agent-defaults.ts so the admin UI shows the
+// value that will actually run. Only agents with a curated model list belong
+// here — amp/pi/opencode have no platform-wide default.
+var DefaultCodingAgentModelDefaults = map[AgentType]string{
+	AgentTypeCodex:      DefaultCodexModel,
+	AgentTypeClaudeCode: DefaultClaudeCodeModel,
+}
+
+var DefaultCodingAgentReasoningDefaults = map[AgentType]ReasoningEffort{
+	AgentTypeCodex:      ReasoningEffortHigh,
+	AgentTypeClaudeCode: ReasoningEffortMax,
+}
+
 const (
 	OpenCodeModelGPT54Mini                 = "openai/gpt-5.4-mini"
 	OpenCodeModelGPT53CodexSpark           = "openai/gpt-5.3-codex-spark"
@@ -575,6 +593,31 @@ func ValidateSettingsModels(settings OrgSettings) error {
 	}
 	if err := settings.LLMReasoningEffort.Validate(); err != nil {
 		return err
+	}
+	// The agent key is validated before the empty-value skip: an empty value is a
+	// legitimate "no default" opt-out, but the key it hangs off still has to name
+	// a real agent so typos don't accumulate as dead settings.
+	for agentType, model := range settings.CodingAgentModelDefaults {
+		if err := agentType.Validate(); err != nil {
+			return fmt.Errorf("coding_agent_model_defaults.%s: %w", agentType, err)
+		}
+		if model == "" {
+			continue
+		}
+		if err := ValidateModelForAgentType(agentType, model); err != nil {
+			return fmt.Errorf("coding_agent_model_defaults.%s: %w", agentType, err)
+		}
+	}
+	for agentType, effort := range settings.CodingAgentReasoningDefaults {
+		if err := agentType.Validate(); err != nil {
+			return fmt.Errorf("coding_agent_reasoning_defaults.%s: %w", agentType, err)
+		}
+		if effort == "" {
+			continue
+		}
+		if !agentType.SupportsReasoningEffortLevel(effort) {
+			return fmt.Errorf("coding_agent_reasoning_defaults.%s: reasoning effort %q is not supported", agentType, effort)
+		}
 	}
 	for agentTypeStr, envVars := range settings.AgentConfig {
 		agentType := AgentType(agentTypeStr)

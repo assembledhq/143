@@ -248,8 +248,7 @@ describe("CreateSessionDialog", () => {
     await waitFor(() => {
       expect(screen.getByText("api-server")).toBeInTheDocument();
       expect(screen.getByText("main")).toBeInTheDocument();
-      expect(screen.getByText("Default model")).toBeInTheDocument();
-      expect(screen.getByText("Default reasoning")).toBeInTheDocument();
+      expect(screen.getByText(/^Default \(.+\)$/)).toBeInTheDocument();
     });
     expect(screen.queryByRole("combobox", { name: /Model override/i })).not.toBeInTheDocument();
 
