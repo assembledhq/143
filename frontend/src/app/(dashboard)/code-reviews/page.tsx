@@ -1427,8 +1427,6 @@ export default function CodeReviewsPage() {
 
           <TabsContent value="policy" className="space-y-4">
             <SectionGroup
-              title="Review policy"
-              description="Set how reviews run, what guidance they follow, and when approval is allowed."
               action={<AutosaveIndicator status={autosave.status} />}
               className="max-w-5xl"
             >
