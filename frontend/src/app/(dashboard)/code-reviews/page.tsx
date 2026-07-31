@@ -96,7 +96,8 @@ import type {
 const ALL_REPOSITORIES = "all";
 const ALL_OUTCOMES = "all";
 const ALL_RISKS = "all";
-type CodeReviewTab = "reviews" | "analytics" | "policy";
+const CODE_REVIEW_TAB_VALUES = ["reviews", "analytics", "policy"] as const;
+type CodeReviewTab = (typeof CODE_REVIEW_TAB_VALUES)[number];
 const TIME_RANGE_FILTER_VALUES = ["7d", "30d", "90d", "all"] as const;
 type TimeRangeFilter = (typeof TIME_RANGE_FILTER_VALUES)[number];
 const DEFAULT_TIME_RANGE = "30d" satisfies TimeRangeFilter;
@@ -559,7 +560,14 @@ export default function CodeReviewsPage() {
   const { user } = useAuth();
   const canManagePolicy = user?.role === "admin";
   const canRetryReviews = user?.role === "admin" || user?.role === "member";
-  const [activeTab, setActiveTabState] = useState<CodeReviewTab>("reviews");
+  const [tabParam] = useQueryState(
+    "tab",
+    parseAsStringLiteral(CODE_REVIEW_TAB_VALUES).withDefault("reviews"),
+  );
+  const [activeTab, setActiveTabState] = useState<CodeReviewTab>(tabParam);
+  useEffect(() => {
+    setActiveTabState(tabParam);
+  }, [tabParam]);
   const setActiveTab = useCallback(
     (value: string) => {
       setActiveTabState(value as CodeReviewTab);
@@ -581,6 +589,7 @@ export default function CodeReviewsPage() {
     "status",
     STATUS_FILTER_PARSER,
   );
+  const [authorFilter, setAuthorFilter] = useQueryState("author", parseAsString.withDefault(""));
   const [searchParam, setSearchParam] = useQueryState("search", parseAsString.withDefault(""));
   const [search, setSearch] = useState(searchParam);
   useEffect(() => {
@@ -628,9 +637,10 @@ export default function CodeReviewsPage() {
           : undefined,
       outcome: outcomeFilter === AUTOMATICALLY_APPROVED || outcomeFilter === COMPLETED_NOT_APPROVED ? (outcomeFilter as CodeReviewListOutcome) : undefined,
       risk: riskFilter === ALL_RISKS ? undefined : (riskFilter as "acceptable" | "needs_review"),
+      author: authorFilter.trim() || undefined,
       search: searchParam.trim() || undefined,
     }),
-    [outcomeFilter, reviewRepositoryId, riskFilter, searchParam],
+    [authorFilter, outcomeFilter, reviewRepositoryId, riskFilter, searchParam],
   );
   const listReviewFilters = useMemo(
     () => statusFilter === "cancelled"
@@ -715,6 +725,7 @@ export default function CodeReviewsPage() {
     || outcomeFilter !== ALL_OUTCOMES
     || riskFilter !== ALL_RISKS
     || statusFilter !== DEFAULT_STATUS_FILTER
+    || authorFilter.trim()
     || searchParam.trim()
     || timeRangeFilter !== "all"
   );
@@ -723,10 +734,11 @@ export default function CodeReviewsPage() {
     void setOutcomeParam(null);
     void setRiskFilter(null);
     void setStatusFilter(null);
+    void setAuthorFilter(null);
     setSearch("");
     void setSearchParam(null);
     setTimeRangeFilter("all");
-  }, [setOutcomeParam, setRepositoryFilter, setRiskFilter, setSearchParam, setStatusFilter, setTimeRangeFilter]);
+  }, [setAuthorFilter, setOutcomeParam, setRepositoryFilter, setRiskFilter, setSearchParam, setStatusFilter, setTimeRangeFilter]);
   const reviewScopeKey = JSON.stringify(reviewFiltersQueryKey);
   const [extraReviewPages, setExtraReviewPages] = useState<CodeReviewListItem[][]>([]);
   const [loadMoreCursor, setLoadMoreCursor] = useState<string | undefined>();
@@ -1208,7 +1220,7 @@ export default function CodeReviewsPage() {
             </Button>
             <div
               id="code-review-filters"
-              className={`${mobileFiltersOpen ? "grid" : "hidden"} gap-3 rounded-xl border border-border bg-card p-3 shadow-sm md:grid md:grid-cols-2 md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none lg:grid-cols-3 xl:grid-cols-[minmax(12rem,18rem)_repeat(3,minmax(9rem,11rem))_minmax(12rem,1fr)_minmax(9rem,11rem)]`}
+              className={`${mobileFiltersOpen ? "grid" : "hidden"} gap-3 rounded-xl border border-border bg-card p-3 shadow-sm md:grid md:grid-cols-2 md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none lg:grid-cols-3 xl:grid-cols-[minmax(12rem,18rem)_repeat(4,minmax(9rem,11rem))_minmax(12rem,1fr)_minmax(9rem,11rem)]`}
             >
               <FilterSelect label="Repository" value={repositoryFilter} onValueChange={(value) => void setRepositoryFilter(value === ALL_REPOSITORIES ? null : value)}>
                 <SelectItem value={ALL_REPOSITORIES}>All repositories</SelectItem>
@@ -1240,6 +1252,15 @@ export default function CodeReviewsPage() {
                 <SelectItem value="superseded">Superseded history</SelectItem>
                 <SelectItem value="all">All attempts</SelectItem>
               </FilterSelect>
+              <div className="flex flex-col gap-2">
+                <Label className="text-xs text-muted-foreground">PR author</Label>
+                <Input
+                  value={authorFilter}
+                  onChange={(event) => void setAuthorFilter(event.target.value || null)}
+                  placeholder="GitHub handle"
+                  aria-label="PR author"
+                />
+              </div>
               <div className="flex flex-col gap-2">
                 <Label className="text-xs text-muted-foreground">Search</Label>
                 <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="PR, repo, or title" aria-label="Search code reviews" />
@@ -1422,6 +1443,11 @@ export default function CodeReviewsPage() {
               isLoading={analyticsQuery.isLoading}
               isError={analyticsQuery.isError}
               onRetry={() => void analyticsQuery.refetch()}
+              reviewLinkFilters={{
+                repository: reviewRepositoryId,
+                range: timeRangeFilter,
+              }}
+              onNavigateToReviews={() => setActiveTab("reviews")}
             />
           </TabsContent>
 
