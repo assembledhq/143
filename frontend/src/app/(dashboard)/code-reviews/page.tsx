@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { EmptyState } from "@/components/empty-state";
 import { ListPage } from "@/components/list-page";
+import { PageTabContent } from "@/components/page-tab-content";
 import { ResourceRow } from "@/components/resource-row";
 import {
   ResponsiveResourceList,
@@ -35,7 +36,7 @@ import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Switch } from "@/components/ui/switch";
@@ -1189,7 +1190,7 @@ export default function CodeReviewsPage() {
           </TabsTrigger>
         </TabsList>
 
-        <TabsContent value="reviews" className="space-y-3">
+        <PageTabContent value="reviews">
             <CodeReviewSummaryCards
               stats={statsQuery.data?.data}
               isLoading={statsQuery.isLoading}
@@ -1336,9 +1337,9 @@ export default function CodeReviewsPage() {
                 </>
               )}
             </SectionGroup>
-          </TabsContent>
+          </PageTabContent>
 
-          <TabsContent value="analytics" className="space-y-4">
+          <PageTabContent value="analytics">
             <CodeReviewAnalyticsReport
               analytics={analyticsQuery.data?.data}
               isLoading={analyticsQuery.isLoading}
@@ -1357,9 +1358,9 @@ export default function CodeReviewsPage() {
               onNavigateToReviews={() => setActiveTab("reviews")}
               filters={<CodeReviewFilters id="code-review-analytics-filters" values={sharedFilterValues} repositories={repositories} mobileOpen={mobileFiltersOpen} onMobileOpenChange={setMobileFiltersOpen} onChange={changeSharedFilter} />}
             />
-          </TabsContent>
+          </PageTabContent>
 
-          <TabsContent value="policy" className="space-y-4">
+          <PageTabContent value="policy">
             <SectionGroup
               action={<AutosaveIndicator status={autosave.status} />}
               className="max-w-5xl"
@@ -1505,7 +1506,7 @@ export default function CodeReviewsPage() {
                 setEditingRequirementKey(null);
               }}
             />
-          </TabsContent>
+          </PageTabContent>
       </Tabs>
     </ListPage>
   );
