@@ -637,6 +637,13 @@ describe('SessionDetailPage PR creation', () => {
       'data-variant',
       'outline',
     );
+    expect(screen.getByTestId('readiness-actions')).toHaveClass(
+      'grid-cols-1',
+      '@min-[24rem]/readiness:grid-cols-[max-content_max-content]',
+    );
+    expect(screen.getByTestId('readiness-actions').closest('[data-slot="card-content"]')).toHaveClass(
+      '@container/readiness',
+    );
     expect(screen.queryByText('Issue-less context')).not.toBeInTheDocument();
     expect(screen.queryByDisplayValue('Maintenance follow-up requested in Slack')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Save context' })).not.toBeInTheDocument();
