@@ -1042,27 +1042,28 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
       </div>
 
       {/* Execution context */}
-      {(session.planning_reasoning || session.execution_brief) && (
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-xs">Execution context</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3 text-xs">
-            {session.planning_reasoning && (
-              <div>
-                <p className="text-xs font-medium text-muted-foreground">Planning reasoning</p>
-                <p className="break-words">{session.planning_reasoning}</p>
-              </div>
-            )}
-            {session.execution_brief && (
-              <div>
-                <p className="text-xs font-medium text-muted-foreground">Execution brief</p>
-                <p className="break-words">{session.execution_brief}</p>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
+      {session.origin !== "manual" &&
+        (session.planning_reasoning || session.execution_brief) && (
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-xs">Execution context</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3 text-xs">
+              {session.planning_reasoning && (
+                <div>
+                  <p className="text-xs font-medium text-muted-foreground">Planning reasoning</p>
+                  <p className="break-words">{session.planning_reasoning}</p>
+                </div>
+              )}
+              {session.execution_brief && (
+                <div>
+                  <p className="text-xs font-medium text-muted-foreground">Execution brief</p>
+                  <p className="break-words">{session.execution_brief}</p>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
 
     </div>
   );
