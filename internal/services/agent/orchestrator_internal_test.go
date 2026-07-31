@@ -17,12 +17,45 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/auth"
+	"github.com/assembledhq/143/internal/internalapi"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/repoconfig"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/workspace"
 )
+
+func TestOrchestratorInjectInternalAPIEnvUsesCodingSessionID(t *testing.T) {
+	t.Parallel()
+
+	secret := "test-internal-api-secret"
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	repoID := uuid.New()
+	threadID := uuid.New()
+	session := &models.Session{ID: sessionID, OrgID: orgID}
+	cfg := &SandboxConfig{
+		Timeout: time.Minute,
+		Env:     map[string]string{"EXISTING_ENV": "preserved"},
+	}
+	orchestrator := &Orchestrator{
+		internalAPIURL:    "https://platform.test",
+		internalAPISecret: secret,
+	}
+
+	orchestrator.injectInternalAPIEnv(context.Background(), session, &repoID, &threadID, cfg, zerolog.Nop())
+
+	require.Equal(t, sessionID.String(), cfg.Env[internalapi.CodingSessionIDEnvVar], "sandbox environment should expose the platform-neutral coding session identifier")
+	require.Equal(t, "https://platform.test", cfg.Env["INTERNAL_API_URL"], "sandbox environment should preserve the configured internal API origin")
+	require.Equal(t, "preserved", cfg.Env["EXISTING_ENV"], "session context injection should preserve unrelated environment variables")
+	require.Len(t, cfg.Env, 4, "session context injection should add only the canonical session ID and internal API credentials")
+
+	claims, err := auth.ValidateInternalToken(secret, cfg.Env["INTERNAL_API_TOKEN"])
+	require.NoError(t, err, "injected internal API token should be valid")
+	require.Equal(t, &sessionID, claims.SessionID, "injected internal API token should authorize the same session exposed in the environment")
+	require.Equal(t, &threadID, claims.ThreadID, "injected internal API token should remain scoped to the active thread")
+}
 
 func TestSessionPromptStyleCodeReviewUsesRawTask(t *testing.T) {
 	t.Parallel()

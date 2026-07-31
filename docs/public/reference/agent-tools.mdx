@@ -418,7 +418,7 @@ Common use: group errors by service, org, or endpoint before drilling into raw l
 
 ## Previews
 
-Preview commands use 143's platform-controlled preview lifecycle and browser inspector. For coding agents, prefer `--session-id` so screenshots and browser checks run against the live session workspace before the branch is published. Browser diagnostics also accept `--preview-id` for a known branch preview.
+Preview commands use 143's platform-controlled preview lifecycle and browser inspector. Inside a coding-agent sandbox, session-scoped commands default to `CODING_SESSION_ID`, so screenshots and browser checks run against the live session workspace before the branch is published. Browser diagnostics also accept an explicit `--session-id` or `--preview-id`.
 
 ### `preview create`
 
@@ -432,7 +432,7 @@ Create or reuse a preview.
 | `--wait` | boolean | No | Wait until the preview is ready or fails. |
 
 ```bash
-143-tools preview create --session-id "$143_SESSION_ID" --wait
+143-tools preview create --session-id "$CODING_SESSION_ID" --wait
 143-tools preview create --repository example-org/example-app --branch feature/foo --wait
 ```
 
@@ -481,7 +481,7 @@ Read status, URL, freshness, and the recommended update mode.
 | `--preview-id` | string | Conditional | Preview UUID for a branch preview. |
 
 ```bash
-143-tools preview status --session-id "$143_SESSION_ID"
+143-tools preview status --session-id "$CODING_SESSION_ID"
 ```
 
 ### `preview update`
@@ -490,7 +490,7 @@ Make a session preview reflect recent workspace edits. The platform selects the 
 
 | Flag | Type | Required | Description |
 |---|---|---:|---|
-| `--session-id` | string | Yes | Session UUID. |
+| `--session-id` | string | No in a coding-agent sandbox | Session UUID. Defaults to `CODING_SESSION_ID` in a coding-agent sandbox. |
 | `--path` | string | No | Path to reload/check. Defaults to `/`. |
 | `--wait` | boolean | No | Wait when a restart is started. |
 | `--force-mode` | string | No | Diagnostic override: `browser_reload`, `soft_service_restart`, `full_recycle`, `cold_relaunch`, or `noop_current`. |
@@ -498,7 +498,7 @@ Make a session preview reflect recent workspace edits. The platform selects the 
 | `--config` | JSON string | No | Optional preview config override. |
 
 ```bash
-143-tools preview update --session-id "$143_SESSION_ID" --wait
+143-tools preview update --session-id "$CODING_SESSION_ID" --wait
 ```
 
 ### Browser Inspection
@@ -516,11 +516,11 @@ Use these after creating or updating a preview. Pass either `--session-id` or `-
 | `preview assert` | target, `--assertions` | Run browser assertions from a JSON assertion array. |
 
 ```bash
-143-tools preview screenshot --session-id "$143_SESSION_ID" --path / --viewport-w 1280 --viewport-h 720 --inline-base64 false
-143-tools preview inspect --session-id "$143_SESSION_ID" --selector '[data-testid=save]'
-143-tools preview interact --session-id "$143_SESSION_ID" --steps '[{"action":"click","selector":"[data-testid=save]","screenshot":true}]'
-143-tools preview multi_viewport --session-id "$143_SESSION_ID" --path /
-143-tools preview console --session-id "$143_SESSION_ID" --level error
+143-tools preview screenshot --session-id "$CODING_SESSION_ID" --path / --viewport-w 1280 --viewport-h 720 --inline-base64 false
+143-tools preview inspect --session-id "$CODING_SESSION_ID" --selector '[data-testid=save]'
+143-tools preview interact --session-id "$CODING_SESSION_ID" --steps '[{"action":"click","selector":"[data-testid=save]","screenshot":true}]'
+143-tools preview multi_viewport --session-id "$CODING_SESSION_ID" --path /
+143-tools preview console --session-id "$CODING_SESSION_ID" --level error
 ```
 
 ## Messaging
