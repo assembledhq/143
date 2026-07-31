@@ -1886,8 +1886,9 @@ func codeReviewAuthorAnalyticsOrder(sortBy, sortOrder string) (string, error) {
 		// rather than the numerator alone: "9 / 12" must not outrank "8 / 8".
 		"split_sample":      "(a.reviews_with_change_breakdown::double precision / NULLIF(a.reviews_completed, 0))",
 		"average_additions": "a.average_additions",
-		"median_additions":  "a.median_additions", "average_deletions": "a.average_deletions",
-		"median_deletions": "a.median_deletions",
+		"median_additions":  "a.median_additions",
+		"average_deletions": "a.average_deletions",
+		"median_deletions":  "a.median_deletions",
 	}
 	if sortBy == "" {
 		return "a.reviews_completed DESC, a.author ASC", nil
