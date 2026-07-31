@@ -41,6 +41,7 @@ func TestTransportRoundTripLogsStructuredGitHubTelemetry(t *testing.T) {
 				Kind:           RequestKindAPI,
 				AuthType:       AuthTypeAppInstallation,
 				InstallationID: 42,
+				SyncReason:     "stale_reconcile",
 			},
 			requestURL: "https://api.github.com/repos/assembledhq/143/pulls/99?ignored=true",
 			response: &http.Response{
@@ -63,6 +64,7 @@ func TestTransportRoundTripLogsStructuredGitHubTelemetry(t *testing.T) {
 				"github_repository":               "assembledhq/143",
 				"github_auth_type":                AuthTypeAppInstallation,
 				"github_installation_id":          float64(42),
+				"github_sync_reason":              "stale_reconcile",
 				"github_status_code":              float64(http.StatusOK),
 				"github_status_class":             "2xx",
 				"github_result":                   "success",

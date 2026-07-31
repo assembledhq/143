@@ -11,6 +11,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -218,6 +220,104 @@ func TestService_GetInstallationToken_FetchesAndCaches(t *testing.T) {
 	require.NoError(t, err, "second GetInstallationToken call should not return an error")
 	require.Equal(t, "ghs_cached", second, "second GetInstallationToken call should return the cached token")
 	require.Equal(t, 1, callCount, "GetInstallationToken should exchange only once and use cache on subsequent calls")
+}
+
+func TestService_GetInstallationToken_CoalescesConcurrentCacheMisses(t *testing.T) {
+	t.Parallel()
+
+	svc, err := NewService(143, testPrivateKeyPEM(t))
+	require.NoError(t, err, "NewService should create a valid GitHub service")
+
+	var callCount atomic.Int32
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	var startedOnce sync.Once
+	svc.httpClient = &http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			callCount.Add(1)
+			startedOnce.Do(func() { close(requestStarted) })
+			<-releaseRequest
+			return &http.Response{
+				StatusCode: http.StatusCreated,
+				Body: io.NopCloser(strings.NewReader(
+					`{"token":"ghs_shared","expires_at":"2030-01-01T00:00:00Z"}`,
+				)),
+				Header: make(http.Header),
+			}, nil
+		}),
+	}
+
+	const callers = 20
+	results := make(chan string, callers)
+	errs := make(chan error, callers)
+	var callersReady sync.WaitGroup
+	callersReady.Add(callers)
+	for range callers {
+		go func() {
+			callersReady.Done()
+			token, callErr := svc.GetInstallationToken(context.Background(), 77)
+			results <- token
+			errs <- callErr
+		}()
+	}
+	callersReady.Wait()
+	<-requestStarted
+	close(releaseRequest)
+
+	for range callers {
+		require.NoError(t, <-errs, "concurrent GetInstallationToken call should not return an error")
+		require.Equal(t, "ghs_shared", <-results, "concurrent GetInstallationToken call should share the exchanged token")
+	}
+	require.Equal(t, int32(1), callCount.Load(), "concurrent cache misses should perform one installation token exchange")
+}
+
+func TestService_GetInstallationToken_CanceledCallerDoesNotPoisonSharedExchange(t *testing.T) {
+	t.Parallel()
+
+	svc, err := NewService(143, testPrivateKeyPEM(t))
+	require.NoError(t, err, "NewService should create a valid GitHub service")
+
+	var callCount atomic.Int32
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	svc.httpClient = &http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			callCount.Add(1)
+			close(requestStarted)
+			<-releaseRequest
+			return &http.Response{
+				StatusCode: http.StatusCreated,
+				Body: io.NopCloser(strings.NewReader(
+					`{"token":"ghs_shared","expires_at":"2030-01-01T00:00:00Z"}`,
+				)),
+				Header: make(http.Header),
+			}, nil
+		}),
+	}
+
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstErr := make(chan error, 1)
+	go func() {
+		_, callErr := svc.GetInstallationToken(firstCtx, 77)
+		firstErr <- callErr
+	}()
+	<-requestStarted
+
+	secondResult := make(chan string, 1)
+	secondErr := make(chan error, 1)
+	go func() {
+		token, callErr := svc.GetInstallationToken(context.Background(), 77)
+		secondResult <- token
+		secondErr <- callErr
+	}()
+
+	cancelFirst()
+	require.ErrorIs(t, <-firstErr, context.Canceled, "the canceled caller should stop waiting for the shared token exchange")
+	close(releaseRequest)
+
+	require.NoError(t, <-secondErr, "a healthy waiter should receive the shared token despite another caller canceling")
+	require.Equal(t, "ghs_shared", <-secondResult, "the healthy waiter should receive the exchanged token")
+	require.Equal(t, int32(1), callCount.Load(), "caller cancellation should not start a second token exchange")
 }
 
 func TestService_GetInstallationToken_PreservesRateLimitHeaders(t *testing.T) {

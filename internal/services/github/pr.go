@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/rs/zerolog"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
@@ -135,6 +136,7 @@ type PRService struct {
 	mergeabilityRetryWait    func(context.Context, time.Duration) error
 	linearMilestones         LinearMilestoneEnqueuer // nil-safe: Linear writes disabled if nil
 	prPreviewSurfacesEnabled bool
+	prHealthSyncGroup        singleflight.Group
 
 	// cachedResolverMu guards lazy construction of cachedResolver. The
 	// resolver is built from the currently-wired dependencies on first use
@@ -1716,7 +1718,7 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 		}
 	}
 	pr.HeadSHA = &pushed.HeadSHA
-	s.enqueuePullRequestStateSync(ctx, pr)
+	s.enqueuePullRequestStateSync(ctx, pr, PullRequestSyncReasonHeadChanged)
 
 	if targetChangeset != nil {
 		return &pr, nil
@@ -2446,11 +2448,33 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 			return fmt.Errorf("refresh edited pull request snapshot: %w", err)
 		}
 		if baseChanged {
-			s.enqueuePullRequestStateSync(ctx, pr)
+			s.enqueuePullRequestStateSync(ctx, pr, PullRequestSyncReasonBaseChanged)
 		}
 		return nil
-	case "opened", "reopened", "ready_for_review", "synchronize":
-		s.enqueuePullRequestStateSync(ctx, pr)
+	case "opened", "reopened":
+		reason := PullRequestSyncReasonInitial
+		if pullRequestHasHealthBaseline(pr) && *pr.HeadSHA != event.PR.Head.SHA {
+			reason = PullRequestSyncReasonHeadChanged
+		}
+		s.enqueuePullRequestStateSync(ctx, pr, reason)
+		return s.handleAutoPreviewEvent(ctx, event)
+	case "ready_for_review":
+		// Unlike every other trigger this one changes GitHub's mergeable_state
+		// ("draft" -> "clean"/"blocked") without moving the head SHA, and
+		// projected check rebuilds never recompute merge state. Skipping the
+		// readback here would leave a PR that 143 opened as a draft stuck at
+		// MergeState=blocked, and therefore CanMerge=false, until the reconcile
+		// sweep catches it. Draft transitions are rare, so always sync.
+		reason := PullRequestSyncReasonReadyForReview
+		if !pullRequestHasHealthBaseline(pr) {
+			reason = PullRequestSyncReasonInitial
+		} else if pr.HeadSHA == nil || *pr.HeadSHA != event.PR.Head.SHA {
+			reason = PullRequestSyncReasonHeadChanged
+		}
+		s.enqueuePullRequestStateSync(ctx, pr, reason)
+		return s.handleAutoPreviewEvent(ctx, event)
+	case "synchronize":
+		s.enqueuePullRequestStateSync(ctx, pr, PullRequestSyncReasonHeadChanged)
 		return s.handleAutoPreviewEvent(ctx, event)
 	case "closed":
 		// handled below
@@ -2462,7 +2486,6 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 		return err
 	}
 
-	s.enqueuePullRequestStateSync(ctx, pr)
 	return s.handleAutoPreviewEvent(ctx, event)
 }
 
@@ -2890,6 +2913,7 @@ func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullR
 			commitSHA = headSHA
 		}
 		s.runMergedPullRequestFollowUps(ctx, pr, commitSHA)
+		s.publishPullRequestTerminalState(ctx, pr)
 		return nil
 	}
 
@@ -2910,6 +2934,7 @@ func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullR
 	}
 	s.teardownPRPreview(ctx, pr, false)
 	s.maybeAutoArchiveSessionOnPRClose(ctx, pr, nil, false)
+	s.publishPullRequestTerminalState(ctx, pr)
 	return nil
 }
 
@@ -3681,7 +3706,7 @@ func (s *PRService) enqueueReinforceMemories(ctx context.Context, orgID uuid.UUI
 // --- GitHub API helpers ---
 
 func (s *PRService) doGitHubRequest(ctx context.Context, token, method, path string, body any) ([]byte, error) {
-	ctx = githubtelemetry.WithRequestMetadata(ctx, s.githubRequestMetadataForToken(token))
+	ctx = githubtelemetry.WithRequestMetadata(ctx, s.githubRequestMetadataForToken(ctx, token))
 	var bodyReader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -3735,7 +3760,7 @@ func (s *PRService) doGitHubRequest(ctx context.Context, token, method, path str
 // GitHub Enterprise Server splits these differently (REST at /api/v3, GraphQL at
 // /api/graphql); revisit this if 143 ever targets a GHES base URL.
 func (s *PRService) doGitHubGraphQL(ctx context.Context, token, query string, variables map[string]any) ([]byte, error) {
-	ctx = githubtelemetry.WithRequestMetadata(ctx, s.githubRequestMetadataForToken(token))
+	ctx = githubtelemetry.WithRequestMetadata(ctx, s.githubRequestMetadataForToken(ctx, token))
 	payload, err := json.Marshal(map[string]any{"query": query, "variables": variables})
 	if err != nil {
 		return nil, err
@@ -3773,10 +3798,13 @@ func (s *PRService) doGitHubGraphQL(ctx context.Context, token, query string, va
 	return respBody, nil
 }
 
-func (s *PRService) githubRequestMetadataForToken(token string) githubtelemetry.RequestMetadata {
+func (s *PRService) githubRequestMetadataForToken(ctx context.Context, token string) githubtelemetry.RequestMetadata {
 	metadata := githubtelemetry.RequestMetadata{
 		Kind:     githubtelemetry.RequestKindAPI,
 		AuthType: githubtelemetry.AuthTypeUser,
+	}
+	if reason, ok := pullRequestSyncReasonAttribute(ctx); ok {
+		metadata.SyncReason = string(reason)
 	}
 	if s != nil && s.tokenProvider != nil {
 		if installationID, ok := s.tokenProvider.installationIDForToken(token); ok {
@@ -5985,11 +6013,24 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 			continue
 		}
 		state := checkRunEventState(pr, event)
-		_, err = s.pullRequests.UpsertCheckState(ctx, pr.OrgID, state)
+		applied, err := s.pullRequests.UpsertCheckState(ctx, pr.OrgID, state)
 		if err != nil {
 			return err
 		}
-		if err := s.enqueuePullRequestHealthRebuild(ctx, pr); err != nil {
+		if !applied {
+			// The upsert rejected this event as out of order, so the projection
+			// did not move and a rebuild would re-read the same row. Note that
+			// check_run events share a provider_sequence (the run ID) across a
+			// run's lifecycle and GitHub's updated_at is second-granular, so a
+			// run that starts and finishes inside one second also lands here;
+			// the reconcile sweep is what repairs that.
+			continue
+		}
+		requiresSync, err := s.checkStateRequiresAuthoritativeSync(ctx, pr, state)
+		if err != nil {
+			return err
+		}
+		if err := s.enqueuePullRequestCheckProjection(ctx, pr, requiresSync); err != nil {
 			return err
 		}
 	}
@@ -6035,15 +6076,64 @@ func (s *PRService) HandleStatusEvent(ctx context.Context, event StatusEvent) er
 	}
 	for _, pr := range prs {
 		state := statusEventState(pr, event)
-		_, err = s.pullRequests.UpsertCheckState(ctx, pr.OrgID, state)
+		applied, err := s.pullRequests.UpsertCheckState(ctx, pr.OrgID, state)
 		if err != nil {
 			return err
 		}
-		if err := s.enqueuePullRequestHealthRebuild(ctx, pr); err != nil {
+		if !applied {
+			continue
+		}
+		requiresSync, err := s.checkStateRequiresAuthoritativeSync(ctx, pr, state)
+		if err != nil {
+			return err
+		}
+		if err := s.enqueuePullRequestCheckProjection(ctx, pr, requiresSync); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func pullRequestHasHealthBaseline(pr models.PullRequest) bool {
+	return pr.GitHubStateSyncedAt != nil && pr.HealthVersion > 0 && pr.HeadSHA != nil && strings.TrimSpace(*pr.HeadSHA) != ""
+}
+
+func (s *PRService) checkStateRequiresAuthoritativeSync(ctx context.Context, pr models.PullRequest, state models.PullRequestCheckState) (bool, error) {
+	if !pullRequestHasHealthBaseline(pr) {
+		return true, nil
+	}
+	current, err := s.pullRequests.GetHealthCurrent(ctx, pr.OrgID, pr.ID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("load pull request health baseline for webhook check: %w", err)
+	}
+	if current.HeadSHA != state.HeadSHA {
+		return true, nil
+	}
+	var summary models.PullRequestHealthSummary
+	if err := json.Unmarshal(current.SummaryJSON, &summary); err != nil {
+		// Degrade to the authoritative readback rather than failing the webhook.
+		// Returning an error here would 500 the delivery, and every redelivery
+		// would decode the same bad row and fail identically — a poison pill for
+		// this PR's whole check stream. An unreadable baseline is precisely the
+		// case a full sync repairs, because it rewrites the snapshot.
+		s.logger.Warn().Err(err).
+			Str("pull_request_id", pr.ID.String()).
+			Msg("pull request health baseline is undecodable; forcing an authoritative sync")
+		return true, nil
+	}
+	if summary.CheckSetComplete == nil || !*summary.CheckSetComplete {
+		return true, nil
+	}
+	incomingKey := projectedCheckSummaryKey(state.CheckSummary())
+	for _, check := range summary.Checks {
+		if projectedCheckSummaryKey(check) == incomingKey {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func checkRunEventState(pr models.PullRequest, event CheckRunEvent) models.PullRequestCheckState {

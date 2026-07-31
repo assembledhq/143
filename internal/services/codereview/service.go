@@ -296,7 +296,8 @@ func (s *Service) RetryReview(ctx context.Context, input RetryReviewInput) (Retr
 		return RetryReviewResult{}, err
 	}
 
-	if err := s.pullRequestSyncer.SyncPullRequestState(ctx, input.OrgID, failed.PullRequestID); err != nil && !errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
+	syncCtx := ghservice.WithPullRequestSyncReason(ctx, ghservice.PullRequestSyncReasonCodeReview)
+	if err := s.pullRequestSyncer.SyncPullRequestState(syncCtx, input.OrgID, failed.PullRequestID); err != nil && !errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
 		return RetryReviewResult{}, fmt.Errorf("refresh pull request before code review retry: %w", err)
 	}
 	pr, err := s.pullRequests.GetByID(ctx, input.OrgID, failed.PullRequestID)
