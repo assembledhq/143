@@ -133,9 +133,9 @@ export default function CodeReviewSection({ isDark }: CodeReviewSectionProps) {
             </h3>
             <p className={`${type.body} ${layout.copyBody} ${body}`}>
               Approval follows a policy you control: size limits, sensitive
-              paths, required checks, description rules. The reviewers are
-              coding agents, not people. Run one model to keep reviews cheap, or
-              several in parallel for higher confidence.
+              paths, required checks. The reviewers are coding agents, not
+              people; run one model to keep reviews cheap or several in
+              parallel for higher confidence.
             </p>
             <ul className="grid gap-2 pt-2">
               {codeReviewControls.map((control) => (

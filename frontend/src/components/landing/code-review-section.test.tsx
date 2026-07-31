@@ -15,7 +15,7 @@ describe("CodeReviewSection", () => {
     expect(heading.className).toContain(landingTypography.sectionTitle);
     expect(screen.getByText("01 Code review")).toBeInTheDocument();
     expect(
-      screen.getByText(/Reviewing it is the bottleneck/),
+      screen.getByText(/reviewing it is the bottleneck/),
     ).toBeInTheDocument();
   });
 

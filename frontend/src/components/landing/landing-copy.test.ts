@@ -28,7 +28,8 @@ describe("landing copy", () => {
     expect(codeReviewSummary.heading).toBe(
       "Code review that can auto-approve.",
     );
-    expect(codeReviewSummary.body).toContain("Reviewing it is the bottleneck.");
+    expect(codeReviewSummary.body).toContain("reviewing it is the bottleneck");
+    expect(codeReviewSummary.body.split(". ").length).toBeLessThanOrEqual(2);
   });
 
   it("focuses the review controls on policy tuning and reviewer model choice", () => {
