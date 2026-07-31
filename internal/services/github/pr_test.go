@@ -54,6 +54,15 @@ func (f fakeSessionThreadLister) ListBySessionWithOptions(context.Context, uuid.
 	return f.threads, f.err
 }
 
+type fakeSessionReviewLoopLister struct {
+	loops []models.SessionReviewLoop
+	err   error
+}
+
+func (f fakeSessionReviewLoopLister) ListLoopsBySession(context.Context, uuid.UUID, uuid.UUID) ([]models.SessionReviewLoop, error) {
+	return f.loops, f.err
+}
+
 var prTestIssueColumns = []string{
 	"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
 	"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
@@ -1671,7 +1680,7 @@ func TestGeneratePRContent_WithRepoTemplate(t *testing.T) {
 	require.Contains(t, mockLLM.lastUserPrompt, "<pr_template>", "LLM prompt should wrap template in pr_template tags")
 }
 
-func TestGeneratePRContent_IncludesAllThreadSummaries(t *testing.T) {
+func TestGeneratePRContent_UsesImplementationContextAndExcludesReviews(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1683,10 +1692,13 @@ func TestGeneratePRContent_IncludesAllThreadSummaries(t *testing.T) {
 	sessionID := uuid.New()
 	primaryThreadID := uuid.New()
 	reviewThreadID := uuid.New()
+	readOnlyReviewThreadID := uuid.New()
+	workerThreadID := uuid.New()
 	now := time.Now()
-	// The session ResultSummary matches the review thread (last to complete), simulating
-	// a review-loop session where the review thread's summary populated run.ResultSummary.
+	implSummary := "Implemented PR context generation from implementation thread summaries."
 	reviewSummary := "Review loop: checked the code and requested naming cleanup."
+	readOnlyReviewSummary := "Code review found no blocking issues."
+	workerSummary := "Added focused regression coverage for PR context selection."
 	diff := "+++ b/internal/services/github/pr.go\n+func buildPRThreadContext() string { return \"\" }\n"
 	run := &models.Session{
 		ID:              sessionID,
@@ -1714,7 +1726,7 @@ func TestGeneratePRContent_IncludesAllThreadSummaries(t *testing.T) {
 			Label:         "Main",
 			Status:        models.ThreadStatusCompleted,
 			CreatedAt:     now,
-			ResultSummary: ptrString("Implemented PR context generation from thread summaries."),
+			ResultSummary: ptrString(implSummary),
 		},
 		{
 			ID:                reviewThreadID,
@@ -1727,22 +1739,454 @@ func TestGeneratePRContent_IncludesAllThreadSummaries(t *testing.T) {
 			CreatedByThreadID: &primaryThreadID,
 			ResultSummary:     ptrString(reviewSummary),
 		},
+		{
+			ID:            readOnlyReviewThreadID,
+			SessionID:     sessionID,
+			OrgID:         orgID,
+			Label:         "Security audit",
+			Status:        models.ThreadStatusCompleted,
+			CreatedAt:     now.Add(2 * time.Minute),
+			ResultSummary: ptrString(readOnlyReviewSummary),
+			ExecutionMode: models.ThreadExecutionModeReview,
+		},
+		{
+			ID:            workerThreadID,
+			SessionID:     sessionID,
+			OrgID:         orgID,
+			Label:         "Tests",
+			Status:        models.ThreadStatusCompleted,
+			CreatedAt:     now.Add(3 * time.Minute),
+			ResultSummary: ptrString(workerSummary),
+		},
 	}})
+	svc.SetSessionReviewLoopStore(fakeSessionReviewLoopLister{loops: []models.SessionReviewLoop{{
+		ID:        uuid.New(),
+		OrgID:     orgID,
+		SessionID: sessionID,
+		ThreadID:  &reviewThreadID,
+	}}})
 
 	_, err := svc.generatePRContent(context.Background(), "token", "owner", "repo", "main", uuid.New(), orgID, run, nil)
 	require.NoError(t, err, "generatePRContent should succeed when thread context loads")
 	require.Contains(t, mockLLM.lastUserPrompt, "<session_threads>", "LLM prompt should include session thread context")
-	require.Contains(t, mockLLM.lastUserPrompt, "Main (primary)", "prompt should identify the primary implementation thread")
-	require.Contains(t, mockLLM.lastUserPrompt, "Implemented PR context generation from thread summaries.", "prompt should include primary thread summary")
-	// The review thread's summary matches run.ResultSummary and is already in <agent_summary>;
-	// it must not be duplicated inside <session_threads>.
-	require.Equal(t, 1, strings.Count(mockLLM.lastUserPrompt, reviewSummary),
-		"review summary should appear exactly once (in agent_summary only, not duplicated in session_threads)")
-	agentSummaryIdx := strings.Index(mockLLM.lastUserPrompt, "<agent_summary>")
-	sessionThreadsIdx := strings.Index(mockLLM.lastUserPrompt, "<session_threads>")
-	require.Greater(t, sessionThreadsIdx, agentSummaryIdx, "session_threads block should follow agent_summary block")
+	require.Contains(t, mockLLM.lastUserPrompt, implSummary, "prompt should use the primary implementation summary")
+	require.Contains(t, mockLLM.lastUserPrompt, workerSummary, "prompt should retain non-review supporting work")
+	require.NotContains(t, mockLLM.lastUserPrompt, reviewSummary, "prompt should exclude pre-PR review-loop prose")
+	require.NotContains(t, mockLLM.lastUserPrompt, readOnlyReviewSummary, "prompt should exclude typed code-review prose")
 	require.Contains(t, mockLLM.lastSystemPrompt, "Use the code diff and files changed as the source of truth", "system prompt should make the code changes the primary source of truth")
 	require.Contains(t, mockLLM.lastSystemPrompt, "Use the session title, issue, and session threads only as supporting context", "system prompt should keep conversation context secondary to the code changes")
+}
+
+func TestImplementationSummary(t *testing.T) {
+	t.Parallel()
+
+	primaryID := uuid.New()
+	reviewID := uuid.New()
+	const implText = "Implemented the requested behavior."
+	const reviewText = "Review found no remaining issues."
+
+	reviewsFor := func(summaries ...string) prReviewContext {
+		reviews := newPRReviewContext()
+		reviews.threadIDs[reviewID] = struct{}{}
+		for _, summary := range summaries {
+			reviews.addSummary(summary)
+		}
+		return reviews
+	}
+
+	tests := []struct {
+		name       string
+		threads    []models.SessionThread
+		primaryID  *uuid.UUID
+		reviews    prReviewContext
+		fallback   string
+		expected   string
+		expectedID *uuid.UUID
+	}{
+		{
+			name: "uses primary implementation summary instead of latest review",
+			threads: []models.SessionThread{
+				{ID: primaryID, ResultSummary: ptrString(implText)},
+				{ID: reviewID, ResultSummary: ptrString(reviewText)},
+			},
+			primaryID:  &primaryID,
+			reviews:    reviewsFor(reviewText),
+			fallback:   reviewText,
+			expected:   implText,
+			expectedID: &primaryID,
+		},
+		{
+			// The production shape: Session.PrimaryThreadID is db:"-" and is nil on
+			// sessions loaded by the open_pr job, so the implementation thread must
+			// be recovered from the thread list itself.
+			name: "falls back to earliest non-review thread when primary id is unset",
+			threads: []models.SessionThread{
+				{ID: primaryID, ResultSummary: ptrString(implText)},
+				{ID: reviewID, ResultSummary: ptrString(reviewText)},
+			},
+			reviews:    reviewsFor(reviewText),
+			fallback:   reviewText,
+			expected:   implText,
+			expectedID: &primaryID,
+		},
+		{
+			// run_agent points PrimaryThreadID at whichever thread is executing,
+			// which for a review-loop turn is the reviewer.
+			name: "ignores primary id that names a review thread",
+			threads: []models.SessionThread{
+				{ID: reviewID, ResultSummary: ptrString(reviewText)},
+				{ID: primaryID, ResultSummary: ptrString(implText)},
+			},
+			primaryID:  &reviewID,
+			reviews:    reviewsFor(reviewText),
+			fallback:   reviewText,
+			expected:   implText,
+			expectedID: &primaryID,
+		},
+		{
+			// The review thread was archived, so it is missing from the thread list;
+			// the loop row's LatestSummary is what identifies the prose.
+			name:       "drops review prose known only from the review loop row",
+			threads:    []models.SessionThread{{ID: primaryID}},
+			reviews:    reviewsFor(reviewText),
+			fallback:   reviewText,
+			expected:   "",
+			expectedID: nil,
+		},
+		{
+			name:       "keeps session fallback when it is not review output",
+			threads:    []models.SessionThread{{ID: primaryID}},
+			primaryID:  &primaryID,
+			reviews:    reviewsFor(reviewText),
+			fallback:   implText,
+			expected:   implText,
+			expectedID: nil,
+		},
+		{
+			// The loop query failed, so an unrecognized session summary could be a
+			// review-loop thread's output: prefer thread-attributed narrative.
+			name: "distrusts session fallback when review provenance is incomplete",
+			threads: []models.SessionThread{
+				{ID: primaryID, ResultSummary: ptrString(implText)},
+			},
+			reviews: func() prReviewContext {
+				reviews := newPRReviewContext()
+				reviews.provenanceIncomplete = true
+				return reviews
+			}(),
+			fallback:   "Unrecognized summary of unknown origin.",
+			expected:   implText,
+			expectedID: &primaryID,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actualID, actual := implementationSummary(tt.threads, tt.primaryID, tt.reviews, tt.fallback)
+			require.Equal(t, tt.expected, actual, "implementation summary should preserve only change-focused narrative context")
+			if tt.expectedID == nil {
+				require.Nil(t, actualID, "summary taken from the session row should not be attributed to a thread")
+			} else {
+				require.NotNil(t, actualID, "summary taken from a thread should report that thread")
+				require.Equal(t, *tt.expectedID, *actualID, "summary should be attributed to the implementation thread")
+			}
+		})
+	}
+}
+
+// newPRContentTestService builds a PRService whose LLM call is captured and
+// whose GitHub calls 404 (no repo PR template).
+func newPRContentTestService(t *testing.T) (*PRService, *mockLLMClient) {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(server.Close)
+
+	mockLLM := &mockLLMClient{response: "<pr_title>Title</pr_title>\n<pr_body>Body</pr_body>"}
+	return &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		llmClient:  mockLLM,
+		logger:     zerolog.Nop(),
+	}, mockLLM
+}
+
+// The open_pr job loads the session with SessionStore.GetByID, which leaves
+// PrimaryThreadID nil (models.Session tags it db:"-"). Review exclusion and
+// implementation-summary selection must both hold in that shape.
+func TestGeneratePRContent_ExcludesReviewsWithoutPrimaryThreadID(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	mainThreadID := uuid.New()
+	reviewThreadID := uuid.New()
+	now := time.Now()
+	implSummary := "Implemented the requested behavior."
+	reviewSummary := "Review loop: no remaining issues."
+	diff := "+++ b/x.go\n+func f() {}\n"
+	run := &models.Session{
+		ID:            sessionID,
+		OrgID:         orgID,
+		AgentType:     "claude-code",
+		ResultSummary: &reviewSummary,
+		Diff:          &diff,
+	}
+
+	svc, mockLLM := newPRContentTestService(t)
+	svc.SetSessionThreadStore(fakeSessionThreadLister{threads: []models.SessionThread{
+		{ID: mainThreadID, SessionID: sessionID, OrgID: orgID, Label: "Main", CreatedAt: now, ResultSummary: ptrString(implSummary)},
+		{ID: reviewThreadID, SessionID: sessionID, OrgID: orgID, Label: "Review", CreatedAt: now.Add(time.Minute), ResultSummary: ptrString(reviewSummary)},
+	}})
+	svc.SetSessionReviewLoopStore(fakeSessionReviewLoopLister{loops: []models.SessionReviewLoop{{
+		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ThreadID: &reviewThreadID,
+	}}})
+
+	_, err := svc.generatePRContent(context.Background(), "token", "owner", "repo", "main", uuid.New(), orgID, run, nil)
+	require.NoError(t, err)
+	require.NotContains(t, mockLLM.lastUserPrompt, reviewSummary, "review prose must not reach the prompt when PrimaryThreadID is nil")
+	require.Contains(t, mockLLM.lastUserPrompt, "<agent_summary>", "the implementation narrative should still fill agent_summary")
+	require.Contains(t, mockLLM.lastUserPrompt, implSummary, "implementation thread summary should become the agent summary")
+	require.Equal(t, 1, strings.Count(mockLLM.lastUserPrompt, implSummary), "the promoted summary should not be repeated in session_threads")
+}
+
+// An archived review thread is absent from the thread list, so the loop row's
+// LatestSummary is the only signal that session.result_summary is review prose.
+func TestGeneratePRContent_ExcludesArchivedReviewThreadProse(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	mainThreadID := uuid.New()
+	archivedReviewThreadID := uuid.New()
+	implSummary := "Implemented the requested behavior."
+	reviewSummary := "Review loop: no remaining issues."
+	diff := "+++ b/x.go\n+func f() {}\n"
+	run := &models.Session{
+		ID:            sessionID,
+		OrgID:         orgID,
+		AgentType:     "claude-code",
+		ResultSummary: &reviewSummary,
+		Diff:          &diff,
+	}
+
+	svc, mockLLM := newPRContentTestService(t)
+	svc.SetSessionThreadStore(fakeSessionThreadLister{threads: []models.SessionThread{
+		{ID: mainThreadID, SessionID: sessionID, OrgID: orgID, Label: "Main", CreatedAt: time.Now(), ResultSummary: ptrString(implSummary)},
+	}})
+	svc.SetSessionReviewLoopStore(fakeSessionReviewLoopLister{loops: []models.SessionReviewLoop{{
+		ID:            uuid.New(),
+		OrgID:         orgID,
+		SessionID:     sessionID,
+		ThreadID:      &archivedReviewThreadID,
+		LatestSummary: ptrString(reviewSummary),
+	}}})
+
+	_, err := svc.generatePRContent(context.Background(), "token", "owner", "repo", "main", uuid.New(), orgID, run, nil)
+	require.NoError(t, err)
+	require.NotContains(t, mockLLM.lastUserPrompt, reviewSummary, "review prose recorded on the loop row must not reach the prompt")
+	require.Contains(t, mockLLM.lastUserPrompt, implSummary, "implementation narrative should survive review exclusion")
+}
+
+// Review-loop threads carry execution_mode "work" (the thread service defaults
+// it), so when the loop query fails no typed signal identifies them. The session
+// summary — the last completer's text, i.e. the reviewer's — must not be trusted
+// as the narrative in that state.
+func TestGeneratePRContent_ReviewLoopStoreErrorWithUntypedReviewThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	mainThreadID := uuid.New()
+	reviewThreadID := uuid.New()
+	now := time.Now()
+	implSummary := "Implemented the requested behavior."
+	reviewSummary := "Review loop: no remaining issues."
+	diff := "+++ b/x.go\n+func f() {}\n"
+	run := &models.Session{
+		ID:            sessionID,
+		OrgID:         orgID,
+		AgentType:     "claude-code",
+		ResultSummary: &reviewSummary,
+		Diff:          &diff,
+	}
+
+	svc, mockLLM := newPRContentTestService(t)
+	svc.SetSessionThreadStore(fakeSessionThreadLister{threads: []models.SessionThread{
+		{ID: mainThreadID, SessionID: sessionID, OrgID: orgID, Label: "Main", CreatedAt: now, ResultSummary: ptrString(implSummary)},
+		// execution_mode "work", exactly as reviewloop.Service creates it.
+		{ID: reviewThreadID, SessionID: sessionID, OrgID: orgID, Label: "Review", CreatedAt: now.Add(time.Minute), ResultSummary: ptrString(reviewSummary)},
+	}})
+	svc.SetSessionReviewLoopStore(fakeSessionReviewLoopLister{err: errors.New("db unavailable")})
+
+	_, err := svc.generatePRContent(context.Background(), "token", "owner", "repo", "main", uuid.New(), orgID, run, nil)
+	require.NoError(t, err, "generatePRContent should degrade gracefully when the review loop store errors")
+	require.NotContains(t, mockLLM.lastUserPrompt, reviewSummary, "untrusted session summary must not become the narrative when provenance is incomplete")
+	require.Contains(t, mockLLM.lastUserPrompt, "<agent_summary>", "a thread-attributed narrative should replace the untrusted session summary")
+	require.Contains(t, mockLLM.lastUserPrompt, implSummary, "implementation thread summary should be promoted instead")
+}
+
+// A failing review-loop query must degrade to the execution_mode signal rather
+// than back to session.result_summary, which is where review prose lives.
+func TestGeneratePRContent_ReviewLoopStoreErrorKeepsReviewProseOut(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	mainThreadID := uuid.New()
+	reviewThreadID := uuid.New()
+	now := time.Now()
+	implSummary := "Implemented the requested behavior."
+	reviewSummary := "Code review found no blocking issues."
+	diff := "+++ b/x.go\n+func f() {}\n"
+	run := &models.Session{
+		ID:            sessionID,
+		OrgID:         orgID,
+		AgentType:     "claude-code",
+		ResultSummary: &reviewSummary,
+		Diff:          &diff,
+	}
+
+	svc, mockLLM := newPRContentTestService(t)
+	svc.SetSessionThreadStore(fakeSessionThreadLister{threads: []models.SessionThread{
+		{ID: mainThreadID, SessionID: sessionID, OrgID: orgID, Label: "Main", CreatedAt: now, ResultSummary: ptrString(implSummary)},
+		{
+			ID:            reviewThreadID,
+			SessionID:     sessionID,
+			OrgID:         orgID,
+			Label:         "Security audit",
+			CreatedAt:     now.Add(time.Minute),
+			ResultSummary: ptrString(reviewSummary),
+			ExecutionMode: models.ThreadExecutionModeReview,
+		},
+	}})
+	svc.SetSessionReviewLoopStore(fakeSessionReviewLoopLister{err: errors.New("db unavailable")})
+
+	_, err := svc.generatePRContent(context.Background(), "token", "owner", "repo", "main", uuid.New(), orgID, run, nil)
+	require.NoError(t, err, "generatePRContent should degrade gracefully when the review loop store errors")
+	require.NotContains(t, mockLLM.lastUserPrompt, reviewSummary, "typed review prose must stay out even without review-loop provenance")
+	require.Contains(t, mockLLM.lastUserPrompt, implSummary, "implementation narrative should survive the degraded path")
+}
+
+// Without a review-loop store wired, review-loop threads (execution_mode "work")
+// are invisible, but typed review threads must still be excluded.
+func TestGeneratePRContent_WithoutReviewLoopStoreExcludesTypedReviews(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	mainThreadID := uuid.New()
+	reviewThreadID := uuid.New()
+	now := time.Now()
+	implSummary := "Implemented the requested behavior."
+	reviewSummary := "Code review found no blocking issues."
+	diff := "+++ b/x.go\n+func f() {}\n"
+	run := &models.Session{
+		ID:            sessionID,
+		OrgID:         orgID,
+		AgentType:     "claude-code",
+		ResultSummary: &implSummary,
+		Diff:          &diff,
+	}
+
+	svc, mockLLM := newPRContentTestService(t)
+	svc.SetSessionThreadStore(fakeSessionThreadLister{threads: []models.SessionThread{
+		{ID: mainThreadID, SessionID: sessionID, OrgID: orgID, Label: "Main", CreatedAt: now, ResultSummary: ptrString(implSummary)},
+		{
+			ID:            reviewThreadID,
+			SessionID:     sessionID,
+			OrgID:         orgID,
+			Label:         "Security audit",
+			CreatedAt:     now.Add(time.Minute),
+			ResultSummary: ptrString(reviewSummary),
+			ExecutionMode: models.ThreadExecutionModeReview,
+		},
+	}})
+
+	_, err := svc.generatePRContent(context.Background(), "token", "owner", "repo", "main", uuid.New(), orgID, run, nil)
+	require.NoError(t, err)
+	require.NotContains(t, mockLLM.lastUserPrompt, reviewSummary, "typed review prose should be excluded without a review loop store")
+	require.Contains(t, mockLLM.lastUserPrompt, implSummary, "implementation narrative should still be present")
+}
+
+// A loop row with no thread binding still contributes its LatestSummary, and a
+// non-review thread that echoes review prose is dropped from the thread block.
+func TestGeneratePRContent_ExcludesReviewProseFromUnboundLoop(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	mainThreadID := uuid.New()
+	echoThreadID := uuid.New()
+	now := time.Now()
+	implSummary := "Implemented the requested behavior."
+	reviewSummary := "Review loop: no remaining issues."
+	diff := "+++ b/x.go\n+func f() {}\n"
+	run := &models.Session{
+		ID:            sessionID,
+		OrgID:         orgID,
+		AgentType:     "claude-code",
+		ResultSummary: &implSummary,
+		Diff:          &diff,
+	}
+
+	svc, mockLLM := newPRContentTestService(t)
+	svc.SetSessionThreadStore(fakeSessionThreadLister{threads: []models.SessionThread{
+		{ID: mainThreadID, SessionID: sessionID, OrgID: orgID, Label: "Main", CreatedAt: now, ResultSummary: ptrString(implSummary)},
+		// Not classified as a review thread, but its summary is the review text.
+		{ID: echoThreadID, SessionID: sessionID, OrgID: orgID, Label: "Echo", CreatedAt: now.Add(time.Minute), ResultSummary: ptrString(reviewSummary)},
+	}})
+	svc.SetSessionReviewLoopStore(fakeSessionReviewLoopLister{loops: []models.SessionReviewLoop{{
+		ID:            uuid.New(),
+		OrgID:         orgID,
+		SessionID:     sessionID,
+		LatestSummary: ptrString(reviewSummary),
+		// ThreadID intentionally nil: older loop rows may carry no binding.
+	}}})
+
+	_, err := svc.generatePRContent(context.Background(), "token", "owner", "repo", "main", uuid.New(), orgID, run, nil)
+	require.NoError(t, err)
+	require.NotContains(t, mockLLM.lastUserPrompt, reviewSummary, "review prose should be excluded by text even from an unbound loop row")
+	require.Contains(t, mockLLM.lastUserPrompt, implSummary, "implementation narrative should be unaffected")
+}
+
+// A session whose only summarized threads are reviewers yields no narrative on
+// purpose: the diff drives the PR rather than review prose. Pinned so the
+// trade-off is a contract, not an accident.
+func TestGeneratePRContent_ReviewOnlySessionOmitsNarrative(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	reviewThreadID := uuid.New()
+	reviewSummary := "Review loop: fixed the naming and re-ran tests."
+	diff := "+++ b/x.go\n+func f() {}\n"
+	run := &models.Session{
+		ID:            sessionID,
+		OrgID:         orgID,
+		AgentType:     "claude-code",
+		ResultSummary: &reviewSummary,
+		Diff:          &diff,
+	}
+
+	svc, mockLLM := newPRContentTestService(t)
+	svc.SetSessionThreadStore(fakeSessionThreadLister{threads: []models.SessionThread{
+		{ID: reviewThreadID, SessionID: sessionID, OrgID: orgID, Label: "Review", CreatedAt: time.Now(), ResultSummary: ptrString(reviewSummary)},
+	}})
+	svc.SetSessionReviewLoopStore(fakeSessionReviewLoopLister{loops: []models.SessionReviewLoop{{
+		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ThreadID: &reviewThreadID,
+	}}})
+
+	_, err := svc.generatePRContent(context.Background(), "token", "owner", "repo", "main", uuid.New(), orgID, run, nil)
+	require.NoError(t, err, "PR content should still generate from the diff alone")
+	require.NotContains(t, mockLLM.lastUserPrompt, reviewSummary, "review prose must not be the fallback narrative")
+	require.NotContains(t, mockLLM.lastUserPrompt, "<agent_summary>", "no narrative should be invented when every summary is review prose")
+	require.NotContains(t, mockLLM.lastUserPrompt, "<session_threads>", "no thread context should remain once reviewers are excluded")
+	require.Contains(t, mockLLM.lastUserPrompt, "<code_diff>", "the diff should still carry the PR")
 }
 
 func TestGeneratePRContent_ThreadStoreError(t *testing.T) {
@@ -1799,9 +2243,10 @@ func TestGeneratePRContent_ThreadCapAndEmptySummaries(t *testing.T) {
 		Diff:      &diff,
 	}
 
-	// Build 10 threads: one with no summary, nine with distinct summaries.
-	// The no-summary thread should be skipped; at most 8 of the 9 summaries should appear.
-	threads := make([]models.SessionThread, 0, 10)
+	// Build 11 threads: one with no summary, ten with distinct summaries. The
+	// no-summary thread is skipped, the first summarized thread is promoted to
+	// <agent_summary>, and at most 8 of the rest reach <session_threads>.
+	threads := make([]models.SessionThread, 0, 11)
 	threads = append(threads, models.SessionThread{
 		ID:        uuid.New(),
 		SessionID: sessionID,
@@ -1811,7 +2256,7 @@ func TestGeneratePRContent_ThreadCapAndEmptySummaries(t *testing.T) {
 		CreatedAt: now,
 		// ResultSummary intentionally nil
 	})
-	for i := range 9 {
+	for i := range 10 {
 		s := fmt.Sprintf("Thread summary number %d with distinct content.", i+1)
 		threads = append(threads, models.SessionThread{
 			ID:            uuid.New(),
@@ -1837,11 +2282,16 @@ func TestGeneratePRContent_ThreadCapAndEmptySummaries(t *testing.T) {
 
 	_, err := svc.generatePRContent(context.Background(), "token", "owner", "repo", "main", uuid.New(), orgID, run, nil)
 	require.NoError(t, err)
-	// Threads 1-8 should appear; thread 9 should be capped out.
-	for i := range 8 {
+	// Thread 1 becomes the agent summary; threads 2-9 fill the 8-entry context block.
+	for i := range 9 {
 		require.Contains(t, mockLLM.lastUserPrompt, fmt.Sprintf("Thread summary number %d", i+1))
 	}
-	require.NotContains(t, mockLLM.lastUserPrompt, "Thread summary number 9", "9th summary should be excluded by the 8-thread cap")
+	blockStart := strings.Index(mockLLM.lastUserPrompt, "<session_threads>")
+	blockEnd := strings.Index(mockLLM.lastUserPrompt, "</session_threads>")
+	require.Greater(t, blockEnd, blockStart, "prompt should contain a session_threads block")
+	block := mockLLM.lastUserPrompt[blockStart:blockEnd]
+	require.Equal(t, 8, strings.Count(block, "\n- "), "session_threads should hold at most 8 entries")
+	require.NotContains(t, mockLLM.lastUserPrompt, "Thread summary number 10", "10th summary should be excluded by the 8-thread cap")
 	require.NotContains(t, mockLLM.lastUserPrompt, "Empty", "thread with nil summary should be excluded")
 }
 
