@@ -28,7 +28,9 @@ describe("landing copy", () => {
     expect(codeReviewSummary.heading).toBe(
       "Code review that can auto-approve.",
     );
-    expect(codeReviewSummary.body).toContain("reviewing it is the bottleneck");
+    expect(codeReviewSummary.body).toContain(
+      "Opening a pull request takes minutes; getting it reviewed takes days.",
+    );
     expect(codeReviewSummary.body.split(". ").length).toBeLessThanOrEqual(2);
   });
 

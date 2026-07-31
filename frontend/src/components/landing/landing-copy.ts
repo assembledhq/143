@@ -2,7 +2,7 @@ export const codeReviewSummary = {
   step: "01",
   kicker: "Code review",
   heading: "Code review that can auto-approve.",
-  body: "Your team can use anything to open a pull request, but reviewing it is the bottleneck. 143 reviews each PR with several coding agents and approves it on GitHub when it passes your policy.",
+  body: "Opening a pull request takes minutes; getting it reviewed takes days. 143 reviews each PR with several coding agents and approves it on GitHub when it passes your policy.",
 };
 
 export const codeReviewControls = [
