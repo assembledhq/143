@@ -22,10 +22,14 @@ import {
 import { captureError } from "@/lib/errors";
 import { useAuth } from "@/hooks/use-auth";
 import {
+  AVAILABLE_CLAUDE_CODE_MODELS,
+  AVAILABLE_CODEX_MODELS,
   AVAILABLE_AMP_MODES,
   AVAILABLE_PI_MODELS,
   PI_MODEL_CLAUDE_OPUS_48,
 } from "@/lib/model-constants";
+import { CODING_AGENT_REASONING_OPTIONS_BY_AGENT, toCodingAgentReasoningEffort } from "@/lib/coding-agent-reasoning";
+import { getOrgDefaultCodingAgentModel, getOrgDefaultCodingAgentReasoning } from "@/lib/org-coding-agent-defaults";
 import { queryKeys } from "@/lib/query-keys";
 import type { AgentCapabilityDefinition, AgentCapabilityGrant, CodingCredentialSummary, ListResponse, Organization, OrgSettings, SingleResponse } from "@/lib/types";
 import { CodingAuthStack } from "@/components/coding-auth-stack";
@@ -235,6 +239,21 @@ export default function AgentPage() {
       toast.error("Could not update default capabilities");
     },
   });
+
+  const defaultsMutation = useMutation({
+    mutationFn: (patch: Partial<OrgSettings>) => api.settings.update({ settings: patch }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.settings.all });
+      toast.success("Organization coding-agent defaults updated");
+    },
+    onError: (error) => {
+      captureError(error, { feature: "organization-coding-agent-defaults-update" });
+      toast.error("Could not update organization coding-agent defaults");
+    },
+  });
+  // Only the field being saved goes read-only — one mutation object drives all
+  // four selects, so gating on isPending alone would freeze the other three.
+  const pendingDefaultsPatch = defaultsMutation.isPending ? defaultsMutation.variables : undefined;
 
   function setCapabilityEnabled(definition: AgentCapabilityDefinition, enabled: boolean) {
     if (enabled && definition.risk === "high") {
@@ -518,6 +537,76 @@ export default function AgentPage() {
               void reorderMutation.mutateAsync(nextRows);
             }}
           />
+        </section>
+
+        <section className="space-y-4">
+          <div className="space-y-1.5">
+            <h2 className="text-xs font-medium text-foreground">Organization defaults</h2>
+            <p className="text-xs text-muted-foreground">
+              Applied to new manual sessions when a member has not saved a personal default. A session selection still takes precedence.
+            </p>
+          </div>
+          <Card>
+            <CardContent className="grid gap-6 p-4 sm:grid-cols-2">
+              {([
+                { agent: "codex" as const, label: "Codex", models: AVAILABLE_CODEX_MODELS },
+                { agent: "claude_code" as const, label: "Claude Code", models: AVAILABLE_CLAUDE_CODE_MODELS },
+              ]).map(({ agent, label, models }) => {
+                const orgModel = getOrgDefaultCodingAgentModel(settings, agent);
+                // A model that has since left the curated list is still stored and
+                // still inert. Radix renders an unmatched value as the placeholder,
+                // which would read as "nothing is set" — list it explicitly so the
+                // stale setting is visible and clearable.
+                const retiredModel = orgModel && !(models as readonly string[]).includes(orgModel) ? orgModel : "";
+                return (
+                <div key={agent} className="space-y-4">
+                  <div className="space-y-2">
+                    <Label htmlFor={`org-default-model-${agent}`}>{label} model</Label>
+                    <Select
+                      disabled={pendingDefaultsPatch?.coding_agent_model_defaults?.[agent] !== undefined}
+                      // Patch only the edited key: the server deep-merges settings, so
+                      // sending the whole map would let a second edit revert the first
+                      // one it raced with off a stale cache.
+                      value={orgModel || "__default__"}
+                      onValueChange={(value) => defaultsMutation.mutate({
+                        coding_agent_model_defaults: { [agent]: value === "__default__" ? "" : value },
+                      })}
+                    >
+                      <SelectTrigger id={`org-default-model-${agent}`} aria-label={`Organization default ${label} model`}>
+                        <SelectValue placeholder="Provider default" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__default__">Provider default</SelectItem>
+                        {retiredModel ? <SelectItem value={retiredModel}>{retiredModel} (no longer available)</SelectItem> : null}
+                        {models.map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor={`org-default-reasoning-${agent}`}>{label} reasoning</Label>
+                    <Select
+                      disabled={pendingDefaultsPatch?.coding_agent_reasoning_defaults?.[agent] !== undefined}
+                      value={getOrgDefaultCodingAgentReasoning(settings, agent) || "__default__"}
+                      onValueChange={(value) => defaultsMutation.mutate({
+                        coding_agent_reasoning_defaults: { [agent]: value === "__default__" ? "" : toCodingAgentReasoningEffort(value) },
+                      })}
+                    >
+                      <SelectTrigger id={`org-default-reasoning-${agent}`} aria-label={`Organization default ${label} reasoning`}>
+                        <SelectValue placeholder="Agent default" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__default__">Agent default</SelectItem>
+                        {CODING_AGENT_REASONING_OPTIONS_BY_AGENT[agent].options.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+                );
+              })}
+            </CardContent>
+          </Card>
         </section>
 
         <section className="space-y-4">

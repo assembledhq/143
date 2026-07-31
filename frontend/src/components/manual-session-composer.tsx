@@ -91,6 +91,7 @@ import {
   supportsReasoningEffort,
   toCodingAgentReasoningEffort,
 } from "@/lib/coding-agent-reasoning";
+import { getOrgDefaultCodingAgentModel, getOrgDefaultCodingAgentReasoning } from "@/lib/org-coding-agent-defaults";
 import type {
   CodingCredentialSummary,
   Integration,
@@ -615,9 +616,13 @@ export function ManualSessionComposer({
   }, [modelGroups, selectedModel, resolvedCredsResponse, codexAuthResponse]);
 
   // Determine which agent type would be used and whether credentials exist.
-  const submittedModel = selectedModel || userDefaultModel;
+  // The org fallbacks wait for settings to load: guessing before then could pin
+  // the wrong agent on a session submitted immediately after mount.
+  const orgDefaultModel = settingsLoaded ? getOrgDefaultCodingAgentModel(settings, defaultAgentType) : "";
+  const submittedModel = selectedModel || userDefaultModel || orgDefaultModel;
   const effectiveAgentType: string = submittedModel ? agentTypeForModel(submittedModel) ?? defaultAgentType : defaultAgentType;
-  const defaultReasoningEffort = getDefaultCodingAgentReasoningForAgent(user?.settings, effectiveAgentType);
+  const defaultReasoningEffort = getDefaultCodingAgentReasoningForAgent(user?.settings, effectiveAgentType)
+    || (settingsLoaded ? getOrgDefaultCodingAgentReasoning(settings, effectiveAgentType) : "");
   const effectiveReasoningOverride = isCodingAgentReasoningEffortSupported(effectiveAgentType, reasoningOverride) ? reasoningOverride : "";
   const effectiveReasoningEffort = effectiveReasoningOverride || defaultReasoningEffort;
   const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
@@ -1058,7 +1063,7 @@ export function ManualSessionComposer({
   }
 
   const repoSummary = selectedRepo ? selectedRepo.full_name.split("/").pop() ?? selectedRepo.full_name : "No repo";
-  const modelSummary = selectedModel || (userDefaultModel ? `Default (${userDefaultModel})` : "Default model");
+  const modelSummary = selectedModel || (submittedModel ? `Default (${submittedModel})` : "Default model");
   const reasoningSummary = effectiveReasoningEffort || "Default reasoning";
 
   const settingsControls = (

@@ -48,6 +48,14 @@ function installHandlers() {
           name: "Acme",
           settings: {
             default_agent_type: "codex",
+            coding_agent_model_defaults: {
+              codex: "gpt-5.6-sol",
+              claude_code: "claude-opus-5",
+            },
+            coding_agent_reasoning_defaults: {
+              codex: "high",
+              claude_code: "max",
+            },
             max_concurrent_runs: 5,
             max_session_duration_seconds: 1500,
             agent_config: {},
@@ -75,6 +83,138 @@ describe("Agent settings page", () => {
     expect(screen.queryByLabelText("Max concurrent sessions")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Session max time (minutes)")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Agent tab tools")).not.toBeInTheDocument();
+    expect(screen.getByText("Organization defaults")).toBeInTheDocument();
+    expect(screen.getByLabelText("Organization default Codex model")).toHaveTextContent("gpt-5.6-sol");
+    expect(screen.getByLabelText("Organization default Claude Code model")).toHaveTextContent("claude-opus-5");
+    expect(screen.getByLabelText("Organization default Codex reasoning")).toHaveTextContent("High");
+    expect(screen.getByLabelText("Organization default Claude Code reasoning")).toHaveTextContent("Max");
+  });
+
+  it("shows the platform defaults for an org that never saved coding-agent defaults", async () => {
+    // GET /settings returns the raw settings blob, but ParseOrgSettings back-fills
+    // these server-side — so an absent key still runs sessions on gpt-5.6-sol/high
+    // and the UI has to say so instead of "Provider default". The explicit
+    // Claude Code reasoning below is the marker that the response has landed.
+    installHandlers();
+    server.use(
+      http.get("/api/v1/settings", () =>
+        HttpResponse.json({
+          data: {
+            id: "org-1",
+            name: "Acme",
+            settings: {
+              default_agent_type: "codex",
+              coding_agent_reasoning_defaults: { claude_code: "low" },
+              agent_config: {},
+            },
+            created_at: "2026-04-22T10:00:00Z",
+            updated_at: "2026-04-22T10:00:00Z",
+          },
+        }),
+      ),
+    );
+
+    renderWithProviders(<AgentPage />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Organization default Claude Code reasoning")).toHaveTextContent("Low");
+    });
+    expect(screen.getByLabelText("Organization default Codex model")).toHaveTextContent("gpt-5.6-sol");
+    expect(screen.getByLabelText("Organization default Claude Code model")).toHaveTextContent("claude-opus-5");
+    expect(screen.getByLabelText("Organization default Codex reasoning")).toHaveTextContent("High");
+  });
+
+  it("shows an explicitly stored opt-out instead of the platform default", async () => {
+    installHandlers();
+    server.use(
+      http.get("/api/v1/settings", () =>
+        HttpResponse.json({
+          data: {
+            id: "org-1",
+            name: "Acme",
+            settings: {
+              default_agent_type: "codex",
+              coding_agent_model_defaults: { codex: "" },
+              coding_agent_reasoning_defaults: { codex: "" },
+              agent_config: {},
+            },
+            created_at: "2026-04-22T10:00:00Z",
+            updated_at: "2026-04-22T10:00:00Z",
+          },
+        }),
+      ),
+    );
+
+    renderWithProviders(<AgentPage />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Organization default Codex model")).toHaveTextContent("Provider default");
+    });
+    expect(screen.getByLabelText("Organization default Codex reasoning")).toHaveTextContent("Agent default");
+  });
+
+  it("surfaces a stored model that is no longer offered", async () => {
+    // Radix renders an unmatched value as the placeholder, which would read as
+    // "nothing is set" for a setting that is stored but inert.
+    installHandlers();
+    server.use(
+      http.get("/api/v1/settings", () =>
+        HttpResponse.json({
+          data: {
+            id: "org-1",
+            name: "Acme",
+            settings: {
+              default_agent_type: "codex",
+              coding_agent_model_defaults: { codex: "gpt-4-retired" },
+              agent_config: {},
+            },
+            created_at: "2026-04-22T10:00:00Z",
+            updated_at: "2026-04-22T10:00:00Z",
+          },
+        }),
+      ),
+    );
+
+    renderWithProviders(<AgentPage />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Organization default Codex model")).toHaveTextContent("gpt-4-retired (no longer available)");
+    });
+  });
+
+  it("patches only the edited coding-agent default", async () => {
+    // The server deep-merges settings, so sending the untouched agent back would
+    // let a second edit revert the first one it raced with off a stale cache.
+    const user = userEvent.setup();
+    let capturedBody: Record<string, unknown> | null = null;
+
+    installHandlers();
+    server.use(
+      http.patch("/api/v1/settings", async ({ request }) => {
+        capturedBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({
+          data: {
+            id: "org-1",
+            name: "Acme",
+            settings: { default_agent_type: "codex", agent_config: {} },
+            created_at: "2026-04-22T10:00:00Z",
+            updated_at: "2026-04-22T10:00:00Z",
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<AgentPage />);
+
+    await user.click(await screen.findByLabelText("Organization default Codex reasoning"));
+    await user.click(await screen.findByRole("option", { name: "Extra High" }));
+
+    await waitFor(() => {
+      expect(capturedBody).not.toBeNull();
+    });
+    expect(capturedBody).toEqual({
+      settings: { coding_agent_reasoning_defaults: { codex: "xhigh" } },
+    });
   });
 
   it("aligns the personal auths link with the organization auths description", async () => {
