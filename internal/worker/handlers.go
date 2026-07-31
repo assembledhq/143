@@ -11092,6 +11092,15 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			run.LinkedIssues = links
 		}
 
+		if input.RequestedRole == string(models.RoleBuilder) {
+			if err := ensureBuilderReviewFresh(ctx, stores, run, changesetID); err != nil {
+				if stateErr := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStateFailed, "A clean Review for the current snapshot is required before creating a pull request."); stateErr != nil {
+					logger.Error().Err(stateErr).Msg("failed to mark PR creation blocked by review policy")
+				}
+				return err
+			}
+		}
+
 		ready, err := ensureAutomationPrePRReview(ctx, stores, services, logger, run, changesetID)
 		if err != nil {
 			return err
@@ -11433,6 +11442,40 @@ func newCreateBranchHandler(stores *Stores, services *Services, logger zerolog.L
 		}
 		return nil
 	}
+}
+
+// ensureBuilderReviewFresh revalidates the builder publication gate in the
+// durable worker. The session can change after the API enqueues open_pr, so the
+// synchronous handler check alone cannot attest to the snapshot being pushed.
+func ensureBuilderReviewFresh(ctx context.Context, stores *Stores, run models.Session, changesetID *uuid.UUID) error {
+	if stores == nil || stores.ReviewLoops == nil {
+		return errors.New("review policy is not configured")
+	}
+	if changesetID != nil {
+		if stores.SessionChangesets == nil {
+			return errors.New("changeset store is not configured for review policy")
+		}
+		changeset, err := stores.SessionChangesets.GetByID(ctx, run.OrgID, run.ID, *changesetID)
+		if err != nil {
+			return fmt.Errorf("load changeset for builder review policy: %w", err)
+		}
+		if !changeset.IsPrimary && changeset.WorktreePath != nil {
+			return errors.New("builder review evidence does not cover a separate changeset worktree")
+		}
+	}
+	if run.SnapshotKey == nil || *run.SnapshotKey == "" {
+		return errors.New("builder publication requires a current session snapshot")
+	}
+	loops, err := stores.ReviewLoops.ListLoopsBySession(ctx, run.OrgID, run.ID)
+	if err != nil {
+		return fmt.Errorf("load review loops for builder publication: %w", err)
+	}
+	for _, loop := range loops {
+		if loop.Status == models.ReviewLoopStatusClean && loop.LatestCheckpointKey != nil && *loop.LatestCheckpointKey == *run.SnapshotKey {
+			return nil
+		}
+	}
+	return errors.New("builder publication requires a clean Review for the current snapshot")
 }
 
 func ensureAutomationPrePRReview(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, run models.Session, changesetID *uuid.UUID) (bool, error) {

@@ -6284,6 +6284,68 @@ func TestCreateBranchHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestEnsureBuilderReviewFresh(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		snapshotKey   string
+		checkpointKey *string
+		status        models.ReviewLoopStatus
+		wantErr       bool
+	}{
+		{
+			name:          "accepts clean review for current snapshot",
+			snapshotKey:   "snap-current",
+			checkpointKey: stringPtr("snap-current"),
+			status:        models.ReviewLoopStatusClean,
+		},
+		{
+			name:          "rejects clean review for stale snapshot",
+			snapshotKey:   "snap-current",
+			checkpointKey: stringPtr("snap-older"),
+			status:        models.ReviewLoopStatusClean,
+			wantErr:       true,
+		},
+		{
+			name:          "rejects running review for current snapshot",
+			snapshotKey:   "snap-current",
+			checkpointKey: stringPtr("snap-current"),
+			status:        models.ReviewLoopStatusRunning,
+			wantErr:       true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			stores, mock := newTestStores(t)
+			defer mock.Close()
+			stores.ReviewLoops = db.NewSessionReviewLoopStore(mock)
+			orgID, sessionID, loopID := uuid.New(), uuid.New(), uuid.New()
+			now := time.Now()
+			mock.ExpectQuery(`SELECT .+ FROM session_review_loops`).
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(workerReviewLoopColumns()).AddRow(
+					loopID, orgID, sessionID, nil, nil,
+					tt.status, models.ReviewLoopSourceManual, models.AgentTypeCodex,
+					2, models.ReviewLoopFixModeMinimal, 1, true, nil, nil, stringPtr("snap-start"), tt.checkpointKey,
+					nil, nil, now, nil,
+				))
+
+			run := models.Session{ID: sessionID, OrgID: orgID, SnapshotKey: &tt.snapshotKey}
+			err := ensureBuilderReviewFresh(context.Background(), stores, run, nil)
+			if tt.wantErr {
+				require.Error(t, err, "worker should reject builder publication without a clean review for the current snapshot")
+			} else {
+				require.NoError(t, err, "worker should accept builder publication with a clean review for the current snapshot")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestOpenPRHandler_StartsAutomationPrePRReviewBeforePushing(t *testing.T) {
 	t.Parallel()
 

@@ -24,6 +24,10 @@ was configured: a builder must have a clean review loop for the current snapshot
 before `CreatePR` or `PushChangesToPR` is accepted
 (409 `REVIEW_REQUIRED_BEFORE_PR`).
 
+The durable `open_pr` worker repeats the same check before pushing. This closes
+the enqueue-to-execution race: a review that was current when the API accepted
+the request cannot authorize a newer snapshot captured before the job runs.
+
 ## Builder Gate Scope
 
 Readiness was changeset-scoped: it pinned `evaluated_head_sha` to the target

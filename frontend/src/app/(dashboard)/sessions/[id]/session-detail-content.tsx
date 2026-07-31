@@ -4577,8 +4577,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   const latestReviewLoop = reviewLoopsData?.data?.[0] ?? null;
   // Mirror the server-side builder gate so the action is disabled with a reason
   // instead of failing with 409 REVIEW_REQUIRED_BEFORE_PR on click. The API
-  // compares against the session snapshot key for changesets too, so this does
-  // not key off the selected changeset. Branch creation has no server gate.
+  // compares against the session snapshot key for the primary changeset, so
+  // this does not key off branch-head state. Branch creation has no server gate.
   const builderReviewAllowsPR = user?.role !== "builder" ||
     (reviewLoopsData?.data ?? []).some((loop) =>
       loop.status === "clean" && (loop.latest_checkpoint_key ?? "") === (session?.snapshot_key ?? ""));
