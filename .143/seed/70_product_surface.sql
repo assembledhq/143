@@ -12,7 +12,7 @@ SET settings = COALESCE(settings, '{}'::jsonb) || '{
     "principles": [
       "show agent work with evidence",
       "keep tenant data isolated",
-      "make preview and PR readiness obvious"
+      "make preview and review status obvious"
     ],
     "current_focus": [
       "preview reliability",

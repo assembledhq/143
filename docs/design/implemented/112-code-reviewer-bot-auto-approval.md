@@ -2,7 +2,7 @@
 
 > **Status:** Implemented | **Last reviewed:** 2026-07-30
 >
-> **Depends on:** [../overall.md](../overall.md), [78-review-agent-loops.md](78-review-agent-loops.md), [107-pr-readiness-checks.md](107-pr-readiness-checks.md), [61-pr-state-sync-and-repair-actions.md](61-pr-state-sync-and-repair-actions.md), [../backlog/11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md)
+> **Depends on:** [../overall.md](../overall.md), [78-review-agent-loops.md](78-review-agent-loops.md), [61-pr-state-sync-and-repair-actions.md](61-pr-state-sync-and-repair-actions.md), [../backlog/11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md)
 
 ## Summary
 
@@ -54,7 +54,6 @@ Coding agents and faster developer tooling increase PR volume. Teams then face t
 Existing 143 surfaces help adjacent parts of the flow:
 
 - Review agent loops improve a session's own diff before publishing.
-- PR readiness checks decide whether a session looks ready to become a PR.
 - PR health surfaces conflicts and failing checks after a PR exists.
 
 This feature fills the post-PR slot: reviewer automation in GitHub, where teams already assign review responsibility.
@@ -311,7 +310,7 @@ Default editable requirements:
 | Testing evidence | Required for nontrivial changes. Admins can define nontrivial by files changed, lines changed, touched paths, changed test files, or risk categories. |
 | Screenshots or preview link | Required for frontend changes, UI-visible changes, or changes above configured file/line thresholds. |
 
-Reuse the PR readiness custom-check pattern where possible: typed built-ins first, prompt-only custom checks second, no arbitrary code execution.
+Use typed built-ins first and prompt-only custom checks second; do not execute arbitrary repository code.
 
 ### Multi-Agent Review Roster
 
@@ -699,5 +698,5 @@ Implementation notes:
 - Percentage of bot-approved PRs merged without additional human requested-changes reviews.
 - False approval rate, measured by revert, incident, or post-approval human blocker.
 - Human review load reduction in repositories where the bot is enabled.
-- Top non-approval reasons, used to tune PR templates and readiness checks.
+- Top non-approval reasons, used to tune PR templates and review policy.
 - Median time from reviewer request to review decision.

@@ -145,22 +145,18 @@ const (
 	AuditActionCredentialDeleted                   AuditAction = "credential.deleted" // #nosec G101 -- not a credential
 
 	// Preview secret bundle actions
-	AuditActionPreviewSecretBundleUpdated    AuditAction = "preview_secret_bundle.updated"  // #nosec G101 -- not a credential
-	AuditActionPreviewSecretBundleDeleted    AuditAction = "preview_secret_bundle.deleted"  // #nosec G101 -- not a credential
-	AuditActionPreviewSecretBundleRevealed   AuditAction = "preview_secret_bundle.revealed" // #nosec G101 -- not a credential
-	AuditActionPreviewSecretBundleResolved   AuditAction = "preview_secret_bundle.resolved" // #nosec G101 -- not a credential
-	AuditActionPreviewSecretBundleFailed     AuditAction = "preview_secret_bundle.failed"   // #nosec G101 -- not a credential
-	AuditActionPreviewPolicyUpdated          AuditAction = "preview_policy.updated"
-	AuditActionPreviewToolInvoked            AuditAction = "preview.tool_invoked"
-	AuditActionPreviewUpdated                AuditAction = "preview.updated"
-	AuditActionPreviewScreenshotCaptured     AuditAction = "preview.screenshot_captured"
-	AuditActionPRReadinessPolicyUpdated      AuditAction = "pr_readiness_policy.updated"
-	AuditActionPRReadinessCustomCheckUpdated AuditAction = "pr_readiness_custom_check.updated"
-	AuditActionPRReadinessCustomCheckDeleted AuditAction = "pr_readiness_custom_check.deleted"
-	AuditActionPRReadinessBypassed           AuditAction = "pr_readiness.bypassed" // #nosec G101 -- not a credential
-	AuditActionCodeReviewPolicyUpdated       AuditAction = "code_review_policy.updated"
-	AuditActionCodeReviewPolicyReset         AuditAction = "code_review_policy.reset"
-	AuditActionCodeReviewRetried             AuditAction = "code_review.retried"
+	AuditActionPreviewSecretBundleUpdated  AuditAction = "preview_secret_bundle.updated"  // #nosec G101 -- not a credential
+	AuditActionPreviewSecretBundleDeleted  AuditAction = "preview_secret_bundle.deleted"  // #nosec G101 -- not a credential
+	AuditActionPreviewSecretBundleRevealed AuditAction = "preview_secret_bundle.revealed" // #nosec G101 -- not a credential
+	AuditActionPreviewSecretBundleResolved AuditAction = "preview_secret_bundle.resolved" // #nosec G101 -- not a credential
+	AuditActionPreviewSecretBundleFailed   AuditAction = "preview_secret_bundle.failed"   // #nosec G101 -- not a credential
+	AuditActionPreviewPolicyUpdated        AuditAction = "preview_policy.updated"
+	AuditActionPreviewToolInvoked          AuditAction = "preview.tool_invoked"
+	AuditActionPreviewUpdated              AuditAction = "preview.updated"
+	AuditActionPreviewScreenshotCaptured   AuditAction = "preview.screenshot_captured"
+	AuditActionCodeReviewPolicyUpdated     AuditAction = "code_review_policy.updated"
+	AuditActionCodeReviewPolicyReset       AuditAction = "code_review_policy.reset"
+	AuditActionCodeReviewRetried           AuditAction = "code_review.retried"
 
 	// Auth actions
 	AuditActionAuthLogin    AuditAction = "auth.login"
@@ -235,8 +231,6 @@ func (a AuditAction) Validate() error {
 		AuditActionPreviewSecretBundleUpdated, AuditActionPreviewSecretBundleDeleted,
 		AuditActionPreviewSecretBundleRevealed, AuditActionPreviewSecretBundleResolved, AuditActionPreviewSecretBundleFailed,
 		AuditActionPreviewPolicyUpdated, AuditActionPreviewToolInvoked, AuditActionPreviewUpdated, AuditActionPreviewScreenshotCaptured,
-		AuditActionPRReadinessPolicyUpdated, AuditActionPRReadinessCustomCheckUpdated,
-		AuditActionPRReadinessCustomCheckDeleted, AuditActionPRReadinessBypassed,
 		AuditActionCodeReviewPolicyUpdated, AuditActionCodeReviewPolicyReset, AuditActionCodeReviewRetried,
 		AuditActionAuthLogin, AuditActionAuthLogout, AuditActionAuthRegister,
 		AuditActionAuthCLILogin, AuditActionAuthCLILogout,
@@ -282,11 +276,8 @@ const (
 	AuditResourcePreviewSecretBundle        AuditResourceType = "preview_secret_bundle" // #nosec G101 -- not a credential
 	AuditResourcePreviewPolicy              AuditResourceType = "preview_policy"
 	AuditResourcePreview                    AuditResourceType = "preview"
-	AuditResourcePRReadinessPolicy          AuditResourceType = "pr_readiness_policy"
 	AuditResourceCodeReviewPolicy           AuditResourceType = "code_review_policy"
 	AuditResourceCodeReview                 AuditResourceType = "code_review"
-	AuditResourcePRReadinessCustomCheck     AuditResourceType = "pr_readiness_custom_check"
-	AuditResourcePRReadinessBypass          AuditResourceType = "pr_readiness_bypass" // #nosec G101 -- not a credential
 	AuditResourceAPIClient                  AuditResourceType = "api_client"
 	AuditResourceAPIToken                   AuditResourceType = "api_token"      // #nosec G101 -- audit resource type
 	AuditResourceCLIToken                   AuditResourceType = "cli_token"      // #nosec G101 -- audit resource type
@@ -305,7 +296,7 @@ func (t AuditResourceType) Validate() error {
 		AuditResourceSessionReviewComment, AuditResourcePullRequest, AuditResourceReferenceDocument, AuditResourceReferenceDocumentSet,
 		AuditResourceEvalTask, AuditResourceEvalRun, AuditResourceEvalBatch,
 		AuditResourceAutomation, AuditResourceOrganization, AuditResourcePreviewSecretBundle, AuditResourcePreviewPolicy, AuditResourcePreview,
-		AuditResourcePRReadinessPolicy, AuditResourcePRReadinessCustomCheck, AuditResourcePRReadinessBypass, AuditResourceCodeReviewPolicy,
+		AuditResourceCodeReviewPolicy,
 		AuditResourceCodeReview,
 		AuditResourceAPIClient, AuditResourceAPIToken,
 		AuditResourceCLIToken, AuditResourceOrgJoinToken, AuditResourceCLITool,

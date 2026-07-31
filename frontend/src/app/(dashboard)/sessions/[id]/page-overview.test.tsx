@@ -202,7 +202,7 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
   });
 
-  it('hides the Overview review readiness action when there are no changes to review', async () => {
+  it('hides the Overview review action when there are no changes to review', async () => {
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
 
     await screen.findByText('Could not reproduce the error in test environment');
@@ -212,7 +212,7 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(screen.queryByRole('button', { name: 'Code review' })).not.toBeInTheDocument();
   });
 
-  it('shows a disabled review action in the Overview readiness area when changes exist but no snapshot is available', async () => {
+  it('shows a disabled review action in Overview when changes exist but no snapshot is available', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({
@@ -241,7 +241,7 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
   });
 
-  it('keeps the Overview readiness card header stacked inside the constrained detail panel', async () => {
+  it('keeps the Overview review card header stacked inside the constrained detail panel', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({
@@ -283,7 +283,6 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(header).not.toBeNull();
     expect(header?.className).not.toContain('lg:flex-row');
     expect(header?.className).not.toContain('lg:justify-between');
-    expect(screen.queryByRole('button', { name: 'Check readiness' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
   });
 
@@ -989,7 +988,6 @@ describe('SessionDetailPage overview and review loop', () => {
 
     const selectedPanel = screen.getByTestId('selected-pull-request-panel');
     expect(within(selectedPanel).getByRole('button', { name: 'Create PR' })).toBeDisabled();
-    expect(screen.queryByRole('button', { name: 'Check readiness' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Push changes' })).not.toBeInTheDocument();
 

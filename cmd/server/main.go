@@ -494,7 +494,6 @@ func main() {
 			Automations:         automationStore,
 			AutomationRuns:      automationRunStore,
 			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
-			PRReadiness:         db.NewPRReadinessStore(pool),
 			CodeReviews:         codeReviewStore,
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 			Previews:            previewStore,
@@ -1518,7 +1517,6 @@ func buildServices(
 		AutomationGoalImprovements: automationGoalImprovementUpdater,
 		Issues:                     issueStore,
 		Repositories:               repoStore,
-		PRReadiness:                db.NewPRReadinessStore(pool),
 		Orgs:                       orgStore,
 		Jobs:                       jobStore,
 		GitHub:                     ghSvc,
@@ -1573,7 +1571,6 @@ func buildServices(
 		orgStore,
 		llmClient,
 		prTemplateStore,
-		db.NewPRReadinessStore(pool),
 		redisClient,
 		logger,
 	)
@@ -1609,7 +1606,6 @@ func buildServices(
 			Sessions: sessionStore,
 			Threads:  threadSvc,
 		},
-		reviewloopservice.WithAutoReadinessDependencies(orgStore, userStore, pool, jobStore),
 	)
 
 	logger.Info().
@@ -1883,7 +1879,6 @@ func wireWorkerPRService(
 	orgStore *db.OrganizationStore,
 	llmClient llm.Client,
 	prTemplateStore *db.PRTemplateStore,
-	prReadinessStore *db.PRReadinessStore,
 	redisClient *cache.Client,
 	logger zerolog.Logger,
 ) {
@@ -1899,7 +1894,6 @@ func wireWorkerPRService(
 	prService.SetOrgStore(orgStore)
 	prService.SetLLMClient(llmClient)
 	prService.SetPRTemplateStore(prTemplateStore)
-	prService.SetReadinessStore(prReadinessStore)
 	prService.SetRedisClient(redisClient)
 	prService.SetPullRequestStreams(cache.NewPullRequestStreams(redisClient, logger))
 }

@@ -233,7 +233,7 @@ type PersonalAuthType = "subscription" | "api_key";
 // to the merge-patch settings endpoint (null clears an agent's entry).
 type ReasoningDefaults = ReturnType<typeof getCodingAgentReasoningDefaultsFromSettings>;
 type ReasoningDefaultsPatch = NonNullable<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"]>;
-type PersonalAutomationKey = "readiness_after_review_loop" | "resolve_conflicts_when_idle" | "fix_tests_when_idle";
+type PersonalAutomationKey = "resolve_conflicts_when_idle" | "fix_tests_when_idle";
 
 const PERSONAL_AUTOMATION_OPTIONS: Array<{ value: AutomaticFollowThroughPreference; label: string }> = [
   { value: "inherit", label: "Use organization default" },
@@ -242,10 +242,6 @@ const PERSONAL_AUTOMATION_OPTIONS: Array<{ value: AutomaticFollowThroughPreferen
 ];
 
 const PERSONAL_AUTOMATION_COPY: Record<PersonalAutomationKey, { title: string; description: string }> = {
-  readiness_after_review_loop: {
-    title: "Readiness after clean review loop",
-    description: "Run readiness automatically after your review loop completes cleanly.",
-  },
   resolve_conflicts_when_idle: {
     title: "Resolve conflicts when idle",
     description: "Allow automatic conflict repair for your idle sessions, overriding the organization default when needed.",
@@ -599,11 +595,9 @@ export default function AccountPage() {
             {(Object.keys(PERSONAL_AUTOMATION_COPY) as PersonalAutomationKey[]).map((key) => {
               const copy = PERSONAL_AUTOMATION_COPY[key];
               const currentValue = personalAutomaticFollowThrough[key] ?? "inherit";
-              const orgDefault = key === "readiness_after_review_loop"
-                ? orgAutomaticFollowThrough.readiness_after_review_loop
-                : key === "resolve_conflicts_when_idle"
-                  ? orgAutomaticFollowThrough.resolve_conflicts_when_idle
-                  : orgAutomaticFollowThrough.fix_tests_when_idle;
+              const orgDefault = key === "resolve_conflicts_when_idle"
+                ? orgAutomaticFollowThrough.resolve_conflicts_when_idle
+                : orgAutomaticFollowThrough.fix_tests_when_idle;
               return (
                 <div key={key} className="space-y-3 border-b border-border pb-5 last:border-b-0 last:pb-0">
                   <div className="space-y-1">

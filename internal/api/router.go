@@ -45,7 +45,6 @@ import (
 	"github.com/assembledhq/143/internal/services/ownerloss"
 	pagerdutysvc "github.com/assembledhq/143/internal/services/pagerduty"
 	"github.com/assembledhq/143/internal/services/preview"
-	prreadinesssvc "github.com/assembledhq/143/internal/services/prreadiness"
 	"github.com/assembledhq/143/internal/services/reviewartifact"
 	reviewloopservice "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/services/sandbox"
@@ -352,8 +351,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	threadRuntimeStore := db.NewThreadRuntimeStore(pool)
 	sessionSandboxHolderStore := db.NewSessionSandboxHolderStore(pool)
 	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
-	prReadinessStore := db.NewPRReadinessStore(pool)
-	prReadinessRunner := prreadinesssvc.NewService(prReadinessStore, jobStore)
 	codeReviewStore := db.NewCodeReviewStore(pool)
 	codeReviewStreams := cache.NewCodeReviewStreams(redisClient, logger)
 	codeReviewStore.SetStreams(codeReviewStreams)
@@ -403,11 +400,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetSlackSessionLinkStore(slackSessionLinkStore)
 	sessionHandler.SetReviewCommentStore(sessionReviewCommentStore)
 	sessionHandler.SetReviewLoopStore(reviewLoopStore)
-	sessionHandler.SetReadinessStore(prReadinessStore)
-	sessionHandler.SetReadinessRunner(prReadinessRunner)
-	if prService != nil {
-		prService.SetReadinessStore(prReadinessStore)
-	}
 	sessionHandler.SetHumanInputRequestStore(sessionHumanInputStore)
 	sessionHandler.SetCapabilityService(agentCapabilitySvc)
 	sessionHandler.SetUserStore(userStore)
@@ -542,7 +534,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	reviewLoopSvc := reviewloopservice.NewService(reviewLoopStore, reviewloopservice.RuntimeAdapter{
 		Sessions: sessionStore,
 		Threads:  threadSvc,
-	}, reviewloopservice.WithAutoReadinessDependencies(orgStore, userStore, pool, jobStore))
+	})
 	reviewLoopHandler := handlers.NewReviewLoopHandler(reviewLoopSvc, reviewLoopStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
@@ -1309,9 +1301,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/thread-file-events", sessionThreadHandler.ListThreadFileEvents)
 				r.Get("/api/v1/sessions/{id}/review-loops", reviewLoopHandler.List)
 				r.Get("/api/v1/sessions/{id}/review-loops/{loop_id}", reviewLoopHandler.Get)
-				r.Get("/api/v1/sessions/{id}/readiness", sessionHandler.GetReadiness)
-				r.Get("/api/v1/sessions/{id}/pr-readiness-runs/latest", sessionHandler.GetReadiness)
-				r.Get("/api/v1/sessions/{id}/pr-readiness-context", sessionHandler.GetReadinessContext)
 				r.Get("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.List)
 				r.Get("/api/v1/sessions/{id}/usage", usageHandler.ListBySession)
 				r.Get("/api/v1/usage", usageHandler.GetSummary)
@@ -1469,14 +1458,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/revert", sessionThreadHandler.RevertThread)
 				r.Post("/api/v1/sessions/{id}/review-loops", reviewLoopHandler.Start)
 				r.Post("/api/v1/sessions/{id}/review-loops/{loop_id}/cancel", reviewLoopHandler.Cancel)
-				r.Post("/api/v1/sessions/{id}/readiness/run", sessionHandler.RunReadiness)
-				r.Post("/api/v1/sessions/{id}/pr-readiness-runs", sessionHandler.RunReadiness)
-				r.Post("/api/v1/sessions/{id}/pr-readiness-bypasses", sessionHandler.CreateReadinessBypass)
-				r.Post("/api/v1/sessions/{id}/pr-readiness-context", sessionHandler.UpsertReadinessContext)
-				// Policy reads expose sensitive_paths and aggregated bypass counts,
-				// so keep them out of the viewer-readable group above.
-				r.Get("/api/v1/pr-readiness-policies", sessionHandler.GetReadinessPolicy)
-				r.Get("/api/v1/pr-readiness-custom-checks", sessionHandler.ListReadinessCustomChecks)
 				r.Post("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.Create)
 				r.Post("/api/v1/previews", branchPreviewHandler.Create)
 				r.Post("/api/v1/previews/current/{preview_group_id}/stop", branchPreviewHandler.StopCurrent)
@@ -1643,10 +1624,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/code-review-github-trigger", codeReviewHandler.DeleteGitHubTrigger)
 				r.Post("/api/v1/code-reviews/{id}/agent-results", codeReviewHandler.CreateAgentResult)
 				r.Post("/api/v1/code-reviews/{id}/findings", codeReviewHandler.CreateFinding)
-				r.Put("/api/v1/pr-readiness-policies", sessionHandler.PutReadinessPolicy)
-				r.Post("/api/v1/pr-readiness-custom-checks", sessionHandler.CreateReadinessCustomCheck)
-				r.Put("/api/v1/pr-readiness-custom-checks/{check_id}", sessionHandler.UpdateReadinessCustomCheck)
-				r.Delete("/api/v1/pr-readiness-custom-checks/{check_id}", sessionHandler.DeleteReadinessCustomCheck)
 				r.Put("/api/v1/repositories/{repository_id}/preview-policy", branchPreviewHandler.UpdatePolicy)
 				r.Post("/api/v1/repositories/{repository_id}/preview-policy/test-preview", branchPreviewHandler.TestPolicyPreview)
 				r.Get("/api/v1/previews/api-tokens", branchPreviewHandler.ListAPITokens)

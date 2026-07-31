@@ -2,7 +2,7 @@
 
 > **Status:** Not Started | **Last reviewed:** 2026-07-10
 
-> **Depends on:** [overall.md](../overall.md), [PR command continuity](../implemented/76-pr-repair-session-continuity.md), [durable sessions](../implemented/82-durable-session-executors.md), [shared session threads](../implemented/88-shared-sandbox-thread-runtimes.md), [durable webhook ingress](../implemented/100-slack-webhook-ingress-durability.md), [automatic PR repair](../implemented/113-automated-pr-repair-and-readiness.md)
+> **Depends on:** [overall.md](../overall.md), [PR command continuity](../implemented/76-pr-repair-session-continuity.md), [durable sessions](../implemented/82-durable-session-executors.md), [shared session threads](../implemented/88-shared-sandbox-thread-runtimes.md), [durable webhook ingress](../implemented/100-slack-webhook-ingress-durability.md), [automatic PR repair](../implemented/113-automated-pr-repair.md)
 
 ## Decision
 

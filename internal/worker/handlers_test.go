@@ -44,28 +44,6 @@ var workerIssueColumns = []string{
 	"created_at", "updated_at", "deleted_at",
 }
 
-func TestEvaluateCustomReadinessChecksSkipsAllRoleOffChecks(t *testing.T) {
-	t.Parallel()
-
-	results := evaluateCustomReadinessChecks(context.Background(), &Services{}, []models.PRReadinessCustomCheck{
-		{
-			CheckKey: "off_check",
-			Name:     "Off check",
-			Prompt:   "This should not run.",
-			PathFilters: models.PRReadinessPathFilter{
-				Include: []string{"internal/**"},
-			},
-			Enforcement: models.PRReadinessEnforcementByRole{
-				Builder:  models.PRReadinessEnforcementOff,
-				Engineer: models.PRReadinessEnforcementOff,
-				Admin:    models.PRReadinessEnforcementOff,
-			},
-		},
-	}, models.Session{}, []string{"internal/api/foo.go"}, nil)
-
-	require.Empty(t, results, "custom checks configured off for every role should not execute or emit skipped results")
-}
-
 var workerSessionIssueLinkColumns = []string{
 	"id", "org_id", "session_id", "issue_id", "role",
 	"position", "added_by_user_id", "created_at",
@@ -382,12 +360,6 @@ func TestSlackNotificationSubscriptionMatches(t *testing.T) {
 			expected:  false,
 		},
 		{
-			name:      "explicit readiness attention does not match",
-			raw:       json.RawMessage(`{"events":["pr.readiness_attention"]}`),
-			eventKind: "pr.readiness_attention",
-			expected:  false,
-		},
-		{
 			name:      "explicit session failure does not match",
 			raw:       json.RawMessage(`{"events":["session.failed"]}`),
 			eventKind: "session.failed",
@@ -446,14 +418,12 @@ func TestSlackNotificationSubscriptionMatchesPresets(t *testing.T) {
 	}{
 		{name: "balanced excludes PR opened", preset: &balanced, eventKind: string(models.SlackNotificationPROpened), expected: false},
 		{name: "balanced excludes auto repair attention", preset: &balanced, eventKind: string(models.SlackNotificationPRAutoRepairAttention), expected: false},
-		{name: "balanced excludes readiness attention", preset: &balanced, eventKind: string(models.SlackNotificationPRReadinessAttention), expected: false},
 		{name: "balanced excludes session completed", preset: &balanced, eventKind: string(models.SlackNotificationSessionCompleted), expected: false},
 		{name: "balanced excludes preview ready", preset: &balanced, eventKind: string(models.SlackNotificationPreviewReady), expected: false},
 		{name: "balanced excludes preview failed", preset: &balanced, eventKind: string(models.SlackNotificationPreviewFailed), expected: false},
 		{name: "balanced excludes preview stale", preset: &balanced, eventKind: string(models.SlackNotificationPreviewStale), expected: false},
 		{name: "quiet includes human input", preset: &quiet, eventKind: string(models.SlackNotificationHumanInputRequested), expected: true},
 		{name: "quiet excludes auto repair attention", preset: &quiet, eventKind: string(models.SlackNotificationPRAutoRepairAttention), expected: false},
-		{name: "quiet excludes readiness attention", preset: &quiet, eventKind: string(models.SlackNotificationPRReadinessAttention), expected: false},
 		{name: "quiet excludes preview failed", preset: &quiet, eventKind: string(models.SlackNotificationPreviewFailed), expected: false},
 		{name: "quiet excludes session completed", preset: &quiet, eventKind: string(models.SlackNotificationSessionCompleted), expected: false},
 		{name: "quiet excludes session failed", preset: &quiet, eventKind: string(models.SlackNotificationSessionFailed), expected: false},
@@ -486,7 +456,6 @@ func TestSlackNotificationEventDisabled(t *testing.T) {
 		string(models.SlackNotificationPreviewFailed),
 		string(models.SlackNotificationPreviewStale),
 		string(models.SlackNotificationPRAutoRepairAttention),
-		string(models.SlackNotificationPRReadinessAttention),
 	}
 	for _, eventKind := range disabled {
 		require.True(t, slackNotificationEventDisabled(eventKind), "%s should be a retired notification event", eventKind)
@@ -588,20 +557,6 @@ func TestRenderSlackNotificationUsesAutoRepairAttentionDefaults(t *testing.T) {
 	require.Contains(t, text, "could not complete automatic PR repair", "notification should default the auto repair attention body")
 	require.True(t, slackBlocksContainURLButton(blocks, "Open session"), "auto repair attention notifications should include a session action")
 	require.True(t, slackBlocksContainURLButton(blocks, "Review PR"), "auto repair attention notifications should include a PR action")
-}
-
-func TestRenderSlackNotificationUsesReadinessAttentionDefaults(t *testing.T) {
-	t.Parallel()
-
-	sessionID := uuid.New()
-	text, blocks := renderSlackNotification(&Services{FrontendURL: "https://143.test"}, models.SlackSendNotificationJobPayload{
-		Kind:      string(models.SlackNotificationPRReadinessAttention),
-		SessionID: sessionID.String(),
-	})
-
-	require.Contains(t, text, "PR readiness needs attention", "notification should default the readiness attention title")
-	require.Contains(t, text, "readiness checks found blockers", "notification should default the readiness attention body")
-	require.True(t, slackBlocksContainURLButton(blocks, "Open session"), "readiness attention notifications should include a session action")
 }
 
 func TestRenderSlackPromptIncludesReferencesAndFiles(t *testing.T) {
@@ -11472,121 +11427,6 @@ func TestContinueSessionHandler_DeadLettersThreadCancelledDuringWorkspaceWait(t 
 	require.ErrorAs(t, err, &fatal, "workspace-wait cancellation should dead-letter instead of retrying after readiness")
 	require.ErrorIs(t, fatal.Err, agent.ErrThreadCancelledBeforeWorkspaceReady, "fatal error should preserve the workspace-wait cancellation sentinel")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before dead-lettering the cancelled turn")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-}
-
-func TestRunPRReadinessHandler_DeadLetterMarksReadinessFailed(t *testing.T) {
-	t.Parallel()
-
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-	stores.PRReadiness = db.NewPRReadinessStore(mock)
-
-	orgID := uuid.New()
-	sessionID := uuid.New()
-	readinessID := uuid.New()
-
-	mock.ExpectQuery("FROM pr_readiness_runs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnError(errors.New("database unavailable"))
-	mock.ExpectExec("UPDATE pr_readiness_runs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-	ctx := jobctx.WithDeadLetterHooks(context.Background())
-	handler := newRunPRReadinessHandler(stores, &Services{}, zerolog.Nop())
-	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","readiness_id":"` + readinessID.String() + `"}`)
-
-	err := handler(ctx, "run_pr_readiness", payload)
-	require.Error(t, err, "handler should surface the readiness load failure")
-
-	jobctx.RunDeadLetterHooks(ctx, errors.New("retryable job timed out after 8m0s"))
-
-	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should mark the readiness run failed")
-}
-
-func TestRunPRReadinessHandler_RunningReviewLoopBypassesRetryWindow(t *testing.T) {
-	t.Parallel()
-
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-	stores.PRReadiness = db.NewPRReadinessStore(mock)
-	stores.ReviewLoops = db.NewSessionReviewLoopStore(mock)
-
-	orgID := uuid.New()
-	sessionID := uuid.New()
-	readinessID := uuid.New()
-	loopID := uuid.New()
-	threadID := uuid.New()
-	now := time.Now().UTC()
-	snapshotKey := "snapshots/org/session/workspace.tar.zst"
-
-	mock.ExpectQuery("FROM pr_readiness_runs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "session_id", "repository_id", "status",
-			"evaluated_workspace_revision", "evaluated_snapshot_key", "summary", "review_packet",
-			"triggered_by_user_id", "started_at", "completed_at", "created_at", "updated_at",
-		}).AddRow(readinessID, orgID, sessionID, nil, models.PRReadinessRunStatusRunning, int64(2), &snapshotKey, "Queued", nil, nil, now, nil, now, now))
-	mock.ExpectQuery("SELECT .* FROM sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
-			workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusRunning, 2, nil, &snapshotKey)...,
-		))
-	mock.ExpectQuery("FROM session_review_loops").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(workerReviewLoopColumns()).AddRow(
-			loopID, orgID, sessionID, nil, &threadID, models.ReviewLoopStatusRunning,
-			models.ReviewLoopSourceManual, models.AgentTypeCodex, 1, models.ReviewLoopFixModeMinimal, 0,
-			true, nil, nil, &snapshotKey, &snapshotKey, nil, nil, now, nil,
-		))
-
-	handler := newRunPRReadinessHandler(stores, &Services{}, zerolog.Nop())
-	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","readiness_id":"` + readinessID.String() + `"}`)
-
-	err := handler(context.Background(), "run_pr_readiness", payload)
-
-	var retryable *RetryableError
-	require.ErrorAs(t, err, &retryable, "running review loop should defer readiness with a retryable error")
-	require.True(t, retryable.BypassMaxRetryDuration, "review-loop waits must not spend the generic retryable job window")
-	require.NotNil(t, retryable.RetryAfter, "review-loop waits should use a short fixed retry delay")
-	require.Equal(t, prePRReviewRetryDelay, *retryable.RetryAfter, "review-loop waits should use the PR review retry delay")
-	require.ErrorContains(t, retryable.Err, "PR readiness review loop is still running", "retryable reason should explain the review-loop wait")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-}
-
-func TestEnsureReadinessReviewLoop_UsesTerminalLoopForSnapshot(t *testing.T) {
-	t.Parallel()
-
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-	stores.ReviewLoops = db.NewSessionReviewLoopStore(mock)
-
-	orgID := uuid.New()
-	sessionID := uuid.New()
-	loopID := uuid.New()
-	threadID := uuid.New()
-	now := time.Now().UTC()
-	snapshotKey := "snapshots/org/session/workspace.tar.zst"
-	latestSummary := "Review still needs a decision."
-	session := models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex}
-
-	mock.ExpectQuery("FROM session_review_loops").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(workerReviewLoopColumns()).AddRow(
-			loopID, orgID, sessionID, nil, &threadID, models.ReviewLoopStatusNeedsHumanDecision,
-			models.ReviewLoopSourceManual, models.AgentTypeCodex, 1, models.ReviewLoopFixModeMinimal, 1,
-			true, nil, nil, &snapshotKey, &snapshotKey, &latestSummary, nil, now, &now,
-		))
-
-	reviews := &stubWorkerReviewLoops{}
-	latest, reviewReady, err := ensureReadinessReviewLoop(context.Background(), stores, &Services{ReviewLoops: reviews}, session, snapshotKey)
-
-	require.NoError(t, err, "terminal review loop lookup should not fail")
-	require.True(t, reviewReady, "terminal review loops for the target snapshot should be ready for readiness evaluation")
-	require.NotNil(t, latest, "the terminal review loop should be returned as readiness evidence")
-	require.Equal(t, models.ReviewLoopStatusNeedsHumanDecision, latest.Status, "readiness should evaluate the existing non-clean review result")
-	require.Empty(t, reviews.starts, "readiness must not start another review loop after a terminal loop exists for the snapshot")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

@@ -38,7 +38,7 @@ Several frontend surfaces keep data fresh with fixed polling loops, many at 3s, 
 
 The worst offender is session detail, which can run 11 or more simultaneous polling queries while a session is active:
 
-- session detail, transcript, human-input requests, readiness checks, and timeline every 3s
+- session detail, transcript, human-input requests, review loops, and timeline every 3s
 - PR health and file events every 5s
 - runtime status every 15s
 - additional queries that refetch on related activity

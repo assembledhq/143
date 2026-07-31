@@ -267,26 +267,15 @@ type SessionAutomationSettings struct {
 	AutomaticFollowThrough AutomaticFollowThroughOrgSettings `json:"automatic_follow_through,omitempty"`
 }
 
-// AutomaticFollowThroughOrgSettings controls automatic PR/readiness next steps
+// AutomaticFollowThroughOrgSettings controls automatic PR next steps
 // when sessions or review loops reach a stable point. All flags default off.
 type AutomaticFollowThroughOrgSettings struct {
-	ReadinessAfterReviewLoop       bool                `json:"readiness_after_review_loop,omitempty"`
-	ReadinessAfterReviewLoopStates []ReviewLoopStatus  `json:"readiness_after_review_loop_states,omitempty"`
-	ResolveConflictsWhenIdle       bool                `json:"resolve_conflicts_when_idle,omitempty"`
-	FixTestsWhenIdle               bool                `json:"fix_tests_when_idle,omitempty"`
-	PRFeedbackMode                 PRFeedbackHumanMode `json:"pr_feedback_mode,omitempty"`
-	PRFeedbackBotMode              PRFeedbackBotMode   `json:"pr_feedback_bot_mode,omitempty"`
-	PRFeedbackBotCycleLimit        NullableCycleLimit  `json:"pr_feedback_bot_cycle_limit,omitzero"`
-	PRFeedbackBotAllowlist         []string            `json:"pr_feedback_bot_allowlist,omitempty"`
-}
-
-// EffectiveReadinessAfterReviewLoopStates applies the v1 default terminal
-// states for auto-readiness policy.
-func (s AutomaticFollowThroughOrgSettings) EffectiveReadinessAfterReviewLoopStates() []ReviewLoopStatus {
-	if len(s.ReadinessAfterReviewLoopStates) == 0 {
-		return []ReviewLoopStatus{ReviewLoopStatusClean}
-	}
-	return append([]ReviewLoopStatus(nil), s.ReadinessAfterReviewLoopStates...)
+	ResolveConflictsWhenIdle bool                `json:"resolve_conflicts_when_idle,omitempty"`
+	FixTestsWhenIdle         bool                `json:"fix_tests_when_idle,omitempty"`
+	PRFeedbackMode           PRFeedbackHumanMode `json:"pr_feedback_mode,omitempty"`
+	PRFeedbackBotMode        PRFeedbackBotMode   `json:"pr_feedback_bot_mode,omitempty"`
+	PRFeedbackBotCycleLimit  NullableCycleLimit  `json:"pr_feedback_bot_cycle_limit,omitzero"`
+	PRFeedbackBotAllowlist   []string            `json:"pr_feedback_bot_allowlist,omitempty"`
 }
 
 // Validate returns an error when the session automation settings are invalid.
@@ -311,14 +300,6 @@ func (s AutomaticFollowThroughOrgSettings) Validate() error {
 	for _, login := range s.PRFeedbackBotAllowlist {
 		if strings.TrimSpace(login) == "" {
 			return fmt.Errorf("pr_feedback_bot_allowlist entries must not be blank")
-		}
-	}
-	for _, status := range s.ReadinessAfterReviewLoopStates {
-		if err := status.Validate(); err != nil {
-			return fmt.Errorf("readiness_after_review_loop_states: %w", err)
-		}
-		if status == ReviewLoopStatusRunning {
-			return fmt.Errorf("readiness_after_review_loop_states: %q is not terminal", status)
 		}
 	}
 	return nil
