@@ -12,12 +12,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const humanInputPhaseInsertPattern = `(?s)FROM session_activity_phases p.+p\.id = @activity_phase_id AND p\.org_id = @org_id.+p\.session_id = @session_id.+p\.thread_id IS NOT DISTINCT FROM @thread_id.+p\.turn_number = @turn_number`
+
 var humanInputRequestColumns = []string{
 	"id", "org_id", "session_id", "thread_id", "turn_number", "agent_type",
 	"provider_request_id", "request_kind", "status", "title", "body",
 	"context", "blocks_phase", "assigned_user_id", "sensitivity", "preferred_channel",
 	"choices", "response_schema", "provider_payload",
 	"answer_text", "answer_payload", "answered_by", "answered_at", "expires_at", "created_at",
+	"activity_phase_id",
 }
 
 func newHumanInputRequestRow(id, orgID, sessionID uuid.UUID, now time.Time) []any {
@@ -30,6 +33,7 @@ func newHumanInputRequestRow(id, orgID, sessionID uuid.UUID, now time.Time) []an
 		(*string)(nil), (*string)(nil), (*uuid.UUID)(nil), models.HumanInputSensitivityTeam,
 		models.HumanInputPreferredChannelSlackThread, choiceJSON, json.RawMessage(nil), json.RawMessage(`{"raw":true}`),
 		(*string)(nil), json.RawMessage(nil), (*uuid.UUID)(nil), (*time.Time)(nil), (*time.Time)(nil), now,
+		(*uuid.UUID)(nil),
 	}
 }
 
@@ -72,6 +76,76 @@ func TestSessionHumanInputRequestStore_Create(t *testing.T) {
 	require.Equal(t, requestID, req.ID, "Create should hydrate the generated id")
 	require.Equal(t, now, req.CreatedAt, "Create should hydrate created_at")
 	require.NoError(t, mock.ExpectationsWereMet(), "all expectations should be met")
+}
+
+func TestSessionHumanInputRequestStore_Create_ValidatesActivityPhaseOwnership(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "database mock should initialize")
+	t.Cleanup(mock.Close)
+
+	phaseID := uuid.New()
+	threadID := uuid.New()
+	req := models.HumanInputRequest{
+		OrgID: uuid.New(), SessionID: uuid.New(), ThreadID: &threadID, TurnNumber: 1,
+		AgentType: models.AgentTypeCodex, Kind: models.HumanInputRequestKindFreeText,
+		Title: "Question", Body: "Choose", ActivityPhaseID: &phaseID,
+	}
+	mock.ExpectQuery(humanInputPhaseInsertPattern).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), time.Now()))
+
+	err = NewSessionHumanInputRequestStore(mock).Create(context.Background(), &req)
+	require.NoError(t, err, "phase-associated human input should be inserted after full ownership validation")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHumanInputRequestStore_Create_DoesNotRequireRunningActivityPhase(t *testing.T) {
+	t.Parallel()
+
+	mock, capturedSQL := newSQLCapturingPool(t)
+
+	phaseID := uuid.New()
+	threadID := uuid.New()
+	req := models.HumanInputRequest{
+		OrgID: uuid.New(), SessionID: uuid.New(), ThreadID: &threadID, TurnNumber: 1,
+		AgentType: models.AgentTypeCodex, Kind: models.HumanInputRequestKindFreeText,
+		Title: "Question", Body: "Choose", ActivityPhaseID: &phaseID,
+	}
+	mock.ExpectQuery(humanInputPhaseInsertPattern).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), time.Now()))
+
+	err := NewSessionHumanInputRequestStore(mock).Create(context.Background(), &req)
+	require.NoError(t, err, "phase-closing human input should be inserted regardless of the phase's terminal status")
+	// A human input request is itself a phase-closing event, so it is written
+	// after the phase reaches a terminal status.
+	require.NotContains(t, *capturedSQL, "p.status", "validated insert should not constrain the phase status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHumanInputRequestStore_Create_RejectsMismatchedActivityPhase(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "database mock should initialize")
+	t.Cleanup(mock.Close)
+
+	phaseID := uuid.New()
+	threadID := uuid.New()
+	req := models.HumanInputRequest{
+		OrgID: uuid.New(), SessionID: uuid.New(), ThreadID: &threadID, TurnNumber: 1,
+		AgentType: models.AgentTypeCodex, Kind: models.HumanInputRequestKindFreeText,
+		Title: "Question", Body: "Choose", ActivityPhaseID: &phaseID,
+	}
+	mock.ExpectQuery(humanInputPhaseInsertPattern).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}))
+
+	err = NewSessionHumanInputRequestStore(mock).Create(context.Background(), &req)
+	require.ErrorContains(t, err, "does not match org/session/thread/turn ownership", "mismatched phase should return a diagnosable ownership error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionHumanInputRequestStore_ListBySession(t *testing.T) {

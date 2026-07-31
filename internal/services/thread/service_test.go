@@ -370,6 +370,7 @@ var threadHumanInputRequestColumns = []string{
 	"context", "blocks_phase", "assigned_user_id", "sensitivity", "preferred_channel",
 	"choices", "response_schema", "provider_payload",
 	"answer_text", "answer_payload", "answered_by", "answered_at", "expires_at", "created_at",
+	"activity_phase_id",
 }
 
 func threadHumanInputRequestRow(id, orgID, sessionID, threadID, userID uuid.UUID, answer string, now time.Time) []any {
@@ -380,6 +381,7 @@ func threadHumanInputRequestRow(id, orgID, sessionID, threadID, userID uuid.UUID
 		(*string)(nil), (*string)(nil), (*uuid.UUID)(nil), models.HumanInputSensitivityTeam,
 		models.HumanInputPreferredChannelSlackThread, []byte("[]"), json.RawMessage(nil), json.RawMessage(`{"raw":true}`),
 		&answer, json.RawMessage(`{"answer_text":"` + answer + `"}`), &userID, &now, (*time.Time)(nil), now,
+		(*uuid.UUID)(nil),
 	}
 }
 
