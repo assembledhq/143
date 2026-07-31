@@ -636,6 +636,16 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByText("500+ total lines")).toBeInTheDocument();
 
     const authorTable = screen.getByRole("table", { name: "Code review analytics by PR author" });
+    expect(within(authorTable).getAllByRole("columnheader").map((header) => header.textContent)).toEqual([
+      "PR author",
+      "Reviews",
+      "Approved",
+      "Not approved",
+      "Approval rate",
+      "Median files changed",
+      "Median additions",
+      "Median deletions",
+    ]);
     const anyaRow = within(authorTable).getByRole("row", { name: /anya/i });
     expect(within(anyaRow).getAllByRole("cell").map((cell) => cell.textContent)).toEqual([
       "anya",
@@ -644,15 +654,39 @@ describe("CodeReviewsPage", () => {
       "3",
       "75%",
       "3",
-      "9 / 12",
-      "60",
-      "52",
-      "28",
-      "20",
+      "+52",
+      "-20",
     ]);
+    expect(within(anyaRow).getByRole("link", { name: "12 completed reviews by anya" })).toHaveAttribute(
+      "href",
+      "/code-reviews?tab=reviews&author=anya&status=completed&range=30d",
+    );
+    expect(within(anyaRow).getByRole("link", { name: "9 automatically approved reviews by anya" })).toHaveAttribute(
+      "href",
+      "/code-reviews?tab=reviews&author=anya&status=completed&range=30d&outcome=automatically_approved",
+    );
+    expect(within(anyaRow).getByRole("link", { name: "3 not approved reviews by anya" })).toHaveAttribute(
+      "href",
+      "/code-reviews?tab=reviews&author=anya&status=completed&range=30d&outcome=completed_not_approved",
+    );
     await waitFor(() => expect(analyticsRequests).toHaveLength(1));
     expectCreatedAfterDaysAgo(analyticsRequests[0]?.get("created_after") ?? undefined, 30);
     expect(analyticsRequests[0]?.has("repository_id")).toBe(false);
+  });
+
+  it("restores the analytics section from the URL", async () => {
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews/analytics", () =>
+        HttpResponse.json({ data: reviewAnalytics } satisfies SingleResponse<CodeReviewAnalytics>)),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, {
+      searchParams: { tab: "analytics" },
+    });
+
+    expect(await screen.findByRole("tab", { name: "Analytics" })).toHaveAttribute("data-state", "active");
+    expect(await screen.findByText("Usage by PR author")).toBeInTheDocument();
   });
 
   it("shows failed and stale attempts when no review completed", async () => {
@@ -1732,10 +1766,12 @@ describe("CodeReviewsPage", () => {
         outcome: "blocked",
         risk: "needs_review",
         status: "completed",
+        author: "anya",
         search: "invoice",
       },
     });
 
+    expect(await screen.findByRole("textbox", { name: "PR author" })).toHaveValue("anya");
     expect(await screen.findByRole("textbox", { name: "Search code reviews" })).toHaveValue("invoice");
     await waitFor(() => {
       expect(requests.some((params) =>
@@ -1744,6 +1780,7 @@ describe("CodeReviewsPage", () => {
         && params.get("risk") === "needs_review"
         && params.get("activity_status") === "completed"
         && params.get("status") === null
+        && params.get("author") === "anya"
         && params.get("search") === "invoice"
         && params.get("limit") === "50",
       )).toBe(true);

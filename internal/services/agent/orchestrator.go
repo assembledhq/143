@@ -22,6 +22,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/auth"
+	"github.com/assembledhq/143/internal/internalapi"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
@@ -1716,11 +1717,7 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 	}
 	sandboxCfg.Env["INTERNAL_API_TOKEN"] = internalToken
 	sandboxCfg.Env["INTERNAL_API_URL"] = o.internalAPIURL
-	sandboxCfg.Env["ASSEMBLED_SESSION_ID"] = session.ID.String()
-	// Compatibility for existing skills and older 143-tools binaries. New
-	// clients use the token-derived current-session endpoint and do not depend
-	// on either environment variable for authorization.
-	sandboxCfg.Env["143_SESSION_ID"] = session.ID.String()
+	sandboxCfg.Env[internalapi.CodingSessionIDEnvVar] = session.ID.String()
 	if evalBootstrapRunID != nil {
 		sandboxCfg.Env["EVAL_BOOTSTRAP_TOOLS_ENABLED"] = "true"
 		sandboxCfg.Env["EVAL_BOOTSTRAP_RUN_ID"] = evalBootstrapRunID.String()

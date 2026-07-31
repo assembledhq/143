@@ -1,6 +1,6 @@
 # Design: Agent-Native Preview Verification
 
-> **Status:** In progress — Phases 1–2 complete; Phase 3 automatic verification wired, adapter fix re-entry pending | **Last reviewed:** 2026-07-14
+> **Status:** In progress — Phases 1–2 complete; Phase 3 automatic verification wired, adapter fix re-entry pending | **Last reviewed:** 2026-07-30
 
 ## Implementation Status
 
@@ -68,7 +68,7 @@ credential exchange, or artifact plumbing:
 143-tools preview update --wait
 ```
 
-`143_SESSION_ID` is the implicit target. Explicit session and preview IDs remain
+`CODING_SESSION_ID` is the implicit target. Explicit session and preview IDs remain
 available for diagnostics and privileged workflows.
 
 ## Product Principles
@@ -330,7 +330,7 @@ New responsibilities should remain separated:
 
 - **Complete:** Separate public and internal API base URLs and normalize legacy environment
   values.
-- **Complete:** Default preview tools to `143_SESSION_ID` and inject it in every coding-agent
+- **Complete:** Default preview tools to `CODING_SESSION_ID` and inject it in every coding-agent
   launch path.
 - **Complete:** Add explicit preview capability mappings and same-session authorization tests.
 - **Complete:** Verify sandbox-token access to preview endpoints and artifact downloads.

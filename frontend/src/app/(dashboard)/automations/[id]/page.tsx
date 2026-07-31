@@ -1,17 +1,17 @@
 "use client";
 
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import dynamic from "next/dynamic";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import {
-  ChevronDown,
-  Play,
-  Pause,
-  Loader2,
-  Minus,
-  Plus,
-  Settings2,
-} from "lucide-react";
+import { ChevronDown, Play, Pause, Loader2, Minus, Plus } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
@@ -32,12 +32,18 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import {
   Sheet,
   SheetContent,
   SheetDescription,
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { MobileBackButton } from "@/components/mobile-back-button";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
@@ -51,17 +57,15 @@ import {
 } from "@/components/automation-capabilities-editor";
 import { BranchPicker } from "@/components/branch-picker";
 import { AutomationModelSelect } from "@/components/automation-model-select";
-import {
-  AutomationScheduleEditor,
-  AutomationScheduleSummary,
-} from "@/components/automation-schedule-editor";
-import { api } from "@/lib/api";
+import { AutomationScheduleEditor } from "@/components/automation-schedule-editor";
+import { ApiError, api } from "@/lib/api";
 import {
   automationScheduleTimezone,
   automationToScheduleDraft,
   formatAutomationSchedule,
   sameScheduleDraft,
   scheduleDraftToAPI,
+  validateScheduleDraft,
   type ScheduleDraft,
 } from "@/lib/automation-schedule";
 import {
@@ -72,13 +76,15 @@ import { queryKeys } from "@/lib/query-keys";
 import { agentTypeForModel } from "@/lib/agents";
 import {
   automationProductTriggerOptions,
+  automationProductTriggersToGitHubEvents,
   githubEventsToAutomationProductTriggers,
   type AutomationProductTrigger,
 } from "@/lib/automation-triggers";
 import { automationGoalLengthState } from "@/lib/automation-validation";
 import { useAuth } from "@/hooks/use-auth";
 import { usePageTitle } from "@/hooks/use-page-title";
-import { useAutosave, type AutosaveStatus } from "@/hooks/useAutosave";
+import { useAutosave, type UseAutosaveResult } from "@/hooks/useAutosave";
+import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
 import type {
   AgentCapabilityDefinition,
@@ -121,36 +127,265 @@ function commaList(value: string): string[] {
     .filter(Boolean);
 }
 
-function SettingsTab({
+// ---------------------------------------------------------------------------
+// Autosave scope
+// ---------------------------------------------------------------------------
+
+/**
+ * Every editable control on this page — the title, the goal, and each property
+ * row — commits through one autosave scope keyed by the automation detail
+ * query.
+ *
+ * `body` is what PATCH receives; `optimistic` is how the cached `Automation`
+ * should look once it lands. The two are kept separate because a few API field
+ * names differ from the model's (`model` vs `model_override`, `triggers` vs
+ * `github_event_triggers`), and because `useAutosave` diffs the optimistic
+ * result against the cache to skip saves that would change nothing.
+ */
+type AutomationPatch = {
+  body: Record<string, unknown>;
+  optimistic: Partial<Automation>;
+  onError?: () => void;
+};
+
+// Module-level so every caller on this queryKey passes one identity —
+// `useAutosave` throws in dev when two components sharing a scope disagree
+// about how to merge.
+const coalesceAutomationPatch = (
+  queued: AutomationPatch,
+  incoming: AutomationPatch,
+): AutomationPatch => ({
+  body: { ...queued.body, ...incoming.body },
+  optimistic: { ...queued.optimistic, ...incoming.optimistic },
+  onError:
+    queued.onError || incoming.onError
+      ? () => {
+          queued.onError?.();
+          incoming.onError?.();
+        }
+      : undefined,
+});
+
+const applyAutomationPatch = (
+  previous: unknown,
+  patch: AutomationPatch,
+): unknown => {
+  const response = previous as { data?: Automation } | undefined;
+  if (!response?.data) return previous;
+  return { ...response, data: { ...response.data, ...patch.optimistic } };
+};
+
+type AutomationAutosave = UseAutosaveResult<AutomationPatch>;
+
+const GENERIC_SAVE_ERROR = "Couldn’t save automation. Your change was reverted.";
+
+// Without a Save button every property fails on its own, and the API refuses
+// these writes for reasons the user can actually act on — a model that needs a
+// credential, a cron expression it won't accept, a personal identity scope on
+// an automation with no creator. Collapsing all of that into one fixed string
+// leaves no way to tell which row was refused or what to do about it.
+const automationSaveError = (error: unknown): string => {
+  if (error instanceof ApiError && error.message.trim()) {
+    return `Couldn’t save automation: ${error.message}`;
+  }
+  return GENERIC_SAVE_ERROR;
+};
+
+function useAutomationAutosave(automationId: string): AutomationAutosave {
+  const queryClient = useQueryClient();
+  return useAutosave<AutomationPatch>({
+    queryKey: queryKeys.automations.detail(automationId),
+    debounceMs: 0,
+    mutationFn: async (patch) => {
+      const response = await api.automations.update(automationId, patch.body);
+      upsertAutomationInListCaches(queryClient, response.data);
+      return response;
+    },
+    applyOptimistic: applyAutomationPatch,
+    coalesce: coalesceAutomationPatch,
+    errorMessage: automationSaveError,
+    onError: (_error, patch) => patch.onError?.(),
+  });
+}
+
+// Capabilities live behind their own endpoint and cache entry, so they get
+// their own scope. A later grant list always supersedes an earlier one.
+const coalesceCapabilityGrants = (
+  _queued: AgentCapabilityGrant[],
+  incoming: AgentCapabilityGrant[],
+): AgentCapabilityGrant[] => incoming;
+
+const applyCapabilityGrants = (
+  previous: unknown,
+  grants: AgentCapabilityGrant[],
+): unknown => {
+  const response = previous as
+    { data?: { capabilities?: AgentCapabilityGrant[] } } | undefined;
+  if (!response?.data) return previous;
+  return { ...response, data: { ...response.data, capabilities: grants } };
+};
+
+// ---------------------------------------------------------------------------
+// Inline property rows
+// ---------------------------------------------------------------------------
+
+// A property reads as plain text until it is hovered or focused, at which point
+// it reveals that it was the control all along — so there is no separate "edit
+// mode" to enter and no second place to look for the value. Heights follow the
+// app's `h-<mobile> sm:h-<desktop>` convention: full-size touch targets on
+// small screens, a tight 28px rhythm in the desktop rail.
+const inlineControlClass =
+  "h-9 sm:h-7 w-full justify-between rounded-md border border-transparent bg-transparent px-1.5 text-xs font-normal shadow-none hover:border-border hover:bg-muted/40 focus-visible:border-border data-[state=open]:border-border";
+
+// SelectTrigger sizes itself through `data-[size]` variants, which
+// tailwind-merge scopes separately from a bare `h-*`, so the same heights have
+// to be restated against those variants to win.
+const inlineSelectTriggerClass = cn(
+  inlineControlClass,
+  "data-[size=default]:h-9 sm:data-[size=default]:h-7",
+);
+
+// `htmlFor` is required, not optional: a `<Label>` with nothing bound to it is
+// a dead click target next to rows that do respond, and emits a `<label>`
+// pointing at no control. Every row here has an addressable control, so the
+// type makes forgetting one a compile error rather than a silent nit.
+function PropertyRow({
+  label,
+  htmlFor,
+  children,
+}: {
+  label: string;
+  htmlFor: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="grid grid-cols-[6.5rem_minmax(0,1fr)] items-center gap-2">
+      <Label
+        htmlFor={htmlFor}
+        className="text-xs font-medium text-muted-foreground"
+      >
+        {label}
+      </Label>
+      <div className="min-w-0">{children}</div>
+    </div>
+  );
+}
+
+/** Read-only counterpart to `PropertyRow`, on the same optical grid. */
+function StaticPropertyRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid grid-cols-[6.5rem_minmax(0,1fr)] items-center gap-2">
+      <span className="text-xs font-medium text-muted-foreground">{label}</span>
+      <span className="min-w-0 break-words px-1.5 text-xs text-foreground">
+        {value}
+      </span>
+    </div>
+  );
+}
+
+function triggerSummaryText(automation: Automation, schedule: string): string {
+  const prTriggerLabels = githubEventsToAutomationProductTriggers(
+    automation.github_event_triggers ?? [],
+  )
+    .map(
+      (trigger) =>
+        automationProductTriggerOptions.find(
+          (option) => option.value === trigger,
+        )?.label,
+    )
+    .filter((label): label is string => Boolean(label));
+
+  return (
+    [automation.schedule_type === "none" ? null : schedule, ...prTriggerLabels]
+      .filter((value): value is string => Boolean(value))
+      .join(", ") || "No triggers"
+  );
+}
+
+function TriggersProperty({
   automation,
+  schedule,
   canManage,
+  autosave,
 }: {
   automation: Automation;
+  schedule: string;
   canManage: boolean;
+  autosave: AutomationAutosave;
+}) {
+  const [open, setOpen] = useState(false);
+  // Two rails can be mounted at once (see AutomationDetailRail), so the id has
+  // to be per-instance for the label to bind to its own trigger.
+  const uid = useId();
+  const summary = triggerSummaryText(automation, schedule);
+
+  if (!canManage) {
+    return <StaticPropertyRow label="Triggers" value={summary} />;
+  }
+
+  return (
+    <PropertyRow label="Triggers" htmlFor={`automation-triggers-${uid}`}>
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <Button
+            type="button"
+            id={`automation-triggers-${uid}`}
+            variant="outline"
+            size="sm"
+            aria-label="Triggers"
+            className={cn(inlineControlClass, "text-left")}
+          >
+            <span className="min-w-0 truncate">{summary}</span>
+            <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
+          </Button>
+        </PopoverTrigger>
+        {/* Radix unmounts closed content, so every open re-seeds the schedule
+            draft from the freshest automation instead of holding a long-lived
+            local copy that the page's 10s poll could stale out. */}
+        <PopoverContent
+          align="start"
+          className="w-[22rem] max-w-[calc(100vw-2rem)] p-3"
+        >
+          <TriggersEditor automation={automation} autosave={autosave} />
+        </PopoverContent>
+      </Popover>
+    </PropertyRow>
+  );
+}
+
+function TriggersEditor({
+  automation,
+  autosave,
+}: {
+  automation: Automation;
+  autosave: AutomationAutosave;
 }) {
   const queryClient = useQueryClient();
-  const [repositoryId, setRepositoryId] = useState(
-    automation.repository_id ?? "",
+  const { save } = autosave;
+  // Memoised per mount: stability keeps the TimezonePicker's `detected` prop
+  // from changing identity mid-edit.
+  const detectedTimezone = useMemo(() => browserTimezone(), []);
+  const [scheduleDraft, setScheduleDraft] = useState<ScheduleDraft | null>(() =>
+    automationToScheduleDraft(automation),
   );
-  const [scope, setScope] = useState(automation.scope ?? "");
-  // Form state is seeded from the automation prop on first mount only. The
-  // parent polls every 10s and may refetch into a new `automation` object.
-  // Keep this local draft mounted while the sheet is open so unrelated inline
-  // title/goal autosaves cannot discard mechanics edits in progress.
-  const [scheduleDraft, setScheduleDraft] = useState<ScheduleDraft | null>(
-    () => automationToScheduleDraft(automation),
-  );
-  // Snapshot the seed draft so the mutation can tell an edited schedule from an
-  // untouched one and send no schedule fields at all in the latter case. That
-  // matters beyond avoiding a cron rewrite: PATCH recomputes next_run_at
-  // whenever any schedule field (timezone included) is present, so re-sending
-  // an unchanged schedule while saving a goal would push an interval
-  // automation's next run out by a full interval.
-  const initialScheduleDraftRef = useRef(scheduleDraft);
-  const [scheduleValid, setScheduleValid] = useState(
-    automation.schedule_type !== "none",
-  );
-  const scheduleEnabled = scheduleDraft !== null;
+  // Validity is tracked as "which draft got which verdict", not as a bare
+  // boolean. The editor reports validity from an effect, one render after the
+  // draft it describes — so a boolean flag is briefly true for a draft that has
+  // already been replaced by an invalid one, and an autosave reading that flag
+  // would persist the invalid draft. Holding the draft reference alongside the
+  // verdict makes the pairing explicit.
+  //
+  // "rejected" is recorded as well as "valid" because the two failure modes
+  // pull in opposite directions on unmount: a draft that simply hasn't settled
+  // yet must still be committed (otherwise closing the popover drops the edit),
+  // while one the API has already refused must not be (that write cannot
+  // succeed, so sending it only buys a failed request and an error toast).
+  // Anything else — still previewing — records nothing and leaves the previous
+  // verdict alone.
+  const [verdict, setVerdict] = useState<{
+    draft: ScheduleDraft | null;
+    status: "valid" | "rejected";
+  } | null>(null);
   const [productTriggers, setProductTriggers] = useState<
     AutomationProductTrigger[]
   >(() =>
@@ -158,86 +393,381 @@ function SettingsTab({
       automation.github_event_triggers ?? [],
     ),
   );
-  const [triggerBaseBranches, setTriggerBaseBranches] = useState(
-    (automation.github_event_filters?.base_branches ?? []).join(", "),
-  );
-  const [triggerAuthors, setTriggerAuthors] = useState(
-    (automation.github_event_filters?.authors ?? []).join(", "),
-  );
-  const [triggerPaths, setTriggerPaths] = useState(
-    (automation.github_event_filters?.paths ?? []).join(", "),
-  );
-  const [triggerFeedbackTypes, setTriggerFeedbackTypes] = useState(
-    (automation.github_event_filters?.feedback_types ?? []).join(", "),
-  );
-  const [triggerReviewStates, setTriggerReviewStates] = useState(
-    (automation.github_event_filters?.review_states ?? []).join(", "),
-  );
-  // Memoised per mount: Intl.DateTimeFormat() is cheap but there's no reason
-  // to re-evaluate it on every render, and stability prevents the
-  // TimezonePicker's `detected` prop from changing identity.
-  const detectedTimezone = useMemo(() => browserTimezone(), []);
-  const [baseBranch, setBaseBranch] = useState(automation.base_branch);
-  const [model, setModel] = useState<string | undefined>(
-    automation.model_override,
-  );
-  const [identityScope, setIdentityScope] = useState<"org" | "personal">(
-    automation.identity_scope ?? "org",
-  );
-  const [publishPolicy, setPublishPolicy] = useState<"pull_request" | "none">(
-    automation.publish_policy ?? "pull_request",
-  );
-  const [prePRReviewLoops, setPrePRReviewLoops] = useState(
-    automation.pre_pr_review_loops ?? 0,
-  );
-  const [reasoningEffort, setReasoningEffort] =
-    useState<CodingAgentReasoningEffort>(automation.reasoning_effort ?? "");
-  const [capabilityDraft, setCapabilityDraft] = useState<
-    AgentCapabilityGrant[] | null
-  >(null);
+  const hasTrigger = scheduleDraft !== null || productTriggers.length > 0;
 
-  const { data: repositoriesResponse } = useQuery<ListResponse<Repository>>({
-    queryKey: queryKeys.repositories.all,
-    queryFn: () => api.repositories.list(),
-  });
-  const repositories = useMemo(
-    () => repositoriesResponse?.data ?? [],
-    [repositoriesResponse?.data],
-  );
-  const selectedRepository = repositories.find(
-    (repository) => repository.id === repositoryId,
+  // The schedule is a compound control — an interval, a unit, a wall clock and
+  // a timezone that only mean anything together — so it commits as one unit
+  // once the editor reports a settled, server-previewed draft rather than on
+  // each keystroke. The editor's own 300ms preview debounce is what paces this.
+  const committedScheduleRef = useRef(scheduleDraft);
+  const restoreTriggerDraft = useCallback((restored: Automation) => {
+    // These controls keep a local draft while the popover is open, so restore
+    // it explicitly on failure; otherwise the rejected values would remain
+    // visible and the advanced committed snapshot would prevent a retry of the
+    // same schedule.
+    const restoredSchedule = automationToScheduleDraft(restored);
+    committedScheduleRef.current = restoredSchedule;
+    setScheduleDraft(restoredSchedule);
+    setVerdict(null);
+    setProductTriggers(
+      githubEventsToAutomationProductTriggers(
+        restored.github_event_triggers ?? [],
+      ),
+    );
+  }, []);
+
+  const commitSchedule = useCallback(
+    (draft: ScheduleDraft | null, restoreOnError: boolean) => {
+      committedScheduleRef.current = draft;
+      const payload = scheduleDraftToAPI(draft, automation.timezone);
+      let onError: (() => void) | undefined;
+      if (restoreOnError) {
+        // Read the pre-optimistic snapshot now, while it is still the truth to
+        // restore to. Skipped entirely on the unmount path, where there is no
+        // local draft left to put back.
+        const savedAutomation =
+          queryClient.getQueryData<{ data?: Automation }>(
+            queryKeys.automations.detail(automation.id),
+          )?.data ?? automation;
+        onError = () => restoreTriggerDraft(savedAutomation);
+      }
+      save({
+        body: payload,
+        optimistic: payload as Partial<Automation>,
+        onError,
+      });
+    },
+    [automation, queryClient, restoreTriggerDraft, save],
   );
 
-  const { data: settingsResponse } = useQuery({
-    queryKey: ["settings"],
-    queryFn: () => api.settings.get(),
+  useEffect(() => {
+    if (verdict?.draft !== scheduleDraft || verdict.status !== "valid") return;
+    // Dropping the last trigger would leave an automation that can never fire
+    // again; refuse the commit and let the inline notice below explain why.
+    // Once a trigger is restored this effect re-runs and the held-back schedule
+    // change lands.
+    if (!hasTrigger) return;
+    if (sameScheduleDraft(scheduleDraft, committedScheduleRef.current)) return;
+    commitSchedule(scheduleDraft, true);
+  }, [commitSchedule, hasTrigger, scheduleDraft, verdict]);
+
+  // One dep-less effect mirrors everything the unmount cleanup needs, matching
+  // how the autosave hooks keep their refs fresh. Intentionally no dep array:
+  // the cleanup below cannot read render state, so these must track every
+  // commit.
+  const latestScheduleRef = useRef({
+    scheduleDraft,
+    hasTrigger,
+    verdict,
+    commitSchedule,
   });
-  const settings = (settingsResponse?.data?.settings ?? {}) as {
-    default_agent_type?: string;
+  useEffect(() => {
+    latestScheduleRef.current = {
+      scheduleDraft,
+      hasTrigger,
+      verdict,
+      commitSchedule,
+    };
+  });
+
+  // Closing the popover unmounts this editor, and the schedule has no blur to
+  // fall back on: it commits only from the effect above, which waits on the
+  // editor's 300ms debounce AND a server preview round-trip. Picking a run time
+  // and clicking away would otherwise drop the change with no toast, no
+  // indicator, and no visible difference.
+  useEffect(() => {
+    return () => {
+      const {
+        scheduleDraft: draft,
+        hasTrigger: has,
+        verdict: lastVerdict,
+        commitSchedule: commit,
+      } = latestScheduleRef.current;
+      // Same guards as the settled path. `sameScheduleDraft` is also what keeps
+      // StrictMode's simulated cleanup inert: the seed draft always matches the
+      // committed snapshot until the user actually edits something.
+      if (!has) return;
+      if (sameScheduleDraft(draft, committedScheduleRef.current)) return;
+      if (draft && validateScheduleDraft(draft)) return;
+      // The API already refused this exact draft during preview, so sending it
+      // buys a guaranteed-failed request and an error toast for a schedule the
+      // user watched the editor reject and then walked away from.
+      if (lastVerdict?.draft === draft && lastVerdict.status === "rejected") {
+        return;
+      }
+      commit(draft, false);
+    };
+  }, []);
+
+  const toggleProductTrigger = (
+    trigger: AutomationProductTrigger,
+    checked: boolean,
+  ) => {
+    const next = checked
+      ? productTriggers.includes(trigger)
+        ? productTriggers
+        : [...productTriggers, trigger]
+      : productTriggers.filter((item) => item !== trigger);
+    setProductTriggers(next);
+    if (next.length === 0 && scheduleDraft === null) return;
+    const savedAutomation =
+      queryClient.getQueryData<{ data?: Automation }>(
+        queryKeys.automations.detail(automation.id),
+      )?.data ?? automation;
+    save({
+      body: { triggers: next },
+      optimistic: {
+        github_event_triggers: automationProductTriggersToGitHubEvents(next),
+      },
+      onError: () => restoreTriggerDraft(savedAutomation),
+    });
   };
-  const defaultAgentType = settings.default_agent_type ?? "codex";
-  const effectiveAgentType = model
-    ? (agentTypeForModel(model) ?? automation.agent_type ?? defaultAgentType)
-    : (automation.agent_type ?? defaultAgentType);
-  const supportsNativeReviewLoop = [
-    "codex",
-    "claude_code",
-    "amp",
-    "pi",
-    "opencode",
-  ].includes(effectiveAgentType);
-  const effectivePrePRReviewLoops = supportsNativeReviewLoop
-    ? prePRReviewLoops
-    : 0;
-  let prePRReviewDescription = "Off for agents without review-loop support.";
-  if (supportsNativeReviewLoop) {
-    prePRReviewDescription =
-      effectivePrePRReviewLoops === 0
+
+  const saveFilter = useCallback(
+    (key: keyof AutomationGitHubEventFilters, value: string) => {
+      // Read the base from the cache rather than a render closure: two filters
+      // edited inside one coalesce window would otherwise clobber each other,
+      // and the cache is advanced synchronously by each optimistic apply.
+      const cached = queryClient.getQueryData<{ data?: Automation }>(
+        queryKeys.automations.detail(automation.id),
+      );
+      const latest = cached?.data?.github_event_filters ?? {};
+      const merged: AutomationGitHubEventFilters = {
+        ...latest,
+        [key]: commaList(value),
+      };
+      save({
+        body: { github_event_filters: merged },
+        optimistic: { github_event_filters: merged },
+      });
+    },
+    [automation.id, queryClient, save],
+  );
+
+  const filters = automation.github_event_filters ?? {};
+
+  return (
+    <div className="space-y-3">
+      <AutomationScheduleEditor
+        value={scheduleDraft}
+        onChange={setScheduleDraft}
+        detectedTimezone={detectedTimezone}
+        // Deliberately an inline closure: the editor re-runs this on every
+        // render, so `scheduleDraft` here is always the same draft the verdict
+        // was computed from. Returning `prev` unchanged keeps that per-render
+        // call from looping.
+        onValidityChange={(valid, { serverRejected }) => {
+          // Still previewing: record nothing rather than overwriting an older
+          // verdict with "we don't know yet".
+          const status = valid ? "valid" : serverRejected ? "rejected" : null;
+          if (!status) return;
+          setVerdict((prev) =>
+            prev?.draft === scheduleDraft && prev.status === status
+              ? prev
+              : { draft: scheduleDraft, status },
+          );
+        }}
+      />
+      <div className="space-y-2">
+        <span className="text-xs font-medium leading-none text-muted-foreground">
+          Pull requests
+        </span>
+        <div className="space-y-1.5">
+          {automationProductTriggerOptions.map((option) => (
+            <Label
+              key={option.value}
+              className="flex min-h-7 cursor-pointer items-center gap-2 text-xs font-normal"
+            >
+              <Checkbox
+                checked={productTriggers.includes(option.value)}
+                onCheckedChange={(checked) =>
+                  toggleProductTrigger(option.value, checked === true)
+                }
+                aria-label={option.label}
+              />
+              <span>{option.label}</span>
+            </Label>
+          ))}
+        </div>
+      </div>
+      {!hasTrigger ? (
+        <p className="text-xs text-destructive">
+          Select at least one trigger. Nothing is saved until you do.
+        </p>
+      ) : null}
+      <Collapsible className="rounded-md border border-border">
+        <CollapsibleTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            className="group h-8 w-full justify-between rounded-md px-2 text-left text-xs font-normal"
+          >
+            <span>Trigger filters</span>
+            <ChevronDown className="h-3.5 w-3.5 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+          </Button>
+        </CollapsibleTrigger>
+        <CollapsibleContent className="space-y-2.5 border-t border-border p-2.5">
+          <p className="text-xs text-muted-foreground">
+            Comma-separated filters applied when GitHub sends matching context.
+          </p>
+          <TriggerFilterField
+            id="trigger-base-branches"
+            label="Target branches"
+            serverValue={(filters.base_branches ?? []).join(", ")}
+            onCommit={(value) => saveFilter("base_branches", value)}
+          />
+          <TriggerFilterField
+            id="trigger-authors"
+            label="Authors"
+            serverValue={(filters.authors ?? []).join(", ")}
+            onCommit={(value) => saveFilter("authors", value)}
+          />
+          <TriggerFilterField
+            id="trigger-paths"
+            label="Paths"
+            serverValue={(filters.paths ?? []).join(", ")}
+            onCommit={(value) => saveFilter("paths", value)}
+          />
+          <TriggerFilterField
+            id="trigger-feedback-types"
+            label="Feedback types"
+            serverValue={(filters.feedback_types ?? []).join(", ")}
+            onCommit={(value) => saveFilter("feedback_types", value)}
+          />
+          <TriggerFilterField
+            id="trigger-review-states"
+            label="Review states"
+            serverValue={(filters.review_states ?? []).join(", ")}
+            onCommit={(value) => saveFilter("review_states", value)}
+          />
+        </CollapsibleContent>
+      </Collapsible>
+    </div>
+  );
+}
+
+function TriggerFilterField({
+  id,
+  label,
+  serverValue,
+  onCommit,
+}: {
+  id: string;
+  label: string;
+  serverValue: string;
+  onCommit: (value: string) => void;
+}) {
+  // Lives inside the Triggers popover, so it can be unmounted mid-edit.
+  const field = useDebouncedTextField({
+    serverValue,
+    onCommit,
+    flushOnUnmount: true,
+  });
+
+  return (
+    <div className="space-y-1">
+      <Label htmlFor={id} className="text-xs font-normal text-muted-foreground">
+        {label}
+      </Label>
+      <Input
+        id={id}
+        value={field.value}
+        onChange={(event) => field.onChange(event.target.value)}
+        onBlur={field.onBlur}
+        className="h-9 text-xs sm:h-7"
+      />
+    </div>
+  );
+}
+
+function PrePRReviewProperty({
+  automation,
+  autosave,
+  supported,
+  canManage,
+}: {
+  automation: Automation;
+  autosave: AutomationAutosave;
+  supported: boolean;
+  canManage: boolean;
+}) {
+  const uid = useId();
+  const field = useAutosaveNumericField<AutomationPatch>({
+    serverValue: supported ? (automation.pre_pr_review_loops ?? 0) : 0,
+    autosave,
+    // Lives inside the Advanced collapsible, so it can be unmounted mid-edit.
+    flushOnUnmount: true,
+    clamp: (raw) => Math.min(5, Math.max(0, raw)),
+    toPatch: (loops) => ({
+      body: { pre_pr_review_loops: loops },
+      optimistic: { pre_pr_review_loops: loops },
+    }),
+  });
+  const current = Number(field.value) || 0;
+  const disabled = !canManage || !supported;
+
+  let description = "Off for agents without review-loop support.";
+  if (supported) {
+    description =
+      current === 0
         ? "Off"
         : "Runs the coding agent's review/fix loop before opening a PR.";
   }
-  const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
-  const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
+
+  return (
+    <div className="space-y-1.5">
+      <Label
+        htmlFor={`pre-pr-review-loops-${uid}`}
+        className="text-xs font-medium text-muted-foreground"
+      >
+        Pre-PR review
+      </Label>
+      <div className="flex items-center gap-1.5">
+        <Button
+          type="button"
+          variant="outline"
+          size="icon-sm"
+          aria-label="Decrease review passes"
+          onClick={() => field.setValueAndSave(Math.max(0, current - 1))}
+          disabled={disabled}
+        >
+          <Minus className="h-3.5 w-3.5" />
+        </Button>
+        <Input
+          id={`pre-pr-review-loops-${uid}`}
+          aria-label="Review passes"
+          type="number"
+          min={0}
+          max={5}
+          value={field.value}
+          onChange={field.onChange}
+          onBlur={field.onBlur}
+          disabled={disabled}
+          className="h-9 w-14 text-center text-xs sm:h-7"
+        />
+        <Button
+          type="button"
+          variant="outline"
+          size="icon-sm"
+          aria-label="Increase review passes"
+          onClick={() => field.setValueAndSave(Math.min(5, current + 1))}
+          disabled={disabled}
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">{description}</p>
+    </div>
+  );
+}
+
+function CapabilitiesProperty({
+  automation,
+  canManage,
+}: {
+  automation: Automation;
+  canManage: boolean;
+}) {
   const { data: capabilityCatalogResponse } = useQuery<
     ListResponse<AgentCapabilityDefinition>
   >({
@@ -252,7 +782,16 @@ function SettingsTab({
     queryKey: ["automation-capabilities", automation.id],
     queryFn: () => api.automations.getCapabilities(automation.id),
   });
-  const savedCapabilityGrants = useMemo(
+  const autosave = useAutosave<AgentCapabilityGrant[]>({
+    queryKey: ["automation-capabilities", automation.id],
+    debounceMs: 0,
+    mutationFn: (grants) =>
+      api.automations.updateCapabilities(automation.id, grants),
+    applyOptimistic: applyCapabilityGrants,
+    coalesce: coalesceCapabilityGrants,
+    errorMessage: "Couldn’t save capabilities. Your change was reverted.",
+  });
+  const grants = useMemo(
     () =>
       normalizeCapabilityGrants(
         capabilityCatalog,
@@ -260,471 +799,25 @@ function SettingsTab({
       ),
     [automationCapabilityResponse?.data?.capabilities, capabilityCatalog],
   );
-  const capabilityGrants = capabilityDraft ?? savedCapabilityGrants;
-  const githubEventFilters: AutomationGitHubEventFilters = useMemo(
-    () => ({
-      base_branches: commaList(triggerBaseBranches),
-      authors: commaList(triggerAuthors),
-      paths: commaList(triggerPaths),
-      feedback_types: commaList(triggerFeedbackTypes),
-      review_states: commaList(triggerReviewStates),
-    }),
-    [
-      triggerAuthors,
-      triggerBaseBranches,
-      triggerFeedbackTypes,
-      triggerPaths,
-      triggerReviewStates,
-    ],
-  );
-  const hasTrigger = scheduleEnabled || productTriggers.length > 0;
-
-  const toggleProductTrigger = (
-    trigger: AutomationProductTrigger,
-    checked: boolean,
-  ) => {
-    setProductTriggers((current) => {
-      if (checked) {
-        return current.includes(trigger) ? current : [...current, trigger];
-      }
-      return current.filter((item) => item !== trigger);
-    });
-  };
-
-  const updateMutation = useMutation({
-    mutationFn: () =>
-      api.automations.update(automation.id, {
-        ...(repositoryId === (automation.repository_id ?? "")
-          ? {}
-          : { repository_id: repositoryId }),
-        scope: scope.trim() || undefined,
-        ...(sameScheduleDraft(scheduleDraft, initialScheduleDraftRef.current)
-          ? {}
-          : scheduleDraftToAPI(scheduleDraft, automation.timezone)),
-        triggers: productTriggers,
-        github_event_filters: githubEventFilters,
-        model: model ?? "",
-        identity_scope: identityScope,
-        publish_policy: publishPolicy,
-        pre_pr_review_loops: effectivePrePRReviewLoops,
-        reasoning_effort:
-          showReasoningSelector && reasoningEffort ? reasoningEffort : "",
-        base_branch: baseBranch.trim() || undefined,
-      }),
-    onSuccess: (res) => {
-      upsertAutomationInListCaches(queryClient, res.data);
-      queryClient.setQueryData(queryKeys.automations.detail(res.data.id), res);
-      queryClient.invalidateQueries({
-        queryKey: queryKeys.automations.detail(res.data.id),
-      });
-      queryClient.invalidateQueries({ queryKey: queryKeys.automations.all });
-    },
-  });
-  const capabilityMutation = useMutation({
-    mutationFn: (capabilities: AgentCapabilityGrant[]) =>
-      api.automations.updateCapabilities(automation.id, capabilities),
-    onSuccess: () => {
-      setCapabilityDraft(null);
-      queryClient.invalidateQueries({
-        queryKey: ["automation-capabilities", automation.id],
-      });
-    },
-  });
 
   return (
-    <div className="space-y-4 rounded-lg border border-border bg-card p-5">
-      <div className="space-y-1.5">
-        <Label htmlFor="automation-repository">Repository</Label>
-        <Select
-          value={repositoryId}
-          onValueChange={(nextRepositoryId) => {
-            setRepositoryId(nextRepositoryId);
-            const nextRepository = repositories.find(
-              (repository) => repository.id === nextRepositoryId,
-            );
-            if (nextRepository) {
-              setBaseBranch(nextRepository.default_branch);
-            }
-          }}
-          disabled={!canManage || repositories.length === 0}
-        >
-          <SelectTrigger id="automation-repository" aria-label="Repository">
-            <SelectValue placeholder="Select repository" />
-          </SelectTrigger>
-          <SelectContent>
-            {repositories.map((repository) => (
-              <SelectItem key={repository.id} value={repository.id}>
-                {repository.full_name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <p className="text-xs text-muted-foreground">
-          Changing the repository resets the base branch to that
-          repository&apos;s default.
-        </p>
-      </div>
-      <div className="space-y-1.5">
-        <Label htmlFor="scope">
-          Scope{" "}
-          <span className="text-muted-foreground font-normal">(optional)</span>
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <Label className="text-xs font-medium text-muted-foreground">
+          Capabilities
         </Label>
-        <Input
-          id="scope"
-          value={scope}
-          onChange={(e) => setScope(e.target.value)}
-        />
+        <AutosaveIndicator status={autosave.status} className="min-w-0" />
       </div>
-      <div className="space-y-1.5">
-        <Label>Run as</Label>
-        <Select
-          value={identityScope}
-          onValueChange={(value: "org" | "personal") => setIdentityScope(value)}
-        >
-          <SelectTrigger aria-label="Run as">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="org">Organization automation</SelectItem>
-            <SelectItem value="personal">Personal automation</SelectItem>
-          </SelectContent>
-        </Select>
-        <p className="text-xs text-muted-foreground">
-          Organization automations use team credentials and publish as 143-bot.
-          Personal automations use the creator&apos;s coding-agent preferences and
-          GitHub identity.
-        </p>
-      </div>
-      <div className="space-y-2">
-        <Label>Triggers</Label>
-        <div className="space-y-3 rounded-md border border-border p-3">
-          {canManage ? (
-            <AutomationScheduleEditor
-              value={scheduleDraft}
-              onChange={setScheduleDraft}
-              detectedTimezone={detectedTimezone}
-              onValidityChange={setScheduleValid}
-            />
-          ) : (
-            <AutomationScheduleSummary
-              schedule={scheduleDraft}
-              nextRunAt={automation.next_run_at}
-              enabled={automation.enabled}
-            />
-          )}
-          <div className="space-y-2">
-            <span className="text-xs font-medium leading-none text-muted-foreground">
-              Pull requests
-            </span>
-            <div className="grid gap-2 md:grid-cols-2">
-              {automationProductTriggerOptions.map((option) => (
-                <Label
-                  key={option.value}
-                  className="flex min-h-7 cursor-pointer items-center gap-2 text-sm font-normal"
-                >
-                  <Checkbox
-                    checked={productTriggers.includes(option.value)}
-                    onCheckedChange={(checked) =>
-                      toggleProductTrigger(option.value, checked === true)
-                    }
-                    aria-label={option.label}
-                    disabled={!canManage}
-                  />
-                  <span>{option.label}</span>
-                </Label>
-              ))}
-            </div>
-          </div>
-          {!hasTrigger ? (
-            <p className="text-xs text-destructive">
-              Select at least one trigger.
-            </p>
-          ) : null}
-        </div>
-      </div>
-      <Collapsible className="rounded-md border border-border">
-        <CollapsibleTrigger asChild>
-          <Button
-            type="button"
-            variant="ghost"
-            className="group h-10 w-full justify-between rounded-md px-3 text-left"
-          >
-            <span>Advanced settings</span>
-            <ChevronDown className="h-4 w-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
-          </Button>
-        </CollapsibleTrigger>
-        <CollapsibleContent className="space-y-4 border-t border-border p-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="automation-model">Model</Label>
-            <AutomationModelSelect
-              id="automation-model"
-              ariaLabel="Model"
-              value={model}
-              onValueChange={setModel}
-            />
-          </div>
-          {showReasoningSelector ? (
-            <div className="space-y-1.5">
-              <Label htmlFor="automation-reasoning">Reasoning</Label>
-              <Select
-                value={reasoningEffort || "__default__"}
-                onValueChange={(value) =>
-                  setReasoningEffort(
-                    value === "__default__"
-                      ? ""
-                      : toCodingAgentReasoningEffort(value),
-                  )
-                }
-              >
-                <SelectTrigger id="automation-reasoning" aria-label="Reasoning">
-                  <SelectValue placeholder="Default reasoning" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__default__">Default reasoning</SelectItem>
-                  {reasoningOptions.map((option) => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          ) : null}
-          <div className="space-y-1.5">
-            <Label>Base branch</Label>
-            <BranchPicker
-              repositoryId={repositoryId}
-              value={baseBranch}
-              defaultBranch={
-                selectedRepository?.default_branch ?? automation.base_branch
-              }
-              onValueChange={setBaseBranch}
-              label="Base branch"
-              buttonClassName="w-full justify-between"
-              contentClassName="w-[var(--radix-popover-trigger-width)]"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label>After a successful run</Label>
-            <Select
-              value={publishPolicy}
-              onValueChange={(value) => {
-                if (value === "pull_request" || value === "none") {
-                  setPublishPolicy(value);
-                }
-              }}
-              disabled={!canManage}
-            >
-              <SelectTrigger aria-label="After a successful run">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="pull_request">Open a pull request</SelectItem>
-                <SelectItem value="none">Do not publish</SelectItem>
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              Pull requests are also skipped when the run produces no diff.
-            </p>
-          </div>
-          <div className="space-y-2">
-            <div className="flex items-center justify-between gap-3">
-              <Label>Capabilities</Label>
-              <span className="truncate text-xs text-muted-foreground">
-                {capabilitySummary(capabilityCatalog, capabilityGrants)}
-              </span>
-            </div>
-            <AutomationCapabilitiesEditor
-              catalog={capabilityCatalog}
-              grants={capabilityGrants}
-              onChange={setCapabilityDraft}
-              disabled={!canManage}
-            />
-            {capabilityDraft ? (
-              <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  onClick={() => capabilityMutation.mutate(capabilityDraft)}
-                  disabled={capabilityMutation.isPending}
-                >
-                  {capabilityMutation.isPending && (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  )}
-                  Save capabilities
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => setCapabilityDraft(null)}
-                >
-                  Reset
-                </Button>
-                {capabilityMutation.isError ? (
-                  <span className="text-xs text-destructive">
-                    Failed to save capabilities.
-                  </span>
-                ) : null}
-              </div>
-            ) : null}
-          </div>
-          <div className="space-y-3 rounded-md border border-border p-3">
-            <div className="space-y-1">
-              <Label>Trigger filters</Label>
-              <p className="text-xs text-muted-foreground">
-                Comma-separated filters applied when GitHub sends matching
-                context.
-              </p>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <Label htmlFor="trigger-base-branches">Target branches</Label>
-                <Input
-                  id="trigger-base-branches"
-                  value={triggerBaseBranches}
-                  onChange={(e) => setTriggerBaseBranches(e.target.value)}
-                  disabled={!canManage}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="trigger-authors">Authors</Label>
-                <Input
-                  id="trigger-authors"
-                  value={triggerAuthors}
-                  onChange={(e) => setTriggerAuthors(e.target.value)}
-                  disabled={!canManage}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="trigger-paths">Paths</Label>
-                <Input
-                  id="trigger-paths"
-                  value={triggerPaths}
-                  onChange={(e) => setTriggerPaths(e.target.value)}
-                  disabled={!canManage}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="trigger-feedback-types">Feedback types</Label>
-                <Input
-                  id="trigger-feedback-types"
-                  value={triggerFeedbackTypes}
-                  onChange={(e) => setTriggerFeedbackTypes(e.target.value)}
-                  disabled={!canManage}
-                />
-              </div>
-              <div className="space-y-1.5 sm:col-span-2">
-                <Label htmlFor="trigger-review-states">Review states</Label>
-                <Input
-                  id="trigger-review-states"
-                  value={triggerReviewStates}
-                  onChange={(e) => setTriggerReviewStates(e.target.value)}
-                  disabled={!canManage}
-                />
-              </div>
-            </div>
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="pre-pr-review-loops">Pre-PR review</Label>
-            <div className="flex items-center gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                aria-label="Decrease review passes"
-                onClick={() =>
-                  setPrePRReviewLoops((value) => Math.max(0, value - 1))
-                }
-                disabled={!canManage || !supportsNativeReviewLoop}
-              >
-                <Minus className="h-4 w-4" />
-              </Button>
-              <Input
-                id="pre-pr-review-loops"
-                aria-label="Review passes"
-                type="number"
-                min={0}
-                max={5}
-                value={effectivePrePRReviewLoops}
-                onChange={(e) => {
-                  const parsed = parseInt(e.target.value, 10);
-                  setPrePRReviewLoops(
-                    Number.isNaN(parsed) ? 0 : Math.min(5, Math.max(0, parsed)),
-                  );
-                }}
-                disabled={!canManage || !supportsNativeReviewLoop}
-                className="w-20 text-center"
-              />
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                aria-label="Increase review passes"
-                onClick={() =>
-                  setPrePRReviewLoops((value) => Math.min(5, value + 1))
-                }
-                disabled={!canManage || !supportsNativeReviewLoop}
-              >
-                <Plus className="h-4 w-4" />
-              </Button>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              {prePRReviewDescription}
-            </p>
-          </div>
-        </CollapsibleContent>
-      </Collapsible>
-      {canManage && (
-        <div className="flex items-center gap-3 pt-2">
-          <Button
-            onClick={() => updateMutation.mutate()}
-            disabled={
-              updateMutation.isPending ||
-              !hasTrigger ||
-              (scheduleEnabled && !scheduleValid)
-            }
-          >
-            {updateMutation.isPending && (
-              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-            )}
-            Save changes
-          </Button>
-          {updateMutation.isError && (
-            <p className="text-xs text-destructive">Failed to save changes.</p>
-          )}
-          {updateMutation.isSuccess && !updateMutation.isPending && (
-            <p className="text-xs text-muted-foreground">Saved.</p>
-          )}
-        </div>
-      )}
+      <p className="truncate text-xs text-muted-foreground">
+        {capabilitySummary(capabilityCatalog, grants)}
+      </p>
+      <AutomationCapabilitiesEditor
+        catalog={capabilityCatalog}
+        grants={grants}
+        onChange={(next) => autosave.save(next)}
+        disabled={!canManage}
+      />
     </div>
-  );
-}
-
-type AutomationTextPatch = Partial<Pick<Automation, "name" | "goal">>;
-const coalesceAutomationTextPatches = (
-  queued: AutomationTextPatch,
-  incoming: AutomationTextPatch,
-): AutomationTextPatch => ({ ...queued, ...incoming });
-
-function AutosaveIndicator({ status }: { status: AutosaveStatus }) {
-  if (status === "idle") return null;
-
-  return (
-    <span
-      role="status"
-      className={cn(
-        "text-xs",
-        status === "error" ? "text-destructive" : "text-muted-foreground",
-      )}
-    >
-      {status === "saving"
-        ? "Saving…"
-        : status === "saved"
-          ? "Saved"
-          : "Couldn’t save"}
-    </span>
   );
 }
 
@@ -739,33 +832,27 @@ function InlineAutomationText({
 }) {
   const queryClient = useQueryClient();
   const detailKey = queryKeys.automations.detail(automation.id);
-  const autosave = useAutosave<AutomationTextPatch>({
-    queryKey: detailKey,
-    debounceMs: 0,
-    mutationFn: async (patch) => {
-      const response = await api.automations.update(automation.id, patch);
-      upsertAutomationInListCaches(queryClient, response.data);
-      return response;
-    },
-    applyOptimistic: (previous, patch) => {
-      const response = previous as { data?: Automation } | undefined;
-      if (!response?.data) return previous;
-      return { ...response, data: { ...response.data, ...patch } };
-    },
-    coalesce: coalesceAutomationTextPatches,
-    errorMessage: "Couldn’t save automation text. Your change was reverted.",
-  });
+  const autosave = useAutomationAutosave(automation.id);
+  // Both flush on unmount so a title or goal typed right before navigating away
+  // isn't dropped inside the 400ms window — the autosave scope outlives this
+  // component, so the dispatch still lands.
   const nameField = useDebouncedTextField({
     serverValue: automation.name,
-    onCommit: (name) => autosave.save({ name: name.trim() }),
+    flushOnUnmount: true,
+    onCommit: (rawName) => {
+      const name = rawName.trim();
+      autosave.save({ body: { name }, optimistic: { name } });
+    },
     // A required field: an empty title is rejected (never saved) and reverts to
     // the last saved name on blur rather than being left silently blank.
     rejectValue: (name) => name.trim() === "",
   });
   const goalField = useDebouncedTextField({
     serverValue: automation.goal,
+    flushOnUnmount: true,
     onCommit: (goal) => {
-      if (!automationGoalLengthState(goal).isTooLong) autosave.save({ goal });
+      if (automationGoalLengthState(goal).isTooLong) return;
+      autosave.save({ body: { goal }, optimistic: { goal } });
     },
   });
   const goalLength = automationGoalLengthState(goalField.value);
@@ -910,7 +997,6 @@ export default function AutomationDetailPage() {
   const { user } = useAuth();
   const automationId = params?.id as string;
   const canManage = user?.role === "admin" || user?.role === "member";
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
 
   const { data, isLoading } = useQuery({
@@ -1135,29 +1221,16 @@ export default function AutomationDetailPage() {
       </Button>
     </div>
   ) : undefined;
-  const headerActions = canManage ? (
-    <div className="flex flex-wrap items-center gap-2">
-      <Button variant="outline" size="sm" onClick={() => setSettingsOpen(true)}>
-        <Settings2 className="mr-1.5 h-3.5 w-3.5" />
-        Edit
-      </Button>
-      <Button
-        variant="outline"
-        size="sm"
-        className="lg:hidden"
-        onClick={() => setDetailsOpen(true)}
-      >
-        Details
-      </Button>
-    </div>
-  ) : (
+  // No "Edit" button: every property is already editable where it is displayed,
+  // so the only header affordance left is reaching the rail on small screens.
+  const headerActions = (
     <Button
       variant="outline"
       size="sm"
       className="lg:hidden"
       onClick={() => setDetailsOpen(true)}
     >
-      Details
+      Properties
     </Button>
   );
   const repositoryName =
@@ -1167,29 +1240,13 @@ export default function AutomationDetailPage() {
     <PageContainer size="wide">
       <div className="space-y-6">
         <MobileBackButton to="/automations" label="Back to automations" />
-        <Sheet modal={false} open={settingsOpen} onOpenChange={setSettingsOpen}>
-          <SheetContent className="sm:max-w-2xl">
-            <SheetHeader>
-              <SheetTitle>Automation settings</SheetTitle>
-              <SheetDescription>
-                Update triggers and recurring execution defaults.
-              </SheetDescription>
-            </SheetHeader>
-            <div className="mt-6">
-              <SettingsTab
-                key={automation.id}
-                automation={automation}
-                canManage={canManage}
-              />
-            </div>
-          </SheetContent>
-        </Sheet>
         <Sheet open={detailsOpen} onOpenChange={setDetailsOpen}>
           <SheetContent className="sm:max-w-md">
             <SheetHeader>
-              <SheetTitle>Automation details</SheetTitle>
+              <SheetTitle>Automation properties</SheetTitle>
               <SheetDescription>
-                Schedule, identity, model, and recent run controls.
+                Triggers, identity, model, and recent run controls. Changes save
+                as you make them.
               </SheetDescription>
             </SheetHeader>
             <div className="mt-6">
@@ -1197,6 +1254,7 @@ export default function AutomationDetailPage() {
                 automation={automation}
                 schedule={schedule}
                 repositoryName={repositoryName}
+                canManage={canManage}
                 runActions={runActions}
               />
             </div>
@@ -1253,9 +1311,11 @@ export default function AutomationDetailPage() {
 
           <aside className="hidden space-y-4 lg:sticky lg:top-4 lg:block">
             <AutomationDetailRail
+              key={automation.id}
               automation={automation}
               schedule={schedule}
               repositoryName={repositoryName}
+              canManage={canManage}
               runActions={runActions}
             />
             <AutomationStatsCard automationId={automationId} />
@@ -1270,96 +1330,417 @@ function AutomationDetailRail({
   automation,
   schedule,
   repositoryName,
+  canManage,
   runActions,
 }: {
   automation: Automation;
   schedule: string;
   repositoryName: string;
+  canManage: boolean;
   runActions?: ReactNode;
 }) {
-  const prTriggerLabels = githubEventsToAutomationProductTriggers(
-    automation.github_event_triggers ?? [],
-  )
-    .map(
-      (trigger) =>
-        automationProductTriggerOptions.find(
-          (option) => option.value === trigger,
-        )?.label,
-    )
-    .filter((label): label is string => Boolean(label));
-  const triggerSummary =
-    [automation.schedule_type === "none" ? null : schedule, ...prTriggerLabels]
-      .filter((value): value is string => Boolean(value))
-      .join(", ") || "-";
+  const autosave = useAutomationAutosave(automation.id);
+  const { save } = autosave;
+  // The desktop aside is `hidden lg:block` rather than unmounted, so opening the
+  // mobile properties sheet puts two copies of this rail in the DOM at once.
+  // Scope the control ids per instance to keep every label bound to its own
+  // control instead of silently pointing at the other copy's.
+  const uid = useId();
+
+  const { data: repositoriesResponse } = useQuery<ListResponse<Repository>>({
+    queryKey: queryKeys.repositories.all,
+    queryFn: () => api.repositories.list(),
+    enabled: canManage,
+  });
+  const repositories = useMemo(
+    () => repositoriesResponse?.data ?? [],
+    [repositoriesResponse?.data],
+  );
+  const repositoryId = automation.repository_id ?? "";
+  const selectedRepository = repositories.find(
+    (repository) => repository.id === repositoryId,
+  );
+
+  const { data: settingsResponse } = useQuery({
+    queryKey: ["settings"],
+    queryFn: () => api.settings.get(),
+  });
+  const settings = (settingsResponse?.data?.settings ?? {}) as {
+    default_agent_type?: string;
+  };
+  const defaultAgentType = settings.default_agent_type ?? "codex";
+  const model = automation.model_override;
+  // Shared by the row that renders the current model and by the handler that
+  // patches a new one — the two have to agree on which agent a model implies,
+  // or the reasoning reset stops matching what the rail is showing.
+  const effectiveAgentTypeFor = (candidate: string | undefined) =>
+    candidate
+      ? (agentTypeForModel(candidate) ??
+        automation.agent_type ??
+        defaultAgentType)
+      : (automation.agent_type ?? defaultAgentType);
+  const effectiveAgentType = effectiveAgentTypeFor(model);
+  const supportsNativeReviewLoop = [
+    "codex",
+    "claude_code",
+    "amp",
+    "pi",
+    "opencode",
+  ].includes(effectiveAgentType);
+  const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
+  const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
+
+  const scopeField = useDebouncedTextField({
+    serverValue: automation.scope ?? "",
+    // The mobile properties sheet mounts a second copy of this rail and
+    // unmounts it on close, so this field can go away mid-edit.
+    flushOnUnmount: true,
+    onCommit: (raw) => {
+      const scope = raw.trim();
+      save({ body: { scope }, optimistic: { scope } });
+    },
+  });
 
   return (
     <section className="rounded-lg border border-border bg-card p-4">
       <div className="space-y-4">
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="text-sm font-semibold text-foreground">Status</h2>
-          <Badge variant={automation.enabled ? "default" : "secondary"}>
-            {automation.enabled ? "Active" : "Paused"}
-          </Badge>
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold text-foreground">Properties</h2>
+          <div className="flex items-center gap-2">
+            <AutosaveIndicator status={autosave.status} className="min-w-0" />
+            <Badge variant={automation.enabled ? "default" : "secondary"}>
+              {automation.enabled ? "Active" : "Paused"}
+            </Badge>
+          </div>
         </div>
         {runActions}
-        <DetailList
-          items={[
-            [
-              "Next run",
+
+        <div className="space-y-2">
+          <StaticPropertyRow
+            label="Next run"
+            value={
               automation.next_run_at
                 ? formatDateTime(automation.next_run_at)
-                : "-",
-            ],
-            [
-              "Last ran",
+                : "-"
+            }
+          />
+          <StaticPropertyRow
+            label="Last ran"
+            value={
               automation.last_run_at
                 ? formatDateTime(automation.last_run_at)
-                : "-",
-            ],
-            ["Repository", repositoryName],
-            ["Triggers", triggerSummary],
-            [
-              "Runs as",
-              automation.identity_scope === "personal"
-                ? "Personal"
-                : "Organization",
-            ],
-            [
-              "Model",
-              automation.model_override || automation.agent_type || "Auto",
-            ],
-            ["Reasoning", automation.reasoning_effort || "Default"],
-            ["Base branch", automation.base_branch || "-"],
-            [
-              "After success",
-              automation.publish_policy === "none"
-                ? "Do not publish"
-                : "Open a pull request",
-            ],
-            ["Priority", priorityLabel(automation.priority)],
-            ["Scope", automation.scope || "-"],
-          ]}
-        />
+                : "-"
+            }
+          />
+
+          <TriggersProperty
+            automation={automation}
+            schedule={schedule}
+            canManage={canManage}
+            autosave={autosave}
+          />
+
+          {canManage ? (
+            <PropertyRow
+              label="Repository"
+              htmlFor={`automation-repository-${uid}`}
+            >
+              <Select
+                value={repositoryId}
+                onValueChange={(nextRepositoryId) => {
+                  const nextRepository = repositories.find(
+                    (repository) => repository.id === nextRepositoryId,
+                  );
+                  // Changing repositories invalidates the stored base branch,
+                  // so both fields move as one patch rather than leaving a
+                  // branch that does not exist on the new repo.
+                  save({
+                    body: {
+                      repository_id: nextRepositoryId,
+                      ...(nextRepository
+                        ? { base_branch: nextRepository.default_branch }
+                        : {}),
+                    },
+                    optimistic: {
+                      repository_id: nextRepositoryId,
+                      ...(nextRepository
+                        ? { base_branch: nextRepository.default_branch }
+                        : {}),
+                    },
+                  });
+                }}
+                disabled={repositories.length === 0}
+              >
+                <SelectTrigger
+                  id={`automation-repository-${uid}`}
+                  aria-label="Repository"
+                  className={inlineSelectTriggerClass}
+                >
+                  <SelectValue placeholder={repositoryName} />
+                </SelectTrigger>
+                <SelectContent>
+                  {/* The repository list loads separately from the automation,
+                      so keep an entry for the current value until it arrives —
+                      otherwise Radix has no item to render and the row reads as
+                      blank on first paint. */}
+                  {repositoryId && !selectedRepository ? (
+                    <SelectItem value={repositoryId}>
+                      {repositoryName}
+                    </SelectItem>
+                  ) : null}
+                  {repositories.map((repository) => (
+                    <SelectItem key={repository.id} value={repository.id}>
+                      {repository.full_name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </PropertyRow>
+          ) : (
+            <StaticPropertyRow label="Repository" value={repositoryName} />
+          )}
+
+          {canManage ? (
+            <PropertyRow
+              label="Runs as"
+              htmlFor={`automation-identity-scope-${uid}`}
+            >
+              <Select
+                value={automation.identity_scope ?? "org"}
+                onValueChange={(value: "org" | "personal") =>
+                  save({
+                    body: { identity_scope: value },
+                    optimistic: { identity_scope: value },
+                  })
+                }
+              >
+                <SelectTrigger
+                  id={`automation-identity-scope-${uid}`}
+                  aria-label="Run as"
+                  className={inlineSelectTriggerClass}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="org">Organization</SelectItem>
+                  <SelectItem value="personal">Personal</SelectItem>
+                </SelectContent>
+              </Select>
+            </PropertyRow>
+          ) : (
+            <StaticPropertyRow
+              label="Runs as"
+              value={
+                automation.identity_scope === "personal"
+                  ? "Personal"
+                  : "Organization"
+              }
+            />
+          )}
+
+          {canManage ? (
+            <PropertyRow label="Model" htmlFor={`automation-model-${uid}`}>
+              <AutomationModelSelect
+                id={`automation-model-${uid}`}
+                ariaLabel="Model"
+                value={model}
+                triggerClassName={inlineSelectTriggerClass}
+                onValueChange={(value) => {
+                  // The API re-validates the STORED reasoning override against
+                  // the model's agent, so a lone `model` patch is rejected
+                  // outright when the new agent can't accept it. The old batch
+                  // save cleared it in the same request; a per-field patch has
+                  // to carry that reset too, or the switch fails and the row
+                  // the user would need to clear is the one that disappears.
+                  const nextAgentType = effectiveAgentTypeFor(value);
+                  const clearsReasoning =
+                    Boolean(automation.reasoning_effort) &&
+                    !supportsReasoningEffort(nextAgentType);
+                  save({
+                    body: {
+                      model: value ?? "",
+                      ...(clearsReasoning ? { reasoning_effort: "" } : {}),
+                    },
+                    optimistic: {
+                      model_override: value ?? "",
+                      ...(clearsReasoning
+                        ? { reasoning_effort: undefined }
+                        : {}),
+                    },
+                  });
+                }}
+              />
+            </PropertyRow>
+          ) : (
+            <StaticPropertyRow
+              label="Model"
+              value={model || automation.agent_type || "Auto"}
+            />
+          )}
+
+          {canManage && showReasoningSelector ? (
+            <PropertyRow
+              label="Reasoning"
+              htmlFor={`automation-reasoning-${uid}`}
+            >
+              <Select
+                value={automation.reasoning_effort || "__default__"}
+                onValueChange={(value) => {
+                  const reasoning_effort: CodingAgentReasoningEffort =
+                    value === "__default__"
+                      ? ""
+                      : toCodingAgentReasoningEffort(value);
+                  save({
+                    // The API clears the override with "", but the model types
+                    // "no override" as absent — so the cache gets `undefined`.
+                    body: { reasoning_effort },
+                    optimistic: {
+                      reasoning_effort: reasoning_effort || undefined,
+                    },
+                  });
+                }}
+              >
+                <SelectTrigger
+                  id={`automation-reasoning-${uid}`}
+                  aria-label="Reasoning"
+                  className={inlineSelectTriggerClass}
+                >
+                  <SelectValue placeholder="Default" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__default__">Default</SelectItem>
+                  {reasoningOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </PropertyRow>
+          ) : showReasoningSelector ? (
+            <StaticPropertyRow
+              label="Reasoning"
+              value={automation.reasoning_effort || "Default"}
+            />
+          ) : null}
+
+          {canManage ? (
+            <PropertyRow
+              label="Base branch"
+              htmlFor={`automation-base-branch-${uid}`}
+            >
+              <BranchPicker
+                id={`automation-base-branch-${uid}`}
+                repositoryId={repositoryId}
+                value={automation.base_branch}
+                defaultBranch={
+                  selectedRepository?.default_branch ?? automation.base_branch
+                }
+                onValueChange={(base_branch) =>
+                  save({
+                    body: { base_branch },
+                    optimistic: { base_branch },
+                  })
+                }
+                label="Base branch"
+                buttonClassName={inlineControlClass}
+                contentClassName="w-[var(--radix-popover-trigger-width)]"
+              />
+            </PropertyRow>
+          ) : (
+            <StaticPropertyRow
+              label="Base branch"
+              value={automation.base_branch || "-"}
+            />
+          )}
+
+          {canManage ? (
+            <PropertyRow
+              label="After success"
+              htmlFor={`automation-publish-policy-${uid}`}
+            >
+              <Select
+                value={automation.publish_policy ?? "pull_request"}
+                onValueChange={(value) => {
+                  if (value !== "pull_request" && value !== "none") return;
+                  save({
+                    body: { publish_policy: value },
+                    optimistic: { publish_policy: value },
+                  });
+                }}
+              >
+                <SelectTrigger
+                  id={`automation-publish-policy-${uid}`}
+                  aria-label="After a successful run"
+                  className={inlineSelectTriggerClass}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="pull_request">Open a PR</SelectItem>
+                  <SelectItem value="none">Do not publish</SelectItem>
+                </SelectContent>
+              </Select>
+            </PropertyRow>
+          ) : (
+            <StaticPropertyRow
+              label="After success"
+              value={
+                automation.publish_policy === "none"
+                  ? "Do not publish"
+                  : "Open a pull request"
+              }
+            />
+          )}
+
+          <StaticPropertyRow
+            label="Priority"
+            value={priorityLabel(automation.priority)}
+          />
+
+          {canManage ? (
+            <PropertyRow label="Scope" htmlFor={`automation-scope-${uid}`}>
+              <Input
+                id={`automation-scope-${uid}`}
+                aria-label="Scope"
+                placeholder="Optional"
+                value={scopeField.value}
+                onChange={(event) => scopeField.onChange(event.target.value)}
+                onBlur={scopeField.onBlur}
+                className={inlineControlClass}
+              />
+            </PropertyRow>
+          ) : (
+            <StaticPropertyRow label="Scope" value={automation.scope || "-"} />
+          )}
+        </div>
+
+        <Collapsible className="rounded-md border border-border">
+          <CollapsibleTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              className="group h-8 w-full justify-between rounded-md px-2 text-left text-xs font-normal"
+            >
+              <span>Advanced</span>
+              <ChevronDown className="h-3.5 w-3.5 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+            </Button>
+          </CollapsibleTrigger>
+          <CollapsibleContent className="space-y-3 border-t border-border p-2.5">
+            <PrePRReviewProperty
+              automation={automation}
+              autosave={autosave}
+              supported={supportsNativeReviewLoop}
+              canManage={canManage}
+            />
+            <CapabilitiesProperty
+              automation={automation}
+              canManage={canManage}
+            />
+          </CollapsibleContent>
+        </Collapsible>
       </div>
     </section>
-  );
-}
-
-function DetailList({ items }: { items: Array<[string, string]> }) {
-  return (
-    <dl className="space-y-3 text-sm">
-      {items.map(([label, value]) => (
-        <div
-          key={label}
-          className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-3"
-        >
-          <dt className="text-xs font-medium text-muted-foreground">{label}</dt>
-          <dd className="min-w-0 break-words text-xs text-foreground">
-            {value}
-          </dd>
-        </div>
-      ))}
-    </dl>
   );
 }
 

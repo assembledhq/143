@@ -119,4 +119,122 @@ describe("useAutosaveNumericField", () => {
     expect(result.current.value).toBe("7");
     expect(autosave.save).not.toHaveBeenCalled();
   });
+
+  it("drops a pending edit on unmount by default", async () => {
+    const autosave = makeAutosaveStub<{ settings: { n: number } }>();
+    const { result, unmount } = renderHook(() =>
+      useAutosaveNumericField({
+        serverValue: 1,
+        autosave,
+        debounceMs: 5_000,
+        toPatch: (n) => ({ settings: { n } }),
+      }),
+    );
+
+    act(() => result.current.onChange(changeEvent("4")));
+    unmount();
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(autosave.save).not.toHaveBeenCalled();
+  });
+
+  it("commits a pending edit on unmount when flushOnUnmount is set", () => {
+    // A numeric field inside a collapsible is unmounted without a focusout, so
+    // onBlur never runs and the debounced edit would be silently dropped.
+    const autosave = makeAutosaveStub<{ settings: { n: number } }>();
+    const { result, unmount } = renderHook(() =>
+      useAutosaveNumericField({
+        serverValue: 1,
+        autosave,
+        debounceMs: 5_000,
+        flushOnUnmount: true,
+        clamp: (raw) => Math.min(5, Math.max(0, raw)),
+        toPatch: (n) => ({ settings: { n } }),
+      }),
+    );
+
+    act(() => result.current.onChange(changeEvent("9")));
+    unmount();
+
+    expect(autosave.save).toHaveBeenCalledTimes(1);
+    // Clamped on the way out, exactly as the debounced path would have.
+    expect(autosave.save).toHaveBeenCalledWith({ settings: { n: 5 } });
+  });
+
+  it("does not flush on unmount when nothing is pending", () => {
+    const autosave = makeAutosaveStub<{ settings: { n: number } }>();
+    const { unmount } = renderHook(() =>
+      useAutosaveNumericField({
+        serverValue: 1,
+        autosave,
+        flushOnUnmount: true,
+        toPatch: (n) => ({ settings: { n } }),
+      }),
+    );
+
+    unmount();
+
+    expect(autosave.save).not.toHaveBeenCalled();
+  });
+
+  it("cancels the queued save when the box is cleared after typing", async () => {
+    // All three exits from this state have to agree. Previously the debounce
+    // timer (and therefore the unmount flush) persisted the digit the user had
+    // just deleted, while onBlur reset to the server value and saved nothing.
+    const autosave = makeAutosaveStub<{ settings: { n: number } }>();
+    const { result, unmount } = renderHook(() =>
+      useAutosaveNumericField({
+        serverValue: 1,
+        autosave,
+        debounceMs: 20,
+        flushOnUnmount: true,
+        toPatch: (n) => ({ settings: { n } }),
+      }),
+    );
+
+    act(() => result.current.onChange(changeEvent("4")));
+    act(() => result.current.onChange(changeEvent("")));
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(autosave.save).not.toHaveBeenCalled();
+
+    unmount();
+    expect(autosave.save).not.toHaveBeenCalled();
+  });
+
+  it("cancels the queued save when the box is garbled after typing", async () => {
+    const autosave = makeAutosaveStub<{ settings: { n: number } }>();
+    const { result } = renderHook(() =>
+      useAutosaveNumericField({
+        serverValue: 1,
+        autosave,
+        debounceMs: 20,
+        toPatch: (n) => ({ settings: { n } }),
+      }),
+    );
+
+    act(() => result.current.onChange(changeEvent("4")));
+    act(() => result.current.onChange(changeEvent("abc")));
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(autosave.save).not.toHaveBeenCalled();
+  });
+
+  it("does not flush on unmount after the stepper already saved the value", () => {
+    const autosave = makeAutosaveStub<{ settings: { n: number } }>();
+    const { result, unmount } = renderHook(() =>
+      useAutosaveNumericField({
+        serverValue: 1,
+        autosave,
+        debounceMs: 5_000,
+        flushOnUnmount: true,
+        toPatch: (n) => ({ settings: { n } }),
+      }),
+    );
+
+    act(() => result.current.setValueAndSave(3));
+    unmount();
+
+    expect(autosave.save).toHaveBeenCalledTimes(1);
+  });
 });

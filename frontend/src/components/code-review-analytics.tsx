@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { ChartNoAxesColumnIncreasing } from "lucide-react";
 import { EmptyState } from "@/components/empty-state";
 import { SectionGroup } from "@/components/section-group";
@@ -59,11 +60,77 @@ function roundedMetric(value: number | null): string {
   return Math.round(value).toLocaleString();
 }
 
+function signedRoundedMetric(value: number | null, sign: "+" | "-"): string {
+  const formatted = roundedMetric(value);
+  return formatted === "—" ? formatted : `${sign}${formatted}`;
+}
+
 function reasonLabel(code: string): string {
   const known = NON_APPROVAL_REASON_LABELS[code];
   if (known) return known;
   const readable = code.replaceAll("_", " ");
   return readable.charAt(0).toUpperCase() + readable.slice(1);
+}
+
+function authorReviewsHref({
+  author,
+  outcome,
+  repository,
+  range,
+}: {
+  author: string;
+  outcome?: "automatically_approved" | "completed_not_approved";
+  repository?: string;
+  range: string;
+}): string {
+  const params = new URLSearchParams({
+    tab: "reviews",
+    author,
+    status: "completed",
+    range,
+  });
+  if (outcome) params.set("outcome", outcome);
+  if (repository) params.set("repository", repository);
+  return `/code-reviews?${params.toString()}`;
+}
+
+function AuthorReviewCountLink({
+  author,
+  count,
+  label,
+  outcome,
+  repository,
+  range,
+  onNavigate,
+}: {
+  author: string;
+  count: number;
+  label: string;
+  outcome?: "automatically_approved" | "completed_not_approved";
+  repository?: string;
+  range: string;
+  onNavigate: () => void;
+}) {
+  return (
+    <Link
+      href={authorReviewsHref({ author, outcome, repository, range })}
+      className="font-medium text-primary underline-offset-4 hover:underline focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      aria-label={`${count.toLocaleString()} ${label} by ${author}`}
+      onClick={(event) => {
+        if (
+          event.button === 0
+          && !event.metaKey
+          && !event.ctrlKey
+          && !event.shiftKey
+          && !event.altKey
+        ) {
+          onNavigate();
+        }
+      }}
+    >
+      {count.toLocaleString()}
+    </Link>
+  );
 }
 
 function MetricCard({
@@ -128,11 +195,18 @@ export function CodeReviewAnalyticsReport({
   isLoading,
   isError,
   onRetry,
+  reviewLinkFilters,
+  onNavigateToReviews,
 }: {
   analytics?: CodeReviewAnalytics;
   isLoading: boolean;
   isError: boolean;
   onRetry: () => void;
+  reviewLinkFilters: {
+    repository?: string;
+    range: string;
+  };
+  onNavigateToReviews: () => void;
 }) {
   if (!analytics && isLoading) {
     return <LoadingReport />;
@@ -216,10 +290,7 @@ export function CodeReviewAnalyticsReport({
                   <TableHead className="text-right">Not approved</TableHead>
                   <TableHead className="text-right">Approval rate</TableHead>
                   <TableHead className="text-right">Median files changed</TableHead>
-                  <TableHead className="text-right">Split sample</TableHead>
-                  <TableHead className="text-right">Avg. additions</TableHead>
                   <TableHead className="text-right">Median additions</TableHead>
-                  <TableHead className="text-right">Avg. deletions</TableHead>
                   <TableHead className="text-right">Median deletions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -227,20 +298,44 @@ export function CodeReviewAnalyticsReport({
                 {analytics.authors.map((author) => (
                   <TableRow key={author.author}>
                     <TableCell className="font-medium">{author.author}</TableCell>
-                    <TableCell className="text-right tabular-nums">{author.reviews_completed.toLocaleString()}</TableCell>
-                    <TableCell className="text-right tabular-nums">{author.automatically_approved.toLocaleString()}</TableCell>
-                    <TableCell className="text-right tabular-nums">{author.not_approved.toLocaleString()}</TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      <AuthorReviewCountLink
+                        author={author.author}
+                        count={author.reviews_completed}
+                        label="completed reviews"
+                        repository={reviewLinkFilters.repository}
+                        range={reviewLinkFilters.range}
+                        onNavigate={onNavigateToReviews}
+                      />
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      <AuthorReviewCountLink
+                        author={author.author}
+                        count={author.automatically_approved}
+                        label="automatically approved reviews"
+                        outcome="automatically_approved"
+                        repository={reviewLinkFilters.repository}
+                        range={reviewLinkFilters.range}
+                        onNavigate={onNavigateToReviews}
+                      />
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      <AuthorReviewCountLink
+                        author={author.author}
+                        count={author.not_approved}
+                        label="not approved reviews"
+                        outcome="completed_not_approved"
+                        repository={reviewLinkFilters.repository}
+                        range={reviewLinkFilters.range}
+                        onNavigate={onNavigateToReviews}
+                      />
+                    </TableCell>
                     <TableCell className="text-right tabular-nums">
                       {percentage(author.automatically_approved, author.reviews_completed)}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">{roundedMetric(author.median_files_changed)}</TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {author.reviews_with_change_breakdown.toLocaleString()} / {author.reviews_completed.toLocaleString()}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">{roundedMetric(author.average_additions)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{roundedMetric(author.median_additions)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{roundedMetric(author.average_deletions)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{roundedMetric(author.median_deletions)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{signedRoundedMetric(author.median_additions, "+")}</TableCell>
+                    <TableCell className="text-right tabular-nums">{signedRoundedMetric(author.median_deletions, "-")}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>

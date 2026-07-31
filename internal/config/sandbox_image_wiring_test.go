@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -65,6 +66,35 @@ func TestSandboxImageWiring(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+func TestSandboxImageRebuildTracksCLIInputs(t *testing.T) {
+	t.Parallel()
+
+	cmd := exec.Command("make", "-pn", "sandbox-image")
+	cmd.Dir = repoPath("")
+	output, err := cmd.Output()
+	require.NoError(t, err, "make should expand the sandbox image dependency graph")
+
+	database := string(output)
+	ruleStart := strings.Index(database, "sandbox/.build-stamp:")
+	require.NotEqual(t, -1, ruleStart, "make database should include the sandbox image stamp rule")
+	ruleEnd := strings.IndexByte(database[ruleStart:], '\n')
+	require.NotEqual(t, -1, ruleEnd, "sandbox image stamp rule should end with a newline")
+	rule := database[ruleStart : ruleStart+ruleEnd]
+
+	repoRoot, err := filepath.Abs(repoPath(""))
+	require.NoError(t, err, "test should resolve the repository root")
+	expectedInputs := []string{
+		"go.mod",
+		"go.sum",
+		filepath.Join(repoRoot, "cmd", "tools"),
+		filepath.Join(repoRoot, "internal", "cli", "preview_tools.go"),
+		filepath.Join(repoRoot, "internal", "internalapi", "env.go"),
+	}
+	for _, expected := range expectedInputs {
+		require.Contains(t, rule, expected, "sandbox image stamp should track every input that can change the baked 143-tools binary")
 	}
 }
 
