@@ -392,6 +392,7 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 // they assign the same rank to the same row. Without it, transposing two
 // branches on one side alone would quietly anchor cursors in the wrong label
 // group and drop rows from the sorted list.
+//nolint:paralleltest // sort subtests share one PostgreSQL connection and isolated schema, so they must run serially
 func TestCodeReviewSortRankMatchesPostgresForEveryRow(t *testing.T) {
 	t.Parallel()
 
