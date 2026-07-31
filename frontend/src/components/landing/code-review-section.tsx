@@ -8,8 +8,6 @@ import {
   codeReviewControls,
   codeReviewEscalation,
   codeReviewSummary,
-  reviewBottlenecks,
-  reviewProblem,
 } from "./landing-copy";
 import { landingLayout as layout } from "./landing-layout";
 import { landingTypography as type } from "./landing-typography";
@@ -141,24 +139,6 @@ export default function CodeReviewSection({ isDark }: CodeReviewSectionProps) {
       </div>
 
       <div className={`${layout.pageShell} space-y-16 sm:space-y-24`}>
-        <div className={layout.sectionHeaderGrid}>
-          <p className={`${type.eyebrow} ${label}`}>
-            {reviewProblem.step} {reviewProblem.kicker}
-          </p>
-          <div className="space-y-5">
-            <h2 className={`max-w-3xl ${type.sectionTitle} ${heading}`}>
-              {reviewProblem.heading}
-            </h2>
-            <ul className="grid gap-2 pt-2">
-              {reviewBottlenecks.map((item) => (
-                <li key={item} className={`text-xs font-mono ${body}`}>
-                  · {item}
-                </li>
-              ))}
-            </ul>
-          </div>
-        </div>
-
         <div className={layout.sectionHeaderGrid}>
           <p className={`${type.eyebrow} ${label}`}>
             {codeReviewSummary.step} {codeReviewSummary.kicker}

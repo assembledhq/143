@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as landingCopy from "./landing-copy";
 import {
-  agentChoiceHighlights,
   codeReviewApproval,
   codeReviewControls,
   codeReviewEscalation,
@@ -9,8 +8,6 @@ import {
   codingAgents,
   integrations,
   platformLayers,
-  reviewBottlenecks,
-  reviewProblem,
 } from "./landing-copy";
 
 describe("landing copy", () => {
@@ -18,37 +15,21 @@ describe("landing copy", () => {
     expect("heroMetrics" in landingCopy).toBe(false);
   });
 
-  it("numbers platform layers after the problem, code-review, and platform headers", () => {
+  it("builds the page around code review, agents, and previews", () => {
     expect(platformLayers.map((layer) => `${layer.step} ${layer.title}`)).toEqual([
-      "04 Team context",
-      "05 Cloud execution",
-      "06 Repair loops",
-      "07 Cloud previews",
+      "02 Cloud agents",
+      "03 Cloud previews",
     ]);
   });
 
-  it("opens the homepage story with the review bottleneck, then code review", () => {
-    expect(`${reviewProblem.step} ${reviewProblem.kicker}`).toBe(
-      "01 Why this matters",
-    );
-    expect(reviewProblem.heading).toBe(
-      "Agents made code faster to write. Review is where it piles up.",
-    );
+  it("opens the homepage story with code review and its bottleneck", () => {
     expect(`${codeReviewSummary.step} ${codeReviewSummary.kicker}`).toBe(
-      "02 Code review",
+      "01 Code review",
     );
     expect(codeReviewSummary.heading).toBe(
       "Code review that approves the pull requests it should.",
     );
-  });
-
-  it("names the review bottlenecks agent-written code creates", () => {
-    expect(reviewBottlenecks).toEqual([
-      "More pull requests than review capacity",
-      "Larger, less cohesive agent-written changes",
-      "More authors who don't review code for a living",
-      "Stacks stuck in review for days while generation sprints ahead",
-    ]);
+    expect(codeReviewSummary.body).toContain("Review is now the bottleneck.");
   });
 
   it("focuses the review controls on policy tuning and reviewer choice", () => {
@@ -96,24 +77,9 @@ describe("landing copy", () => {
     ]);
   });
 
-  it("positions model flexibility as a supporting coding-agent feature", () => {
-    expect(agentChoiceHighlights.map((highlight) => highlight.title)).toEqual([
-      "Use the best agent for the job",
-      "Keep routine work economical",
-      "Stack subscriptions before metered spend",
-    ]);
-    expect(agentChoiceHighlights.map((highlight) => highlight.body)).toEqual([
-      "Run top-tier tools like Codex, Claude Code, and OpenCode when the task needs maximum capability.",
-      "Route lighter jobs through OpenCode and open-source models when cost matters more than peak reasoning.",
-      "Layer personal, team, and bundled coding-agent subscriptions so available seats are used before extra usage piles up.",
-    ]);
-  });
-
   it("keeps section headers simple and focused", () => {
     expect(platformLayers.map((layer) => layer.heading)).toEqual([
-      "Shared context for every run.",
-      "Run agents from anywhere.",
-      "Arrive at review already clean.",
+      "Run any coding agent.",
       "Preview every change in the cloud.",
     ]);
   });

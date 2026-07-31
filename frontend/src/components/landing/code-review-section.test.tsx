@@ -4,28 +4,18 @@ import CodeReviewSection from "./code-review-section";
 import { landingTypography } from "./landing-typography";
 
 describe("CodeReviewSection", () => {
-  it("leads with the review bottleneck, then automated code review", () => {
+  it("leads the homepage story with code review and its bottleneck", () => {
     render(<CodeReviewSection isDark={false} />);
 
-    const problemHeading = screen.getByRole("heading", {
-      level: 2,
-      name: "Agents made code faster to write. Review is where it piles up.",
-    });
-    const answerHeading = screen.getByRole("heading", {
+    const heading = screen.getByRole("heading", {
       level: 2,
       name: "Code review that approves the pull requests it should.",
     });
 
-    expect(problemHeading.className).toContain(landingTypography.sectionTitle);
-    expect(answerHeading.className).toContain(landingTypography.sectionTitle);
+    expect(heading.className).toContain(landingTypography.sectionTitle);
+    expect(screen.getByText("01 Code review")).toBeInTheDocument();
     expect(
-      problemHeading.compareDocumentPosition(answerHeading) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-    expect(screen.getByText("01 Why this matters")).toBeInTheDocument();
-    expect(screen.getByText("02 Code review")).toBeInTheDocument();
-    expect(
-      screen.getByText(/More pull requests than review capacity/),
+      screen.getByText(/Review is now the bottleneck/),
     ).toBeInTheDocument();
   });
 

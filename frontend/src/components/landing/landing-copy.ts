@@ -1,21 +1,8 @@
-export const reviewProblem = {
-  step: "01",
-  kicker: "Why this matters",
-  heading: "Agents made code faster to write. Review is where it piles up.",
-};
-
-export const reviewBottlenecks = [
-  "More pull requests than review capacity",
-  "Larger, less cohesive agent-written changes",
-  "More authors who don't review code for a living",
-  "Stacks stuck in review for days while generation sprints ahead",
-];
-
 export const codeReviewSummary = {
-  step: "02",
+  step: "01",
   kicker: "Code review",
   heading: "Code review that approves the pull requests it should.",
-  body: "Request 143 Code Reviewer on a pull request and several coding agents review it in parallel. When the change clears your policy and no blocking finding remains, 143 submits a real GitHub approval with the evidence attached. When it does not, the pull request comes back with inline findings and the specific reason a human is still needed.",
+  body: "Your team can use anything to open a pull request — coding agents made that the easy part. Review is now the bottleneck. Request 143 Code Reviewer and several agents review the PR in parallel: when the change clears your policy, 143 submits a real GitHub approval with the evidence attached; when it does not, it comes back with inline findings and the specific reason a human is still needed.",
 };
 
 export const codeReviewControls = [
@@ -51,46 +38,20 @@ export const codeReviewEscalation = {
 
 export const platformLayers = [
   {
-    step: "04",
-    kicker: "Context",
-    title: "Team context",
-    heading: "Shared context for every run.",
-    body: "Repos, issues, docs, prompts, automations, sessions, and outcomes live in one team workspace. Every agent starts from the same context.",
+    step: "02",
+    kicker: "Any agent",
+    title: "Cloud agents",
+    heading: "Run any coding agent.",
+    body: "Codex, Claude Code, OpenCode, Amp, and Pi all run in isolated cloud sandboxes. Connect an agent's auth once for the organization, start runs from web, mobile, Slack, Linear, or Sentry, and match the agent to the task — top-tier capability where it matters, economical models for routine work.",
     components: [
-      "Shared prompts and automations",
-      "Team-visible sessions and history",
-      "One integration setup per organization",
-      "Builder and engineer roles",
+      "One isolated cloud sandbox per run",
+      "Team-visible sessions, transcripts, and history",
+      "Start from web, mobile, Slack, Linear, or Sentry",
+      "Stack subscriptions before metered spend",
     ],
   },
   {
-    step: "05",
-    kicker: "Execution",
-    title: "Cloud execution",
-    heading: "Run agents from anywhere.",
-    body: "Start Codex, Claude Code, OpenCode, and other coding agents from web, mobile, Slack, Linear, or Sentry. Runs happen in cloud sandboxes your team can follow.",
-    components: [
-      "Codex, Claude Code, OpenCode, and more",
-      "Cloud sandboxes with previews",
-      "Mobile-friendly job controls",
-      "Sessions from issues and errors",
-    ],
-  },
-  {
-    step: "06",
-    kicker: "Control",
-    title: "Repair loops",
-    heading: "Arrive at review already clean.",
-    body: "Before a reviewer is ever requested, agents repair failing tests, respond to feedback, and iterate inside guardrails, so the pull request that reaches code review is one that can pass it.",
-    components: [
-      "PR review and repair loops",
-      "Usage and cost analytics",
-      "Audit logs for sensitive changes",
-      "Safeguards for builder workflows",
-    ],
-  },
-  {
-    step: "07",
+    step: "03",
     kicker: "Previews",
     title: "Cloud previews",
     heading: "Preview every change in the cloud.",
@@ -124,21 +85,6 @@ export const codingAgents = [
   {
     name: "Pi",
     logo: "/agents/pi.svg",
-  },
-];
-
-export const agentChoiceHighlights = [
-  {
-    title: "Use the best agent for the job",
-    body: "Run top-tier tools like Codex, Claude Code, and OpenCode when the task needs maximum capability.",
-  },
-  {
-    title: "Keep routine work economical",
-    body: "Route lighter jobs through OpenCode and open-source models when cost matters more than peak reasoning.",
-  },
-  {
-    title: "Stack subscriptions before metered spend",
-    body: "Layer personal, team, and bundled coding-agent subscriptions so available seats are used before extra usage piles up.",
   },
 ];
 
