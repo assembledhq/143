@@ -644,6 +644,15 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByText("500+ total lines")).toBeInTheDocument();
 
     const authorTable = screen.getByRole("table", { name: "Code review analytics by PR author" });
+    expect(within(authorTable).getAllByRole("columnheader").map((header) => header.textContent)).toEqual([
+      "PR author",
+      "Reviews",
+      "Approved",
+      "Not approved",
+      "Approval rate",
+      "Median additions",
+      "Median deletions",
+    ]);
     const anyaRow = within(authorTable).getByRole("row", { name: /anya/i });
     expect(within(anyaRow).getAllByRole("cell").map((cell) => cell.textContent)).toEqual([
       "anya",
@@ -651,10 +660,7 @@ describe("CodeReviewsPage", () => {
       "9",
       "3",
       "75%",
-      "9 / 12",
-      "60",
       "52",
-      "28",
       "20",
     ]);
     await waitFor(() => expect(analyticsRequests).toHaveLength(1));

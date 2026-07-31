@@ -595,7 +595,10 @@ export default function AutomationsPage() {
   const { data, isLoading } = useQuery({
     queryKey: queryKeys.automations.all,
     queryFn: () => api.automations.list(),
-    refetchInterval: 10000,
+    // The list changes infrequently and mutations already update and
+    // invalidate its cache. Let React Query refresh stale data on focus
+    // instead of redrawing the whole page on a fixed polling cadence.
+    staleTime: 30_000,
   });
 
   const automations = useMemo(() => data?.data ?? [], [data?.data]);

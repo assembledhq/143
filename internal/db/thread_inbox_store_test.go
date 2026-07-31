@@ -17,7 +17,7 @@ var threadInboxEntryTestColumns = []string{
 	"id", "org_id", "session_id", "thread_id", "sequence_no", "message_id", "client_message_id",
 	"entry_type", "payload", "delivery_state", "delivery_attempts",
 	"last_error", "owner_node_id", "runtime_id", "accepted_at",
-	"delivered_at", "acked_at", "created_at", "updated_at",
+	"delivered_at", "acked_at", "applied_at", "created_at", "updated_at",
 }
 
 func TestThreadInboxStore_AppendForMessage(t *testing.T) {
@@ -40,7 +40,7 @@ func TestThreadInboxStore_AppendForMessage(t *testing.T) {
 			entryID, orgID, sessionID, threadID, int64(3), int64(42), "message:42",
 			models.ThreadInboxEntryTypeUserMessage, payload,
 			models.ThreadInboxDeliveryStatePending, 0,
-			nil, nil, nil, now, nil, nil, now, now,
+			nil, nil, nil, now, nil, nil, nil, now, now,
 		))
 
 	store := NewThreadInboxStore(mock)
@@ -105,7 +105,7 @@ func TestThreadInboxStore_ListDeliverableAfter(t *testing.T) {
 			entryID, orgID, sessionID, threadID, int64(3), int64(42), nil,
 			models.ThreadInboxEntryTypeUserMessage, payload,
 			models.ThreadInboxDeliveryStatePending, 0,
-			nil, nil, nil, now, nil, nil, now, now,
+			nil, nil, nil, now, nil, nil, nil, now, now,
 		))
 
 	store := NewThreadInboxStore(mock)
@@ -137,7 +137,7 @@ func TestThreadInboxStore_ListDeliverableAfterIncludesRetriedPendingBeforeCursor
 			entryID, orgID, sessionID, threadID, int64(3), int64(42), nil,
 			models.ThreadInboxEntryTypeUserMessage, payload,
 			models.ThreadInboxDeliveryStatePending, 0,
-			nil, nil, nil, now, nil, nil, now, now,
+			nil, nil, nil, now, nil, nil, nil, now, now,
 		))
 
 	store := NewThreadInboxStore(mock)
@@ -168,7 +168,7 @@ func TestThreadInboxStore_MarkDeadLetter(t *testing.T) {
 			entryID, orgID, sessionID, threadID, int64(4), int64(42), nil,
 			models.ThreadInboxEntryTypeUserMessage, json.RawMessage(`{"message_id":42}`),
 			models.ThreadInboxDeliveryStateDeadLetter, 1,
-			reason, nil, nil, now, nil, nil, now, now,
+			reason, nil, nil, now, nil, nil, nil, now, now,
 		))
 
 	store := NewThreadInboxStore(mock)
@@ -200,7 +200,7 @@ func TestThreadInboxStore_ListRecoverableByThread(t *testing.T) {
 			entryID, orgID, sessionID, threadID, int64(7), int64(99), nil,
 			models.ThreadInboxEntryTypeUserMessage, json.RawMessage(`{"content":"retry me"}`),
 			models.ThreadInboxDeliveryStateUnknownDelivery, 2,
-			reason, "worker-1", nil, now, now, nil, now, now,
+			reason, "worker-1", nil, now, now, nil, nil, now, now,
 		))
 
 	store := NewThreadInboxStore(mock)
@@ -234,7 +234,7 @@ func TestThreadInboxStore_MarkDeliveryFailed(t *testing.T) {
 			entryID, orgID, sessionID, threadID, int64(7), int64(99), nil,
 			models.ThreadInboxEntryTypeUserMessage, json.RawMessage(`{"content":"retry me"}`),
 			models.ThreadInboxDeliveryStatePending, 1,
-			reason, nil, nil, now, nil, nil, now, now,
+			reason, nil, nil, now, nil, nil, nil, now, now,
 		))
 
 	store := NewThreadInboxStore(mock)
@@ -266,7 +266,7 @@ func TestThreadInboxStore_RetryRecoverable(t *testing.T) {
 			entryID, orgID, sessionID, threadID, int64(7), int64(99), nil,
 			models.ThreadInboxEntryTypeUserMessage, json.RawMessage(`{"content":"retry me"}`),
 			models.ThreadInboxDeliveryStatePending, 0,
-			nil, nil, nil, now, nil, nil, now, now,
+			nil, nil, nil, now, nil, nil, nil, now, now,
 		))
 
 	store := NewThreadInboxStore(mock)
