@@ -1523,12 +1523,6 @@ type CodeReviewStatsFilters struct {
 
 type CodeReviewAnalyticsFilters struct {
 	RepositoryID    *uuid.UUID
-	Decision        *models.CodeReviewDecision
-	Outcome         *models.CodeReviewListOutcome
-	ActivityStatus  *models.CodeReviewActivityStatus
-	Status          *models.CodeReviewSessionStatus
-	Acceptable      *bool
-	Search          string
 	CreatedAfter    *time.Time
 	CreatedBefore   *time.Time
 	AuthorSortBy    string
@@ -1683,14 +1677,6 @@ func (s *CodeReviewStore) GetReviewStats(ctx context.Context, orgID uuid.UUID, f
 	return stats, nil
 }
 
-func codeReviewAnalyticsWhere(orgID uuid.UUID, filters CodeReviewAnalyticsFilters) (string, pgx.NamedArgs, error) {
-	return codeReviewListWhere(orgID, CodeReviewListFilters{
-		RepositoryID: filters.RepositoryID, Decision: filters.Decision, Outcome: filters.Outcome,
-		ActivityStatus: filters.ActivityStatus, Status: filters.Status, Acceptable: filters.Acceptable,
-		Search: filters.Search, CreatedAfter: filters.CreatedAfter, CreatedBefore: filters.CreatedBefore,
-	}, false)
-}
-
 func codeReviewOptionalMetric(value float64) *float64 {
 	if value < 0 {
 		return nil
@@ -1698,176 +1684,254 @@ func codeReviewOptionalMetric(value float64) *float64 {
 	return &value
 }
 
+// GetReviewAnalytics returns one observation per pull request. The cohort is
+// selected by the first attempt's creation time; every later attempt is then
+// considered when deriving the PR's eventual outcome.
 func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUID, filters CodeReviewAnalyticsFilters) (models.CodeReviewAnalytics, error) {
-	where, args, err := codeReviewAnalyticsWhere(orgID, filters)
-	if err != nil {
-		return models.CodeReviewAnalytics{}, err
-	}
 	authorOrder, err := codeReviewAuthorAnalyticsOrder(filters.AuthorSortBy, filters.AuthorSortOrder)
 	if err != nil {
 		return models.CodeReviewAnalytics{}, err
 	}
-	// Keep every report section in one statement so PostgreSQL evaluates the
-	// response against one MVCC snapshot. Materializing the filtered review set
-	// also prevents each aggregation from rescanning unrelated org history.
+	args := pgx.NamedArgs{"org_id": orgID}
+	// A pull request belongs to exactly one repository, so the repository
+	// predicate can narrow every scan of code_review_session_metadata: it can
+	// neither change which attempt is first nor drop an attempt belonging to a
+	// cohort PR. Applying it to each base scan keeps
+	// idx_code_review_metadata_reviews (org_id, repository_id, created_at)
+	// usable instead of reading org-wide history and filtering afterwards.
+	scanWhere := ""
+	if filters.RepositoryID != nil {
+		scanWhere += " AND m.repository_id = @repository_id"
+		args["repository_id"] = *filters.RepositoryID
+	}
+	// The time bounds describe the first attempt itself, so they can only be
+	// applied after the per-PR dedupe: an attempt inside the window does not
+	// put its PR in the cohort when an earlier attempt fell outside it.
+	cohortWhere := ""
+	if filters.CreatedAfter != nil {
+		cohortWhere += " AND first_attempt.first_requested_at >= @created_after"
+		args["created_after"] = *filters.CreatedAfter
+	}
+	if filters.CreatedBefore != nil {
+		cohortWhere += " AND first_attempt.first_requested_at <= @created_before"
+		args["created_before"] = *filters.CreatedBefore
+	}
 	query := `
-		WITH filtered_reviews AS MATERIALIZED (
-			SELECT
-				m.id,
-				m.session_id,
-				m.status,
-				m.decision,
-				m.github_review_id,
-				m.additions,
-				m.deletions,
-				m.risk_reason_details,
-				COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), 'Unknown') AS author
-			FROM code_review_session_metadata m
-			JOIN sessions s ON s.id = m.session_id AND s.org_id = m.org_id
-			JOIN pull_requests pr ON pr.id = m.pull_request_id AND pr.org_id = m.org_id` + where + `
-		),
-		finding_rollup AS (
-			SELECT
-				f.session_id,
-				COUNT(*)::bigint AS finding_count,
-				COUNT(*) FILTER (WHERE f.severity IN ('critical', 'high'))::bigint AS blocking_finding_count
-			FROM code_review_findings f
-			JOIN (
-				SELECT DISTINCT session_id
-				FROM filtered_reviews
-				WHERE status = 'completed'
-			) filtered_sessions ON filtered_sessions.session_id = f.session_id
-			WHERE f.org_id = @org_id
-			GROUP BY f.session_id
-		),
-		summary AS (
-			SELECT
-			COUNT(*)::bigint AS reviews_requested,
-			COUNT(*) FILTER (WHERE r.status = 'completed')::bigint AS reviews_completed,
-			COUNT(*) FILTER (
-				WHERE r.status = 'completed'
-				  AND r.decision = 'approved'
-				  AND r.github_review_id IS NOT NULL
-			)::bigint AS automatically_approved,
-			COUNT(*) FILTER (
-				WHERE r.status = 'completed'
-				  AND (r.decision IS DISTINCT FROM 'approved' OR r.github_review_id IS NULL)
-			)::bigint AS not_approved,
-			COUNT(*) FILTER (WHERE r.status = 'completed' AND r.decision = 'needs_human_review')::bigint AS needs_human_review,
-			COUNT(*) FILTER (WHERE r.status = 'completed' AND r.decision = 'comment_only')::bigint AS comment_only,
-			COUNT(*) FILTER (WHERE r.status = 'completed' AND r.decision = 'blocked')::bigint AS blocked,
-			COUNT(*) FILTER (
-				WHERE r.status = 'completed'
-				  AND r.decision = 'approved'
-				  AND r.github_review_id IS NULL
-			)::bigint AS approval_not_posted,
-			COUNT(*) FILTER (WHERE r.status = 'failed')::bigint AS failed_reviews,
-			COUNT(*) FILTER (WHERE r.status = 'stale')::bigint AS stale_reviews,
-			COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.additions) FILTER (
-				WHERE r.status = 'completed' AND r.additions IS NOT NULL
-			), -1)::double precision AS median_additions,
-			COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.deletions) FILTER (
-				WHERE r.status = 'completed' AND r.deletions IS NOT NULL
-			), -1)::double precision AS median_deletions,
-			COUNT(*) FILTER (
-				WHERE r.status = 'completed' AND COALESCE(finding_rollup.finding_count, 0) > 0
-			)::bigint AS reviews_with_findings,
-			COUNT(*) FILTER (
-				WHERE r.status = 'completed' AND COALESCE(finding_rollup.blocking_finding_count, 0) > 0
-			)::bigint AS reviews_with_blocking_findings,
-			COALESCE(SUM(finding_rollup.finding_count) FILTER (WHERE r.status = 'completed'), 0)::bigint AS total_findings
-			FROM filtered_reviews r
-			LEFT JOIN finding_rollup ON finding_rollup.session_id = r.session_id
-		),
-		authors AS (
-			SELECT
-				r.author,
-				COUNT(*)::bigint AS reviews_completed,
-				COUNT(*) FILTER (
-					WHERE r.decision = 'approved' AND r.github_review_id IS NOT NULL
-				)::bigint AS automatically_approved,
-				COUNT(*) FILTER (
-					WHERE r.decision IS DISTINCT FROM 'approved' OR r.github_review_id IS NULL
-				)::bigint AS not_approved,
-				COUNT(*) FILTER (
-					WHERE r.additions IS NOT NULL AND r.deletions IS NOT NULL
-				)::bigint AS reviews_with_change_breakdown,
-				AVG(r.additions)::double precision AS average_additions,
-				(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.additions))::double precision AS median_additions,
-				AVG(r.deletions)::double precision AS average_deletions,
-				(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.deletions))::double precision AS median_deletions
-			FROM filtered_reviews r
-			WHERE r.status = 'completed'
-			GROUP BY r.author
-		),
-		reasons AS (
-			SELECT
-				reason->>'code' AS code,
-				COUNT(DISTINCT r.id)::bigint AS reviews
-			FROM filtered_reviews r
-			CROSS JOIN LATERAL jsonb_array_elements(r.risk_reason_details) AS reason
-			WHERE r.status = 'completed'
-			  AND (r.decision IS DISTINCT FROM 'approved' OR r.github_review_id IS NULL)
-			  AND NULLIF(reason->>'code', '') IS NOT NULL
-			GROUP BY code
-		)
-		SELECT
-			summary.reviews_requested,
-			summary.reviews_completed,
-			summary.automatically_approved,
-			summary.not_approved,
-			summary.needs_human_review,
-			summary.comment_only,
-			summary.blocked,
-			summary.approval_not_posted,
-			summary.failed_reviews,
-			summary.stale_reviews,
-			summary.median_additions,
-			summary.median_deletions,
-			summary.reviews_with_findings,
-			summary.reviews_with_blocking_findings,
-			summary.total_findings,
-			COALESCE((
-				SELECT jsonb_agg(to_jsonb(a) ORDER BY ` + authorOrder + `)
-				FROM authors a
-			), '[]'::jsonb) AS authors,
-			COALESCE((
-				SELECT jsonb_agg(to_jsonb(reason) ORDER BY reason.reviews DESC, reason.code ASC)
-				FROM reasons reason
-			), '[]'::jsonb) AS non_approval_reasons
-		FROM summary`
+	WITH first_attempt AS MATERIALIZED (
+		SELECT DISTINCT ON (m.pull_request_id)
+			m.pull_request_id, m.repository_id, m.created_at AS first_requested_at
+		FROM code_review_session_metadata m
+		WHERE m.org_id = @org_id` + scanWhere + `
+		ORDER BY m.pull_request_id, m.created_at, m.id
+	),
+	cohort AS MATERIALIZED (
+		-- Resolve the captured author only for PRs that survive the cohort
+		-- filters. Keeping this lookup out of first_attempt stops it from
+		-- running once per attempt row across the whole organization.
+		SELECT first_attempt.*, COALESCE(captured.author, 'Unknown') AS author
+		FROM first_attempt
+		JOIN pull_requests pr ON pr.id = first_attempt.pull_request_id AND pr.org_id = @org_id
+		LEFT JOIN LATERAL (
+			SELECT NULLIF(author_session.revision_context->>'pull_request_author', '') AS author
+			FROM code_review_session_metadata author_attempt
+			JOIN sessions author_session
+			  ON author_session.id = author_attempt.session_id
+			 AND author_session.org_id = author_attempt.org_id
+			WHERE author_attempt.org_id = @org_id
+			  AND author_attempt.pull_request_id = first_attempt.pull_request_id
+			  AND NULLIF(author_session.revision_context->>'pull_request_author', '') IS NOT NULL
+			ORDER BY author_attempt.created_at, author_attempt.id
+			LIMIT 1
+		) captured ON TRUE
+		WHERE TRUE` + cohortWhere + `
+	),
+	attempts AS MATERIALIZED (
+		SELECT m.*
+		FROM code_review_session_metadata m
+		JOIN cohort c ON c.pull_request_id = m.pull_request_id
+		WHERE m.org_id = @org_id` + scanWhere + `
+	),
+	attempt_flags AS (
+		-- One grouped pass instead of a correlated EXISTS per cohort PR: an
+		-- EXISTS sublink in a target list cannot become a semi-join, so it
+		-- would rescan the whole materialized attempt set for every row.
+		SELECT pull_request_id,
+			bool_or(status = 'failed') AS had_failed,
+			bool_or(status = 'stale') AS had_stale
+		FROM attempts
+		GROUP BY pull_request_id
+	),
+	completed_ranked AS (
+		SELECT a.*,
+			ROW_NUMBER() OVER (
+				PARTITION BY a.pull_request_id, a.head_sha
+				ORDER BY
+					(a.decision = 'approved' AND a.github_review_id IS NOT NULL) IS TRUE DESC,
+					CASE WHEN a.decision = 'approved' AND a.github_review_id IS NOT NULL THEN a.completed_at END ASC,
+					a.completed_at DESC, a.id DESC
+			) AS duplicate_rank
+		FROM attempts a
+		WHERE a.status = 'completed' AND a.completed_at IS NOT NULL
+	),
+	distinct_heads AS (
+		SELECT r.*,
+			ROW_NUMBER() OVER (
+				PARTITION BY r.pull_request_id ORDER BY r.completed_at, r.id
+			)::bigint AS round_number
+		FROM completed_ranked r
+		WHERE r.duplicate_rank = 1
+	),
+	first_approvals AS (
+		SELECT DISTINCT ON (pull_request_id)
+			pull_request_id, round_number, session_id
+		FROM distinct_heads
+		WHERE decision = 'approved' AND github_review_id IS NOT NULL
+		ORDER BY pull_request_id, round_number
+	),
+	representatives AS (
+		SELECT DISTINCT ON (h.pull_request_id) h.*
+		FROM distinct_heads h
+		LEFT JOIN first_approvals approval ON approval.pull_request_id = h.pull_request_id
+		ORDER BY h.pull_request_id,
+			(h.session_id = approval.session_id) DESC,
+			h.completed_at DESC, h.id DESC
+	),
+	finding_rollup AS (
+		SELECT f.session_id, COUNT(*)::bigint AS finding_count,
+			COUNT(*) FILTER (WHERE f.severity IN ('critical', 'high'))::bigint AS blocking_finding_count
+		FROM code_review_findings f
+		JOIN representatives r ON r.session_id = f.session_id
+		WHERE f.org_id = @org_id
+		GROUP BY f.session_id
+	),
+	pr_facts AS MATERIALIZED (
+		SELECT c.pull_request_id, c.author, r.session_id, r.decision, r.github_review_id,
+			r.additions, r.deletions,
+			approval.round_number AS approval_round,
+			COALESCE(flags.had_failed, false) AS had_failed,
+			COALESCE(flags.had_stale, false) AS had_stale,
+			COALESCE(findings.finding_count, 0) AS finding_count,
+			COALESCE(findings.blocking_finding_count, 0) AS blocking_finding_count
+		FROM cohort c
+		LEFT JOIN representatives r ON r.pull_request_id = c.pull_request_id
+		LEFT JOIN first_approvals approval ON approval.pull_request_id = c.pull_request_id
+		LEFT JOIN attempt_flags flags ON flags.pull_request_id = c.pull_request_id
+		LEFT JOIN finding_rollup findings ON findings.session_id = r.session_id
+	),
+	summary AS (
+		SELECT COUNT(*)::bigint AS prs_reviewed,
+			COUNT(*) FILTER (WHERE session_id IS NOT NULL)::bigint AS prs_with_completed_round,
+			COUNT(*) FILTER (WHERE approval_round IS NOT NULL)::bigint AS approved_by_143,
+			COUNT(*) FILTER (WHERE session_id IS NOT NULL AND approval_round IS NULL)::bigint AS not_approved,
+			COUNT(*) FILTER (WHERE approval_round = 1)::bigint AS approved_first_round,
+			COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY approval_round)
+				FILTER (WHERE approval_round IS NOT NULL), -1)::double precision AS median_rounds_to_approval,
+			COUNT(*) FILTER (WHERE had_failed)::bigint AS prs_with_failed_attempt,
+			COUNT(*) FILTER (WHERE had_stale)::bigint AS prs_with_stale_attempt,
+			COUNT(*) FILTER (WHERE session_id IS NOT NULL AND additions IS NOT NULL AND deletions IS NOT NULL)::bigint AS prs_with_change_breakdown,
+			COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY additions), -1)::double precision AS median_additions,
+			COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY deletions), -1)::double precision AS median_deletions,
+			COUNT(*) FILTER (WHERE finding_count > 0)::bigint AS prs_with_findings,
+			COUNT(*) FILTER (WHERE blocking_finding_count > 0)::bigint AS prs_with_blocking_findings,
+			COALESCE(SUM(finding_count), 0)::bigint AS total_findings,
+			COUNT(*) FILTER (WHERE decision = 'needs_human_review')::bigint AS needs_human_review,
+			COUNT(*) FILTER (WHERE decision = 'comment_only')::bigint AS comment_only,
+			COUNT(*) FILTER (WHERE decision = 'blocked')::bigint AS blocked,
+			COUNT(*) FILTER (WHERE decision = 'approved' AND github_review_id IS NULL)::bigint AS approval_not_posted
+		FROM pr_facts
+	),
+	authors AS (
+		SELECT author, COUNT(*)::bigint AS prs_reviewed,
+			COUNT(*) FILTER (WHERE approval_round IS NOT NULL)::bigint AS approved_by_143,
+			COUNT(*) FILTER (WHERE session_id IS NOT NULL AND approval_round IS NULL)::bigint AS not_approved,
+			COUNT(*) FILTER (WHERE approval_round = 1)::bigint AS approved_first_round,
+			(percentile_cont(0.5) WITHIN GROUP (ORDER BY approval_round)
+				FILTER (WHERE approval_round IS NOT NULL))::double precision AS median_rounds_to_approval,
+			(percentile_cont(0.5) WITHIN GROUP (ORDER BY additions))::double precision AS median_additions,
+			(percentile_cont(0.5) WITHIN GROUP (ORDER BY deletions))::double precision AS median_deletions
+		FROM pr_facts GROUP BY author
+	),
+	reasons AS (
+		SELECT reason->>'code' AS code, COUNT(DISTINCT h.pull_request_id)::bigint AS prs
+		FROM distinct_heads h
+		LEFT JOIN first_approvals approval ON approval.pull_request_id = h.pull_request_id
+		CROSS JOIN LATERAL jsonb_array_elements(h.risk_reason_details) reason
+		WHERE (approval.round_number IS NULL OR h.round_number <= approval.round_number)
+		  AND (h.decision IS DISTINCT FROM 'approved' OR h.github_review_id IS NULL)
+		  AND NULLIF(reason->>'code', '') IS NOT NULL
+		GROUP BY reason->>'code'
+	),
+	approval_rounds AS (
+		-- Built as a literal array over one aggregate pass so the report always
+		-- carries every mutually exclusive bucket, in order: the page renders one
+		-- card per element, so a missing bucket would silently drop a card.
+		SELECT jsonb_build_array(
+			jsonb_build_object('bucket', 'round_1', 'prs', COUNT(*) FILTER (WHERE approval_round = 1)),
+			jsonb_build_object('bucket', 'round_2', 'prs', COUNT(*) FILTER (WHERE approval_round = 2)),
+			jsonb_build_object('bucket', 'round_3', 'prs', COUNT(*) FILTER (WHERE approval_round = 3)),
+			jsonb_build_object('bucket', 'round_4_plus', 'prs', COUNT(*) FILTER (WHERE approval_round >= 4)),
+			jsonb_build_object('bucket', 'not_yet_approved', 'prs', COUNT(*) FILTER (WHERE approval_round IS NULL))
+		) AS buckets
+		FROM pr_facts
+	)
+	SELECT s.*,
+		(SELECT buckets FROM approval_rounds) AS approval_rounds,
+		COALESCE((SELECT jsonb_agg(to_jsonb(a) ORDER BY ` + authorOrder + `) FROM authors a), '[]') AS authors,
+		COALESCE((SELECT jsonb_agg(to_jsonb(r) ORDER BY r.prs DESC, r.code) FROM reasons r), '[]') AS reasons
+	FROM summary s`
 
 	var analytics models.CodeReviewAnalytics
-	var medianAdditions, medianDeletions float64
-	var authorsJSON, reasonsJSON []byte
-	if err := s.db.QueryRow(ctx, query, args).Scan(
-		&analytics.Summary.ReviewsRequested,
-		&analytics.Summary.ReviewsCompleted,
-		&analytics.Summary.AutomaticallyApproved,
-		&analytics.Summary.NotApproved,
-		&analytics.Summary.NeedsHumanReview,
-		&analytics.Summary.CommentOnly,
-		&analytics.Summary.Blocked,
-		&analytics.Summary.ApprovalNotPosted,
-		&analytics.Summary.FailedReviews,
-		&analytics.Summary.StaleReviews,
-		&medianAdditions,
-		&medianDeletions,
-		&analytics.Summary.ReviewsWithFindings,
-		&analytics.Summary.ReviewsWithBlockingFindings,
-		&analytics.Summary.TotalFindings,
-		&authorsJSON,
+	var medianRounds, medianAdditions, medianDeletions float64
+	var roundsJSON, authorsJSON, reasonsJSON []byte
+	err = s.db.QueryRow(ctx, query, args).Scan(
+		&analytics.Summary.PRsReviewed, &analytics.Summary.PRsWithCompletedRound,
+		&analytics.Summary.ApprovedBy143, &analytics.Summary.NotApproved,
+		&analytics.Summary.ApprovedFirstRound, &medianRounds,
+		&analytics.Summary.PRsWithFailedAttempt, &analytics.Summary.PRsWithStaleAttempt,
+		&analytics.Summary.PRsWithChangeBreakdown,
+		&medianAdditions, &medianDeletions,
+		&analytics.Summary.PRsWithFindings, &analytics.Summary.PRsWithBlockingFindings,
+		&analytics.Summary.TotalFindings, &analytics.Summary.NeedsHumanReview,
+		&analytics.Summary.CommentOnly, &analytics.Summary.Blocked,
+		&analytics.Summary.ApprovalNotPosted, &roundsJSON, &authorsJSON,
 		&reasonsJSON,
-	); err != nil {
-		return models.CodeReviewAnalytics{}, fmt.Errorf("query code review analytics: %w", err)
+	)
+	if err != nil {
+		return models.CodeReviewAnalytics{}, fmt.Errorf("query PR-centric code review analytics: %w", err)
 	}
+	analytics.Summary.MedianRoundsToApproval = codeReviewOptionalMetric(medianRounds)
 	analytics.Summary.MedianAdditions = codeReviewOptionalMetric(medianAdditions)
 	analytics.Summary.MedianDeletions = codeReviewOptionalMetric(medianDeletions)
-	if err := json.Unmarshal(authorsJSON, &analytics.Authors); err != nil {
-		return models.CodeReviewAnalytics{}, fmt.Errorf("decode code review analytics authors: %w", err)
+	for _, section := range []struct {
+		name    string
+		payload []byte
+		target  any
+	}{
+		{"approval rounds", roundsJSON, &analytics.ApprovalRounds},
+		{"authors", authorsJSON, &analytics.Authors},
+		{"non-approval reasons", reasonsJSON, &analytics.NonApprovalReasons},
+	} {
+		if err := json.Unmarshal(section.payload, section.target); err != nil {
+			return models.CodeReviewAnalytics{}, fmt.Errorf("decode PR-centric code review analytics %s: %w", section.name, err)
+		}
 	}
-	if err := json.Unmarshal(reasonsJSON, &analytics.NonApprovalReasons); err != nil {
-		return models.CodeReviewAnalytics{}, fmt.Errorf("decode code review analytics non-approval reasons: %w", err)
+	// The page renders one card per bucket, so a partial or repeated set would
+	// silently drop or double a card rather than fail.
+	seenBuckets := make(map[models.CodeReviewApprovalRoundBucket]struct{}, len(analytics.ApprovalRounds))
+	for _, bucket := range analytics.ApprovalRounds {
+		if err := bucket.Bucket.Validate(); err != nil {
+			return models.CodeReviewAnalytics{}, err
+		}
+		if _, duplicate := seenBuckets[bucket.Bucket]; duplicate {
+			return models.CodeReviewAnalytics{}, fmt.Errorf("duplicate approval round bucket: %q", bucket.Bucket)
+		}
+		seenBuckets[bucket.Bucket] = struct{}{}
+	}
+	if len(seenBuckets) != len(models.CodeReviewApprovalRoundBuckets) {
+		return models.CodeReviewAnalytics{}, fmt.Errorf(
+			"approval round buckets incomplete: got %d of %d",
+			len(seenBuckets), len(models.CodeReviewApprovalRoundBuckets),
+		)
 	}
 	for _, reason := range analytics.NonApprovalReasons {
 		if err := reason.Code.Validate(); err != nil {
@@ -1879,19 +1943,16 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 
 func codeReviewAuthorAnalyticsOrder(sortBy, sortOrder string) (string, error) {
 	columns := map[string]string{
-		"author": "a.author", "reviews": "a.reviews_completed", "approved": "a.automatically_approved",
-		"not_approved":  "a.not_approved",
-		"approval_rate": "(a.automatically_approved::double precision / NULLIF(a.reviews_completed, 0))",
-		// The cell shows "<breakdown> / <completed>", so order by that ratio
-		// rather than the numerator alone: "9 / 12" must not outrank "8 / 8".
-		"split_sample":      "(a.reviews_with_change_breakdown::double precision / NULLIF(a.reviews_completed, 0))",
-		"average_additions": "a.average_additions",
-		"median_additions":  "a.median_additions",
-		"average_deletions": "a.average_deletions",
-		"median_deletions":  "a.median_deletions",
+		"author": "a.author", "reviews": "a.prs_reviewed", "approved": "a.approved_by_143",
+		"not_approved":     "a.not_approved",
+		"approval_rate":    "(a.approved_by_143::double precision / NULLIF(a.prs_reviewed, 0))",
+		"first_round":      "a.approved_first_round",
+		"median_rounds":    "a.median_rounds_to_approval",
+		"median_additions": "a.median_additions",
+		"median_deletions": "a.median_deletions",
 	}
 	if sortBy == "" {
-		return "a.reviews_completed DESC, a.author ASC", nil
+		return "a.prs_reviewed DESC, a.author ASC", nil
 	}
 	column, ok := columns[sortBy]
 	if !ok {

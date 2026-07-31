@@ -12,7 +12,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { CodeReviewAnalytics } from "@/lib/types";
-type AuthorSort = "author" | "reviews" | "approved" | "not_approved" | "approval_rate" | "split_sample" | "average_additions" | "median_additions" | "average_deletions" | "median_deletions";
+type AuthorSort = "author" | "reviews" | "approved" | "not_approved" | "approval_rate" | "first_round" | "median_rounds" | "median_additions" | "median_deletions";
 
 const NON_APPROVAL_REASON_LABELS: Record<string, string> = {
   reviewer_disabled: "Automatic approval was disabled",
@@ -44,6 +44,14 @@ const NON_APPROVAL_REASON_LABELS: Record<string, string> = {
   policy_requirement: "An approval-policy requirement needed human judgment",
 };
 
+const APPROVAL_ROUND_LABELS: Record<CodeReviewAnalytics["approval_rounds"][number]["bucket"], string> = {
+  round_1: "Approved in round 1",
+  round_2: "Approved in round 2",
+  round_3: "Approved in round 3",
+  round_4_plus: "Approved in round 4+",
+  not_yet_approved: "Not yet approved",
+};
+
 function percentage(value: number, total: number): string {
   if (total <= 0) return "—";
   return `${Math.round((value / total) * 100)}%`;
@@ -59,8 +67,6 @@ function signedRoundedMetric(value: number | null, sign: "+" | "-"): string {
   return formatted === "—" ? formatted : `${sign}${formatted}`;
 }
 
-// Cell aria-labels replace the visible text for assistive tech, so they must
-// keep the sign and avoid announcing the "—" placeholder as a value.
 function medianAriaLabel(value: number | null, sign: "+" | "-", noun: string): string {
   const formatted = signedRoundedMetric(value, sign);
   return formatted === "—" ? `No ${noun} data overall` : `${formatted} ${noun} overall`;
@@ -87,10 +93,12 @@ function authorReviewsHref({
   const params = new URLSearchParams({
     tab: "reviews",
     author,
-    status: "completed",
     range,
   });
-  if (outcome) params.set("outcome", outcome);
+  if (outcome) {
+    params.set("status", "completed");
+    params.set("outcome", outcome);
+  }
   if (repository) params.set("repository", repository);
   return `/code-reviews?${params.toString()}`;
 }
@@ -161,24 +169,24 @@ function ApprovalOutcomeCards({ summary }: { summary: CodeReviewAnalytics["summa
   return (
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Approval outcomes">
       <MetricCard
-        label="Reviews completed"
-        value={summary.reviews_completed.toLocaleString()}
-        context={`${summary.reviews_requested.toLocaleString()} total attempts`}
+        label="PRs reviewed"
+        value={summary.prs_reviewed.toLocaleString()}
+        context="First sent to 143 in this period"
       />
       <MetricCard
-        label="Automatically approved"
-        value={summary.automatically_approved.toLocaleString()}
-        context={`${percentage(summary.automatically_approved, summary.reviews_completed)} of completed reviews`}
-      />
-      <MetricCard
-        label="Not approved"
-        value={summary.not_approved.toLocaleString()}
-        context={`${percentage(summary.not_approved, summary.reviews_completed)} of completed reviews`}
+        label="Approved by 143"
+        value={summary.approved_by_143.toLocaleString()}
+        context={`${percentage(summary.approved_by_143, summary.prs_reviewed)} of PRs reviewed`}
       />
       <MetricCard
         label="Approval rate"
-        value={percentage(summary.automatically_approved, summary.reviews_completed)}
-        context={`${summary.failed_reviews.toLocaleString()} failed · ${summary.stale_reviews.toLocaleString()} stale`}
+        value={percentage(summary.approved_by_143, summary.prs_reviewed)}
+        context={`${summary.approved_by_143.toLocaleString()} approved PRs`}
+      />
+      <MetricCard
+        label="Median rounds to approval"
+        value={roundedMetric(summary.median_rounds_to_approval)}
+        context="Approved PRs only"
       />
     </div>
   );
@@ -245,7 +253,7 @@ export function CodeReviewAnalyticsReport({
       />
     );
   };
-  if (summary.reviews_requested === 0) {
+  if (summary.prs_reviewed === 0) {
     return (
       <div className="space-y-3">
         {isError ? (
@@ -258,29 +266,8 @@ export function CodeReviewAnalyticsReport({
         {filters}
         <EmptyState
           icon={ChartNoAxesColumnIncreasing}
-          title="No review attempts in this time window"
-          description="Choose a longer time window or another repository to analyze approval behavior."
-        />
-      </div>
-    );
-  }
-
-  if (summary.reviews_completed === 0) {
-    return (
-      <div className="space-y-6" aria-busy={isLoading}>
-        {isError ? (
-          <ErrorNotice
-            title="Analytics may be out of date"
-            description="Showing the last successful report because the latest refresh failed."
-            action={{ label: "Retry", onClick: onRetry }}
-          />
-        ) : null}
-        <ApprovalOutcomeCards summary={summary} />
-        {filters}
-        <EmptyState
-          icon={ChartNoAxesColumnIncreasing}
-          title="No completed reviews in this time window"
-          description="The attempts in this window failed or became stale before reaching an approval decision."
+          title="No PRs first sent to 143 in this time window"
+          description="Choose a longer time window or another repository to analyze PR outcomes."
         />
       </div>
     );
@@ -300,22 +287,41 @@ export function CodeReviewAnalyticsReport({
       {filters}
 
       <SectionGroup
+        title="Approval by round"
+        description="Each PR appears once, based on the first distinct completed head that received a posted 143 approval."
+      >
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5" aria-label="Approval by round">
+          {analytics.approval_rounds.map((bucket) => (
+            <MetricCard
+              key={bucket.bucket}
+              label={APPROVAL_ROUND_LABELS[bucket.bucket]}
+              value={bucket.prs.toLocaleString()}
+              context={`${percentage(bucket.prs, summary.prs_reviewed)} of PRs reviewed`}
+            />
+          ))}
+        </div>
+      </SectionGroup>
+
+      <SectionGroup
         title="Usage by PR author"
-        description="Who has the most completed review assessments on their pull requests, and how often those assessments lead to an automatic approval."
+        description="Unique PR outcomes grouped by the author captured from the first available assessment."
       >
         {analytics.authors.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted-foreground">No author attribution is available for this report.</p>
         ) : (
+          <>
           <Card className="overflow-x-auto">
             <Table aria-label="Code review analytics by PR author">
               <TableHeader>
                 <TableRow>
                   {([
                     ["PR author", "author"],
-                    ["Reviews", "reviews"],
+                    ["PRs", "reviews"],
                     ["Approved", "approved"],
                     ["Not approved", "not_approved"],
                     ["Approval rate", "approval_rate"],
+                    ["First-round approval", "first_round"],
+                    ["Median rounds", "median_rounds"],
                     ["Median additions", "median_additions"],
                     ["Median deletions", "median_deletions"],
                   ] as const).map(([label, sort]) => (
@@ -336,8 +342,8 @@ export function CodeReviewAnalyticsReport({
                     <TableCell className="text-right tabular-nums">
                       <AuthorReviewCountLink
                         author={author.author}
-                        count={author.reviews_completed}
-                        label="completed reviews"
+                        count={author.prs_reviewed}
+                        label="reviewed PRs"
                         repository={reviewLinkFilters.repository}
                         range={reviewLinkFilters.range}
                         onNavigate={onNavigateToReviews}
@@ -346,8 +352,8 @@ export function CodeReviewAnalyticsReport({
                     <TableCell className="text-right tabular-nums">
                       <AuthorReviewCountLink
                         author={author.author}
-                        count={author.automatically_approved}
-                        label="automatically approved reviews"
+                        count={author.approved_by_143}
+                        label="PRs approved by 143"
                         outcome="automatically_approved"
                         repository={reviewLinkFilters.repository}
                         range={reviewLinkFilters.range}
@@ -358,7 +364,7 @@ export function CodeReviewAnalyticsReport({
                       <AuthorReviewCountLink
                         author={author.author}
                         count={author.not_approved}
-                        label="not approved reviews"
+                        label="not approved PRs"
                         outcome="completed_not_approved"
                         repository={reviewLinkFilters.repository}
                         range={reviewLinkFilters.range}
@@ -366,35 +372,49 @@ export function CodeReviewAnalyticsReport({
                       />
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
-                      {percentage(author.automatically_approved, author.reviews_completed)}
+                      {percentage(author.approved_by_143, author.prs_reviewed)}
                     </TableCell>
+                    <TableCell className="text-right tabular-nums">{author.approved_first_round.toLocaleString()}</TableCell>
+                    <TableCell className="text-right tabular-nums">{roundedMetric(author.median_rounds_to_approval)}</TableCell>
                     <TableCell className="text-right tabular-nums">{signedRoundedMetric(author.median_additions, "+")}</TableCell>
                     <TableCell className="text-right tabular-nums">{signedRoundedMetric(author.median_deletions, "-")}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
               <DataTableSummaryRow
-                description="Across all completed reviews matching the current repository and time filters."
+                description="Across all PRs first sent to 143 in the current repository and time filters."
                 cells={[
                   {
-                    content: summary.reviews_completed.toLocaleString(),
+                    content: summary.prs_reviewed.toLocaleString(),
                     className: "text-right",
-                    ariaLabel: `${summary.reviews_completed.toLocaleString()} completed reviews overall`,
+                    ariaLabel: `${summary.prs_reviewed.toLocaleString()} PRs reviewed overall`,
                   },
                   {
-                    content: summary.automatically_approved.toLocaleString(),
+                    content: summary.approved_by_143.toLocaleString(),
                     className: "text-right",
-                    ariaLabel: `${summary.automatically_approved.toLocaleString()} automatically approved reviews overall`,
+                    ariaLabel: `${summary.approved_by_143.toLocaleString()} PRs approved by 143 overall`,
                   },
                   {
                     content: summary.not_approved.toLocaleString(),
                     className: "text-right",
-                    ariaLabel: `${summary.not_approved.toLocaleString()} not approved reviews overall`,
+                    ariaLabel: `${summary.not_approved.toLocaleString()} PRs not approved overall`,
                   },
                   {
-                    content: percentage(summary.automatically_approved, summary.reviews_completed),
+                    content: percentage(summary.approved_by_143, summary.prs_reviewed),
                     className: "text-right",
-                    ariaLabel: `${percentage(summary.automatically_approved, summary.reviews_completed)} overall approval rate`,
+                    ariaLabel: `${percentage(summary.approved_by_143, summary.prs_reviewed)} overall approval rate`,
+                  },
+                  {
+                    content: summary.approved_first_round.toLocaleString(),
+                    className: "text-right",
+                    ariaLabel: `${summary.approved_first_round.toLocaleString()} PRs approved in the first round overall`,
+                  },
+                  {
+                    content: roundedMetric(summary.median_rounds_to_approval),
+                    className: "text-right",
+                    ariaLabel: summary.median_rounds_to_approval === null
+                      ? "No rounds to approval data overall"
+                      : `${roundedMetric(summary.median_rounds_to_approval)} median rounds to approval overall`,
                   },
                   {
                     content: signedRoundedMetric(summary.median_additions, "+"),
@@ -410,13 +430,20 @@ export function CodeReviewAnalyticsReport({
               />
             </Table>
           </Card>
+          <p className="text-xs text-muted-foreground">
+            Median additions and deletions come from the{" "}
+            {summary.prs_with_change_breakdown.toLocaleString()} of{" "}
+            {summary.prs_reviewed.toLocaleString()} PRs whose representative assessment captured a change
+            breakdown. Treat a small sample as directional.
+          </p>
+          </>
         )}
       </SectionGroup>
 
       <div className="grid gap-6 xl:grid-cols-2">
         <SectionGroup
-          title="Why reviews were not approved"
-          description="Most common captured policy or reviewer signals. One review can contribute to more than one reason; older reviews without structured reason data do not contribute."
+          title="Why PRs were not approved right away"
+          description="Each reason counts at most once per PR across non-approval rounds before the first posted approval."
         >
           {analytics.non_approval_reasons.length === 0 ? (
             <p className="py-6 text-center text-sm text-muted-foreground">
@@ -428,7 +455,7 @@ export function CodeReviewAnalyticsReport({
                 {analytics.non_approval_reasons.map((reason) => (
                   <div key={reason.code} className="flex items-center justify-between gap-4 px-4 py-3">
                     <span className="text-sm text-foreground">{reasonLabel(reason.code)}</span>
-                    <Badge variant="secondary">{reason.reviews.toLocaleString()}</Badge>
+                    <Badge variant="secondary">{reason.prs.toLocaleString()} PRs</Badge>
                   </div>
                 ))}
               </CardContent>
@@ -437,30 +464,32 @@ export function CodeReviewAnalyticsReport({
         </SectionGroup>
 
         <SectionGroup
-          title="Review findings"
-          description="How often the reviewer surfaced code-level concerns, separate from deterministic policy safeguards."
+          title="PR findings and operational outcomes"
+          description="Findings and decision outcomes use one representative assessment per PR."
         >
           <div className="grid gap-3 sm:grid-cols-3 xl:grid-cols-1 2xl:grid-cols-3">
             <MetricCard
-              label="Reviews with findings"
-              value={summary.reviews_with_findings.toLocaleString()}
-              context={`${percentage(summary.reviews_with_findings, summary.reviews_completed)} of completed reviews`}
+              label="PRs with findings"
+              value={summary.prs_with_findings.toLocaleString()}
+              context={`${percentage(summary.prs_with_findings, summary.prs_with_completed_round)} of PRs with a completed round`}
             />
             <MetricCard
               label="Blocking findings"
-              value={summary.reviews_with_blocking_findings.toLocaleString()}
-              context="Reviews with at least one P0 or P1"
+              value={summary.prs_with_blocking_findings.toLocaleString()}
+              context="PRs with at least one P0 or P1"
             />
             <MetricCard
-              label="Findings per review"
-              value={(summary.total_findings / summary.reviews_completed).toFixed(1)}
+              label="Findings per PR"
+              value={summary.prs_with_completed_round > 0 ? (summary.total_findings / summary.prs_with_completed_round).toFixed(1) : "—"}
               context={`${summary.total_findings.toLocaleString()} findings total`}
             />
           </div>
           <p className="text-xs text-muted-foreground">
-            Completed decisions: {summary.needs_human_review.toLocaleString()} needed human review,{" "}
+            Representative decisions: {summary.needs_human_review.toLocaleString()} needed human review,{" "}
             {summary.comment_only.toLocaleString()} were comment-only, {summary.blocked.toLocaleString()} were blocked, and{" "}
             {summary.approval_not_posted.toLocaleString()} approval decisions were not posted.
+            {" "}Operational attempt counts may overlap: {summary.prs_with_failed_attempt.toLocaleString()} PRs had a failed attempt and{" "}
+            {summary.prs_with_stale_attempt.toLocaleString()} had a stale attempt.
           </p>
         </SectionGroup>
       </div>

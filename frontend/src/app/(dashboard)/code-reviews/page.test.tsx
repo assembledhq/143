@@ -209,49 +209,57 @@ const reviewStats: CodeReviewStats = {
 
 const reviewAnalytics: CodeReviewAnalytics = {
   summary: {
-    reviews_requested: 32,
-    reviews_completed: 28,
-    automatically_approved: 17,
+    prs_reviewed: 32,
+    prs_with_completed_round: 28,
+    approved_by_143: 17,
     not_approved: 11,
+    approved_first_round: 10,
+    median_rounds_to_approval: 2,
     needs_human_review: 8,
     comment_only: 2,
     blocked: 0,
     approval_not_posted: 1,
-    failed_reviews: 2,
-    stale_reviews: 2,
+    prs_with_failed_attempt: 2,
+    prs_with_stale_attempt: 2,
+    prs_with_change_breakdown: 20,
     median_additions: 70,
     median_deletions: 26,
-    reviews_with_findings: 9,
-    reviews_with_blocking_findings: 3,
+    prs_with_findings: 9,
+    prs_with_blocking_findings: 3,
     total_findings: 14,
   },
+  approval_rounds: [
+    { bucket: "round_1", prs: 10 },
+    { bucket: "round_2", prs: 5 },
+    { bucket: "round_3", prs: 1 },
+    { bucket: "round_4_plus", prs: 1 },
+    { bucket: "not_yet_approved", prs: 15 },
+  ],
   authors: [
     {
       author: "anya",
-      reviews_completed: 12,
-      automatically_approved: 9,
+      prs_reviewed: 12,
+      approved_by_143: 9,
       not_approved: 3,
-      reviews_with_change_breakdown: 9,
-      average_additions: 60,
+      approved_first_round: 6,
+      median_rounds_to_approval: 2,
       median_additions: 52,
-      average_deletions: 28,
       median_deletions: 20,
     },
     {
       author: "sam",
-      reviews_completed: 8,
-      automatically_approved: 3,
+      prs_reviewed: 8,
+      approved_by_143: 3,
       not_approved: 5,
-      reviews_with_change_breakdown: 6,
-      average_additions: 150,
+      approved_first_round: 2,
+      median_rounds_to_approval: 2,
       median_additions: 130,
-      average_deletions: 75,
       median_deletions: 60,
     },
   ],
   non_approval_reasons: [
-    { code: "lines_limit_exceeded", reviews: 5 },
-    { code: "blocking_findings", reviews: 3 },
+    { code: "lines_limit_exceeded", prs: 5 },
+    { code: "blocking_findings", prs: 3 },
   ],
 };
 
@@ -585,7 +593,7 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findByDisplayValue("Custom requirement")).toBeInTheDocument();
   }, 30_000);
 
-  it("reports approval usage, authors, and policy signals in Analytics", async () => {
+  it("reports PR approval usage, authors, and policy signals in Analytics", async () => {
     const user = userEvent.setup();
     const analyticsRequests: URLSearchParams[] = [];
     mockCodeReviewBaseHandlers();
@@ -607,29 +615,39 @@ describe("CodeReviewsPage", () => {
     // only, ignoring the status filter) and reports 128/92 for this fixture.
     expect(screen.queryByRole("region", { name: "Code review statistics" })).not.toBeInTheDocument();
     const approvalOutcomes = screen.getByLabelText("Approval outcomes");
-    expect(within(approvalOutcomes).getByText("28")).toBeInTheDocument();
-    expect(within(approvalOutcomes).getByText("32 total attempts")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByText("32")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByText("First sent to 143 in this period")).toBeInTheDocument();
     expect(within(approvalOutcomes).getByText("17")).toBeInTheDocument();
-    expect(within(approvalOutcomes).getByText("11")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByText("53%")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByText("2")).toBeInTheDocument();
     expect(within(approvalOutcomes).queryByText("128")).not.toBeInTheDocument();
+    expect(screen.getByText("Approval by round")).toBeInTheDocument();
+    expect(screen.getByText("Why PRs were not approved right away")).toBeInTheDocument();
+    expect(screen.getByText("PR findings and operational outcomes")).toBeInTheDocument();
     const analyticsFilters = document.getElementById("code-review-analytics-filters");
     expect(analyticsFilters).not.toBeNull();
     expect(
       approvalOutcomes.compareDocumentPosition(analyticsFilters as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
-    expect(screen.queryByText("PR size and policy fit")).not.toBeInTheDocument();
-    expect(screen.getByText("Why reviews were not approved")).toBeInTheDocument();
-    expect(screen.getByText("Review findings")).toBeInTheDocument();
     expect(screen.getByText("Line-count limit exceeded")).toBeInTheDocument();
     expect(screen.getByText("Reviewers found a blocking issue")).toBeInTheDocument();
+    expect(screen.queryByText("PR size and policy fit")).not.toBeInTheDocument();
+    // The list-only filters stay in the URL for the Reviews tab, so Analytics
+    // has to say which of them it ignores rather than silently dropping them.
+    expect(screen.queryByLabelText("Search code reviews")).not.toBeInTheDocument();
+    expect(screen.getByText(/apply to the Reviews tab only/)).toBeInTheDocument();
+    expect(screen.getByText(/20 of 32 PRs whose representative assessment captured a change/))
+      .toBeInTheDocument();
 
     const authorTable = screen.getByRole("table", { name: "Code review analytics by PR author" });
     expect(within(authorTable).getAllByRole("columnheader").map((header) => header.textContent)).toEqual([
       "PR author",
-      "Reviews",
+      "PRs",
       "Approved",
       "Not approved",
       "Approval rate",
+      "First-round approval",
+      "Median rounds",
       "Median additions",
       "Median deletions",
     ]);
@@ -640,35 +658,26 @@ describe("CodeReviewsPage", () => {
       "9",
       "3",
       "75%",
+      "6",
+      "2",
       "+52",
       "-20",
     ]);
-    const overallRow = within(authorTable).getByRole("row", { name: /Overall/i });
-    expect(overallRow.closest("tfoot")).not.toBeNull();
-    expect(within(overallRow).getByRole("rowheader")).toHaveTextContent("Overall");
-    expect(within(overallRow).getAllByRole("cell").map((cell) => cell.textContent)).toEqual([
-      "28",
-      "17",
-      "11",
-      "61%",
-      "+70",
-      "-26",
-    ]);
-    expect(within(overallRow).queryByRole("link")).not.toBeInTheDocument();
-    expect(within(overallRow).getByRole("cell", { name: "+70 median additions overall" })).toBeInTheDocument();
-    expect(within(overallRow).getByRole("cell", { name: "-26 median deletions overall" })).toBeInTheDocument();
-    expect(within(overallRow).getByRole("button", { name: "About this summary" })).toBeInTheDocument();
-    expect(within(anyaRow).getByRole("link", { name: "12 completed reviews by anya" })).toHaveAttribute(
+    expect(within(authorTable).getByText("Overall")).toBeInTheDocument();
+    expect(within(authorTable).getByLabelText("32 PRs reviewed overall")).toHaveTextContent("32");
+    expect(within(authorTable).getByLabelText("53% overall approval rate")).toHaveTextContent("53%");
+    expect(within(authorTable).getByLabelText("2 median rounds to approval overall")).toHaveTextContent("2");
+    expect(within(anyaRow).getByRole("link", { name: "12 reviewed PRs by anya" })).toHaveAttribute(
       "href",
-      "/code-reviews?tab=reviews&author=anya&status=completed&range=30d",
+      "/code-reviews?tab=reviews&author=anya&range=30d",
     );
-    expect(within(anyaRow).getByRole("link", { name: "9 automatically approved reviews by anya" })).toHaveAttribute(
+    expect(within(anyaRow).getByRole("link", { name: "9 PRs approved by 143 by anya" })).toHaveAttribute(
       "href",
-      "/code-reviews?tab=reviews&author=anya&status=completed&range=30d&outcome=automatically_approved",
+      "/code-reviews?tab=reviews&author=anya&range=30d&status=completed&outcome=automatically_approved",
     );
-    expect(within(anyaRow).getByRole("link", { name: "3 not approved reviews by anya" })).toHaveAttribute(
+    expect(within(anyaRow).getByRole("link", { name: "3 not approved PRs by anya" })).toHaveAttribute(
       "href",
-      "/code-reviews?tab=reviews&author=anya&status=completed&range=30d&outcome=completed_not_approved",
+      "/code-reviews?tab=reviews&author=anya&range=30d&status=completed&outcome=completed_not_approved",
     );
     await waitFor(() => expect(analyticsRequests).toHaveLength(1));
     expectCreatedAfterDaysAgo(analyticsRequests[0]?.get("created_after") ?? undefined, 30);
@@ -693,77 +702,36 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findByText("Usage by PR author")).toBeInTheDocument();
   });
 
-  it("marks overall medians as unavailable when no change breakdown was captured", async () => {
-    // Author and summary medians come from percentile_cont over the same
-    // filtered set, so an absent breakdown has to be absent at both levels.
-    const analyticsWithoutMedians: CodeReviewAnalytics = {
-      ...reviewAnalytics,
-      summary: {
-        ...reviewAnalytics.summary,
-        median_additions: null,
-        median_deletions: null,
-      },
-      authors: reviewAnalytics.authors.map((author) => ({
-        ...author,
-        reviews_with_change_breakdown: 0,
-        average_additions: null,
-        median_additions: null,
-        average_deletions: null,
-        median_deletions: null,
-      })),
-    };
-    mockCodeReviewBaseHandlers();
-    server.use(
-      http.get("/api/v1/code-reviews/analytics", () =>
-        HttpResponse.json({ data: analyticsWithoutMedians } satisfies SingleResponse<CodeReviewAnalytics>)),
-    );
-
-    renderWithProviders(<CodeReviewsPage />, { searchParams: { tab: "analytics" } });
-
-    const authorTable = await screen.findByRole("table", { name: "Code review analytics by PR author" });
-    const overallRow = within(authorTable).getByRole("row", { name: /Overall/i });
-    expect(within(overallRow).getAllByRole("cell").map((cell) => cell.textContent)).toEqual([
-      "28",
-      "17",
-      "11",
-      "61%",
-      "—",
-      "—",
-    ]);
-    expect(within(overallRow).getByRole("cell", { name: "No median additions data overall" })).toBeInTheDocument();
-    expect(within(overallRow).getByRole("cell", { name: "No median deletions data overall" })).toBeInTheDocument();
-    const anyaRow = within(authorTable).getByRole("row", { name: /anya/i });
-    expect(within(anyaRow).getAllByRole("cell").map((cell) => cell.textContent)).toEqual([
-      "anya",
-      "12",
-      "9",
-      "3",
-      "75%",
-      "—",
-      "—",
-    ]);
-  });
-
   it("shows failed and stale attempts when no review completed", async () => {
     const user = userEvent.setup();
     const failedOnlyAnalytics: CodeReviewAnalytics = {
       summary: {
-        reviews_requested: 5,
-        reviews_completed: 0,
-        automatically_approved: 0,
+        prs_reviewed: 5,
+        prs_with_completed_round: 0,
+        approved_by_143: 0,
         not_approved: 0,
+        approved_first_round: 0,
+        median_rounds_to_approval: null,
         needs_human_review: 0,
         comment_only: 0,
         blocked: 0,
         approval_not_posted: 0,
-        failed_reviews: 4,
-        stale_reviews: 1,
+        prs_with_failed_attempt: 4,
+        prs_with_stale_attempt: 1,
+        prs_with_change_breakdown: 0,
         median_additions: null,
         median_deletions: null,
-        reviews_with_findings: 0,
-        reviews_with_blocking_findings: 0,
+        prs_with_findings: 0,
+        prs_with_blocking_findings: 0,
         total_findings: 0,
       },
+      approval_rounds: [
+        { bucket: "round_1", prs: 0 },
+        { bucket: "round_2", prs: 0 },
+        { bucket: "round_3", prs: 0 },
+        { bucket: "round_4_plus", prs: 0 },
+        { bucket: "not_yet_approved", prs: 5 },
+      ],
       authors: [],
       non_approval_reasons: [],
     };
@@ -779,10 +747,9 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
     await user.click(await screen.findByRole("tab", { name: "Analytics" }));
 
-    expect(await screen.findByText("5 total attempts")).toBeInTheDocument();
-    expect(screen.getByText("4 failed · 1 stale")).toBeInTheDocument();
-    expect(screen.getByText("No completed reviews in this time window")).toBeInTheDocument();
-    expect(screen.getByText(/failed or became stale before reaching an approval decision/)).toBeInTheDocument();
+    expect(await screen.findByText("First sent to 143 in this period")).toBeInTheDocument();
+    expect(screen.getByText(/4 PRs had a failed attempt/)).toBeInTheDocument();
+    expect(screen.getByText("Not yet approved")).toBeInTheDocument();
   });
 
   it("applies shared filters to rows and stats while status scopes review activity only", async () => {

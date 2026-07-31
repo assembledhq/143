@@ -126,6 +126,9 @@ export function CodeReviewFilters({
   onMobileOpenChange,
   onChange,
   id,
+  timeRangeLabel = "Time window",
+  analyticsMode = false,
+  mobileLabel = "Filter reviews",
 }: {
   values: CodeReviewFilterValues;
   repositories: Repository[];
@@ -133,55 +136,69 @@ export function CodeReviewFilters({
   onMobileOpenChange: (open: boolean) => void;
   onChange: (field: keyof CodeReviewFilterValues, value: string) => void;
   id: string;
+  timeRangeLabel?: string;
+  analyticsMode?: boolean;
+  mobileLabel?: string;
 }) {
   return (
     <>
       <Button type="button" variant="outline" size="sm" className="w-full justify-between md:hidden" aria-expanded={mobileOpen} aria-controls={id} onClick={() => onMobileOpenChange(!mobileOpen)}>
-        <span className="flex items-center gap-2"><SlidersHorizontal className="h-4 w-4" />Filter reviews</span>
+        <span className="flex items-center gap-2"><SlidersHorizontal className="h-4 w-4" />{mobileLabel}</span>
         <ChevronDown className={`h-4 w-4 transition-transform ${mobileOpen ? "rotate-180" : ""}`} />
       </Button>
-      <div id={id} className={`${mobileOpen ? "grid" : "hidden"} gap-3 rounded-xl border border-border bg-card p-3 shadow-sm md:grid md:grid-cols-2 md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none lg:grid-cols-3 xl:grid-cols-[minmax(12rem,18rem)_repeat(3,minmax(9rem,11rem))_minmax(12rem,1fr)_minmax(9rem,11rem)]`}>
+      <div id={id} className={`${mobileOpen ? "grid" : "hidden"} gap-3 rounded-xl border border-border bg-card p-3 shadow-sm md:grid md:grid-cols-2 md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none ${analyticsMode ? "lg:grid-cols-2 xl:grid-cols-[minmax(12rem,18rem)_minmax(12rem,18rem)]" : "lg:grid-cols-3 xl:grid-cols-[minmax(12rem,18rem)_repeat(3,minmax(9rem,11rem))_minmax(12rem,1fr)_minmax(9rem,11rem)]"}`}>
         <FilterSelect label="Repository" value={values.repository} onValueChange={(value) => onChange("repository", value)}>
           <SelectItem value={ALL_REPOSITORIES}>All repositories</SelectItem>
           {repositories.map((repo) => <SelectItem key={repo.id} value={repo.id}>{repo.full_name}</SelectItem>)}
         </FilterSelect>
-        <FilterSelect label="Outcome" value={values.outcome} onValueChange={(value) => onChange("outcome", value)}>
-          <SelectItem value={ALL_OUTCOMES}>All outcomes</SelectItem>
-          <SelectItem value={AUTOMATICALLY_APPROVED}>Automatically approved</SelectItem>
-          <SelectItem value={COMPLETED_NOT_APPROVED}>Ran successfully — not approved</SelectItem>
-          <SelectItem value="needs_human_review">Needs human review</SelectItem>
-          <SelectItem value="comment_only">Comment-only decision</SelectItem>
-          <SelectItem value="blocked">Blocked</SelectItem>
-        </FilterSelect>
-        <FilterSelect label="Risk" value={values.risk} onValueChange={(value) => onChange("risk", value)}>
-          <SelectItem value={ALL_RISKS}>All risk</SelectItem>
-          <SelectItem value="acceptable">Acceptable</SelectItem>
-          <SelectItem value="needs_review">Needs review</SelectItem>
-        </FilterSelect>
-        <FilterSelect label="Status" value={values.status} onValueChange={(value) => onChange("status", value)}>
-          <SelectItem value="current">Current reviews</SelectItem>
-          <SelectItem value="completed">Completed</SelectItem>
-          <SelectItem value="in_progress">In progress</SelectItem>
-          <SelectItem value="failed">Failed</SelectItem>
-          <SelectItem value="cancelled">Cancelled</SelectItem>
-          <SelectItem value="superseded">Superseded history</SelectItem>
-          <SelectItem value="all">All attempts</SelectItem>
-        </FilterSelect>
-        <div className="flex flex-col gap-2">
-          <Label className="text-xs text-muted-foreground">PR author</Label>
-          <Input value={values.author} onChange={(event) => onChange("author", event.target.value)} placeholder="GitHub handle" aria-label="PR author" />
-        </div>
-        <div className="flex flex-col gap-2">
-          <Label className="text-xs text-muted-foreground">Search</Label>
-          <Input value={values.search} onChange={(event) => onChange("search", event.target.value)} placeholder="PR, repo, or title" aria-label="Search code reviews" />
-        </div>
-        <FilterSelect label="Time window" value={values.timeRange} onValueChange={(value) => onChange("timeRange", value)}>
+        {/* Analytics selects a PR cohort by repository and first-request time only. */}
+        {!analyticsMode && (
+          <>
+            <FilterSelect label="Outcome" value={values.outcome} onValueChange={(value) => onChange("outcome", value)}>
+              <SelectItem value={ALL_OUTCOMES}>All outcomes</SelectItem>
+              <SelectItem value={AUTOMATICALLY_APPROVED}>Automatically approved</SelectItem>
+              <SelectItem value={COMPLETED_NOT_APPROVED}>Ran successfully — not approved</SelectItem>
+              <SelectItem value="needs_human_review">Needs human review</SelectItem>
+              <SelectItem value="comment_only">Comment-only decision</SelectItem>
+              <SelectItem value="blocked">Blocked</SelectItem>
+            </FilterSelect>
+            <FilterSelect label="Risk" value={values.risk} onValueChange={(value) => onChange("risk", value)}>
+              <SelectItem value={ALL_RISKS}>All risk</SelectItem>
+              <SelectItem value="acceptable">Acceptable</SelectItem>
+              <SelectItem value="needs_review">Needs review</SelectItem>
+            </FilterSelect>
+            <FilterSelect label="Status" value={values.status} onValueChange={(value) => onChange("status", value)}>
+              <SelectItem value="current">Current reviews</SelectItem>
+              <SelectItem value="completed">Completed</SelectItem>
+              <SelectItem value="in_progress">In progress</SelectItem>
+              <SelectItem value="failed">Failed</SelectItem>
+              <SelectItem value="cancelled">Cancelled</SelectItem>
+              <SelectItem value="superseded">Superseded history</SelectItem>
+              <SelectItem value="all">All attempts</SelectItem>
+            </FilterSelect>
+            <div className="flex flex-col gap-2">
+              <Label className="text-xs text-muted-foreground">PR author</Label>
+              <Input value={values.author} onChange={(event) => onChange("author", event.target.value)} placeholder="GitHub handle" aria-label="PR author" />
+            </div>
+            <div className="flex flex-col gap-2">
+              <Label className="text-xs text-muted-foreground">Search</Label>
+              <Input value={values.search} onChange={(event) => onChange("search", event.target.value)} placeholder="PR, repo, or title" aria-label="Search code reviews" />
+            </div>
+          </>
+        )}
+        <FilterSelect label={timeRangeLabel} value={values.timeRange} onValueChange={(value) => onChange("timeRange", value)}>
           <SelectItem value="7d">Last 7 days</SelectItem>
           <SelectItem value="30d">Last 30 days</SelectItem>
           <SelectItem value="90d">Last 90 days</SelectItem>
           <SelectItem value="all">All time</SelectItem>
         </FilterSelect>
       </div>
+      {analyticsMode ? (
+        <p className="text-xs text-muted-foreground">
+          Analytics covers every PR in the selected repository and window. Outcome, risk, status, author,
+          and search filters apply to the Reviews tab only.
+        </p>
+      ) : null}
     </>
   );
 }

@@ -60,6 +60,7 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 			repository_id uuid NOT NULL,
 			pull_request_id uuid NOT NULL,
 			status text NOT NULL,
+			head_sha text NOT NULL,
 			stale boolean NOT NULL DEFAULT false,
 			superseded_by_session_id uuid,
 			acceptable boolean,
@@ -68,6 +69,7 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 			additions integer,
 			deletions integer,
 			risk_reason_details jsonb NOT NULL DEFAULT '[]',
+			completed_at timestamptz,
 			created_at timestamptz NOT NULL
 		);
 		CREATE TABLE code_review_findings (
@@ -116,9 +118,8 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 		createdAt time.Time,
 	) {
 		t.Helper()
-		// The analytics report joins pull_requests so it can share the reviews
-		// list filter builder (title/repo/number search), so every fact needs a
-		// pull request of its own.
+		// The analytics report joins pull_requests to scope the cohort to the
+		// organization, so every fact needs a pull request of its own.
 		pullRequestID := uuid.New()
 		pullRequestNumber := len(insertedPullRequestNumbers) + 1
 		insertedPullRequestNumbers = append(insertedPullRequestNumbers, pullRequestNumber)
@@ -131,11 +132,13 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 		_, insertErr := conn.Exec(ctx, `
 			INSERT INTO code_review_session_metadata (
 				id, org_id, session_id, repository_id, pull_request_id, status, decision,
-				github_review_id, additions, deletions,
-				risk_reason_details, created_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12)`,
+				head_sha, github_review_id, additions, deletions,
+				risk_reason_details, completed_at, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
+				CASE WHEN $6 = 'completed' THEN $13::timestamptz ELSE NULL END, $13::timestamptz)`,
 			id, reviewOrgID, sessionID, reviewRepositoryID, pullRequestID, status, decision,
-			githubReviewID, additions, deletions, riskReasons, createdAt,
+			fmt.Sprintf("sha-%d", pullRequestNumber), githubReviewID, additions, deletions,
+			riskReasons, createdAt,
 		)
 		require.NoError(t, insertErr, "test should insert a review analytics fact")
 	}
@@ -184,11 +187,12 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 	)
 	require.NoError(t, err, "test should insert in-scope and cross-org findings")
 
-	approvedAdditions, approvedMedianAdditions := 30.0, 30.0
-	approvedDeletions, approvedMedianDeletions := 10.0, 10.0
-	needsHumanAdditions, needsHumanMedianAdditions := 190.0, 190.0
-	needsHumanDeletions, needsHumanMedianDeletions := 60.0, 60.0
-	medianAdditions, medianDeletions := 110.0, 35.0
+	medianAdditions := 110.0
+	medianDeletions := 35.0
+	approvedMedianAdditions := 30.0
+	approvedMedianDeletions := 10.0
+	needsHumanMedianAdditions := 190.0
+	needsHumanMedianDeletions := 60.0
 	analytics, err := NewCodeReviewStore(conn).GetReviewAnalytics(ctx, orgID, CodeReviewAnalyticsFilters{
 		RepositoryID: &repositoryID,
 		CreatedAfter: &createdAfter,
@@ -197,58 +201,59 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 	require.NoError(t, err, "single-statement analytics should execute against PostgreSQL")
 	require.Equal(t, models.CodeReviewAnalytics{
 		Summary: models.CodeReviewAnalyticsSummary{
-			ReviewsRequested:            4,
-			ReviewsCompleted:            3,
-			AutomaticallyApproved:       2,
-			NotApproved:                 1,
-			NeedsHumanReview:            1,
-			MedianAdditions:             &medianAdditions,
-			MedianDeletions:             &medianDeletions,
-			ReviewsWithFindings:         1,
-			ReviewsWithBlockingFindings: 1,
-			TotalFindings:               2,
-			FailedReviews:               1,
+			PRsReviewed:             4,
+			PRsWithCompletedRound:   3,
+			ApprovedBy143:           2,
+			NotApproved:             1,
+			ApprovedFirstRound:      2,
+			MedianRoundsToApproval:  func() *float64 { value := 1.0; return &value }(),
+			NeedsHumanReview:        1,
+			PRsWithChangeBreakdown:  2,
+			MedianAdditions:         &medianAdditions,
+			MedianDeletions:         &medianDeletions,
+			PRsWithFindings:         1,
+			PRsWithBlockingFindings: 1,
+			TotalFindings:           2,
+			PRsWithFailedAttempt:    1,
+		},
+		ApprovalRounds: []models.CodeReviewApprovalRoundAnalytics{
+			{Bucket: models.CodeReviewApprovalRound1, PRs: 2},
+			{Bucket: models.CodeReviewApprovalRound2, PRs: 0},
+			{Bucket: models.CodeReviewApprovalRound3, PRs: 0},
+			{Bucket: models.CodeReviewApprovalRound4Plus, PRs: 0},
+			{Bucket: models.CodeReviewApprovalRoundNotYet, PRs: 2},
 		},
 		Authors: []models.CodeReviewAuthorAnalytics{
 			{
-				Author:                     "anya",
-				ReviewsCompleted:           2,
-				AutomaticallyApproved:      2,
-				ReviewsWithChangeBreakdown: 1,
-				AverageAdditions:           &approvedAdditions,
-				MedianAdditions:            &approvedMedianAdditions,
-				AverageDeletions:           &approvedDeletions,
-				MedianDeletions:            &approvedMedianDeletions,
+				Author:                 "anya",
+				PRsReviewed:            3,
+				ApprovedBy143:          2,
+				ApprovedFirstRound:     2,
+				MedianRoundsToApproval: func() *float64 { value := 1.0; return &value }(),
+				MedianAdditions:        &approvedMedianAdditions,
+				MedianDeletions:        &approvedMedianDeletions,
 			},
 			{
-				Author:                     "sam",
-				ReviewsCompleted:           1,
-				NotApproved:                1,
-				ReviewsWithChangeBreakdown: 1,
-				AverageAdditions:           &needsHumanAdditions,
-				MedianAdditions:            &needsHumanMedianAdditions,
-				AverageDeletions:           &needsHumanDeletions,
-				MedianDeletions:            &needsHumanMedianDeletions,
+				Author:          "sam",
+				PRsReviewed:     1,
+				NotApproved:     1,
+				MedianAdditions: &needsHumanMedianAdditions,
+				MedianDeletions: &needsHumanMedianDeletions,
 			},
 		},
 		NonApprovalReasons: []models.CodeReviewNonApprovalReasonAnalytics{
-			{Code: models.CodeReviewRiskReasonFilesLimitExceeded, Reviews: 1},
-			{Code: models.CodeReviewRiskReasonLinesLimitExceeded, Reviews: 1},
+			{Code: models.CodeReviewRiskReasonFilesLimitExceeded, PRs: 1},
+			{Code: models.CodeReviewRiskReasonLinesLimitExceeded, PRs: 1},
 		},
-	}, analytics, "analytics should preserve outcome, author, reason, finding, time, and tenancy semantics")
+	}, analytics, "analytics should preserve outcome, author, size, reason, finding, time, and tenancy semantics")
 
-	// The report now reuses the reviews list WHERE builder, so its SQL reaches
-	// for pull_requests and sessions aliases that only exist because of the
-	// joins in the filtered_reviews CTE, and its author ordering is an
-	// interpolated expression. Execute every one of those against PostgreSQL:
-	// the pgxmock unit tests match on query text and cannot catch an unresolved
-	// alias or a malformed ORDER BY.
+	// Author ordering is interpolated from a strict allowlist. Execute every
+	// supported expression against PostgreSQL because pgxmock query matching
+	// cannot catch an unresolved alias or malformed ORDER BY.
 	store := NewCodeReviewStore(conn)
-	currentActivity := models.CodeReviewActivityStatusCurrent
-	approvedOutcome := models.CodeReviewListOutcomeAutomaticallyApproved
 	for _, sortBy := range []string{
 		"", "author", "reviews", "approved", "not_approved", "approval_rate",
-		"split_sample", "average_additions", "median_additions", "average_deletions", "median_deletions",
+		"first_round", "median_rounds", "median_additions", "median_deletions",
 	} {
 		for _, sortOrder := range []string{"asc", "desc"} {
 			_, sortErr := store.GetReviewAnalytics(ctx, orgID, CodeReviewAnalyticsFilters{
@@ -261,25 +266,6 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 		}
 	}
 
-	searched, err := store.GetReviewAnalytics(ctx, orgID, CodeReviewAnalyticsFilters{
-		RepositoryID:   &repositoryID,
-		CreatedAfter:   &createdAfter,
-		Search:         "Ship feature",
-		ActivityStatus: &currentActivity,
-		Outcome:        &approvedOutcome,
-	})
-	require.NoError(t, err, "the shared list filters should resolve their joined aliases in the analytics CTE")
-	require.Equal(t, int64(2), searched.Summary.AutomaticallyApproved, "the outcome filter should narrow the report to posted approvals")
-	require.Equal(t, int64(2), searched.Summary.ReviewsRequested, "search, activity, and outcome filters should all apply")
-
-	unmatched, err := store.GetReviewAnalytics(ctx, orgID, CodeReviewAnalyticsFilters{
-		RepositoryID: &repositoryID,
-		CreatedAfter: &createdAfter,
-		Search:       "no pull request has this title",
-	})
-	require.NoError(t, err, "an unmatched search should still execute")
-	require.Equal(t, int64(0), unmatched.Summary.ReviewsRequested, "search should filter on the joined pull request columns")
-
 	otherAdditions := float64(smallAdditions)
 	otherDeletions := float64(smallDeletions)
 	otherOrgAnalytics, err := NewCodeReviewStore(conn).GetReviewAnalytics(ctx, otherOrgID, CodeReviewAnalyticsFilters{
@@ -289,25 +275,34 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 	require.NoError(t, err, "analytics should return the selected organization report")
 	require.Equal(t, models.CodeReviewAnalytics{
 		Summary: models.CodeReviewAnalyticsSummary{
-			ReviewsRequested:            1,
-			ReviewsCompleted:            1,
-			AutomaticallyApproved:       1,
-			MedianAdditions:             &otherAdditions,
-			MedianDeletions:             &otherDeletions,
-			ReviewsWithFindings:         1,
-			ReviewsWithBlockingFindings: 1,
-			TotalFindings:               1,
+			PRsReviewed:             1,
+			PRsWithCompletedRound:   1,
+			ApprovedBy143:           1,
+			ApprovedFirstRound:      1,
+			MedianRoundsToApproval:  func() *float64 { value := 1.0; return &value }(),
+			PRsWithChangeBreakdown:  1,
+			MedianAdditions:         &otherAdditions,
+			MedianDeletions:         &otherDeletions,
+			PRsWithFindings:         1,
+			PRsWithBlockingFindings: 1,
+			TotalFindings:           1,
+		},
+		ApprovalRounds: []models.CodeReviewApprovalRoundAnalytics{
+			{Bucket: models.CodeReviewApprovalRound1, PRs: 1},
+			{Bucket: models.CodeReviewApprovalRound2, PRs: 0},
+			{Bucket: models.CodeReviewApprovalRound3, PRs: 0},
+			{Bucket: models.CodeReviewApprovalRound4Plus, PRs: 0},
+			{Bucket: models.CodeReviewApprovalRoundNotYet, PRs: 0},
 		},
 		Authors: []models.CodeReviewAuthorAnalytics{
 			{
-				Author:                     "other",
-				ReviewsCompleted:           1,
-				AutomaticallyApproved:      1,
-				ReviewsWithChangeBreakdown: 1,
-				AverageAdditions:           &otherAdditions,
-				MedianAdditions:            &otherAdditions,
-				AverageDeletions:           &otherDeletions,
-				MedianDeletions:            &otherDeletions,
+				Author:                 "other",
+				PRsReviewed:            1,
+				ApprovedBy143:          1,
+				ApprovedFirstRound:     1,
+				MedianRoundsToApproval: func() *float64 { value := 1.0; return &value }(),
+				MedianAdditions:        &otherAdditions,
+				MedianDeletions:        &otherDeletions,
 			},
 		},
 		NonApprovalReasons: []models.CodeReviewNonApprovalReasonAnalytics{},
@@ -317,9 +312,191 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 
 	require.NoError(t, err, "single-statement analytics should return an empty PostgreSQL report")
 	require.Equal(t, models.CodeReviewAnalytics{
+		ApprovalRounds: []models.CodeReviewApprovalRoundAnalytics{
+			{Bucket: models.CodeReviewApprovalRound1, PRs: 0},
+			{Bucket: models.CodeReviewApprovalRound2, PRs: 0},
+			{Bucket: models.CodeReviewApprovalRound3, PRs: 0},
+			{Bucket: models.CodeReviewApprovalRound4Plus, PRs: 0},
+			{Bucket: models.CodeReviewApprovalRoundNotYet, PRs: 0},
+		},
 		Authors:            []models.CodeReviewAuthorAnalytics{},
 		NonApprovalReasons: []models.CodeReviewNonApprovalReasonAnalytics{},
 	}, emptyAnalytics, "an organization without reviews should receive zero summary values and empty breakdowns")
+}
+
+func TestCodeReviewStore_GetReviewAnalyticsPRJourneys(t *testing.T) {
+	t.Parallel()
+
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set TEST_DATABASE_URL to run the PostgreSQL PR-journey analytics test")
+	}
+
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, databaseURL)
+	require.NoError(t, err, "test should connect to TEST_DATABASE_URL")
+	defer func() {
+		require.NoError(t, conn.Close(context.Background()), "test should close the PostgreSQL connection")
+	}()
+
+	schema := "test_code_review_pr_journeys_" + strings.ReplaceAll(uuid.NewString(), "-", "_")
+	_, err = conn.Exec(ctx, `CREATE SCHEMA `+schema)
+	require.NoError(t, err, "test should create an isolated PR-journey schema")
+	defer func() {
+		_, cleanupErr := conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS `+schema+` CASCADE`)
+		require.NoError(t, cleanupErr, "test should remove the isolated PR-journey schema")
+	}()
+	_, err = conn.Exec(ctx, `SET search_path TO `+schema+`, public`)
+	require.NoError(t, err, "test should isolate PR-journey objects")
+
+	_, err = conn.Exec(ctx, `
+		CREATE TABLE sessions (
+			id uuid PRIMARY KEY, org_id uuid NOT NULL, revision_context jsonb
+		);
+		CREATE TABLE pull_requests (
+			id uuid PRIMARY KEY, org_id uuid NOT NULL, title text NOT NULL,
+			github_repo text NOT NULL, github_pr_number int NOT NULL
+		);
+		CREATE TABLE code_review_session_metadata (
+			id uuid PRIMARY KEY, org_id uuid NOT NULL, session_id uuid NOT NULL,
+			repository_id uuid NOT NULL, pull_request_id uuid NOT NULL,
+			status text NOT NULL, head_sha text NOT NULL, decision text, github_review_id bigint,
+			additions integer, deletions integer,
+			risk_reason_details jsonb NOT NULL DEFAULT '[]', completed_at timestamptz,
+			created_at timestamptz NOT NULL
+		);
+		CREATE TABLE code_review_findings (
+			org_id uuid NOT NULL, session_id uuid NOT NULL, severity text NOT NULL
+		);
+	`)
+	require.NoError(t, err, "test should create minimal PR-journey tables")
+
+	orgID, otherOrgID := uuid.New(), uuid.New()
+	repositoryID, otherRepositoryID := uuid.New(), uuid.New()
+	immediatePRID, iteratedPRID, internalApprovalPRID, operationalPRID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	otherPRID := uuid.New()
+	cohortStart := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	cohortEnd := time.Date(2026, 7, 31, 23, 59, 59, 0, time.UTC)
+	baseTime := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+
+	_, err = conn.Exec(ctx, `
+		INSERT INTO pull_requests (id, org_id, title, github_repo, github_pr_number) VALUES
+			($1, $2, 'Immediate approval', 'acme/api', 1),
+			($3, $2, 'Iterated approval', 'acme/api', 2),
+			($4, $2, 'Internal approval', 'acme/api', 3),
+			($5, $2, 'Operational only', 'acme/api', 4),
+			($6, $7, 'Other tenant', 'other/api', 1)`,
+		immediatePRID, orgID, iteratedPRID, internalApprovalPRID, operationalPRID,
+		otherPRID, otherOrgID,
+	)
+	require.NoError(t, err, "test should insert tenant-scoped PR-journey parents")
+
+	type reviewFact struct {
+		orgID, sessionID, repositoryID, pullRequestID uuid.UUID
+		author, status, headSHA, decision             string
+		githubReviewID                                *int64
+		additions, deletions                          *int
+		reasons                                       string
+		createdAt, completedAt                        time.Time
+	}
+	postedReviewID := int64(143)
+	value := func(number int) *int { return &number }
+	facts := []reviewFact{
+		// Same-head reruns collapse to the earliest posted approval.
+		{orgID, uuid.New(), repositoryID, immediatePRID, "alice", "completed", "a1", "needs_human_review", nil, value(20), value(10), `[{"code":"blocking_findings"}]`, baseTime, baseTime.Add(time.Minute)},
+		{orgID, uuid.New(), repositoryID, immediatePRID, "alice", "completed", "a1", "approved", &postedReviewID, value(30), value(10), `[]`, baseTime.Add(time.Minute), baseTime.Add(2 * time.Minute)},
+		{orgID, uuid.New(), repositoryID, immediatePRID, "alice", "completed", "a1", "approved", &postedReviewID, value(70), value(20), `[]`, baseTime.Add(2 * time.Minute), baseTime.Add(3 * time.Minute)},
+		// The first attempt has no author. Later attribution must supply octocat.
+		{orgID, uuid.New(), repositoryID, iteratedPRID, "", "completed", "b1", "needs_human_review", nil, value(80), value(20), `[{"code":"blocking_findings"}]`, baseTime, baseTime.Add(4 * time.Minute)},
+		{orgID, uuid.New(), repositoryID, iteratedPRID, "octocat", "completed", "b1", "blocked", nil, value(90), value(30), `[{"code":"blocking_findings"},{"code":"lines_limit_exceeded"}]`, baseTime.Add(time.Minute), baseTime.Add(5 * time.Minute)},
+		{orgID, uuid.New(), repositoryID, iteratedPRID, "octocat", "failed", "b2", "", nil, nil, nil, `[]`, baseTime.Add(2 * time.Minute), time.Time{}},
+		{orgID, uuid.New(), repositoryID, iteratedPRID, "octocat", "stale", "b2", "", nil, nil, nil, `[]`, baseTime.Add(3 * time.Minute), time.Time{}},
+		{orgID, uuid.New(), repositoryID, iteratedPRID, "octocat", "completed", "b2", "comment_only", nil, value(140), value(40), `[{"code":"blocking_findings"}]`, baseTime.Add(4 * time.Minute), baseTime.Add(6 * time.Minute)},
+		// Approval completes after the cohort window but stays in the cohort.
+		{orgID, uuid.New(), repositoryID, iteratedPRID, "octocat", "completed", "b3", "approved", &postedReviewID, value(240), value(60), `[]`, baseTime.Add(5 * time.Minute), cohortEnd.Add(time.Hour)},
+		// A later head must not affect the representative assessment or reasons.
+		{orgID, uuid.New(), repositoryID, iteratedPRID, "octocat", "completed", "b4", "blocked", nil, value(400), value(100), `[{"code":"checks_failing"}]`, cohortEnd.Add(2 * time.Hour), cohortEnd.Add(3 * time.Hour)},
+		{orgID, uuid.New(), repositoryID, internalApprovalPRID, "carol", "completed", "c1", "approved", nil, value(35), value(15), `[{"code":"checks_failing"}]`, baseTime, baseTime.Add(7 * time.Minute)},
+		{orgID, uuid.New(), repositoryID, operationalPRID, "", "failed", "d1", "", nil, nil, nil, `[]`, baseTime, time.Time{}},
+		{orgID, uuid.New(), repositoryID, operationalPRID, "", "stale", "d2", "", nil, nil, nil, `[]`, baseTime.Add(time.Minute), time.Time{}},
+		{otherOrgID, uuid.New(), otherRepositoryID, otherPRID, "intruder", "completed", "x1", "approved", &postedReviewID, value(8), value(2), `[]`, baseTime, baseTime.Add(time.Minute)},
+	}
+
+	for _, fact := range facts {
+		_, insertErr := conn.Exec(ctx, `
+			INSERT INTO sessions (id, org_id, revision_context)
+			VALUES ($1, $2, jsonb_build_object('pull_request_author', $3::text))`,
+			fact.sessionID, fact.orgID, fact.author,
+		)
+		require.NoError(t, insertErr, "test should insert each PR-journey session")
+
+		var completedAt *time.Time
+		if !fact.completedAt.IsZero() {
+			completedAt = &fact.completedAt
+		}
+		_, insertErr = conn.Exec(ctx, `
+			INSERT INTO code_review_session_metadata (
+				id, org_id, session_id, repository_id, pull_request_id,
+				status, head_sha, decision, github_review_id, additions,
+				deletions, risk_reason_details, completed_at, created_at
+			) VALUES (
+				gen_random_uuid(), $2, $1, $3, $4, $5, $6, NULLIF($7::text, ''),
+				$8, $9, $10, $11::jsonb, $12::timestamptz, $13::timestamptz
+			)`,
+			fact.sessionID, fact.orgID, fact.repositoryID, fact.pullRequestID,
+			fact.status, fact.headSHA, fact.decision, fact.githubReviewID,
+			fact.additions, fact.deletions, fact.reasons,
+			completedAt, fact.createdAt,
+		)
+		require.NoError(t, insertErr, "test should insert each PR-journey review fact")
+	}
+
+	iteratedApprovalSessionID := facts[8].sessionID
+	_, err = conn.Exec(ctx, `
+		INSERT INTO code_review_findings (org_id, session_id, severity) VALUES
+			($1, $2, 'low'), ($1, $3, 'high'), ($4, $5, 'critical')`,
+		orgID, facts[1].sessionID, iteratedApprovalSessionID, otherOrgID, facts[13].sessionID,
+	)
+	require.NoError(t, err, "test should insert representative and cross-tenant findings")
+
+	analytics, err := NewCodeReviewStore(conn).GetReviewAnalytics(ctx, orgID, CodeReviewAnalyticsFilters{
+		RepositoryID:  &repositoryID,
+		CreatedAfter:  &cohortStart,
+		CreatedBefore: &cohortEnd,
+	})
+	require.NoError(t, err, "PR-journey analytics should execute against PostgreSQL")
+
+	two := 2.0
+	thirtyFive, fifteen := 35.0, 15.0
+	require.Equal(t, models.CodeReviewAnalyticsSummary{
+		PRsReviewed: 4, PRsWithCompletedRound: 3, ApprovedBy143: 2, NotApproved: 1,
+		ApprovedFirstRound: 1, MedianRoundsToApproval: &two,
+		PRsWithFailedAttempt: 2, PRsWithStaleAttempt: 2,
+		PRsWithChangeBreakdown: 3,
+		MedianAdditions:        &thirtyFive,
+		MedianDeletions:        &fifteen,
+		PRsWithFindings:        2, PRsWithBlockingFindings: 1, TotalFindings: 2,
+		ApprovalNotPosted: 1,
+	}, analytics.Summary, "summary should derive unique PR outcomes from representative rounds")
+	require.Equal(t, []models.CodeReviewApprovalRoundAnalytics{
+		{Bucket: models.CodeReviewApprovalRound1, PRs: 1},
+		{Bucket: models.CodeReviewApprovalRound2, PRs: 0},
+		{Bucket: models.CodeReviewApprovalRound3, PRs: 1},
+		{Bucket: models.CodeReviewApprovalRound4Plus, PRs: 0},
+		{Bucket: models.CodeReviewApprovalRoundNotYet, PRs: 2},
+	}, analytics.ApprovalRounds, "approval distribution should ignore duplicate heads and post-approval rounds")
+	require.Equal(t, []models.CodeReviewNonApprovalReasonAnalytics{
+		{Code: models.CodeReviewRiskReasonBlockingFindings, PRs: 1},
+		{Code: models.CodeReviewRiskReasonChecksFailing, PRs: 1},
+		{Code: models.CodeReviewRiskReasonLinesLimitExceeded, PRs: 1},
+	}, analytics.NonApprovalReasons, "reasons should deduplicate per PR and exclude post-approval rounds")
+	require.Equal(t, map[string]int64{"Unknown": 1, "alice": 1, "carol": 1, "octocat": 1}, func() map[string]int64 {
+		authors := make(map[string]int64, len(analytics.Authors))
+		for _, author := range analytics.Authors {
+			authors[author.Author] = author.PRsReviewed
+		}
+		return authors
+	}(), "author aggregation should use the first captured author and preserve Unknown exactly once")
 }
 
 // The rank a page cursor anchors on is computed in Go while the rank the
