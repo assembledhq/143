@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -621,6 +622,33 @@ func TestCodeReviewStore_CompleteReviewRejectsInvalidChangeBreakdown(t *testing.
 			require.EqualError(t, err, tt.expectedError, "CompleteReview should reject inconsistent change metrics before querying")
 			require.NoError(t, mock.ExpectationsWereMet(), "invalid change metrics should not issue a database query")
 		})
+	}
+}
+
+// pgxmock matches on query text, so it cannot tell a real column from an
+// invented one. The change breakdown persisted on completion is exactly
+// additions and deletions (see
+// TestCodeReviewAnalyticsMigrationStoresOnlyAuthorChangeBreakdown); writing any
+// other size column would fail only against a migrated database, which the unit
+// suite never reaches. Pin the written set here so that drift is caught early.
+func TestCodeReviewStore_CompleteReviewWritesOnlyMigratedSizeColumns(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("code_reviews.go")
+	require.NoError(t, err, "test should read the code review store")
+	source := string(body)
+
+	completion := source[strings.Index(source, "func (s *CodeReviewStore) CompleteReview("):]
+	completion = completion[:strings.Index(completion, "RETURNING ")]
+	require.NotEmpty(t, completion, "test should isolate the completion UPDATE")
+
+	require.Contains(t, completion, "additions = @additions", "completion should persist additions for author analytics")
+	require.Contains(t, completion, "deletions = @deletions", "completion should persist deletions for author analytics")
+	for _, column := range []string{"files_changed", "lines_changed"} {
+		require.NotContainsf(
+			t, completion, column,
+			"completion must not write %q: no migration adds it to code_review_session_metadata", column,
+		)
 	}
 }
 
@@ -1324,38 +1352,41 @@ func TestCodeReviewStore_GetReviewAnalyticsReturnsDecisionReport(t *testing.T) {
 	createdAfter := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 	medianAdditions := 70.0
 	medianDeletions := 26.0
-	authorAverageAdditions := 60.0
 	authorMedianAdditions := 50.0
-	authorAverageDeletions := 28.0
 	authorMedianDeletions := 22.0
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
 
-	mock.ExpectQuery(`(?s)WITH filtered_reviews AS MATERIALIZED.*m\.repository_id = @repository_id.*m\.created_at >= @created_after.*finding_rollup AS.*SELECT DISTINCT session_id.*FROM filtered_reviews.*FROM summary`).
+	mock.ExpectQuery(`(?s)WITH first_attempt AS MATERIALIZED.*m\.repository_id = @repository_id.*cohort AS MATERIALIZED.*first_attempt\.first_requested_at >= @created_after.*attempt_flags AS.*distinct_heads AS.*representatives AS.*FROM summary s`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"reviews_requested", "reviews_completed", "automatically_approved", "not_approved",
-			"needs_human_review", "comment_only", "blocked", "approval_not_posted",
-			"failed_reviews", "stale_reviews", "median_additions", "median_deletions", "reviews_with_findings",
-			"reviews_with_blocking_findings", "total_findings", "authors", "non_approval_reasons",
+			"prs_reviewed", "prs_with_completed_round", "approved_by_143", "not_approved",
+			"approved_first_round", "median_rounds_to_approval",
+			"prs_with_failed_attempt", "prs_with_stale_attempt",
+			"prs_with_change_breakdown", "median_additions", "median_deletions", "prs_with_findings",
+			"prs_with_blocking_findings", "total_findings", "needs_human_review",
+			"comment_only", "blocked", "approval_not_posted", "approval_rounds", "authors",
+			"non_approval_reasons",
 		}).AddRow(
-			32, 28, 17, 11, 8, 2, 0, 1, 2, 2, medianAdditions, medianDeletions, 9, 3, 14,
+			32, 28, 17, 11, 10, 2.0, 2, 2,
+			20, medianAdditions, medianDeletions,
+			9, 3, 14, 8, 2, 0, 1,
+			[]byte(`[{"bucket":"round_1","prs":10},{"bucket":"round_2","prs":7},{"bucket":"round_3","prs":0},{"bucket":"round_4_plus","prs":0},{"bucket":"not_yet_approved","prs":15}]`),
 			[]byte(`[{
 				"author":"anya",
-				"reviews_completed":12,
-				"automatically_approved":9,
+				"prs_reviewed":12,
+				"approved_by_143":9,
 				"not_approved":3,
-				"reviews_with_change_breakdown":9,
-				"average_additions":60,
+				"approved_first_round":5,
+				"median_rounds_to_approval":2,
 				"median_additions":50,
-				"average_deletions":28,
 				"median_deletions":22
 			}]`),
 			[]byte(`[
-				{"code":"lines_limit_exceeded","reviews":5},
-				{"code":"blocking_findings","reviews":3}
+				{"code":"lines_limit_exceeded","prs":5},
+				{"code":"blocking_findings","prs":3}
 			]`),
 		))
 
@@ -1367,41 +1398,106 @@ func TestCodeReviewStore_GetReviewAnalyticsReturnsDecisionReport(t *testing.T) {
 	require.NoError(t, err, "GetReviewAnalytics should return the selected report")
 	require.Equal(t, models.CodeReviewAnalytics{
 		Summary: models.CodeReviewAnalyticsSummary{
-			ReviewsRequested:            32,
-			ReviewsCompleted:            28,
-			AutomaticallyApproved:       17,
-			NotApproved:                 11,
-			NeedsHumanReview:            8,
-			CommentOnly:                 2,
-			Blocked:                     0,
-			ApprovalNotPosted:           1,
-			FailedReviews:               2,
-			StaleReviews:                2,
-			MedianAdditions:             &medianAdditions,
-			MedianDeletions:             &medianDeletions,
-			ReviewsWithFindings:         9,
-			ReviewsWithBlockingFindings: 3,
-			TotalFindings:               14,
+			PRsReviewed:             32,
+			PRsWithCompletedRound:   28,
+			ApprovedBy143:           17,
+			NotApproved:             11,
+			ApprovedFirstRound:      10,
+			MedianRoundsToApproval:  func() *float64 { value := 2.0; return &value }(),
+			NeedsHumanReview:        8,
+			CommentOnly:             2,
+			ApprovalNotPosted:       1,
+			PRsWithFailedAttempt:    2,
+			PRsWithStaleAttempt:     2,
+			PRsWithChangeBreakdown:  20,
+			MedianAdditions:         &medianAdditions,
+			MedianDeletions:         &medianDeletions,
+			PRsWithFindings:         9,
+			PRsWithBlockingFindings: 3,
+			TotalFindings:           14,
+		},
+		ApprovalRounds: []models.CodeReviewApprovalRoundAnalytics{
+			{Bucket: models.CodeReviewApprovalRound1, PRs: 10},
+			{Bucket: models.CodeReviewApprovalRound2, PRs: 7},
+			{Bucket: models.CodeReviewApprovalRound3, PRs: 0},
+			{Bucket: models.CodeReviewApprovalRound4Plus, PRs: 0},
+			{Bucket: models.CodeReviewApprovalRoundNotYet, PRs: 15},
 		},
 		Authors: []models.CodeReviewAuthorAnalytics{
 			{
-				Author:                     "anya",
-				ReviewsCompleted:           12,
-				AutomaticallyApproved:      9,
-				NotApproved:                3,
-				ReviewsWithChangeBreakdown: 9,
-				AverageAdditions:           &authorAverageAdditions,
-				MedianAdditions:            &authorMedianAdditions,
-				AverageDeletions:           &authorAverageDeletions,
-				MedianDeletions:            &authorMedianDeletions,
+				Author:                 "anya",
+				PRsReviewed:            12,
+				ApprovedBy143:          9,
+				NotApproved:            3,
+				ApprovedFirstRound:     5,
+				MedianRoundsToApproval: func() *float64 { value := 2.0; return &value }(),
+				MedianAdditions:        &authorMedianAdditions,
+				MedianDeletions:        &authorMedianDeletions,
 			},
 		},
 		NonApprovalReasons: []models.CodeReviewNonApprovalReasonAnalytics{
-			{Code: models.CodeReviewRiskReasonLinesLimitExceeded, Reviews: 5},
-			{Code: models.CodeReviewRiskReasonBlockingFindings, Reviews: 3},
+			{Code: models.CodeReviewRiskReasonLinesLimitExceeded, PRs: 5},
+			{Code: models.CodeReviewRiskReasonBlockingFindings, PRs: 3},
 		},
 	}, analytics, "GetReviewAnalytics should return exact summary, author, and reason metrics")
 	require.NoError(t, mock.ExpectationsWereMet(), "the single analytics query should remain org and filter scoped")
+}
+
+// The Analytics page renders one card per approval-round bucket, so a partial
+// or repeated set would silently drop or double a card instead of failing.
+func TestCodeReviewStore_GetReviewAnalyticsRejectsIncompleteApprovalRounds(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		rounds        string
+		expectedError string
+	}{
+		{
+			name:          "missing bucket",
+			rounds:        `[{"bucket":"round_1","prs":1},{"bucket":"round_2","prs":0},{"bucket":"round_3","prs":0},{"bucket":"round_4_plus","prs":0}]`,
+			expectedError: "approval round buckets incomplete: got 4 of 5",
+		},
+		{
+			name:          "repeated bucket",
+			rounds:        `[{"bucket":"round_1","prs":1},{"bucket":"round_1","prs":2},{"bucket":"round_2","prs":0},{"bucket":"round_3","prs":0},{"bucket":"round_4_plus","prs":0},{"bucket":"not_yet_approved","prs":0}]`,
+			expectedError: `duplicate approval round bucket: "round_1"`,
+		},
+		{
+			name:          "unknown bucket",
+			rounds:        `[{"bucket":"round_9","prs":1},{"bucket":"round_2","prs":0},{"bucket":"round_3","prs":0},{"bucket":"round_4_plus","prs":0},{"bucket":"not_yet_approved","prs":0}]`,
+			expectedError: `invalid CodeReviewApprovalRoundBucket: "round_9"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock should initialize")
+			defer mock.Close()
+
+			mock.ExpectQuery(`(?s)WITH first_attempt AS MATERIALIZED`).
+				WithArgs(pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{
+					"prs_reviewed", "prs_with_completed_round", "approved_by_143", "not_approved",
+					"approved_first_round", "median_rounds_to_approval",
+					"prs_with_failed_attempt", "prs_with_stale_attempt",
+					"prs_with_change_breakdown", "median_additions", "median_deletions", "prs_with_findings",
+					"prs_with_blocking_findings", "total_findings", "needs_human_review",
+					"comment_only", "blocked", "approval_not_posted", "approval_rounds", "authors",
+					"non_approval_reasons",
+				}).AddRow(
+					1, 1, 1, 0, 1, 1.0, 0, 0, 0, -1.0, -1.0, 0, 0, 0, 0, 0, 0, 0,
+					[]byte(tt.rounds), []byte(`[]`), []byte(`[]`),
+				))
+
+			_, err = NewCodeReviewStore(mock).GetReviewAnalytics(context.Background(), uuid.New(), CodeReviewAnalyticsFilters{})
+
+			require.EqualError(t, err, tt.expectedError, "analytics should reject an unrenderable approval-round distribution")
+		})
+	}
 }
 
 func TestCodeReviewListOrderBy(t *testing.T) {

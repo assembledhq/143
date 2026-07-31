@@ -325,42 +325,48 @@ export interface CodeReviewStats {
 }
 
 export interface CodeReviewAnalyticsSummary {
-  reviews_requested: number;
-  reviews_completed: number;
-  automatically_approved: number;
+  prs_reviewed: number;
+  prs_with_completed_round: number;
+  approved_by_143: number;
   not_approved: number;
+  approved_first_round: number;
+  median_rounds_to_approval: number | null;
   needs_human_review: number;
   comment_only: number;
   blocked: number;
   approval_not_posted: number;
-  failed_reviews: number;
-  stale_reviews: number;
+  prs_with_failed_attempt: number;
+  prs_with_stale_attempt: number;
+  prs_with_change_breakdown: number;
   median_additions: number | null;
   median_deletions: number | null;
-  reviews_with_findings: number;
-  reviews_with_blocking_findings: number;
+  prs_with_findings: number;
+  prs_with_blocking_findings: number;
   total_findings: number;
 }
 
 export interface CodeReviewAuthorAnalytics {
   author: string;
-  reviews_completed: number;
-  automatically_approved: number;
+  prs_reviewed: number;
+  approved_by_143: number;
   not_approved: number;
-  reviews_with_change_breakdown: number;
-  average_additions: number | null;
+  approved_first_round: number;
+  median_rounds_to_approval: number | null;
   median_additions: number | null;
-  average_deletions: number | null;
   median_deletions: number | null;
 }
 
 export interface CodeReviewNonApprovalReasonAnalytics {
   code: string;
-  reviews: number;
+  prs: number;
 }
 
 export interface CodeReviewAnalytics {
   summary: CodeReviewAnalyticsSummary;
+  approval_rounds: Array<{
+    bucket: "round_1" | "round_2" | "round_3" | "round_4_plus" | "not_yet_approved";
+    prs: number;
+  }>;
   authors: CodeReviewAuthorAnalytics[];
   non_approval_reasons: CodeReviewNonApprovalReasonAnalytics[];
 }

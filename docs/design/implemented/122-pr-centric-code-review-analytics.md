@@ -1,8 +1,8 @@
 # Design: PR-Centric Code Review Analytics
 
-> **Status:** Not Started | **Last reviewed:** 2026-07-31
+> **Status:** Implemented | **Last reviewed:** 2026-07-31
 >
-> **Depends on:** [../implemented/112-code-reviewer-bot-auto-approval.md](../implemented/112-code-reviewer-bot-auto-approval.md), [../overall.md](../overall.md)
+> **Depends on:** [112-code-reviewer-bot-auto-approval.md](112-code-reviewer-bot-auto-approval.md), [../overall.md](../overall.md)
 
 ## Summary
 
@@ -21,15 +21,19 @@ Individual review sessions remain available as evidence, but they are not the
 primary analytics unit. This prevents a PR reviewed several times from having
 several times the influence of a PR approved immediately.
 
-The existing author, size, policy-fit, finding, non-approval, and operational
-metrics remain. Their labels and calculations change from reviews to unique PRs.
-First-round approval and rounds to approval are added alongside them.
+The existing author, finding, non-approval, and operational metrics remain.
+Their labels and calculations change from reviews to unique PRs. First-round
+approval and rounds to approval are added alongside them.
+
+Global PR-size, file-count, size-bucket, and policy-limit analytics are
+intentionally excluded. The author table retains median additions and deletions
+as the addition/deletion distribution design 112 describes for this tab.
 
 ## Problem
 
 The current report aggregates `code_review_session_metadata`, so its counts and
 rates describe review attempts. A PR with three completed assessments contributes
-three observations to approval rate, author usage, size buckets, findings, and
+three observations to approval rate, author usage, findings, and
 non-approval reasons.
 
 That is useful for understanding reviewer activity, but it does not match the
@@ -137,7 +141,8 @@ assessment**:
 - for a PR without approval, its latest completed round;
 - if a PR has no completed round, no representative assessment.
 
-This snapshot supplies size, policy-limit, decision subtype, and finding metrics.
+This snapshot supplies author change-distribution, decision subtype, and finding
+metrics.
 Using one snapshot prevents a multi-round PR from being weighted several times
 while still describing the final observed state of the PR.
 
@@ -194,22 +199,7 @@ outcome filters where the existing list supports them. The Reviews tab may still
 show individual sessions after navigation; grouping that tab by PR is outside
 this design.
 
-### 4. PR size and policy fit
-
-Keep the current size and policy-fit section. Calculate each metric from one
-representative assessment per PR:
-
-- average and median additions;
-- average and median deletions;
-- average and median files changed;
-- PRs above the policy size limits captured by that assessment;
-- approved PRs above those captured limits;
-- approval rate by total-line size bucket.
-
-Update labels and supporting copy from “reviews” to “PRs.” Each size bucket
-contains a PR at most once.
-
-### 5. Why PRs were not approved right away
+### 4. Why PRs were not approved right away
 
 Show the existing structured non-approval reason labels, but count each reason at
 most once per PR.
@@ -222,7 +212,7 @@ reasons.
 This preserves evidence about friction encountered during the PR journey without
 allowing long-running PRs to dominate the report.
 
-### 6. PR findings and operational outcomes
+### 5. PR findings and operational outcomes
 
 Keep the current findings and decision-outcome section, using the representative
 assessment:
@@ -259,10 +249,6 @@ Approval by round
 Usage by PR author
 Author       PRs   Approved   Not approved   First-round approval   Median rounds
 
-PR size and policy fit
-[Median additions] [Median deletions] [Median files] [Above size limits]
-[0–49] [50–199] [200–499] [500+]
-
 Why PRs were not approved right away
 Reason                                      PRs
 Blocking issue                               12
@@ -295,16 +281,9 @@ filters. Change the response contract to PR-oriented fields:
       "median_rounds_to_approval": 2,
       "prs_with_failed_attempt": 2,
       "prs_with_stale_attempt": 5,
-      "prs_with_size_data": 37,
       "prs_with_change_breakdown": 36,
-      "average_additions": 142,
       "median_additions": 84,
-      "average_deletions": 61,
       "median_deletions": 25,
-      "average_files_changed": 7,
-      "median_files_changed": 5,
-      "prs_above_size_limit": 3,
-      "approvals_above_size_limit": 1,
       "prs_with_findings": 21,
       "prs_with_blocking_findings": 9,
       "total_findings": 48,
@@ -332,13 +311,6 @@ filters. Change the response contract to PR-oriented fields:
         "median_deletions": 20
       }
     ],
-    "size_buckets": [
-      {
-        "bucket": "0_49",
-        "prs_with_completed_round": 12,
-        "approved_by_143": 10
-      }
-    ],
     "non_approval_reasons": [
       {"code": "blocking_findings", "prs": 12}
     ]
@@ -354,8 +326,8 @@ The implementation should derive this in one org-scoped PostgreSQL query:
 3. collapse duplicate completed sessions to one result per PR and head SHA;
 4. order distinct completed heads by completion time to assign round numbers;
 5. select one representative assessment per PR;
-6. aggregate PR outcomes, rounds, authors, representative size and finding
-   metrics, and distinct per-PR reason codes.
+6. aggregate PR outcomes, rounds, authors, representative change-distribution
+   and finding metrics, and distinct per-PR reason codes.
 
 Continue filtering every source by `org_id`. No migration is expected unless
 focused query testing shows an additional index is required.
@@ -392,7 +364,7 @@ Add focused store tests covering:
 - approval after the cohort window;
 - repository, time, and organization isolation;
 - per-PR reason deduplication across rounds;
-- representative size, policy-limit, decision, and finding metrics;
+- representative author change-distribution, decision, and finding metrics;
 - unique PR counts for failed and stale attempts;
 - author aggregation and missing authors.
 
@@ -402,7 +374,7 @@ Update handler contract tests and frontend component tests for:
 - all approval-round buckets;
 - no-PR and no-approval empty values;
 - non-approval reasons;
-- existing PR-size, finding, and outcome sections with PR-based copy;
+- finding and outcome sections with PR-based copy;
 - PR-author rows and navigation filters.
 
 ## Rollout
@@ -420,7 +392,7 @@ the report is derived from current durable review and PR records.
 - Each PR contributes once to PR counts and outcome rates.
 - Failed, stale, and same-head retries do not inflate rounds.
 - The page directly answers how many rounds approval took.
-- Existing author, size, policy-fit, finding, non-approval, and operational
+- Existing author, finding, non-approval, and operational
   insights remain available with PR-based denominators.
-- No PR contributes more than once to a size bucket, author row, outcome count,
+- No PR contributes more than once to an author row, outcome count,
   or individual non-approval reason.
