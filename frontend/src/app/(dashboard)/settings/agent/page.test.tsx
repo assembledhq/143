@@ -217,6 +217,47 @@ describe("Agent settings page", () => {
     });
   });
 
+  it("serializes coding-agent default updates", async () => {
+    const user = userEvent.setup();
+    let resolveUpdate: (() => void) | undefined;
+
+    installHandlers();
+    server.use(
+      http.patch("/api/v1/settings", async () => {
+        await new Promise<void>((resolve) => {
+          resolveUpdate = resolve;
+        });
+        return HttpResponse.json({
+          data: {
+            id: "org-1",
+            name: "Acme",
+            settings: { default_agent_type: "codex", agent_config: {} },
+            created_at: "2026-04-22T10:00:00Z",
+            updated_at: "2026-04-22T10:00:00Z",
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<AgentPage />);
+
+    await user.click(await screen.findByLabelText("Organization default Codex reasoning"));
+    await user.click(await screen.findByRole("option", { name: "Extra High" }));
+
+    await waitFor(() => {
+      expect(resolveUpdate).toBeDefined();
+      expect(screen.getByLabelText("Organization default Codex model")).toBeDisabled();
+      expect(screen.getByLabelText("Organization default Claude Code model")).toBeDisabled();
+      expect(screen.getByLabelText("Organization default Codex reasoning")).toBeDisabled();
+      expect(screen.getByLabelText("Organization default Claude Code reasoning")).toBeDisabled();
+    });
+
+    resolveUpdate?.();
+    await waitFor(() => {
+      expect(screen.getByLabelText("Organization default Codex model")).toBeEnabled();
+    });
+  });
+
   it("aligns the personal auths link with the organization auths description", async () => {
     installHandlers();
 

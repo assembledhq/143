@@ -251,10 +251,6 @@ export default function AgentPage() {
       toast.error("Could not update organization coding-agent defaults");
     },
   });
-  // Only the field being saved goes read-only — one mutation object drives all
-  // four selects, so gating on isPending alone would freeze the other three.
-  const pendingDefaultsPatch = defaultsMutation.isPending ? defaultsMutation.variables : undefined;
-
   function setCapabilityEnabled(definition: AgentCapabilityDefinition, enabled: boolean) {
     if (enabled && definition.risk === "high") {
       const confirmed = window.confirm(`${definition.display_name} is high-risk. Changes apply to future runs only.`);
@@ -563,7 +559,10 @@ export default function AgentPage() {
                   <div className="space-y-2">
                     <Label htmlFor={`org-default-model-${agent}`}>{label} model</Label>
                     <Select
-                      disabled={pendingDefaultsPatch?.coding_agent_model_defaults?.[agent] !== undefined}
+                      // Settings PATCHes are read/merge/whole-blob writes, so
+                      // serialize these controls to prevent overlapping saves
+                      // from discarding one another.
+                      disabled={defaultsMutation.isPending}
                       // Patch only the edited key: the server deep-merges settings, so
                       // sending the whole map would let a second edit revert the first
                       // one it raced with off a stale cache.
@@ -585,7 +584,7 @@ export default function AgentPage() {
                   <div className="space-y-2">
                     <Label htmlFor={`org-default-reasoning-${agent}`}>{label} reasoning</Label>
                     <Select
-                      disabled={pendingDefaultsPatch?.coding_agent_reasoning_defaults?.[agent] !== undefined}
+                      disabled={defaultsMutation.isPending}
                       value={getOrgDefaultCodingAgentReasoning(settings, agent) || "__default__"}
                       onValueChange={(value) => defaultsMutation.mutate({
                         coding_agent_reasoning_defaults: { [agent]: value === "__default__" ? "" : toCodingAgentReasoningEffort(value) },
