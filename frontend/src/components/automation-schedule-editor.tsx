@@ -22,7 +22,6 @@ import {
   defaultRunAt,
   defaultScheduleDraft,
   formatNextRun,
-  formatScheduleSentence,
   formatWeekdays,
   intervalHasRunAt,
   scheduleDraftToAPI,
@@ -53,7 +52,18 @@ type Props = {
   onChange: (value: ScheduleDraft | null) => void;
   detectedTimezone: string;
   disabled?: boolean;
-  onValidityChange?: (valid: boolean) => void;
+  /**
+   * `valid` answers "can this be committed now?". `serverRejected` separates
+   * the two very different reasons it can be false: the preview has not
+   * settled yet (keep waiting) versus the API has refused this exact draft
+   * (never send it). A caller that autosaves on unmount needs that
+   * distinction — treating "not settled" as "refused" drops the edit, and
+   * treating "refused" as "not settled" guarantees a failed write.
+   */
+  onValidityChange?: (
+    valid: boolean,
+    detail: { serverRejected: boolean },
+  ) => void;
 };
 
 export function AutomationScheduleEditor({
@@ -102,7 +112,14 @@ export function AutomationScheduleEditor({
     (!clientError &&
       (previewTransportError || (isCurrent && preview.isSuccess)));
 
-  useEffect(() => onValidityChange?.(valid), [onValidityChange, valid]);
+  // Scoped to `isCurrent` so a verdict about a superseded draft can't be read
+  // as one about the draft on screen.
+  const serverRejected = Boolean(isCurrent && previewValidationError);
+
+  useEffect(
+    () => onValidityChange?.(valid, { serverRejected }),
+    [onValidityChange, serverRejected, valid],
+  );
 
   if (!value) {
     return (
@@ -327,30 +344,6 @@ export function AutomationScheduleEditor({
           </span>
         ) : null}
       </div>
-    </div>
-  );
-}
-
-export function AutomationScheduleSummary({
-  schedule,
-  nextRunAt,
-  enabled = true,
-}: {
-  schedule: ScheduleDraft | null;
-  nextRunAt?: string;
-  enabled?: boolean;
-}) {
-  if (!schedule) return <span>No schedule</span>;
-  return (
-    <div className="space-y-0.5">
-      <p>{formatScheduleSentence(schedule)}</p>
-      <p className="text-xs text-muted-foreground">
-        {!enabled
-          ? "Paused"
-          : nextRunAt
-            ? `Next run ${formatNextRun(nextRunAt, schedule.timezone)}`
-            : "Next run unavailable"}
-      </p>
     </div>
   );
 }

@@ -253,6 +253,68 @@ describe("useAutosave", () => {
     expect(queryClient.getQueryData(queryKey)).toEqual({ data: { settings: { existing: "value" } } });
   });
 
+  it("derives the toast from the rejection when errorMessage is a function", async () => {
+    // A surface with many independently-failing writes and no Save button has
+    // nothing but this toast to say which field the server refused and why.
+    const mutationFn = vi.fn().mockRejectedValue(new Error("cron_expression is invalid"));
+    const queryKey = ["settings", "test-error-resolver"];
+    queryClient.setQueryData(queryKey, { data: { settings: { existing: "value" } } });
+
+    const { result } = renderHook(
+      () =>
+        useAutosave<{ settings: { new: string } }>({
+          queryKey,
+          mutationFn,
+          applyOptimistic,
+          errorMessage: (error) =>
+            `Couldn't save: ${(error as Error).message}`,
+          debounceMs: 0,
+        }),
+      { wrapper: makeWrapper(queryClient) },
+    );
+
+    act(() => {
+      result.current.save({ settings: { new: "x" } });
+    });
+
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(
+        "Couldn't save: cron_expression is invalid",
+      ),
+    );
+    expect(queryClient.getQueryData(queryKey)).toEqual({ data: { settings: { existing: "value" } } });
+  });
+
+  it("still rolls back and toasts when the errorMessage resolver itself throws", async () => {
+    const mutationFn = vi.fn().mockRejectedValue(new Error("500 boom"));
+    const queryKey = ["settings", "test-error-resolver-throws"];
+    queryClient.setQueryData(queryKey, { data: { settings: { existing: "value" } } });
+
+    const { result } = renderHook(
+      () =>
+        useAutosave<{ settings: { new: string } }>({
+          queryKey,
+          mutationFn,
+          applyOptimistic,
+          errorMessage: () => {
+            throw new Error("resolver blew up");
+          },
+          debounceMs: 0,
+        }),
+      { wrapper: makeWrapper(queryClient) },
+    );
+
+    act(() => {
+      result.current.save({ settings: { new: "x" } });
+    });
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+    expect(toast.error).toHaveBeenCalledWith(
+      "Couldn't save. Your change was reverted.",
+    );
+    expect(queryClient.getQueryData(queryKey)).toEqual({ data: { settings: { existing: "value" } } });
+  });
+
   it("skips dispatch when the optimistic end state is unchanged", async () => {
     const mutationFn = vi.fn().mockResolvedValue(undefined);
     const queryKey = ["settings", "test-noop"];

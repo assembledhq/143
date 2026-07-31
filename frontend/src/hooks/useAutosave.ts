@@ -18,7 +18,14 @@ export interface UseAutosaveOptions<TVars> {
   applyOptimistic: (previous: unknown, vars: TVars) => unknown;
   coalesce?: (queued: TVars, incoming: TVars) => TVars;
   debounceMs?: number;
-  errorMessage?: string;
+  /**
+   * Toast copy for a failed save. Pass a function to derive it from the
+   * rejection — a surface with many independently-failing writes and no Save
+   * button has nothing but this toast to explain which field the server
+   * refused and why, so a fixed string throws away the only diagnosis the user
+   * can act on.
+   */
+  errorMessage?: string | ((error: unknown) => string);
   invalidateOnSettled?: boolean;
   onError?: (error: unknown, vars: TVars) => void;
   onSuccess?: (vars: TVars) => void;
@@ -60,7 +67,7 @@ interface QueueEntry {
   coalesce?: (queued: unknown, incoming: unknown) => unknown;
   mutationFn?: (vars: unknown) => Promise<unknown>;
   applyOptimistic?: (previous: unknown, vars: unknown) => unknown;
-  errorMessage?: string;
+  errorMessage?: string | ((error: unknown) => string);
   invalidateOnSettled: boolean;
   onError?: (error: unknown, vars: unknown) => void;
   onSuccess?: (vars: unknown) => void;
@@ -160,7 +167,7 @@ async function run(
   const previous = queryClient.getQueryData(queryKey);
   const applyOptimistic = entry.applyOptimistic!;
   const mutationFn = entry.mutationFn!;
-  const errorMessage = entry.errorMessage ?? DEFAULT_ERROR_MESSAGE;
+  const resolveErrorMessage = entry.errorMessage ?? DEFAULT_ERROR_MESSAGE;
   const invalidateOnSettled = entry.invalidateOnSettled;
   queryClient.setQueryData(queryKey, (current: unknown) => applyOptimistic(current, vars));
 
@@ -172,7 +179,18 @@ async function run(
     entry.onError?.(err, vars);
     captureError(err, { feature: "useAutosave" });
     queryClient.setQueryData(queryKey, previous);
-    toast.error(errorMessage);
+    // A resolver that itself throws must not swallow the rollback + toast, so
+    // fall back to the generic copy rather than letting it escape.
+    let message = DEFAULT_ERROR_MESSAGE;
+    try {
+      message =
+        typeof resolveErrorMessage === "function"
+          ? resolveErrorMessage(err)
+          : resolveErrorMessage;
+    } catch {
+      message = DEFAULT_ERROR_MESSAGE;
+    }
+    toast.error(message);
     emit(entry, "error", ownerIds);
   } finally {
     // NOTE: `inFlight` flips to false only after `invalidateQueries` settles.
