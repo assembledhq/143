@@ -17,6 +17,45 @@ import type {
   ThreadRuntimeEvent,
   ThreadStatus,
 } from "@/lib/types";
+import { isProvisionalSessionDetail } from "@/lib/session-detail-cache";
+
+export type SessionDetailLoadState =
+  | { kind: "initial"; session: null }
+  | { kind: "provisional"; session: SessionDetail }
+  | { kind: "ready"; session: SessionDetail }
+  // `retrying` rides on the error variant rather than being tracked
+  // separately by the caller: the query holds its error until a refetch
+  // settles, so the failed UI and the in-flight retry are one state and must
+  // not be able to disagree.
+  | { kind: "error"; session: SessionDetail | null; retrying: boolean };
+
+export function deriveSessionDetailLoadState({
+  session,
+  isLoading,
+  isFetching = false,
+  error,
+}: {
+  session: SessionDetail | undefined;
+  isLoading: boolean;
+  isFetching?: boolean;
+  error: unknown;
+}): SessionDetailLoadState {
+  if (session && !isProvisionalSessionDetail(session)) {
+    // Authoritative cached data remains usable when a background refetch
+    // fails. A refetch error must not replace a loaded workspace.
+    return { kind: "ready", session };
+  }
+  if (error) {
+    return { kind: "error", session: session ?? null, retrying: isFetching };
+  }
+  if (session) {
+    return { kind: "provisional", session };
+  }
+  if (isLoading) {
+    return { kind: "initial", session: null };
+  }
+  return { kind: "error", session: null, retrying: isFetching };
+}
 
 type PendingEditableThreadUpdate = {
   label: string;

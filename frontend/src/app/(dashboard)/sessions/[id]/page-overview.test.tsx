@@ -8,6 +8,7 @@ import { mockSessions, mockMembers, mockPR, mockPRHealth } from '@/test/mocks/ha
 import { SessionDetailContent } from './session-detail-content';
 import { queryKeys } from '@/lib/query-keys';
 import { markProvisionalSessionDetail } from '@/lib/session-detail-cache';
+import { SESSION_THREAD_STRIP_HEIGHT_CLASSNAME } from './session-detail-geometry';
 import type {
   ReviewLoopFixMode,
   Session,
@@ -71,8 +72,25 @@ installSessionDetailPageTestHooks({ toast, routerPush });
 describe('SessionDetailPage overview and review loop', () => {
   it('shows the session details skeleton initially', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
-    expect(screen.getByTestId('session-detail-loading-skeleton')).toBeInTheDocument();
+    const frame = screen.getByTestId('session-detail-loading-skeleton');
+    expect(frame).toBeInTheDocument();
+    expect(frame).toHaveAttribute('data-session-transition', 'initial');
+    expect(frame).toHaveAttribute('data-session-state', 'loading');
     expect(screen.queryByText('Loading session...')).not.toBeInTheDocument();
+  });
+
+  it('reconciles the cold-open skeleton into the loaded workspace in place', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    // Nothing seeded this open, so the skeleton starts cold rather than
+    // provisional — the frame still has to survive the swap.
+    const frame = screen.getByTestId('session-detail-loading-skeleton');
+    expect(frame).toHaveAttribute('data-session-transition', 'initial');
+
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    expect(screen.getByTestId('session-detail-frame')).toBe(frame);
+    expect(frame).not.toHaveAttribute('data-session-state');
+    expect(frame).not.toHaveAttribute('aria-busy');
   });
 
   it('refetches authoritative detail immediately when provisional detail is cached as fresh', async () => {
@@ -128,17 +146,196 @@ describe('SessionDetailPage overview and review loop', () => {
     await waitFor(() => {
       expect(detailRequests).toBe(1);
     });
-    expect(screen.getByTestId('session-detail-loading-skeleton')).toBeInTheDocument();
+    const transitionFrame = screen.getByTestId('session-detail-loading-skeleton');
+    expect(transitionFrame).toHaveAttribute('data-session-transition', 'provisional');
+    expect(transitionFrame).toHaveAttribute('data-session-state', 'loading');
+    expect(transitionFrame).toHaveAttribute('aria-busy', 'true');
     // Metadata-first paint: the provisional row's title shows in the skeleton
     // headers (desktop and mobile) immediately, while the data-bearing
     // queries still wait for the authoritative payload.
     expect(screen.getAllByText('Provisional list title').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByTestId('session-composer-loading')).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText('Send a follow-up message...')).not.toBeInTheDocument();
     expect(timelineRequests).toBe(0);
     expect(prRequests).toBe(0);
 
     releaseDetail();
 
     expect(await screen.findAllByText('Authoritative detail title')).not.toHaveLength(0);
+    // The shared SessionDetailFrame reconciles in place: loading content is
+    // replaced locally without replacing the workspace root.
+    expect(screen.getByTestId('session-detail-frame')).toBe(transitionFrame);
+  });
+
+  it('keeps target metadata and actions gated when provisional detail fails, then retries in place', async () => {
+    const user = userEvent.setup();
+    const sessionId = 'session-abcdef12-3456-7890';
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+    });
+    queryClient.setQueryData(queryKeys.sessions.detail(sessionId), {
+      data: markProvisionalSessionDetail({
+        ...mockSessions[0],
+        result_summary: 'Selected target session',
+        threads: [],
+        changesets: [],
+      }),
+    } satisfies SingleResponse<Session>);
+    let releaseRetry = () => {};
+    const retryBlocked = new Promise<void>((resolve) => {
+      releaseRetry = resolve;
+    });
+    let requests = 0;
+    let prRequests = 0;
+    server.use(
+      http.get(`/api/v1/sessions/${sessionId}`, async () => {
+        requests += 1;
+        if (requests === 1) {
+          return HttpResponse.json(
+            { error: { code: 'DETAIL_UNAVAILABLE', message: 'temporarily unavailable' } },
+            { status: 503 },
+          );
+        }
+        await retryBlocked;
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            result_summary: 'Recovered target session',
+            threads: [],
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get(`/api/v1/sessions/${sessionId}/pr`, () => {
+        prRequests += 1;
+        return HttpResponse.json({ data: null });
+      }),
+    );
+
+    renderSessionDetailWithQueryClient(sessionId, queryClient);
+
+    expect(await screen.findByTestId('session-detail-transition-error')).toBeInTheDocument();
+    expect(screen.getAllByText('Selected target session').length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByPlaceholderText('Send a follow-up message...')).not.toBeInTheDocument();
+    // A failed detail request must not un-gate the queries that wait for an
+    // authoritative session — we never loaded the session they describe.
+    expect(prRequests).toBe(0);
+
+    const transitionFrame = screen.getByTestId('session-detail-loading-skeleton');
+    // Nothing is in flight until the user retries, so the frame must not
+    // announce itself as busy over the alert.
+    expect(transitionFrame).not.toHaveAttribute('aria-busy');
+    expect(transitionFrame).toHaveAttribute('data-session-state', 'error');
+    // A seeded row still backs this failure, so the frame reports what it
+    // is preserving, not just that it failed.
+    expect(transitionFrame).toHaveAttribute('data-session-transition', 'provisional');
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+
+    // The query holds its error until the refetch settles, so the error stays
+    // on screen. Without pending feedback the button would read as dead.
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Retry' })).toBeDisabled();
+    });
+    expect(screen.getByTestId('session-detail-transition-error')).toBeInTheDocument();
+    expect(transitionFrame).toHaveAttribute('aria-busy', 'true');
+
+    releaseRetry();
+
+    expect(await screen.findAllByText('Recovered target session')).not.toHaveLength(0);
+    expect(screen.getByTestId('session-detail-frame')).toBe(transitionFrame);
+    expect(requests).toBe(2);
+  });
+
+  it('reports a cold detail failure as an error rather than an endless skeleton', async () => {
+    const sessionId = 'session-abcdef12-3456-7890';
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+    });
+    server.use(
+      http.get(`/api/v1/sessions/${sessionId}`, () =>
+        HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'no such session' } },
+          { status: 404 },
+        ),
+      ),
+    );
+
+    renderSessionDetailWithQueryClient(sessionId, queryClient);
+
+    const alert = await screen.findByTestId('session-detail-transition-error');
+    // Nothing was seeded, so the copy must not claim a preserved selection and
+    // the shimmer chrome must not imply that content is still on its way.
+    expect(alert).toHaveTextContent('could not be found');
+    expect(alert).not.toHaveTextContent('preserved');
+    expect(screen.queryByTestId('session-thread-strip-loading')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('session-composer-loading')).not.toBeInTheDocument();
+    const coldFrame = screen.getByTestId('session-detail-loading-skeleton');
+    expect(coldFrame).not.toHaveAttribute('aria-busy');
+    // Nothing was seeded, so the frame reports the cold shape of the failure.
+    expect(coldFrame).toHaveAttribute('data-session-state', 'error');
+    expect(coldFrame).toHaveAttribute('data-session-transition', 'initial');
+  });
+
+  it('keeps the frame mounted and removes stale content when switching from loaded A to provisional B', async () => {
+    const firstSession = {
+      ...mockSessions[0],
+      result_summary: 'Loaded session A',
+      threads: [],
+      changesets: [],
+    };
+    const secondSession = {
+      ...mockSessions[1],
+      result_summary: 'Selected session B',
+      threads: [],
+      changesets: [],
+    };
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+    });
+    queryClient.setQueryData(queryKeys.sessions.detail(firstSession.id), {
+      data: firstSession,
+    } satisfies SingleResponse<Session>);
+    queryClient.setQueryData(queryKeys.sessions.detail(secondSession.id), {
+      data: markProvisionalSessionDetail(secondSession),
+    } satisfies SingleResponse<Session>);
+
+    let releaseSecondDetail = () => {};
+    const secondDetailBlocked = new Promise<void>((resolve) => {
+      releaseSecondDetail = resolve;
+    });
+    let secondTimelineRequests = 0;
+    server.use(
+      http.get(`/api/v1/sessions/${firstSession.id}`, () =>
+        HttpResponse.json({ data: firstSession } satisfies SingleResponse<Session>),
+      ),
+      http.get(`/api/v1/sessions/${secondSession.id}`, async () => {
+        await secondDetailBlocked;
+        return HttpResponse.json({ data: secondSession } satisfies SingleResponse<Session>);
+      }),
+      http.get(`/api/v1/sessions/${secondSession.id}/timeline`, () => {
+        secondTimelineRequests += 1;
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    const view = renderWithProviders(<SessionDetailContent id={firstSession.id} />, { queryClient });
+    expect(await screen.findAllByText('Loaded session A')).not.toHaveLength(0);
+    const frame = screen.getByTestId('session-detail-frame');
+    expect(screen.getByPlaceholderText('Send a follow-up message...')).toBeInTheDocument();
+
+    view.rerender(<SessionDetailContent id={secondSession.id} />);
+
+    expect(screen.getByTestId('session-detail-loading-skeleton')).toBe(frame);
+    expect(screen.getAllByText('Selected session B').length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByText('Loaded session A')).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText('Send a follow-up message...')).not.toBeInTheDocument();
+    expect(secondTimelineRequests).toBe(0);
+
+    releaseSecondDetail();
+    expect(await screen.findAllByText('Selected session B')).not.toHaveLength(0);
+    expect(screen.getByTestId('session-detail-frame')).toBe(frame);
+    expect(screen.getByTestId('session-thread-strip-empty')).toHaveClass(
+      SESSION_THREAD_STRIP_HEIGHT_CLASSNAME,
+    );
   });
 
   it('renders session with result summary as title', async () => {

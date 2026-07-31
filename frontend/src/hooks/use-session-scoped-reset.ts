@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 
 export type SessionScopedResetGroup = {
   name: string;
@@ -12,11 +12,14 @@ export function useSessionScopedReset(
   const groupsRef = useRef(groups);
   const previousSessionIdRef = useRef(sessionId);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     groupsRef.current = groups;
   }, [groups]);
 
-  useEffect(() => {
+  // Session changes are route transitions. Reset session-owned state before
+  // the browser paints the new route so controls from the previous session
+  // cannot flash under the newly selected session's title.
+  useLayoutEffect(() => {
     if (previousSessionIdRef.current === sessionId) {
       return;
     }
