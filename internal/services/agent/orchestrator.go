@@ -24,6 +24,7 @@ import (
 	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/internalapi"
 	"github.com/assembledhq/143/internal/jobctx"
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/repoconfig"
@@ -32,6 +33,7 @@ import (
 	"github.com/assembledhq/143/internal/services/integration"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/mcp"
+	"github.com/assembledhq/143/internal/services/publicationintent"
 	"github.com/assembledhq/143/internal/services/reviewartifact"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
@@ -551,6 +553,14 @@ type UserLookup interface {
 	GetByID(ctx context.Context, orgID, userID uuid.UUID) (models.User, error)
 }
 
+type UserSettingsLookup interface {
+	GetByIDGlobalWithSettings(ctx context.Context, userID uuid.UUID) (models.UserWithSettings, error)
+}
+
+type PublicationIntentLookup interface {
+	HasSessionPublicationIntent(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error)
+}
+
 // SandboxAuthServer is the host-side socket server that issues fresh GitHub
 // credentials to the in-sandbox 143-tools helper. Defined as an interface
 // so tests can stub it without spinning real Unix sockets.
@@ -842,6 +852,9 @@ type Orchestrator struct {
 	threadCancels              *ThreadCancelRegistry // optional — enables per-tab SIGINT
 	nodeID                     string
 	isDraining                 func() bool
+	agentPRPromptEnabled       bool
+	agentPRPublicationEnabled  bool
+	prePRReviewEnabled         bool
 }
 
 type ChangesetMaterializationResult struct {
@@ -1350,15 +1363,18 @@ type OrchestratorConfig struct {
 	// Users looks up the triggering user record for the App-token
 	// Co-authored-by trailer. Required when IdentityResolver is set and
 	// the org has any user-triggered sessions.
-	Users                  UserLookup
-	EvalBootstraps         EvalBootstrapLookup
-	SuccessfulTurnVerifier SuccessfulTurnVerifier // optional — automatic preview verification
-	InternalAPIURL         string
-	InternalAPISecret      string
-	NodeID                 string
-	IsDraining             func() bool
-	Logger                 zerolog.Logger
-	MaxConcurrent          int
+	Users                     UserLookup
+	EvalBootstraps            EvalBootstrapLookup
+	SuccessfulTurnVerifier    SuccessfulTurnVerifier // optional — automatic preview verification
+	InternalAPIURL            string
+	InternalAPISecret         string
+	NodeID                    string
+	IsDraining                func() bool
+	AgentPRPromptEnabled      bool
+	AgentPRPublicationEnabled bool
+	PrePRReviewEnabled        bool
+	Logger                    zerolog.Logger
+	MaxConcurrent             int
 }
 
 type sandboxGitHubAuthState struct {
@@ -1437,6 +1453,9 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		maxConcurrent:              maxConcurrent,
 		nodeID:                     cfg.NodeID,
 		isDraining:                 cfg.IsDraining,
+		agentPRPromptEnabled:       cfg.AgentPRPromptEnabled,
+		agentPRPublicationEnabled:  cfg.AgentPRPublicationEnabled,
+		prePRReviewEnabled:         cfg.PrePRReviewEnabled,
 	}
 }
 
@@ -2406,6 +2425,31 @@ func sessionPromptStyle(session *models.Session) PromptStyle {
 	return PromptStyleIssueContext
 }
 
+// agentPRHandoffEligible reports whether this kind of turn may hand its own
+// work off for publication. It is the single source of truth for two decisions
+// that must stay in lockstep: whether the system prompt advertises
+// `143-tools pr create`, and whether shouldQueueAutomaticPR may stand down in
+// favour of the agent calling it. If the two ever disagree, a turn either
+// publishes twice or — far worse, because it is silent — strands its diff with
+// nothing left to open a PR.
+//
+// It covers only the structural shape of the turn. Whether a pull request
+// already exists is deliberately NOT part of it: that fact means "advertise
+// nothing" to the prompt but "queue nothing" to the completion gate, and the
+// two callers invert this predicate differently, so folding it in here would
+// make one of them do the opposite of what it reads as.
+func agentPRHandoffEligible(session *models.Session) bool {
+	if session == nil {
+		return false
+	}
+	return session.RepositoryID != nil &&
+		session.AutomationRunID == nil &&
+		session.Origin != models.SessionOriginCodeReview &&
+		session.Origin != models.SessionOriginRevision &&
+		sessionPromptStyle(session) != PromptStyleAnswerOnly &&
+		len(session.RevisionContext) == 0
+}
+
 func slackRoutingModeFromSessionInputManifest(raw json.RawMessage) (models.SlackRoutingMode, bool) {
 	if len(raw) == 0 {
 		return "", false
@@ -2871,10 +2915,12 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	// 5b. Resolve org-specific context limits for adaptive token budgets.
 	var contextLimits *models.ContextLimits
+	var automaticFollowThrough models.AutomaticFollowThroughOrgSettings
 	if o.orgs != nil {
 		if org, orgErr := o.orgs.GetByID(ctx, run.OrgID); orgErr == nil {
 			if orgSettings, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil {
 				contextLimits = &orgSettings.ContextLimits
+				automaticFollowThrough = orgSettings.SessionAutomation.AutomaticFollowThrough
 			}
 		}
 	}
@@ -2912,6 +2958,28 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}(),
 		TokenMode:     run.TokenMode,
 		ContextLimits: contextLimits,
+	}
+	if o.agentPRPromptEnabled && agentPRHandoffEligible(run) &&
+		run.PRCreationState != models.PRCreationStateSucceeded {
+		var personal *models.AutomaticPRFollowThroughSettings
+		if run.TriggeredByUserID != nil {
+			if settingsLookup, ok := o.users.(UserSettingsLookup); ok {
+				if user, userErr := settingsLookup.GetByIDGlobalWithSettings(ctx, *run.TriggeredByUserID); userErr == nil && user.OrgID == run.OrgID {
+					personal = user.Settings.AutomaticPRFollowThrough
+				} else if userErr != nil {
+					log.Warn().Err(userErr).Msg("failed to resolve session initiator publication policy for prompt")
+				}
+			}
+		}
+		policy := publicationintent.ResolvePolicy(automaticFollowThrough, personal)
+		input.PRHandoffPolicy = &PRHandoffPolicy{
+			AutomaticHandoff: policy.CreatePRWhenAgentReady,
+			// Only advertise the pre-PR review when the cycle can actually
+			// run; promising a review that no code performs would change how
+			// the model sequences its work for nothing.
+			ReviewBeforePR:  policy.ReviewBeforePR && o.prePRReviewEnabled,
+			ReviewMaxPasses: policy.ReviewMaxPasses,
+		}
 	}
 	if run.ComplexityTier != nil {
 		input.ComplexityEstimate = &ComplexityEstimate{
@@ -3665,7 +3733,33 @@ func (o *Orchestrator) shouldQueueAutomaticPR(ctx context.Context, run *models.S
 		return false
 	}
 	if run.AutomationRunID == nil {
-		return true
+		// Only retire the legacy completion trigger for turns that were
+		// actually told they could publish themselves. The prompt gate and
+		// this gate must agree: a turn that never saw the handoff instruction
+		// (prompt flag off, answer-only, code review, revision) would
+		// otherwise lose its PR with nothing to replace it.
+		if !o.agentPRPublicationEnabled || !o.agentPRPromptEnabled || !agentPRHandoffEligible(run) {
+			return true
+		}
+		if run.PRCreationState == models.PRCreationStateSucceeded {
+			// Already published. Standing down is the whole point of the
+			// rollout; falling through to the legacy queue here would ask for
+			// a second pull request on a session that has one.
+			return false
+		}
+		if lookup, ok := o.sessions.(PublicationIntentLookup); ok {
+			hasIntent, intentErr := lookup.HasSessionPublicationIntent(ctx, run.OrgID, run.ID)
+			if intentErr != nil {
+				log.Warn().Err(intentErr).Msg("failed to check agent publication intent at turn completion")
+				return false
+			}
+			if hasIntent {
+				return false
+			}
+		}
+		metrics.RecordAgentPRIntentMissing(ctx, string(run.AgentType), string(run.Origin))
+		log.Warn().Msg("eligible implementation completed with unpublished changes and no agent publication intent")
+		return false
 	}
 	if o.automationRuns == nil {
 		log.Warn().

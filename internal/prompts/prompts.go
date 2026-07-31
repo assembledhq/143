@@ -107,6 +107,18 @@ func CodingSandboxGuidance() string {
 	return render("coding_sandbox_guidance.template", nil)
 }
 
+type AgentPRHandoffData struct {
+	AutomaticHandoff bool
+	ReviewBeforePR   bool
+	ReviewMaxPasses  int
+}
+
+// AgentPRHandoff renders the non-overridable publication instruction fragment.
+// Callers must apply the deterministic capability gate before including it.
+func AgentPRHandoff(data AgentPRHandoffData) string {
+	return render("agent_pr_handoff.template", data)
+}
+
 // AnswerOnlyPreamble returns the preamble injected into Slack answer-only agent
 // prompts. These runs should answer questions without mutating the repository.
 func AnswerOnlyPreamble() string {

@@ -21,7 +21,9 @@ func NewSessionPublicationStore(db DBTX) *SessionPublicationStore {
 }
 
 const sessionPublicationSelectColumns = `id, org_id, session_id, changeset_id, repository_id,
-	state, source, review_gate_state, job_queue, request_payload, request_generation_at,
+	state, source, trigger_kind, handoff_mode, initiated_by_user_id,
+	automatic_pr_policy_source, review_policy_source,
+	review_gate_state, job_queue, request_payload, request_generation_at,
 	base_branch, head_branch, desired_head_sha,
 	published_head_sha, github_pr_number, github_pr_url, attempt_count,
 	last_error_code, last_error_message, requested_at, last_attempt_at,
@@ -36,6 +38,34 @@ func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uui
 	}
 	if err := publication.Source.Validate(); err != nil {
 		return err
+	}
+	if publication.TriggerKind == "" {
+		publication.TriggerKind = models.SessionPublicationTriggerPolicy
+	}
+	if err := publication.TriggerKind.Validate(); err != nil {
+		return err
+	}
+	if publication.HandoffMode == "" {
+		publication.HandoffMode = models.PRHandoffModePrePublish
+	}
+	if err := publication.HandoffMode.Validate(); err != nil {
+		return err
+	}
+	if publication.AutomaticPolicySource == "" {
+		publication.AutomaticPolicySource = models.PublicationPolicySourceProductDefault
+	}
+	if err := publication.AutomaticPolicySource.ValidateAutomatic(); err != nil {
+		return err
+	}
+	if publication.ReviewPolicySource == "" {
+		publication.ReviewPolicySource = models.PublicationPolicySourceProductDefault
+	}
+	if err := publication.ReviewPolicySource.ValidateReview(); err != nil {
+		return err
+	}
+	if publication.TriggerKind == models.SessionPublicationTriggerAgentReady &&
+		publication.Source != models.SessionPublicationSourceAgentTool {
+		return errors.New("agent-ready publication must originate from the agent tool")
 	}
 	if err := publication.ReviewGateState.Validate(); err != nil {
 		return err
@@ -62,10 +92,14 @@ func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uui
 
 	rows, err := s.db.Query(ctx, `INSERT INTO session_publications (
 		org_id, session_id, changeset_id, repository_id, state, source,
+		trigger_kind, handoff_mode, initiated_by_user_id,
+		automatic_pr_policy_source, review_policy_source,
 		review_gate_state, job_queue, request_payload, request_generation_at,
 		base_branch, head_branch, desired_head_sha
 	) VALUES (
 		@org_id, @session_id, @changeset_id, @repository_id, 'requested', @source,
+		@trigger_kind, @handoff_mode, @initiated_by_user_id,
+		@automatic_pr_policy_source, @review_policy_source,
 		@review_gate_state, @job_queue, @request_payload::jsonb, @request_generation_at,
 		@base_branch, @head_branch, @desired_head_sha
 	)
@@ -125,6 +159,62 @@ func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uui
 			THEN session_publications.source
 			WHEN session_publications.source IN ('backfill', 'reconciler') THEN EXCLUDED.source
 			ELSE session_publications.source
+		END,
+		trigger_kind = CASE
+			WHEN session_publications.state IN ('completed_noop', 'terminal_failed')
+			 AND EXCLUDED.request_generation_at > session_publications.request_generation_at
+			THEN EXCLUDED.trigger_kind
+			WHEN session_publications.state IN ('completed', 'completed_noop', 'terminal_failed')
+			  OR EXCLUDED.request_generation_at < session_publications.request_generation_at
+			THEN session_publications.trigger_kind
+			WHEN session_publications.source IN ('backfill', 'reconciler')
+			THEN EXCLUDED.trigger_kind
+			ELSE session_publications.trigger_kind
+		END,
+		handoff_mode = CASE
+			WHEN session_publications.state IN ('completed_noop', 'terminal_failed')
+			 AND EXCLUDED.request_generation_at > session_publications.request_generation_at
+			THEN EXCLUDED.handoff_mode
+			WHEN session_publications.state IN ('completed', 'completed_noop', 'terminal_failed')
+			  OR EXCLUDED.request_generation_at < session_publications.request_generation_at
+			THEN session_publications.handoff_mode
+			WHEN session_publications.source IN ('backfill', 'reconciler')
+			THEN EXCLUDED.handoff_mode
+			ELSE session_publications.handoff_mode
+		END,
+		initiated_by_user_id = CASE
+			WHEN session_publications.state IN ('completed_noop', 'terminal_failed')
+			 AND EXCLUDED.request_generation_at > session_publications.request_generation_at
+			THEN EXCLUDED.initiated_by_user_id
+			WHEN session_publications.state IN ('completed', 'completed_noop', 'terminal_failed')
+			  OR EXCLUDED.request_generation_at < session_publications.request_generation_at
+			THEN session_publications.initiated_by_user_id
+			WHEN session_publications.initiated_by_user_id IS NULL
+			  OR session_publications.source IN ('backfill', 'reconciler')
+			THEN EXCLUDED.initiated_by_user_id
+			ELSE session_publications.initiated_by_user_id
+		END,
+		automatic_pr_policy_source = CASE
+			WHEN session_publications.state IN ('completed_noop', 'terminal_failed')
+			 AND EXCLUDED.request_generation_at > session_publications.request_generation_at
+			THEN EXCLUDED.automatic_pr_policy_source
+			WHEN session_publications.state IN ('completed', 'completed_noop', 'terminal_failed')
+			  OR EXCLUDED.request_generation_at < session_publications.request_generation_at
+			THEN session_publications.automatic_pr_policy_source
+			WHEN session_publications.source IN ('backfill', 'reconciler')
+			THEN EXCLUDED.automatic_pr_policy_source
+			ELSE session_publications.automatic_pr_policy_source
+		END,
+		review_policy_source = CASE
+			WHEN session_publications.state IN ('completed_noop', 'terminal_failed')
+			 AND EXCLUDED.request_generation_at > session_publications.request_generation_at
+			THEN EXCLUDED.review_policy_source
+			WHEN session_publications.state IN ('completed', 'completed_noop', 'terminal_failed')
+			  OR EXCLUDED.request_generation_at < session_publications.request_generation_at
+			THEN session_publications.review_policy_source
+			WHEN session_publications.source IN ('backfill', 'reconciler')
+			THEN EXCLUDED.review_policy_source
+			ELSE session_publications.review_policy_source
 		END,
 		review_gate_state = CASE
 			WHEN session_publications.state IN ('completed_noop', 'terminal_failed')
@@ -232,7 +322,11 @@ func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uui
 	RETURNING `+sessionPublicationSelectColumns, pgx.NamedArgs{
 		"org_id": orgID, "session_id": publication.SessionID, "changeset_id": publication.ChangesetID,
 		"repository_id": publication.RepositoryID, "source": publication.Source,
-		"review_gate_state": publication.ReviewGateState, "job_queue": publication.JobQueue,
+		"trigger_kind": publication.TriggerKind, "handoff_mode": publication.HandoffMode,
+		"initiated_by_user_id":       publication.InitiatedByUserID,
+		"automatic_pr_policy_source": publication.AutomaticPolicySource,
+		"review_policy_source":       publication.ReviewPolicySource,
+		"review_gate_state":          publication.ReviewGateState, "job_queue": publication.JobQueue,
 		"request_payload": requestPayload, "request_generation_at": publication.RequestGenerationAt,
 		"base_branch": publication.BaseBranch,
 		"head_branch": publication.HeadBranch, "desired_head_sha": publication.DesiredHeadSHA,

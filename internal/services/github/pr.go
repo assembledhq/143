@@ -570,14 +570,19 @@ func (s *PRService) sessionURL(sessionID uuid.UUID) string {
 // API request (as opposed to org-level defaults). Fields use pointers to
 // distinguish "caller explicitly set this" from "use org default".
 type CreatePRParams struct {
-	Draft                     *bool                             `json:"draft,omitempty"`
-	AuthorMode                string                            `json:"author_mode,omitempty"`
-	ChangesetID               *uuid.UUID                        `json:"changeset_id,omitempty"`
-	PublicationSource         models.SessionPublicationSource   `json:"publication_source,omitempty"`
-	PublicationQueue          models.SessionPublicationJobQueue `json:"-"`
-	PublicationRequestPayload json.RawMessage                   `json:"-"`
-	PublicationGenerationAt   time.Time                         `json:"-"`
-	PublicationHeadBranch     string                            `json:"-"`
+	Draft                     *bool                                `json:"draft,omitempty"`
+	AuthorMode                string                               `json:"author_mode,omitempty"`
+	ChangesetID               *uuid.UUID                           `json:"changeset_id,omitempty"`
+	PublicationSource         models.SessionPublicationSource      `json:"publication_source,omitempty"`
+	PublicationQueue          models.SessionPublicationJobQueue    `json:"-"`
+	PublicationRequestPayload json.RawMessage                      `json:"-"`
+	PublicationGenerationAt   time.Time                            `json:"-"`
+	PublicationHeadBranch     string                               `json:"-"`
+	PublicationTriggerKind    models.SessionPublicationTriggerKind `json:"-"`
+	PublicationHandoffMode    models.PRHandoffMode                 `json:"-"`
+	PublicationInitiatorID    *uuid.UUID                           `json:"-"`
+	AutomaticPolicySource     models.PublicationPolicySource       `json:"-"`
+	ReviewPolicySource        models.PublicationPolicySource       `json:"-"`
 }
 
 // PublicationAttempt is the durable publication request paired with the
@@ -789,18 +794,23 @@ func (s *PRService) PreparePublicationAttempt(
 	params.PublicationHeadBranch = headBranch
 
 	publication := models.SessionPublication{
-		OrgID:               run.OrgID,
-		SessionID:           run.ID,
-		ChangesetID:         changeset.ID,
-		RepositoryID:        *run.RepositoryID,
-		Source:              params.PublicationSource,
-		ReviewGateState:     publicationReviewGateForCreate(run),
-		JobQueue:            queue,
-		RequestPayload:      append(json.RawMessage(nil), payload...),
-		RequestGenerationAt: params.PublicationGenerationAt,
-		BaseBranch:          changeset.BaseBranch,
-		HeadBranch:          headBranch,
-		DesiredHeadSHA:      changeset.HeadSHA,
+		OrgID:                 run.OrgID,
+		SessionID:             run.ID,
+		ChangesetID:           changeset.ID,
+		RepositoryID:          *run.RepositoryID,
+		Source:                params.PublicationSource,
+		TriggerKind:           params.PublicationTriggerKind,
+		HandoffMode:           params.PublicationHandoffMode,
+		InitiatedByUserID:     params.PublicationInitiatorID,
+		AutomaticPolicySource: params.AutomaticPolicySource,
+		ReviewPolicySource:    params.ReviewPolicySource,
+		ReviewGateState:       publicationReviewGateForCreate(run),
+		JobQueue:              queue,
+		RequestPayload:        append(json.RawMessage(nil), payload...),
+		RequestGenerationAt:   params.PublicationGenerationAt,
+		BaseBranch:            changeset.BaseBranch,
+		HeadBranch:            headBranch,
+		DesiredHeadSHA:        changeset.HeadSHA,
 	}
 	if err := s.publications.EnsureRequested(ctx, run.OrgID, &publication); err != nil {
 		return PublicationAttempt{}, fmt.Errorf("ensure session publication: %w", err)

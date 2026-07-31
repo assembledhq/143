@@ -72,6 +72,15 @@ const (
 	httpShutdownTimeout       = 100 * time.Second
 )
 
+// The orchestrator reaches these capabilities through runtime type assertions
+// on its Sessions/Users interfaces (internal/services/agent cannot import
+// internal/db). Assert them here so a store refactor that drops a method is a
+// compile error rather than a silently degraded publication policy at runtime.
+var (
+	_ agent.PublicationIntentLookup = (*db.SessionStore)(nil)
+	_ agent.UserSettingsLookup      = (*db.UserStore)(nil)
+)
+
 func previewDependencyCacheEnabled(cfg config.Config) bool {
 	return strings.TrimSpace(cfg.PreviewDependencyCacheBucket) != ""
 }
@@ -1544,6 +1553,9 @@ func buildServices(
 		InternalAPIURL:             cfg.BaseURL,
 		InternalAPISecret:          cfg.SessionSecret,
 		NodeID:                     cfg.NodeID,
+		AgentPRPromptEnabled:       cfg.AgentPRPromptEnabled && cfg.AgentPRPublicationEnabled,
+		AgentPRPublicationEnabled:  cfg.AgentPRPublicationEnabled,
+		PrePRReviewEnabled:         cfg.PrePRReviewEnabled && cfg.AgentPRPublicationEnabled,
 		Logger:                     logger,
 	})
 

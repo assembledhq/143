@@ -30,6 +30,7 @@ import (
 	humaninputsvc "github.com/assembledhq/143/internal/services/humaninput"
 	"github.com/assembledhq/143/internal/services/linear"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
+	"github.com/assembledhq/143/internal/services/publicationintent"
 	"github.com/assembledhq/143/internal/services/sessiontimeline"
 	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/go-chi/chi/v5"
@@ -96,18 +97,22 @@ type SessionHandler struct {
 	prAuthChecker      interface {
 		HasValidCredential(ctx context.Context, orgID, userID uuid.UUID) (bool, error)
 	}
-	snapshotStore    storage.SnapshotStore // optional — enables snapshot cleanup on archive
-	llmClient        llm.Client            // optional, used for generating manual session titles
-	logger           zerolog.Logger
-	audit            *db.AuditEmitter
-	canceller        SessionCanceller // optional — enables cancelling running sessions
-	workerSelector   sessionWorkerSelector
-	workerClient     sessionWorkerCancelClient
-	localNodeID      string
-	prTitleSyncer    sessionPRTitleSyncer
-	prAuthSigningKey []byte
-	frontendURL      string
-	streams          *cache.SessionStreams
+	snapshotStore                 storage.SnapshotStore // optional — enables snapshot cleanup on archive
+	llmClient                     llm.Client            // optional, used for generating manual session titles
+	logger                        zerolog.Logger
+	audit                         *db.AuditEmitter
+	canceller                     SessionCanceller // optional — enables cancelling running sessions
+	workerSelector                sessionWorkerSelector
+	workerClient                  sessionWorkerCancelClient
+	localNodeID                   string
+	prTitleSyncer                 sessionPRTitleSyncer
+	prAuthSigningKey              []byte
+	publicationPolicyEnabled      bool
+	prePRReviewEnabled            bool
+	publicationCoordinator        publicationintent.PublicationIntentCoordinator
+	publicationCoordinatorEnabled bool
+	frontendURL                   string
+	streams                       *cache.SessionStreams
 	// linearLinker is wired at boot via SetLinearLinker (called from
 	// router.go after the SSE-aware Linear service is constructed). Held
 	// behind an atomic.Pointer holder so a request that lands during boot —
@@ -132,6 +137,72 @@ type SessionHandler struct {
 	// though the setter is conventionally called once per test before any
 	// requests fire.
 	pollOverrideNanos atomic.Int64
+}
+
+func (h *SessionHandler) SetPublicationPolicyEnabled(enabled bool) {
+	h.publicationPolicyEnabled = enabled
+}
+
+func (h *SessionHandler) SetPrePRReviewEnabled(enabled bool) {
+	h.prePRReviewEnabled = enabled
+}
+
+func (h *SessionHandler) SetPublicationIntentCoordinator(
+	coordinator publicationintent.PublicationIntentCoordinator,
+	enabled bool,
+) {
+	h.publicationCoordinator = coordinator
+	h.publicationCoordinatorEnabled = enabled
+}
+
+// resolveSessionPublicationPolicy snapshots the effective publication policy
+// for a session detail response, or returns nil when it cannot be resolved.
+// It is best-effort by design: the policy is advisory UI data, and failing the
+// whole GET over it would make a session with a deleted or relocated initiator
+// permanently unloadable.
+func (h *SessionHandler) resolveSessionPublicationPolicy(
+	ctx context.Context,
+	orgID uuid.UUID,
+	run *models.Session,
+) *models.SessionPublicationPolicy {
+	org, err := h.orgStore.GetByID(ctx, orgID)
+	if err != nil {
+		h.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to load publication policy for session detail")
+		return nil
+	}
+	orgSettings, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		h.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to parse publication policy for session detail")
+		return nil
+	}
+	var personal *models.AutomaticPRFollowThroughSettings
+	if run.TriggeredByUserID != nil && h.userStore != nil {
+		initiator, initiatorErr := h.userStore.GetByIDGlobalWithSettings(ctx, *run.TriggeredByUserID)
+		switch {
+		case initiatorErr != nil:
+			h.logger.Warn().Err(initiatorErr).
+				Str("session_id", run.ID.String()).
+				Msg("falling back to organization publication policy; session initiator could not be loaded")
+		case initiator.OrgID != orgID:
+			h.logger.Warn().
+				Str("session_id", run.ID.String()).
+				Msg("falling back to organization publication policy; session initiator is outside organization scope")
+		default:
+			personal = initiator.Settings.AutomaticPRFollowThrough
+		}
+	}
+	policy := publicationintent.ResolvePolicy(orgSettings.SessionAutomation.AutomaticFollowThrough, personal)
+	return &models.SessionPublicationPolicy{
+		CreatePRWhenAgentReady: policy.CreatePRWhenAgentReady,
+		CreatePRSource:         policy.CreatePRSource,
+		// Mirror the orchestrator's prompt gate: the review is only reported
+		// as on when the cycle can actually run, so the API and the agent
+		// never describe the same policy differently.
+		ReviewBeforePR:  policy.ReviewBeforePR && h.prePRReviewEnabled,
+		ReviewSource:    policy.ReviewSource,
+		ReviewMaxPasses: policy.ReviewMaxPasses,
+		PRHandoffMode:   models.PRHandoffModePrePublish,
+	}
 }
 
 const (
@@ -889,6 +960,12 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 	h.enrichSessionLinks(r.Context(), orgID, &run)
 
 	detail := models.SessionDetail{Session: run}
+	if h.publicationPolicyEnabled && h.orgStore != nil {
+		// Advisory display data. A session whose initiator was deleted or
+		// moved orgs must still load, so every failure here omits the block
+		// rather than failing the whole session detail.
+		detail.PublicationPolicy = h.resolveSessionPublicationPolicy(r.Context(), orgID, &run)
+	}
 	changesets, err := h.listChangesetSummaries(r.Context(), orgID, runID)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CHANGESETS_FAILED", "failed to load pull requests", err)
@@ -2856,6 +2933,87 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		Draft:                req.Draft,
 		MergeWhenReady:       req.MergeWhenReady,
 	}) {
+		return
+	}
+	if h.publicationCoordinatorEnabled && targetChangeset.IsPrimary {
+		if h.publicationCoordinator == nil {
+			writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "publication coordinator is unavailable")
+			return
+		}
+		var requestedByUserID *uuid.UUID
+		if user := middleware.UserFromContext(r.Context()); user != nil {
+			requestedByUserID = &user.ID
+		}
+		if req.MergeWhenReady && requestedByUserID == nil {
+			writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "not authenticated")
+			return
+		}
+		intentResult, intentErr := h.publicationCoordinator.RequestPullRequest(r.Context(), orgID, sessionID, publicationintent.RequestPullRequest{
+			Draft: req.Draft, AuthorMode: string(authorMode),
+			// An authenticated operator clicked "Create PR" in the UI.
+			Source:         models.SessionPublicationSourceUser,
+			TriggerKind:    models.SessionPublicationTriggerExplicitAction,
+			MergeWhenReady: req.MergeWhenReady, RequestedByUserID: requestedByUserID,
+			RequestedRole: middleware.ActiveRoleFromContext(r.Context()),
+		})
+		if intentErr != nil {
+			var typedErr *publicationintent.Error
+			if errors.As(intentErr, &typedErr) {
+				switch typedErr.Code {
+				case publicationintent.ErrorSessionNotEligible, publicationintent.ErrorWorkspaceNotReady, publicationintent.ErrorPRInFlight:
+					writeError(w, r, http.StatusConflict, string(typedErr.Code), "pull request publication request was rejected", intentErr)
+				default:
+					writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "failed to record publication intent", intentErr)
+				}
+				return
+			}
+			writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "failed to record publication intent", intentErr)
+			return
+		}
+		// Not every non-error outcome means the job is on the queue. Reporting
+		// "queued" for the others would leave the operator watching a UI that
+		// never moves, so each maps onto a response this endpoint already
+		// returns for the same underlying condition.
+		if intentResult == nil {
+			writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "publication coordinator returned no result")
+			return
+		}
+		switch intentResult.Status {
+		case publicationintent.ResultPRQueued:
+			// Fall through to the audit event and the queued response.
+		case publicationintent.ResultAlreadyPublished:
+			writeError(w, r, http.StatusConflict, "PR_EXISTS", "a pull request already exists for this session")
+			return
+		case publicationintent.ResultBlocked:
+			// The intent is durable and reconciliation will retry it, but
+			// nothing was enqueued and the changeset never entered the queued
+			// state — that write lives in the same rolled-back transaction.
+			// Match the legacy enqueue-failure contract so retrying is the
+			// obvious next step; retries are idempotent.
+			h.logger.Error().
+				Str("session_id", sessionID.String()).
+				Msg("publication intent recorded but enqueue failed; awaiting reconciliation")
+			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation job")
+			return
+		default:
+			message := "pull request creation was not queued"
+			if intentResult.Reason != nil {
+				message = *intentResult.Reason
+			}
+			writeError(w, r, http.StatusConflict, "PUBLICATION_NOT_QUEUED", message)
+			return
+		}
+		sessionIDStr := sessionID.String()
+		prDetails := sessionAuditSnapshot(&session, nil, map[string]any{"job_type": "open_pr"})
+		if req.Draft != nil {
+			prDetails["draft"] = *req.Draft
+		}
+		if req.MergeWhenReady {
+			prDetails["merge_when_ready"] = true
+		}
+		emitUserAuditWithSession(h.audit, r, models.AuditActionSessionPRRequested, models.AuditResourceSession, &sessionIDStr, &session.ID, nil,
+			marshalAuditDetails(h.logger, prDetails))
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
 		return
 	}
 

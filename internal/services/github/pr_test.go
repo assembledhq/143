@@ -6408,8 +6408,12 @@ func TestPreparePublicationAttemptPersistsExactBranchAndGatesTerminalReplay(t *t
 			mock.ExpectQuery("INSERT INTO session_publications").WithArgs(pgx.NamedArgs{
 				"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
 				"repository_id": repositoryID, "source": models.SessionPublicationSourceUser,
-				"review_gate_state": models.SessionPublicationReviewGateNotRequired,
-				"job_queue":         models.SessionPublicationJobQueueAgent, "request_payload": string(payload),
+				"trigger_kind": models.SessionPublicationTriggerPolicy, "handoff_mode": models.PRHandoffModePrePublish,
+				"initiated_by_user_id":       (*uuid.UUID)(nil),
+				"automatic_pr_policy_source": models.PublicationPolicySourceProductDefault,
+				"review_policy_source":       models.PublicationPolicySourceProductDefault,
+				"review_gate_state":          models.SessionPublicationReviewGateNotRequired,
+				"job_queue":                  models.SessionPublicationJobQueueAgent, "request_payload": string(payload),
 				"request_generation_at": now,
 				"base_branch":           "main", "head_branch": headBranch, "desired_head_sha": (*string)(nil),
 			}).WillReturnRows(pgxmock.NewRows(publicationHealthTestColumns).AddRow(publicationHealthTestRow(stored)...))
@@ -6590,6 +6594,8 @@ func TestCheckpointExistingPullRequestPublicationReplaysDurableCheckpoints(t *te
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows(publicationHealthTestColumns).AddRow(publicationHealthTestRow(storedPublication)...))
@@ -6658,7 +6664,7 @@ func TestCheckpointExistingPullRequestPublicationPreservesMergedLifecycle(t *tes
 		RequestedAt: now, CreatedAt: now, UpdatedAt: now,
 	}
 
-	mock.ExpectQuery("INSERT INTO session_publications").WithArgs(githubAnyArgs(12)...).
+	mock.ExpectQuery("INSERT INTO session_publications").WithArgs(githubAnyArgs(17)...).
 		WillReturnRows(pgxmock.NewRows(publicationHealthTestColumns).AddRow(publicationHealthTestRow(storedPublication)...))
 	mock.ExpectExec("UPDATE session_publications[\\s\\S]*published_head_sha").WithArgs(pgx.NamedArgs{
 		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "head_sha": headSHA,

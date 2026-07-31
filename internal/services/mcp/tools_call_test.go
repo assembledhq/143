@@ -884,7 +884,7 @@ func TestCallToolIssueCreatorUnknownMethod(t *testing.T) {
 func TestCallToolPullRequestCreatorCreate(t *testing.T) {
 	t.Parallel()
 	tr := NewToolRegistry(buildFullTestRegistry())
-	args := `{"session_id":"session-123","draft":true,"author_mode":"app"}`
+	args := `{"session_id":"session-123","draft":true,"author_mode":"app","trigger_kind":"explicit_action"}`
 	result := tr.CallTool(context.Background(), "create_pr", json.RawMessage(args))
 
 	if result.IsError {

@@ -94,6 +94,17 @@ func buildSystemPrompt(input *agent.AgentInput) string {
 			b.WriteString("\n\n")
 		}
 	}
+	if input != nil && input.PRHandoffPolicy != nil {
+		handoff := prompts.AgentPRHandoff(prompts.AgentPRHandoffData{
+			AutomaticHandoff: input.PRHandoffPolicy.AutomaticHandoff,
+			ReviewBeforePR:   input.PRHandoffPolicy.ReviewBeforePR,
+			ReviewMaxPasses:  input.PRHandoffPolicy.ReviewMaxPasses,
+		})
+		b.WriteString(handoff)
+		if !strings.HasSuffix(handoff, "\n\n") {
+			b.WriteString("\n\n")
+		}
+	}
 
 	// Repo conventions from context docs.
 	if len(input.ContextDocs) > 0 {

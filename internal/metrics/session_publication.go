@@ -17,8 +17,10 @@ var (
 // durable branch/PR publication state machine. Identifiers deliberately stay
 // in structured logs; metrics only carry state, source, and outcome.
 type SessionPublicationMetrics struct {
-	TransitionsTotal     otelmetric.Int64Counter
-	ReconciliationsTotal otelmetric.Int64Counter
+	TransitionsTotal          otelmetric.Int64Counter
+	ReconciliationsTotal      otelmetric.Int64Counter
+	AgentPRIntentsTotal       otelmetric.Int64Counter
+	AgentPRIntentMissingTotal otelmetric.Int64Counter
 }
 
 func getSessionPublicationMetrics() *SessionPublicationMetrics {
@@ -42,12 +44,54 @@ func getSessionPublicationMetrics() *SessionPublicationMetrics {
 			otel.Handle(err)
 			return
 		}
+		agentPRIntents, err := meter.Int64Counter(
+			"agent_pr_intents",
+			otelmetric.WithDescription("Agent PR publication intents by source and outcome"),
+			otelmetric.WithUnit("{intent}"),
+		)
+		if err != nil {
+			otel.Handle(err)
+			return
+		}
+		agentPRIntentMissing, err := meter.Int64Counter(
+			"agent_pr_intent_missing",
+			otelmetric.WithDescription("Eligible agent turns ending with a diff but no publication intent"),
+			otelmetric.WithUnit("{turn}"),
+		)
+		if err != nil {
+			otel.Handle(err)
+			return
+		}
 		sessionPublicationMetrics = &SessionPublicationMetrics{
-			TransitionsTotal:     transitions,
-			ReconciliationsTotal: reconciliations,
+			TransitionsTotal:          transitions,
+			ReconciliationsTotal:      reconciliations,
+			AgentPRIntentsTotal:       agentPRIntents,
+			AgentPRIntentMissingTotal: agentPRIntentMissing,
 		}
 	})
 	return sessionPublicationMetrics
+}
+
+func RecordAgentPRIntentMissing(ctx context.Context, agentType, sessionOrigin string) {
+	metrics := getSessionPublicationMetrics()
+	if metrics == nil || metrics.AgentPRIntentMissingTotal == nil {
+		return
+	}
+	metrics.AgentPRIntentMissingTotal.Add(ctx, 1, otelmetric.WithAttributes(
+		attrString("agent_type", agentType),
+		attrString("session_origin", sessionOrigin),
+	))
+}
+
+func RecordAgentPRIntent(ctx context.Context, source, outcome string) {
+	metrics := getSessionPublicationMetrics()
+	if metrics == nil || metrics.AgentPRIntentsTotal == nil {
+		return
+	}
+	metrics.AgentPRIntentsTotal.Add(ctx, 1, otelmetric.WithAttributes(
+		attrString("source", source),
+		attrString("outcome", outcome),
+	))
 }
 
 func RecordSessionPublicationTransition(ctx context.Context, state, source string) {

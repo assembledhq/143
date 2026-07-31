@@ -403,9 +403,10 @@ func (tr *ToolRegistry) ListTools() []Tool {
 				InputSchema: ToolSchema{
 					Type: "object",
 					Properties: map[string]SchemaProperty{
-						"session_id":  {Type: "string", Description: "Session UUID. Omit inside a session sandbox; the server derives it from the signed internal token."},
-						"draft":       {Type: "boolean", Description: "Whether to create a draft PR. Omit to use the repo default."},
-						"author_mode": {Type: "string", Description: "PR author mode. Omit to use the default (auto).", Enum: []string{"auto", "app", "user"}},
+						"session_id":   {Type: "string", Description: "Session UUID. Omit inside a session sandbox; the server derives it from the signed internal token."},
+						"draft":        {Type: "boolean", Description: "Whether to create a draft PR. Omit to use the repo default."},
+						"author_mode":  {Type: "string", Description: "PR author mode. Omit to use the default (auto).", Enum: []string{"auto", "app", "user"}},
+						"trigger_kind": {Type: "string", Description: "Set to explicit_action only when the user directly requested PR creation; otherwise omit.", Enum: []string{"explicit_action"}},
 					},
 				},
 			},
@@ -1321,9 +1322,10 @@ func (tr *ToolRegistry) callPullRequestCreator(ctx context.Context, pc integrati
 	switch method {
 	case "create_pr":
 		var p struct {
-			SessionID  string          `json:"session_id"`
-			Draft      json.RawMessage `json:"draft"`
-			AuthorMode string          `json:"author_mode"`
+			SessionID   string          `json:"session_id"`
+			Draft       json.RawMessage `json:"draft"`
+			AuthorMode  string          `json:"author_mode"`
+			TriggerKind string          `json:"trigger_kind"`
 		}
 		if err := json.Unmarshal(args, &p); err != nil && len(args) > 0 {
 			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
@@ -1348,9 +1350,10 @@ func (tr *ToolRegistry) callPullRequestCreator(ctx context.Context, pc integrati
 			draft = &b
 		}
 		result, err := pc.CreatePullRequest(ctx, integration.CreatePullRequestParams{
-			SessionID:  p.SessionID,
-			Draft:      draft,
-			AuthorMode: p.AuthorMode,
+			SessionID:   p.SessionID,
+			Draft:       draft,
+			AuthorMode:  p.AuthorMode,
+			TriggerKind: p.TriggerKind,
 		})
 		if err != nil {
 			return ErrorResult(fmt.Sprintf("create pull request failed: %s", err))

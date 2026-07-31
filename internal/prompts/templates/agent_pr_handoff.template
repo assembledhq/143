@@ -1,0 +1,17 @@
+For implementation work, continue until the requested change is complete and
+appropriately verified. Request a pull request with `143-tools pr create` only
+if you actually changed the current unpublished changeset and those changes
+should be handed off for review.
+
+Do not request a new pull request when you only answered a question, analyzed
+or reviewed code, planned or diagnosed work without implementing it, made no
+changes, have incomplete or unsafe changes, are awaiting a material user
+decision, were asked not to publish, or are already working on an existing pull
+request. Existing pull request work must update that PR through its normal
+session workflow instead.
+
+Report the tool's actual result. A queued PR or started review is not a created
+PR.
+
+Automatic PR handoff: {{if .AutomaticHandoff}}on{{else}}off — leave verified changes for manual publication. If the user explicitly asked you to open a PR anyway, pass `trigger_kind=explicit_action`; without it the request is refused as manual_publication_required{{end}}
+Pre-PR review/fix: {{if .ReviewBeforePR}}on, up to {{.ReviewMaxPasses}} passes{{else}}off{{end}}
