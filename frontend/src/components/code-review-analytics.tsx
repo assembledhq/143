@@ -4,6 +4,7 @@ import { ChartNoAxesColumnIncreasing } from "lucide-react";
 import { EmptyState } from "@/components/empty-state";
 import { SectionGroup } from "@/components/section-group";
 import { Badge } from "@/components/ui/badge";
+import { SortableTableHeader, sortDirectionAriaValue } from "@/components/sortable-table-header";
 import { Card, CardContent } from "@/components/ui/card";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -18,6 +19,7 @@ const SIZE_BUCKET_LABELS: Record<CodeReviewSizeBucket, string> = {
   "200_499": "200–499 total lines",
   "500_plus": "500+ total lines",
 };
+type AuthorSort = "author" | "reviews" | "approved" | "not_approved" | "approval_rate" | "split_sample" | "average_additions" | "median_additions" | "average_deletions" | "median_deletions";
 
 const NON_APPROVAL_REASON_LABELS: Record<string, string> = {
   reviewer_disabled: "Automatic approval was disabled",
@@ -86,16 +88,9 @@ function MetricCard({
   );
 }
 
-function LoadingReport() {
-  return (
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Loading code review analytics">
-      {["Reviews completed", "Automatically approved", "Not approved", "Approval rate"].map((label) => (
-        <MetricCard key={label} label={label} value="—" context="Loading selected time window" />
-      ))}
-    </div>
-  );
-}
-
+// Derived from the same report as the tables below, so the headline numbers
+// always agree with them. The reviews tab's cards deliberately describe current
+// review activity only and answer a different question.
 function ApprovalOutcomeCards({ summary }: { summary: CodeReviewAnalytics["summary"] }) {
   return (
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Approval outcomes">
@@ -128,14 +123,20 @@ export function CodeReviewAnalyticsReport({
   isLoading,
   isError,
   onRetry,
+  authorSort,
+  authorSortOrder,
+  onAuthorSort,
 }: {
   analytics?: CodeReviewAnalytics;
   isLoading: boolean;
   isError: boolean;
   onRetry: () => void;
+  authorSort: AuthorSort;
+  authorSortOrder: "asc" | "desc";
+  onAuthorSort: (sort: AuthorSort, order: "asc" | "desc") => void;
 }) {
   if (!analytics && isLoading) {
-    return <LoadingReport />;
+    return <p className="py-12 text-center text-sm text-muted-foreground">Loading code review analytics…</p>;
   }
   if (!analytics) {
     return (
@@ -148,6 +149,19 @@ export function CodeReviewAnalyticsReport({
   }
 
   const { summary } = analytics;
+  const authorHeader = (label: string, sort: AuthorSort) => {
+    const active = authorSort === sort;
+    return (
+      <SortableTableHeader
+        label={label}
+        direction={active ? authorSortOrder : false}
+        align={sort === "author" ? "left" : "right"}
+        // The author table always has an ordering, so allowUnsorted stays off
+        // and the callback only ever receives a direction.
+        onSort={(next) => { if (next) onAuthorSort(sort, next); }}
+      />
+    );
+  };
   if (summary.reviews_requested === 0) {
     return (
       <div className="space-y-3">
@@ -210,16 +224,26 @@ export function CodeReviewAnalyticsReport({
             <Table aria-label="Code review analytics by PR author">
               <TableHeader>
                 <TableRow>
-                  <TableHead>PR author</TableHead>
-                  <TableHead className="text-right">Reviews</TableHead>
-                  <TableHead className="text-right">Approved</TableHead>
-                  <TableHead className="text-right">Not approved</TableHead>
-                  <TableHead className="text-right">Approval rate</TableHead>
-                  <TableHead className="text-right">Split sample</TableHead>
-                  <TableHead className="text-right">Avg. additions</TableHead>
-                  <TableHead className="text-right">Median additions</TableHead>
-                  <TableHead className="text-right">Avg. deletions</TableHead>
-                  <TableHead className="text-right">Median deletions</TableHead>
+                  {([
+                    ["PR author", "author"],
+                    ["Reviews", "reviews"],
+                    ["Approved", "approved"],
+                    ["Not approved", "not_approved"],
+                    ["Approval rate", "approval_rate"],
+                    ["Split sample", "split_sample"],
+                    ["Avg. additions", "average_additions"],
+                    ["Median additions", "median_additions"],
+                    ["Avg. deletions", "average_deletions"],
+                    ["Median deletions", "median_deletions"],
+                  ] as const).map(([label, sort]) => (
+                    <TableHead
+                      key={sort}
+                      className={sort === "author" ? undefined : "text-right"}
+                      aria-sort={sortDirectionAriaValue(authorSort === sort ? authorSortOrder : false)}
+                    >
+                      {authorHeader(label, sort)}
+                    </TableHead>
+                  ))}
                 </TableRow>
               </TableHeader>
               <TableBody>
