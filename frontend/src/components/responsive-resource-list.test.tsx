@@ -75,4 +75,26 @@ describe("ResponsiveResourceList", () => {
     );
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });
+
+  it("exposes shared sortable-column state on the column header", () => {
+    render(
+      <ResponsiveResourceList
+        ariaLabel="Automations"
+        items={[{ id: "automation-1", name: "Release check", status: "Enabled" }]}
+        getItemKey={(item) => item.id}
+        columns={[
+          {
+            id: "name",
+            header: "Name",
+            sortDirection: "desc",
+            render: (item) => item.name,
+          },
+        ]}
+        emptyState="No automations."
+        renderMobileItem={(item) => <div>{item.name}</div>}
+      />,
+    );
+
+    expect(screen.getByRole("columnheader", { name: "Name" })).toHaveAttribute("aria-sort", "descending");
+  });
 });

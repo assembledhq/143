@@ -11,10 +11,12 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { sortDirectionAriaValue, type SortDirection } from "@/components/sortable-table-header";
 
 export type ResponsiveResourceListColumn<TItem> = {
   id: string;
   header: ReactNode;
+  sortDirection?: SortDirection | false;
   className?: string;
   cellClassName?: string;
   render: (item: TItem) => ReactNode;
@@ -69,7 +71,11 @@ export function ResponsiveResourceList<TItem>({
             <TableHeader>
               <TableRow>
                 {columns.map((column) => (
-                  <TableHead key={column.id} className={column.className}>
+                  <TableHead
+                    key={column.id}
+                    className={column.className}
+                    aria-sort={column.sortDirection === undefined ? undefined : sortDirectionAriaValue(column.sortDirection)}
+                  >
                     {column.header}
                   </TableHead>
                 ))}
