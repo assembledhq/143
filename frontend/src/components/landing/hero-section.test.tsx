@@ -32,8 +32,8 @@ describe("HeroSection", () => {
 
     expect(screen.getByTestId("hero-canvas")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Ship as fast as you build" })).toBeInTheDocument();
-    expect(screen.getByText(/Review loops auto-approve pull requests that pass your policy/)).toBeInTheDocument();
-    expect(screen.getByText(/Codex, Claude Code, and OpenCode run in an open-source cloud/)).toBeInTheDocument();
+    expect(screen.getByText(/Run Codex, Claude Code, and OpenCode in an open-source cloud/)).toBeInTheDocument();
+    expect(screen.getByText(/review loops auto-approve the pull requests that pass your policy/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /get started/i })).toHaveClass("bg-[#315ce8]");
     expect(screen.queryByText(/mission control/i)).not.toBeInTheDocument();
   });
