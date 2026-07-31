@@ -215,10 +215,7 @@ export function CodeReviewAnalyticsReport({
                   <TableHead className="text-right">Approved</TableHead>
                   <TableHead className="text-right">Not approved</TableHead>
                   <TableHead className="text-right">Approval rate</TableHead>
-                  <TableHead className="text-right">Split sample</TableHead>
-                  <TableHead className="text-right">Avg. additions</TableHead>
                   <TableHead className="text-right">Median additions</TableHead>
-                  <TableHead className="text-right">Avg. deletions</TableHead>
                   <TableHead className="text-right">Median deletions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -232,12 +229,7 @@ export function CodeReviewAnalyticsReport({
                     <TableCell className="text-right tabular-nums">
                       {percentage(author.automatically_approved, author.reviews_completed)}
                     </TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {author.reviews_with_change_breakdown.toLocaleString()} / {author.reviews_completed.toLocaleString()}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">{roundedMetric(author.average_additions)}</TableCell>
                     <TableCell className="text-right tabular-nums">{roundedMetric(author.median_additions)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{roundedMetric(author.average_deletions)}</TableCell>
                     <TableCell className="text-right tabular-nums">{roundedMetric(author.median_deletions)}</TableCell>
                   </TableRow>
                 ))}
