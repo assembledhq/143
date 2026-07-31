@@ -59,6 +59,11 @@ function roundedMetric(value: number | null): string {
   return Math.round(value).toLocaleString();
 }
 
+function signedRoundedMetric(value: number | null, sign: "+" | "-"): string {
+  const formatted = roundedMetric(value);
+  return formatted === "—" ? formatted : `${sign}${formatted}`;
+}
+
 function reasonLabel(code: string): string {
   const known = NON_APPROVAL_REASON_LABELS[code];
   if (known) return known;
@@ -229,8 +234,8 @@ export function CodeReviewAnalyticsReport({
                     <TableCell className="text-right tabular-nums">
                       {percentage(author.automatically_approved, author.reviews_completed)}
                     </TableCell>
-                    <TableCell className="text-right tabular-nums">{roundedMetric(author.median_additions)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{roundedMetric(author.median_deletions)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{signedRoundedMetric(author.median_additions, "+")}</TableCell>
+                    <TableCell className="text-right tabular-nums">{signedRoundedMetric(author.median_deletions, "-")}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>

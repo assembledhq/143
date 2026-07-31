@@ -650,8 +650,8 @@ describe("CodeReviewsPage", () => {
       "9",
       "3",
       "75%",
-      "52",
-      "20",
+      "+52",
+      "-20",
     ]);
     await waitFor(() => expect(analyticsRequests).toHaveLength(1));
     expectCreatedAfterDaysAgo(analyticsRequests[0]?.get("created_after") ?? undefined, 30);
