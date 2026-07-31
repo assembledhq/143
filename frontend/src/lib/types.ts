@@ -324,8 +324,6 @@ export interface CodeReviewStats {
   median_turnaround_seconds: number | null;
 }
 
-export type CodeReviewSizeBucket = "0_49" | "50_199" | "200_499" | "500_plus";
-
 export interface CodeReviewAnalyticsSummary {
   reviews_requested: number;
   reviews_completed: number;
@@ -337,18 +335,6 @@ export interface CodeReviewAnalyticsSummary {
   approval_not_posted: number;
   failed_reviews: number;
   stale_reviews: number;
-  reviews_with_size_data: number;
-  reviews_with_change_breakdown: number;
-  average_lines_changed: number | null;
-  median_lines_changed: number | null;
-  average_additions: number | null;
-  median_additions: number | null;
-  average_deletions: number | null;
-  median_deletions: number | null;
-  average_files_changed: number | null;
-  median_files_changed: number | null;
-  reviews_above_size_limit: number;
-  approvals_above_size_limit: number;
   reviews_with_findings: number;
   reviews_with_blocking_findings: number;
   total_findings: number;
@@ -359,20 +345,11 @@ export interface CodeReviewAuthorAnalytics {
   reviews_completed: number;
   automatically_approved: number;
   not_approved: number;
-  reviews_with_size_data: number;
   reviews_with_change_breakdown: number;
-  average_lines_changed: number | null;
-  median_lines_changed: number | null;
   average_additions: number | null;
   median_additions: number | null;
   average_deletions: number | null;
   median_deletions: number | null;
-}
-
-export interface CodeReviewSizeBucketAnalytics {
-  bucket: CodeReviewSizeBucket;
-  reviews_completed: number;
-  automatically_approved: number;
 }
 
 export interface CodeReviewNonApprovalReasonAnalytics {
@@ -383,7 +360,6 @@ export interface CodeReviewNonApprovalReasonAnalytics {
 export interface CodeReviewAnalytics {
   summary: CodeReviewAnalyticsSummary;
   authors: CodeReviewAuthorAnalytics[];
-  size_buckets: CodeReviewSizeBucketAnalytics[];
   non_approval_reasons: CodeReviewNonApprovalReasonAnalytics[];
 }
 

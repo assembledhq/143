@@ -949,50 +949,20 @@ type CodeReviewStats struct {
 	MedianTurnaroundSeconds *float64 `json:"median_turnaround_seconds"`
 }
 
-type CodeReviewSizeBucket string
-
-const (
-	CodeReviewSizeBucketSmall  CodeReviewSizeBucket = "0_49"
-	CodeReviewSizeBucketMedium CodeReviewSizeBucket = "50_199"
-	CodeReviewSizeBucketLarge  CodeReviewSizeBucket = "200_499"
-	CodeReviewSizeBucketXLarge CodeReviewSizeBucket = "500_plus"
-)
-
-func (b CodeReviewSizeBucket) Validate() error {
-	switch b {
-	case CodeReviewSizeBucketSmall, CodeReviewSizeBucketMedium, CodeReviewSizeBucketLarge, CodeReviewSizeBucketXLarge:
-		return nil
-	default:
-		return fmt.Errorf("invalid CodeReviewSizeBucket: %q", b)
-	}
-}
-
 type CodeReviewAnalyticsSummary struct {
-	ReviewsRequested            int64    `json:"reviews_requested"`
-	ReviewsCompleted            int64    `json:"reviews_completed"`
-	AutomaticallyApproved       int64    `json:"automatically_approved"`
-	NotApproved                 int64    `json:"not_approved"`
-	NeedsHumanReview            int64    `json:"needs_human_review"`
-	CommentOnly                 int64    `json:"comment_only"`
-	Blocked                     int64    `json:"blocked"`
-	ApprovalNotPosted           int64    `json:"approval_not_posted"`
-	FailedReviews               int64    `json:"failed_reviews"`
-	StaleReviews                int64    `json:"stale_reviews"`
-	ReviewsWithSizeData         int64    `json:"reviews_with_size_data"`
-	ReviewsWithChangeBreakdown  int64    `json:"reviews_with_change_breakdown"`
-	AverageLinesChanged         *float64 `json:"average_lines_changed"`
-	MedianLinesChanged          *float64 `json:"median_lines_changed"`
-	AverageAdditions            *float64 `json:"average_additions"`
-	MedianAdditions             *float64 `json:"median_additions"`
-	AverageDeletions            *float64 `json:"average_deletions"`
-	MedianDeletions             *float64 `json:"median_deletions"`
-	AverageFilesChanged         *float64 `json:"average_files_changed"`
-	MedianFilesChanged          *float64 `json:"median_files_changed"`
-	ReviewsAboveSizeLimit       int64    `json:"reviews_above_size_limit"`
-	ApprovalsAboveSizeLimit     int64    `json:"approvals_above_size_limit"`
-	ReviewsWithFindings         int64    `json:"reviews_with_findings"`
-	ReviewsWithBlockingFindings int64    `json:"reviews_with_blocking_findings"`
-	TotalFindings               int64    `json:"total_findings"`
+	ReviewsRequested            int64 `json:"reviews_requested"`
+	ReviewsCompleted            int64 `json:"reviews_completed"`
+	AutomaticallyApproved       int64 `json:"automatically_approved"`
+	NotApproved                 int64 `json:"not_approved"`
+	NeedsHumanReview            int64 `json:"needs_human_review"`
+	CommentOnly                 int64 `json:"comment_only"`
+	Blocked                     int64 `json:"blocked"`
+	ApprovalNotPosted           int64 `json:"approval_not_posted"`
+	FailedReviews               int64 `json:"failed_reviews"`
+	StaleReviews                int64 `json:"stale_reviews"`
+	ReviewsWithFindings         int64 `json:"reviews_with_findings"`
+	ReviewsWithBlockingFindings int64 `json:"reviews_with_blocking_findings"`
+	TotalFindings               int64 `json:"total_findings"`
 }
 
 type CodeReviewAuthorAnalytics struct {
@@ -1000,20 +970,11 @@ type CodeReviewAuthorAnalytics struct {
 	ReviewsCompleted           int64    `db:"reviews_completed" json:"reviews_completed"`
 	AutomaticallyApproved      int64    `db:"automatically_approved" json:"automatically_approved"`
 	NotApproved                int64    `db:"not_approved" json:"not_approved"`
-	ReviewsWithSizeData        int64    `db:"reviews_with_size_data" json:"reviews_with_size_data"`
 	ReviewsWithChangeBreakdown int64    `db:"reviews_with_change_breakdown" json:"reviews_with_change_breakdown"`
-	AverageLinesChanged        *float64 `db:"average_lines_changed" json:"average_lines_changed"`
-	MedianLinesChanged         *float64 `db:"median_lines_changed" json:"median_lines_changed"`
 	AverageAdditions           *float64 `db:"average_additions" json:"average_additions"`
 	MedianAdditions            *float64 `db:"median_additions" json:"median_additions"`
 	AverageDeletions           *float64 `db:"average_deletions" json:"average_deletions"`
 	MedianDeletions            *float64 `db:"median_deletions" json:"median_deletions"`
-}
-
-type CodeReviewSizeBucketAnalytics struct {
-	Bucket                CodeReviewSizeBucket `db:"bucket" json:"bucket"`
-	ReviewsCompleted      int64                `db:"reviews_completed" json:"reviews_completed"`
-	AutomaticallyApproved int64                `db:"automatically_approved" json:"automatically_approved"`
 }
 
 type CodeReviewNonApprovalReasonAnalytics struct {
@@ -1024,7 +985,6 @@ type CodeReviewNonApprovalReasonAnalytics struct {
 type CodeReviewAnalytics struct {
 	Summary            CodeReviewAnalyticsSummary             `json:"summary"`
 	Authors            []CodeReviewAuthorAnalytics            `json:"authors"`
-	SizeBuckets        []CodeReviewSizeBucketAnalytics        `json:"size_buckets"`
 	NonApprovalReasons []CodeReviewNonApprovalReasonAnalytics `json:"non_approval_reasons"`
 }
 

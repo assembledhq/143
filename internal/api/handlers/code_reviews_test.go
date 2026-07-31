@@ -425,17 +425,10 @@ func TestCodeReviewHandler_AnalyticsReturnsReport(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{
 			"reviews_requested", "reviews_completed", "automatically_approved", "not_approved",
 			"needs_human_review", "comment_only", "blocked", "approval_not_posted",
-			"failed_reviews", "stale_reviews", "reviews_with_size_data",
-			"reviews_with_change_breakdown", "average_lines_changed", "median_lines_changed",
-			"average_additions", "median_additions", "average_deletions", "median_deletions",
-			"average_files_changed", "median_files_changed",
-			"reviews_above_size_limit", "approvals_above_size_limit", "reviews_with_findings",
-			"reviews_with_blocking_findings", "total_findings", "authors", "size_buckets",
-			"non_approval_reasons",
+			"failed_reviews", "stale_reviews", "reviews_with_findings",
+			"reviews_with_blocking_findings", "total_findings", "authors", "non_approval_reasons",
 		}).AddRow(
-			6, 5, 3, 2, 2, 0, 0, 0, 1, 0, 0,
-			0, -1, -1, -1, -1, -1, -1, -1, -1,
-			0, 0, 1, 1, 2, []byte(`[]`), []byte(`[]`), []byte(`[]`),
+			6, 5, 3, 2, 2, 0, 0, 0, 1, 0, 1, 1, 2, []byte(`[]`), []byte(`[]`),
 		))
 	handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-reviews/analytics?repository_id="+repositoryID.String(), nil)
@@ -458,27 +451,14 @@ func TestCodeReviewHandler_AnalyticsReturnsReport(t *testing.T) {
 				"approval_not_posted": 0,
 				"failed_reviews": 1,
 				"stale_reviews": 0,
-				"reviews_with_size_data": 0,
-				"reviews_with_change_breakdown": 0,
-				"average_lines_changed": null,
-				"median_lines_changed": null,
-				"average_additions": null,
-				"median_additions": null,
-				"average_deletions": null,
-				"median_deletions": null,
-				"average_files_changed": null,
-				"median_files_changed": null,
-				"reviews_above_size_limit": 0,
-				"approvals_above_size_limit": 0,
 				"reviews_with_findings": 1,
 				"reviews_with_blocking_findings": 1,
 				"total_findings": 2
 			},
 			"authors": [],
-			"size_buckets": [],
 			"non_approval_reasons": []
 		}
-	}`, rr.Body.String(), "analytics should return exact nullable metrics and empty breakdowns")
+	}`, rr.Body.String(), "analytics should return exact outcome metrics and empty breakdowns")
 	require.NoError(t, mock.ExpectationsWereMet(), "analytics handler should apply the repository scope to every query")
 }
 

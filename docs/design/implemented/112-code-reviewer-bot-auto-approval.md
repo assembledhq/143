@@ -37,7 +37,7 @@ Implemented:
 - productized GitHub team-trigger setup that creates or repairs the `143-code-reviewer` org team, grants repository read access, and persists repo-scoped active trigger settings
 - final-review template rendering from persisted policy data with safe fallback to the built-in body
 - `/api/v1/code-reviews`, `/api/v1/code-reviews/stats`, `/api/v1/code-reviews/analytics`, `/api/v1/code-reviews/templates`, `/api/v1/code-reviews/{id}/evidence`, `/api/v1/code-review-policies`, and `/api/v1/code-review-github-trigger` API surface
-- top-level `Code reviews` dashboard surface with Reviews, Analytics, and Policy tabs; repository/decision/risk/status/search filtering; approval-usage, PR-size, PR-author, finding, and non-approval-reason reporting; and organization-wide policy controls
+- top-level `Code reviews` dashboard surface with Reviews, Analytics, and Policy tabs; repository/decision/risk/status/search filtering; approval-usage, PR-author, finding, and non-approval-reason reporting; and organization-wide policy controls
 
 Deferred:
 
@@ -220,7 +220,7 @@ Recommended tabs:
 | Tab | Purpose |
 | --- | --- |
 | Reviews | Filtered session list containing code review sessions, with PR, repository, author, risk, decision, operational phase/status, retry time or failure action, requested-at, and completed-at columns. |
-| Analytics | Time-window and repository-scoped approval outcomes, PR-author usage, addition/deletion/file distributions, total-line size buckets, historical-policy size-limit hits, finding rates, and structured non-approval reasons. |
+| Analytics | Time-window and repository-scoped approval outcomes, PR-author usage with addition/deletion distributions, finding rates, and structured non-approval reasons. |
 | Policy | Organization-wide code review policy: enablement, description requirements, risk thresholds, agent roster, orchestrator, approval guidance, and repository-specific GitHub trigger setup. |
 
 The Reviews tab reuses the normal session list/detail route. Primary action opens the session; secondary actions open the GitHub PR, policy version, or final GitHub review.
@@ -621,10 +621,8 @@ code_review_session_metadata (
     review_output_key text not null,
     prompt_artifact_key text,
     github_review_id bigint,
-    files_changed integer,
     additions integer,
     deletions integer,
-    lines_changed integer,
     risk_reason_details jsonb not null default '[]',
     completed_at timestamptz,
     created_at timestamptz not null default now()

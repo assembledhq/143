@@ -45,9 +45,9 @@ A retry is rejected if the pull request has moved to another commit, is no longe
 
 ## Evaluate approval behavior
 
-Use the **Analytics** tab to evaluate a repository or the organization over the last 7, 30, or 90 days, or across all recorded reviews. It reports completed automatic approvals and non-approvals, approval rate, usage by pull request author, average and median additions, deletions, and file counts, approval rate by total pull request size, finding rates, historical size-limit hits, and the most common structured reasons reviews required human judgment.
+Use the **Analytics** tab to evaluate a repository or the organization over the last 7, 30, or 90 days, or across all recorded reviews. It reports completed automatic approvals and non-approvals, approval rate, usage by pull request author, average and median additions and deletions by author, finding rates, and the most common structured reasons reviews required human judgment.
 
-The change and file summaries show their captured sample size. New reviews persist additions and deletions separately, plus their added-plus-deleted total and structured non-approval reasons used for the decision. Older reviews are included when their stored review result contains recoverable total-line and file statistics, but the historical review body does not preserve the additions/deletions split and may not contribute to the non-approval-reason breakdown. Treat a small historical sample as directional rather than representative.
+The author change summaries show their captured sample size. New reviews persist additions and deletions separately, along with structured non-approval reasons used for the decision. Older reviews may not contribute to either breakdown, so treat a small historical sample as directional rather than representative.
 
 Use the report to tune policy deliberately:
 

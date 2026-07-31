@@ -855,10 +855,8 @@ type CompleteCodeReviewParams struct {
 	GitHubReviewID    *int64
 	GitHubReviewURL   *string
 	FinalReviewBody   string
-	FilesChanged      *int
 	Additions         *int
 	Deletions         *int
-	LinesChanged      *int
 	RiskReasonDetails []models.CodeReviewRiskReason
 }
 
@@ -866,28 +864,14 @@ func (s *CodeReviewStore) CompleteReview(ctx context.Context, orgID uuid.UUID, p
 	if err := params.Decision.Validate(); err != nil {
 		return models.CodeReviewSessionMetadata{}, err
 	}
-	if params.FilesChanged != nil && *params.FilesChanged < 0 {
-		return models.CodeReviewSessionMetadata{}, fmt.Errorf("files_changed must be non-negative")
-	}
 	if params.Additions != nil && *params.Additions < 0 {
 		return models.CodeReviewSessionMetadata{}, fmt.Errorf("additions must be non-negative")
 	}
 	if params.Deletions != nil && *params.Deletions < 0 {
 		return models.CodeReviewSessionMetadata{}, fmt.Errorf("deletions must be non-negative")
 	}
-	if params.LinesChanged != nil && *params.LinesChanged < 0 {
-		return models.CodeReviewSessionMetadata{}, fmt.Errorf("lines_changed must be non-negative")
-	}
 	if (params.Additions == nil) != (params.Deletions == nil) {
 		return models.CodeReviewSessionMetadata{}, fmt.Errorf("additions and deletions must be provided together")
-	}
-	if params.Additions != nil {
-		if params.LinesChanged == nil {
-			return models.CodeReviewSessionMetadata{}, fmt.Errorf("lines_changed is required with additions and deletions")
-		}
-		if *params.LinesChanged != *params.Additions+*params.Deletions {
-			return models.CodeReviewSessionMetadata{}, fmt.Errorf("lines_changed must equal additions plus deletions")
-		}
 	}
 	reasonDetails := params.RiskReasonDetails
 	if reasonDetails == nil {
@@ -911,10 +895,8 @@ func (s *CodeReviewStore) CompleteReview(ctx context.Context, orgID uuid.UUID, p
 		    github_review_id = @github_review_id,
 		    github_review_url = @github_review_url,
 		    final_review_body = @final_review_body,
-		    files_changed = @files_changed,
 		    additions = @additions,
 		    deletions = @deletions,
-		    lines_changed = @lines_changed,
 		    risk_reason_details = @risk_reason_details,
 		    failure_reason = NULL,
 		    status_code = NULL,
@@ -933,10 +915,8 @@ func (s *CodeReviewStore) CompleteReview(ctx context.Context, orgID uuid.UUID, p
 		"github_review_id":    params.GitHubReviewID,
 		"github_review_url":   params.GitHubReviewURL,
 		"final_review_body":   params.FinalReviewBody,
-		"files_changed":       params.FilesChanged,
 		"additions":           params.Additions,
 		"deletions":           params.Deletions,
-		"lines_changed":       params.LinesChanged,
 		"risk_reason_details": encodedReasonDetails,
 	})
 	if err != nil {
@@ -1475,13 +1455,6 @@ func codeReviewAnalyticsWhere(orgID uuid.UUID, filters CodeReviewAnalyticsFilter
 	return query, args
 }
 
-func codeReviewOptionalMetric(value float64) *float64 {
-	if value < 0 {
-		return nil
-	}
-	return &value
-}
-
 func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUID, filters CodeReviewAnalyticsFilters) (models.CodeReviewAnalytics, error) {
 	where, args := codeReviewAnalyticsWhere(orgID, filters)
 	// Keep every report section in one statement so PostgreSQL evaluates the
@@ -1495,17 +1468,12 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 				m.status,
 				m.decision,
 				m.github_review_id,
-				m.lines_changed,
 				m.additions,
 				m.deletions,
-				m.files_changed,
 				m.risk_reason_details,
-				COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), 'Unknown') AS author,
-				COALESCE(NULLIF(p.risk_policy->>'max_lines_changed', '')::bigint, 9223372036854775807) AS max_lines_changed,
-				COALESCE(NULLIF(p.risk_policy->>'max_files_changed', '')::bigint, 9223372036854775807) AS max_files_changed
+				COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), 'Unknown') AS author
 			FROM code_review_session_metadata m
-			JOIN sessions s ON s.id = m.session_id AND s.org_id = m.org_id
-			JOIN code_review_policies p ON p.id = m.policy_id AND p.org_id = m.org_id` + where + `
+			JOIN sessions s ON s.id = m.session_id AND s.org_id = m.org_id` + where + `
 		),
 		finding_rollup AS (
 			SELECT
@@ -1545,58 +1513,6 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 			COUNT(*) FILTER (WHERE r.status = 'failed')::bigint AS failed_reviews,
 			COUNT(*) FILTER (WHERE r.status = 'stale')::bigint AS stale_reviews,
 			COUNT(*) FILTER (
-				WHERE r.status = 'completed'
-				  AND r.lines_changed IS NOT NULL
-				  AND r.files_changed IS NOT NULL
-			)::bigint AS reviews_with_size_data,
-			COUNT(*) FILTER (
-				WHERE r.status = 'completed'
-				  AND r.additions IS NOT NULL
-				  AND r.deletions IS NOT NULL
-			)::bigint AS reviews_with_change_breakdown,
-			COALESCE(AVG(r.lines_changed) FILTER (
-				WHERE r.status = 'completed' AND r.lines_changed IS NOT NULL
-			), -1)::double precision AS average_lines_changed,
-			COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.lines_changed) FILTER (
-				WHERE r.status = 'completed' AND r.lines_changed IS NOT NULL
-			), -1)::double precision AS median_lines_changed,
-			COALESCE(AVG(r.additions) FILTER (
-				WHERE r.status = 'completed' AND r.additions IS NOT NULL
-			), -1)::double precision AS average_additions,
-			COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.additions) FILTER (
-				WHERE r.status = 'completed' AND r.additions IS NOT NULL
-			), -1)::double precision AS median_additions,
-			COALESCE(AVG(r.deletions) FILTER (
-				WHERE r.status = 'completed' AND r.deletions IS NOT NULL
-			), -1)::double precision AS average_deletions,
-			COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.deletions) FILTER (
-				WHERE r.status = 'completed' AND r.deletions IS NOT NULL
-			), -1)::double precision AS median_deletions,
-			COALESCE(AVG(r.files_changed) FILTER (
-				WHERE r.status = 'completed' AND r.files_changed IS NOT NULL
-			), -1)::double precision AS average_files_changed,
-			COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.files_changed) FILTER (
-				WHERE r.status = 'completed' AND r.files_changed IS NOT NULL
-			), -1)::double precision AS median_files_changed,
-			COUNT(*) FILTER (
-				WHERE r.status = 'completed'
-				  AND (
-					(r.lines_changed IS NOT NULL AND r.lines_changed > r.max_lines_changed)
-					OR
-					(r.files_changed IS NOT NULL AND r.files_changed > r.max_files_changed)
-				  )
-			)::bigint AS reviews_above_size_limit,
-			COUNT(*) FILTER (
-				WHERE r.status = 'completed'
-				  AND r.decision = 'approved'
-				  AND r.github_review_id IS NOT NULL
-				  AND (
-					(r.lines_changed IS NOT NULL AND r.lines_changed > r.max_lines_changed)
-					OR
-					(r.files_changed IS NOT NULL AND r.files_changed > r.max_files_changed)
-				  )
-			)::bigint AS approvals_above_size_limit,
-			COUNT(*) FILTER (
 				WHERE r.status = 'completed' AND COALESCE(finding_rollup.finding_count, 0) > 0
 			)::bigint AS reviews_with_findings,
 			COUNT(*) FILTER (
@@ -1617,13 +1533,8 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 					WHERE r.decision IS DISTINCT FROM 'approved' OR r.github_review_id IS NULL
 				)::bigint AS not_approved,
 				COUNT(*) FILTER (
-					WHERE r.lines_changed IS NOT NULL AND r.files_changed IS NOT NULL
-				)::bigint AS reviews_with_size_data,
-				COUNT(*) FILTER (
 					WHERE r.additions IS NOT NULL AND r.deletions IS NOT NULL
 				)::bigint AS reviews_with_change_breakdown,
-				AVG(r.lines_changed)::double precision AS average_lines_changed,
-				(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.lines_changed))::double precision AS median_lines_changed,
 				AVG(r.additions)::double precision AS average_additions,
 				(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.additions))::double precision AS median_additions,
 				AVG(r.deletions)::double precision AS average_deletions,
@@ -1631,24 +1542,6 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 			FROM filtered_reviews r
 			WHERE r.status = 'completed'
 			GROUP BY r.author
-		),
-		size_buckets AS (
-			SELECT
-				CASE
-					WHEN r.lines_changed < 50 THEN '0_49'
-					WHEN r.lines_changed < 200 THEN '50_199'
-					WHEN r.lines_changed < 500 THEN '200_499'
-					ELSE '500_plus'
-				END AS bucket,
-				COUNT(*)::bigint AS reviews_completed,
-				COUNT(*) FILTER (
-					WHERE r.decision = 'approved' AND r.github_review_id IS NOT NULL
-				)::bigint AS automatically_approved,
-				MIN(r.lines_changed) AS sort_order
-			FROM filtered_reviews r
-			WHERE r.status = 'completed'
-			  AND r.lines_changed IS NOT NULL
-			GROUP BY bucket
 		),
 		reasons AS (
 			SELECT
@@ -1672,18 +1565,6 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 			summary.approval_not_posted,
 			summary.failed_reviews,
 			summary.stale_reviews,
-			summary.reviews_with_size_data,
-			summary.reviews_with_change_breakdown,
-			summary.average_lines_changed,
-			summary.median_lines_changed,
-			summary.average_additions,
-			summary.median_additions,
-			summary.average_deletions,
-			summary.median_deletions,
-			summary.average_files_changed,
-			summary.median_files_changed,
-			summary.reviews_above_size_limit,
-			summary.approvals_above_size_limit,
 			summary.reviews_with_findings,
 			summary.reviews_with_blocking_findings,
 			summary.total_findings,
@@ -1692,26 +1573,13 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 				FROM authors a
 			), '[]'::jsonb) AS authors,
 			COALESCE((
-				SELECT jsonb_agg(
-					jsonb_build_object(
-						'bucket', b.bucket,
-						'reviews_completed', b.reviews_completed,
-						'automatically_approved', b.automatically_approved
-					)
-					ORDER BY b.sort_order ASC
-				)
-				FROM size_buckets b
-			), '[]'::jsonb) AS size_buckets,
-			COALESCE((
 				SELECT jsonb_agg(to_jsonb(reason) ORDER BY reason.reviews DESC, reason.code ASC)
 				FROM reasons reason
 			), '[]'::jsonb) AS non_approval_reasons
 		FROM summary`
 
 	var analytics models.CodeReviewAnalytics
-	var averageLines, medianLines, averageAdditions, medianAdditions float64
-	var averageDeletions, medianDeletions, averageFiles, medianFiles float64
-	var authorsJSON, sizeBucketsJSON, reasonsJSON []byte
+	var authorsJSON, reasonsJSON []byte
 	if err := s.db.QueryRow(ctx, query, args).Scan(
 		&analytics.Summary.ReviewsRequested,
 		&analytics.Summary.ReviewsCompleted,
@@ -1723,48 +1591,19 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 		&analytics.Summary.ApprovalNotPosted,
 		&analytics.Summary.FailedReviews,
 		&analytics.Summary.StaleReviews,
-		&analytics.Summary.ReviewsWithSizeData,
-		&analytics.Summary.ReviewsWithChangeBreakdown,
-		&averageLines,
-		&medianLines,
-		&averageAdditions,
-		&medianAdditions,
-		&averageDeletions,
-		&medianDeletions,
-		&averageFiles,
-		&medianFiles,
-		&analytics.Summary.ReviewsAboveSizeLimit,
-		&analytics.Summary.ApprovalsAboveSizeLimit,
 		&analytics.Summary.ReviewsWithFindings,
 		&analytics.Summary.ReviewsWithBlockingFindings,
 		&analytics.Summary.TotalFindings,
 		&authorsJSON,
-		&sizeBucketsJSON,
 		&reasonsJSON,
 	); err != nil {
 		return models.CodeReviewAnalytics{}, fmt.Errorf("query code review analytics: %w", err)
 	}
-	analytics.Summary.AverageLinesChanged = codeReviewOptionalMetric(averageLines)
-	analytics.Summary.MedianLinesChanged = codeReviewOptionalMetric(medianLines)
-	analytics.Summary.AverageAdditions = codeReviewOptionalMetric(averageAdditions)
-	analytics.Summary.MedianAdditions = codeReviewOptionalMetric(medianAdditions)
-	analytics.Summary.AverageDeletions = codeReviewOptionalMetric(averageDeletions)
-	analytics.Summary.MedianDeletions = codeReviewOptionalMetric(medianDeletions)
-	analytics.Summary.AverageFilesChanged = codeReviewOptionalMetric(averageFiles)
-	analytics.Summary.MedianFilesChanged = codeReviewOptionalMetric(medianFiles)
 	if err := json.Unmarshal(authorsJSON, &analytics.Authors); err != nil {
 		return models.CodeReviewAnalytics{}, fmt.Errorf("decode code review analytics authors: %w", err)
 	}
-	if err := json.Unmarshal(sizeBucketsJSON, &analytics.SizeBuckets); err != nil {
-		return models.CodeReviewAnalytics{}, fmt.Errorf("decode code review analytics size buckets: %w", err)
-	}
 	if err := json.Unmarshal(reasonsJSON, &analytics.NonApprovalReasons); err != nil {
 		return models.CodeReviewAnalytics{}, fmt.Errorf("decode code review analytics non-approval reasons: %w", err)
-	}
-	for _, bucket := range analytics.SizeBuckets {
-		if err := bucket.Bucket.Validate(); err != nil {
-			return models.CodeReviewAnalytics{}, err
-		}
 	}
 	for _, reason := range analytics.NonApprovalReasons {
 		if err := reason.Code.Validate(); err != nil {
