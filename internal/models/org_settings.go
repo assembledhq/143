@@ -257,6 +257,12 @@ type OpenCodeRoutingSettings struct {
 // organizations. Do not move these into ParseOrgSettings defaults unless the
 // value should also apply retroactively to existing organizations with absent
 // settings.
+//
+// The automatic repair flags are the exception: they also apply retroactively,
+// via EffectiveResolveConflictsWhenIdle/EffectiveFixTestsWhenIdle, so a new
+// organization would behave identically without them. They stay written here
+// so a new organization's stored policy is explicit rather than inferred from
+// an absent key — keep them, and keep the accessors as the enforcement point.
 func DefaultNewOrganizationSettings() json.RawMessage {
 	return json.RawMessage(`{"session_automation":{"automatic_follow_through":{"resolve_conflicts_when_idle":true,"fix_tests_when_idle":true}}}`)
 }
@@ -268,16 +274,30 @@ type SessionAutomationSettings struct {
 }
 
 // AutomaticFollowThroughOrgSettings controls automatic PR/readiness next steps
-// when sessions or review loops reach a stable point. All flags default off.
+// when sessions or review loops reach a stable point. Repair flags are pointers
+// so absent settings default on for every organization while preserving an
+// administrator's explicit false opt-out.
 type AutomaticFollowThroughOrgSettings struct {
 	ReadinessAfterReviewLoop       bool                `json:"readiness_after_review_loop,omitempty"`
 	ReadinessAfterReviewLoopStates []ReviewLoopStatus  `json:"readiness_after_review_loop_states,omitempty"`
-	ResolveConflictsWhenIdle       bool                `json:"resolve_conflicts_when_idle,omitempty"`
-	FixTestsWhenIdle               bool                `json:"fix_tests_when_idle,omitempty"`
+	ResolveConflictsWhenIdle       *bool               `json:"resolve_conflicts_when_idle,omitempty"`
+	FixTestsWhenIdle               *bool               `json:"fix_tests_when_idle,omitempty"`
 	PRFeedbackMode                 PRFeedbackHumanMode `json:"pr_feedback_mode,omitempty"`
 	PRFeedbackBotMode              PRFeedbackBotMode   `json:"pr_feedback_bot_mode,omitempty"`
 	PRFeedbackBotCycleLimit        NullableCycleLimit  `json:"pr_feedback_bot_cycle_limit,omitzero"`
 	PRFeedbackBotAllowlist         []string            `json:"pr_feedback_bot_allowlist,omitempty"`
+}
+
+// EffectiveResolveConflictsWhenIdle defaults automatic conflict repair on
+// while honoring an explicit organization opt-out.
+func (s AutomaticFollowThroughOrgSettings) EffectiveResolveConflictsWhenIdle() bool {
+	return s.ResolveConflictsWhenIdle == nil || *s.ResolveConflictsWhenIdle
+}
+
+// EffectiveFixTestsWhenIdle defaults automatic test repair on while honoring
+// an explicit organization opt-out.
+func (s AutomaticFollowThroughOrgSettings) EffectiveFixTestsWhenIdle() bool {
+	return s.FixTestsWhenIdle == nil || *s.FixTestsWhenIdle
 }
 
 // EffectiveReadinessAfterReviewLoopStates applies the v1 default terminal

@@ -35,8 +35,12 @@ func (m orgSettingsArgument) Match(v any) bool {
 	}
 	settings, err := models.ParseOrgSettings(raw)
 	require.NoError(m.t, err, "created organization settings should be valid")
-	return settings.SessionAutomation.AutomaticFollowThrough.ResolveConflictsWhenIdle &&
-		settings.SessionAutomation.AutomaticFollowThrough.FixTestsWhenIdle
+	// Match on the stored flags rather than the effective accessors: absent
+	// flags also resolve on, so effective values would match any settings blob
+	// that merely fails to disable automatic repair.
+	followThrough := settings.SessionAutomation.AutomaticFollowThrough
+	return followThrough.ResolveConflictsWhenIdle != nil && *followThrough.ResolveConflictsWhenIdle &&
+		followThrough.FixTestsWhenIdle != nil && *followThrough.FixTestsWhenIdle
 }
 
 func TestOrganizationsHandler_Create_Unauthenticated(t *testing.T) {

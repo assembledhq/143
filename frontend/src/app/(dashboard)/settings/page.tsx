@@ -480,8 +480,12 @@ function PRAuthorshipSettings() {
   const saveAutomaticFollowThrough = (patch: Partial<AutomaticFollowThroughOrgSettings>) => {
     save({ settings: sessionAutomationPatch(automaticFollowThrough, patch) });
   };
+  // Absent repair flags mean "on" for every org, so the effective value has to
+  // come from the same default the switch renders; reading the raw field here
+  // would treat an unset flag as off and skip the confirmation contract.
+  const repairAutomationEnabled = (key: RepairAutomationKey) => automaticFollowThrough[key] ?? true;
   const setRepairAutomation = (key: RepairAutomationKey, enabled: boolean) => {
-    if (enabled && !automaticFollowThrough[key]) {
+    if (enabled && !repairAutomationEnabled(key)) {
       setRepairEnableCandidate(key);
       return;
     }
@@ -527,7 +531,7 @@ function PRAuthorshipSettings() {
             <div className="space-y-1">
               <h3 className="text-xs font-medium text-foreground">Branch-writing repair</h3>
               <p className="text-xs text-muted-foreground">
-                These policies use the same repair actions as the manual buttons when an open PR is blocked and the session is idle.
+                These policies use the same repair actions as the manual buttons when an open PR is blocked and the session is idle. Both are on for every organization unless an admin turns them off here.
               </p>
             </div>
             {Object.entries(REPAIR_AUTOMATION_COPY).map(([key, copy]) => {
@@ -540,7 +544,7 @@ function PRAuthorshipSettings() {
                   </div>
                   <Switch
                     id={`session-automation-${repairKey}`}
-                    checked={automaticFollowThrough[repairKey] ?? false}
+                    checked={repairAutomationEnabled(repairKey)}
                     onCheckedChange={(checked) => setRepairAutomation(repairKey, checked)}
                     aria-label={copy.title}
                   />

@@ -106,7 +106,10 @@ func (s *PRService) MaybeStartAutoRepair(ctx context.Context, orgID uuid.UUID, s
 		}
 	}
 
-	health, err := s.GetPullRequestHealth(ctx, orgID, pr.ID)
+	// Skip the exhausted-action badges: they are a PR health UI concern, the
+	// budget is rechecked below, and populating them here would repeat the
+	// organization, session, and user loads this function already performed.
+	health, err := s.getPullRequestHealth(ctx, orgID, pr.ID, healthBuildOptions{skipAutoRepairAttemptState: true})
 	if err != nil {
 		return nil, fmt.Errorf("load pull request health for auto-repair: %w", err)
 	}
@@ -171,8 +174,8 @@ func (s *PRService) resolveAutoRepairPolicy(ctx context.Context, orgID uuid.UUID
 	}
 	followThrough := settings.SessionAutomation.AutomaticFollowThrough
 	policy := autoRepairPolicy{
-		ResolveConflicts: followThrough.ResolveConflictsWhenIdle,
-		FixTests:         followThrough.FixTestsWhenIdle,
+		ResolveConflicts: followThrough.EffectiveResolveConflictsWhenIdle(),
+		FixTests:         followThrough.EffectiveFixTestsWhenIdle(),
 	}
 	return s.applySessionAutoRepairOverride(ctx, policy, session)
 }

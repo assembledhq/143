@@ -122,7 +122,7 @@ func (s *PRService) ProcessMergeWhenReady(ctx context.Context, orgID, pullReques
 	if pr.MergeWhenReadyState != models.PullRequestMergeWhenReadyStateQueued && !isStaleMergeWhenReadyMerging(pr, time.Now()) {
 		return nil
 	}
-	health, err := s.buildPullRequestHealthResponse(ctx, pr)
+	health, err := s.buildPullRequestHealthResponse(ctx, pr, healthBuildOptions{})
 	if err != nil {
 		return fmt.Errorf("build pull request health: %w", err)
 	}
@@ -234,7 +234,7 @@ func (s *PRService) currentMergeWhenReadyHealth(ctx context.Context, pr models.P
 		}
 		pr = refreshed
 	}
-	health, err := s.buildPullRequestHealthResponse(ctx, pr)
+	health, err := s.buildPullRequestHealthResponse(ctx, pr, healthBuildOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("build pull request health: %w", err)
 	}

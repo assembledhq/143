@@ -97,16 +97,20 @@ func TestParseOrgSettings_DefaultWorkRepositoryID(t *testing.T) {
 func TestParseOrgSettings_SessionAutomation(t *testing.T) {
 	t.Parallel()
 
+	enabled := true
+	disabled := false
 	tests := []struct {
-		name    string
-		raw     json.RawMessage
-		want    AutomaticFollowThroughOrgSettings
-		wantErr string
+		name                string
+		raw                 json.RawMessage
+		want                AutomaticFollowThroughOrgSettings
+		wantEffectiveRepair bool
+		wantErr             string
 	}{
 		{
-			name: "defaults automatic follow through off",
-			raw:  json.RawMessage(`{}`),
-			want: AutomaticFollowThroughOrgSettings{},
+			name:                "defaults automatic repair on",
+			raw:                 json.RawMessage(`{}`),
+			want:                AutomaticFollowThroughOrgSettings{},
+			wantEffectiveRepair: true,
 		},
 		{
 			name: "parses automatic follow through settings",
@@ -114,9 +118,21 @@ func TestParseOrgSettings_SessionAutomation(t *testing.T) {
 			want: AutomaticFollowThroughOrgSettings{
 				ReadinessAfterReviewLoop:       true,
 				ReadinessAfterReviewLoopStates: []ReviewLoopStatus{ReviewLoopStatusClean},
-				ResolveConflictsWhenIdle:       true,
-				FixTestsWhenIdle:               true,
+				ResolveConflictsWhenIdle:       &enabled,
+				FixTestsWhenIdle:               &enabled,
 			},
+			wantEffectiveRepair: true,
+		},
+		{
+			// The explicit false decode is what preserves an administrator's
+			// opt-out now that absent repair flags resolve to on.
+			name: "preserves explicit automatic repair opt-out",
+			raw:  json.RawMessage(`{"session_automation":{"automatic_follow_through":{"resolve_conflicts_when_idle":false,"fix_tests_when_idle":false}}}`),
+			want: AutomaticFollowThroughOrgSettings{
+				ResolveConflictsWhenIdle: &disabled,
+				FixTestsWhenIdle:         &disabled,
+			},
+			wantEffectiveRepair: false,
 		},
 		{
 			name:    "rejects non-terminal readiness states",
@@ -145,6 +161,7 @@ func TestParseOrgSettings_SessionAutomation(t *testing.T) {
 				PRFeedbackBotMode:      PRFeedbackBotModeAllowlist,
 				PRFeedbackBotAllowlist: []string{"dependabot[bot]"},
 			},
+			wantEffectiveRepair: true,
 		},
 	}
 
@@ -161,6 +178,8 @@ func TestParseOrgSettings_SessionAutomation(t *testing.T) {
 			}
 			require.NoError(t, err, "ParseOrgSettings should accept session automation settings")
 			require.Equal(t, tt.want, got.SessionAutomation.AutomaticFollowThrough, "ParseOrgSettings should decode session automation settings")
+			require.Equal(t, tt.wantEffectiveRepair, got.SessionAutomation.AutomaticFollowThrough.EffectiveResolveConflictsWhenIdle(), "decoded settings should resolve automatic conflict repair correctly")
+			require.Equal(t, tt.wantEffectiveRepair, got.SessionAutomation.AutomaticFollowThrough.EffectiveFixTestsWhenIdle(), "decoded settings should resolve automatic test repair correctly")
 		})
 	}
 }
@@ -170,9 +189,54 @@ func TestDefaultNewOrganizationSettings_EnablesAutomaticRepair(t *testing.T) {
 
 	settings, err := ParseOrgSettings(DefaultNewOrganizationSettings())
 	require.NoError(t, err, "DefaultNewOrganizationSettings should produce valid org settings")
-	require.True(t, settings.SessionAutomation.AutomaticFollowThrough.ResolveConflictsWhenIdle, "new organizations should default automatic conflict repair on")
-	require.True(t, settings.SessionAutomation.AutomaticFollowThrough.FixTestsWhenIdle, "new organizations should default automatic test repair on")
+	// Assert the stored flags, not the effective accessors: absent flags also
+	// resolve on, so an effective-value assertion would pass even if the
+	// default blob stopped persisting the repair settings entirely.
+	require.NotNil(t, settings.SessionAutomation.AutomaticFollowThrough.ResolveConflictsWhenIdle, "new organizations should persist an explicit conflict repair setting")
+	require.True(t, *settings.SessionAutomation.AutomaticFollowThrough.ResolveConflictsWhenIdle, "new organizations should default automatic conflict repair on")
+	require.NotNil(t, settings.SessionAutomation.AutomaticFollowThrough.FixTestsWhenIdle, "new organizations should persist an explicit test repair setting")
+	require.True(t, *settings.SessionAutomation.AutomaticFollowThrough.FixTestsWhenIdle, "new organizations should default automatic test repair on")
 	require.False(t, settings.SessionAutomation.AutomaticFollowThrough.ReadinessAfterReviewLoop, "new organizations should not change the readiness default")
+}
+
+func TestAutomaticFollowThroughOrgSettings_EffectiveRepairDefaults(t *testing.T) {
+	t.Parallel()
+
+	enabled := true
+	disabled := false
+	tests := []struct {
+		name             string
+		settings         AutomaticFollowThroughOrgSettings
+		wantConflictsOn  bool
+		wantTestRepairOn bool
+	}{
+		{name: "missing defaults both on", settings: AutomaticFollowThroughOrgSettings{}, wantConflictsOn: true, wantTestRepairOn: true},
+		{
+			name: "explicit false disables both",
+			settings: AutomaticFollowThroughOrgSettings{
+				ResolveConflictsWhenIdle: &disabled,
+				FixTestsWhenIdle:         &disabled,
+			},
+			wantConflictsOn: false, wantTestRepairOn: false,
+		},
+		{
+			name: "explicit true enables both",
+			settings: AutomaticFollowThroughOrgSettings{
+				ResolveConflictsWhenIdle: &enabled,
+				FixTestsWhenIdle:         &enabled,
+			},
+			wantConflictsOn: true, wantTestRepairOn: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.wantConflictsOn, tt.settings.EffectiveResolveConflictsWhenIdle(), "effective conflict repair setting should match the organization policy")
+			require.Equal(t, tt.wantTestRepairOn, tt.settings.EffectiveFixTestsWhenIdle(), "effective test repair setting should match the organization policy")
+		})
+	}
 }
 
 func TestAutomaticFollowThroughOrgSettings_EffectiveReadinessAfterReviewLoopStates(t *testing.T) {

@@ -134,7 +134,22 @@ type gitHubCheckRunAnnotation struct {
 	Message         string `json:"message"`
 }
 
+// healthBuildOptions tunes how much derived state a health build populates for
+// callers that do not read all of it.
+type healthBuildOptions struct {
+	// skipAutoRepairAttemptState omits AutoRepairExhaustedActions, which only
+	// the PR health UI consumes. Populating it costs an organization load, a
+	// session load, a user load, and up to two attempt-count queries, so the
+	// automatic repair coordinator — which resolves its own policy and rechecks
+	// the attempt budget directly — skips it on its webhook-driven path.
+	skipAutoRepairAttemptState bool
+}
+
 func (s *PRService) GetPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID) (*models.PullRequestHealthResponse, error) {
+	return s.getPullRequestHealth(ctx, orgID, pullRequestID, healthBuildOptions{})
+}
+
+func (s *PRService) getPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, opts healthBuildOptions) (*models.PullRequestHealthResponse, error) {
 	pr, err := s.pullRequests.GetByID(ctx, orgID, pullRequestID)
 	if err != nil {
 		return nil, err
@@ -148,7 +163,7 @@ func (s *PRService) GetPullRequestHealth(ctx context.Context, orgID, pullRequest
 		if repoErr == nil {
 			linkedRepo = &repo
 			if repoBlocksPullRequestHealthSync(repo) {
-				resp, err := s.buildPullRequestHealthResponse(ctx, pr)
+				resp, err := s.buildPullRequestHealthResponse(ctx, pr, opts)
 				if err != nil {
 					return nil, err
 				}
@@ -166,7 +181,7 @@ func (s *PRService) GetPullRequestHealth(ctx context.Context, orgID, pullRequest
 			if errors.Is(err, ErrPullRequestMergeabilityPending) {
 				s.enqueuePullRequestStateSync(ctx, pr)
 			} else if errors.Is(err, ErrPullRequestRepositoryDisconnected) {
-				resp, buildErr := s.buildPullRequestHealthResponse(ctx, pr)
+				resp, buildErr := s.buildPullRequestHealthResponse(ctx, pr, opts)
 				if buildErr != nil {
 					return nil, buildErr
 				}
@@ -187,7 +202,7 @@ func (s *PRService) GetPullRequestHealth(ctx context.Context, orgID, pullRequest
 		s.enqueuePullRequestStateSync(ctx, pr)
 	}
 
-	resp, err := s.buildPullRequestHealthResponse(ctx, pr)
+	resp, err := s.buildPullRequestHealthResponse(ctx, pr, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +218,7 @@ func (s *PRService) GetPullRequestHealth(ctx context.Context, orgID, pullRequest
 	return resp, nil
 }
 
-func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr models.PullRequest) (*models.PullRequestHealthResponse, error) {
+func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr models.PullRequest, opts healthBuildOptions) (*models.PullRequestHealthResponse, error) {
 	resp := &models.PullRequestHealthResponse{
 		PullRequestID:       pr.ID,
 		PullRequestNumber:   pr.GitHubPRNumber,
@@ -291,8 +306,10 @@ func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr model
 	if err := s.populateActiveRepairs(ctx, pr, resp); err != nil {
 		return nil, err
 	}
-	if err := s.populateAutoRepairAttemptState(ctx, pr, resp); err != nil {
-		return nil, err
+	if !opts.skipAutoRepairAttemptState {
+		if err := s.populateAutoRepairAttemptState(ctx, pr, resp); err != nil {
+			return nil, err
+		}
 	}
 	resp.Summary = buildPRHealthSummaryText(*resp)
 	return resp, nil
@@ -374,8 +391,8 @@ func (s *PRService) populateAutoRepairAttemptState(ctx context.Context, pr model
 		return fmt.Errorf("parse organization settings for automatic repair state: %w", err)
 	}
 	policy := autoRepairPolicy{
-		ResolveConflicts: settings.SessionAutomation.AutomaticFollowThrough.ResolveConflictsWhenIdle,
-		FixTests:         settings.SessionAutomation.AutomaticFollowThrough.FixTestsWhenIdle,
+		ResolveConflicts: settings.SessionAutomation.AutomaticFollowThrough.EffectiveResolveConflictsWhenIdle(),
+		FixTests:         settings.SessionAutomation.AutomaticFollowThrough.EffectiveFixTestsWhenIdle(),
 	}
 	// Personal preferences can independently flip either action on or off, so
 	// resolve the effective policy whenever the PR has an owning session. This
