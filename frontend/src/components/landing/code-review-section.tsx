@@ -1,12 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowRight, Check, CircleDot } from "lucide-react";
+import { ArrowRight, Check } from "lucide-react";
 import { useInView } from "@/hooks/use-in-view";
 import {
   codeReviewApproval,
   codeReviewControls,
-  codeReviewEscalation,
   codeReviewSummary,
 } from "./landing-copy";
 import { landingLayout as layout } from "./landing-layout";
@@ -81,43 +80,6 @@ function ApprovalCard({ isDark }: { isDark: boolean }) {
   );
 }
 
-function EscalationCard({ isDark }: { isDark: boolean }) {
-  return (
-    <div
-      className={`${layout.visualFrame} border p-6 sm:p-8 ${
-        isDark ? "border-white/10 bg-[#1d1d1a]" : "border-[#e1ded5] bg-[#efeee8]"
-      }`}
-    >
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <p
-          className={`${type.cardTitle} ${isDark ? "text-[#f4f3ee]" : "text-[#1b1b19]"}`}
-        >
-          {codeReviewEscalation.title}
-        </p>
-        <span
-          className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-mono font-medium uppercase tracking-wider ${
-            isDark ? "bg-white/[0.08] text-[#aaa89f]" : "bg-[#dad7ce]/60 text-[#6b6b65]"
-          }`}
-        >
-          <CircleDot className="size-3" aria-hidden="true" />
-          {codeReviewEscalation.decision}
-        </span>
-      </div>
-
-      <ul className="mt-5 grid gap-2">
-        {codeReviewEscalation.reasons.map((reason) => (
-          <li
-            key={reason}
-            className={`text-xs font-mono ${isDark ? "text-[#aaa89f]" : "text-[#6b6b65]"}`}
-          >
-            · {reason}
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
 export default function CodeReviewSection({ isDark }: CodeReviewSectionProps) {
   const { ref, inView } = useInView({ threshold: 0.9 });
   const label = isDark ? "text-[#7992ff]" : "text-[#315ce8]";
@@ -163,10 +125,7 @@ export default function CodeReviewSection({ isDark }: CodeReviewSectionProps) {
               "opacity 0.65s cubic-bezier(0.16, 1, 0.3, 1), transform 0.65s cubic-bezier(0.16, 1, 0.3, 1)",
           }}
         >
-          <div className="grid gap-4">
-            <ApprovalCard isDark={isDark} />
-            <EscalationCard isDark={isDark} />
-          </div>
+          <ApprovalCard isDark={isDark} />
 
           <div className={layout.copyColumn}>
             <h3 className={`${type.featureTitle} ${heading}`}>

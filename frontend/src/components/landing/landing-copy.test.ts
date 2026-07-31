@@ -3,7 +3,6 @@ import * as landingCopy from "./landing-copy";
 import {
   codeReviewApproval,
   codeReviewControls,
-  codeReviewEscalation,
   codeReviewSummary,
   codingAgents,
   integrations,
@@ -27,7 +26,7 @@ describe("landing copy", () => {
       "01 Code review",
     );
     expect(codeReviewSummary.heading).toBe(
-      "Code review that approves the pull requests it should.",
+      "Code review that can auto-approve.",
     );
     expect(codeReviewSummary.body).toContain("Reviewing it is the bottleneck.");
   });
@@ -52,9 +51,8 @@ describe("landing copy", () => {
     expect(flatten({ ...landingCopy })).not.toContain("—");
   });
 
-  it("shows both the auto-approval and the escalation path", () => {
+  it("keeps the auto-approval evidence concrete", () => {
     expect(codeReviewApproval.decision).toBe("Approved");
-    expect(codeReviewEscalation.decision).toBe("Needs human review");
     expect(codeReviewApproval.evidence.map((row) => row.label)).toEqual([
       "Risk",
       "Description",

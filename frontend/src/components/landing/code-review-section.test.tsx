@@ -9,7 +9,7 @@ describe("CodeReviewSection", () => {
 
     const heading = screen.getByRole("heading", {
       level: 2,
-      name: "Code review that approves the pull requests it should.",
+      name: "Code review that can auto-approve.",
     });
 
     expect(heading.className).toContain(landingTypography.sectionTitle);
@@ -30,14 +30,13 @@ describe("CodeReviewSection", () => {
     expect(screen.getByText(/Policy v12/)).toBeInTheDocument();
   });
 
-  it("keeps the escalation path visible alongside the approval", () => {
+  it("shows only the approved verdict card", () => {
     render(<CodeReviewSection isDark={false} />);
 
     expect(
-      screen.getByText("143 Code Reviewer did not approve this PR"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Needs human review")).toBeInTheDocument();
-    expect(screen.getByText(/Auth-sensitive paths changed/)).toBeInTheDocument();
+      screen.queryByText("143 Code Reviewer did not approve this PR"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Needs human review")).not.toBeInTheDocument();
   });
 
   it("focuses the copy column on policy tuning and reviewer model choice", () => {

@@ -39,7 +39,7 @@ describe("LandingPage", () => {
     ]);
     expect(
       screen.getByRole("heading", {
-        name: "Code review that approves the pull requests it should.",
+        name: "Code review that can auto-approve.",
       }),
     ).toBeInTheDocument();
   });

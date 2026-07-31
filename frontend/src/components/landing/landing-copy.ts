@@ -1,7 +1,7 @@
 export const codeReviewSummary = {
   step: "01",
   kicker: "Code review",
-  heading: "Code review that approves the pull requests it should.",
+  heading: "Code review that can auto-approve.",
   body: "Your team can use anything to open a pull request. Reviewing it is the bottleneck. Request 143 Code Reviewer and several coding agents review the PR in parallel. If the change passes your policy, 143 approves it on GitHub with the evidence attached. If not, it leaves inline findings and the reason a human is needed.",
 };
 
@@ -24,16 +24,6 @@ export const codeReviewApproval = {
     { label: "Sensitive paths", value: "None touched" },
   ],
   footer: "Policy v12 · reviewed a91f3c2 · evidence kept in the review session",
-};
-
-export const codeReviewEscalation = {
-  title: "143 Code Reviewer did not approve this PR",
-  decision: "Needs human review",
-  reasons: [
-    "Auth-sensitive paths changed",
-    "Description is missing a testing strategy",
-    "P1 finding posted inline on src/auth/session.go:88",
-  ],
 };
 
 export const platformLayers = [
