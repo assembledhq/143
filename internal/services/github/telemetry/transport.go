@@ -34,6 +34,7 @@ type RequestMetadata struct {
 	Kind           string
 	AuthType       string
 	InstallationID int64
+	SyncReason     string
 }
 
 // WithRequestMetadata attaches safe GitHub telemetry dimensions to a request.
@@ -163,6 +164,9 @@ func (t *transport) logRequest(req *http.Request, resp *http.Response, requestEr
 	}
 	if metadata.InstallationID > 0 {
 		event = event.Int64("github_installation_id", metadata.InstallationID)
+	}
+	if metadata.SyncReason != "" {
+		event = event.Str("github_sync_reason", metadata.SyncReason)
 	}
 	if rateLimitKind != "" {
 		event = event.Str("github_rate_limit_kind", rateLimitKind)

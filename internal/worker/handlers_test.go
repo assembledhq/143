@@ -5727,6 +5727,28 @@ func TestSyncPullRequestStateHandlerDefersPendingMergeability(t *testing.T) {
 	require.True(t, retryable.ConsumeAttempt, "pending mergeability should consume attempts so exponential backoff advances")
 }
 
+func TestSyncPullRequestStateHandlerPropagatesSyncReason(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	var actualReason ghservice.PullRequestSyncReason
+	services := &Services{
+		PR: &stubPRService{
+			syncPullRequestStateFn: func(ctx context.Context, _ uuid.UUID, _ uuid.UUID) error {
+				actualReason = ghservice.PullRequestSyncReasonFromContext(ctx)
+				return nil
+			},
+		},
+	}
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `","sync_reason":"head_changed"}`)
+
+	err := newSyncPullRequestStateHandler(services, zerolog.Nop())(context.Background(), "sync_pull_request_state", payload)
+
+	require.NoError(t, err, "sync handler should complete when the GitHub refresh succeeds")
+	require.Equal(t, ghservice.PullRequestSyncReasonHeadChanged, actualReason, "sync handler should propagate the durable sync reason to GitHub telemetry")
+}
+
 func TestSyncPullRequestStateHandlerWaitsForGitHubRateLimit(t *testing.T) {
 	t.Parallel()
 

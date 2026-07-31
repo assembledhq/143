@@ -642,7 +642,8 @@ func syncCodeReviewPullRequestState(ctx context.Context, services *Services, log
 	if services == nil || services.PR == nil {
 		return nil
 	}
-	if err := services.PR.SyncPullRequestState(ctx, job.OrgID, job.PullRequestID); err != nil {
+	syncCtx := ghservice.WithPullRequestSyncReason(ctx, ghservice.PullRequestSyncReasonCodeReview)
+	if err := services.PR.SyncPullRequestState(syncCtx, job.OrgID, job.PullRequestID); err != nil {
 		if errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
 			delay := 5 * time.Second
 			return &RetryableError{Err: err, RetryAfter: &delay, BypassMaxRetryDuration: true}
