@@ -108,6 +108,54 @@ func (a AgentType) SupportsReasoningEffortLevel(level ReasoningEffort) bool {
 	return false
 }
 
+// ResolveCodingAgentDefaults fills in a new session's model and reasoning effort
+// when the request left them blank. Both resolve independently, request →
+// member's personal default → organization default, which is the precedence the
+// session composer renders; doing it here means API and CLI callers that never
+// look at those settings land on the same values as the web UI.
+//
+// A personal model default only applies when it belongs to this session's agent
+// — it names a model, not a preference per agent, so it says nothing about a
+// session the caller pinned to a different agent. personal may be nil when the
+// caller has no user context.
+//
+// Every candidate is checked against what the agent can run today, and one that
+// fails is skipped rather than returned. Models and reasoning levels do get
+// retired from the curated lists, and a saved default that outlived its value
+// must not be able to turn into an INVALID_MODEL / INVALID_REASONING_EFFORT on a
+// request that never named it — that would take down session creation for
+// everyone sharing the setting until an admin noticed. An explicitly requested
+// value is returned untouched so the caller still gets a 400 for their own typo.
+func ResolveCodingAgentDefaults(
+	agentType AgentType,
+	model string,
+	reasoningEffort ReasoningEffort,
+	personal *UserSettings,
+	org OrgSettings,
+) (string, ReasoningEffort) {
+	usableModel := func(candidate string) bool {
+		return candidate != "" && ValidateModelForAgentType(agentType, candidate) == nil
+	}
+	if model == "" && personal != nil &&
+		AgentTypeForModel(personal.CodingAgentModelDefault) == agentType && usableModel(personal.CodingAgentModelDefault) {
+		model = personal.CodingAgentModelDefault
+	}
+	if model == "" && usableModel(org.CodingAgentModelDefaults[agentType]) {
+		model = org.CodingAgentModelDefaults[agentType]
+	}
+	if reasoningEffort == "" && personal != nil {
+		if effort := personal.CodingAgentReasoningDefaults[agentType]; agentType.SupportsReasoningEffortLevel(effort) {
+			reasoningEffort = effort
+		}
+	}
+	if reasoningEffort == "" {
+		if effort := org.CodingAgentReasoningDefaults[agentType]; agentType.SupportsReasoningEffortLevel(effort) {
+			reasoningEffort = effort
+		}
+	}
+	return model, reasoningEffort
+}
+
 // OrgSize classifies an organization by volume of issues and activity.
 // It drives runtime concurrency and agent token defaults.
 type OrgSize string
@@ -175,22 +223,24 @@ func (p PRAuthorship) Validate() error {
 
 // OrgSettings is the strongly-typed representation of organizations.settings JSONB.
 type OrgSettings struct {
-	MaxConcurrentRuns       int                       `json:"max_concurrent_runs"`
-	PriorityWeights         PriorityWeights           `json:"priority_weights"`
-	ProductContext          *ProductContext           `json:"product_context,omitempty"`
-	LLMModel                string                    `json:"llm_model"`
-	LLMReasoningEffort      ReasoningEffort           `json:"llm_reasoning_effort,omitempty"`
-	AgentConfig             AgentEnvConfig            `json:"agent_config,omitempty"`
-	DefaultAgentType        AgentType                 `json:"default_agent_type,omitempty"`
-	AuditRetentionDays      int                       `json:"audit_retention_days,omitempty"`
-	OrgSize                 OrgSize                   `json:"org_size,omitempty"`
-	ContextLimits           ContextLimits             `json:"context_limits,omitempty"`
-	PRAuthorship            PRAuthorship              `json:"pr_authorship,omitempty"`
-	PRDraftDefault          bool                      `json:"pr_draft_default,omitempty"`
-	AutoArchiveOnPRClose    *bool                     `json:"auto_archive_on_pr_close,omitempty"`
-	DefaultWorkRepositoryID *uuid.UUID                `json:"default_work_repository_id,omitempty"`
-	SandboxNetwork          SandboxNetworkSettings    `json:"sandbox_network,omitempty"`
-	SessionAutomation       SessionAutomationSettings `json:"session_automation,omitempty"`
+	MaxConcurrentRuns            int                           `json:"max_concurrent_runs"`
+	PriorityWeights              PriorityWeights               `json:"priority_weights"`
+	ProductContext               *ProductContext               `json:"product_context,omitempty"`
+	LLMModel                     string                        `json:"llm_model"`
+	LLMReasoningEffort           ReasoningEffort               `json:"llm_reasoning_effort,omitempty"`
+	AgentConfig                  AgentEnvConfig                `json:"agent_config,omitempty"`
+	DefaultAgentType             AgentType                     `json:"default_agent_type,omitempty"`
+	CodingAgentModelDefaults     map[AgentType]string          `json:"coding_agent_model_defaults,omitempty"`
+	CodingAgentReasoningDefaults map[AgentType]ReasoningEffort `json:"coding_agent_reasoning_defaults,omitempty"`
+	AuditRetentionDays           int                           `json:"audit_retention_days,omitempty"`
+	OrgSize                      OrgSize                       `json:"org_size,omitempty"`
+	ContextLimits                ContextLimits                 `json:"context_limits,omitempty"`
+	PRAuthorship                 PRAuthorship                  `json:"pr_authorship,omitempty"`
+	PRDraftDefault               bool                          `json:"pr_draft_default,omitempty"`
+	AutoArchiveOnPRClose         *bool                         `json:"auto_archive_on_pr_close,omitempty"`
+	DefaultWorkRepositoryID      *uuid.UUID                    `json:"default_work_repository_id,omitempty"`
+	SandboxNetwork               SandboxNetworkSettings        `json:"sandbox_network,omitempty"`
+	SessionAutomation            SessionAutomationSettings     `json:"session_automation,omitempty"`
 	// CodingAgentTabToolsEnabled controls whether sandbox agents may use
 	// 143-tools to view/create/message tabs in their current session. Pointer
 	// typed so absent settings default on without losing explicit false.
@@ -257,6 +307,17 @@ type OpenCodeRoutingSettings struct {
 // organizations. Do not move these into ParseOrgSettings defaults unless the
 // value should also apply retroactively to existing organizations with absent
 // settings.
+// Coding-agent model/reasoning defaults are deliberately absent here: writing
+// them into a new org's blob would pin that org to today's values, so a later
+// bump to DefaultCodexModel would move every pre-existing org (absent key →
+// back-filled) while leaving orgs created after this commit behind. The
+// ParseOrgSettings back-fill already covers new and existing orgs alike.
+//
+// The automatic repair flags are the exception: they also apply retroactively,
+// via EffectiveResolveConflictsWhenIdle/EffectiveFixTestsWhenIdle, so a new
+// organization would behave identically without them. They stay written here
+// so a new organization's stored policy is explicit rather than inferred from
+// an absent key — keep them, and keep the accessors as the enforcement point.
 func DefaultNewOrganizationSettings() json.RawMessage {
 	return json.RawMessage(`{"session_automation":{"automatic_follow_through":{"resolve_conflicts_when_idle":true,"fix_tests_when_idle":true}}}`)
 }
@@ -267,15 +328,29 @@ type SessionAutomationSettings struct {
 	AutomaticFollowThrough AutomaticFollowThroughOrgSettings `json:"automatic_follow_through,omitempty"`
 }
 
-// AutomaticFollowThroughOrgSettings controls automatic PR next steps
-// when sessions or review loops reach a stable point. All flags default off.
+// AutomaticFollowThroughOrgSettings controls automatic PR next steps when
+// sessions reach a stable point. Repair flags are pointers
+// so absent settings default on for every organization while preserving an
+// administrator's explicit false opt-out.
 type AutomaticFollowThroughOrgSettings struct {
-	ResolveConflictsWhenIdle bool                `json:"resolve_conflicts_when_idle,omitempty"`
-	FixTestsWhenIdle         bool                `json:"fix_tests_when_idle,omitempty"`
+	ResolveConflictsWhenIdle *bool               `json:"resolve_conflicts_when_idle,omitempty"`
+	FixTestsWhenIdle         *bool               `json:"fix_tests_when_idle,omitempty"`
 	PRFeedbackMode           PRFeedbackHumanMode `json:"pr_feedback_mode,omitempty"`
 	PRFeedbackBotMode        PRFeedbackBotMode   `json:"pr_feedback_bot_mode,omitempty"`
 	PRFeedbackBotCycleLimit  NullableCycleLimit  `json:"pr_feedback_bot_cycle_limit,omitzero"`
 	PRFeedbackBotAllowlist   []string            `json:"pr_feedback_bot_allowlist,omitempty"`
+}
+
+// EffectiveResolveConflictsWhenIdle defaults automatic conflict repair on
+// while honoring an explicit organization opt-out.
+func (s AutomaticFollowThroughOrgSettings) EffectiveResolveConflictsWhenIdle() bool {
+	return s.ResolveConflictsWhenIdle == nil || *s.ResolveConflictsWhenIdle
+}
+
+// EffectiveFixTestsWhenIdle defaults automatic test repair on while honoring
+// an explicit organization opt-out.
+func (s AutomaticFollowThroughOrgSettings) EffectiveFixTestsWhenIdle() bool {
+	return s.FixTestsWhenIdle == nil || *s.FixTestsWhenIdle
 }
 
 // Validate returns an error when the session automation settings are invalid.
@@ -750,6 +825,27 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 	}
 	if s.DefaultAgentType == "" {
 		s.DefaultAgentType = DefaultDefaultAgentType
+	}
+	// Coding-agent defaults are back-filled here (not only in
+	// DefaultNewOrganizationSettings) so they apply retroactively to orgs that
+	// predate the setting. Key presence — not the value — decides: an admin who
+	// picks "provider/agent default" in the UI stores an explicit empty string,
+	// and that opt-out has to survive every subsequent parse.
+	if s.CodingAgentModelDefaults == nil {
+		s.CodingAgentModelDefaults = make(map[AgentType]string)
+	}
+	for agentType, model := range DefaultCodingAgentModelDefaults {
+		if _, ok := s.CodingAgentModelDefaults[agentType]; !ok {
+			s.CodingAgentModelDefaults[agentType] = model
+		}
+	}
+	if s.CodingAgentReasoningDefaults == nil {
+		s.CodingAgentReasoningDefaults = make(map[AgentType]ReasoningEffort)
+	}
+	for agentType, effort := range DefaultCodingAgentReasoningDefaults {
+		if _, ok := s.CodingAgentReasoningDefaults[agentType]; !ok {
+			s.CodingAgentReasoningDefaults[agentType] = effort
+		}
 	}
 	if s.AuditRetentionDays == 0 {
 		s.AuditRetentionDays = DefaultAuditRetentionDays

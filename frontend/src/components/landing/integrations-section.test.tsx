@@ -16,16 +16,13 @@ describe("IntegrationsSection", () => {
     expect(heading.className).not.toContain(landingTypography.sectionTitle);
   });
 
-  it("shows agent choice and cost controls as supporting features", () => {
+  it("keeps the section focused on team tool integrations", () => {
     render(<IntegrationsSection isDark={false} />);
 
+    expect(screen.getByText("05 Integrations")).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", {
-        level: 3,
-        name: "Use the best agent for the job",
-      }),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/open-source models/i)).toBeInTheDocument();
-    expect(screen.getByText(/bundled coding-agent subscriptions/i)).toBeInTheDocument();
+      screen.queryByRole("heading", { name: "Run any coding agent." }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("GitHub")).toBeInTheDocument();
   });
 });

@@ -421,15 +421,22 @@ func TestCodeReviewHandler_AnalyticsReturnsReport(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
-	mock.ExpectQuery(`(?s)WITH filtered_reviews AS MATERIALIZED.*m\.repository_id = @repository_id.*finding_rollup AS.*FROM summary`).
+	mock.ExpectQuery(`(?s)WITH first_attempt AS MATERIALIZED.*m\.repository_id = @repository_id.*FROM summary s`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"reviews_requested", "reviews_completed", "automatically_approved", "not_approved",
-			"needs_human_review", "comment_only", "blocked", "approval_not_posted",
-			"failed_reviews", "stale_reviews", "median_additions", "median_deletions", "reviews_with_findings",
-			"reviews_with_blocking_findings", "total_findings", "authors", "non_approval_reasons",
+			"prs_reviewed", "prs_with_completed_round", "approved_by_143", "not_approved",
+			"approved_first_round", "median_rounds_to_approval",
+			"prs_with_failed_attempt", "prs_with_stale_attempt",
+			"prs_with_change_breakdown", "median_additions", "median_deletions", "prs_with_findings",
+			"prs_with_blocking_findings", "total_findings", "needs_human_review",
+			"comment_only", "blocked", "approval_not_posted", "approval_rounds", "authors",
+			"non_approval_reasons",
 		}).AddRow(
-			6, 5, 3, 2, 2, 0, 0, 0, 1, 0, -1, -1, 1, 1, 2, []byte(`[]`), []byte(`[]`),
+			6, 5, 3, 2, 2, 1.0, 1, 0,
+			0, -1, -1, 1,
+			1, 2, 2, 0, 0, 0,
+			[]byte(`[{"bucket":"round_1","prs":2},{"bucket":"round_2","prs":1},{"bucket":"round_3","prs":0},{"bucket":"round_4_plus","prs":0},{"bucket":"not_yet_approved","prs":3}]`),
+			[]byte(`[]`), []byte(`[]`),
 		))
 	handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-reviews/analytics?repository_id="+repositoryID.String(), nil)
@@ -442,26 +449,36 @@ func TestCodeReviewHandler_AnalyticsReturnsReport(t *testing.T) {
 	require.JSONEq(t, `{
 		"data": {
 			"summary": {
-				"reviews_requested": 6,
-				"reviews_completed": 5,
-				"automatically_approved": 3,
+				"prs_reviewed": 6,
+				"prs_with_completed_round": 5,
+				"approved_by_143": 3,
 				"not_approved": 2,
+				"approved_first_round": 2,
+				"median_rounds_to_approval": 1,
 				"needs_human_review": 2,
 				"comment_only": 0,
 				"blocked": 0,
 				"approval_not_posted": 0,
-				"failed_reviews": 1,
-				"stale_reviews": 0,
+				"prs_with_failed_attempt": 1,
+				"prs_with_stale_attempt": 0,
+				"prs_with_change_breakdown": 0,
 				"median_additions": null,
 				"median_deletions": null,
-				"reviews_with_findings": 1,
-				"reviews_with_blocking_findings": 1,
+				"prs_with_findings": 1,
+				"prs_with_blocking_findings": 1,
 				"total_findings": 2
 			},
+			"approval_rounds": [
+				{"bucket":"round_1","prs":2},
+				{"bucket":"round_2","prs":1},
+				{"bucket":"round_3","prs":0},
+				{"bucket":"round_4_plus","prs":0},
+				{"bucket":"not_yet_approved","prs":3}
+			],
 			"authors": [],
 			"non_approval_reasons": []
 		}
-	}`, rr.Body.String(), "analytics should return exact outcome metrics and empty breakdowns")
+	}`, rr.Body.String(), "analytics should return exact nullable metrics and empty breakdowns")
 	require.NoError(t, mock.ExpectationsWereMet(), "analytics handler should apply the repository scope to every query")
 }
 
@@ -679,6 +696,30 @@ func TestCodeReviewAnalyticsIgnoresListOnlySortParameters(t *testing.T) {
 	require.True(t, ok, "a list-only sort parameter should not fail the analytics request")
 	require.Equal(t, http.StatusOK, rr.Code, "no error should be written for a list-only sort parameter")
 	require.Empty(t, filters.AuthorSortBy, "the list sort should not leak into the analytics author ordering")
+}
+
+func TestCodeReviewAnalyticsUsesOnlyPRCohortFilters(t *testing.T) {
+	t.Parallel()
+
+	repositoryID := uuid.New()
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v1/code-reviews/analytics?repository_id="+repositoryID.String()+
+			"&created_after=2026-07-01T00:00:00Z&decision=blocked&outcome=completed_not_approved"+
+			"&activity_status=failed&status=stale&risk=needs_review&author=octocat&search=ignored"+
+			"&author_sort_by=first_round&author_sort_order=desc",
+		nil,
+	)
+	rr := httptest.NewRecorder()
+
+	filters, ok := parseCodeReviewAnalyticsFilters(rr, req)
+
+	require.True(t, ok, "PR-centric analytics should accept its cohort and author-sort filters")
+	require.Equal(t, &repositoryID, filters.RepositoryID, "analytics should preserve the repository cohort filter")
+	require.Equal(t, "first_round", filters.AuthorSortBy, "analytics should accept the first-round PR sort")
+	require.Equal(t, "desc", filters.AuthorSortOrder, "analytics should preserve the author sort direction")
+	require.NotNil(t, filters.CreatedAfter, "analytics should preserve the first-request lower boundary")
+	require.Equal(t, time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), *filters.CreatedAfter, "analytics should parse the cohort boundary exactly")
 }
 
 func TestCodeReviewHandler_Retry(t *testing.T) {

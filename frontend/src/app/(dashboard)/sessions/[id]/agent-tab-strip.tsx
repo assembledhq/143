@@ -16,6 +16,7 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { AGENTS_BY_KEY } from "@/lib/agents";
 import type { SessionThread, SessionThreadFileEvent } from "@/lib/types";
+import { SESSION_THREAD_STRIP_HEIGHT_CLASSNAME } from "./session-detail-geometry";
 
 // Status helpers — kept in one place so the tab strip and detail panel agree.
 
@@ -148,6 +149,25 @@ interface AgentTabStripProps {
   addTabButtonRef?: RefObject<HTMLButtonElement | null>;
 }
 
+// Stands in for the tab row whenever there is nothing to render in it, so the
+// strip keeps its footprint. Every "no tabs to show" path routes through here
+// rather than returning null: a bare null collapses the row and shifts the
+// transcript and composer beneath it, which is the layout jump the shared
+// session detail frame exists to prevent.
+function ThreadStripPlaceholder({ message }: { message?: string }) {
+  return (
+    <div
+      data-testid="session-thread-strip-empty"
+      className={cn(
+        "flex shrink-0 items-center border-b border-border bg-background px-3 text-xs text-muted-foreground",
+        SESSION_THREAD_STRIP_HEIGHT_CLASSNAME,
+      )}
+    >
+      {message}
+    </div>
+  );
+}
+
 // AgentTabStrip is the user's primary surface for switching between tabs and
 // taking per-tab actions (cancel, fork, revert). It renders a compact
 // Conductor-style row with status, overlap badge, and an actions menu
@@ -176,12 +196,18 @@ export function AgentTabStrip({
   addTabButtonRef,
 }: AgentTabStripProps) {
   const tabs = useMemo(() => threads, [threads]);
-  if (tabs.length === 0 || !activeThreadId) {
-    return null;
+  if (tabs.length === 0) {
+    return <ThreadStripPlaceholder message="No agent tabs for this session" />;
+  }
+  // Tabs exist but none is selected yet — a transient state while the initial
+  // selection resolves, or right after the selected tab disappears. Hold the
+  // row without labelling the session as empty, since it isn't.
+  if (!activeThreadId) {
+    return <ThreadStripPlaceholder />;
   }
   const activeThread = tabs.find((thread) => thread.id === activeThreadId);
   if (!activeThread) {
-    return null;
+    return <ThreadStripPlaceholder />;
   }
 
   if (tabs.length === 1) {

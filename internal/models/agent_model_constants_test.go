@@ -350,6 +350,34 @@ func TestValidateSettingsModels(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "accepts coding agent defaults opting out with an empty value",
+			settings: OrgSettings{
+				CodingAgentModelDefaults:     map[AgentType]string{AgentTypeCodex: ""},
+				CodingAgentReasoningDefaults: map[AgentType]ReasoningEffort{AgentTypeClaudeCode: ""},
+			},
+		},
+		{
+			name: "rejects coding agent defaults keyed by an unknown agent",
+			settings: OrgSettings{
+				CodingAgentModelDefaults: map[AgentType]string{"not_an_agent": ""},
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects coding agent model default from another agent",
+			settings: OrgSettings{
+				CodingAgentModelDefaults: map[AgentType]string{AgentTypeCodex: ClaudeCodeModelOpus5},
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects coding agent reasoning default the agent cannot honor",
+			settings: OrgSettings{
+				CodingAgentReasoningDefaults: map[AgentType]ReasoningEffort{AgentTypeCodex: ReasoningEffortMax},
+			},
+			wantErr: true,
+		},
+		{
 			name: "rejects invalid llm model",
 			settings: OrgSettings{
 				LLMModel: "invalid-model",

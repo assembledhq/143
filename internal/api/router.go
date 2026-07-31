@@ -683,6 +683,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		prService.SetAutomationEventTriggerer(githubAutomationTriggerer)
 		prService.SetSessionMessageStore(sessionMessageStore)
 		prService.SetSessionThreadStore(sessionThreadStore)
+		prService.SetSessionReviewLoopStore(reviewLoopStore)
 		prService.SetAppUserAuth(appUserAuthSvc)
 		prService.SetUserStore(userStore)
 		prService.SetOrgStore(orgStore)

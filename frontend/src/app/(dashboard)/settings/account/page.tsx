@@ -595,9 +595,9 @@ export default function AccountPage() {
             {(Object.keys(PERSONAL_AUTOMATION_COPY) as PersonalAutomationKey[]).map((key) => {
               const copy = PERSONAL_AUTOMATION_COPY[key];
               const currentValue = personalAutomaticFollowThrough[key] ?? "inherit";
-              const orgDefault = key === "resolve_conflicts_when_idle"
-                ? orgAutomaticFollowThrough.resolve_conflicts_when_idle
-                : orgAutomaticFollowThrough.fix_tests_when_idle;
+			  const orgDefault = key === "resolve_conflicts_when_idle"
+				? (orgAutomaticFollowThrough.resolve_conflicts_when_idle ?? true)
+				: (orgAutomaticFollowThrough.fix_tests_when_idle ?? true);
               return (
                 <div key={key} className="space-y-3 border-b border-border pb-5 last:border-b-0 last:pb-0">
                   <div className="space-y-1">

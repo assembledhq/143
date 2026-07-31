@@ -4410,6 +4410,9 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 		withUserContext bool
 		expectedCode    int
 		expectedBody    string
+		// forbiddenBody asserts a substring is absent, for cases whose point is
+		// that a default was *not* applied.
+		forbiddenBody string
 	}{
 		{
 			name: "creates manual session successfully",
@@ -4596,6 +4599,165 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 			withUserContext: true,
 			expectedCode:    http.StatusCreated,
 			expectedBody:    "opencode",
+		},
+		{
+			name: "applies the org coding agent model default when the request omits one",
+			body: `{"message":"Fix the login bug","agent_type":"codex"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				runID := uuid.New()
+				messageID := int64(1)
+				jobID := uuid.New()
+
+				mock.ExpectQuery("SELECT .+ FROM organizations").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+							AddRow(orgID, "Acme", []byte(`{"coding_agent_model_defaults":{"codex":"gpt-5.5"}}`), now, now),
+					)
+
+				expectManualSessionCreate(mock, runID, now)
+
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
+
+				mock.ExpectQuery("SELECT count").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+			},
+			expectedCode: http.StatusCreated,
+			expectedBody: "gpt-5.5",
+		},
+		{
+			name: "ignores an org model default the agent no longer offers",
+			// A model retired from AvailableCodexModels but still saved as the org
+			// default must not 400 every manual session in the org — the request
+			// never named it.
+			body: `{"message":"Fix the login bug","agent_type":"codex"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				runID := uuid.New()
+				messageID := int64(1)
+				jobID := uuid.New()
+
+				mock.ExpectQuery("SELECT .+ FROM organizations").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+							AddRow(orgID, "Acme", []byte(`{"coding_agent_model_defaults":{"codex":"gpt-4-retired"}}`), now, now),
+					)
+
+				expectManualSessionCreate(mock, runID, now)
+
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
+
+				mock.ExpectQuery("SELECT count").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+			},
+			expectedCode:  http.StatusCreated,
+			expectedBody:  "codex",
+			forbiddenBody: "gpt-4-retired",
+		},
+		{
+			name: "ignores an org reasoning default the agent cannot honor",
+			// "max" is Claude-Code-only. A stored value Codex can't honor has to
+			// degrade to "no default" — rejecting it would make every manual
+			// session fail until an admin fixed the org settings.
+			body: `{"message":"Fix the login bug","agent_type":"codex"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				runID := uuid.New()
+				messageID := int64(1)
+				jobID := uuid.New()
+
+				mock.ExpectQuery("SELECT .+ FROM organizations").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+							AddRow(orgID, "Acme", []byte(`{"coding_agent_reasoning_defaults":{"codex":"max"}}`), now, now),
+					)
+
+				expectManualSessionCreate(mock, runID, now)
+
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
+
+				mock.ExpectQuery("SELECT count").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+			},
+			expectedCode:  http.StatusCreated,
+			expectedBody:  "codex",
+			forbiddenBody: `"reasoning_effort"`,
+		},
+		{
+			name: "prefers the member's reasoning default over the org default",
+			body: `{"message":"Fix the login bug"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				runID := uuid.New()
+				messageID := int64(1)
+				jobID := uuid.New()
+				userID := authCoverageUserID
+
+				mock.ExpectQuery("SELECT .+ FROM organizations").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+							AddRow(orgID, "Acme", []byte(`{"default_agent_type":"codex","coding_agent_reasoning_defaults":{"codex":"high"}}`), now, now),
+					)
+
+				// Settings are read once and reused for both the model and the
+				// reasoning fallback, so a single users query covers both.
+				mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
+					WithArgs(userID).
+					WillReturnRows(pgxmock.NewRows([]string{
+						"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "google_id", "email_verified_at", "created_at", "settings",
+					}).AddRow(userID, orgID, "me@example.com", "Me", "admin", nil, nil, nil, nil, nil, now, []byte(`{"coding_agent_reasoning_defaults":{"codex":"low"}}`)))
+
+				expectManualSessionCreate(mock, runID, now)
+
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
+
+				mock.ExpectQuery("SELECT count").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+			},
+			setUserStore:    true,
+			withUserContext: true,
+			expectedCode:    http.StatusCreated,
+			expectedBody:    `"reasoning_effort":"low"`,
 		},
 		{
 			name:         "returns bad request for empty message",
@@ -4876,6 +5038,9 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 			handler.CreateManual(w, req)
 			require.Equal(t, tt.expectedCode, w.Code)
 			require.Contains(t, w.Body.String(), tt.expectedBody)
+			if tt.forbiddenBody != "" {
+				require.NotContains(t, w.Body.String(), tt.forbiddenBody)
+			}
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}

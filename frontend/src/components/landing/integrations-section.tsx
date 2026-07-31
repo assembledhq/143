@@ -2,11 +2,7 @@
 
 import Image from "next/image";
 import { Card, CardContent } from "@/components/ui/card";
-import {
-  agentChoiceHighlights,
-  codingAgents,
-  integrations,
-} from "./landing-copy";
+import { integrations } from "./landing-copy";
 import { landingTypography as type } from "./landing-typography";
 
 interface IntegrationsSectionProps {
@@ -82,59 +78,14 @@ export default function IntegrationsSection({
     >
       <div className="mx-auto max-w-5xl">
         <div className="grid gap-8 lg:grid-cols-[0.38fr_0.62fr] lg:items-end">
-          <p className={`${type.eyebrow} ${label}`}>07 Coding agents</p>
-          <div className="space-y-5">
-            <h2 className={`max-w-3xl ${type.featureTitle} ${heading}`}>
-              Run any coding agent.
-            </h2>
-            <p className={`max-w-2xl ${type.body} ${body}`}>
-              Bring the agent your team already trusts. Connect its auth once and
-              start runs across web, mobile, Slack, Linear, and Sentry.
-            </p>
-          </div>
-        </div>
-
-        <div className="mt-16">{renderGrid(codingAgents)}</div>
-
-        <div
-          className={`mt-8 grid gap-1 rounded-2xl border p-2 md:grid-cols-3 ${
-            isDark
-              ? "border-white/10 bg-[#11110f]"
-              : "border-[#e1ded5] bg-[#efeee8]"
-          }`}
-        >
-          {agentChoiceHighlights.map((highlight) => (
-            <Card
-              key={highlight.title}
-              variant="quiet"
-              className={isDark ? "bg-[#1d1d1a]" : "bg-[#fefdfb]"}
-            >
-              <CardContent className="p-6">
-                <h3
-                  className={`${type.cardTitle} ${
-                    isDark ? "text-[#f4f3ee]" : "text-[#1b1b19]"
-                  }`}
-                >
-                  {highlight.title}
-                </h3>
-                <p className={`mt-4 ${type.body} ${body}`}>
-                  {highlight.body}
-                </p>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-
-        <div className="mt-28 grid gap-8 lg:grid-cols-[0.38fr_0.62fr] lg:items-end">
-          <p className={`${type.eyebrow} ${label}`}>08 Integrations</p>
+          <p className={`${type.eyebrow} ${label}`}>05 Integrations</p>
           <div className="space-y-5">
             <h2 className={`max-w-3xl ${type.featureTitle} ${heading}`}>
               Connect your engineering tools.
             </h2>
             <p className={`max-w-2xl ${type.body} ${body}`}>
-              Integrations are configured once for the organization, so every
-              agent starts with the same source of truth your team uses every
-              day.
+              Connect each tool once for the organization. Every agent starts
+              with the same context your team already uses.
             </p>
           </div>
         </div>

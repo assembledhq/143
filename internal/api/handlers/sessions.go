@@ -4395,17 +4395,41 @@ func (h *SessionHandler) createManual(w http.ResponseWriter, r *http.Request, or
 	}
 
 	agentType := models.AgentType(body.AgentType)
-	if body.Model == "" && agentType == "" && h.userStore != nil {
-		if user := middleware.UserFromContext(r.Context()); user != nil {
-			userWithSettings, err := h.userStore.GetByIDGlobalWithSettings(r.Context(), user.ID)
-			if err != nil {
-				zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to load user settings for default model")
-			} else if userWithSettings.Settings.CodingAgentModelDefault != "" {
-				resolvedAgentType := models.AgentTypeForModel(userWithSettings.Settings.CodingAgentModelDefault)
-				if resolvedAgentType != "" {
-					body.Model = userWithSettings.Settings.CodingAgentModelDefault
-					agentType = resolvedAgentType
-				}
+
+	// Model and reasoning effort resolve request → personal default → org
+	// default. The personal settings lookup is memoized because both fall back
+	// to the same row, and skipped entirely when the request pins both.
+	var (
+		personalSettings       *models.UserSettings
+		personalSettingsLoaded bool
+	)
+	loadPersonalSettings := func() *models.UserSettings {
+		if personalSettingsLoaded {
+			return personalSettings
+		}
+		personalSettingsLoaded = true
+		if h.userStore == nil {
+			return nil
+		}
+		user := middleware.UserFromContext(r.Context())
+		if user == nil {
+			return nil
+		}
+		userWithSettings, err := h.userStore.GetByIDGlobalWithSettings(r.Context(), user.ID)
+		if err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to load user settings for session defaults")
+			return nil
+		}
+		personalSettings = &userWithSettings.Settings
+		return personalSettings
+	}
+
+	if body.Model == "" && agentType == "" {
+		if settings := loadPersonalSettings(); settings != nil && settings.CodingAgentModelDefault != "" {
+			resolvedAgentType := models.AgentTypeForModel(settings.CodingAgentModelDefault)
+			if resolvedAgentType != "" {
+				body.Model = settings.CodingAgentModelDefault
+				agentType = resolvedAgentType
 			}
 		}
 	}
@@ -4414,6 +4438,14 @@ func (h *SessionHandler) createManual(w http.ResponseWriter, r *http.Request, or
 		if agentType == "" {
 			agentType = models.DefaultDefaultAgentType
 		}
+	}
+	// Resolved server-side rather than trusting the composer to send it, so
+	// API/CLI callers get the same personal-over-org precedence the web UI shows.
+	if body.Model == "" || body.ReasoningEffort == "" {
+		model, effort := models.ResolveCodingAgentDefaults(
+			agentType, body.Model, models.ReasoningEffort(body.ReasoningEffort), loadPersonalSettings(), orgSettings)
+		body.Model = model
+		body.ReasoningEffort = string(effort)
 	}
 	if err := agentType.Validate(); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_AGENT_TYPE", err.Error())

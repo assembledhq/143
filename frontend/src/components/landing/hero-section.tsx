@@ -84,14 +84,15 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
               isDark ? "text-[#f4f3ee]" : "text-[#1b1b19]"
             }`}
           >
-            Where your whole team builds software together
+            Ship as fast as you build
           </h1>
 
           <p
             className={`max-w-2xl ${type.heroBody} ${isDark ? "text-[#aaa89f]" : "text-[#6b6b65]"}`}
           >
-            Run Codex, Claude Code, and OpenCode in an open-source cloud with
-            shared context, previews, review loops, and automations.
+            Run Codex, Claude Code, and OpenCode in an open-source cloud,
+            where review loops auto-approve the pull requests that pass your
+            policy.
           </p>
 
           <div className="flex flex-wrap gap-4 pt-1 pointer-events-auto">

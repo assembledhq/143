@@ -45,14 +45,26 @@ A retry is rejected if the pull request has moved to another commit, is no longe
 
 ## Evaluate approval behavior
 
-Use the **Analytics** tab to evaluate a repository or the organization over the last 7, 30, or 90 days, or across all recorded reviews. It reports completed automatic approvals and non-approvals, approval rate, usage by pull request author, average and median additions and deletions by author, finding rates, and the most common structured reasons reviews required human judgment.
+Use the **Analytics** tab to evaluate pull requests first sent to 143 in a
+repository or the organization over the last 7, 30, or 90 days, or across all
+recorded history. Each pull request contributes once even when it required
+several review attempts. The report shows eventual 143 approvals, approval
+rate, approval by distinct-head review round, median rounds to approval, usage
+by pull request author, median additions and deletions by author, finding rates,
+and the most common structured reasons approval was withheld.
 
-The author change summaries show their captured sample size. New reviews persist additions and deletions separately, along with structured non-approval reasons used for the decision. Older reviews may not contribute to either breakdown, so treat a small historical sample as directional rather than representative.
+Later rounds remain attached to the pull request's original first-request time
+cohort, including approvals completed after the selected window. Failed, stale,
+cancelled, and same-head retry attempts do not add review rounds. Older reviews
+may not have captured additions, deletions, or structured reason data, so treat
+small historical samples as directional rather than representative.
 
 Use the report to tune policy deliberately:
 
-- A high approval rate on large pull requests may justify tighter size or path limits.
-- Frequent size-limit non-approvals may mean the limit is intentionally protective or unrealistically low for the team's normal work.
+- A high first-round approval rate suggests the current policy and author
+  workflow usually converge without another commit.
+- Frequent second- or later-round approvals show where authors commonly need
+  iteration before 143 can approve.
 - Frequent blocking findings point to code-quality concerns, while description, check, quorum, or sensitive-path reasons point to specific deterministic safeguards.
 - PR-author totals show whose pull requests receive automated reviews; they do not claim who clicked or mentioned the reviewer.
 

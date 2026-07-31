@@ -86,6 +86,10 @@ type sessionThreadLister interface {
 	ListBySessionWithOptions(ctx context.Context, orgID, sessionID uuid.UUID, includeArchived bool) ([]models.SessionThread, error)
 }
 
+type sessionReviewLoopLister interface {
+	ListLoopsBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionReviewLoop, error)
+}
+
 // PRService handles GitHub PR creation and webhook-based tracking.
 type PRService struct {
 	tokenProvider   *Service
@@ -103,6 +107,7 @@ type PRService struct {
 	userCredentials *db.UserCredentialStore
 	sessionMessages *db.SessionMessageStore
 	sessionThreads  sessionThreadLister
+	reviewLoops     sessionReviewLoopLister
 	appUserAuth     interface {
 		GetValidCredential(ctx context.Context, orgID, userID uuid.UUID) (*models.GitHubAppUserConfig, error)
 	}
@@ -231,6 +236,10 @@ func (s *PRService) SetSessionMessageStore(store *db.SessionMessageStore) {
 
 func (s *PRService) SetSessionThreadStore(store sessionThreadLister) {
 	s.sessionThreads = store
+}
+
+func (s *PRService) SetSessionReviewLoopStore(store sessionReviewLoopLister) {
+	s.reviewLoops = store
 }
 
 // SetAppUserAuth wires the refresh-aware GitHub App user auth service used to
@@ -5332,10 +5341,7 @@ func (s *PRService) generatePRContent(ctx context.Context, token, owner, repoNam
 		RepoTemplate: repoTemplate,
 	}
 
-	if run.ResultSummary != nil && *run.ResultSummary != "" {
-		userData.ResultSummary = *run.ResultSummary
-	}
-	userData.ThreadContext = s.buildPRThreadContext(ctx, run)
+	userData.ResultSummary, userData.ThreadContext = s.buildPRNarrativeContext(ctx, run)
 	if run.Title != nil && *run.Title != "" {
 		userData.SessionTitle = *run.Title
 	}
@@ -5375,22 +5381,175 @@ func (s *PRService) generatePRContent(ctx context.Context, token, owner, repoNam
 	return result, nil
 }
 
-func (s *PRService) buildPRThreadContext(ctx context.Context, run *models.Session) string {
-	if s.sessionThreads == nil || run == nil {
-		return ""
+func (s *PRService) buildPRNarrativeContext(ctx context.Context, run *models.Session) (string, string) {
+	if run == nil {
+		return "", ""
+	}
+	fallbackSummary := strings.TrimSpace(stringValue(run.ResultSummary))
+	if s.sessionThreads == nil {
+		return fallbackSummary, ""
 	}
 	threads, err := s.sessionThreads.ListBySessionWithOptions(ctx, run.OrgID, run.ID, false)
 	if err != nil {
 		s.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to load session threads for PR content")
-		return ""
+		return fallbackSummary, ""
 	}
-	// Pass the session-level summary so formatPRThreadContext can skip any thread
-	// whose summary is already surfaced in <agent_summary>, preventing the same
-	// content (typically the last-completing thread's summary) from appearing twice.
-	return formatPRThreadContext(threads, run.PrimaryThreadID, stringValue(run.ResultSummary))
+
+	reviews, reviewErr := s.reviewContext(ctx, run, threads)
+	if reviewErr != nil {
+		s.logger.Warn().Err(reviewErr).Str("session_id", run.ID.String()).Msg("failed to load review loops for PR content")
+		// Keep the execution_mode half reviewContext already collected from the
+		// thread rows, but stop trusting session.result_summary: it holds the
+		// summary of whichever thread completed last, and review-loop threads
+		// carry execution_mode "work", so with the loop rows unavailable there
+		// is no signal that would recognize a reviewer as the last completer.
+		// Prefer a thread-attributed narrative instead, and suppress the session
+		// text from the thread block too — dropping one legitimate bullet on a
+		// rare DB failure beats publishing review prose as the PR narrative.
+		reviews.provenanceIncomplete = true
+		reviews.addSummary(fallbackSummary)
+	}
+
+	implThreadID, summary := implementationSummary(threads, run.PrimaryThreadID, reviews, fallbackSummary)
+	return summary, formatPRThreadContext(threads, implThreadID, reviews, summary)
 }
 
-func formatPRThreadContext(threads []models.SessionThread, primaryThreadID *uuid.UUID, sessionSummary string) string {
+// prReviewContext identifies the threads that produced review prose and the
+// prose itself, so PR narrative selection can exclude both. Summaries are
+// tracked separately from thread IDs because a review thread can be archived
+// (and therefore absent from the thread list) while session.result_summary
+// still carries its text.
+//
+// Always build one with newPRReviewContext: the zero value's maps are nil, so
+// the lookups are safe but addSummary and threadIDs writes would panic.
+type prReviewContext struct {
+	threadIDs map[uuid.UUID]struct{}
+	summaries map[string]struct{}
+	// provenanceIncomplete records that review classification is missing a
+	// signal (the session_review_loops lookup failed), so an unrecognized
+	// summary cannot be assumed to be implementation narrative.
+	provenanceIncomplete bool
+}
+
+func newPRReviewContext() prReviewContext {
+	return prReviewContext{
+		threadIDs: make(map[uuid.UUID]struct{}),
+		summaries: make(map[string]struct{}),
+	}
+}
+
+func (c prReviewContext) addSummary(summary string) {
+	if trimmed := strings.TrimSpace(summary); trimmed != "" {
+		c.summaries[trimmed] = struct{}{}
+	}
+}
+
+func (c prReviewContext) isReviewThread(id uuid.UUID) bool {
+	_, ok := c.threadIDs[id]
+	return ok
+}
+
+func (c prReviewContext) isReviewSummary(summary string) bool {
+	trimmed := strings.TrimSpace(summary)
+	if trimmed == "" {
+		return false
+	}
+	_, ok := c.summaries[trimmed]
+	return ok
+}
+
+// reviewContext classifies review threads from two independent signals: the
+// typed execution mode (set on read-only review threads) and the
+// session_review_loops rows (review-loop threads are created through the
+// generic thread service, so they carry execution_mode "work"). On error it
+// still returns the execution-mode half so callers can degrade usefully.
+func (s *PRService) reviewContext(ctx context.Context, run *models.Session, threads []models.SessionThread) (prReviewContext, error) {
+	reviews := newPRReviewContext()
+	for _, thread := range threads {
+		if thread.ExecutionMode == models.ThreadExecutionModeReview {
+			reviews.threadIDs[thread.ID] = struct{}{}
+			reviews.addSummary(stringValue(thread.ResultSummary))
+		}
+	}
+	if s.reviewLoops == nil {
+		return reviews, nil
+	}
+	loops, err := s.reviewLoops.ListLoopsBySession(ctx, run.OrgID, run.ID)
+	if err != nil {
+		return reviews, err
+	}
+	byID := make(map[uuid.UUID]models.SessionThread, len(threads))
+	for _, thread := range threads {
+		byID[thread.ID] = thread
+	}
+	for _, loop := range loops {
+		// LatestSummary is durable review provenance: it survives archiving the
+		// review thread, which would otherwise drop the row from `threads` and
+		// leave the review text unrecognizable in session.result_summary.
+		reviews.addSummary(stringValue(loop.LatestSummary))
+		if loop.ThreadID == nil {
+			continue
+		}
+		reviews.threadIDs[*loop.ThreadID] = struct{}{}
+		if thread, ok := byID[*loop.ThreadID]; ok {
+			reviews.addSummary(stringValue(thread.ResultSummary))
+		}
+	}
+	return reviews, nil
+}
+
+// implementationSummary picks the narrative that describes the code change and
+// returns the thread it came from (nil when it came from session.result_summary)
+// so the caller can avoid repeating it in the thread context block. It prefers,
+// in order:
+//
+//  1. The thread primaryThreadID names, when that is not a review thread. The
+//     field is only a hint: models.Session.PrimaryThreadID is db:"-" and is left
+//     nil on sessions loaded for PR creation, and the run_agent worker sets it to
+//     whichever thread is executing — which can be a review thread.
+//  2. session.result_summary, unless it is review prose or review provenance is
+//     incomplete (see prReviewContext.provenanceIncomplete).
+//  3. The earliest non-review thread with a summary. Threads arrive ordered
+//     created_at ASC, so this is the thread seeded with the session — the same
+//     one PrimaryThreadID would have named had it been hydrated — rather than
+//     whichever thread happened to finish last.
+//
+// When every summary belongs to a reviewer the result is empty on purpose: the
+// diff and file summary carry the PR, and the system prompt already treats them
+// as the source of truth. Guessing from review prose is what this path exists
+// to prevent.
+func implementationSummary(threads []models.SessionThread, primaryThreadID *uuid.UUID, reviews prReviewContext, fallback string) (*uuid.UUID, string) {
+	if primaryThreadID != nil && !reviews.isReviewThread(*primaryThreadID) {
+		for _, thread := range threads {
+			if thread.ID != *primaryThreadID {
+				continue
+			}
+			summary := strings.TrimSpace(stringValue(thread.ResultSummary))
+			if summary != "" && !reviews.isReviewSummary(summary) {
+				threadID := thread.ID
+				return &threadID, summary
+			}
+			break
+		}
+	}
+	if fallback != "" && !reviews.provenanceIncomplete && !reviews.isReviewSummary(fallback) {
+		return nil, fallback
+	}
+	for _, thread := range threads {
+		if reviews.isReviewThread(thread.ID) {
+			continue
+		}
+		summary := strings.TrimSpace(stringValue(thread.ResultSummary))
+		if summary == "" || reviews.isReviewSummary(summary) {
+			continue
+		}
+		threadID := thread.ID
+		return &threadID, summary
+	}
+	return nil, ""
+}
+
+func formatPRThreadContext(threads []models.SessionThread, implementationThreadID *uuid.UUID, reviews prReviewContext, primarySummary string) string {
 	if len(threads) == 0 {
 		return ""
 	}
@@ -5398,22 +5557,23 @@ func formatPRThreadContext(threads []models.SessionThread, primaryThreadID *uuid
 	var b strings.Builder
 	included := 0
 	for _, thread := range threads {
-		summary := strings.TrimSpace(stringValue(thread.ResultSummary))
-		if summary == "" {
+		if implementationThreadID != nil && thread.ID == *implementationThreadID {
 			continue
 		}
-		// Skip threads whose summary is identical to the session-level summary
-		// already included in <agent_summary> to avoid redundant context.
-		if sessionSummary != "" && summary == sessionSummary {
+		if reviews.isReviewThread(thread.ID) {
+			continue
+		}
+		summary := strings.TrimSpace(stringValue(thread.ResultSummary))
+		if summary == "" || reviews.isReviewSummary(summary) {
+			continue
+		}
+		if primarySummary != "" && summary == primarySummary {
 			continue
 		}
 		included++
 		label := strings.TrimSpace(thread.Label)
 		if label == "" {
 			label = "Thread"
-		}
-		if primaryThreadID != nil && thread.ID == *primaryThreadID {
-			label += " (primary)"
 		}
 		fmt.Fprintf(&b, "- %s: %s\n", label, truncateText(summary, 1200))
 		if included >= 8 {

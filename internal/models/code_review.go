@@ -950,42 +950,76 @@ type CodeReviewStats struct {
 }
 
 type CodeReviewAnalyticsSummary struct {
-	ReviewsRequested            int64    `json:"reviews_requested"`
-	ReviewsCompleted            int64    `json:"reviews_completed"`
-	AutomaticallyApproved       int64    `json:"automatically_approved"`
-	NotApproved                 int64    `json:"not_approved"`
-	NeedsHumanReview            int64    `json:"needs_human_review"`
-	CommentOnly                 int64    `json:"comment_only"`
-	Blocked                     int64    `json:"blocked"`
-	ApprovalNotPosted           int64    `json:"approval_not_posted"`
-	FailedReviews               int64    `json:"failed_reviews"`
-	StaleReviews                int64    `json:"stale_reviews"`
-	MedianAdditions             *float64 `json:"median_additions"`
-	MedianDeletions             *float64 `json:"median_deletions"`
-	ReviewsWithFindings         int64    `json:"reviews_with_findings"`
-	ReviewsWithBlockingFindings int64    `json:"reviews_with_blocking_findings"`
-	TotalFindings               int64    `json:"total_findings"`
+	PRsReviewed             int64    `json:"prs_reviewed"`
+	PRsWithCompletedRound   int64    `json:"prs_with_completed_round"`
+	ApprovedBy143           int64    `json:"approved_by_143"`
+	NotApproved             int64    `json:"not_approved"`
+	ApprovedFirstRound      int64    `json:"approved_first_round"`
+	MedianRoundsToApproval  *float64 `json:"median_rounds_to_approval"`
+	NeedsHumanReview        int64    `json:"needs_human_review"`
+	CommentOnly             int64    `json:"comment_only"`
+	Blocked                 int64    `json:"blocked"`
+	ApprovalNotPosted       int64    `json:"approval_not_posted"`
+	PRsWithFailedAttempt    int64    `json:"prs_with_failed_attempt"`
+	PRsWithStaleAttempt     int64    `json:"prs_with_stale_attempt"`
+	PRsWithChangeBreakdown  int64    `json:"prs_with_change_breakdown"`
+	MedianAdditions         *float64 `json:"median_additions"`
+	MedianDeletions         *float64 `json:"median_deletions"`
+	PRsWithFindings         int64    `json:"prs_with_findings"`
+	PRsWithBlockingFindings int64    `json:"prs_with_blocking_findings"`
+	TotalFindings           int64    `json:"total_findings"`
 }
 
 type CodeReviewAuthorAnalytics struct {
-	Author                     string   `db:"author" json:"author"`
-	ReviewsCompleted           int64    `db:"reviews_completed" json:"reviews_completed"`
-	AutomaticallyApproved      int64    `db:"automatically_approved" json:"automatically_approved"`
-	NotApproved                int64    `db:"not_approved" json:"not_approved"`
-	ReviewsWithChangeBreakdown int64    `db:"reviews_with_change_breakdown" json:"reviews_with_change_breakdown"`
-	AverageAdditions           *float64 `db:"average_additions" json:"average_additions"`
-	MedianAdditions            *float64 `db:"median_additions" json:"median_additions"`
-	AverageDeletions           *float64 `db:"average_deletions" json:"average_deletions"`
-	MedianDeletions            *float64 `db:"median_deletions" json:"median_deletions"`
+	Author                 string   `db:"author" json:"author"`
+	PRsReviewed            int64    `db:"prs_reviewed" json:"prs_reviewed"`
+	ApprovedBy143          int64    `db:"approved_by_143" json:"approved_by_143"`
+	NotApproved            int64    `db:"not_approved" json:"not_approved"`
+	ApprovedFirstRound     int64    `db:"approved_first_round" json:"approved_first_round"`
+	MedianRoundsToApproval *float64 `db:"median_rounds_to_approval" json:"median_rounds_to_approval"`
+	MedianAdditions        *float64 `db:"median_additions" json:"median_additions"`
+	MedianDeletions        *float64 `db:"median_deletions" json:"median_deletions"`
 }
 
 type CodeReviewNonApprovalReasonAnalytics struct {
-	Code    CodeReviewRiskReasonCode `db:"code" json:"code"`
-	Reviews int64                    `db:"reviews" json:"reviews"`
+	Code CodeReviewRiskReasonCode `db:"code" json:"code"`
+	PRs  int64                    `db:"prs" json:"prs"`
+}
+
+type CodeReviewApprovalRoundBucket string
+
+const (
+	CodeReviewApprovalRound1      CodeReviewApprovalRoundBucket = "round_1"
+	CodeReviewApprovalRound2      CodeReviewApprovalRoundBucket = "round_2"
+	CodeReviewApprovalRound3      CodeReviewApprovalRoundBucket = "round_3"
+	CodeReviewApprovalRound4Plus  CodeReviewApprovalRoundBucket = "round_4_plus"
+	CodeReviewApprovalRoundNotYet CodeReviewApprovalRoundBucket = "not_yet_approved"
+)
+
+// CodeReviewApprovalRoundBuckets lists every mutually exclusive bucket, in the
+// order the analytics report presents them. A report must carry all of them.
+var CodeReviewApprovalRoundBuckets = []CodeReviewApprovalRoundBucket{
+	CodeReviewApprovalRound1, CodeReviewApprovalRound2, CodeReviewApprovalRound3,
+	CodeReviewApprovalRound4Plus, CodeReviewApprovalRoundNotYet,
+}
+
+func (b CodeReviewApprovalRoundBucket) Validate() error {
+	for _, known := range CodeReviewApprovalRoundBuckets {
+		if b == known {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid CodeReviewApprovalRoundBucket: %q", b)
+}
+
+type CodeReviewApprovalRoundAnalytics struct {
+	Bucket CodeReviewApprovalRoundBucket `json:"bucket"`
+	PRs    int64                         `json:"prs"`
 }
 
 type CodeReviewAnalytics struct {
 	Summary            CodeReviewAnalyticsSummary             `json:"summary"`
+	ApprovalRounds     []CodeReviewApprovalRoundAnalytics     `json:"approval_rounds"`
 	Authors            []CodeReviewAuthorAnalytics            `json:"authors"`
 	NonApprovalReasons []CodeReviewNonApprovalReasonAnalytics `json:"non_approval_reasons"`
 }

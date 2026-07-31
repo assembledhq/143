@@ -536,27 +536,28 @@ func (h *CodeReviewHandler) Stats(w http.ResponseWriter, r *http.Request) {
 }
 
 func parseCodeReviewAnalyticsFilters(w http.ResponseWriter, r *http.Request) (db.CodeReviewAnalyticsFilters, bool) {
-	// The shared filter parser reports a bad UUID as INVALID_QUERY; this
-	// endpoint has always answered with the more specific
-	// INVALID_REPOSITORY_ID, so check first to keep that contract.
+	// This endpoint has always answered a bad repository UUID with the specific
+	// INVALID_REPOSITORY_ID rather than the generic INVALID_QUERY the shared
+	// list parser returns, so it parses the cohort repository itself.
+	var repositoryID *uuid.UUID
 	if raw := strings.TrimSpace(r.URL.Query().Get("repository_id")); raw != "" {
-		if _, err := uuid.Parse(raw); err != nil {
+		parsed, err := uuid.Parse(raw)
+		if err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
 			return db.CodeReviewAnalyticsFilters{}, false
 		}
+		repositoryID = &parsed
 	}
-	filters, ok := parseCodeReviewFilters(w, r)
+	createdAfter, createdBefore, ok := parseCodeReviewTimeFilters(w, r)
 	if !ok {
 		return db.CodeReviewAnalyticsFilters{}, false
 	}
 	analyticsFilters := db.CodeReviewAnalyticsFilters{
-		RepositoryID: filters.RepositoryID, Decision: filters.Decision, Outcome: filters.Outcome,
-		ActivityStatus: filters.ActivityStatus, Status: filters.Status, Acceptable: filters.Acceptable,
-		Search: filters.Search, CreatedAfter: filters.CreatedAfter, CreatedBefore: filters.CreatedBefore,
+		RepositoryID: repositoryID, CreatedAfter: createdAfter, CreatedBefore: createdBefore,
 	}
 	if raw := strings.TrimSpace(r.URL.Query().Get("author_sort_by")); raw != "" {
 		switch raw {
-		case "author", "reviews", "approved", "not_approved", "approval_rate", "split_sample", "average_additions", "median_additions", "average_deletions", "median_deletions":
+		case "author", "reviews", "approved", "not_approved", "approval_rate", "first_round", "median_rounds", "median_additions", "median_deletions":
 			analyticsFilters.AuthorSortBy = raw
 		default:
 			writeError(w, r, http.StatusBadRequest, "INVALID_ANALYTICS_SORT", "invalid author_sort_by")

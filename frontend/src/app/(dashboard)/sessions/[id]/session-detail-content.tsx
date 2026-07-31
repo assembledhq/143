@@ -174,12 +174,21 @@ import { pollMs } from "@/lib/poll-intervals";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
 import { MobileSessionTopBar } from "./mobile-session-top-bar";
 import { RecoverableInboxNotice } from "./recoverable-inbox-notice";
-import { SessionDetailLoadingSkeleton, SessionTimelineSkeleton } from "./session-detail-loading-skeleton";
+import { SessionDetailLoadingContent, SessionTimelineSkeleton } from "./session-detail-loading-skeleton";
+import { SessionDetailFrame } from "./session-detail-frame";
+import {
+  SESSION_DETAIL_PANEL_DEFAULT_WIDTH,
+  SESSION_DETAIL_PANEL_MAX_WIDTH,
+  SESSION_DETAIL_PANEL_MIN_WIDTH,
+  SESSION_HEADER_HEIGHT_CLASSNAME,
+  SESSION_WORKSPACE_MIN_WIDTH_CLASSNAME,
+} from "./session-detail-geometry";
 import {
   applyThreadInboxEventToThreads,
   applyThreadRuntimeEventToThreads,
   buildChromeThreads,
   capLiveSessionLogMessage,
+  deriveSessionDetailLoadState,
   deriveEffectivePRStatus,
   formatDuration,
   getDisplayStatus,
@@ -3208,11 +3217,7 @@ function FreshThreadShell() {
 // Main component
 // ---------------------------------------------------------------------------
 
-const MIN_DETAIL = 280;
-const MAX_DETAIL = 600;
-const DEFAULT_DETAIL = 384;
 const MOBILE_REVIEW_MEDIA_QUERY = "(max-width: 767px)";
-const SESSION_HEADER_HEIGHT_CLASSNAME = "h-14";
 // Transcript keyboard scroll tuning. Step matches a comfortable line-pair
 // jump; page distance follows browser conventions (~85% viewport with a
 // floor for very short panels).
@@ -3344,7 +3349,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [reviewPasses, setReviewPasses] = useState(2);
   const [reviewAgentType, setReviewAgentType] = useState<string>("codex");
   const [reviewFixMode, setReviewFixMode] = useState<ReviewLoopFixMode>("minimal");
-  const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
+  const [detailWidth, setDetailWidth] = useState(SESSION_DETAIL_PANEL_DEFAULT_WIDTH);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   // null means "follow the saved user-settings preference"; a boolean means
   // the user toggled full screen in this session (and we persist it).
@@ -3442,7 +3447,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, []);
 
   const handleDetailResize = useCallback((delta: number) => {
-    setDetailWidth((w) => Math.min(MAX_DETAIL, Math.max(MIN_DETAIL, w - delta)));
+    setDetailWidth((w) => Math.min(SESSION_DETAIL_PANEL_MAX_WIDTH, Math.max(SESSION_DETAIL_PANEL_MIN_WIDTH, w - delta)));
   }, []);
   const selectedIsPrimaryRef = useRef(true);
 
@@ -3546,7 +3551,13 @@ export function SessionDetailContent({ id }: { id: string }) {
     { name: "session chrome and action state", reset: resetSessionChromeAndActionState },
   ]);
 
-  const { data, isLoading, error } = useQuery({
+  const {
+    data,
+    isLoading,
+    error,
+    isFetching: isFetchingSessionDetail,
+    refetch: refetchSessionDetail,
+  } = useQuery({
     queryKey: queryKeys.sessions.detail(id),
     queryFn: () => api.sessions.get(id),
     // Sidebar navigation may seed this key with list-row data so the detail
@@ -3604,8 +3615,34 @@ export function SessionDetailContent({ id }: { id: string }) {
     [user],
   );
   const rawSession = data?.data;
+  const detailLoadState = deriveSessionDetailLoadState({
+    session: rawSession,
+    isLoading,
+    isFetching: isFetchingSessionDetail,
+    error,
+  });
+  // Gates dependent fetches (the PR query and the diff). Deliberately the raw
+  // predicate rather than `detailLoadState.kind === "provisional"`: the load
+  // state resolves to "error" when a seeded row's detail request fails, which
+  // would un-gate those queries and fire them for a session we never loaded.
   const isProvisionalSession = isProvisionalSessionDetail(rawSession);
-  const session = isProvisionalSession ? undefined : rawSession;
+  const session = detailLoadState.kind === "ready" ? detailLoadState.session : undefined;
+  const isRetryingSessionDetail =
+    detailLoadState.kind === "error" && detailLoadState.retrying;
+  // Metadata-first paint: the provisional row seeded by the sidebar (or a
+  // partially settled payload) already carries the title, status, and agent.
+  // Both the loading and the failed transition render it, and a loaded session
+  // discards it, so memoize rather than recompute on every streaming update.
+  const provisionalMetadata = useMemo(() => {
+    if (!rawSession) return null;
+    const status = getDisplayStatus(rawSession.status);
+    return {
+      title: sessionTitle(rawSession),
+      statusLabel: status.label,
+      statusColor: status.color,
+      agentType: rawSession.agent_type,
+    };
+  }, [rawSession]);
   const changesets = session?.changesets ?? [];
   const primaryChangeset = changesets.find((changeset) => changeset.is_primary) ?? changesets[0];
   const [selectedChangesetID, setSelectedChangesetID] = useState<string | null>(changesetParam);
@@ -3997,7 +4034,12 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
   }, [activeThread, id, session, sessionStopRequest]);
 
-  useEffect(() => {
+  // Layout effect, not passive: the loading skeleton reserves boxes for the
+  // thread strip and the composer, but both are gated on an active thread. If
+  // the initial selection resolved after paint, the first frame of the loaded
+  // workspace would render without either — the skeleton's reserved space
+  // would collapse and then spring back a frame later.
+  useLayoutEffect(() => {
     if (!session) {
       return;
     }
@@ -5830,38 +5872,46 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
-  if (isLoading || (isProvisionalSession && !error)) {
-    // Metadata-first paint: the provisional row seeded by the sidebar (or a
-    // partially settled payload) already carries the title, status, and
-    // agent. Show those immediately and confine the shimmer to the parts we
-    // genuinely don't have yet, so opening a session never hides data the
-    // client already holds.
-    const provisionalStatus = rawSession ? getDisplayStatus(rawSession.status) : null;
+  if (detailLoadState.kind === "initial" || detailLoadState.kind === "provisional") {
+    // Show the metadata we already have immediately and confine the shimmer to
+    // the parts we genuinely don't have yet, so opening a session never hides
+    // data the client already holds.
     return (
-      <SessionDetailLoadingSkeleton
-        metadata={
-          rawSession && provisionalStatus
-            ? {
-                title: sessionTitle(rawSession),
-                statusLabel: provisionalStatus.label,
-                statusColor: provisionalStatus.color,
-                agentType: rawSession.agent_type,
-              }
-            : null
-        }
-      />
+      <SessionDetailFrame
+        testId="session-detail-loading-skeleton"
+        state="loading"
+        transition={provisionalMetadata ? "provisional" : "initial"}
+      >
+        <SessionDetailLoadingContent
+          detailPanelOpen={showDetailPanel}
+          detailPanelWidth={detailWidth}
+          metadata={provisionalMetadata}
+        />
+      </SessionDetailFrame>
     );
   }
 
-  if (error || !session) {
+  if (detailLoadState.kind === "error" || !session) {
     return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-center space-y-2 max-w-[280px]">
-          <AlertTriangle className="h-5 w-5 text-muted-foreground/40 mx-auto" />
-          <p className="text-xs font-medium text-muted-foreground">Failed to load session</p>
-          <p className="text-xs text-muted-foreground/60">The session could not be found or an error occurred.</p>
-        </div>
-      </div>
+      <SessionDetailFrame
+        testId="session-detail-loading-skeleton"
+        state="error"
+        transition={provisionalMetadata ? "provisional" : "initial"}
+        retrying={isRetryingSessionDetail}
+      >
+        <SessionDetailLoadingContent
+          detailPanelOpen={showDetailPanel}
+          detailPanelWidth={detailWidth}
+          metadata={provisionalMetadata}
+          errorMessage={
+            provisionalMetadata
+              ? "The session detail could not be loaded. Your current session selection has been preserved."
+              : "The session could not be found, or an error occurred while loading it."
+          }
+          onRetry={() => void refetchSessionDetail()}
+          retrying={isRetryingSessionDetail}
+        />
+      </SessionDetailFrame>
     );
   }
 
@@ -6487,11 +6537,11 @@ export function SessionDetailContent({ id }: { id: string }) {
   );
 
   return (
-    <div className="flex h-full">
+    <SessionDetailFrame>
       {/* Center area: chat or review diff view */}
       <div
         data-testid="session-conversation-workspace"
-        className="flex-1 min-w-0 md:min-w-[440px] flex flex-col"
+        className={cn("flex-1 min-w-0 flex flex-col", SESSION_WORKSPACE_MIN_WIDTH_CLASSNAME)}
       >
         {!isDedicatedMobileReview ? (
           <>
@@ -6612,23 +6662,26 @@ export function SessionDetailContent({ id }: { id: string }) {
           </>
         ) : null}
 
+        {/* AgentTabStrip holds the row's height itself in every "nothing to
+            show" case, so there is no empty-state branch out here to keep in
+            step with its internal guards. */}
         {!isDedicatedMobileReview ? (
           <div className="hidden md:block">
-          <AgentTabStrip
-            threads={chromeThreads}
-            activeThreadId={activeThread?.id ?? null}
-            viewedThreadIds={viewedThreadIds}
-            nonInteractiveThreadIds={nonInteractiveThreadIds}
-            overlapsByThreadId={overlapsByThreadId}
-            statusConfig={statusConfig}
-            onActiveThreadChange={setActiveThreadId}
-            onAddTab={handleCreateThread}
-            addTabPending={createThreadMutation.isPending}
-            onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
-            onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
-            archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
-            addTabButtonRef={addTabButtonRef}
-          />
+            <AgentTabStrip
+              threads={chromeThreads}
+              activeThreadId={activeThread?.id ?? null}
+              viewedThreadIds={viewedThreadIds}
+              nonInteractiveThreadIds={nonInteractiveThreadIds}
+              overlapsByThreadId={overlapsByThreadId}
+              statusConfig={statusConfig}
+              onActiveThreadChange={setActiveThreadId}
+              onAddTab={handleCreateThread}
+              addTabPending={createThreadMutation.isPending}
+              onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
+              onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
+              archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
+              addTabButtonRef={addTabButtonRef}
+            />
           </div>
         ) : null}
         {/* Center content — either chat or diff review */}
@@ -7247,6 +7300,6 @@ export function SessionDetailContent({ id }: { id: string }) {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
+    </SessionDetailFrame>
   );
 }

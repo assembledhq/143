@@ -57,11 +57,11 @@ evidence rather than widening this gate.
 - Removing review-agent loops, the `Review` action, or the builder pre-PR gate.
 - Removing PR health synchronization, repair actions, or code review.
 - Preserving readiness history. Readiness runs, checks, and bypasses are
-  destroyed by migration `000266` and cannot be reconstructed from within 143.
+  destroyed by migration `000267` and cannot be reconstructed from within 143.
 
 ## Rollout Order
 
-Migration `000266_remove_pr_readiness` is the rolling-deploy barrier, following
+Migration `000267_remove_pr_readiness` is the rolling-deploy barrier, following
 the pattern established by `000259_cancel_pending_pm_jobs`:
 
 1. `LOCK TABLE jobs IN SHARE ROW EXCLUSIVE MODE` before the drain check, so a

@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { EmptyState } from "@/components/empty-state";
 import { ListPage } from "@/components/list-page";
+import { PageTabContent } from "@/components/page-tab-content";
 import { ResourceRow } from "@/components/resource-row";
 import {
   ResponsiveResourceList,
@@ -35,7 +36,7 @@ import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Switch } from "@/components/ui/switch";
@@ -114,7 +115,9 @@ type StatusFilter = (typeof STATUS_FILTER_VALUES)[number];
 const DEFAULT_STATUS_FILTER = "current" satisfies StatusFilter;
 const REVIEW_SORT_VALUES = ["pull_request", "outcome", "risk", "run_status", "repository", "completed"] as const;
 type ReviewSort = (typeof REVIEW_SORT_VALUES)[number];
-const AUTHOR_SORT_VALUES = ["author", "reviews", "approved", "not_approved", "approval_rate", "split_sample", "average_additions", "median_additions", "average_deletions", "median_deletions"] as const;
+// "reviews" now orders the PR count: the column became unique PRs, but the
+// parameter keeps its name so shared analytics links stay valid.
+const AUTHOR_SORT_VALUES = ["author", "reviews", "approved", "not_approved", "approval_rate", "first_round", "median_rounds", "median_additions", "median_deletions"] as const;
 type AuthorSort = (typeof AUTHOR_SORT_VALUES)[number];
 const STATUS_FILTER_PARSER = createParser<StatusFilter>({
   parse: (value) => {
@@ -563,8 +566,8 @@ export default function CodeReviewsPage() {
     }),
     [authorFilter, outcomeFilter, reviewRepositoryId, riskFilter, searchParam],
   );
-  // Which review attempts are in scope. The analytics report answers questions
-  // about the same set, so it shares this; the ordering below is list-only.
+  // Which review attempts are in scope for the Reviews tab. Analytics selects
+  // PR cohorts only by repository and first-request time.
   const scopedReviewFilters = useMemo(
     () => statusFilter === "cancelled"
       ? {
@@ -604,12 +607,12 @@ export default function CodeReviewsPage() {
   // fresh cache entry for an identical request every time the table is re-sorted.
   const analyticsScopeQueryKey = useMemo(
     () => ({
-      ...scopedReviewFilters,
+      repository_id: reviewRepositoryId,
       time_range: timeRangeFilter,
       author_sort_by: authorSort,
       author_sort_order: authorSortOrder,
     }),
-    [authorSort, authorSortOrder, scopedReviewFilters, timeRangeFilter],
+    [authorSort, authorSortOrder, reviewRepositoryId, timeRangeFilter],
   );
   const statsScopeQueryKey = useMemo(
     () => ({
@@ -640,7 +643,7 @@ export default function CodeReviewsPage() {
   );
   const currentAnalyticsFilters = useCallback(
     () => ({
-      ...scopedReviewFilters,
+      repository_id: reviewRepositoryId,
       author_sort_by: authorSort,
       author_sort_order: authorSortOrder,
       created_after: createdAfterForTimeRange(
@@ -648,7 +651,7 @@ export default function CodeReviewsPage() {
         new Date(timeRangeAnchorMsRef.current),
       ),
     }),
-    [authorSort, authorSortOrder, scopedReviewFilters, timeRangeFilter],
+    [authorSort, authorSortOrder, reviewRepositoryId, timeRangeFilter],
   );
   const reviewFiltersQueryKey = useMemo(
     () => ({
@@ -1189,7 +1192,7 @@ export default function CodeReviewsPage() {
           </TabsTrigger>
         </TabsList>
 
-        <TabsContent value="reviews" className="space-y-3">
+        <PageTabContent value="reviews">
             <CodeReviewSummaryCards
               stats={statsQuery.data?.data}
               isLoading={statsQuery.isLoading}
@@ -1336,10 +1339,9 @@ export default function CodeReviewsPage() {
                 </>
               )}
             </SectionGroup>
-          </TabsContent>
+          </PageTabContent>
 
-          <TabsContent value="analytics" className="space-y-4">
-            <CodeReviewFilters id="code-review-analytics-filters" values={sharedFilterValues} repositories={repositories} mobileOpen={mobileFiltersOpen} onMobileOpenChange={setMobileFiltersOpen} onChange={changeSharedFilter} />
+          <PageTabContent value="analytics">
             <CodeReviewAnalyticsReport
               analytics={analyticsQuery.data?.data}
               isLoading={analyticsQuery.isLoading}
@@ -1356,10 +1358,23 @@ export default function CodeReviewsPage() {
                 range: timeRangeFilter,
               }}
               onNavigateToReviews={() => setActiveTab("reviews")}
+              filters={(
+                <CodeReviewFilters
+                  id="code-review-analytics-filters"
+                  values={sharedFilterValues}
+                  repositories={repositories}
+                  mobileOpen={mobileFiltersOpen}
+                  onMobileOpenChange={setMobileFiltersOpen}
+                  onChange={changeSharedFilter}
+                  timeRangeLabel="PRs first sent to 143 during this period"
+                  analyticsMode
+                  mobileLabel="Filter analytics"
+                />
+              )}
             />
-          </TabsContent>
+          </PageTabContent>
 
-          <TabsContent value="policy" className="space-y-4">
+          <PageTabContent value="policy">
             <SectionGroup
               action={<AutosaveIndicator status={autosave.status} />}
               className="max-w-5xl"
@@ -1505,7 +1520,7 @@ export default function CodeReviewsPage() {
                 setEditingRequirementKey(null);
               }}
             />
-          </TabsContent>
+          </PageTabContent>
       </Tabs>
     </ListPage>
   );

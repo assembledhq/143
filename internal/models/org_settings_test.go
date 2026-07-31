@@ -20,6 +20,12 @@ func TestParseOrgSettings_Defaults(t *testing.T) {
 	require.Equal(t, DefaultWeightRecency, s.PriorityWeights.Recency, "should default recency weight")
 	require.Equal(t, DefaultWeightRevenueRisk, s.PriorityWeights.RevenueRisk, "should default revenue_risk weight")
 	require.Empty(t, s.LLMModel, "should default llm_model to empty")
+	require.Equal(t, CodexModelGPT56Sol, s.CodingAgentModelDefaults[AgentTypeCodex], "Codex should default to GPT 5.6 Sol")
+	require.Equal(t, ClaudeCodeModelOpus5, s.CodingAgentModelDefaults[AgentTypeClaudeCode], "Claude Code should default to Opus 5")
+	require.Equal(t, ReasoningEffortHigh, s.CodingAgentReasoningDefaults[AgentTypeCodex], "Codex should default to high reasoning")
+	require.Equal(t, ReasoningEffortMax, s.CodingAgentReasoningDefaults[AgentTypeClaudeCode], "Claude Code should default to max reasoning")
+	require.Equal(t, DefaultCodingAgentModelDefaults, s.CodingAgentModelDefaults, "back-filled model defaults should match the shared constants")
+	require.Equal(t, DefaultCodingAgentReasoningDefaults, s.CodingAgentReasoningDefaults, "back-filled reasoning defaults should match the shared constants")
 	require.Nil(t, s.ProductContext, "should default product_context to nil")
 	require.True(t, s.EffectiveCodingAgentTabToolsEnabled(), "agent tab tools should default on")
 	require.True(t, s.EffectiveAutoArchiveOnPRClose(), "auto-archive on PR close should default on")
@@ -97,24 +103,40 @@ func TestParseOrgSettings_DefaultWorkRepositoryID(t *testing.T) {
 func TestParseOrgSettings_SessionAutomation(t *testing.T) {
 	t.Parallel()
 
+	enabled := true
+	disabled := false
 	tests := []struct {
-		name    string
-		raw     json.RawMessage
-		want    AutomaticFollowThroughOrgSettings
-		wantErr string
+		name                string
+		raw                 json.RawMessage
+		want                AutomaticFollowThroughOrgSettings
+		wantEffectiveRepair bool
+		wantErr             string
 	}{
 		{
-			name: "defaults automatic follow through off",
-			raw:  json.RawMessage(`{}`),
-			want: AutomaticFollowThroughOrgSettings{},
+			name:                "defaults automatic repair on",
+			raw:                 json.RawMessage(`{}`),
+			want:                AutomaticFollowThroughOrgSettings{},
+			wantEffectiveRepair: true,
 		},
 		{
 			name: "parses automatic follow through settings",
 			raw:  json.RawMessage(`{"session_automation":{"automatic_follow_through":{"resolve_conflicts_when_idle":true,"fix_tests_when_idle":true}}}`),
 			want: AutomaticFollowThroughOrgSettings{
-				ResolveConflictsWhenIdle: true,
-				FixTestsWhenIdle:         true,
+				ResolveConflictsWhenIdle: &enabled,
+				FixTestsWhenIdle:         &enabled,
 			},
+			wantEffectiveRepair: true,
+		},
+		{
+			// The explicit false decode is what preserves an administrator's
+			// opt-out now that absent repair flags resolve to on.
+			name: "preserves explicit automatic repair opt-out",
+			raw:  json.RawMessage(`{"session_automation":{"automatic_follow_through":{"resolve_conflicts_when_idle":false,"fix_tests_when_idle":false}}}`),
+			want: AutomaticFollowThroughOrgSettings{
+				ResolveConflictsWhenIdle: &disabled,
+				FixTestsWhenIdle:         &disabled,
+			},
+			wantEffectiveRepair: false,
 		},
 		{
 			name:    "rejects empty allowlist when bot mode is allowlist",
@@ -133,6 +155,7 @@ func TestParseOrgSettings_SessionAutomation(t *testing.T) {
 				PRFeedbackBotMode:      PRFeedbackBotModeAllowlist,
 				PRFeedbackBotAllowlist: []string{"dependabot[bot]"},
 			},
+			wantEffectiveRepair: true,
 		},
 	}
 
@@ -149,6 +172,8 @@ func TestParseOrgSettings_SessionAutomation(t *testing.T) {
 			}
 			require.NoError(t, err, "ParseOrgSettings should accept session automation settings")
 			require.Equal(t, tt.want, got.SessionAutomation.AutomaticFollowThrough, "ParseOrgSettings should decode session automation settings")
+			require.Equal(t, tt.wantEffectiveRepair, got.SessionAutomation.AutomaticFollowThrough.EffectiveResolveConflictsWhenIdle(), "decoded settings should resolve automatic conflict repair correctly")
+			require.Equal(t, tt.wantEffectiveRepair, got.SessionAutomation.AutomaticFollowThrough.EffectiveFixTestsWhenIdle(), "decoded settings should resolve automatic test repair correctly")
 		})
 	}
 }
@@ -158,8 +183,178 @@ func TestDefaultNewOrganizationSettings_EnablesAutomaticRepair(t *testing.T) {
 
 	settings, err := ParseOrgSettings(DefaultNewOrganizationSettings())
 	require.NoError(t, err, "DefaultNewOrganizationSettings should produce valid org settings")
-	require.True(t, settings.SessionAutomation.AutomaticFollowThrough.ResolveConflictsWhenIdle, "new organizations should default automatic conflict repair on")
-	require.True(t, settings.SessionAutomation.AutomaticFollowThrough.FixTestsWhenIdle, "new organizations should default automatic test repair on")
+	// Assert the stored flags, not the effective accessors: absent flags also
+	// resolve on, so an effective-value assertion would pass even if the
+	// default blob stopped persisting the repair settings entirely.
+	require.NotNil(t, settings.SessionAutomation.AutomaticFollowThrough.ResolveConflictsWhenIdle, "new organizations should persist an explicit conflict repair setting")
+	require.True(t, *settings.SessionAutomation.AutomaticFollowThrough.ResolveConflictsWhenIdle, "new organizations should default automatic conflict repair on")
+	require.NotNil(t, settings.SessionAutomation.AutomaticFollowThrough.FixTestsWhenIdle, "new organizations should persist an explicit test repair setting")
+	require.True(t, *settings.SessionAutomation.AutomaticFollowThrough.FixTestsWhenIdle, "new organizations should default automatic test repair on")
+}
+
+func TestDefaultNewOrganizationSettings_LeavesCodingAgentDefaultsUnpinned(t *testing.T) {
+	t.Parallel()
+
+	// Persisting the defaults would pin a new org to today's values while every
+	// pre-existing org keeps tracking the constant, so the two cohorts would drift
+	// apart the first time a platform default is bumped.
+	var seeded map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(DefaultNewOrganizationSettings(), &seeded), "seeded settings should be valid JSON")
+	require.NotContains(t, seeded, "coding_agent_model_defaults", "new orgs should inherit model defaults, not persist them")
+	require.NotContains(t, seeded, "coding_agent_reasoning_defaults", "new orgs should inherit reasoning defaults, not persist them")
+
+	settings, err := ParseOrgSettings(DefaultNewOrganizationSettings())
+	require.NoError(t, err, "DefaultNewOrganizationSettings should produce valid org settings")
+	require.NoError(t, ValidateSettingsModels(settings), "back-filled coding-agent defaults should pass settings validation")
+	require.Equal(t, DefaultCodingAgentModelDefaults, settings.CodingAgentModelDefaults, "a new org should still resolve the shared model defaults")
+	require.Equal(t, DefaultCodingAgentReasoningDefaults, settings.CodingAgentReasoningDefaults, "a new org should still resolve the shared reasoning defaults")
+}
+
+func TestParseOrgSettings_PreservesExplicitCodingAgentOptOut(t *testing.T) {
+	t.Parallel()
+
+	// An admin choosing "provider default" / "agent default" stores an empty
+	// string. Key presence — not value — has to gate the back-fill, or the opt-out
+	// gets silently overwritten on the next parse.
+	raw := json.RawMessage(`{"coding_agent_model_defaults":{"codex":""},"coding_agent_reasoning_defaults":{"codex":""}}`)
+	s, err := ParseOrgSettings(raw)
+	require.NoError(t, err)
+
+	require.Empty(t, s.CodingAgentModelDefaults[AgentTypeCodex], "explicit empty Codex model should survive parsing")
+	require.Empty(t, s.CodingAgentReasoningDefaults[AgentTypeCodex], "explicit empty Codex reasoning should survive parsing")
+	require.Equal(t, ClaudeCodeModelOpus5, s.CodingAgentModelDefaults[AgentTypeClaudeCode], "untouched agents should still be back-filled")
+	require.Equal(t, ReasoningEffortMax, s.CodingAgentReasoningDefaults[AgentTypeClaudeCode], "untouched agents should still be back-filled")
+}
+
+func TestResolveCodingAgentDefaults(t *testing.T) {
+	t.Parallel()
+
+	org := OrgSettings{
+		CodingAgentModelDefaults:     map[AgentType]string{AgentTypeCodex: CodexModelGPT55, AgentTypeClaudeCode: ClaudeCodeModelOpus5},
+		CodingAgentReasoningDefaults: map[AgentType]ReasoningEffort{AgentTypeCodex: ReasoningEffortHigh, AgentTypeClaudeCode: ReasoningEffortMax},
+	}
+	personal := &UserSettings{
+		CodingAgentModelDefault:      CodexModelGPT54,
+		CodingAgentReasoningDefaults: map[AgentType]ReasoningEffort{AgentTypeCodex: ReasoningEffortLow},
+	}
+
+	tests := []struct {
+		name          string
+		agentType     AgentType
+		model         string
+		effort        ReasoningEffort
+		personal      *UserSettings
+		org           OrgSettings
+		wantModel     string
+		wantEffort    ReasoningEffort
+		wantAssertion string
+	}{
+		{
+			name: "request wins over every default", agentType: AgentTypeCodex,
+			model: CodexModelGPT53Codex, effort: ReasoningEffortXHigh, personal: personal, org: org,
+			wantModel: CodexModelGPT53Codex, wantEffort: ReasoningEffortXHigh,
+			wantAssertion: "an explicit session selection should never be overridden",
+		},
+		{
+			name: "personal defaults win over org defaults", agentType: AgentTypeCodex,
+			personal: personal, org: org,
+			wantModel: CodexModelGPT54, wantEffort: ReasoningEffortLow,
+			wantAssertion: "a member's saved defaults should outrank the org defaults",
+		},
+		{
+			name: "org defaults apply without personal settings", agentType: AgentTypeCodex,
+			personal: nil, org: org,
+			wantModel: CodexModelGPT55, wantEffort: ReasoningEffortHigh,
+			wantAssertion: "org defaults should fill in for callers with no user context",
+		},
+		{
+			name: "personal model for another agent is ignored", agentType: AgentTypeClaudeCode,
+			personal: personal, org: org,
+			wantModel: ClaudeCodeModelOpus5, wantEffort: ReasoningEffortMax,
+			wantAssertion: "a Codex personal model should not leak into a Claude Code session",
+		},
+		{
+			name: "unsupported org reasoning level is skipped", agentType: AgentTypeCodex,
+			org:       OrgSettings{CodingAgentReasoningDefaults: map[AgentType]ReasoningEffort{AgentTypeCodex: ReasoningEffortMax}},
+			wantModel: "", wantEffort: "",
+			wantAssertion: "a level Codex cannot honor should degrade to no default rather than a 400",
+		},
+		{
+			name: "retired org model default is skipped", agentType: AgentTypeCodex,
+			org:       OrgSettings{CodingAgentModelDefaults: map[AgentType]string{AgentTypeCodex: "gpt-4-retired"}},
+			wantModel: "", wantEffort: "",
+			wantAssertion: "a default naming a model Codex no longer offers must not become an INVALID_MODEL for the whole org",
+		},
+		{
+			name: "retired personal model default is skipped", agentType: AgentTypeCodex,
+			personal:  &UserSettings{CodingAgentModelDefault: "gpt-4-retired"},
+			org:       OrgSettings{CodingAgentModelDefaults: map[AgentType]string{AgentTypeCodex: CodexModelGPT55}},
+			wantModel: CodexModelGPT55, wantEffort: "",
+			wantAssertion: "a member's retired default should fall through to the org default, not fail the request",
+		},
+		{
+			name: "an explicitly requested model is returned unchecked", agentType: AgentTypeCodex,
+			model: "gpt-4-retired", org: org,
+			wantModel: "gpt-4-retired", wantEffort: ReasoningEffortHigh,
+			wantAssertion: "the caller's own bad value should still reach the handler's 400",
+		},
+		{
+			name: "agents without defaults resolve to nothing", agentType: AgentTypeAmp,
+			personal: personal, org: org,
+			wantModel: "", wantEffort: "",
+			wantAssertion: "agents with no configured default should be left untouched",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			model, effort := ResolveCodingAgentDefaults(tt.agentType, tt.model, tt.effort, tt.personal, tt.org)
+			require.Equal(t, tt.wantModel, model, tt.wantAssertion)
+			require.Equal(t, tt.wantEffort, effort, tt.wantAssertion)
+		})
+	}
+}
+
+func TestAutomaticFollowThroughOrgSettings_EffectiveRepairDefaults(t *testing.T) {
+	t.Parallel()
+
+	enabled := true
+	disabled := false
+	tests := []struct {
+		name             string
+		settings         AutomaticFollowThroughOrgSettings
+		wantConflictsOn  bool
+		wantTestRepairOn bool
+	}{
+		{name: "missing defaults both on", settings: AutomaticFollowThroughOrgSettings{}, wantConflictsOn: true, wantTestRepairOn: true},
+		{
+			name: "explicit false disables both",
+			settings: AutomaticFollowThroughOrgSettings{
+				ResolveConflictsWhenIdle: &disabled,
+				FixTestsWhenIdle:         &disabled,
+			},
+			wantConflictsOn: false, wantTestRepairOn: false,
+		},
+		{
+			name: "explicit true enables both",
+			settings: AutomaticFollowThroughOrgSettings{
+				ResolveConflictsWhenIdle: &enabled,
+				FixTestsWhenIdle:         &enabled,
+			},
+			wantConflictsOn: true, wantTestRepairOn: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.wantConflictsOn, tt.settings.EffectiveResolveConflictsWhenIdle(), "effective conflict repair setting should match the organization policy")
+			require.Equal(t, tt.wantTestRepairOn, tt.settings.EffectiveFixTestsWhenIdle(), "effective test repair setting should match the organization policy")
+		})
+	}
 }
 
 func TestParseOrgSettings_OverrideValues(t *testing.T) {

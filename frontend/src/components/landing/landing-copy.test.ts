@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import * as landingCopy from "./landing-copy";
 import {
-  agentChoiceHighlights,
+  codeReviewApproval,
+  codeReviewControls,
+  codeReviewSummary,
   codingAgents,
   integrations,
   platformLayers,
@@ -12,12 +14,58 @@ describe("landing copy", () => {
     expect("heroMetrics" in landingCopy).toBe(false);
   });
 
-  it("numbers platform layers after the why-this-matters section", () => {
+  it("builds the page around code review, agents, and previews", () => {
     expect(platformLayers.map((layer) => `${layer.step} ${layer.title}`)).toEqual([
-      "02 Team context",
-      "03 Cloud execution",
-      "04 Review control",
-      "05 Cloud previews",
+      "02 Cloud agents",
+      "03 Cloud previews",
+    ]);
+  });
+
+  it("opens the homepage story with code review and its bottleneck", () => {
+    expect(`${codeReviewSummary.step} ${codeReviewSummary.kicker}`).toBe(
+      "01 Code review",
+    );
+    expect(codeReviewSummary.heading).toBe(
+      "Code review that can auto-approve.",
+    );
+    expect(codeReviewSummary.body).toContain(
+      "A pull request takes minutes to open and days to review.",
+    );
+    expect(codeReviewSummary.body.split(". ").length).toBeLessThanOrEqual(2);
+  });
+
+  it("focuses the review controls on policy tuning and reviewer model choice", () => {
+    expect(codeReviewControls).toEqual([
+      "Tune thresholds, sensitive paths, and required checks",
+      "Raise the auto-approval rate by tightening policy",
+      "Choose reviewer models: Codex, Claude Code, OpenCode",
+      "Set reasoning depth per reviewer to control cost",
+    ]);
+  });
+
+  it("keeps the landing copy free of em-dashes and semicolons", () => {
+    const flatten = (value: unknown): string =>
+      typeof value === "string"
+        ? value
+        : value && typeof value === "object"
+          ? Object.values(value).map(flatten).join(" ")
+          : "";
+
+    const copy = flatten({ ...landingCopy });
+
+    expect(copy).not.toContain("—");
+    expect(copy).not.toContain(";");
+  });
+
+  it("keeps the auto-approval evidence concrete", () => {
+    expect(codeReviewApproval.decision).toBe("Approved");
+    expect(codeReviewApproval.evidence.map((row) => row.label)).toEqual([
+      "Risk",
+      "Description",
+      "Review agents",
+      "Required checks",
+      "Changed",
+      "Sensitive paths",
     ]);
   });
 
@@ -44,24 +92,9 @@ describe("landing copy", () => {
     ]);
   });
 
-  it("positions model flexibility as a supporting coding-agent feature", () => {
-    expect(agentChoiceHighlights.map((highlight) => highlight.title)).toEqual([
-      "Use the best agent for the job",
-      "Keep routine work economical",
-      "Stack subscriptions before metered spend",
-    ]);
-    expect(agentChoiceHighlights.map((highlight) => highlight.body)).toEqual([
-      "Run top-tier tools like Codex, Claude Code, and OpenCode when the task needs maximum capability.",
-      "Route lighter jobs through OpenCode and open-source models when cost matters more than peak reasoning.",
-      "Layer personal, team, and bundled coding-agent subscriptions so available seats are used before extra usage piles up.",
-    ]);
-  });
-
   it("keeps section headers simple and focused", () => {
     expect(platformLayers.map((layer) => layer.heading)).toEqual([
-      "Shared context for every run.",
-      "Run agents from anywhere.",
-      "Review loops before human review.",
+      "Run any coding agent.",
       "Preview every change in the cloud.",
     ]);
   });

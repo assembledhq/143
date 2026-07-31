@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { screen } from "@testing-library/react";
 
 import { AgentTabStrip } from "./agent-tab-strip";
+import { SESSION_THREAD_STRIP_HEIGHT_CLASSNAME } from "./session-detail-geometry";
 import { renderWithProviders, userEvent } from "@/test/test-utils";
 import type { SessionThread } from "@/lib/types";
 
@@ -33,6 +34,53 @@ function makeThread(overrides: Partial<SessionThread>): SessionThread {
 }
 
 describe("AgentTabStrip", () => {
+  // The strip's height is part of the session workspace's stable geometry: a
+  // bare null here collapses the row and shifts the transcript and composer
+  // beneath it. Every "nothing to show" path must hold the same box.
+  describe("holds its footprint when there are no tabs to render", () => {
+    const commonProps = {
+      viewedThreadIds: new Set<string>(),
+      overlapsByThreadId: new Map<string, string[]>(),
+      statusConfig,
+      onActiveThreadChange: vi.fn(),
+      onAddTab: vi.fn(),
+      onRevertThread: vi.fn(),
+      onArchiveThread: vi.fn(),
+      archivePendingThreadId: null,
+    };
+
+    it("labels the row when the session genuinely has no tabs", () => {
+      renderWithProviders(<AgentTabStrip threads={[]} activeThreadId={null} {...commonProps} />);
+
+      const placeholder = screen.getByTestId("session-thread-strip-empty");
+      expect(placeholder).toHaveClass(SESSION_THREAD_STRIP_HEIGHT_CLASSNAME);
+      expect(placeholder).toHaveTextContent("No agent tabs for this session");
+    });
+
+    it("holds the row without an empty label while the selection is unresolved", () => {
+      const thread = makeThread({});
+      renderWithProviders(
+        <AgentTabStrip threads={[thread]} activeThreadId={null} {...commonProps} />,
+      );
+
+      const placeholder = screen.getByTestId("session-thread-strip-empty");
+      expect(placeholder).toHaveClass(SESSION_THREAD_STRIP_HEIGHT_CLASSNAME);
+      // Tabs exist, so calling the session empty would be wrong.
+      expect(placeholder).toHaveTextContent("");
+    });
+
+    it("holds the row when the selected tab is no longer present", () => {
+      const thread = makeThread({});
+      renderWithProviders(
+        <AgentTabStrip threads={[thread]} activeThreadId="thread-that-went-away" {...commonProps} />,
+      );
+
+      const placeholder = screen.getByTestId("session-thread-strip-empty");
+      expect(placeholder).toHaveClass(SESSION_THREAD_STRIP_HEIGHT_CLASSNAME);
+      expect(placeholder).toHaveTextContent("");
+    });
+  });
+
   it("renders a quiet single-agent header with a trailing add button instead of a tab strip", async () => {
     const user = userEvent.setup();
     const thread = makeThread({ pending_message_count: 2 });

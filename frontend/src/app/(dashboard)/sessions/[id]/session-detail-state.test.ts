@@ -21,11 +21,84 @@ import {
   trackInFlightAgentUpdate,
   buildChromeThreads,
   getPullRequestHealthRefetchInterval,
+  deriveSessionDetailLoadState,
 } from "./session-detail-state";
 import type { PullRequestHealthResponse, SessionDetail, SessionLog, SessionMessage, SessionReviewLoop, SessionThread } from "@/lib/types";
+import { isProvisionalSessionDetail, markProvisionalSessionDetail } from "@/lib/session-detail-cache";
 
 const start = "2026-01-01T00:00:00.000Z";
 const plus = (ms: number) => new Date(new Date(start).getTime() + ms).toISOString();
+
+describe("deriveSessionDetailLoadState", () => {
+  const session = { id: "session-1", status: "running" } as SessionDetail;
+
+  it.each([
+    {
+      name: "uses the cold initial state without cached data",
+      input: { session: undefined, isLoading: true, error: null },
+      expectedKind: "initial",
+    },
+    {
+      name: "identifies list-seeded data as provisional",
+      input: { session: markProvisionalSessionDetail(session), isLoading: false, error: null },
+      expectedKind: "provisional",
+    },
+    {
+      name: "uses a localized error state when provisional detail fails",
+      input: {
+        session: markProvisionalSessionDetail(session),
+        isLoading: false,
+        error: new Error("failed"),
+      },
+      expectedKind: "error",
+    },
+    {
+      name: "keeps authoritative data ready after a background refetch error",
+      input: { session, isLoading: false, error: new Error("failed") },
+      expectedKind: "ready",
+    },
+    {
+      name: "treats an idle query with no data as an error rather than a stuck skeleton",
+      input: { session: undefined, isLoading: false, error: null },
+      expectedKind: "error",
+    },
+  ])("$name", ({ input, expectedKind }) => {
+    expect(deriveSessionDetailLoadState(input).kind).toBe(expectedKind);
+  });
+
+  it("carries the in-flight retry on the error state", () => {
+    const settled = deriveSessionDetailLoadState({
+      session: markProvisionalSessionDetail(session),
+      isLoading: false,
+      isFetching: false,
+      error: new Error("failed"),
+    });
+    const retrying = deriveSessionDetailLoadState({
+      session: markProvisionalSessionDetail(session),
+      isLoading: false,
+      isFetching: true,
+      error: new Error("failed"),
+    });
+
+    expect(settled).toMatchObject({ kind: "error", retrying: false });
+    expect(retrying).toMatchObject({ kind: "error", retrying: true });
+  });
+
+  it("stays provisional for gating purposes only via the raw cache predicate", () => {
+    // Regression guard: a failed detail request moves the load state to
+    // "error" even though the cached row is still provisional. Callers that
+    // gate dependent fetches must not read provisional-ness off the load
+    // state, or they would fire for a session that never loaded.
+    const failed = deriveSessionDetailLoadState({
+      session: markProvisionalSessionDetail(session),
+      isLoading: false,
+      error: new Error("failed"),
+    });
+
+    expect(failed.kind).toBe("error");
+    expect(isProvisionalSessionDetail(failed.session ?? undefined)).toBe(true);
+  });
+});
 
 const baseHealth: PullRequestHealthResponse = {
   pull_request_id: "pr-1",

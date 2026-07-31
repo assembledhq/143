@@ -385,6 +385,58 @@ func (a pullRequestHealthSummaryArg) Match(value interface{}) bool {
 	return false
 }
 
+// TestPRServiceBuildPullRequestHealthResponseSkipsAutoRepairAttemptState pins
+// the automatic repair coordinator's cheap path: with the attempt state
+// skipped, the build must not reload the organization or recount attempts.
+// pgxmock fails any query beyond the expectations below, so an accidental
+// reintroduction of that work fails here rather than silently doubling the
+// per-webhook query load.
+func TestPRServiceBuildPullRequestHealthResponseSkipsAutoRepairAttemptState(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+	now := time.Now().UTC()
+	summary := models.PullRequestHealthSummary{
+		MergeState:       models.PullRequestMergeStateConflicted,
+		HasConflicts:     true,
+		FailingTestCount: 1,
+	}
+	summaryJSON, err := json.Marshal(summary)
+	require.NoError(t, err, "should marshal current health summary")
+
+	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
+			pullRequestID, orgID, int64(3), "head-skip", "base-skip", summaryJSON, summaryJSON,
+			models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
+		))
+
+	service := &PRService{
+		pullRequests: db.NewPullRequestStore(mock),
+		orgs:         db.NewOrganizationStore(mock),
+		logger:       zerolog.New(io.Discard),
+	}
+
+	resp, err := service.buildPullRequestHealthResponse(context.Background(), models.PullRequest{
+		ID:             pullRequestID,
+		OrgID:          orgID,
+		GitHubPRNumber: 42,
+		GitHubRepo:     "assembledhq/143",
+		Status:         models.PullRequestStatusOpen,
+		HeadSHA:        ptrString("head-skip"),
+		HealthVersion:  3,
+	}, healthBuildOptions{skipAutoRepairAttemptState: true})
+	require.NoError(t, err, "buildPullRequestHealthResponse should succeed without loading automatic repair attempt state")
+	require.Empty(t, resp.AutoRepairExhaustedActions, "skipping attempt state should leave the exhausted-action badges unpopulated")
+	require.True(t, resp.CanResolveConflicts, "skipping attempt state should not change the derived repair actions")
+	require.NoError(t, mock.ExpectationsWereMet(), "no organization or attempt-count queries should run when attempt state is skipped")
+}
+
 func TestPRServiceBuildPullRequestHealthResponseUsesCurrentSummaryForRepairActions(t *testing.T) {
 	t.Parallel()
 
@@ -454,7 +506,7 @@ func TestPRServiceBuildPullRequestHealthResponseUsesCurrentSummaryForRepairActio
 		FailingTestCount: 0,
 		NeedsAgentAction: false,
 		HealthVersion:    1,
-	})
+	}, healthBuildOptions{})
 	require.NoError(t, err, "buildPullRequestHealthResponse should succeed")
 	require.Equal(t, models.PullRequestMergeStateConflicted, resp.MergeState, "response should use merge state from current health summary")
 	require.True(t, resp.CanResolveConflicts, "response should advertise conflict repair when current summary reports conflicts")
@@ -605,7 +657,7 @@ func TestPRServiceBuildPullRequestHealthResponseIncludesActiveRepairs(t *testing
 		FailingTestCount: 0,
 		NeedsAgentAction: false,
 		HealthVersion:    7,
-	})
+	}, healthBuildOptions{})
 	require.NoError(t, err, "buildPullRequestHealthResponse should succeed")
 	require.Len(t, resp.ActiveRepairs, 1, "buildPullRequestHealthResponse should only include active repairs whose linked sessions are still non-terminal")
 	require.Equal(t, models.PullRequestRepairActionTypeFixTests, resp.ActiveRepairs[0].ActionType, "buildPullRequestHealthResponse should surface the running repair action")
@@ -667,7 +719,7 @@ func TestPRServiceBuildPullRequestHealthResponseLoadsSnapshotDetails(t *testing.
 		HeadSHA:          &headSHA,
 		BaseSHA:          &baseSHA,
 		HealthVersion:    2,
-	})
+	}, healthBuildOptions{})
 	require.NoError(t, err, "buildPullRequestHealthResponse should succeed")
 	require.Equal(t, "head-ready", resp.HeadSHA, "response should use the current health head SHA")
 	require.Equal(t, "base-ready", resp.BaseSHA, "response should use the current health base SHA")
@@ -719,7 +771,7 @@ func TestPRServiceBuildPullRequestHealthResponseNormalizesLegacyCheckStatuses(t 
 		Status:         "open",
 		MergeState:     models.PullRequestMergeStateUnknown,
 		HealthVersion:  2,
-	})
+	}, healthBuildOptions{})
 	require.NoError(t, err, "buildPullRequestHealthResponse should succeed")
 	require.Len(t, resp.Checks, 3, "response should include all legacy checks")
 	require.Equal(t, models.PullRequestCheckStatusFailed, resp.Checks[0].Status, "response should infer the first failing legacy test check as failed")
@@ -768,7 +820,7 @@ func TestPRServiceBuildPullRequestHealthResponseRespectsStoredChecksConfirmed(t 
 		Status:         "open",
 		MergeState:     models.PullRequestMergeStateUnknown,
 		HealthVersion:  2,
-	})
+	}, healthBuildOptions{})
 	require.NoError(t, err, "buildPullRequestHealthResponse should succeed")
 	require.False(t, resp.ChecksConfirmed, "response should preserve an unconfirmed check state from the stored summary")
 	require.False(t, resp.CanMerge, "response should keep merge disabled until checks are confirmed")
@@ -815,7 +867,7 @@ func TestPRServiceBuildPullRequestHealthResponseMarksConfirmedZeroChecksMergeabl
 		Status:         "open",
 		MergeState:     models.PullRequestMergeStateUnknown,
 		HealthVersion:  2,
-	})
+	}, healthBuildOptions{})
 	require.NoError(t, err, "buildPullRequestHealthResponse should succeed")
 	require.True(t, resp.ChecksConfirmed, "response should mark current GitHub checks as confirmed even when none are configured")
 	require.True(t, resp.CanMerge, "response should allow merge when GitHub confirmed a clean PR with no checks configured")
@@ -905,7 +957,9 @@ func TestPRServicePopulateAutoRepairAttemptStateUsesPersonalOverride(t *testing.
 
 	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id = @id").
 		WithArgs(pgx.NamedArgs{"id": orgID}).
-		WillReturnRows(pgxmock.NewRows(prTestOrganizationColumns).AddRow(orgID, "Acme", []byte(`{}`), now, now))
+		WillReturnRows(pgxmock.NewRows(prTestOrganizationColumns).AddRow(
+			orgID, "Acme", []byte(`{"session_automation":{"automatic_follow_through":{"resolve_conflicts_when_idle":false,"fix_tests_when_idle":false}}}`), now, now,
+		))
 
 	sessionRow := newPRHealthSessionRow(sessionID, orgID, now, models.SessionStatusCompleted)
 	for i, column := range prHealthSessionColumns {
@@ -965,7 +1019,7 @@ func TestPRServicePopulateAutoRepairAttemptStatePersonalOverrideDisablesOrgDefau
 	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id = @id").
 		WithArgs(pgx.NamedArgs{"id": orgID}).
 		WillReturnRows(pgxmock.NewRows(prTestOrganizationColumns).AddRow(
-			orgID, "Acme", []byte(`{"session_automation":{"automatic_follow_through":{"resolve_conflicts_when_idle":true}}}`), now, now,
+			orgID, "Acme", []byte(`{"session_automation":{"automatic_follow_through":{"resolve_conflicts_when_idle":true,"fix_tests_when_idle":false}}}`), now, now,
 		))
 
 	sessionRow := newPRHealthSessionRow(sessionID, orgID, now, models.SessionStatusCompleted)
