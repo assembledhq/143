@@ -531,6 +531,44 @@ func TestBuildServicesWiresLinearAgentWorkerDepsWithoutFeatureFlagGate(t *testin
 	require.Less(t, lastFeatureFlagGate, lastFuncStart, "LinearAgentDeps must be wired even when LINEAR_AGENT_ENABLED=false so queued jobs drain")
 }
 
+func TestWireWorkerPRServiceWiresSessionMessageStoreForAutoRepair(t *testing.T) {
+	t.Parallel()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", nil, 0)
+	require.NoError(t, err, "main.go should parse for automatic PR repair wiring regression test")
+
+	var wireFunc *ast.FuncDecl
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Name.Name == "wireWorkerPRService" {
+			wireFunc = fn
+			break
+		}
+	}
+	require.NotNil(t, wireFunc, "worker startup should define PR service dependency wiring")
+
+	var sessionMessageSetter *ast.CallExpr
+	ast.Inspect(wireFunc.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if ok && selector.Sel.Name == "SetSessionMessageStore" {
+			sessionMessageSetter = call
+			return false
+		}
+		return true
+	})
+
+	require.NotNil(t, sessionMessageSetter, "worker PR service should wire session messages before automatic repair can resume a session")
+	require.Len(t, sessionMessageSetter.Args, 1, "session message setter should receive exactly one dependency")
+	sessionMessageArg, ok := sessionMessageSetter.Args[0].(*ast.Ident)
+	require.True(t, ok, "session message dependency should be passed directly to the worker PR service")
+	require.Equal(t, "sessionMessageStore", sessionMessageArg.Name, "worker PR service should use the shared session message store")
+}
+
 func TestMainProductionWorkersPreflightSandboxAuthBeforeConstructingServer(t *testing.T) {
 	t.Parallel()
 
