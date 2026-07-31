@@ -304,7 +304,12 @@ export function CodeReviewAnalyticsReport({
         description="Who has the most completed review assessments on their pull requests, and how often those assessments lead to an automatic approval."
       >
         {analytics.authors.length === 0 ? (
-          <p className="py-6 text-center text-sm text-muted-foreground">No author attribution is available for this report.</p>
+          <EmptyState
+            icon={ChartNoAxesColumnIncreasing}
+            title="No author attribution available"
+            description="Completed reviews in this report could not be matched to a pull request author."
+            variant="inline"
+          />
         ) : (
           <Card className="overflow-x-auto">
             <Table aria-label="Code review analytics by PR author">

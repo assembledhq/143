@@ -785,6 +785,30 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByText(/failed or became stale before reaching an approval decision/)).toBeInTheDocument();
   });
 
+  it("uses the shared empty state when completed reviews have no author attribution", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews/analytics", () =>
+        HttpResponse.json({
+          data: {
+            ...reviewAnalytics,
+            authors: [],
+          },
+        } satisfies SingleResponse<CodeReviewAnalytics>),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
+    await user.click(await screen.findByRole("tab", { name: "Analytics" }));
+
+    expect(await screen.findByText("No author attribution available")).toBeInTheDocument();
+    expect(
+      screen.getByText("Completed reviews in this report could not be matched to a pull request author."),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("table", { name: "Code review analytics by PR author" })).not.toBeInTheDocument();
+  });
+
   it("applies shared filters to rows and stats while status scopes review activity only", async () => {
     const user = userEvent.setup();
     const listRequests: URLSearchParams[] = [];
