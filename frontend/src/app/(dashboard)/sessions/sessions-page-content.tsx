@@ -9,7 +9,7 @@ import {
   type ColumnDef,
   type SortingState,
 } from "@tanstack/react-table";
-import { ArrowUpDown, CalendarClock, Plus } from "lucide-react";
+import { CalendarClock, Plus } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -30,6 +30,7 @@ import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
+import { SortableTableHeader, sortDirectionAriaValue } from "@/components/sortable-table-header";
 import { AnimatedEllipsis } from "@/components/animated-ellipsis";
 import { AgentBadge } from "@/components/agent-badge";
 import { usePeopleFilter } from "@/hooks/use-people-filter";
@@ -63,15 +64,8 @@ function SessionStatusDot({ displayStatus }: { displayStatus: SessionDisplayStat
 }
 
 function SortableHeader({ label, column }: { label: string; column: { toggleSorting: (desc?: boolean) => void; getIsSorted: () => false | "asc" | "desc" } }) {
-  return (
-    <button
-      className="flex items-center gap-1 hover:text-foreground transition-colors -ml-1 px-1 py-0.5 rounded"
-      onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
-    >
-      {label}
-      <ArrowUpDown className="h-3 w-3 opacity-50" />
-    </button>
-  );
+  const direction = column.getIsSorted();
+  return <SortableTableHeader label={label} direction={direction} onSort={(next) => column.toggleSorting(next === "desc")} />;
 }
 
 // ---------------------------------------------------------------------------
@@ -426,6 +420,7 @@ export function SessionsPageContent() {
                         <TableHead
                           key={header.id}
                           className="uppercase"
+                          aria-sort={header.column.getCanSort() ? sortDirectionAriaValue(header.column.getIsSorted()) : undefined}
                           style={{ width: header.column.getSize() !== 150 ? header.column.getSize() : undefined }}
                         >
                           {header.isPlaceholder

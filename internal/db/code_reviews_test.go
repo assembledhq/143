@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -962,10 +964,11 @@ func TestCodeReviewStore_ListReviewsAppliesDesignFilters(t *testing.T) {
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
 
-	mock.ExpectQuery("(?s)m.status = 'failed'.*pr.status = 'open'.*current_health.head_sha = m.head_sha.*FROM code_review_session_metadata newer.*approved.status = 'completed'.*policy.active = true.*AS retry_eligible.*m.decision = @decision").
+	mock.ExpectQuery("(?s)m.status = 'failed'.*pr.status = 'open'.*current_health.head_sha = m.head_sha.*FROM code_review_session_metadata newer.*approved.status = 'completed'.*policy.active = true.*AS retry_eligible.*m.decision = @decision.*LOWER\\(COALESCE\\(NULLIF\\(s.revision_context->>'pull_request_author', ''\\), 'Unknown'\\)\\) = LOWER\\(@author\\)").
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
@@ -985,6 +988,7 @@ func TestCodeReviewStore_ListReviewsAppliesDesignFilters(t *testing.T) {
 		Decision:     &decision,
 		Status:       &status,
 		Acceptable:   &acceptable,
+		Author:       "Devin",
 		Search:       "auth",
 		Limit:        25,
 	})
@@ -1318,6 +1322,8 @@ func TestCodeReviewStore_GetReviewAnalyticsReturnsDecisionReport(t *testing.T) {
 	orgID := uuid.New()
 	repositoryID := uuid.New()
 	createdAfter := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	medianAdditions := 70.0
+	medianDeletions := 26.0
 	authorAverageAdditions := 60.0
 	authorMedianAdditions := 50.0
 	authorAverageDeletions := 28.0
@@ -1332,10 +1338,10 @@ func TestCodeReviewStore_GetReviewAnalyticsReturnsDecisionReport(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{
 			"reviews_requested", "reviews_completed", "automatically_approved", "not_approved",
 			"needs_human_review", "comment_only", "blocked", "approval_not_posted",
-			"failed_reviews", "stale_reviews", "reviews_with_findings",
+			"failed_reviews", "stale_reviews", "median_additions", "median_deletions", "reviews_with_findings",
 			"reviews_with_blocking_findings", "total_findings", "authors", "non_approval_reasons",
 		}).AddRow(
-			32, 28, 17, 11, 8, 2, 0, 1, 2, 2, 9, 3, 14,
+			32, 28, 17, 11, 8, 2, 0, 1, 2, 2, medianAdditions, medianDeletions, 9, 3, 14,
 			[]byte(`[{
 				"author":"anya",
 				"reviews_completed":12,
@@ -1371,6 +1377,8 @@ func TestCodeReviewStore_GetReviewAnalyticsReturnsDecisionReport(t *testing.T) {
 			ApprovalNotPosted:           1,
 			FailedReviews:               2,
 			StaleReviews:                2,
+			MedianAdditions:             &medianAdditions,
+			MedianDeletions:             &medianDeletions,
 			ReviewsWithFindings:         9,
 			ReviewsWithBlockingFindings: 3,
 			TotalFindings:               14,
@@ -1394,6 +1402,376 @@ func TestCodeReviewStore_GetReviewAnalyticsReturnsDecisionReport(t *testing.T) {
 		},
 	}, analytics, "GetReviewAnalytics should return exact summary, author, and reason metrics")
 	require.NoError(t, mock.ExpectationsWereMet(), "the single analytics query should remain org and filter scoped")
+}
+
+func TestCodeReviewListOrderBy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		sortBy    string
+		sortOrder string
+		expected  string
+		expectErr bool
+	}{
+		{name: "default", expected: " ORDER BY m.created_at DESC, m.id DESC"},
+		// Recency stays the secondary key so rows within one sort group keep the
+		// newest-first order instead of falling back to the random UUID key, and
+		// NULLS LAST appears only for the one sort that can produce a null.
+		{name: "repository ascending", sortBy: "repository", sortOrder: "asc", expected: " ORDER BY r.full_name ASC, m.created_at DESC, m.id DESC"},
+		{name: "completed descending", sortBy: "completed", sortOrder: "desc", expected: " ORDER BY m.completed_at DESC NULLS LAST, m.created_at DESC, m.id DESC"},
+		{name: "rank sorts break ties by recency", sortBy: "risk", sortOrder: "asc", expected: " ORDER BY " + codeReviewRiskRankSQL + " ASC, m.created_at DESC, m.id DESC"},
+		{name: "rejects unknown column", sortBy: "created_at; DROP TABLE sessions", expectErr: true},
+		{name: "rejects unknown direction", sortBy: "outcome", sortOrder: "sideways", expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			actual, err := codeReviewListOrderBy(tt.sortBy, tt.sortOrder)
+			if tt.expectErr {
+				require.Error(t, err, "invalid sort input should be rejected")
+				return
+			}
+			require.NoError(t, err, "supported sort input should be accepted")
+			require.Equal(t, tt.expected, actual, "sort input should map to the exact allowlisted SQL clause")
+		})
+	}
+}
+
+func TestCodeReviewSortedCursorPredicate(t *testing.T) {
+	t.Parallel()
+
+	cursorID := uuid.New()
+	cursorCreatedAt := time.Date(2026, 7, 20, 9, 30, 0, 0, time.UTC)
+	tests := []struct {
+		name           string
+		filters        CodeReviewListFilters
+		expectedWhere  string
+		expectedValue  any
+		expectsNullArm bool
+	}{
+		{
+			name: "ascending non-null value",
+			filters: CodeReviewListFilters{
+				SortBy: "repository", SortOrder: "asc", CursorSortValue: "acme/api",
+			},
+			expectedWhere: "r.full_name > @cursor_sort_value",
+			expectedValue: "acme/api",
+		},
+		{
+			name: "descending non-null value includes later nulls",
+			filters: CodeReviewListFilters{
+				SortBy: "completed", SortOrder: "desc", CursorSortValue: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+			},
+			expectedWhere:  "m.completed_at < @cursor_sort_value",
+			expectedValue:  time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+			expectsNullArm: true,
+		},
+		{
+			name: "null value remains within null partition",
+			filters: CodeReviewListFilters{
+				SortBy: "completed", SortOrder: "asc", CursorSortNull: true,
+			},
+			expectedWhere: "m.completed_at IS NULL AND (m.created_at, m.id) < (@cursor_created_at, @cursor)",
+		},
+		{
+			name: "label-derived sort anchors on the displayed rank",
+			filters: CodeReviewListFilters{
+				SortBy: "risk", SortOrder: "asc", CursorSortValue: 1,
+			},
+			expectedWhere: "WHEN m.acceptable THEN 0",
+			expectedValue: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			filters := tt.filters
+			filters.Cursor = &cursorID
+			filters.CursorCreatedAt = &cursorCreatedAt
+
+			where, args, err := codeReviewSortedCursorPredicate(filters)
+
+			require.NoError(t, err, "valid sorted cursors should produce a keyset predicate")
+			require.Contains(t, where, tt.expectedWhere, "keyset predicate should use the selected direction and null partition")
+			require.Equal(t, cursorID, args["cursor"], "keyset predicate should retain the stable row ID tiebreaker")
+			require.Equal(t, cursorCreatedAt, args["cursor_created_at"], "keyset predicate should bind the recency tiebreaker")
+			if tt.expectedValue != nil {
+				require.Equal(t, tt.expectedValue, args["cursor_sort_value"], "keyset predicate should bind the typed sort anchor")
+				require.Contains(t, where,
+					"AND (m.created_at, m.id) < (@cursor_created_at, @cursor)",
+					"rows tied on the sort value should continue in the newest-first order the table shows",
+				)
+			}
+			// Only completed_at can be null, so only it should widen the page to
+			// the trailing null partition.
+			require.Equal(t, tt.expectsNullArm, strings.Contains(where, "OR m.completed_at IS NULL"),
+				"the trailing null partition should appear only for a nullable sort")
+		})
+	}
+}
+
+func TestCodeReviewSortedCursorPredicateRejectsUnusableAnchors(t *testing.T) {
+	t.Parallel()
+
+	cursorID := uuid.New()
+	cursorCreatedAt := time.Date(2026, 7, 20, 9, 30, 0, 0, time.UTC)
+
+	_, _, err := codeReviewSortedCursorPredicate(CodeReviewListFilters{
+		SortBy: "repository", SortOrder: "asc", Cursor: &cursorID, CursorSortValue: "acme/api",
+	})
+	require.Error(t, err, "a sorted cursor without its recency anchor cannot page deterministically")
+
+	// repositories.full_name is NOT NULL behind an inner join, so a null anchor
+	// would silently select a partition holding no rows.
+	_, _, err = codeReviewSortedCursorPredicate(CodeReviewListFilters{
+		SortBy: "repository", SortOrder: "asc", Cursor: &cursorID,
+		CursorCreatedAt: &cursorCreatedAt, CursorSortNull: true,
+	})
+	require.Error(t, err, "a non-nullable sort should refuse a null cursor anchor")
+
+	nullable, err := CodeReviewListSortIsNullable("completed")
+	require.NoError(t, err, "an allowlisted sort should report its nullability")
+	require.True(t, nullable, "completed_at is the one sort that can order a null partition")
+	for _, sortBy := range []string{"pull_request", "outcome", "risk", "run_status", "repository"} {
+		nullable, err := CodeReviewListSortIsNullable(sortBy)
+		require.NoErrorf(t, err, "%q should be allowlisted", sortBy)
+		require.Falsef(t, nullable, "%q orders a NOT NULL column or a total rank", sortBy)
+	}
+	_, err = CodeReviewListSortIsNullable("unsupported")
+	require.Error(t, err, "an unknown sort should not report nullability")
+}
+
+func TestCodeReviewSortRankForItemGroupsRowsByDisplayedLabel(t *testing.T) {
+	t.Parallel()
+
+	supersededSession := uuid.New()
+	reviewID := int64(9001)
+	approved := models.CodeReviewDecisionApproved
+	needsHuman := models.CodeReviewDecisionNeedsHumanReview
+	blocked := models.CodeReviewDecisionBlocked
+	commentOnly := models.CodeReviewDecisionCommentOnly
+	acceptable, notAcceptable := true, false
+
+	tests := []struct {
+		name     string
+		sortBy   string
+		meta     models.CodeReviewSessionMetadata
+		expected int
+	}{
+		// Outcome: the cell reads "Approved" only once the approval is posted,
+		// and superseded rows read "No outcome" whatever the decision says.
+		{
+			name:   "posted approval outranks an unposted one",
+			sortBy: "outcome",
+			meta: models.CodeReviewSessionMetadata{
+				Status: models.CodeReviewSessionStatusCompleted, Decision: &approved, GitHubReviewID: &reviewID,
+			},
+			expected: 0,
+		},
+		{
+			name:     "approval that was never posted sorts apart from posted approvals",
+			sortBy:   "outcome",
+			meta:     models.CodeReviewSessionMetadata{Status: models.CodeReviewSessionStatusCompleted, Decision: &approved},
+			expected: 1,
+		},
+		{
+			name:     "review needed",
+			sortBy:   "outcome",
+			meta:     models.CodeReviewSessionMetadata{Status: models.CodeReviewSessionStatusCompleted, Decision: &needsHuman},
+			expected: 2,
+		},
+		{
+			name:     "blocked",
+			sortBy:   "outcome",
+			meta:     models.CodeReviewSessionMetadata{Status: models.CodeReviewSessionStatusCompleted, Decision: &blocked},
+			expected: 3,
+		},
+		{
+			name:     "comment only",
+			sortBy:   "outcome",
+			meta:     models.CodeReviewSessionMetadata{Status: models.CodeReviewSessionStatusCompleted, Decision: &commentOnly},
+			expected: 4,
+		},
+		{
+			name:     "an undecided review is pending",
+			sortBy:   "outcome",
+			meta:     models.CodeReviewSessionMetadata{Status: models.CodeReviewSessionStatusRunning},
+			expected: 5,
+		},
+		{
+			name:   "a superseded approval still reads as no outcome",
+			sortBy: "outcome",
+			meta: models.CodeReviewSessionMetadata{
+				Status: models.CodeReviewSessionStatusCompleted, Decision: &approved,
+				GitHubReviewID: &reviewID, SupersededBySessionID: &supersededSession,
+			},
+			expected: 6,
+		},
+		// Risk: an unset acceptable renders "Review needed" exactly like an
+		// explicit false, so the two have to share a rank.
+		{
+			name:     "acceptable risk",
+			sortBy:   "risk",
+			meta:     models.CodeReviewSessionMetadata{Status: models.CodeReviewSessionStatusCompleted, Acceptable: &acceptable},
+			expected: 0,
+		},
+		{
+			name:     "unacceptable risk",
+			sortBy:   "risk",
+			meta:     models.CodeReviewSessionMetadata{Status: models.CodeReviewSessionStatusCompleted, Acceptable: &notAcceptable},
+			expected: 1,
+		},
+		{
+			name:     "unset risk shares the review-needed rank",
+			sortBy:   "risk",
+			meta:     models.CodeReviewSessionMetadata{Status: models.CodeReviewSessionStatusRunning},
+			expected: 1,
+		},
+		{
+			name:   "superseded risk is not applicable",
+			sortBy: "risk",
+			meta: models.CodeReviewSessionMetadata{
+				Status: models.CodeReviewSessionStatusCompleted, Acceptable: &acceptable, Stale: true,
+			},
+			expected: 2,
+		},
+		// Run status: ordered by lifecycle stage rather than the status string.
+		{name: "queued run", sortBy: "run_status", meta: models.CodeReviewSessionMetadata{Status: models.CodeReviewSessionStatusQueued}, expected: 0},
+		{name: "running run", sortBy: "run_status", meta: models.CodeReviewSessionMetadata{Status: models.CodeReviewSessionStatusRunning}, expected: 1},
+		{name: "completed run", sortBy: "run_status", meta: models.CodeReviewSessionMetadata{Status: models.CodeReviewSessionStatusCompleted}, expected: 2},
+		{name: "failed run", sortBy: "run_status", meta: models.CodeReviewSessionMetadata{Status: models.CodeReviewSessionStatusFailed}, expected: 3},
+		{name: "cancelled run", sortBy: "run_status", meta: models.CodeReviewSessionMetadata{Status: models.CodeReviewSessionStatusCancelled}, expected: 4},
+		{
+			name:     "stale run status is superseded",
+			sortBy:   "run_status",
+			meta:     models.CodeReviewSessionMetadata{Status: models.CodeReviewSessionStatusStale},
+			expected: 5,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rank, ok := CodeReviewSortRankForItem(tt.sortBy, models.CodeReviewListItem{CodeReviewSessionMetadata: tt.meta})
+			require.True(t, ok, "label-derived sorts should produce a rank cursor anchor")
+			require.Equal(t, tt.expected, rank, "the cursor rank should match the rank the ORDER BY assigns")
+		})
+	}
+
+	for _, sortBy := range []string{"", "pull_request", "repository", "completed", "unsupported"} {
+		_, ok := CodeReviewSortRankForItem(sortBy, models.CodeReviewListItem{})
+		require.Falsef(t, ok, "%q anchors on a column value rather than a displayed-label rank", sortBy)
+	}
+}
+
+// The rank the cursor carries and the rank the ORDER BY computes live in two
+// languages, so at minimum every branch on one side must exist on the other.
+func TestCodeReviewSortRankSQLCoversTheSameBranches(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		sortBy string
+		sql    string
+	}{
+		{sortBy: "outcome", sql: codeReviewOutcomeRankSQL},
+		{sortBy: "risk", sql: codeReviewRiskRankSQL},
+		{sortBy: "run_status", sql: codeReviewRunStatusRankSQL},
+	}
+
+	statuses := []models.CodeReviewSessionStatus{
+		models.CodeReviewSessionStatusQueued, models.CodeReviewSessionStatusRunning,
+		models.CodeReviewSessionStatusCompleted, models.CodeReviewSessionStatusFailed,
+		models.CodeReviewSessionStatusStale, models.CodeReviewSessionStatusCancelled,
+		// Both sides keep a defensive fallback for a status neither knows yet.
+		models.CodeReviewSessionStatus("unrecognized_future_status"),
+	}
+	decisions := []*models.CodeReviewDecision{nil}
+	for _, decision := range []models.CodeReviewDecision{
+		models.CodeReviewDecisionApproved, models.CodeReviewDecisionNeedsHumanReview,
+		models.CodeReviewDecisionBlocked, models.CodeReviewDecisionCommentOnly,
+	} {
+		decisions = append(decisions, &decision)
+	}
+	reviewID := int64(1)
+	acceptable, notAcceptable := true, false
+	supersededSession := uuid.New()
+
+	var items []models.CodeReviewListItem
+	for _, status := range statuses {
+		for _, decision := range decisions {
+			for _, githubReviewID := range []*int64{nil, &reviewID} {
+				for _, riskValue := range []*bool{nil, &acceptable, &notAcceptable} {
+					for _, superseded := range []*uuid.UUID{nil, &supersededSession} {
+						for _, stale := range []bool{false, true} {
+							items = append(items, models.CodeReviewListItem{
+								CodeReviewSessionMetadata: models.CodeReviewSessionMetadata{
+									Status: status, Decision: decision, GitHubReviewID: githubReviewID,
+									Acceptable: riskValue, SupersededBySessionID: superseded, Stale: stale,
+								},
+							})
+						}
+					}
+				}
+			}
+		}
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.sortBy, func(t *testing.T) {
+			t.Parallel()
+
+			goRanks := map[int]bool{}
+			for _, item := range items {
+				rank, ok := CodeReviewSortRankForItem(tt.sortBy, item)
+				require.True(t, ok, "every combination should rank")
+				goRanks[rank] = true
+			}
+
+			sqlRanks := map[int]bool{}
+			for _, match := range regexp.MustCompile(`THEN (\d+)|ELSE (\d+)`).FindAllStringSubmatch(tt.sql, -1) {
+				digits := match[1]
+				if digits == "" {
+					digits = match[2]
+				}
+				rank, convErr := strconv.Atoi(digits)
+				require.NoError(t, convErr, "rank branches should be integers")
+				sqlRanks[rank] = true
+			}
+
+			require.Equal(t, sqlRanks, goRanks, "the Go cursor rank and the SQL ORDER BY rank should cover identical branches")
+		})
+	}
+}
+
+func TestCodeReviewAuthorAnalyticsOrder(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		sortBy    string
+		sortOrder string
+		expectErr bool
+	}{
+		{name: "default"},
+		{name: "author ascending", sortBy: "author", sortOrder: "asc"},
+		{name: "approval rate descending", sortBy: "approval_rate", sortOrder: "desc"},
+		{name: "rejects unknown column", sortBy: "unsafe", expectErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			order, err := codeReviewAuthorAnalyticsOrder(tt.sortBy, tt.sortOrder)
+			if tt.expectErr {
+				require.Error(t, err, "invalid analytics sort input should be rejected")
+				return
+			}
+			require.NoError(t, err, "supported analytics sort input should be accepted")
+			require.NotEmpty(t, order, "supported analytics sort input should produce an order clause")
+		})
+	}
 }
 
 func TestCodeReviewStore_ListReviewsPageReturnsExactCountForEmptyPage(t *testing.T) {

@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/assembledhq/143/internal/internalapi"
 )
 
 func runChangesets(args []string, stdout, stderr io.Writer) int {
@@ -18,7 +20,7 @@ func runChangesets(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "Usage: 143-tools changesets <list|current|status|split-status|diff|create|materialize|verify|publish|publish-stack|restack|import-remote>")
 		return 1
 	}
-	sessionID := os.Getenv("143_SESSION_ID")
+	sessionID := codingSessionIDFromEnv()
 	changesetID := ""
 	title := ""
 	stackedOn := ""
@@ -53,7 +55,7 @@ func runChangesets(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if sessionID == "" {
-		fmt.Fprintln(stderr, "error: --session-id is required when 143_SESSION_ID is not set")
+		fmt.Fprintf(stderr, "error: --session-id is required when %s is not set\n", internalapi.CodingSessionIDEnvVar)
 		return 1
 	}
 	cfg, err := LoadConfig()

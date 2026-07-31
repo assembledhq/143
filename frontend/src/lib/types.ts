@@ -335,6 +335,8 @@ export interface CodeReviewAnalyticsSummary {
   approval_not_posted: number;
   failed_reviews: number;
   stale_reviews: number;
+  median_additions: number | null;
+  median_deletions: number | null;
   reviews_with_findings: number;
   reviews_with_blocking_findings: number;
   total_findings: number;

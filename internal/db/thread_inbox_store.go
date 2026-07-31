@@ -43,11 +43,11 @@ type AppendThreadInboxEntryParams struct {
 
 const threadInboxEntryColumns = `id, org_id, session_id, thread_id, sequence_no, message_id, client_message_id,
 		entry_type, payload, delivery_state, delivery_attempts, last_error,
-		owner_node_id, runtime_id, accepted_at, delivered_at, acked_at, created_at, updated_at`
+		owner_node_id, runtime_id, accepted_at, delivered_at, acked_at, applied_at, created_at, updated_at`
 
 const threadInboxEntryColumnsE = `e.id, e.org_id, e.session_id, e.thread_id, e.sequence_no, e.message_id, e.client_message_id,
 		e.entry_type, e.payload, e.delivery_state, e.delivery_attempts, e.last_error,
-		e.owner_node_id, e.runtime_id, e.accepted_at, e.delivered_at, e.acked_at, e.created_at, e.updated_at`
+		e.owner_node_id, e.runtime_id, e.accepted_at, e.delivered_at, e.acked_at, e.applied_at, e.created_at, e.updated_at`
 
 const threadInboxDeliverySummarySelect = `
 		SELECT
@@ -134,6 +134,7 @@ func scanThreadInboxEntryRow(row pgx.CollectableRow) (models.ThreadInboxEntry, e
 	var runtimeID pgtype.UUID
 	var deliveredAt pgtype.Timestamptz
 	var ackedAt pgtype.Timestamptz
+	var appliedAt pgtype.Timestamptz
 	if err := row.Scan(
 		&entry.ID,
 		&entry.OrgID,
@@ -152,6 +153,7 @@ func scanThreadInboxEntryRow(row pgx.CollectableRow) (models.ThreadInboxEntry, e
 		&entry.AcceptedAt,
 		&deliveredAt,
 		&ackedAt,
+		&appliedAt,
 		&entry.CreatedAt,
 		&entry.UpdatedAt,
 	); err != nil {
@@ -183,6 +185,10 @@ func scanThreadInboxEntryRow(row pgx.CollectableRow) (models.ThreadInboxEntry, e
 	if ackedAt.Valid {
 		t := ackedAt.Time.UTC()
 		entry.AckedAt = &t
+	}
+	if appliedAt.Valid {
+		t := appliedAt.Time.UTC()
+		entry.AppliedAt = &t
 	}
 	entry.AcceptedAt = entry.AcceptedAt.In(time.UTC)
 	entry.CreatedAt = entry.CreatedAt.In(time.UTC)

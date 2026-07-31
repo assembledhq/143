@@ -1140,19 +1140,32 @@ func (s *CodeReviewStore) GetListItemBySessionID(ctx context.Context, orgID, ses
 }
 
 type CodeReviewListFilters struct {
-	RepositoryID   *uuid.UUID
-	Decision       *models.CodeReviewDecision
-	Outcome        *models.CodeReviewListOutcome
-	ActivityStatus *models.CodeReviewActivityStatus
-	Status         *models.CodeReviewSessionStatus
-	Acceptable     *bool
-	Search         string
-	Limit          int
-	CreatedAfter   *time.Time
-	CreatedBefore  *time.Time
+	RepositoryID    *uuid.UUID
+	Decision        *models.CodeReviewDecision
+	Outcome         *models.CodeReviewListOutcome
+	ActivityStatus  *models.CodeReviewActivityStatus
+	Status          *models.CodeReviewSessionStatus
+	Acceptable      *bool
+	Author          string
+	Search          string
+	Limit           int
+	CreatedAfter    *time.Time
+	CreatedBefore   *time.Time
+	SortBy          string
+	SortOrder       string
+	CursorSortValue any
+	CursorSortNull  bool
 	// Cursor is the metadata row ID of the last item from the previous page.
-	// Rows strictly after it in the (created_at DESC, id DESC) order are
-	// returned, matching the session-history keyset pagination contract.
+	// In the default order, rows strictly after it in (created_at DESC, id DESC)
+	// are returned, matching the session-history keyset pagination contract; both
+	// anchors are immutable, so a page boundary never moves.
+	//
+	// An explicit SortBy anchors on CursorSortValue instead, and every sort
+	// except repository and pull_request reads a column that changes as a review
+	// progresses (queued -> running -> completed). A row whose sort value changes
+	// mid-pagination can therefore be skipped or repeated across pages. That is
+	// accepted here: the list polls live and the sorted views are for scanning,
+	// not for exhaustive one-pass export.
 	Cursor          *uuid.UUID
 	CursorCreatedAt *time.Time
 }
@@ -1229,6 +1242,10 @@ func codeReviewListWhere(orgID uuid.UUID, filters CodeReviewListFilters, include
 		query += ` AND m.acceptable = @acceptable`
 		args["acceptable"] = *filters.Acceptable
 	}
+	if author := strings.TrimSpace(filters.Author); author != "" {
+		query += ` AND LOWER(COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), 'Unknown')) = LOWER(@author)`
+		args["author"] = author
+	}
 	if filters.CreatedAfter != nil {
 		query += ` AND m.created_at >= @created_after`
 		args["created_after"] = *filters.CreatedAfter
@@ -1261,19 +1278,234 @@ func codeReviewListWhere(orgID uuid.UUID, filters CodeReviewListFilters, include
 }
 
 func (s *CodeReviewStore) listReviews(ctx context.Context, orgID uuid.UUID, filters CodeReviewListFilters, limit int) ([]models.CodeReviewListItem, error) {
-	where, args, err := codeReviewListWhere(orgID, filters, true)
+	where, args, err := codeReviewListWhere(orgID, filters, filters.SortBy == "")
 	if err != nil {
 		return nil, err
 	}
+	if filters.SortBy != "" && filters.Cursor != nil {
+		cursorWhere, cursorArgs, err := codeReviewSortedCursorPredicate(filters)
+		if err != nil {
+			return nil, err
+		}
+		where += cursorWhere
+		for key, value := range cursorArgs {
+			args[key] = value
+		}
+	}
 	args["limit"] = limit
-	query := codeReviewListItemSelect + where + `
-		ORDER BY m.created_at DESC, m.id DESC
+	orderBy, err := codeReviewListOrderBy(filters.SortBy, filters.SortOrder)
+	if err != nil {
+		return nil, err
+	}
+	query := codeReviewListItemSelect + where + orderBy + `
 		LIMIT @limit`
 	rows, err := s.db.Query(ctx, query, args)
 	if err != nil {
 		return nil, fmt.Errorf("query code review list: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.CodeReviewListItem])
+}
+
+// codeReviewSupersededSQL mirrors the isSupersededReview() predicate the
+// reviews table uses to blank out a row's outcome, risk, and run status.
+const codeReviewSupersededSQL = `(m.stale OR m.status = 'stale' OR m.superseded_by_session_id IS NOT NULL)`
+
+// The outcome, risk, and run status cells render labels derived from several
+// columns rather than the columns themselves, so sorting on the raw column
+// splits one displayed label across the result (a NULL and a false `acceptable`
+// both read "Review needed") and scatters superseded rows through every group.
+// These rank expressions order by the label the row actually shows;
+// CodeReviewSortRankForItem computes the identical rank for the page cursor and
+// is kept in lockstep by TestCodeReviewSortRankMatchesSQL.
+const (
+	codeReviewOutcomeRankSQL = `(CASE
+			WHEN ` + codeReviewSupersededSQL + ` THEN 6
+			WHEN m.status = 'completed' AND m.decision = 'approved' AND m.github_review_id IS NOT NULL THEN 0
+			WHEN m.decision = 'approved' THEN 1
+			WHEN m.decision = 'needs_human_review' THEN 2
+			WHEN m.decision = 'blocked' THEN 3
+			WHEN m.decision = 'comment_only' THEN 4
+			ELSE 5
+		END)`
+	codeReviewRiskRankSQL = `(CASE
+			WHEN ` + codeReviewSupersededSQL + ` THEN 2
+			WHEN m.acceptable THEN 0
+			ELSE 1
+		END)`
+	// Queued and running rows label themselves with their phase; the phase
+	// labels live in the frontend, so those rows sort as one lifecycle group
+	// and fall back to the row ID within it.
+	codeReviewRunStatusRankSQL = `(CASE
+			WHEN ` + codeReviewSupersededSQL + ` THEN 5
+			WHEN m.status = 'queued' THEN 0
+			WHEN m.status = 'running' THEN 1
+			WHEN m.status = 'completed' THEN 2
+			WHEN m.status = 'failed' THEN 3
+			WHEN m.status = 'cancelled' THEN 4
+			ELSE 6
+		END)`
+)
+
+// codeReviewListSort is one allowlisted ordering: the expression it orders by,
+// and whether that expression can be NULL. Nullability decides both the NULLS
+// LAST clause and whether a page cursor may anchor on the null partition.
+type codeReviewListSort struct {
+	expression string
+	nullable   bool
+}
+
+// pull_requests.github_pr_number and repositories.full_name are NOT NULL behind
+// inner joins, and the rank expressions always return an integer, so only
+// completed_at can order a null partition.
+var codeReviewListSorts = map[string]codeReviewListSort{
+	"pull_request": {expression: "pr.github_pr_number"},
+	"outcome":      {expression: codeReviewOutcomeRankSQL},
+	"risk":         {expression: codeReviewRiskRankSQL},
+	"run_status":   {expression: codeReviewRunStatusRankSQL},
+	"repository":   {expression: "r.full_name"},
+	"completed":    {expression: "m.completed_at", nullable: true},
+}
+
+// CodeReviewListSortIsNullable reports whether a page cursor for this sort may
+// anchor on a null value. Anchoring on a partition the column cannot produce
+// would silently return an empty page and end pagination early.
+func CodeReviewListSortIsNullable(sortBy string) (bool, error) {
+	sort, err := codeReviewListSortFor(sortBy)
+	if err != nil {
+		return false, err
+	}
+	return sort.nullable, nil
+}
+
+func codeReviewListSortFor(sortBy string) (codeReviewListSort, error) {
+	sort, ok := codeReviewListSorts[sortBy]
+	if !ok {
+		return codeReviewListSort{}, fmt.Errorf("unsupported code review sort: %q", sortBy)
+	}
+	return sort, nil
+}
+
+// CodeReviewSortRankForItem returns the displayed-label rank for the label-
+// derived sorts, matching the CASE expressions above so a page cursor anchors
+// on the same value the ORDER BY produced. ok is false for sorts that anchor on
+// a plain column value instead.
+func CodeReviewSortRankForItem(sortBy string, item models.CodeReviewListItem) (int, bool) {
+	superseded := item.Stale || item.Status == models.CodeReviewSessionStatusStale || item.SupersededBySessionID != nil
+	decision := ""
+	if item.Decision != nil {
+		decision = string(*item.Decision)
+	}
+	switch sortBy {
+	case "outcome":
+		switch {
+		case superseded:
+			return 6, true
+		case item.Status == models.CodeReviewSessionStatusCompleted && decision == "approved" && item.GitHubReviewID != nil:
+			return 0, true
+		case decision == "approved":
+			return 1, true
+		case decision == "needs_human_review":
+			return 2, true
+		case decision == "blocked":
+			return 3, true
+		case decision == "comment_only":
+			return 4, true
+		default:
+			return 5, true
+		}
+	case "risk":
+		switch {
+		case superseded:
+			return 2, true
+		case item.Acceptable != nil && *item.Acceptable:
+			return 0, true
+		default:
+			return 1, true
+		}
+	case "run_status":
+		switch {
+		case superseded:
+			return 5, true
+		case item.Status == models.CodeReviewSessionStatusQueued:
+			return 0, true
+		case item.Status == models.CodeReviewSessionStatusRunning:
+			return 1, true
+		case item.Status == models.CodeReviewSessionStatusCompleted:
+			return 2, true
+		case item.Status == models.CodeReviewSessionStatusFailed:
+			return 3, true
+		case item.Status == models.CodeReviewSessionStatusCancelled:
+			return 4, true
+		default:
+			return 6, true
+		}
+	default:
+		return 0, false
+	}
+}
+
+// codeReviewSortedRecency is the secondary ordering every explicit sort falls
+// back to. The rank sorts have only a handful of distinct values, so without it
+// the order within a group would come from the random UUID primary key instead
+// of the newest-first order the list shows by default.
+const codeReviewSortedRecency = `m.created_at DESC, m.id DESC`
+
+func codeReviewListOrderBy(sortBy, sortOrder string) (string, error) {
+	if sortBy == "" {
+		return ` ORDER BY ` + codeReviewSortedRecency, nil
+	}
+	sort, err := codeReviewListSortFor(sortBy)
+	if err != nil {
+		return "", err
+	}
+	direction := "ASC"
+	if sortOrder == "desc" {
+		direction = "DESC"
+	} else if sortOrder != "" && sortOrder != "asc" {
+		return "", fmt.Errorf("unsupported code review sort order: %q", sortOrder)
+	}
+	nulls := ""
+	if sort.nullable {
+		nulls = " NULLS LAST"
+	}
+	return ` ORDER BY ` + sort.expression + ` ` + direction + nulls + `, ` + codeReviewSortedRecency, nil
+}
+
+func codeReviewSortedCursorPredicate(filters CodeReviewListFilters) (string, pgx.NamedArgs, error) {
+	sort, err := codeReviewListSortFor(filters.SortBy)
+	if err != nil {
+		return "", nil, err
+	}
+	comparison := ">"
+	if filters.SortOrder == "desc" {
+		comparison = "<"
+	} else if filters.SortOrder != "asc" {
+		return "", nil, fmt.Errorf("unsupported code review sort order: %q", filters.SortOrder)
+	}
+	if filters.CursorCreatedAt == nil {
+		return "", nil, errors.New("sorted code review cursor is missing its recency anchor")
+	}
+	args := pgx.NamedArgs{"cursor": *filters.Cursor, "cursor_created_at": *filters.CursorCreatedAt}
+	// The secondary key is fixed at (created_at DESC, id DESC), so the tuple
+	// comparison stays "<" whichever way the primary key is ordered.
+	recency := `(m.created_at, m.id) < (@cursor_created_at, @cursor)`
+	if filters.CursorSortNull {
+		if !sort.nullable {
+			return "", nil, fmt.Errorf("code review sort %q cannot anchor on a null value", filters.SortBy)
+		}
+		return ` AND (` + sort.expression + ` IS NULL AND ` + recency + `)`, args, nil
+	}
+	if filters.CursorSortValue == nil {
+		return "", nil, errors.New("sorted code review cursor value is missing")
+	}
+	args["cursor_sort_value"] = filters.CursorSortValue
+	predicate := ` AND ((` + sort.expression + ` ` + comparison + ` @cursor_sort_value)
+		OR (` + sort.expression + ` = @cursor_sort_value AND ` + recency + `)`
+	if sort.nullable {
+		predicate += `
+		OR ` + sort.expression + ` IS NULL`
+	}
+	return predicate + `)`, args, nil
 }
 
 type CodeReviewStatsFilters struct {
@@ -1283,15 +1515,24 @@ type CodeReviewStatsFilters struct {
 	ActivityStatus *models.CodeReviewActivityStatus
 	Status         *models.CodeReviewSessionStatus
 	Acceptable     *bool
+	Author         string
 	Search         string
 	CreatedAfter   *time.Time
 	CreatedBefore  *time.Time
 }
 
 type CodeReviewAnalyticsFilters struct {
-	RepositoryID  *uuid.UUID
-	CreatedAfter  *time.Time
-	CreatedBefore *time.Time
+	RepositoryID    *uuid.UUID
+	Decision        *models.CodeReviewDecision
+	Outcome         *models.CodeReviewListOutcome
+	ActivityStatus  *models.CodeReviewActivityStatus
+	Status          *models.CodeReviewSessionStatus
+	Acceptable      *bool
+	Search          string
+	CreatedAfter    *time.Time
+	CreatedBefore   *time.Time
+	AuthorSortBy    string
+	AuthorSortOrder string
 }
 
 func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filters CodeReviewListFilters) ([]models.CodeReviewListItem, error) {
@@ -1404,6 +1645,11 @@ func (s *CodeReviewStore) GetReviewStats(ctx context.Context, orgID uuid.UUID, f
 		  AND m.acceptable = @acceptable`
 		args["acceptable"] = *filters.Acceptable
 	}
+	if author := strings.TrimSpace(filters.Author); author != "" {
+		query += `
+		  AND LOWER(COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), 'Unknown')) = LOWER(@author)`
+		args["author"] = author
+	}
 	if filters.CreatedAfter != nil {
 		query += `
 		  AND m.created_at >= @created_after`
@@ -1437,26 +1683,30 @@ func (s *CodeReviewStore) GetReviewStats(ctx context.Context, orgID uuid.UUID, f
 	return stats, nil
 }
 
-func codeReviewAnalyticsWhere(orgID uuid.UUID, filters CodeReviewAnalyticsFilters) (string, pgx.NamedArgs) {
-	args := pgx.NamedArgs{"org_id": orgID}
-	query := ` WHERE m.org_id = @org_id`
-	if filters.RepositoryID != nil {
-		query += ` AND m.repository_id = @repository_id`
-		args["repository_id"] = *filters.RepositoryID
+func codeReviewAnalyticsWhere(orgID uuid.UUID, filters CodeReviewAnalyticsFilters) (string, pgx.NamedArgs, error) {
+	return codeReviewListWhere(orgID, CodeReviewListFilters{
+		RepositoryID: filters.RepositoryID, Decision: filters.Decision, Outcome: filters.Outcome,
+		ActivityStatus: filters.ActivityStatus, Status: filters.Status, Acceptable: filters.Acceptable,
+		Search: filters.Search, CreatedAfter: filters.CreatedAfter, CreatedBefore: filters.CreatedBefore,
+	}, false)
+}
+
+func codeReviewOptionalMetric(value float64) *float64 {
+	if value < 0 {
+		return nil
 	}
-	if filters.CreatedAfter != nil {
-		query += ` AND m.created_at >= @created_after`
-		args["created_after"] = *filters.CreatedAfter
-	}
-	if filters.CreatedBefore != nil {
-		query += ` AND m.created_at <= @created_before`
-		args["created_before"] = *filters.CreatedBefore
-	}
-	return query, args
+	return &value
 }
 
 func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUID, filters CodeReviewAnalyticsFilters) (models.CodeReviewAnalytics, error) {
-	where, args := codeReviewAnalyticsWhere(orgID, filters)
+	where, args, err := codeReviewAnalyticsWhere(orgID, filters)
+	if err != nil {
+		return models.CodeReviewAnalytics{}, err
+	}
+	authorOrder, err := codeReviewAuthorAnalyticsOrder(filters.AuthorSortBy, filters.AuthorSortOrder)
+	if err != nil {
+		return models.CodeReviewAnalytics{}, err
+	}
 	// Keep every report section in one statement so PostgreSQL evaluates the
 	// response against one MVCC snapshot. Materializing the filtered review set
 	// also prevents each aggregation from rescanning unrelated org history.
@@ -1473,7 +1723,8 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 				m.risk_reason_details,
 				COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), 'Unknown') AS author
 			FROM code_review_session_metadata m
-			JOIN sessions s ON s.id = m.session_id AND s.org_id = m.org_id` + where + `
+			JOIN sessions s ON s.id = m.session_id AND s.org_id = m.org_id
+			JOIN pull_requests pr ON pr.id = m.pull_request_id AND pr.org_id = m.org_id` + where + `
 		),
 		finding_rollup AS (
 			SELECT
@@ -1512,6 +1763,12 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 			)::bigint AS approval_not_posted,
 			COUNT(*) FILTER (WHERE r.status = 'failed')::bigint AS failed_reviews,
 			COUNT(*) FILTER (WHERE r.status = 'stale')::bigint AS stale_reviews,
+			COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.additions) FILTER (
+				WHERE r.status = 'completed' AND r.additions IS NOT NULL
+			), -1)::double precision AS median_additions,
+			COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.deletions) FILTER (
+				WHERE r.status = 'completed' AND r.deletions IS NOT NULL
+			), -1)::double precision AS median_deletions,
 			COUNT(*) FILTER (
 				WHERE r.status = 'completed' AND COALESCE(finding_rollup.finding_count, 0) > 0
 			)::bigint AS reviews_with_findings,
@@ -1565,11 +1822,13 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 			summary.approval_not_posted,
 			summary.failed_reviews,
 			summary.stale_reviews,
+			summary.median_additions,
+			summary.median_deletions,
 			summary.reviews_with_findings,
 			summary.reviews_with_blocking_findings,
 			summary.total_findings,
 			COALESCE((
-				SELECT jsonb_agg(to_jsonb(a) ORDER BY a.reviews_completed DESC, a.author ASC)
+				SELECT jsonb_agg(to_jsonb(a) ORDER BY ` + authorOrder + `)
 				FROM authors a
 			), '[]'::jsonb) AS authors,
 			COALESCE((
@@ -1579,6 +1838,7 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 		FROM summary`
 
 	var analytics models.CodeReviewAnalytics
+	var medianAdditions, medianDeletions float64
 	var authorsJSON, reasonsJSON []byte
 	if err := s.db.QueryRow(ctx, query, args).Scan(
 		&analytics.Summary.ReviewsRequested,
@@ -1591,6 +1851,8 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 		&analytics.Summary.ApprovalNotPosted,
 		&analytics.Summary.FailedReviews,
 		&analytics.Summary.StaleReviews,
+		&medianAdditions,
+		&medianDeletions,
 		&analytics.Summary.ReviewsWithFindings,
 		&analytics.Summary.ReviewsWithBlockingFindings,
 		&analytics.Summary.TotalFindings,
@@ -1599,6 +1861,8 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 	); err != nil {
 		return models.CodeReviewAnalytics{}, fmt.Errorf("query code review analytics: %w", err)
 	}
+	analytics.Summary.MedianAdditions = codeReviewOptionalMetric(medianAdditions)
+	analytics.Summary.MedianDeletions = codeReviewOptionalMetric(medianDeletions)
 	if err := json.Unmarshal(authorsJSON, &analytics.Authors); err != nil {
 		return models.CodeReviewAnalytics{}, fmt.Errorf("decode code review analytics authors: %w", err)
 	}
@@ -1611,6 +1875,34 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 		}
 	}
 	return analytics, nil
+}
+
+func codeReviewAuthorAnalyticsOrder(sortBy, sortOrder string) (string, error) {
+	columns := map[string]string{
+		"author": "a.author", "reviews": "a.reviews_completed", "approved": "a.automatically_approved",
+		"not_approved":  "a.not_approved",
+		"approval_rate": "(a.automatically_approved::double precision / NULLIF(a.reviews_completed, 0))",
+		// The cell shows "<breakdown> / <completed>", so order by that ratio
+		// rather than the numerator alone: "9 / 12" must not outrank "8 / 8".
+		"split_sample":      "(a.reviews_with_change_breakdown::double precision / NULLIF(a.reviews_completed, 0))",
+		"average_additions": "a.average_additions",
+		"median_additions":  "a.median_additions", "average_deletions": "a.average_deletions",
+		"median_deletions": "a.median_deletions",
+	}
+	if sortBy == "" {
+		return "a.reviews_completed DESC, a.author ASC", nil
+	}
+	column, ok := columns[sortBy]
+	if !ok {
+		return "", fmt.Errorf("unsupported code review author sort: %q", sortBy)
+	}
+	direction := "ASC"
+	if sortOrder == "desc" {
+		direction = "DESC"
+	} else if sortOrder != "" && sortOrder != "asc" {
+		return "", fmt.Errorf("unsupported code review author sort order: %q", sortOrder)
+	}
+	return column + " " + direction + " NULLS LAST, a.author ASC", nil
 }
 
 func (s *CodeReviewStore) CreateAgentResult(ctx context.Context, result *models.CodeReviewAgentResult) error {

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -42,14 +43,26 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 		CREATE TABLE sessions (
 			id uuid PRIMARY KEY,
 			org_id uuid NOT NULL,
+			title text,
 			revision_context jsonb
+		);
+		CREATE TABLE pull_requests (
+			id uuid PRIMARY KEY,
+			org_id uuid NOT NULL,
+			title text NOT NULL,
+			github_repo text NOT NULL,
+			github_pr_number int NOT NULL
 		);
 		CREATE TABLE code_review_session_metadata (
 			id uuid PRIMARY KEY,
 			org_id uuid NOT NULL,
 			session_id uuid NOT NULL,
 			repository_id uuid NOT NULL,
+			pull_request_id uuid NOT NULL,
 			status text NOT NULL,
+			stale boolean NOT NULL DEFAULT false,
+			superseded_by_session_id uuid,
+			acceptable boolean,
 			decision text,
 			github_review_id bigint,
 			additions integer,
@@ -92,6 +105,7 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 	)
 	require.NoError(t, err, "test should insert analytics session attribution")
 
+	var insertedPullRequestNumbers []int
 	insertReview := func(
 		id, reviewOrgID, sessionID, reviewRepositoryID uuid.UUID,
 		status string,
@@ -102,13 +116,25 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 		createdAt time.Time,
 	) {
 		t.Helper()
+		// The analytics report joins pull_requests so it can share the reviews
+		// list filter builder (title/repo/number search), so every fact needs a
+		// pull request of its own.
+		pullRequestID := uuid.New()
+		pullRequestNumber := len(insertedPullRequestNumbers) + 1
+		insertedPullRequestNumbers = append(insertedPullRequestNumbers, pullRequestNumber)
+		_, prErr := conn.Exec(ctx, `
+			INSERT INTO pull_requests (id, org_id, title, github_repo, github_pr_number)
+			VALUES ($1, $2, $3, 'acme/api', $4)`,
+			pullRequestID, reviewOrgID, fmt.Sprintf("Ship feature %d", pullRequestNumber), pullRequestNumber,
+		)
+		require.NoError(t, prErr, "test should insert the pull request a review is attached to")
 		_, insertErr := conn.Exec(ctx, `
 			INSERT INTO code_review_session_metadata (
-				id, org_id, session_id, repository_id, status, decision,
+				id, org_id, session_id, repository_id, pull_request_id, status, decision,
 				github_review_id, additions, deletions,
 				risk_reason_details, created_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)`,
-			id, reviewOrgID, sessionID, reviewRepositoryID, status, decision,
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12)`,
+			id, reviewOrgID, sessionID, reviewRepositoryID, pullRequestID, status, decision,
 			githubReviewID, additions, deletions, riskReasons, createdAt,
 		)
 		require.NoError(t, insertErr, "test should insert a review analytics fact")
@@ -162,6 +188,7 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 	approvedDeletions, approvedMedianDeletions := 10.0, 10.0
 	needsHumanAdditions, needsHumanMedianAdditions := 190.0, 190.0
 	needsHumanDeletions, needsHumanMedianDeletions := 60.0, 60.0
+	medianAdditions, medianDeletions := 110.0, 35.0
 	analytics, err := NewCodeReviewStore(conn).GetReviewAnalytics(ctx, orgID, CodeReviewAnalyticsFilters{
 		RepositoryID: &repositoryID,
 		CreatedAfter: &createdAfter,
@@ -175,6 +202,8 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 			AutomaticallyApproved:       2,
 			NotApproved:                 1,
 			NeedsHumanReview:            1,
+			MedianAdditions:             &medianAdditions,
+			MedianDeletions:             &medianDeletions,
 			ReviewsWithFindings:         1,
 			ReviewsWithBlockingFindings: 1,
 			TotalFindings:               2,
@@ -208,6 +237,49 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 		},
 	}, analytics, "analytics should preserve outcome, author, reason, finding, time, and tenancy semantics")
 
+	// The report now reuses the reviews list WHERE builder, so its SQL reaches
+	// for pull_requests and sessions aliases that only exist because of the
+	// joins in the filtered_reviews CTE, and its author ordering is an
+	// interpolated expression. Execute every one of those against PostgreSQL:
+	// the pgxmock unit tests match on query text and cannot catch an unresolved
+	// alias or a malformed ORDER BY.
+	store := NewCodeReviewStore(conn)
+	currentActivity := models.CodeReviewActivityStatusCurrent
+	approvedOutcome := models.CodeReviewListOutcomeAutomaticallyApproved
+	for _, sortBy := range []string{
+		"", "author", "reviews", "approved", "not_approved", "approval_rate",
+		"split_sample", "average_additions", "median_additions", "average_deletions", "median_deletions",
+	} {
+		for _, sortOrder := range []string{"asc", "desc"} {
+			_, sortErr := store.GetReviewAnalytics(ctx, orgID, CodeReviewAnalyticsFilters{
+				RepositoryID:    &repositoryID,
+				CreatedAfter:    &createdAfter,
+				AuthorSortBy:    sortBy,
+				AuthorSortOrder: sortOrder,
+			})
+			require.NoErrorf(t, sortErr, "author sort %q %s should execute against PostgreSQL", sortBy, sortOrder)
+		}
+	}
+
+	searched, err := store.GetReviewAnalytics(ctx, orgID, CodeReviewAnalyticsFilters{
+		RepositoryID:   &repositoryID,
+		CreatedAfter:   &createdAfter,
+		Search:         "Ship feature",
+		ActivityStatus: &currentActivity,
+		Outcome:        &approvedOutcome,
+	})
+	require.NoError(t, err, "the shared list filters should resolve their joined aliases in the analytics CTE")
+	require.Equal(t, int64(2), searched.Summary.AutomaticallyApproved, "the outcome filter should narrow the report to posted approvals")
+	require.Equal(t, int64(2), searched.Summary.ReviewsRequested, "search, activity, and outcome filters should all apply")
+
+	unmatched, err := store.GetReviewAnalytics(ctx, orgID, CodeReviewAnalyticsFilters{
+		RepositoryID: &repositoryID,
+		CreatedAfter: &createdAfter,
+		Search:       "no pull request has this title",
+	})
+	require.NoError(t, err, "an unmatched search should still execute")
+	require.Equal(t, int64(0), unmatched.Summary.ReviewsRequested, "search should filter on the joined pull request columns")
+
 	otherAdditions := float64(smallAdditions)
 	otherDeletions := float64(smallDeletions)
 	otherOrgAnalytics, err := NewCodeReviewStore(conn).GetReviewAnalytics(ctx, otherOrgID, CodeReviewAnalyticsFilters{
@@ -220,6 +292,8 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 			ReviewsRequested:            1,
 			ReviewsCompleted:            1,
 			AutomaticallyApproved:       1,
+			MedianAdditions:             &otherAdditions,
+			MedianDeletions:             &otherDeletions,
 			ReviewsWithFindings:         1,
 			ReviewsWithBlockingFindings: 1,
 			TotalFindings:               1,
@@ -246,4 +320,122 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 		Authors:            []models.CodeReviewAuthorAnalytics{},
 		NonApprovalReasons: []models.CodeReviewNonApprovalReasonAnalytics{},
 	}, emptyAnalytics, "an organization without reviews should receive zero summary values and empty breakdowns")
+}
+
+// The rank a page cursor anchors on is computed in Go while the rank the
+// ORDER BY applies is computed in SQL. TestCodeReviewSortRankSQLCoversTheSame
+// Branches only proves both sides use the same set of rank values; this proves
+// they assign the same rank to the same row. Without it, transposing two
+// branches on one side alone would quietly anchor cursors in the wrong label
+// group and drop rows from the sorted list.
+//
+//nolint:paralleltest // sort subtests share one PostgreSQL connection and isolated schema, so they must run serially
+func TestCodeReviewSortRankMatchesPostgresForEveryRow(t *testing.T) {
+	t.Parallel()
+
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set TEST_DATABASE_URL to run the PostgreSQL sort rank equivalence test")
+	}
+
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, databaseURL)
+	require.NoError(t, err, "test should connect to TEST_DATABASE_URL")
+	defer func() {
+		require.NoError(t, conn.Close(context.Background()), "test should close the PostgreSQL connection")
+	}()
+
+	schema := "test_code_review_sort_rank_" + strings.ReplaceAll(uuid.NewString(), "-", "_")
+	_, err = conn.Exec(ctx, `CREATE SCHEMA `+schema)
+	require.NoError(t, err, "test should create an isolated sort rank schema")
+	defer func() {
+		_, cleanupErr := conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS `+schema+` CASCADE`)
+		require.NoError(t, cleanupErr, "test should remove the isolated sort rank schema")
+	}()
+	_, err = conn.Exec(ctx, `SET search_path TO `+schema+`, public`)
+	require.NoError(t, err, "test should isolate sort rank objects")
+
+	_, err = conn.Exec(ctx, `
+		CREATE TABLE code_review_session_metadata (
+			id uuid PRIMARY KEY,
+			status text NOT NULL,
+			stale boolean NOT NULL,
+			superseded_by_session_id uuid,
+			decision text,
+			acceptable boolean,
+			github_review_id bigint
+		)`)
+	require.NoError(t, err, "test should create the columns the rank expressions read")
+
+	statuses := []models.CodeReviewSessionStatus{
+		models.CodeReviewSessionStatusQueued, models.CodeReviewSessionStatusRunning,
+		models.CodeReviewSessionStatusCompleted, models.CodeReviewSessionStatusFailed,
+		models.CodeReviewSessionStatusStale, models.CodeReviewSessionStatusCancelled,
+	}
+	decisions := []*models.CodeReviewDecision{nil}
+	for _, decision := range []models.CodeReviewDecision{
+		models.CodeReviewDecisionApproved, models.CodeReviewDecisionNeedsHumanReview,
+		models.CodeReviewDecisionBlocked, models.CodeReviewDecisionCommentOnly,
+	} {
+		decisions = append(decisions, &decision)
+	}
+	reviewID := int64(1)
+	acceptable, notAcceptable := true, false
+	supersededSession := uuid.New()
+
+	expected := map[uuid.UUID]models.CodeReviewListItem{}
+	for _, status := range statuses {
+		for _, decision := range decisions {
+			for _, githubReviewID := range []*int64{nil, &reviewID} {
+				for _, riskValue := range []*bool{nil, &acceptable, &notAcceptable} {
+					for _, superseded := range []*uuid.UUID{nil, &supersededSession} {
+						for _, stale := range []bool{false, true} {
+							id := uuid.New()
+							expected[id] = models.CodeReviewListItem{
+								CodeReviewSessionMetadata: models.CodeReviewSessionMetadata{
+									ID: id, Status: status, Decision: decision, GitHubReviewID: githubReviewID,
+									Acceptable: riskValue, SupersededBySessionID: superseded, Stale: stale,
+								},
+							}
+							_, insertErr := conn.Exec(ctx, `
+								INSERT INTO code_review_session_metadata (
+									id, status, stale, superseded_by_session_id, decision, acceptable, github_review_id
+								) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+								id, status, stale, superseded, decision, riskValue, githubReviewID,
+							)
+							require.NoError(t, insertErr, "test should insert a rank combination")
+						}
+					}
+				}
+			}
+		}
+	}
+
+	for _, sortBy := range []string{"outcome", "risk", "run_status"} {
+		t.Run(sortBy, func(t *testing.T) {
+			sort, sortErr := codeReviewListSortFor(sortBy)
+			require.NoError(t, sortErr, "the sort should be allowlisted")
+
+			rows, queryErr := conn.Query(ctx, `SELECT m.id, `+sort.expression+` FROM code_review_session_metadata m`)
+			require.NoError(t, queryErr, "the rank expression should execute against PostgreSQL")
+			defer rows.Close()
+
+			seen := 0
+			for rows.Next() {
+				var id uuid.UUID
+				var sqlRank int
+				require.NoError(t, rows.Scan(&id, &sqlRank), "the rank expression should return an integer")
+				goRank, ok := CodeReviewSortRankForItem(sortBy, expected[id])
+				require.True(t, ok, "the Go rank should be defined for a label-derived sort")
+				require.Equalf(t, sqlRank, goRank,
+					"row %s (status=%s stale=%t superseded=%t decision=%v approval_posted=%t acceptable=%v) should rank identically in Go and SQL",
+					id, expected[id].Status, expected[id].Stale, expected[id].SupersededBySessionID != nil,
+					expected[id].Decision, expected[id].GitHubReviewID != nil, expected[id].Acceptable,
+				)
+				seen++
+			}
+			require.NoError(t, rows.Err(), "the rank query should complete")
+			require.Equal(t, len(expected), seen, "every seeded combination should be compared")
+		})
+	}
 }

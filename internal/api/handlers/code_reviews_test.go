@@ -363,10 +363,11 @@ func TestCodeReviewHandler_StatsReturnsFilteredAggregates(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
-	mock.ExpectQuery(`(?s)FROM code_review_session_metadata m.*m\.repository_id = @repository_id.*m\.decision = @decision.*m\.status <> 'stale'.*m\.superseded_by_session_id IS NULL.*m\.status = @status.*m\.acceptable = @acceptable.*m\.created_at >= @created_after.*pr\.title ILIKE @search`).
+	mock.ExpectQuery(`(?s)FROM code_review_session_metadata m.*m\.repository_id = @repository_id.*m\.decision = @decision.*m\.status <> 'stale'.*m\.superseded_by_session_id IS NULL.*m\.status = @status.*m\.acceptable = @acceptable.*LOWER\(COALESCE\(NULLIF\(s\.revision_context->>'pull_request_author', ''\), 'Unknown'\)\) = LOWER\(@author\).*m\.created_at >= @created_after.*pr\.title ILIKE @search`).
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"reviews_completed",
@@ -378,7 +379,7 @@ func TestCodeReviewHandler_StatsReturnsFilteredAggregates(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodGet,
 		"/api/v1/code-reviews/stats?repository_id="+repositoryID.String()+
-			"&decision=needs_human_review&activity_status=current&status=completed&risk=needs_review&search=auth&created_after=2026-06-01T00:00:00Z",
+			"&decision=needs_human_review&activity_status=current&status=completed&risk=needs_review&author=Anya&search=auth&created_after=2026-06-01T00:00:00Z",
 		nil,
 	)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -425,10 +426,10 @@ func TestCodeReviewHandler_AnalyticsReturnsReport(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{
 			"reviews_requested", "reviews_completed", "automatically_approved", "not_approved",
 			"needs_human_review", "comment_only", "blocked", "approval_not_posted",
-			"failed_reviews", "stale_reviews", "reviews_with_findings",
+			"failed_reviews", "stale_reviews", "median_additions", "median_deletions", "reviews_with_findings",
 			"reviews_with_blocking_findings", "total_findings", "authors", "non_approval_reasons",
 		}).AddRow(
-			6, 5, 3, 2, 2, 0, 0, 0, 1, 0, 1, 1, 2, []byte(`[]`), []byte(`[]`),
+			6, 5, 3, 2, 2, 0, 0, 0, 1, 0, -1, -1, 1, 1, 2, []byte(`[]`), []byte(`[]`),
 		))
 	handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-reviews/analytics?repository_id="+repositoryID.String(), nil)
@@ -451,6 +452,8 @@ func TestCodeReviewHandler_AnalyticsReturnsReport(t *testing.T) {
 				"approval_not_posted": 0,
 				"failed_reviews": 1,
 				"stale_reviews": 0,
+				"median_additions": null,
+				"median_deletions": null,
 				"reviews_with_findings": 1,
 				"reviews_with_blocking_findings": 1,
 				"total_findings": 2
@@ -472,6 +475,8 @@ func TestCodeReviewHandler_AnalyticsRejectsInvalidFilters(t *testing.T) {
 	}{
 		{name: "repository", query: "?repository_id=invalid", expectedCode: "INVALID_REPOSITORY_ID"},
 		{name: "time window", query: "?created_after=invalid", expectedCode: "INVALID_TIMESTAMP"},
+		{name: "author sort", query: "?author_sort_by=unsafe", expectedCode: "INVALID_ANALYTICS_SORT"},
+		{name: "author sort order", query: "?author_sort_by=reviews&author_sort_order=sideways", expectedCode: "INVALID_SORT_ORDER"},
 	}
 
 	for _, tt := range tests {
@@ -500,6 +505,7 @@ func TestCodeReviewHandler_ListRejectsCursorOutsideOrganization(t *testing.T) {
 		db.CodeReviewListFilters{Limit: 50},
 		uuid.New(),
 		time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC),
+		nil,
 	)
 	require.NoError(t, err, "a cursor for another organization should encode")
 	handler := NewCodeReviewHandler(nil, nil)
@@ -518,28 +524,161 @@ func TestCodeReviewListCursorRejectsChangedFilterButAllowsMutableRowChanges(t *t
 
 	orgID := uuid.New()
 	running := models.CodeReviewSessionStatusRunning
-	filters := db.CodeReviewListFilters{Status: &running, Search: "invoice", Limit: 50}
+	filters := db.CodeReviewListFilters{
+		Status: &running, Author: "anya", Search: "invoice", Limit: 50,
+		SortBy: "repository", SortOrder: "asc",
+	}
 	id := uuid.New()
 	createdAt := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
-	cursor, err := encodeCodeReviewListCursor(orgID, filters, id, createdAt)
+	repository := "acme/api"
+	cursor, err := encodeCodeReviewListCursor(orgID, filters, id, createdAt, &codeReviewSortCursor{Text: &repository})
 	require.NoError(t, err, "the cursor should encode immutable ordering values and filter scope")
 
-	decodedID, decodedCreatedAt, err := decodeCodeReviewListCursor(cursor, orgID, filters)
+	decoded, err := decodeCodeReviewListCursor(cursor, orgID, filters)
 
 	require.NoError(t, err, "the same request filters should decode without consulting mutable row state")
-	require.Equal(t, id, decodedID, "the cursor should preserve the review ID anchor")
-	require.Equal(t, createdAt, decodedCreatedAt, "the cursor should preserve the creation-time anchor")
+	require.Equal(t, id, decoded.ID, "the cursor should preserve the review ID anchor")
+	require.Equal(t, createdAt, decoded.CreatedAt, "the cursor should preserve the creation-time anchor")
+	require.Equal(t, repository, *decoded.Sort.Text, "the cursor should preserve the backend-sort value")
 
 	changedFilters := filters
 	changedFilters.Search = "payments"
-	_, _, err = decodeCodeReviewListCursor(cursor, orgID, changedFilters)
+	_, err = decodeCodeReviewListCursor(cursor, orgID, changedFilters)
 	require.Error(t, err, "a cursor reused with a different filter collection should be rejected")
 
 	current := models.CodeReviewActivityStatusCurrent
 	changedFilters = filters
 	changedFilters.ActivityStatus = &current
-	_, _, err = decodeCodeReviewListCursor(cursor, orgID, changedFilters)
+	_, err = decodeCodeReviewListCursor(cursor, orgID, changedFilters)
 	require.Error(t, err, "a cursor reused with a different activity status should be rejected")
+
+	changedFilters = filters
+	changedFilters.SortOrder = "desc"
+	_, err = decodeCodeReviewListCursor(cursor, orgID, changedFilters)
+	require.Error(t, err, "a cursor reused with a different backend sort should be rejected")
+
+	changedFilters = filters
+	changedFilters.Author = "sam"
+	_, err = decodeCodeReviewListCursor(cursor, orgID, changedFilters)
+	require.Error(t, err, "a cursor reused with a different author should be rejected")
+}
+
+func TestCodeReviewSortCursorRoundTripsEveryListSort(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	completedAt := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	repository := "acme/api"
+	approved := models.CodeReviewDecisionApproved
+	reviewID := int64(4242)
+	item := models.CodeReviewListItem{
+		CodeReviewSessionMetadata: models.CodeReviewSessionMetadata{
+			ID:          uuid.New(),
+			Status:      models.CodeReviewSessionStatusCompleted,
+			Decision:    &approved,
+			Acceptable:  func() *bool { acceptable := true; return &acceptable }(),
+			CompletedAt: &completedAt,
+		},
+		RepositoryName: &repository,
+		GitHubPRNumber: 143,
+	}
+	item.GitHubReviewID = &reviewID
+
+	tests := []struct {
+		sortBy   string
+		expected any
+	}{
+		{sortBy: "pull_request", expected: 143},
+		// The label-derived sorts anchor on the rank the ORDER BY assigns, not
+		// on the raw column, so a cursor cannot land in the wrong label group.
+		{sortBy: "outcome", expected: 0},
+		{sortBy: "risk", expected: 0},
+		{sortBy: "run_status", expected: 2},
+		{sortBy: "repository", expected: repository},
+		{sortBy: "completed", expected: completedAt},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.sortBy, func(t *testing.T) {
+			t.Parallel()
+
+			for _, order := range []string{"asc", "desc"} {
+				filters := db.CodeReviewListFilters{Limit: 50, SortBy: tt.sortBy, SortOrder: order}
+				sortCursor, err := codeReviewSortCursorForItem(filters.SortBy, item)
+				require.NoError(t, err, "an allowlisted sort should produce a cursor anchor")
+
+				raw, err := encodeCodeReviewListCursor(orgID, filters, item.ID, item.CreatedAt.Add(time.Second), sortCursor)
+				require.NoError(t, err, "the sort anchor should encode")
+
+				decoded, err := decodeCodeReviewListCursor(raw, orgID, filters)
+				require.NoError(t, err, "the sort anchor should decode under the same filters")
+				require.NoError(t, applyCodeReviewSortCursor(&filters, decoded.Sort), "the decoded anchor should apply to the query filters")
+				require.Equal(t, tt.expected, filters.CursorSortValue, "the applied anchor should keep the value and type the ORDER BY compares against")
+				require.False(t, filters.CursorSortNull, "a populated anchor should not select the null partition")
+			}
+		})
+	}
+}
+
+func TestCodeReviewSortCursorRejectsIncompleteAndMistypedAnchors(t *testing.T) {
+	t.Parallel()
+
+	nullableItem := models.CodeReviewListItem{}
+	sortCursor, err := codeReviewSortCursorForItem("completed", nullableItem)
+	require.NoError(t, err, "a review that never completed should still anchor")
+	require.True(t, sortCursor.Null, "a null sort value should anchor on the null partition")
+
+	_, err = codeReviewSortCursorForItem("unsupported", nullableItem)
+	require.Error(t, err, "an unsupported sort should not silently produce an anchor")
+
+	// repositories.full_name is NOT NULL behind an inner join, so a missing name
+	// is a broken invariant, not a null partition to page into.
+	_, err = codeReviewSortCursorForItem("repository", nullableItem)
+	require.Error(t, err, "a repository sort should refuse to anchor on a missing repository name")
+
+	filters := db.CodeReviewListFilters{SortBy: "repository", SortOrder: "asc"}
+	require.Error(t,
+		applyCodeReviewSortCursor(&filters, &codeReviewSortCursor{Null: true}),
+		"a hand-edited null flag should be rejected for a sort that cannot produce one",
+	)
+
+	filters = db.CodeReviewListFilters{SortBy: "completed", SortOrder: "asc"}
+	require.Error(t, applyCodeReviewSortCursor(&filters, nil), "a sorted request needs a sort anchor")
+
+	// A cursor minted for one sort must not be reinterpreted under another: the
+	// scope hash normally blocks this, so this guards the last line of defence.
+	repository := "acme/api"
+	filters = db.CodeReviewListFilters{SortBy: "completed", SortOrder: "asc"}
+	require.Error(t,
+		applyCodeReviewSortCursor(&filters, &codeReviewSortCursor{Text: &repository}),
+		"a text anchor should not satisfy a timestamp sort",
+	)
+
+	filters = db.CodeReviewListFilters{SortBy: "unsupported", SortOrder: "asc"}
+	require.Error(t,
+		applyCodeReviewSortCursor(&filters, &codeReviewSortCursor{Null: true}),
+		"an unsupported sort should be rejected while applying the anchor",
+	)
+
+	filters = db.CodeReviewListFilters{}
+	require.NoError(t, applyCodeReviewSortCursor(&filters, nil), "the default order needs no sort anchor")
+	require.Nil(t, filters.CursorSortValue, "the default order should not set a sort anchor")
+}
+
+func TestCodeReviewAnalyticsIgnoresListOnlySortParameters(t *testing.T) {
+	t.Parallel()
+
+	// sort_by orders the reviews table; the analytics report has its own
+	// ordering, so it must neither honor nor reject the list parameter.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-reviews/analytics?sort_by=unsafe&sort_order=sideways", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	rr := httptest.NewRecorder()
+
+	filters, ok := parseCodeReviewAnalyticsFilters(rr, req)
+
+	require.True(t, ok, "a list-only sort parameter should not fail the analytics request")
+	require.Equal(t, http.StatusOK, rr.Code, "no error should be written for a list-only sort parameter")
+	require.Empty(t, filters.AuthorSortBy, "the list sort should not leak into the analytics author ordering")
 }
 
 func TestCodeReviewHandler_Retry(t *testing.T) {

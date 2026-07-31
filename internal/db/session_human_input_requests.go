@@ -30,7 +30,8 @@ const humanInputRequestSelectColumns = `
 	provider_request_id, request_kind, status, title, body, context,
 	blocks_phase, assigned_user_id, sensitivity, preferred_channel,
 	choices, response_schema, provider_payload,
-	answer_text, answer_payload, answered_by, answered_at, expires_at, created_at`
+	answer_text, answer_payload, answered_by, answered_at, expires_at, created_at,
+	activity_phase_id`
 
 func (s *SessionHumanInputRequestStore) Create(ctx context.Context, req *models.HumanInputRequest) error {
 	if req.Status == "" {
@@ -63,7 +64,7 @@ func (s *SessionHumanInputRequestStore) Create(ctx context.Context, req *models.
 		)
 		RETURNING id, created_at`
 
-	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+	args := pgx.NamedArgs{
 		"org_id":              req.OrgID,
 		"session_id":          req.SessionID,
 		"thread_id":           req.ThreadID,
@@ -84,8 +85,39 @@ func (s *SessionHumanInputRequestStore) Create(ctx context.Context, req *models.
 		"provider_payload":    nullRawMessage(req.ProviderPayload),
 		"answer_text":         req.AnswerText,
 		"answer_payload":      nullRawMessage(req.AnswerPayload),
-	})
+	}
+	if req.ActivityPhaseID != nil {
+		// The phase must belong to the same org, session, thread, and turn as the
+		// request. Phase status is deliberately not constrained: a human input
+		// request is itself a phase-closing event and can be persisted after the
+		// phase reaches its terminal status.
+		query = `
+			INSERT INTO session_human_input_requests (
+				org_id, session_id, thread_id, turn_number, agent_type,
+				provider_request_id, request_kind, status, title, body, context,
+				blocks_phase, assigned_user_id, sensitivity, preferred_channel,
+				choices, response_schema, provider_payload,
+				answer_text, answer_payload, activity_phase_id
+			)
+			SELECT
+				@org_id, @session_id, @thread_id, @turn_number, @agent_type,
+				@provider_request_id, @request_kind, @status, @title, @body, @context,
+				@blocks_phase, @assigned_user_id, @sensitivity, @preferred_channel,
+				@choices, @response_schema, @provider_payload,
+				@answer_text, @answer_payload, @activity_phase_id
+			FROM session_activity_phases p
+			WHERE p.id = @activity_phase_id AND p.org_id = @org_id
+			  AND p.session_id = @session_id
+			  AND p.thread_id IS NOT DISTINCT FROM @thread_id
+			  AND p.turn_number = @turn_number
+			RETURNING id, created_at`
+		args["activity_phase_id"] = req.ActivityPhaseID
+	}
+	row := s.db.QueryRow(ctx, query, args)
 	if err := row.Scan(&req.ID, &req.CreatedAt); err != nil {
+		if req.ActivityPhaseID != nil && errors.Is(err, pgx.ErrNoRows) {
+			return wrapPhaseOwnershipError("create session human input request", req.ActivityPhaseID, err)
+		}
 		return fmt.Errorf("create session human input request: %w", err)
 	}
 	return nil
@@ -467,6 +499,7 @@ func scanHumanInputRequest(rows pgx.Rows) (models.HumanInputRequest, error) {
 		&req.AnsweredAt,
 		&req.ExpiresAt,
 		&req.CreatedAt,
+		&req.ActivityPhaseID,
 	); err != nil {
 		return models.HumanInputRequest{}, err
 	}

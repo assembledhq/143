@@ -859,6 +859,7 @@ describe('SessionDetailPage composer and session metadata', () => {
   it('shows execution brief without planning reasoning in neutral execution context', async () => {
     const sessionWithExecutionContext: Session = {
       ...mockSessions[0],
+      origin: 'automation',
       planning_reasoning: undefined,
       execution_brief: 'Direct fix approach',
     };
@@ -874,6 +875,27 @@ describe('SessionDetailPage composer and session metadata', () => {
     expect(screen.getAllByText('Direct fix approach').length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByText('Planning reasoning')).not.toBeInTheDocument();
     expect(screen.getByText('Execution brief')).toBeInTheDocument();
+  });
+
+  it('hides execution context for manually created sessions', async () => {
+    const manualSessionWithExecutionContext: Session = {
+      ...mockSessions[0],
+      origin: 'manual',
+      planning_reasoning: 'Consider the smallest safe change',
+      execution_brief: 'Direct fix approach',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: manualSessionWithExecutionContext } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    expect(screen.queryByText('Execution context')).not.toBeInTheDocument();
+    expect(screen.queryByText('Planning reasoning')).not.toBeInTheDocument();
+    expect(screen.queryByText('Execution brief')).not.toBeInTheDocument();
   });
 
   it('clears message after successful send', async () => {

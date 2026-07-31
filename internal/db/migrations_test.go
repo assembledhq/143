@@ -1239,3 +1239,88 @@ func TestSingleCodeReviewPolicyMigrationPreservesHistoryAndPreventsActiveOverrid
 	require.Contains(t, sql, "active = false OR repository_id IS NULL", "constraint should allow historical repository policy rows while requiring active policies to be organization scoped")
 	require.NotContains(t, strings.ToUpper(sql), "DELETE FROM CODE_REVIEW_POLICIES", "migration should preserve policy versions referenced by historical reviews")
 }
+
+func TestSessionActivityPhaseMigrationEnforcesLifecycleAndDeliveryIdentity(t *testing.T) {
+	t.Parallel()
+
+	upBody, err := os.ReadFile("../../migrations/000264_session_activity_phases.up.sql")
+	require.NoError(t, err, "test should read the activity phase up migration")
+	downBody, err := os.ReadFile("../../migrations/000264_session_activity_phases.down.sql")
+	require.NoError(t, err, "test should read the activity phase down migration")
+
+	upSQL := string(upBody)
+	requiredFragments := []string{
+		"ADD COLUMN applied_at timestamptz",
+		"chk_session_activity_phases_lifecycle",
+		"chk_session_activity_phases_time_order",
+		"chk_session_activity_phases_status_reason",
+		"chk_session_activity_phases_trigger_range",
+		"uq_session_activity_phase_number",
+		"idx_session_activity_phases_one_running",
+		"idx_session_activity_phases_trigger_batch",
+		"uq_thread_inbox_delivery_batches_range",
+	}
+	for _, fragment := range requiredFragments {
+		require.Contains(t, upSQL, fragment, "activity phase migration should enforce every durable lifecycle invariant")
+	}
+	require.Contains(
+		t,
+		upSQL,
+		"runtime_id uuid NOT NULL REFERENCES thread_runtimes(id) ON DELETE RESTRICT",
+		"delivery batches should prevent runtime deletion from silently removing durable acknowledgment identity",
+	)
+	require.NotContains(
+		t,
+		upSQL,
+		"runtime_id uuid NOT NULL REFERENCES thread_runtimes(id) ON DELETE CASCADE",
+		"delivery batches should never be cascade-deleted with their runtime",
+	)
+
+	downSQL := string(downBody)
+	phaseDrop := strings.Index(downSQL, "DROP TABLE IF EXISTS session_activity_phases")
+	batchDrop := strings.Index(downSQL, "DROP TABLE IF EXISTS thread_inbox_delivery_batches")
+	columnDrop := strings.Index(downSQL, "DROP COLUMN IF EXISTS applied_at")
+	require.NotEqual(t, -1, phaseDrop, "down migration should remove activity phases")
+	require.NotEqual(t, -1, batchDrop, "down migration should remove delivery batches")
+	require.NotEqual(t, -1, columnDrop, "down migration should remove inbox applied timestamps")
+	require.Less(t, phaseDrop, batchDrop, "down migration should remove the dependent phase table before delivery batches")
+	require.Less(t, batchDrop, columnDrop, "down migration should remove delivery batches before the inbox column")
+}
+
+func TestActivityPhaseTranscriptAssociationMigration(t *testing.T) {
+	t.Parallel()
+
+	upBody, err := os.ReadFile("../../migrations/000265_activity_phase_transcript_associations.up.sql")
+	require.NoError(t, err, "test should read the transcript association up migration")
+	downBody, err := os.ReadFile("../../migrations/000265_activity_phase_transcript_associations.down.sql")
+	require.NoError(t, err, "test should read the transcript association down migration")
+
+	upSQL := string(upBody)
+	requiredFragments := []string{
+		"ALTER TABLE session_logs\n    ADD COLUMN activity_phase_id uuid;",
+		"ALTER TABLE session_messages\n    ADD COLUMN activity_phase_id uuid;",
+		"REFERENCES session_activity_phases(id) ON DELETE SET NULL",
+		"idx_session_logs_activity_phase",
+		"idx_session_messages_activity_phase",
+		"idx_session_human_input_requests_activity_phase",
+	}
+	for _, fragment := range requiredFragments {
+		require.Contains(t, upSQL, fragment, "transcript association migration should add every phase column and index")
+	}
+	require.Equal(
+		t,
+		3,
+		strings.Count(upSQL, "WHERE activity_phase_id IS NOT NULL"),
+		"every phase index should be partial so unassociated historical rows stay out of it",
+	)
+
+	downSQL := string(downBody)
+	for _, table := range []string{"session_logs", "session_messages", "session_human_input_requests"} {
+		require.Contains(
+			t,
+			downSQL,
+			"ALTER TABLE "+table+" DROP COLUMN IF EXISTS activity_phase_id",
+			"down migration should remove the phase column from every transcript table",
+		)
+	}
+}

@@ -13,6 +13,14 @@ import { AUTOMATION_GOAL_MAX_LENGTH } from "@/lib/automation-validation";
 
 const pushMock = vi.fn();
 const currentUserRole = vi.hoisted(() => ({ value: "member" }));
+const toast = vi.hoisted(() => ({
+  success: vi.fn(),
+  info: vi.fn(),
+  warning: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock("@/lib/notify", () => ({ notify: toast }));
 
 vi.mock("next/link", () => ({
   default: ({
@@ -46,6 +54,11 @@ vi.mock("./automation-stats-card", () => ({
   AutomationStatsCard: () => <div data-testid="automation-stats-card" />,
 }));
 
+// An unhandled request would REJECT, and the editor deliberately treats a
+// transport failure as "valid" so a dead preview can't wedge unrelated fields.
+// Tests that need the schedule to stay unsettled have to say so explicitly.
+const neverResolves = () => new Promise<never>(() => {});
+
 const selectEmojiOption = async (name: string) => {
   const listbox = await screen.findByRole("listbox");
   const option = listbox.querySelector<HTMLElement>(
@@ -59,6 +72,7 @@ describe("AutomationDetailPage", () => {
   beforeEach(() => {
     currentUserRole.value = "member";
     pushMock.mockReset();
+    toast.error.mockReset();
     server.use(
       http.get("*/api/v1/repositories/repo-1", () =>
         HttpResponse.json({
@@ -158,7 +172,18 @@ describe("AutomationDetailPage", () => {
     expect(headerEmoji).toHaveClass("h-auto", "p-0", "align-baseline");
     expect(headerEmoji).not.toHaveClass("size-9");
 
-    await userEvent.setup().click(screen.getByRole("button", { name: "Edit" }));
+    // The schedule is a compound control, so it lives in a popover hung off the
+    // Triggers property rather than a separate edit mode.
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Triggers" }));
+
+    expect(
+      screen.queryByRole("dialog", { name: "Automation settings" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Edit" }),
+    ).not.toBeInTheDocument();
 
     const timezoneButton = screen.getByTitle("UTC");
     const scheduleRow = timezoneButton.parentElement;
@@ -174,7 +199,7 @@ describe("AutomationDetailPage", () => {
     expect(screen.queryByText(/Run time is in/i)).not.toBeInTheDocument();
   });
 
-  it("keeps advanced automation controls collapsed by default", async () => {
+  it("keeps everyday properties inline and only rare ones behind Advanced", async () => {
     server.use(
       http.get("*/api/v1/automations/auto-1", () =>
         HttpResponse.json({
@@ -229,25 +254,25 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await userEvent.setup().click(screen.getByRole("button", { name: "Edit" }));
-
+    // No edit mode to enter: the goal and the day-to-day properties are already
+    // live controls on first paint.
     expect(screen.getByLabelText("Goal")).toHaveAttribute("rows", "9");
-    expect(
-      screen.queryByRole("combobox", { name: "Model" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Base branch" }),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Review passes")).not.toBeInTheDocument();
-
-    await userEvent
-      .setup()
-      .click(screen.getByRole("button", { name: "Advanced settings" }));
-
     expect(screen.getByRole("combobox", { name: "Model" })).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Base branch" }),
     ).toBeInTheDocument();
+    expect(screen.getByLabelText("Scope")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Triggers" }),
+    ).toBeInTheDocument();
+
+    // Only the rarely-touched knobs stay folded away.
+    expect(screen.queryByLabelText("Review passes")).not.toBeInTheDocument();
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Advanced" }));
+
     expect(screen.getByLabelText("Review passes")).toBeInTheDocument();
   });
 
@@ -369,26 +394,22 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.click(screen.getByRole("button", { name: "Triggers" }));
     const intervalInput = screen.getByLabelText("Interval value");
     await user.clear(intervalInput);
 
     expect(intervalInput).toHaveValue(null);
-    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
 
     await user.tab();
 
     expect(intervalInput).toHaveValue(1);
-    const saveButton = screen.getByRole("button", { name: "Save changes" });
-    await waitFor(() => expect(saveButton).toBeEnabled());
-    await user.click(saveButton);
 
-    // Blur restored the stored value, so the schedule ends up untouched and no
-    // schedule fields are sent — clearing the box must not be enough to make
-    // PATCH recompute next_run_at.
-    await waitFor(() => expect(updateBody).not.toBeNull());
-    expect(updateBody).not.toHaveProperty("interval_value");
-    expect(updateBody).not.toHaveProperty("timezone");
+    // Blur restored the stored value, so the draft never reaches a state that
+    // differs from what was loaded — and an autosave that fires per-field must
+    // not treat a transient empty box as a schedule change, or PATCH would
+    // recompute next_run_at for nothing.
+    await waitFor(() => expect(screen.getByTitle("UTC")).toBeInTheDocument());
+    expect(updateBody).toBeNull();
   });
 
   it("sends the interval when the value actually changes", async () => {
@@ -453,21 +474,15 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.click(screen.getByRole("button", { name: "Triggers" }));
     const intervalInput = screen.getByLabelText("Interval value");
     await user.clear(intervalInput);
     await user.type(intervalInput, "6");
     expect(intervalInput).toHaveValue(6);
 
-    // The preview is debounced; validity (and therefore the save button) only
-    // settles once it resolves for the edited draft.
+    // The preview is debounced, and the schedule commits itself only once the
+    // draft settles into a server-previewed state — no Save button involved.
     await screen.findByText(/Next run:/);
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Save changes" }),
-      ).toBeEnabled(),
-    );
-    await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
       expect(updateBody).toMatchObject({
@@ -544,7 +559,7 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.click(screen.getByRole("button", { name: "Triggers" }));
     await user.click(screen.getByRole("combobox", { name: "Interval unit" }));
     await user.click(await screen.findByRole("option", { name: "hours" }));
 
@@ -552,10 +567,6 @@ describe("AutomationDetailPage", () => {
     expect(
       screen.queryByRole("combobox", { name: "Run time" }),
     ).not.toBeInTheDocument();
-
-    const saveButton = screen.getByRole("button", { name: "Save changes" });
-    await waitFor(() => expect(saveButton).toBeEnabled());
-    await user.click(saveButton);
 
     // PATCH treats an absent interval_run_at as "unchanged", so an explicit ""
     // is the only thing that actually unanchors the stored schedule.
@@ -568,7 +579,7 @@ describe("AutomationDetailPage", () => {
     });
   });
 
-  it("sends no schedule fields when the schedule is untouched", async () => {
+  it("sends nothing at all when the trigger popover is opened but untouched", async () => {
     const user = userEvent.setup();
     let updateBody: Record<string, unknown> | null = null;
 
@@ -635,29 +646,20 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
-    const saveButton = screen.getByRole("button", { name: "Save changes" });
-    await waitFor(() => expect(saveButton).toBeEnabled());
-    await user.click(saveButton);
+    await user.click(screen.getByRole("button", { name: "Triggers" }));
+    // Wait for the editor's debounced preview to settle, which is the point at
+    // which a genuine edit would commit.
+    await screen.findByText(/Next run:|Could not preview/);
 
-    await waitFor(() => expect(updateBody).not.toBeNull());
-    // Not just cron_expression: timezone alone is enough to make PATCH
-    // recompute next_run_at, which would push an interval automation's next
-    // run out by a full interval every time an unrelated field is saved.
-    for (const field of [
-      "schedule_type",
-      "cron_expression",
-      "interval_value",
-      "interval_unit",
-      "interval_run_at",
-      "timezone",
-    ]) {
-      expect(updateBody).not.toHaveProperty(field);
-    }
+    // Sunday-as-7 and an unsorted day list both round-trip to a
+    // different-but-equivalent cron expression, so simply looking at the
+    // schedule must not regenerate it. Timezone alone is enough to make PATCH
+    // recompute next_run_at, which would push the next run out by a full
+    // interval every time someone opened the popover to read the cadence.
+    expect(updateBody).toBeNull();
   });
 
   it("does not disturb an interval automation's next run when saving other fields", async () => {
-    const user = userEvent.setup();
     let updateBody: Record<string, unknown> | null = null;
 
     server.use(
@@ -720,26 +722,15 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
-    fireEvent.change(screen.getByLabelText(/^Scope/), {
-      target: { value: "src/" },
-    });
-
-    const saveButton = screen.getByRole("button", { name: "Save changes" });
-    await waitFor(() => expect(saveButton).toBeEnabled());
-    await user.click(saveButton);
+    const scope = screen.getByLabelText("Scope");
+    fireEvent.change(scope, { target: { value: "src/" } });
+    fireEvent.blur(scope);
 
     await waitFor(() => expect(updateBody).not.toBeNull());
-    expect(updateBody).toMatchObject({ scope: "src/" });
-    for (const field of [
-      "schedule_type",
-      "interval_value",
-      "interval_unit",
-      "interval_run_at",
-      "timezone",
-    ]) {
-      expect(updateBody).not.toHaveProperty(field);
-    }
+    // Per-field autosave makes this structural rather than a guard someone has
+    // to remember: editing the scope can only ever send the scope, so PATCH has
+    // no schedule field to recompute next_run_at from.
+    expect(updateBody).toEqual({ scope: "src/" });
   });
 
   it("shows readable metadata and run actions in the details rail", async () => {
@@ -824,9 +815,9 @@ describe("AutomationDetailPage", () => {
 
     await userEvent
       .setup()
-      .click(screen.getByRole("button", { name: "Details" }));
+      .click(screen.getByRole("button", { name: "Properties" }));
     expect(
-      screen.getByRole("dialog", { name: "Automation details" }),
+      screen.getByRole("dialog", { name: "Automation properties" }),
     ).toBeInTheDocument();
     expect(screen.getAllByText("acme/repo").length).toBeGreaterThan(1);
   });
@@ -1052,6 +1043,115 @@ describe("AutomationDetailPage", () => {
     expect(
       screen.queryByRole("button", { name: "Save changes" }),
     ).not.toBeInTheDocument();
+
+    // Inline editing must not become an accidental permission grant: the same
+    // rows render as plain text for someone who cannot manage the automation.
+    expect(
+      screen.queryByRole("combobox", { name: "Repository" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("combobox", { name: "Run as" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Scope")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Triggers" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Base branch" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("reports autosave progress and rolls rejected property and trigger edits back", async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({
+          data: {
+            id: "auto-1",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Weekly audit",
+            goal: "Check release health",
+            scope: "",
+            identity_scope: "org",
+            interval_value: 1,
+            interval_unit: "weeks",
+            base_branch: "main",
+            enabled: true,
+            timezone: "UTC",
+            last_run_at: null,
+            next_run_at: null,
+            priority: 50,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.get("*/api/v1/automations/auto-1/stats*", () =>
+        HttpResponse.json({
+          data: {
+            since: "2026-01-01T00:00:00Z",
+            until: "2026-01-31T00:00:00Z",
+            buckets: [],
+            totals: {
+              total: 0,
+              completed: 0,
+              completed_noop: 0,
+              failed: 0,
+              skipped: 0,
+              running: 0,
+              pending: 0,
+              success_rate: 0,
+              avg_duration_seconds: 0,
+            },
+          },
+        }),
+      ),
+      http.patch("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({ error: "nope" }, { status: 500 }),
+      ),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+
+    const runAs = screen.getByRole("combobox", { name: "Run as" });
+    expect(runAs).toHaveTextContent("Organization");
+
+    await user.click(runAs);
+    await user.click(await screen.findByRole("option", { name: "Personal" }));
+
+    // Without a Save button the indicator is the only signal that a click was
+    // persisted, so a failed write has to say so and put the value back.
+    expect(await screen.findByText("Couldn't save")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("combobox", { name: "Run as" }),
+      ).toHaveTextContent("Organization"),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Triggers" }));
+    const intervalInput = screen.getByLabelText("Interval value");
+    await user.clear(intervalInput);
+    await user.type(intervalInput, "6");
+    await screen.findByText(/Next run:/);
+
+    // Trigger controls keep a local draft while their popover is open. A
+    // rejected schedule must restore that draft, not merely the query cache.
+    await waitFor(() => expect(intervalInput).toHaveValue(1));
+
+    const mergedTrigger = screen.getByRole("checkbox", {
+      name: "When a PR is merged",
+    });
+    await user.click(mergedTrigger);
+    await waitFor(() => expect(mergedTrigger).not.toBeChecked());
   });
 
   it("renders a back button to the automations list preserving query params", async () => {
@@ -1178,8 +1278,6 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
-    await user.click(screen.getByRole("button", { name: "Advanced settings" }));
     await user.click(
       await screen.findByRole("button", { name: "Base branch" }),
     );
@@ -1188,42 +1286,41 @@ describe("AutomationDetailPage", () => {
       "ops",
     );
     await user.click(await screen.findByText("release/ops"));
-    await user.click(screen.getByRole("button", { name: "Save changes" }));
 
+    // Picking the branch is the save. Nothing else rides along with it.
     await waitFor(() => {
-      expect(updateBody).toMatchObject({
-        base_branch: "release/ops",
-        identity_scope: "org",
-      });
+      expect(updateBody).toEqual({ base_branch: "release/ops" });
     });
   });
 
   it("updates the repository and resets the base branch to its default", async () => {
     const user = userEvent.setup();
     let updateBody: Record<string, unknown> | null = null;
+    // Autosaved rows render whatever the server last returned, so the mock has
+    // to actually apply the patch — otherwise the refetch that follows every
+    // save would replay the pre-edit fixture and mask a real regression.
+    const stored: Record<string, unknown> = {
+      id: "auto-1",
+      org_id: "org-1",
+      repository_id: "repo-1",
+      name: "Weekly audit",
+      goal: "Check release health",
+      scope: "",
+      interval_value: 1,
+      interval_unit: "weeks",
+      base_branch: "main",
+      enabled: true,
+      timezone: "UTC",
+      last_run_at: null,
+      next_run_at: null,
+      priority: 50,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    };
 
     server.use(
       http.get("*/api/v1/automations/auto-1", () =>
-        HttpResponse.json({
-          data: {
-            id: "auto-1",
-            org_id: "org-1",
-            repository_id: "repo-1",
-            name: "Weekly audit",
-            goal: "Check release health",
-            scope: "",
-            interval_value: 1,
-            interval_unit: "weeks",
-            base_branch: "main",
-            enabled: true,
-            timezone: "UTC",
-            last_run_at: null,
-            next_run_at: null,
-            priority: 50,
-            created_at: "2026-01-01T00:00:00Z",
-            updated_at: "2026-01-01T00:00:00Z",
-          },
-        }),
+        HttpResponse.json({ data: { ...stored } }),
       ),
       http.get("*/api/v1/repositories", () =>
         HttpResponse.json({
@@ -1287,7 +1384,8 @@ describe("AutomationDetailPage", () => {
       ),
       http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
         updateBody = (await request.json()) as Record<string, unknown>;
-        return HttpResponse.json({ data: { id: "auto-1" } });
+        Object.assign(stored, updateBody);
+        return HttpResponse.json({ data: { ...stored } });
       }),
     );
 
@@ -1297,30 +1395,29 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
     await user.click(screen.getByRole("combobox", { name: "Repository" }));
     await user.click(
       await screen.findByRole("option", { name: "acme/worker" }),
     );
-    await user.click(screen.getByRole("button", { name: "Advanced settings" }));
 
-    expect(
-      screen.getByRole("button", { name: "Base branch" }),
-    ).toHaveTextContent("trunk");
-
-    await user.click(screen.getByRole("button", { name: "Save changes" }));
-
+    // The branch reset has to ride along in the same patch: a repository saved
+    // on its own would momentarily point at a branch the new repo may not have.
     await waitFor(() => {
-      expect(updateBody).toMatchObject({
+      expect(updateBody).toEqual({
         repository_id: "repo-2",
         base_branch: "trunk",
       });
     });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Base branch" }),
+      ).toHaveTextContent("trunk"),
+    );
   });
 
-  it("saves the selected personal automation identity scope", async () => {
+  it("saves identity scope and publish policy as independent edits", async () => {
     const user = userEvent.setup();
-    let updateBody: Record<string, unknown> | null = null;
+    const updateBodies: Record<string, unknown>[] = [];
 
     server.use(
       http.get("*/api/v1/automations/auto-1", () =>
@@ -1369,7 +1466,7 @@ describe("AutomationDetailPage", () => {
         }),
       ),
       http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
-        updateBody = (await request.json()) as Record<string, unknown>;
+        updateBodies.push((await request.json()) as Record<string, unknown>);
         return HttpResponse.json({ data: { id: "auto-1" } });
       }),
     );
@@ -1380,22 +1477,25 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
     await user.click(screen.getByRole("combobox", { name: "Run as" }));
-    await user.click(await screen.findByText("Personal automation"));
-    await user.click(screen.getByText("Advanced settings"));
+    await user.click(await screen.findByRole("option", { name: "Personal" }));
+
+    await waitFor(() =>
+      expect(updateBodies).toContainEqual({ identity_scope: "personal" }),
+    );
+
     await user.click(
       screen.getByRole("combobox", { name: "After a successful run" }),
     );
-    await user.click(await screen.findByText("Do not publish"));
-    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await user.click(
+      await screen.findByRole("option", { name: "Do not publish" }),
+    );
 
-    await waitFor(() => {
-      expect(updateBody).toMatchObject({
-        identity_scope: "personal",
-        publish_policy: "none",
-      });
-    });
+    // Two separate selects, two separate patches — neither carries the other's
+    // field, so a stale render of one can never overwrite the other.
+    await waitFor(() =>
+      expect(updateBodies).toContainEqual({ publish_policy: "none" }),
+    );
   });
 
   it("saves the selected automation emoji inline", async () => {
@@ -1475,7 +1575,7 @@ describe("AutomationDetailPage", () => {
     });
   });
 
-  it("edits the title inline and keeps title and goal out of settings", async () => {
+  it("edits the title inline without disturbing an in-progress scope edit", async () => {
     const user = userEvent.setup();
     let updateBody: Record<string, unknown> | null = null;
     let updatedAt = "2026-01-01T00:00:00Z";
@@ -1543,8 +1643,7 @@ describe("AutomationDetailPage", () => {
     renderWithProviders(<AutomationDetailPage />);
 
     await screen.findByText("Weekly audit");
-    await user.click(screen.getByRole("button", { name: "Edit" }));
-    const scope = screen.getByLabelText(/Scope/);
+    const scope = screen.getByLabelText("Scope");
     await user.type(scope, "backend services");
 
     const title = screen.getByLabelText("Automation title");
@@ -1555,14 +1654,13 @@ describe("AutomationDetailPage", () => {
       expect(updateBody).toEqual({ name: "Release audit" });
     });
 
+    // The title's save (and the refetch it triggers) must not stomp text the
+    // user is still typing in a different field.
     await waitFor(() => {
-      expect(screen.getByLabelText(/Scope/)).toHaveValue("backend services");
+      expect(screen.getByLabelText("Scope")).toHaveValue("backend services");
     });
     expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Goal")).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Automation emoji" }),
-    ).not.toBeInTheDocument();
   });
 
   it("reverts a cleared title on blur instead of saving or leaving it blank", async () => {
@@ -1799,8 +1897,6 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
-
     const goalInput = screen.getByLabelText("Goal");
     await user.clear(goalInput);
     await user.type(goalInput, "Inspect @serv");
@@ -1810,9 +1906,7 @@ describe("AutomationDetailPage", () => {
 
     expect(goalInput).toHaveValue("Inspect @internal/services ");
     expect(await screen.findByText("Saving…")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Improve goal" }),
-    ).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Improve goal" })).toBeEnabled();
   });
 
   it("inserts selected slash commands into the edit goal field", async () => {
@@ -1902,8 +1996,6 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
-
     const goalInput = screen.getByLabelText("Goal");
     await user.clear(goalInput);
     await user.type(goalInput, "/rev");
@@ -1966,8 +2058,6 @@ describe("AutomationDetailPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
-
-    await userEvent.setup().click(screen.getByRole("button", { name: "Edit" }));
 
     fireEvent.change(screen.getByLabelText("Goal"), {
       target: { value: "x".repeat(AUTOMATION_GOAL_MAX_LENGTH + 1) },
@@ -2090,20 +2180,17 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
-    await user.click(screen.getByRole("button", { name: "Advanced settings" }));
     await user.click(screen.getByRole("combobox", { name: "Model" }));
     await user.click(await screen.findByText("claude-sonnet-4-6"));
-    await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
-      expect(updateBody).toMatchObject({ model: "claude-sonnet-4-6" });
+      expect(updateBody).toEqual({ model: "claude-sonnet-4-6" });
     });
   });
 
-  it("saves product triggers from automation settings", async () => {
+  it("holds back a schedule removal until another trigger replaces it", async () => {
     const user = userEvent.setup();
-    let updateBody: Record<string, unknown> | null = null;
+    const updateBodies: Record<string, unknown>[] = [];
 
     server.use(
       http.get("*/api/v1/settings", () =>
@@ -2165,7 +2252,7 @@ describe("AutomationDetailPage", () => {
         }),
       ),
       http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
-        updateBody = (await request.json()) as Record<string, unknown>;
+        updateBodies.push((await request.json()) as Record<string, unknown>);
         return HttpResponse.json({ data: { id: "auto-1" } });
       }),
     );
@@ -2176,25 +2263,38 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.click(screen.getByRole("button", { name: "Triggers" }));
     await user.click(screen.getByRole("button", { name: "Remove schedule" }));
+
+    // Removing the only trigger would leave an automation that can never fire,
+    // so it is refused rather than saved — with an inline reason.
+    expect(screen.getByText(/Select at least one trigger/)).toBeInTheDocument();
+    expect(updateBodies).toHaveLength(0);
+
     await user.click(
       screen.getByRole("checkbox", { name: "When a PR is merged" }),
     );
-    await user.click(screen.getByRole("button", { name: "Save changes" }));
 
-    await waitFor(() => {
-      expect(updateBody).toMatchObject({
-        schedule_type: "none",
-        triggers: ["github.pr.merged"],
-      });
-    });
-    expect(updateBody).not.toHaveProperty("interval_value");
-    expect(updateBody).not.toHaveProperty("interval_unit");
-    expect(updateBody).not.toHaveProperty("interval_run_at");
+    // Once a PR trigger restores the invariant, the held-back schedule removal
+    // lands too.
+    await waitFor(() =>
+      expect(updateBodies).toContainEqual(
+        expect.objectContaining({ triggers: ["github.pr.merged"] }),
+      ),
+    );
+    await waitFor(() =>
+      expect(updateBodies).toContainEqual(
+        expect.objectContaining({ schedule_type: "none" }),
+      ),
+    );
+    for (const body of updateBodies) {
+      expect(body).not.toHaveProperty("interval_value");
+      expect(body).not.toHaveProperty("interval_unit");
+      expect(body).not.toHaveProperty("interval_run_at");
+    }
   });
 
-  it("preserves a saved unavailable model when saving another field", async () => {
+  it("never re-sends an unrelated saved model when another field is edited", async () => {
     const user = userEvent.setup();
     let updateBody: Record<string, unknown> | null = null;
 
@@ -2287,8 +2387,6 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
-    await user.click(screen.getByRole("button", { name: "Advanced settings" }));
     await user.click(
       await screen.findByRole("button", { name: "Base branch" }),
     );
@@ -2297,13 +2395,12 @@ describe("AutomationDetailPage", () => {
       "ops",
     );
     await user.click(await screen.findByText("release/ops"));
-    await user.click(screen.getByRole("button", { name: "Save changes" }));
 
+    // The saved model is unavailable to this org, so a batch save had to echo
+    // it back to avoid clearing it. Per-field patches never mention it, which
+    // removes the failure mode instead of working around it.
     await waitFor(() => {
-      expect(updateBody).toMatchObject({
-        base_branch: "release/ops",
-        model: "claude-sonnet-4-6",
-      });
+      expect(updateBody).toEqual({ base_branch: "release/ops" });
     });
   });
 
@@ -2404,14 +2501,468 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
-    await user.click(screen.getByRole("button", { name: "Advanced settings" }));
     await user.click(screen.getByRole("combobox", { name: "Reasoning" }));
     await user.click(await screen.findByText("High"));
-    await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
-      expect(updateBody).toMatchObject({ reasoning_effort: "high" });
+      expect(updateBody).toEqual({ reasoning_effort: "high" });
     });
+  });
+
+  it("clears an unsupported reasoning override in the same patch as the model switch", async () => {
+    const user = userEvent.setup();
+    let updateBody: Record<string, unknown> | null = null;
+    const stored: Record<string, unknown> = {
+      id: "auto-1",
+      org_id: "org-1",
+      repository_id: "repo-1",
+      name: "Weekly audit",
+      goal: "Check release health",
+      scope: "",
+      // No agent_type: the effective agent comes from the model, which is
+      // exactly the shape the API infers from too.
+      model_override: "gpt-5.4",
+      reasoning_effort: "high",
+      interval_value: 1,
+      interval_unit: "weeks",
+      base_branch: "main",
+      enabled: true,
+      timezone: "UTC",
+      last_run_at: null,
+      next_run_at: null,
+      priority: 50,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    };
+
+    server.use(
+      // Amp is the org default, so its modes are offered without a credential.
+      // Amp has no reasoning levels — picking one has to clear the override.
+      http.get("*/api/v1/settings", () =>
+        HttpResponse.json({
+          data: { settings: { default_agent_type: "amp" } },
+        }),
+      ),
+      http.get("*/api/v1/settings/codex-auth/status", () =>
+        HttpResponse.json({ data: null }),
+      ),
+      http.get("*/api/v1/coding-credentials*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({ data: { ...stored } }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      // Stateful, so the refetch that follows the save can't replay the
+      // pre-edit fixture and hide whether the reset actually landed.
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        updateBody = (await request.json()) as Record<string, unknown>;
+        const { model, reasoning_effort } = updateBody as {
+          model?: string;
+          reasoning_effort?: string;
+        };
+        if (model !== undefined) stored.model_override = model;
+        if (reasoning_effort !== undefined) {
+          stored.reasoning_effort = reasoning_effort;
+        }
+        return HttpResponse.json({ data: { ...stored } });
+      }),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+    // Codex today, so the reasoning row is on screen and the override is live.
+    expect(
+      screen.getByRole("combobox", { name: "Reasoning" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("combobox", { name: "Model" }));
+    await user.click(await screen.findByRole("option", { name: "smart" }));
+
+    // The API re-validates the STORED reasoning override against the new
+    // model's agent, so a lone `model` patch would come back 400 and the row
+    // the user would have to clear is the one that disappears with the switch.
+    await waitFor(() => {
+      expect(updateBody).toEqual({ model: "smart", reasoning_effort: "" });
+    });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("combobox", { name: "Reasoning" }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("leaves a still-supported reasoning override alone when the model changes", async () => {
+    const user = userEvent.setup();
+    let updateBody: Record<string, unknown> | null = null;
+
+    server.use(
+      http.get("*/api/v1/settings", () =>
+        HttpResponse.json({
+          data: { settings: { default_agent_type: "claude_code" } },
+        }),
+      ),
+      http.get("*/api/v1/settings/codex-auth/status", () =>
+        HttpResponse.json({ data: null }),
+      ),
+      http.get("*/api/v1/coding-credentials*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({
+          data: {
+            id: "auto-1",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Weekly audit",
+            goal: "Check release health",
+            scope: "",
+            model_override: "gpt-5.4",
+            reasoning_effort: "high",
+            interval_value: 1,
+            interval_unit: "weeks",
+            base_branch: "main",
+            enabled: true,
+            timezone: "UTC",
+            last_run_at: null,
+            next_run_at: null,
+            priority: 50,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        updateBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("combobox", { name: "Model" }));
+    await user.click(await screen.findByRole("option", { name: "claude-sonnet-4-6" }));
+
+    // Claude Code has reasoning levels, so the reset must NOT ride along —
+    // clearing an override the user never touched would be its own bug.
+    await waitFor(() => {
+      expect(updateBody).toEqual({ model: "claude-sonnet-4-6" });
+    });
+  });
+
+  it("commits a pending trigger-filter edit when the popover closes", async () => {
+    const user = userEvent.setup();
+    const updateBodies: Record<string, unknown>[] = [];
+
+    server.use(
+      // Pin the preview as never-settling. An unmocked preview FAILS, and the
+      // editor treats a transport failure as valid — which lets the settled
+      // path emit a byte-identical patch and satisfy this test without the
+      // unmount flush ever running.
+      http.post("*/api/v1/automations/schedule-preview", () => neverResolves()),
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({
+          data: {
+            id: "auto-1",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Weekly audit",
+            goal: "Check release health",
+            scope: "",
+            interval_value: 1,
+            interval_unit: "weeks",
+            base_branch: "main",
+            enabled: true,
+            timezone: "UTC",
+            last_run_at: null,
+            next_run_at: null,
+            priority: 50,
+            github_event_triggers: ["github.pr.merged"],
+            github_event_filters: { authors: [] },
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        updateBodies.push((await request.json()) as Record<string, unknown>);
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+    await screen.findByText("Weekly audit");
+
+    await user.click(screen.getByRole("button", { name: "Triggers" }));
+    await user.click(screen.getByRole("button", { name: /Trigger filters/ }));
+    fireEvent.change(await screen.findByLabelText("Authors"), {
+      target: { value: "octocat" },
+    });
+
+    // Closing the popover removes the focused input from the DOM, which does
+    // NOT dispatch focusout — so onBlur never runs and the debounced edit has
+    // to be flushed on unmount or it is lost with no error and no indicator.
+    await user.keyboard("{Escape}");
+
+    await waitFor(() =>
+      expect(updateBodies).toContainEqual({
+        github_event_filters: { authors: ["octocat"] },
+      }),
+    );
+  });
+
+  it("commits a pending schedule edit when the popover closes", async () => {
+    const user = userEvent.setup();
+    const updateBodies: Record<string, unknown>[] = [];
+
+    server.use(
+      // Never-settling, so `valid` stays false for the whole test and the only
+      // thing that can produce a patch is the unmount flush under test.
+      http.post("*/api/v1/automations/schedule-preview", () => neverResolves()),
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({
+          data: {
+            id: "auto-1",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Weekly audit",
+            goal: "Check release health",
+            scope: "",
+            interval_value: 1,
+            interval_unit: "weeks",
+            base_branch: "main",
+            enabled: true,
+            timezone: "UTC",
+            last_run_at: null,
+            next_run_at: null,
+            priority: 50,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        updateBodies.push((await request.json()) as Record<string, unknown>);
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+    await screen.findByText("Weekly audit");
+
+    await user.click(screen.getByRole("button", { name: "Triggers" }));
+    const intervalInput = await screen.findByLabelText("Interval value");
+    await user.clear(intervalInput);
+    await user.type(intervalInput, "6");
+
+    // The schedule has no blur to fall back on: it normally commits only after
+    // the editor's 300ms debounce AND a server preview round-trip. Closing
+    // inside that window must still persist the draft, on the client-side
+    // verdict — the API validates it again on write.
+    await user.keyboard("{Escape}");
+
+    await waitFor(() =>
+      expect(updateBodies).toContainEqual(
+        expect.objectContaining({
+          schedule_type: "interval",
+          interval_value: 6,
+        }),
+      ),
+    );
+  });
+
+  it("does not commit a client-invalid schedule when the popover closes", async () => {
+    const user = userEvent.setup();
+    const updateBodies: Record<string, unknown>[] = [];
+
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({
+          data: {
+            id: "auto-1",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Weekly audit",
+            goal: "Check release health",
+            scope: "",
+            interval_value: 1,
+            interval_unit: "weeks",
+            base_branch: "main",
+            enabled: true,
+            timezone: "UTC",
+            last_run_at: null,
+            next_run_at: null,
+            priority: 50,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        updateBodies.push((await request.json()) as Record<string, unknown>);
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+    await screen.findByText("Weekly audit");
+
+    await user.click(screen.getByRole("button", { name: "Triggers" }));
+    // 999 is past the API's 1-365 bound, so validateScheduleDraft rejects the
+    // draft locally. Flushing on unmount must not turn that into a certain 400.
+    const intervalInput = await screen.findByLabelText("Interval value");
+    await user.clear(intervalInput);
+    await user.type(intervalInput, "999");
+    await user.keyboard("{Escape}");
+
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(updateBodies).toEqual([]);
+  });
+
+  it("does not commit a schedule the preview already refused when the popover closes", async () => {
+    const user = userEvent.setup();
+    const updateBodies: Record<string, unknown>[] = [];
+
+    server.use(
+      // The API has already told us, on screen, that this draft is unusable.
+      http.post("*/api/v1/automations/schedule-preview", () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: "INVALID_SCHEDULE",
+              message: "No future occurrence.",
+            },
+          },
+          { status: 400 },
+        ),
+      ),
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({
+          data: {
+            id: "auto-1",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Weekly audit",
+            goal: "Check release health",
+            scope: "",
+            interval_value: 1,
+            interval_unit: "weeks",
+            base_branch: "main",
+            enabled: true,
+            timezone: "UTC",
+            last_run_at: null,
+            next_run_at: null,
+            priority: 50,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        updateBodies.push((await request.json()) as Record<string, unknown>);
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+    await screen.findByText("Weekly audit");
+
+    await user.click(screen.getByRole("button", { name: "Triggers" }));
+    const intervalInput = await screen.findByLabelText("Interval value");
+    await user.clear(intervalInput);
+    await user.type(intervalInput, "6");
+
+    // Wait until the refusal for THIS draft is on screen — that is the state
+    // the user walks away from.
+    await screen.findByText("No future occurrence.");
+    await user.keyboard("{Escape}");
+
+    // The write cannot succeed, so sending it would buy nothing but a failed
+    // request and an error toast for a schedule the user watched get rejected.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(updateBodies).toEqual([]);
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the API's reason when an inline property save is rejected", async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({
+          data: {
+            id: "auto-1",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Weekly audit",
+            goal: "Check release health",
+            scope: "",
+            identity_scope: "org",
+            interval_value: 1,
+            interval_unit: "weeks",
+            base_branch: "main",
+            enabled: true,
+            timezone: "UTC",
+            last_run_at: null,
+            next_run_at: null,
+            priority: 50,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.patch("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: "INVALID_IDENTITY_SCOPE",
+              message: "identity_scope=personal requires automation.created_by",
+            },
+          },
+          { status: 400 },
+        ),
+      ),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+    await screen.findByText("Weekly audit");
+
+    await user.click(screen.getByRole("combobox", { name: "Run as" }));
+    await user.click(await screen.findByRole("option", { name: "Personal" }));
+
+    // With no Save button, this toast is the only thing that can tell the user
+    // WHICH row the server refused and why. A fixed string throws that away.
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(
+        "Couldn\u2019t save automation: identity_scope=personal requires automation.created_by",
+      ),
+    );
   });
 });

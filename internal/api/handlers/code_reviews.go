@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -41,9 +42,17 @@ type codeReviewRetryService interface {
 }
 
 type codeReviewListCursor struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	Scope     [32]byte  `json:"scope"`
+	ID        uuid.UUID             `json:"id"`
+	CreatedAt time.Time             `json:"created_at"`
+	Sort      *codeReviewSortCursor `json:"sort,omitempty"`
+	Scope     [32]byte              `json:"scope"`
+}
+
+type codeReviewSortCursor struct {
+	Null bool       `json:"null,omitempty"`
+	Text *string    `json:"text,omitempty"`
+	Int  *int       `json:"int,omitempty"`
+	Time *time.Time `json:"time,omitempty"`
 }
 
 type codeReviewCursorScope struct {
@@ -54,9 +63,12 @@ type codeReviewCursorScope struct {
 	ActivityStatus *models.CodeReviewActivityStatus `json:"activity_status,omitempty"`
 	Status         *models.CodeReviewSessionStatus  `json:"status,omitempty"`
 	Acceptable     *bool                            `json:"acceptable,omitempty"`
+	Author         string                           `json:"author,omitempty"`
 	Search         string                           `json:"search,omitempty"`
 	CreatedAfter   *time.Time                       `json:"created_after,omitempty"`
 	CreatedBefore  *time.Time                       `json:"created_before,omitempty"`
+	SortBy         string                           `json:"sort_by,omitempty"`
+	SortOrder      string                           `json:"sort_order,omitempty"`
 }
 
 func codeReviewListCursorScopeHash(orgID uuid.UUID, filters db.CodeReviewListFilters) ([32]byte, error) {
@@ -68,9 +80,12 @@ func codeReviewListCursorScopeHash(orgID uuid.UUID, filters db.CodeReviewListFil
 		ActivityStatus: filters.ActivityStatus,
 		Status:         filters.Status,
 		Acceptable:     filters.Acceptable,
+		Author:         strings.TrimSpace(filters.Author),
 		Search:         strings.TrimSpace(filters.Search),
 		CreatedAfter:   filters.CreatedAfter,
 		CreatedBefore:  filters.CreatedBefore,
+		SortBy:         filters.SortBy,
+		SortOrder:      filters.SortOrder,
 	})
 	if err != nil {
 		return [32]byte{}, err
@@ -78,38 +93,112 @@ func codeReviewListCursorScopeHash(orgID uuid.UUID, filters db.CodeReviewListFil
 	return sha256.Sum256(encoded), nil
 }
 
-func encodeCodeReviewListCursor(orgID uuid.UUID, filters db.CodeReviewListFilters, id uuid.UUID, createdAt time.Time) (string, error) {
+func encodeCodeReviewListCursor(orgID uuid.UUID, filters db.CodeReviewListFilters, id uuid.UUID, createdAt time.Time, sort *codeReviewSortCursor) (string, error) {
 	scope, err := codeReviewListCursorScopeHash(orgID, filters)
 	if err != nil {
 		return "", err
 	}
-	encoded, err := json.Marshal(codeReviewListCursor{ID: id, CreatedAt: createdAt, Scope: scope})
+	encoded, err := json.Marshal(codeReviewListCursor{ID: id, CreatedAt: createdAt, Sort: sort, Scope: scope})
 	if err != nil {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(encoded), nil
 }
 
-func decodeCodeReviewListCursor(raw string, orgID uuid.UUID, filters db.CodeReviewListFilters) (uuid.UUID, time.Time, error) {
+func decodeCodeReviewListCursor(raw string, orgID uuid.UUID, filters db.CodeReviewListFilters) (codeReviewListCursor, error) {
 	encoded, err := base64.RawURLEncoding.DecodeString(raw)
 	if err != nil {
-		return uuid.Nil, time.Time{}, err
+		return codeReviewListCursor{}, err
 	}
 	var cursor codeReviewListCursor
 	if err := json.Unmarshal(encoded, &cursor); err != nil {
-		return uuid.Nil, time.Time{}, err
+		return codeReviewListCursor{}, err
 	}
 	if cursor.ID == uuid.Nil || cursor.CreatedAt.IsZero() {
-		return uuid.Nil, time.Time{}, errors.New("cursor anchor is incomplete")
+		return codeReviewListCursor{}, errors.New("cursor anchor is incomplete")
 	}
 	scope, err := codeReviewListCursorScopeHash(orgID, filters)
 	if err != nil {
-		return uuid.Nil, time.Time{}, err
+		return codeReviewListCursor{}, err
 	}
 	if cursor.Scope != scope {
-		return uuid.Nil, time.Time{}, errors.New("cursor does not match the active filters")
+		return codeReviewListCursor{}, errors.New("cursor does not match the active filters")
 	}
-	return cursor.ID, cursor.CreatedAt, nil
+	if filters.SortBy != "" && cursor.Sort == nil {
+		return codeReviewListCursor{}, errors.New("sorted cursor anchor is incomplete")
+	}
+	return cursor, nil
+}
+
+func codeReviewSortCursorForItem(sortBy string, item models.CodeReviewListItem) (*codeReviewSortCursor, error) {
+	if sortBy == "" {
+		return nil, nil
+	}
+	// Outcome, risk, and run status order by the rank of the label the row
+	// displays, so the cursor has to anchor on that same rank.
+	if rank, ok := db.CodeReviewSortRankForItem(sortBy, item); ok {
+		return &codeReviewSortCursor{Int: &rank}, nil
+	}
+	switch sortBy {
+	case "pull_request":
+		value := item.GitHubPRNumber
+		return &codeReviewSortCursor{Int: &value}, nil
+	case "repository":
+		// repositories.full_name is NOT NULL behind an inner join. A null
+		// anchor here would query a partition holding no rows and end
+		// pagination early, so surface the broken invariant instead.
+		if item.RepositoryName == nil {
+			return nil, errors.New("review is missing the repository name its cursor sorts on")
+		}
+		return &codeReviewSortCursor{Text: item.RepositoryName}, nil
+	case "completed":
+		if item.CompletedAt == nil {
+			return &codeReviewSortCursor{Null: true}, nil
+		}
+		return &codeReviewSortCursor{Time: item.CompletedAt}, nil
+	default:
+		return nil, fmt.Errorf("unsupported code review sort: %q", sortBy)
+	}
+}
+
+func applyCodeReviewSortCursor(filters *db.CodeReviewListFilters, sort *codeReviewSortCursor) error {
+	if filters.SortBy == "" {
+		return nil
+	}
+	if sort == nil {
+		return errors.New("sorted cursor anchor is missing")
+	}
+	// The scope hash covers the filters, not the anchor, so a client can edit a
+	// legitimate cursor's null flag. Reject an anchor the sort cannot produce
+	// here rather than letting the query layer fail the whole request.
+	nullable, err := db.CodeReviewListSortIsNullable(filters.SortBy)
+	if err != nil {
+		return err
+	}
+	if sort.Null && !nullable {
+		return fmt.Errorf("code review sort %q cannot anchor on a null value", filters.SortBy)
+	}
+	filters.CursorSortNull = sort.Null
+	switch filters.SortBy {
+	case "pull_request", "outcome", "risk", "run_status":
+		if sort.Int != nil {
+			filters.CursorSortValue = *sort.Int
+		}
+	case "repository":
+		if sort.Text != nil {
+			filters.CursorSortValue = *sort.Text
+		}
+	case "completed":
+		if sort.Time != nil {
+			filters.CursorSortValue = *sort.Time
+		}
+	default:
+		return fmt.Errorf("unsupported code review sort: %q", filters.SortBy)
+	}
+	if !sort.Null && filters.CursorSortValue == nil {
+		return errors.New("sorted cursor value has the wrong type")
+	}
+	return nil
 }
 
 type CodeReviewHandler struct {
@@ -276,6 +365,7 @@ func parseCodeReviewFilters(w http.ResponseWriter, r *http.Request) (db.CodeRevi
 	}
 	filters := db.CodeReviewListFilters{
 		RepositoryID:  repositoryID,
+		Author:        strings.TrimSpace(r.URL.Query().Get("author")),
 		Search:        strings.TrimSpace(r.URL.Query().Get("search")),
 		CreatedAfter:  createdAfter,
 		CreatedBefore: createdBefore,
@@ -328,10 +418,42 @@ func parseCodeReviewFilters(w http.ResponseWriter, r *http.Request) (db.CodeRevi
 	return filters, true
 }
 
+// parseCodeReviewListSort reads the ordering the reviews table asks for. It is
+// list-only: /stats and /analytics share the filter parser but have their own
+// ordering (or none), so they must not accept or reject these parameters.
+func parseCodeReviewListSort(w http.ResponseWriter, r *http.Request, filters *db.CodeReviewListFilters) bool {
+	raw := strings.TrimSpace(r.URL.Query().Get("sort_by"))
+	if raw == "" {
+		return true
+	}
+	switch raw {
+	case "pull_request", "outcome", "risk", "run_status", "repository", "completed":
+		filters.SortBy = raw
+	default:
+		writeError(w, r, http.StatusBadRequest, "INVALID_SORT", "invalid sort_by")
+		return false
+	}
+	order := strings.TrimSpace(r.URL.Query().Get("sort_order"))
+	if order == "" {
+		order = "asc"
+	}
+	if order != "asc" && order != "desc" {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SORT_ORDER", "sort_order must be asc or desc")
+		return false
+	}
+	filters.SortOrder = order
+	return true
+}
+
 func (h *CodeReviewHandler) List(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	filters, ok := parseCodeReviewFilters(w, r)
 	if !ok {
+		return
+	}
+	// Must run before the cursor is decoded: the sort is part of the cursor
+	// scope hash, so a cursor issued under one order cannot be replayed here.
+	if !parseCodeReviewListSort(w, r, &filters) {
 		return
 	}
 	limit := 50
@@ -346,13 +468,17 @@ func (h *CodeReviewHandler) List(w http.ResponseWriter, r *http.Request) {
 	filters.Limit = limit
 	rawCursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
 	if rawCursor != "" {
-		cursorID, cursorCreatedAt, err := decodeCodeReviewListCursor(rawCursor, orgID, filters)
+		cursor, err := decodeCodeReviewListCursor(rawCursor, orgID, filters)
 		if err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "cursor is invalid or does not match the active filters")
 			return
 		}
-		filters.Cursor = &cursorID
-		filters.CursorCreatedAt = &cursorCreatedAt
+		filters.Cursor = &cursor.ID
+		filters.CursorCreatedAt = &cursor.CreatedAt
+		if err := applyCodeReviewSortCursor(&filters, cursor.Sort); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "cursor sort anchor is invalid")
+			return
+		}
 	}
 	page, err := h.store.ListReviewsPage(r.Context(), orgID, filters)
 	if err != nil {
@@ -366,7 +492,13 @@ func (h *CodeReviewHandler) List(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEWS_LOAD_FAILED", "failed to encode code review cursor", err)
 			return
 		}
-		nextCursor, err = encodeCodeReviewListCursor(orgID, filters, cursorID, page.NextCursorCreatedAt)
+		lastItem := page.Items[len(page.Items)-1]
+		sortCursor, sortErr := codeReviewSortCursorForItem(filters.SortBy, lastItem)
+		if sortErr != nil {
+			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEWS_LOAD_FAILED", "failed to encode review sort cursor", sortErr)
+			return
+		}
+		nextCursor, err = encodeCodeReviewListCursor(orgID, filters, cursorID, page.NextCursorCreatedAt, sortCursor)
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEWS_LOAD_FAILED", "failed to encode code review cursor", err)
 			return
@@ -391,6 +523,7 @@ func (h *CodeReviewHandler) Stats(w http.ResponseWriter, r *http.Request) {
 		ActivityStatus: filters.ActivityStatus,
 		Status:         filters.Status,
 		Acceptable:     filters.Acceptable,
+		Author:         filters.Author,
 		Search:         filters.Search,
 		CreatedAfter:   filters.CreatedAfter,
 		CreatedBefore:  filters.CreatedBefore,
@@ -403,23 +536,43 @@ func (h *CodeReviewHandler) Stats(w http.ResponseWriter, r *http.Request) {
 }
 
 func parseCodeReviewAnalyticsFilters(w http.ResponseWriter, r *http.Request) (db.CodeReviewAnalyticsFilters, bool) {
-	createdAfter, createdBefore, ok := parseCodeReviewTimeFilters(w, r)
-	if !ok {
-		return db.CodeReviewAnalyticsFilters{}, false
-	}
-	filters := db.CodeReviewAnalyticsFilters{
-		CreatedAfter:  createdAfter,
-		CreatedBefore: createdBefore,
-	}
+	// The shared filter parser reports a bad UUID as INVALID_QUERY; this
+	// endpoint has always answered with the more specific
+	// INVALID_REPOSITORY_ID, so check first to keep that contract.
 	if raw := strings.TrimSpace(r.URL.Query().Get("repository_id")); raw != "" {
-		repositoryID, err := uuid.Parse(raw)
-		if err != nil {
+		if _, err := uuid.Parse(raw); err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
 			return db.CodeReviewAnalyticsFilters{}, false
 		}
-		filters.RepositoryID = &repositoryID
 	}
-	return filters, true
+	filters, ok := parseCodeReviewFilters(w, r)
+	if !ok {
+		return db.CodeReviewAnalyticsFilters{}, false
+	}
+	analyticsFilters := db.CodeReviewAnalyticsFilters{
+		RepositoryID: filters.RepositoryID, Decision: filters.Decision, Outcome: filters.Outcome,
+		ActivityStatus: filters.ActivityStatus, Status: filters.Status, Acceptable: filters.Acceptable,
+		Search: filters.Search, CreatedAfter: filters.CreatedAfter, CreatedBefore: filters.CreatedBefore,
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("author_sort_by")); raw != "" {
+		switch raw {
+		case "author", "reviews", "approved", "not_approved", "approval_rate", "split_sample", "average_additions", "median_additions", "average_deletions", "median_deletions":
+			analyticsFilters.AuthorSortBy = raw
+		default:
+			writeError(w, r, http.StatusBadRequest, "INVALID_ANALYTICS_SORT", "invalid author_sort_by")
+			return db.CodeReviewAnalyticsFilters{}, false
+		}
+		order := strings.TrimSpace(r.URL.Query().Get("author_sort_order"))
+		if order == "" {
+			order = "asc"
+		}
+		if order != "asc" && order != "desc" {
+			writeError(w, r, http.StatusBadRequest, "INVALID_SORT_ORDER", "author_sort_order must be asc or desc")
+			return db.CodeReviewAnalyticsFilters{}, false
+		}
+		analyticsFilters.AuthorSortOrder = order
+	}
+	return analyticsFilters, true
 }
 
 func (h *CodeReviewHandler) Analytics(w http.ResponseWriter, r *http.Request) {

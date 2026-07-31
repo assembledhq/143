@@ -950,19 +950,21 @@ type CodeReviewStats struct {
 }
 
 type CodeReviewAnalyticsSummary struct {
-	ReviewsRequested            int64 `json:"reviews_requested"`
-	ReviewsCompleted            int64 `json:"reviews_completed"`
-	AutomaticallyApproved       int64 `json:"automatically_approved"`
-	NotApproved                 int64 `json:"not_approved"`
-	NeedsHumanReview            int64 `json:"needs_human_review"`
-	CommentOnly                 int64 `json:"comment_only"`
-	Blocked                     int64 `json:"blocked"`
-	ApprovalNotPosted           int64 `json:"approval_not_posted"`
-	FailedReviews               int64 `json:"failed_reviews"`
-	StaleReviews                int64 `json:"stale_reviews"`
-	ReviewsWithFindings         int64 `json:"reviews_with_findings"`
-	ReviewsWithBlockingFindings int64 `json:"reviews_with_blocking_findings"`
-	TotalFindings               int64 `json:"total_findings"`
+	ReviewsRequested            int64    `json:"reviews_requested"`
+	ReviewsCompleted            int64    `json:"reviews_completed"`
+	AutomaticallyApproved       int64    `json:"automatically_approved"`
+	NotApproved                 int64    `json:"not_approved"`
+	NeedsHumanReview            int64    `json:"needs_human_review"`
+	CommentOnly                 int64    `json:"comment_only"`
+	Blocked                     int64    `json:"blocked"`
+	ApprovalNotPosted           int64    `json:"approval_not_posted"`
+	FailedReviews               int64    `json:"failed_reviews"`
+	StaleReviews                int64    `json:"stale_reviews"`
+	MedianAdditions             *float64 `json:"median_additions"`
+	MedianDeletions             *float64 `json:"median_deletions"`
+	ReviewsWithFindings         int64    `json:"reviews_with_findings"`
+	ReviewsWithBlockingFindings int64    `json:"reviews_with_blocking_findings"`
+	TotalFindings               int64    `json:"total_findings"`
 }
 
 type CodeReviewAuthorAnalytics struct {

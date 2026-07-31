@@ -22,6 +22,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/auth"
+	"github.com/assembledhq/143/internal/internalapi"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
@@ -1716,11 +1717,7 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 	}
 	sandboxCfg.Env["INTERNAL_API_TOKEN"] = internalToken
 	sandboxCfg.Env["INTERNAL_API_URL"] = o.internalAPIURL
-	sandboxCfg.Env["ASSEMBLED_SESSION_ID"] = session.ID.String()
-	// Compatibility for existing skills and older 143-tools binaries. New
-	// clients use the token-derived current-session endpoint and do not depend
-	// on either environment variable for authorization.
-	sandboxCfg.Env["143_SESSION_ID"] = session.ID.String()
+	sandboxCfg.Env[internalapi.CodingSessionIDEnvVar] = session.ID.String()
 	if evalBootstrapRunID != nil {
 		sandboxCfg.Env["EVAL_BOOTSTRAP_TOOLS_ENABLED"] = "true"
 		sandboxCfg.Env["EVAL_BOOTSTRAP_RUN_ID"] = evalBootstrapRunID.String()
@@ -3468,12 +3465,13 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	// 10. Execute agent with log streaming.
 	o.honorPendingCancelRequest(ctx, run.OrgID, run.ID, log)
+	writeCtx := TranscriptWriteContext{ThreadID: primaryThreadID, TurnNumber: turnNumber}
 	logCh := make(chan LogEntry, 100)
 	var logWg sync.WaitGroup
 	logWg.Add(1)
 	go func() {
 		defer logWg.Done()
-		o.streamLogs(ctx, run.ID, run.OrgID, run.AgentType, primaryThreadID, turnNumber, logCh, runtimeTracker)
+		o.streamLogs(ctx, run.ID, run.OrgID, run.AgentType, writeCtx, logCh, runtimeTracker)
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
@@ -3500,13 +3498,13 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	logWg.Wait()
 
 	// 10b. Retry once on token expiration for Codex agents.
-	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, run.ID, primaryThreadID, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
+	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, run.ID, writeCtx, sandbox, adapter, execCtx, prompt, result, err, log)
 
 	// 10c. Shed the just-picked credential's in-process health-cache slot if
 	// the (possibly retried) result indicates a credential-level failure.
 	// No-ops cleanly for agent types whose auth flows do not pass through
 	// the unified resolver (e.g. Codex subscription via codexauth.Service).
-	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, run, primaryThreadID, turnNumber, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, false, log)
+	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, run, writeCtx, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, false, log)
 	if _, harvestErr := o.harvestClaudeCodeCredentials(ctx, run, sandbox, authBillingMode, log); harvestErr != nil {
 		log.Warn().
 			Err(harvestErr).
@@ -3674,7 +3672,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	if isInteractive {
 		turnNumber := run.CurrentTurn + 1
-		if err := o.createAssistantMessage(ctx, run.ID, run.OrgID, primaryThreadID, turnNumber, result); err != nil {
+		if err := o.createAssistantMessage(ctx, run.ID, run.OrgID, writeCtx.withTurn(turnNumber), result); err != nil {
 			log.Warn().Err(err).Msg("failed to persist assistant message for interactive turn")
 		}
 
@@ -5103,12 +5101,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 
 	// 6. Execute agent with log streaming.
+	writeCtx := TranscriptWriteContext{ThreadID: threadID, TurnNumber: messageTurnNumber}
 	logCh := make(chan LogEntry, 100)
 	var logWg sync.WaitGroup
 	logWg.Add(1)
 	go func() {
 		defer logWg.Done()
-		o.streamLogs(ctx, session.ID, session.OrgID, session.AgentType, threadID, messageTurnNumber, logCh, runtimeTracker)
+		o.streamLogs(ctx, session.ID, session.OrgID, session.AgentType, writeCtx, logCh, runtimeTracker)
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
@@ -5164,12 +5163,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	logWg.Wait()
 
 	// 6b. Retry once on token expiration for Codex agents.
-	result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, threadID, messageTurnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
+	result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, writeCtx, sandbox, adapter, execCtx, prompt, result, err, log)
 
 	// 6c. Shed the just-picked credential when the (post-retry) result shows
 	// rate-limit or auth-rejected signals. Same semantics as the entry-turn
 	// path above; see shedOnRunResult.
-	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, session, threadID, messageTurnNumber, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, true, log)
+	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, session, writeCtx, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, true, log)
 	if _, harvestErr := o.harvestClaudeCodeCredentials(ctx, session, sandbox, authBillingMode, log); harvestErr != nil {
 		log.Warn().
 			Err(harvestErr).
@@ -5266,7 +5265,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 
 	// 7. Create assistant message with result summary.
-	if err := o.createAssistantMessage(ctx, session.ID, session.OrgID, threadID, messageTurnNumber, result); err != nil {
+	if err := o.createAssistantMessage(ctx, session.ID, session.OrgID, writeCtx, result); err != nil {
 		log.Warn().Err(err).Msg("failed to create assistant message")
 	}
 	if opts != nil && opts.ResultAgentSessionID != nil {
@@ -6069,29 +6068,74 @@ func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID uuid.UUID, ex
 	return nil
 }
 
+// TranscriptWriteContext carries the durable execution identity shared by all
+// transcript writers for one provider invocation.
+type TranscriptWriteContext struct {
+	ThreadID        *uuid.UUID
+	TurnNumber      int
+	ActivityPhaseID *uuid.UUID
+}
+
+// withTurn rescopes the context to a different turn. A phase belongs to exactly
+// one turn, so the phase association is dropped when the turn actually changes:
+// writers validate turn ownership and would otherwise reject the whole entry
+// rather than just its association.
+func (c TranscriptWriteContext) withTurn(turnNumber int) TranscriptWriteContext {
+	if turnNumber != c.TurnNumber {
+		c.ActivityPhaseID = nil
+	}
+	c.TurnNumber = turnNumber
+	return c
+}
+
+// phaseAssociation returns the phase to persist alongside an entry written
+// under this context. Phases are thread-scoped and session_activity_phases
+// .thread_id is NOT NULL, so an unthreaded context carries no phase — every
+// transcript writer goes through here so the invariant holds in one place.
+func (c TranscriptWriteContext) phaseAssociation() *uuid.UUID {
+	if c.ThreadID == nil {
+		return nil
+	}
+	return c.ActivityPhaseID
+}
+
+// forThread rescopes the context to the thread an entry actually resolved to.
+// A phase is thread-scoped, so the phase association is dropped when the entry
+// belongs to a different thread than the one the context was opened for —
+// writers validate phase ownership and would otherwise reject the entry
+// entirely rather than just its association.
+func (c TranscriptWriteContext) forThread(threadID *uuid.UUID) TranscriptWriteContext {
+	if threadID == nil || c.ThreadID == nil || *threadID != *c.ThreadID {
+		c.ActivityPhaseID = nil
+	}
+	c.ThreadID = threadID
+	return c
+}
+
 // streamLogs reads LogEntry values from the channel and persists them to the DB.
 // It also normalizes structured or legacy human-input prompts into durable pause records.
-func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, agentType models.AgentType, threadID *uuid.UUID, turnNumber int, logCh <-chan LogEntry, tracker *runtimeProgressTracker) {
+func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, agentType models.AgentType, writeCtx TranscriptWriteContext, logCh <-chan LogEntry, tracker *runtimeProgressTracker) {
 	for entry := range logCh {
 		if tracker != nil {
 			if progressType, strength, toolID, ok := runtimeProgressFromLog(entry); ok {
 				tracker.Record(progressType, strength, entry.Timestamp, toolID, runtimeToolSummaryFromLog(entry))
 			}
 		}
-		effectiveThreadID := threadID
+		effectiveThreadID := writeCtx.ThreadID
 		if effectiveThreadID == nil {
 			effectiveThreadID = entry.ThreadID
 		}
+		entryCtx := writeCtx.forThread(effectiveThreadID)
 
 		var humanInputRecord *models.HumanInputRequest
 		if entry.HumanInput != nil {
-			humanInputRecord = o.handleHumanInputRequest(ctx, runID, orgID, agentType, effectiveThreadID, turnNumber, entry.HumanInput)
+			humanInputRecord = o.handleHumanInputRequest(ctx, runID, orgID, agentType, entryCtx, entry.HumanInput)
 		} else if entry.Level == "question" {
 			req := humanInputRequestFromQuestionLog(entry)
 			entry.HumanInput = &req
 			entry.Level = "human_input"
 			entry.Message = req.Body
-			humanInputRecord = o.handleHumanInputRequest(ctx, runID, orgID, agentType, effectiveThreadID, turnNumber, &req)
+			humanInputRecord = o.handleHumanInputRequest(ctx, runID, orgID, agentType, entryCtx, &req)
 		}
 		if humanInputRecord != nil {
 			annotateHumanInputLogMetadata(&entry, humanInputRecord)
@@ -6108,13 +6152,14 @@ func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, a
 		}
 
 		log := &models.SessionLog{
-			SessionID:  runID,
-			OrgID:      orgID,
-			ThreadID:   effectiveThreadID,
-			Level:      models.SessionLogLevel(entry.Level),
-			Message:    entry.Message,
-			Metadata:   metadata,
-			TurnNumber: turnNumber,
+			SessionID:       runID,
+			OrgID:           orgID,
+			ThreadID:        entryCtx.ThreadID,
+			Level:           models.SessionLogLevel(entry.Level),
+			Message:         entry.Message,
+			Metadata:        metadata,
+			TurnNumber:      entryCtx.TurnNumber,
+			ActivityPhaseID: entryCtx.phaseAssociation(),
 		}
 		if err := o.agentRunLogs.Create(ctx, log); err != nil {
 			o.logger.Error().Err(err).Str("run_id", runID.String()).Msg("failed to persist log entry")
@@ -6126,8 +6171,7 @@ func (o *Orchestrator) handleHumanInputRequest(
 	ctx context.Context,
 	sessionID, orgID uuid.UUID,
 	agentType models.AgentType,
-	threadID *uuid.UUID,
-	turnNumber int,
+	writeCtx TranscriptWriteContext,
 	req *HumanInputRequest,
 ) *models.HumanInputRequest {
 	if req == nil {
@@ -6152,8 +6196,9 @@ func (o *Orchestrator) handleHumanInputRequest(
 		record := &models.HumanInputRequest{
 			OrgID:             orgID,
 			SessionID:         sessionID,
-			ThreadID:          threadID,
-			TurnNumber:        turnNumber,
+			ThreadID:          writeCtx.ThreadID,
+			TurnNumber:        writeCtx.TurnNumber,
+			ActivityPhaseID:   writeCtx.phaseAssociation(),
 			AgentType:         agentType,
 			ProviderRequestID: providerRequestID,
 			Kind:              req.Kind,
@@ -8067,18 +8112,19 @@ func gracefulStopFailure(reason StopReason, checkpointedThisTurn, hadPriorCheckp
 	}
 }
 
-func (o *Orchestrator) createAssistantMessage(ctx context.Context, sessionID, orgID uuid.UUID, threadID *uuid.UUID, turnNumber int, result *AgentResult) error {
+func (o *Orchestrator) createAssistantMessage(ctx context.Context, sessionID, orgID uuid.UUID, writeCtx TranscriptWriteContext, result *AgentResult) error {
 	if o.sessionMessages == nil {
 		return nil
 	}
 
 	assistantMsg := &models.SessionMessage{
-		SessionID:  sessionID,
-		OrgID:      orgID,
-		ThreadID:   threadID,
-		TurnNumber: turnNumber,
-		Role:       models.MessageRoleAssistant,
-		Content:    result.Summary,
+		SessionID:       sessionID,
+		OrgID:           orgID,
+		ThreadID:        writeCtx.ThreadID,
+		TurnNumber:      writeCtx.TurnNumber,
+		Role:            models.MessageRoleAssistant,
+		Content:         result.Summary,
+		ActivityPhaseID: writeCtx.phaseAssociation(),
 	}
 	if HasPersistableTokenUsage(result.TokenUsage) {
 		tokenJSON, err := json.Marshal(result.TokenUsage)
@@ -8093,12 +8139,12 @@ func (o *Orchestrator) createAssistantMessage(ctx context.Context, sessionID, or
 	if marker, ok := o.agentRunLogs.(interface {
 		MarkAssistantTranscriptDuplicate(ctx context.Context, orgID, sessionID uuid.UUID, threadID *uuid.UUID, turnNumber int, message string) error
 	}); ok && result.Summary != "" {
-		if err := marker.MarkAssistantTranscriptDuplicate(ctx, orgID, sessionID, threadID, turnNumber, result.Summary); err != nil {
+		if err := marker.MarkAssistantTranscriptDuplicate(ctx, orgID, sessionID, writeCtx.ThreadID, writeCtx.TurnNumber, result.Summary); err != nil {
 			o.logger.Warn().
 				Err(err).
 				Str("session_id", sessionID.String()).
 				Str("org_id", orgID.String()).
-				Int("turn_number", turnNumber).
+				Int("turn_number", writeCtx.TurnNumber).
 				Msg("failed to mark assistant output log as transcript duplicate")
 		}
 	}
@@ -8396,8 +8442,7 @@ func (o *Orchestrator) retryOnTokenExpired(
 	orgID uuid.UUID,
 	userID *uuid.UUID,
 	sessionID uuid.UUID,
-	threadID *uuid.UUID,
-	turnNumber int,
+	writeCtx TranscriptWriteContext,
 	sandbox *Sandbox,
 	adapter AgentAdapter,
 	execCtx context.Context,
@@ -8426,7 +8471,7 @@ func (o *Orchestrator) retryOnTokenExpired(
 	retryLogWg.Add(1)
 	go func() {
 		defer retryLogWg.Done()
-		o.streamLogs(ctx, sessionID, orgID, agentType, threadID, turnNumber, retryLogCh, nil)
+		o.streamLogs(ctx, sessionID, orgID, agentType, writeCtx, retryLogCh, nil)
 	}()
 
 	result, err = adapter.Execute(execCtx, sandbox, prompt, retryLogCh)
@@ -8440,8 +8485,7 @@ func (o *Orchestrator) retryOnTokenExpired(
 func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 	ctx context.Context,
 	session *models.Session,
-	threadID *uuid.UUID,
-	turnNumber int,
+	writeCtx TranscriptWriteContext,
 	sandboxCfg SandboxConfig,
 	sandbox *Sandbox,
 	adapter AgentAdapter,
@@ -8463,13 +8507,13 @@ func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 	if authErr := o.env.CheckAuth(session.AgentType, refreshedEnv); authErr != nil {
 		logCredentialRateLimitBlocked(log, session, authErr)
 		if createBlockedMessage {
-			o.createContinueAuthFailureMessage(ctx, session, threadID, authErr, log)
+			o.createContinueAuthFailureMessage(ctx, session, writeCtx.ThreadID, authErr, log)
 		}
 		return result, authErr, false
 	}
 
 	sandbox.Env = cloneStringMap(refreshedEnv)
-	if authErr := o.prepareAgentAuthForRetry(ctx, session, threadID, sandbox, refreshedEnv); authErr != nil {
+	if authErr := o.prepareAgentAuthForRetry(ctx, session, writeCtx.ThreadID, sandbox, refreshedEnv); authErr != nil {
 		return result, authErr, false
 	}
 	prompt.UsageHint = o.buildTokenUsageHint(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, refreshedEnv, prompt.UsageHint)
@@ -8484,20 +8528,20 @@ func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 	retryLogWg.Add(1)
 	go func() {
 		defer retryLogWg.Done()
-		o.streamLogs(ctx, session.ID, session.OrgID, session.AgentType, threadID, turnNumber, retryLogCh, nil)
+		o.streamLogs(ctx, session.ID, session.OrgID, session.AgentType, writeCtx, retryLogCh, nil)
 	}()
 	retryResult, retryErr := adapter.Execute(execCtx, sandbox, prompt, retryLogCh)
 	close(retryLogCh)
 	retryLogWg.Wait()
 
-	retryResult, retryErr = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, threadID, turnNumber, sandbox, adapter, execCtx, prompt, retryResult, retryErr, log)
+	retryResult, retryErr = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, writeCtx, sandbox, adapter, execCtx, prompt, retryResult, retryErr, log)
 	if parseCredentialFailureSignal(retryResult, time.Now()).RateLimited {
 		o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, retryResult, retryErr, log)
 		refreshedEnv = o.resolveSessionCredentialEnv(ctx, session, sandboxCfg)
 		if authErr := o.env.CheckAuth(session.AgentType, refreshedEnv); authErr != nil {
 			logCredentialRateLimitBlocked(log, session, authErr)
 			if createBlockedMessage {
-				o.createContinueAuthFailureMessage(ctx, session, threadID, authErr, log)
+				o.createContinueAuthFailureMessage(ctx, session, writeCtx.ThreadID, authErr, log)
 			}
 			return retryResult, authErr, true
 		}

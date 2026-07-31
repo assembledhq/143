@@ -1,6 +1,6 @@
 # Durable Session Publication
 
-> **Status:** Implemented | **Last reviewed:** 2026-07-16
+> **Status:** Implemented | **Last reviewed:** 2026-07-30
 
 ## Problem
 
@@ -33,8 +33,8 @@ repository exclusively from the signed internal token. The legacy
 `/sessions/{session_id}/pr` route remains compatible, but any explicit ID must
 match the token. `143-tools pr create` uses the token-scoped route unless the
 caller explicitly supplies `session_id`. Sandboxes still receive
-`ASSEMBLED_SESSION_ID` and the legacy `143_SESSION_ID` for other session-aware
-tools, but those environment variables do not select PR authorization.
+`CODING_SESSION_ID` for other session-aware tools, but that contextual
+environment variable does not select PR authorization.
 
 Caller-supplied session IDs are therefore hints for compatibility, never the
 authorization source.

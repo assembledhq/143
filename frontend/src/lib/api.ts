@@ -272,9 +272,12 @@ export const api = {
       activity_status?: import('./types').CodeReviewActivityStatus;
       status?: import('./types').CodeReviewSessionStatus;
       risk?: "acceptable" | "needs_review";
+      author?: string;
       search?: string;
       created_after?: string;
       created_before?: string;
+      sort_by?: "pull_request" | "outcome" | "risk" | "run_status" | "repository" | "completed";
+      sort_order?: "asc" | "desc";
       limit?: number;
       cursor?: string;
     }) => {
@@ -285,9 +288,12 @@ export const api = {
       if (params?.activity_status) searchParams.set('activity_status', params.activity_status);
       if (params?.status) searchParams.set('status', params.status);
       if (params?.risk) searchParams.set('risk', params.risk);
+      if (params?.author) searchParams.set('author', params.author);
       if (params?.search) searchParams.set('search', params.search);
       if (params?.created_after) searchParams.set('created_after', params.created_after);
       if (params?.created_before) searchParams.set('created_before', params.created_before);
+      if (params?.sort_by) searchParams.set('sort_by', params.sort_by);
+      if (params?.sort_order) searchParams.set('sort_order', params.sort_order);
       if (params?.limit) searchParams.set('limit', String(params.limit));
       if (params?.cursor) searchParams.set('cursor', params.cursor);
       const qs = searchParams.toString();
@@ -300,6 +306,7 @@ export const api = {
       activity_status?: import('./types').CodeReviewActivityStatus;
       status?: import('./types').CodeReviewSessionStatus;
       risk?: "acceptable" | "needs_review";
+      author?: string;
       search?: string;
       created_after?: string;
       created_before?: string;
@@ -311,6 +318,7 @@ export const api = {
       if (params?.activity_status) searchParams.set('activity_status', params.activity_status);
       if (params?.status) searchParams.set('status', params.status);
       if (params?.risk) searchParams.set('risk', params.risk);
+      if (params?.author) searchParams.set('author', params.author);
       if (params?.search) searchParams.set('search', params.search);
       if (params?.created_after) searchParams.set('created_after', params.created_after);
       if (params?.created_before) searchParams.set('created_before', params.created_before);
@@ -319,11 +327,27 @@ export const api = {
     },
     analytics: (params?: {
       repository_id?: string;
+      decision?: import('./types').CodeReviewDecision;
+      outcome?: import('./types').CodeReviewListOutcome;
+      activity_status?: import('./types').CodeReviewActivityStatus;
+      status?: import('./types').CodeReviewSessionStatus;
+      risk?: "acceptable" | "needs_review";
+      search?: string;
+      author_sort_by?: "author" | "reviews" | "approved" | "not_approved" | "approval_rate" | "split_sample" | "average_additions" | "median_additions" | "average_deletions" | "median_deletions";
+      author_sort_order?: "asc" | "desc";
       created_after?: string;
       created_before?: string;
     }) => {
       const searchParams = new URLSearchParams();
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
+      if (params?.decision) searchParams.set('decision', params.decision);
+      if (params?.outcome) searchParams.set('outcome', params.outcome);
+      if (params?.activity_status) searchParams.set('activity_status', params.activity_status);
+      if (params?.status) searchParams.set('status', params.status);
+      if (params?.risk) searchParams.set('risk', params.risk);
+      if (params?.search) searchParams.set('search', params.search);
+      if (params?.author_sort_by) searchParams.set('author_sort_by', params.author_sort_by);
+      if (params?.author_sort_order) searchParams.set('author_sort_order', params.author_sort_order);
       if (params?.created_after) searchParams.set('created_after', params.created_after);
       if (params?.created_before) searchParams.set('created_before', params.created_before);
       const qs = searchParams.toString();

@@ -1,13 +1,17 @@
 "use client";
 
+import Link from "next/link";
 import { ChartNoAxesColumnIncreasing } from "lucide-react";
+import { DataTableSummaryRow } from "@/components/data-table-summary-row";
 import { EmptyState } from "@/components/empty-state";
 import { SectionGroup } from "@/components/section-group";
 import { Badge } from "@/components/ui/badge";
+import { SortableTableHeader, sortDirectionAriaValue } from "@/components/sortable-table-header";
 import { Card, CardContent } from "@/components/ui/card";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { CodeReviewAnalytics } from "@/lib/types";
+type AuthorSort = "author" | "reviews" | "approved" | "not_approved" | "approval_rate" | "split_sample" | "average_additions" | "median_additions" | "average_deletions" | "median_deletions";
 
 const NON_APPROVAL_REASON_LABELS: Record<string, string> = {
   reviewer_disabled: "Automatic approval was disabled",
@@ -49,11 +53,84 @@ function roundedMetric(value: number | null): string {
   return Math.round(value).toLocaleString();
 }
 
+function signedRoundedMetric(value: number | null, sign: "+" | "-"): string {
+  const formatted = roundedMetric(value);
+  return formatted === "—" ? formatted : `${sign}${formatted}`;
+}
+
+// Cell aria-labels replace the visible text for assistive tech, so they must
+// keep the sign and avoid announcing the "—" placeholder as a value.
+function medianAriaLabel(value: number | null, sign: "+" | "-", noun: string): string {
+  const formatted = signedRoundedMetric(value, sign);
+  return formatted === "—" ? `No ${noun} data overall` : `${formatted} ${noun} overall`;
+}
+
 function reasonLabel(code: string): string {
   const known = NON_APPROVAL_REASON_LABELS[code];
   if (known) return known;
   const readable = code.replaceAll("_", " ");
   return readable.charAt(0).toUpperCase() + readable.slice(1);
+}
+
+function authorReviewsHref({
+  author,
+  outcome,
+  repository,
+  range,
+}: {
+  author: string;
+  outcome?: "automatically_approved" | "completed_not_approved";
+  repository?: string;
+  range: string;
+}): string {
+  const params = new URLSearchParams({
+    tab: "reviews",
+    author,
+    status: "completed",
+    range,
+  });
+  if (outcome) params.set("outcome", outcome);
+  if (repository) params.set("repository", repository);
+  return `/code-reviews?${params.toString()}`;
+}
+
+function AuthorReviewCountLink({
+  author,
+  count,
+  label,
+  outcome,
+  repository,
+  range,
+  onNavigate,
+}: {
+  author: string;
+  count: number;
+  label: string;
+  outcome?: "automatically_approved" | "completed_not_approved";
+  repository?: string;
+  range: string;
+  onNavigate: () => void;
+}) {
+  return (
+    <Link
+      href={authorReviewsHref({ author, outcome, repository, range })}
+      className="font-medium text-primary underline-offset-4 hover:underline focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      aria-label={`${count.toLocaleString()} ${label} by ${author}`}
+      onClick={(event) => {
+        if (
+          event.button === 0
+          && !event.metaKey
+          && !event.ctrlKey
+          && !event.shiftKey
+          && !event.altKey
+        ) {
+          onNavigate();
+        }
+      }}
+    >
+      {count.toLocaleString()}
+    </Link>
+  );
 }
 
 function MetricCard({
@@ -76,16 +153,9 @@ function MetricCard({
   );
 }
 
-function LoadingReport() {
-  return (
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Loading code review analytics">
-      {["Reviews completed", "Automatically approved", "Not approved", "Approval rate"].map((label) => (
-        <MetricCard key={label} label={label} value="—" context="Loading selected time window" />
-      ))}
-    </div>
-  );
-}
-
+// Derived from the same report as the tables below, so the headline numbers
+// always agree with them. The reviews tab's cards deliberately describe current
+// review activity only and answer a different question.
 function ApprovalOutcomeCards({ summary }: { summary: CodeReviewAnalytics["summary"] }) {
   return (
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Approval outcomes">
@@ -118,14 +188,27 @@ export function CodeReviewAnalyticsReport({
   isLoading,
   isError,
   onRetry,
+  authorSort,
+  authorSortOrder,
+  onAuthorSort,
+  reviewLinkFilters,
+  onNavigateToReviews,
 }: {
   analytics?: CodeReviewAnalytics;
   isLoading: boolean;
   isError: boolean;
   onRetry: () => void;
+  authorSort: AuthorSort;
+  authorSortOrder: "asc" | "desc";
+  onAuthorSort: (sort: AuthorSort, order: "asc" | "desc") => void;
+  reviewLinkFilters: {
+    repository?: string;
+    range: string;
+  };
+  onNavigateToReviews: () => void;
 }) {
   if (!analytics && isLoading) {
-    return <LoadingReport />;
+    return <p className="py-12 text-center text-sm text-muted-foreground">Loading code review analytics…</p>;
   }
   if (!analytics) {
     return (
@@ -138,6 +221,19 @@ export function CodeReviewAnalyticsReport({
   }
 
   const { summary } = analytics;
+  const authorHeader = (label: string, sort: AuthorSort) => {
+    const active = authorSort === sort;
+    return (
+      <SortableTableHeader
+        label={label}
+        direction={active ? authorSortOrder : false}
+        align={sort === "author" ? "left" : "right"}
+        // The author table always has an ordering, so allowUnsorted stays off
+        // and the callback only ever receives a direction.
+        onSort={(next) => { if (next) onAuthorSort(sort, next); }}
+      />
+    );
+  };
   if (summary.reviews_requested === 0) {
     return (
       <div className="space-y-3">
@@ -200,38 +296,104 @@ export function CodeReviewAnalyticsReport({
             <Table aria-label="Code review analytics by PR author">
               <TableHeader>
                 <TableRow>
-                  <TableHead>PR author</TableHead>
-                  <TableHead className="text-right">Reviews</TableHead>
-                  <TableHead className="text-right">Approved</TableHead>
-                  <TableHead className="text-right">Not approved</TableHead>
-                  <TableHead className="text-right">Approval rate</TableHead>
-                  <TableHead className="text-right">Split sample</TableHead>
-                  <TableHead className="text-right">Avg. additions</TableHead>
-                  <TableHead className="text-right">Median additions</TableHead>
-                  <TableHead className="text-right">Avg. deletions</TableHead>
-                  <TableHead className="text-right">Median deletions</TableHead>
+                  {([
+                    ["PR author", "author"],
+                    ["Reviews", "reviews"],
+                    ["Approved", "approved"],
+                    ["Not approved", "not_approved"],
+                    ["Approval rate", "approval_rate"],
+                    ["Median additions", "median_additions"],
+                    ["Median deletions", "median_deletions"],
+                  ] as const).map(([label, sort]) => (
+                    <TableHead
+                      key={sort}
+                      className={sort === "author" ? undefined : "text-right"}
+                      aria-sort={sortDirectionAriaValue(authorSort === sort ? authorSortOrder : false)}
+                    >
+                      {authorHeader(label, sort)}
+                    </TableHead>
+                  ))}
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {analytics.authors.map((author) => (
                   <TableRow key={author.author}>
                     <TableCell className="font-medium">{author.author}</TableCell>
-                    <TableCell className="text-right tabular-nums">{author.reviews_completed.toLocaleString()}</TableCell>
-                    <TableCell className="text-right tabular-nums">{author.automatically_approved.toLocaleString()}</TableCell>
-                    <TableCell className="text-right tabular-nums">{author.not_approved.toLocaleString()}</TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      <AuthorReviewCountLink
+                        author={author.author}
+                        count={author.reviews_completed}
+                        label="completed reviews"
+                        repository={reviewLinkFilters.repository}
+                        range={reviewLinkFilters.range}
+                        onNavigate={onNavigateToReviews}
+                      />
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      <AuthorReviewCountLink
+                        author={author.author}
+                        count={author.automatically_approved}
+                        label="automatically approved reviews"
+                        outcome="automatically_approved"
+                        repository={reviewLinkFilters.repository}
+                        range={reviewLinkFilters.range}
+                        onNavigate={onNavigateToReviews}
+                      />
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      <AuthorReviewCountLink
+                        author={author.author}
+                        count={author.not_approved}
+                        label="not approved reviews"
+                        outcome="completed_not_approved"
+                        repository={reviewLinkFilters.repository}
+                        range={reviewLinkFilters.range}
+                        onNavigate={onNavigateToReviews}
+                      />
+                    </TableCell>
                     <TableCell className="text-right tabular-nums">
                       {percentage(author.automatically_approved, author.reviews_completed)}
                     </TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {author.reviews_with_change_breakdown.toLocaleString()} / {author.reviews_completed.toLocaleString()}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">{roundedMetric(author.average_additions)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{roundedMetric(author.median_additions)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{roundedMetric(author.average_deletions)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{roundedMetric(author.median_deletions)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{signedRoundedMetric(author.median_additions, "+")}</TableCell>
+                    <TableCell className="text-right tabular-nums">{signedRoundedMetric(author.median_deletions, "-")}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
+              <DataTableSummaryRow
+                description="Across all completed reviews matching the current repository and time filters."
+                cells={[
+                  {
+                    content: summary.reviews_completed.toLocaleString(),
+                    className: "text-right",
+                    ariaLabel: `${summary.reviews_completed.toLocaleString()} completed reviews overall`,
+                  },
+                  {
+                    content: summary.automatically_approved.toLocaleString(),
+                    className: "text-right",
+                    ariaLabel: `${summary.automatically_approved.toLocaleString()} automatically approved reviews overall`,
+                  },
+                  {
+                    content: summary.not_approved.toLocaleString(),
+                    className: "text-right",
+                    ariaLabel: `${summary.not_approved.toLocaleString()} not approved reviews overall`,
+                  },
+                  {
+                    content: percentage(summary.automatically_approved, summary.reviews_completed),
+                    className: "text-right",
+                    ariaLabel: `${percentage(summary.automatically_approved, summary.reviews_completed)} overall approval rate`,
+                  },
+                  {
+                    content: signedRoundedMetric(summary.median_additions, "+"),
+                    className: "text-right",
+                    ariaLabel: medianAriaLabel(summary.median_additions, "+", "median additions"),
+                  },
+                  {
+                    content: signedRoundedMetric(summary.median_deletions, "-"),
+                    className: "text-right",
+                    ariaLabel: medianAriaLabel(summary.median_deletions, "-", "median deletions"),
+                  },
+                ]}
+              />
             </Table>
           </Card>
         )}

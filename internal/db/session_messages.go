@@ -20,7 +20,7 @@ func NewSessionMessageStore(db DBTX) *SessionMessageStore {
 	return &SessionMessageStore{db: db}
 }
 
-const sessionMessageSelectColumns = `id, session_id, org_id, thread_id, user_id, turn_number, role, content, attachments, "references", commands, token_usage, source, created_at`
+const sessionMessageSelectColumns = `id, session_id, org_id, thread_id, user_id, turn_number, role, content, attachments, "references", commands, token_usage, source, created_at, activity_phase_id`
 
 const DefaultSessionMessageWindowLimit = 60
 const MaxSessionMessageWindowLimit = 200
@@ -74,9 +74,67 @@ func (s *SessionMessageStore) Create(ctx context.Context, msg *models.SessionMes
 		"commands":        msg.Commands,
 		"token_usage":     msg.TokenUsage,
 	}
+	if msg.ActivityPhaseID != nil {
+		query = phaseValidatedMessageInsert()
+		args["activity_phase_id"] = msg.ActivityPhaseID
+	}
 
 	row := s.db.QueryRow(ctx, query, args)
-	return row.Scan(&msg.ID, &msg.CreatedAt)
+	if err := row.Scan(&msg.ID, &msg.CreatedAt); err != nil {
+		return wrapPhaseOwnershipError("create session message", msg.ActivityPhaseID, err)
+	}
+	return nil
+}
+
+// phaseValidatedMessageInsert builds the message insert used when the message
+// carries an activity phase.
+func phaseValidatedMessageInsert() string {
+	return buildPhaseValidatedMessageInsert(false)
+}
+
+// phaseValidatedMessageInsertWithSource is phaseValidatedMessageInsert for the
+// write path that also persists the message source.
+func phaseValidatedMessageInsertWithSource() string {
+	return buildPhaseValidatedMessageInsert(true)
+}
+
+// buildPhaseValidatedMessageInsert validates that the phase belongs to the same
+// org, session, thread, and turn as the message. Phase status is deliberately
+// not constrained: a message that closes a phase (the final assistant summary)
+// can be persisted after the phase reaches its terminal status and still
+// belongs to it.
+func buildPhaseValidatedMessageInsert(withSource bool) string {
+	columns := `session_id, org_id, thread_id, user_id, turn_number, role, content, attachments, "references", commands, token_usage`
+	values := `@session_id, @org_id, @thread_id, @user_id, @turn_number, @role, @content, @attachments, @references_data, @commands, @token_usage`
+	if withSource {
+		columns += `, source`
+		values += `, @source`
+	}
+	return `
+		INSERT INTO session_messages (` + columns + `, activity_phase_id)
+		SELECT ` + values + `, @activity_phase_id
+		FROM session_activity_phases p
+		WHERE p.id = @activity_phase_id AND p.org_id = @org_id
+		  AND p.session_id = @session_id
+		  AND p.thread_id IS NOT DISTINCT FROM @thread_id
+		  AND p.turn_number = @turn_number
+		RETURNING id, created_at`
+}
+
+// wrapPhaseOwnershipError annotates the empty result a phase-validated insert
+// returns when the phase does not belong to the same org, session, thread, and
+// turn, so the failure is not reported as a bare "no rows". operation names the
+// failing write (e.g. "create session message").
+func wrapPhaseOwnershipError(operation string, phaseID *uuid.UUID, err error) error {
+	if phaseID != nil && errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf(
+			"%s: activity phase %s does not match org/session/thread/turn ownership: %w",
+			operation,
+			*phaseID,
+			err,
+		)
+	}
+	return err
 }
 
 func (s *SessionMessageStore) CreateWithSource(ctx context.Context, msg *models.SessionMessage) error {
@@ -99,9 +157,16 @@ func (s *SessionMessageStore) CreateWithSource(ctx context.Context, msg *models.
 		"token_usage":     msg.TokenUsage,
 		"source":          msg.Source,
 	}
+	if msg.ActivityPhaseID != nil {
+		query = phaseValidatedMessageInsertWithSource()
+		args["activity_phase_id"] = msg.ActivityPhaseID
+	}
 
 	row := s.db.QueryRow(ctx, query, args)
-	return row.Scan(&msg.ID, &msg.CreatedAt)
+	if err := row.Scan(&msg.ID, &msg.CreatedAt); err != nil {
+		return wrapPhaseOwnershipError("create session message", msg.ActivityPhaseID, err)
+	}
+	return nil
 }
 
 func (s *SessionMessageStore) ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionMessage, error) {

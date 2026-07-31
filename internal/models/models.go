@@ -827,15 +827,16 @@ type SessionCounts struct {
 
 // SessionLog represents a log line emitted during an agent run.
 type SessionLog struct {
-	ID         int64           `db:"id" json:"id"`
-	SessionID  uuid.UUID       `db:"session_id" json:"session_id"`
-	OrgID      uuid.UUID       `db:"org_id" json:"org_id"`
-	ThreadID   *uuid.UUID      `db:"thread_id" json:"thread_id,omitempty"`
-	Timestamp  time.Time       `db:"timestamp" json:"created_at"`
-	Level      SessionLogLevel `db:"level" json:"level"`
-	Message    string          `db:"message" json:"message"`
-	Metadata   json.RawMessage `db:"metadata" json:"metadata,omitempty"`
-	TurnNumber int             `db:"turn_number" json:"turn_number"`
+	ID              int64           `db:"id" json:"id"`
+	SessionID       uuid.UUID       `db:"session_id" json:"session_id"`
+	OrgID           uuid.UUID       `db:"org_id" json:"org_id"`
+	ThreadID        *uuid.UUID      `db:"thread_id" json:"thread_id,omitempty"`
+	Timestamp       time.Time       `db:"timestamp" json:"created_at"`
+	Level           SessionLogLevel `db:"level" json:"level"`
+	Message         string          `db:"message" json:"message"`
+	Metadata        json.RawMessage `db:"metadata" json:"metadata,omitempty"`
+	TurnNumber      int             `db:"turn_number" json:"turn_number"`
+	ActivityPhaseID *uuid.UUID      `db:"activity_phase_id" json:"activity_phase_id,omitempty"`
 
 	MessageBytes     int  `db:"-" json:"message_bytes,omitempty"`
 	MessageChars     int  `db:"-" json:"message_chars,omitempty"`
@@ -861,20 +862,21 @@ func (s SessionMessageSource) Validate() error {
 }
 
 type SessionMessage struct {
-	ID          int64                  `db:"id" json:"id"`
-	SessionID   uuid.UUID              `db:"session_id" json:"session_id"`
-	OrgID       uuid.UUID              `db:"org_id" json:"org_id"`
-	ThreadID    *uuid.UUID             `db:"thread_id" json:"thread_id,omitempty"`
-	UserID      *uuid.UUID             `db:"user_id" json:"user_id,omitempty"`
-	TurnNumber  int                    `db:"turn_number" json:"turn_number"`
-	Role        MessageRole            `db:"role" json:"role"`
-	Content     string                 `db:"content" json:"content"`
-	Attachments []string               `db:"attachments" json:"attachments,omitempty"`
-	References  SessionInputReferences `db:"references" json:"references,omitempty"`
-	Commands    SessionInputCommands   `db:"commands" json:"commands,omitempty"`
-	TokenUsage  json.RawMessage        `db:"token_usage" json:"token_usage,omitempty"`
-	Source      SessionMessageSource   `db:"source" json:"source,omitempty"`
-	CreatedAt   time.Time              `db:"created_at" json:"created_at"`
+	ID              int64                  `db:"id" json:"id"`
+	SessionID       uuid.UUID              `db:"session_id" json:"session_id"`
+	OrgID           uuid.UUID              `db:"org_id" json:"org_id"`
+	ThreadID        *uuid.UUID             `db:"thread_id" json:"thread_id,omitempty"`
+	UserID          *uuid.UUID             `db:"user_id" json:"user_id,omitempty"`
+	TurnNumber      int                    `db:"turn_number" json:"turn_number"`
+	Role            MessageRole            `db:"role" json:"role"`
+	Content         string                 `db:"content" json:"content"`
+	Attachments     []string               `db:"attachments" json:"attachments,omitempty"`
+	References      SessionInputReferences `db:"references" json:"references,omitempty"`
+	Commands        SessionInputCommands   `db:"commands" json:"commands,omitempty"`
+	TokenUsage      json.RawMessage        `db:"token_usage" json:"token_usage,omitempty"`
+	Source          SessionMessageSource   `db:"source" json:"source,omitempty"`
+	CreatedAt       time.Time              `db:"created_at" json:"created_at"`
+	ActivityPhaseID *uuid.UUID             `db:"activity_phase_id" json:"activity_phase_id,omitempty"`
 }
 
 // ThreadCreatedBySource identifies what or who created a session thread.
