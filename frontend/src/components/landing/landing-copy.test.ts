@@ -29,16 +29,27 @@ describe("landing copy", () => {
     expect(codeReviewSummary.heading).toBe(
       "Code review that approves the pull requests it should.",
     );
-    expect(codeReviewSummary.body).toContain("Review is now the bottleneck.");
+    expect(codeReviewSummary.body).toContain("Reviewing it is the bottleneck.");
   });
 
-  it("focuses the review controls on policy tuning and reviewer choice", () => {
+  it("focuses the review controls on policy tuning and reviewer model choice", () => {
     expect(codeReviewControls).toEqual([
-      "Approval thresholds, sensitive paths, and required checks are yours to tune",
-      "Raise the auto-approval rate by tightening policy, not by trusting the model more",
-      "Run one reviewer agent or several in parallel — Codex, Claude Code, OpenCode",
-      "Set each reviewer's model and reasoning depth to balance cost and quality",
+      "Tune thresholds, sensitive paths, and required checks",
+      "Raise the auto-approval rate by tightening policy",
+      "Choose reviewer models: Codex, Claude Code, OpenCode",
+      "Set reasoning depth per reviewer to control cost",
     ]);
+  });
+
+  it("keeps the landing copy free of em-dashes", () => {
+    const flatten = (value: unknown): string =>
+      typeof value === "string"
+        ? value
+        : value && typeof value === "object"
+          ? Object.values(value).map(flatten).join(" ")
+          : "";
+
+    expect(flatten({ ...landingCopy })).not.toContain("—");
   });
 
   it("shows both the auto-approval and the escalation path", () => {

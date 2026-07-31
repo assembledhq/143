@@ -15,7 +15,7 @@ describe("CodeReviewSection", () => {
     expect(heading.className).toContain(landingTypography.sectionTitle);
     expect(screen.getByText("01 Code review")).toBeInTheDocument();
     expect(
-      screen.getByText(/Review is now the bottleneck/),
+      screen.getByText(/Reviewing it is the bottleneck/),
     ).toBeInTheDocument();
   });
 
@@ -40,23 +40,23 @@ describe("CodeReviewSection", () => {
     expect(screen.getByText(/Auth-sensitive paths changed/)).toBeInTheDocument();
   });
 
-  it("focuses the copy column on policy tuning and reviewer choice", () => {
+  it("focuses the copy column on policy tuning and reviewer model choice", () => {
     render(<CodeReviewSection isDark={false} />);
 
     expect(
       screen.getByRole("heading", {
         level: 3,
-        name: "Tune the policy. Pick the reviewers.",
+        name: "Tune the policy. Pick the reviewer models.",
       }),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/thresholds, sensitive paths, and required checks/),
+      screen.getByText(/The reviewers are coding agents, not people/),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/Run one reviewer agent or several in parallel/),
+      screen.getByText(/Choose reviewer models: Codex, Claude Code, OpenCode/),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/model and reasoning depth to balance cost and quality/),
+      screen.getByText(/Set reasoning depth per reviewer to control cost/),
     ).toBeInTheDocument();
     expect(screen.queryAllByRole("heading", { level: 3 })).toHaveLength(1);
   });

@@ -170,14 +170,13 @@ export default function CodeReviewSection({ isDark }: CodeReviewSectionProps) {
 
           <div className={layout.copyColumn}>
             <h3 className={`${type.featureTitle} ${heading}`}>
-              Tune the policy. Pick the reviewers.
+              Tune the policy. Pick the reviewer models.
             </h3>
             <p className={`${type.body} ${layout.copyBody} ${body}`}>
-              Approval is decided by a policy you tune — size thresholds,
-              sensitive paths, required checks, description requirements — with
-              the evidence kept inspectable. The review itself is staffed by
-              agents you choose: one economical reviewer or several in parallel,
-              each with its own model and reasoning depth.
+              Approval follows a policy you control: size limits, sensitive
+              paths, required checks, description rules. The reviewers are
+              coding agents, not people. Run one model to keep reviews cheap, or
+              several in parallel for higher confidence.
             </p>
             <ul className="grid gap-2 pt-2">
               {codeReviewControls.map((control) => (
