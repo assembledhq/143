@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { ChartNoAxesColumnIncreasing } from "lucide-react";
+import { DataTableSummaryRow } from "@/components/data-table-summary-row";
 import { EmptyState } from "@/components/empty-state";
 import { SectionGroup } from "@/components/section-group";
 import { Badge } from "@/components/ui/badge";
@@ -65,6 +66,13 @@ function roundedMetric(value: number | null): string {
 function signedRoundedMetric(value: number | null, sign: "+" | "-"): string {
   const formatted = roundedMetric(value);
   return formatted === "—" ? formatted : `${sign}${formatted}`;
+}
+
+// Cell aria-labels replace the visible text for assistive tech, so they must
+// keep the sign and avoid announcing the "—" placeholder as a value.
+function medianAriaLabel(value: number | null, sign: "+" | "-", noun: string): string {
+  const formatted = signedRoundedMetric(value, sign);
+  return formatted === "—" ? `No ${noun} data overall` : `${formatted} ${noun} overall`;
 }
 
 function reasonLabel(code: string): string {
@@ -361,6 +369,41 @@ export function CodeReviewAnalyticsReport({
                   </TableRow>
                 ))}
               </TableBody>
+              <DataTableSummaryRow
+                description="Across all completed reviews matching the current repository and time filters."
+                cells={[
+                  {
+                    content: summary.reviews_completed.toLocaleString(),
+                    className: "text-right",
+                    ariaLabel: `${summary.reviews_completed.toLocaleString()} completed reviews overall`,
+                  },
+                  {
+                    content: summary.automatically_approved.toLocaleString(),
+                    className: "text-right",
+                    ariaLabel: `${summary.automatically_approved.toLocaleString()} automatically approved reviews overall`,
+                  },
+                  {
+                    content: summary.not_approved.toLocaleString(),
+                    className: "text-right",
+                    ariaLabel: `${summary.not_approved.toLocaleString()} not approved reviews overall`,
+                  },
+                  {
+                    content: percentage(summary.automatically_approved, summary.reviews_completed),
+                    className: "text-right",
+                    ariaLabel: `${percentage(summary.automatically_approved, summary.reviews_completed)} overall approval rate`,
+                  },
+                  {
+                    content: signedRoundedMetric(summary.median_additions, "+"),
+                    className: "text-right",
+                    ariaLabel: medianAriaLabel(summary.median_additions, "+", "median additions"),
+                  },
+                  {
+                    content: signedRoundedMetric(summary.median_deletions, "-"),
+                    className: "text-right",
+                    ariaLabel: medianAriaLabel(summary.median_deletions, "-", "median deletions"),
+                  },
+                ]}
+              />
             </Table>
           </Card>
         )}

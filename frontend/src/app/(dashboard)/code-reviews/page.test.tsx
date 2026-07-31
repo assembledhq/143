@@ -663,6 +663,21 @@ describe("CodeReviewsPage", () => {
       "+52",
       "-20",
     ]);
+    const overallRow = within(authorTable).getByRole("row", { name: /Overall/i });
+    expect(overallRow.closest("tfoot")).not.toBeNull();
+    expect(within(overallRow).getByRole("rowheader")).toHaveTextContent("Overall");
+    expect(within(overallRow).getAllByRole("cell").map((cell) => cell.textContent)).toEqual([
+      "28",
+      "17",
+      "11",
+      "61%",
+      "+70",
+      "-26",
+    ]);
+    expect(within(overallRow).queryByRole("link")).not.toBeInTheDocument();
+    expect(within(overallRow).getByRole("cell", { name: "+70 median additions overall" })).toBeInTheDocument();
+    expect(within(overallRow).getByRole("cell", { name: "-26 median deletions overall" })).toBeInTheDocument();
+    expect(within(overallRow).getByRole("button", { name: "About this summary" })).toBeInTheDocument();
     expect(within(anyaRow).getByRole("link", { name: "12 completed reviews by anya" })).toHaveAttribute(
       "href",
       "/code-reviews?tab=reviews&author=anya&status=completed&range=30d",
@@ -696,6 +711,60 @@ describe("CodeReviewsPage", () => {
 
     expect(await screen.findByRole("tab", { name: "Analytics" })).toHaveAttribute("data-state", "active");
     expect(await screen.findByText("Usage by PR author")).toBeInTheDocument();
+  });
+
+  it("marks overall medians as unavailable when no change breakdown was captured", async () => {
+    // Author and summary medians come from percentile_cont over the same
+    // filtered set, so an absent breakdown has to be absent at both levels.
+    const analyticsWithoutMedians: CodeReviewAnalytics = {
+      ...reviewAnalytics,
+      summary: {
+        ...reviewAnalytics.summary,
+        reviews_with_change_breakdown: 0,
+        average_additions: null,
+        median_additions: null,
+        average_deletions: null,
+        median_deletions: null,
+      },
+      authors: reviewAnalytics.authors.map((author) => ({
+        ...author,
+        reviews_with_change_breakdown: 0,
+        average_additions: null,
+        median_additions: null,
+        average_deletions: null,
+        median_deletions: null,
+      })),
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews/analytics", () =>
+        HttpResponse.json({ data: analyticsWithoutMedians } satisfies SingleResponse<CodeReviewAnalytics>)),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, { searchParams: { tab: "analytics" } });
+
+    const authorTable = await screen.findByRole("table", { name: "Code review analytics by PR author" });
+    const overallRow = within(authorTable).getByRole("row", { name: /Overall/i });
+    expect(within(overallRow).getAllByRole("cell").map((cell) => cell.textContent)).toEqual([
+      "28",
+      "17",
+      "11",
+      "61%",
+      "—",
+      "—",
+    ]);
+    expect(within(overallRow).getByRole("cell", { name: "No median additions data overall" })).toBeInTheDocument();
+    expect(within(overallRow).getByRole("cell", { name: "No median deletions data overall" })).toBeInTheDocument();
+    const anyaRow = within(authorTable).getByRole("row", { name: /anya/i });
+    expect(within(anyaRow).getAllByRole("cell").map((cell) => cell.textContent)).toEqual([
+      "anya",
+      "12",
+      "9",
+      "3",
+      "75%",
+      "—",
+      "—",
+    ]);
   });
 
   it("shows failed and stale attempts when no review completed", async () => {
