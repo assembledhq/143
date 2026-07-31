@@ -259,6 +259,30 @@ groups:
           summary: 'Session reaper errors elevated'
           description: 'The session reaper logged {{ $value }} errors in the last 15 minutes.'
           runbook: 'Reaper errors usually indicate DB pressure or stale rows it cannot reconcile. Check DB health and recent reaper code paths.'
+      - alert: StrandedActivityPhases
+        expr: '_time:10m level:warn AND _msg:"activity phase reconciliation found running phases without valid runtime leases" | stats count() as detections | filter detections:>2'
+        for: 2m
+        labels:
+          service: worker
+          severity: warning
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Session activity phases remain stranded'
+          description: 'The activity-phase reconciler repeatedly found running phases without valid runtime leases.'
+          runbook: 'Inspect worker logs for stranded_phase_count, then query session_activity_phases joined to thread_runtimes and session_threads. Runtime-less phases on active threads are alert-only and require lifecycle investigation.'
+      - alert: ActivityPhaseReconciliationFailures
+        expr: '_time:10m level:error AND (_msg:"failed to reconcile stranded activity phase" OR _msg:"reaper: failed to reconcile stranded activity phases" OR _msg:"reaper: failed to reconcile acknowledged inbox delivery batches") | stats count() as failures | filter failures:>0'
+        for: 1m
+        labels:
+          service: worker
+          severity: critical
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Session activity lifecycle reconciliation failed'
+          description: '{{ $value }} activity-phase or acknowledged-batch reconciliation failures occurred in the last 10 minutes.'
+          runbook: 'Inspect the matching worker logs and verify phase/batch constraints, runtime leases, and database health before manually changing lifecycle rows.'
 
 # Scheduler heartbeat and queue backlog alerts are intentionally not yet
 # encoded here. The current system does not emit a dedicated scheduler

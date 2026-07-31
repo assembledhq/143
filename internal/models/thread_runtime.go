@@ -211,6 +211,7 @@ type ThreadInboxEntry struct {
 	AcceptedAt       time.Time                `db:"accepted_at" json:"accepted_at"`
 	DeliveredAt      *time.Time               `db:"delivered_at" json:"delivered_at,omitempty"`
 	AckedAt          *time.Time               `db:"acked_at" json:"acked_at,omitempty"`
+	AppliedAt        *time.Time               `db:"applied_at" json:"applied_at,omitempty"`
 	CreatedAt        time.Time                `db:"created_at" json:"created_at"`
 	UpdatedAt        time.Time                `db:"updated_at" json:"updated_at"`
 }

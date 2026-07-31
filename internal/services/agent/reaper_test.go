@@ -119,6 +119,33 @@ type reaperMockRuntimeLeaseReclaimer struct {
 	seenMaxBatch int
 }
 
+type reaperMockActivityPhaseReconciler struct {
+	called            bool
+	seenBefore        time.Time
+	seenMaxBatch      int
+	count             int
+	err               error
+	batchCalled       bool
+	batchSeenBefore   time.Time
+	batchSeenMaxBatch int
+	batchCount        int
+	batchErr          error
+}
+
+func (m *reaperMockActivityPhaseReconciler) ReconcileAbandonedInboxBatches(_ context.Context, before time.Time, limit int) (int, error) {
+	m.batchCalled = true
+	m.batchSeenBefore = before
+	m.batchSeenMaxBatch = limit
+	return m.batchCount, m.batchErr
+}
+
+func (m *reaperMockActivityPhaseReconciler) ReconcileAllStrandedPhases(_ context.Context, before time.Time, limit int) (int, error) {
+	m.called = true
+	m.seenBefore = before
+	m.seenMaxBatch = limit
+	return m.count, m.err
+}
+
 func (m *reaperMockRuntimeLeaseReclaimer) ReclaimExpiredLeases(_ context.Context, before time.Time, maxBatch int) (ThreadRuntimeLeaseReclaimResult, error) {
 	m.called = true
 	m.seenBefore = before
@@ -230,6 +257,24 @@ func TestReapPhase0_ReclaimsExpiredThreadRuntimeLeases(t *testing.T) {
 	require.True(t, reclaimer.called, "reaper should reclaim expired thread runtime leases each tick")
 	require.WithinDuration(t, time.Now(), reclaimer.seenBefore, 5*time.Second, "reaper should reclaim runtimes expired before now")
 	require.Equal(t, defaultThreadRuntimeReclaimBatchSize, reclaimer.seenMaxBatch, "reaper should bound runtime lease recovery work per tick")
+}
+
+func TestReapPhase0_ReconcilesStrandedActivityPhases(t *testing.T) {
+	t.Parallel()
+
+	reconciler := &reaperMockActivityPhaseReconciler{count: 2}
+	reaper := NewSessionReaper(&reaperMockSessionLister{}, &reaperMockSnapshotStore{}, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop(),
+		WithActivityPhaseReconciler(reconciler),
+	)
+
+	reaper.reap(context.Background())
+
+	require.True(t, reconciler.called, "reaper should reconcile stranded activity phases each tick")
+	require.WithinDuration(t, time.Now().Add(-defaultRuntimeStallAge), reconciler.seenBefore, 5*time.Second, "reaper should apply the runtime recovery window")
+	require.Equal(t, defaultActivityPhaseReconcileBatchSize, reconciler.seenMaxBatch, "reaper should bound activity phase reconciliation work per tick")
+	require.True(t, reconciler.batchCalled, "reaper should reconcile acknowledged inbox delivery batches each tick")
+	require.WithinDuration(t, reconciler.seenBefore, reconciler.batchSeenBefore, time.Second, "phase and batch reconciliation should share one recovery cutoff")
+	require.Equal(t, defaultActivityPhaseReconcileBatchSize, reconciler.batchSeenMaxBatch, "reaper should bound inbox batch reconciliation work per tick")
 }
 
 func TestReapPhase0_5_FailsStaleRunningSessions(t *testing.T) {
