@@ -1,8 +1,7 @@
-export const codeReviewSummary = {
+export const reviewProblem = {
   step: "01",
-  kicker: "Code review",
-  heading: "Code review that approves the pull requests it should.",
-  body: "Request 143 Code Reviewer on a pull request and several coding agents review it in parallel. When the change clears your policy and no blocking finding remains, 143 submits a real GitHub approval with the evidence attached. When it does not, the pull request comes back with inline findings and the specific reason a human is still needed.",
+  kicker: "Why this matters",
+  heading: "Agents made code faster to write. Review is where it piles up.",
 };
 
 export const reviewBottlenecks = [
@@ -12,11 +11,18 @@ export const reviewBottlenecks = [
   "Stacks stuck in review for days while generation sprints ahead",
 ];
 
-export const codeReviewOutcomes = [
-  "Reviews finish in minutes, not days",
-  "Policy is enforced the same way on every pull request",
-  "Hard feedback lands without the interpersonal cost",
-  "Acceptable-risk changes merge on the spot",
+export const codeReviewSummary = {
+  step: "02",
+  kicker: "Code review",
+  heading: "Code review that approves the pull requests it should.",
+  body: "Request 143 Code Reviewer on a pull request and several coding agents review it in parallel. When the change clears your policy and no blocking finding remains, 143 submits a real GitHub approval with the evidence attached. When it does not, the pull request comes back with inline findings and the specific reason a human is still needed.",
+};
+
+export const codeReviewControls = [
+  "Approval thresholds, sensitive paths, and required checks are yours to tune",
+  "Raise the auto-approval rate by tightening policy, not by trusting the model more",
+  "Run one reviewer agent or several in parallel — Codex, Claude Code, OpenCode",
+  "Set each reviewer's model and reasoning depth to balance cost and quality",
 ];
 
 export const codeReviewApproval = {
@@ -45,7 +51,7 @@ export const codeReviewEscalation = {
 
 export const platformLayers = [
   {
-    step: "03",
+    step: "04",
     kicker: "Context",
     title: "Team context",
     heading: "Shared context for every run.",
@@ -58,7 +64,7 @@ export const platformLayers = [
     ],
   },
   {
-    step: "04",
+    step: "05",
     kicker: "Execution",
     title: "Cloud execution",
     heading: "Run agents from anywhere.",
@@ -71,7 +77,7 @@ export const platformLayers = [
     ],
   },
   {
-    step: "05",
+    step: "06",
     kicker: "Control",
     title: "Repair loops",
     heading: "Arrive at review already clean.",
@@ -84,7 +90,7 @@ export const platformLayers = [
     ],
   },
   {
-    step: "06",
+    step: "07",
     kicker: "Previews",
     title: "Cloud previews",
     heading: "Preview every change in the cloud.",

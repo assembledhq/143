@@ -4,16 +4,29 @@ import CodeReviewSection from "./code-review-section";
 import { landingTypography } from "./landing-typography";
 
 describe("CodeReviewSection", () => {
-  it("leads the homepage story with automated code review", () => {
+  it("leads with the review bottleneck, then automated code review", () => {
     render(<CodeReviewSection isDark={false} />);
 
-    const heading = screen.getByRole("heading", {
+    const problemHeading = screen.getByRole("heading", {
+      level: 2,
+      name: "Agents made code faster to write. Review is where it piles up.",
+    });
+    const answerHeading = screen.getByRole("heading", {
       level: 2,
       name: "Code review that approves the pull requests it should.",
     });
 
-    expect(heading.className).toContain(landingTypography.sectionTitle);
-    expect(screen.getByText("01 Code review")).toBeInTheDocument();
+    expect(problemHeading.className).toContain(landingTypography.sectionTitle);
+    expect(answerHeading.className).toContain(landingTypography.sectionTitle);
+    expect(
+      problemHeading.compareDocumentPosition(answerHeading) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(screen.getByText("01 Why this matters")).toBeInTheDocument();
+    expect(screen.getByText("02 Code review")).toBeInTheDocument();
+    expect(
+      screen.getByText(/More pull requests than review capacity/),
+    ).toBeInTheDocument();
   });
 
   it("shows the auto-approval verdict with the evidence behind it", () => {
@@ -37,20 +50,23 @@ describe("CodeReviewSection", () => {
     expect(screen.getByText(/Auth-sensitive paths changed/)).toBeInTheDocument();
   });
 
-  it("lists the outcomes as supporting bullets instead of extra cards", () => {
+  it("focuses the copy column on policy tuning and reviewer choice", () => {
     render(<CodeReviewSection isDark={false} />);
 
     expect(
-      screen.getByText(/Reviews finish in minutes, not days/),
+      screen.getByRole("heading", {
+        level: 3,
+        name: "Tune the policy. Pick the reviewers.",
+      }),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/Policy is enforced the same way on every pull request/),
+      screen.getByText(/thresholds, sensitive paths, and required checks/),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/Hard feedback lands without the interpersonal cost/),
+      screen.getByText(/Run one reviewer agent or several in parallel/),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/Acceptable-risk changes merge on the spot/),
+      screen.getByText(/model and reasoning depth to balance cost and quality/),
     ).toBeInTheDocument();
     expect(screen.queryAllByRole("heading", { level: 3 })).toHaveLength(1);
   });

@@ -3,13 +3,14 @@ import * as landingCopy from "./landing-copy";
 import {
   agentChoiceHighlights,
   codeReviewApproval,
+  codeReviewControls,
   codeReviewEscalation,
-  codeReviewOutcomes,
   codeReviewSummary,
-  reviewBottlenecks,
   codingAgents,
   integrations,
   platformLayers,
+  reviewBottlenecks,
+  reviewProblem,
 } from "./landing-copy";
 
 describe("landing copy", () => {
@@ -17,18 +18,24 @@ describe("landing copy", () => {
     expect("heroMetrics" in landingCopy).toBe(false);
   });
 
-  it("numbers platform layers after the code-review and why-this-matters sections", () => {
+  it("numbers platform layers after the problem, code-review, and platform headers", () => {
     expect(platformLayers.map((layer) => `${layer.step} ${layer.title}`)).toEqual([
-      "03 Team context",
-      "04 Cloud execution",
-      "05 Repair loops",
-      "06 Cloud previews",
+      "04 Team context",
+      "05 Cloud execution",
+      "06 Repair loops",
+      "07 Cloud previews",
     ]);
   });
 
-  it("opens the homepage story with code review", () => {
+  it("opens the homepage story with the review bottleneck, then code review", () => {
+    expect(`${reviewProblem.step} ${reviewProblem.kicker}`).toBe(
+      "01 Why this matters",
+    );
+    expect(reviewProblem.heading).toBe(
+      "Agents made code faster to write. Review is where it piles up.",
+    );
     expect(`${codeReviewSummary.step} ${codeReviewSummary.kicker}`).toBe(
-      "01 Code review",
+      "02 Code review",
     );
     expect(codeReviewSummary.heading).toBe(
       "Code review that approves the pull requests it should.",
@@ -44,14 +51,13 @@ describe("landing copy", () => {
     ]);
   });
 
-  it("answers each bottleneck with a code review outcome", () => {
-    expect(codeReviewOutcomes).toEqual([
-      "Reviews finish in minutes, not days",
-      "Policy is enforced the same way on every pull request",
-      "Hard feedback lands without the interpersonal cost",
-      "Acceptable-risk changes merge on the spot",
+  it("focuses the review controls on policy tuning and reviewer choice", () => {
+    expect(codeReviewControls).toEqual([
+      "Approval thresholds, sensitive paths, and required checks are yours to tune",
+      "Raise the auto-approval rate by tightening policy, not by trusting the model more",
+      "Run one reviewer agent or several in parallel — Codex, Claude Code, OpenCode",
+      "Set each reviewer's model and reasoning depth to balance cost and quality",
     ]);
-    expect(codeReviewOutcomes).toHaveLength(reviewBottlenecks.length);
   });
 
   it("shows both the auto-approval and the escalation path", () => {

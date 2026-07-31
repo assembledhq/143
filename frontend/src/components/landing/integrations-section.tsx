@@ -82,7 +82,7 @@ export default function IntegrationsSection({
     >
       <div className="mx-auto max-w-5xl">
         <div className="grid gap-8 lg:grid-cols-[0.38fr_0.62fr] lg:items-end">
-          <p className={`${type.eyebrow} ${label}`}>08 Coding agents</p>
+          <p className={`${type.eyebrow} ${label}`}>09 Coding agents</p>
           <div className="space-y-5">
             <h2 className={`max-w-3xl ${type.featureTitle} ${heading}`}>
               Run any coding agent.
@@ -126,7 +126,7 @@ export default function IntegrationsSection({
         </div>
 
         <div className="mt-28 grid gap-8 lg:grid-cols-[0.38fr_0.62fr] lg:items-end">
-          <p className={`${type.eyebrow} ${label}`}>09 Integrations</p>
+          <p className={`${type.eyebrow} ${label}`}>10 Integrations</p>
           <div className="space-y-5">
             <h2 className={`max-w-3xl ${type.featureTitle} ${heading}`}>
               Connect your engineering tools.

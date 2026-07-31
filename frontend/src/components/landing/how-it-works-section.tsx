@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import { useInView } from "@/hooks/use-in-view";
-import { platformLayers, reviewBottlenecks } from "./landing-copy";
+import { platformLayers } from "./landing-copy";
 import { landingLayout as layout } from "./landing-layout";
 import { landingScreenshots } from "./landing-screenshots";
 import { landingTypography as type } from "./landing-typography";
@@ -122,12 +122,12 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
 
       <div className={`${layout.pageShell} space-y-28 sm:space-y-44`}>
         <div className={layout.sectionHeaderGrid}>
-          <p className={`${type.eyebrow} ${label}`}>02 Why this matters</p>
+          <p className={`${type.eyebrow} ${label}`}>03 The platform</p>
           <div className="space-y-5">
             <h2 className={`max-w-3xl ${type.sectionTitle} ${heading}`}>
-              Agents made code faster to write. Review is where it piles up.
+              Individual coding agents create scattered work. Teams need one
+              place to run, review, and schedule it.
             </h2>
-            <AnimatedBulletList items={reviewBottlenecks} isDark={isDark} />
             <p className={`max-w-2xl ${type.body} ${body}`}>
               143 turns scattered local runs and one-off fixes into a shared
               system with context, previews, repair loops, and history the
@@ -242,7 +242,7 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
           <div className={layout.featureRow}>
             <div className={layout.copyColumn}>
               <p className={`${type.eyebrow} ${label}`}>
-                07 Workspace
+                08 Workspace
               </p>
               <h2 className={`${type.featureTitle} ${heading}`}>
                 See every run in one workspace.

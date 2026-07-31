@@ -5,9 +5,11 @@ import { ArrowRight, Check, CircleDot } from "lucide-react";
 import { useInView } from "@/hooks/use-in-view";
 import {
   codeReviewApproval,
+  codeReviewControls,
   codeReviewEscalation,
-  codeReviewOutcomes,
   codeReviewSummary,
+  reviewBottlenecks,
+  reviewProblem,
 } from "./landing-copy";
 import { landingLayout as layout } from "./landing-layout";
 import { landingTypography as type } from "./landing-typography";
@@ -141,6 +143,24 @@ export default function CodeReviewSection({ isDark }: CodeReviewSectionProps) {
       <div className={`${layout.pageShell} space-y-16 sm:space-y-24`}>
         <div className={layout.sectionHeaderGrid}>
           <p className={`${type.eyebrow} ${label}`}>
+            {reviewProblem.step} {reviewProblem.kicker}
+          </p>
+          <div className="space-y-5">
+            <h2 className={`max-w-3xl ${type.sectionTitle} ${heading}`}>
+              {reviewProblem.heading}
+            </h2>
+            <ul className="grid gap-2 pt-2">
+              {reviewBottlenecks.map((item) => (
+                <li key={item} className={`text-xs font-mono ${body}`}>
+                  · {item}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+
+        <div className={layout.sectionHeaderGrid}>
+          <p className={`${type.eyebrow} ${label}`}>
             {codeReviewSummary.step} {codeReviewSummary.kicker}
           </p>
           <div className="space-y-5">
@@ -170,18 +190,19 @@ export default function CodeReviewSection({ isDark }: CodeReviewSectionProps) {
 
           <div className={layout.copyColumn}>
             <h3 className={`${type.featureTitle} ${heading}`}>
-              Auto-approval, backed by evidence.
+              Tune the policy. Pick the reviewers.
             </h3>
             <p className={`${type.body} ${layout.copyBody} ${body}`}>
-              The approval decision is made from explicit evidence, not a
-              model&apos;s recommendation. Every safeguard in your policy has to
-              pass first, and the reviewed commit, policy version, and agent
-              output stay inspectable afterward.
+              Approval is decided by a policy you tune — size thresholds,
+              sensitive paths, required checks, description requirements — with
+              the evidence kept inspectable. The review itself is staffed by
+              agents you choose: one economical reviewer or several in parallel,
+              each with its own model and reasoning depth.
             </p>
             <ul className="grid gap-2 pt-2">
-              {codeReviewOutcomes.map((outcome) => (
-                <li key={outcome} className={`text-xs font-mono ${body}`}>
-                  · {outcome}
+              {codeReviewControls.map((control) => (
+                <li key={control} className={`text-xs font-mono ${body}`}>
+                  · {control}
                 </li>
               ))}
             </ul>
