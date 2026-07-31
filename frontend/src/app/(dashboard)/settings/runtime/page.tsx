@@ -784,7 +784,7 @@ function SessionsAndCleanupSection() {
     : null;
 
   return (
-    <section className="space-y-3">
+    <section>
       <DisclosureCard
         title="Sessions and cleanup"
         description="Lifecycle, retention, preview idle behavior, and advanced agent tab coordination."
@@ -966,164 +966,161 @@ function ResourceDefaultsSection() {
   const advancedSummary = `${previewMaxTier.charAt(0).toUpperCase()}${previewMaxTier.slice(1)} max · ${formatCPUCores(previewMaxCPUMillis)} cores · ${formatGiB(previewMaxMemoryMiB)}`;
 
   return (
-    <>
-      <section data-testid="sandbox-defaults-section" className="space-y-3">
-        <SectionHeader title="Sandbox defaults" status={autosave.status} />
-        <Card>
-          <CardContent>
-            <SettingRow
+    <section data-testid="sandbox-defaults-section" className="space-y-3">
+      <SectionHeader title="Sandbox defaults" status={autosave.status} />
+      <Card>
+        <CardContent>
+          <SettingRow
+            id="agent-default-tier"
+            label="Agent sandbox size"
+            description="Choose the default sandbox tier for new coding-agent sessions."
+            tooltip="Repositories can still influence preview resources separately."
+          >
+            <ResourceTierSelect
               id="agent-default-tier"
               label="Agent sandbox size"
-              description="Choose the default sandbox tier for new coding-agent sessions."
-              tooltip="Repositories can still influence preview resources separately."
-            >
-              <ResourceTierSelect
-                id="agent-default-tier"
-                label="Agent sandbox size"
-                value={agentDefaultTier}
-                onChange={(value) => {
-                  autosave.save({
-                    settings: {
-                      sandbox_resources: { agent_default_tier: value },
-                    },
-                  });
-                }}
-              />
-            </SettingRow>
-            <SettingRow
+              value={agentDefaultTier}
+              onChange={(value) => {
+                autosave.save({
+                  settings: {
+                    sandbox_resources: { agent_default_tier: value },
+                  },
+                });
+              }}
+            />
+          </SettingRow>
+          <SettingRow
+            id="preview-default-tier"
+            label="Preview sandbox size"
+            description="Choose the default preview tier when repository config does not request one."
+            tooltip="This default applies before repository-specific preview requests are considered."
+          >
+            <ResourceTierSelect
               id="preview-default-tier"
               label="Preview sandbox size"
-              description="Choose the default preview tier when repository config does not request one."
-              tooltip="This default applies before repository-specific preview requests are considered."
-            >
-              <ResourceTierSelect
-                id="preview-default-tier"
-                label="Preview sandbox size"
-                value={previewDefaultTier}
-                onChange={(value) => {
-                  autosave.save({
-                    settings: {
-                      sandbox_resources: { preview_default_tier: value },
-                    },
-                  });
-                }}
-              />
-            </SettingRow>
-            <SettingRow
+              value={previewDefaultTier}
+              onChange={(value) => {
+                autosave.save({
+                  settings: {
+                    sandbox_resources: { preview_default_tier: value },
+                  },
+                });
+              }}
+            />
+          </SettingRow>
+          <SettingRow
+            id="allow-repo-resource-requests"
+            label="Allow repository resource requests"
+            description="Let repository preview config request CPU, memory, and disk up to org limits."
+            tooltip="Disable this to force previews to use the organization preview default tier."
+          >
+            <Switch
               id="allow-repo-resource-requests"
-              label="Allow repository resource requests"
-              description="Let repository preview config request CPU, memory, and disk up to org limits."
-              tooltip="Disable this to force previews to use the organization preview default tier."
-            >
-              <Switch
-                id="allow-repo-resource-requests"
-                checked={allowRepoResourceRequests}
-                onCheckedChange={(checked) => {
-                  autosave.save({
-                    settings: {
-                      sandbox_resources: {
-                        allow_repo_resource_requests: checked,
-                      },
+              checked={allowRepoResourceRequests}
+              onCheckedChange={(checked) => {
+                autosave.save({
+                  settings: {
+                    sandbox_resources: {
+                      allow_repo_resource_requests: checked,
                     },
-                  });
-                }}
-                aria-label="Allow repository resource requests"
-                className="sm:ml-auto"
-              />
-            </SettingRow>
-            <div data-testid="advanced-resource-limits-section">
-              <DisclosureCard
-                title="Advanced resource limits"
-                description="Exact caps for repository-requested previews."
-                summary={advancedSummary}
-                open={advancedOpen}
-                onOpenChange={setAdvancedOpen}
-                variant="inset"
-                showAriaLabel="Show advanced resource limits"
-                hideAriaLabel="Hide advanced resource limits"
-                status={<AutosaveIndicator status={autosave.status} />}
+                  },
+                });
+              }}
+              aria-label="Allow repository resource requests"
+              className="sm:ml-auto"
+            />
+          </SettingRow>
+          <div data-testid="advanced-resource-limits-section">
+            <DisclosureCard
+              title="Advanced resource limits"
+              description="Exact caps for repository-requested previews."
+              summary={advancedSummary}
+              open={advancedOpen}
+              onOpenChange={setAdvancedOpen}
+              variant="inset"
+              showAriaLabel="Show advanced resource limits"
+              hideAriaLabel="Hide advanced resource limits"
+            >
+              <SettingRow
+                id="preview-max-tier"
+                label="Largest preview size"
+                description="Set the largest sandbox tier a repository preview config can request."
+                tooltip="This cap applies only when repository resource requests are allowed."
               >
-                <SettingRow
+                <ResourceTierSelect
                   id="preview-max-tier"
                   label="Largest preview size"
-                  description="Set the largest sandbox tier a repository preview config can request."
-                  tooltip="This cap applies only when repository resource requests are allowed."
-                >
-                  <ResourceTierSelect
-                    id="preview-max-tier"
-                    label="Largest preview size"
-                    value={previewMaxTier}
-                    onChange={(value) => {
-                      autosave.save({
-                        settings: {
-                          sandbox_resources: { preview_max_tier: value },
-                        },
-                      });
-                    }}
-                  />
-                </SettingRow>
-                <SettingRow
+                  value={previewMaxTier}
+                  onChange={(value) => {
+                    autosave.save({
+                      settings: {
+                        sandbox_resources: { preview_max_tier: value },
+                      },
+                    });
+                  }}
+                />
+              </SettingRow>
+              <SettingRow
+                id="preview-max-cpu-millis"
+                label="Preview CPU limit"
+                description="Set the largest CPU request a repository preview config can make."
+                helper={`Range ${formatCPUCores(MIN_PREVIEW_MAX_CPU_MILLIS)}-${formatCPUCores(MAX_PREVIEW_MAX_CPU_MILLIS)} cores`}
+                tooltip="CPU is shown in cores but saved as millicores."
+              >
+                <BoundedNumberInput
                   id="preview-max-cpu-millis"
                   label="Preview CPU limit"
-                  description="Set the largest CPU request a repository preview config can make."
-                  helper={`Range ${formatCPUCores(MIN_PREVIEW_MAX_CPU_MILLIS)}-${formatCPUCores(MAX_PREVIEW_MAX_CPU_MILLIS)} cores`}
-                  tooltip="CPU is shown in cores but saved as millicores."
-                >
-                  <BoundedNumberInput
-                    id="preview-max-cpu-millis"
-                    label="Preview CPU limit"
-                    inputMode="decimal"
-                    min={MIN_PREVIEW_MAX_CPU_MILLIS / CPU_MILLIS_PER_CORE}
-                    max={MAX_PREVIEW_MAX_CPU_MILLIS / CPU_MILLIS_PER_CORE}
-                    step={CPU_MILLIS_STEP / CPU_MILLIS_PER_CORE}
-                    value={previewMaxCPUField.value}
-                    onChange={previewMaxCPUField.onChange}
-                    onBlur={previewMaxCPUField.onBlur}
-                    unit="cores"
-                  />
-                </SettingRow>
-                <SettingRow
+                  inputMode="decimal"
+                  min={MIN_PREVIEW_MAX_CPU_MILLIS / CPU_MILLIS_PER_CORE}
+                  max={MAX_PREVIEW_MAX_CPU_MILLIS / CPU_MILLIS_PER_CORE}
+                  step={CPU_MILLIS_STEP / CPU_MILLIS_PER_CORE}
+                  value={previewMaxCPUField.value}
+                  onChange={previewMaxCPUField.onChange}
+                  onBlur={previewMaxCPUField.onBlur}
+                  unit="cores"
+                />
+              </SettingRow>
+              <SettingRow
+                id="preview-max-memory-mib"
+                label="Preview memory limit"
+                description="Set the largest memory request a repository preview config can make."
+                helper={`Range ${MIN_PREVIEW_MAX_MEMORY_MIB}-${MAX_PREVIEW_MAX_MEMORY_MIB} MiB`}
+                tooltip="Use this to bound memory-heavy preview services without changing default tiers."
+              >
+                <BoundedNumberInput
                   id="preview-max-memory-mib"
                   label="Preview memory limit"
-                  description="Set the largest memory request a repository preview config can make."
-                  helper={`Range ${MIN_PREVIEW_MAX_MEMORY_MIB}-${MAX_PREVIEW_MAX_MEMORY_MIB} MiB`}
-                  tooltip="Use this to bound memory-heavy preview services without changing default tiers."
-                >
-                  <BoundedNumberInput
-                    id="preview-max-memory-mib"
-                    label="Preview memory limit"
-                    min={MIN_PREVIEW_MAX_MEMORY_MIB}
-                    max={MAX_PREVIEW_MAX_MEMORY_MIB}
-                    value={previewMaxMemoryField.value}
-                    onChange={previewMaxMemoryField.onChange}
-                    onBlur={previewMaxMemoryField.onBlur}
-                    unit="MiB"
-                  />
-                </SettingRow>
-                <SettingRow
+                  min={MIN_PREVIEW_MAX_MEMORY_MIB}
+                  max={MAX_PREVIEW_MAX_MEMORY_MIB}
+                  value={previewMaxMemoryField.value}
+                  onChange={previewMaxMemoryField.onChange}
+                  onBlur={previewMaxMemoryField.onBlur}
+                  unit="MiB"
+                />
+              </SettingRow>
+              <SettingRow
+                id="preview-max-ephemeral-disk-mib"
+                label="Preview disk limit"
+                description="Set the largest temporary disk request a repository preview config can make."
+                helper={`Range ${MIN_PREVIEW_MAX_EPHEMERAL_DISK_MIB}-${MAX_PREVIEW_MAX_EPHEMERAL_DISK_MIB} MiB`}
+                tooltip="This limits ephemeral workspace disk, not persistent repository storage."
+              >
+                <BoundedNumberInput
                   id="preview-max-ephemeral-disk-mib"
                   label="Preview disk limit"
-                  description="Set the largest temporary disk request a repository preview config can make."
-                  helper={`Range ${MIN_PREVIEW_MAX_EPHEMERAL_DISK_MIB}-${MAX_PREVIEW_MAX_EPHEMERAL_DISK_MIB} MiB`}
-                  tooltip="This limits ephemeral workspace disk, not persistent repository storage."
-                >
-                  <BoundedNumberInput
-                    id="preview-max-ephemeral-disk-mib"
-                    label="Preview disk limit"
-                    min={MIN_PREVIEW_MAX_EPHEMERAL_DISK_MIB}
-                    max={MAX_PREVIEW_MAX_EPHEMERAL_DISK_MIB}
-                    value={previewMaxDiskField.value}
-                    onChange={previewMaxDiskField.onChange}
-                    onBlur={previewMaxDiskField.onBlur}
-                    unit="MiB"
-                  />
-                </SettingRow>
-              </DisclosureCard>
-            </div>
-          </CardContent>
-        </Card>
-      </section>
-    </>
+                  min={MIN_PREVIEW_MAX_EPHEMERAL_DISK_MIB}
+                  max={MAX_PREVIEW_MAX_EPHEMERAL_DISK_MIB}
+                  value={previewMaxDiskField.value}
+                  onChange={previewMaxDiskField.onChange}
+                  onBlur={previewMaxDiskField.onBlur}
+                  unit="MiB"
+                />
+              </SettingRow>
+            </DisclosureCard>
+          </div>
+        </CardContent>
+      </Card>
+    </section>
   );
 }
 

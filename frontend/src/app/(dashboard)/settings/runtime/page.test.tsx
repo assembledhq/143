@@ -321,6 +321,40 @@ describe("RuntimeSettingsPage", () => {
     expect(advancedLimits).toContainElement(diskLimit);
   });
 
+  it("separates the advanced disclosure from the preceding row with a single rule", async () => {
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    const advancedLimits = await screen.findByTestId(
+      "advanced-resource-limits-section",
+    );
+    const precedingRow = advancedLimits.previousElementSibling;
+    const advancedCard = advancedLimits.querySelector('[data-slot="card"]');
+
+    expect(precedingRow).toHaveClass("border-b");
+    expect(advancedCard).not.toHaveClass("border-t");
+  });
+
+  it("shows one autosave indicator per save scope in the sandbox defaults card", async () => {
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    const sandboxDefaults = await screen.findByTestId(
+      "sandbox-defaults-section",
+    );
+
+    expect(within(sandboxDefaults).getAllByRole("status")).toHaveLength(1);
+  });
+
+  it("keeps the lifecycle autosave indicator outside the disclosure trigger", async () => {
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    const disclosure = await screen.findByRole("button", {
+      name: "Show session lifecycle controls",
+    });
+
+    expect(within(disclosure).queryByRole("status")).not.toBeInTheDocument();
+    expect(disclosure).toHaveAttribute("aria-describedby");
+  });
+
   it("left-aligns the public IP value with the setting copy", async () => {
     renderWithProviders(<RuntimeSettingsPage />);
 
