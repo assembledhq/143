@@ -39,7 +39,7 @@ Add policy-controlled backend follow-through for two cases:
 
 Auto-readiness shipped first because it is read-only and already supports platform-triggered runs. Auto-repair now runs behind session automation policy because system-authored repair prompts and automatic attempt accounting are durable.
 
-Defaults remain off for existing orgs. New orgs default automatic conflict repair and automatic test repair on; readiness after review loop remains off by default.
+Automatic conflict repair and automatic test repair default on for every organization, including organizations whose settings predate this feature. An explicit organization or personal opt-out remains off. Readiness after review loop remains off by default.
 
 ## Implementation Status
 
@@ -90,7 +90,7 @@ Do not imply a human clicked the button.
 
 Organization defaults should live on the Organization settings page (`/settings`) in a new **Session automation** section, not under PR readiness, Agent, Runtime, or Integrations settings. This is session behavior: the trigger is "when this session becomes idle, decide the next automatic session action." PR health and readiness are inputs, but the policy is about session follow-through.
 
-Place the section near other organization-level workflow defaults, ideally above the existing `Pull requests` section so admins see it as "what sessions do next" before "how PRs are created." The section should be compact: one read-only readiness default, then a visually separate branch-writing repair default group. Repair actions commit to and push the user's PR branch, so the first enablement for either write action needs a one-time confirmation.
+Place the section near other organization-level workflow defaults, ideally above the existing `Pull requests` section so admins see it as "what sessions do next" before "how PRs are created." The section should be compact: one read-only readiness default, then a visually separate branch-writing repair default group. Repair actions commit to and push the user's PR branch, so re-enabling either write action after an explicit opt-out keeps its one-time confirmation. That confirmation no longer gates first use: both write actions now ship on by default, so the section copy has to state that outright and the rollout has to be announced outside the product rather than discovered through the toggles.
 
 Users also need a personal setting on the Account/Personal settings page. Each automatic action should offer `Use organization default`, `On`, and `Off`. `Use organization default` is the default choice and should display the effective org/repo value inline so users understand what will happen without opening organization settings.
 
@@ -205,8 +205,8 @@ Defaults:
 | Setting | Existing orgs | New orgs |
 |---|---:|---:|
 | Run readiness after clean review loop | off | off initially |
-| Resolve conflicts when idle | off | on |
-| Fix tests when idle | off | on |
+| Resolve conflicts when idle | on unless explicitly disabled | on |
+| Fix tests when idle | on unless explicitly disabled | on |
 | Max automatic attempts per head/action | 1 | 1 |
 
 User defaults are `inherit`, so organization defaults remain the team baseline until a user deliberately chooses a personal preference.
@@ -300,8 +300,9 @@ Backend `internal/models`:
 - Add `AutomaticFollowThroughOrgSettings`:
   - `ReadinessAfterReviewLoop bool json:"readiness_after_review_loop,omitempty"`
   - `ReadinessAfterReviewLoopStates []ReviewLoopStatus json:"readiness_after_review_loop_states,omitempty"`
-  - `ResolveConflictsWhenIdle bool json:"resolve_conflicts_when_idle,omitempty"`
-  - `FixTestsWhenIdle bool json:"fix_tests_when_idle,omitempty"`
+  - `ResolveConflictsWhenIdle *bool json:"resolve_conflicts_when_idle,omitempty"`
+  - `FixTestsWhenIdle *bool json:"fix_tests_when_idle,omitempty"`
+  - Absent repair flags resolve to on; explicit false values remain off.
 - Add `AutomaticFollowThroughPreference` typed string: `inherit`, `on`, `off`, with `Validate()`.
 - Add `AutomaticPRFollowThroughUserSettings` to `UserSettings`:
   - `AutomaticPRFollowThrough AutomaticPRFollowThroughUserSettings json:"automatic_pr_follow_through,omitempty"`

@@ -612,6 +612,11 @@ describe("CodeReviewsPage", () => {
     expect(within(approvalOutcomes).getByText("17")).toBeInTheDocument();
     expect(within(approvalOutcomes).getByText("11")).toBeInTheDocument();
     expect(within(approvalOutcomes).queryByText("128")).not.toBeInTheDocument();
+    const analyticsFilters = document.getElementById("code-review-analytics-filters");
+    expect(analyticsFilters).not.toBeNull();
+    expect(
+      approvalOutcomes.compareDocumentPosition(analyticsFilters as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     expect(screen.queryByText("PR size and policy fit")).not.toBeInTheDocument();
     expect(screen.getByText("Why reviews were not approved")).toBeInTheDocument();
     expect(screen.getByText("Review findings")).toBeInTheDocument();

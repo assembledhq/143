@@ -254,7 +254,7 @@ func TestPRServiceMaybeStartAutoRepairCheapNoOps(t *testing.T) {
 			setup: func(mock pgxmock.PgxPoolIface, orgID, sessionID, prID uuid.UUID, now time.Time) {
 				expectAutoRepairSession(mock, orgID, sessionID, now, models.SessionStatusCompleted)
 				expectAutoRepairPullRequest(mock, orgID, sessionID, prID, now, "head-disabled")
-				expectAutoRepairOrg(mock, orgID, json.RawMessage(`{}`), now)
+				expectAutoRepairOrg(mock, orgID, json.RawMessage(`{"session_automation":{"automatic_follow_through":{"resolve_conflicts_when_idle":false,"fix_tests_when_idle":false}}}`), now)
 			},
 			wantStatus:   AutoRepairDecisionDisabled,
 			wantPRLinked: true,
@@ -308,6 +308,70 @@ func TestPRServiceMaybeStartAutoRepairCheapNoOps(t *testing.T) {
 			require.NotNil(t, decision, "MaybeStartAutoRepair should return a decision")
 			require.Equal(t, tt.wantStatus, decision.Status, "MaybeStartAutoRepair should return the expected decision status")
 			require.Equal(t, tt.wantPRLinked, decision.PullRequestID != nil, "MaybeStartAutoRepair should include a PR ID only after a PR is loaded")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+// TestPRServiceResolveAutoRepairPolicyOrgDefaults covers the settings shapes
+// that decide whether an organization gets automatic branch-writing repair:
+// organizations whose settings predate the feature resolve on, and an explicit
+// opt-out stays off.
+func TestPRServiceResolveAutoRepairPolicyOrgDefaults(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		settings         json.RawMessage
+		wantConflictsOn  bool
+		wantTestRepairOn bool
+	}{
+		{
+			name:             "settings predating the feature default on",
+			settings:         json.RawMessage(`{}`),
+			wantConflictsOn:  true,
+			wantTestRepairOn: true,
+		},
+		{
+			name:             "unrelated session automation settings default on",
+			settings:         json.RawMessage(`{"session_automation":{"automatic_follow_through":{"pr_feedback_mode":"mentions"}}}`),
+			wantConflictsOn:  true,
+			wantTestRepairOn: true,
+		},
+		{
+			name:             "explicit opt-out stays off",
+			settings:         json.RawMessage(`{"session_automation":{"automatic_follow_through":{"resolve_conflicts_when_idle":false,"fix_tests_when_idle":false}}}`),
+			wantConflictsOn:  false,
+			wantTestRepairOn: false,
+		},
+		{
+			name:             "per-action opt-out leaves the other action on",
+			settings:         json.RawMessage(`{"session_automation":{"automatic_follow_through":{"fix_tests_when_idle":false}}}`),
+			wantConflictsOn:  true,
+			wantTestRepairOn: false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			expectAutoRepairOrg(mock, orgID, tt.settings, time.Now())
+
+			service := &PRService{orgs: db.NewOrganizationStore(mock)}
+			// A session with no triggering user keeps the personal-preference
+			// layer out of the way so this asserts the organization default.
+			policy, source, err := service.resolveAutoRepairPolicy(context.Background(), orgID, models.Session{OrgID: orgID})
+			require.NoError(t, err, "resolveAutoRepairPolicy should resolve organization defaults")
+			require.Equal(t, tt.wantConflictsOn, policy.ResolveConflicts, "organization policy should resolve automatic conflict repair correctly")
+			require.Equal(t, tt.wantTestRepairOn, policy.FixTests, "organization policy should resolve automatic test repair correctly")
+			require.Equal(t, "organization default", source, "policy source should report the organization default without a triggering user")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}

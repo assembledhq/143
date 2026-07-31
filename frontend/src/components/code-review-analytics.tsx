@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import type { ReactNode } from "react";
 import { ChartNoAxesColumnIncreasing } from "lucide-react";
 import { DataTableSummaryRow } from "@/components/data-table-summary-row";
 import { EmptyState } from "@/components/empty-state";
@@ -193,6 +194,7 @@ export function CodeReviewAnalyticsReport({
   onAuthorSort,
   reviewLinkFilters,
   onNavigateToReviews,
+  filters,
 }: {
   analytics?: CodeReviewAnalytics;
   isLoading: boolean;
@@ -206,17 +208,26 @@ export function CodeReviewAnalyticsReport({
     range: string;
   };
   onNavigateToReviews: () => void;
+  filters: ReactNode;
 }) {
   if (!analytics && isLoading) {
-    return <p className="py-12 text-center text-sm text-muted-foreground">Loading code review analytics…</p>;
+    return (
+      <div className="space-y-4">
+        {filters}
+        <p className="py-12 text-center text-sm text-muted-foreground">Loading code review analytics…</p>
+      </div>
+    );
   }
   if (!analytics) {
     return (
-      <ErrorNotice
-        title="Analytics unavailable"
-        description="The selected code review report could not be loaded."
-        action={{ label: "Retry", onClick: onRetry }}
-      />
+      <div className="space-y-4">
+        {filters}
+        <ErrorNotice
+          title="Analytics unavailable"
+          description="The selected code review report could not be loaded."
+          action={{ label: "Retry", onClick: onRetry }}
+        />
+      </div>
     );
   }
 
@@ -244,6 +255,7 @@ export function CodeReviewAnalyticsReport({
             action={{ label: "Retry", onClick: onRetry }}
           />
         ) : null}
+        {filters}
         <EmptyState
           icon={ChartNoAxesColumnIncreasing}
           title="No review attempts in this time window"
@@ -264,6 +276,7 @@ export function CodeReviewAnalyticsReport({
           />
         ) : null}
         <ApprovalOutcomeCards summary={summary} />
+        {filters}
         <EmptyState
           icon={ChartNoAxesColumnIncreasing}
           title="No completed reviews in this time window"
@@ -284,6 +297,7 @@ export function CodeReviewAnalyticsReport({
       ) : null}
 
       <ApprovalOutcomeCards summary={summary} />
+      {filters}
 
       <SectionGroup
         title="Usage by PR author"
