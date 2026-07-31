@@ -139,6 +139,7 @@ type HumanInputRequest struct {
 	AnsweredAt        *time.Time                 `db:"answered_at" json:"answered_at,omitempty"`
 	ExpiresAt         *time.Time                 `db:"expires_at" json:"expires_at,omitempty"`
 	CreatedAt         time.Time                  `db:"created_at" json:"created_at"`
+	ActivityPhaseID   *uuid.UUID                 `db:"activity_phase_id" json:"activity_phase_id,omitempty"`
 }
 
 type HumanInputAnswerInput struct {

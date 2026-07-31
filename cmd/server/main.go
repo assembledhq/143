@@ -1574,6 +1574,8 @@ func buildServices(
 		llmClient,
 		prTemplateStore,
 		db.NewPRReadinessStore(pool),
+		sessionThreadStore,
+		reviewLoopStore,
 		redisClient,
 		logger,
 	)
@@ -1884,6 +1886,8 @@ func wireWorkerPRService(
 	llmClient llm.Client,
 	prTemplateStore *db.PRTemplateStore,
 	prReadinessStore *db.PRReadinessStore,
+	sessionThreadStore *db.SessionThreadStore,
+	reviewLoopStore *db.SessionReviewLoopStore,
 	redisClient *cache.Client,
 	logger zerolog.Logger,
 ) {
@@ -1900,6 +1904,8 @@ func wireWorkerPRService(
 	prService.SetLLMClient(llmClient)
 	prService.SetPRTemplateStore(prTemplateStore)
 	prService.SetReadinessStore(prReadinessStore)
+	prService.SetSessionThreadStore(sessionThreadStore)
+	prService.SetSessionReviewLoopStore(reviewLoopStore)
 	prService.SetRedisClient(redisClient)
 	prService.SetPullRequestStreams(cache.NewPullRequestStreams(redisClient, logger))
 }

@@ -552,10 +552,8 @@ compare decisions against the policy active at the time.
 | github_review_url | text | Posted GitHub review URL |
 | final_review_body | text | Persisted synthesized review body |
 | failure_reason | text | Terminal failure detail |
-| files_changed | integer | Captured PR file count for completed-review analytics, nullable for unavailable historical data |
-| additions | integer | Captured added-line count for completed-review analytics, nullable when the historical split is unavailable |
-| deletions | integer | Captured deleted-line count for completed-review analytics, nullable when the historical split is unavailable |
-| lines_changed | integer | Captured added-plus-deleted line count for completed-review analytics, nullable for unavailable historical data |
+| additions | integer | Captured added-line count for completed-review author analytics |
+| deletions | integer | Captured deleted-line count for completed-review author analytics |
 | risk_reason_details | jsonb | Structured risk/policy reasons used by non-approval analytics |
 | completed_at | timestamptz | |
 | created_at | timestamptz | |

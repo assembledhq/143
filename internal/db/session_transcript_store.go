@@ -235,7 +235,7 @@ func (s *SessionTranscriptStore) fetchEntriesForTurns(
 	if include.Tools || include.System {
 		// --- session_logs ---
 		logQuery := `
-		SELECT id, session_id, org_id, thread_id, timestamp, level, message, metadata, turn_number
+		SELECT id, session_id, org_id, thread_id, timestamp, level, message, metadata, turn_number, activity_phase_id
 		FROM session_logs
 		WHERE org_id = @org_id AND thread_id = @thread_id
 		  AND turn_number = ANY(@turns)
@@ -250,7 +250,7 @@ func (s *SessionTranscriptStore) fetchEntriesForTurns(
 		if err != nil {
 			return nil, fmt.Errorf("query transcript logs: %w", err)
 		}
-		logs, err := pgx.CollectRows(logRows, pgx.RowToStructByName[models.SessionLog])
+		logs, err := pgx.CollectRows(logRows, pgx.RowToStructByNameLax[models.SessionLog])
 		if err != nil {
 			return nil, fmt.Errorf("collect transcript logs: %w", err)
 		}

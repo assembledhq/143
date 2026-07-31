@@ -289,7 +289,7 @@ Using `chi` for the HTTP router. All API routes are under `/api/v1/`.
 ├── /code-reviews
 │   ├── GET    /                    # list code review assessments
 │   ├── GET    /stats               # compact review outcome summary
-│   ├── GET    /analytics           # time/repository-scoped approval, author, size, finding, and reason report
+│   ├── GET    /analytics           # time/repository-scoped approval, author, finding, and reason report
 │   ├── GET    /stream              # org-scoped lifecycle event stream
 │   ├── GET    /templates           # starter policy templates
 │   ├── GET    /prompt-examples     # policy prompt examples

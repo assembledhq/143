@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { ChartNoAxesColumnIncreasing } from "lucide-react";
+import { DataTableSummaryRow } from "@/components/data-table-summary-row";
 import { EmptyState } from "@/components/empty-state";
 import { SectionGroup } from "@/components/section-group";
 import { Badge } from "@/components/ui/badge";
@@ -9,17 +10,7 @@ import { SortableTableHeader, sortDirectionAriaValue } from "@/components/sortab
 import { Card, CardContent } from "@/components/ui/card";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import type {
-  CodeReviewAnalytics,
-  CodeReviewSizeBucket,
-} from "@/lib/types";
-
-const SIZE_BUCKET_LABELS: Record<CodeReviewSizeBucket, string> = {
-  "0_49": "0–49 total lines",
-  "50_199": "50–199 total lines",
-  "200_499": "200–499 total lines",
-  "500_plus": "500+ total lines",
-};
+import type { CodeReviewAnalytics } from "@/lib/types";
 type AuthorSort = "author" | "reviews" | "approved" | "not_approved" | "approval_rate" | "split_sample" | "average_additions" | "median_additions" | "average_deletions" | "median_deletions";
 
 const NON_APPROVAL_REASON_LABELS: Record<string, string> = {
@@ -65,6 +56,13 @@ function roundedMetric(value: number | null): string {
 function signedRoundedMetric(value: number | null, sign: "+" | "-"): string {
   const formatted = roundedMetric(value);
   return formatted === "—" ? formatted : `${sign}${formatted}`;
+}
+
+// Cell aria-labels replace the visible text for assistive tech, so they must
+// keep the sign and avoid announcing the "—" placeholder as a value.
+function medianAriaLabel(value: number | null, sign: "+" | "-", noun: string): string {
+  const formatted = signedRoundedMetric(value, sign);
+  return formatted === "—" ? `No ${noun} data overall` : `${formatted} ${noun} overall`;
 }
 
 function reasonLabel(code: string): string {
@@ -361,67 +359,44 @@ export function CodeReviewAnalyticsReport({
                   </TableRow>
                 ))}
               </TableBody>
+              <DataTableSummaryRow
+                description="Across all completed reviews matching the current repository and time filters."
+                cells={[
+                  {
+                    content: summary.reviews_completed.toLocaleString(),
+                    className: "text-right",
+                    ariaLabel: `${summary.reviews_completed.toLocaleString()} completed reviews overall`,
+                  },
+                  {
+                    content: summary.automatically_approved.toLocaleString(),
+                    className: "text-right",
+                    ariaLabel: `${summary.automatically_approved.toLocaleString()} automatically approved reviews overall`,
+                  },
+                  {
+                    content: summary.not_approved.toLocaleString(),
+                    className: "text-right",
+                    ariaLabel: `${summary.not_approved.toLocaleString()} not approved reviews overall`,
+                  },
+                  {
+                    content: percentage(summary.automatically_approved, summary.reviews_completed),
+                    className: "text-right",
+                    ariaLabel: `${percentage(summary.automatically_approved, summary.reviews_completed)} overall approval rate`,
+                  },
+                  {
+                    content: signedRoundedMetric(summary.median_additions, "+"),
+                    className: "text-right",
+                    ariaLabel: medianAriaLabel(summary.median_additions, "+", "median additions"),
+                  },
+                  {
+                    content: signedRoundedMetric(summary.median_deletions, "-"),
+                    className: "text-right",
+                    ariaLabel: medianAriaLabel(summary.median_deletions, "-", "median deletions"),
+                  },
+                ]}
+              />
             </Table>
           </Card>
         )}
-      </SectionGroup>
-
-      <SectionGroup
-        title="PR size and policy fit"
-        description={`Addition and deletion metrics include ${summary.reviews_with_change_breakdown.toLocaleString()} of ${summary.reviews_completed.toLocaleString()} completed reviews with a captured breakdown. Total-line buckets and policy limits use additions plus deletions; total-line and file data is available for ${summary.reviews_with_size_data.toLocaleString()} reviews.`}
-      >
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          <MetricCard
-            label="Average additions"
-            value={roundedMetric(summary.average_additions)}
-            context="Lines added per completed review"
-          />
-          <MetricCard
-            label="Median additions"
-            value={roundedMetric(summary.median_additions)}
-            context="Less sensitive to unusually additive PRs"
-          />
-          <MetricCard
-            label="Average deletions"
-            value={roundedMetric(summary.average_deletions)}
-            context="Lines deleted per completed review"
-          />
-          <MetricCard
-            label="Median deletions"
-            value={roundedMetric(summary.median_deletions)}
-            context="Less sensitive to unusually subtractive PRs"
-          />
-          <MetricCard
-            label="Median files changed"
-            value={roundedMetric(summary.median_files_changed)}
-            context={`Average ${roundedMetric(summary.average_files_changed)} files`}
-          />
-          <MetricCard
-            label="Above captured size limits"
-            value={summary.reviews_above_size_limit.toLocaleString()}
-            context={`${summary.approvals_above_size_limit.toLocaleString()} were automatically approved`}
-          />
-        </div>
-        {analytics.size_buckets.length > 0 ? (
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Approval rate by pull request size">
-            {analytics.size_buckets.map((bucket) => (
-              <Card key={bucket.bucket}>
-                <CardContent className="space-y-2">
-                  <p className="text-sm font-medium text-foreground">{SIZE_BUCKET_LABELS[bucket.bucket]}</p>
-                  <div className="flex items-baseline justify-between gap-3">
-                    <span className="text-2xl font-semibold tabular-nums">
-                      {percentage(bucket.automatically_approved, bucket.reviews_completed)}
-                    </span>
-                    <Badge variant="secondary">{bucket.reviews_completed.toLocaleString()} reviews</Badge>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    {bucket.automatically_approved.toLocaleString()} automatically approved
-                  </p>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
-        ) : null}
       </SectionGroup>
 
       <div className="grid gap-6 xl:grid-cols-2">
