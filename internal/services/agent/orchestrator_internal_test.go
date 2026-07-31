@@ -360,6 +360,27 @@ func (s *testInternalSessionMessageStore) ListBySession(ctx context.Context, org
 	return nil, nil
 }
 
+type testInternalHumanInputStore struct {
+	requests []models.HumanInputRequest
+}
+
+func (s *testInternalHumanInputStore) Create(_ context.Context, req *models.HumanInputRequest) error {
+	s.requests = append(s.requests, *req)
+	return nil
+}
+
+func (s *testInternalHumanInputStore) GetByID(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (models.HumanInputRequest, error) {
+	return models.HumanInputRequest{}, pgx.ErrNoRows
+}
+
+func (s *testInternalHumanInputStore) AnswerLatestPendingFreeTextBySession(context.Context, uuid.UUID, uuid.UUID, string, uuid.UUID) (models.HumanInputRequest, error) {
+	return models.HumanInputRequest{}, pgx.ErrNoRows
+}
+
+func (s *testInternalHumanInputStore) AnswerLatestPendingFreeTextByThread(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, uuid.UUID) (models.HumanInputRequest, error) {
+	return models.HumanInputRequest{}, pgx.ErrNoRows
+}
+
 type testInternalUserLookup struct {
 	user models.User
 	err  error
@@ -1531,6 +1552,7 @@ func TestCreateAssistantMessage_CarriesThreadID(t *testing.T) {
 	orgID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
 	sessionID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	threadID := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	phaseID := uuid.MustParse("44444444-4444-4444-4444-444444444444")
 
 	logs := &testInternalSessionLogStore{}
 	messages := &testInternalSessionMessageStore{}
@@ -1540,13 +1562,14 @@ func TestCreateAssistantMessage_CarriesThreadID(t *testing.T) {
 		logger:          zerolog.Nop(),
 	}
 
-	err := orch.createAssistantMessage(context.Background(), sessionID, orgID, &threadID, 4, &AgentResult{
+	err := orch.createAssistantMessage(context.Background(), sessionID, orgID, TranscriptWriteContext{ThreadID: &threadID, TurnNumber: 4, ActivityPhaseID: &phaseID}, &AgentResult{
 		Summary: "Final answer",
 	})
 	require.NoError(t, err, "createAssistantMessage should persist the assistant transcript")
 	require.Len(t, messages.messages, 1, "assistant message should be created")
 	require.NotNil(t, messages.messages[0].ThreadID, "assistant message should preserve the thread id")
 	require.Equal(t, threadID, *messages.messages[0].ThreadID, "assistant message should use the provided thread id")
+	require.Equal(t, &phaseID, messages.messages[0].ActivityPhaseID, "assistant message should preserve the active phase id")
 	require.NotNil(t, logs.markedThreadID, "duplicate marker should preserve the thread id")
 	require.Equal(t, threadID, *logs.markedThreadID, "duplicate marker should use the provided thread id")
 	require.Equal(t, 4, logs.markedTurnNumber, "duplicate marker should use the provided turn number")
@@ -1564,7 +1587,7 @@ func TestCreateAssistantMessage_PersistsCacheOnlyAndNativeCostUsage(t *testing.T
 		logger:          zerolog.Nop(),
 	}
 
-	err := orch.createAssistantMessage(context.Background(), sessionID, orgID, nil, 2, &AgentResult{
+	err := orch.createAssistantMessage(context.Background(), sessionID, orgID, TranscriptWriteContext{TurnNumber: 2}, &AgentResult{
 		Summary: "Cached reply",
 		TokenUsage: TokenUsage{
 			CachedInputTokens:   123,
@@ -1593,7 +1616,7 @@ func TestCreateAssistantMessage_DoesNotPersistUnavailableTokenUsage(t *testing.T
 		logger:          zerolog.Nop(),
 	}
 
-	err := orch.createAssistantMessage(context.Background(), sessionID, orgID, nil, 3, &AgentResult{
+	err := orch.createAssistantMessage(context.Background(), sessionID, orgID, TranscriptWriteContext{TurnNumber: 3}, &AgentResult{
 		Summary: "No usage reported",
 		TokenUsage: FinalizeTokenUsage(TokenUsage{}, TokenUsageHint{
 			AgentType:      models.AgentTypeCodex,
@@ -1763,6 +1786,7 @@ func TestStreamLogs_CarriesThreadID(t *testing.T) {
 	orgID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
 	sessionID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	threadID := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	phaseID := uuid.MustParse("44444444-4444-4444-4444-444444444444")
 
 	logs := &testInternalSessionLogStore{}
 	orch := &Orchestrator{
@@ -1778,14 +1802,144 @@ func TestStreamLogs_CarriesThreadID(t *testing.T) {
 	}
 	close(logCh)
 
-	orch.streamLogs(context.Background(), sessionID, orgID, models.AgentTypeClaudeCode, &threadID, 2, logCh, nil)
+	orch.streamLogs(context.Background(), sessionID, orgID, models.AgentTypeClaudeCode, TranscriptWriteContext{ThreadID: &threadID, TurnNumber: 2, ActivityPhaseID: &phaseID}, logCh, nil)
 
 	require.Len(t, logs.logs, 1, "streamLogs should persist the log entry")
 	require.NotNil(t, logs.logs[0].ThreadID, "persisted log should preserve the thread id")
 	require.Equal(t, threadID, *logs.logs[0].ThreadID, "persisted log should use the provided thread id")
 	require.Equal(t, 2, logs.logs[0].TurnNumber, "persisted log should keep the turn number")
+	require.Equal(t, &phaseID, logs.logs[0].ActivityPhaseID, "persisted log should preserve the active phase id")
 	require.Equal(t, "streamed message", logs.logs[0].Message, "persisted log should keep the message content")
 	require.Nil(t, logs.logs[0].Metadata, "persisted log should leave absent metadata as SQL null")
+}
+
+func TestHandleHumanInputRequest_CarriesActivityPhaseID(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	sessionID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	threadID := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	phaseID := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+	store := &testInternalHumanInputStore{}
+	orch := &Orchestrator{humanInputRequests: store, logger: zerolog.Nop()}
+
+	created := orch.handleHumanInputRequest(
+		context.Background(),
+		sessionID,
+		orgID,
+		models.AgentTypeCodex,
+		TranscriptWriteContext{ThreadID: &threadID, TurnNumber: 2, ActivityPhaseID: &phaseID},
+		&HumanInputRequest{Kind: models.HumanInputRequestKindFreeText, Title: "Need input", Body: "Choose"},
+	)
+
+	require.NotNil(t, created, "human input request should be persisted")
+	require.Equal(t, &phaseID, created.ActivityPhaseID, "human input request should preserve the active phase id")
+	require.Equal(t, &threadID, created.ThreadID, "human input request should preserve the active thread id")
+	require.Equal(t, 2, created.TurnNumber, "human input request should preserve the active turn number")
+}
+
+func TestStreamLogs_DropsPhaseAssociationForEntriesFromAnotherThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	sessionID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	entryThreadID := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	phaseID := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+
+	logs := &testInternalSessionLogStore{}
+	orch := &Orchestrator{agentRunLogs: logs, logger: zerolog.Nop()}
+
+	logCh := make(chan LogEntry, 1)
+	logCh <- LogEntry{ThreadID: &entryThreadID, Timestamp: time.Now(), Level: "output", Message: "streamed message"}
+	close(logCh)
+
+	// A phase is thread-scoped. When the run context has no thread of its own,
+	// the entry's thread cannot be assumed to own the phase — persisting the
+	// association anyway would make the store reject the whole log line.
+	orch.streamLogs(context.Background(), sessionID, orgID, models.AgentTypeClaudeCode,
+		TranscriptWriteContext{TurnNumber: 2, ActivityPhaseID: &phaseID}, logCh, nil)
+
+	require.Len(t, logs.logs, 1, "streamLogs should still persist the log entry")
+	require.Equal(t, &entryThreadID, logs.logs[0].ThreadID, "persisted log should use the entry's thread id")
+	require.Nil(t, logs.logs[0].ActivityPhaseID, "phase association should be dropped rather than losing the log line")
+}
+
+func TestTranscriptWriteContext_WithTurn(t *testing.T) {
+	t.Parallel()
+
+	threadID := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	phaseID := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+	writeCtx := TranscriptWriteContext{ThreadID: &threadID, TurnNumber: 2, ActivityPhaseID: &phaseID}
+
+	same := writeCtx.withTurn(2)
+	require.Equal(t, 2, same.TurnNumber, "withTurn should keep the turn number it was given")
+	require.Equal(t, &threadID, same.ThreadID, "withTurn should carry the thread id")
+	require.Equal(t, &phaseID, same.ActivityPhaseID, "an unchanged turn should keep the phase association")
+
+	// A phase belongs to exactly one turn, so carrying it into a different turn
+	// would make the store reject the entry outright.
+	moved := writeCtx.withTurn(5)
+	require.Equal(t, 5, moved.TurnNumber, "withTurn should rescope the turn number")
+	require.Nil(t, moved.ActivityPhaseID, "a changed turn should drop the phase association")
+	require.Equal(t, 2, writeCtx.TurnNumber, "withTurn should not mutate the receiver")
+	require.Equal(t, &phaseID, writeCtx.ActivityPhaseID, "withTurn should not mutate the receiver")
+}
+
+func TestTranscriptWriteContext_PhaseAssociationRequiresThread(t *testing.T) {
+	t.Parallel()
+
+	threadID := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	phaseID := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+
+	threaded := TranscriptWriteContext{ThreadID: &threadID, TurnNumber: 2, ActivityPhaseID: &phaseID}
+	require.Equal(t, &phaseID, threaded.phaseAssociation(), "a threaded context should persist its phase")
+
+	// session_activity_phases.thread_id is NOT NULL, so an unthreaded write can
+	// never match a phase and must not carry one.
+	unthreaded := TranscriptWriteContext{TurnNumber: 2, ActivityPhaseID: &phaseID}
+	require.Nil(t, unthreaded.phaseAssociation(), "an unthreaded context should not persist a phase")
+}
+
+func TestCreateAssistantMessage_DropsPhaseForUnthreadedContext(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	sessionID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	phaseID := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+
+	messages := &testInternalSessionMessageStore{}
+	orch := &Orchestrator{
+		sessionMessages: messages,
+		agentRunLogs:    &testInternalSessionLogStore{},
+		logger:          zerolog.Nop(),
+	}
+
+	err := orch.createAssistantMessage(context.Background(), sessionID, orgID,
+		TranscriptWriteContext{TurnNumber: 4, ActivityPhaseID: &phaseID},
+		&AgentResult{Summary: "Final answer"})
+
+	require.NoError(t, err, "createAssistantMessage should persist the assistant transcript")
+	require.Len(t, messages.messages, 1, "assistant message should be created")
+	require.Nil(t, messages.messages[0].ActivityPhaseID, "an unthreaded assistant message should not carry a phase")
+}
+
+func TestHandleHumanInputRequest_DropsPhaseForUnthreadedContext(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	sessionID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	phaseID := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+	store := &testInternalHumanInputStore{}
+	orch := &Orchestrator{humanInputRequests: store, logger: zerolog.Nop()}
+
+	created := orch.handleHumanInputRequest(
+		context.Background(), sessionID, orgID, models.AgentTypeCodex,
+		TranscriptWriteContext{TurnNumber: 2, ActivityPhaseID: &phaseID},
+		&HumanInputRequest{Kind: models.HumanInputRequestKindFreeText, Title: "Need input", Body: "Choose"},
+	)
+
+	require.NotNil(t, created, "human input request should be persisted")
+	require.Nil(t, created.ActivityPhaseID, "an unthreaded human input request should not carry a phase")
 }
 
 func TestStreamLogs_PersistsMetadataAsJSON(t *testing.T) {
@@ -1809,7 +1963,7 @@ func TestStreamLogs_PersistsMetadataAsJSON(t *testing.T) {
 	}
 	close(logCh)
 
-	orch.streamLogs(context.Background(), sessionID, orgID, models.AgentTypeClaudeCode, nil, 1, logCh, nil)
+	orch.streamLogs(context.Background(), sessionID, orgID, models.AgentTypeClaudeCode, TranscriptWriteContext{TurnNumber: 1}, logCh, nil)
 
 	require.Len(t, logs.logs, 1, "streamLogs should persist the log entry")
 	require.NotNil(t, logs.logs[0].Metadata, "non-nil metadata should be marshaled and persisted")
@@ -1839,7 +1993,7 @@ func TestStreamLogs_DropsUnmarshalableMetadata(t *testing.T) {
 	}
 	close(logCh)
 
-	orch.streamLogs(context.Background(), sessionID, orgID, models.AgentTypeClaudeCode, nil, 1, logCh, nil)
+	orch.streamLogs(context.Background(), sessionID, orgID, models.AgentTypeClaudeCode, TranscriptWriteContext{TurnNumber: 1}, logCh, nil)
 
 	require.Len(t, logs.logs, 1, "streamLogs should still persist the log entry when metadata fails to marshal")
 	require.Nil(t, logs.logs[0].Metadata, "unmarshalable metadata should be dropped to nil rather than blocking the log")

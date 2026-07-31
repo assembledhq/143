@@ -16,14 +16,38 @@ import (
 )
 
 var logColumns = []string{
-	"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number",
+	"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number", "activity_phase_id",
+}
+
+// logRowPhaseID is the phase every fixture row carries, so read paths prove the
+// association survives the round trip out of the store.
+var logRowPhaseID = uuid.New()
+
+// newSQLCapturingPool returns a mock pool that records the SQL of the last
+// query it matched, so tests can assert on what a store did *not* emit. Shared
+// by the phase-validated insert tests in this package.
+func newSQLCapturingPool(t *testing.T) (pgxmock.PgxPoolIface, *string) {
+	t.Helper()
+
+	captured := new(string)
+	mock, err := pgxmock.NewPool(pgxmock.QueryMatcherOption(pgxmock.QueryMatcherFunc(
+		func(expectedSQL, actualSQL string) error {
+			*captured = actualSQL
+			return pgxmock.QueryMatcherRegexp.Match(expectedSQL, actualSQL)
+		},
+	)))
+	require.NoError(t, err, "database mock should initialize")
+	t.Cleanup(mock.Close)
+	return mock, captured
 }
 
 const sessionLogValidatedInsertPattern = `(?s)INSERT INTO session_logs[\s\S]+FROM sessions s\s+WHERE s\.id = @session_id\s+AND s\.org_id = @org_id\s+RETURNING id, timestamp`
 
+const sessionLogPhaseInsertPattern = `(?s)JOIN session_activity_phases p.+p\.id = @activity_phase_id AND p\.org_id = @org_id.+p\.session_id = @session_id.+p\.thread_id IS NOT DISTINCT FROM @thread_id.+p\.turn_number = @turn_number`
+
 func newLogRow(id int64, sessionID uuid.UUID, now time.Time) []any {
 	return []any{
-		id, sessionID, uuid.New(), nil, now, "info", "doing something", json.RawMessage(`{}`), 0,
+		id, sessionID, uuid.New(), nil, now, "info", "doing something", json.RawMessage(`{}`), 0, &logRowPhaseID,
 	}
 }
 
@@ -54,6 +78,112 @@ func TestSessionLogStore_Create_Success(t *testing.T) {
 	require.NoError(t, err, "should create agent run log without error")
 	require.Equal(t, int64(1), log.ID, "should set the generated ID on the log")
 	require.Equal(t, now, log.Timestamp, "should set the timestamp on the log")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionLogStore_Create_ValidatesActivityPhaseOwnership(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "database mock should initialize")
+	t.Cleanup(mock.Close)
+
+	phaseID := uuid.New()
+	threadID := uuid.New()
+	log := &models.SessionLog{
+		SessionID: uuid.New(), OrgID: uuid.New(), ThreadID: &threadID,
+		Level: models.SessionLogLevelInfo, Message: "working", TurnNumber: 1,
+		ActivityPhaseID: &phaseID,
+	}
+	mock.ExpectQuery(sessionLogPhaseInsertPattern).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "timestamp"}).AddRow(int64(1), time.Now()))
+
+	err = NewSessionLogStore(mock).Create(context.Background(), log)
+	require.NoError(t, err, "phase-associated log should be inserted after full ownership validation")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionLogStore_Create_DoesNotRequireRunningActivityPhase(t *testing.T) {
+	t.Parallel()
+
+	mock, capturedSQL := newSQLCapturingPool(t)
+
+	phaseID := uuid.New()
+	threadID := uuid.New()
+	log := &models.SessionLog{
+		SessionID: uuid.New(), OrgID: uuid.New(), ThreadID: &threadID,
+		Level: models.SessionLogLevelOutput, Message: "final answer", TurnNumber: 1,
+		ActivityPhaseID: &phaseID,
+	}
+	mock.ExpectQuery(sessionLogPhaseInsertPattern).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "timestamp"}).AddRow(int64(7), time.Now()))
+
+	err := NewSessionLogStore(mock).Create(context.Background(), log)
+	require.NoError(t, err, "phase-closing log should be inserted regardless of the phase's terminal status")
+	// An entry that closes a phase is written after the phase reaches a terminal
+	// status, so the validated insert must not filter on phase status.
+	require.NotContains(t, *capturedSQL, "p.status", "validated insert should not constrain the phase status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionLogStore_Create_RejectsMismatchedActivityPhase(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "database mock should initialize")
+	t.Cleanup(mock.Close)
+
+	phaseID := uuid.New()
+	threadID := uuid.New()
+	log := &models.SessionLog{
+		SessionID: uuid.New(), OrgID: uuid.New(), ThreadID: &threadID,
+		Level: models.SessionLogLevelInfo, Message: "working", TurnNumber: 1,
+		ActivityPhaseID: &phaseID,
+	}
+	mock.ExpectQuery(sessionLogPhaseInsertPattern).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "timestamp"}))
+	// Follow-up check: the session/org pair is valid, so the phase is at fault.
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM sessions WHERE id = @id AND org_id = @org_id\)`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+
+	err = NewSessionLogStore(mock).Create(context.Background(), log)
+	require.ErrorContains(t, err, "does not match org/session/thread/turn ownership", "mismatched phase should return an ownership error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionLogStore_Create_PhaseInsertReportsOrgMismatchOverPhaseMismatch(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "database mock should initialize")
+	t.Cleanup(mock.Close)
+
+	store := NewSessionLogStore(mock)
+	store.SetLogger(zerolog.Nop())
+	phaseID := uuid.New()
+	threadID := uuid.New()
+	log := &models.SessionLog{
+		SessionID: uuid.New(), OrgID: uuid.New(), ThreadID: &threadID,
+		Level: models.SessionLogLevelInfo, Message: "working", TurnNumber: 1,
+		ActivityPhaseID: &phaseID,
+	}
+	mock.ExpectQuery(sessionLogPhaseInsertPattern).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "timestamp"}))
+	// The session does not belong to the org, so the phase is not the cause.
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM sessions WHERE id = @id AND org_id = @org_id\)`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM sessions WHERE id = @id\)`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+
+	err = store.Create(context.Background(), log)
+	require.ErrorContains(t, err, "does not belong to org", "a tenant isolation violation must not be masked by the phase check")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -264,6 +394,7 @@ func TestSessionLogStore_ListByRunID_Success(t *testing.T) {
 	require.Equal(t, sessionID, logs[0].SessionID, "first log entry should have the correct session ID")
 	require.Equal(t, models.SessionLogLevelInfo, logs[0].Level, "first log entry should have the correct level")
 	require.Equal(t, "doing something", logs[0].Message, "first log entry should have the correct message")
+	require.Equal(t, &logRowPhaseID, logs[0].ActivityPhaseID, "listed log should carry the phase association it was stored with")
 	require.Equal(t, int64(2), logs[1].ID, "second log entry should have the correct ID")
 	require.Equal(t, sessionID, logs[1].SessionID, "second log entry should have the correct session ID")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
@@ -285,7 +416,7 @@ func TestSessionLogStore_GetByID_Success(t *testing.T) {
 		WithArgs(int64(42), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(logColumns).
-				AddRow(int64(42), sessionID, orgID, nil, now, "output", "full output", json.RawMessage(`{"type":"tool_result"}`), 3),
+				AddRow(int64(42), sessionID, orgID, nil, now, "output", "full output", json.RawMessage(`{"type":"tool_result"}`), 3, &logRowPhaseID),
 		)
 
 	log, err := store.GetByID(context.Background(), orgID, sessionID, 42)
@@ -294,6 +425,7 @@ func TestSessionLogStore_GetByID_Success(t *testing.T) {
 	require.Equal(t, sessionID, log.SessionID, "GetByID should preserve session ID")
 	require.Equal(t, orgID, log.OrgID, "GetByID should preserve org ID")
 	require.Equal(t, "full output", log.Message, "GetByID should return the full message")
+	require.Equal(t, &logRowPhaseID, log.ActivityPhaseID, "GetByID should return the stored phase association")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
