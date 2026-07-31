@@ -531,7 +531,7 @@ func TestBuildServicesWiresLinearAgentWorkerDepsWithoutFeatureFlagGate(t *testin
 	require.Less(t, lastFeatureFlagGate, lastFuncStart, "LinearAgentDeps must be wired even when LINEAR_AGENT_ENABLED=false so queued jobs drain")
 }
 
-func TestWireWorkerPRServiceWiresSessionMessageStoreForAutoRepair(t *testing.T) {
+func TestWireWorkerPRServiceWiresAutoRepairDependencies(t *testing.T) {
 	t.Parallel()
 
 	fset := token.NewFileSet()
@@ -548,25 +548,48 @@ func TestWireWorkerPRServiceWiresSessionMessageStoreForAutoRepair(t *testing.T) 
 	}
 	require.NotNil(t, wireFunc, "worker startup should define PR service dependency wiring")
 
-	var sessionMessageSetter *ast.CallExpr
+	setters := make(map[string]*ast.CallExpr)
 	ast.Inspect(wireFunc.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
 		selector, ok := call.Fun.(*ast.SelectorExpr)
-		if ok && selector.Sel.Name == "SetSessionMessageStore" {
-			sessionMessageSetter = call
-			return false
+		if ok {
+			setters[selector.Sel.Name] = call
 		}
 		return true
 	})
 
-	require.NotNil(t, sessionMessageSetter, "worker PR service should wire session messages before automatic repair can resume a session")
-	require.Len(t, sessionMessageSetter.Args, 1, "session message setter should receive exactly one dependency")
-	sessionMessageArg, ok := sessionMessageSetter.Args[0].(*ast.Ident)
-	require.True(t, ok, "session message dependency should be passed directly to the worker PR service")
-	require.Equal(t, "sessionMessageStore", sessionMessageArg.Name, "worker PR service should use the shared session message store")
+	tests := []struct {
+		name       string
+		setter     string
+		dependency string
+	}{
+		{
+			name:       "session messages",
+			setter:     "SetSessionMessageStore",
+			dependency: "sessionMessageStore",
+		},
+		{
+			name:       "audit emitter",
+			setter:     "SetAuditEmitter",
+			dependency: "auditEmitter",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			setter := setters[tt.setter]
+			require.NotNil(t, setter, "worker PR service should wire the automatic repair dependency")
+			require.Len(t, setter.Args, 1, "automatic repair dependency setter should receive exactly one argument")
+			dependency, ok := setter.Args[0].(*ast.Ident)
+			require.True(t, ok, "automatic repair dependency should be passed directly to the worker PR service")
+			require.Equal(t, tt.dependency, dependency.Name, "worker PR service should receive the shared automatic repair dependency")
+		})
+	}
 }
 
 func TestMainProductionWorkersPreflightSandboxAuthBeforeConstructingServer(t *testing.T) {
