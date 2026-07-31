@@ -78,7 +78,10 @@ describe("SessionDetailLoadingSkeleton", () => {
     );
 
     expect(screen.getByTestId("session-timeline-skeleton")).toBeInTheDocument();
-    expect(screen.getByTestId("session-composer-loading")).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByTestId("session-composer-loading")).toBeInTheDocument();
+    // The composer is unusable because there is no textbox yet, not because
+    // of an aria-disabled on a plain container (which AT ignores).
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     expect(screen.getByTestId("session-composer-loading-surface")).toHaveClass(
       SESSION_COMPOSER_SURFACE_HEIGHT_CLASSNAME,
     );
@@ -139,7 +142,8 @@ describe("SessionDetailLoadingSkeleton", () => {
     expect(screen.getByTestId("session-detail-transition-error")).toHaveTextContent(
       "The detail request failed.",
     );
-    expect(frame).toHaveAttribute("data-session-transition", "error");
+    expect(frame).toHaveAttribute("data-session-state", "error");
+    expect(frame).toHaveAttribute("data-session-transition", "provisional");
     expect(frame).not.toHaveAttribute("aria-busy");
     expect(screen.queryByTestId("session-timeline-skeleton")).not.toBeInTheDocument();
     // Metadata is still worth preserving, so the reserved chrome stays.

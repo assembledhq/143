@@ -187,7 +187,6 @@ import {
   SESSION_DETAIL_PANEL_MAX_WIDTH,
   SESSION_DETAIL_PANEL_MIN_WIDTH,
   SESSION_HEADER_HEIGHT_CLASSNAME,
-  SESSION_THREAD_STRIP_HEIGHT_CLASSNAME,
   SESSION_WORKSPACE_MIN_WIDTH_CLASSNAME,
 } from "./session-detail-geometry";
 import {
@@ -6351,8 +6350,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     return (
       <SessionDetailFrame
         testId="session-detail-loading-skeleton"
-        busy
-        transition={rawSession ? "provisional" : "initial"}
+        state="loading"
+        transition={provisionalMetadata ? "provisional" : "initial"}
       >
         <SessionDetailLoadingContent
           detailPanelOpen={showDetailPanel}
@@ -6365,14 +6364,11 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   if (detailLoadState.kind === "error" || !session) {
     return (
-      // Busy only while a retry is actually running: a settled failure marking
-      // itself busy would suppress the alert below, and the query keeps its
-      // error until the refetch settles, so this is what tells the user their
-      // click landed.
       <SessionDetailFrame
         testId="session-detail-loading-skeleton"
-        busy={isRetryingSessionDetail}
-        transition="error"
+        state="error"
+        transition={provisionalMetadata ? "provisional" : "initial"}
+        retrying={isRetryingSessionDetail}
       >
         <SessionDetailLoadingContent
           detailPanelOpen={showDetailPanel}
@@ -7249,35 +7245,26 @@ export function SessionDetailContent({ id }: { id: string }) {
           </>
         ) : null}
 
+        {/* AgentTabStrip holds the row's height itself in every "nothing to
+            show" case, so there is no empty-state branch out here to keep in
+            step with its internal guards. */}
         {!isDedicatedMobileReview ? (
           <div className="hidden md:block">
-            {chromeThreads.length > 0 ? (
-              <AgentTabStrip
-                threads={chromeThreads}
-                activeThreadId={activeThread?.id ?? null}
-                viewedThreadIds={viewedThreadIds}
-                nonInteractiveThreadIds={nonInteractiveThreadIds}
-                overlapsByThreadId={overlapsByThreadId}
-                statusConfig={statusConfig}
-                onActiveThreadChange={setActiveThreadId}
-                onAddTab={handleCreateThread}
-                addTabPending={createThreadMutation.isPending}
-                onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
-                onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
-                archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
-                addTabButtonRef={addTabButtonRef}
-              />
-            ) : (
-              <div
-                data-testid="session-thread-strip-empty"
-                className={cn(
-                  "flex shrink-0 items-center border-b border-border bg-background px-3 text-xs text-muted-foreground",
-                  SESSION_THREAD_STRIP_HEIGHT_CLASSNAME,
-                )}
-              >
-                No agent tabs for this session
-              </div>
-            )}
+            <AgentTabStrip
+              threads={chromeThreads}
+              activeThreadId={activeThread?.id ?? null}
+              viewedThreadIds={viewedThreadIds}
+              nonInteractiveThreadIds={nonInteractiveThreadIds}
+              overlapsByThreadId={overlapsByThreadId}
+              statusConfig={statusConfig}
+              onActiveThreadChange={setActiveThreadId}
+              onAddTab={handleCreateThread}
+              addTabPending={createThreadMutation.isPending}
+              onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
+              onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
+              archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
+              addTabButtonRef={addTabButtonRef}
+            />
           </div>
         ) : null}
         {/* Center content — either chat or diff review */}

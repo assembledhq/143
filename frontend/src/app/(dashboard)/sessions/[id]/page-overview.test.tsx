@@ -72,8 +72,25 @@ installSessionDetailPageTestHooks({ toast, routerPush });
 describe('SessionDetailPage overview and review loop', () => {
   it('shows the session details skeleton initially', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
-    expect(screen.getByTestId('session-detail-loading-skeleton')).toBeInTheDocument();
+    const frame = screen.getByTestId('session-detail-loading-skeleton');
+    expect(frame).toBeInTheDocument();
+    expect(frame).toHaveAttribute('data-session-transition', 'initial');
+    expect(frame).toHaveAttribute('data-session-state', 'loading');
     expect(screen.queryByText('Loading session...')).not.toBeInTheDocument();
+  });
+
+  it('reconciles the cold-open skeleton into the loaded workspace in place', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    // Nothing seeded this open, so the skeleton starts cold rather than
+    // provisional — the frame still has to survive the swap.
+    const frame = screen.getByTestId('session-detail-loading-skeleton');
+    expect(frame).toHaveAttribute('data-session-transition', 'initial');
+
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    expect(screen.getByTestId('session-detail-frame')).toBe(frame);
+    expect(frame).not.toHaveAttribute('data-session-state');
+    expect(frame).not.toHaveAttribute('aria-busy');
   });
 
   it('refetches authoritative detail immediately when provisional detail is cached as fresh', async () => {
@@ -131,12 +148,13 @@ describe('SessionDetailPage overview and review loop', () => {
     });
     const transitionFrame = screen.getByTestId('session-detail-loading-skeleton');
     expect(transitionFrame).toHaveAttribute('data-session-transition', 'provisional');
+    expect(transitionFrame).toHaveAttribute('data-session-state', 'loading');
     expect(transitionFrame).toHaveAttribute('aria-busy', 'true');
     // Metadata-first paint: the provisional row's title shows in the skeleton
     // headers (desktop and mobile) immediately, while the data-bearing
     // queries still wait for the authoritative payload.
     expect(screen.getAllByText('Provisional list title').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByTestId('session-composer-loading')).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByTestId('session-composer-loading')).toBeInTheDocument();
     expect(screen.queryByPlaceholderText('Send a follow-up message...')).not.toBeInTheDocument();
     expect(timelineRequests).toBe(0);
     expect(prRequests).toBe(0);
@@ -206,7 +224,10 @@ describe('SessionDetailPage overview and review loop', () => {
     // Nothing is in flight until the user retries, so the frame must not
     // announce itself as busy over the alert.
     expect(transitionFrame).not.toHaveAttribute('aria-busy');
-    expect(transitionFrame).toHaveAttribute('data-session-transition', 'error');
+    expect(transitionFrame).toHaveAttribute('data-session-state', 'error');
+    // A seeded row still backs this failure, so the frame reports what it
+    // is preserving, not just that it failed.
+    expect(transitionFrame).toHaveAttribute('data-session-transition', 'provisional');
     await user.click(screen.getByRole('button', { name: 'Retry' }));
 
     // The query holds its error until the refetch settles, so the error stays
@@ -247,7 +268,11 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(alert).not.toHaveTextContent('preserved');
     expect(screen.queryByTestId('session-thread-strip-loading')).not.toBeInTheDocument();
     expect(screen.queryByTestId('session-composer-loading')).not.toBeInTheDocument();
-    expect(screen.getByTestId('session-detail-loading-skeleton')).not.toHaveAttribute('aria-busy');
+    const coldFrame = screen.getByTestId('session-detail-loading-skeleton');
+    expect(coldFrame).not.toHaveAttribute('aria-busy');
+    // Nothing was seeded, so the frame reports the cold shape of the failure.
+    expect(coldFrame).toHaveAttribute('data-session-state', 'error');
+    expect(coldFrame).toHaveAttribute('data-session-transition', 'initial');
   });
 
   it('keeps the frame mounted and removes stale content when switching from loaded A to provisional B', async () => {

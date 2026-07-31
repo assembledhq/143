@@ -10,7 +10,12 @@ import {
   SESSION_WORKSPACE_MIN_WIDTH_CLASSNAME,
 } from "./session-detail-geometry";
 
-export function SessionTimelineSkeleton() {
+// `announce` controls the live region. Inside the loading frame the ancestor
+// already carries aria-busy, which suppresses descendant live regions anyway —
+// so the announcement there is dead markup that only looks like coverage. In
+// the loaded transcript, where nothing else marks the region busy, this is the
+// only thing that tells a screen reader the timeline is still filling in.
+export function SessionTimelineSkeleton({ announce = true }: { announce?: boolean } = {}) {
   const rows: { align: "left" | "right"; widths: string[] }[] = [
     { align: "right", widths: ["w-3/5", "w-2/5"] },
     { align: "left", widths: ["w-4/5", "w-3/4", "w-1/2"] },
@@ -20,9 +25,9 @@ export function SessionTimelineSkeleton() {
 
   return (
     <div
-      role="status"
-      aria-live="polite"
-      aria-label="Loading session activity"
+      role={announce ? "status" : undefined}
+      aria-live={announce ? "polite" : undefined}
+      aria-label={announce ? "Loading session activity" : undefined}
       data-testid="session-timeline-skeleton"
       className="space-y-3 py-1"
     >
@@ -47,7 +52,7 @@ export function SessionTimelineSkeleton() {
           </div>
         </div>
       ))}
-      <span className="sr-only">Loading session activity...</span>
+      {announce ? <span className="sr-only">Loading session activity...</span> : null}
     </div>
   );
 }
@@ -207,11 +212,10 @@ export function SessionDetailLoadingContent({
           </div>
         </div>
         <div className="flex min-h-0 flex-1 flex-col">
-          {/* AgentTabStrip renders nothing for a session with no threads, so
-              reserving this box overshoots for those sessions. A provisional
-              list row carries no thread data, so we cannot tell them apart
-              here; reserving is the better bet because nearly every session
-              has at least one thread. */}
+          {/* AgentTabStrip holds this same height even when it has no tabs to
+              show, so reserving it here matches the loaded view for every
+              session — including the zero-thread case a provisional list row
+              cannot tell us about. */}
           <div
             data-testid="session-thread-strip-loading"
             className={cn(
@@ -233,13 +237,15 @@ export function SessionDetailLoadingContent({
                   retrying={retrying}
                 />
               ) : (
-                <SessionTimelineSkeleton />
+                <SessionTimelineSkeleton announce={false} />
               )}
             </div>
           </div>
+          {/* No aria-disabled here: on a plain container it is inert, and the
+              composer's real "not yet usable" signal is that no textbox
+              exists in the tree until the session loads. */}
           <div
             data-testid="session-composer-loading"
-            aria-disabled="true"
             className="shrink-0 border-t border-border p-3"
           >
             <div
@@ -291,10 +297,9 @@ export function SessionDetailLoadingSkeleton(props: SessionDetailLoadingProps) {
   return (
     <SessionDetailFrame
       testId="session-detail-loading-skeleton"
-      busy={!props.errorMessage || Boolean(props.retrying)}
-      transition={
-        props.errorMessage ? "error" : props.metadata ? "provisional" : "initial"
-      }
+      state={props.errorMessage ? "error" : "loading"}
+      transition={props.metadata ? "provisional" : "initial"}
+      retrying={props.retrying}
     >
       <SessionDetailLoadingContent {...props} />
     </SessionDetailFrame>
