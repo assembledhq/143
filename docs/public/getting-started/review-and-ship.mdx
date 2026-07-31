@@ -43,7 +43,13 @@ Previews let you click through the app inside the session instead of pulling the
 
 ## After the PR opens
 
-Repository-native CI remains the source of truth. 143 can help repair failures, resolve conflicts, or continue the session, but branch protection and required checks should still live in GitHub.
+Repository-native CI remains the source of truth. For open PRs linked to an
+idle session, 143 automatically attempts to repair failing test checks and
+merge conflicts once per PR revision and repair type. Organization admins can
+disable either branch-writing action under **Settings → Session automation**,
+and each user can inherit or override those defaults under **Account settings
+→ Session automation**. Branch protection and required checks should still
+live in GitHub.
 
 PR publication is durable. If GitHub accepts the branch or PR while a worker
 restarts or a webhook arrives first, the session shows the current publication

@@ -108,7 +108,7 @@ func (s *PRService) mergePullRequest(ctx context.Context, orgID, pullRequestID, 
 		return nil, fmt.Errorf("reload pull request after sync: %w", err)
 	}
 
-	health, err := s.buildPullRequestHealthResponse(ctx, pr)
+	health, err := s.buildPullRequestHealthResponse(ctx, pr, healthBuildOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("build pull request health: %w", err)
 	}

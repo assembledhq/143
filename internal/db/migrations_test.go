@@ -86,6 +86,117 @@ func TestCodeReviewAnalyticsMigrationStoresOnlyAuthorChangeBreakdown(t *testing.
 	require.NotContains(t, sql, "UPDATE code_review_session_metadata", "migration should not backfill removed historical size metrics")
 }
 
+func TestCodeReviewChangeBreakdownCompatibilityMigrationPreservesLegacyData(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000266_relax_code_review_change_breakdown_constraint.up.sql")
+	require.NoError(t, err, "test should read the code review change-breakdown compatibility migration")
+	sql := string(body)
+
+	require.Contains(t, sql, "DROP CONSTRAINT IF EXISTS chk_code_review_session_metadata_change_breakdown", "migration should replace the constraint retained by already-migrated databases")
+	require.Contains(t, sql, "additions IS NOT NULL AND deletions IS NOT NULL", "migration should accept the supported addition and deletion pair")
+	require.NotContains(t, sql, "lines_changed =", "migration should not retain the removed total-line dependency")
+	require.NotContains(t, sql, "DROP COLUMN", "migration should preserve legacy analytics data while repairing the write contract")
+}
+
+func TestCodeReviewChangeBreakdownCompatibilityMigrationPostgresBehavior(t *testing.T) {
+	t.Parallel()
+
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set TEST_DATABASE_URL to run the Postgres migration behavior test")
+	}
+
+	migrationBody, err := os.ReadFile("../../migrations/000266_relax_code_review_change_breakdown_constraint.up.sql")
+	require.NoError(t, err, "test should read the code review change-breakdown compatibility migration")
+
+	tests := []struct {
+		name        string
+		createTable string
+	}{
+		{
+			name: "repairs an already-migrated legacy constraint",
+			createTable: `
+				CREATE TABLE code_review_session_metadata (
+					id uuid PRIMARY KEY,
+					additions integer,
+					deletions integer,
+					lines_changed integer,
+					CONSTRAINT chk_code_review_session_metadata_change_breakdown CHECK (
+						(additions IS NULL AND deletions IS NULL)
+						OR (
+							additions IS NOT NULL
+							AND deletions IS NOT NULL
+							AND lines_changed IS NOT NULL
+							AND lines_changed = additions + deletions
+						)
+					)
+				)`,
+		},
+		{
+			name: "remains safe on the current fresh-install schema",
+			createTable: `
+				CREATE TABLE code_review_session_metadata (
+					id uuid PRIMARY KEY,
+					additions integer,
+					deletions integer,
+					CONSTRAINT chk_code_review_session_metadata_change_breakdown CHECK (
+						(additions IS NULL AND deletions IS NULL)
+						OR (additions IS NOT NULL AND deletions IS NOT NULL)
+					)
+				)`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := context.Background()
+			conn, connectErr := pgx.Connect(ctx, databaseURL)
+			require.NoError(t, connectErr, "test should connect to TEST_DATABASE_URL")
+			defer func() {
+				require.NoError(t, conn.Close(context.Background()), "test should close the PostgreSQL connection")
+			}()
+
+			schema := "test_code_review_constraint_" + strings.ReplaceAll(uuid.NewString(), "-", "_")
+			_, createSchemaErr := conn.Exec(ctx, `CREATE SCHEMA `+schema)
+			require.NoError(t, createSchemaErr, "test should create an isolated compatibility schema")
+			defer func() {
+				_, cleanupErr := conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS `+schema+` CASCADE`)
+				require.NoError(t, cleanupErr, "test should remove the isolated compatibility schema")
+			}()
+			_, searchPathErr := conn.Exec(ctx, `SET search_path TO `+schema+`, public`)
+			require.NoError(t, searchPathErr, "test should isolate compatibility migration objects")
+
+			_, createTableErr := conn.Exec(ctx, tt.createTable)
+			require.NoError(t, createTableErr, "test should create the pre-migration code review metadata schema")
+			_, migrationErr := conn.Exec(ctx, string(migrationBody))
+			require.NoError(t, migrationErr, "compatibility migration should apply to the pre-migration schema")
+
+			reviewID := uuid.New()
+			_, insertErr := conn.Exec(ctx, `
+				INSERT INTO code_review_session_metadata (id, additions, deletions)
+				VALUES ($1, 13, 1)`, reviewID)
+			require.NoError(t, insertErr, "completed review metrics should persist without the removed lines_changed value")
+
+			var additions, deletions int
+			scanErr := conn.QueryRow(ctx, `
+				SELECT additions, deletions
+				FROM code_review_session_metadata
+				WHERE id = $1`, reviewID).Scan(&additions, &deletions)
+			require.NoError(t, scanErr, "persisted change-breakdown metrics should remain readable")
+			require.Equal(t, 13, additions, "migration should preserve the exact additions count")
+			require.Equal(t, 1, deletions, "migration should preserve the exact deletions count")
+
+			_, oneSidedErr := conn.Exec(ctx, `
+				INSERT INTO code_review_session_metadata (id, additions)
+				VALUES ($1, 3)`, uuid.New())
+			require.Error(t, oneSidedErr, "migration should continue rejecting an incomplete change breakdown")
+		})
+	}
+}
+
 func TestSessionChangesetsMigrationPostgresBehavior(t *testing.T) {
 	t.Parallel()
 

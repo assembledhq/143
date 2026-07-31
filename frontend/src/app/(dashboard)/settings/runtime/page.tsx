@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronDown, CircleHelp, Minus, Plus } from "lucide-react";
+import { CircleHelp, Minus, Plus } from "lucide-react";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { CopyButton } from "@/components/copy-button";
 import { PageContainer } from "@/components/page-container";
@@ -16,11 +16,7 @@ import { PageHeader } from "@/components/page-header";
 import { SettingsLastActivity } from "@/components/settings/settings-last-activity";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
+import { DisclosureCard } from "@/components/ui/disclosure-card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -732,7 +728,8 @@ function SessionsAndCleanupSection() {
       DEFAULT_EXECUTION_SETTINGS.max_session_duration_seconds) / 60,
   );
   const tabToolsEnabled = settings.coding_agent_tab_tools_enabled ?? true;
-  const requireOpenRouter = settings.opencode_routing?.require_openrouter ?? false;
+  const requireOpenRouter =
+    settings.opencode_routing?.require_openrouter ?? false;
   const completedRetentionMinutes =
     lifecycle.completed_session_retention_minutes ??
     DEFAULT_COMPLETED_SESSION_RETENTION_MINUTES;
@@ -787,165 +784,129 @@ function SessionsAndCleanupSection() {
     : null;
 
   return (
-    <section className="space-y-3">
-      <Collapsible open={open} onOpenChange={setOpen}>
-        <Card>
-          <CardContent>
-            <CollapsibleTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                aria-label={
-                  open
-                    ? "Hide session lifecycle controls"
-                    : "Show session lifecycle controls"
-                }
-                className="flex h-auto w-full items-start justify-between gap-3 rounded-none px-0 py-4 text-left hover:bg-transparent sm:items-center sm:gap-4"
-              >
-                <span className="block min-w-0 flex-1 space-y-1">
-                  <span className="flex flex-wrap items-center gap-2 text-xs font-medium whitespace-normal text-foreground">
-                    Sessions and cleanup
-                    <AutosaveIndicator status={autosave.status} />
-                  </span>
-                  {summary && (
-                    <span className="block text-sm font-medium whitespace-normal text-foreground">
-                      {summary}
-                    </span>
-                  )}
-                  <span className="block text-xs leading-5 whitespace-normal text-muted-foreground">
-                    Lifecycle, retention, preview idle behavior, and advanced agent tab coordination.
-                  </span>
-                </span>
-                <span
-                  data-testid="session-lifecycle-disclosure-action"
-                  className="flex shrink-0 items-center gap-2 pt-0.5 text-xs text-muted-foreground sm:pt-0"
-                >
-                  {open ? "Hide" : "Show"}
-                  <ChevronDown
-                    className={cn(
-                      "h-4 w-4 transition-transform",
-                      open && "rotate-180",
-                    )}
-                    aria-hidden="true"
-                  />
-                </span>
-              </Button>
-            </CollapsibleTrigger>
-            <CollapsibleContent className="border-t border-border/70">
-              <SettingRow
-                id="max-session-minutes"
-                label="Maximum session length"
-                description="Stop an agent turn when it exceeds this organization limit."
-                helper={`Range ${MIN_SESSION_DURATION_MINUTES}-${MAX_SESSION_DURATION_MINUTES} minutes`}
-                tooltip="Longer limits help large changes finish, but they also hold sandbox capacity longer."
-              >
-                <BoundedNumberInput
-                  id="max-session-minutes"
-                  label="Maximum session length"
-                  min={MIN_SESSION_DURATION_MINUTES}
-                  max={MAX_SESSION_DURATION_MINUTES}
-                  value={maxSessionMinutesField.value}
-                  onChange={maxSessionMinutesField.onChange}
-                  onBlur={maxSessionMinutesField.onBlur}
-                  unit="min"
-                />
-              </SettingRow>
-              <SettingRow
-                id="completed-session-retention"
-                label="Keep completed sessions for"
-                description="Keep completed sandboxes available briefly for inspection and preview reuse."
-                helper={`Range ${MIN_COMPLETED_SESSION_RETENTION_MINUTES}-${MAX_COMPLETED_SESSION_RETENTION_MINUTES} minutes`}
-                tooltip="Use 0 minutes when completed sandboxes should be cleaned up immediately."
-              >
-                <BoundedNumberInput
-                  id="completed-session-retention"
-                  label="Keep completed sessions for"
-                  min={MIN_COMPLETED_SESSION_RETENTION_MINUTES}
-                  max={MAX_COMPLETED_SESSION_RETENTION_MINUTES}
-                  value={completedRetentionField.value}
-                  onChange={completedRetentionField.onChange}
-                  onBlur={completedRetentionField.onBlur}
-                  unit="min"
-                />
-              </SettingRow>
-              <SettingRow
-                id="idle-preview-ttl"
-                label="Idle preview timeout"
-                description="Stop a preview sandbox after it sits idle for this long."
-                helper={`Range ${MIN_IDLE_PREVIEW_TTL_MINUTES}-${MAX_IDLE_PREVIEW_TTL_MINUTES} minutes`}
-                tooltip="Active previews are still stopped when they hit this idle window."
-              >
-                <BoundedNumberInput
-                  id="idle-preview-ttl"
-                  label="Idle preview timeout"
-                  min={MIN_IDLE_PREVIEW_TTL_MINUTES}
-                  max={MAX_IDLE_PREVIEW_TTL_MINUTES}
-                  value={idlePreviewTTLField.value}
-                  onChange={idlePreviewTTLField.onChange}
-                  onBlur={idlePreviewTTLField.onBlur}
-                  unit="min"
-                />
-              </SettingRow>
-              <SettingRow
-                id="preview-holds-sandbox"
-                label="Keep sandbox while preview is active"
-                description="Preserve the backing sandbox while a preview is still running."
-                tooltip="Disable this only if preview cost is more important than fast preview reuse."
-              >
-                <Switch
-                  id="preview-holds-sandbox"
-                  checked={previewHoldsSandbox}
-                  onCheckedChange={(checked) => {
-                    autosave.save({
-                      settings: {
-                        sandbox_lifecycle: { preview_holds_sandbox: checked },
-                      },
-                    });
-                  }}
-                  aria-label="Keep sandbox while preview is active"
-                  className="sm:ml-auto"
-                />
-              </SettingRow>
-              <SettingRow
-                id="sandbox-tab-tools"
-                label="Agent tab tools"
-                description="Allow sibling agent tabs in the same session to coordinate through 143 tools."
-                tooltip="This only exposes scoped tab coordination for the current session and repository."
-              >
-                <Switch
-                  id="sandbox-tab-tools"
-                  checked={tabToolsEnabled}
-                  onCheckedChange={(checked) => {
-                    autosave.save({
-                      settings: { coding_agent_tab_tools_enabled: checked },
-                    });
-                  }}
-                  aria-label="Agent tab tools"
-                  className="sm:ml-auto"
-                />
-              </SettingRow>
-              <SettingRow
-                id="opencode-require-openrouter"
-                label="OpenCode: require OpenRouter routing"
-                description="Route OpenCode models only through OpenRouter (audited US-only providers). When off, models fall back to the OpenCode-native gateway if no OpenRouter key is available."
-                tooltip="The native gateway lacks OpenRouter's US-only provider guarantee. Enable this for US/data-sensitive orgs. Pinned native model ids always bypass this."
-              >
-                <Switch
-                  id="opencode-require-openrouter"
-                  checked={requireOpenRouter}
-                  onCheckedChange={(checked) => {
-                    autosave.save({
-                      settings: { opencode_routing: { require_openrouter: checked } },
-                    });
-                  }}
-                  aria-label="Require OpenRouter routing for OpenCode"
-                  className="sm:ml-auto"
-                />
-              </SettingRow>
-            </CollapsibleContent>
-          </CardContent>
-        </Card>
-      </Collapsible>
+    <section>
+      <DisclosureCard
+        title="Sessions and cleanup"
+        description="Lifecycle, retention, preview idle behavior, and advanced agent tab coordination."
+        summary={summary}
+        open={open}
+        onOpenChange={setOpen}
+        showAriaLabel="Show session lifecycle controls"
+        hideAriaLabel="Hide session lifecycle controls"
+        status={<AutosaveIndicator status={autosave.status} />}
+        actionTestId="session-lifecycle-disclosure-action"
+      >
+        <SettingRow
+          id="max-session-minutes"
+          label="Maximum session length"
+          description="Stop an agent turn when it exceeds this organization limit."
+          helper={`Range ${MIN_SESSION_DURATION_MINUTES}-${MAX_SESSION_DURATION_MINUTES} minutes`}
+          tooltip="Longer limits help large changes finish, but they also hold sandbox capacity longer."
+        >
+          <BoundedNumberInput
+            id="max-session-minutes"
+            label="Maximum session length"
+            min={MIN_SESSION_DURATION_MINUTES}
+            max={MAX_SESSION_DURATION_MINUTES}
+            value={maxSessionMinutesField.value}
+            onChange={maxSessionMinutesField.onChange}
+            onBlur={maxSessionMinutesField.onBlur}
+            unit="min"
+          />
+        </SettingRow>
+        <SettingRow
+          id="completed-session-retention"
+          label="Keep completed sessions for"
+          description="Keep completed sandboxes available briefly for inspection and preview reuse."
+          helper={`Range ${MIN_COMPLETED_SESSION_RETENTION_MINUTES}-${MAX_COMPLETED_SESSION_RETENTION_MINUTES} minutes`}
+          tooltip="Use 0 minutes when completed sandboxes should be cleaned up immediately."
+        >
+          <BoundedNumberInput
+            id="completed-session-retention"
+            label="Keep completed sessions for"
+            min={MIN_COMPLETED_SESSION_RETENTION_MINUTES}
+            max={MAX_COMPLETED_SESSION_RETENTION_MINUTES}
+            value={completedRetentionField.value}
+            onChange={completedRetentionField.onChange}
+            onBlur={completedRetentionField.onBlur}
+            unit="min"
+          />
+        </SettingRow>
+        <SettingRow
+          id="idle-preview-ttl"
+          label="Idle preview timeout"
+          description="Stop a preview sandbox after it sits idle for this long."
+          helper={`Range ${MIN_IDLE_PREVIEW_TTL_MINUTES}-${MAX_IDLE_PREVIEW_TTL_MINUTES} minutes`}
+          tooltip="Active previews are still stopped when they hit this idle window."
+        >
+          <BoundedNumberInput
+            id="idle-preview-ttl"
+            label="Idle preview timeout"
+            min={MIN_IDLE_PREVIEW_TTL_MINUTES}
+            max={MAX_IDLE_PREVIEW_TTL_MINUTES}
+            value={idlePreviewTTLField.value}
+            onChange={idlePreviewTTLField.onChange}
+            onBlur={idlePreviewTTLField.onBlur}
+            unit="min"
+          />
+        </SettingRow>
+        <SettingRow
+          id="preview-holds-sandbox"
+          label="Keep sandbox while preview is active"
+          description="Preserve the backing sandbox while a preview is still running."
+          tooltip="Disable this only if preview cost is more important than fast preview reuse."
+        >
+          <Switch
+            id="preview-holds-sandbox"
+            checked={previewHoldsSandbox}
+            onCheckedChange={(checked) => {
+              autosave.save({
+                settings: {
+                  sandbox_lifecycle: { preview_holds_sandbox: checked },
+                },
+              });
+            }}
+            aria-label="Keep sandbox while preview is active"
+            className="sm:ml-auto"
+          />
+        </SettingRow>
+        <SettingRow
+          id="sandbox-tab-tools"
+          label="Agent tab tools"
+          description="Allow sibling agent tabs in the same session to coordinate through 143 tools."
+          tooltip="This only exposes scoped tab coordination for the current session and repository."
+        >
+          <Switch
+            id="sandbox-tab-tools"
+            checked={tabToolsEnabled}
+            onCheckedChange={(checked) => {
+              autosave.save({
+                settings: { coding_agent_tab_tools_enabled: checked },
+              });
+            }}
+            aria-label="Agent tab tools"
+            className="sm:ml-auto"
+          />
+        </SettingRow>
+        <SettingRow
+          id="opencode-require-openrouter"
+          label="OpenCode: require OpenRouter routing"
+          description="Route OpenCode models only through OpenRouter (audited US-only providers). When off, models fall back to the OpenCode-native gateway if no OpenRouter key is available."
+          tooltip="The native gateway lacks OpenRouter's US-only provider guarantee. Enable this for US/data-sensitive orgs. Pinned native model ids always bypass this."
+        >
+          <Switch
+            id="opencode-require-openrouter"
+            checked={requireOpenRouter}
+            onCheckedChange={(checked) => {
+              autosave.save({
+                settings: { opencode_routing: { require_openrouter: checked } },
+              });
+            }}
+            aria-label="Require OpenRouter routing for OpenCode"
+            className="sm:ml-auto"
+          />
+        </SettingRow>
+      </DisclosureCard>
     </section>
   );
 }
@@ -1005,197 +966,161 @@ function ResourceDefaultsSection() {
   const advancedSummary = `${previewMaxTier.charAt(0).toUpperCase()}${previewMaxTier.slice(1)} max · ${formatCPUCores(previewMaxCPUMillis)} cores · ${formatGiB(previewMaxMemoryMiB)}`;
 
   return (
-    <>
-      <section data-testid="sandbox-defaults-section" className="space-y-3">
-        <SectionHeader title="Sandbox defaults" status={autosave.status} />
-        <Card>
-          <CardContent>
-            <SettingRow
+    <section data-testid="sandbox-defaults-section" className="space-y-3">
+      <SectionHeader title="Sandbox defaults" status={autosave.status} />
+      <Card>
+        <CardContent>
+          <SettingRow
+            id="agent-default-tier"
+            label="Agent sandbox size"
+            description="Choose the default sandbox tier for new coding-agent sessions."
+            tooltip="Repositories can still influence preview resources separately."
+          >
+            <ResourceTierSelect
               id="agent-default-tier"
               label="Agent sandbox size"
-              description="Choose the default sandbox tier for new coding-agent sessions."
-              tooltip="Repositories can still influence preview resources separately."
-            >
-              <ResourceTierSelect
-                id="agent-default-tier"
-                label="Agent sandbox size"
-                value={agentDefaultTier}
-                onChange={(value) => {
-                  autosave.save({
-                    settings: {
-                      sandbox_resources: { agent_default_tier: value },
-                    },
-                  });
-                }}
-              />
-            </SettingRow>
-            <SettingRow
+              value={agentDefaultTier}
+              onChange={(value) => {
+                autosave.save({
+                  settings: {
+                    sandbox_resources: { agent_default_tier: value },
+                  },
+                });
+              }}
+            />
+          </SettingRow>
+          <SettingRow
+            id="preview-default-tier"
+            label="Preview sandbox size"
+            description="Choose the default preview tier when repository config does not request one."
+            tooltip="This default applies before repository-specific preview requests are considered."
+          >
+            <ResourceTierSelect
               id="preview-default-tier"
               label="Preview sandbox size"
-              description="Choose the default preview tier when repository config does not request one."
-              tooltip="This default applies before repository-specific preview requests are considered."
-            >
-              <ResourceTierSelect
-                id="preview-default-tier"
-                label="Preview sandbox size"
-                value={previewDefaultTier}
-                onChange={(value) => {
-                  autosave.save({
-                    settings: {
-                      sandbox_resources: { preview_default_tier: value },
-                    },
-                  });
-                }}
-              />
-            </SettingRow>
-            <SettingRow
+              value={previewDefaultTier}
+              onChange={(value) => {
+                autosave.save({
+                  settings: {
+                    sandbox_resources: { preview_default_tier: value },
+                  },
+                });
+              }}
+            />
+          </SettingRow>
+          <SettingRow
+            id="allow-repo-resource-requests"
+            label="Allow repository resource requests"
+            description="Let repository preview config request CPU, memory, and disk up to org limits."
+            tooltip="Disable this to force previews to use the organization preview default tier."
+          >
+            <Switch
               id="allow-repo-resource-requests"
-              label="Allow repository resource requests"
-              description="Let repository preview config request CPU, memory, and disk up to org limits."
-              tooltip="Disable this to force previews to use the organization preview default tier."
-            >
-              <Switch
-                id="allow-repo-resource-requests"
-                checked={allowRepoResourceRequests}
-                onCheckedChange={(checked) => {
-                  autosave.save({
-                    settings: {
-                      sandbox_resources: {
-                        allow_repo_resource_requests: checked,
-                      },
+              checked={allowRepoResourceRequests}
+              onCheckedChange={(checked) => {
+                autosave.save({
+                  settings: {
+                    sandbox_resources: {
+                      allow_repo_resource_requests: checked,
                     },
-                  });
-                }}
-                aria-label="Allow repository resource requests"
-                className="sm:ml-auto"
-              />
-            </SettingRow>
-          </CardContent>
-        </Card>
-      </section>
-      <section
-        data-testid="advanced-resource-limits-section"
-        className="space-y-3"
-      >
-        <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
-          <Card>
-            <CardContent>
-              <CollapsibleTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  aria-label={
-                    advancedOpen
-                      ? "Hide advanced resource limits"
-                      : "Show advanced resource limits"
-                  }
-                  className="flex h-auto w-full items-start justify-between gap-3 rounded-none px-0 py-4 text-left hover:bg-transparent sm:items-center sm:gap-4"
-                >
-                  <span className="block min-w-0 flex-1 space-y-1">
-                    <span className="block text-xs font-medium whitespace-normal text-foreground">
-                      Advanced resource limits
-                    </span>
-                    <span className="block text-sm font-medium whitespace-normal text-foreground">
-                      {advancedSummary}
-                    </span>
-                    <span className="block text-xs leading-5 whitespace-normal text-muted-foreground">
-                      Exact caps for repository-requested previews.
-                    </span>
-                  </span>
-                  <span className="flex shrink-0 items-center gap-2 text-xs font-medium text-muted-foreground">
-                    <AutosaveIndicator status={autosave.status} />
-                    {advancedOpen ? "Hide" : "Show"}
-                    <ChevronDown
-                      className={cn(
-                        "h-3.5 w-3.5 transition-transform",
-                        advancedOpen && "rotate-180",
-                      )}
-                    />
-                  </span>
-                </Button>
-              </CollapsibleTrigger>
-              <CollapsibleContent>
-                <SettingRow
+                  },
+                });
+              }}
+              aria-label="Allow repository resource requests"
+              className="sm:ml-auto"
+            />
+          </SettingRow>
+          <div data-testid="advanced-resource-limits-section">
+            <DisclosureCard
+              title="Advanced resource limits"
+              description="Exact caps for repository-requested previews."
+              summary={advancedSummary}
+              open={advancedOpen}
+              onOpenChange={setAdvancedOpen}
+              variant="inset"
+              showAriaLabel="Show advanced resource limits"
+              hideAriaLabel="Hide advanced resource limits"
+            >
+              <SettingRow
+                id="preview-max-tier"
+                label="Largest preview size"
+                description="Set the largest sandbox tier a repository preview config can request."
+                tooltip="This cap applies only when repository resource requests are allowed."
+              >
+                <ResourceTierSelect
                   id="preview-max-tier"
                   label="Largest preview size"
-                  description="Set the largest sandbox tier a repository preview config can request."
-                  tooltip="This cap applies only when repository resource requests are allowed."
-                >
-                  <ResourceTierSelect
-                    id="preview-max-tier"
-                    label="Largest preview size"
-                    value={previewMaxTier}
-                    onChange={(value) => {
-                      autosave.save({
-                        settings: {
-                          sandbox_resources: { preview_max_tier: value },
-                        },
-                      });
-                    }}
-                  />
-                </SettingRow>
-                <SettingRow
+                  value={previewMaxTier}
+                  onChange={(value) => {
+                    autosave.save({
+                      settings: {
+                        sandbox_resources: { preview_max_tier: value },
+                      },
+                    });
+                  }}
+                />
+              </SettingRow>
+              <SettingRow
+                id="preview-max-cpu-millis"
+                label="Preview CPU limit"
+                description="Set the largest CPU request a repository preview config can make."
+                helper={`Range ${formatCPUCores(MIN_PREVIEW_MAX_CPU_MILLIS)}-${formatCPUCores(MAX_PREVIEW_MAX_CPU_MILLIS)} cores`}
+                tooltip="CPU is shown in cores but saved as millicores."
+              >
+                <BoundedNumberInput
                   id="preview-max-cpu-millis"
                   label="Preview CPU limit"
-                  description="Set the largest CPU request a repository preview config can make."
-                  helper={`Range ${formatCPUCores(MIN_PREVIEW_MAX_CPU_MILLIS)}-${formatCPUCores(MAX_PREVIEW_MAX_CPU_MILLIS)} cores`}
-                  tooltip="CPU is shown in cores but saved as millicores."
-                >
-                  <BoundedNumberInput
-                    id="preview-max-cpu-millis"
-                    label="Preview CPU limit"
-                    inputMode="decimal"
-                    min={MIN_PREVIEW_MAX_CPU_MILLIS / CPU_MILLIS_PER_CORE}
-                    max={MAX_PREVIEW_MAX_CPU_MILLIS / CPU_MILLIS_PER_CORE}
-                    step={CPU_MILLIS_STEP / CPU_MILLIS_PER_CORE}
-                    value={previewMaxCPUField.value}
-                    onChange={previewMaxCPUField.onChange}
-                    onBlur={previewMaxCPUField.onBlur}
-                    unit="cores"
-                  />
-                </SettingRow>
-                <SettingRow
+                  inputMode="decimal"
+                  min={MIN_PREVIEW_MAX_CPU_MILLIS / CPU_MILLIS_PER_CORE}
+                  max={MAX_PREVIEW_MAX_CPU_MILLIS / CPU_MILLIS_PER_CORE}
+                  step={CPU_MILLIS_STEP / CPU_MILLIS_PER_CORE}
+                  value={previewMaxCPUField.value}
+                  onChange={previewMaxCPUField.onChange}
+                  onBlur={previewMaxCPUField.onBlur}
+                  unit="cores"
+                />
+              </SettingRow>
+              <SettingRow
+                id="preview-max-memory-mib"
+                label="Preview memory limit"
+                description="Set the largest memory request a repository preview config can make."
+                helper={`Range ${MIN_PREVIEW_MAX_MEMORY_MIB}-${MAX_PREVIEW_MAX_MEMORY_MIB} MiB`}
+                tooltip="Use this to bound memory-heavy preview services without changing default tiers."
+              >
+                <BoundedNumberInput
                   id="preview-max-memory-mib"
                   label="Preview memory limit"
-                  description="Set the largest memory request a repository preview config can make."
-                  helper={`Range ${MIN_PREVIEW_MAX_MEMORY_MIB}-${MAX_PREVIEW_MAX_MEMORY_MIB} MiB`}
-                  tooltip="Use this to bound memory-heavy preview services without changing default tiers."
-                >
-                  <BoundedNumberInput
-                    id="preview-max-memory-mib"
-                    label="Preview memory limit"
-                    min={MIN_PREVIEW_MAX_MEMORY_MIB}
-                    max={MAX_PREVIEW_MAX_MEMORY_MIB}
-                    value={previewMaxMemoryField.value}
-                    onChange={previewMaxMemoryField.onChange}
-                    onBlur={previewMaxMemoryField.onBlur}
-                    unit="MiB"
-                  />
-                </SettingRow>
-                <SettingRow
+                  min={MIN_PREVIEW_MAX_MEMORY_MIB}
+                  max={MAX_PREVIEW_MAX_MEMORY_MIB}
+                  value={previewMaxMemoryField.value}
+                  onChange={previewMaxMemoryField.onChange}
+                  onBlur={previewMaxMemoryField.onBlur}
+                  unit="MiB"
+                />
+              </SettingRow>
+              <SettingRow
+                id="preview-max-ephemeral-disk-mib"
+                label="Preview disk limit"
+                description="Set the largest temporary disk request a repository preview config can make."
+                helper={`Range ${MIN_PREVIEW_MAX_EPHEMERAL_DISK_MIB}-${MAX_PREVIEW_MAX_EPHEMERAL_DISK_MIB} MiB`}
+                tooltip="This limits ephemeral workspace disk, not persistent repository storage."
+              >
+                <BoundedNumberInput
                   id="preview-max-ephemeral-disk-mib"
                   label="Preview disk limit"
-                  description="Set the largest temporary disk request a repository preview config can make."
-                  helper={`Range ${MIN_PREVIEW_MAX_EPHEMERAL_DISK_MIB}-${MAX_PREVIEW_MAX_EPHEMERAL_DISK_MIB} MiB`}
-                  tooltip="This limits ephemeral workspace disk, not persistent repository storage."
-                >
-                  <BoundedNumberInput
-                    id="preview-max-ephemeral-disk-mib"
-                    label="Preview disk limit"
-                    min={MIN_PREVIEW_MAX_EPHEMERAL_DISK_MIB}
-                    max={MAX_PREVIEW_MAX_EPHEMERAL_DISK_MIB}
-                    value={previewMaxDiskField.value}
-                    onChange={previewMaxDiskField.onChange}
-                    onBlur={previewMaxDiskField.onBlur}
-                    unit="MiB"
-                  />
-                </SettingRow>
-              </CollapsibleContent>
-            </CardContent>
-          </Card>
-        </Collapsible>
-      </section>
-    </>
+                  min={MIN_PREVIEW_MAX_EPHEMERAL_DISK_MIB}
+                  max={MAX_PREVIEW_MAX_EPHEMERAL_DISK_MIB}
+                  value={previewMaxDiskField.value}
+                  onChange={previewMaxDiskField.onChange}
+                  onBlur={previewMaxDiskField.onBlur}
+                  unit="MiB"
+                />
+              </SettingRow>
+            </DisclosureCard>
+          </div>
+        </CardContent>
+      </Card>
+    </section>
   );
 }
 

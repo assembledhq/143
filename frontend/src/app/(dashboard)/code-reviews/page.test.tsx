@@ -624,6 +624,11 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByText("Approval by round")).toBeInTheDocument();
     expect(screen.getByText("Why PRs were not approved right away")).toBeInTheDocument();
     expect(screen.getByText("PR findings and operational outcomes")).toBeInTheDocument();
+    const analyticsFilters = document.getElementById("code-review-analytics-filters");
+    expect(analyticsFilters).not.toBeNull();
+    expect(
+      approvalOutcomes.compareDocumentPosition(analyticsFilters as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     expect(screen.getByText("Line-count limit exceeded")).toBeInTheDocument();
     expect(screen.getByText("Reviewers found a blocking issue")).toBeInTheDocument();
     expect(screen.queryByText("PR size and policy fit")).not.toBeInTheDocument();

@@ -95,7 +95,7 @@ export interface ExternalUserObservation {
 export interface UserSettings {
   coding_agent_model_default?: string;
   coding_agent_reasoning_defaults?: Partial<
-    Record<"codex" | "claude_code", "low" | "medium" | "high" | "xhigh" | "max">
+    Record<"codex" | "claude_code", "" | "low" | "medium" | "high" | "xhigh" | "max">
   >;
   diff_viewer_full_screen?: boolean;
   manual_session_planes_hidden?: boolean;
@@ -2209,6 +2209,13 @@ export interface OrgSettings {
   llm_reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max" | "";
   agent_config?: Record<string, Record<string, string>>;
   default_agent_type?: "codex" | "claude_code" | "amp" | "pi" | "opencode";
+  // An explicitly stored empty string means "no org default" — distinct from an
+  // absent key, which falls back to the platform default. See
+  // getOrgDefaultCodingAgentModel in @/lib/org-coding-agent-defaults.
+  coding_agent_model_defaults?: Partial<Record<"codex" | "claude_code" | "amp" | "pi" | "opencode", string>>;
+  coding_agent_reasoning_defaults?: Partial<
+    Record<"codex" | "claude_code", "" | "low" | "medium" | "high" | "xhigh" | "max">
+  >;
   default_work_repository_id?: string | null;
   pr_authorship?: "user_preferred" | "app_only" | "user_required";
   pr_draft_default?: boolean;

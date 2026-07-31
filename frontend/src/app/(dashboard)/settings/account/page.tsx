@@ -600,10 +600,10 @@ export default function AccountPage() {
               const copy = PERSONAL_AUTOMATION_COPY[key];
               const currentValue = personalAutomaticFollowThrough[key] ?? "inherit";
               const orgDefault = key === "readiness_after_review_loop"
-                ? orgAutomaticFollowThrough.readiness_after_review_loop
+                ? (orgAutomaticFollowThrough.readiness_after_review_loop ?? false)
                 : key === "resolve_conflicts_when_idle"
-                  ? orgAutomaticFollowThrough.resolve_conflicts_when_idle
-                  : orgAutomaticFollowThrough.fix_tests_when_idle;
+                  ? (orgAutomaticFollowThrough.resolve_conflicts_when_idle ?? true)
+                  : (orgAutomaticFollowThrough.fix_tests_when_idle ?? true);
               return (
                 <div key={key} className="space-y-3 border-b border-border pb-5 last:border-b-0 last:pb-0">
                   <div className="space-y-1">

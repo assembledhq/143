@@ -58,6 +58,7 @@ function renderReport(analytics: CodeReviewAnalytics) {
       onAuthorSort={vi.fn()}
       reviewLinkFilters={{ range: "30d" }}
       onNavigateToReviews={vi.fn()}
+      filters={null}
     />,
   );
 }

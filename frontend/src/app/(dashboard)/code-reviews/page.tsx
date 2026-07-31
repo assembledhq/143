@@ -1341,17 +1341,6 @@ export default function CodeReviewsPage() {
           </TabsContent>
 
           <TabsContent value="analytics" className="space-y-4">
-            <CodeReviewFilters
-              id="code-review-analytics-filters"
-              values={sharedFilterValues}
-              repositories={repositories}
-              mobileOpen={mobileFiltersOpen}
-              onMobileOpenChange={setMobileFiltersOpen}
-              onChange={changeSharedFilter}
-              timeRangeLabel="PRs first sent to 143 during this period"
-              analyticsMode
-              mobileLabel="Filter analytics"
-            />
             <CodeReviewAnalyticsReport
               analytics={analyticsQuery.data?.data}
               isLoading={analyticsQuery.isLoading}
@@ -1368,6 +1357,19 @@ export default function CodeReviewsPage() {
                 range: timeRangeFilter,
               }}
               onNavigateToReviews={() => setActiveTab("reviews")}
+              filters={(
+                <CodeReviewFilters
+                  id="code-review-analytics-filters"
+                  values={sharedFilterValues}
+                  repositories={repositories}
+                  mobileOpen={mobileFiltersOpen}
+                  onMobileOpenChange={setMobileFiltersOpen}
+                  onChange={changeSharedFilter}
+                  timeRangeLabel="PRs first sent to 143 during this period"
+                  analyticsMode
+                  mobileLabel="Filter analytics"
+                />
+              )}
             />
           </TabsContent>
 

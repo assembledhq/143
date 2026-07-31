@@ -1563,6 +1563,8 @@ func buildServices(
 	prService.SetPRPreviewSurfacesEnabled(cfg.PRPreviewSurfacesEnabled)
 	wireWorkerPRService(
 		prService,
+		sessionMessageStore,
+		auditEmitter,
 		sandboxProvider,
 		snapshotStore,
 		prSandboxAuth,
@@ -1574,6 +1576,8 @@ func buildServices(
 		llmClient,
 		prTemplateStore,
 		db.NewPRReadinessStore(pool),
+		sessionThreadStore,
+		reviewLoopStore,
 		redisClient,
 		logger,
 	)
@@ -1873,6 +1877,8 @@ func buildUploadStore(ctx context.Context, cfg *config.Config, logger zerolog.Lo
 
 func wireWorkerPRService(
 	prService *ghservice.PRService,
+	sessionMessageStore *db.SessionMessageStore,
+	auditEmitter *db.AuditEmitter,
 	sandboxProvider agent.SandboxProvider,
 	snapshotStore storage.SnapshotStore,
 	sandboxAuthServer agent.SandboxAuthServer,
@@ -1884,12 +1890,16 @@ func wireWorkerPRService(
 	llmClient llm.Client,
 	prTemplateStore *db.PRTemplateStore,
 	prReadinessStore *db.PRReadinessStore,
+	sessionThreadStore *db.SessionThreadStore,
+	reviewLoopStore *db.SessionReviewLoopStore,
 	redisClient *cache.Client,
 	logger zerolog.Logger,
 ) {
 	if prService == nil {
 		return
 	}
+	prService.SetSessionMessageStore(sessionMessageStore)
+	prService.SetAuditEmitter(auditEmitter)
 	prService.SetSandboxPushDeps(sandboxProvider, snapshotStore)
 	prService.SetSandboxAuth(sandboxAuthServer)
 	prService.SetIntegrationStore(integrationStore)
@@ -1900,6 +1910,8 @@ func wireWorkerPRService(
 	prService.SetLLMClient(llmClient)
 	prService.SetPRTemplateStore(prTemplateStore)
 	prService.SetReadinessStore(prReadinessStore)
+	prService.SetSessionThreadStore(sessionThreadStore)
+	prService.SetSessionReviewLoopStore(reviewLoopStore)
 	prService.SetRedisClient(redisClient)
 	prService.SetPullRequestStreams(cache.NewPullRequestStreams(redisClient, logger))
 }
