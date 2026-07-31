@@ -77,6 +77,48 @@ func TestRemovePRReadinessMigrationPinsShutdownContracts(t *testing.T) {
 	}
 }
 
+func TestRemovedPRReadinessTablesDoNotBreakHistoricalRollbacks(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		path     string
+		required []string
+	}{
+		{
+			name: "changeset rollback guards removed readiness tables",
+			path: "../../migrations/000242_session_changeset_split_plans.down.sql",
+			required: []string{
+				"ALTER TABLE IF EXISTS pr_readiness_bypasses",
+				"ALTER TABLE IF EXISTS pr_readiness_checks",
+				"to_regclass('pr_readiness_runs') IS NOT NULL",
+				"ALTER TABLE IF EXISTS pr_readiness_runs",
+			},
+		},
+		{
+			name: "core gaps rollback guards removed readiness tables",
+			path: "../../migrations/000213_pr_readiness_core_gaps.down.sql",
+			required: []string{
+				"ALTER TABLE IF EXISTS pr_readiness_checks",
+				"ALTER TABLE IF EXISTS pr_readiness_runs",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			body, err := os.ReadFile(tt.path)
+			require.NoError(t, err, "test should read the historical readiness rollback migration")
+			sql := string(body)
+			for _, required := range tt.required {
+				require.Contains(t, sql, required, "historical rollback should tolerate readiness tables removed by migration 267")
+			}
+		})
+	}
+}
+
 func TestAutomationNoChangeBackfillPinsSafeNoopPredicates(t *testing.T) {
 	t.Parallel()
 
