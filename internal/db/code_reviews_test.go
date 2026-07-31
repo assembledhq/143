@@ -1364,6 +1364,7 @@ func TestCodeReviewStore_GetReviewAnalyticsReturnsDecisionReport(t *testing.T) {
 	authorMedianAdditions := 50.0
 	authorAverageDeletions := 28.0
 	authorMedianDeletions := 22.0
+	authorMedianFiles := 4.0
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock should initialize")
@@ -1398,7 +1399,8 @@ func TestCodeReviewStore_GetReviewAnalyticsReturnsDecisionReport(t *testing.T) {
 				"average_additions":60,
 				"median_additions":50,
 				"average_deletions":28,
-				"median_deletions":22
+				"median_deletions":22,
+				"median_files_changed":4
 			}]`),
 			[]byte(`[
 				{"bucket":"0_49","reviews_completed":8,"automatically_approved":7},
@@ -1458,6 +1460,7 @@ func TestCodeReviewStore_GetReviewAnalyticsReturnsDecisionReport(t *testing.T) {
 				MedianAdditions:            &authorMedianAdditions,
 				AverageDeletions:           &authorAverageDeletions,
 				MedianDeletions:            &authorMedianDeletions,
+				MedianFilesChanged:         &authorMedianFiles,
 			},
 		},
 		SizeBuckets: []models.CodeReviewSizeBucketAnalytics{

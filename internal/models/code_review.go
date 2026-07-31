@@ -1008,6 +1008,7 @@ type CodeReviewAuthorAnalytics struct {
 	MedianAdditions            *float64 `db:"median_additions" json:"median_additions"`
 	AverageDeletions           *float64 `db:"average_deletions" json:"average_deletions"`
 	MedianDeletions            *float64 `db:"median_deletions" json:"median_deletions"`
+	MedianFilesChanged         *float64 `db:"median_files_changed" json:"median_files_changed"`
 }
 
 type CodeReviewSizeBucketAnalytics struct {

@@ -367,6 +367,7 @@ export interface CodeReviewAuthorAnalytics {
   median_additions: number | null;
   average_deletions: number | null;
   median_deletions: number | null;
+  median_files_changed: number | null;
 }
 
 export interface CodeReviewSizeBucketAnalytics {

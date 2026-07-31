@@ -187,9 +187,11 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 	approvedLines, approvedMedianLines := 70.0, 70.0
 	approvedAdditions, approvedMedianAdditions := 30.0, 30.0
 	approvedDeletions, approvedMedianDeletions := 10.0, 10.0
+	approvedMedianFiles := 3.0
 	needsHumanLines, needsHumanMedianLines := 250.0, 250.0
 	needsHumanAdditions, needsHumanMedianAdditions := 190.0, 190.0
 	needsHumanDeletions, needsHumanMedianDeletions := 60.0, 60.0
+	needsHumanMedianFiles := 8.0
 	analytics, err := NewCodeReviewStore(conn).GetReviewAnalytics(ctx, orgID, CodeReviewAnalyticsFilters{
 		RepositoryID: &repositoryID,
 		CreatedAfter: &createdAfter,
@@ -232,6 +234,7 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 				MedianAdditions:            &approvedMedianAdditions,
 				AverageDeletions:           &approvedDeletions,
 				MedianDeletions:            &approvedMedianDeletions,
+				MedianFilesChanged:         &approvedMedianFiles,
 			},
 			{
 				Author:                     "sam",
@@ -245,6 +248,7 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 				MedianAdditions:            &needsHumanMedianAdditions,
 				AverageDeletions:           &needsHumanDeletions,
 				MedianDeletions:            &needsHumanMedianDeletions,
+				MedianFilesChanged:         &needsHumanMedianFiles,
 			},
 		},
 		SizeBuckets: []models.CodeReviewSizeBucketAnalytics{
@@ -299,6 +303,7 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 				MedianAdditions:            &otherAdditions,
 				AverageDeletions:           &otherDeletions,
 				MedianDeletions:            &otherDeletions,
+				MedianFilesChanged:         &otherFiles,
 			},
 		},
 		SizeBuckets: []models.CodeReviewSizeBucketAnalytics{

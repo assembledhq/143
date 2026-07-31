@@ -249,6 +249,7 @@ const reviewAnalytics: CodeReviewAnalytics = {
       median_additions: 52,
       average_deletions: 28,
       median_deletions: 20,
+      median_files_changed: 3,
     },
     {
       author: "sam",
@@ -263,6 +264,7 @@ const reviewAnalytics: CodeReviewAnalytics = {
       median_additions: 130,
       average_deletions: 75,
       median_deletions: 60,
+      median_files_changed: 7,
     },
   ],
   size_buckets: [
@@ -641,6 +643,7 @@ describe("CodeReviewsPage", () => {
       "9",
       "3",
       "75%",
+      "3",
       "9 / 12",
       "60",
       "52",

@@ -1627,7 +1627,8 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 				AVG(r.additions)::double precision AS average_additions,
 				(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.additions))::double precision AS median_additions,
 				AVG(r.deletions)::double precision AS average_deletions,
-				(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.deletions))::double precision AS median_deletions
+				(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.deletions))::double precision AS median_deletions,
+				(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.files_changed))::double precision AS median_files_changed
 			FROM filtered_reviews r
 			WHERE r.status = 'completed'
 			GROUP BY r.author
