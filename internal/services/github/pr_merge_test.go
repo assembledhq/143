@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -536,8 +537,20 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 				AddRow(uuid.New(), now, now),
 		)
 
+	// Pinned to evaluate_experiment on purpose: the merge path must not also
+	// enqueue a sync_pull_request_state readback. A merged PR has no live
+	// health left to fetch, and the SSE nudge that enqueue used to provide now
+	// comes from publishPullRequestTerminalState reading the stored snapshot.
+	evaluateExperimentKey := fmt.Sprintf("evaluate_experiment:%s", prID)
 	jobMock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgx.NamedArgs{
+			"org_id":     orgID,
+			"queue":      "default",
+			"job_type":   "evaluate_experiment",
+			"payload":    pgxmock.AnyArg(),
+			"priority":   5,
+			"dedupe_key": &evaluateExperimentKey,
+		}).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
 	service := &PRService{

@@ -111,7 +111,8 @@ func (s *PRService) ProcessMergeWhenReady(ctx context.Context, orgID, pullReques
 		return s.pullRequests.MarkMergeWhenReadyFailed(ctx, orgID, pullRequestID, err.Error())
 	}
 
-	if err := s.SyncPullRequestState(ctx, orgID, pullRequestID); err != nil && !errors.Is(err, ErrPullRequestMergeabilityPending) {
+	syncCtx := WithPullRequestSyncReason(ctx, PullRequestSyncReasonMergeSafety)
+	if err := s.SyncPullRequestState(syncCtx, orgID, pullRequestID); err != nil && !errors.Is(err, ErrPullRequestMergeabilityPending) {
 		return fmt.Errorf("sync pull request before merge when ready: %w", err)
 	}
 
@@ -225,7 +226,8 @@ func isStaleMergeWhenReadyMerging(pr models.PullRequest, now time.Time) bool {
 
 func (s *PRService) currentMergeWhenReadyHealth(ctx context.Context, pr models.PullRequest) (*models.PullRequestHealthResponse, error) {
 	if pr.GitHubStateSyncedAt == nil || pr.HealthVersion == 0 {
-		if err := s.SyncPullRequestState(ctx, pr.OrgID, pr.ID); err != nil && !errors.Is(err, ErrPullRequestMergeabilityPending) {
+		syncCtx := WithPullRequestSyncReason(ctx, PullRequestSyncReasonInitial)
+		if err := s.SyncPullRequestState(syncCtx, pr.OrgID, pr.ID); err != nil && !errors.Is(err, ErrPullRequestMergeabilityPending) {
 			return nil, fmt.Errorf("sync pull request before queueing merge when ready: %w", err)
 		}
 		refreshed, err := s.pullRequests.GetByID(ctx, pr.OrgID, pr.ID)

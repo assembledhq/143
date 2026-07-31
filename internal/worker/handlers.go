@@ -9773,7 +9773,8 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			}
 			if errors.Is(err, agent.ErrStalePullRequestHead) {
 				if input.PullRequestID != "" && services.PR != nil {
-					if syncErr := services.PR.SyncPullRequestState(ctx, orgID, uuid.MustParse(input.PullRequestID)); syncErr != nil {
+					syncCtx := ghservice.WithPullRequestSyncReason(ctx, ghservice.PullRequestSyncReasonHeadChanged)
+					if syncErr := services.PR.SyncPullRequestState(syncCtx, orgID, uuid.MustParse(input.PullRequestID)); syncErr != nil {
 						logger.Warn().Err(syncErr).Str("pull_request_id", input.PullRequestID).Msg("failed to sync pull request state after stale repair head")
 					}
 				}
@@ -10027,7 +10028,8 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			if input.AutoAttempt {
 				metrics.RecordPRAutoRepairOutcome(ctx, orgID.String(), "", string(continueOpts.PRRepair.CommandType), "completed")
 			}
-			if syncErr := services.PR.SyncPullRequestState(ctx, orgID, continueOpts.PRRepair.PullRequestID); syncErr != nil {
+			syncCtx := ghservice.WithPullRequestSyncReason(ctx, ghservice.PullRequestSyncReasonRepair)
+			if syncErr := services.PR.SyncPullRequestState(syncCtx, orgID, continueOpts.PRRepair.PullRequestID); syncErr != nil {
 				if errors.Is(syncErr, ghservice.ErrPullRequestMergeabilityPending) {
 					// The health snapshot was refreshed to the post-repair head;
 					// only GitHub's mergeability flag is still settling. The
@@ -10691,6 +10693,7 @@ func newSyncPullRequestStateHandler(services *Services, logger zerolog.Logger) J
 		var input struct {
 			OrgID         string `json:"org_id"`
 			PullRequestID string `json:"pull_request_id"`
+			SyncReason    string `json:"sync_reason"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal sync_pull_request_state payload: %w", err)
@@ -10703,8 +10706,17 @@ func newSyncPullRequestStateHandler(services *Services, logger zerolog.Logger) J
 		if err != nil {
 			return fmt.Errorf("parse pull request ID: %w", err)
 		}
-		logger.Info().Str("org_id", orgID.String()).Str("pull_request_id", pullRequestID.String()).Msg("starting sync_pull_request_state job")
-		if err := services.PR.SyncPullRequestState(ctx, orgID, pullRequestID); err != nil {
+		syncReason := ghservice.PullRequestSyncReason(input.SyncReason)
+		if syncReason.Validate() != nil {
+			syncReason = ghservice.PullRequestSyncReasonManual
+		}
+		logger.Info().
+			Str("org_id", orgID.String()).
+			Str("pull_request_id", pullRequestID.String()).
+			Str("sync_reason", string(syncReason)).
+			Msg("starting sync_pull_request_state job")
+		syncCtx := ghservice.WithPullRequestSyncReason(ctx, syncReason)
+		if err := services.PR.SyncPullRequestState(syncCtx, orgID, pullRequestID); err != nil {
 			if errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
 				return &RetryableError{Err: err, ConsumeAttempt: true}
 			}

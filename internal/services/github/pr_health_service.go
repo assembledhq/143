@@ -25,7 +25,26 @@ import (
 )
 
 const (
-	prHealthStaleAfter       = 2 * time.Minute
+	// prHealthStaleAfter bounds how far behind GitHub the background reconciler
+	// is allowed to let an open PR drift. It is deliberately loose because that
+	// sweep touches every open PR in the org and is the dominant consumer of the
+	// REST budget.
+	prHealthStaleAfter = 10 * time.Minute
+	// prHealthReadStaleAfter is the tighter budget for interactive reads only —
+	// GetPullRequestHealth serving the HTTP endpoint. Projected check rebuilds
+	// never recompute summary.MergeState (see rebuildProjectedHealthSummary), so
+	// an authoritative readback is the only thing that flips a PR from
+	// behind/blocked to clean once CI goes green; at prHealthStaleAfter the
+	// merge button would stay disabled for ten minutes after the last check
+	// passed.
+	//
+	// Background callers must NOT inherit this budget. getPullRequestHealth is
+	// also reached from the auto-repair coordinator, which both the
+	// sync_pull_request_state and rebuild_pull_request_health job handlers
+	// invoke — letting that path refresh every two minutes would re-request the
+	// readback that checkStateRequiresAuthoritativeSync just avoided. They pass
+	// healthBuildOptions.asyncRefreshAfter instead.
+	prHealthReadStaleAfter   = 2 * time.Minute
 	prHealthSyncQueue        = "default"
 	prHealthSyncJobType      = "sync_pull_request_state"
 	prHealthRebuildJobType   = "rebuild_pull_request_health"
@@ -37,7 +56,78 @@ const (
 	maxRebuildEnqueueHops    = 8
 	requiredChecksCacheTTL   = 24 * time.Hour
 	noRequiredChecksCacheTTL = 6 * time.Hour
+	prHealthSyncTimeout      = 2 * time.Minute
 )
+
+type PullRequestSyncReason string
+
+const (
+	PullRequestSyncReasonInitial          PullRequestSyncReason = "initial"
+	PullRequestSyncReasonHeadChanged      PullRequestSyncReason = "head_changed"
+	PullRequestSyncReasonBaseChanged      PullRequestSyncReason = "base_changed"
+	PullRequestSyncReasonReadyForReview   PullRequestSyncReason = "ready_for_review"
+	PullRequestSyncReasonIncomplete       PullRequestSyncReason = "incomplete_check_set"
+	PullRequestSyncReasonStaleReconcile   PullRequestSyncReason = "stale_reconcile"
+	PullRequestSyncReasonMergeSafety      PullRequestSyncReason = "merge_safety"
+	PullRequestSyncReasonCodeReview       PullRequestSyncReason = "code_review"
+	PullRequestSyncReasonRepair           PullRequestSyncReason = "repair"
+	PullRequestSyncReasonManual           PullRequestSyncReason = "manual"
+	PullRequestSyncReasonMergeabilityWait PullRequestSyncReason = "mergeability_wait"
+)
+
+func (r PullRequestSyncReason) Validate() error {
+	switch r {
+	case PullRequestSyncReasonInitial,
+		PullRequestSyncReasonHeadChanged,
+		PullRequestSyncReasonBaseChanged,
+		PullRequestSyncReasonReadyForReview,
+		PullRequestSyncReasonIncomplete,
+		PullRequestSyncReasonStaleReconcile,
+		PullRequestSyncReasonMergeSafety,
+		PullRequestSyncReasonCodeReview,
+		PullRequestSyncReasonRepair,
+		PullRequestSyncReasonManual,
+		PullRequestSyncReasonMergeabilityWait:
+		return nil
+	default:
+		return fmt.Errorf("invalid pull request sync reason %q", r)
+	}
+}
+
+// coalesces reports whether a sync requested for this reason may be satisfied
+// by an already-running sync for the same PR. Merge safety is the one caller
+// that must not: mergePullRequest documents that its CanMerge gate is only
+// meaningful against GitHub data fetched after the merge was requested, and
+// joining an in-flight sync would hand it a snapshot taken beforehand.
+func (r PullRequestSyncReason) coalesces() bool {
+	return r != PullRequestSyncReasonMergeSafety
+}
+
+type pullRequestSyncReasonContextKey struct{}
+
+func WithPullRequestSyncReason(ctx context.Context, reason PullRequestSyncReason) context.Context {
+	return context.WithValue(ctx, pullRequestSyncReasonContextKey{}, reason)
+}
+
+func PullRequestSyncReasonFromContext(ctx context.Context) PullRequestSyncReason {
+	reason, ok := pullRequestSyncReasonAttribute(ctx)
+	if !ok {
+		return PullRequestSyncReasonManual
+	}
+	return reason
+}
+
+// pullRequestSyncReasonAttribute is the raw lookup behind
+// PullRequestSyncReasonFromContext. It keeps "no reason attached" distinct from
+// "manual" so GitHub request telemetry can leave requests made outside a sync
+// flow unlabeled instead of mislabeling them as operator-initiated.
+func pullRequestSyncReasonAttribute(ctx context.Context) (PullRequestSyncReason, bool) {
+	reason, ok := ctx.Value(pullRequestSyncReasonContextKey{}).(PullRequestSyncReason)
+	if !ok || reason.Validate() != nil {
+		return "", false
+	}
+	return reason, true
+}
 
 var (
 	ErrPullRequestMergeabilityPending    = errors.New("pull request mergeability is still being checked by GitHub")
@@ -143,6 +233,21 @@ type healthBuildOptions struct {
 	// automatic repair coordinator — which resolves its own policy and rechecks
 	// the attempt budget directly — skips it on its webhook-driven path.
 	skipAutoRepairAttemptState bool
+
+	// asyncRefreshAfter overrides how stale the persisted GitHub snapshot may be
+	// before this read enqueues a background readback. Zero means
+	// prHealthReadStaleAfter, the tight budget appropriate for a human waiting
+	// on the merge button. Background callers pass prHealthStaleAfter so they
+	// track the reconcile sweep instead of re-arming the readback that the
+	// check-webhook heuristic just avoided.
+	asyncRefreshAfter time.Duration
+}
+
+func (o healthBuildOptions) staleAfter() time.Duration {
+	if o.asyncRefreshAfter > 0 {
+		return o.asyncRefreshAfter
+	}
+	return prHealthReadStaleAfter
 }
 
 func (s *PRService) GetPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID) (*models.PullRequestHealthResponse, error) {
@@ -156,7 +261,7 @@ func (s *PRService) getPullRequestHealth(ctx context.Context, orgID, pullRequest
 	}
 
 	needsInlineSync := (pr.GitHubStateSyncedAt == nil || pr.HealthVersion == 0) && pr.Status == models.PullRequestStatusOpen
-	needsAsyncRefresh := pr.Status == models.PullRequestStatusOpen && pr.GitHubStateSyncedAt != nil && time.Since(*pr.GitHubStateSyncedAt) > prHealthStaleAfter
+	needsAsyncRefresh := pr.Status == models.PullRequestStatusOpen && pr.GitHubStateSyncedAt != nil && time.Since(*pr.GitHubStateSyncedAt) > opts.staleAfter()
 	var linkedRepo *models.Repository
 	if pr.Status == models.PullRequestStatusOpen && s.repos != nil {
 		repo, repoErr := s.repos.GetByFullNameAnyStatus(ctx, orgID, pr.GitHubRepo)
@@ -177,9 +282,10 @@ func (s *PRService) getPullRequestHealth(ctx context.Context, orgID, pullRequest
 	}
 
 	if needsInlineSync {
-		if err := s.SyncPullRequestState(ctx, orgID, pullRequestID); err != nil {
+		syncCtx := WithPullRequestSyncReason(ctx, PullRequestSyncReasonInitial)
+		if err := s.SyncPullRequestState(syncCtx, orgID, pullRequestID); err != nil {
 			if errors.Is(err, ErrPullRequestMergeabilityPending) {
-				s.enqueuePullRequestStateSync(ctx, pr)
+				s.enqueuePullRequestStateSync(ctx, pr, PullRequestSyncReasonMergeabilityWait)
 			} else if errors.Is(err, ErrPullRequestRepositoryDisconnected) {
 				resp, buildErr := s.buildPullRequestHealthResponse(ctx, pr, opts)
 				if buildErr != nil {
@@ -199,7 +305,7 @@ func (s *PRService) getPullRequestHealth(ctx context.Context, orgID, pullRequest
 			return nil, err
 		}
 	} else if needsAsyncRefresh {
-		s.enqueuePullRequestStateSync(ctx, pr)
+		s.enqueuePullRequestStateSync(ctx, pr, PullRequestSyncReasonStaleReconcile)
 	}
 
 	resp, err := s.buildPullRequestHealthResponse(ctx, pr, opts)
@@ -506,6 +612,49 @@ func checkSummariesHaveFailedCheck(checks []models.PullRequestCheckSummary) bool
 }
 
 func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
+	reason := PullRequestSyncReasonFromContext(ctx)
+	if !reason.coalesces() {
+		s.logger.Info().
+			Str("org_id", orgID.String()).
+			Str("pull_request_id", pullRequestID.String()).
+			Str("sync_reason", string(reason)).
+			Msg("starting uncoalesced github pull request health sync")
+		// Deliberately the caller's context, not a prHealthSyncTimeout copy: a
+		// merge gate has exactly one waiter, so there is nobody to protect from
+		// its deadline and the merge request's own timeout should govern. The
+		// coalesced branch below needs its own budget only because it detaches
+		// from whichever caller happened to lead the flight. Runtime is bounded
+		// regardless by the GitHub client's per-request timeout plus the
+		// mergeability backoff ladder.
+		return s.syncPullRequestState(ctx, orgID, pullRequestID)
+	}
+	key := orgID.String() + ":" + pullRequestID.String()
+	result := s.prHealthSyncGroup.DoChan(key, func() (any, error) {
+		s.logger.Info().
+			Str("org_id", orgID.String()).
+			Str("pull_request_id", pullRequestID.String()).
+			Str("sync_reason", string(reason)).
+			Msg("starting github pull request health sync")
+		syncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), prHealthSyncTimeout)
+		defer cancel()
+		return nil, s.syncPullRequestState(syncCtx, orgID, pullRequestID)
+	})
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case completed := <-result:
+		if completed.Shared {
+			s.logger.Debug().
+				Str("org_id", orgID.String()).
+				Str("pull_request_id", pullRequestID.String()).
+				Str("requested_sync_reason", string(reason)).
+				Msg("shared in-flight github pull request health sync")
+		}
+		return completed.Err
+	}
+}
+
+func (s *PRService) syncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
 	pr, err := s.pullRequests.GetByID(ctx, orgID, pullRequestID)
 	if err != nil {
 		return err
@@ -873,7 +1022,8 @@ func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UU
 		return err
 	}
 	for _, pr := range stale {
-		if err := s.SyncPullRequestState(ctx, orgID, pr.ID); err != nil {
+		syncCtx := WithPullRequestSyncReason(ctx, PullRequestSyncReasonStaleReconcile)
+		if err := s.SyncPullRequestState(syncCtx, orgID, pr.ID); err != nil {
 			if errors.Is(err, ErrPullRequestMergeabilityPending) {
 				s.logger.Debug().Str("pull_request_id", pr.ID.String()).Msg("pull request mergeability is still pending during reconciliation")
 				continue
@@ -1929,24 +2079,73 @@ func (s *PRService) fetchCheckRunAnnotations(ctx context.Context, token, owner, 
 	return lines, nil
 }
 
-func (s *PRService) enqueuePullRequestStateSync(ctx context.Context, pr models.PullRequest) {
+// enqueuePullRequestStateSync queues an authoritative GitHub readback. The
+// reason is a required argument rather than an option so that a new trigger
+// cannot silently land in telemetry as "manual".
+//
+// The dedupe key intentionally excludes the reason: a PR only ever needs one
+// pending readback, whatever prompted it. The consequence is that the queued
+// job's payload — and therefore the github_sync_reason dimension on the API
+// calls it makes — keeps whichever reason arrived first. The log event below is
+// emitted for every request, including absorbed ones, so trigger frequency
+// stays measurable even though the per-request attribution is skewed.
+func (s *PRService) enqueuePullRequestStateSync(ctx context.Context, pr models.PullRequest, reason PullRequestSyncReason) {
 	if s.jobs == nil {
 		return
 	}
+	if reason.Validate() != nil {
+		reason = PullRequestSyncReasonManual
+	}
 	dedupeKey := pullRequestStateSyncDedupeKey(pr.ID)
-	_, err := s.jobs.EnqueueWithOpts(ctx, pr.OrgID, db.EnqueueOpts{
+	jobID, err := s.jobs.EnqueueWithOpts(ctx, pr.OrgID, db.EnqueueOpts{
 		Queue:   prHealthSyncQueue,
 		JobType: prHealthSyncJobType,
 		Payload: map[string]string{
 			"org_id":          pr.OrgID.String(),
 			"pull_request_id": pr.ID.String(),
+			"sync_reason":     string(reason),
 		},
 		Priority:  6,
 		DedupeKey: &dedupeKey,
 	})
 	if err != nil {
-		s.logger.Warn().Err(err).Str("pull_request_id", pr.ID.String()).Msg("failed to enqueue pull request health sync")
+		s.logger.Warn().
+			Err(err).
+			Str("pull_request_id", pr.ID.String()).
+			Str("sync_reason", string(reason)).
+			Msg("failed to enqueue pull request health sync")
+		return
 	}
+	event := s.logger.Info().
+		Str("org_id", pr.OrgID.String()).
+		Str("pull_request_id", pr.ID.String()).
+		Str("sync_reason", string(reason)).
+		Bool("deduplicated", jobID == uuid.Nil)
+	if jobID != uuid.Nil {
+		event = event.Str("job_id", jobID.String())
+	}
+	event.Msg("github pull request health sync requested")
+}
+
+// enqueuePullRequestCheckProjection schedules the follow-up work for a check
+// webhook that changed the projection.
+//
+// The DB-only rebuild is enqueued unconditionally, including when an
+// authoritative readback is also needed. It is the only thing guaranteed to
+// fold this row into the health summary: enqueuePullRequestStateSync dedupes
+// against pending *and running* jobs, so a sync that is already past its
+// HasCheckStatesAfter race overlay will absorb the request and finish without
+// ever seeing this write. Returning the rebuild's error also keeps an enqueue
+// failure visible to GitHub as a webhook retry, which the fire-and-forget sync
+// enqueue cannot do.
+func (s *PRService) enqueuePullRequestCheckProjection(ctx context.Context, pr models.PullRequest, requiresSync bool) error {
+	if err := s.enqueuePullRequestHealthRebuild(ctx, pr); err != nil {
+		return err
+	}
+	if requiresSync {
+		s.enqueuePullRequestStateSync(ctx, pr, PullRequestSyncReasonIncomplete)
+	}
+	return nil
 }
 
 func (s *PRService) enqueuePullRequestHealthRebuild(ctx context.Context, pr models.PullRequest) error {
@@ -2035,6 +2234,29 @@ func (s *PRService) enqueueMergeWhenReadyProcessing(ctx context.Context, pr mode
 
 func isMergeWhenReadyProcessable(pr models.PullRequest, now time.Time) bool {
 	return pr.MergeWhenReadyState == models.PullRequestMergeWhenReadyStateQueued || isStaleMergeWhenReadyMerging(pr, now)
+}
+
+// publishPullRequestTerminalState nudges SSE subscribers after a PR reaches
+// merged/closed. Neither terminal path spends a GitHub readback any more — a
+// dead PR has no live health to track — but the sync path used to be the only
+// publisher, so without this a client watching a PR that was merged on
+// github.com would sit on an open-looking snapshot until it refreshed.
+// Subscribers re-read health on the event, and the status column is already
+// updated by the time we get here.
+func (s *PRService) publishPullRequestTerminalState(ctx context.Context, pr models.PullRequest) {
+	if s.prHealthStreams == nil || s.pullRequests == nil {
+		return
+	}
+	current, err := s.pullRequests.GetHealthCurrent(ctx, pr.OrgID, pr.ID)
+	if err != nil {
+		// No snapshot means nothing was ever streamed for this PR, so there is
+		// no stale view to correct.
+		if !errors.Is(err, pgx.ErrNoRows) {
+			s.logger.Warn().Err(err).Str("pull_request_id", pr.ID.String()).Msg("failed to load pull request health while announcing terminal state")
+		}
+		return
+	}
+	s.publishPullRequestUpdated(ctx, pr, current)
 }
 
 func (s *PRService) publishPullRequestUpdated(ctx context.Context, pr models.PullRequest, current models.PullRequestHealthCurrent) {

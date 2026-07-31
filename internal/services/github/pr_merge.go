@@ -99,7 +99,8 @@ func (s *PRService) mergePullRequest(ctx context.Context, orgID, pullRequestID, 
 	// CanMerge gate downstream is meaningful only if it ran against fresh
 	// GitHub data — falling through on a stale snapshot would defeat the
 	// safety check, so we surface the failure and let the user retry.
-	if err := s.SyncPullRequestState(ctx, orgID, pullRequestID); err != nil {
+	syncCtx := WithPullRequestSyncReason(ctx, PullRequestSyncReasonMergeSafety)
+	if err := s.SyncPullRequestState(syncCtx, orgID, pullRequestID); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrMergeStateRefreshFailed, err)
 	}
 	// Reload PR after the sync so we see the freshest persisted state.
@@ -217,15 +218,15 @@ func (s *PRService) mergePullRequest(ctx context.Context, orgID, pullRequestID, 
 	}
 	s.runMergedPullRequestFollowUps(ctx, pr, mergeResp.SHA)
 
-	// Match every other state-mutating PR path (HandlePullRequestEvent,
-	// repair completions) by enqueuing a state sync so other clients
-	// subscribed to this PR's SSE stream see the merged state without having
-	// to wait for the webhook round-trip.
-	s.enqueuePullRequestStateSync(ctx, pr)
-
-	if current, err := s.pullRequests.GetHealthCurrent(ctx, orgID, pullRequestID); err == nil {
-		s.publishPullRequestUpdated(ctx, pr, current)
-	}
+	// Tell other clients subscribed to this PR's SSE stream about the merge
+	// without waiting for the webhook round-trip. This deliberately publishes
+	// from the existing snapshot rather than enqueuing a state sync: a merged
+	// PR has no live health left to read, and by this point UpdateStatus above
+	// has already flipped the row, so a sync would skip its closed-PR
+	// self-heal and spend a full details + check-runs + statuses readback
+	// writing a snapshot nobody reads. HandlePullRequestEvent's closed branch
+	// makes the same call for PRs merged on github.com.
+	s.publishPullRequestTerminalState(ctx, pr)
 
 	s.logger.Info().
 		Str("pull_request_id", pullRequestID.String()).

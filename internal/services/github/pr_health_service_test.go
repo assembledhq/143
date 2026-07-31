@@ -1,6 +1,7 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -885,7 +889,7 @@ func TestPRServiceGetPullRequestHealthEnqueuesSyncAndEnrichment(t *testing.T) {
 	orgID := uuid.New()
 	pullRequestID := uuid.New()
 	now := time.Now().UTC()
-	stale := now.Add(-5 * time.Minute)
+	stale := now.Add(-15 * time.Minute)
 	summary := models.PullRequestHealthSummary{
 		MergeState:       models.PullRequestMergeStateClean,
 		HasConflicts:     false,
@@ -940,6 +944,88 @@ func TestPRServiceGetPullRequestHealthEnqueuesSyncAndEnrichment(t *testing.T) {
 	require.True(t, resp.CanFixTests, "GetPullRequestHealth should advertise test repair when tests are failing")
 	require.True(t, resp.EnrichmentRequested, "GetPullRequestHealth should mark enrichment as requested after enqueueing it")
 	require.NoError(t, mock.ExpectationsWereMet(), "all stale health expectations should be met")
+}
+
+// getPullRequestHealth is reached from the auto-repair coordinator, which the
+// sync_pull_request_state and rebuild_pull_request_health job handlers invoke.
+// If that background path inherited the interactive staleness budget, every
+// projected rebuild would re-request the authoritative readback that
+// checkStateRequiresAuthoritativeSync just avoided.
+func TestPRServiceGetPullRequestHealthStalenessBudgetIsPerCaller(t *testing.T) {
+	t.Parallel()
+
+	summaryJSON, err := json.Marshal(models.PullRequestHealthSummary{MergeState: models.PullRequestMergeStateClean})
+	require.NoError(t, err, "should marshal health summary")
+
+	tests := []struct {
+		name        string
+		opts        healthBuildOptions
+		wantEnqueue bool
+	}{
+		{
+			name:        "interactive read refreshes past the tight budget",
+			opts:        healthBuildOptions{},
+			wantEnqueue: true,
+		},
+		{
+			name:        "background caller tracks the reconcile budget",
+			opts:        healthBuildOptions{asyncRefreshAfter: prHealthStaleAfter},
+			wantEnqueue: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create pgx mock pool")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			pullRequestID := uuid.New()
+			now := time.Now().UTC()
+			// Between the two budgets: stale for a human, fresh for the sweep.
+			syncedAt := now.Add(-5 * time.Minute)
+
+			mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+					pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+					"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
+					models.PullRequestMergeStateUnknown, false, 0, false, &syncedAt, int64(2), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
+				))
+			if tt.wantEnqueue {
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgx.NamedArgs{
+						"org_id":     orgID,
+						"queue":      prHealthSyncQueue,
+						"job_type":   prHealthSyncJobType,
+						"payload":    pgxmock.AnyArg(),
+						"priority":   6,
+						"dedupe_key": pgxmock.AnyArg(),
+					}).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+			}
+			mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+				WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
+					pullRequestID, orgID, int64(3), "head", "base", summaryJSON, summaryJSON,
+					models.PullRequestHealthEnrichmentStatusReady, &now, int64(0), now, now,
+				))
+
+			service := &PRService{
+				pullRequests: db.NewPullRequestStore(mock),
+				jobs:         db.NewJobStore(mock),
+				logger:       zerolog.New(io.Discard),
+			}
+
+			_, err = service.getPullRequestHealth(context.Background(), orgID, pullRequestID, tt.opts)
+			require.NoError(t, err, "health build should succeed")
+			require.NoError(t, mock.ExpectationsWereMet(),
+				"a five-minute-old snapshot should enqueue a readback only for the interactive budget")
+		})
+	}
 }
 
 func TestPRServicePopulateAutoRepairAttemptStateUsesPersonalOverride(t *testing.T) {
@@ -1073,6 +1159,113 @@ func TestPullRequestStateSyncDedupeKey(t *testing.T) {
 		pullRequestStateSyncDedupeKey(prID),
 		"all sync triggers for one pull request should share a dedupe key",
 	)
+}
+
+func TestEnqueuePullRequestStateSyncRecordsEveryDeduplicatedReason(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	dedupeKey := pullRequestStateSyncDedupeKey(prID)
+	for index := range 2 {
+		rows := pgxmock.NewRows([]string{"id"})
+		if index == 0 {
+			rows.AddRow(uuid.New())
+		}
+		mock.ExpectQuery("INSERT INTO jobs").
+			WithArgs(pgx.NamedArgs{
+				"org_id":     orgID,
+				"queue":      prHealthSyncQueue,
+				"job_type":   prHealthSyncJobType,
+				"payload":    pgxmock.AnyArg(),
+				"priority":   6,
+				"dedupe_key": &dedupeKey,
+			}).
+			WillReturnRows(rows)
+	}
+
+	var logs bytes.Buffer
+	service := &PRService{
+		jobs:   db.NewJobStore(mock),
+		logger: zerolog.New(&logs),
+	}
+	pr := models.PullRequest{ID: prID, OrgID: orgID}
+
+	service.enqueuePullRequestStateSync(context.Background(), pr, PullRequestSyncReasonStaleReconcile)
+	service.enqueuePullRequestStateSync(context.Background(), pr, PullRequestSyncReasonHeadChanged)
+
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	require.Len(t, lines, 2, "each synchronization trigger should emit its own request event")
+	var first, second map[string]any
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &first), "first synchronization request log should be valid JSON")
+	require.NoError(t, json.Unmarshal([]byte(lines[1]), &second), "deduplicated synchronization request log should be valid JSON")
+	require.Equal(t, string(PullRequestSyncReasonStaleReconcile), first["sync_reason"], "first event should preserve the initiating reason")
+	require.Equal(t, false, first["deduplicated"], "first event should identify the newly queued job")
+	require.Equal(t, string(PullRequestSyncReasonHeadChanged), second["sync_reason"], "deduplicated event should preserve the later trigger reason")
+	require.Equal(t, true, second["deduplicated"], "second event should identify that the active job absorbed it")
+	require.NoError(t, mock.ExpectationsWereMet(), "both synchronization triggers should exercise durable queue deduplication")
+}
+
+func TestPullRequestSyncReasonValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		reason    PullRequestSyncReason
+		expectErr bool
+	}{
+		{name: "initial", reason: PullRequestSyncReasonInitial},
+		{name: "head changed", reason: PullRequestSyncReasonHeadChanged},
+		{name: "base changed", reason: PullRequestSyncReasonBaseChanged},
+		{name: "ready for review", reason: PullRequestSyncReasonReadyForReview},
+		{name: "incomplete check set", reason: PullRequestSyncReasonIncomplete},
+		{name: "stale reconcile", reason: PullRequestSyncReasonStaleReconcile},
+		{name: "merge safety", reason: PullRequestSyncReasonMergeSafety},
+		{name: "code review", reason: PullRequestSyncReasonCodeReview},
+		{name: "repair", reason: PullRequestSyncReasonRepair},
+		{name: "manual", reason: PullRequestSyncReasonManual},
+		{name: "mergeability wait", reason: PullRequestSyncReasonMergeabilityWait},
+		{name: "unknown", reason: PullRequestSyncReason("unknown"), expectErr: true},
+		{name: "empty", reason: "", expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.reason.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "unknown sync reasons should fail validation")
+				return
+			}
+			require.NoError(t, err, "known sync reasons should pass validation")
+		})
+	}
+}
+
+// Every trigger except merge safety may ride along on a sync that is already
+// running. Merge safety has its own dedicated test below.
+func TestPullRequestSyncReasonCoalesces(t *testing.T) {
+	t.Parallel()
+
+	require.False(t, PullRequestSyncReasonMergeSafety.coalesces(), "merge safety must observe GitHub state fetched after its own request began")
+	for _, reason := range []PullRequestSyncReason{
+		PullRequestSyncReasonInitial,
+		PullRequestSyncReasonHeadChanged,
+		PullRequestSyncReasonBaseChanged,
+		PullRequestSyncReasonReadyForReview,
+		PullRequestSyncReasonIncomplete,
+		PullRequestSyncReasonStaleReconcile,
+		PullRequestSyncReasonCodeReview,
+		PullRequestSyncReasonRepair,
+		PullRequestSyncReasonManual,
+		PullRequestSyncReasonMergeabilityWait,
+	} {
+		require.True(t, reason.coalesces(), "%s should share an in-flight sync rather than spend a second GitHub round trip", reason)
+	}
 }
 
 func TestEnqueuePullRequestHealthRebuildChainsAfterRunningJob(t *testing.T) {
@@ -1718,6 +1911,162 @@ func TestPRServiceSyncPullRequestStateSelfHealsMergedDrift(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "self-heal should issue UpdateStatus(merged) and skip the health snapshot path")
 }
 
+// driftSyncGate lets a test hold a SyncPullRequestState inside its GitHub call
+// so the sync is observably in flight, and counts the round trips it made.
+type driftSyncGate struct {
+	fetches     atomic.Int32
+	started     chan struct{}
+	release     chan struct{}
+	startedOnce sync.Once
+	releaseOnce sync.Once
+}
+
+// awaitInFlight returns once the sync has entered its GitHub request.
+func (g *driftSyncGate) awaitInFlight() { <-g.started }
+
+func (g *driftSyncGate) releaseNow() { g.releaseOnce.Do(func() { close(g.release) }) }
+
+// newDriftSyncService builds the smallest service that can complete a
+// SyncPullRequestState: GitHub reports the PR closed, so the sync self-heals
+// the status and returns without touching the check-run or snapshot paths. The
+// returned gate holds that single GitHub call open until the test releases it.
+func newDriftSyncService(t *testing.T, orgID, pullRequestID uuid.UUID) (*PRService, *driftSyncGate) {
+	t.Helper()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	t.Cleanup(mock.Close)
+
+	repoID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+
+	gate := &driftSyncGate{started: make(chan struct{}), release: make(chan struct{})}
+	t.Cleanup(gate.releaseNow)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/assembledhq/143/pulls/42":
+			gate.fetches.Add(1)
+			gate.startedOnce.Do(func() { close(gate.started) })
+			<-gate.release
+			_, _ = w.Write([]byte(`{"number":42,"html_url":"https://github.com/assembledhq/143/pull/42","state":"closed","merged":false,"mergeable":false,"mergeable_state":"dirty","head":{"ref":"feature","sha":"head-sync"},"base":{"ref":"main","sha":"base-sync"}}`))
+		default:
+			t.Errorf("drift sync should not call %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+			pullRequestID, (*uuid.UUID)(nil), orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
+			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
+		))
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
+		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
+			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
+		))
+	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
+	mock.ExpectExec("UPDATE pull_requests SET status").
+		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID, "status": models.PullRequestStatusClosed}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	service := &PRService{
+		tokenProvider: &Service{cache: map[int64]*cachedToken{}},
+		pullRequests:  db.NewPullRequestStore(mock),
+		repos:         db.NewRepositoryStore(mock),
+		logger:        zerolog.New(io.Discard),
+		baseURL:       server.URL,
+		httpClient:    server.Client(),
+		// No backoff ladder: mergeability retries would inflate the round-trip
+		// count these tests assert on.
+		mergeabilityRetryDelays: []time.Duration{},
+	}
+	service.tokenProvider.cache[123] = &cachedToken{Token: "install-token", ExpiresAt: time.Now().Add(time.Hour)}
+	return service, gate
+}
+
+// A coalescing reason occupies the shared group key, so a concurrent caller
+// rides along instead of spending its own GitHub round trip.
+//
+// singleflight.DoChan registers the caller before it returns the channel, so
+// the follower's membership is settled the moment the call returns — there is
+// no window to sleep through.
+func TestPRServiceSyncPullRequestStateCoalescesConcurrentRequests(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+	service, gate := newDriftSyncService(t, orgID, pullRequestID)
+
+	leaderErr := make(chan error, 1)
+	go func() {
+		leaderErr <- service.SyncPullRequestState(
+			WithPullRequestSyncReason(context.Background(), PullRequestSyncReasonStaleReconcile),
+			orgID, pullRequestID,
+		)
+	}()
+	gate.awaitInFlight()
+
+	var followerRan atomic.Bool
+	follower := service.prHealthSyncGroup.DoChan(orgID.String()+":"+pullRequestID.String(), func() (any, error) {
+		followerRan.Store(true)
+		return nil, nil
+	})
+	gate.releaseNow()
+
+	result := <-follower
+	require.NoError(t, <-leaderErr, "the leading sync should complete")
+	require.True(t, result.Shared, "a coalescing sync should hold the shared group key so concurrent callers join it")
+	require.False(t, followerRan.Load(), "the joining caller should not start a second flight")
+	require.Equal(t, int32(1), gate.fetches.Load(), "coalesced callers should share one GitHub round trip")
+}
+
+// mergePullRequest documents that its CanMerge gate is only meaningful against
+// GitHub data fetched after the merge was requested, so a merge-safety sync
+// must not occupy the coalescing group: a later caller has to be free to fetch
+// for itself, and the merge itself must never inherit an earlier snapshot.
+func TestPRServiceSyncPullRequestStateBypassesCoalescingForMergeSafety(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+	service, gate := newDriftSyncService(t, orgID, pullRequestID)
+
+	leaderErr := make(chan error, 1)
+	go func() {
+		leaderErr <- service.SyncPullRequestState(
+			WithPullRequestSyncReason(context.Background(), PullRequestSyncReasonMergeSafety),
+			orgID, pullRequestID,
+		)
+	}()
+	gate.awaitInFlight()
+
+	var followerRan atomic.Bool
+	follower := service.prHealthSyncGroup.DoChan(orgID.String()+":"+pullRequestID.String(), func() (any, error) {
+		followerRan.Store(true)
+		return nil, nil
+	})
+
+	// The merge-safety sync is still mid-flight. Because it never registered on
+	// the group, this call runs its own function immediately rather than
+	// blocking on it. The timeout only bounds the failure path.
+	select {
+	case result := <-follower:
+		require.False(t, result.Shared, "a merge-safety sync must not hold the shared group key")
+		require.True(t, followerRan.Load(), "a concurrent caller should be free to start its own flight")
+	case <-time.After(5 * time.Second):
+		t.Fatal("merge-safety sync occupied the coalescing group; a concurrent caller was forced to wait on it")
+	}
+
+	gate.releaseNow()
+	require.NoError(t, <-leaderErr, "merge safety should run its own sync to completion")
+	require.Equal(t, int32(1), gate.fetches.Load(), "merge safety should read authoritative GitHub state for itself")
+}
+
 // Same drift, but the PR was closed without merging. Sync should flip status
 // to "closed" and skip the snapshot path. Distinct from the merged case
 // because the close branch runs different follow-ups (no deploy row, no
@@ -2247,6 +2596,66 @@ func TestPRServiceStartPullRequestRepairReturnsBusyWhenCanonicalSessionRunning(t
 	require.Nil(t, resp, "StartPullRequestRepair should not launch a second repair turn while the canonical session is running")
 	require.ErrorIs(t, err, ErrRepairSessionBusy, "StartPullRequestRepair should return a handled busy error when the canonical session is not resumable")
 	require.NoError(t, mock.ExpectationsWereMet(), "all busy repair expectations should be met")
+}
+
+// The closed webhook deliberately skips the GitHub readback, so the sync path
+// is no longer around to notify SSE subscribers. Without an explicit publish, a
+// client watching a PR that was merged on github.com would keep rendering the
+// open snapshot until it happened to refetch.
+func TestPRServiceApplyClosedPRTransitionPublishesTerminalState(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	defer mock.Close()
+
+	mr := miniredis.RunT(t)
+	redisMetrics, err := cache.NewMetrics()
+	require.NoError(t, err, "redis metrics should initialize")
+	redisClient := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), redisMetrics)
+	require.NotNil(t, redisClient, "redis client should initialize")
+	t.Cleanup(func() {
+		require.NoError(t, redisClient.Close(), "redis client should close cleanly")
+	})
+	streams := cache.NewPullRequestStreams(redisClient, zerolog.Nop())
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+	now := time.Now().UTC()
+	summaryJSON := json.RawMessage(`{"merge_state":"clean","has_conflicts":false,"failing_test_count":0,"needs_agent_action":false}`)
+
+	sub, err := streams.Subscribe(orgID)
+	require.NoError(t, err, "test should subscribe to pull request updates")
+	defer sub.Close()
+
+	mock.ExpectExec("UPDATE pull_requests SET status").
+		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID, "status": models.PullRequestStatusClosed}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
+			pullRequestID, orgID, int64(7), "head-closed", "base-closed", summaryJSON, summaryJSON,
+			models.PullRequestHealthEnrichmentStatusReady, nil, int64(0), now, now,
+		))
+
+	service := &PRService{
+		pullRequests:    db.NewPullRequestStore(mock),
+		prHealthStreams: streams,
+		logger:          zerolog.New(io.Discard),
+	}
+	pr := models.PullRequest{ID: pullRequestID, OrgID: orgID, GitHubRepo: "assembledhq/143", GitHubPRNumber: 42}
+
+	require.NoError(t, service.applyClosedPRTransition(context.Background(), pr, false, "", "head-closed"),
+		"closing a pull request should succeed")
+	require.Eventually(t, func() bool {
+		select {
+		case event := <-sub.C:
+			return event.PullRequestID == pullRequestID && event.Version == 7 && event.HeadSHA == "head-closed"
+		default:
+			return false
+		}
+	}, 2*time.Second, 20*time.Millisecond, "closing a pull request should publish an update so subscribers refetch the terminal state")
+	require.NoError(t, mock.ExpectationsWereMet(), "the terminal publish should read the existing snapshot instead of calling GitHub")
 }
 
 func TestPRServiceCompletePullRequestRepairRunPublishesUpdate(t *testing.T) {
