@@ -1871,7 +1871,8 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 				AVG(r.additions)::double precision AS average_additions,
 				(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.additions))::double precision AS median_additions,
 				AVG(r.deletions)::double precision AS average_deletions,
-				(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.deletions))::double precision AS median_deletions
+				(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.deletions))::double precision AS median_deletions,
+				(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.files_changed))::double precision AS median_files_changed
 			FROM filtered_reviews r
 			WHERE r.status = 'completed'
 			GROUP BY r.author
@@ -2028,7 +2029,8 @@ func codeReviewAuthorAnalyticsOrder(sortBy, sortOrder string) (string, error) {
 		"split_sample":      "(a.reviews_with_change_breakdown::double precision / NULLIF(a.reviews_completed, 0))",
 		"average_additions": "a.average_additions",
 		"median_additions":  "a.median_additions", "average_deletions": "a.average_deletions",
-		"median_deletions": "a.median_deletions",
+		"median_deletions":     "a.median_deletions",
+		"median_files_changed": "a.median_files_changed",
 	}
 	if sortBy == "" {
 		return "a.reviews_completed DESC, a.author ASC", nil

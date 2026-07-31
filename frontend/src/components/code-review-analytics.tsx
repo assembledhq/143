@@ -21,7 +21,7 @@ const SIZE_BUCKET_LABELS: Record<CodeReviewSizeBucket, string> = {
   "200_499": "200–499 total lines",
   "500_plus": "500+ total lines",
 };
-type AuthorSort = "author" | "reviews" | "approved" | "not_approved" | "approval_rate" | "split_sample" | "average_additions" | "median_additions" | "average_deletions" | "median_deletions";
+type AuthorSort = "author" | "reviews" | "approved" | "not_approved" | "approval_rate" | "split_sample" | "average_additions" | "median_additions" | "average_deletions" | "median_deletions" | "median_files_changed";
 
 const NON_APPROVAL_REASON_LABELS: Record<string, string> = {
   reviewer_disabled: "Automatic approval was disabled",
@@ -72,6 +72,11 @@ function signedRoundedMetric(value: number | null, sign: "+" | "-"): string {
 // keep the sign and avoid announcing the "—" placeholder as a value.
 function medianAriaLabel(value: number | null, sign: "+" | "-", noun: string): string {
   const formatted = signedRoundedMetric(value, sign);
+  return formatted === "—" ? `No ${noun} data overall` : `${formatted} ${noun} overall`;
+}
+
+function roundedMetricAriaLabel(value: number | null, noun: string): string {
+  const formatted = roundedMetric(value);
   return formatted === "—" ? `No ${noun} data overall` : `${formatted} ${noun} overall`;
 }
 
@@ -312,6 +317,7 @@ export function CodeReviewAnalyticsReport({
                     ["Approved", "approved"],
                     ["Not approved", "not_approved"],
                     ["Approval rate", "approval_rate"],
+                    ["Median files changed", "median_files_changed"],
                     ["Median additions", "median_additions"],
                     ["Median deletions", "median_deletions"],
                   ] as const).map(([label, sort]) => (
@@ -364,6 +370,7 @@ export function CodeReviewAnalyticsReport({
                     <TableCell className="text-right tabular-nums">
                       {percentage(author.automatically_approved, author.reviews_completed)}
                     </TableCell>
+                    <TableCell className="text-right tabular-nums">{roundedMetric(author.median_files_changed)}</TableCell>
                     <TableCell className="text-right tabular-nums">{signedRoundedMetric(author.median_additions, "+")}</TableCell>
                     <TableCell className="text-right tabular-nums">{signedRoundedMetric(author.median_deletions, "-")}</TableCell>
                   </TableRow>
@@ -391,6 +398,11 @@ export function CodeReviewAnalyticsReport({
                     content: percentage(summary.automatically_approved, summary.reviews_completed),
                     className: "text-right",
                     ariaLabel: `${percentage(summary.automatically_approved, summary.reviews_completed)} overall approval rate`,
+                  },
+                  {
+                    content: roundedMetric(summary.median_files_changed),
+                    className: "text-right",
+                    ariaLabel: roundedMetricAriaLabel(summary.median_files_changed, "median files changed"),
                   },
                   {
                     content: signedRoundedMetric(summary.median_additions, "+"),

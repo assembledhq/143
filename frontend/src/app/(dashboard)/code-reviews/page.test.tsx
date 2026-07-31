@@ -249,6 +249,7 @@ const reviewAnalytics: CodeReviewAnalytics = {
       median_additions: 52,
       average_deletions: 28,
       median_deletions: 20,
+      median_files_changed: 3,
     },
     {
       author: "sam",
@@ -263,6 +264,7 @@ const reviewAnalytics: CodeReviewAnalytics = {
       median_additions: 130,
       average_deletions: 75,
       median_deletions: 60,
+      median_files_changed: 7,
     },
   ],
   size_buckets: [
@@ -650,6 +652,7 @@ describe("CodeReviewsPage", () => {
       "Approved",
       "Not approved",
       "Approval rate",
+      "Median files changed",
       "Median additions",
       "Median deletions",
     ]);
@@ -660,6 +663,7 @@ describe("CodeReviewsPage", () => {
       "9",
       "3",
       "75%",
+      "3",
       "+52",
       "-20",
     ]);
@@ -671,10 +675,12 @@ describe("CodeReviewsPage", () => {
       "17",
       "11",
       "61%",
+      "3",
       "+70",
       "-26",
     ]);
     expect(within(overallRow).queryByRole("link")).not.toBeInTheDocument();
+    expect(within(overallRow).getByRole("cell", { name: "3 median files changed overall" })).toBeInTheDocument();
     expect(within(overallRow).getByRole("cell", { name: "+70 median additions overall" })).toBeInTheDocument();
     expect(within(overallRow).getByRole("cell", { name: "-26 median deletions overall" })).toBeInTheDocument();
     expect(within(overallRow).getByRole("button", { name: "About this summary" })).toBeInTheDocument();
@@ -695,6 +701,29 @@ describe("CodeReviewsPage", () => {
     expect(analyticsRequests[0]?.has("repository_id")).toBe(false);
     await user.click(within(authorTable).getByRole("button", { name: "Sort by PR author ascending" }));
     await waitFor(() => expect(analyticsRequests.at(-1)?.get("author_sort_by")).toBe("author"));
+    expect(analyticsRequests.at(-1)?.get("author_sort_order")).toBe("asc");
+  });
+
+  it("sorts PR author analytics by median files changed", async () => {
+    const user = userEvent.setup();
+    const analyticsRequests: URLSearchParams[] = [];
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews/analytics", ({ request }) => {
+        analyticsRequests.push(new URL(request.url).searchParams);
+        return HttpResponse.json({ data: reviewAnalytics } satisfies SingleResponse<CodeReviewAnalytics>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, {
+      nuqsHasMemory: true,
+      searchParams: { tab: "analytics" },
+    });
+
+    const authorTable = await screen.findByRole("table", { name: "Code review analytics by PR author" });
+    await user.click(within(authorTable).getByRole("button", { name: "Sort by Median files changed ascending" }));
+
+    await waitFor(() => expect(analyticsRequests.at(-1)?.get("author_sort_by")).toBe("median_files_changed"));
     expect(analyticsRequests.at(-1)?.get("author_sort_order")).toBe("asc");
   });
 
@@ -750,6 +779,7 @@ describe("CodeReviewsPage", () => {
       "17",
       "11",
       "61%",
+      "3",
       "—",
       "—",
     ]);
@@ -762,6 +792,7 @@ describe("CodeReviewsPage", () => {
       "9",
       "3",
       "75%",
+      "3",
       "—",
       "—",
     ]);

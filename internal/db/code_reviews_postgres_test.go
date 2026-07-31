@@ -213,9 +213,11 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 	approvedLines, approvedMedianLines := 70.0, 70.0
 	approvedAdditions, approvedMedianAdditions := 30.0, 30.0
 	approvedDeletions, approvedMedianDeletions := 10.0, 10.0
+	approvedMedianFiles := 3.0
 	needsHumanLines, needsHumanMedianLines := 250.0, 250.0
 	needsHumanAdditions, needsHumanMedianAdditions := 190.0, 190.0
 	needsHumanDeletions, needsHumanMedianDeletions := 60.0, 60.0
+	needsHumanMedianFiles := 8.0
 	analytics, err := NewCodeReviewStore(conn).GetReviewAnalytics(ctx, orgID, CodeReviewAnalyticsFilters{
 		RepositoryID: &repositoryID,
 		CreatedAfter: &createdAfter,
@@ -258,6 +260,7 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 				MedianAdditions:            &approvedMedianAdditions,
 				AverageDeletions:           &approvedDeletions,
 				MedianDeletions:            &approvedMedianDeletions,
+				MedianFilesChanged:         &approvedMedianFiles,
 			},
 			{
 				Author:                     "sam",
@@ -271,6 +274,7 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 				MedianAdditions:            &needsHumanMedianAdditions,
 				AverageDeletions:           &needsHumanDeletions,
 				MedianDeletions:            &needsHumanMedianDeletions,
+				MedianFilesChanged:         &needsHumanMedianFiles,
 			},
 		},
 		SizeBuckets: []models.CodeReviewSizeBucketAnalytics{
@@ -296,6 +300,7 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 	for _, sortBy := range []string{
 		"", "author", "reviews", "approved", "not_approved", "approval_rate",
 		"split_sample", "average_additions", "median_additions", "average_deletions", "median_deletions",
+		"median_files_changed",
 	} {
 		for _, sortOrder := range []string{"asc", "desc"} {
 			_, sortErr := store.GetReviewAnalytics(ctx, orgID, CodeReviewAnalyticsFilters{
@@ -368,6 +373,7 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 				MedianAdditions:            &otherAdditions,
 				AverageDeletions:           &otherDeletions,
 				MedianDeletions:            &otherDeletions,
+				MedianFilesChanged:         &otherFiles,
 			},
 		},
 		SizeBuckets: []models.CodeReviewSizeBucketAnalytics{
@@ -392,6 +398,7 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 // they assign the same rank to the same row. Without it, transposing two
 // branches on one side alone would quietly anchor cursors in the wrong label
 // group and drop rows from the sorted list.
+//
 //nolint:paralleltest // sort subtests share one PostgreSQL connection and isolated schema, so they must run serially
 func TestCodeReviewSortRankMatchesPostgresForEveryRow(t *testing.T) {
 	t.Parallel()
