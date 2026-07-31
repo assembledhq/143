@@ -39,7 +39,7 @@ describe("LandingPage", () => {
     ]);
     expect(
       screen.getByRole("heading", {
-        name: "Agents made code faster to write. Review is where it piles up.",
+        name: "Code review that approves the pull requests it should.",
       }),
     ).toBeInTheDocument();
   });

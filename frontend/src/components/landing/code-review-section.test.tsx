@@ -9,34 +9,11 @@ describe("CodeReviewSection", () => {
 
     const heading = screen.getByRole("heading", {
       level: 2,
-      name: "Agents made code faster to write. Review is where it piles up.",
+      name: "Code review that approves the pull requests it should.",
     });
 
     expect(heading.className).toContain(landingTypography.sectionTitle);
     expect(screen.getByText("01 Code review")).toBeInTheDocument();
-  });
-
-  it("names the review bottlenecks before offering the answer", () => {
-    render(<CodeReviewSection isDark={false} />);
-
-    expect(
-      screen.getByRole("heading", { level: 3, name: "More pull requests" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("heading", {
-        level: 3,
-        name: "Larger, less cohesive changes",
-      }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("heading", {
-        level: 3,
-        name: "Authors who don't review code",
-      }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("heading", { level: 3, name: "Stacks stuck for days" }),
-    ).toBeInTheDocument();
   });
 
   it("shows the auto-approval verdict with the evidence behind it", () => {
@@ -60,41 +37,22 @@ describe("CodeReviewSection", () => {
     expect(screen.getByText(/Auth-sensitive paths changed/)).toBeInTheDocument();
   });
 
-  it("calls out faster reviews, strict policy, reviewer burden, and unblocked merges", () => {
+  it("lists the outcomes as supporting bullets instead of extra cards", () => {
     render(<CodeReviewSection isDark={false} />);
 
     expect(
-      screen.getByRole("heading", {
-        level: 3,
-        name: "Reviews finish in minutes, not days",
-      }),
+      screen.getByText(/Reviews finish in minutes, not days/),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", {
-        level: 3,
-        name: "Policy is enforced, not remembered",
-      }),
+      screen.getByText(/Policy is enforced the same way on every pull request/),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", {
-        level: 3,
-        name: "Hard feedback without the interpersonal cost",
-      }),
+      screen.getByText(/Hard feedback lands without the interpersonal cost/),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", {
-        level: 3,
-        name: "Review stops blocking the merge",
-      }),
+      screen.getByText(/Acceptable-risk changes merge on the spot/),
     ).toBeInTheDocument();
-  });
-
-  it("frames the auto-approval rate as the metric to move", () => {
-    render(<CodeReviewSection isDark={false} />);
-
-    expect(
-      screen.getByText(/share of your pull requests that get approved this way/),
-    ).toBeInTheDocument();
+    expect(screen.queryAllByRole("heading", { level: 3 })).toHaveLength(1);
   });
 
   it("links to the code review policy guide", () => {

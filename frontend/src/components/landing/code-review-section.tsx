@@ -2,14 +2,11 @@
 
 import Link from "next/link";
 import { ArrowRight, Check, CircleDot } from "lucide-react";
-import { Card, CardContent } from "@/components/ui/card";
 import { useInView } from "@/hooks/use-in-view";
 import {
   codeReviewApproval,
-  codeReviewCapabilities,
   codeReviewEscalation,
   codeReviewOutcomes,
-  codeReviewPressures,
   codeReviewSummary,
 } from "./landing-copy";
 import { landingLayout as layout } from "./landing-layout";
@@ -156,22 +153,6 @@ export default function CodeReviewSection({ isDark }: CodeReviewSectionProps) {
           </div>
         </div>
 
-        <div className="grid gap-x-10 gap-y-8 sm:grid-cols-2 lg:grid-cols-4">
-          {codeReviewPressures.map((pressure) => (
-            <div
-              key={pressure.title}
-              className={`border-t pt-5 ${
-                isDark ? "border-white/10" : "border-[#dad7ce]"
-              }`}
-            >
-              <h3 className={`${type.cardTitle} ${heading}`}>
-                {pressure.title}
-              </h3>
-              <p className={`mt-3 ${type.body} ${body}`}>{pressure.body}</p>
-            </div>
-          ))}
-        </div>
-
         <div
           ref={ref}
           className={layout.featureRowReverse}
@@ -195,17 +176,12 @@ export default function CodeReviewSection({ isDark }: CodeReviewSectionProps) {
               The approval decision is made from explicit evidence, not a
               model&apos;s recommendation. Every safeguard in your policy has to
               pass first, and the reviewed commit, policy version, and agent
-              output stay inspectable afterward. The number worth watching is
-              the share of your pull requests that get approved this way — raise
-              it by tuning the policy, not by trusting the model more.
+              output stay inspectable afterward.
             </p>
             <ul className="grid gap-2 pt-2">
-              {codeReviewCapabilities.map((capability) => (
-                <li
-                  key={capability}
-                  className={`text-xs font-mono ${body}`}
-                >
-                  · {capability}
+              {codeReviewOutcomes.map((outcome) => (
+                <li key={outcome} className={`text-xs font-mono ${body}`}>
+                  · {outcome}
                 </li>
               ))}
             </ul>
@@ -223,26 +199,6 @@ export default function CodeReviewSection({ isDark }: CodeReviewSectionProps) {
               </Link>
             </div>
           </div>
-        </div>
-
-        <div className="grid gap-4 md:grid-cols-2">
-          {codeReviewOutcomes.map((outcome) => (
-            <Card
-              key={outcome.title}
-              className={
-                isDark
-                  ? "border-white/10 bg-[#1d1d1a]"
-                  : "border-[#e1ded5] bg-[#fefdfb] shadow-[0_18px_48px_-36px_rgb(36_34_28_/_32%)]"
-              }
-            >
-              <CardContent className="p-6">
-                <h3 className={`${type.cardTitle} ${heading}`}>
-                  {outcome.title}
-                </h3>
-                <p className={`mt-4 ${type.body} ${body}`}>{outcome.body}</p>
-              </CardContent>
-            </Card>
-          ))}
         </div>
       </div>
     </section>

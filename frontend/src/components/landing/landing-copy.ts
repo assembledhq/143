@@ -1,55 +1,22 @@
 export const codeReviewSummary = {
   step: "01",
   kicker: "Code review",
-  heading: "Agents made code faster to write. Review is where it piles up.",
+  heading: "Code review that approves the pull requests it should.",
   body: "Request 143 Code Reviewer on a pull request and several coding agents review it in parallel. When the change clears your policy and no blocking finding remains, 143 submits a real GitHub approval with the evidence attached. When it does not, the pull request comes back with inline findings and the specific reason a human is still needed.",
 };
 
-export const codeReviewPressures = [
-  {
-    title: "More pull requests",
-    body: "Agents raise the volume every team has to get through. Review capacity does not scale with it.",
-  },
-  {
-    title: "Larger, less cohesive changes",
-    body: "Agent-written pull requests bundle work that does not obviously belong together, so each one costs more to hold in your head.",
-  },
-  {
-    title: "Authors who don't review code",
-    body: "More changes come from teammates who aren't engineers, arriving without the practices reviewers lean on. Saying so is work that falls on the reviewer too.",
-  },
-  {
-    title: "Stacks stuck for days",
-    body: "Generating the code got faster. Getting it to production safely did not, so finished work waits instead of shipping.",
-  },
+export const reviewBottlenecks = [
+  "More pull requests than review capacity",
+  "Larger, less cohesive agent-written changes",
+  "More authors who don't review code for a living",
+  "Stacks stuck in review for days while generation sprints ahead",
 ];
 
 export const codeReviewOutcomes = [
-  {
-    title: "Reviews finish in minutes, not days",
-    body: "Assessment starts the moment 143 is requested as a reviewer, and every new commit is reviewed again automatically until the pull request is approved. Nothing waits for a batch window or for someone to free up.",
-  },
-  {
-    title: "Policy is enforced, not remembered",
-    body: "Size thresholds, sensitive paths, migrations, auth, billing, dependency changes, required checks, and description requirements are evaluated on every pull request the same way — instead of depending on who happens to be reviewing that day.",
-  },
-  {
-    title: "Hard feedback without the interpersonal cost",
-    body: "When a change isn't ready, the reason arrives as inline findings against the policy every author is held to. No one has to spend social capital telling a colleague their pull request needs work.",
-  },
-  {
-    title: "Review stops blocking the merge",
-    body: "Acceptable-risk changes are approved on the spot instead of waiting in someone's queue, so finished work reaches main while reviewers keep their attention for the changes that need judgment.",
-  },
-];
-
-export const codeReviewCapabilities = [
-  "Requested like any other GitHub reviewer",
-  "Reviewer agents run their native /review in parallel",
-  "Approval needs evidence, not a model's opinion",
-  "P0 and P1 findings block approval and post inline",
-  "One versioned policy across every repository",
-  "Every decision links to its session and commit",
+  "Reviews finish in minutes, not days",
+  "Policy is enforced the same way on every pull request",
+  "Hard feedback lands without the interpersonal cost",
+  "Acceptable-risk changes merge on the spot",
 ];
 
 export const codeReviewApproval = {

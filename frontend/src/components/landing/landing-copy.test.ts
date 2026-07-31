@@ -5,8 +5,8 @@ import {
   codeReviewApproval,
   codeReviewEscalation,
   codeReviewOutcomes,
-  codeReviewPressures,
   codeReviewSummary,
+  reviewBottlenecks,
   codingAgents,
   integrations,
   platformLayers,
@@ -31,27 +31,27 @@ describe("landing copy", () => {
       "01 Code review",
     );
     expect(codeReviewSummary.heading).toBe(
-      "Agents made code faster to write. Review is where it piles up.",
+      "Code review that approves the pull requests it should.",
     );
   });
 
   it("names the review bottlenecks agent-written code creates", () => {
-    expect(codeReviewPressures.map((pressure) => pressure.title)).toEqual([
-      "More pull requests",
-      "Larger, less cohesive changes",
-      "Authors who don't review code",
-      "Stacks stuck for days",
+    expect(reviewBottlenecks).toEqual([
+      "More pull requests than review capacity",
+      "Larger, less cohesive agent-written changes",
+      "More authors who don't review code for a living",
+      "Stacks stuck in review for days while generation sprints ahead",
     ]);
   });
 
-  it("answers each pressure with a code review outcome", () => {
-    expect(codeReviewOutcomes.map((outcome) => outcome.title)).toEqual([
+  it("answers each bottleneck with a code review outcome", () => {
+    expect(codeReviewOutcomes).toEqual([
       "Reviews finish in minutes, not days",
-      "Policy is enforced, not remembered",
-      "Hard feedback without the interpersonal cost",
-      "Review stops blocking the merge",
+      "Policy is enforced the same way on every pull request",
+      "Hard feedback lands without the interpersonal cost",
+      "Acceptable-risk changes merge on the spot",
     ]);
-    expect(codeReviewOutcomes).toHaveLength(codeReviewPressures.length);
+    expect(codeReviewOutcomes).toHaveLength(reviewBottlenecks.length);
   });
 
   it("shows both the auto-approval and the escalation path", () => {
