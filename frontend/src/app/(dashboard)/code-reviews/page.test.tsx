@@ -504,8 +504,21 @@ describe("CodeReviewsPage", () => {
     const timeWindow = screen.getByRole("button", { name: "Time window" });
     expect(timeWindow).toHaveTextContent("Last 30 days");
     const filters = timeWindow.closest("#code-review-filters");
+    expect(filters).toHaveAttribute("data-slot", "card");
     expect(filters).toContainElement(screen.getByRole("combobox", { name: "Repository" }));
     expect(filters?.lastElementChild).toContainElement(timeWindow);
+    expect(screen.getByText("Repository", { selector: "label" })).toHaveAttribute(
+      "for",
+      screen.getByRole("combobox", { name: "Repository" }).id,
+    );
+    expect(screen.getByText("PR author", { selector: "label" })).toHaveAttribute(
+      "for",
+      screen.getByRole("textbox", { name: "PR author" }).id,
+    );
+    expect(screen.getByText("Search", { selector: "label" })).toHaveAttribute(
+      "for",
+      screen.getByRole("textbox", { name: "Search code reviews" }).id,
+    );
     expect(screen.getByRole("heading", { level: 2, name: "Review activity" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Status" })).toHaveTextContent("Current reviews");
     expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
