@@ -1,5 +1,14 @@
 import { cn } from "@/lib/utils";
 import { AgentBadge } from "@/components/agent-badge";
+import { Button } from "@/components/ui/button";
+import { SessionDetailFrame } from "./session-detail-frame";
+import {
+  SESSION_COMPOSER_SURFACE_HEIGHT_CLASSNAME,
+  SESSION_DETAIL_PANEL_DEFAULT_WIDTH,
+  SESSION_HEADER_HEIGHT_CLASSNAME,
+  SESSION_THREAD_STRIP_HEIGHT_CLASSNAME,
+  SESSION_WORKSPACE_MIN_WIDTH_CLASSNAME,
+} from "./session-detail-geometry";
 
 export function SessionTimelineSkeleton() {
   const rows: { align: "left" | "right"; widths: string[] }[] = [
@@ -60,18 +69,83 @@ export type SessionDetailSkeletonMetadata = {
   agentType?: string | null;
 };
 
-export function SessionDetailLoadingSkeleton({
-  metadata,
-}: {
+type SessionDetailLoadingProps = {
   metadata?: SessionDetailSkeletonMetadata | null;
+  detailPanelOpen?: boolean;
+  detailPanelWidth?: number;
+  errorMessage?: string;
+  onRetry?: () => void;
+  // A retry keeps the error on screen — the query holds its error until the
+  // refetch settles — so the button is the only place we can show that the
+  // click did something.
+  retrying?: boolean;
+};
+
+function SessionDetailTransitionError({
+  message,
+  onRetry,
+  retrying = false,
+}: {
+  message: string;
+  onRetry?: () => void;
+  retrying?: boolean;
 }) {
   return (
     <div
-      data-testid="session-detail-loading-skeleton"
-      aria-busy="true"
-      className="flex h-full min-h-0 bg-background"
+      role="alert"
+      data-testid="session-detail-transition-error"
+      className="mx-auto max-w-sm space-y-3 rounded-lg border border-border bg-card p-5 text-center"
     >
-      <div className="flex min-w-0 flex-1 flex-col">
+      <p className="text-sm font-medium text-foreground">Couldn&apos;t load this session</p>
+      <p className="text-xs text-muted-foreground">{message}</p>
+      {onRetry ? (
+        <Button type="button" size="sm" variant="outline" loading={retrying} onClick={onRetry}>
+          Retry
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+export function SessionDetailLoadingContent({
+  metadata,
+  detailPanelOpen = true,
+  detailPanelWidth = SESSION_DETAIL_PANEL_DEFAULT_WIDTH,
+  errorMessage,
+  onRetry,
+  retrying,
+}: SessionDetailLoadingProps) {
+  // A cold failure has no metadata to preserve and nothing pending, so the
+  // shimmer chrome would be a lie: it reads as "still loading" and reserves
+  // boxes for content that is never going to arrive. Show only the error.
+  //
+  // This does mean the reserved detail panel collapses on the way from the
+  // initial skeleton to a cold failure. That shift is deliberate: there is no
+  // session to show beside the error, and holding a shimmering panel open next
+  // to a dead end is worse than the one-time reflow.
+  if (errorMessage && !metadata) {
+    return (
+      <div
+        data-testid="session-conversation-workspace-loading"
+        className={cn("flex min-w-0 flex-1 flex-col", SESSION_WORKSPACE_MIN_WIDTH_CLASSNAME)}
+      >
+        <div className="flex min-h-0 flex-1 items-center justify-center p-4">
+          <SessionDetailTransitionError
+            message={errorMessage}
+            onRetry={onRetry}
+            retrying={retrying}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div
+        data-testid="session-conversation-workspace-loading"
+        className={cn("flex min-w-0 flex-1 flex-col", SESSION_WORKSPACE_MIN_WIDTH_CLASSNAME)}
+      >
         {/* Mirrors MobileSessionTopBar's geometry (back button, title, two
             icon buttons) so the swap to the real page does not shift layout.
             The controls stay shimmer — they need session data to act — but
@@ -97,7 +171,12 @@ export function SessionDetailLoadingSkeleton({
             <SkeletonLine className="h-9 w-9 rounded-md" />
           </span>
         </div>
-        <div className="hidden h-12 shrink-0 border-b border-border px-4 md:flex md:items-center md:justify-between">
+        <div
+          className={cn(
+            "hidden shrink-0 border-b border-border px-4 md:flex md:items-center md:justify-between",
+            SESSION_HEADER_HEIGHT_CLASSNAME,
+          )}
+        >
           {metadata ? (
             // Mirrors the loaded header's title row (same type classes and
             // status pill) so the swap to the real page does not shift layout.
@@ -128,7 +207,18 @@ export function SessionDetailLoadingSkeleton({
           </div>
         </div>
         <div className="flex min-h-0 flex-1 flex-col">
-          <div className="hidden h-10 shrink-0 border-b border-border px-3 md:flex md:items-center">
+          {/* AgentTabStrip renders nothing for a session with no threads, so
+              reserving this box overshoots for those sessions. A provisional
+              list row carries no thread data, so we cannot tell them apart
+              here; reserving is the better bet because nearly every session
+              has at least one thread. */}
+          <div
+            data-testid="session-thread-strip-loading"
+            className={cn(
+              "hidden shrink-0 border-b border-border px-3 md:flex md:items-center",
+              SESSION_THREAD_STRIP_HEIGHT_CLASSNAME,
+            )}
+          >
             <div className="flex gap-2 animate-pulse">
               <SkeletonLine className="h-6 w-24 rounded-md" />
               <SkeletonLine className="h-6 w-28 rounded-md" />
@@ -136,13 +226,33 @@ export function SessionDetailLoadingSkeleton({
           </div>
           <div className="min-h-0 flex-1 overflow-hidden p-4">
             <div className="mx-auto flex h-full max-w-3xl flex-col justify-end gap-3">
-              <SessionTimelineSkeleton />
+              {errorMessage ? (
+                <SessionDetailTransitionError
+                  message={errorMessage}
+                  onRetry={onRetry}
+                  retrying={retrying}
+                />
+              ) : (
+                <SessionTimelineSkeleton />
+              )}
             </div>
           </div>
-          <div className="shrink-0 border-t border-border p-3">
-            <div className="animate-pulse rounded-lg border border-border bg-card p-3">
-              <SkeletonLine className="h-16 w-full rounded-md" />
-              <div className="mt-3 flex items-center justify-between">
+          <div
+            data-testid="session-composer-loading"
+            aria-disabled="true"
+            className="shrink-0 border-t border-border p-3"
+          >
+            <div
+              data-testid="session-composer-loading-surface"
+              className={cn(
+                "flex flex-col rounded-xl border border-border-strong bg-surface-raised animate-pulse",
+                SESSION_COMPOSER_SURFACE_HEIGHT_CLASSNAME,
+              )}
+            >
+              <div className="flex min-h-11 flex-1 items-center px-2.5 py-1.5">
+                <SkeletonLine className="h-3 w-2/5 rounded-md" />
+              </div>
+              <div className="flex h-10 items-center justify-between px-2 pb-2">
                 <div className="flex gap-2">
                   <SkeletonLine className="h-8 w-8 rounded-md" />
                   <SkeletonLine className="h-8 w-24 rounded-md" />
@@ -153,20 +263,40 @@ export function SessionDetailLoadingSkeleton({
           </div>
         </div>
       </div>
-      <div className="hidden w-[360px] shrink-0 border-l border-border bg-background md:flex md:flex-col">
-        <div className="h-12 shrink-0 border-b border-border px-3">
-          <div className="flex h-full items-center gap-2 animate-pulse">
-            <SkeletonLine className="h-7 w-20 rounded-md" />
-            <SkeletonLine className="h-7 w-20 rounded-md" />
-            <SkeletonLine className="h-7 w-20 rounded-md" />
+      {detailPanelOpen ? (
+        <div
+          data-testid="session-detail-panel-loading"
+          style={{ width: detailPanelWidth }}
+          className="hidden shrink-0 border-l border-border bg-background md:flex md:flex-col"
+        >
+          <div className={cn("shrink-0 border-b border-border px-3", SESSION_HEADER_HEIGHT_CLASSNAME)}>
+            <div className="flex h-full items-center gap-2 animate-pulse">
+              <SkeletonLine className="h-7 w-20 rounded-md" />
+              <SkeletonLine className="h-7 w-20 rounded-md" />
+              <SkeletonLine className="h-7 w-20 rounded-md" />
+            </div>
+          </div>
+          <div className="space-y-4 p-4 animate-pulse">
+            <SkeletonLine className="h-24 w-full rounded-md" />
+            <SkeletonLine className="h-16 w-full rounded-md" />
+            <SkeletonLine className="h-32 w-full rounded-md" />
           </div>
         </div>
-        <div className="space-y-4 p-4 animate-pulse">
-          <SkeletonLine className="h-24 w-full rounded-md" />
-          <SkeletonLine className="h-16 w-full rounded-md" />
-          <SkeletonLine className="h-32 w-full rounded-md" />
-        </div>
-      </div>
-    </div>
+      ) : null}
+    </>
+  );
+}
+
+export function SessionDetailLoadingSkeleton(props: SessionDetailLoadingProps) {
+  return (
+    <SessionDetailFrame
+      testId="session-detail-loading-skeleton"
+      busy={!props.errorMessage || Boolean(props.retrying)}
+      transition={
+        props.errorMessage ? "error" : props.metadata ? "provisional" : "initial"
+      }
+    >
+      <SessionDetailLoadingContent {...props} />
+    </SessionDetailFrame>
   );
 }

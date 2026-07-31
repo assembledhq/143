@@ -139,8 +139,11 @@ describe('SessionDetailPage transcript and scroll', () => {
 
     renderWithProviders(<SessionDetailContent id="nonexistent" />);
     expect(
-      await screen.findByText('Failed to load session'),
+      await screen.findByText("Couldn't load this session"),
     ).toBeInTheDocument();
+    expect(screen.getByTestId('session-detail-transition-error')).toHaveTextContent(
+      'The session could not be found, or an error occurred while loading it.',
+    );
   });
 
   it('shows result summary card in overview', async () => {
