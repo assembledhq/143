@@ -125,12 +125,12 @@ func TestPRServiceQueueMergeWhenReadyPreflightsUserRequiredGitHubAuth(t *testing
 	orgMock.ExpectQuery("SELECT .+ FROM organizations WHERE id = @id").
 		WithArgs(pgx.NamedArgs{"id": orgID}).
 		WillReturnRows(pgxmock.NewRows(prTestOrganizationColumns).AddRow(
-			orgID, "Acme", []byte(`{"pr_authorship":"user_required"}`), now, now,
+			orgID, "Acme", []byte(`{"pr_authorship":"user_required","session_automation":{"automatic_follow_through":{"resolve_conflicts_when_idle":false,"fix_tests_when_idle":false}}}`), now, now,
 		))
 	orgMock.ExpectQuery("SELECT .+ FROM organizations WHERE id = @id").
 		WithArgs(pgx.NamedArgs{"id": orgID}).
 		WillReturnRows(pgxmock.NewRows(prTestOrganizationColumns).AddRow(
-			orgID, "Acme", []byte(`{"pr_authorship":"user_required"}`), now, now,
+			orgID, "Acme", []byte(`{"pr_authorship":"user_required","session_automation":{"automatic_follow_through":{"resolve_conflicts_when_idle":false,"fix_tests_when_idle":false}}}`), now, now,
 		))
 	repoMock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
