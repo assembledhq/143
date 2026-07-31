@@ -1563,6 +1563,8 @@ func buildServices(
 	prService.SetPRPreviewSurfacesEnabled(cfg.PRPreviewSurfacesEnabled)
 	wireWorkerPRService(
 		prService,
+		sessionMessageStore,
+		auditEmitter,
 		sandboxProvider,
 		snapshotStore,
 		prSandboxAuth,
@@ -1875,6 +1877,8 @@ func buildUploadStore(ctx context.Context, cfg *config.Config, logger zerolog.Lo
 
 func wireWorkerPRService(
 	prService *ghservice.PRService,
+	sessionMessageStore *db.SessionMessageStore,
+	auditEmitter *db.AuditEmitter,
 	sandboxProvider agent.SandboxProvider,
 	snapshotStore storage.SnapshotStore,
 	sandboxAuthServer agent.SandboxAuthServer,
@@ -1894,6 +1898,8 @@ func wireWorkerPRService(
 	if prService == nil {
 		return
 	}
+	prService.SetSessionMessageStore(sessionMessageStore)
+	prService.SetAuditEmitter(auditEmitter)
 	prService.SetSandboxPushDeps(sandboxProvider, snapshotStore)
 	prService.SetSandboxAuth(sandboxAuthServer)
 	prService.SetIntegrationStore(integrationStore)

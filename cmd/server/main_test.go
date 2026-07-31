@@ -531,6 +531,67 @@ func TestBuildServicesWiresLinearAgentWorkerDepsWithoutFeatureFlagGate(t *testin
 	require.Less(t, lastFeatureFlagGate, lastFuncStart, "LinearAgentDeps must be wired even when LINEAR_AGENT_ENABLED=false so queued jobs drain")
 }
 
+func TestWireWorkerPRServiceWiresAutoRepairDependencies(t *testing.T) {
+	t.Parallel()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", nil, 0)
+	require.NoError(t, err, "main.go should parse for automatic PR repair wiring regression test")
+
+	var wireFunc *ast.FuncDecl
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Name.Name == "wireWorkerPRService" {
+			wireFunc = fn
+			break
+		}
+	}
+	require.NotNil(t, wireFunc, "worker startup should define PR service dependency wiring")
+
+	setters := make(map[string]*ast.CallExpr)
+	ast.Inspect(wireFunc.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if ok {
+			setters[selector.Sel.Name] = call
+		}
+		return true
+	})
+
+	tests := []struct {
+		name       string
+		setter     string
+		dependency string
+	}{
+		{
+			name:       "session messages",
+			setter:     "SetSessionMessageStore",
+			dependency: "sessionMessageStore",
+		},
+		{
+			name:       "audit emitter",
+			setter:     "SetAuditEmitter",
+			dependency: "auditEmitter",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			setter := setters[tt.setter]
+			require.NotNil(t, setter, "worker PR service should wire the automatic repair dependency")
+			require.Len(t, setter.Args, 1, "automatic repair dependency setter should receive exactly one argument")
+			dependency, ok := setter.Args[0].(*ast.Ident)
+			require.True(t, ok, "automatic repair dependency should be passed directly to the worker PR service")
+			require.Equal(t, tt.dependency, dependency.Name, "worker PR service should receive the shared automatic repair dependency")
+		})
+	}
+}
+
 func TestMainProductionWorkersPreflightSandboxAuthBeforeConstructingServer(t *testing.T) {
 	t.Parallel()
 
