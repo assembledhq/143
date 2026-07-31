@@ -212,6 +212,7 @@ func TestPreviewArgsWithSessionDefault(t *testing.T) {
 	require.Equal(t, "session-from-env", actual["session_id"], "preview tools should default to the injected session ID")
 }
 
+//nolint:paralleltest // uses t.Setenv, so the table subtests must share process-global environment serially
 func TestPreviewToolExecutor_InternalSessionCommandsDefaultToCodingSessionID(t *testing.T) {
 	// Environment variables are process-global, so this regression test and its subtests cannot run in parallel.
 	t.Setenv(internalapi.CodingSessionIDEnvVar, "session-from-env")
