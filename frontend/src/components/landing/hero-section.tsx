@@ -84,7 +84,7 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
               isDark ? "text-[#f4f3ee]" : "text-[#1b1b19]"
             }`}
           >
-            Where your whole team builds software together
+            Ship as fast as you build
           </h1>
 
           <p
