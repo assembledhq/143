@@ -556,7 +556,7 @@ func parseCodeReviewAnalyticsFilters(w http.ResponseWriter, r *http.Request) (db
 	}
 	if raw := strings.TrimSpace(r.URL.Query().Get("author_sort_by")); raw != "" {
 		switch raw {
-		case "author", "reviews", "approved", "not_approved", "approval_rate", "split_sample", "average_additions", "median_additions", "average_deletions", "median_deletions", "median_files_changed":
+		case "author", "reviews", "approved", "not_approved", "approval_rate", "split_sample", "average_additions", "median_additions", "average_deletions", "median_deletions":
 			analyticsFilters.AuthorSortBy = raw
 		default:
 			writeError(w, r, http.StatusBadRequest, "INVALID_ANALYTICS_SORT", "invalid author_sort_by")

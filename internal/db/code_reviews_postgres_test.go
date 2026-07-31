@@ -46,11 +46,6 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 			title text,
 			revision_context jsonb
 		);
-		CREATE TABLE code_review_policies (
-			id uuid PRIMARY KEY,
-			org_id uuid NOT NULL,
-			risk_policy jsonb NOT NULL
-		);
 		CREATE TABLE pull_requests (
 			id uuid PRIMARY KEY,
 			org_id uuid NOT NULL,
@@ -64,17 +59,14 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 			session_id uuid NOT NULL,
 			repository_id uuid NOT NULL,
 			pull_request_id uuid NOT NULL,
-			policy_id uuid NOT NULL,
 			status text NOT NULL,
 			stale boolean NOT NULL DEFAULT false,
 			superseded_by_session_id uuid,
 			acceptable boolean,
 			decision text,
 			github_review_id bigint,
-			lines_changed integer,
 			additions integer,
 			deletions integer,
-			files_changed integer,
 			risk_reason_details jsonb NOT NULL DEFAULT '[]',
 			created_at timestamptz NOT NULL
 		);
@@ -90,8 +82,6 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 	otherOrgID := uuid.New()
 	repositoryID := uuid.New()
 	otherRepositoryID := uuid.New()
-	policyID := uuid.New()
-	otherPolicyID := uuid.New()
 	approvedSessionID := uuid.New()
 	needsHumanSessionID := uuid.New()
 	failedSessionID := uuid.New()
@@ -100,15 +90,6 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 	otherOrgSessionID := uuid.New()
 	recentAt := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	createdAfter := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
-
-	_, err = conn.Exec(ctx, `
-		INSERT INTO code_review_policies (id, org_id, risk_policy)
-		VALUES
-			($1, $2, '{"max_lines_changed":200,"max_files_changed":5}'),
-			($3, $4, '{"max_lines_changed":3000000000,"max_files_changed":3000000000}')`,
-		policyID, orgID, otherPolicyID, otherOrgID,
-	)
-	require.NoError(t, err, "test should insert captured analytics policies")
 
 	_, err = conn.Exec(ctx, `
 		INSERT INTO sessions (id, org_id, revision_context)
@@ -126,11 +107,11 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 
 	var insertedPullRequestNumbers []int
 	insertReview := func(
-		id, reviewOrgID, sessionID, reviewRepositoryID, reviewPolicyID uuid.UUID,
+		id, reviewOrgID, sessionID, reviewRepositoryID uuid.UUID,
 		status string,
 		decision *models.CodeReviewDecision,
 		githubReviewID *int64,
-		linesChanged, additions, deletions, filesChanged *int,
+		additions, deletions *int,
 		riskReasons string,
 		createdAt time.Time,
 	) {
@@ -149,12 +130,12 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 		require.NoError(t, prErr, "test should insert the pull request a review is attached to")
 		_, insertErr := conn.Exec(ctx, `
 			INSERT INTO code_review_session_metadata (
-				id, org_id, session_id, repository_id, pull_request_id, policy_id, status, decision,
-				github_review_id, lines_changed, additions, deletions, files_changed,
+				id, org_id, session_id, repository_id, pull_request_id, status, decision,
+				github_review_id, additions, deletions,
 				risk_reason_details, created_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15)`,
-			id, reviewOrgID, sessionID, reviewRepositoryID, pullRequestID, reviewPolicyID, status, decision,
-			githubReviewID, linesChanged, additions, deletions, filesChanged, riskReasons, createdAt,
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12)`,
+			id, reviewOrgID, sessionID, reviewRepositoryID, pullRequestID, status, decision,
+			githubReviewID, additions, deletions, riskReasons, createdAt,
 		)
 		require.NoError(t, insertErr, "test should insert a review analytics fact")
 	}
@@ -162,41 +143,38 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 	approvedDecision := models.CodeReviewDecisionApproved
 	needsHumanDecision := models.CodeReviewDecisionNeedsHumanReview
 	reviewID := int64(143)
-	smallLines, smallFiles := 40, 2
 	smallAdditions, smallDeletions := 30, 10
-	largeLines, largeFiles := 250, 8
 	largeAdditions, largeDeletions := 190, 60
-	legacyLines, legacyFiles := 100, 4
 	insertReview(
-		uuid.New(), orgID, approvedSessionID, repositoryID, policyID,
+		uuid.New(), orgID, approvedSessionID, repositoryID,
 		"completed", &approvedDecision, &reviewID,
-		&smallLines, &smallAdditions, &smallDeletions, &smallFiles, "[]", recentAt,
+		&smallAdditions, &smallDeletions, "[]", recentAt,
 	)
 	insertReview(
-		uuid.New(), orgID, needsHumanSessionID, repositoryID, policyID,
+		uuid.New(), orgID, needsHumanSessionID, repositoryID,
 		"completed", &needsHumanDecision, nil,
-		&largeLines, &largeAdditions, &largeDeletions, &largeFiles,
+		&largeAdditions, &largeDeletions,
 		`[{"code":"lines_limit_exceeded"},{"code":"files_limit_exceeded"}]`, recentAt,
 	)
 	insertReview(
-		uuid.New(), orgID, failedSessionID, repositoryID, policyID,
-		"failed", nil, nil, nil, nil, nil, nil, "[]", recentAt,
+		uuid.New(), orgID, failedSessionID, repositoryID,
+		"failed", nil, nil, nil, nil, "[]", recentAt,
 	)
 	insertReview(
-		uuid.New(), orgID, oldSessionID, repositoryID, policyID,
+		uuid.New(), orgID, oldSessionID, repositoryID,
 		"completed", &approvedDecision, &reviewID,
-		&smallLines, &smallAdditions, &smallDeletions, &smallFiles, "[]",
+		&smallAdditions, &smallDeletions, "[]",
 		time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
 	)
 	insertReview(
-		uuid.New(), orgID, legacySessionID, repositoryID, policyID,
+		uuid.New(), orgID, legacySessionID, repositoryID,
 		"completed", &approvedDecision, &reviewID,
-		&legacyLines, nil, nil, &legacyFiles, "[]", recentAt,
+		nil, nil, "[]", recentAt,
 	)
 	insertReview(
-		uuid.New(), otherOrgID, otherOrgSessionID, otherRepositoryID, otherPolicyID,
+		uuid.New(), otherOrgID, otherOrgSessionID, otherRepositoryID,
 		"completed", &approvedDecision, &reviewID,
-		&smallLines, &smallAdditions, &smallDeletions, &smallFiles, "[]", recentAt,
+		&smallAdditions, &smallDeletions, "[]", recentAt,
 	)
 
 	_, err = conn.Exec(ctx, `
@@ -206,18 +184,11 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 	)
 	require.NoError(t, err, "test should insert in-scope and cross-org findings")
 
-	averageLines, medianLines := 130.0, 100.0
-	averageAdditions, medianAdditions := 110.0, 110.0
-	averageDeletions, medianDeletions := 35.0, 35.0
-	averageFiles, medianFiles := 14.0/3.0, 4.0
-	approvedLines, approvedMedianLines := 70.0, 70.0
 	approvedAdditions, approvedMedianAdditions := 30.0, 30.0
 	approvedDeletions, approvedMedianDeletions := 10.0, 10.0
-	approvedMedianFiles := 3.0
-	needsHumanLines, needsHumanMedianLines := 250.0, 250.0
 	needsHumanAdditions, needsHumanMedianAdditions := 190.0, 190.0
 	needsHumanDeletions, needsHumanMedianDeletions := 60.0, 60.0
-	needsHumanMedianFiles := 8.0
+	medianAdditions, medianDeletions := 110.0, 35.0
 	analytics, err := NewCodeReviewStore(conn).GetReviewAnalytics(ctx, orgID, CodeReviewAnalyticsFilters{
 		RepositoryID: &repositoryID,
 		CreatedAfter: &createdAfter,
@@ -231,17 +202,8 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 			AutomaticallyApproved:       2,
 			NotApproved:                 1,
 			NeedsHumanReview:            1,
-			ReviewsWithSizeData:         3,
-			ReviewsWithChangeBreakdown:  2,
-			AverageLinesChanged:         &averageLines,
-			MedianLinesChanged:          &medianLines,
-			AverageAdditions:            &averageAdditions,
 			MedianAdditions:             &medianAdditions,
-			AverageDeletions:            &averageDeletions,
 			MedianDeletions:             &medianDeletions,
-			AverageFilesChanged:         &averageFiles,
-			MedianFilesChanged:          &medianFiles,
-			ReviewsAboveSizeLimit:       1,
 			ReviewsWithFindings:         1,
 			ReviewsWithBlockingFindings: 1,
 			TotalFindings:               2,
@@ -252,41 +214,28 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 				Author:                     "anya",
 				ReviewsCompleted:           2,
 				AutomaticallyApproved:      2,
-				ReviewsWithSizeData:        2,
 				ReviewsWithChangeBreakdown: 1,
-				AverageLinesChanged:        &approvedLines,
-				MedianLinesChanged:         &approvedMedianLines,
 				AverageAdditions:           &approvedAdditions,
 				MedianAdditions:            &approvedMedianAdditions,
 				AverageDeletions:           &approvedDeletions,
 				MedianDeletions:            &approvedMedianDeletions,
-				MedianFilesChanged:         &approvedMedianFiles,
 			},
 			{
 				Author:                     "sam",
 				ReviewsCompleted:           1,
 				NotApproved:                1,
-				ReviewsWithSizeData:        1,
 				ReviewsWithChangeBreakdown: 1,
-				AverageLinesChanged:        &needsHumanLines,
-				MedianLinesChanged:         &needsHumanMedianLines,
 				AverageAdditions:           &needsHumanAdditions,
 				MedianAdditions:            &needsHumanMedianAdditions,
 				AverageDeletions:           &needsHumanDeletions,
 				MedianDeletions:            &needsHumanMedianDeletions,
-				MedianFilesChanged:         &needsHumanMedianFiles,
 			},
-		},
-		SizeBuckets: []models.CodeReviewSizeBucketAnalytics{
-			{Bucket: models.CodeReviewSizeBucketSmall, ReviewsCompleted: 1, AutomaticallyApproved: 1},
-			{Bucket: models.CodeReviewSizeBucketMedium, ReviewsCompleted: 1, AutomaticallyApproved: 1},
-			{Bucket: models.CodeReviewSizeBucketLarge, ReviewsCompleted: 1},
 		},
 		NonApprovalReasons: []models.CodeReviewNonApprovalReasonAnalytics{
 			{Code: models.CodeReviewRiskReasonFilesLimitExceeded, Reviews: 1},
 			{Code: models.CodeReviewRiskReasonLinesLimitExceeded, Reviews: 1},
 		},
-	}, analytics, "analytics should preserve outcome, author, size, reason, finding, time, and tenancy semantics")
+	}, analytics, "analytics should preserve outcome, author, reason, finding, time, and tenancy semantics")
 
 	// The report now reuses the reviews list WHERE builder, so its SQL reaches
 	// for pull_requests and sessions aliases that only exist because of the
@@ -300,7 +249,6 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 	for _, sortBy := range []string{
 		"", "author", "reviews", "approved", "not_approved", "approval_rate",
 		"split_sample", "average_additions", "median_additions", "average_deletions", "median_deletions",
-		"median_files_changed",
 	} {
 		for _, sortOrder := range []string{"asc", "desc"} {
 			_, sortErr := store.GetReviewAnalytics(ctx, orgID, CodeReviewAnalyticsFilters{
@@ -332,30 +280,20 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 	require.NoError(t, err, "an unmatched search should still execute")
 	require.Equal(t, int64(0), unmatched.Summary.ReviewsRequested, "search should filter on the joined pull request columns")
 
-	otherLines := float64(smallLines)
 	otherAdditions := float64(smallAdditions)
 	otherDeletions := float64(smallDeletions)
-	otherFiles := float64(smallFiles)
 	otherOrgAnalytics, err := NewCodeReviewStore(conn).GetReviewAnalytics(ctx, otherOrgID, CodeReviewAnalyticsFilters{
 		RepositoryID: &otherRepositoryID,
 	})
 
-	require.NoError(t, err, "analytics should accept captured policy limits larger than a PostgreSQL integer")
+	require.NoError(t, err, "analytics should return the selected organization report")
 	require.Equal(t, models.CodeReviewAnalytics{
 		Summary: models.CodeReviewAnalyticsSummary{
 			ReviewsRequested:            1,
 			ReviewsCompleted:            1,
 			AutomaticallyApproved:       1,
-			ReviewsWithSizeData:         1,
-			ReviewsWithChangeBreakdown:  1,
-			AverageLinesChanged:         &otherLines,
-			MedianLinesChanged:          &otherLines,
-			AverageAdditions:            &otherAdditions,
 			MedianAdditions:             &otherAdditions,
-			AverageDeletions:            &otherDeletions,
 			MedianDeletions:             &otherDeletions,
-			AverageFilesChanged:         &otherFiles,
-			MedianFilesChanged:          &otherFiles,
 			ReviewsWithFindings:         1,
 			ReviewsWithBlockingFindings: 1,
 			TotalFindings:               1,
@@ -365,29 +303,21 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 				Author:                     "other",
 				ReviewsCompleted:           1,
 				AutomaticallyApproved:      1,
-				ReviewsWithSizeData:        1,
 				ReviewsWithChangeBreakdown: 1,
-				AverageLinesChanged:        &otherLines,
-				MedianLinesChanged:         &otherLines,
 				AverageAdditions:           &otherAdditions,
 				MedianAdditions:            &otherAdditions,
 				AverageDeletions:           &otherDeletions,
 				MedianDeletions:            &otherDeletions,
-				MedianFilesChanged:         &otherFiles,
 			},
 		},
-		SizeBuckets: []models.CodeReviewSizeBucketAnalytics{
-			{Bucket: models.CodeReviewSizeBucketSmall, ReviewsCompleted: 1, AutomaticallyApproved: 1},
-		},
 		NonApprovalReasons: []models.CodeReviewNonApprovalReasonAnalytics{},
-	}, otherOrgAnalytics, "large captured limits should remain usable in every analytics section")
+	}, otherOrgAnalytics, "analytics should remain isolated to the selected organization")
 
 	emptyAnalytics, err := NewCodeReviewStore(conn).GetReviewAnalytics(ctx, uuid.New(), CodeReviewAnalyticsFilters{})
 
 	require.NoError(t, err, "single-statement analytics should return an empty PostgreSQL report")
 	require.Equal(t, models.CodeReviewAnalytics{
 		Authors:            []models.CodeReviewAuthorAnalytics{},
-		SizeBuckets:        []models.CodeReviewSizeBucketAnalytics{},
 		NonApprovalReasons: []models.CodeReviewNonApprovalReasonAnalytics{},
 	}, emptyAnalytics, "an organization without reviews should receive zero summary values and empty breakdowns")
 }

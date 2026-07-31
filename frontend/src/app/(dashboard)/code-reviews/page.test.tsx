@@ -219,18 +219,8 @@ const reviewAnalytics: CodeReviewAnalytics = {
     approval_not_posted: 1,
     failed_reviews: 2,
     stale_reviews: 2,
-    reviews_with_size_data: 24,
-    reviews_with_change_breakdown: 20,
-    average_lines_changed: 143,
-    median_lines_changed: 96,
-    average_additions: 105,
     median_additions: 70,
-    average_deletions: 38,
     median_deletions: 26,
-    average_files_changed: 4,
-    median_files_changed: 3,
-    reviews_above_size_limit: 5,
-    approvals_above_size_limit: 0,
     reviews_with_findings: 9,
     reviews_with_blocking_findings: 3,
     total_findings: 14,
@@ -241,37 +231,23 @@ const reviewAnalytics: CodeReviewAnalytics = {
       reviews_completed: 12,
       automatically_approved: 9,
       not_approved: 3,
-      reviews_with_size_data: 10,
       reviews_with_change_breakdown: 9,
-      average_lines_changed: 88,
-      median_lines_changed: 72,
       average_additions: 60,
       median_additions: 52,
       average_deletions: 28,
       median_deletions: 20,
-      median_files_changed: 3,
     },
     {
       author: "sam",
       reviews_completed: 8,
       automatically_approved: 3,
       not_approved: 5,
-      reviews_with_size_data: 7,
       reviews_with_change_breakdown: 6,
-      average_lines_changed: 225,
-      median_lines_changed: 190,
       average_additions: 150,
       median_additions: 130,
       average_deletions: 75,
       median_deletions: 60,
-      median_files_changed: 7,
     },
-  ],
-  size_buckets: [
-    { bucket: "0_49", reviews_completed: 8, automatically_approved: 7 },
-    { bucket: "50_199", reviews_completed: 12, automatically_approved: 8 },
-    { bucket: "200_499", reviews_completed: 3, automatically_approved: 2 },
-    { bucket: "500_plus", reviews_completed: 1, automatically_approved: 0 },
   ],
   non_approval_reasons: [
     { code: "lines_limit_exceeded", reviews: 5 },
@@ -609,7 +585,7 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findByDisplayValue("Custom requirement")).toBeInTheDocument();
   }, 30_000);
 
-  it("reports approval usage, PR size, authors, and policy signals in Analytics", async () => {
+  it("reports approval usage, authors, and policy signals in Analytics", async () => {
     const user = userEvent.setup();
     const analyticsRequests: URLSearchParams[] = [];
     mockCodeReviewBaseHandlers();
@@ -636,14 +612,11 @@ describe("CodeReviewsPage", () => {
     expect(within(approvalOutcomes).getByText("17")).toBeInTheDocument();
     expect(within(approvalOutcomes).getByText("11")).toBeInTheDocument();
     expect(within(approvalOutcomes).queryByText("128")).not.toBeInTheDocument();
-    expect(screen.getByText("PR size and policy fit")).toBeInTheDocument();
+    expect(screen.queryByText("PR size and policy fit")).not.toBeInTheDocument();
     expect(screen.getByText("Why reviews were not approved")).toBeInTheDocument();
     expect(screen.getByText("Review findings")).toBeInTheDocument();
-    expect(screen.getByText(/20 of 28 completed reviews with a captured breakdown/)).toBeInTheDocument();
-    expect(screen.getByText(/total-line and file data is available for 24 reviews/)).toBeInTheDocument();
     expect(screen.getByText("Line-count limit exceeded")).toBeInTheDocument();
     expect(screen.getByText("Reviewers found a blocking issue")).toBeInTheDocument();
-    expect(screen.getByText("500+ total lines")).toBeInTheDocument();
 
     const authorTable = screen.getByRole("table", { name: "Code review analytics by PR author" });
     expect(within(authorTable).getAllByRole("columnheader").map((header) => header.textContent)).toEqual([
@@ -652,7 +625,6 @@ describe("CodeReviewsPage", () => {
       "Approved",
       "Not approved",
       "Approval rate",
-      "Median files changed",
       "Median additions",
       "Median deletions",
     ]);
@@ -663,7 +635,6 @@ describe("CodeReviewsPage", () => {
       "9",
       "3",
       "75%",
-      "3",
       "+52",
       "-20",
     ]);
@@ -675,12 +646,10 @@ describe("CodeReviewsPage", () => {
       "17",
       "11",
       "61%",
-      "3",
       "+70",
       "-26",
     ]);
     expect(within(overallRow).queryByRole("link")).not.toBeInTheDocument();
-    expect(within(overallRow).getByRole("cell", { name: "3 median files changed overall" })).toBeInTheDocument();
     expect(within(overallRow).getByRole("cell", { name: "+70 median additions overall" })).toBeInTheDocument();
     expect(within(overallRow).getByRole("cell", { name: "-26 median deletions overall" })).toBeInTheDocument();
     expect(within(overallRow).getByRole("button", { name: "About this summary" })).toBeInTheDocument();
@@ -701,29 +670,6 @@ describe("CodeReviewsPage", () => {
     expect(analyticsRequests[0]?.has("repository_id")).toBe(false);
     await user.click(within(authorTable).getByRole("button", { name: "Sort by PR author ascending" }));
     await waitFor(() => expect(analyticsRequests.at(-1)?.get("author_sort_by")).toBe("author"));
-    expect(analyticsRequests.at(-1)?.get("author_sort_order")).toBe("asc");
-  });
-
-  it("sorts PR author analytics by median files changed", async () => {
-    const user = userEvent.setup();
-    const analyticsRequests: URLSearchParams[] = [];
-    mockCodeReviewBaseHandlers();
-    server.use(
-      http.get("/api/v1/code-reviews/analytics", ({ request }) => {
-        analyticsRequests.push(new URL(request.url).searchParams);
-        return HttpResponse.json({ data: reviewAnalytics } satisfies SingleResponse<CodeReviewAnalytics>);
-      }),
-    );
-
-    renderWithProviders(<CodeReviewsPage />, {
-      nuqsHasMemory: true,
-      searchParams: { tab: "analytics" },
-    });
-
-    const authorTable = await screen.findByRole("table", { name: "Code review analytics by PR author" });
-    await user.click(within(authorTable).getByRole("button", { name: "Sort by Median files changed ascending" }));
-
-    await waitFor(() => expect(analyticsRequests.at(-1)?.get("author_sort_by")).toBe("median_files_changed"));
     expect(analyticsRequests.at(-1)?.get("author_sort_order")).toBe("asc");
   });
 
@@ -749,10 +695,7 @@ describe("CodeReviewsPage", () => {
       ...reviewAnalytics,
       summary: {
         ...reviewAnalytics.summary,
-        reviews_with_change_breakdown: 0,
-        average_additions: null,
         median_additions: null,
-        average_deletions: null,
         median_deletions: null,
       },
       authors: reviewAnalytics.authors.map((author) => ({
@@ -779,7 +722,6 @@ describe("CodeReviewsPage", () => {
       "17",
       "11",
       "61%",
-      "3",
       "—",
       "—",
     ]);
@@ -792,7 +734,6 @@ describe("CodeReviewsPage", () => {
       "9",
       "3",
       "75%",
-      "3",
       "—",
       "—",
     ]);
@@ -812,24 +753,13 @@ describe("CodeReviewsPage", () => {
         approval_not_posted: 0,
         failed_reviews: 4,
         stale_reviews: 1,
-        reviews_with_size_data: 0,
-        reviews_with_change_breakdown: 0,
-        average_lines_changed: null,
-        median_lines_changed: null,
-        average_additions: null,
         median_additions: null,
-        average_deletions: null,
         median_deletions: null,
-        average_files_changed: null,
-        median_files_changed: null,
-        reviews_above_size_limit: 0,
-        approvals_above_size_limit: 0,
         reviews_with_findings: 0,
         reviews_with_blocking_findings: 0,
         total_findings: 0,
       },
       authors: [],
-      size_buckets: [],
       non_approval_reasons: [],
     };
     mockCodeReviewBaseHandlers();

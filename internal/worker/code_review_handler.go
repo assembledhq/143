@@ -347,15 +347,11 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if strings.TrimSpace(submission.FinalReviewBody) != "" {
 			finalReviewBody = submission.FinalReviewBody
 		}
-		var filesChanged, additions, deletions, linesChanged *int
+		var additions, deletions *int
 		if changedFilesAvailable {
-			fileCount := len(changedFiles)
 			additionCount, deletionCount := codeReviewLineChanges(changedFiles)
-			lineCount := additionCount + deletionCount
-			filesChanged = &fileCount
 			additions = &additionCount
 			deletions = &deletionCount
-			linesChanged = &lineCount
 		}
 		removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
 		if _, err := stores.CodeReviews.CompleteReview(ctx, job.OrgID, db.CompleteCodeReviewParams{
@@ -365,10 +361,8 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			GitHubReviewID:    submission.GitHubReviewID,
 			GitHubReviewURL:   submission.GitHubReviewURL,
 			FinalReviewBody:   finalReviewBody,
-			FilesChanged:      filesChanged,
 			Additions:         additions,
 			Deletions:         deletions,
-			LinesChanged:      linesChanged,
 			RiskReasonDetails: decision.RiskReasonDetails,
 		}); err != nil {
 			return fmt.Errorf("complete code review: %w", err)

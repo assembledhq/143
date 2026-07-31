@@ -333,7 +333,7 @@ export const api = {
       status?: import('./types').CodeReviewSessionStatus;
       risk?: "acceptable" | "needs_review";
       search?: string;
-      author_sort_by?: "author" | "reviews" | "approved" | "not_approved" | "approval_rate" | "split_sample" | "average_additions" | "median_additions" | "average_deletions" | "median_deletions" | "median_files_changed";
+      author_sort_by?: "author" | "reviews" | "approved" | "not_approved" | "approval_rate" | "split_sample" | "average_additions" | "median_additions" | "average_deletions" | "median_deletions";
       author_sort_order?: "asc" | "desc";
       created_after?: string;
       created_before?: string;
