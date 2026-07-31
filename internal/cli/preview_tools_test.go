@@ -12,8 +12,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/assembledhq/143/internal/services/mcp"
 	"github.com/stretchr/testify/require"
+
+	"github.com/assembledhq/143/internal/internalapi"
+	"github.com/assembledhq/143/internal/services/mcp"
 )
 
 func TestPreviewToolExecutor_SessionScreenshotOmitsInlineBase64(t *testing.T) {
@@ -47,8 +49,7 @@ func TestPreviewToolExecutor_SessionScreenshotOmitsInlineBase64(t *testing.T) {
 }
 
 func TestPreviewToolExecutor_InternalCreateRejectsBranchTarget(t *testing.T) {
-	// Not parallel: mutates process env via t.Setenv.
-	t.Setenv("143_SESSION_ID", "session-1")
+	t.Parallel()
 
 	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: "http://unused.test", Token: "sandbox-token"}), internal: true}
 	result := executor.create(context.Background(), mustJSON(map[string]any{
@@ -205,10 +206,47 @@ func TestPreviewToolExecutor_RequestHandoffUsesSessionScopedEndpoint(t *testing.
 
 func TestPreviewArgsWithSessionDefault(t *testing.T) {
 	// Environment variables are process-global, so this test cannot run in parallel.
-	t.Setenv("143_SESSION_ID", "session-from-env")
+	t.Setenv(internalapi.CodingSessionIDEnvVar, " session-from-env ")
 	var actual map[string]any
 	require.NoError(t, json.Unmarshal(previewArgsWithSessionDefault(mustJSON(map[string]any{"path": "/"})), &actual), "defaulted arguments should remain valid JSON")
 	require.Equal(t, "session-from-env", actual["session_id"], "preview tools should default to the injected session ID")
+}
+
+func TestPreviewToolExecutor_InternalSessionCommandsDefaultToCodingSessionID(t *testing.T) {
+	// Environment variables are process-global, so this regression test and its subtests cannot run in parallel.
+	t.Setenv(internalapi.CodingSessionIDEnvVar, "session-from-env")
+
+	tests := []struct {
+		name     string
+		toolName string
+	}{
+		{name: "create", toolName: "preview_create"},
+		{name: "ensure", toolName: "preview_ensure"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotPath string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				require.Equal(t, http.MethodPost, r.Method, "session preview creation should use POST")
+				w.Header().Set("Content-Type", "application/json")
+				_, err := w.Write([]byte(`{"data":{"action":"created","instance":{"id":"preview-1","session_id":"session-from-env","status":"provisioning"}}}`))
+				require.NoError(t, err, "session preview response should write")
+			}))
+			defer server.Close()
+
+			executor := &previewToolExecutor{
+				client:   NewClient(Config{ServerURL: server.URL, Token: "sandbox-token"}),
+				internal: true,
+			}
+			result := executor.call(context.Background(), tt.toolName, mustJSON(map[string]any{}))
+
+			require.False(t, result.IsError, "session preview command should resolve the current coding session from the sandbox environment")
+			require.Equal(t, "/api/v1/internal/sessions/session-from-env/preview/ensure", gotPath, "session preview command should target the injected coding session")
+			require.Contains(t, firstText(result), `"preview_id": "preview-1"`, "session preview command should return the created preview")
+		})
+	}
 }
 
 func TestPreviewToolExecutor_ObserveWritesWorkspaceImage(t *testing.T) {

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/assembledhq/143/internal/internalapi"
 	"github.com/assembledhq/143/internal/services/mcp"
 )
 
@@ -48,9 +49,9 @@ func (e *previewToolExecutor) tools() []mcp.Tool {
 	return []mcp.Tool{
 		{
 			Name:        "preview_ensure",
-			Description: "Idempotently create or resume the current session preview. Defaults to 143_SESSION_ID.",
+			Description: "Idempotently create or resume the current session preview. Defaults to " + internalapi.CodingSessionIDEnvVar + ".",
 			InputSchema: mcp.ToolSchema{Type: "object", Properties: map[string]mcp.SchemaProperty{
-				"session_id": {Type: "string", Description: "Session ID; defaults to 143_SESSION_ID"},
+				"session_id": {Type: "string", Description: "Session ID; defaults to " + internalapi.CodingSessionIDEnvVar},
 				"wait":       {Type: "boolean", Description: "Wait until the preview is ready or fails"},
 			}},
 		},
@@ -292,7 +293,7 @@ func previewArgsWithSessionDefault(args json.RawMessage) json.RawMessage {
 	sessionID, _ := params["session_id"].(string)
 	previewID, _ := params["preview_id"].(string)
 	if strings.TrimSpace(sessionID) == "" && strings.TrimSpace(previewID) == "" {
-		if sessionID := strings.TrimSpace(os.Getenv("143_SESSION_ID")); sessionID != "" {
+		if sessionID := codingSessionIDFromEnv(); sessionID != "" {
 			params["session_id"] = sessionID
 		}
 	}
@@ -465,7 +466,7 @@ func previewSessionAndWait(args json.RawMessage) (string, bool, error) {
 		}
 	}
 	if params.SessionID == "" {
-		params.SessionID = strings.TrimSpace(os.Getenv("143_SESSION_ID"))
+		params.SessionID = codingSessionIDFromEnv()
 	}
 	if params.SessionID == "" {
 		return "", false, fmt.Errorf("session_id is required")
@@ -515,7 +516,7 @@ func previewTargetFromMap(params map[string]any) previewTarget {
 	internal, _ := params["__internal"].(bool)
 	target := previewTarget{SessionID: strings.TrimSpace(sessionID), PreviewID: strings.TrimSpace(previewID), Internal: internal}
 	if target.SessionID == "" && target.PreviewID == "" {
-		target.SessionID = strings.TrimSpace(os.Getenv("143_SESSION_ID"))
+		target.SessionID = codingSessionIDFromEnv()
 	}
 	return target
 }
@@ -559,7 +560,7 @@ func (e *previewToolExecutor) create(ctx context.Context, args json.RawMessage) 
 		return mcp.ErrorResult("sandbox preview tools operate on the current session; omit repository/branch to create the session preview")
 	}
 	if e.internal && params.SessionID == "" {
-		params.SessionID = strings.TrimSpace(os.Getenv("143_SESSION_ID"))
+		params.SessionID = codingSessionIDFromEnv()
 	}
 	if params.SessionID != "" {
 		if hasBranchTarget {
@@ -577,7 +578,7 @@ func (e *previewToolExecutor) create(ctx context.Context, args json.RawMessage) 
 		return jsonResult(resp.Data.view())
 	}
 	if e.internal {
-		return mcp.ErrorResult("sandbox preview tools require 143_SESSION_ID")
+		return mcp.ErrorResult("sandbox preview tools require " + internalapi.CodingSessionIDEnvVar)
 	}
 	if params.Repository == "" || params.Branch == "" {
 		return mcp.ErrorResult("session_id or repository and branch are required")
@@ -688,7 +689,7 @@ func (e *previewToolExecutor) list(ctx context.Context, args json.RawMessage) *m
 		}
 	}
 	if e.internal && strings.TrimSpace(params.SessionID) == "" {
-		params.SessionID = strings.TrimSpace(os.Getenv("143_SESSION_ID"))
+		params.SessionID = codingSessionIDFromEnv()
 	}
 	if strings.TrimSpace(params.SessionID) != "" {
 		result := e.sessionStatus(ctx, params.SessionID)
@@ -702,7 +703,7 @@ func (e *previewToolExecutor) list(ctx context.Context, args json.RawMessage) *m
 		return jsonResult([]map[string]any{status})
 	}
 	if e.internal {
-		return mcp.ErrorResult("sandbox preview tools require 143_SESSION_ID")
+		return mcp.ErrorResult("sandbox preview tools require " + internalapi.CodingSessionIDEnvVar)
 	}
 	var resp struct {
 		Data []branchPreviewWire `json:"data"`

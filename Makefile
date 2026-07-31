@@ -1,6 +1,12 @@
 # Stamp file tracking when the sandbox image was last built.
 SANDBOX_STAMP := sandbox/.build-stamp
-SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
+# The sandbox image bakes ./cmd/tools into /usr/local/bin/143-tools. Resolve
+# that command's local package graph so make dev cannot pair new orchestrator
+# environment wiring with a stale CLI binary from a cached sandbox image.
+SANDBOX_CLI_PACKAGE_DIRS := $(shell GOOS=linux CGO_ENABLED=0 go list -deps -f '{{if .Module}}{{if eq .Module.Path "github.com/assembledhq/143"}}{{.Dir}}{{end}}{{end}}' ./cmd/tools 2>/dev/null)
+SANDBOX_CLI_GO_SOURCES := $(foreach dir,$(SANDBOX_CLI_PACKAGE_DIRS),$(filter-out %_test.go,$(wildcard $(dir)/*.go)))
+SANDBOX_CLI_EMBED_SOURCES := $(shell GOOS=linux CGO_ENABLED=0 go list -deps -f '{{if .Module}}{{if eq .Module.Path "github.com/assembledhq/143"}}{{range .EmbedFiles}}{{$$.Dir}}/{{.}} {{end}}{{end}}{{end}}' ./cmd/tools 2>/dev/null)
+SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json go.mod go.sum $(SANDBOX_CLI_PACKAGE_DIRS) $(SANDBOX_CLI_GO_SOURCES) $(SANDBOX_CLI_EMBED_SOURCES)
 
 .PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down demo-seed-check build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate single-node-prepare single-node-up single-node-down provision-app provision-worker provision-workers provision-egress provision-db provision-db-backups provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
@@ -18,7 +24,7 @@ dev:
 	$(MAKE) sandbox-image; \
 	docker compose up --build
 
-# Only rebuild the sandbox image when Dockerfile or versions.json change.
+# Rebuild when the runtime definition or any baked 143-tools input changes.
 $(SANDBOX_STAMP): $(SANDBOX_SOURCES)
 	docker compose build sandbox
 	@touch $@
