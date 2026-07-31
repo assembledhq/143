@@ -135,7 +135,7 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 				head_sha, github_review_id, additions, deletions,
 				risk_reason_details, completed_at, created_at
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
-				CASE WHEN $6 = 'completed' THEN $13 ELSE NULL END, $13)`,
+				CASE WHEN $6 = 'completed' THEN $13::timestamptz ELSE NULL END, $13::timestamptz)`,
 			id, reviewOrgID, sessionID, reviewRepositoryID, pullRequestID, status, decision,
 			fmt.Sprintf("sha-%d", pullRequestNumber), githubReviewID, additions, deletions,
 			riskReasons, createdAt,
@@ -425,19 +425,28 @@ func TestCodeReviewStore_GetReviewAnalyticsPRJourneys(t *testing.T) {
 	for _, fact := range facts {
 		_, insertErr := conn.Exec(ctx, `
 			INSERT INTO sessions (id, org_id, revision_context)
-			VALUES ($1, $2, jsonb_build_object('pull_request_author', $3::text));
+			VALUES ($1, $2, jsonb_build_object('pull_request_author', $3::text))`,
+			fact.sessionID, fact.orgID, fact.author,
+		)
+		require.NoError(t, insertErr, "test should insert each PR-journey session")
+
+		var completedAt *time.Time
+		if !fact.completedAt.IsZero() {
+			completedAt = &fact.completedAt
+		}
+		_, insertErr = conn.Exec(ctx, `
 			INSERT INTO code_review_session_metadata (
 				id, org_id, session_id, repository_id, pull_request_id,
 				status, head_sha, decision, github_review_id, additions,
 				deletions, risk_reason_details, completed_at, created_at
 			) VALUES (
-				gen_random_uuid(), $2, $1, $4, $5, $6, $7, NULLIF($8::text, ''),
-				$9, $10, $11, $12::jsonb, NULLIF($13, '0001-01-01 00:00:00+00'::timestamptz), $14
+				gen_random_uuid(), $2, $1, $3, $4, $5, $6, NULLIF($7::text, ''),
+				$8, $9, $10, $11::jsonb, $12::timestamptz, $13::timestamptz
 			)`,
-			fact.sessionID, fact.orgID, fact.author, fact.repositoryID, fact.pullRequestID,
+			fact.sessionID, fact.orgID, fact.repositoryID, fact.pullRequestID,
 			fact.status, fact.headSHA, fact.decision, fact.githubReviewID,
 			fact.additions, fact.deletions, fact.reasons,
-			fact.completedAt, fact.createdAt,
+			completedAt, fact.createdAt,
 		)
 		require.NoError(t, insertErr, "test should insert each PR-journey review fact")
 	}
