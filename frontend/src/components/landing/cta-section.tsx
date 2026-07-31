@@ -38,9 +38,8 @@ export default function CtaSection({ isDark }: CtaSectionProps) {
             isDark ? "text-[#aaa89f]" : "text-[#6b6b65]"
           }`}
         >
-          Connect a repository, request 143 Code Reviewer on your next pull
-          request, and let the changes that clear your policy approve
-          themselves.
+          Connect a repository, request 143 Code Reviewer on a pull request,
+          and changes that pass your policy get approved automatically.
         </p>
         <div className="flex flex-wrap items-center justify-center gap-3">
           <Button

@@ -84,9 +84,8 @@ export default function IntegrationsSection({
               Connect your engineering tools.
             </h2>
             <p className={`max-w-2xl ${type.body} ${body}`}>
-              Integrations are configured once for the organization, so every
-              agent starts with the same source of truth your team uses every
-              day.
+              Connect each tool once for the organization. Every agent starts
+              with the same context your team already uses.
             </p>
           </div>
         </div>

@@ -29,7 +29,7 @@ describe("landing copy", () => {
       "Code review that can auto-approve.",
     );
     expect(codeReviewSummary.body).toContain(
-      "Opening a pull request takes minutes; getting it reviewed takes days.",
+      "A pull request takes minutes to open and days to review.",
     );
     expect(codeReviewSummary.body.split(". ").length).toBeLessThanOrEqual(2);
   });
@@ -43,7 +43,7 @@ describe("landing copy", () => {
     ]);
   });
 
-  it("keeps the landing copy free of em-dashes", () => {
+  it("keeps the landing copy free of em-dashes and semicolons", () => {
     const flatten = (value: unknown): string =>
       typeof value === "string"
         ? value
@@ -51,7 +51,10 @@ describe("landing copy", () => {
           ? Object.values(value).map(flatten).join(" ")
           : "";
 
-    expect(flatten({ ...landingCopy })).not.toContain("—");
+    const copy = flatten({ ...landingCopy });
+
+    expect(copy).not.toContain("—");
+    expect(copy).not.toContain(";");
   });
 
   it("keeps the auto-approval evidence concrete", () => {

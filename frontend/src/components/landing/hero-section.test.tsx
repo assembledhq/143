@@ -32,7 +32,7 @@ describe("HeroSection", () => {
 
     expect(screen.getByTestId("hero-canvas")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Where your whole team builds software together" })).toBeInTheDocument();
-    expect(screen.getByText(/Review loops auto-approve pull requests against your policy/)).toBeInTheDocument();
+    expect(screen.getByText(/Review loops auto-approve pull requests that pass your policy/)).toBeInTheDocument();
     expect(screen.getByText(/Codex, Claude Code, and OpenCode run in an open-source cloud/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /get started/i })).toHaveClass("bg-[#315ce8]");
     expect(screen.queryByText(/mission control/i)).not.toBeInTheDocument();

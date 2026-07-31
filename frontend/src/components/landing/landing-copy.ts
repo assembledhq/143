@@ -2,7 +2,7 @@ export const codeReviewSummary = {
   step: "01",
   kicker: "Code review",
   heading: "Code review that can auto-approve.",
-  body: "Opening a pull request takes minutes; getting it reviewed takes days. 143 reviews each PR with several coding agents and approves it on GitHub when it passes your policy.",
+  body: "A pull request takes minutes to open and days to review. 143 reviews each PR with several coding agents and approves it on GitHub when it passes your policy.",
 };
 
 export const codeReviewControls = [
@@ -45,7 +45,7 @@ export const platformLayers = [
     kicker: "Previews",
     title: "Cloud previews",
     heading: "Preview every change in the cloud.",
-    body: "Every agent change can launch a browser preview directly from its cloud sandbox, so teammates can inspect behavior before code reaches a PR.",
+    body: "Every agent change can launch a browser preview from its sandbox, so teammates can check behavior before it reaches a PR.",
     components: [
       "Shareable preview links",
       "Preview status in the session",

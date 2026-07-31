@@ -90,7 +90,7 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
           <p
             className={`max-w-2xl ${type.heroBody} ${isDark ? "text-[#aaa89f]" : "text-[#6b6b65]"}`}
           >
-            Review loops auto-approve pull requests against your policy.
+            Review loops auto-approve pull requests that pass your policy.
             Codex, Claude Code, and OpenCode run in an open-source cloud with
             shared context, previews, and automations.
           </p>

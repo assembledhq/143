@@ -215,10 +215,10 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
                 See every run in one workspace.
               </h2>
               <p className={`${type.body} ${layout.copyBody} ${body}`}>
-                Sessions, automation jobs, previews, PR state, usage, and audit
-                logs stay visible to the team, and repair loops fix failing
-                checks before a reviewer is ever requested. Engineers keep full
-                control; builders get scoped workflows with review safeguards.
+                Sessions, previews, PR state, usage, and audit logs are visible
+                to the whole team. Repair loops fix failing checks before
+                anyone is asked to review. Engineers keep full control, and
+                builders get scoped workflows.
               </p>
             </div>
             <ProductScreenshotFrame
