@@ -29,6 +29,8 @@ interface AutomationModelSelectProps {
   onValueChange: (value: string | undefined) => void;
   id?: string;
   ariaLabel?: string;
+  /** Restyles the trigger — used by inline property rows to render it ghosted. */
+  triggerClassName?: string;
 }
 
 export function AutomationModelSelect({
@@ -36,6 +38,7 @@ export function AutomationModelSelect({
   onValueChange,
   id,
   ariaLabel = "Automation model",
+  triggerClassName,
 }: AutomationModelSelectProps) {
   const { data: settingsResponse } = useQuery({
     queryKey: ["settings"],
@@ -102,7 +105,7 @@ export function AutomationModelSelect({
         onValueChange(nextValue === AUTO_MODEL_VALUE ? undefined : nextValue)
       }
     >
-      <SelectTrigger id={id} aria-label={ariaLabel}>
+      <SelectTrigger id={id} aria-label={ariaLabel} className={triggerClassName}>
         <SelectValue placeholder="Auto" />
       </SelectTrigger>
       <SelectContent>

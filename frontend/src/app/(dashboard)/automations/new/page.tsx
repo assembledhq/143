@@ -765,7 +765,11 @@ export default function NewAutomationPage() {
                     value={scheduleDraft}
                     onChange={setScheduleDraft}
                     detectedTimezone={detectedTimezone}
-                    onValidityChange={setScheduleValid}
+                    // Wrapped rather than passed raw: the editor now sends a
+                    // second `detail` argument, and handing extra arguments to
+                    // a state setter is the kind of thing that silently changes
+                    // meaning later. This form only ever wants the boolean.
+                    onValidityChange={(valid) => setScheduleValid(valid)}
                   />
                   <div className="space-y-1">
                     <span className="text-xs font-medium text-muted-foreground">

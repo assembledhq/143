@@ -21,6 +21,17 @@ export interface UseDebouncedTextFieldOptions {
    * visible with its own error affordance (e.g. an over-length editor).
    */
   rejectValue?: (value: string) => boolean;
+  /**
+   * Commit a pending (debounced but not yet dispatched) edit when the field
+   * unmounts, instead of dropping it. Opt-in rather than the default because
+   * most callers live in always-mounted forms where it can never fire; turn it
+   * on for any field that can be unmounted mid-edit — inside a popover, a
+   * collapsible, a sheet, or a tab — since removing a focused input from the
+   * DOM does NOT dispatch `focusout`, so `onBlur` never runs and the edit would
+   * be lost with no error and no visible change. Mirrors the unmount flush
+   * `useAutosave` already performs for its own debounce window.
+   */
+  flushOnUnmount?: boolean;
   preserveLocalOnServerChange?: boolean;
   /**
    * Optional semantic equality check for fields whose server canonicalizes
@@ -66,6 +77,7 @@ export function useDebouncedTextField({
   onCommit,
   debounceMs = 400,
   rejectValue,
+  flushOnUnmount = false,
   preserveLocalOnServerChange = false,
   valuesEqual = Object.is,
 }: UseDebouncedTextFieldOptions): UseDebouncedTextFieldResult {
@@ -73,6 +85,12 @@ export function useDebouncedTextField({
   const [local, setLocal] = useState(serverValue);
   const [lastSent, setLastSent] = useState(serverValue);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The value the armed timer will commit. Held in a ref so the unmount
+  // cleanup — which cannot read render state — knows what is outstanding.
+  const pendingValueRef = useRef<string | null>(null);
+  // `lastSent` mirrored into a ref for the same reason: the cleanup has to
+  // re-check "did this already go out?" without a render closure.
+  const lastSentRef = useRef(lastSent);
 
   // Hold `onCommit` in a ref so the debounce timer reads the latest
   // closure at fire time. Without this, a timer armed during render N
@@ -83,10 +101,13 @@ export function useDebouncedTextField({
   const onCommitRef = useRef(onCommit);
   const rejectValueRef = useRef(rejectValue);
   const valuesEqualRef = useRef(valuesEqual);
+  const flushOnUnmountRef = useRef(flushOnUnmount);
   useEffect(() => {
     onCommitRef.current = onCommit;
     rejectValueRef.current = rejectValue;
     valuesEqualRef.current = valuesEqual;
+    flushOnUnmountRef.current = flushOnUnmount;
+    lastSentRef.current = lastSent;
   });
 
   // Resync when the server value changes for reasons other than our own
@@ -107,9 +128,24 @@ export function useDebouncedTextField({
     }
   }
 
+  // Only an ARMED timer represents an uncommitted edit, which is also what
+  // makes this safe under StrictMode: on the dev double-invoke's simulated
+  // cleanup no user event has run yet, so there is no timer and nothing fires.
   useEffect(() => {
     return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
+      if (!debounceRef.current) return;
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+      const pending = pendingValueRef.current;
+      pendingValueRef.current = null;
+      if (!flushOnUnmountRef.current || pending === null) return;
+      // Deliberately no `setLastSent` here — the component is going away, and
+      // the same guards `commit` applies still decide whether this is worth
+      // sending.
+      if (valuesEqualRef.current(pending, lastSentRef.current)) return;
+      if (rejectValueRef.current?.(pending)) return;
+      lastSentRef.current = pending;
+      onCommitRef.current(pending);
     };
   }, []);
 
@@ -118,6 +154,7 @@ export function useDebouncedTextField({
     // A rejected value is never sent and never recorded as `lastSent`, so it
     // can't poison the resync baseline or be mistaken for a saved value.
     if (rejectValueRef.current?.(value)) return;
+    lastSentRef.current = value;
     setLastSent(value);
     onCommitRef.current(value);
   };
@@ -125,8 +162,10 @@ export function useDebouncedTextField({
   const onChange = (next: string) => {
     setLocal(next);
     if (debounceRef.current) clearTimeout(debounceRef.current);
+    pendingValueRef.current = next;
     debounceRef.current = setTimeout(() => {
       debounceRef.current = null;
+      pendingValueRef.current = null;
       commit(next);
     }, debounceMs);
   };
@@ -136,6 +175,7 @@ export function useDebouncedTextField({
       clearTimeout(debounceRef.current);
       debounceRef.current = null;
     }
+    pendingValueRef.current = null;
     // Revert an invalid value on blur so a required field can't be left in a
     // dropped/blank state with the stale server value silently still in effect.
     if (rejectValueRef.current?.(local)) {
@@ -150,7 +190,9 @@ export function useDebouncedTextField({
       clearTimeout(debounceRef.current);
       debounceRef.current = null;
     }
+    pendingValueRef.current = null;
     setLocal(next);
+    lastSentRef.current = next;
     setLastSent(next);
   };
 

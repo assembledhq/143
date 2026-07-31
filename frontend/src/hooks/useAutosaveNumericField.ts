@@ -16,6 +16,15 @@ export interface UseAutosaveNumericFieldOptions<TVars> {
    * a time and need the field-level pacing here.
    */
   debounceMs?: number;
+  /**
+   * Commit a pending (debounced but not yet dispatched) edit when the field
+   * unmounts, instead of dropping it. Opt-in for the same reason as
+   * `useDebouncedTextField`'s option of the same name: turn it on for any field
+   * that can be unmounted mid-edit — inside a popover, a collapsible, a sheet,
+   * or a tab — because removing a focused input from the DOM does NOT dispatch
+   * `focusout`, so `onBlur` never runs and the edit would be silently lost.
+   */
+  flushOnUnmount?: boolean;
 }
 
 export interface UseAutosaveNumericFieldResult {
@@ -54,6 +63,7 @@ export function useAutosaveNumericField<TVars>({
   toPatch,
   clamp,
   debounceMs = 400,
+  flushOnUnmount = false,
 }: UseAutosaveNumericFieldOptions<TVars>): UseAutosaveNumericFieldResult {
   const [trackedServer, setTrackedServer] = useState(serverValue);
   const [local, setLocal] = useState(() => String(serverValue));
@@ -61,6 +71,11 @@ export function useAutosaveNumericField<TVars>({
 
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingValueRef = useRef<number | null>(null);
+  // Mirrored into refs so the unmount cleanup, which cannot read render state,
+  // can re-check "did this already go out?" and still reach the autosave scope.
+  const lastSentRef = useRef(lastSent);
+  const flushOnUnmountRef = useRef(flushOnUnmount);
+  const saveRef = useRef(autosave.save);
 
   // Guard against the double-debounce footgun: if the outer `useAutosave` also
   // debounces, keystrokes wait out BOTH windows before hitting the network,
@@ -93,6 +108,9 @@ export function useAutosaveNumericField<TVars>({
   useEffect(() => {
     toPatchRef.current = toPatch;
     clampRef.current = clamp;
+    lastSentRef.current = lastSent;
+    flushOnUnmountRef.current = flushOnUnmount;
+    saveRef.current = autosave.save;
   });
 
   // Resync when the server value changes for reasons other than our own
@@ -113,26 +131,56 @@ export function useAutosaveNumericField<TVars>({
     }
   }
 
+  // Only an ARMED timer represents an uncommitted edit, which is also what
+  // makes this safe under StrictMode: on the dev double-invoke's simulated
+  // cleanup no user event has run yet, so there is no timer and nothing fires.
   useEffect(() => {
     return () => {
-      if (debounceTimerRef.current) {
-        clearTimeout(debounceTimerRef.current);
-        debounceTimerRef.current = null;
-      }
+      if (!debounceTimerRef.current) return;
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+      const pending = pendingValueRef.current;
+      pendingValueRef.current = null;
+      if (!flushOnUnmountRef.current || pending === null) return;
+      if (pending === lastSentRef.current) return;
+      // Deliberately no `setLastSent` here — the component is going away, and
+      // the autosave scope outlives it, so the dispatch still lands.
+      lastSentRef.current = pending;
+      saveRef.current(toPatchRef.current(pending));
     };
   }, []);
 
   const dispatch = (clamped: number) => {
+    lastSentRef.current = clamped;
     setLastSent(clamped);
     autosave.save(toPatchRef.current(clamped));
+  };
+
+  // Emptying or garbling the box CANCELS the armed save rather than leaving
+  // the last parseable value queued behind it. Without this, typing "4" and
+  // then clearing the field still persists 4 once the timer fires — and `onBlur`
+  // in that same state resets to the server value and saves nothing, so the two
+  // exits from one input state disagreed about what the user meant.
+  const cancelPending = () => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    pendingValueRef.current = null;
   };
 
   const onChange = (event: ChangeEvent<HTMLInputElement>) => {
     const raw = event.target.value;
     setLocal(raw);
-    if (raw.trim() === "") return;
+    if (raw.trim() === "") {
+      cancelPending();
+      return;
+    }
     const parsed = Number.parseInt(raw, 10);
-    if (Number.isNaN(parsed)) return;
+    if (Number.isNaN(parsed)) {
+      cancelPending();
+      return;
+    }
     const clamped = clampRef.current ? clampRef.current(parsed) : parsed;
     pendingValueRef.current = clamped;
     if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
