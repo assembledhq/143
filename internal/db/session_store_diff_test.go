@@ -11,6 +11,7 @@ import (
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -346,6 +347,37 @@ func TestSessionStore_MarkLatestDiffSnapshotPushed(t *testing.T) {
 	err = store.MarkLatestDiffSnapshotPushed(context.Background(), orgID, sessionID, headSHA)
 	require.NoError(t, err, "MarkLatestDiffSnapshotPushed should update the latest diff snapshot state")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_HasSessionPublicationIntent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		exists bool
+	}{
+		{name: "intent exists", exists: true},
+		{name: "intent is missing", exists: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "test should create the database mock")
+			t.Cleanup(mock.Close)
+			orgID, sessionID := uuid.New(), uuid.New()
+			mock.ExpectQuery(`SELECT EXISTS \([\s\S]+FROM session_publications[\s\S]+org_id = @org_id AND session_id = @session_id`).
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+				WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(tt.exists))
+
+			got, err := NewSessionStore(mock).HasSessionPublicationIntent(context.Background(), orgID, sessionID)
+			require.NoError(t, err, "publication intent lookup should succeed")
+			require.Equal(t, tt.exists, got, "publication intent lookup should return the exact tenant-scoped existence state")
+			require.NoError(t, mock.ExpectationsWereMet(), "publication intent lookup should filter by organization and session")
+		})
+	}
 }
 
 // TestSessionStore_UpdateResult_PreservesDiffWhenNil verifies that the

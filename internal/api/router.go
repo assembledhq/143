@@ -45,6 +45,7 @@ import (
 	"github.com/assembledhq/143/internal/services/ownerloss"
 	pagerdutysvc "github.com/assembledhq/143/internal/services/pagerduty"
 	"github.com/assembledhq/143/internal/services/preview"
+	"github.com/assembledhq/143/internal/services/publicationintent"
 	"github.com/assembledhq/143/internal/services/reviewartifact"
 	reviewloopservice "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/services/sandbox"
@@ -378,6 +379,16 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	codeReviewHandler.SetAuditEmitter(auditEmitter)
 	codeReviewHandler.SetGitHubTriggerSetupService(codeReviewTriggerSetupSvc)
 	prHealthStreams := cache.NewPullRequestStreams(redisClient, logger)
+	publicationIntentCoordinator := publicationintent.NewCoordinator(
+		sessionStore,
+		sessionChangesetStore,
+		pullRequestStore,
+		orgStore,
+		userStore,
+		sessionPublicationStore,
+		jobStore,
+		logger,
+	)
 	sessionHandler := handlers.NewSessionHandler(
 		sessionStore,
 		sessionLogStore,
@@ -403,6 +414,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetHumanInputRequestStore(sessionHumanInputStore)
 	sessionHandler.SetCapabilityService(agentCapabilitySvc)
 	sessionHandler.SetUserStore(userStore)
+	sessionHandler.SetPublicationPolicyEnabled(cfg.AgentPRPublicationEnabled)
+	sessionHandler.SetPrePRReviewEnabled(cfg.PrePRReviewEnabled && cfg.AgentPRPublicationEnabled)
+	sessionHandler.SetPublicationIntentCoordinator(publicationIntentCoordinator, cfg.AgentPRPublicationEnabled)
 	sessionHandler.SetThreadInboxStore(threadInboxStore)
 	sessionHandler.SetSessionSandboxHolderStore(sessionSandboxHolderStore)
 	sessionHandler.SetTxStarter(pool)
@@ -1024,6 +1038,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		internalIssueHandler := handlers.NewInternalIssueHandler(issueStore, sessionStore, jobStore, orgStore, cfg.SessionSecret, logger)
 		internalPullRequestHandler := handlers.NewInternalPullRequestHandler(sessionStore, pullRequestStore, jobStore, cfg.SessionSecret, logger)
 		internalPullRequestHandler.SetChangesetStore(sessionChangesetStore)
+		internalPullRequestHandler.SetThreadStore(sessionThreadStore)
+		internalPullRequestHandler.SetAuditEmitter(auditEmitter)
+		internalPullRequestHandler.SetPublicationIntentCoordinator(
+			publicationIntentCoordinator,
+			cfg.AgentPRPublicationEnabled,
+		)
 		internalSessionTabsHandler := handlers.NewInternalSessionTabsHandler(threadSvc, sessionStore, orgStore, cfg.SessionSecret, logger)
 		internalAutomationHandler := handlers.NewInternalAutomationHandler(automationHandler, sessionStore, automationStore, cfg.SessionSecret)
 		internalSlackMessageHandler := handlers.NewInternalSlackMessageHandler(sessionStore, slackInstallationStore, credentialStore, db.NewSlackOutboundMessageStore(pool), cfg.SessionSecret, logger)

@@ -535,15 +535,20 @@ type PullRequestCreator interface {
 
 // CreatePullRequestParams describes a session PR creation request.
 type CreatePullRequestParams struct {
-	SessionID  string `json:"session_id,omitempty"`
-	Draft      *bool  `json:"draft,omitempty"`
-	AuthorMode string `json:"author_mode,omitempty"`
+	SessionID   string `json:"session_id,omitempty"`
+	Draft       *bool  `json:"draft,omitempty"`
+	AuthorMode  string `json:"author_mode,omitempty"`
+	TriggerKind string `json:"trigger_kind,omitempty"`
 }
 
 // CreatePullRequestResult is returned after PR creation has been queued.
 type CreatePullRequestResult struct {
-	Status    string `json:"status"`
-	SessionID string `json:"session_id"`
+	Status         string  `json:"status"`
+	SessionID      string  `json:"session_id"`
+	PublicationID  *string `json:"publication_id,omitempty"`
+	ReviewLoopID   *string `json:"review_loop_id,omitempty"`
+	PullRequestURL *string `json:"pull_request_url,omitempty"`
+	Reason         *string `json:"reason,omitempty"`
 }
 
 // --------------------------------------------------------------------------

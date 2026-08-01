@@ -462,11 +462,21 @@ type SessionTitleState struct {
 // SessionDetail is the API response for a single session, enriched with threads.
 type SessionDetail struct {
 	Session
-	RepositoryFullName  *string              `json:"repository_full_name,omitempty"`
-	Threads             []SessionThread      `json:"threads"`
-	Changesets          []ChangesetSummary   `json:"changesets"`
-	Publications        []SessionPublication `json:"publications,omitempty"`
-	ChangesetStackState ChangesetStackState  `json:"changeset_stack_state"`
+	RepositoryFullName  *string                   `json:"repository_full_name,omitempty"`
+	Threads             []SessionThread           `json:"threads"`
+	Changesets          []ChangesetSummary        `json:"changesets"`
+	Publications        []SessionPublication      `json:"publications,omitempty"`
+	ChangesetStackState ChangesetStackState       `json:"changeset_stack_state"`
+	PublicationPolicy   *SessionPublicationPolicy `json:"publication_policy,omitempty"`
+}
+
+type SessionPublicationPolicy struct {
+	CreatePRWhenAgentReady bool                    `json:"create_pr_when_agent_ready"`
+	CreatePRSource         PublicationPolicySource `json:"create_pr_source"`
+	ReviewBeforePR         bool                    `json:"review_before_pr"`
+	ReviewSource           PublicationPolicySource `json:"review_source"`
+	ReviewMaxPasses        int                     `json:"review_max_passes"`
+	PRHandoffMode          PRHandoffMode           `json:"pr_handoff_mode"`
 }
 
 // SessionDiff is the large, lazily-loaded diff payload for a session. It is

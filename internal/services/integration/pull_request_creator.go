@@ -19,6 +19,25 @@ type InternalPullRequestCreator struct {
 	client  *http.Client
 }
 
+// PullRequestCreationError carries the API's structured error code alongside
+// the HTTP status. No caller branches on the fields yet — the MCP layer
+// formats the error through Error(), which is what puts the code in front of
+// the agent — but keeping them typed means a caller that needs to tell a
+// policy rejection from a retryable server failure can do so without parsing
+// prose.
+type PullRequestCreationError struct {
+	StatusCode int
+	Code       string
+	Message    string
+}
+
+func (e *PullRequestCreationError) Error() string {
+	if e.Code == "" {
+		return fmt.Sprintf("pull request creation failed (status %d): %s", e.StatusCode, e.Message)
+	}
+	return fmt.Sprintf("pull request creation failed (%s, status %d): %s", e.Code, e.StatusCode, e.Message)
+}
+
 // NewInternalPullRequestCreator creates a PullRequestCreator that calls the internal API.
 func NewInternalPullRequestCreator(token, baseURL string) *InternalPullRequestCreator {
 	return &InternalPullRequestCreator{
@@ -64,11 +83,24 @@ func (c *InternalPullRequestCreator) CreatePullRequest(ctx context.Context, para
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode != http.StatusAccepted {
+		var apiError struct {
+			Error struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(respBody, &apiError) == nil && (apiError.Error.Code != "" || apiError.Error.Message != "") {
+			return nil, &PullRequestCreationError{
+				StatusCode: resp.StatusCode,
+				Code:       apiError.Error.Code,
+				Message:    apiError.Error.Message,
+			}
+		}
 		bodyStr := string(respBody)
 		if len(bodyStr) > 512 {
 			bodyStr = bodyStr[:512] + "...(truncated)"
 		}
-		return nil, fmt.Errorf("pull request creation failed (status %d): %s", resp.StatusCode, bodyStr)
+		return nil, &PullRequestCreationError{StatusCode: resp.StatusCode, Message: bodyStr}
 	}
 
 	var result CreatePullRequestResult

@@ -24,6 +24,14 @@ func TestSessionPublicationEnumsValidate(t *testing.T) {
 		{name: "default job queue", validate: SessionPublicationJobQueueDefault.Validate},
 		{name: "agent job queue", validate: SessionPublicationJobQueueAgent.Validate},
 		{name: "invalid job queue", validate: SessionPublicationJobQueue("unknown").Validate, wantErr: true},
+		{name: "agent ready trigger", validate: SessionPublicationTriggerAgentReady.Validate},
+		{name: "invalid trigger", validate: SessionPublicationTriggerKind("unknown").Validate, wantErr: true},
+		{name: "pre publish handoff", validate: PRHandoffModePrePublish.Validate},
+		{name: "invalid handoff", validate: PRHandoffMode("unknown").Validate, wantErr: true},
+		{name: "automatic organization source", validate: PublicationPolicySourceOrganization.ValidateAutomatic},
+		{name: "automatic rejects bypass source", validate: PublicationPolicySourceExplicitBypass.ValidateAutomatic, wantErr: true},
+		{name: "review personal source", validate: PublicationPolicySourcePersonal.ValidateReview},
+		{name: "review rejects explicit action source", validate: PublicationPolicySourceExplicitAction.ValidateReview, wantErr: true},
 	}
 
 	for _, tt := range tests {

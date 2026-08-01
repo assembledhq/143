@@ -1,6 +1,6 @@
 # Design: Agent-Initiated PR Publication with Automatic Review
 
-> **Status:** Not Started | **Last reviewed:** 2026-07-31
+> **Status:** In Progress (PR 1 implemented) | **Last reviewed:** 2026-07-31
 >
 > **Depends on:** [overall.md](../overall.md),
 > [review agent loops](../implemented/78-review-agent-loops.md),

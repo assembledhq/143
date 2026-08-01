@@ -22,6 +22,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
+	"github.com/assembledhq/143/internal/services/publicationintent"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -11061,7 +11062,6 @@ func stringPtr(s string) *string {
 	return &s
 }
 
-// Review evidence is session-scoped. A non-primary materialized changeset is a
 // separate worktree that no review loop describes, so builders must be refused
 // rather than admitted on the session's unrelated clean review loop. A primary
 // changeset keeps a worktree path after an accepted split, so the worktree path
@@ -11138,6 +11138,112 @@ func TestSessionHandler_RequireBuilderReviewForTarget_RefusesSeparateWorktree(t 
 				require.Equal(t, tt.expectedStatus, w.Code, "refused publication should return the expected status")
 				require.Contains(t, w.Body.String(), tt.expectedBody, "refused publication should name the review gate")
 			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+// The UI's Create PR button routes through the same coordinator as the agent
+// tool, so the handler must name its own channel (recording it as agent_tool
+// would mis-attribute the durable row) and must not report "queued" for
+// outcomes that did not reach the queue.
+func TestSessionHandler_CreatePR_CoordinatorOutcomes(t *testing.T) {
+	t.Parallel()
+
+	publicationID := uuid.New()
+	blockedReason := "publication intent is durable, but immediate queueing failed"
+	tests := []struct {
+		name       string
+		status     publicationintent.ResultStatus
+		reason     *string
+		wantCode   int
+		wantInBody string
+	}{
+		{
+			name:       "queued intent reports queued",
+			status:     publicationintent.ResultPRQueued,
+			wantCode:   http.StatusAccepted,
+			wantInBody: `"status":"queued"`,
+		},
+		{
+			// The durable row exists and reconciliation will retry, but
+			// nothing is on the queue and the changeset never entered the
+			// queued state, so the operator must not be told otherwise.
+			name:       "failed enqueue is not reported as queued",
+			status:     publicationintent.ResultBlocked,
+			reason:     &blockedReason,
+			wantCode:   http.StatusInternalServerError,
+			wantInBody: "ENQUEUE_FAILED",
+		},
+		{
+			name:       "concurrent publish reports the existing pull request",
+			status:     publicationintent.ResultAlreadyPublished,
+			wantCode:   http.StatusConflict,
+			wantInBody: "PR_EXISTS",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should be created")
+			defer mock.Close()
+
+			now := time.Now()
+			snapshotKey := "snap-TestSessionHandler_CreatePR_CoordinatorOutcomes"
+			orgID, sessionID, issueID := uuid.New(), uuid.New(), uuid.New()
+			handler := newSessionHandler(t, mock)
+			coordinator := &internalPRCoordinatorStub{result: &publicationintent.PublicationIntentResult{
+				Status: tt.status, SessionID: sessionID, PublicationID: &publicationID, Reason: tt.reason,
+			}}
+			handler.SetPublicationIntentCoordinator(coordinator, true)
+
+			diff := "--- a/file.go\n+++ b/file.go\n@@ -1 +1 @@\n-old\n+new"
+			mock.ExpectQuery("SELECT .+ FROM sessions").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(
+					addSessionRow(pgxmock.NewRows(sessionColumns),
+						sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+						nil, nil, nil, nil,
+						nil, false, &now, &now, nil,
+						nil, nil, nil, false,
+						nil, nil, nil, nil, &diff,
+						nil, nil, nil, nil,
+						nil, nil,
+						nil,
+						nil, 0, now, "none", &snapshotKey,
+						nil, nil, nil, nil, nil, nil,
+						nil, nil,
+						nil,
+						"idle",
+						(*string)(nil),
+						nil,
+						now,
+					),
+				)
+			mock.ExpectQuery("SELECT .+ FROM pull_requests").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("id", sessionID.String())
+			ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+			ctx = middleware.WithOrgID(ctx, orgID)
+			req = req.WithContext(ctx)
+			w := httptest.NewRecorder()
+
+			handler.CreatePR(w, req)
+
+			require.Equal(t, tt.wantCode, w.Code, "coordinator outcome should map onto the documented status: %s", w.Body.String())
+			require.Contains(t, w.Body.String(), tt.wantInBody, "response should describe the real outcome")
+			require.NotNil(t, coordinator.requested, "the handler should reach the publication coordinator")
+			require.Equal(t, models.SessionPublicationSourceUser, coordinator.requested.Source,
+				"an operator clicking Create PR is a user-channel publication, not an agent tool one")
+			require.Equal(t, models.SessionPublicationTriggerExplicitAction, coordinator.requested.TriggerKind,
+				"a UI click is always an explicit action")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}

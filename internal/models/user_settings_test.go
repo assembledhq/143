@@ -44,11 +44,13 @@ func TestParseUserSettings(t *testing.T) {
 		},
 		{
 			name: "parses automatic pr follow through preferences",
-			raw:  json.RawMessage(`{"automatic_pr_follow_through":{"resolve_conflicts_when_idle":"on","fix_tests_when_idle":"off"}}`),
+			raw:  json.RawMessage(`{"automatic_pr_follow_through":{"resolve_conflicts_when_idle":"on","fix_tests_when_idle":"off","create_pr_when_agent_ready":"off","review_before_pr":"on"}}`),
 			want: UserSettings{
 				AutomaticPRFollowThrough: &AutomaticPRFollowThroughSettings{
 					ResolveConflictsWhenIdle: AutomaticFollowThroughPreferenceOn,
 					FixTestsWhenIdle:         AutomaticFollowThroughPreferenceOff,
+					CreatePRWhenAgentReady:   AutomaticFollowThroughPreferenceOff,
+					ReviewBeforePR:           AutomaticFollowThroughPreferenceOn,
 				},
 			},
 		},

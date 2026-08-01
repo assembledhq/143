@@ -1339,38 +1339,40 @@ func boolPtr(v bool) *bool {
 }
 
 type testDeps struct {
-	provider         *testutil.MockSandboxProvider
-	adapter          *mockAgentAdapter
-	sessions         *mockSessionStore
-	sessionThreads   *mockSessionThreadStore
-	projects         *mockProjectTaskUpdater
-	automationRuns   agent.AutomationRunUpdater
-	issues           *mockIssueStore
-	repos            *mockRepositoryStore
-	logs             *mockSessionLogStore
-	questions        *mockSessionQuestionStore
-	humanInputs      *mockSessionHumanInputRequestStore
-	messages         *mockSessionMessageStore
-	jobs             *mockJobStore
-	github           *mockGitHubTokenProvider
-	codexAuth        agent.CodexAuthProvider
-	claudeCodeAuth   agent.ClaudeCodeAuthProvider
-	creds            *mockCredentialProvider
-	codingCreds      agent.CodingCredentialProvider
-	snapshots        *mockSnapshotStore
-	uploads          *mockUploadStore
-	fileReader       sandbox.FileReader
-	mentionIndexes   *workspace.MentionIndexCache
-	cancels          *agent.CancelRegistry
-	nodeID           string
-	orgs             *mockOrgStore
-	identityResolver *identity.Resolver
-	sandboxAuth      agent.SandboxAuthServer
-	sandboxCapacity  *agent.SandboxCapacityGate
-	threadRuntimes   agent.ThreadRuntimeStore
-	staticEgress     agent.StaticEgressRuntimeConfig
-	users            agent.UserLookup
-	logger           *zerolog.Logger
+	provider                  *testutil.MockSandboxProvider
+	adapter                   *mockAgentAdapter
+	sessions                  *mockSessionStore
+	sessionThreads            *mockSessionThreadStore
+	projects                  *mockProjectTaskUpdater
+	automationRuns            agent.AutomationRunUpdater
+	issues                    *mockIssueStore
+	repos                     *mockRepositoryStore
+	logs                      *mockSessionLogStore
+	questions                 *mockSessionQuestionStore
+	humanInputs               *mockSessionHumanInputRequestStore
+	messages                  *mockSessionMessageStore
+	jobs                      *mockJobStore
+	github                    *mockGitHubTokenProvider
+	codexAuth                 agent.CodexAuthProvider
+	claudeCodeAuth            agent.ClaudeCodeAuthProvider
+	creds                     *mockCredentialProvider
+	codingCreds               agent.CodingCredentialProvider
+	snapshots                 *mockSnapshotStore
+	uploads                   *mockUploadStore
+	fileReader                sandbox.FileReader
+	mentionIndexes            *workspace.MentionIndexCache
+	cancels                   *agent.CancelRegistry
+	nodeID                    string
+	orgs                      *mockOrgStore
+	identityResolver          *identity.Resolver
+	sandboxAuth               agent.SandboxAuthServer
+	sandboxCapacity           *agent.SandboxCapacityGate
+	threadRuntimes            agent.ThreadRuntimeStore
+	staticEgress              agent.StaticEgressRuntimeConfig
+	users                     agent.UserLookup
+	logger                    *zerolog.Logger
+	agentPRPublicationEnabled bool
+	agentPRPromptEnabled      bool
 }
 
 // mockSessionThreadStore captures thread-status writes the orchestrator
@@ -1632,39 +1634,41 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		sessionThreads = d.sessionThreads
 	}
 	return agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:           d.provider,
-		Adapters:           map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
-		Sessions:           d.sessions,
-		SessionThreads:     sessionThreads,
-		SessionLogs:        d.logs,
-		SessionQuestions:   d.questions,
-		HumanInputRequests: d.humanInputs,
-		SessionMessages:    d.messages,
-		ProjectTasks:       d.projects,
-		AutomationRuns:     d.automationRuns,
-		Issues:             d.issues,
-		Repositories:       d.repos,
-		Jobs:               d.jobs,
-		GitHub:             d.github,
-		CodexAuth:          d.codexAuth,
-		ClaudeCodeAuth:     d.claudeCodeAuth,
-		Credentials:        d.creds,
-		CodingCredentials:  codingCredsForTest(d),
-		Snapshots:          snapshotStore,
-		Uploads:            d.uploads,
-		FileReader:         d.fileReader,
-		MentionIndexes:     d.mentionIndexes,
-		Cancels:            d.cancels,
-		Orgs:               orgStore,
-		IdentityResolver:   d.identityResolver,
-		SandboxAuth:        d.sandboxAuth,
-		SandboxCapacity:    d.sandboxCapacity,
-		ThreadRuntimes:     d.threadRuntimes,
-		StaticEgress:       d.staticEgress,
-		Users:              d.users,
-		NodeID:             d.nodeID,
-		Logger:             logger,
-		MaxConcurrent:      3,
+		Provider:                  d.provider,
+		Adapters:                  map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Sessions:                  d.sessions,
+		SessionThreads:            sessionThreads,
+		SessionLogs:               d.logs,
+		SessionQuestions:          d.questions,
+		HumanInputRequests:        d.humanInputs,
+		SessionMessages:           d.messages,
+		ProjectTasks:              d.projects,
+		AutomationRuns:            d.automationRuns,
+		Issues:                    d.issues,
+		Repositories:              d.repos,
+		Jobs:                      d.jobs,
+		GitHub:                    d.github,
+		CodexAuth:                 d.codexAuth,
+		ClaudeCodeAuth:            d.claudeCodeAuth,
+		Credentials:               d.creds,
+		CodingCredentials:         codingCredsForTest(d),
+		Snapshots:                 snapshotStore,
+		Uploads:                   d.uploads,
+		FileReader:                d.fileReader,
+		MentionIndexes:            d.mentionIndexes,
+		Cancels:                   d.cancels,
+		Orgs:                      orgStore,
+		IdentityResolver:          d.identityResolver,
+		SandboxAuth:               d.sandboxAuth,
+		SandboxCapacity:           d.sandboxCapacity,
+		ThreadRuntimes:            d.threadRuntimes,
+		StaticEgress:              d.staticEgress,
+		Users:                     d.users,
+		NodeID:                    d.nodeID,
+		Logger:                    logger,
+		MaxConcurrent:             3,
+		AgentPRPublicationEnabled: d.agentPRPublicationEnabled,
+		AgentPRPromptEnabled:      d.agentPRPromptEnabled,
 	})
 }
 
@@ -4055,12 +4059,16 @@ func TestRunAgent_AutomaticPRPublishingGuards(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name            string
-		diff            string
-		automation      bool
-		policy          models.AutomationPublishPolicy
-		expectOpenPR    bool
-		expectEndedNoPR bool
+		name             string
+		diff             string
+		automation       bool
+		policy           models.AutomationPublishPolicy
+		publicationFlag  bool
+		promptFlag       bool
+		ineligibleOrigin bool
+		alreadyPublished bool
+		expectOpenPR     bool
+		expectEndedNoPR  bool
 	}{
 		{
 			name:            "no diff skips pull request",
@@ -4079,6 +4087,43 @@ func TestRunAgent_AutomaticPRPublishingGuards(t *testing.T) {
 			policy:       models.AutomationPublishPolicyPullRequest,
 			expectOpenPR: true,
 		},
+		{
+			name:            "agent publication rollout disables legacy manual completion trigger",
+			diff:            "--- a/fix.go\n+++ b/fix.go",
+			publicationFlag: true,
+			promptFlag:      true,
+		},
+		{
+			// Enabling the backend before the prompt is a natural staged
+			// rollout order. The agent was never told it could publish, so
+			// the legacy completion trigger must still fire or the diff is
+			// stranded with nothing left to open a PR.
+			name:            "publication flag without prompt flag keeps the legacy trigger",
+			diff:            "--- a/fix.go\n+++ b/fix.go",
+			publicationFlag: true,
+			expectOpenPR:    true,
+		},
+		{
+			// Code review turns never receive the handoff instruction and the
+			// coordinator refuses them, so the two gates must agree that they
+			// keep the legacy trigger.
+			name:             "ineligible origin keeps the legacy trigger under full rollout",
+			diff:             "--- a/fix.go\n+++ b/fix.go",
+			publicationFlag:  true,
+			promptFlag:       true,
+			ineligibleOrigin: true,
+			expectOpenPR:     true,
+		},
+		{
+			// A follow-up turn on a session that already published must stand
+			// down, not fall through to the legacy queue and ask for a second
+			// pull request.
+			name:             "already published session stands down under full rollout",
+			diff:             "--- a/fix.go\n+++ b/fix.go",
+			publicationFlag:  true,
+			promptFlag:       true,
+			alreadyPublished: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -4089,6 +4134,14 @@ func TestRunAgent_AutomaticPRPublishingGuards(t *testing.T) {
 			issue := testIssue(orgID)
 			run := testRun(orgID, issue.ID)
 			d := defaultDeps()
+			d.agentPRPublicationEnabled = tt.publicationFlag
+			d.agentPRPromptEnabled = tt.promptFlag
+			if tt.ineligibleOrigin {
+				run.Origin = models.SessionOriginCodeReview
+			}
+			if tt.alreadyPublished {
+				run.PRCreationState = models.PRCreationStateSucceeded
+			}
 			if tt.automation {
 				automationRunID := uuid.New()
 				run.AutomationRunID = &automationRunID
