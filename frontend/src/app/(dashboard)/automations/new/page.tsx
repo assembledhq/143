@@ -737,7 +737,8 @@ export default function NewAutomationPage() {
             <>
                 <Select value={repoId} onValueChange={(value) => setFormField("selectedRepoId", value)}>
                   <SelectTrigger
-                    className="h-8 w-full border-transparent bg-muted/25 shadow-none hover:bg-muted/50 sm:w-[210px]"
+                    density="compact"
+                    className="w-full border-transparent bg-muted/25 shadow-none hover:bg-muted/50 sm:w-[210px]"
                     aria-label="Repository"
                   >
                     <SelectValue placeholder="Select repo" />
@@ -854,7 +855,7 @@ export default function NewAutomationPage() {
                             onChange={(event) =>
                               setFormField("pagerDutyServiceIDs", event.target.value)
                             }
-                            className="h-8"
+                            density="compact"
                           />
                           <Select
                             value={pagerDutyUrgency}
@@ -865,7 +866,7 @@ export default function NewAutomationPage() {
                             }}
                           >
                             <SelectTrigger
-                              className="h-8"
+                              density="compact"
                               aria-label="PagerDuty urgency"
                             >
                               <SelectValue />
@@ -884,7 +885,7 @@ export default function NewAutomationPage() {
                             onChange={(event) =>
                               setFormField("pagerDutyTeamIDs", event.target.value)
                             }
-                            className="h-8"
+                            density="compact"
                           />
                           <Input
                             aria-label="PagerDuty statuses"
@@ -893,7 +894,7 @@ export default function NewAutomationPage() {
                             onChange={(event) =>
                               setFormField("pagerDutyStatuses", event.target.value)
                             }
-                            className="h-8"
+                            density="compact"
                           />
                           <Input
                             aria-label="PagerDuty priority names"
@@ -902,7 +903,7 @@ export default function NewAutomationPage() {
                             onChange={(event) =>
                               setFormField("pagerDutyPriorityNames", event.target.value)
                             }
-                            className="h-8"
+                            density="compact"
                           />
                           <Input
                             aria-label="PagerDuty incident types"
@@ -911,7 +912,7 @@ export default function NewAutomationPage() {
                             onChange={(event) =>
                               setFormField("pagerDutyIncidentTypes", event.target.value)
                             }
-                            className="h-8"
+                            density="compact"
                           />
                           <Input
                             aria-label="PagerDuty title contains"
@@ -920,7 +921,7 @@ export default function NewAutomationPage() {
                             onChange={(event) =>
                               setFormField("pagerDutyTitleContains", event.target.value)
                             }
-                            className="h-8"
+                            density="compact"
                           />
                           <Input
                             aria-label="PagerDuty cooldown minutes"
@@ -931,7 +932,7 @@ export default function NewAutomationPage() {
                             onChange={(event) =>
                               setFormField("pagerDutyCooldownMinutes", event.target.value)
                             }
-                            className="h-8"
+                            density="compact"
                           />
                           <Input
                             aria-label="PagerDuty custom fields"
@@ -940,7 +941,8 @@ export default function NewAutomationPage() {
                             onChange={(event) =>
                               setFormField("pagerDutyCustomFields", event.target.value)
                             }
-                            className="h-8 sm:col-span-2"
+                            density="compact"
+                            className="sm:col-span-2"
                           />
                         </div>
                       </div>
@@ -1007,7 +1009,7 @@ export default function NewAutomationPage() {
                             onChange={(event) =>
                               setFormField("linearTeamKeys", event.target.value)
                             }
-                            className="h-8"
+                            density="compact"
                           />
                           <Input
                             aria-label="Linear labels"
@@ -1016,7 +1018,7 @@ export default function NewAutomationPage() {
                             onChange={(event) =>
                               setFormField("linearLabels", event.target.value)
                             }
-                            className="h-8"
+                            density="compact"
                           />
                           <Input
                             aria-label="Linear issue types"
@@ -1025,7 +1027,7 @@ export default function NewAutomationPage() {
                             onChange={(event) =>
                               setFormField("linearIssueTypes", event.target.value)
                             }
-                            className="h-8"
+                            density="compact"
                           />
                           <Input
                             aria-label="Linear state types"
@@ -1034,7 +1036,7 @@ export default function NewAutomationPage() {
                             onChange={(event) =>
                               setFormField("linearStateTypes", event.target.value)
                             }
-                            className="h-8"
+                            density="compact"
                           />
                           <Input
                             aria-label="Linear priorities"
@@ -1043,7 +1045,7 @@ export default function NewAutomationPage() {
                             onChange={(event) =>
                               setFormField("linearPriorities", event.target.value)
                             }
-                            className="h-8"
+                            density="compact"
                           />
                           <Input
                             aria-label="Linear cooldown minutes"
@@ -1054,7 +1056,7 @@ export default function NewAutomationPage() {
                             onChange={(event) =>
                               setFormField("linearCooldownMinutes", event.target.value)
                             }
-                            className="h-8"
+                            density="compact"
                           />
                           <Input
                             aria-label="Linear title contains"
@@ -1063,7 +1065,8 @@ export default function NewAutomationPage() {
                             onChange={(event) =>
                               setFormField("linearTitleContains", event.target.value)
                             }
-                            className="h-8 sm:col-span-2"
+                            density="compact"
+                            className="sm:col-span-2"
                           />
                         </div>
                       </div>

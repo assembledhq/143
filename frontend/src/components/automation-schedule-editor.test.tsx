@@ -342,11 +342,10 @@ describe("AutomationScheduleEditor", () => {
     );
 
     expect(screen.getByText("3 days")).toHaveClass("sm:hidden");
-    expect(
-      screen.getByRole("button", {
-        name: "Days of week: Monday, Wednesday, and Friday",
-      }),
-    ).toBeInTheDocument();
+    const weekdayTrigger = screen.getByRole("button", {
+      name: "Days of week: Monday, Wednesday, and Friday",
+    });
+    expect(weekdayTrigger).toHaveAttribute("data-density", "default");
+    expect(weekdayTrigger).toHaveClass("h-11", "sm:h-9");
   });
 });
-

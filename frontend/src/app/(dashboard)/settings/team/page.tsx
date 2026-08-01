@@ -376,8 +376,7 @@ export default function TeamSettingsPage() {
                             }}
                           >
                             <SelectTrigger
-                              size="default"
-                              className="h-11 w-full max-w-28 md:h-9"
+                              className="w-full max-w-28"
                               aria-label={`Role for ${member.name}`}
                             >
                               <SelectValue>
@@ -620,7 +619,6 @@ export default function TeamSettingsPage() {
                               setSelectedGitHubAvatarUrl(undefined);
                               setInviteError("");
                             }}
-                            className="h-11 sm:h-9"
                           />
                           <p className="text-xs text-muted-foreground">
                             Connect a GitHub App to search for users.
@@ -639,7 +637,6 @@ export default function TeamSettingsPage() {
                           setInviteEmail(e.target.value);
                           setInviteError("");
                         }}
-                        className="h-11 sm:h-9"
                       />
                       <p className="text-xs text-muted-foreground">
                         We&apos;ll send the invite link here, but acceptance still requires the matching GitHub account.
@@ -660,7 +657,6 @@ export default function TeamSettingsPage() {
                           setInviteEmail(e.target.value);
                           setInviteError("");
                         }}
-                        className="h-11 sm:h-9"
                       />
                       <p className="text-xs text-muted-foreground">
                         The invitee will accept with this email address.
@@ -730,7 +726,7 @@ export default function TeamSettingsPage() {
               <div className="space-y-1.5">
                 <Label htmlFor="invite-role">Role</Label>
                 <Select value={inviteRole} onValueChange={setInviteRole}>
-                  <SelectTrigger id="invite-role" className="h-11 w-full sm:h-9">
+                  <SelectTrigger id="invite-role" className="w-full">
                     <SelectValue>{roleLabel(inviteRole)}</SelectValue>
                   </SelectTrigger>
                   <SelectContent>

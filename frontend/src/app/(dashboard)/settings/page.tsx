@@ -787,7 +787,10 @@ function PRAuthorshipSettings() {
                                       value={enforcement}
                                       onValueChange={(value) => setCheckEnforcement(checkKey, role.key, value as PRReadinessEnforcement)}
                                     >
-                                      <SelectTrigger aria-label={`${check.label} ${role.label} enforcement`} className="h-8">
+                                      <SelectTrigger
+                                        aria-label={`${check.label} ${role.label} enforcement`}
+                                        density="compact"
+                                      >
                                         <SelectValue>{READINESS_ENFORCEMENT_LABELS[enforcement]}</SelectValue>
                                       </SelectTrigger>
                                       <SelectContent>

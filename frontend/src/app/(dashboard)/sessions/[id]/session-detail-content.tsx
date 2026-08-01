@@ -1576,7 +1576,7 @@ function SessionComposer({
         <div className="space-y-2">
           <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Agent</Label>
           <Select value={editableAgentType} onValueChange={onEditableAgentTypeChange} disabled={agentUpdatePending}>
-            <SelectTrigger className="h-11 rounded-xl border-border/70 bg-background text-sm" aria-label="Agent">
+            <SelectTrigger className="rounded-xl border-border/70 bg-background text-sm" aria-label="Agent">
               <SelectValue placeholder="Select agent" />
             </SelectTrigger>
             <SelectContent>
@@ -1594,7 +1594,7 @@ function SessionComposer({
         <div className="space-y-2">
           <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Model</Label>
           <Select value={selectedModel} onValueChange={onSelectedModelChange}>
-            <SelectTrigger className="h-11 rounded-xl border-border/70 bg-background text-sm" aria-label="Model override">
+            <SelectTrigger className="rounded-xl border-border/70 bg-background text-sm" aria-label="Model override">
               <SelectValue placeholder="Default model" />
             </SelectTrigger>
             <SelectContent>
@@ -1830,7 +1830,7 @@ function SessionComposer({
                 onChange={(event) => setImageURL(event.target.value)}
                 placeholder="https://example.com/screenshot.png"
                 aria-label="Image URL"
-                className="h-8"
+                density="compact"
               />
               <Button type="button" variant="outline" size="sm" onClick={addImageURL}>
                 Add
@@ -1865,7 +1865,7 @@ function SessionComposer({
                   placeholder="ACS-1234 or https://linear.app/acme/issue/ACS-1234"
                   aria-label="Linear issue id or URL"
                   aria-invalid={linearInputError ? true : undefined}
-                  className="h-8"
+                density="compact"
                 />
                 <Button type="button" variant="outline" size="sm" onClick={addLinearLink}>
                   Add
@@ -1972,7 +1972,7 @@ function SessionComposer({
 
                 {editableAgents && editableAgents.length > 0 && editableAgentType && onEditableAgentTypeChange && (
                   <Select value={editableAgentType} onValueChange={onEditableAgentTypeChange} disabled={agentUpdatePending}>
-                    <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Agent">
+                    <SelectTrigger density="compact" className="w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Agent">
                       <SelectValue placeholder="Agent" />
                     </SelectTrigger>
                     <SelectContent>
@@ -1987,7 +1987,7 @@ function SessionComposer({
 
                 {availableModels.length > 0 && (
                   <Select value={selectedModel} onValueChange={onSelectedModelChange}>
-                    <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
+                    <SelectTrigger density="compact" className="w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
                       <SelectValue placeholder="Default model" />
                     </SelectTrigger>
                     <SelectContent>
@@ -7162,7 +7162,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                       aria-label="Session title"
                       value={draftTitle}
                       onChange={(e) => setDraftTitle(e.target.value)}
-                      className="h-8 max-w-xl"
+                      density="compact"
+                      className="max-w-xl"
                       disabled={updateSessionMutation.isPending}
                     />
                     <DisabledTooltip disabled={!canSaveTitle} content={saveTitleDisabledReason}>
@@ -7481,7 +7482,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 onValueChange={setReviewAgentType}
                 disabled={startReviewLoopMutation.isPending}
               >
-                <SelectTrigger id="review-agent-type" aria-label="Review coding agent" className="h-9 w-full">
+                <SelectTrigger id="review-agent-type" aria-label="Review coding agent" className="w-full">
                   <SelectValue placeholder="Select coding agent" />
                 </SelectTrigger>
                 <SelectContent>
@@ -7565,7 +7566,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                     }
                     setReviewPasses(Math.min(5, Math.max(1, next)));
                   }}
-                  className="h-9 text-center"
+                      className="text-center"
                 />
                 <Button
                   type="button"

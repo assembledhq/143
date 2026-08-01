@@ -135,7 +135,8 @@ function AutomationTemplateGallery({ canManage }: { canManage: boolean }) {
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Search templates..."
-              className="h-8 bg-background pl-9"
+              density="compact"
+              className="bg-background pl-9"
             />
           </div>
 
@@ -356,7 +357,8 @@ function AutomationsWorkspace({
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder="Search automations..."
-                className="h-8 bg-background pl-9"
+                density="compact"
+                className="bg-background pl-9"
               />
             </div>
           </div>

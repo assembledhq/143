@@ -133,7 +133,7 @@ export default function AuditLogPage() {
         {/* Filters */}
         <div className="flex flex-wrap items-center gap-3">
           <Select value={resourceType ?? "_all"} onValueChange={handleResourceTypeChange}>
-            <SelectTrigger className="h-8 w-[160px] text-xs">
+            <SelectTrigger density="compact" className="w-[160px] text-xs">
               <SelectValue placeholder="All resources" />
             </SelectTrigger>
             <SelectContent>
@@ -146,7 +146,7 @@ export default function AuditLogPage() {
           </Select>
 
           <Select value={actionPrefix ?? "_all"} onValueChange={handleActionPrefixChange}>
-            <SelectTrigger className="h-8 w-[160px] text-xs">
+            <SelectTrigger density="compact" className="w-[160px] text-xs">
               <SelectValue placeholder="All actions" />
             </SelectTrigger>
             <SelectContent>
@@ -159,7 +159,7 @@ export default function AuditLogPage() {
           </Select>
 
           <Select value={userId ?? "_all"} onValueChange={handleUserIdChange}>
-            <SelectTrigger className="h-8 w-[160px] text-xs">
+            <SelectTrigger density="compact" className="w-[160px] text-xs">
               <SelectValue placeholder="All actors" />
             </SelectTrigger>
             <SelectContent>
