@@ -716,23 +716,25 @@ function BootstrapDetailSheet({
         </div>
         <div
           ref={logContainerRef}
-          className="flex-1 min-h-0 overflow-y-auto rounded-md bg-zinc-950 border border-zinc-800 p-3 font-mono text-xs"
+          role="log"
+          aria-label="Bootstrap run logs"
+          className="flex-1 min-h-0 overflow-y-auto rounded-md border border-border bg-background/70 p-3 font-mono text-xs"
         >
           {logs.length === 0 && isActive && (
-            <div className="text-zinc-500">Waiting for the first log...</div>
+            <div className="text-muted-foreground">Waiting for the first log...</div>
           )}
           {logs.length === 0 && !isActive && !bootstrap.session_id && (
-            <div className="text-zinc-500">No logs available for this run.</div>
+            <div className="text-muted-foreground">No logs available for this run.</div>
           )}
           {logs.map((log) => (
             <div key={log.id} className="py-0.5 flex gap-2 leading-relaxed">
-              <span className="text-zinc-600 shrink-0 select-none">
+              <span className="shrink-0 select-none text-muted-foreground tabular-nums">
                 {new Date(log.created_at).toLocaleTimeString()}
               </span>
               <span className={
-                log.level === "error" ? "text-red-400" :
-                log.level === "assistant" ? "text-zinc-300" :
-                "text-zinc-400"
+                log.level === "error" ? "text-destructive" :
+                log.level === "assistant" ? "text-foreground" :
+                "text-muted-foreground"
               }>
                 {log.message}
               </span>
