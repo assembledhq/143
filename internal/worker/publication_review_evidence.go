@@ -62,7 +62,6 @@ func (r *publicationReviewEvidenceRefresher) RefreshPublicationEvidence(
 		branch, branchErr := r.pr.CreateBranch(ctx, &session, ghservice.CreatePRParams{ChangesetID: loop.ChangesetID})
 		if errors.Is(branchErr, ghservice.ErrNoChanges) {
 			headSHA = stringValue(changeset.HeadSHA)
-			branchErr = nil
 		} else if branchErr != nil {
 			return 0, "", fmt.Errorf("push pre-publish review fixes: %w", branchErr)
 		} else if branch == nil {

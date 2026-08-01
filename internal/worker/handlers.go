@@ -11736,7 +11736,6 @@ func ensurePublicationPrePRReview(
 				return false, fmt.Errorf("load unchanged publication review target: %w", loadErr)
 			}
 			desiredHeadSHA = stringValue(changeset.HeadSHA)
-			err = nil
 		} else if err != nil {
 			return false, fmt.Errorf("checkpoint publication branch for review: %w", err)
 		} else if branch != nil {
