@@ -249,7 +249,7 @@ describe('SettingsLayout', () => {
     expect(screen.queryByRole('link')).not.toBeInTheDocument();
   });
 
-  it('adds shared bottom scroll padding for settings page containers', () => {
+  it('applies the shared settings copy treatment', () => {
     useAuthMock.mockReturnValue({ user: { role: 'admin' }, isLoading: false });
 
     const { container } = renderWithProviders(
@@ -258,9 +258,8 @@ describe('SettingsLayout', () => {
       </SettingsLayout>
     );
 
-    const paddingScope = container.querySelector('[data-slot="settings-layout-padding-scope"]');
-    expect(paddingScope).not.toBeNull();
-    expect(paddingScope).toHaveClass('[&_[data-slot=page-container]]:pb-24');
-    expect(paddingScope).toHaveClass('md:[&_[data-slot=page-container]]:pb-20');
+    const settingsLayout = container.querySelector('[data-slot="settings-layout"]');
+    expect(settingsLayout).not.toBeNull();
+    expect(settingsLayout).toHaveClass('settings-readable-copy');
   });
 });
