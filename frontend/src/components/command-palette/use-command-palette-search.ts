@@ -22,20 +22,8 @@ export function useCommandPaletteSearch(query: string, repo: string | null) {
     staleTime: 10_000,
   });
 
-  const projects = useQuery({
-    queryKey: [...queryKeys.projects.list({ repo, search: deferredQuery })],
-    queryFn: () =>
-      api.projects.list({
-        search: deferredQuery,
-        limit: SEARCH_LIMIT,
-        ...(repo ? { repository_id: repo } : {}),
-      }),
-    enabled,
-  });
-
   return {
     sessions: sessions.data?.data ?? [],
-    projects: projects.data?.data ?? [],
-    isLoading: enabled && (sessions.isLoading || projects.isLoading),
+    isLoading: enabled && sessions.isLoading,
   };
 }

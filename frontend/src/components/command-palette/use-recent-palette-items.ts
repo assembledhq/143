@@ -5,7 +5,7 @@ const MAX_ENTRIES = 10;
 const DISPLAY_COUNT = 5;
 
 export interface RecentItem {
-  type: "session" | "project" | "navigation";
+  type: "session" | "navigation";
   id: string;
   label: string;
   href: string;
@@ -15,7 +15,8 @@ export interface RecentItem {
 function getStoredItems(): RecentItem[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as RecentItem[]) : [];
+    const items = raw ? (JSON.parse(raw) as RecentItem[]) : [];
+    return items.filter((item) => item.type === "session" || item.type === "navigation");
   } catch {
     return [];
   }
