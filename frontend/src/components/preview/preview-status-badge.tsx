@@ -31,7 +31,8 @@ export function PreviewStatusBadge({
     <StatusLabel
       label={label ?? formatPreviewStatus(status)}
       tone={tone}
-      active={isStarting}
+      activity={isStarting ? "indeterminate" : "none"}
+      stateKey={status}
       className={cn(className)}
     />
   );

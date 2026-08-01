@@ -836,7 +836,7 @@ describe('SessionDetailPage composer and session metadata', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByPlaceholderText('Send a follow-up message...');
-    expect(screen.getAllByText('Idle').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('Ready to continue').length).toBeGreaterThanOrEqual(1);
   });
 
   it('shows session title from title field when available', async () => {

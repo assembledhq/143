@@ -210,6 +210,26 @@ describe("RunCard click-through", () => {
     renderWithProviders(<RunCard run={run} />);
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
     expect(screen.getByText(/pending/i)).toBeInTheDocument();
+    expect(document.querySelector('[data-activity="indeterminate"]')).toBeInTheDocument();
+  });
+
+  it("uses a calm breathing status for a long-running automation", () => {
+    const run = makeRun({
+      status: "running",
+      completed_at: undefined,
+      session: {
+        id: "sess-running",
+        status: "running",
+        failure_retry_advised: false,
+        pr_creation_state: "idle",
+      },
+    });
+
+    renderWithProviders(<RunCard run={run} />);
+
+    expect(screen.getByText("Running")).toBeInTheDocument();
+    expect(document.querySelector('[data-activity="breathing"]')).toBeInTheDocument();
+    expect(document.querySelector(".animate-spin")).toBeNull();
   });
 
   it("shows manual provenance for pending manual runs", () => {

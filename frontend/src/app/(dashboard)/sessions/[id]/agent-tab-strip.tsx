@@ -14,7 +14,9 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { StatusIndicator } from "@/components/status-indicator";
 import { AGENTS_BY_KEY } from "@/lib/agents";
+import { deriveSessionStatusPresentation } from "@/lib/session-display-status";
 import type { SessionThread, SessionThreadFileEvent } from "@/lib/types";
 import { SESSION_THREAD_STRIP_HEIGHT_CLASSNAME } from "./session-detail-geometry";
 
@@ -36,11 +38,7 @@ function threadNeedsAttention(thread: SessionThread): boolean {
 }
 
 function shouldShowUnreadDot(thread: SessionThread, viewedThreadIds: ReadonlySet<string>): boolean {
-  if (!viewedThreadIds.has(thread.id)) {
-    return true;
-  }
-
-  return thread.status === "pending" || thread.status === "running";
+  return !viewedThreadIds.has(thread.id);
 }
 
 function canArchiveThread(thread: SessionThread, threadCount: number): boolean {
@@ -222,6 +220,7 @@ export function AgentTabStrip({
     const provenance = formatThreadProvenance(activeThread);
     const needsAttention = threadNeedsAttention(activeThread);
     const showUnreadDot = shouldShowUnreadDot(activeThread, viewedThreadIds);
+    const operationalStatus = deriveSessionStatusPresentation(activeThread.status);
 
     return (
       <TooltipProvider delayDuration={150}>
@@ -236,18 +235,15 @@ export function AgentTabStrip({
                     aria-label={`${agentLabel} ${statusLabel}`}
                     className="inline-flex max-w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
                   >
-                    {showUnreadDot ? (
-                      <span
-                        className={cn(
-                          "h-2 w-2 shrink-0 rounded-full bg-primary",
-                          activeThread.status === "running" && !isCancelling && "animate-pulse",
-                        )}
-                        aria-hidden
-                      />
-                    ) : (
-                      <span className="h-2 w-2 shrink-0" aria-hidden />
-                    )}
+                    <StatusIndicator
+                      tone={operationalStatus.tone}
+                      activity={isCancelling ? "none" : operationalStatus.activity}
+                      stateKey={activeThread.status}
+                    />
                     <span className="truncate text-xs font-medium text-foreground">{activeThread.label}</span>
+                    {showUnreadDot ? (
+                      <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" title="Unread activity" />
+                    ) : null}
                     {isCancelling && (
                       <Loader2
                         className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground"
@@ -356,6 +352,7 @@ export function AgentTabStrip({
                   const deliverySummary = formatDeliverySummary(thread);
                   const provenance = formatThreadProvenance(thread);
                   const showUnreadDot = shouldShowUnreadDot(thread, viewedThreadIds);
+                  const operationalStatus = deriveSessionStatusPresentation(thread.status);
                   const showArchiveButton = canArchiveThread(thread, tabs.length);
                   const isNonInteractive = nonInteractiveThreadIds?.has(thread.id) ?? false;
                   const closeLabel = `Close ${thread.label}${thread.label.toLowerCase().endsWith(" tab") ? "" : " tab"}`;
@@ -375,18 +372,15 @@ export function AgentTabStrip({
                                 isNonInteractive && "cursor-default opacity-60",
                               )}
                             >
-                              {showUnreadDot ? (
-                                <span
-                                  className={cn(
-                                    "h-2 w-2 shrink-0 rounded-full bg-primary",
-                                    thread.status === "running" && !isCancelling && "animate-pulse",
-                                  )}
-                                  aria-hidden
-                                />
-                              ) : (
-                                <span className="h-2 w-2 shrink-0" aria-hidden />
-                              )}
+                              <StatusIndicator
+                                tone={operationalStatus.tone}
+                                activity={isCancelling ? "none" : operationalStatus.activity}
+                                stateKey={thread.status}
+                              />
                               <span className="truncate">{thread.label}</span>
+                              {showUnreadDot ? (
+                                <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" title="Unread activity" />
+                              ) : null}
                               {isCancelling && (
                                 <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" aria-label="Cancelling" />
                               )}

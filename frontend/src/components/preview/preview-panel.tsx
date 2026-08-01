@@ -47,6 +47,7 @@ import {
 import { cn, formatTimeAgo } from "@/lib/utils";
 import { api } from "@/lib/api";
 import { pollMs } from "@/lib/poll-intervals";
+import { StatusIndicator } from "@/components/status-indicator";
 import {
   PREVIEW_ERROR_CODES,
   type PreviewStatus,
@@ -285,7 +286,7 @@ function startupStepIcon(state: StartupChecklistStepState) {
     case "complete":
       return <CheckCircle2 className="size-3.5 text-success" />;
     case "active":
-      return <Loader2 className="size-3.5 animate-spin text-primary" />;
+      return <StatusIndicator tone="primary" activity="indeterminate" stateKey="startup-active" />;
     case "failed":
       return <AlertTriangle className="size-3.5 text-destructive" />;
     default:

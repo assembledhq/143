@@ -817,6 +817,8 @@ describe('SessionDetailPage session states', () => {
 
     expect(await screen.findAllByText('Restoring runtime from checkpoint')).not.toHaveLength(0);
     expect(screen.getAllByText('Follow-up messages will be queued and delivered after the runtime is restored.')).not.toHaveLength(0);
+    const recoveryNotices = screen.getAllByText('Restoring runtime from checkpoint');
+    expect(recoveryNotices.every((notice) => notice.parentElement?.parentElement?.querySelector('[data-activity="breathing"]'))).toBe(true);
     const composer = screen.getByPlaceholderText('Send a follow-up message...');
     expect(composer).toBeEnabled();
   });
@@ -959,7 +961,7 @@ describe('SessionDetailPage session states', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
-    expect(screen.getAllByText('Awaiting input').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('Waiting for you').length).toBeGreaterThanOrEqual(1);
   });
 
   it('shows needs_human_guidance status', async () => {

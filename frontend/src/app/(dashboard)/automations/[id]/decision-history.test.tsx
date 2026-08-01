@@ -137,7 +137,9 @@ describe("DecisionHistory", () => {
     expect(screen.getByText("Changes requested")).toBeInTheDocument();
     expect(screen.getByText("Advisory")).toBeInTheDocument();
     expect(screen.getByText("Not applicable")).toBeInTheDocument();
-    expect(screen.getByText("Evaluating")).toBeInTheDocument();
+    const evaluatingBadge = screen.getByText("Evaluating").closest('[data-slot="badge"]');
+    expect(evaluatingBadge).toBeInTheDocument();
+    expect(evaluatingBadge?.querySelector('[data-activity="breathing"]')).toBeInTheDocument();
     expect(screen.getByText("Execution failed")).toBeInTheDocument();
     expect(screen.getByText("Outcome not reported")).toBeInTheDocument();
     expect(screen.getByText("Evaluated 2 times")).toBeInTheDocument();

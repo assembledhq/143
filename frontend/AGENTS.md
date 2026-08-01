@@ -81,6 +81,19 @@ Status meaning always goes through state tokens — **never raw Tailwind palette
 
 Usage recipes: dot `bg-success`; text `text-success`; tinted badge `bg-success/10 text-success`; tinted banner `border-success/30 bg-success/10`; solid fill `bg-success text-success-foreground`. Same shapes for `warning`, `attention`, `info`, `destructive`.
 
+Operational state presentation separates three axes through
+`src/lib/operational-state.ts`: `tone` communicates meaning, `activity`
+communicates whether work is actually progressing, and `attention`
+communicates whether the user must act. Feature code maps domain states into
+those axes and renders `StatusLabel`; it must not choose animation classes or
+pass raw color classes to a status primitive.
+
+- Long-lived work uses `activity="breathing"`.
+- Short, indeterminate local operations may use `activity="indeterminate"`.
+- Waiting, blocked, completed, failed, cancelled, and skipped states remain static.
+- Use at most one animated element for a single status. Do not combine an
+  active indicator with animated ellipses or a second spinner.
+
 **Exceptions** (the only blessed raw-palette uses):
 
 - Diff add/remove coloring in the code-review viewer keeps its conventional green/red palette classes — that is diff semantics, not status.
@@ -338,23 +351,31 @@ Key rules:
 
 ### Status Dots
 
-Active/running items use animated ping dots (prefer the `StatusDot` component):
+Use `StatusLabel` for visible status text. It owns the semantic tone, indicator,
+stable geometry, and optional activity treatment:
+
 ```tsx
-<span className="relative flex h-2 w-2">
-  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/60 opacity-75" />
-  <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
-</span>
+<StatusLabel
+  label="Running"
+  tone="primary"
+  activity="breathing"
+  stateKey="running"
+/>
 ```
 
-Static status dots use state tokens: `<span className="inline-flex rounded-full h-2 w-2 bg-success" />` (or `bg-warning`, `bg-attention`, `bg-info`, `bg-destructive`)
+Use `StatusIndicator` only when the adjacent accessible label already provides
+the state text. Do not hand-build `animate-ping` dots.
 
 ### Status Badges
 
-Use `<span>` with inline status colors for row status indicators:
+Use `StatusLabel` with a domain-to-presentation mapping for row status indicators:
 ```tsx
-<span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${status.color}`}>
-  {status.label}
-</span>
+<StatusLabel
+  label={status.label}
+  tone={status.tone}
+  activity={status.activity}
+  stateKey={domainStatus}
+/>
 ```
 
 ### Empty State
@@ -530,7 +551,8 @@ State tokens (`success`, `warning`, `attention`, `info`, `destructive`) adapt to
 | `PageHeader` | `src/components/page-header.tsx` | Standard page title + description + action |
 | `EmptyState` | `src/components/empty-state.tsx` | Empty list/data placeholder |
 | `AuthenticatedLayout` | `src/components/authenticated-layout.tsx` | Sidebar + main content shell |
-| `StatusDot` | `src/components/status-dot.tsx` | Animated/static status dots |
+| `StatusIndicator` | `src/components/status-indicator.tsx` | Semantic status indicator internals |
+| `StatusLabel` | `src/components/status-label.tsx` | Canonical operational status + activity treatment |
 | `Kbd` | `src/components/ui/kbd.tsx` | Keyboard shortcut hints |
 
 ## Keyboard Shortcut Hints
@@ -660,3 +682,4 @@ Use the `tags` parameter to add searchable context (feature name, endpoint, comp
 10. **Missing transitions** — Interactive elements (radio cards, buttons, rows) need `transition-all duration-150`.
 11. **Insufficient header-to-scroll-area spacing** — Fixed header sections above scrollable content must have at least `pb-3` (12px) bottom padding. Using `pb-2` or less causes the scroll area to overlap with the last header element (e.g., filter tabs, buttons), clipping their bottom border or active indicator.
 12. **Full-document settings writes** — Never spread the cached settings object into a mutation body to "preserve" unchanged fields. Settings endpoints are merge patches; send only the changed fields (see "Settings Mutations: Patch, Don't Replace").
+13. **Hand-built operational motion** — Never compose `animate-ping`, a status spinner, or animated ellipses for domain state. Map the domain state to the shared operational-state contract and render `StatusLabel`/`StatusIndicator`.

@@ -400,8 +400,8 @@ function ReviewOperationalStatus({ review, nowMs }: { review: CodeReviewListItem
       <StatusLabel
         label={reviewStatusLabel(review)}
         tone={waitingForGitHub ? "warning" : reviewStatusTone(isSupersededReview(review) ? "superseded" : review.status)}
-        active={active}
-        indicator={false}
+        activity={active ? (review.status === "queued" ? "indeterminate" : "breathing") : "none"}
+        stateKey={`${review.status}:${review.phase ?? ""}`}
       />
       {message ? <p className="text-xs leading-5 text-muted-foreground">{message}</p> : null}
       {countdown ? <p className="text-xs font-medium text-warning">{countdown}</p> : null}
@@ -1084,7 +1084,7 @@ export default function CodeReviewsPage() {
       header: sortHeader("Outcome", "outcome"),
       sortDirection: reviewSort === "outcome" ? reviewSortOrder : false,
       render: (review) => (
-        <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} indicator={false} />
+        <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} indicator="none" />
       ),
     },
     {
@@ -1095,7 +1095,7 @@ export default function CodeReviewsPage() {
         <StatusLabel
           label={reviewRiskLabel(review)}
           tone={reviewRiskTone(review)}
-          indicator={false}
+          indicator="none"
         />
       ),
     },
@@ -1284,7 +1284,7 @@ export default function CodeReviewsPage() {
                           <StatusLabel
                             label={decisionLabel(review)}
                             tone={reviewDecisionTone(review)}
-                            indicator={false}
+                            indicator="none"
                           />
                           {review.completed_at ? (
                             <span className="text-foreground">{formatDate(review.completed_at)}</span>
@@ -1295,7 +1295,7 @@ export default function CodeReviewsPage() {
                           <StatusLabel
                             label={reviewRiskLabel(review)}
                             tone={reviewRiskTone(review)}
-                            indicator={false}
+                            indicator="none"
                           />
                         </div>
                       </div>
@@ -3264,7 +3264,8 @@ function CodeReviewEvidenceSheet({
                         <StatusLabel
                           label={statusLabel(result.status)}
                           tone={reviewStatusTone(result.status)}
-                          active={result.status === "running" || result.status === "queued"}
+                          activity={result.status === "queued" ? "indeterminate" : result.status === "running" ? "breathing" : "none"}
+                          stateKey={result.status}
                         />
                       </div>
                       {result.raw_output ? (

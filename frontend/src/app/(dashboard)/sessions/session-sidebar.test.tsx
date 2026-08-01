@@ -838,7 +838,7 @@ describe('SessionSidebar', () => {
     await waitFor(() => {
       expect(screen.getByText('Creating sandbox...')).toBeInTheDocument();
     });
-    expect(screen.getByText('Pending')).toBeInTheDocument();
+    expect(screen.getByText('Starting')).toBeInTheDocument();
   });
 
   it('uses the same row padding frame for optimistic sessions and normal sessions', async () => {
