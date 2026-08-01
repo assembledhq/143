@@ -192,8 +192,10 @@ describe("AutomationDetailPage", () => {
 
     expect(scheduleRow).toHaveClass("flex-wrap");
     expect(everyText).toHaveClass("text-muted-foreground");
-    expect(intervalUnitTrigger).toHaveClass("h-9");
-    expect(timezoneButton).toHaveClass("h-9", "type-dense", "max-sm:text-base");
+    expect(intervalUnitTrigger).toHaveAttribute("data-density", "default");
+    expect(intervalUnitTrigger).toHaveClass("h-11", "sm:h-9", "max-sm:text-base");
+    expect(timezoneButton).toHaveAttribute("data-density", "default");
+    expect(timezoneButton).toHaveClass("h-11", "sm:h-9", "type-dense", "max-sm:text-base");
     expect(intervalUnitTrigger).not.toHaveClass("text-base");
     expect(timezoneButton).not.toHaveClass("text-base");
     expect(screen.queryByText(/Run time is in/i)).not.toBeInTheDocument();

@@ -141,7 +141,7 @@ export default function UsagePage() {
               }
             }}
           >
-            <SelectTrigger className="h-8 w-40 text-xs" aria-label="Break down by">
+            <SelectTrigger density="compact" className="w-40 text-xs" aria-label="Break down by">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -152,7 +152,7 @@ export default function UsagePage() {
             </SelectContent>
           </Select>
           <Select value={selectedAgent ?? "any"} onValueChange={(v) => setSelectedAgent(v === "any" ? null : v)}>
-            <SelectTrigger className="h-8 w-32 text-xs" aria-label="Agent filter">
+            <SelectTrigger density="compact" className="w-32 text-xs" aria-label="Agent filter">
               <SelectValue placeholder="Agent" />
             </SelectTrigger>
             <SelectContent>
@@ -165,7 +165,7 @@ export default function UsagePage() {
             </SelectContent>
           </Select>
           <Select value={selectedReasoning ?? "any"} onValueChange={(v) => setSelectedReasoning(v === "any" ? null : v)}>
-            <SelectTrigger className="h-8 w-36 text-xs" aria-label="Reasoning filter">
+            <SelectTrigger density="compact" className="w-36 text-xs" aria-label="Reasoning filter">
               <SelectValue placeholder="Reasoning" />
             </SelectTrigger>
             <SelectContent>

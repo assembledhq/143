@@ -149,7 +149,7 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
             <div className="min-w-0 flex-1">
               <div className="mb-1 flex items-center gap-2">
                 <Select value={selectedAgentType} onValueChange={(value) => setSelectedAgentType(value as AgentType)}>
-                  <SelectTrigger aria-label="Coding agent provider" className="h-8 w-[180px]">
+                  <SelectTrigger aria-label="Coding agent provider" density="compact" className="w-[180px]">
                     <SelectValue placeholder="Select coding agent" />
                   </SelectTrigger>
                   <SelectContent>

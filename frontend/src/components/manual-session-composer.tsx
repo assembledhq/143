@@ -16,6 +16,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { ControlTrigger } from "@/components/ui/control-trigger";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -211,15 +212,15 @@ const ComposerSettingsControls = memo(function ComposerSettingsControls({
       {repositories.length > 0 && (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button
+            <ControlTrigger
               variant="ghost"
-              size="sm"
-              className="h-8 gap-1.5 rounded-full px-3 text-xs text-muted-foreground hover:text-foreground"
+              density="compact"
+              className="gap-1.5 rounded-full px-3 text-xs text-muted-foreground hover:text-foreground"
             >
               <GitBranch className="h-3.5 w-3.5" />
               <span>{selectedRepo ? selectedRepo.full_name.split("/").pop() : "Select repo"}</span>
               <ChevronDown className="h-3 w-3 opacity-50" />
-            </Button>
+            </ControlTrigger>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-72">
             {repositories.map((repo) => (
@@ -243,13 +244,14 @@ const ComposerSettingsControls = memo(function ComposerSettingsControls({
           defaultBranch={selectedRepo.default_branch}
           onValueChange={onBranchChange}
           label="Target branch"
-          buttonClassName="h-8 rounded-full border-none bg-transparent px-3 text-xs text-muted-foreground shadow-none hover:bg-accent hover:text-foreground"
+          density="compact"
+          buttonClassName="rounded-full border-none bg-transparent px-3 text-xs text-muted-foreground shadow-none hover:bg-accent hover:text-foreground"
           contentClassName="w-72"
         />
       )}
 
       <Select value={selectedModel} onValueChange={onModelChange}>
-        <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
+        <SelectTrigger density="compact" className="w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
           <SelectValue placeholder="Default model" />
         </SelectTrigger>
         <SelectContent>
@@ -260,7 +262,7 @@ const ComposerSettingsControls = memo(function ComposerSettingsControls({
 
       {showReasoningSelector ? (
         <Select value={effectiveReasoningOverride || "__default__"} onValueChange={onReasoningChange}>
-          <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Reasoning override">
+          <SelectTrigger density="compact" className="w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Reasoning override">
             <SelectValue placeholder="Reasoning" />
           </SelectTrigger>
           <SelectContent>
@@ -1073,13 +1075,16 @@ export function ManualSessionComposer({
           <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Repository</Label>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="outline" className="h-11 w-full justify-between rounded-xl border-border/70 bg-background px-3 text-left">
+              <ControlTrigger
+                variant="outline"
+                className="w-full justify-between rounded-xl border-border/70 bg-background px-3 text-left"
+              >
                 <span className="flex items-center gap-2 overflow-hidden">
                   <GitBranch className="h-4 w-4 shrink-0 text-muted-foreground" />
                   <span className="truncate">{selectedRepo ? selectedRepo.full_name : "Select repository"}</span>
                 </span>
                 <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
-              </Button>
+              </ControlTrigger>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="w-72">
               {repositories.map((repo) => (
@@ -1106,7 +1111,7 @@ export function ManualSessionComposer({
             defaultBranch={selectedRepo.default_branch}
             onValueChange={handleBranchChange}
             label="Target branch"
-            buttonClassName="h-11 w-full justify-between rounded-xl border border-border/70 bg-background px-3 text-left text-sm shadow-none hover:bg-accent/60"
+            buttonClassName="w-full justify-between rounded-xl border border-border/70 bg-background px-3 text-left text-sm shadow-none hover:bg-accent/60"
             contentClassName="w-72"
           />
         </div>
@@ -1115,7 +1120,7 @@ export function ManualSessionComposer({
       <div className="space-y-2">
         <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Model</Label>
         <Select value={selectedModel} onValueChange={handleModelChange}>
-          <SelectTrigger className="h-11 rounded-xl border-border/70 bg-background text-sm" aria-label="Model override">
+          <SelectTrigger className="rounded-xl border-border/70 bg-background text-sm" aria-label="Model override">
             <SelectValue placeholder="Default model" />
           </SelectTrigger>
           <SelectContent>
@@ -1129,7 +1134,7 @@ export function ManualSessionComposer({
         <div className="space-y-2">
           <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Reasoning</Label>
           <Select value={effectiveReasoningOverride || "__default__"} onValueChange={handleReasoningChange}>
-            <SelectTrigger className="h-11 rounded-xl border-border/70 bg-background text-sm" aria-label="Reasoning override">
+            <SelectTrigger className="rounded-xl border-border/70 bg-background text-sm" aria-label="Reasoning override">
               <SelectValue placeholder="Default reasoning" />
             </SelectTrigger>
             <SelectContent>

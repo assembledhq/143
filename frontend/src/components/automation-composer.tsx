@@ -66,7 +66,8 @@ export function AutomationComposer({
           value={name}
           onChange={(e) => onNameChange(e.target.value)}
           placeholder="Untitled automation"
-          className="h-auto min-h-10 rounded-none border-0 bg-transparent px-0 py-0 text-2xl font-semibold shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0 sm:text-2xl"
+          inset="none"
+          className="rounded-none border-0 bg-transparent text-2xl leading-none font-semibold shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0 sm:text-2xl"
         />
       </div>
 

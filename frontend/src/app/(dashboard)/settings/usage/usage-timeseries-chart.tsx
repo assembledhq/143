@@ -171,7 +171,7 @@ export function UsageTimeseriesChart({
           <h3 className="text-sm font-medium">Daily Usage</h3>
           <div className="flex items-center gap-2">
             <Select value={metric} onValueChange={(v) => onMetricChange(v as MetricKey)}>
-              <SelectTrigger className="h-8 w-40 text-xs">
+              <SelectTrigger density="compact" className="w-40 text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -183,7 +183,7 @@ export function UsageTimeseriesChart({
               </SelectContent>
             </Select>
               <Select value={chartMode} onValueChange={(v) => onChartModeChange(v as ChartMode)}>
-              <SelectTrigger className="h-8 w-32 text-xs">
+              <SelectTrigger density="compact" className="w-32 text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>

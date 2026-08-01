@@ -415,7 +415,7 @@ export function VisualEditingPanel({
                   setDirtyFields((prev) => new Set(prev).add("fontSize"));
                 }}
               >
-                <SelectTrigger className="w-14 h-6 text-xs">
+                <SelectTrigger density="dense" className="w-14 text-xs">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -434,7 +434,7 @@ export function VisualEditingPanel({
               value={editState.fontWeight}
               onValueChange={(v) => update("fontWeight", v)}
             >
-              <SelectTrigger className="h-7 text-xs">
+              <SelectTrigger density="dense" className="text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -486,7 +486,7 @@ export function VisualEditingPanel({
               value={editState.flexDirection}
               onValueChange={(v) => update("flexDirection", v)}
             >
-              <SelectTrigger className="h-7 text-xs">
+              <SelectTrigger density="dense" className="text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -504,7 +504,7 @@ export function VisualEditingPanel({
               value={editState.justifyContent}
               onValueChange={(v) => update("justifyContent", v)}
             >
-              <SelectTrigger className="h-7 text-xs">
+              <SelectTrigger density="dense" className="text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -522,7 +522,7 @@ export function VisualEditingPanel({
               value={editState.alignItems}
               onValueChange={(v) => update("alignItems", v)}
             >
-              <SelectTrigger className="h-7 text-xs">
+              <SelectTrigger density="dense" className="text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -559,7 +559,8 @@ export function VisualEditingPanel({
               <Input
                 value={editState.width}
                 onChange={(e) => update("width", e.target.value)}
-                className="h-7 text-xs flex-1"
+                density="dense"
+                className="text-xs flex-1"
                 placeholder="auto"
               />
               <Select
@@ -569,7 +570,7 @@ export function VisualEditingPanel({
                   setDirtyFields((prev) => new Set(prev).add("width"));
                 }}
               >
-                <SelectTrigger className="w-16 h-7 text-xs">
+                <SelectTrigger density="dense" className="w-16 text-xs">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -588,7 +589,8 @@ export function VisualEditingPanel({
               <Input
                 value={editState.height}
                 onChange={(e) => update("height", e.target.value)}
-                className="h-7 text-xs flex-1"
+                density="dense"
+                className="text-xs flex-1"
                 placeholder="auto"
               />
               <Select
@@ -598,7 +600,7 @@ export function VisualEditingPanel({
                   setDirtyFields((prev) => new Set(prev).add("height"));
                 }}
               >
-                <SelectTrigger className="w-16 h-7 text-xs">
+                <SelectTrigger density="dense" className="w-16 text-xs">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -696,7 +698,8 @@ function ColorField({
         <Input
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          className="h-7 text-xs font-mono flex-1"
+          density="dense"
+          className="text-xs font-mono flex-1"
           placeholder="#000000"
         />
       </div>
