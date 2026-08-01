@@ -72,13 +72,13 @@ Use the report to tune policy deliberately:
 
 **Additional review instructions** are optional team guidance for priorities, domain risks, and comment style. They are appended after each agent's native `/review` command. Leave them empty to use built-in reviewer behavior.
 
-**Automated approval policy** guides how the orchestrator classifies findings and identifies non-code decisions that need human judgment. The backend makes the final decision from explicit evidence: P0 and P1 code findings block approval, while P2 and P3 findings are advisory. Architecture, ownership, operational risk, sensitive changes, or another policy requirement can still require a human, but 143 states that reason in the result instead of relying on a hidden model veto. By default, approval evaluates the code without requiring GitHub checks to pass. If you enable a passing-check requirement under advanced controls, the prompt cannot override it; path restrictions, size limits, quorum, disagreement handling, fork restrictions, and other enabled safeguards also remain authoritative.
+**Automated approval policy** guides how the orchestrator classifies findings and identifies non-code decisions that need human judgment. The backend makes the final decision from explicit evidence: P0 and P1 code findings block approval, while P2 and P3 findings are advisory. Architecture, ownership, operational risk, sensitive changes, or another policy requirement can still require a human, but 143 states that reason in the result instead of relying on a hidden model veto. By default, approval evaluates the code without requiring GitHub checks to pass. If you enable a passing-check requirement under Safeguards, the prompt cannot override it; path restrictions, size limits, quorum, disagreement handling, fork restrictions, and other enabled safeguards also remain authoritative.
 
 143 evaluates the current pull request independently of existing human review activity. Human comments, review decisions, and open or resolved review threads—including unresolved change requests—do not become findings or block 143's approval. Repository branch protection and merge rules still apply independently on GitHub.
 
 Use a prompt example when it matches your intent. Previewing and applying an example replaces only its corresponding prompt; it never changes enablement, outcome, reviewers, paths, thresholds, or safety gates. Advanced policy presets are different: they replace the complete policy, including safeguards and agent settings.
 
-Under **Advanced controls → Reviewers & agents**, choose a reasoning level beside each reviewer model. Reviewers can use different levels in the same run. The default is **High**, and the available choices follow the agent selected in that row. Configure the orchestrator's reasoning separately beside its model.
+Under **Safeguards → Reviewers & agents**, choose a reasoning level beside each reviewer model. Reviewers can use different levels in the same run. The default is **High**, and the available choices follow the agent selected in that row. Configure the orchestrator's reasoning separately beside its model.
 
 ## Apply one policy everywhere
 

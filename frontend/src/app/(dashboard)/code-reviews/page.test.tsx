@@ -1,6 +1,6 @@
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { act } from "react";
-import { http, HttpResponse } from "msw";
+import { delay, http, HttpResponse } from "msw";
 import { createTestQueryClient, fireEvent, renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import { queryKeys } from "@/lib/query-keys";
@@ -438,6 +438,48 @@ describe("CodeReviewsPage", () => {
     sse.onEvent = undefined;
   });
 
+  it("does not show inactive or required-policy messaging before the policy loads", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-review-policies", async () => {
+        await delay("infinite");
+        return HttpResponse.json({ data: policy } satisfies SingleResponse<CodeReviewResolvedPolicy>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: "Policy" }));
+
+    const approval = screen.getByRole("region", { name: "Automated approval policy" });
+    expect(within(approval).getByRole("textbox")).toHaveAttribute("aria-invalid", "false");
+    expect(within(approval).queryByText(/saved and ready/i)).not.toBeInTheDocument();
+    expect(within(approval).queryByText(/automated approval policy is required/i)).not.toBeInTheDocument();
+  });
+
+  it("does not require an automated approval policy while approval is inactive", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-review-policies", () =>
+        HttpResponse.json({
+          data: {
+            ...policy,
+            config: { ...policy.config, automated_approval_policy: "" },
+          },
+        } satisfies SingleResponse<CodeReviewResolvedPolicy>),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: "Policy" }));
+
+    const approval = screen.getByRole("region", { name: "Automated approval policy" });
+    expect(within(approval).getByRole("textbox")).toHaveAttribute("aria-invalid", "false");
+    expect(within(approval).getByText(/only used when “Approve acceptable PRs” is selected/i)).toBeInTheDocument();
+    expect(within(approval).queryByText(/automated approval policy is required/i)).not.toBeInTheDocument();
+  });
+
   it("renders review sessions and policy configuration", async () => {
     const user = userEvent.setup();
     mockCodeReviewBaseHandlers();
@@ -529,19 +571,20 @@ describe("CodeReviewsPage", () => {
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
     // The current behavior, outcome, and repository trigger are visible without expanding anything.
     expect(screen.getByText("Current behavior:")).toBeInTheDocument();
-    expect(screen.getByText(/Comments only · 2 reviewers · quorum 2 · passing checks required · disagreement blocks approval · sensitive paths need human review/i)).toBeInTheDocument();
+    expect(screen.getByText(/^2 reviewers · quorum 2 · passing checks required · disagreement blocks approval · sensitive paths need human review$/i)).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /Comment only/i })).toBeChecked();
     expect(screen.getByRole("region", { name: "Additional review instructions (optional)" })).toBeInTheDocument();
     expect(screen.getByText(/native \/review behavior without extra guidance/i)).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Automated approval policy" })).toHaveClass("hidden");
+    expect(screen.getByRole("region", { name: "Automated approval policy" })).toBeVisible();
+    expect(screen.getByText(/only used when “Approve acceptable PRs” is selected/i)).toBeInTheDocument();
     expect(await screen.findByText("@acme/143-code-reviewer")).toBeInTheDocument();
     expect(screen.getByText("Ready")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Repair GitHub reviewer/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Set up GitHub reviewer/i })).not.toBeInTheDocument();
 
-    // Advanced controls and their focused groups are collapsed by default.
+    // Safeguards and their focused groups are collapsed by default.
     const advancedControls = screen.getByRole("button", {
-      name: "Advanced controls",
+      name: "Safeguards",
     });
     expect(advancedControls).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("button", { name: /Approval criteria/i })).not.toBeInTheDocument();
@@ -1616,7 +1659,7 @@ describe("CodeReviewsPage", () => {
       "Automated approval policy",
       "Additional review instructions (optional)",
       "acme/api GitHub reviewer",
-      "Advanced controls",
+      "Safeguards",
     ];
     for (const label of topLevelGuidance) {
       expect(screen.getByRole("button", { name: `About ${label}` })).toBeInTheDocument();
@@ -1627,15 +1670,37 @@ describe("CodeReviewsPage", () => {
     });
     const githubHeading = screen.getByText("acme/api");
     const instructionsHeading = screen.getByText("Additional review instructions (optional)");
+    const approvalHeading = screen.getByText("Automated approval policy");
+    const approvalRegion = screen.getByRole("region", { name: "Automated approval policy" });
+    const instructionsRegion = screen.getByRole("region", { name: "Additional review instructions (optional)" });
     const summaryHeading = screen.getByText("Current behavior:");
     const advancedTrigger = screen.getByRole("button", {
-      name: "Advanced controls",
+      name: "Safeguards",
     });
-    expect(advancedTrigger).toHaveClass("h-auto", "p-4", "sm:h-auto");
+    expect(advancedTrigger).toHaveClass("h-auto", "p-4", "sm:h-auto", "sm:p-5");
+    // Behavior, then both prompts together, then safeguards, then GitHub setup.
     expect(enablement.compareDocumentPosition(summaryHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(summaryHeading.compareDocumentPosition(instructionsHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(instructionsHeading.compareDocumentPosition(githubHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(githubHeading.compareDocumentPosition(advancedTrigger) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(summaryHeading.compareDocumentPosition(approvalHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(approvalHeading.compareDocumentPosition(instructionsHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(instructionsHeading.compareDocumentPosition(advancedTrigger) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(advancedTrigger.compareDocumentPosition(githubHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Prominence comes from order and size only — no badge, tint, ring, or shadow.
+    expect(within(approvalRegion).queryByText("Primary policy")).not.toBeInTheDocument();
+    expect(approvalRegion.className).toBe(instructionsRegion.className);
+    expect(within(approvalRegion).getByRole("textbox")).toHaveClass("min-h-72");
+    expect(within(instructionsRegion).getByRole("textbox")).toHaveClass("min-h-32");
+    // Every section title is a real heading, nested under the tab's own h2,
+    // and all of them share one size.
+    expect(screen.getByRole("heading", { level: 2, name: "Review policy" })).toBeInTheDocument();
+    for (const name of ["Review behavior", "Automated approval policy", "Additional review instructions (optional)", "GitHub setup"]) {
+      expect(screen.getByRole("heading", { level: 3, name })).toBeInTheDocument();
+    }
+    // Safeguards wraps its disclosure trigger, so the heading carries the
+    // trigger's descriptive line too.
+    expect(screen.getByRole("heading", { level: 3, name: /^Safeguards/ })).toBeInTheDocument();
+    for (const heading of [approvalHeading, instructionsHeading]) {
+      expect(heading).toHaveClass("font-display", "text-lg", "font-semibold");
+    }
 
     const outcomeInfo = screen.getByRole("button", {
       name: "About Review outcome",
@@ -1647,7 +1712,7 @@ describe("CodeReviewsPage", () => {
     act(() => enablementInfo.focus());
     expect(await screen.findByRole("tooltip")).toHaveTextContent(/built-in default is on/i);
     act(() => enablementInfo.blur());
-    const advancedInfo = screen.getByRole("button", { name: "About Advanced controls" });
+    const advancedInfo = screen.getByRole("button", { name: "About Safeguards" });
     await user.hover(advancedInfo);
     expect(await screen.findByRole("tooltip")).toHaveTextContent(/deterministic approval safeguards/i);
     await user.unhover(advancedInfo);
@@ -1669,7 +1734,7 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByText("Repository access")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Disable reviewer" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Advanced controls" }));
+    await user.click(screen.getByRole("button", { name: "Safeguards" }));
     expect(screen.getByText(/Applying a preset replaces safety controls/i)).toBeVisible();
     for (const section of ["Approval criteria", "Paths, authors & checks", "Reviewers & agents"]) {
       await user.click(screen.getByRole("button", { name: new RegExp(section, "i") }));
@@ -1887,7 +1952,7 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(await screen.findByRole("button", { name: "Advanced controls" }));
+    await user.click(await screen.findByRole("button", { name: "Safeguards" }));
     await user.click(
       await screen.findByRole("button", {
         name: /Structured PR-description checks/i,
@@ -1964,7 +2029,7 @@ describe("CodeReviewsPage", () => {
 
     renderWithProviders(<CodeReviewsPage />);
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("button", { name: "Advanced controls" }));
+    await user.click(screen.getByRole("button", { name: "Safeguards" }));
     await user.click(screen.getByRole("button", { name: /Reviewers & agents/i }));
     await user.click(await screen.findByRole("combobox", { name: "Reviewer 1 reasoning level" }));
     await user.click(await screen.findByRole("option", { name: "Extra high" }));
@@ -2028,7 +2093,7 @@ describe("CodeReviewsPage", () => {
 
     renderWithProviders(<CodeReviewsPage />);
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("button", { name: "Advanced controls" }));
+    await user.click(screen.getByRole("button", { name: "Safeguards" }));
     await user.click(screen.getByRole("button", { name: /Reviewers & agents/i }));
 
     const reasoningSelect = await screen.findByRole("combobox", { name: "Reviewer 1 reasoning level" });
@@ -2072,7 +2137,8 @@ describe("CodeReviewsPage", () => {
       expect(latest?.agent_roster).toEqual(policy.config.agent_roster);
     });
     await user.click(screen.getByRole("radio", { name: /Comment only/i }));
-    expect(screen.getByRole("region", { name: "Automated approval policy" })).toHaveClass("hidden");
+    expect(screen.getByRole("region", { name: "Automated approval policy" })).toBeVisible();
+    expect(screen.getByText(/only used when “Approve acceptable PRs” is selected/i)).toBeInTheDocument();
     await user.click(screen.getByRole("radio", { name: /Approve acceptable PRs/i }));
     expect(within(screen.getByRole("region", { name: "Automated approval policy" })).getByRole("textbox")).toHaveValue("Approve only routine changes with proportionate tests.");
   });
@@ -2165,7 +2231,10 @@ describe("CodeReviewsPage", () => {
     await user.type(input, "Keep this unsaved local guidance");
     fireEvent.blur(input);
 
-    expect(await screen.findAllByText("Couldn't save")).not.toHaveLength(0);
+    // Both editors keep visual feedback nearby, while the page-level indicator
+    // remains the only live status announced to assistive technology.
+    expect(await screen.findAllByText("Couldn't save")).toHaveLength(3);
+    expect(screen.getAllByRole("status")).toHaveLength(1);
     expect(input).toHaveValue("Keep this unsaved local guidance");
   });
 
@@ -2182,7 +2251,7 @@ describe("CodeReviewsPage", () => {
     await waitFor(() => expect(updates.at(-1)?.automated_approval_policy).toContain("Automatically approve routine changes"));
   });
 
-  it("places compact example and reset actions together above each prompt editor", async () => {
+  it("places compact example and reset actions together below each prompt editor", async () => {
     const user = userEvent.setup();
     mockCodeReviewBaseHandlers();
     renderWithProviders(<CodeReviewsPage />);
@@ -2199,8 +2268,12 @@ describe("CodeReviewsPage", () => {
 
       expect(examples).toHaveTextContent("Examples");
       expect(examples).toHaveClass("border-0", "bg-transparent");
-      expect(reset).toHaveClass("sm:h-8");
-      expect(actions.compareDocumentPosition(editor) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      // Reset discards the author's text, so it stays the quietest control here.
+      expect(reset).toHaveClass("text-xs", "text-muted-foreground", "sm:h-8");
+      // The second-best spot on the card belongs to the field, not to reset.
+      expect(editor.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      // The character count is noise until a prompt approaches the limit.
+      expect(within(composer).queryByText(/\/ 8000$/)).not.toBeInTheDocument();
     }
   });
 
@@ -2228,7 +2301,7 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(await screen.findByRole("button", { name: "Advanced controls" }));
+    await user.click(await screen.findByRole("button", { name: "Safeguards" }));
     await user.click(await screen.findByRole("button", { name: /Paths, authors & checks/i }));
 
     const sensitivePathsInput = await screen.findByRole("textbox", {
@@ -2307,7 +2380,7 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("button", { name: "Advanced controls" }));
+    await user.click(screen.getByRole("button", { name: "Safeguards" }));
     await user.click(screen.getByRole("combobox", { name: /Advanced policy preset/i }));
     await user.click(await screen.findByRole("option", { name: "Small backend change" }));
     await user.click(screen.getByRole("button", { name: /Apply preset/i }));
@@ -2324,7 +2397,7 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("button", { name: "Advanced controls" }));
+    await user.click(screen.getByRole("button", { name: "Safeguards" }));
     await user.click(screen.getByRole("button", { name: /Approval criteria/i }));
 
     expect(await screen.findByLabelText("Timeout value")).toHaveValue(30);
@@ -2396,7 +2469,7 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(await screen.findByRole("button", { name: "Advanced controls" }));
+    await user.click(await screen.findByRole("button", { name: "Safeguards" }));
     await user.click(await screen.findByRole("button", { name: /Reviewers & agents/i }));
     await user.click(await screen.findByRole("combobox", { name: "Reviewer 1 model" }));
 
@@ -2545,7 +2618,8 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
     await user.click(await screen.findByRole("tab", { name: "Policy" }));
     const viewOnlyNotice = await screen.findByText(/view-only access/i);
-    expect(viewOnlyNotice).toHaveClass("bg-muted/40");
+    expect(viewOnlyNotice).toHaveClass("text-muted-foreground");
+    expect(viewOnlyNotice.className).not.toMatch(/\bbg-/);
     expect(screen.getByRole("switch", { name: "Code reviews enabled" })).toBeDisabled();
     expect(screen.getByRole("textbox", { name: "Additional review instructions (optional)" })).toBeDisabled();
 
@@ -2587,6 +2661,6 @@ describe("CodeReviewsPage", () => {
     await user.click(screen.getByRole("switch", { name: "Code reviews enabled" }));
     const subsection = await screen.findByRole("button", { name: /Reviewers & agents/i });
     await waitFor(() => expect(subsection).toHaveFocus());
-    expect(screen.getByRole("button", { name: "Advanced controls" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "Safeguards" })).toHaveAttribute("aria-expanded", "true");
   });
 });
