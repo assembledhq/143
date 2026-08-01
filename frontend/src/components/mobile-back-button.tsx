@@ -6,7 +6,7 @@ import { useSearchParams } from "next/navigation";
 import { cn } from "@/lib/utils";
 
 interface MobileBackButtonProps {
-  /** Destination list path, e.g. "/sessions" or "/projects". Search params from
+  /** Destination list path, e.g. "/sessions" or "/previews". Search params from
    * the current URL are preserved so filter state survives the round trip. */
   to: string;
   label: string;

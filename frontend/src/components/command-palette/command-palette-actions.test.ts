@@ -22,7 +22,6 @@ describe("command-palette-actions", () => {
     expect(actions.find((a) => a.id === "settings-integrations")).toBeUndefined();
     expect(actions.find((a) => a.id === "settings-evals")).toBeUndefined();
     expect(actions.find((a) => a.id === "settings-team")).toBeUndefined();
-    expect(actions.find((a) => a.id === "action-new-project")).toBeUndefined();
     expect(actions.find((a) => a.id === "action-new-eval")).toBeUndefined();
     expect(actions.find((a) => a.id === "settings-agents")).toBeDefined();
   });
@@ -48,8 +47,6 @@ describe("command-palette-actions", () => {
   it("repo-scoped navigation actions have preserveRepo", () => {
     const sessionsAction = staticActions.find((a) => a.id === "nav-sessions");
     expect(sessionsAction?.preserveRepo).toBe(true);
-    const projectsAction = staticActions.find((a) => a.id === "nav-projects");
-    expect(projectsAction?.preserveRepo).toBe(true);
   });
 
   it("global new session action does not preserve ambient repo context", () => {

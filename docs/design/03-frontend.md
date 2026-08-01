@@ -49,7 +49,6 @@ The authenticated app is organized around team-visible agent work, not raw backe
 | --- | --- | --- |
 | `/sessions` | What agent work is running or ready to review? | Primary execution surface for prompts, transcripts, diffs, previews, follow-ups, branches, and PRs. |
 | `/automations` | What recurring or event-triggered goals exist? | Team-owned automation setup, run history, pause/resume, and failure recovery. |
-| `/projects` | What larger work is being planned? | Multi-step work that may feed sessions over time. |
 | `/previews` | What live app previews exist? | Session, branch, and PR preview index and health. |
 | `/code-reviews` | What PR review work is active? | Reviewer-bot findings, evidence, risk decisions, and GitHub review output. |
 | `/settings` | How is the org configured? | Integrations, agents, runtime, API keys, team, audit log, usage, evals, and previews. |
@@ -111,7 +110,7 @@ Use `nuqs` for filter/search state that should be bookmarkable or shareable:
 - tabs with meaningful URLs
 - query text
 - sort/order controls
-- selected preview/session/project where deep linking matters
+- selected preview/session where deep linking matters
 
 Keep ephemeral UI state local: open menus, focused rows, draft text before submit, and temporary popover state.
 
