@@ -588,16 +588,6 @@ export const api = {
       post<{ status: string; job_id: string }>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/restack-descendants`),
     confirmChangesetRestack: (sessionId: string, changesetId: string) =>
       post<{ status: string }>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/confirm-restack`),
-    getReadiness: (sessionId: string, changesetId?: string) =>
-      get<import('./types').SingleResponse<import('./types').PRReadinessResponse>>(`/api/v1/sessions/${sessionId}/pr-readiness-runs/latest${changesetId ? `?changeset_id=${encodeURIComponent(changesetId)}` : ''}`),
-    runReadiness: (sessionId: string, changesetId?: string) =>
-      post<import('./types').SingleResponse<import('./types').PRReadinessRun>>(`/api/v1/sessions/${sessionId}/pr-readiness-runs${changesetId ? `?changeset_id=${encodeURIComponent(changesetId)}` : ''}`, {}),
-    createReadinessBypass: (sessionId: string, reason: string) =>
-      post<import('./types').SingleResponse<import('./types').PRReadinessBypass>>(`/api/v1/sessions/${sessionId}/pr-readiness-bypasses`, { reason }),
-    getReadinessContext: (sessionId: string) =>
-      get<import('./types').SingleResponse<import('./types').PRReadinessContext>>(`/api/v1/sessions/${sessionId}/pr-readiness-context`),
-    updateReadinessContext: (sessionId: string, issueLessReason: string) =>
-      post<import('./types').SingleResponse<import('./types').PRReadinessContext>>(`/api/v1/sessions/${sessionId}/pr-readiness-context`, { issue_less_reason: issueLessReason }),
     createPR: (sessionId: string, options?: { draft?: boolean; authorMode?: 'auto' | 'user' | 'app'; resumeToken?: string; mergeWhenReady?: boolean; changesetId?: string }) =>
       post<{ status: string }>(`/api/v1/sessions/${sessionId}/pr${options?.changesetId ? `?changeset_id=${encodeURIComponent(options.changesetId)}` : ''}`, options ? {
         ...(options.draft !== undefined ? { draft: options.draft } : {}),
@@ -832,27 +822,6 @@ export const api = {
     getLLMModels: () => get<{ data: Record<string, string[]> }>('/api/v1/settings/llm-models'),
     getOpenCodeModels: () =>
       get<{ data: import('./types').OpenCodeModelInfo[] }>('/api/v1/settings/opencode-models'),
-    getPRReadinessPolicy: (repositoryId?: string) =>
-      get<import('./types').SingleResponse<import('./types').PRReadinessResolvedPolicy>>(
-        `/api/v1/pr-readiness-policies${repositoryId ? `?repository_id=${encodeURIComponent(repositoryId)}` : ''}`,
-      ),
-    updatePRReadinessPolicy: (config: import('./types').PRReadinessPolicyConfig, repositoryId?: string) =>
-      request<import('./types').SingleResponse<unknown>>('/api/v1/pr-readiness-policies', {
-        method: 'PUT',
-        body: JSON.stringify({ repository_id: repositoryId, config }),
-      }),
-    listPRReadinessCustomChecks: (repositoryId?: string) =>
-      get<import('./types').ListResponse<import('./types').PRReadinessCustomCheck>>(
-        `/api/v1/pr-readiness-custom-checks${repositoryId ? `?repository_id=${encodeURIComponent(repositoryId)}` : ''}`,
-      ),
-    createPRReadinessCustomCheck: (check: import('./types').PRReadinessCustomCheck) =>
-      post<import('./types').SingleResponse<import('./types').PRReadinessCustomCheck>>('/api/v1/pr-readiness-custom-checks', check),
-    updatePRReadinessCustomCheck: (id: string, check: import('./types').PRReadinessCustomCheck) =>
-      request<import('./types').SingleResponse<import('./types').PRReadinessCustomCheck>>(`/api/v1/pr-readiness-custom-checks/${id}`, {
-        method: 'PUT',
-        body: JSON.stringify(check),
-      }),
-    deletePRReadinessCustomCheck: (id: string) => del<void>(`/api/v1/pr-readiness-custom-checks/${id}`),
   },
   credentials: {
     list: () => get<import('./types').ListResponse<import('./types').CredentialSummary>>('/api/v1/settings/credentials'),

@@ -89,6 +89,7 @@ describe("session PR action state", () => {
       hasSnapshot: true,
       isRunning: false,
       builderReviewAllowsPR: true,
+      builderTargetUnreviewable: false,
       snapshotUnavailable: false,
       ghBlocked: false,
       queueingPR: false,
@@ -105,9 +106,14 @@ describe("session PR action state", () => {
         reason: "Wait for the session to finish before creating a PR",
       },
       {
-        name: "review required",
+        name: "builder review required",
         input: { ...base, builderReviewAllowsPR: false },
-        reason: "Run readiness checks successfully before creating a PR",
+        reason: "Run Review successfully for the current snapshot before creating a PR",
+      },
+      {
+        name: "builder targets a separate changeset worktree",
+        input: { ...base, builderTargetUnreviewable: true },
+        reason: "Builders cannot publish a separate pull request branch — Review only covers the primary session workspace",
       },
       {
         name: "snapshot missing",
@@ -132,6 +138,7 @@ describe("session PR action state", () => {
       hasSnapshot: true,
       isRunning: true,
       builderReviewAllowsPR: true,
+      builderTargetUnreviewable: false,
       snapshotUnavailable: false,
       ghBlocked: false,
       queueingPush: false,
@@ -144,6 +151,47 @@ describe("session PR action state", () => {
     expect(state.disabledReason, "Push changes should explain the running-session blocker").toBe("Wait for the session to finish before pushing changes");
   });
 
+  it("disables push changes for builders without a clean review loop for the current snapshot", () => {
+    const state = derivePushChangesActionState({
+      canShipPR: true,
+      hasOpenPR: true,
+      hasUnpushedChanges: true,
+      hasSnapshot: true,
+      isRunning: false,
+      builderReviewAllowsPR: false,
+      builderTargetUnreviewable: false,
+      snapshotUnavailable: false,
+      ghBlocked: false,
+      queueingPush: false,
+      pushingChanges: false,
+      pushState: "idle",
+    });
+
+    expect(state.visible, "Push changes should stay visible when the builder review gate blocks it").toBe(true);
+    expect(state.disabled, "Push changes should be disabled instead of failing with a server 409").toBe(true);
+    expect(state.disabledReason, "Push changes should explain the builder review gate").toBe("Run Review successfully for the current snapshot before pushing changes");
+  });
+
+  it("disables push changes for builders targeting a separate changeset worktree", () => {
+    const state = derivePushChangesActionState({
+      canShipPR: true,
+      hasOpenPR: true,
+      hasUnpushedChanges: true,
+      hasSnapshot: true,
+      isRunning: false,
+      builderReviewAllowsPR: true,
+      builderTargetUnreviewable: true,
+      snapshotUnavailable: false,
+      ghBlocked: false,
+      queueingPush: false,
+      pushingChanges: false,
+      pushState: "idle",
+    });
+
+    expect(state.disabled, "Push changes should be disabled when review evidence cannot cover the target").toBe(true);
+    expect(state.disabledReason, "The reason should not suggest running Review, which cannot unblock this target").toBe("Builders cannot push a separate pull request branch — Review only covers the primary session workspace");
+  });
+
   it("disables branch-diverged continuation while the session is still running", () => {
     const state = derivePushChangesActionState({
       canShipPR: true,
@@ -152,6 +200,7 @@ describe("session PR action state", () => {
       hasSnapshot: true,
       isRunning: true,
       builderReviewAllowsPR: true,
+      builderTargetUnreviewable: false,
       snapshotUnavailable: false,
       ghBlocked: false,
       queueingPush: false,
@@ -196,6 +245,7 @@ describe("session PR action state", () => {
         hasSnapshot: true,
         isRunning: false,
         builderReviewAllowsPR: true,
+        builderTargetUnreviewable: false,
         snapshotUnavailable: false,
         ghBlocked: false,
         queueingPush: false,
@@ -226,6 +276,7 @@ describe("session PR action state", () => {
       hasSnapshot: true,
       isRunning: false,
       builderReviewAllowsPR: true,
+      builderTargetUnreviewable: false,
       snapshotUnavailable: false,
       ghBlocked: false,
       queueingPush: false,

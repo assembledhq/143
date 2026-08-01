@@ -76,8 +76,7 @@ describe("settings autosave helpers", () => {
         settings: {
           session_automation: {
             automatic_follow_through: {
-              readiness_after_review_loop: true,
-              readiness_after_review_loop_states: ["clean"],
+              resolve_conflicts_when_idle: false,
             },
           },
         },
@@ -97,8 +96,7 @@ describe("settings autosave helpers", () => {
       settings: {
         session_automation: {
           automatic_follow_through: {
-            readiness_after_review_loop: true,
-            readiness_after_review_loop_states: ["clean"],
+            resolve_conflicts_when_idle: false,
             fix_tests_when_idle: true,
           },
         },

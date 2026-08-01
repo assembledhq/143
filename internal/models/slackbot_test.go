@@ -43,7 +43,6 @@ func TestSlackNotificationKindValidate(t *testing.T) {
 		expectErr bool
 	}{
 		{name: "auto repair attention is valid", kind: SlackNotificationPRAutoRepairAttention},
-		{name: "readiness attention is valid", kind: SlackNotificationPRReadinessAttention},
 		{name: "unknown is invalid", kind: SlackNotificationKind("pr.auto_repair_done"), expectErr: true},
 	}
 

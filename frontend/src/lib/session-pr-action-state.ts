@@ -41,7 +41,14 @@ export type CreatePRActionInput = {
   hasSessionChanges: boolean;
   hasSnapshot: boolean;
   isRunning: boolean;
+  // Mirrors the server-side builder gate (409 REVIEW_REQUIRED_BEFORE_PR): a
+  // builder needs a clean review loop for the current snapshot before the API
+  // will accept publication.
   builderReviewAllowsPR: boolean;
+  // Review evidence is session-scoped, so a builder targeting a non-primary
+  // materialized changeset can never satisfy the gate. Running Review does not
+  // unblock it, so it needs its own reason.
+  builderTargetUnreviewable: boolean;
   snapshotUnavailable: boolean;
   snapshotMessage?: string;
   ghBlocked: boolean;
@@ -142,11 +149,21 @@ export function deriveCreatePRActionState(input: CreatePRActionInput): LabeledLi
     };
   }
 
+  if (input.builderTargetUnreviewable) {
+    return {
+      visible: true,
+      disabled: true,
+      disabledReason: "Builders cannot publish a separate pull request branch — Review only covers the primary session workspace",
+      label: "Create PR",
+      spinning: false,
+    };
+  }
+
   if (!input.builderReviewAllowsPR) {
     return {
       visible: true,
       disabled: true,
-      disabledReason: "Run readiness checks successfully before creating a PR",
+      disabledReason: "Run Review successfully for the current snapshot before creating a PR",
       label: "Create PR",
       spinning: false,
     };
@@ -171,7 +188,10 @@ export type PushChangesActionInput = {
   hasUnpushedChanges: boolean;
   hasSnapshot: boolean;
   isRunning: boolean;
+  // See CreatePRActionInput — PushChangesToPR enforces the same server-side
+  // builder gate.
   builderReviewAllowsPR: boolean;
+  builderTargetUnreviewable: boolean;
   snapshotUnavailable: boolean;
   snapshotMessage?: string;
   ghBlocked: boolean;
@@ -283,11 +303,21 @@ export function derivePushChangesActionState(input: PushChangesActionInput): Lab
     };
   }
 
+  if (input.builderTargetUnreviewable) {
+    return {
+      visible: true,
+      disabled: true,
+      disabledReason: "Builders cannot push a separate pull request branch — Review only covers the primary session workspace",
+      label: "Push changes",
+      spinning: false,
+    };
+  }
+
   if (!input.builderReviewAllowsPR) {
     return {
       visible: true,
       disabled: true,
-      disabledReason: "Run Review successfully before pushing changes",
+      disabledReason: "Run Review successfully for the current snapshot before pushing changes",
       label: "Push changes",
       spinning: false,
     };
