@@ -15,6 +15,13 @@ import (
 // migrateLogger implements migrate.Logger to surface verbose migration output.
 type migrateLogger struct{ verbose bool }
 
+const prReadinessDirtyMigrationVersion = 267
+
+type dirtyMigrationRepairer interface {
+	Version() (uint, bool, error)
+	Force(version int) error
+}
+
 func (l migrateLogger) Printf(format string, v ...interface{}) {
 	fmt.Printf("[migrate] "+format, v...)
 }
@@ -28,7 +35,7 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: migrate [up|down]")
+		fmt.Println("Usage: migrate [up|down|repair-pr-readiness]")
 		os.Exit(1)
 	}
 
@@ -60,10 +67,46 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("Migrations rolled back successfully.")
+	case "repair-pr-readiness":
+		repaired, err := repairPRReadinessDirtyMigration(m)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to repair PR readiness migration state: %v\n", err)
+			os.Exit(1)
+		}
+		if repaired {
+			fmt.Printf("Repaired dirty migration %d; migrations can resume from %d.\n", prReadinessDirtyMigrationVersion, prReadinessDirtyMigrationVersion-1)
+		} else {
+			fmt.Println("PR readiness migration repair not needed.")
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1]) // #nosec G705 -- writing to stderr, not HTTP response
 		os.Exit(1)
 	}
+}
+
+// repairPRReadinessDirtyMigration repairs only the known production failure of
+// the original migration 267. PostgreSQL executed that migration file as one
+// transaction, so its deadlock rolled back every schema/data statement while
+// golang-migrate's separately-written dirty marker remained at 267. Refuse to
+// clear any other dirty version so this cannot become a general force bypass.
+func repairPRReadinessDirtyMigration(m dirtyMigrationRepairer) (bool, error) {
+	version, dirty, err := m.Version()
+	if err != nil {
+		if errors.Is(err, migrate.ErrNilVersion) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read migration version: %w", err)
+	}
+	if !dirty {
+		return false, nil
+	}
+	if version != prReadinessDirtyMigrationVersion {
+		return false, fmt.Errorf("database is dirty at version %d; refusing targeted repair for version %d", version, prReadinessDirtyMigrationVersion)
+	}
+	if err := m.Force(prReadinessDirtyMigrationVersion - 1); err != nil {
+		return false, fmt.Errorf("force migration version to %d: %w", prReadinessDirtyMigrationVersion-1, err)
+	}
+	return true, nil
 }
 
 func resolveMigrationSource(exists func(string) bool) (string, error) {

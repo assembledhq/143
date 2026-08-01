@@ -68,7 +68,7 @@ second model-produced readiness field.
 If automatic creation is off, the agent leaves verified changes ready for
 manual publication. An explicit user instruction such as "create the PR"
 overrides that automatic preference, but never overrides authorization,
-repository policy, review requirements, or readiness gates.
+repository policy, review requirements, or publication gates.
 
 The tool returns a typed asynchronous state (`review_started`,
 `review_in_progress`, `pr_queued`, `already_published`,

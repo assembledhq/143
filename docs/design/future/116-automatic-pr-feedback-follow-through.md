@@ -129,7 +129,7 @@ GitHub webhook
   -> continue PR feedback thread against verified PR head
   -> if diff: control-plane push
   -> compose and publish one response per item
-  -> drain pending feedback, then conflicts, tests, readiness
+  -> drain pending feedback, then conflicts and tests
 ~~~
 
 Batching:
@@ -140,7 +140,7 @@ Batching:
 - items arriving after execution starts wait for the next batch
 - one active collecting/queued/running/pushing/responding batch per PR
 
-Automatic priority is human-or-bot PR feedback, conflicts, failing checks, then readiness. Running work is never interrupted.
+Automatic priority is human-or-bot PR feedback, conflicts, then failing checks. Running work is never interrupted.
 
 The session uses one PR feedback thread and SessionMessageSource github_pr_feedback. The visible message summarizes author/count; full bodies and coordinates stay in structured context.
 
