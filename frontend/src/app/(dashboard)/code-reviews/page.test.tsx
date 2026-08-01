@@ -501,7 +501,7 @@ describe("CodeReviewsPage", () => {
     expect(within(stats).getByText("21 need human review")).toBeInTheDocument();
     expect(within(stats).getByText("Median turnaround")).toBeInTheDocument();
     expect(within(stats).getByText("8m")).toBeInTheDocument();
-    const timeWindow = screen.getByRole("combobox", { name: "Time window" });
+    const timeWindow = screen.getByRole("button", { name: "Time window" });
     expect(timeWindow).toHaveTextContent("Last 30 days");
     const filters = timeWindow.closest("#code-review-filters");
     expect(filters).toContainElement(screen.getByRole("combobox", { name: "Repository" }));
@@ -818,7 +818,7 @@ describe("CodeReviewsPage", () => {
 
     renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
 
-    expect(await screen.findByRole("combobox", { name: "Time window" })).toHaveTextContent("Last 30 days");
+    expect(await screen.findByRole("button", { name: "Time window" })).toHaveTextContent("Last 30 days");
     await waitFor(() => {
       expect(listRequests.at(-1)?.get("created_after")).toBeTruthy();
       expect(statsRequests.at(-1)?.get("created_after")).toBeTruthy();
@@ -838,10 +838,10 @@ describe("CodeReviewsPage", () => {
     const initialListCreatedAfter = listRequests.at(-1)?.get("created_after");
     const initialStatsCreatedAfter = statsRequests.at(-1)?.get("created_after");
 
-    await user.click(screen.getByRole("combobox", { name: "Time window" }));
-    await user.click(await screen.findByRole("option", { name: "Last 7 days" }));
+    await user.click(screen.getByRole("button", { name: "Time window" }));
+    await user.click(await screen.findByRole("button", { name: /Last 7 days/ }));
 
-    expect(await screen.findByRole("combobox", { name: "Time window" })).toHaveTextContent("Last 7 days");
+    expect(await screen.findByRole("button", { name: "Time window" })).toHaveTextContent("Last 7 days");
     await waitFor(() => {
       expect(listRequests.at(-1)?.get("created_after")).not.toBe(initialListCreatedAfter);
       expect(statsRequests.at(-1)?.get("created_after")).not.toBe(initialStatsCreatedAfter);
@@ -881,6 +881,35 @@ describe("CodeReviewsPage", () => {
     expect(
       [...new Set(statsRequests.flatMap((params) => params.has("search") ? [params.get("search")] : []))],
     ).toEqual(["invoice"]);
+  });
+
+  it("restores a custom date range from the URL and sends both boundaries", async () => {
+    const listRequests: URLSearchParams[] = [];
+    const statsRequests: URLSearchParams[] = [];
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", ({ request }) => {
+        listRequests.push(new URL(request.url).searchParams);
+        return HttpResponse.json({ data: [review], meta: {} } satisfies ListResponse<CodeReviewListItem>);
+      }),
+      http.get("/api/v1/code-reviews/stats", ({ request }) => {
+        statsRequests.push(new URL(request.url).searchParams);
+        return HttpResponse.json({ data: reviewStats } satisfies SingleResponse<CodeReviewStats>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, {
+      searchParams: { range: "custom:2026-07-01:2026-07-31" },
+    });
+
+    expect(await screen.findByRole("button", { name: "Time window" }))
+      .toHaveTextContent("Jul 1, 2026 – Jul 31, 2026");
+    await waitFor(() => {
+      for (const params of [listRequests.at(-1), statsRequests.at(-1)]) {
+        expect(params?.get("created_after")).toBe(new Date(2026, 6, 1, 0, 0, 0, 0).toISOString());
+        expect(params?.get("created_before")).toBe(new Date(2026, 6, 31, 23, 59, 59, 999).toISOString());
+      }
+    });
   });
 
   it("keeps superseded history out of headline metrics and ordinary activity by default", async () => {
@@ -947,7 +976,7 @@ describe("CodeReviewsPage", () => {
 
     expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
     await waitFor(() => expect(listCreatedAfterValues.at(-1)).toBeNull());
-    expect(screen.getByRole("combobox", { name: "Time window" })).toHaveTextContent("All time");
+    expect(screen.getByRole("button", { name: "Time window" })).toHaveTextContent("All time");
   });
 
   it("keeps rows and metrics visible while the rolling window refreshes", async () => {

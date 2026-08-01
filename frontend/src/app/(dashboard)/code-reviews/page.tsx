@@ -62,6 +62,13 @@ import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
 import { useOpenCodeAvailability, type OpenCodeModelAvailability } from "@/hooks/use-opencode-models";
 import { useAuth } from "@/hooks/use-auth";
+import {
+  DEFAULT_TIME_RANGE,
+  isRollingTimeRange,
+  parseTimeRange,
+  timeRangeBounds,
+  type TimeRangeFilter,
+} from "@/lib/time-range";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { CodeReviewAnalyticsReport } from "@/components/code-review-analytics";
@@ -104,9 +111,6 @@ import type {
 
 const CODE_REVIEW_TAB_VALUES = ["reviews", "analytics", "policy"] as const;
 type CodeReviewTab = (typeof CODE_REVIEW_TAB_VALUES)[number];
-const TIME_RANGE_FILTER_VALUES = ["7d", "30d", "90d", "all"] as const;
-type TimeRangeFilter = (typeof TIME_RANGE_FILTER_VALUES)[number];
-const DEFAULT_TIME_RANGE = "30d" satisfies TimeRangeFilter;
 const OUTCOME_FILTER_VALUES = [ALL_OUTCOMES, AUTOMATICALLY_APPROVED, COMPLETED_NOT_APPROVED, "needs_human_review", "comment_only", "blocked"] as const;
 type OutcomeFilter = (typeof OUTCOME_FILTER_VALUES)[number];
 const RISK_FILTER_VALUES = [ALL_RISKS, "acceptable", "needs_review"] as const;
@@ -128,6 +132,10 @@ const STATUS_FILTER_PARSER = createParser<StatusFilter>({
   },
   serialize: (value) => value,
 }).withDefault(DEFAULT_STATUS_FILTER);
+const TIME_RANGE_FILTER_PARSER = createParser<TimeRangeFilter>({
+  parse: parseTimeRange,
+  serialize: (value) => value,
+}).withDefault(DEFAULT_TIME_RANGE);
 const NO_TEMPLATE = "none";
 // Coalesce a burst of SSE lifecycle events into a single list refetch.
 const CODE_REVIEW_INVALIDATE_COALESCE_MS = 300;
@@ -203,12 +211,6 @@ function formatDate(value?: string): string {
     hour: "numeric",
     minute: "2-digit",
   }).format(new Date(value));
-}
-
-function createdAfterForTimeRange(range: TimeRangeFilter, anchor: Date): string | undefined {
-  if (range === "all") return undefined;
-  const days = Number.parseInt(range, 10);
-  return new Date(anchor.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
 }
 
 function trackCodeReviewPolicyEvent(event: CodeReviewPolicyAnalyticsEvent): void {
@@ -504,7 +506,7 @@ export default function CodeReviewsPage() {
   );
   const [timeRangeFilter, setTimeRangeParam] = useQueryState(
     "range",
-    parseAsStringLiteral(TIME_RANGE_FILTER_VALUES).withDefault(DEFAULT_TIME_RANGE),
+    TIME_RANGE_FILTER_PARSER,
   );
   const timeRangeAnchorMsRef = useRef(Date.now());
   const [riskFilter, setRiskFilter] = useQueryState("risk", parseAsStringLiteral(RISK_FILTER_VALUES).withDefault(ALL_RISKS));
@@ -627,20 +629,14 @@ export default function CodeReviewsPage() {
   const currentListReviewFilters = useCallback(
     () => ({
       ...listReviewFilters,
-      created_after: createdAfterForTimeRange(
-        timeRangeFilter,
-        new Date(timeRangeAnchorMsRef.current),
-      ),
+      ...timeRangeBounds(timeRangeFilter, new Date(timeRangeAnchorMsRef.current)),
     }),
     [listReviewFilters, timeRangeFilter],
   );
   const currentStatsReviewFilters = useCallback(
     () => ({
       ...statsReviewFilters,
-      created_after: createdAfterForTimeRange(
-        timeRangeFilter,
-        new Date(timeRangeAnchorMsRef.current),
-      ),
+      ...timeRangeBounds(timeRangeFilter, new Date(timeRangeAnchorMsRef.current)),
     }),
     [statsReviewFilters, timeRangeFilter],
   );
@@ -649,10 +645,7 @@ export default function CodeReviewsPage() {
       repository_id: reviewRepositoryId,
       author_sort_by: authorSort,
       author_sort_order: authorSortOrder,
-      created_after: createdAfterForTimeRange(
-        timeRangeFilter,
-        new Date(timeRangeAnchorMsRef.current),
-      ),
+      ...timeRangeBounds(timeRangeFilter, new Date(timeRangeAnchorMsRef.current)),
     }),
     [authorSort, authorSortOrder, reviewRepositoryId, timeRangeFilter],
   );
@@ -712,7 +705,7 @@ export default function CodeReviewsPage() {
     });
   }, [queryClient]);
   useEffect(() => {
-    if (timeRangeFilter === "all" || (isViewingReviewHistory && activeTab === "reviews")) return;
+    if (!isRollingTimeRange(timeRangeFilter) || (isViewingReviewHistory && activeTab === "reviews")) return;
     const timer = window.setInterval(
       refreshRollingReviewWindow,
       CODE_REVIEW_TIME_WINDOW_REFRESH_MS,
