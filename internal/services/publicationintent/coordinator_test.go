@@ -48,6 +48,12 @@ func (s coordinatorUserStore) GetByIDGlobalWithSettings(context.Context, uuid.UU
 	return s.user, nil
 }
 
+type coordinatorRepositoryStore struct{ repository models.Repository }
+
+func (s coordinatorRepositoryStore) GetByID(context.Context, uuid.UUID, uuid.UUID) (models.Repository, error) {
+	return s.repository, nil
+}
+
 type coordinatorPublicationStore struct{ captured *models.SessionPublication }
 
 func (s *coordinatorPublicationStore) EnsureRequested(_ context.Context, _ uuid.UUID, publication *models.SessionPublication) error {
@@ -55,6 +61,24 @@ func (s *coordinatorPublicationStore) EnsureRequested(_ context.Context, _ uuid.
 	copy := *publication
 	s.captured = &copy
 	return nil
+}
+
+func (s *coordinatorPublicationStore) ApplyReviewBypass(_ context.Context, _ uuid.UUID, publication *models.SessionPublication) error {
+	publication.ReviewGateState = models.SessionPublicationReviewGateNotRequired
+	publication.ReviewMaxPasses = nil
+	publication.ReviewLoopID = nil
+	publication.ReviewWorkspaceRevision = nil
+	publication.ReviewDesiredHeadSHA = nil
+	copy := *publication
+	s.captured = &copy
+	return nil
+}
+
+func (s *coordinatorPublicationStore) GetByChangeset(_ context.Context, _, _, _ uuid.UUID) (models.SessionPublication, error) {
+	if s.captured == nil {
+		return models.SessionPublication{}, pgx.ErrNoRows
+	}
+	return *s.captured, nil
 }
 
 type coordinatorJobStore struct {
@@ -145,7 +169,7 @@ func TestCoordinatorRequestPullRequest(t *testing.T) {
 		wantQueued  bool
 		queueErr    error
 	}{
-		{name: "eligible agent intent is durably queued", wantStatus: ResultPRQueued, wantQueued: true},
+		{name: "eligible agent intent starts durable review", wantStatus: ResultReviewInProgress, wantQueued: true},
 		{name: "queue failure preserves durable blocked intent", wantStatus: ResultBlocked, queueErr: assertiveError("queue unavailable")},
 		{
 			name: "code review session is ineligible",
@@ -267,7 +291,7 @@ func TestCoordinatorRequestPullRequestDoesNotRequireCapturedDiffEvidence(t *test
 			result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{})
 
 			require.NoError(t, err, "a mid-turn request must not be refused for lacking end-of-turn diff evidence")
-			require.Equal(t, ResultPRQueued, result.Status, "the worker stays the authority on whether there is anything to publish")
+			require.Equal(t, ResultReviewInProgress, result.Status, "the worker should capture review evidence after the turn becomes quiescent")
 			require.NotNil(t, f.publications.captured, "the intent should be durable before the job is queued")
 		})
 	}
@@ -361,7 +385,111 @@ func TestCoordinatorRequestPullRequestExplicitActionBypassesDisabledPolicy(t *te
 		Source: models.SessionPublicationSourceUser, TriggerKind: models.SessionPublicationTriggerExplicitAction,
 	})
 	require.NoError(t, err, "an explicit user request should be accepted")
-	require.Equal(t, ResultPRQueued, explicitResult.Status, "explicit user action should override the automatic handoff opt-out")
+	require.Equal(t, ResultReviewInProgress, explicitResult.Status, "explicit user action should override handoff policy while retaining review")
+}
+
+func TestCoordinatorRequestPullRequestRepositoryHandoffAndDraftBypass(t *testing.T) {
+	t.Parallel()
+
+	draft := true
+	tests := []struct {
+		name                 string
+		req                  RequestPullRequest
+		expectedStatus       ResultStatus
+		expectedGate         models.SessionPublicationReviewGateState
+		expectedReviewSource models.PublicationPolicySource
+		expectedBypass       bool
+	}{
+		{
+			name:           "repository draft-first policy forces a draft while retaining review",
+			req:            RequestPullRequest{Source: models.SessionPublicationSourceAgentTool, TriggerKind: models.SessionPublicationTriggerAgentReady},
+			expectedStatus: ResultReviewInProgress, expectedGate: models.SessionPublicationReviewGatePending,
+			expectedReviewSource: models.PublicationPolicySourceProductDefault,
+		},
+		{
+			name: "authorized explicit draft action bypasses review",
+			req: RequestPullRequest{
+				Source: models.SessionPublicationSourceUser, TriggerKind: models.SessionPublicationTriggerExplicitAction,
+				Draft: &draft, RequestedByUserID: coordinatorUUIDPtr(uuid.New()), RequestedRole: string(models.RoleMember),
+			},
+			expectedStatus: ResultPRQueued, expectedGate: models.SessionPublicationReviewGateNotRequired,
+			expectedReviewSource: models.PublicationPolicySourceExplicitBypass, expectedBypass: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, nil, true, nil)
+			f.coordinator.SetRepositoryStore(coordinatorRepositoryStore{repository: models.Repository{
+				ID: f.repositoryID, OrgID: f.orgID, Settings: json.RawMessage(`{"pr_handoff_mode":"draft_first"}`),
+			}})
+
+			result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, tt.req)
+			require.NoError(t, err, "repository handoff request should be accepted")
+			require.Equal(t, tt.expectedStatus, result.Status, "repository handoff should return the expected durable state")
+			require.Equal(t, tt.expectedBypass, result.ReviewBypassed, "result should expose whether review was explicitly bypassed for audit")
+			require.Equal(t, models.PRHandoffModeDraftFirst, f.publications.captured.HandoffMode, "repository policy should be authoritative for handoff mode")
+			require.Equal(t, tt.expectedGate, f.publications.captured.ReviewGateState, "draft handoff should persist the expected review gate")
+			require.Equal(t, tt.expectedReviewSource, f.publications.captured.ReviewPolicySource, "draft handoff should persist the review decision source")
+			require.Equal(t, true, f.jobs.payload["draft"], "draft-first should force the durable open_pr request to create a draft")
+		})
+	}
+}
+
+func coordinatorUUIDPtr(value uuid.UUID) *uuid.UUID { return &value }
+
+func TestExistingPublicationResult(t *testing.T) {
+	t.Parallel()
+
+	publicationID, sessionID, loopID := uuid.New(), uuid.New(), uuid.New()
+	prURL := "https://github.com/assembledhq/143/pull/42"
+	tests := []struct {
+		name        string
+		publication models.SessionPublication
+		wantStatus  ResultStatus
+		wantReason  bool
+	}{
+		{
+			name: "pending review rejoins the active loop",
+			publication: models.SessionPublication{
+				ID: publicationID, SessionID: sessionID, ReviewLoopID: &loopID,
+				ReviewGateState: models.SessionPublicationReviewGatePending,
+			},
+			wantStatus: ResultReviewInProgress,
+		},
+		{
+			name: "recorded draft awaiting finalization remains queued",
+			publication: models.SessionPublication{
+				ID: publicationID, SessionID: sessionID, GitHubPRURL: &prURL,
+				State: models.SessionPublicationStateRecorded, ReviewGateState: models.SessionPublicationReviewGatePassed,
+			},
+			wantStatus: ResultPRQueued,
+		},
+		{
+			name: "review attention remains blocked",
+			publication: models.SessionPublication{
+				ID: publicationID, SessionID: sessionID, ReviewGateState: models.SessionPublicationReviewGateNeedsHuman,
+			},
+			wantStatus: ResultBlocked, wantReason: true,
+		},
+		{
+			name: "completed publication is already published",
+			publication: models.SessionPublication{
+				ID: publicationID, SessionID: sessionID, State: models.SessionPublicationStateCompleted,
+			},
+			wantStatus: ResultAlreadyPublished,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := existingPublicationResult(tt.publication)
+			require.Equal(t, tt.wantStatus, result.Status, "existing durable intent should return its current asynchronous state")
+			require.Equal(t, tt.wantReason, result.Reason != nil, "blocked existing intent should explain why it cannot advance")
+			require.Equal(t, tt.publication.ReviewLoopID, result.ReviewLoopID, "existing intent should preserve its review loop link")
+			require.Equal(t, tt.publication.GitHubPRURL, result.PullRequestURL, "existing intent should preserve its draft or pull request URL")
+		})
+	}
 }
 
 type assertiveError string

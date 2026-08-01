@@ -33,13 +33,14 @@ func (s ReviewLoopStatus) Validate() error {
 type ReviewLoopSource string
 
 const (
-	ReviewLoopSourceManual     ReviewLoopSource = "manual"
-	ReviewLoopSourceAutomation ReviewLoopSource = "automation"
+	ReviewLoopSourceManual      ReviewLoopSource = "manual"
+	ReviewLoopSourceAutomation  ReviewLoopSource = "automation"
+	ReviewLoopSourcePublication ReviewLoopSource = "publication"
 )
 
 func (s ReviewLoopSource) Validate() error {
 	switch s {
-	case ReviewLoopSourceManual, ReviewLoopSourceAutomation:
+	case ReviewLoopSourceManual, ReviewLoopSourceAutomation, ReviewLoopSourcePublication:
 		return nil
 	default:
 		return fmt.Errorf("invalid ReviewLoopSource: %q", s)
@@ -111,6 +112,9 @@ type SessionReviewLoop struct {
 	ThreadID               *uuid.UUID        `db:"thread_id" json:"thread_id,omitempty"`
 	Status                 ReviewLoopStatus  `db:"status" json:"status"`
 	Source                 ReviewLoopSource  `db:"source" json:"source"`
+	ChangesetID            *uuid.UUID        `db:"changeset_id" json:"changeset_id,omitempty"`
+	WorkspaceRevision      *int64            `db:"workspace_revision" json:"workspace_revision,omitempty"`
+	DesiredHeadSHA         *string           `db:"desired_head_sha" json:"desired_head_sha,omitempty"`
 	AgentType              AgentType         `db:"agent_type" json:"agent_type"`
 	MaxPasses              int               `db:"max_passes" json:"max_passes"`
 	FixMode                ReviewLoopFixMode `db:"fix_mode" json:"fix_mode"`

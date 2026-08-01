@@ -534,6 +534,11 @@ func main() {
 				projectStore, projectTaskStore, integrationStore,
 				sessionMessageStore, automationRunStore, evalBootstrapStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, sessionStreams, fileReader)
 			if services != nil {
+				if publicationReviewService, ok := services.ReviewLoops.(*reviewloopservice.Service); ok {
+					publicationReviewService.SetPublicationEvidenceRefresher(
+						worker.NewPublicationReviewEvidenceRefresher(stores, services.PR),
+					)
+				}
 				sandboxAuthShutdown = services.SandboxAuthShutdown
 				registerInternalSandboxAuthRoutes(router, services.SandboxAuthBroker, cfg, logger)
 				if previewManager != nil && pvProvider != nil {

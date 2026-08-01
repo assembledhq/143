@@ -1082,6 +1082,29 @@ func (s *PRService) reconcileSessionPublications(ctx context.Context, orgID uuid
 }
 
 func (s *PRService) reconcileSessionPublication(ctx context.Context, publication models.SessionPublication) error {
+	if publication.ReviewGateState == models.SessionPublicationReviewGatePending {
+		if publication.ReviewLoopID == nil {
+			metrics.RecordSessionPublicationReconciliation(ctx, "review_resumed")
+			return s.resumeSessionPublicationCreation(ctx, publication)
+		}
+		metrics.RecordSessionPublicationReconciliation(ctx, "review_running")
+		return nil
+	}
+	if publication.ReviewGateState != models.SessionPublicationReviewGateNotRequired &&
+		publication.ReviewGateState != models.SessionPublicationReviewGatePassed {
+		metrics.RecordSessionPublicationReconciliation(ctx, "review_blocked")
+		return nil
+	}
+	if publication.HandoffMode == models.PRHandoffModeDraftFirst &&
+		publication.ReviewPolicySource != models.PublicationPolicySourceExplicitBypass {
+		// Draft-first completion has an additional GitHub side effect (verify
+		// the reviewed head and mark ready) that only the guarded open_pr worker
+		// performs. Reconciliation must resume that worker even when the draft
+		// row already exists; adopting it as completed would strand a draft or
+		// skip the final-head check.
+		metrics.RecordSessionPublicationReconciliation(ctx, "draft_finalize_resumed")
+		return s.resumeSessionPublicationCreation(ctx, publication)
+	}
 	if existing, err := s.pullRequests.GetByChangesetID(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID); err == nil {
 		if err := s.completeReconciledSessionPublication(ctx, publication, existing, ""); err != nil {
 			return err
@@ -1091,12 +1114,6 @@ func (s *PRService) reconcileSessionPublication(ctx context.Context, publication
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("look up publication pull request: %w", err)
 	}
-	if publication.ReviewGateState != models.SessionPublicationReviewGateNotRequired &&
-		publication.ReviewGateState != models.SessionPublicationReviewGatePassed {
-		metrics.RecordSessionPublicationReconciliation(ctx, "review_blocked")
-		return nil
-	}
-
 	repo, err := s.repos.GetByID(ctx, publication.OrgID, publication.RepositoryID)
 	if err != nil {
 		return fmt.Errorf("load publication repository: %w", err)

@@ -74,6 +74,7 @@ var publicationHealthTestColumns = []string{
 	"id", "org_id", "session_id", "changeset_id", "repository_id",
 	"state", "source", "trigger_kind", "handoff_mode", "initiated_by_user_id",
 	"automatic_pr_policy_source", "review_policy_source",
+	"review_max_passes", "review_loop_id", "review_workspace_revision", "review_desired_head_sha",
 	"review_gate_state", "job_queue", "request_payload", "request_generation_at",
 	"base_branch", "head_branch", "desired_head_sha",
 	"published_head_sha", "github_pr_number", "github_pr_url", "attempt_count",
@@ -86,6 +87,7 @@ func publicationHealthTestRow(publication models.SessionPublication) []any {
 		publication.ID, publication.OrgID, publication.SessionID, publication.ChangesetID, publication.RepositoryID,
 		publication.State, publication.Source, publication.TriggerKind, publication.HandoffMode, publication.InitiatedByUserID,
 		publication.AutomaticPolicySource, publication.ReviewPolicySource,
+		publication.ReviewMaxPasses, publication.ReviewLoopID, publication.ReviewWorkspaceRevision, publication.ReviewDesiredHeadSHA,
 		publication.ReviewGateState, publication.JobQueue, publication.RequestPayload, publication.RequestGenerationAt,
 		publication.BaseBranch, publication.HeadBranch, publication.DesiredHeadSHA,
 		publication.PublishedHeadSHA, publication.GitHubPRNumber, publication.GitHubPRURL, publication.AttemptCount,
@@ -133,6 +135,7 @@ func TestPRServiceReconcileSessionPublicationDefersCompletionWhenLocalCheckpoint
 	publication := models.SessionPublication{
 		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID,
 		State: models.SessionPublicationStateRequested, GitHubPRNumber: ptrInt(42),
+		ReviewGateState: models.SessionPublicationReviewGateNotRequired,
 	}
 
 	err = service.reconcileSessionPublication(context.Background(), publication)
@@ -163,6 +166,7 @@ func TestPRServiceReconcileSessionPublicationRequiresRecoveredHeadSHA(t *testing
 	publication := models.SessionPublication{
 		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID,
 		State: models.SessionPublicationStateRequested, GitHubPRNumber: ptrInt(42),
+		ReviewGateState: models.SessionPublicationReviewGateNotRequired,
 	}
 
 	err = service.reconcileSessionPublication(context.Background(), publication)
@@ -217,6 +221,7 @@ func TestPRServiceReconcileSessionPublicationAppliesClosedLifecycle(t *testing.T
 	publication := models.SessionPublication{
 		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID,
 		State: models.SessionPublicationStateRecorded, GitHubPRNumber: ptrInt(42),
+		ReviewGateState: models.SessionPublicationReviewGateNotRequired,
 	}
 
 	err = service.reconcileSessionPublication(context.Background(), publication)
@@ -360,6 +365,38 @@ func TestPRServiceResumeSessionPublicationCreationRequeuesGuardedWorkflow(t *tes
 	err = service.resumeSessionPublicationCreation(context.Background(), publication)
 	require.NoError(t, err, "reconciliation should requeue the original guarded open_pr workflow instead of calling GitHub directly")
 	require.NoError(t, mock.ExpectationsWereMet(), "reconciliation should enqueue one deduplicated job and checkpoint the requeue")
+}
+
+func TestPRServiceReconcileDraftFirstResumesFinalizationWorker(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","changeset_id":"` + changesetID.String() + `","publication_source":"user","publication_queue":"agent","draft":true}`)
+	dedupeKey := db.OpenPRDedupeKey(changesetID)
+	mock.ExpectQuery("INSERT INTO jobs").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "queue": string(models.SessionPublicationJobQueueAgent), "job_type": "open_pr",
+		"payload": pgxmock.AnyArg(), "priority": 5, "dedupe_key": &dedupeKey,
+	}).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectExec("UPDATE session_publications").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	service := &PRService{
+		jobs: db.NewJobStore(mock), publications: db.NewSessionPublicationStore(mock), logger: zerolog.New(io.Discard),
+	}
+	publication := models.SessionPublication{
+		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID,
+		State: models.SessionPublicationStateRecorded, HandoffMode: models.PRHandoffModeDraftFirst,
+		ReviewPolicySource: models.PublicationPolicySourceProductDefault,
+		ReviewGateState:    models.SessionPublicationReviewGatePassed,
+		JobQueue:           models.SessionPublicationJobQueueAgent, RequestPayload: payload,
+	}
+
+	err = service.reconcileSessionPublication(context.Background(), publication)
+	require.NoError(t, err, "draft-first reconciliation should resume the guarded finalization worker")
+	require.NoError(t, mock.ExpectationsWereMet(), "draft-first reconciliation should not adopt the recorded draft as completed")
 }
 
 func (a pullRequestHealthSummaryArg) Match(value interface{}) bool {

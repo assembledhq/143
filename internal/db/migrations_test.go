@@ -1420,6 +1420,37 @@ func TestSingleCodeReviewPolicyMigrationPreservesHistoryAndPreventsActiveOverrid
 	require.NotContains(t, strings.ToUpper(sql), "DELETE FROM CODE_REVIEW_POLICIES", "migration should preserve policy versions referenced by historical reviews")
 }
 
+func TestPublicationReviewEvidenceMigrationsPreserveHistoryAndSplitValidation(t *testing.T) {
+	t.Parallel()
+
+	upBody, err := os.ReadFile("../../migrations/000271_publication_review_evidence.up.sql")
+	require.NoError(t, err, "test should read the publication review evidence migration")
+	validateBody, err := os.ReadFile("../../migrations/000272_validate_publication_review_evidence.up.sql")
+	require.NoError(t, err, "test should read the publication review evidence validation migration")
+	downBody, err := os.ReadFile("../../migrations/000271_publication_review_evidence.down.sql")
+	require.NoError(t, err, "test should read the publication review evidence down migration")
+
+	upSQL := string(upBody)
+	require.Contains(t, upSQL, "SET LOCAL lock_timeout = '5s'", "schema migration should fail fast on lock acquisition")
+	require.Contains(t, upSQL, "source IN ('manual', 'automation', 'publication')", "review loop source should admit publication-owned loops")
+	require.Contains(t, upSQL, "session_review_loops_changeset_scope_fkey", "review evidence should enforce tenant-scoped changeset ownership")
+	require.Contains(t, upSQL, "review_max_passes BETWEEN 1 AND 5", "publication review pass counts should preserve automation values within the review-loop bound")
+	require.Contains(t, upSQL, "NOT VALID", "catalog migration should defer scans to the validation migration")
+	require.NotContains(t, upSQL, "VALIDATE CONSTRAINT", "catalog migration should not hold access-exclusive locks through validation scans")
+
+	validateSQL := string(validateBody)
+	require.Contains(t, validateSQL, "VALIDATE CONSTRAINT session_review_loops_publication_evidence_check", "validation migration should verify review-loop evidence")
+	require.Contains(t, validateSQL, "VALIDATE CONSTRAINT session_publications_review_evidence_check", "validation migration should verify publication evidence")
+
+	downSQL := string(downBody)
+	remap := strings.Index(downSQL, "UPDATE session_review_loops SET source = 'manual' WHERE source = 'publication'")
+	narrow := strings.LastIndex(downSQL, "source IN ('manual', 'automation')")
+	require.NotEqual(t, -1, remap, "down migration should remap publication loops instead of deleting review history")
+	require.NotEqual(t, -1, narrow, "down migration should restore the narrower source check")
+	require.Less(t, remap, narrow, "down migration should preserve publication loops before narrowing the source enum")
+	require.NotContains(t, strings.ToUpper(downSQL), "DELETE FROM SESSION_REVIEW_LOOPS", "down migration must preserve loops and their pass children")
+}
+
 func TestSessionActivityPhaseMigrationEnforcesLifecycleAndDeliveryIdentity(t *testing.T) {
 	t.Parallel()
 

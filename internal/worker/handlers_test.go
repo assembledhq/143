@@ -4628,6 +4628,7 @@ type stubPRService struct {
 	createPRFn                     func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
 	createBranchFn                 func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*ghservice.CreateBranchResult, error)
 	pushChangesToPRFn              func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
+	markPullRequestReadyFn         func(context.Context, uuid.UUID, uuid.UUID, string) error
 	syncPullRequestStateFn         func(context.Context, uuid.UUID, uuid.UUID) error
 	rebuildPullRequestHealthFn     func(context.Context, uuid.UUID, uuid.UUID) (bool, error)
 	reconcilePullRequestFn         func(context.Context, uuid.UUID, int) error
@@ -4673,6 +4674,13 @@ func (s *stubPRService) PushChangesToPR(ctx context.Context, run *models.Session
 		return s.pushChangesToPRFn(ctx, run, params...)
 	}
 	return nil, nil
+}
+
+func (s *stubPRService) MarkPullRequestReady(ctx context.Context, orgID, pullRequestID uuid.UUID, expectedHeadSHA string) error {
+	if s.markPullRequestReadyFn != nil {
+		return s.markPullRequestReadyFn(ctx, orgID, pullRequestID, expectedHeadSHA)
+	}
+	return nil
 }
 
 func (s *stubPRService) SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
@@ -5961,6 +5969,30 @@ func workerChangesetTestRow(changeset models.SessionChangeset) []any {
 	}
 }
 
+var workerPublicationTestColumns = []string{
+	"id", "org_id", "session_id", "changeset_id", "repository_id",
+	"state", "source", "trigger_kind", "handoff_mode", "initiated_by_user_id",
+	"automatic_pr_policy_source", "review_policy_source", "review_max_passes", "review_loop_id",
+	"review_workspace_revision", "review_desired_head_sha", "review_gate_state", "job_queue",
+	"request_payload", "request_generation_at", "base_branch", "head_branch", "desired_head_sha",
+	"published_head_sha", "github_pr_number", "github_pr_url", "attempt_count", "last_error_code",
+	"last_error_message", "requested_at", "last_attempt_at", "branch_published_at", "pr_resolved_at",
+	"completed_at", "created_at", "updated_at",
+}
+
+func workerPublicationTestRow(publication models.SessionPublication) []any {
+	return []any{
+		publication.ID, publication.OrgID, publication.SessionID, publication.ChangesetID, publication.RepositoryID,
+		publication.State, publication.Source, publication.TriggerKind, publication.HandoffMode, publication.InitiatedByUserID,
+		publication.AutomaticPolicySource, publication.ReviewPolicySource, publication.ReviewMaxPasses, publication.ReviewLoopID,
+		publication.ReviewWorkspaceRevision, publication.ReviewDesiredHeadSHA, publication.ReviewGateState, publication.JobQueue,
+		publication.RequestPayload, publication.RequestGenerationAt, publication.BaseBranch, publication.HeadBranch, publication.DesiredHeadSHA,
+		publication.PublishedHeadSHA, publication.GitHubPRNumber, publication.GitHubPRURL, publication.AttemptCount,
+		publication.LastErrorCode, publication.LastErrorMessage, publication.RequestedAt, publication.LastAttemptAt,
+		publication.BranchPublishedAt, publication.PRResolvedAt, publication.CompletedAt, publication.CreatedAt, publication.UpdatedAt,
+	}
+}
+
 func TestOpenPRHandlerCompletedPublicationResumesPostPublicationWork(t *testing.T) {
 	t.Parallel()
 
@@ -6006,6 +6038,8 @@ func TestOpenPRHandlerCompletedPublicationResumesPostPublicationWork(t *testing.
 			prID, &sessionID, &changesetID, orgID, 42, prURL, "assembledhq/143",
 			"Recovered PR", models.PullRequestStatusOpen, models.PullRequestReviewStatusPending, models.GitIdentitySourceUser, now, now,
 		))
+	mock.ExpectQuery("SELECT .*FROM session_publications").WithArgs(changesetArgs).
+		WillReturnRows(pgxmock.NewRows(workerPublicationTestColumns).AddRow(workerPublicationTestRow(publication)...))
 	mock.ExpectQuery("SELECT .*FROM session_changesets").WithArgs(changesetArgs).
 		WillReturnRows(pgxmock.NewRows(workerChangesetTestColumns).AddRow(workerChangesetTestRow(changeset)...))
 	mock.ExpectQuery("INSERT INTO session_publish_state").
@@ -6067,9 +6101,7 @@ func TestOpenPRHandlerPreparesBranchlessSnapshotPublicationBeforeCreatePR(t *tes
 			WillReturnRows(pgxmock.NewRows(workerChangesetTestColumns).AddRow(workerChangesetTestRow(changeset)...))
 	}
 	expectChangeset()
-	mock.ExpectExec("UPDATE session_publications").WithArgs(workerAnyArgs(5)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	for _, state := range []models.PRCreationState{models.PRCreationStatePushing, models.PRCreationStateSucceeded} {
+	for _, state := range []models.PRCreationState{models.PRCreationStatePushing} {
 		expectChangeset()
 		mock.ExpectQuery("INSERT INTO session_publish_state").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), prCreationStateArg{state: state}, pgxmock.AnyArg()).
@@ -6079,6 +6111,26 @@ func TestOpenPRHandlerPreparesBranchlessSnapshotPublicationBeforeCreatePR(t *tes
 			"state": state, "error": (*string)(nil),
 		}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	}
+	storedPublication := models.SessionPublication{
+		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID, RepositoryID: repositoryID,
+		State: models.SessionPublicationStateRequested, Source: models.SessionPublicationSourceBackend,
+		TriggerKind: models.SessionPublicationTriggerPolicy, HandoffMode: models.PRHandoffModePrePublish,
+		AutomaticPolicySource: models.PublicationPolicySourceProductDefault,
+		ReviewPolicySource:    models.PublicationPolicySourceProductDefault,
+		ReviewGateState:       models.SessionPublicationReviewGateNotRequired,
+		JobQueue:              models.SessionPublicationJobQueueDefault, RequestPayload: json.RawMessage(`{}`), RequestGenerationAt: now,
+		BaseBranch: "main", HeadBranch: preparedBranch, RequestedAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("SELECT .*FROM session_publications").WithArgs(changesetArgs).
+		WillReturnRows(pgxmock.NewRows(workerPublicationTestColumns).AddRow(workerPublicationTestRow(storedPublication)...))
+	expectChangeset()
+	mock.ExpectQuery("INSERT INTO session_publish_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), prCreationStateArg{state: models.PRCreationStateSucceeded}, pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectExec("UPDATE session_changesets").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+		"state": models.PRCreationStateSucceeded, "error": (*string)(nil),
+	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	prepareCalls, createCalls := 0, 0
 	var preparedParams ghservice.CreatePRParams
@@ -6114,6 +6166,95 @@ func TestOpenPRHandlerPreparesBranchlessSnapshotPublicationBeforeCreatePR(t *tes
 	require.Equal(t, 1, prepareCalls, "branchless publication should be prepared exactly once")
 	require.Equal(t, 1, createCalls, "prepared branchless publication should invoke CreatePR exactly once")
 	require.NoError(t, mock.ExpectationsWereMet(), "branchless publication should converge local PR creation state")
+}
+
+func TestFinalizeDraftFirstPublication(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		gate              models.SessionPublicationReviewGateState
+		reviewedHead      string
+		pushedHead        string
+		expectedFinalized bool
+		expectedPushes    int
+		expectedReady     int
+	}{
+		{name: "reviewed head is pushed and marked ready", gate: models.SessionPublicationReviewGatePassed, reviewedHead: "reviewed", pushedHead: "reviewed", expectedFinalized: true, expectedPushes: 1, expectedReady: 1},
+		{name: "head race leaves draft blocked", gate: models.SessionPublicationReviewGatePassed, reviewedHead: "reviewed", pushedHead: "moved", expectedPushes: 1},
+		{name: "review not required marks existing draft ready", gate: models.SessionPublicationReviewGateNotRequired, expectedFinalized: true, expectedReady: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "test should create a database mock")
+			t.Cleanup(mock.Close)
+			orgID, sessionID, changesetID, prID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			stores := &Stores{SessionPublications: db.NewSessionPublicationStore(mock)}
+			pushes, readyCalls := 0, 0
+			service := &stubPRService{
+				pushChangesToPRFn: func(context.Context, *models.Session, ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+					pushes++
+					head := tt.pushedHead
+					return &models.PullRequest{HeadSHA: &head}, nil
+				},
+				markPullRequestReadyFn: func(_ context.Context, gotOrgID, gotPRID uuid.UUID, expectedHeadSHA string) error {
+					readyCalls++
+					require.Equal(t, orgID, gotOrgID, "draft readiness should retain tenant scope")
+					require.Equal(t, prID, gotPRID, "draft readiness should target the recorded pull request")
+					require.Equal(t, tt.reviewedHead, expectedHeadSHA, "draft readiness should be bound to the reviewed head")
+					return nil
+				},
+			}
+			publication := &models.SessionPublication{ReviewGateState: tt.gate}
+			if tt.reviewedHead != "" {
+				publication.ReviewDesiredHeadSHA = &tt.reviewedHead
+			}
+			if tt.gate == models.SessionPublicationReviewGatePassed && tt.pushedHead != tt.reviewedHead {
+				mock.ExpectExec("UPDATE session_publications").WithArgs(workerAnyArgs(5)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			} else {
+				mock.ExpectExec("UPDATE session_publications").WithArgs(workerAnyArgs(7)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			}
+
+			finalized, err := finalizeDraftFirstPublication(
+				context.Background(), stores, &Services{PR: service},
+				&models.Session{ID: sessionID, OrgID: orgID}, openPRJobInput{}, &changesetID,
+				&models.PullRequest{ID: prID, OrgID: orgID}, publication,
+			)
+			require.NoError(t, err, "draft-first finalization should converge without an infrastructure failure")
+			require.Equal(t, tt.expectedFinalized, finalized, "draft-first finalization should report whether the draft became ready")
+			require.Equal(t, tt.expectedPushes, pushes, "draft-first finalization should push only reviewed workflows")
+			require.Equal(t, tt.expectedReady, readyCalls, "draft-first finalization should mark ready only after safe head validation")
+			require.NoError(t, mock.ExpectationsWereMet(), "draft-first finalization should persist the expected tenant-scoped state")
+		})
+	}
+}
+
+func TestTurnWorkspaceChangedComparesWholeWorkspaceDiff(t *testing.T) {
+	t.Parallel()
+
+	before := "diff --git a/file b/file\n+existing change"
+	tests := []struct {
+		name     string
+		before   *string
+		after    string
+		expected bool
+	}{
+		{name: "same non-empty diff is a clean review", before: &before, after: before},
+		{name: "changed diff records review mutation", before: &before, after: before + "\n+review fix", expected: true},
+		{name: "new diff from empty workspace records mutation", after: before, expected: true},
+		{name: "empty adapter diff does not invent mutation", before: &before},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, turnWorkspaceChanged(tt.before, tt.after), "review mutation detection should compare before and after workspace content")
+		})
+	}
 }
 
 func TestOpenPRHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
@@ -6329,7 +6470,7 @@ func TestEnsureBuilderReviewFresh(t *testing.T) {
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 				WillReturnRows(pgxmock.NewRows(workerReviewLoopColumns()).AddRow(
 					loopID, orgID, sessionID, nil, nil,
-					tt.status, models.ReviewLoopSourceManual, models.AgentTypeCodex,
+					tt.status, models.ReviewLoopSourceManual, nil, nil, nil, models.AgentTypeCodex,
 					2, models.ReviewLoopFixModeMinimal, 1, true, nil, nil, stringPtr("snap-start"), tt.checkpointKey,
 					nil, nil, now, nil,
 				))
@@ -6435,7 +6576,7 @@ func TestEnsureAutomationPrePRReviewRetriesExistingRunningLoop(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerReviewLoopColumns()).AddRow(
 			loopID, orgID, sessionID, &automationRunID, &threadID,
-			models.ReviewLoopStatusRunning, models.ReviewLoopSourceAutomation, models.AgentTypeCodex,
+			models.ReviewLoopStatusRunning, models.ReviewLoopSourceAutomation, nil, nil, nil, models.AgentTypeCodex,
 			1, models.ReviewLoopFixModeMinimal, 0, true, nil, nil, nil, nil, nil, nil, now, nil,
 		))
 
@@ -6451,6 +6592,69 @@ func TestEnsureAutomationPrePRReviewRetriesExistingRunningLoop(t *testing.T) {
 	require.ErrorAs(t, err, &retryable, "existing running pre-PR review should defer open_pr for a retry")
 	require.NotNil(t, retryable.RetryAfter, "running pre-PR review retry should use a bounded delay")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestAutomationPrePRReviewPassesPreservesSupportedCounts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		config   json.RawMessage
+		expected int
+		wantErr  bool
+	}{
+		{name: "disabled", config: json.RawMessage(`{"pre_pr_review_loops":0}`)},
+		{name: "one pass", config: json.RawMessage(`{"pre_pr_review_loops":1}`), expected: 1},
+		{name: "three passes", config: json.RawMessage(`{"pre_pr_review_loops":3}`), expected: 3},
+		{name: "four passes", config: json.RawMessage(`{"pre_pr_review_loops":4}`), expected: 4},
+		{name: "five passes", config: json.RawMessage(`{"pre_pr_review_loops":5}`), expected: 5},
+		{name: "six passes is invalid", config: json.RawMessage(`{"pre_pr_review_loops":6}`), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			actual, err := automationPrePRReviewPasses(tt.config)
+			if tt.wantErr {
+				require.Error(t, err, "automation review policy should reject counts outside the schema bound")
+				return
+			}
+			require.NoError(t, err, "automation review policy should accept schema-compatible pass counts")
+			require.Equal(t, tt.expected, actual, "automation review policy should preserve the configured pass count")
+		})
+	}
+}
+
+func TestSelectPublicationReviewerPrefersIndependentAgent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		available map[models.AgentType]bool
+		expected  models.AgentType
+	}{
+		{
+			name:      "available alternative is preferred",
+			available: map[models.AgentType]bool{models.AgentTypeClaudeCode: true, models.AgentTypeCodex: true},
+			expected:  models.AgentTypeClaudeCode,
+		},
+		{
+			name:      "implementation agent is the safe fallback",
+			available: map[models.AgentType]bool{models.AgentTypeCodex: true},
+			expected:  models.AgentTypeCodex,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reviewer, err := selectPublicationReviewer(
+				context.Background(), &Stores{},
+				&Services{CodingAgents: codeReviewAgentAvailabilityStub{available: tt.available}},
+				models.Session{OrgID: uuid.New(), AgentType: models.AgentTypeCodex}, nil,
+			)
+			require.NoError(t, err, "reviewer selection should find an available supported review agent")
+			require.Equal(t, tt.expected, reviewer, "reviewer selection should prefer an independent agent before falling back")
+		})
+	}
 }
 
 func TestOpenPRHandler_HydratesLinkedIssuesBeforeCreatePR(t *testing.T) {
@@ -7949,7 +8153,8 @@ func automationRowColumns() []string {
 func workerReviewLoopColumns() []string {
 	return []string{
 		"id", "org_id", "session_id", "automation_run_id", "thread_id",
-		"status", "source", "agent_type", "max_passes", "fix_mode", "completed_passes", "review_required",
+		"status", "source", "changeset_id", "workspace_revision", "desired_head_sha",
+		"agent_type", "max_passes", "fix_mode", "completed_passes", "review_required",
 		"bypassed_by_user_id", "bypass_reason", "loop_start_checkpoint_key", "latest_checkpoint_key",
 		"latest_summary", "started_by_user_id", "started_at", "completed_at",
 	}

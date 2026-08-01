@@ -23,6 +23,7 @@ func NewSessionPublicationStore(db DBTX) *SessionPublicationStore {
 const sessionPublicationSelectColumns = `id, org_id, session_id, changeset_id, repository_id,
 	state, source, trigger_kind, handoff_mode, initiated_by_user_id,
 	automatic_pr_policy_source, review_policy_source,
+	review_max_passes, review_loop_id, review_workspace_revision, review_desired_head_sha,
 	review_gate_state, job_queue, request_payload, request_generation_at,
 	base_branch, head_branch, desired_head_sha,
 	published_head_sha, github_pr_number, github_pr_url, attempt_count,
@@ -67,6 +68,12 @@ func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uui
 		publication.Source != models.SessionPublicationSourceAgentTool {
 		return errors.New("agent-ready publication must originate from the agent tool")
 	}
+	if publication.ReviewMaxPasses != nil && (*publication.ReviewMaxPasses < 1 || *publication.ReviewMaxPasses > 5) {
+		return errors.New("review max passes must be between 1 and 5")
+	}
+	if publication.ReviewLoopID != nil && (publication.ReviewMaxPasses == nil || publication.ReviewWorkspaceRevision == nil || publication.ReviewDesiredHeadSHA == nil) {
+		return errors.New("linked publication review requires complete evidence")
+	}
 	if err := publication.ReviewGateState.Validate(); err != nil {
 		return err
 	}
@@ -94,12 +101,14 @@ func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uui
 		org_id, session_id, changeset_id, repository_id, state, source,
 		trigger_kind, handoff_mode, initiated_by_user_id,
 		automatic_pr_policy_source, review_policy_source,
+		review_max_passes, review_loop_id, review_workspace_revision, review_desired_head_sha,
 		review_gate_state, job_queue, request_payload, request_generation_at,
 		base_branch, head_branch, desired_head_sha
 	) VALUES (
 		@org_id, @session_id, @changeset_id, @repository_id, 'requested', @source,
 		@trigger_kind, @handoff_mode, @initiated_by_user_id,
 		@automatic_pr_policy_source, @review_policy_source,
+		@review_max_passes, @review_loop_id, @review_workspace_revision, @review_desired_head_sha,
 		@review_gate_state, @job_queue, @request_payload::jsonb, @request_generation_at,
 		@base_branch, @head_branch, @desired_head_sha
 	)
@@ -216,6 +225,30 @@ func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uui
 			THEN EXCLUDED.review_policy_source
 			ELSE session_publications.review_policy_source
 		END,
+		review_max_passes = CASE
+			WHEN session_publications.state IN ('completed_noop', 'terminal_failed')
+			 AND EXCLUDED.request_generation_at > session_publications.request_generation_at
+			THEN EXCLUDED.review_max_passes
+			WHEN session_publications.state IN ('completed', 'completed_noop', 'terminal_failed')
+			  OR EXCLUDED.request_generation_at < session_publications.request_generation_at
+			THEN session_publications.review_max_passes
+			ELSE COALESCE(session_publications.review_max_passes, EXCLUDED.review_max_passes)
+		END,
+		review_loop_id = CASE
+			WHEN session_publications.state IN ('completed_noop', 'terminal_failed')
+			 AND EXCLUDED.request_generation_at > session_publications.request_generation_at
+			THEN EXCLUDED.review_loop_id ELSE session_publications.review_loop_id
+		END,
+		review_workspace_revision = CASE
+			WHEN session_publications.state IN ('completed_noop', 'terminal_failed')
+			 AND EXCLUDED.request_generation_at > session_publications.request_generation_at
+			THEN EXCLUDED.review_workspace_revision ELSE session_publications.review_workspace_revision
+		END,
+		review_desired_head_sha = CASE
+			WHEN session_publications.state IN ('completed_noop', 'terminal_failed')
+			 AND EXCLUDED.request_generation_at > session_publications.request_generation_at
+			THEN EXCLUDED.review_desired_head_sha ELSE session_publications.review_desired_head_sha
+		END,
 		review_gate_state = CASE
 			WHEN session_publications.state IN ('completed_noop', 'terminal_failed')
 			 AND EXCLUDED.request_generation_at > session_publications.request_generation_at
@@ -326,6 +359,10 @@ func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uui
 		"initiated_by_user_id":       publication.InitiatedByUserID,
 		"automatic_pr_policy_source": publication.AutomaticPolicySource,
 		"review_policy_source":       publication.ReviewPolicySource,
+		"review_max_passes":          publication.ReviewMaxPasses,
+		"review_loop_id":             publication.ReviewLoopID,
+		"review_workspace_revision":  publication.ReviewWorkspaceRevision,
+		"review_desired_head_sha":    publication.ReviewDesiredHeadSHA,
 		"review_gate_state":          publication.ReviewGateState, "job_queue": publication.JobQueue,
 		"request_payload": requestPayload, "request_generation_at": publication.RequestGenerationAt,
 		"base_branch": publication.BaseBranch,
@@ -337,6 +374,61 @@ func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uui
 	stored, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionPublication])
 	if err != nil {
 		return fmt.Errorf("collect session publication: %w", err)
+	}
+	*publication = stored
+	return nil
+}
+
+// ApplyReviewBypass atomically detaches review evidence from a non-terminal
+// publication and advances it to draft publication. It is deliberately a
+// separate transition from EnsureRequested: replay protection normally keeps
+// terminal review decisions immutable, while this audited user action is the
+// one authorized exception.
+func (s *SessionPublicationStore) ApplyReviewBypass(ctx context.Context, orgID uuid.UUID, publication *models.SessionPublication) error {
+	if publication == nil {
+		return errors.New("session publication is required")
+	}
+	if publication.OrgID != uuid.Nil && publication.OrgID != orgID {
+		return errors.New("session publication org does not match orgID")
+	}
+	if publication.ReviewPolicySource != models.PublicationPolicySourceExplicitBypass {
+		return errors.New("publication review bypass policy source is required")
+	}
+	if publication.TriggerKind != models.SessionPublicationTriggerExplicitAction {
+		return errors.New("publication review bypass must be an explicit action")
+	}
+	if publication.Source != models.SessionPublicationSourceUser {
+		return errors.New("publication review bypass must originate from an authenticated user")
+	}
+	requestPayload := string(publication.RequestPayload)
+	if requestPayload == "" {
+		return errors.New("publication review bypass payload is required")
+	}
+	rows, err := s.db.Query(ctx, `UPDATE session_publications
+		SET state = 'ready_to_publish', source = @source,
+			trigger_kind = 'explicit_action',
+			automatic_pr_policy_source = @automatic_policy_source,
+			review_policy_source = 'explicit_bypass',
+			review_max_passes = NULL, review_loop_id = NULL,
+			review_workspace_revision = NULL, review_desired_head_sha = NULL,
+			review_gate_state = 'not_required', job_queue = @job_queue,
+			request_payload = @request_payload::jsonb,
+			request_generation_at = GREATEST(request_generation_at, @request_generation_at),
+			last_error_code = NULL, last_error_message = NULL, updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id
+		  AND state NOT IN ('completed', 'completed_noop', 'terminal_failed')
+		RETURNING `+sessionPublicationSelectColumns, pgx.NamedArgs{
+		"org_id": orgID, "session_id": publication.SessionID, "changeset_id": publication.ChangesetID,
+		"source": publication.Source, "automatic_policy_source": publication.AutomaticPolicySource,
+		"job_queue": publication.JobQueue, "request_payload": requestPayload,
+		"request_generation_at": publication.RequestGenerationAt,
+	})
+	if err != nil {
+		return fmt.Errorf("apply session publication review bypass: %w", err)
+	}
+	stored, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionPublication])
+	if err != nil {
+		return fmt.Errorf("collect bypassed session publication: %w", err)
 	}
 	*publication = stored
 	return nil
@@ -427,6 +519,161 @@ func (s *SessionPublicationStore) SetReviewGate(ctx context.Context, orgID, sess
 	})
 	if err != nil {
 		return fmt.Errorf("update session publication review gate: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+// LinkReviewLoop snapshots the exact revision and head reviewed for a durable
+// publication intent. All evidence columns move together in one statement.
+func (s *SessionPublicationStore) LinkReviewLoop(
+	ctx context.Context,
+	orgID, sessionID, changesetID, loopID uuid.UUID,
+	maxPasses int,
+	workspaceRevision int64,
+	desiredHeadSHA string,
+) error {
+	if maxPasses < 1 || maxPasses > 5 {
+		return errors.New("review max passes must be between 1 and 5")
+	}
+	if desiredHeadSHA == "" {
+		return errors.New("review desired head SHA is required")
+	}
+	result, err := s.db.Exec(ctx, `UPDATE session_publications
+		SET review_gate_state = 'pending', state = 'review_pending',
+			review_max_passes = @max_passes,
+			review_loop_id = @loop_id,
+			review_workspace_revision = @workspace_revision,
+			review_desired_head_sha = @desired_head_sha,
+			updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id
+		  AND state NOT IN ('completed', 'completed_noop', 'terminal_failed')
+		  AND (review_loop_id IS NULL OR review_loop_id = @loop_id)
+		  AND EXISTS (
+			SELECT 1 FROM session_review_loops
+			WHERE org_id = @org_id AND id = @loop_id AND session_id = @session_id
+			  AND changeset_id = @changeset_id AND workspace_revision = @workspace_revision
+			  AND desired_head_sha = @desired_head_sha AND source = 'publication' AND status = 'running'
+		  )`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+		"loop_id": loopID, "max_passes": maxPasses,
+		"workspace_revision": workspaceRevision, "desired_head_sha": desiredHeadSHA,
+	})
+	if err != nil {
+		return fmt.Errorf("link publication review loop: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+// ReuseCleanReview adopts exact clean evidence and advances the gate in one
+// write. The caller is already executing the durable open_pr job; if it
+// crashes after this checkpoint, publication reconciliation observes passed
+// state and safely resumes without another review.
+func (s *SessionPublicationStore) ReuseCleanReview(
+	ctx context.Context,
+	orgID, sessionID, changesetID, loopID uuid.UUID,
+	maxPasses int,
+	workspaceRevision int64,
+	desiredHeadSHA string,
+) error {
+	if maxPasses < 1 || maxPasses > 5 {
+		return errors.New("review max passes must be between 1 and 5")
+	}
+	if desiredHeadSHA == "" {
+		return errors.New("review desired head SHA is required")
+	}
+	result, err := s.db.Exec(ctx, `UPDATE session_publications
+		SET review_gate_state = 'passed', state = 'ready_to_publish',
+			review_max_passes = @max_passes, review_loop_id = @loop_id,
+			review_workspace_revision = @workspace_revision,
+			review_desired_head_sha = @desired_head_sha, updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id
+		  AND review_gate_state = 'pending'
+		  AND state NOT IN ('completed', 'completed_noop', 'terminal_failed')
+		  AND EXISTS (
+			SELECT 1 FROM session_review_loops
+			WHERE org_id = @org_id AND id = @loop_id AND session_id = @session_id
+			  AND changeset_id = @changeset_id AND workspace_revision = @workspace_revision
+			  AND desired_head_sha = @desired_head_sha AND source = 'publication' AND status = 'clean'
+		  )`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+		"loop_id": loopID, "max_passes": maxPasses,
+		"workspace_revision": workspaceRevision, "desired_head_sha": desiredHeadSHA,
+	})
+	if err != nil {
+		return fmt.Errorf("reuse clean publication review: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+// ParkForReview records that review is required before a loop can safely be
+// linked. This is used when another session review loop already owns the
+// one-running-loop slot.
+func (s *SessionPublicationStore) ParkForReview(ctx context.Context, orgID, sessionID, changesetID uuid.UUID, maxPasses int) error {
+	if maxPasses < 1 || maxPasses > 5 {
+		return errors.New("review max passes must be between 1 and 5")
+	}
+	result, err := s.db.Exec(ctx, `UPDATE session_publications
+		SET review_gate_state = 'pending', state = 'review_pending',
+			review_max_passes = @max_passes, updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id
+		  AND state NOT IN ('completed', 'completed_noop', 'terminal_failed')`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "max_passes": maxPasses,
+	})
+	if err != nil {
+		return fmt.Errorf("park publication for review: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+func (s *SessionPublicationStore) RecordReviewTarget(ctx context.Context, orgID, sessionID, changesetID uuid.UUID, desiredHeadSHA string) error {
+	if desiredHeadSHA == "" {
+		return errors.New("review target head SHA is required")
+	}
+	result, err := s.db.Exec(ctx, `UPDATE session_publications
+		SET desired_head_sha = @desired_head_sha, updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id
+		  AND state NOT IN ('completed', 'completed_noop', 'terminal_failed')`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+		"desired_head_sha": desiredHeadSHA,
+	})
+	if err != nil {
+		return fmt.Errorf("record publication review target: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+func (s *SessionPublicationStore) InvalidateReviewEvidence(ctx context.Context, orgID, sessionID, changesetID uuid.UUID, desiredHeadSHA string) error {
+	if desiredHeadSHA == "" {
+		return errors.New("replacement review target head SHA is required")
+	}
+	result, err := s.db.Exec(ctx, `UPDATE session_publications
+		SET review_gate_state = 'pending', state = 'review_pending',
+			review_loop_id = NULL, review_workspace_revision = NULL,
+			review_desired_head_sha = NULL, desired_head_sha = @desired_head_sha,
+			updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id
+		  AND review_max_passes IS NOT NULL
+		  AND state NOT IN ('completed', 'completed_noop', 'terminal_failed')`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+		"desired_head_sha": desiredHeadSHA,
+	})
+	if err != nil {
+		return fmt.Errorf("invalidate publication review evidence: %w", err)
 	}
 	if result.RowsAffected() == 0 {
 		return pgx.ErrNoRows
@@ -551,6 +798,7 @@ func (s *SessionPublicationStore) ListReconcileCandidates(ctx context.Context, o
 		  )
 		  AND (
 			review_gate_state IN ('not_required', 'passed')
+			OR (review_gate_state = 'pending' AND review_loop_id IS NULL)
 			OR EXISTS (
 				SELECT 1 FROM pull_requests
 				WHERE pull_requests.org_id = session_publications.org_id

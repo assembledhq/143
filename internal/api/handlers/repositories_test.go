@@ -285,18 +285,9 @@ func TestRepositoryHandler_Update(t *testing.T) {
 			expectedBody: "REPOSITORY_STATUS_IMMUTABLE",
 		},
 		{
-			name: "rejects removed repository PM settings",
-			body: `{"settings":{"pm":{"pm_schedule_hours":4}}}`,
-			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, repoID uuid.UUID) {
-				now := time.Now()
-				mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows(repoColumns()).AddRow(
-						repoID, orgID, uuid.New(), int64(1001), "test-org/repo1", "main",
-						false, nil, nil, "https://github.com/test-org/repo1.git", int64(12345), "active",
-						nil, nil, json.RawMessage(`{}`), now, now,
-					))
-			},
+			name:         "rejects removed repository PM settings",
+			body:         `{"settings":{"pm":{"pm_schedule_hours":4}}}`,
+			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, repoID uuid.UUID) {},
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "REMOVED_SETTINGS",
 		},

@@ -389,6 +389,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		jobStore,
 		logger,
 	)
+	publicationIntentCoordinator.SetRepositoryStore(repoStore)
+	publicationIntentCoordinator.SetReviewEnabled(cfg.PrePRReviewEnabled && cfg.AgentPRPublicationEnabled)
 	sessionHandler := handlers.NewSessionHandler(
 		sessionStore,
 		sessionLogStore,

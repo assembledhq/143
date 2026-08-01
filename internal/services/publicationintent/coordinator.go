@@ -49,6 +49,7 @@ type PublicationIntentResult struct {
 	ReviewLoopID   *uuid.UUID
 	PullRequestURL *string
 	Reason         *string
+	ReviewBypassed bool
 }
 
 type PublicationIntentCoordinator interface {
@@ -105,6 +106,12 @@ type UserStore interface {
 
 type PublicationStore interface {
 	EnsureRequested(ctx context.Context, orgID uuid.UUID, publication *models.SessionPublication) error
+	ApplyReviewBypass(ctx context.Context, orgID uuid.UUID, publication *models.SessionPublication) error
+	GetByChangeset(ctx context.Context, orgID, sessionID, changesetID uuid.UUID) (models.SessionPublication, error)
+}
+
+type RepositoryStore interface {
+	GetByID(ctx context.Context, orgID, repoID uuid.UUID) (models.Repository, error)
 }
 
 type JobStore interface {
@@ -119,7 +126,17 @@ type Coordinator struct {
 	users         UserStore
 	publications  PublicationStore
 	jobs          JobStore
+	repositories  RepositoryStore
+	reviewEnabled bool
 	logger        zerolog.Logger
+}
+
+func (c *Coordinator) SetRepositoryStore(store RepositoryStore) {
+	c.repositories = store
+}
+
+func (c *Coordinator) SetReviewEnabled(enabled bool) {
+	c.reviewEnabled = enabled
 }
 
 func NewCoordinator(
@@ -135,7 +152,7 @@ func NewCoordinator(
 	return &Coordinator{
 		sessions: sessions, changesets: changesets, pullRequests: pullRequests,
 		organizations: organizations, users: users, publications: publications,
-		jobs: jobs, logger: logger,
+		jobs: jobs, reviewEnabled: true, logger: logger,
 	}
 }
 
@@ -177,12 +194,6 @@ func (c *Coordinator) RequestPullRequest(
 		session.Origin == models.SessionOriginRevision || session.AutomationRunID != nil {
 		return nil, &Error{Code: ErrorSessionNotEligible, Err: errors.New("session cannot create a new pull request")}
 	}
-	if _, prErr := c.pullRequests.GetPrimaryBySessionID(ctx, orgID, sessionID); prErr == nil {
-		return &PublicationIntentResult{Status: ResultAlreadyPublished, SessionID: sessionID}, nil
-	} else if !errors.Is(prErr, pgx.ErrNoRows) {
-		return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("check existing pull request: %w", prErr)}
-	}
-
 	changeset, err := c.changesets.GetPrimary(ctx, orgID, sessionID)
 	if err != nil {
 		return nil, &Error{Code: ErrorWorkspaceNotReady, Err: fmt.Errorf("resolve primary changeset: %w", err)}
@@ -193,6 +204,24 @@ func (c *Coordinator) RequestPullRequest(
 	headBranch, desiredHeadSHA, err := resolvePublicationTarget(session, changeset)
 	if err != nil {
 		return nil, err
+	}
+	bypassRequested := req.Source == models.SessionPublicationSourceUser &&
+		req.TriggerKind == models.SessionPublicationTriggerExplicitAction &&
+		req.Draft != nil && *req.Draft && req.RequestedByUserID != nil &&
+		(req.RequestedRole == string(models.RoleAdmin) || req.RequestedRole == string(models.RoleMember))
+	existingPublication, publicationErr := c.publications.GetByChangeset(ctx, orgID, sessionID, changeset.ID)
+	if publicationErr == nil && !bypassRequested {
+		return existingPublicationResult(existingPublication), nil
+	}
+	if publicationErr != nil && !errors.Is(publicationErr, pgx.ErrNoRows) {
+		return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("check existing publication intent: %w", publicationErr)}
+	}
+	if errors.Is(publicationErr, pgx.ErrNoRows) {
+		if _, prErr := c.pullRequests.GetPrimaryBySessionID(ctx, orgID, sessionID); prErr == nil {
+			return &PublicationIntentResult{Status: ResultAlreadyPublished, SessionID: sessionID}, nil
+		} else if !errors.Is(prErr, pgx.ErrNoRows) {
+			return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("check existing pull request: %w", prErr)}
+		}
 	}
 
 	policy, err := c.resolvePolicy(ctx, orgID, session.TriggeredByUserID)
@@ -205,10 +234,28 @@ func (c *Coordinator) RequestPullRequest(
 			Status: ResultManualPublicationRequired, SessionID: sessionID, Reason: &reason,
 		}, nil
 	}
+	handoffMode := models.PRHandoffModePrePublish
+	if c.repositories != nil {
+		repo, repoErr := c.repositories.GetByID(ctx, orgID, *session.RepositoryID)
+		if repoErr != nil {
+			return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("load repository handoff policy: %w", repoErr)}
+		}
+		repoSettings, parseErr := models.ParseRepositorySettings(repo.Settings)
+		if parseErr != nil {
+			return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("parse repository handoff policy: %w", parseErr)}
+		}
+		handoffMode = repoSettings.PRHandoffMode
+	}
 
 	automaticSource := policy.CreatePRSource
 	if req.TriggerKind == models.SessionPublicationTriggerExplicitAction {
 		automaticSource = models.PublicationPolicySourceExplicitAction
+	}
+	reviewRequired := c.reviewEnabled && policy.ReviewBeforePR
+	reviewBypassed := bypassRequested
+	reviewPolicySource := policy.ReviewSource
+	if reviewBypassed {
+		reviewPolicySource = models.PublicationPolicySourceExplicitBypass
 	}
 	payload := map[string]any{
 		"session_id":                 sessionID.String(),
@@ -217,12 +264,14 @@ func (c *Coordinator) RequestPullRequest(
 		"publication_source":         string(req.Source),
 		"publication_queue":          string(models.SessionPublicationJobQueueAgent),
 		"publication_trigger_kind":   string(req.TriggerKind),
-		"publication_handoff_mode":   string(models.PRHandoffModePrePublish),
+		"publication_handoff_mode":   string(handoffMode),
 		"automatic_pr_policy_source": string(automaticSource),
-		"review_policy_source":       string(policy.ReviewSource),
+		"review_policy_source":       string(reviewPolicySource),
 		"initiated_by_user_id":       session.TriggeredByUserID,
 	}
-	if req.Draft != nil {
+	if handoffMode == models.PRHandoffModeDraftFirst {
+		payload["draft"] = true
+	} else if req.Draft != nil {
 		payload["draft"] = *req.Draft
 	}
 	if req.AuthorMode != "" && req.AuthorMode != "auto" {
@@ -242,15 +291,28 @@ func (c *Coordinator) RequestPullRequest(
 	publication := models.SessionPublication{
 		OrgID: orgID, SessionID: sessionID, ChangesetID: changeset.ID, RepositoryID: *session.RepositoryID,
 		Source: req.Source, TriggerKind: req.TriggerKind,
-		HandoffMode: models.PRHandoffModePrePublish, InitiatedByUserID: session.TriggeredByUserID,
-		AutomaticPolicySource: automaticSource, ReviewPolicySource: policy.ReviewSource,
+		HandoffMode: handoffMode, InitiatedByUserID: session.TriggeredByUserID,
+		AutomaticPolicySource: automaticSource, ReviewPolicySource: reviewPolicySource,
 		ReviewGateState: models.SessionPublicationReviewGateNotRequired,
 		JobQueue:        models.SessionPublicationJobQueueAgent, RequestPayload: encodedPayload,
 		RequestGenerationAt: time.Now().UTC(), BaseBranch: changeset.BaseBranch,
 		HeadBranch: headBranch, DesiredHeadSHA: desiredHeadSHA,
 	}
+	if reviewRequired && !reviewBypassed {
+		maxPasses := policy.ReviewMaxPasses
+		publication.ReviewMaxPasses = &maxPasses
+		publication.ReviewGateState = models.SessionPublicationReviewGatePending
+	}
+	bypassIntent := publication
 	if ensureErr := c.publications.EnsureRequested(ctx, orgID, &publication); ensureErr != nil {
 		return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("persist publication intent: %w", ensureErr)}
+	}
+	if reviewBypassed {
+		bypassIntent.ID = publication.ID
+		if bypassErr := c.publications.ApplyReviewBypass(ctx, orgID, &bypassIntent); bypassErr != nil {
+			return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("persist publication review bypass: %w", bypassErr)}
+		}
+		publication = bypassIntent
 	}
 	_, queued, queueErr := c.jobs.QueueChangesetPRCreation(ctx, orgID, sessionID, changeset.ID, "agent", payload, 5)
 	if queueErr != nil {
@@ -276,9 +338,43 @@ func (c *Coordinator) RequestPullRequest(
 		Str("publication_id", publication.ID.String()).
 		Str("trigger_kind", string(req.TriggerKind)).
 		Msg("agent publication intent queued")
+	status := ResultPRQueued
+	if reviewRequired && !reviewBypassed {
+		status = ResultReviewInProgress
+	}
 	return &PublicationIntentResult{
-		Status: ResultPRQueued, SessionID: sessionID, PublicationID: &publication.ID,
+		Status: status, SessionID: sessionID, PublicationID: &publication.ID,
+		ReviewBypassed: reviewBypassed,
 	}, nil
+}
+
+func existingPublicationResult(publication models.SessionPublication) *PublicationIntentResult {
+	result := &PublicationIntentResult{
+		SessionID: publication.SessionID, PublicationID: &publication.ID,
+		ReviewLoopID: publication.ReviewLoopID, PullRequestURL: publication.GitHubPRURL,
+	}
+	if publication.State == models.SessionPublicationStateCompleted ||
+		publication.State == models.SessionPublicationStateCompletedNoop {
+		result.Status = ResultAlreadyPublished
+		return result
+	}
+	if publication.State == models.SessionPublicationStateTerminalFailed {
+		result.Status = ResultBlocked
+		reason := "publication failed terminally and requires attention"
+		result.Reason = &reason
+		return result
+	}
+	switch publication.ReviewGateState {
+	case models.SessionPublicationReviewGatePending:
+		result.Status = ResultReviewInProgress
+	case models.SessionPublicationReviewGateNeedsHuman, models.SessionPublicationReviewGateFailed:
+		result.Status = ResultBlocked
+		reason := "publication review requires attention before the pull request can continue"
+		result.Reason = &reason
+	default:
+		result.Status = ResultPRQueued
+	}
+	return result
 }
 
 func recordIntentOutcome(

@@ -6412,6 +6412,10 @@ func TestPreparePublicationAttemptPersistsExactBranchAndGatesTerminalReplay(t *t
 				"initiated_by_user_id":       (*uuid.UUID)(nil),
 				"automatic_pr_policy_source": models.PublicationPolicySourceProductDefault,
 				"review_policy_source":       models.PublicationPolicySourceProductDefault,
+				"review_max_passes":          (*int)(nil),
+				"review_loop_id":             (*uuid.UUID)(nil),
+				"review_workspace_revision":  (*int64)(nil),
+				"review_desired_head_sha":    (*string)(nil),
 				"review_gate_state":          models.SessionPublicationReviewGateNotRequired,
 				"job_queue":                  models.SessionPublicationJobQueueAgent, "request_payload": string(payload),
 				"request_generation_at": now,
@@ -6520,7 +6524,7 @@ func TestCompletePublicationLocalStateWritesTerminalStateLast(t *testing.T) {
 		publications: db.NewSessionPublicationStore(mock),
 		logger:       zerolog.Nop(),
 	}
-	err = svc.completePublicationLocalState(context.Background(), run, changeset, headSHA)
+	err = svc.completePublicationLocalState(context.Background(), run, changeset, headSHA, false)
 	require.NoError(t, err, "publication completion should succeed after both local checkpoints")
 	require.NoError(t, mock.ExpectationsWereMet(), "publication completion should preserve checkpoint ordering")
 }
@@ -6550,9 +6554,48 @@ func TestCompletePublicationLocalStateDefersTerminalStateWhenCheckpointFails(t *
 		run,
 		changeset,
 		"0123456789abcdef0123456789abcdef01234567",
+		false,
 	)
 	require.ErrorContains(t, err, "record published changeset head", "publication completion should surface the failed local checkpoint")
 	require.NoError(t, mock.ExpectationsWereMet(), "publication completion should stop before session and terminal publication writes")
+}
+
+func TestCompletePublicationLocalStateRetainsDraftFirstForReview(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+
+	orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	headSHA := "0123456789abcdef0123456789abcdef01234567"
+	run := &models.Session{ID: sessionID, OrgID: orgID}
+	changeset := &models.SessionChangeset{ID: changesetID, OrgID: orgID, SessionID: sessionID}
+
+	mock.ExpectExec("UPDATE session_changesets SET head_sha").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	updatedSessionRow := newPRHealthSessionRow(sessionID, orgID, now, models.SessionStatusPRCreated)
+	mock.ExpectQuery("UPDATE sessions SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prHealthSessionColumns).AddRow(updatedSessionRow...))
+	mock.ExpectExec("UPDATE session_publications").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	svc := &PRService{
+		changesets:   db.NewSessionChangesetStore(mock),
+		sessions:     db.NewSessionStore(mock),
+		publications: db.NewSessionPublicationStore(mock),
+		logger:       zerolog.Nop(),
+	}
+	err = svc.completePublicationLocalState(context.Background(), run, changeset, headSHA, true)
+	require.NoError(t, err, "draft-first publication should remain recorded while review is pending")
+	require.NoError(t, mock.ExpectationsWereMet(), "draft-first completion should not terminalize the publication")
 }
 
 func TestCheckpointExistingPullRequestPublicationReplaysDurableCheckpoints(t *testing.T) {
@@ -6591,13 +6634,7 @@ func TestCheckpointExistingPullRequestPublicationReplaysDurableCheckpoints(t *te
 	// The ordered expectations model a retry that finds the server PR row but
 	// must reconstruct every durable checkpoint before terminal completion.
 	mock.ExpectQuery("INSERT INTO session_publications").
-		WithArgs(
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-		).
+		WithArgs(githubAnyArgs(21)...).
 		WillReturnRows(pgxmock.NewRows(publicationHealthTestColumns).AddRow(publicationHealthTestRow(storedPublication)...))
 	mock.ExpectExec("UPDATE session_publications[\\s\\S]*published_head_sha").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -6664,7 +6701,7 @@ func TestCheckpointExistingPullRequestPublicationPreservesMergedLifecycle(t *tes
 		RequestedAt: now, CreatedAt: now, UpdatedAt: now,
 	}
 
-	mock.ExpectQuery("INSERT INTO session_publications").WithArgs(githubAnyArgs(17)...).
+	mock.ExpectQuery("INSERT INTO session_publications").WithArgs(githubAnyArgs(21)...).
 		WillReturnRows(pgxmock.NewRows(publicationHealthTestColumns).AddRow(publicationHealthTestRow(storedPublication)...))
 	mock.ExpectExec("UPDATE session_publications[\\s\\S]*published_head_sha").WithArgs(pgx.NamedArgs{
 		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "head_sha": headSHA,

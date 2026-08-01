@@ -112,6 +112,52 @@ func (s *RepositoryStore) Update(ctx context.Context, repo *models.Repository) e
 	return row.Scan(&repo.UpdatedAt)
 }
 
+// MergeSettings applies an RFC 7386 patch while holding the repository row
+// lock, so concurrent settings edits compose instead of replacing unrelated
+// keys in the shared JSON document.
+func (s *RepositoryStore) MergeSettings(ctx context.Context, orgID, repoID uuid.UUID, patch json.RawMessage) (models.Repository, error) {
+	if s.pool == nil {
+		return models.Repository{}, errors.New("repository store does not support transactions")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return models.Repository{}, fmt.Errorf("begin repository settings merge: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rows, err := tx.Query(ctx, `
+		SELECT id, org_id, integration_id, github_id, full_name, default_branch, private,
+			language, description, clone_url, installation_id, status, last_synced_at,
+			context_quality, settings, created_at, updated_at
+		FROM repositories
+		WHERE id = @id AND org_id = @org_id
+		FOR UPDATE`, pgx.NamedArgs{"id": repoID, "org_id": orgID})
+	if err != nil {
+		return models.Repository{}, fmt.Errorf("load repository settings for merge: %w", err)
+	}
+	repo, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Repository])
+	if err != nil {
+		return models.Repository{}, err
+	}
+	merged, _, err := models.ApplyRepositorySettingsMergePatch(repo.Settings, patch)
+	if err != nil {
+		return models.Repository{}, err
+	}
+	if err := tx.QueryRow(ctx, `UPDATE repositories
+		SET settings = @settings, updated_at = now()
+		WHERE id = @id AND org_id = @org_id
+		RETURNING updated_at`, pgx.NamedArgs{
+		"id": repoID, "org_id": orgID, "settings": merged,
+	}).Scan(&repo.UpdatedAt); err != nil {
+		return models.Repository{}, fmt.Errorf("update repository settings: %w", err)
+	}
+	repo.Settings = merged
+	if err := tx.Commit(ctx); err != nil {
+		return models.Repository{}, fmt.Errorf("commit repository settings merge: %w", err)
+	}
+	return repo, nil
+}
+
 // SetStatus flips a repo's status within an org. Returns the refreshed row so
 // callers can echo it back to the client without an extra round-trip. The
 // status parameter is typed (models.RepositoryStatus) so callers must pass one

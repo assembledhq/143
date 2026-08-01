@@ -180,7 +180,8 @@ var sessionColumns = []string{
 
 var reviewLoopColumns = []string{
 	"id", "org_id", "session_id", "automation_run_id", "thread_id",
-	"status", "source", "agent_type", "max_passes", "fix_mode", "completed_passes", "review_required",
+	"status", "source", "changeset_id", "workspace_revision", "desired_head_sha",
+	"agent_type", "max_passes", "fix_mode", "completed_passes", "review_required",
 	"bypassed_by_user_id", "bypass_reason", "loop_start_checkpoint_key", "latest_checkpoint_key",
 	"latest_summary", "started_by_user_id", "started_at", "completed_at",
 }
@@ -189,7 +190,7 @@ func reviewLoopRowWithLatestCheckpoint(loopID, sessionID uuid.UUID, status, sour
 	now := time.Now()
 	return []any{
 		loopID, uuid.New(), sessionID, nil, nil,
-		status, source, "claude_code", 2, "minimal", 1, false,
+		status, source, nil, nil, nil, "claude_code", 2, "minimal", 1, false,
 		nil, nil, nil, latestCheckpointKey,
 		nil, nil, now, &now,
 	}
@@ -11223,10 +11224,6 @@ func TestSessionHandler_CreatePR_CoordinatorOutcomes(t *testing.T) {
 						now,
 					),
 				)
-			mock.ExpectQuery("SELECT .+ FROM pull_requests").
-				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-				WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
-
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
 			rctx := chi.NewRouteContext()
 			rctx.URLParams.Add("id", sessionID.String())

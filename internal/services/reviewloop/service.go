@@ -76,23 +76,35 @@ func (a RuntimeAdapter) SendMessage(ctx context.Context, input threadsvc.SendMes
 }
 
 type Service struct {
-	store   Store
-	runtime Runtime
+	store             Store
+	runtime           Runtime
+	evidenceRefresher PublicationEvidenceRefresher
+}
+
+type PublicationEvidenceRefresher interface {
+	RefreshPublicationEvidence(ctx context.Context, loop models.SessionReviewLoop) (workspaceRevision int64, desiredHeadSHA string, err error)
 }
 
 func NewService(store Store, runtime Runtime) *Service {
 	return &Service{store: store, runtime: runtime}
 }
 
+func (s *Service) SetPublicationEvidenceRefresher(refresher PublicationEvidenceRefresher) {
+	s.evidenceRefresher = refresher
+}
+
 type StartReviewLoopRequest struct {
-	AgentType       models.AgentType
-	Model           string
-	MaxPasses       int
-	FixMode         models.ReviewLoopFixMode
-	Source          models.ReviewLoopSource
-	AutomationRunID *uuid.UUID
-	StartedByUserID *uuid.UUID
-	ReviewRequired  bool
+	AgentType         models.AgentType
+	Model             string
+	MaxPasses         int
+	FixMode           models.ReviewLoopFixMode
+	Source            models.ReviewLoopSource
+	AutomationRunID   *uuid.UUID
+	StartedByUserID   *uuid.UUID
+	ReviewRequired    bool
+	ChangesetID       *uuid.UUID
+	WorkspaceRevision *int64
+	DesiredHeadSHA    *string
 }
 
 func (s *Service) Start(ctx context.Context, orgID, sessionID uuid.UUID, req StartReviewLoopRequest) (*models.SessionReviewLoop, error) {
@@ -105,6 +117,11 @@ func (s *Service) Start(ctx context.Context, orgID, sessionID uuid.UUID, req Sta
 	}
 	if err := source.Validate(); err != nil {
 		return nil, err
+	}
+	if source == models.ReviewLoopSourcePublication {
+		if req.ChangesetID == nil || req.WorkspaceRevision == nil || req.DesiredHeadSHA == nil || strings.TrimSpace(*req.DesiredHeadSHA) == "" {
+			return nil, errors.New("publication review requires changeset, workspace revision, and desired head SHA")
+		}
 	}
 	fixMode := req.FixMode
 	if fixMode == "" {
@@ -156,17 +173,20 @@ func (s *Service) Start(ctx context.Context, orgID, sessionID uuid.UUID, req Sta
 		return nil, err
 	}
 	loop := &models.SessionReviewLoop{
-		OrgID:           orgID,
-		SessionID:       sessionID,
-		AutomationRunID: req.AutomationRunID,
-		ThreadID:        &thread.ID,
-		Status:          models.ReviewLoopStatusRunning,
-		Source:          source,
-		AgentType:       agentType,
-		MaxPasses:       req.MaxPasses,
-		FixMode:         fixMode,
-		ReviewRequired:  req.ReviewRequired,
-		StartedByUserID: req.StartedByUserID,
+		OrgID:             orgID,
+		SessionID:         sessionID,
+		AutomationRunID:   req.AutomationRunID,
+		ThreadID:          &thread.ID,
+		Status:            models.ReviewLoopStatusRunning,
+		Source:            source,
+		ChangesetID:       req.ChangesetID,
+		WorkspaceRevision: req.WorkspaceRevision,
+		DesiredHeadSHA:    req.DesiredHeadSHA,
+		AgentType:         agentType,
+		MaxPasses:         req.MaxPasses,
+		FixMode:           fixMode,
+		ReviewRequired:    req.ReviewRequired,
+		StartedByUserID:   req.StartedByUserID,
 	}
 	if session.SnapshotKey != nil && *session.SnapshotKey != "" {
 		loop.LoopStartCheckpointKey = session.SnapshotKey
@@ -203,6 +223,13 @@ func isRunningLoopConflict(err error) bool {
 }
 
 func (s *Service) OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid.UUID, assistantSummary string) error {
+	return s.OnThreadTurnCompleteWithChange(ctx, orgID, threadID, assistantSummary, false)
+}
+
+// OnThreadTurnCompleteWithChange advances a review loop while retaining the
+// per-turn mutation signal. A final review pass that writes files is not clean
+// evidence and must stop for human attention rather than publishing it.
+func (s *Service) OnThreadTurnCompleteWithChange(ctx context.Context, orgID, threadID uuid.UUID, assistantSummary string, workspaceChanged bool) error {
 	loop, err := s.store.GetRunningLoopByThread(ctx, orgID, threadID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -215,18 +242,21 @@ func (s *Service) OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid
 		return err
 	}
 	summary := strings.TrimSpace(assistantSummary)
+	if workspaceChanged && pass.PassIndex >= loop.MaxPasses &&
+		(pass.Status == models.ReviewLoopPassStatusReviewing || pass.Status == models.ReviewLoopPassStatusDeciding) {
+		return s.markPassNeedsHumanDecision(
+			ctx, orgID, loop.ID, pass.ID, models.ReviewLoopDecisionNeedsFix,
+			"The final review pass changed the workspace; those changes have not been independently reviewed.", loop,
+		)
+	}
 	switch pass.Status {
 	case models.ReviewLoopPassStatusReviewing:
+		if workspaceChanged {
+			return s.completeFixAndStartNextReview(ctx, orgID, loop, pass, summary)
+		}
 		decision, err := parseDecision(summary)
 		if err == nil && decision == models.ReviewLoopDecisionClean {
-			if loop.AutomationRunID != nil {
-				payload, dedupeKey, targetErr := s.automationOpenPRTarget(ctx, orgID, loop)
-				if targetErr != nil {
-					return targetErr
-				}
-				return s.store.MarkPassCleanAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, decision, summary, payload, dedupeKey)
-			}
-			return s.store.MarkPassClean(ctx, orgID, loop.ID, pass.ID, decision, summary)
+			return s.markPassClean(ctx, orgID, loop, pass, decision, summary)
 		}
 		msg, err := s.sendPlain(ctx, loop, prompts.ReviewLoopDecisionPrompt(), nil, withContinuationDedupeKey(reviewLoopContinuationDedupeKey(loop.ID, pass.ID, "decision")))
 		if err != nil {
@@ -235,17 +265,13 @@ func (s *Service) OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid
 		}
 		return s.store.MarkPassDeciding(ctx, orgID, pass.ID, summary, msg.ID)
 	case models.ReviewLoopPassStatusDeciding:
+		if workspaceChanged {
+			return s.completeFixAndStartNextReview(ctx, orgID, loop, pass, summary)
+		}
 		decision, err := parseDecision(summary)
 		switch {
 		case err == nil && decision == models.ReviewLoopDecisionClean:
-			if loop.AutomationRunID != nil {
-				payload, dedupeKey, targetErr := s.automationOpenPRTarget(ctx, orgID, loop)
-				if targetErr != nil {
-					return targetErr
-				}
-				return s.store.MarkPassCleanAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, decision, summary, payload, dedupeKey)
-			}
-			return s.store.MarkPassClean(ctx, orgID, loop.ID, pass.ID, decision, summary)
+			return s.markPassClean(ctx, orgID, loop, pass, decision, summary)
 		case err == nil && decision == models.ReviewLoopDecisionNeedsFix:
 			return s.startLegacyFixPass(ctx, orgID, loop, pass, decision)
 		case summary == "":
@@ -266,14 +292,7 @@ func (s *Service) OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid
 
 func (s *Service) startLegacyFixPass(ctx context.Context, orgID uuid.UUID, loop models.SessionReviewLoop, pass models.SessionReviewLoopPass, decision models.ReviewLoopDecision) error {
 	if pass.PassIndex >= loop.MaxPasses {
-		if loop.AutomationRunID != nil {
-			payload, dedupeKey, targetErr := s.automationOpenPRTarget(ctx, orgID, loop)
-			if targetErr != nil {
-				return targetErr
-			}
-			return s.store.MarkPassNeedsHumanDecisionAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, decision, "Review pass limit reached with remaining issues.", payload, dedupeKey)
-		}
-		if err := s.store.MarkPassNeedsHumanDecision(ctx, orgID, loop.ID, pass.ID, decision, "Review pass limit reached with remaining issues."); err != nil {
+		if err := s.markPassNeedsHumanDecision(ctx, orgID, loop.ID, pass.ID, decision, "Review pass limit reached with remaining issues.", loop); err != nil {
 			return err
 		}
 		return nil
@@ -292,17 +311,18 @@ func (s *Service) completeFixAndStartNextReview(ctx context.Context, orgID uuid.
 	}
 	if pass.PassIndex >= loop.MaxPasses {
 		terminalSummary := "Review pass limit reached after fixes; confirmation review is still needed."
-		if loop.AutomationRunID != nil {
-			payload, dedupeKey, targetErr := s.automationOpenPRTarget(ctx, orgID, loop)
-			if targetErr != nil {
-				return targetErr
-			}
-			return s.store.MarkPassNeedsHumanDecisionAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, models.ReviewLoopDecisionNeedsFix, terminalSummary, payload, dedupeKey)
-		}
-		if err := s.store.MarkPassNeedsHumanDecision(ctx, orgID, loop.ID, pass.ID, models.ReviewLoopDecisionNeedsFix, terminalSummary); err != nil {
+		if err := s.markPassNeedsHumanDecision(ctx, orgID, loop.ID, pass.ID, models.ReviewLoopDecisionNeedsFix, terminalSummary, loop); err != nil {
 			return err
 		}
 		return nil
+	}
+	if loop.Source == models.ReviewLoopSourcePublication {
+		workspaceRevision, desiredHeadSHA, err := s.refreshPublicationEvidence(ctx, orgID, loop)
+		if err != nil {
+			return err
+		}
+		loop.WorkspaceRevision = &workspaceRevision
+		loop.DesiredHeadSHA = &desiredHeadSHA
 	}
 	next := &models.SessionReviewLoopPass{
 		OrgID:     orgID,
@@ -312,7 +332,7 @@ func (s *Service) completeFixAndStartNextReview(ctx context.Context, orgID uuid.
 		Status:    models.ReviewLoopPassStatusReviewing,
 	}
 	if err := s.store.CreatePass(ctx, next); err != nil {
-		return err
+		return errors.Join(err, s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to create confirmation review pass: %s", err)))
 	}
 	msg, err := s.sendReview(ctx, &loop, next, nil, withContinuationDedupeKey(reviewLoopContinuationDedupeKey(loop.ID, next.ID, "review")))
 	if err != nil {
@@ -334,14 +354,67 @@ func (s *Service) OnThreadTurnFailed(ctx context.Context, orgID, threadID uuid.U
 }
 
 func (s *Service) failLoop(ctx context.Context, orgID uuid.UUID, loop models.SessionReviewLoop, summary string) error {
-	if loop.AutomationRunID != nil {
-		payload, dedupeKey, targetErr := s.automationOpenPRTarget(ctx, orgID, loop)
-		if targetErr != nil {
-			return targetErr
+	if isLegacyAutomationLoop(loop) {
+		payload, dedupeKey, err := s.automationOpenPRTarget(ctx, orgID, loop)
+		if err != nil {
+			return err
 		}
 		return s.store.MarkLoopFailedAndEnqueueOpenPR(ctx, orgID, loop.ID, summary, payload, dedupeKey)
 	}
 	return s.store.MarkLoopFailed(ctx, orgID, loop.ID, summary)
+}
+
+func (s *Service) markPassClean(ctx context.Context, orgID uuid.UUID, loop models.SessionReviewLoop, pass models.SessionReviewLoopPass, decision models.ReviewLoopDecision, summary string) error {
+	if isLegacyAutomationLoop(loop) {
+		payload, dedupeKey, err := s.automationOpenPRTarget(ctx, orgID, loop)
+		if err != nil {
+			return err
+		}
+		return s.store.MarkPassCleanAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, decision, summary, payload, dedupeKey)
+	}
+	if loop.Source == models.ReviewLoopSourcePublication {
+		if _, _, err := s.refreshPublicationEvidence(ctx, orgID, loop); err != nil {
+			return err
+		}
+	}
+	return s.store.MarkPassClean(ctx, orgID, loop.ID, pass.ID, decision, summary)
+}
+
+func (s *Service) refreshPublicationEvidence(ctx context.Context, orgID uuid.UUID, loop models.SessionReviewLoop) (int64, string, error) {
+	if s.evidenceRefresher == nil {
+		failure := errors.New("publication review evidence refresher is unavailable")
+		return 0, "", errors.Join(failure, s.failLoop(ctx, orgID, loop, failure.Error()))
+	}
+	workspaceRevision, desiredHeadSHA, err := s.evidenceRefresher.RefreshPublicationEvidence(ctx, loop)
+	if err != nil {
+		return 0, "", errors.Join(err, s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to refresh publication review evidence: %s", err)))
+	}
+	evidenceStore, ok := s.store.(interface {
+		RefreshPublicationEvidence(context.Context, uuid.UUID, uuid.UUID, int64, string) error
+	})
+	if !ok {
+		failure := errors.New("publication review evidence store is unavailable")
+		return 0, "", errors.Join(failure, s.failLoop(ctx, orgID, loop, failure.Error()))
+	}
+	if err := evidenceStore.RefreshPublicationEvidence(ctx, orgID, loop.ID, workspaceRevision, desiredHeadSHA); err != nil {
+		return 0, "", errors.Join(err, s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to persist refreshed publication review evidence: %s", err)))
+	}
+	return workspaceRevision, desiredHeadSHA, nil
+}
+
+func (s *Service) markPassNeedsHumanDecision(ctx context.Context, orgID, loopID, passID uuid.UUID, decision models.ReviewLoopDecision, summary string, loop models.SessionReviewLoop) error {
+	if isLegacyAutomationLoop(loop) {
+		payload, dedupeKey, err := s.automationOpenPRTarget(ctx, orgID, loop)
+		if err != nil {
+			return err
+		}
+		return s.store.MarkPassNeedsHumanDecisionAndEnqueueOpenPR(ctx, orgID, loopID, passID, decision, summary, payload, dedupeKey)
+	}
+	return s.store.MarkPassNeedsHumanDecision(ctx, orgID, loopID, passID, decision, summary)
+}
+
+func isLegacyAutomationLoop(loop models.SessionReviewLoop) bool {
+	return loop.AutomationRunID != nil && loop.Source != models.ReviewLoopSourcePublication
 }
 
 func (s *Service) automationOpenPRTarget(ctx context.Context, orgID uuid.UUID, loop models.SessionReviewLoop) (map[string]any, string, error) {

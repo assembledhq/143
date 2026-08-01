@@ -1,6 +1,6 @@
 # Design: Agent-Initiated PR Publication with Automatic Review
 
-> **Status:** In Progress (PR 1 implemented) | **Last reviewed:** 2026-07-31
+> **Status:** In Progress (PRs 1-2 implemented) | **Last reviewed:** 2026-08-01
 >
 > **Depends on:** [overall.md](../overall.md),
 > [review agent loops](../implemented/78-review-agent-loops.md),
@@ -705,10 +705,13 @@ deliberate denormalization of the joined `session_review_loops` row reachable
 via `review_loop_id`. The copy exists so the atomic
 `loop clean + gate passed + open_pr enqueue` transaction can compare evidence
 without joining, and so evidence survives if the loop row is later relabelled
-(see the down migration). Both columns are written once, when the loop is
-linked, and are never updated in place — a new review writes a new loop link
-and a new pair. Any code path that updates one must update the other in the
-same statement.
+(see the down migration). The pair is written when the loop is linked. If an
+earlier pass fixes code, the worker pushes that checkpoint and atomically
+rotates both the loop evidence and publication copy before starting the next
+pass; the pair then remains fixed for that pass. Workspace movement outside
+that bounded fix transition invalidates the evidence and starts a new review
+loop. Any code path that updates one evidence field must update the other in
+the same statement.
 
 Every store method accepts `orgID` and filters by `org_id`. Fresh-review lookup
 uses the exact tenant/session/changeset/revision/SHA tuple and `status = clean`.

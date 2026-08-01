@@ -2,6 +2,8 @@ package db
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -32,7 +34,8 @@ func NewSessionReviewLoopStore(db DBTX) *SessionReviewLoopStore {
 }
 
 const reviewLoopSelectColumns = `id, org_id, session_id, automation_run_id, thread_id,
-	status, source, agent_type, max_passes, fix_mode, completed_passes, review_required,
+	status, source, changeset_id, workspace_revision, desired_head_sha,
+	agent_type, max_passes, fix_mode, completed_passes, review_required,
 	bypassed_by_user_id, bypass_reason, loop_start_checkpoint_key, latest_checkpoint_key,
 	latest_summary, started_by_user_id, started_at, completed_at`
 
@@ -88,11 +91,13 @@ func createLoopOn(ctx context.Context, q DBTX, loop *models.SessionReviewLoop) e
 	}
 	query := `
 		INSERT INTO session_review_loops (
-			org_id, session_id, automation_run_id, thread_id, status, source, agent_type,
+			org_id, session_id, automation_run_id, thread_id, status, source,
+			changeset_id, workspace_revision, desired_head_sha, agent_type,
 			max_passes, fix_mode, completed_passes, review_required, bypassed_by_user_id, bypass_reason,
 			loop_start_checkpoint_key, latest_checkpoint_key, latest_summary, started_by_user_id
 		) VALUES (
-			@org_id, @session_id, @automation_run_id, @thread_id, @status, @source, @agent_type,
+			@org_id, @session_id, @automation_run_id, @thread_id, @status, @source,
+			@changeset_id, @workspace_revision, @desired_head_sha, @agent_type,
 			@max_passes, @fix_mode, @completed_passes, @review_required, @bypassed_by_user_id, @bypass_reason,
 			@loop_start_checkpoint_key, @latest_checkpoint_key, @latest_summary, @started_by_user_id
 		)
@@ -104,6 +109,9 @@ func createLoopOn(ctx context.Context, q DBTX, loop *models.SessionReviewLoop) e
 		"thread_id":                 loop.ThreadID,
 		"status":                    loop.Status,
 		"source":                    loop.Source,
+		"changeset_id":              loop.ChangesetID,
+		"workspace_revision":        loop.WorkspaceRevision,
+		"desired_head_sha":          loop.DesiredHeadSHA,
 		"agent_type":                loop.AgentType,
 		"max_passes":                loop.MaxPasses,
 		"fix_mode":                  loop.FixMode,
@@ -184,6 +192,78 @@ func (s *SessionReviewLoopStore) GetLatestLoopByAutomationRun(ctx context.Contex
 		return models.SessionReviewLoop{}, fmt.Errorf("query automation review loop: %w", err)
 	}
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionReviewLoop])
+}
+
+func (s *SessionReviewLoopStore) GetFreshCleanPublicationLoop(
+	ctx context.Context,
+	orgID, sessionID, changesetID uuid.UUID,
+	workspaceRevision int64,
+	desiredHeadSHA string,
+) (models.SessionReviewLoop, error) {
+	query := `SELECT ` + reviewLoopSelectColumns + `
+		FROM session_review_loops
+		WHERE org_id = @org_id AND session_id = @session_id
+		  AND changeset_id = @changeset_id
+		  AND workspace_revision = @workspace_revision
+		  AND desired_head_sha = @desired_head_sha
+		  AND source = 'publication' AND status = 'clean'
+		ORDER BY completed_at DESC, id DESC
+		LIMIT 1`
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+		"workspace_revision": workspaceRevision, "desired_head_sha": desiredHeadSHA,
+	})
+	if err != nil {
+		return models.SessionReviewLoop{}, fmt.Errorf("query fresh clean publication review: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionReviewLoop])
+}
+
+func (s *SessionReviewLoopStore) RefreshPublicationEvidence(ctx context.Context, orgID, loopID uuid.UUID, workspaceRevision int64, desiredHeadSHA string) error {
+	if desiredHeadSHA == "" {
+		return fmt.Errorf("publication review desired head SHA is required")
+	}
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return fmt.Errorf("refresh publication review evidence requires transaction support")
+	}
+	tx, err := txStarter.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin publication evidence refresh: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := tx.Exec(ctx, `UPDATE session_review_loops
+		SET workspace_revision = @workspace_revision, desired_head_sha = @desired_head_sha
+		WHERE org_id = @org_id AND id = @loop_id AND source = 'publication' AND status = 'running'`, pgx.NamedArgs{
+		"org_id": orgID, "loop_id": loopID, "workspace_revision": workspaceRevision,
+		"desired_head_sha": desiredHeadSHA,
+	})
+	if err != nil {
+		return fmt.Errorf("refresh review loop publication evidence: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	result, err = tx.Exec(ctx, `UPDATE session_publications
+		SET review_workspace_revision = @workspace_revision,
+			review_desired_head_sha = @desired_head_sha,
+			desired_head_sha = @desired_head_sha,
+			updated_at = now()
+		WHERE org_id = @org_id AND review_loop_id = @loop_id
+		  AND state NOT IN ('completed', 'completed_noop', 'terminal_failed')`, pgx.NamedArgs{
+		"org_id": orgID, "loop_id": loopID, "workspace_revision": workspaceRevision,
+		"desired_head_sha": desiredHeadSHA,
+	})
+	if err != nil {
+		return fmt.Errorf("refresh publication linked evidence: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit publication evidence refresh: %w", err)
+	}
+	return nil
 }
 
 func (s *SessionReviewLoopStore) CreatePass(ctx context.Context, pass *models.SessionReviewLoopPass) error {
@@ -299,20 +379,19 @@ func (s *SessionReviewLoopStore) MarkPassClean(ctx context.Context, orgID, loopI
 	if err := decision.Validate(); err != nil {
 		return err
 	}
-	if err := execPassUpdateOn(ctx, s.db, `
-		UPDATE session_review_loop_passes
-		SET status = 'clean',
-		    agent_decision = @agent_decision,
-		    review_output = COALESCE(review_output, @summary),
-		    review_completed_at = COALESCE(review_completed_at, now()),
-		    summary = @summary
-		WHERE id = @id AND org_id = @org_id`, orgID, passID, pgx.NamedArgs{
-		"agent_decision": decision,
-		"summary":        summary,
-	}); err != nil {
-		return err
-	}
-	return s.markLoopTerminal(ctx, orgID, loopID, models.ReviewLoopStatusClean, summary)
+	return s.withTerminalTransition(ctx, func(tx pgx.Tx) error {
+		if err := execPassUpdateOn(ctx, tx, `
+			UPDATE session_review_loop_passes
+			SET status = 'clean', agent_decision = @agent_decision,
+			    review_output = COALESCE(review_output, @summary),
+			    review_completed_at = COALESCE(review_completed_at, now()), summary = @summary
+			WHERE id = @id AND org_id = @org_id`, orgID, passID, pgx.NamedArgs{
+			"agent_decision": decision, "summary": summary,
+		}); err != nil {
+			return err
+		}
+		return markLoopTerminalOn(ctx, tx, orgID, loopID, models.ReviewLoopStatusClean, summary)
+	})
 }
 
 func (s *SessionReviewLoopStore) MarkPassCleanAndEnqueueOpenPR(ctx context.Context, orgID, loopID, passID uuid.UUID, decision models.ReviewLoopDecision, summary string, payload map[string]any, dedupeKey string) error {
@@ -348,7 +427,9 @@ func (s *SessionReviewLoopStore) MarkPassFixComplete(ctx context.Context, orgID,
 }
 
 func (s *SessionReviewLoopStore) MarkLoopNeedsHumanDecision(ctx context.Context, orgID, loopID uuid.UUID, summary string) error {
-	return s.markLoopTerminal(ctx, orgID, loopID, models.ReviewLoopStatusNeedsHumanDecision, summary)
+	return s.withTerminalTransition(ctx, func(tx pgx.Tx) error {
+		return markLoopTerminalOn(ctx, tx, orgID, loopID, models.ReviewLoopStatusNeedsHumanDecision, summary)
+	})
 }
 
 func (s *SessionReviewLoopStore) MarkPassNeedsHumanDecision(ctx context.Context, orgID, loopID, passID uuid.UUID, decision models.ReviewLoopDecision, summary string) error {
@@ -376,7 +457,9 @@ func (s *SessionReviewLoopStore) MarkPassNeedsHumanDecisionAndEnqueueOpenPR(ctx 
 }
 
 func (s *SessionReviewLoopStore) MarkLoopFailed(ctx context.Context, orgID, loopID uuid.UUID, summary string) error {
-	return s.markLoopTerminal(ctx, orgID, loopID, models.ReviewLoopStatusFailed, summary)
+	return s.withTerminalTransition(ctx, func(tx pgx.Tx) error {
+		return markLoopTerminalOn(ctx, tx, orgID, loopID, models.ReviewLoopStatusFailed, summary)
+	})
 }
 
 func (s *SessionReviewLoopStore) MarkLoopFailedAndEnqueueOpenPR(ctx context.Context, orgID, loopID uuid.UUID, summary string, payload map[string]any, dedupeKey string) error {
@@ -398,7 +481,9 @@ func markPassNeedsHumanDecisionOn(ctx context.Context, q DBTX, orgID, passID uui
 }
 
 func (s *SessionReviewLoopStore) CancelLoop(ctx context.Context, orgID, loopID uuid.UUID) error {
-	return s.markLoopTerminal(ctx, orgID, loopID, models.ReviewLoopStatusCancelled, "Review loop cancelled.")
+	return s.withTerminalTransition(ctx, func(tx pgx.Tx) error {
+		return markLoopTerminalOn(ctx, tx, orgID, loopID, models.ReviewLoopStatusCancelled, "Review loop cancelled.")
+	})
 }
 
 func (s *SessionReviewLoopStore) execPassUpdate(ctx context.Context, query string, orgID, passID uuid.UUID, extra pgx.NamedArgs) error {
@@ -420,15 +505,13 @@ func execPassUpdateOn(ctx context.Context, q DBTX, query string, orgID, passID u
 	return nil
 }
 
-func (s *SessionReviewLoopStore) markLoopTerminal(ctx context.Context, orgID, loopID uuid.UUID, status models.ReviewLoopStatus, summary string) error {
-	return markLoopTerminalOn(ctx, s.db, orgID, loopID, status, summary)
-}
-
 func markLoopTerminalOn(ctx context.Context, q DBTX, orgID, loopID uuid.UUID, status models.ReviewLoopStatus, summary string) error {
 	if err := status.Validate(); err != nil {
 		return err
 	}
-	ct, err := q.Exec(ctx, `
+	var sessionID uuid.UUID
+	var source models.ReviewLoopSource
+	err := q.QueryRow(ctx, `
 		UPDATE session_review_loops
 		SET status = @status,
 		    latest_summary = @summary,
@@ -438,13 +521,123 @@ func markLoopTerminalOn(ctx context.Context, q DBTX, orgID, loopID uuid.UUID, st
 		        WHERE org_id = @org_id AND loop_id = @id AND status IN ('clean', 'needs_fix')
 		    ),
 		    completed_at = now()
-		WHERE id = @id AND org_id = @org_id AND status = 'running'`,
-		pgx.NamedArgs{"id": loopID, "org_id": orgID, "status": status, "summary": summary})
+		WHERE id = @id AND org_id = @org_id AND status = 'running'
+		RETURNING session_id, source`,
+		pgx.NamedArgs{"id": loopID, "org_id": orgID, "status": status, "summary": summary}).Scan(&sessionID, &source)
 	if err != nil {
 		return err
 	}
-	if ct.RowsAffected() == 0 {
-		return pgx.ErrNoRows
+	if source == models.ReviewLoopSourcePublication {
+		if err := finishPublicationReviewOn(ctx, q, orgID, loopID, status); err != nil {
+			return err
+		}
+		// A publication loop can own the session-wide review slot while a
+		// second publication is parked. Re-evaluate the parked intent after
+		// advancing the linked publication, regardless of terminal outcome.
+		return resumeParkedPublicationOn(ctx, q, orgID, sessionID)
+	}
+	return resumeParkedPublicationOn(ctx, q, orgID, sessionID)
+}
+
+func finishPublicationReviewOn(ctx context.Context, q DBTX, orgID, loopID uuid.UUID, status models.ReviewLoopStatus) error {
+	gate := models.SessionPublicationReviewGateFailed
+	state := models.SessionPublicationStateReviewPending
+	if status == models.ReviewLoopStatusClean {
+		gate = models.SessionPublicationReviewGatePassed
+		state = models.SessionPublicationStateReadyToPublish
+	} else if status == models.ReviewLoopStatusNeedsHumanDecision {
+		gate = models.SessionPublicationReviewGateNeedsHuman
+	}
+	var payload json.RawMessage
+	var queue models.SessionPublicationJobQueue
+	var changesetID uuid.UUID
+	err := q.QueryRow(ctx, `UPDATE session_publications AS publication
+		SET review_gate_state = @gate, state = @state, updated_at = now()
+		FROM session_review_loops AS loop, sessions AS session, session_changesets AS changeset
+		WHERE publication.org_id = @org_id AND publication.review_loop_id = @loop_id
+		  AND loop.org_id = publication.org_id AND loop.id = publication.review_loop_id
+		  AND session.org_id = publication.org_id AND session.id = publication.session_id
+		  AND changeset.org_id = publication.org_id AND changeset.session_id = publication.session_id
+		  AND changeset.id = publication.changeset_id
+		  AND publication.review_workspace_revision = loop.workspace_revision
+		  AND publication.review_desired_head_sha = loop.desired_head_sha
+		  AND (
+			@status <> 'clean'
+			OR (
+				session.workspace_revision = loop.workspace_revision
+				AND changeset.head_sha = loop.desired_head_sha
+			)
+		  )
+		  AND publication.state NOT IN ('completed', 'completed_noop', 'terminal_failed')
+		RETURNING publication.request_payload, publication.job_queue, publication.changeset_id`, pgx.NamedArgs{
+		"org_id": orgID, "loop_id": loopID, "gate": gate, "state": state, "status": status,
+	}).Scan(&payload, &queue, &changesetID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if status != models.ReviewLoopStatusClean {
+			return nil
+		}
+		// Clean evidence that no longer matches the current session revision
+		// and pushed changeset head is stale. Clear the link and atomically
+		// resume the original request so a new publication review is started.
+		err = q.QueryRow(ctx, `UPDATE session_publications
+			SET review_gate_state = 'pending', state = 'review_pending',
+				review_loop_id = NULL, review_workspace_revision = NULL,
+				review_desired_head_sha = NULL, updated_at = now()
+			WHERE org_id = @org_id AND review_loop_id = @loop_id
+			  AND state NOT IN ('completed', 'completed_noop', 'terminal_failed')
+			RETURNING request_payload, job_queue, changeset_id`, pgx.NamedArgs{
+			"org_id": orgID, "loop_id": loopID,
+		}).Scan(&payload, &queue, &changesetID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("invalidate stale publication review: %w", err)
+		}
+		dedupeKey := OpenPRDedupeKey(changesetID)
+		if _, err := enqueueOn(ctx, q, orgID, EnqueueOpts{
+			Queue: string(queue), JobType: "open_pr", Payload: payload, Priority: 5, DedupeKey: &dedupeKey,
+		}); err != nil {
+			return fmt.Errorf("enqueue publication after stale review: %w", err)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("advance publication review gate: %w", err)
+	}
+	if status != models.ReviewLoopStatusClean {
+		return nil
+	}
+	dedupeKey := OpenPRDedupeKey(changesetID)
+	if _, err := enqueueOn(ctx, q, orgID, EnqueueOpts{
+		Queue: string(queue), JobType: "open_pr", Payload: payload, Priority: 5, DedupeKey: &dedupeKey,
+	}); err != nil {
+		return fmt.Errorf("enqueue publication after clean review: %w", err)
+	}
+	return nil
+}
+
+func resumeParkedPublicationOn(ctx context.Context, q DBTX, orgID, sessionID uuid.UUID) error {
+	var payload json.RawMessage
+	var queue models.SessionPublicationJobQueue
+	var changesetID uuid.UUID
+	err := q.QueryRow(ctx, `SELECT request_payload, job_queue, changeset_id
+		FROM session_publications
+		WHERE org_id = @org_id AND session_id = @session_id
+		  AND state = 'review_pending' AND review_gate_state = 'pending' AND review_loop_id IS NULL
+		ORDER BY requested_at, id
+		LIMIT 1`, pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).Scan(&payload, &queue, &changesetID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load parked publication review: %w", err)
+	}
+	dedupeKey := OpenPRDedupeKey(changesetID)
+	if _, err := enqueueOn(ctx, q, orgID, EnqueueOpts{
+		Queue: string(queue), JobType: "open_pr", Payload: payload, Priority: 5, DedupeKey: &dedupeKey,
+	}); err != nil {
+		return fmt.Errorf("resume parked publication review: %w", err)
 	}
 	return nil
 }
