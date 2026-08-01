@@ -109,7 +109,19 @@ func (s *PRService) MaybeStartAutoRepair(ctx context.Context, orgID uuid.UUID, s
 	// Skip the exhausted-action badges: they are a PR health UI concern, the
 	// budget is rechecked below, and populating them here would repeat the
 	// organization, session, and user loads this function already performed.
-	health, err := s.getPullRequestHealth(ctx, orgID, pr.ID, healthBuildOptions{skipAutoRepairAttemptState: true})
+	//
+	// asyncRefreshAfter keeps this off the interactive staleness budget. The
+	// coordinator runs from the sync_pull_request_state and
+	// rebuild_pull_request_health job handlers, so borrowing the read path's
+	// two-minute threshold would make every projected rebuild pull in the
+	// authoritative readback that checkStateRequiresAuthoritativeSync avoided.
+	// Conflicts — the blocker this path actually reads merge state for — come
+	// from base-branch movement, which produces no webhook on this PR at all
+	// and is detected by the reconcile sweep regardless.
+	health, err := s.getPullRequestHealth(ctx, orgID, pr.ID, healthBuildOptions{
+		skipAutoRepairAttemptState: true,
+		asyncRefreshAfter:          prHealthStaleAfter,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("load pull request health for auto-repair: %w", err)
 	}

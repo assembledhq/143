@@ -137,7 +137,7 @@ Use SSE or polling only for surfaces that need it:
 
 - session transcripts and run state
 - preview startup state
-- PR health/readiness state
+- PR health and review-loop state
 - queues that operators actively watch
 
 Durable backend state remains authoritative. Optimistic UI is fine, but live updates should not imply a state transition that has not been committed.

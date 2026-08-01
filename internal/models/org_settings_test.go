@@ -120,12 +120,10 @@ func TestParseOrgSettings_SessionAutomation(t *testing.T) {
 		},
 		{
 			name: "parses automatic follow through settings",
-			raw:  json.RawMessage(`{"session_automation":{"automatic_follow_through":{"readiness_after_review_loop":true,"readiness_after_review_loop_states":["clean"],"resolve_conflicts_when_idle":true,"fix_tests_when_idle":true}}}`),
+			raw:  json.RawMessage(`{"session_automation":{"automatic_follow_through":{"resolve_conflicts_when_idle":true,"fix_tests_when_idle":true}}}`),
 			want: AutomaticFollowThroughOrgSettings{
-				ReadinessAfterReviewLoop:       true,
-				ReadinessAfterReviewLoopStates: []ReviewLoopStatus{ReviewLoopStatusClean},
-				ResolveConflictsWhenIdle:       &enabled,
-				FixTestsWhenIdle:               &enabled,
+				ResolveConflictsWhenIdle: &enabled,
+				FixTestsWhenIdle:         &enabled,
 			},
 			wantEffectiveRepair: true,
 		},
@@ -139,16 +137,6 @@ func TestParseOrgSettings_SessionAutomation(t *testing.T) {
 				FixTestsWhenIdle:         &disabled,
 			},
 			wantEffectiveRepair: false,
-		},
-		{
-			name:    "rejects non-terminal readiness states",
-			raw:     json.RawMessage(`{"session_automation":{"automatic_follow_through":{"readiness_after_review_loop_states":["running"]}}}`),
-			wantErr: "not terminal",
-		},
-		{
-			name:    "rejects invalid readiness states",
-			raw:     json.RawMessage(`{"session_automation":{"automatic_follow_through":{"readiness_after_review_loop_states":["unknown"]}}}`),
-			wantErr: "invalid ReviewLoopStatus",
 		},
 		{
 			name:    "rejects empty allowlist when bot mode is allowlist",
@@ -202,7 +190,6 @@ func TestDefaultNewOrganizationSettings_EnablesAutomaticRepair(t *testing.T) {
 	require.True(t, *settings.SessionAutomation.AutomaticFollowThrough.ResolveConflictsWhenIdle, "new organizations should default automatic conflict repair on")
 	require.NotNil(t, settings.SessionAutomation.AutomaticFollowThrough.FixTestsWhenIdle, "new organizations should persist an explicit test repair setting")
 	require.True(t, *settings.SessionAutomation.AutomaticFollowThrough.FixTestsWhenIdle, "new organizations should default automatic test repair on")
-	require.False(t, settings.SessionAutomation.AutomaticFollowThrough.ReadinessAfterReviewLoop, "new organizations should not change the readiness default")
 }
 
 func TestDefaultNewOrganizationSettings_LeavesCodingAgentDefaultsUnpinned(t *testing.T) {
@@ -366,39 +353,6 @@ func TestAutomaticFollowThroughOrgSettings_EffectiveRepairDefaults(t *testing.T)
 
 			require.Equal(t, tt.wantConflictsOn, tt.settings.EffectiveResolveConflictsWhenIdle(), "effective conflict repair setting should match the organization policy")
 			require.Equal(t, tt.wantTestRepairOn, tt.settings.EffectiveFixTestsWhenIdle(), "effective test repair setting should match the organization policy")
-		})
-	}
-}
-
-func TestAutomaticFollowThroughOrgSettings_EffectiveReadinessAfterReviewLoopStates(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		settings AutomaticFollowThroughOrgSettings
-		want     []ReviewLoopStatus
-	}{
-		{
-			name:     "defaults to clean",
-			settings: AutomaticFollowThroughOrgSettings{},
-			want:     []ReviewLoopStatus{ReviewLoopStatusClean},
-		},
-		{
-			name: "returns configured states",
-			settings: AutomaticFollowThroughOrgSettings{
-				ReadinessAfterReviewLoopStates: []ReviewLoopStatus{ReviewLoopStatusClean, ReviewLoopStatusFailed},
-			},
-			want: []ReviewLoopStatus{ReviewLoopStatusClean, ReviewLoopStatusFailed},
-		},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			got := tt.settings.EffectiveReadinessAfterReviewLoopStates()
-			require.Equal(t, tt.want, got, "EffectiveReadinessAfterReviewLoopStates should return expected states")
 		})
 	}
 }

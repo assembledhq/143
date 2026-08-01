@@ -42,12 +42,81 @@ func TestSessionChangesetSplitMigrationPinsPhaseThreeContracts(t *testing.T) {
 	require.NoError(t, err, "test should read the changeset split migration")
 	sql := string(body)
 	require.Contains(t, sql, "source_diff_snapshot_id uuid NOT NULL", "split plans should freeze an immutable diff snapshot")
-	require.Contains(t, sql, "FOREIGN KEY (changeset_id, org_id, session_id)", "split ownership and readiness should enforce tenant and session ownership")
+	require.Contains(t, sql, "FOREIGN KEY (changeset_id, org_id, session_id)", "split ownership should enforce tenant and session ownership")
 	require.Contains(t, sql, "session_changeset_split_omissions", "confirmed omissions should remain auditable")
 	require.Contains(t, sql, "session_changesets_one_materializing_per_session", "worktree materialization should serialize per session")
-	require.Contains(t, sql, "pr_readiness_runs_changeset_scope_fkey", "readiness runs should be changeset scoped")
-	require.Contains(t, sql, "pr_readiness_checks_changeset_scope_fkey", "readiness checks should be changeset scoped")
-	require.Contains(t, sql, "pr_readiness_bypasses_changeset_scope_fkey", "readiness bypasses should be changeset scoped")
+}
+
+func TestRemovePRReadinessMigrationPinsShutdownContracts(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000267_remove_pr_readiness.up.sql")
+	require.NoError(t, err, "test should read the PR readiness removal migration")
+	sql := string(body)
+
+	require.Contains(t, sql, "LOCK TABLE jobs", "migration should close the rolling-deploy enqueue race")
+	require.Contains(t, sql, "status = 'running'", "migration should refuse to drop readiness state while a worker is using it")
+	require.Contains(t, sql, "trg_reject_removed_pr_readiness_jobs", "migration should prevent old processes from enqueueing removed jobs")
+	require.Contains(t, sql, "status = 'cancelled'", "migration should cancel pending readiness jobs")
+	require.NotContains(t, sql, "DELETE FROM jobs", "migration should cancel rather than delete readiness jobs so history survives and the jobs lock is not held for a sequential scan")
+	require.Contains(t, sql, "DELETE FROM session_changeset_leases", "migration should clear readiness leases before narrowing the lease constraint")
+	require.Contains(t, sql, "UPDATE organizations", "migration should remove retired organization settings before strict decoding")
+	require.Contains(t, sql, "UPDATE users", "migration should remove retired user settings before strict decoding")
+	require.Contains(t, sql, "UPDATE slack_bot_settings", "migration should remove retired bot-level Slack subscriptions")
+	require.Contains(t, sql, "UPDATE slack_channel_settings", "migration should remove retired channel-level Slack subscriptions")
+	require.Contains(t, sql, `"pr.readiness_attention"`, "migration should identify the retired Slack event exactly")
+	for _, table := range []string{
+		"pr_readiness_bypasses",
+		"pr_readiness_checks",
+		"pr_readiness_runs",
+		"pr_readiness_custom_checks",
+		"pr_readiness_policies",
+		"pr_readiness_contexts",
+	} {
+		require.Contains(t, sql, "DROP TABLE "+table, "migration should drop every readiness table")
+	}
+}
+
+func TestRemovedPRReadinessTablesDoNotBreakHistoricalRollbacks(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		path     string
+		required []string
+	}{
+		{
+			name: "changeset rollback guards removed readiness tables",
+			path: "../../migrations/000242_session_changeset_split_plans.down.sql",
+			required: []string{
+				"ALTER TABLE IF EXISTS pr_readiness_bypasses",
+				"ALTER TABLE IF EXISTS pr_readiness_checks",
+				"to_regclass('pr_readiness_runs') IS NOT NULL",
+				"ALTER TABLE IF EXISTS pr_readiness_runs",
+			},
+		},
+		{
+			name: "core gaps rollback guards removed readiness tables",
+			path: "../../migrations/000213_pr_readiness_core_gaps.down.sql",
+			required: []string{
+				"ALTER TABLE IF EXISTS pr_readiness_checks",
+				"ALTER TABLE IF EXISTS pr_readiness_runs",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			body, err := os.ReadFile(tt.path)
+			require.NoError(t, err, "test should read the historical readiness rollback migration")
+			sql := string(body)
+			for _, required := range tt.required {
+				require.Contains(t, sql, required, "historical rollback should tolerate readiness tables removed by migration 267")
+			}
+		})
+	}
 }
 
 func TestAutomationNoChangeBackfillPinsSafeNoopPredicates(t *testing.T) {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/rs/zerolog"
+	"golang.org/x/sync/singleflight"
 
 	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 )
@@ -27,7 +28,10 @@ type Service struct {
 	cache        map[int64]*cachedToken
 	sandboxCache map[sandboxTokenCacheKey]*cachedToken
 	mu           sync.RWMutex
+	tokenGroup   singleflight.Group
 }
+
+const sharedTokenRequestTimeout = 15 * time.Second
 
 type sandboxTokenCacheKey struct {
 	InstallationID int64
@@ -116,28 +120,52 @@ func (s *Service) GitHubAppID() int64 {
 }
 
 func (s *Service) GetInstallationToken(ctx context.Context, installationID int64) (string, error) {
+	if token, ok := s.cachedInstallationToken(installationID); ok {
+		return token, nil
+	}
+
+	result := s.tokenGroup.DoChan(fmt.Sprintf("installation:%d", installationID), func() (any, error) {
+		if token, ok := s.cachedInstallationToken(installationID); ok {
+			return token, nil
+		}
+
+		requestCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sharedTokenRequestTimeout)
+		defer cancel()
+		jwtToken, err := s.generateJWT()
+		if err != nil {
+			return "", err
+		}
+
+		token, expiresAt, err := s.exchangeForInstallationToken(requestCtx, jwtToken, installationID)
+		if err != nil {
+			return "", err
+		}
+
+		s.mu.Lock()
+		s.cache[installationID] = &cachedToken{Token: token, ExpiresAt: expiresAt}
+		s.mu.Unlock()
+
+		return token, nil
+	})
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case completed := <-result:
+		if completed.Err != nil {
+			return "", completed.Err
+		}
+		return completed.Val.(string), nil
+	}
+}
+
+func (s *Service) cachedInstallationToken(installationID int64) (string, bool) {
 	s.mu.RLock()
 	cached, ok := s.cache[installationID]
 	s.mu.RUnlock()
 	if ok && time.Now().Add(5*time.Minute).Before(cached.ExpiresAt) {
-		return cached.Token, nil
+		return cached.Token, true
 	}
-
-	jwtToken, err := s.generateJWT()
-	if err != nil {
-		return "", err
-	}
-
-	token, expiresAt, err := s.exchangeForInstallationToken(ctx, jwtToken, installationID)
-	if err != nil {
-		return "", err
-	}
-
-	s.mu.Lock()
-	s.cache[installationID] = &cachedToken{Token: token, ExpiresAt: expiresAt}
-	s.mu.Unlock()
-
-	return token, nil
+	return "", false
 }
 
 // GetSandboxInstallationToken returns a repository-bound installation token
@@ -169,32 +197,56 @@ func (s *Service) GetSandboxInstallationToken(ctx context.Context, installationI
 	}
 
 	key := sandboxTokenCacheKey{InstallationID: installationID, RepositoryID: repositoryID, Action: action}
+	if token, ok := s.cachedSandboxInstallationToken(key); ok {
+		return token, nil
+	}
+
+	result := s.tokenGroup.DoChan(fmt.Sprintf("sandbox:%d:%d:%s", installationID, repositoryID, action), func() (any, error) {
+		if token, ok := s.cachedSandboxInstallationToken(key); ok {
+			return token, nil
+		}
+
+		requestCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sharedTokenRequestTimeout)
+		defer cancel()
+		jwtToken, err := s.generateJWT()
+		if err != nil {
+			return "", err
+		}
+		token, expiresAt, err := s.exchangeForScopedInstallationToken(requestCtx, jwtToken, installationID, installationTokenRequest{
+			RepositoryIDs: []int64{repositoryID},
+			Permissions:   permissions,
+		})
+		if err != nil {
+			return "", err
+		}
+
+		s.mu.Lock()
+		if s.sandboxCache == nil {
+			s.sandboxCache = make(map[sandboxTokenCacheKey]*cachedToken)
+		}
+		s.sandboxCache[key] = &cachedToken{Token: token, ExpiresAt: expiresAt}
+		s.mu.Unlock()
+		return token, nil
+	})
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case completed := <-result:
+		if completed.Err != nil {
+			return "", completed.Err
+		}
+		return completed.Val.(string), nil
+	}
+}
+
+func (s *Service) cachedSandboxInstallationToken(key sandboxTokenCacheKey) (string, bool) {
 	s.mu.RLock()
 	cached, ok := s.sandboxCache[key]
 	s.mu.RUnlock()
 	if ok && time.Now().Add(5*time.Minute).Before(cached.ExpiresAt) {
-		return cached.Token, nil
+		return cached.Token, true
 	}
-
-	jwtToken, err := s.generateJWT()
-	if err != nil {
-		return "", err
-	}
-	token, expiresAt, err := s.exchangeForScopedInstallationToken(ctx, jwtToken, installationID, installationTokenRequest{
-		RepositoryIDs: []int64{repositoryID},
-		Permissions:   permissions,
-	})
-	if err != nil {
-		return "", err
-	}
-
-	s.mu.Lock()
-	if s.sandboxCache == nil {
-		s.sandboxCache = make(map[sandboxTokenCacheKey]*cachedToken)
-	}
-	s.sandboxCache[key] = &cachedToken{Token: token, ExpiresAt: expiresAt}
-	s.mu.Unlock()
-	return token, nil
+	return "", false
 }
 
 func (s *Service) generateJWT() (string, error) {

@@ -10,10 +10,8 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
-	"text/template"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,7 +36,6 @@ import (
 	pagerdutysvc "github.com/assembledhq/143/internal/services/pagerduty"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/prioritization"
-	readinesssvc "github.com/assembledhq/143/internal/services/readiness"
 	reviewloopsvc "github.com/assembledhq/143/internal/services/reviewloop"
 	slackbotsvc "github.com/assembledhq/143/internal/services/slackbot"
 	"github.com/assembledhq/143/internal/services/storage"
@@ -53,13 +50,6 @@ const continuePostSuccessActionPushPRChanges = "push_pr_changes"
 
 var enqueuePRPushChangesJobAfterContinue = enqueuePRPushChangesJob
 
-// prePRReviewMaxWait bounds how long a readiness run will requeue itself waiting
-// for the agent review loop to finish. The wait uses BypassMaxRetryDuration +
-// non-consuming retries, so without this deadline a review loop that never
-// reaches a clean snapshot would requeue every prePRReviewRetryDelay forever
-// (re-running custom-check LLM calls each time). Past the deadline the run is
-// marked failed instead.
-const prePRReviewMaxWait = 30 * time.Minute
 const defaultSessionPrewarmQueuedTimeout = 15 * time.Minute
 const failureCategoryStaleSandbox = "stale_sandbox"
 const failureCategoryInterrupted = "interrupted_unrecovered"
@@ -489,7 +479,6 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("open_pr", newOpenPRHandler(stores, services, logger))
 		w.Register("create_branch", newCreateBranchHandler(stores, services, logger))
 		w.Register("push_pr_changes", newPushPRChangesHandler(stores, services, logger))
-		w.Register("run_pr_readiness", newRunPRReadinessHandler(stores, services, logger))
 		w.Register(models.JobTypeMaterializeChangeset, newMaterializeChangesetHandler(stores, services, logger))
 		w.Register(models.JobTypeVerifyChangesetSplit, newVerifyChangesetSplitHandler(stores, services, logger))
 		w.Register(models.JobTypeRestackChangesets, newRestackChangesetsHandler(stores, services, logger))
@@ -632,7 +621,6 @@ type Stores struct {
 	Automations         *db.AutomationStore    // nil-safe: automations feature disabled if nil
 	AutomationRuns      *db.AutomationRunStore // nil-safe: automations feature disabled if nil
 	ReviewLoops         *db.SessionReviewLoopStore
-	PRReadiness         *db.PRReadinessStore
 	CodeReviews         *db.CodeReviewStore
 	SessionIssueLinks   *db.SessionIssueLinkStore // nil-safe: needed for Linear milestones
 	Previews            *db.PreviewStore
@@ -4171,8 +4159,6 @@ func slackNotificationDefaultTitle(kind models.SlackNotificationKind) string {
 		return "143 needs your response"
 	case models.SlackNotificationPRAutoRepairAttention:
 		return "Automatic PR repair needs attention"
-	case models.SlackNotificationPRReadinessAttention:
-		return "PR readiness needs attention"
 	default:
 		return "143 notification"
 	}
@@ -4202,8 +4188,6 @@ func slackNotificationDefaultBody(kind models.SlackNotificationKind) string {
 		return "The agent is waiting for a human response."
 	case models.SlackNotificationPRAutoRepairAttention:
 		return "143 could not complete automatic PR repair. Open the session or pull request to decide the next step."
-	case models.SlackNotificationPRReadinessAttention:
-		return "Automatic readiness checks found blockers. Open the session or pull request to decide the next step."
 	default:
 		return ""
 	}
@@ -4229,8 +4213,7 @@ func slackNotificationEventDisabled(eventKind string) bool {
 		string(models.SlackNotificationPreviewReady),
 		string(models.SlackNotificationPreviewFailed),
 		string(models.SlackNotificationPreviewStale),
-		string(models.SlackNotificationPRAutoRepairAttention),
-		string(models.SlackNotificationPRReadinessAttention):
+		string(models.SlackNotificationPRAutoRepairAttention):
 		return true
 	}
 	return false
@@ -4428,32 +4411,6 @@ func notifyPRAutoRepairAttention(ctx context.Context, stores *Stores, logger zer
 	enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
 		EventKind:     string(models.SlackNotificationPRAutoRepairAttention),
 		Title:         "Automatic PR repair needs attention",
-		Body:          body,
-		SessionID:     &sessionID,
-		PullRequestID: pullRequestID,
-	})
-}
-
-func notifyPRAutoReadinessAttention(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID, status models.PRReadinessRunStatus, summary string) {
-	var pullRequestID *uuid.UUID
-	if stores != nil && stores.PullRequests != nil {
-		pr, err := stores.PullRequests.GetPrimaryBySessionID(ctx, orgID, sessionID)
-		if err == nil {
-			id := pr.ID
-			pullRequestID = &id
-		} else if !errors.Is(err, pgx.ErrNoRows) {
-			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load pull request for automatic PR readiness notification")
-		}
-	}
-	body := "Automatic readiness checks need attention."
-	if strings.TrimSpace(summary) != "" {
-		body = summary
-	} else if status == models.PRReadinessRunStatusFailed {
-		body = "Automatic readiness checks failed before producing a result."
-	}
-	enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
-		EventKind:     string(models.SlackNotificationPRReadinessAttention),
-		Title:         "PR readiness needs attention",
 		Body:          body,
 		SessionID:     &sessionID,
 		PullRequestID: pullRequestID,
@@ -9773,7 +9730,8 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			}
 			if errors.Is(err, agent.ErrStalePullRequestHead) {
 				if input.PullRequestID != "" && services.PR != nil {
-					if syncErr := services.PR.SyncPullRequestState(ctx, orgID, uuid.MustParse(input.PullRequestID)); syncErr != nil {
+					syncCtx := ghservice.WithPullRequestSyncReason(ctx, ghservice.PullRequestSyncReasonHeadChanged)
+					if syncErr := services.PR.SyncPullRequestState(syncCtx, orgID, uuid.MustParse(input.PullRequestID)); syncErr != nil {
 						logger.Warn().Err(syncErr).Str("pull_request_id", input.PullRequestID).Msg("failed to sync pull request state after stale repair head")
 					}
 				}
@@ -10027,7 +9985,8 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			if input.AutoAttempt {
 				metrics.RecordPRAutoRepairOutcome(ctx, orgID.String(), "", string(continueOpts.PRRepair.CommandType), "completed")
 			}
-			if syncErr := services.PR.SyncPullRequestState(ctx, orgID, continueOpts.PRRepair.PullRequestID); syncErr != nil {
+			syncCtx := ghservice.WithPullRequestSyncReason(ctx, ghservice.PullRequestSyncReasonRepair)
+			if syncErr := services.PR.SyncPullRequestState(syncCtx, orgID, continueOpts.PRRepair.PullRequestID); syncErr != nil {
 				if errors.Is(syncErr, ghservice.ErrPullRequestMergeabilityPending) {
 					// The health snapshot was refreshed to the post-repair head;
 					// only GitHub's mergeability flag is still settling. The
@@ -10691,6 +10650,7 @@ func newSyncPullRequestStateHandler(services *Services, logger zerolog.Logger) J
 		var input struct {
 			OrgID         string `json:"org_id"`
 			PullRequestID string `json:"pull_request_id"`
+			SyncReason    string `json:"sync_reason"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal sync_pull_request_state payload: %w", err)
@@ -10703,8 +10663,17 @@ func newSyncPullRequestStateHandler(services *Services, logger zerolog.Logger) J
 		if err != nil {
 			return fmt.Errorf("parse pull request ID: %w", err)
 		}
-		logger.Info().Str("org_id", orgID.String()).Str("pull_request_id", pullRequestID.String()).Msg("starting sync_pull_request_state job")
-		if err := services.PR.SyncPullRequestState(ctx, orgID, pullRequestID); err != nil {
+		syncReason := ghservice.PullRequestSyncReason(input.SyncReason)
+		if syncReason.Validate() != nil {
+			syncReason = ghservice.PullRequestSyncReasonManual
+		}
+		logger.Info().
+			Str("org_id", orgID.String()).
+			Str("pull_request_id", pullRequestID.String()).
+			Str("sync_reason", string(syncReason)).
+			Msg("starting sync_pull_request_state job")
+		syncCtx := ghservice.WithPullRequestSyncReason(ctx, syncReason)
+		if err := services.PR.SyncPullRequestState(syncCtx, orgID, pullRequestID); err != nil {
 			if errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
 				return &RetryableError{Err: err, ConsumeAttempt: true}
 			}
@@ -11061,7 +11030,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			if persisted {
 				// A review-loop continuation may carry only scope. Restore all
 				// caller choices from the first durable request before running
-				// readiness checks or invoking the PR service.
+				// review policy checks or invoking the PR service.
 				input = persistedInput
 				payload = append(json.RawMessage(nil), publication.RequestPayload...)
 				publicationSource = publication.Source
@@ -11124,9 +11093,9 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 		}
 
 		if input.RequestedRole == string(models.RoleBuilder) {
-			if err := ensureBuilderReadinessFresh(ctx, stores, run, changesetID); err != nil {
-				if stateErr := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStateFailed, "PR readiness blockers must pass before creating a PR."); stateErr != nil {
-					logger.Error().Err(stateErr).Msg("failed to mark PR creation blocked by readiness")
+			if err := ensureBuilderReviewFresh(ctx, stores, run, changesetID); err != nil {
+				if stateErr := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStateFailed, "A clean Review for the current snapshot is required before creating a pull request."); stateErr != nil {
+					logger.Error().Err(stateErr).Msg("failed to mark PR creation blocked by review policy")
 				}
 				return err
 			}
@@ -11340,7 +11309,7 @@ func completeOpenPRJob(
 
 // registerOpenPRPublicationDeadLetter closes the durable publication state if
 // any retryable failure after StartAttempt exhausts the worker's retry policy.
-// Without this hook, failures in pre-push guards (for example readiness or the
+// Without this hook, failures in pre-push guards (for example the
 // automation review service) can leave a review_pending/requested row excluded
 // from reconciliation forever after its final job attempt.
 func registerOpenPRPublicationDeadLetter(
@@ -11393,571 +11362,6 @@ func registerOpenPRDeadLetterMilestone(ctx context.Context, stores *Stores, logg
 		defer cancel()
 		linear.EnqueueMilestone(writeCtx, stores.Jobs, logger, orgID, sessionID, "failed", 0)
 	})
-}
-
-func ensureBuilderReadinessFresh(ctx context.Context, stores *Stores, run models.Session, changesetID *uuid.UUID) error {
-	if stores == nil || stores.PRReadiness == nil {
-		return fmt.Errorf("PR readiness policy is not configured")
-	}
-	resolved, err := stores.PRReadiness.ResolvePolicy(ctx, run.OrgID, run.RepositoryID)
-	if err != nil {
-		return fmt.Errorf("resolve PR readiness policy: %w", err)
-	}
-	if !resolved.Config.RequiresRoleReadiness(models.RoleBuilder) {
-		return nil
-	}
-	var readinessRun *models.PRReadinessRun
-	if changesetID != nil {
-		readinessRun, err = stores.PRReadiness.GetLatestByChangeset(ctx, run.OrgID, run.ID, *changesetID)
-	} else {
-		readinessRun, err = stores.PRReadiness.GetLatestBySession(ctx, run.OrgID, run.ID)
-	}
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("PR readiness is required before builder PR creation")
-		}
-		return fmt.Errorf("load PR readiness for builder PR creation: %w", err)
-	}
-	if readinessRun.Status == models.PRReadinessRunStatusQueued || readinessRun.Status == models.PRReadinessRunStatusRunning {
-		return fmt.Errorf("PR readiness is still running")
-	}
-	stale := readinessRun.EvaluatedWorkspaceRevision != run.WorkspaceRevision || stringValue(readinessRun.EvaluatedSnapshotKey) != stringValue(run.SnapshotKey)
-	if changesetID != nil && stores.SessionChangesets != nil {
-		changeset, loadErr := stores.SessionChangesets.GetByID(ctx, run.OrgID, run.ID, *changesetID)
-		if loadErr != nil {
-			return fmt.Errorf("load changeset for builder readiness: %w", loadErr)
-		}
-		stale = stringValue(readinessRun.EvaluatedHeadSHA) != stringValue(changeset.HeadSHA)
-	}
-	if stale {
-		return fmt.Errorf("PR readiness is stale for current workspace revision")
-	}
-	if readinessRun.Status == models.PRReadinessRunStatusFailed {
-		return fmt.Errorf("PR readiness is blocked")
-	}
-	if blockers := readinessRun.UnbypassedBlockingCheckKeys(models.RoleBuilder); len(blockers) > 0 {
-		return fmt.Errorf("PR readiness blocking check failed: %s", strings.Join(blockers, ", "))
-	}
-	return nil
-}
-
-func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
-	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
-		var input struct {
-			OrgID       string `json:"org_id"`
-			SessionID   string `json:"session_id"`
-			ReadinessID string `json:"readiness_id"`
-		}
-		if err := json.Unmarshal(payload, &input); err != nil {
-			return fmt.Errorf("unmarshal run_pr_readiness payload: %w", err)
-		}
-		orgID, err := parseOrgID(input.OrgID, ctx)
-		if err != nil {
-			return fmt.Errorf("parse org ID: %w", err)
-		}
-		sessionID, err := uuid.Parse(input.SessionID)
-		if err != nil {
-			return fmt.Errorf("parse session ID: %w", err)
-		}
-		readinessID, err := uuid.Parse(input.ReadinessID)
-		if err != nil {
-			return fmt.Errorf("parse readiness ID: %w", err)
-		}
-		if stores == nil || stores.PRReadiness == nil || stores.Sessions == nil {
-			return fmt.Errorf("PR readiness stores are not configured")
-		}
-		registerPRReadinessDeadLetter(ctx, stores, logger, orgID, readinessID)
-
-		run, err := stores.PRReadiness.GetRunByID(ctx, orgID, readinessID)
-		if err != nil {
-			return fmt.Errorf("load PR readiness run: %w", err)
-		}
-		// Skip runs that already reached a terminal state (e.g. a dead-letter
-		// MarkFailed or a prior completion). MarkRunning is guarded the same way,
-		// so treat its ErrNoRows as "already terminal" rather than a job failure.
-		if run.Status != models.PRReadinessRunStatusQueued && run.Status != models.PRReadinessRunStatusRunning {
-			logger.Info().
-				Str("session_id", sessionID.String()).
-				Str("readiness_id", readinessID.String()).
-				Str("status", string(run.Status)).
-				Msg("PR readiness run already terminal; skipping")
-			return nil
-		}
-		if run.Status != models.PRReadinessRunStatusRunning {
-			if err := stores.PRReadiness.MarkRunning(ctx, orgID, readinessID); err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					return nil
-				}
-				return err
-			}
-		}
-		session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
-		if err != nil {
-			return fmt.Errorf("load readiness session: %w", err)
-		}
-		changeset := models.SessionChangeset{ID: run.ChangesetID, OrgID: orgID, SessionID: sessionID, IsPrimary: true}
-		if stores.SessionChangesets != nil && run.ChangesetID != uuid.Nil {
-			changeset, err = stores.SessionChangesets.GetByID(ctx, orgID, sessionID, run.ChangesetID)
-			if err != nil {
-				return fmt.Errorf("load readiness changeset: %w", err)
-			}
-		}
-		if !changeset.IsPrimary && changeset.WorktreePath != nil {
-			holderID := uuid.New()
-			if _, err := stores.SessionChangesets.AcquireLease(ctx, orgID, sessionID, changeset.ID, holderID, models.ChangesetLeaseTypeReadiness, "pull request readiness", 10*time.Minute, true); err != nil {
-				return err
-			}
-			defer func() {
-				if releaseErr := stores.SessionChangesets.ReleaseLease(context.WithoutCancel(ctx), orgID, sessionID, changeset.ID, holderID); releaseErr != nil {
-					logger.Warn().Err(releaseErr).Str("changeset_id", changeset.ID.String()).Msg("failed to release changeset readiness lease")
-				}
-			}()
-		}
-		if run.EvaluatedHeadSHA != nil && (changeset.HeadSHA == nil || *run.EvaluatedHeadSHA != *changeset.HeadSHA) {
-			return stores.PRReadiness.MarkFailed(ctx, orgID, readinessID, "Readiness became stale after pull request changes")
-		}
-		if changeset.IsPrimary {
-			if loop, err := runningReadinessReviewLoop(ctx, stores, session); err != nil {
-				return err
-			} else if loop != nil {
-				if time.Since(run.CreatedAt) > prePRReviewMaxWait {
-					return failReadinessReviewWaitTimeout(ctx, stores, logger, orgID, readinessID, sessionID)
-				}
-				return retryPRReadinessReviewLoop(logger, sessionID, readinessID)
-			}
-		}
-		if err := ensureSessionSnapshotQuiescent(ctx, stores, session); err != nil {
-			return err
-		}
-
-		var latestLoop *models.SessionReviewLoop
-		if changeset.IsPrimary {
-			var reviewReady bool
-			latestLoop, reviewReady, err = ensureReadinessReviewLoop(ctx, stores, services, session, stringValue(run.EvaluatedSnapshotKey))
-			if err != nil {
-				return err
-			}
-			if !reviewReady {
-				if time.Since(run.CreatedAt) > prePRReviewMaxWait {
-					return failReadinessReviewWaitTimeout(ctx, stores, logger, orgID, readinessID, sessionID)
-				}
-				return retryPRReadinessReviewLoop(logger, sessionID, readinessID)
-			}
-		}
-
-		logs := []models.SessionLog{}
-		if stores.SessionLogs != nil {
-			if loaded, err := stores.SessionLogs.ListByRunID(ctx, orgID, sessionID); err == nil {
-				logs = loaded
-			} else {
-				return fmt.Errorf("load readiness logs: %w", err)
-			}
-		}
-		changedFiles := []string{}
-		if !changeset.IsPrimary && changeset.MaterializedDiff != nil {
-			changedFiles = changedPathsFromPatch(*changeset.MaterializedDiff)
-		} else if stores.ThreadFileEvents != nil {
-			events, err := stores.ThreadFileEvents.ListBySession(ctx, orgID, sessionID, nil)
-			if err != nil {
-				return fmt.Errorf("load readiness changed files: %w", err)
-			}
-			seen := map[string]struct{}{}
-			for _, event := range events {
-				if _, ok := seen[event.Path]; ok {
-					continue
-				}
-				seen[event.Path] = struct{}{}
-				changedFiles = append(changedFiles, event.Path)
-			}
-		}
-		linkedIssueCount := 0
-		if stores.SessionIssueLinks != nil {
-			links, err := stores.SessionIssueLinks.ListBySession(ctx, orgID, sessionID)
-			if err != nil {
-				return fmt.Errorf("load readiness issue links: %w", err)
-			}
-			linkedIssueCount = len(links)
-		}
-		policyConfig := models.DefaultPRReadinessPolicyConfig()
-		if stores.PRReadiness != nil {
-			resolved, err := stores.PRReadiness.ResolvePolicy(ctx, orgID, session.RepositoryID)
-			if err != nil {
-				return fmt.Errorf("resolve PR readiness policy: %w", err)
-			}
-			policyConfig = resolved.Config
-		}
-		issueLessReason := ""
-		if stores.PRReadiness != nil {
-			contextValue, err := stores.PRReadiness.GetContext(ctx, orgID, sessionID)
-			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-				return fmt.Errorf("load PR readiness context: %w", err)
-			}
-			if err == nil {
-				issueLessReason = contextValue.IssueLessReason
-			}
-		}
-		customChecks := []models.PRReadinessCheck{}
-		if stores.PRReadiness != nil {
-			definedChecks, err := stores.PRReadiness.ListCustomChecks(ctx, orgID, session.RepositoryID)
-			if err != nil {
-				return fmt.Errorf("load PR readiness custom checks: %w", err)
-			}
-			customChecks = evaluateCustomReadinessChecks(ctx, services, definedChecks, session, changedFiles, logs)
-		}
-
-		result, err := readinesssvc.NewEvaluator(policyConfig.EffectivePolicy()).Evaluate(ctx, readinesssvc.EvaluationInput{
-			Session:                    session,
-			EvaluatedWorkspaceRevision: run.EvaluatedWorkspaceRevision,
-			EvaluatedSnapshotKey:       stringValue(run.EvaluatedSnapshotKey),
-			LatestReviewLoop:           latestLoop,
-			Logs:                       logs,
-			ChangedFiles:               changedFiles,
-			LinkedIssueCount:           linkedIssueCount,
-			IssueLessReason:            issueLessReason,
-			PolicyConfig:               policyConfig,
-			CustomChecks:               customChecks,
-		})
-		if err != nil {
-			return fmt.Errorf("evaluate PR readiness: %w", err)
-		}
-		completed := models.PRReadinessRun{
-			Status:       result.Status,
-			Summary:      result.Summary,
-			ReviewPacket: result.ReviewPacket,
-		}
-		for i := range result.Checks {
-			result.Checks[i].OrgID = orgID
-			result.Checks[i].RunID = readinessID
-			result.Checks[i].SessionID = sessionID
-			result.Checks[i].ChangesetID = run.ChangesetID
-		}
-		if err := stores.PRReadiness.CompleteRunWithChecks(ctx, orgID, readinessID, completed, result.Checks); err != nil {
-			return err
-		}
-		if run.TriggeredByUserID == nil && (result.Status == models.PRReadinessRunStatusBlocked || result.Status == models.PRReadinessRunStatusFailed) {
-			notifyPRAutoReadinessAttention(ctx, stores, logger, orgID, sessionID, result.Status, result.Summary)
-			metrics.RecordPRAutoRepairOutcome(ctx, orgID.String(), "", "readiness", string(result.Status))
-		}
-		return nil
-	}
-}
-
-func changedPathsFromPatch(diff string) []string {
-	seen := map[string]struct{}{}
-	for _, line := range strings.Split(diff, "\n") {
-		if !strings.HasPrefix(line, "diff --git ") {
-			continue
-		}
-		if marker := strings.LastIndex(line, " b/"); marker >= 0 {
-			seen[strings.TrimSpace(line[marker+3:])] = struct{}{}
-		}
-	}
-	paths := make([]string, 0, len(seen))
-	for path := range seen {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-	return paths
-}
-
-type customReadinessLLMResponse struct {
-	Status  models.PRReadinessCheckStatus `json:"status"`
-	Summary string                        `json:"summary"`
-	Details map[string]any                `json:"details"`
-	Action  string                        `json:"action"`
-}
-
-func evaluateCustomReadinessChecks(ctx context.Context, services *Services, checks []models.PRReadinessCustomCheck, session models.Session, changedFiles []string, logs []models.SessionLog) []models.PRReadinessCheck {
-	results := make([]models.PRReadinessCheck, 0, len(checks))
-	for _, check := range checks {
-		if !customReadinessCheckEnabled(check) {
-			continue
-		}
-		if !customReadinessCheckMatches(check, changedFiles) {
-			results = append(results, customReadinessCheckResult(check, models.PRReadinessCheckStatusSkipped, "Custom check skipped", "No changed files matched this custom check's path filters.", nil, ""))
-			continue
-		}
-		if services == nil || services.LLM == nil {
-			results = append(results, customReadinessCheckError(check, fmt.Errorf("LLM client is not configured")))
-			continue
-		}
-		userPrompt, err := renderCustomReadinessUserPrompt(check, session, changedFiles, logs)
-		if err != nil {
-			results = append(results, customReadinessCheckError(check, err))
-			continue
-		}
-		raw, err := services.LLM.Complete(ctx, prompts.PRReadinessCustomCheckPrompt(), userPrompt)
-		if err != nil {
-			results = append(results, customReadinessCheckError(check, err))
-			continue
-		}
-		parsed, err := parseCustomReadinessLLMResponse(raw)
-		if err != nil {
-			results = append(results, customReadinessCheckError(check, err))
-			continue
-		}
-		summary := strings.TrimSpace(parsed.Summary)
-		if summary == "" {
-			summary = "Custom check completed."
-		}
-		results = append(results, customReadinessCheckResult(check, parsed.Status, check.Name, summary, parsed.Details, parsed.Action))
-	}
-	return results
-}
-
-func customReadinessCheckEnabled(check models.PRReadinessCustomCheck) bool {
-	if check.Enforcement == (models.PRReadinessEnforcementByRole{}) {
-		return true
-	}
-	return check.Enforcement.EnforcementFor(models.RoleBuilder) != models.PRReadinessEnforcementOff ||
-		check.Enforcement.EnforcementFor(models.RoleMember) != models.PRReadinessEnforcementOff ||
-		check.Enforcement.EnforcementFor(models.RoleAdmin) != models.PRReadinessEnforcementOff
-}
-
-func customReadinessCheckResult(check models.PRReadinessCustomCheck, status models.PRReadinessCheckStatus, title, summary string, details map[string]any, action string) models.PRReadinessCheck {
-	rawDetails, _ := json.Marshal(details)
-	if len(details) == 0 {
-		rawDetails = nil
-	}
-	enforcement := check.Enforcement
-	if enforcement == (models.PRReadinessEnforcementByRole{}) {
-		enforcement = models.PRReadinessEnforcementByRole{
-			Builder:  models.PRReadinessEnforcementAdvisory,
-			Engineer: models.PRReadinessEnforcementAdvisory,
-			Admin:    models.PRReadinessEnforcementAdvisory,
-		}
-	}
-	return models.PRReadinessCheck{
-		CheckKey:             check.CheckKey,
-		CheckType:            models.PRReadinessCheckTypeCustomPrompt,
-		Status:               status,
-		Enforcement:          enforcement.Builder,
-		EnforcementByRole:    enforcement,
-		EnforcementBuilder:   enforcement.Builder,
-		EnforcementEngineer:  enforcement.Engineer,
-		EnforcementAdmin:     enforcement.Admin,
-		EffectiveEnforcement: enforcement.Builder,
-		Provenance:           models.PRReadinessProvenance(check.Source),
-		Source:               string(check.Source),
-		Title:                title,
-		Summary:              summary,
-		Details:              rawDetails,
-		Action:               action,
-	}
-}
-
-func customReadinessCheckError(check models.PRReadinessCustomCheck, err error) models.PRReadinessCheck {
-	return customReadinessCheckResult(check, models.PRReadinessCheckStatusError, check.Name, "Custom readiness check failed to execute.", map[string]any{"error": err.Error()}, "Review check configuration")
-}
-
-func customReadinessCheckMatches(check models.PRReadinessCustomCheck, changedFiles []string) bool {
-	if len(check.PathFilters.Include) == 0 && len(check.PathFilters.Exclude) == 0 {
-		return true
-	}
-	for _, file := range changedFiles {
-		included := len(check.PathFilters.Include) == 0
-		for _, pattern := range check.PathFilters.Include {
-			if readinesssvc.MatchPathPattern(pattern, file) {
-				included = true
-				break
-			}
-		}
-		if !included {
-			continue
-		}
-		excluded := false
-		for _, pattern := range check.PathFilters.Exclude {
-			if readinesssvc.MatchPathPattern(pattern, file) {
-				excluded = true
-				break
-			}
-		}
-		if !excluded {
-			return true
-		}
-	}
-	return false
-}
-
-func renderCustomReadinessUserPrompt(check models.PRReadinessCustomCheck, session models.Session, changedFiles []string, logs []models.SessionLog) (string, error) {
-	data := map[string]any{
-		"CheckName":         check.Name,
-		"ChangedFiles":      limitStrings(changedFiles, 100),
-		"DiffStats":         string(session.DiffStats),
-		"WorkspaceRevision": session.WorkspaceRevision,
-		"Logs":              boundedReadinessLogs(logs, 20, 4000),
-	}
-	tmpl, err := template.New("custom_readiness_prompt").Parse(check.Prompt)
-	if err != nil {
-		return "", fmt.Errorf("parse custom readiness prompt template: %w", err)
-	}
-	var rendered bytes.Buffer
-	if err := tmpl.Execute(&rendered, data); err != nil {
-		return "", fmt.Errorf("render custom readiness prompt template: %w", err)
-	}
-	payload := map[string]any{
-		"check_prompt":       rendered.String(),
-		"changed_files":      data["ChangedFiles"],
-		"diff_stats":         data["DiffStats"],
-		"workspace_revision": data["WorkspaceRevision"],
-		"logs":               data["Logs"],
-	}
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("marshal custom readiness prompt context: %w", err)
-	}
-	return string(payloadBytes), nil
-}
-
-func parseCustomReadinessLLMResponse(raw string) (customReadinessLLMResponse, error) {
-	trimmed := strings.TrimSpace(raw)
-	trimmed = strings.TrimPrefix(trimmed, "```json")
-	trimmed = strings.TrimPrefix(trimmed, "```")
-	trimmed = strings.TrimSuffix(trimmed, "```")
-	var parsed customReadinessLLMResponse
-	if err := json.Unmarshal([]byte(strings.TrimSpace(trimmed)), &parsed); err != nil {
-		return customReadinessLLMResponse{}, fmt.Errorf("parse custom readiness check response: %w", err)
-	}
-	switch parsed.Status {
-	case models.PRReadinessCheckStatusPassed, models.PRReadinessCheckStatusWarning, models.PRReadinessCheckStatusFailed:
-		return parsed, nil
-	default:
-		return customReadinessLLMResponse{}, fmt.Errorf("invalid custom readiness status %q", parsed.Status)
-	}
-}
-
-func limitStrings(values []string, limit int) []string {
-	if len(values) <= limit {
-		return values
-	}
-	return values[:limit]
-}
-
-func boundedReadinessLogs(logs []models.SessionLog, maxLogs, maxBytes int) []string {
-	if len(logs) > maxLogs {
-		logs = logs[len(logs)-maxLogs:]
-	}
-	// Walk newest-first so the most recent (most relevant) logs win the byte
-	// budget, and skip — rather than stop at — an oversized line so one early
-	// giant entry can't drop every newer log. Re-reverse to chronological order.
-	out := make([]string, 0, len(logs))
-	used := 0
-	for i := len(logs) - 1; i >= 0; i-- {
-		line := logs[i].Timestamp.UTC().Format(time.RFC3339) + " " + logs[i].Message
-		if used+len(line) > maxBytes {
-			continue
-		}
-		used += len(line)
-		out = append(out, line)
-	}
-	for l, r := 0, len(out)-1; l < r; l, r = l+1, r-1 {
-		out[l], out[r] = out[r], out[l]
-	}
-	return out
-}
-
-func registerPRReadinessDeadLetter(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, readinessID uuid.UUID) {
-	if stores == nil || stores.PRReadiness == nil {
-		return
-	}
-	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
-		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
-		defer cancel()
-		summary := "Readiness job failed before checks completed."
-		if deadLetterErr != nil {
-			summary = "Readiness job failed before checks completed: " + deadLetterErr.Error()
-		}
-		if err := stores.PRReadiness.MarkFailed(writeCtx, orgID, readinessID, summary); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			logger.Error().
-				Err(err).
-				Str("readiness_id", readinessID.String()).
-				Msg("failed to mark PR readiness run failed after job dead-letter")
-		}
-	})
-}
-
-func runningReadinessReviewLoop(ctx context.Context, stores *Stores, session models.Session) (*models.SessionReviewLoop, error) {
-	if stores == nil || stores.ReviewLoops == nil {
-		return nil, nil
-	}
-	loop, err := stores.ReviewLoops.GetRunningLoopBySession(ctx, session.OrgID, session.ID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("load running readiness review loop: %w", err)
-	}
-	return &loop, nil
-}
-
-func retryPRReadinessReviewLoop(logger zerolog.Logger, sessionID, readinessID uuid.UUID) error {
-	logger.Info().
-		Str("session_id", sessionID.String()).
-		Str("readiness_id", readinessID.String()).
-		Msg("PR readiness waiting for review loop")
-	delay := prePRReviewRetryDelay
-	return &RetryableError{
-		Err:                    fmt.Errorf("PR readiness review loop is still running"),
-		RetryAfter:             &delay,
-		BypassMaxRetryDuration: true,
-	}
-}
-
-// failReadinessReviewWaitTimeout terminates a readiness run that has waited past
-// prePRReviewMaxWait for the agent review loop. It marks the run failed and
-// returns nil so the job completes instead of requeuing forever.
-func failReadinessReviewWaitTimeout(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, readinessID, sessionID uuid.UUID) error {
-	summary := fmt.Sprintf("Readiness timed out after %s waiting for the agent review loop to finish.", prePRReviewMaxWait)
-	if err := stores.PRReadiness.MarkFailed(ctx, orgID, readinessID, summary); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("mark readiness failed after review wait timeout: %w", err)
-	}
-	logger.Warn().
-		Str("session_id", sessionID.String()).
-		Str("readiness_id", readinessID.String()).
-		Dur("max_wait", prePRReviewMaxWait).
-		Msg("PR readiness review wait timed out; marking run failed")
-	return nil
-}
-
-func ensureReadinessReviewLoop(ctx context.Context, stores *Stores, services *Services, session models.Session, snapshotKey string) (*models.SessionReviewLoop, bool, error) {
-	if stores == nil || stores.ReviewLoops == nil {
-		return nil, true, nil
-	}
-	loops, err := stores.ReviewLoops.ListLoopsBySession(ctx, session.OrgID, session.ID)
-	if err != nil {
-		return nil, false, fmt.Errorf("list readiness review loops: %w", err)
-	}
-	var latest *models.SessionReviewLoop
-	for i := range loops {
-		loop := loops[i]
-		if latest == nil {
-			latest = &loop
-		}
-		if loop.Status == models.ReviewLoopStatusClean && stringValue(loop.LatestCheckpointKey) == snapshotKey {
-			return &loop, true, nil
-		}
-		if loop.Status == models.ReviewLoopStatusRunning {
-			return &loop, false, nil
-		}
-		if stringValue(loop.LatestCheckpointKey) == snapshotKey || stringValue(loop.LoopStartCheckpointKey) == snapshotKey {
-			return &loop, true, nil
-		}
-	}
-	if services == nil || services.ReviewLoops == nil || snapshotKey == "" {
-		return latest, true, nil
-	}
-	started, err := services.ReviewLoops.Start(ctx, session.OrgID, session.ID, reviewloopsvc.StartReviewLoopRequest{
-		AgentType:       session.AgentType,
-		Model:           stringValue(session.ModelOverride),
-		MaxPasses:       1,
-		Source:          models.ReviewLoopSourceManual,
-		StartedByUserID: session.TriggeredByUserID,
-		ReviewRequired:  true,
-	})
-	if err != nil {
-		return nil, false, fmt.Errorf("start readiness review loop: %w", err)
-	}
-	return started, false, nil
 }
 
 // create_branch pushes a completed session snapshot to GitHub without opening
@@ -12038,6 +11442,40 @@ func newCreateBranchHandler(stores *Stores, services *Services, logger zerolog.L
 		}
 		return nil
 	}
+}
+
+// ensureBuilderReviewFresh revalidates the builder publication gate in the
+// durable worker. The session can change after the API enqueues open_pr, so the
+// synchronous handler check alone cannot attest to the snapshot being pushed.
+func ensureBuilderReviewFresh(ctx context.Context, stores *Stores, run models.Session, changesetID *uuid.UUID) error {
+	if stores == nil || stores.ReviewLoops == nil {
+		return errors.New("review policy is not configured")
+	}
+	if changesetID != nil {
+		if stores.SessionChangesets == nil {
+			return errors.New("changeset store is not configured for review policy")
+		}
+		changeset, err := stores.SessionChangesets.GetByID(ctx, run.OrgID, run.ID, *changesetID)
+		if err != nil {
+			return fmt.Errorf("load changeset for builder review policy: %w", err)
+		}
+		if !changeset.IsPrimary && changeset.WorktreePath != nil {
+			return errors.New("builder review evidence does not cover a separate changeset worktree")
+		}
+	}
+	if run.SnapshotKey == nil || *run.SnapshotKey == "" {
+		return errors.New("builder publication requires a current session snapshot")
+	}
+	loops, err := stores.ReviewLoops.ListLoopsBySession(ctx, run.OrgID, run.ID)
+	if err != nil {
+		return fmt.Errorf("load review loops for builder publication: %w", err)
+	}
+	for _, loop := range loops {
+		if loop.Status == models.ReviewLoopStatusClean && loop.LatestCheckpointKey != nil && *loop.LatestCheckpointKey == *run.SnapshotKey {
+			return nil
+		}
+	}
+	return errors.New("builder publication requires a clean Review for the current snapshot")
 }
 
 func ensureAutomationPrePRReview(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, run models.Session, changesetID *uuid.UUID) (bool, error) {

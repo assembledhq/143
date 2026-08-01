@@ -214,9 +214,9 @@ func TestPrepareSandboxRepositoryRunsBootstrapCommandsFromWorkDir(t *testing.T) 
 	o := &Orchestrator{provider: provider}
 	sandbox := &Sandbox{ID: "sandbox-1", WorkDir: workDir}
 
-	err := o.prepareSandboxRepository(context.Background(), sandbox, workDir, zerolog.Nop())
+	err := PrepareSandboxRepository(context.Background(), o.provider, sandbox, workDir, zerolog.Nop())
 
-	require.NoError(t, err, "prepareSandboxRepository should run configured bootstrap commands successfully")
+	require.NoError(t, err, "PrepareSandboxRepository should run configured bootstrap commands successfully")
 	require.Equal(t, []string{
 		"cd '/home/sandbox/backend' && npm install",
 		"cd '/home/sandbox/backend' && npm run lint:js -w assets",
@@ -241,57 +241,11 @@ func TestPrepareSandboxRepositoryReturnsBootstrapCommandFailure(t *testing.T) {
 	o := &Orchestrator{provider: provider}
 	sandbox := &Sandbox{ID: "sandbox-1", WorkDir: workDir}
 
-	err := o.prepareSandboxRepository(context.Background(), sandbox, workDir, zerolog.Nop())
+	err := PrepareSandboxRepository(context.Background(), o.provider, sandbox, workDir, zerolog.Nop())
 
-	require.Error(t, err, "prepareSandboxRepository should fail when a configured bootstrap command exits non-zero")
+	require.Error(t, err, "PrepareSandboxRepository should fail when a configured bootstrap command exits non-zero")
 	require.Contains(t, err.Error(), "npm run lint:js -w assets", "bootstrap setup error should identify the command that failed")
 	require.Contains(t, err.Error(), "sh: eslint: not found", "bootstrap setup error should include stderr so missing tool failures are actionable")
-}
-
-func TestPrepareSandboxRepositoryMaterializesEmptyRepoReadinessConfig(t *testing.T) {
-	t.Parallel()
-
-	workDir := "/home/sandbox/backend"
-	repoID := uuid.New()
-	orgID := uuid.New()
-	provider := &testInternalSandboxProvider{
-		readFiles: map[string][]byte{
-			path.Join(workDir, repoconfig.ConfigPath): []byte(`{"pr_readiness":{"checks":[]}}`),
-		},
-	}
-	readiness := &testInternalPRReadinessStore{}
-	o := &Orchestrator{provider: provider, prReadiness: readiness}
-	sandbox := &Sandbox{ID: "sandbox-1", WorkDir: workDir}
-	session := &models.Session{ID: uuid.New(), OrgID: orgID, RepositoryID: &repoID}
-
-	err := o.prepareSandboxRepository(context.Background(), sandbox, workDir, zerolog.Nop(), session)
-
-	require.NoError(t, err, "prepareSandboxRepository should accept an empty repo readiness config")
-	require.True(t, readiness.materializeCalled, "empty repo readiness config should still materialize so stale repo-config checks are deactivated")
-	require.Equal(t, orgID, readiness.materializeOrgID, "materialization should be org-scoped")
-	require.Equal(t, repoID, readiness.materializeRepoID, "materialization should be repository-scoped")
-	require.Empty(t, readiness.materializeChecks, "empty repo readiness config should pass an empty check set")
-}
-
-func TestPrepareSandboxRepositoryClearsRepoReadinessWhenConfigMissing(t *testing.T) {
-	t.Parallel()
-
-	workDir := "/home/sandbox/backend"
-	repoID := uuid.New()
-	orgID := uuid.New()
-	provider := &testInternalSandboxProvider{}
-	readiness := &testInternalPRReadinessStore{}
-	o := &Orchestrator{provider: provider, prReadiness: readiness}
-	sandbox := &Sandbox{ID: "sandbox-1", WorkDir: workDir}
-	session := &models.Session{ID: uuid.New(), OrgID: orgID, RepositoryID: &repoID}
-
-	err := o.prepareSandboxRepository(context.Background(), sandbox, workDir, zerolog.Nop(), session)
-
-	require.NoError(t, err, "prepareSandboxRepository should tolerate missing repo config")
-	require.True(t, readiness.materializeCalled, "missing repo config should materialize an empty check set so stale repo-config checks are deactivated")
-	require.Equal(t, orgID, readiness.materializeOrgID, "materialization should remain org-scoped when repo config is missing")
-	require.Equal(t, repoID, readiness.materializeRepoID, "materialization should remain repository-scoped when repo config is missing")
-	require.Empty(t, readiness.materializeChecks, "missing repo config should clear repo-config readiness checks")
 }
 
 type blockingMentionIndexFileReader struct {
@@ -431,33 +385,6 @@ func (s testInternalGitHubTokens) GetInstallationToken(context.Context, int64) (
 		return "", s.err
 	}
 	return s.token, nil
-}
-
-type testInternalPRReadinessStore struct {
-	materializeCalled bool
-	materializeOrgID  uuid.UUID
-	materializeRepoID uuid.UUID
-	materializeChecks []models.PRReadinessCustomCheck
-}
-
-func (s *testInternalPRReadinessStore) MaterializeRepoConfigChecks(_ context.Context, orgID, repositoryID uuid.UUID, checks []models.PRReadinessCustomCheck) error {
-	s.materializeCalled = true
-	s.materializeOrgID = orgID
-	s.materializeRepoID = repositoryID
-	s.materializeChecks = append([]models.PRReadinessCustomCheck(nil), checks...)
-	return nil
-}
-
-func (s *testInternalPRReadinessStore) ResolvePolicy(context.Context, uuid.UUID, *uuid.UUID) (models.PRReadinessResolvedPolicy, error) {
-	return models.PRReadinessResolvedPolicy{Config: models.DefaultPRReadinessPolicyConfig(), Source: "default"}, nil
-}
-
-func (s *testInternalPRReadinessStore) GetLatestBySession(context.Context, uuid.UUID, uuid.UUID) (*models.PRReadinessRun, error) {
-	return nil, pgx.ErrNoRows
-}
-
-func (s *testInternalPRReadinessStore) CreateRun(context.Context, *models.PRReadinessRun) error {
-	return nil
 }
 
 type testInternalSandboxProvider struct {

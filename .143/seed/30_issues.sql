@@ -75,28 +75,6 @@ VALUES
     now() - interval '3 hours'
   ),
   (
-    '00000000-0000-4000-a000-000000000603'::uuid,
-    '00000000-0000-4000-a000-000000000001'::uuid,
-    'DEMO-LIN-103',
-    'linear',
-    '00000000-0000-4000-a000-000000000011'::uuid,
-    '00000000-0000-4000-a000-000000000100'::uuid,
-    'PR readiness summary needs clearer failing check labels',
-    'Synthetic issue: readiness cards should group failing checks by category.',
-    '{"identifier":"DEMO-LIN-103","team":"Platform","labels":["pr-readiness","ux"]}'::jsonb,
-    'fixed',
-    now() - interval '14 days',
-    now() - interval '1 day',
-    3,
-    1,
-    'low',
-    ARRAY['linear','pr-readiness','ux'],
-    'demo:linear:readiness-labels',
-    NULL,
-    now() - interval '14 days',
-    now() - interval '1 day'
-  ),
-  (
     '00000000-0000-4000-a000-000000000604'::uuid,
     '00000000-0000-4000-a000-000000000001'::uuid,
     'manual-preview-copy',
@@ -168,7 +146,6 @@ VALUES
   ('00000000-0000-4000-a000-000000000620'::uuid, '00000000-0000-4000-a000-000000000600'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 3, 'moderate', 0.82, 'frontend_state', 'Filter state and archived-session query behavior need coordinated changes.', ARRAY['frontend/src/app/sessions/page.tsx','internal/db/session_store.go'], 4200, 'seeded-estimator', now() - interval '20 minutes', now() - interval '20 minutes'),
   ('00000000-0000-4000-a000-000000000621'::uuid, '00000000-0000-4000-a000-000000000601'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 4, 'complex', 0.74, 'backend_reliability', 'Replay ordering touches ingestion idempotency and retry accounting.', ARRAY['internal/services/ingestion/service.go','internal/db/webhook_deliveries.go'], 6800, 'seeded-estimator', now() - interval '1 hour', now() - interval '1 hour'),
   ('00000000-0000-4000-a000-000000000622'::uuid, '00000000-0000-4000-a000-000000000602'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 3, 'moderate', 0.79, 'preview_runtime', 'Cold-start diagnostics need runtime timing and UI treatment.', ARRAY['internal/services/preview','frontend/src/components/preview'], 5400, 'seeded-estimator', now() - interval '3 hours', now() - interval '3 hours'),
-  ('00000000-0000-4000-a000-000000000623'::uuid, '00000000-0000-4000-a000-000000000603'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 2, 'simple', 0.91, 'copy_and_grouping', 'Mostly presentation logic around readiness check labels.', ARRAY['frontend/src/components/pr-readiness'], 2600, 'seeded-estimator', now() - interval '1 day', now() - interval '1 day'),
   ('00000000-0000-4000-a000-000000000624'::uuid, '00000000-0000-4000-a000-000000000604'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, 2, 'simple', 0.86, 'product_polish', 'Synthetic copy consolidation across existing preview surfaces.', ARRAY['frontend/src/components/preview'], 3100, 'seeded-estimator', now() - interval '30 minutes', now() - interval '30 minutes')
 ON CONFLICT (issue_id) DO UPDATE
 SET tier = EXCLUDED.tier,

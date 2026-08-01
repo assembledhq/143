@@ -1213,18 +1213,6 @@ func TestHandlePullRequestEvent_ClosedWithoutMergeFlow(t *testing.T) {
 	prMock.ExpectExec("UPDATE pull_requests SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	dedupeKey := pullRequestStateSyncDedupeKey(prID)
-	jobMock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgx.NamedArgs{
-			"org_id":     orgID,
-			"queue":      prHealthSyncQueue,
-			"job_type":   prHealthSyncJobType,
-			"payload":    pgxmock.AnyArg(),
-			"priority":   6,
-			"dedupe_key": &dedupeKey,
-		}).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
-
 	event := PullRequestEvent{
 		Action: "closed",
 		Number: 42,
@@ -1235,7 +1223,7 @@ func TestHandlePullRequestEvent_ClosedWithoutMergeFlow(t *testing.T) {
 	err := svc.HandlePullRequestEvent(context.Background(), event)
 	require.NoError(t, err, "HandlePullRequestEvent should not return an error for a closed-without-merge PR")
 	require.NoError(t, prMock.ExpectationsWereMet(), "all PR store expectations should be met")
-	require.NoError(t, jobMock.ExpectationsWereMet(), "closed pull request webhooks should enqueue a state sync with the generic dedupe key")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "closed pull request webhooks should not enqueue a redundant GitHub readback")
 }
 
 func TestHandlePullRequestEvent_ClosedWithoutMergeReturnsStatusUpdateError(t *testing.T) {
@@ -2561,6 +2549,8 @@ func TestHandleCheckRunEvent_CompletedEnqueuesHealthSync(t *testing.T) {
 	prRow := handlerPRRow(prID, &sessionID, orgID, "testorg/testrepo", now)
 	headSHA := "head-sha"
 	prRow[12] = &headSHA
+	prRow[19] = &now
+	prRow[20] = int64(1)
 	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -2591,6 +2581,21 @@ func TestHandleCheckRunEvent_CompletedEnqueuesHealthSync(t *testing.T) {
 		}).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
 	prMock.ExpectCommit()
+	checkSetComplete := true
+	baselineJSON, err := json.Marshal(models.PullRequestHealthSummary{
+		CheckSetComplete: &checkSetComplete,
+		Checks: []models.PullRequestCheckSummary{{
+			Name:     "Backend Test",
+			Provider: "github-actions",
+		}},
+	})
+	require.NoError(t, err, "check run test should encode its authoritative baseline")
+	prMock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
+			prID, orgID, int64(1), headSHA, "base-sha", baselineJSON, baselineJSON,
+			models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
+		))
 	dedupeKey := fmt.Sprintf("%s:%s", prHealthRebuildJobType, prID.String())
 	jobMock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgx.NamedArgs{
@@ -2622,10 +2627,202 @@ func TestHandleCheckRunEvent_CompletedEnqueuesHealthSync(t *testing.T) {
 		} `json:"base"`
 	}{Number: 42})
 
-	err := svc.HandleCheckRunEvent(context.Background(), event)
+	err = svc.HandleCheckRunEvent(context.Background(), event)
 	require.NoError(t, err, "HandleCheckRunEvent should project completed check runs")
 	require.NoError(t, prMock.ExpectationsWereMet(), "all pull request expectations should be met")
 	require.NoError(t, jobMock.ExpectationsWereMet(), "check run completion should enqueue a DB-only health rebuild")
+}
+
+func TestPullRequestHasHealthBaseline(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	headSHA := "head-sha"
+	tests := []struct {
+		name     string
+		pr       models.PullRequest
+		expected bool
+	}{
+		{
+			name: "complete baseline",
+			pr: models.PullRequest{
+				GitHubStateSyncedAt: &now,
+				HealthVersion:       1,
+				HeadSHA:             &headSHA,
+			},
+			expected: true,
+		},
+		{name: "missing sync timestamp", pr: models.PullRequest{HealthVersion: 1, HeadSHA: &headSHA}},
+		{name: "missing health version", pr: models.PullRequest{GitHubStateSyncedAt: &now, HeadSHA: &headSHA}},
+		{name: "missing head", pr: models.PullRequest{GitHubStateSyncedAt: &now, HealthVersion: 1}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, pullRequestHasHealthBaseline(tt.pr), "baseline classification should require a synchronized version for a known head")
+		})
+	}
+}
+
+func TestCheckStateRequiresAuthoritativeSyncForUnknownCheck(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockPool(t)
+	orgID := uuid.New()
+	prID := uuid.New()
+	now := time.Now()
+	headSHA := "head-sha"
+	checkSetComplete := true
+	baselineJSON, err := json.Marshal(models.PullRequestHealthSummary{
+		CheckSetComplete: &checkSetComplete,
+		Checks: []models.PullRequestCheckSummary{{
+			Name:     "Existing Test",
+			Provider: "github-actions",
+		}},
+	})
+	require.NoError(t, err, "unknown-check test should encode its authoritative baseline")
+	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
+			prID, orgID, int64(1), headSHA, "base-sha", baselineJSON, baselineJSON,
+			models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
+		))
+	service := &PRService{
+		pullRequests: db.NewPullRequestStore(mock),
+		logger:       zerolog.Nop(),
+	}
+	pr := models.PullRequest{
+		ID:                  prID,
+		OrgID:               orgID,
+		HeadSHA:             &headSHA,
+		HealthVersion:       1,
+		GitHubStateSyncedAt: &now,
+	}
+	state := models.PullRequestCheckState{
+		HeadSHA:  headSHA,
+		Name:     "New Test",
+		Provider: "github-actions",
+	}
+
+	requiresSync, err := service.checkStateRequiresAuthoritativeSync(context.Background(), pr, state)
+
+	require.NoError(t, err, "unknown-check detection should read a valid baseline")
+	require.True(t, requiresSync, "a check absent from the authoritative baseline should trigger a full synchronization")
+	require.NoError(t, mock.ExpectationsWereMet(), "unknown-check detection should use the org-scoped health baseline query")
+}
+
+// An undecodable baseline must not fail the webhook. Returning an error would
+// 500 the delivery, and every redelivery would decode the same bad row and fail
+// identically — a poison pill for this PR's whole check stream. The
+// authoritative readback is what repairs it, because it rewrites the snapshot.
+func TestCheckStateRequiresAuthoritativeSyncOnUndecodableBaseline(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockPool(t)
+	orgID := uuid.New()
+	prID := uuid.New()
+	now := time.Now()
+	headSHA := "head-sha"
+
+	corrupt := []byte(`{"checks":`)
+	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
+			prID, orgID, int64(1), headSHA, "base-sha", corrupt, corrupt,
+			models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
+		))
+	service := &PRService{
+		pullRequests: db.NewPullRequestStore(mock),
+		logger:       zerolog.Nop(),
+	}
+	pr := models.PullRequest{
+		ID:                  prID,
+		OrgID:               orgID,
+		HeadSHA:             &headSHA,
+		HealthVersion:       1,
+		GitHubStateSyncedAt: &now,
+	}
+	state := models.PullRequestCheckState{HeadSHA: headSHA, Name: "Backend Test", Provider: "github-actions"}
+
+	requiresSync, err := service.checkStateRequiresAuthoritativeSync(context.Background(), pr, state)
+
+	require.NoError(t, err, "an undecodable baseline should not fail the webhook delivery")
+	require.True(t, requiresSync, "an undecodable baseline should escalate to the readback that rewrites it")
+	require.NoError(t, mock.ExpectationsWereMet(), "the baseline lookup should still be org-scoped")
+}
+
+// A check webhook that also needs an authoritative readback must still enqueue
+// the DB-only rebuild: the sync enqueue dedupes against running jobs, so a sync
+// already past its race overlay would absorb the request and finish without
+// ever folding this webhook's row into the health summary.
+func TestEnqueuePullRequestCheckProjectionAlwaysRebuilds(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		requiresSync bool
+		wantJobTypes []string
+	}{
+		{
+			name:         "projection covers the event",
+			requiresSync: false,
+			wantJobTypes: []string{prHealthRebuildJobType},
+		},
+		{
+			name:         "event needs authoritative state",
+			requiresSync: true,
+			wantJobTypes: []string{prHealthRebuildJobType, prHealthSyncJobType},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create pgx mock pool")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			prID := uuid.New()
+			pr := models.PullRequest{ID: prID, OrgID: orgID}
+
+			rebuildKey := fmt.Sprintf("%s:%s", prHealthRebuildJobType, prID.String())
+			syncKey := pullRequestStateSyncDedupeKey(prID)
+			for _, jobType := range tt.wantJobTypes {
+				args := pgx.NamedArgs{
+					"org_id":     orgID,
+					"queue":      prHealthSyncQueue,
+					"job_type":   jobType,
+					"payload":    pgxmock.AnyArg(),
+					"priority":   4,
+					"dedupe_key": &rebuildKey,
+					"run_at":     pgxmock.AnyArg(),
+				}
+				if jobType == prHealthSyncJobType {
+					args = pgx.NamedArgs{
+						"org_id":     orgID,
+						"queue":      prHealthSyncQueue,
+						"job_type":   jobType,
+						"payload":    pgxmock.AnyArg(),
+						"priority":   6,
+						"dedupe_key": &syncKey,
+					}
+				}
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(args).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+			}
+
+			service := &PRService{jobs: db.NewJobStore(mock), logger: zerolog.Nop()}
+			require.NoError(t, service.enqueuePullRequestCheckProjection(context.Background(), pr, tt.requiresSync),
+				"check projection follow-up should succeed")
+
+			require.NoError(t, mock.ExpectationsWereMet(),
+				"a check webhook should enqueue exactly %v", tt.wantJobTypes)
+		})
+	}
 }
 
 func TestHandleStatusEvent_EnqueuesHealthSyncForHeadSHA(t *testing.T) {
@@ -2647,6 +2844,8 @@ func TestHandleStatusEvent_EnqueuesHealthSyncForHeadSHA(t *testing.T) {
 	prRow := handlerPRRow(prID, &sessionID, orgID, "testorg/testrepo", now)
 	headSHA := "head-sha"
 	prRow[12] = &headSHA
+	prRow[19] = &now
+	prRow[20] = int64(1)
 	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE org_id = .+ AND github_repo = .+ AND head_sha = .+ AND status = 'open'").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": "testorg/testrepo", "head_sha": "head-sha"}).
 		WillReturnRows(
@@ -2677,6 +2876,21 @@ func TestHandleStatusEvent_EnqueuesHealthSyncForHeadSHA(t *testing.T) {
 		}).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
 	prMock.ExpectCommit()
+	checkSetComplete := true
+	baselineJSON, err := json.Marshal(models.PullRequestHealthSummary{
+		CheckSetComplete: &checkSetComplete,
+		Checks: []models.PullRequestCheckSummary{{
+			Name:     "ci/circleci: frontend_lint_format_license",
+			Provider: "circleci",
+		}},
+	})
+	require.NoError(t, err, "status test should encode its authoritative baseline")
+	prMock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
+			prID, orgID, int64(1), headSHA, "base-sha", baselineJSON, baselineJSON,
+			models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
+		))
 	dedupeKey := fmt.Sprintf("%s:%s", prHealthRebuildJobType, prID.String())
 	jobMock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgx.NamedArgs{
@@ -2703,7 +2917,7 @@ func TestHandleStatusEvent_EnqueuesHealthSyncForHeadSHA(t *testing.T) {
 	}
 	event.Repository.FullName = "testorg/testrepo"
 
-	err := svc.HandleStatusEvent(context.Background(), event)
+	err = svc.HandleStatusEvent(context.Background(), event)
 	require.NoError(t, err, "HandleStatusEvent should project statuses for matching open PR heads")
 	require.NoError(t, prMock.ExpectationsWereMet(), "all pull request expectations should be met")
 	require.NoError(t, jobMock.ExpectationsWereMet(), "status event should enqueue a DB-only health rebuild")
@@ -3521,15 +3735,24 @@ func TestHandlePullRequestEvent_ReadyForReviewWith143GeneratedPRTriggersAutoPrev
 		logger:             zerolog.Nop(),
 	}
 
-	// 1. getWebhookPullRequest returns the tracked 143 PR.
+	// 1. getWebhookPullRequest returns the tracked 143 PR with a valid health
+	// baseline for the same head.
+	event := autoPreviewPullRequestEvent(orgID)
+	event.Action = "ready_for_review"
+	prRow := handlerPRRow(prID, &sessionID, orgID, "acme/app", now)
+	prRow[12] = &event.PR.Head.SHA
+	prRow[19] = &now
+	prRow[20] = int64(1)
 	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE org_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
-				AddRow(handlerPRRow(prID, &sessionID, orgID, "acme/app", now)...),
+				AddRow(prRow...),
 		)
 
-	// 2. enqueuePullRequestStateSync inserts a job.
+	// 2. enqueuePullRequestStateSync inserts a job. Leaving the draft state
+	// changes GitHub's mergeable_state without moving the head, so the readback
+	// runs even though the baseline is current for this SHA.
 	jobMock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
@@ -3546,16 +3769,87 @@ func TestHandlePullRequestEvent_ReadyForReviewWith143GeneratedPRTriggersAutoPrev
 		WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
 			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeOff), false, false, true, true, "", userID, now, now))
 
-	event := autoPreviewPullRequestEvent(orgID)
-	event.Action = "ready_for_review"
 	err := svc.HandlePullRequestEvent(context.Background(), event)
 
 	require.NoError(t, err, "HandlePullRequestEvent for ready_for_review on tracked PR should not fail")
 	require.True(t, starter.called, "auto preview starter should be invoked for ready_for_review on tracked 143 PRs")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "ready_for_review should enqueue a readback because leaving draft changes mergeability without moving the head")
 	require.NoError(t, prMock.ExpectationsWereMet(), "all PR expectations should be met")
-	require.NoError(t, jobMock.ExpectationsWereMet(), "all job expectations should be met")
 	require.NoError(t, repoMock.ExpectationsWereMet(), "all repo expectations should be met")
 	require.NoError(t, previewMock.ExpectationsWereMet(), "all preview expectations should be met")
+}
+
+// capturedPayload records the JSON payload a job was enqueued with while still
+// matching like pgxmock.AnyArg(). It keeps only the first payload it is offered
+// so that being evaluated against several expectations cannot overwrite the one
+// the test asserts on.
+type capturedPayload struct{ raw []byte }
+
+func (c *capturedPayload) Match(v any) bool {
+	if raw, ok := v.([]byte); ok && c.raw == nil {
+		c.raw = append([]byte(nil), raw...)
+	}
+	return true
+}
+
+// Leaving the draft state is the one trigger that changes GitHub's
+// mergeable_state without moving the head SHA, and projected rebuilds never
+// recompute merge state. Skipping the readback would strand a PR that 143
+// opened as a draft at MergeState=blocked, hence CanMerge=false.
+func TestHandlePullRequestEvent_ReadyForReviewSyncsCurrentBaseline(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+
+	prMock := newMockPool(t)
+	jobMock := newMockPool(t)
+	svc := &PRService{
+		pullRequests: db.NewPullRequestStore(prMock),
+		jobs:         db.NewJobStore(jobMock),
+		logger:       zerolog.Nop(),
+	}
+
+	event := PullRequestEvent{Action: "ready_for_review", Number: 42}
+	event.PR.Head.SHA = "head-sha"
+	event.Repository.FullName = "testorg/testrepo"
+
+	// A fully synchronized baseline for this exact head: the old gate skipped
+	// the readback here.
+	headSHA := event.PR.Head.SHA
+	prRow := handlerPRRow(prID, &sessionID, orgID, "testorg/testrepo", now)
+	prRow[12] = &headSHA
+	prRow[19] = &now
+	prRow[20] = int64(1)
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(handlerPRColumns).AddRow(prRow...))
+
+	payload := &capturedPayload{}
+	dedupeKey := pullRequestStateSyncDedupeKey(prID)
+	jobMock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgx.NamedArgs{
+			"org_id":     orgID,
+			"queue":      prHealthSyncQueue,
+			"job_type":   prHealthSyncJobType,
+			"payload":    payload,
+			"priority":   6,
+			"dedupe_key": &dedupeKey,
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	require.NoError(t, svc.HandlePullRequestEvent(context.Background(), event),
+		"ready_for_review should be handled without error")
+	require.NoError(t, jobMock.ExpectationsWereMet(),
+		"ready_for_review should enqueue a readback even when the baseline already matches the head")
+
+	var enqueued map[string]string
+	require.NoError(t, json.Unmarshal(payload.raw, &enqueued), "enqueued payload should be valid JSON")
+	require.Equal(t, string(PullRequestSyncReasonReadyForReview), enqueued["sync_reason"],
+		"the draft transition should be attributable in GitHub request telemetry")
+	require.NoError(t, prMock.ExpectationsWereMet(), "all PR store expectations should be met")
 }
 
 // TestHandlePullRequestEvent_ClosedWith143GeneratedPRTeardownAutoPreview confirms

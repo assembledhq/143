@@ -328,19 +328,17 @@ type SessionAutomationSettings struct {
 	AutomaticFollowThrough AutomaticFollowThroughOrgSettings `json:"automatic_follow_through,omitempty"`
 }
 
-// AutomaticFollowThroughOrgSettings controls automatic PR/readiness next steps
-// when sessions or review loops reach a stable point. Repair flags are pointers
+// AutomaticFollowThroughOrgSettings controls automatic PR next steps when
+// sessions reach a stable point. Repair flags are pointers
 // so absent settings default on for every organization while preserving an
 // administrator's explicit false opt-out.
 type AutomaticFollowThroughOrgSettings struct {
-	ReadinessAfterReviewLoop       bool                `json:"readiness_after_review_loop,omitempty"`
-	ReadinessAfterReviewLoopStates []ReviewLoopStatus  `json:"readiness_after_review_loop_states,omitempty"`
-	ResolveConflictsWhenIdle       *bool               `json:"resolve_conflicts_when_idle,omitempty"`
-	FixTestsWhenIdle               *bool               `json:"fix_tests_when_idle,omitempty"`
-	PRFeedbackMode                 PRFeedbackHumanMode `json:"pr_feedback_mode,omitempty"`
-	PRFeedbackBotMode              PRFeedbackBotMode   `json:"pr_feedback_bot_mode,omitempty"`
-	PRFeedbackBotCycleLimit        NullableCycleLimit  `json:"pr_feedback_bot_cycle_limit,omitzero"`
-	PRFeedbackBotAllowlist         []string            `json:"pr_feedback_bot_allowlist,omitempty"`
+	ResolveConflictsWhenIdle *bool               `json:"resolve_conflicts_when_idle,omitempty"`
+	FixTestsWhenIdle         *bool               `json:"fix_tests_when_idle,omitempty"`
+	PRFeedbackMode           PRFeedbackHumanMode `json:"pr_feedback_mode,omitempty"`
+	PRFeedbackBotMode        PRFeedbackBotMode   `json:"pr_feedback_bot_mode,omitempty"`
+	PRFeedbackBotCycleLimit  NullableCycleLimit  `json:"pr_feedback_bot_cycle_limit,omitzero"`
+	PRFeedbackBotAllowlist   []string            `json:"pr_feedback_bot_allowlist,omitempty"`
 }
 
 // EffectiveResolveConflictsWhenIdle defaults automatic conflict repair on
@@ -353,15 +351,6 @@ func (s AutomaticFollowThroughOrgSettings) EffectiveResolveConflictsWhenIdle() b
 // an explicit organization opt-out.
 func (s AutomaticFollowThroughOrgSettings) EffectiveFixTestsWhenIdle() bool {
 	return s.FixTestsWhenIdle == nil || *s.FixTestsWhenIdle
-}
-
-// EffectiveReadinessAfterReviewLoopStates applies the v1 default terminal
-// states for auto-readiness policy.
-func (s AutomaticFollowThroughOrgSettings) EffectiveReadinessAfterReviewLoopStates() []ReviewLoopStatus {
-	if len(s.ReadinessAfterReviewLoopStates) == 0 {
-		return []ReviewLoopStatus{ReviewLoopStatusClean}
-	}
-	return append([]ReviewLoopStatus(nil), s.ReadinessAfterReviewLoopStates...)
 }
 
 // Validate returns an error when the session automation settings are invalid.
@@ -386,14 +375,6 @@ func (s AutomaticFollowThroughOrgSettings) Validate() error {
 	for _, login := range s.PRFeedbackBotAllowlist {
 		if strings.TrimSpace(login) == "" {
 			return fmt.Errorf("pr_feedback_bot_allowlist entries must not be blank")
-		}
-	}
-	for _, status := range s.ReadinessAfterReviewLoopStates {
-		if err := status.Validate(); err != nil {
-			return fmt.Errorf("readiness_after_review_loop_states: %w", err)
-		}
-		if status == ReviewLoopStatusRunning {
-			return fmt.Errorf("readiness_after_review_loop_states: %q is not terminal", status)
 		}
 	}
 	return nil
