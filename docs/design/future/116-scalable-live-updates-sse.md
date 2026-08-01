@@ -682,7 +682,7 @@ Session detail uses:
 - optimistic pending state for the user's PR/branch/push actions
 - short scoped polling only for a server-side state machine that is actively converging
 
-Healthy backup is 60s while active and disabled or 5 minutes after terminal settle. Newly unhealthy detail refreshes immediately and then every 5-15s. Transcript, human input, file events, timeline, readiness, and detail must not independently poll every 3-5s when the resource stream is healthy.
+Healthy backup is 60s while active and disabled or 5 minutes after terminal settle. Newly unhealthy detail refreshes immediately and then every 5-15s. Transcript, human input, file events, timeline, review loops, and detail must not independently poll every 3-5s when the resource stream is healthy.
 
 As a follow-up consolidation, merge the current three per-session Redis readers into one typed per-session Redis Stream so a focused session costs one backend blocking reader rather than separate log, status, and event readers. This is not required to prove the org bus but is required before resource-stream concurrency materially exceeds current levels.
 
@@ -958,7 +958,7 @@ Run transport tests through the production-equivalent edge/proxy path, not only 
 1. Acting-user session, preview, and automation mutations render an honest optimistic state in the next frame and reconcile without flicker.
 2. Other-client critical status changes render with p95 under 750ms and p99 under 2s when the live path is healthy.
 3. Sessions list/count/sidebar no longer poll every 10s when live updates are healthy.
-4. Session detail no longer runs independent 3-5s polls for detail, transcript, human input, timeline, readiness, and file events while streams are healthy.
+4. Session detail no longer runs independent 3-5s polls for detail, transcript, human input, timeline, review loops, and file events while streams are healthy.
 5. Previews index no longer polls running previews every 5s when healthy.
 6. Automations list/detail/runs no longer poll every 10s when healthy.
 7. Redis live-bus connection count is bounded by configured shards/topology and does not grow with org/client count.

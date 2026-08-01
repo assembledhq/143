@@ -1,6 +1,9 @@
--- PR readiness is a removed product subsystem. Block rolling deploys while an
--- old worker is executing a readiness job, then prevent old API/worker
--- processes from enqueueing new work after this migration commits.
+-- PR readiness is a removed product subsystem. This migration is deliberately
+-- limited to the jobs table: golang-migrate executes each file as one
+-- transaction, so holding the jobs lock while also changing settings, leases,
+-- and readiness tables can deadlock with application transactions that touch
+-- those relations before enqueueing work. Migration 000271 performs the
+-- cross-table cleanup after this barrier transaction commits.
 LOCK TABLE jobs IN SHARE ROW EXCLUSIVE MODE;
 
 DO $$
@@ -47,83 +50,3 @@ SET status = 'cancelled',
     last_error = 'cancelled: PR readiness subsystem removed'
 WHERE status = 'pending'
   AND job_type = 'run_pr_readiness';
-
-DELETE FROM session_changeset_leases
-WHERE holder_type = 'readiness';
-
--- ParseUserSettings decodes with DisallowUnknownFields, so a retired user
--- preference is a hard decode failure once the new version ships. Org settings
--- decode leniently; strip them too so the stored documents stay truthful.
-UPDATE organizations
-SET settings = settings
-    #- '{session_automation,automatic_follow_through,readiness_after_review_loop}'
-    #- '{session_automation,automatic_follow_through,readiness_after_review_loop_states}'
-WHERE (settings #> '{session_automation,automatic_follow_through}') ?| ARRAY[
-    'readiness_after_review_loop',
-    'readiness_after_review_loop_states'
-];
-
-UPDATE users
-SET settings = settings
-    #- '{automatic_pr_follow_through,readiness_after_review_loop}'
-WHERE (settings #> '{automatic_pr_follow_through}') ? 'readiness_after_review_loop';
-
--- Remove the retired event from custom Slack subscriptions. If it was the
--- only explicit event, pin the preset to custom before producing an empty
--- array so subscription matching does not fall back to a broader preset.
-UPDATE slack_bot_settings
-SET notification_preset = 'custom'
-WHERE notification_subscriptions->'events' @> '["pr.readiness_attention"]'::jsonb
-  AND NOT EXISTS (
-      SELECT 1
-      FROM jsonb_array_elements(notification_subscriptions->'events') AS item(value)
-      WHERE item.value <> '"pr.readiness_attention"'::jsonb
-  );
-
-UPDATE slack_channel_settings
-SET notification_preset = 'custom'
-WHERE notification_subscriptions->'events' @> '["pr.readiness_attention"]'::jsonb
-  AND NOT EXISTS (
-      SELECT 1
-      FROM jsonb_array_elements(notification_subscriptions->'events') AS item(value)
-      WHERE item.value <> '"pr.readiness_attention"'::jsonb
-  );
-
-UPDATE slack_bot_settings
-SET notification_subscriptions = jsonb_set(
-    notification_subscriptions,
-    '{events}',
-    COALESCE((
-        SELECT jsonb_agg(item.value)
-        FROM jsonb_array_elements(notification_subscriptions->'events') AS item(value)
-        WHERE item.value <> '"pr.readiness_attention"'::jsonb
-    ), '[]'::jsonb)
-)
-WHERE notification_subscriptions->'events' @> '["pr.readiness_attention"]'::jsonb;
-
-UPDATE slack_channel_settings
-SET notification_subscriptions = jsonb_set(
-    notification_subscriptions,
-    '{events}',
-    COALESCE((
-        SELECT jsonb_agg(item.value)
-        FROM jsonb_array_elements(notification_subscriptions->'events') AS item(value)
-        WHERE item.value <> '"pr.readiness_attention"'::jsonb
-    ), '[]'::jsonb)
-)
-WHERE notification_subscriptions->'events' @> '["pr.readiness_attention"]'::jsonb;
-
-ALTER TABLE session_changeset_leases
-    DROP CONSTRAINT session_changeset_leases_holder_type_check,
-    ADD CONSTRAINT session_changeset_leases_holder_type_check
-        CHECK (holder_type IN ('agent_turn', 'materialize', 'publish', 'restack', 'preview'));
-
-DROP TRIGGER IF EXISTS trg_pr_readiness_assign_primary_changeset ON pr_readiness_runs;
-DROP FUNCTION IF EXISTS assign_pr_readiness_primary_changeset();
-
-DROP TABLE pr_readiness_bypasses;
-DROP TABLE pr_readiness_checks;
-DROP TABLE pr_readiness_runs;
-DROP TABLE pr_readiness_custom_checks;
-DROP TABLE pr_readiness_policies;
-DROP TABLE pr_readiness_contexts;

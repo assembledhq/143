@@ -50,21 +50,37 @@ func TestSessionChangesetSplitMigrationPinsPhaseThreeContracts(t *testing.T) {
 func TestRemovePRReadinessMigrationPinsShutdownContracts(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile("../../migrations/000267_remove_pr_readiness.up.sql")
-	require.NoError(t, err, "test should read the PR readiness removal migration")
-	sql := string(body)
+	barrierBody, err := os.ReadFile("../../migrations/000267_remove_pr_readiness.up.sql")
+	require.NoError(t, err, "test should read the PR readiness jobs-barrier migration")
+	barrierSQL := string(barrierBody)
 
-	require.Contains(t, sql, "LOCK TABLE jobs", "migration should close the rolling-deploy enqueue race")
-	require.Contains(t, sql, "status = 'running'", "migration should refuse to drop readiness state while a worker is using it")
-	require.Contains(t, sql, "trg_reject_removed_pr_readiness_jobs", "migration should prevent old processes from enqueueing removed jobs")
-	require.Contains(t, sql, "status = 'cancelled'", "migration should cancel pending readiness jobs")
-	require.NotContains(t, sql, "DELETE FROM jobs", "migration should cancel rather than delete readiness jobs so history survives and the jobs lock is not held for a sequential scan")
-	require.Contains(t, sql, "DELETE FROM session_changeset_leases", "migration should clear readiness leases before narrowing the lease constraint")
-	require.Contains(t, sql, "UPDATE organizations", "migration should remove retired organization settings before strict decoding")
-	require.Contains(t, sql, "UPDATE users", "migration should remove retired user settings before strict decoding")
-	require.Contains(t, sql, "UPDATE slack_bot_settings", "migration should remove retired bot-level Slack subscriptions")
-	require.Contains(t, sql, "UPDATE slack_channel_settings", "migration should remove retired channel-level Slack subscriptions")
-	require.Contains(t, sql, `"pr.readiness_attention"`, "migration should identify the retired Slack event exactly")
+	require.Contains(t, barrierSQL, "LOCK TABLE jobs", "jobs barrier should close the rolling-deploy enqueue race")
+	require.Contains(t, barrierSQL, "status = 'running'", "jobs barrier should refuse cleanup while a worker is using readiness state")
+	require.Contains(t, barrierSQL, "trg_reject_removed_pr_readiness_jobs", "jobs barrier should prevent old processes from enqueueing removed jobs")
+	require.Contains(t, barrierSQL, "status = 'cancelled'", "jobs barrier should cancel pending readiness jobs")
+	require.NotContains(t, barrierSQL, "DELETE FROM jobs", "jobs barrier should cancel rather than delete readiness jobs so history survives")
+	for _, crossTableStatement := range []string{
+		"DELETE FROM session_changeset_leases",
+		"UPDATE organizations",
+		"UPDATE users",
+		"UPDATE slack_bot_settings",
+		"UPDATE slack_channel_settings",
+		"DROP TABLE",
+	} {
+		require.NotContains(t, barrierSQL, crossTableStatement, "jobs barrier should not hold the jobs lock while changing other application tables")
+	}
+
+	cleanupBody, err := os.ReadFile("../../migrations/000271_remove_pr_readiness_state.up.sql")
+	require.NoError(t, err, "test should read the PR readiness state-cleanup migration")
+	cleanupSQL := string(cleanupBody)
+
+	require.Contains(t, cleanupSQL, "DELETE FROM session_changeset_leases", "state cleanup should clear readiness leases before narrowing the lease constraint")
+	require.Contains(t, cleanupSQL, "UPDATE organizations", "state cleanup should remove retired organization settings")
+	require.Contains(t, cleanupSQL, "UPDATE users", "state cleanup should remove retired user settings before strict decoding")
+	require.Contains(t, cleanupSQL, "UPDATE slack_bot_settings", "state cleanup should remove retired bot-level Slack subscriptions")
+	require.Contains(t, cleanupSQL, "UPDATE slack_channel_settings", "state cleanup should remove retired channel-level Slack subscriptions")
+	require.Contains(t, cleanupSQL, `"pr.readiness_attention"`, "state cleanup should identify the retired Slack event exactly")
+	require.NotContains(t, cleanupSQL, "DROP TRIGGER IF EXISTS trg_reject_removed_pr_readiness_jobs", "state cleanup should retain the rolling guard until a later fleet contraction")
 	for _, table := range []string{
 		"pr_readiness_bypasses",
 		"pr_readiness_checks",
@@ -73,7 +89,7 @@ func TestRemovePRReadinessMigrationPinsShutdownContracts(t *testing.T) {
 		"pr_readiness_policies",
 		"pr_readiness_contexts",
 	} {
-		require.Contains(t, sql, "DROP TABLE "+table, "migration should drop every readiness table")
+		require.Contains(t, cleanupSQL, "DROP TABLE IF EXISTS "+table, "state cleanup should idempotently drop every readiness table")
 	}
 }
 

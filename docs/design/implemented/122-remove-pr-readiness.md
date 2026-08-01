@@ -1,6 +1,6 @@
 # 122 - Remove PR Readiness
 
-> **Status:** Implemented | **Last reviewed:** 2026-07-31
+> **Status:** Implemented | **Last reviewed:** 2026-08-01
 >
 > **Applies to:** PR readiness runs, checks, bypasses, contexts, policies, and
 > custom checks; the `run_pr_readiness` job; readiness org/user follow-through
@@ -61,12 +61,12 @@ evidence rather than widening this gate.
 - Removing review-agent loops, the `Review` action, or the builder pre-PR gate.
 - Removing PR health synchronization, repair actions, or code review.
 - Preserving readiness history. Readiness runs, checks, and bypasses are
-  destroyed by migration `000267` and cannot be reconstructed from within 143.
+  destroyed by migration `000271` and cannot be reconstructed from within 143.
 
 ## Rollout Order
 
-Migration `000267_remove_pr_readiness` is the rolling-deploy barrier, following
-the pattern established by `000259_cancel_pending_pm_jobs`:
+Migration `000267_remove_pr_readiness` is the jobs-only rolling-deploy barrier,
+following the pattern established by `000259_cancel_pending_pm_jobs`:
 
 1. `LOCK TABLE jobs IN SHARE ROW EXCLUSIVE MODE` before the drain check, so a
    worker cannot claim a pending readiness job between the check and the
@@ -80,10 +80,32 @@ the pattern established by `000259_cancel_pending_pm_jobs`:
    `job_type` has no standalone index. `delete_expired_completed_jobs` does not
    cover `cancelled`, so these rows persist, as the PM shutdown's cancelled rows
    do; the queued readiness backlog is small and bounded.
-5. Clear `readiness` changeset leases, then narrow the lease `holder_type`
+
+Migration `000271_remove_pr_readiness_state` runs after the barrier transaction
+commits:
+
+1. Clear `readiness` changeset leases, then narrow the lease `holder_type`
    check constraint.
-6. Strip retired org/user settings keys and the `pr.readiness_attention` Slack
-   subscription, then drop the six readiness tables.
+2. Strip retired org/user settings keys and the `pr.readiness_attention` Slack
+   subscription.
+3. Drop the six readiness tables.
+
+The split is required because golang-migrate sends each migration file as one
+transaction. The original all-in-one `000267` held a `SHARE ROW EXCLUSIVE` lock
+on `jobs` while acquiring locks on settings, lease, and readiness relations. A
+concurrent application transaction that already held one of those locks and
+then enqueued a job produced a lock inversion and deadlocked the production
+rollout. Keeping `000267` jobs-only releases the barrier lock before `000271`
+touches any other application table without reopening the enqueue race: the
+trigger remains installed between the two transactions.
+
+The failed production attempt left golang-migrate's separately committed dirty
+marker at version 267 even though PostgreSQL rolled back the migration
+transaction. App deploys therefore run `migrate repair-pr-readiness` before
+`migrate up`. That repair is intentionally narrow: it no-ops on clean databases,
+rewinds only an exactly dirty version 267 to 266, and refuses every other dirty
+version. Remove the repair command from the migrator and deploy script in the
+same follow-up that contracts the temporary rejection trigger.
 
 Slack subscriptions that listed only `pr.readiness_attention` are pinned to the
 `custom` preset before the event is stripped. Without that, an emptied `events`
@@ -98,7 +120,8 @@ by a follow-up migration once no pre-removal process can still be running.
 
 - **User settings strict decoding.** `ParseUserSettings` uses
   `DisallowUnknownFields`, so a retired key is a hard decode failure. The
-  migration strips `automatic_pr_follow_through.readiness_after_review_loop`,
+  state-cleanup migration strips
+  `automatic_pr_follow_through.readiness_after_review_loop`,
   but an old API process serving a cached frontend bundle during the rollout
   window could write it back, after which that one user's settings row fails to
   decode until it is cleared. Org settings decode leniently and are not exposed

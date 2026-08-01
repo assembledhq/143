@@ -1,14 +1,100 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/golang-migrate/migrate/v4"
 	"github.com/stretchr/testify/require"
 )
+
+type fakeDirtyMigrationRepairer struct {
+	version      uint
+	dirty        bool
+	versionErr   error
+	forceErr     error
+	forcedTo     int
+	forceInvoked bool
+}
+
+func (f *fakeDirtyMigrationRepairer) Version() (uint, bool, error) {
+	return f.version, f.dirty, f.versionErr
+}
+
+func (f *fakeDirtyMigrationRepairer) Force(version int) error {
+	f.forceInvoked = true
+	f.forcedTo = version
+	return f.forceErr
+}
+
+func TestRepairPRReadinessDirtyMigration(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		repairer         fakeDirtyMigrationRepairer
+		expectedRepaired bool
+		expectedForce    int
+		expectForce      bool
+		expectError      bool
+	}{
+		{
+			name:             "repairs exact dirty readiness migration",
+			repairer:         fakeDirtyMigrationRepairer{version: prReadinessDirtyMigrationVersion, dirty: true},
+			expectedRepaired: true,
+			expectedForce:    prReadinessDirtyMigrationVersion - 1,
+			expectForce:      true,
+		},
+		{
+			name:     "does nothing for clean database",
+			repairer: fakeDirtyMigrationRepairer{version: prReadinessDirtyMigrationVersion, dirty: false},
+		},
+		{
+			name:        "refuses unrelated dirty migration",
+			repairer:    fakeDirtyMigrationRepairer{version: prReadinessDirtyMigrationVersion + 1, dirty: true},
+			expectError: true,
+		},
+		{
+			name:        "returns version read failure",
+			repairer:    fakeDirtyMigrationRepairer{versionErr: errors.New("version unavailable")},
+			expectError: true,
+		},
+		{
+			name:     "does nothing before the first migration",
+			repairer: fakeDirtyMigrationRepairer{versionErr: migrate.ErrNilVersion},
+		},
+		{
+			name:          "returns force failure",
+			repairer:      fakeDirtyMigrationRepairer{version: prReadinessDirtyMigrationVersion, dirty: true, forceErr: errors.New("force rejected")},
+			expectForce:   true,
+			expectedForce: prReadinessDirtyMigrationVersion - 1,
+			expectError:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			repairer := tt.repairer
+			repaired, err := repairPRReadinessDirtyMigration(&repairer)
+			if tt.expectError {
+				require.Error(t, err, "targeted migration repair should return the expected failure")
+			} else {
+				require.NoError(t, err, "targeted migration repair should complete without error")
+			}
+			require.Equal(t, tt.expectedRepaired, repaired, "targeted migration repair should report whether it changed migration state")
+			require.Equal(t, tt.expectForce, repairer.forceInvoked, "targeted migration repair should only force the exact known dirty version")
+			if tt.expectForce {
+				require.Equal(t, tt.expectedForce, repairer.forcedTo, "targeted migration repair should rewind to the version before readiness removal")
+			}
+		})
+	}
+}
 
 func TestResolveMigrationSource(t *testing.T) {
 	t.Parallel()

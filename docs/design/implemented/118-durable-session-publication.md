@@ -163,7 +163,7 @@ Recovery has two independent paths:
   webhook/worker crash after local association still converges. When no local
   or GitHub PR exists, it re-enqueues the exact stored request payload on its
   original queue. The normal `open_pr` worker then re-runs snapshot quiescence,
-  builder-readiness, draft/authorship, and automation-review guards; the
+  builder-review, draft/authorship, and automation-review guards; the
   reconciler never calls the low-level PR creator directly. A failed candidate
   is checkpointed as `retryable_failed`, advancing its `updated_at` so a bounded
   oldest-first batch cannot be monopolized by permanently broken rows.
