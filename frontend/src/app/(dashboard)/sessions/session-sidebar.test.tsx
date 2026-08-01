@@ -182,10 +182,11 @@ describe('SessionSidebar', () => {
     expect(capturedUserId).toBe('user-1');
   });
 
-  it('keeps the desktop search field aligned with the people filter', () => {
+  it('keeps the search field aligned with the people filter at mobile and desktop sizes', () => {
     renderWithProviders(<SessionSidebar />);
 
-    expect(screen.getByPlaceholderText('Search sessions...')).toHaveClass('h-8', 'sm:h-8');
+    expect(screen.getByPlaceholderText('Search sessions...')).toHaveClass('h-11', 'sm:h-8');
+    expect(screen.getByRole('button', { name: /Mine/ })).toHaveClass('h-11', 'sm:h-8');
   });
 
   it('does not fetch sessions until the Mine scope can resolve the current user', async () => {

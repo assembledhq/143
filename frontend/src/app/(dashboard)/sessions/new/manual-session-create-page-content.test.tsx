@@ -543,6 +543,9 @@ describe("ManualSessionCreatePageContent", () => {
     expect(await screen.findByRole("dialog", { name: "Session settings" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: /Model override/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Target branch/ })).toBeInTheDocument();
+    const repositoryTrigger = screen.getByRole("button", { name: /org\/test-repo/i });
+    expect(repositoryTrigger).toHaveAttribute("data-density", "default");
+    expect(repositoryTrigger).toHaveClass("h-11", "sm:h-9");
   });
 
   it("submits the user's default coding-agent model when no per-session model is selected", async () => {

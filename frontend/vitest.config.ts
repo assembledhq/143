@@ -4,6 +4,7 @@ import path from 'path';
 
 const nodeTestFiles = [
   'src/ci-guardrails.test.ts',
+  'src/eslint-rules/no-ad-hoc-control-sizing.test.ts',
   'src/next-config.test.ts',
   'src/lib/agents.test.ts',
   'src/lib/automation-templates.test.ts',

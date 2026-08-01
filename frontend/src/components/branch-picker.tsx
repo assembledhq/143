@@ -5,6 +5,8 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronsUpDown, GitBranch } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import type { ControlDensity } from "@/components/ui/control-sizing";
+import { ControlTrigger } from "@/components/ui/control-trigger";
 import {
   Command,
   CommandCheckItem,
@@ -35,6 +37,7 @@ interface BranchPickerProps {
   buttonClassName?: string;
   contentClassName?: string;
   disabled?: boolean;
+  density?: ControlDensity;
 }
 
 export function BranchPicker({
@@ -48,6 +51,7 @@ export function BranchPicker({
   buttonClassName,
   contentClassName,
   disabled = false,
+  density = "default",
 }: BranchPickerProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -93,21 +97,26 @@ export function BranchPicker({
       }}
     >
       <PopoverTrigger asChild>
-        <Button
+        <ControlTrigger
           type="button"
           variant="outline"
           id={id}
           aria-label={label}
           aria-expanded={open}
           disabled={disabled || !repositoryId}
-          className={cn("justify-between gap-2 font-normal", className, buttonClassName)}
+          className={cn(
+            "justify-between gap-2 font-normal",
+            className,
+            buttonClassName,
+          )}
+          density={density}
         >
           <span className="flex min-w-0 items-center gap-2">
             <GitBranch className="h-4 w-4 shrink-0 text-muted-foreground" />
             <span className="truncate">{selectedBranch || "Select branch"}</span>
           </span>
           <ChevronsUpDown className="h-4 w-4 shrink-0 text-muted-foreground" />
-        </Button>
+        </ControlTrigger>
       </PopoverTrigger>
       <PopoverContent className={cn("w-[var(--radix-popover-trigger-width)] p-0", contentClassName)}>
         {/* shouldFilter={false}: branches are filtered server-side, so cmdk

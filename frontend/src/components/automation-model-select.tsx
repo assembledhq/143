@@ -21,6 +21,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import type { ControlDensity } from "@/components/ui/control-sizing";
 
 const AUTO_MODEL_VALUE = "__auto__";
 
@@ -31,6 +32,7 @@ interface AutomationModelSelectProps {
   ariaLabel?: string;
   /** Restyles the trigger — used by inline property rows to render it ghosted. */
   triggerClassName?: string;
+  density?: ControlDensity;
 }
 
 export function AutomationModelSelect({
@@ -39,6 +41,7 @@ export function AutomationModelSelect({
   id,
   ariaLabel = "Automation model",
   triggerClassName,
+  density = "default",
 }: AutomationModelSelectProps) {
   const { data: settingsResponse } = useQuery({
     queryKey: ["settings"],
@@ -105,7 +108,7 @@ export function AutomationModelSelect({
         onValueChange(nextValue === AUTO_MODEL_VALUE ? undefined : nextValue)
       }
     >
-      <SelectTrigger id={id} aria-label={ariaLabel} className={triggerClassName}>
+      <SelectTrigger id={id} aria-label={ariaLabel} density={density} className={triggerClassName}>
         <SelectValue placeholder="Auto" />
       </SelectTrigger>
       <SelectContent>

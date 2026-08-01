@@ -2,7 +2,8 @@
 
 import { useMemo, useState } from "react";
 import { ChevronDown } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import type { ControlDensity } from "@/components/ui/control-sizing";
+import { ControlTrigger } from "@/components/ui/control-trigger";
 import {
   Command,
   CommandCheckItem,
@@ -64,6 +65,7 @@ interface TimezonePickerProps {
   className?: string;
   ariaLabel?: string;
   disabled?: boolean;
+  density?: ControlDensity;
 }
 
 export function TimezonePicker({
@@ -73,6 +75,7 @@ export function TimezonePicker({
   className,
   ariaLabel = "Time zone",
   disabled = false,
+  density = "default",
 }: TimezonePickerProps) {
   const [open, setOpen] = useState(false);
   // When the Detected group is rendered, the detected zone also appears in
@@ -90,21 +93,23 @@ export function TimezonePicker({
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <Button
+        <ControlTrigger
           type="button"
           variant="outline"
           role="combobox"
           aria-label={ariaLabel}
           aria-expanded={open}
           disabled={disabled}
-          // Match the sibling SelectTrigger so the trio in
-          // the schedule row lines up visually.
-          className={cn("h-9 min-w-0 justify-between type-dense max-sm:text-base font-normal", className)}
+          className={cn(
+            "min-w-0 justify-between type-dense font-normal",
+            className,
+          )}
+          density={density}
           title={value}
         >
           <span className="min-w-0 max-w-[180px] truncate">{value}</span>
           <ChevronDown className="ml-2 h-3.5 w-3.5 shrink-0 opacity-60" />
-        </Button>
+        </ControlTrigger>
       </PopoverTrigger>
       <PopoverContent className="w-72 p-0" align="start">
         <Command>

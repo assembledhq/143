@@ -17,6 +17,7 @@ import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { ControlTrigger } from "@/components/ui/control-trigger";
 import {
   Collapsible,
   CollapsibleContent,
@@ -231,19 +232,10 @@ const applyCapabilityGrants = (
 
 // A property reads as plain text until it is hovered or focused, at which point
 // it reveals that it was the control all along — so there is no separate "edit
-// mode" to enter and no second place to look for the value. Heights follow the
-// app's `h-<mobile> sm:h-<desktop>` convention: full-size touch targets on
-// small screens, a tight 28px rhythm in the desktop rail.
+// mode" to enter and no second place to look for the value. The shared dense
+// control density keeps these rows tight on desktop and touch-safe on mobile.
 const inlineControlClass =
-  "h-9 sm:h-7 w-full justify-between rounded-md border border-transparent bg-transparent px-1.5 text-xs font-normal shadow-none hover:border-border hover:bg-muted/40 focus-visible:border-border data-[state=open]:border-border";
-
-// SelectTrigger sizes itself through `data-[size]` variants, which
-// tailwind-merge scopes separately from a bare `h-*`, so the same heights have
-// to be restated against those variants to win.
-const inlineSelectTriggerClass = cn(
-  inlineControlClass,
-  "data-[size=default]:h-9 sm:data-[size=default]:h-7",
-);
+  "w-full justify-between rounded-md border border-transparent bg-transparent px-1.5 text-xs font-normal shadow-none hover:border-border hover:bg-muted/40 focus-visible:border-border data-[state=open]:border-border";
 
 // `htmlFor` is required, not optional: a `<Label>` with nothing bound to it is
 // a dead click target next to rows that do respond, and emits a `<label>`
@@ -327,17 +319,17 @@ function TriggersProperty({
     <PropertyRow label="Triggers" htmlFor={`automation-triggers-${uid}`}>
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
-          <Button
+          <ControlTrigger
             type="button"
             id={`automation-triggers-${uid}`}
             variant="outline"
-            size="sm"
+            density="dense"
             aria-label="Triggers"
             className={cn(inlineControlClass, "text-left")}
           >
             <span className="min-w-0 truncate">{summary}</span>
             <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
-          </Button>
+          </ControlTrigger>
         </PopoverTrigger>
         {/* Radix unmounts closed content, so every open re-seeds the schedule
             draft from the freshest automation instead of holding a long-lived
@@ -674,7 +666,8 @@ function TriggerFilterField({
         value={field.value}
         onChange={(event) => field.onChange(event.target.value)}
         onBlur={field.onBlur}
-        className="h-9 text-xs sm:h-7"
+        density="dense"
+        className="text-xs"
       />
     </div>
   );
@@ -743,7 +736,8 @@ function PrePRReviewProperty({
           onChange={field.onChange}
           onBlur={field.onBlur}
           disabled={disabled}
-          className="h-9 w-14 text-center text-xs sm:h-7"
+          density="dense"
+          className="w-14 text-center text-xs"
         />
         <Button
           type="button"
@@ -868,7 +862,8 @@ function InlineAutomationText({
               value={nameField.value}
               onChange={(event) => nameField.onChange(event.target.value)}
               onBlur={nameField.onBlur}
-              className="h-auto border-transparent bg-transparent px-1 py-0 text-2xl font-semibold tracking-tight shadow-none hover:border-border focus-visible:border-border md:text-3xl"
+              inset="none"
+              className="border-transparent bg-transparent px-1 text-2xl leading-none font-semibold tracking-tight shadow-none hover:border-border focus-visible:border-border md:text-3xl"
             />
           </>
         ) : (
@@ -1474,7 +1469,8 @@ function AutomationDetailRail({
                 <SelectTrigger
                   id={`automation-repository-${uid}`}
                   aria-label="Repository"
-                  className={inlineSelectTriggerClass}
+                  density="dense"
+                  className={inlineControlClass}
                 >
                   <SelectValue placeholder={repositoryName} />
                 </SelectTrigger>
@@ -1517,7 +1513,8 @@ function AutomationDetailRail({
                 <SelectTrigger
                   id={`automation-identity-scope-${uid}`}
                   aria-label="Run as"
-                  className={inlineSelectTriggerClass}
+                  density="dense"
+                  className={inlineControlClass}
                 >
                   <SelectValue />
                 </SelectTrigger>
@@ -1544,7 +1541,8 @@ function AutomationDetailRail({
                 id={`automation-model-${uid}`}
                 ariaLabel="Model"
                 value={model}
-                triggerClassName={inlineSelectTriggerClass}
+                density="dense"
+                triggerClassName={inlineControlClass}
                 onValueChange={(value) => {
                   // The API re-validates the STORED reasoning override against
                   // the model's agent, so a lone `model` patch is rejected
@@ -1603,7 +1601,8 @@ function AutomationDetailRail({
                 <SelectTrigger
                   id={`automation-reasoning-${uid}`}
                   aria-label="Reasoning"
-                  className={inlineSelectTriggerClass}
+                  density="dense"
+                  className={inlineControlClass}
                 >
                   <SelectValue placeholder="Default" />
                 </SelectTrigger>
@@ -1643,6 +1642,7 @@ function AutomationDetailRail({
                   })
                 }
                 label="Base branch"
+                density="dense"
                 buttonClassName={inlineControlClass}
                 contentClassName="w-[var(--radix-popover-trigger-width)]"
               />
@@ -1672,7 +1672,8 @@ function AutomationDetailRail({
                 <SelectTrigger
                   id={`automation-publish-policy-${uid}`}
                   aria-label="After a successful run"
-                  className={inlineSelectTriggerClass}
+                  density="dense"
+                  className={inlineControlClass}
                 >
                   <SelectValue />
                 </SelectTrigger>
@@ -1707,6 +1708,7 @@ function AutomationDetailRail({
                 value={scopeField.value}
                 onChange={(event) => scopeField.onChange(event.target.value)}
                 onBlur={scopeField.onBlur}
+                density="dense"
                 className={inlineControlClass}
               />
             </PropertyRow>

@@ -12,6 +12,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { ControlTrigger } from "@/components/ui/control-trigger";
 import { api } from "@/lib/api";
 import { useEffect, useState } from "react";
 
@@ -51,13 +52,17 @@ export function RepoContextSwitcher() {
 
   return (
     <DropdownMenu onOpenChange={(open) => { if (!open) setSearch(""); }}>
-      <DropdownMenuTrigger
-        className="flex items-center h-8 w-full gap-2 rounded-md px-2.5 text-xs font-medium transition-colors duration-150 text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground"
-        data-testid="repo-context-switcher"
-      >
-        <GitBranch className="h-4 w-4 shrink-0" />
-        <span className="truncate flex-1 text-left">{label}</span>
-        <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-40" />
+      <DropdownMenuTrigger asChild>
+        <ControlTrigger
+          variant="ghost"
+          density="compact"
+          className="w-full gap-2 px-2.5 text-xs font-medium text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground"
+          data-testid="repo-context-switcher"
+        >
+          <GitBranch className="h-4 w-4 shrink-0" />
+          <span className="truncate flex-1 text-left">{label}</span>
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-40" />
+        </ControlTrigger>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" side="top" className="w-64">
         {showSearch && (
