@@ -43,7 +43,7 @@ describe("CommandPalette", () => {
   it("renders static navigation items when open", async () => {
     renderPalette();
     expect(await screen.findByText("Sessions")).toBeInTheDocument();
-    expect(screen.getByText("Projects")).toBeInTheDocument();
+    expect(screen.queryByText("Projects")).not.toBeInTheDocument();
     expect(screen.queryByText("Autopilot")).not.toBeInTheDocument();
   });
 
@@ -57,7 +57,7 @@ describe("CommandPalette", () => {
   it("renders quick action items", async () => {
     renderPalette();
     expect(await screen.findByText("New session")).toBeInTheDocument();
-    expect(screen.getByText("New project")).toBeInTheDocument();
+    expect(screen.queryByText("New project")).not.toBeInTheDocument();
     expect(screen.getByText("Log out")).toBeInTheDocument();
   });
 
@@ -120,9 +120,6 @@ describe("CommandPalette", () => {
       http.get("/api/v1/sessions", () =>
         HttpResponse.json({ data: [], meta: {} })
       ),
-      http.get("/api/v1/projects", () =>
-        HttpResponse.json({ data: [], meta: {} })
-      )
     );
 
     renderPalette();
@@ -151,10 +148,7 @@ describe("CommandPalette", () => {
           });
         }
         return HttpResponse.json({ data: [], meta: {} });
-      }),
-      http.get("/api/v1/projects", () =>
-        HttpResponse.json({ data: [], meta: {} })
-      )
+      })
     );
 
     renderPalette();
@@ -181,10 +175,7 @@ describe("CommandPalette", () => {
           });
         }
         return HttpResponse.json({ data: [], meta: {} });
-      }),
-      http.get("/api/v1/projects", () =>
-        HttpResponse.json({ data: [], meta: {} })
-      )
+      })
     );
 
     renderPalette({ searchParams: { repo: "repo-1" } });
@@ -226,9 +217,6 @@ describe("CommandPalette", () => {
     server.use(
       http.get("/api/v1/sessions", () =>
         HttpResponse.json({ data: [], meta: {} })
-      ),
-      http.get("/api/v1/projects", () =>
-        HttpResponse.json({ data: [], meta: {} })
       )
     );
 
@@ -249,9 +237,6 @@ describe("CommandPalette", () => {
     const user = userEvent.setup();
     server.use(
       http.get("/api/v1/sessions", () =>
-        HttpResponse.json({ data: [], meta: {} })
-      ),
-      http.get("/api/v1/projects", () =>
         HttpResponse.json({ data: [], meta: {} })
       )
     );

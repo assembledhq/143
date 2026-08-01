@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQueryState } from "nuqs";
 import { useQuery } from "@tanstack/react-query";
-import { GitBranch, Loader2, Play, FolderKanban, Sparkles } from "lucide-react";
+import { GitBranch, Loader2, Play, Sparkles } from "lucide-react";
 import {
   CommandDialog,
   CommandEmpty,
@@ -47,7 +47,7 @@ function CommandPaletteContent({
 
   const actions = useMemo(() => getFilteredActions(userRole), [userRole]);
   const canStartManualSession = userRole !== "viewer";
-  const { sessions, projects, isLoading } = useCommandPaletteSearch(query, repo);
+  const { sessions, isLoading } = useCommandPaletteSearch(query, repo);
 
   const { data: repoSummaries } = useQuery({
     queryKey: queryKeys.repositories.summary,
@@ -115,19 +115,6 @@ function CommandPaletteContent({
     [addRecent, navigate]
   );
 
-  const handleProjectSelect = useCallback(
-    (project: { id: string; title: string }) => {
-      addRecent({
-        type: "project",
-        id: project.id,
-        label: project.title,
-        href: `/projects/${project.id}`,
-      });
-      navigate(`/projects/${project.id}`, true);
-    },
-    [addRecent, navigate]
-  );
-
   const handleRepoSelect = useCallback(
     (repoID: string | null) => {
       setRepo(repoID);
@@ -160,7 +147,7 @@ function CommandPaletteContent({
   const settingsActions = useMemo(() => actions.filter((action) => action.group === "settings"), [actions]);
   const quickActions = useMemo(() => actions.filter((action) => action.group === "quick-actions"), [actions]);
   const hasQuery = query.length >= 2;
-  const hasDynamicResults = sessions.length > 0 || projects.length > 0;
+  const hasDynamicResults = sessions.length > 0;
   const hasMatchingStaticItem = useMemo(() => {
     if (normalizedQuery.length === 0) {
       return false;
@@ -230,27 +217,6 @@ function CommandPaletteContent({
           </CommandGroup>
         )}
 
-        {hasQuery && projects.length > 0 && (
-          <CommandGroup heading="Projects">
-            {projects.map((project) => (
-              <CommandItem
-                key={project.id}
-                value={`project-${project.id}-${project.title}`}
-                onSelect={() => handleProjectSelect(project)}
-              >
-                <FolderKanban className="h-4 w-4" />
-                <span className="flex-1 truncate">{project.title}</span>
-                <Badge
-                  variant="secondary"
-                  className="ml-auto px-1.5 py-0 text-xs"
-                >
-                  {project.status}
-                </Badge>
-              </CommandItem>
-            ))}
-          </CommandGroup>
-        )}
-
         {hasQuery && hasDynamicResults && <CommandSeparator />}
 
         {displayItems.length > 0 && (
@@ -262,7 +228,6 @@ function CommandPaletteContent({
                 onSelect={() => handleRecentSelect(item)}
               >
                 {item.type === "session" && <Play className="h-4 w-4" />}
-                {item.type === "project" && <FolderKanban className="h-4 w-4" />}
                 {item.type === "navigation" && <Sparkles className="h-4 w-4" />}
                 <span className="truncate">{item.label}</span>
               </CommandItem>
@@ -401,7 +366,7 @@ export function CommandPalette({
       open={open}
       onOpenChange={onOpenChange}
       title="Command Palette"
-      description="Search for pages, sessions, projects, and actions"
+      description="Search for pages, sessions, and actions"
       showCloseButton={false}
     >
       {open ? (

@@ -24,7 +24,6 @@ export default async function robots(): Promise<MetadataRoute.Robots> {
           "/verify-email",
           // Authenticated dashboard.
           "/sessions",
-          "/projects",
           "/settings",
           "/team",
           "/agent",
