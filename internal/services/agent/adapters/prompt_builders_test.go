@@ -42,6 +42,33 @@ func TestBuildSystemPrompt_IncludesExecutionContext(t *testing.T) {
 	require.NotContains(t, prompt, "Product Manager", "system prompt should not expose removed PM terminology")
 }
 
+func TestBuildSystemPrompt_PRHandoffCapabilityGate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		policy      *agent.PRHandoffPolicy
+		wantHandoff bool
+	}{
+		{name: "eligible implementation includes handoff", policy: &agent.PRHandoffPolicy{AutomaticHandoff: true, ReviewBeforePR: true, ReviewMaxPasses: 2}, wantHandoff: true},
+		{name: "ineligible turn omits handoff", wantHandoff: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := buildSystemPrompt(&agent.AgentInput{PromptStyle: agent.PromptStyleRawTask, PRHandoffPolicy: tt.policy})
+			if tt.wantHandoff {
+				require.Contains(t, got, "143-tools pr create", "eligible implementation prompt should advertise the publication tool")
+				require.Contains(t, got, "Automatic PR handoff: on", "eligible implementation prompt should state effective policy")
+				return
+			}
+			require.NotContains(t, got, "143-tools pr create", "ineligible prompt should not advertise publication")
+		})
+	}
+}
+
 func TestBuildSystemPrompt_IncludesRevisionContext(t *testing.T) {
 	t.Parallel()
 

@@ -21,7 +21,7 @@ export function PageContainer({ children, size = "default", className }: PageCon
     <div
       data-slot="page-container"
       data-size={size}
-      className={cn("w-full mx-auto", sizeClassMap[size], className)}
+      className={cn("w-full mx-auto pb-24 md:pb-20", sizeClassMap[size], className)}
     >
       {children}
     </div>

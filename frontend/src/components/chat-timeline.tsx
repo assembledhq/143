@@ -26,6 +26,7 @@ import { deriveToolDisplay, formatToolInput } from "@/lib/tool-label";
 import { ImageLightbox } from "@/components/image-lightbox";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
+import { StatusLabel } from "@/components/status-label";
 
 // Shared max-width for chat bubbles (user, assistant, plan) so they line up
 // consistently across the timeline.
@@ -832,10 +833,12 @@ function ChatTimelineImpl({ entries, isRunning, recoveryActive = false, stopping
     rendered.push(
       <div key="recovering" className="flex justify-start">
         <div className="rounded-lg bg-surface-recessed px-3 py-2 text-sm">
-          <span className="flex items-center gap-2 text-muted-foreground">
-            <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
-            Resuming after maintenance...
-          </span>
+          <StatusLabel
+            label="Reconnecting after maintenance"
+            tone="info"
+            activity="indeterminate"
+            stateKey="reconnecting"
+          />
         </div>
       </div>
     );
@@ -843,13 +846,12 @@ function ChatTimelineImpl({ entries, isRunning, recoveryActive = false, stopping
     rendered.push(
       <div key="working" className="flex justify-start">
         <div className="rounded-lg bg-surface-recessed px-3 py-2 text-sm">
-          <span className="flex items-center gap-2 text-muted-foreground">
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75" />
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
-            </span>
-            Agent is working...
-          </span>
+          <StatusLabel
+            label="Agent is working..."
+            tone="primary"
+            activity="breathing"
+            stateKey="running"
+          />
         </div>
       </div>
     );

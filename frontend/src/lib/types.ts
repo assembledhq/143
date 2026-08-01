@@ -105,7 +105,6 @@ export interface UserSettings {
 export type AutomaticFollowThroughPreference = "inherit" | "on" | "off";
 
 export interface AutomaticPRFollowThroughUserSettings {
-  readiness_after_review_loop?: AutomaticFollowThroughPreference;
   resolve_conflicts_when_idle?: AutomaticFollowThroughPreference;
   fix_tests_when_idle?: AutomaticFollowThroughPreference;
   respond_to_pr_feedback?: AutomaticFollowThroughPreference;
@@ -1446,145 +1445,6 @@ export interface SessionWorkspaceGenerationChangedEvent {
   reason?: string;
 }
 
-export type PRReadinessRunStatus = "queued" | "running" | "passed" | "warnings" | "blocked" | "failed";
-export type PRReadinessCheckStatus = "passed" | "warning" | "failed" | "skipped" | "error";
-export type PRReadinessEnforcement = "off" | "advisory" | "blocking";
-export type PRReadinessCheckType =
-  | "freshness"
-  | "agent_review_clean"
-  | "diff_collected"
-  | "test_evidence_present"
-  | "risk_flags"
-  | "dependency_config_risk"
-  | "generated_file_churn"
-  | "context_complete"
-  | "review_packet_draftable"
-  | "custom_prompt";
-
-export interface PRReadinessEnforcementByRole {
-  builder?: PRReadinessEnforcement;
-  engineer?: PRReadinessEnforcement;
-  admin?: PRReadinessEnforcement;
-}
-
-export interface PRReadinessCheck {
-  id: string;
-  org_id: string;
-  run_id: string;
-  session_id: string;
-  check_key?: string;
-  check_type: PRReadinessCheckType;
-  status: PRReadinessCheckStatus;
-  enforcement: PRReadinessEnforcement;
-  enforcement_by_role?: PRReadinessEnforcementByRole;
-  effective_enforcement?: PRReadinessEnforcement;
-  provenance?: "builtin" | "org_settings" | "repo_config" | string;
-  source?: string;
-  title: string;
-  summary: string;
-  details?: unknown;
-  action?: string;
-  created_at: string;
-}
-
-export interface PRReadinessBypass {
-  id: string;
-  org_id: string;
-  readiness_run_id: string;
-  session_id: string;
-  repository_id?: string;
-  pull_request_id?: string;
-  bypassed_by_user_id: string;
-  reason: string;
-  bypassed_checks: string[];
-  created_at: string;
-}
-
-export interface PRReadinessRun {
-  id: string;
-  org_id: string;
-  session_id: string;
-  changeset_id?: string;
-  repository_id?: string;
-  status: PRReadinessRunStatus;
-  evaluated_workspace_revision: number;
-  evaluated_snapshot_key?: string;
-  evaluated_head_sha?: string;
-  summary?: string;
-  review_packet?: unknown;
-  triggered_by_user_id?: string;
-  started_at: string;
-  completed_at?: string;
-  created_at: string;
-  updated_at: string;
-  checks?: PRReadinessCheck[];
-  bypasses?: PRReadinessBypass[];
-}
-
-export interface PRReadinessResponse {
-  latest?: PRReadinessRun;
-}
-
-export interface PRReadinessCheckPolicy {
-  enforcement?: PRReadinessEnforcementByRole;
-}
-
-export interface PRReadinessPolicyConfig {
-  enabled_for_builders: boolean;
-  checks?: Record<string, PRReadinessCheckPolicy>;
-  bypass?: { enabled: boolean; allowed_roles?: string[]; scopes?: string[]; non_bypassable_checks?: string[] };
-  auto_run?: { after_session_completion: boolean; on_create_pr: boolean };
-  sensitive_paths?: string[];
-  generated_file_allowed_paths?: string[];
-  large_diff_file_threshold?: number;
-  large_diff_line_threshold?: number;
-}
-
-export interface PRReadinessResolvedPolicy {
-  config: PRReadinessPolicyConfig;
-  source: string;
-  policy?: {
-    id: string;
-    org_id: string;
-    repository_id?: string;
-    config: PRReadinessPolicyConfig;
-    active: boolean;
-    created_by_user_id?: string;
-    created_at: string;
-  };
-  bypass_counts?: {
-    total: number;
-    by_repository?: Array<{ key: string; count: number }>;
-    by_user?: Array<{ key: string; count: number }>;
-    by_check?: Array<{ key: string; count: number }>;
-  };
-}
-
-export interface PRReadinessContext {
-  org_id: string;
-  session_id: string;
-  issue_less_reason: string;
-  created_by_user_id?: string;
-  updated_by_user_id?: string;
-  created_at?: string;
-  updated_at?: string;
-}
-
-export interface PRReadinessCustomCheck {
-  id?: string;
-  org_id?: string;
-  repository_id?: string;
-  check_key: string;
-  name: string;
-  prompt: string;
-  paths?: { include?: string[]; exclude?: string[] };
-  enforcement?: PRReadinessEnforcementByRole;
-  source?: "org_settings" | "repo_config";
-  active?: boolean;
-  created_by_user_id?: string;
-  created_at?: string;
-}
-
 export interface SessionThreadFileEvent {
   id: number;
   org_id: string;
@@ -1747,7 +1607,7 @@ export interface ChangesetSummary {
   restack_delta_kind?: "clean_replay" | "mechanical_fallout" | "semantic_change";
   restack_delta_summary?: string;
   restack_confirmation_required?: boolean;
-  active_lease_holder_type?: "agent_turn" | "materialize" | "publish" | "restack" | "readiness" | "preview";
+  active_lease_holder_type?: "agent_turn" | "materialize" | "publish" | "restack" | "preview";
   active_lease_holder_label?: string;
   pull_request?: PullRequest;
   created_at: string;
@@ -2249,8 +2109,6 @@ export interface SessionAutomationSettings {
 }
 
 export interface AutomaticFollowThroughOrgSettings {
-  readiness_after_review_loop?: boolean;
-  readiness_after_review_loop_states?: ReviewLoopStatus[];
   resolve_conflicts_when_idle?: boolean;
   fix_tests_when_idle?: boolean;
   pr_feedback_mode?: "all_trusted_humans" | "mentions" | "off";
@@ -2933,9 +2791,6 @@ export type AuditResourceType =
   | "preview_secret_bundle"
   | "preview_policy"
   | "code_review_policy"
-  | "pr_readiness_policy"
-  | "pr_readiness_custom_check"
-  | "pr_readiness_bypass"
   | "cli_token"
   | "org_join_token"
   | "cli_tool"
@@ -2965,21 +2820,6 @@ export interface ProjectDetail {
   attachments: ProjectAttachment[];
   specs: ProjectSpec[];
 }
-
-export const projectStatusConfig: Record<
-  string,
-  { color: string; label: string }
-> = {
-  draft: { color: "bg-muted text-muted-foreground", label: "Draft" },
-  active: { color: "bg-info/10 text-info", label: "Active" },
-  completed: { color: "bg-success/10 text-success", label: "Done" },
-};
-
-export const projectStatusDotColor: Record<string, string> = {
-  draft: "bg-muted-foreground/50",
-  active: "bg-info",
-  completed: "bg-success",
-};
 
 // --- Session file browsing types ---
 

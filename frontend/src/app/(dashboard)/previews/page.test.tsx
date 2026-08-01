@@ -515,7 +515,7 @@ describe("PreviewsPage", () => {
     ).toBeInTheDocument();
   });
 
-  it("shows a spinner inside starting status badges in the overview", async () => {
+  it("shows indeterminate progress inside starting status badges in the overview", async () => {
     installPreviewHandlers({
       running: [
         preview({
@@ -538,7 +538,7 @@ describe("PreviewsPage", () => {
     const startingLabels = within(runningSection).getAllByText("Starting");
     expect(startingLabels.length).toBeGreaterThan(0);
     for (const label of startingLabels) {
-      expect(label.closest('[data-slot="status-label"]')?.querySelector('[data-slot="status-spinner"]')).toBeInTheDocument();
+      expect(label.closest('[data-slot="status-label"]')?.querySelector('[data-slot="status-indicator"][data-activity="indeterminate"]')).toBeInTheDocument();
     }
   });
 

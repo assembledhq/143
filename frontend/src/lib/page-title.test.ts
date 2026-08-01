@@ -34,7 +34,6 @@ describe("resolvePageTitle", () => {
 
   it("returns stable entity fallbacks for dynamic detail routes", () => {
     expect(resolvePageTitle("/sessions/session-abcdef12-3456")).toBe("Session");
-    expect(resolvePageTitle("/projects/proj-1")).toBe("Project");
     expect(resolvePageTitle("/repositories/repo-1")).toBe("Repository");
     expect(resolvePageTitle("/settings/evals/eval-1")).toBe("Eval");
     expect(resolvePageTitle("/settings/evals/batch/batch-1")).toBe("Eval batch");

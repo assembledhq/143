@@ -72,7 +72,9 @@ type pullRequestHealthSummaryArg struct {
 
 var publicationHealthTestColumns = []string{
 	"id", "org_id", "session_id", "changeset_id", "repository_id",
-	"state", "source", "review_gate_state", "job_queue", "request_payload", "request_generation_at",
+	"state", "source", "trigger_kind", "handoff_mode", "initiated_by_user_id",
+	"automatic_pr_policy_source", "review_policy_source",
+	"review_gate_state", "job_queue", "request_payload", "request_generation_at",
 	"base_branch", "head_branch", "desired_head_sha",
 	"published_head_sha", "github_pr_number", "github_pr_url", "attempt_count",
 	"last_error_code", "last_error_message", "requested_at", "last_attempt_at",
@@ -82,7 +84,9 @@ var publicationHealthTestColumns = []string{
 func publicationHealthTestRow(publication models.SessionPublication) []any {
 	return []any{
 		publication.ID, publication.OrgID, publication.SessionID, publication.ChangesetID, publication.RepositoryID,
-		publication.State, publication.Source, publication.ReviewGateState, publication.JobQueue, publication.RequestPayload, publication.RequestGenerationAt,
+		publication.State, publication.Source, publication.TriggerKind, publication.HandoffMode, publication.InitiatedByUserID,
+		publication.AutomaticPolicySource, publication.ReviewPolicySource,
+		publication.ReviewGateState, publication.JobQueue, publication.RequestPayload, publication.RequestGenerationAt,
 		publication.BaseBranch, publication.HeadBranch, publication.DesiredHeadSHA,
 		publication.PublishedHeadSHA, publication.GitHubPRNumber, publication.GitHubPRURL, publication.AttemptCount,
 		publication.LastErrorCode, publication.LastErrorMessage, publication.RequestedAt, publication.LastAttemptAt,

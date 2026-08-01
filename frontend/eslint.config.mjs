@@ -1,6 +1,7 @@
 import { defineConfig, globalIgnores } from "eslint/config";
 import nextVitals from "eslint-config-next/core-web-vitals";
 import nextTs from "eslint-config-next/typescript";
+import { noAdHocControlSizing } from "./eslint-rules/no-ad-hoc-control-sizing.mjs";
 
 // ---------------------------------------------------------------------------
 // Custom rule: no-banned-typography
@@ -70,6 +71,7 @@ const noBannedTypography = {
 const customPlugin = {
   rules: {
     "no-banned-typography": noBannedTypography,
+    "no-ad-hoc-control-sizing": noAdHocControlSizing,
   },
 };
 
@@ -83,6 +85,7 @@ const eslintConfig = defineConfig([
     plugins: { custom: customPlugin },
     rules: {
       "custom/no-banned-typography": "error",
+      "custom/no-ad-hoc-control-sizing": "error",
     },
   },
   {

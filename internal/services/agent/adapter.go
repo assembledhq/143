@@ -95,6 +95,15 @@ type AgentInput struct {
 	ExecutionContext   *ExecutionContext     // optional planning guidance for coding agents
 	IntegrationSkills  string                // auto-generated CLI skills doc for integration tools
 	ContextLimits      *models.ContextLimits // org-specific token limits (nil = use defaults)
+	PRHandoffPolicy    *PRHandoffPolicy
+}
+
+// PRHandoffPolicy is present only after the orchestrator's deterministic
+// capability gate has established that this turn may publish a new changeset.
+type PRHandoffPolicy struct {
+	AutomaticHandoff bool
+	ReviewBeforePR   bool
+	ReviewMaxPasses  int
 }
 
 // AgentAttachment describes a user-uploaded attachment after the server has

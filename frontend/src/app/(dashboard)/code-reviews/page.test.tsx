@@ -1312,6 +1312,7 @@ describe("CodeReviewsPage", () => {
 
     const mobileActivity = await screen.findByLabelText("Code review activity");
     expect(within(mobileActivity).getByText("Queued")).toBeInTheDocument();
+    expect(mobileActivity.querySelector('[data-activity="indeterminate"]')).toBeInTheDocument();
     expect(within(mobileActivity).queryByText("-")).not.toBeInTheDocument();
   });
 
@@ -2230,9 +2231,10 @@ describe("CodeReviewsPage", () => {
     await user.type(input, "Keep this unsaved local guidance");
     fireEvent.blur(input);
 
-    // One save indicator for one save, in the policy section header.
-    expect(await screen.findByText("Couldn't save")).toBeInTheDocument();
-    expect(screen.getAllByText("Couldn't save")).toHaveLength(1);
+    // Both editors keep visual feedback nearby, while the page-level indicator
+    // remains the only live status announced to assistive technology.
+    expect(await screen.findAllByText("Couldn't save")).toHaveLength(3);
+    expect(screen.getAllByRole("status")).toHaveLength(1);
     expect(input).toHaveValue("Keep this unsaved local guidance");
   });
 

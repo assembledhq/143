@@ -450,7 +450,6 @@ func buildSessionExecutorStores(deps sessionExecutorStoreDeps) *worker.Stores {
 		Automations:         db.NewAutomationStore(pool),
 		AutomationRuns:      deps.AutomationRuns,
 		ReviewLoops:         db.NewSessionReviewLoopStore(pool),
-		PRReadiness:         db.NewPRReadinessStore(pool),
 		CodeReviews:         deps.CodeReviews,
 		SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 		Previews:            db.NewPreviewStore(pool),

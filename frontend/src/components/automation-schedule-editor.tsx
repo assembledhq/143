@@ -6,6 +6,7 @@ import { ChevronDown, Loader2, Plus, Trash2 } from "lucide-react";
 import { TimezonePicker } from "@/app/(dashboard)/automations/timezone-picker";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { ControlTrigger } from "@/components/ui/control-trigger";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -163,7 +164,7 @@ export function AutomationScheduleEditor({
             update(changeFrequency(value, frequency, detectedTimezone))
           }
         >
-          <SelectTrigger className="h-9 w-auto min-w-28" aria-label="Schedule frequency">
+          <SelectTrigger className="w-auto min-w-28" aria-label="Schedule frequency">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -197,7 +198,7 @@ export function AutomationScheduleEditor({
                 update({ ...value, dayOfMonth: Number(day) })
               }
             >
-              <SelectTrigger className="h-9 w-20" aria-label="Day of month">
+              <SelectTrigger className="w-20" aria-label="Day of month">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -227,7 +228,7 @@ export function AutomationScheduleEditor({
                 update(normalizeIntervalDraft({ ...value, unit }))
               }
             >
-              <SelectTrigger className="h-9 w-24" aria-label="Interval unit">
+              <SelectTrigger className="w-24" aria-label="Interval unit">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -244,7 +245,7 @@ export function AutomationScheduleEditor({
             value={value.cronExpression}
             disabled={disabled}
             aria-label="Cron expression"
-            className="h-9 min-w-56 flex-1 font-mono"
+            className="min-w-56 flex-1 font-mono"
             onChange={(event) =>
               update({ ...value, cronExpression: event.target.value })
             }
@@ -259,7 +260,7 @@ export function AutomationScheduleEditor({
                 update({ ...value, time: nextTime } as ScheduleDraft)
               }
             >
-              <SelectTrigger className="h-9 w-28" aria-label="Run time">
+              <SelectTrigger className="w-28" aria-label="Run time">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent className="max-h-72">
@@ -395,7 +396,7 @@ function IntervalValueInput({
       value={text}
       disabled={disabled}
       aria-label="Interval value"
-      className="h-9 w-20"
+      className="w-20"
       onChange={(event) => {
         setText(event.target.value);
         onChange(Number(event.target.value));
@@ -429,12 +430,12 @@ function WeekdayPicker({
   return (
     <Popover>
       <PopoverTrigger asChild>
-        <Button
+        <ControlTrigger
           type="button"
           variant="outline"
           disabled={disabled}
           aria-label={`Days of week: ${formatWeekdays(value)}`}
-          className="h-9 max-w-64 justify-between font-normal"
+          className="max-w-64 justify-between font-normal"
         >
           <span className={value.length >= 3 ? "hidden sm:inline" : "truncate"}>
             {formatWeekdays(value)}
@@ -443,7 +444,7 @@ function WeekdayPicker({
             <span className="sm:hidden">{value.length} days</span>
           )}
           <ChevronDown className="ml-2 h-3.5 w-3.5 shrink-0 opacity-60" />
-        </Button>
+        </ControlTrigger>
       </PopoverTrigger>
       <PopoverContent className="w-56 p-2">
         <div className="space-y-1">

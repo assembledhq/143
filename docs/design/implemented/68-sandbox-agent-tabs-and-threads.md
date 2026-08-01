@@ -108,7 +108,7 @@ The current single-thread assumption also leaks into runtime architecture:
   enough to a thread
 - cancellation, status, runtime budgets, and cost accounting are not naturally
   per-thread
-- PR readiness is combined, while per-tab state is singular
+- publication policy is combined, while per-tab state is singular
 
 ## Product Principles
 

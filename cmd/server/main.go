@@ -72,6 +72,15 @@ const (
 	httpShutdownTimeout       = 100 * time.Second
 )
 
+// The orchestrator reaches these capabilities through runtime type assertions
+// on its Sessions/Users interfaces (internal/services/agent cannot import
+// internal/db). Assert them here so a store refactor that drops a method is a
+// compile error rather than a silently degraded publication policy at runtime.
+var (
+	_ agent.PublicationIntentLookup = (*db.SessionStore)(nil)
+	_ agent.UserSettingsLookup      = (*db.UserStore)(nil)
+)
+
 func previewDependencyCacheEnabled(cfg config.Config) bool {
 	return strings.TrimSpace(cfg.PreviewDependencyCacheBucket) != ""
 }
@@ -494,7 +503,6 @@ func main() {
 			Automations:         automationStore,
 			AutomationRuns:      automationRunStore,
 			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
-			PRReadiness:         db.NewPRReadinessStore(pool),
 			CodeReviews:         codeReviewStore,
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 			Previews:            previewStore,
@@ -1518,7 +1526,6 @@ func buildServices(
 		AutomationGoalImprovements: automationGoalImprovementUpdater,
 		Issues:                     issueStore,
 		Repositories:               repoStore,
-		PRReadiness:                db.NewPRReadinessStore(pool),
 		Orgs:                       orgStore,
 		Jobs:                       jobStore,
 		GitHub:                     ghSvc,
@@ -1546,6 +1553,9 @@ func buildServices(
 		InternalAPIURL:             cfg.BaseURL,
 		InternalAPISecret:          cfg.SessionSecret,
 		NodeID:                     cfg.NodeID,
+		AgentPRPromptEnabled:       cfg.AgentPRPromptEnabled && cfg.AgentPRPublicationEnabled,
+		AgentPRPublicationEnabled:  cfg.AgentPRPublicationEnabled,
+		PrePRReviewEnabled:         cfg.PrePRReviewEnabled && cfg.AgentPRPublicationEnabled,
 		Logger:                     logger,
 	})
 
@@ -1575,7 +1585,6 @@ func buildServices(
 		orgStore,
 		llmClient,
 		prTemplateStore,
-		db.NewPRReadinessStore(pool),
 		sessionThreadStore,
 		reviewLoopStore,
 		redisClient,
@@ -1613,7 +1622,6 @@ func buildServices(
 			Sessions: sessionStore,
 			Threads:  threadSvc,
 		},
-		reviewloopservice.WithAutoReadinessDependencies(orgStore, userStore, pool, jobStore),
 	)
 
 	logger.Info().
@@ -1889,7 +1897,6 @@ func wireWorkerPRService(
 	orgStore *db.OrganizationStore,
 	llmClient llm.Client,
 	prTemplateStore *db.PRTemplateStore,
-	prReadinessStore *db.PRReadinessStore,
 	sessionThreadStore *db.SessionThreadStore,
 	reviewLoopStore *db.SessionReviewLoopStore,
 	redisClient *cache.Client,
@@ -1909,7 +1916,6 @@ func wireWorkerPRService(
 	prService.SetOrgStore(orgStore)
 	prService.SetLLMClient(llmClient)
 	prService.SetPRTemplateStore(prTemplateStore)
-	prService.SetReadinessStore(prReadinessStore)
 	prService.SetSessionThreadStore(sessionThreadStore)
 	prService.SetSessionReviewLoopStore(reviewLoopStore)
 	prService.SetRedisClient(redisClient)

@@ -145,6 +145,16 @@ type Config struct {
 	// every org's settings. Defaults to false so phase-1 ships dark.
 	LinearAgentEnabled bool `env:"LINEAR_AGENT_ENABLED" envDefault:"false"`
 
+	// AgentPRPublicationEnabled gates agent-initiated publication execution.
+	// It ships dark so stored default-on customer policy cannot trigger an
+	// external side effect before the staged rollout is enabled.
+	AgentPRPublicationEnabled bool `env:"AGENT_PR_PUBLICATION_ENABLED" envDefault:"false"`
+	// AgentPRPromptEnabled independently gates the model instruction that
+	// advertises agent-initiated publication.
+	AgentPRPromptEnabled bool `env:"AGENT_PR_PROMPT_ENABLED" envDefault:"false"`
+	// PrePRReviewEnabled gates execution of the pre-publication review cycle.
+	PrePRReviewEnabled bool `env:"PRE_PR_REVIEW_ENABLED" envDefault:"false"`
+
 	// Sentry OAuth
 	SentryOAuthClientID     string `env:"SENTRY_OAUTH_CLIENT_ID"`
 	SentryOAuthClientSecret string `env:"SENTRY_OAUTH_CLIENT_SECRET"`

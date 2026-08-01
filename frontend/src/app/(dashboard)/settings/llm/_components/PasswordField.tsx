@@ -36,7 +36,8 @@ export function PasswordField({
         onChange={(e) => onChange(e.target.value)}
         autoFocus={autoFocus}
         disabled={disabled}
-        className="h-8 pr-9 font-mono text-xs"
+        density="compact"
+        className="pr-9 font-mono text-xs"
       />
       <button
         type="button"

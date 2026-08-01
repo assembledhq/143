@@ -261,7 +261,6 @@ const (
 	SlackNotificationPreviewStale            SlackNotificationKind = "preview.stale"
 	SlackNotificationHumanInputRequested     SlackNotificationKind = "human_input.requested"
 	SlackNotificationPRAutoRepairAttention   SlackNotificationKind = "pr.auto_repair_attention"
-	SlackNotificationPRReadinessAttention    SlackNotificationKind = "pr.readiness_attention"
 )
 
 func (s SlackNotificationKind) Validate() error {
@@ -276,8 +275,7 @@ func (s SlackNotificationKind) Validate() error {
 		SlackNotificationPreviewFailed,
 		SlackNotificationPreviewStale,
 		SlackNotificationHumanInputRequested,
-		SlackNotificationPRAutoRepairAttention,
-		SlackNotificationPRReadinessAttention:
+		SlackNotificationPRAutoRepairAttention:
 		return nil
 	default:
 		return fmt.Errorf("invalid SlackNotificationKind: %q", s)

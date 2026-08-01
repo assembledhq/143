@@ -41,10 +41,6 @@ func CorrectnessCheckPrompt() string {
 	return render("correctness_check_prompt.template", nil)
 }
 
-func PRReadinessCustomCheckPrompt() string {
-	return render("pr_readiness_custom_check.template", nil)
-}
-
 // RegressionCheckPrompt returns the system prompt for checking regression tests.
 func RegressionCheckPrompt() string {
 	return render("regression_check_prompt.template", nil)
@@ -109,6 +105,18 @@ func CodingTaskPreamble() string {
 // CodingSandboxGuidance returns runtime guidance shared by coding-agent prompts.
 func CodingSandboxGuidance() string {
 	return render("coding_sandbox_guidance.template", nil)
+}
+
+type AgentPRHandoffData struct {
+	AutomaticHandoff bool
+	ReviewBeforePR   bool
+	ReviewMaxPasses  int
+}
+
+// AgentPRHandoff renders the non-overridable publication instruction fragment.
+// Callers must apply the deterministic capability gate before including it.
+func AgentPRHandoff(data AgentPRHandoffData) string {
+	return render("agent_pr_handoff.template", data)
 }
 
 // AnswerOnlyPreamble returns the preamble injected into Slack answer-only agent

@@ -8,7 +8,6 @@ import {
   CheckCircle2,
   CircleHelp,
   ExternalLink,
-  LoaderCircle,
   MessageSquareWarning,
   MinusCircle,
   XCircle,
@@ -16,6 +15,7 @@ import {
 import { parseAsString, useQueryState } from "nuqs";
 
 import { Badge } from "@/components/ui/badge";
+import { StatusIndicator } from "@/components/status-indicator";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -529,7 +529,7 @@ function OutcomeBadge({
     evaluating: {
       label: "Evaluating",
       variant: "info" as const,
-      icon: LoaderCircle,
+      icon: CircleHelp,
     },
     execution_failed: {
       label: "Execution failed",
@@ -545,7 +545,11 @@ function OutcomeBadge({
   const Icon = config.icon;
   return (
     <Badge variant={config.variant}>
-      <Icon className={state === "evaluating" ? "animate-spin" : undefined} />
+      {state === "evaluating" ? (
+        <StatusIndicator tone="info" activity="breathing" stateKey={state} />
+      ) : (
+        <Icon />
+      )}
       {label ?? config.label}
     </Badge>
   );

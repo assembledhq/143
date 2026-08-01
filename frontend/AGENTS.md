@@ -81,6 +81,19 @@ Status meaning always goes through state tokens — **never raw Tailwind palette
 
 Usage recipes: dot `bg-success`; text `text-success`; tinted badge `bg-success/10 text-success`; tinted banner `border-success/30 bg-success/10`; solid fill `bg-success text-success-foreground`. Same shapes for `warning`, `attention`, `info`, `destructive`.
 
+Operational state presentation separates three axes through
+`src/lib/operational-state.ts`: `tone` communicates meaning, `activity`
+communicates whether work is actually progressing, and `attention`
+communicates whether the user must act. Feature code maps domain states into
+those axes and renders `StatusLabel`; it must not choose animation classes or
+pass raw color classes to a status primitive.
+
+- Long-lived work uses `activity="breathing"`.
+- Short, indeterminate local operations may use `activity="indeterminate"`.
+- Waiting, blocked, completed, failed, cancelled, and skipped states remain static.
+- Use at most one animated element for a single status. Do not combine an
+  active indicator with animated ellipses or a second spinner.
+
 **Exceptions** (the only blessed raw-palette uses):
 
 - Diff add/remove coloring in the code-review viewer keeps its conventional green/red palette classes — that is diff semantics, not status.
@@ -147,6 +160,7 @@ Numbers that users compare or scan (counts, costs, durations, dates in tables/me
 | Context | Pattern |
 |---------|---------|
 | Page-level section spacing | `space-y-6` |
+| Page-bottom scroll clearance | `pb-24 md:pb-20` via `PageContainer` |
 | Within sections (header → content) | `space-y-3` |
 | Within cards | `space-y-4` to `space-y-6` |
 | Form field groups (label → input → hint) | `space-y-2` |
@@ -154,6 +168,35 @@ Numbers that users compare or scan (counts, costs, durations, dates in tables/me
 | Button groups | `gap-3` |
 | Sidebar/panel header padding | `px-4 pt-3 pb-3` — minimum `pb-3` (12px) bottom padding to prevent scrollable content from overlapping with the last header element (e.g., filter tabs, buttons) |
 | Gap between fixed header and scrollable list | Always ensure at least 12px (`pb-3`) of bottom padding on the fixed header container so interactive elements (tabs, buttons) are fully visible and not clipped by the scroll area |
+
+### Control Density
+
+The source of truth for single-line control heights is
+`src/components/ui/control-sizing.ts`. `Input`, `SelectTrigger`,
+`CommandInput`, and the `ControlTrigger` button-based picker primitive consume
+its typed `density` variant.
+
+| Density | Mobile | Desktop | Use |
+|---------|--------|---------|-----|
+| `default` | 44px | 36px | Forms and settings |
+| `compact` | 44px | 32px | Filters, toolbars, and sidebars |
+| `dense` | 44px | 28px | Dense desktop property rails |
+
+Rules:
+
+- Choose `density="default"`, `density="compact"`, or `density="dense"`
+  through the component API. Omit the prop for the default density.
+- Do not put `h-*`, `min-h-*`, or `py-*` classes on `Input`,
+  `SelectTrigger`, `CommandInput`, or shared picker triggers in feature code.
+  ESLint enforces this with `custom/no-ad-hoc-control-sizing`.
+- Button-based selectors and comboboxes must use `ControlTrigger`; ordinary
+  action buttons continue to use the `Button` component's own size variants.
+- Compact and dense controls retain a 44px mobile minimum touch target. Their
+  smaller rhythm begins at the `sm` breakpoint.
+- Multi-line textareas, checkboxes, switches, sliders, and icon-only actions do
+  not share the single-line control height. Use their own primitive APIs.
+- The authenticated, unlinked `/design-system` route renders every density for
+  visual comparison. Update it when adding a new single-line control family.
 
 ### Border Radius
 
@@ -167,7 +210,7 @@ Cards use `shadow-sm` by default. Buttons (default/outline/destructive variants)
 
 ### Page Container
 
-Use `PageContainer` (`src/components/page-container.tsx`) for ALL dashboard pages:
+Use `PageContainer` (`src/components/page-container.tsx`) for ALL dashboard pages. It owns the standard width constraint and responsive bottom scroll clearance, so pages must not add one-off bottom padding:
 
 ```tsx
 <PageContainer size="default">
@@ -308,23 +351,31 @@ Key rules:
 
 ### Status Dots
 
-Active/running items use animated ping dots (prefer the `StatusDot` component):
+Use `StatusLabel` for visible status text. It owns the semantic tone, indicator,
+stable geometry, and optional activity treatment:
+
 ```tsx
-<span className="relative flex h-2 w-2">
-  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/60 opacity-75" />
-  <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
-</span>
+<StatusLabel
+  label="Running"
+  tone="primary"
+  activity="breathing"
+  stateKey="running"
+/>
 ```
 
-Static status dots use state tokens: `<span className="inline-flex rounded-full h-2 w-2 bg-success" />` (or `bg-warning`, `bg-attention`, `bg-info`, `bg-destructive`)
+Use `StatusIndicator` only when the adjacent accessible label already provides
+the state text. Do not hand-build `animate-ping` dots.
 
 ### Status Badges
 
-Use `<span>` with inline status colors for row status indicators:
+Use `StatusLabel` with a domain-to-presentation mapping for row status indicators:
 ```tsx
-<span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${status.color}`}>
-  {status.label}
-</span>
+<StatusLabel
+  label={status.label}
+  tone={status.tone}
+  activity={status.activity}
+  stateKey={domainStatus}
+/>
 ```
 
 ### Empty State
@@ -496,11 +547,12 @@ State tokens (`success`, `warning`, `attention`, `info`, `destructive`) adapt to
 
 | Component | Location | Purpose |
 |-----------|----------|---------|
-| `PageContainer` | `src/components/page-container.tsx` | Page width constraint |
+| `PageContainer` | `src/components/page-container.tsx` | Page width constraint + bottom scroll clearance |
 | `PageHeader` | `src/components/page-header.tsx` | Standard page title + description + action |
 | `EmptyState` | `src/components/empty-state.tsx` | Empty list/data placeholder |
 | `AuthenticatedLayout` | `src/components/authenticated-layout.tsx` | Sidebar + main content shell |
-| `StatusDot` | `src/components/status-dot.tsx` | Animated/static status dots |
+| `StatusIndicator` | `src/components/status-indicator.tsx` | Semantic status indicator internals |
+| `StatusLabel` | `src/components/status-label.tsx` | Canonical operational status + activity treatment |
 | `Kbd` | `src/components/ui/kbd.tsx` | Keyboard shortcut hints |
 
 ## Keyboard Shortcut Hints
@@ -519,7 +571,7 @@ Use the `Kbd` primitive (`src/components/ui/kbd.tsx`) for every keyboard shortcu
 | Secondary action / Back | `outline` | `sm` |
 | Filter tabs | `default`/`ghost` toggle | `sm` |
 | Inline destructive | `ghost` + `text-destructive` | `sm` |
-| Save/Submit | `default` | default (h-8) |
+| Save/Submit | `default` | default |
 | Modal cancel | via `AlertDialogCancel` or `outline` | default |
 
 ## Text Casing
@@ -630,3 +682,4 @@ Use the `tags` parameter to add searchable context (feature name, endpoint, comp
 10. **Missing transitions** — Interactive elements (radio cards, buttons, rows) need `transition-all duration-150`.
 11. **Insufficient header-to-scroll-area spacing** — Fixed header sections above scrollable content must have at least `pb-3` (12px) bottom padding. Using `pb-2` or less causes the scroll area to overlap with the last header element (e.g., filter tabs, buttons), clipping their bottom border or active indicator.
 12. **Full-document settings writes** — Never spread the cached settings object into a mutation body to "preserve" unchanged fields. Settings endpoints are merge patches; send only the changed fields (see "Settings Mutations: Patch, Don't Replace").
+13. **Hand-built operational motion** — Never compose `animate-ping`, a status spinner, or animated ellipses for domain state. Map the domain state to the shared operational-state contract and render `StatusLabel`/`StatusIndicator`.

@@ -9,8 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FocusEventHandl
 import { useQueryState, parseAsString } from "nuqs";
 import { PeopleFilter } from "@/components/people-filter";
 import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
-import { StatusDot } from "@/components/status-dot";
-import { AnimatedEllipsis } from "@/components/animated-ellipsis";
+import { StatusIndicator } from "@/components/status-indicator";
 import { SwipeActionRow } from "@/components/swipe-action-row";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -35,23 +34,6 @@ import {
 } from "@/lib/session-status-groups";
 import { getCountForTab, renderCount } from "@/lib/session-counts";
 import { useSessionsRouteState } from "./sessions-route-state";
-
-// ---------------------------------------------------------------------------
-// Status config
-// ---------------------------------------------------------------------------
-
-const statusConfig: Record<string, { dot: string; label: string }> = {
-  pending: { dot: "bg-muted-foreground/50", label: "Pending" },
-  running: { dot: "bg-primary", label: "Running" },
-  idle: { dot: "bg-primary", label: "Idle" },
-  awaiting_input: { dot: "bg-warning", label: "Awaiting input" },
-  needs_human_guidance: { dot: "bg-attention", label: "Needs guidance" },
-  completed: { dot: "bg-success", label: "Completed" },
-  pr_created: { dot: prMergedAccent.dot, label: "PR created" },
-  failed: { dot: "bg-destructive", label: "Failed" },
-  cancelled: { dot: "bg-muted-foreground/50", label: "Cancelled" },
-  skipped: { dot: "bg-muted-foreground/30", label: "Skipped" },
-};
 
 const filterTabs = [
   { value: "all", label: "All" },
@@ -226,7 +208,6 @@ function SessionLinearBadge({ session }: { session: SessionListItem }) {
 // ---------------------------------------------------------------------------
 
 function OptimisticSessionRow({ session }: { session: OptimisticSession }) {
-  const cfg = statusConfig.pending;
   return (
     <SessionSidebarOptionFrame
       id={`session-sidebar-option-${session.id}`}
@@ -237,10 +218,7 @@ function OptimisticSessionRow({ session }: { session: OptimisticSession }) {
       <SessionSidebarRowSurface>
         <div className="flex items-start gap-2.5 min-w-0">
           <div className="mt-1.5 shrink-0">
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/60 opacity-75" />
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
-            </span>
+            <StatusIndicator tone="neutral" activity="indeterminate" stateKey="optimistic-starting" />
           </div>
           <div className="min-w-0 flex-1">
             <p className="text-xs font-medium text-foreground truncate leading-snug">
@@ -248,8 +226,7 @@ function OptimisticSessionRow({ session }: { session: OptimisticSession }) {
             </p>
             <div className="flex items-center gap-3 mt-0.5">
               <span className="text-xs text-muted-foreground shrink-0">
-                <span>{cfg.label}</span>
-                <AnimatedEllipsis />
+                Starting
               </span>
               <span className="text-xs text-muted-foreground/50">just now</span>
             </div>
@@ -272,7 +249,6 @@ function CurrentSessionContextRow({
   optionRef?: (node: HTMLDivElement | null) => void;
 }) {
   const displayStatus = deriveSessionDisplayStatus(session);
-  const isWorkingSession = displayStatus.animated;
   const ts = session.completed_at || session.started_at || session.created_at;
   const title = sessionTitle(session);
 
@@ -295,11 +271,11 @@ function CurrentSessionContextRow({
         />
         <div className="flex items-start gap-2.5 min-w-0">
           <div className="mt-1.5 shrink-0">
-            {isWorkingSession ? (
-              <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />
-            ) : (
-              <span className="inline-flex rounded-full h-2 w-2 bg-primary/55" />
-            )}
+            <StatusIndicator
+              tone={displayStatus.tone}
+              activity={displayStatus.activity}
+              stateKey={`${session.status}:${displayStatus.kind}`}
+            />
           </div>
           <div className="min-w-0 flex-1">
             <div className="flex items-start justify-between gap-2">
@@ -312,8 +288,7 @@ function CurrentSessionContextRow({
             </div>
             <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
               <span className="text-xs text-muted-foreground shrink-0">
-                <span>{displayStatus.label}</span>
-                {displayStatus.animated && <AnimatedEllipsis />}
+                {displayStatus.label}
               </span>
               <span className="text-xs text-muted-foreground/50 shrink-0">
                 {formatTimeAgo(ts)}
@@ -922,7 +897,7 @@ export function SessionSidebar() {
   const renderSavedSessionRow = (session: SessionListItem, renderKey: string) => {
     const isSelected = selectedId === session.id;
     const displayStatus = deriveSessionDisplayStatus(session);
-    const isWorkingSession = displayStatus.animated;
+    const isWorkingSession = displayStatus.activity !== "none";
     const hasUnread = isUnread(session);
     const ts = session.completed_at || session.started_at || session.created_at;
     const isArchived = !!session.archived_at;
@@ -1006,22 +981,29 @@ export function SessionSidebar() {
             />
             <div className="flex items-start gap-2.5 min-w-0">
               <div className="mt-1.5 shrink-0">
-                {isWorkingSession ? (
-                  <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />
-                ) : hasUnread ? (
-                  <StatusDot color="bg-primary" />
-                ) : (
-                  <span className="inline-flex rounded-full h-2 w-2" />
-                )}
+                <StatusIndicator
+                  tone={displayStatus.tone}
+                  activity={displayStatus.activity}
+                  stateKey={`${session.status}:${displayStatus.kind}`}
+                />
               </div>
 
               <div className="min-w-0 flex-1">
                 <div className="flex items-start justify-between gap-2">
                   <p className={cn(
-                    "type-dense font-medium truncate",
+                    "type-dense flex min-w-0 items-center gap-1.5 font-medium",
                     hasUnread || isWorkingSession ? "text-foreground" : "text-muted-foreground"
                   )}>
-                    {title}
+                    <span className={cn(
+                      "truncate",
+                      hasUnread || isWorkingSession ? "text-foreground" : "text-muted-foreground",
+                    )}>{title}</span>
+                    {hasUnread ? (
+                      <span
+                        aria-label="Unread activity"
+                        className="size-1.5 shrink-0 rounded-full bg-primary"
+                      />
+                    ) : null}
                   </p>
                 </div>
                 <div className="mt-0.5 flex min-w-0 items-center gap-2">
@@ -1031,8 +1013,7 @@ export function SessionSidebar() {
                   >
                     <div className="flex min-w-max items-center gap-1.5 pr-1">
                       <span className="text-xs text-muted-foreground shrink-0">
-                        <span>{displayStatus.label}</span>
-                        {displayStatus.animated && <AnimatedEllipsis />}
+                        {displayStatus.label}
                       </span>
                       {session.agent_type === 'pm_agent' && !session.triggered_by_user_id && (
                         <span className="inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary shrink-0">
@@ -1081,7 +1062,8 @@ export function SessionSidebar() {
                   e.currentTarget.blur();
                 }
               }}
-              className="h-8 pl-8 pr-8 text-xs sm:h-8"
+              density="compact"
+              className="pl-8 pr-8 text-xs"
             />
             <Kbd className="absolute right-2 top-1/2 hidden -translate-y-1/2 md:inline-flex">/</Kbd>
           </div>

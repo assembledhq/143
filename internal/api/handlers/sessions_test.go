@@ -22,6 +22,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
+	"github.com/assembledhq/143/internal/services/publicationintent"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -7701,117 +7702,6 @@ func TestSessionHandler_CreatePR_BuilderRequiresCleanReviewLoop(t *testing.T) {
 	}
 }
 
-func TestSessionHandler_PutReadinessPolicyRejectsRepositoryOutsideOrg(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "pgxmock pool should be created")
-	defer mock.Close()
-
-	orgID := uuid.New()
-	repoID := uuid.New()
-	userID := uuid.New()
-	handler := newSessionHandler(t, mock)
-	handler.SetReadinessStore(db.NewPRReadinessStore(mock))
-
-	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "integration_id", "github_id", "full_name", "default_branch", "private", "language", "description", "clone_url", "installation_id", "status", "last_synced_at", "context_quality", "settings", "created_at", "updated_at",
-		}))
-
-	body, err := json.Marshal(map[string]any{
-		"repository_id": repoID,
-		"config":        models.DefaultPRReadinessPolicyConfig(),
-	})
-	require.NoError(t, err, "readiness policy body should marshal")
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/pr-readiness-policies", strings.NewReader(string(body)))
-	ctx := middleware.WithOrgID(req.Context(), orgID)
-	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: models.RoleAdmin})
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
-
-	handler.PutReadinessPolicy(w, req)
-
-	require.Equal(t, http.StatusNotFound, w.Code, "PutReadinessPolicy should reject repository IDs outside the active org")
-	require.Contains(t, w.Body.String(), "REPOSITORY_NOT_FOUND", "PutReadinessPolicy should report repository ownership failures as not found")
-	require.NoError(t, mock.ExpectationsWereMet(), "repository ownership lookup should be required before saving policy")
-}
-
-func TestSessionHandler_CreateReadinessCustomCheckRejectsRepositoryOutsideOrg(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "pgxmock pool should be created")
-	defer mock.Close()
-
-	orgID := uuid.New()
-	repoID := uuid.New()
-	userID := uuid.New()
-	handler := newSessionHandler(t, mock)
-	handler.SetReadinessStore(db.NewPRReadinessStore(mock))
-
-	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "integration_id", "github_id", "full_name", "default_branch", "private", "language", "description", "clone_url", "installation_id", "status", "last_synced_at", "context_quality", "settings", "created_at", "updated_at",
-		}))
-
-	body, err := json.Marshal(models.PRReadinessCustomCheck{
-		RepositoryID: &repoID,
-		CheckKey:     "repo_guard",
-		Name:         "Repo guard",
-		Prompt:       "Check repository-specific policy.",
-		Enforcement: models.PRReadinessEnforcementByRole{
-			Builder:  models.PRReadinessEnforcementBlocking,
-			Engineer: models.PRReadinessEnforcementAdvisory,
-			Admin:    models.PRReadinessEnforcementAdvisory,
-		},
-	})
-	require.NoError(t, err, "readiness custom check body should marshal")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/pr-readiness-custom-checks", strings.NewReader(string(body)))
-	ctx := middleware.WithOrgID(req.Context(), orgID)
-	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: models.RoleAdmin})
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
-
-	handler.CreateReadinessCustomCheck(w, req)
-
-	require.Equal(t, http.StatusNotFound, w.Code, "CreateReadinessCustomCheck should reject repository IDs outside the active org")
-	require.Contains(t, w.Body.String(), "REPOSITORY_NOT_FOUND", "CreateReadinessCustomCheck should report repository ownership failures as not found")
-	require.NoError(t, mock.ExpectationsWereMet(), "repository ownership lookup should be required before saving custom checks")
-}
-
-func TestSessionHandler_UpsertReadinessContextRejectsViewer(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "pgxmock pool should be created")
-	defer mock.Close()
-
-	orgID := uuid.New()
-	sessionID := uuid.New()
-	userID := uuid.New()
-	handler := newSessionHandler(t, mock)
-	handler.SetReadinessStore(db.NewPRReadinessStore(mock))
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr-readiness-context", strings.NewReader(`{"issue_less_reason":"triaged in customer escalation"}`))
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("id", sessionID.String())
-	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
-	ctx = middleware.WithOrgID(ctx, orgID)
-	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: models.RoleViewer})
-	ctx = middleware.WithActiveRole(ctx, string(models.RoleViewer))
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
-
-	handler.UpsertReadinessContext(w, req)
-
-	require.Equal(t, http.StatusForbidden, w.Code, "viewer should not be allowed to mutate readiness context evidence")
-	require.Contains(t, w.Body.String(), "FORBIDDEN", "viewer readiness-context writes should use a stable forbidden error code")
-	require.NoError(t, mock.ExpectationsWereMet(), "viewer rejection should happen before database writes")
-}
-
 func TestSessionHandler_CreatePR_DedupeConflict(t *testing.T) {
 	t.Parallel()
 
@@ -11170,4 +11060,191 @@ func TestSessionHandler_UnarchiveSession(t *testing.T) {
 
 func stringPtr(s string) *string {
 	return &s
+}
+
+// separate worktree that no review loop describes, so builders must be refused
+// rather than admitted on the session's unrelated clean review loop. A primary
+// changeset keeps a worktree path after an accepted split, so the worktree path
+// alone must not block the ordinary builder flow.
+func TestSessionHandler_RequireBuilderReviewForTarget_RefusesSeparateWorktree(t *testing.T) {
+	t.Parallel()
+
+	worktree := "/workspace/changeset-2"
+	snapshotKey := "snap-builder-review-target"
+
+	tests := []struct {
+		name           string
+		role           models.Role
+		changeset      *models.SessionChangeset
+		expectQuery    bool
+		expectAllowed  bool
+		expectedStatus int
+		expectedBody   string
+	}{
+		{
+			name:           "builder is refused on a non-primary materialized changeset",
+			role:           models.RoleBuilder,
+			changeset:      &models.SessionChangeset{IsPrimary: false, WorktreePath: &worktree},
+			expectAllowed:  false,
+			expectedStatus: http.StatusConflict,
+			expectedBody:   "REVIEW_REQUIRED_BEFORE_PR",
+		},
+		{
+			name:          "engineer is unaffected by the changeset target",
+			role:          models.RoleMember,
+			changeset:     &models.SessionChangeset{IsPrimary: false, WorktreePath: &worktree},
+			expectAllowed: true,
+		},
+		{
+			name:          "builder still publishes a primary changeset that kept a worktree after a split",
+			role:          models.RoleBuilder,
+			changeset:     &models.SessionChangeset{IsPrimary: true, WorktreePath: &worktree},
+			expectQuery:   true,
+			expectAllowed: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should be created")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			handler := newSessionHandler(t, mock)
+
+			if tt.expectQuery {
+				mock.ExpectQuery("SELECT .+ FROM session_review_loops").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(reviewLoopColumns).AddRow(
+						reviewLoopRowWithLatestCheckpoint(uuid.New(), sessionID, "clean", "manual", &snapshotKey)...,
+					))
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
+			ctx := middleware.WithOrgID(req.Context(), orgID)
+			ctx = middleware.WithActiveRole(ctx, string(tt.role))
+			req = req.WithContext(ctx)
+			w := httptest.NewRecorder()
+
+			session := models.Session{ID: sessionID, OrgID: orgID, SnapshotKey: &snapshotKey}
+			allowed := handler.requireBuilderReviewForTarget(w, req, orgID, session, tt.changeset)
+
+			require.Equal(t, tt.expectAllowed, allowed, "builder review gate should return the expected decision for the target")
+			if !tt.expectAllowed {
+				require.Equal(t, tt.expectedStatus, w.Code, "refused publication should return the expected status")
+				require.Contains(t, w.Body.String(), tt.expectedBody, "refused publication should name the review gate")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+// The UI's Create PR button routes through the same coordinator as the agent
+// tool, so the handler must name its own channel (recording it as agent_tool
+// would mis-attribute the durable row) and must not report "queued" for
+// outcomes that did not reach the queue.
+func TestSessionHandler_CreatePR_CoordinatorOutcomes(t *testing.T) {
+	t.Parallel()
+
+	publicationID := uuid.New()
+	blockedReason := "publication intent is durable, but immediate queueing failed"
+	tests := []struct {
+		name       string
+		status     publicationintent.ResultStatus
+		reason     *string
+		wantCode   int
+		wantInBody string
+	}{
+		{
+			name:       "queued intent reports queued",
+			status:     publicationintent.ResultPRQueued,
+			wantCode:   http.StatusAccepted,
+			wantInBody: `"status":"queued"`,
+		},
+		{
+			// The durable row exists and reconciliation will retry, but
+			// nothing is on the queue and the changeset never entered the
+			// queued state, so the operator must not be told otherwise.
+			name:       "failed enqueue is not reported as queued",
+			status:     publicationintent.ResultBlocked,
+			reason:     &blockedReason,
+			wantCode:   http.StatusInternalServerError,
+			wantInBody: "ENQUEUE_FAILED",
+		},
+		{
+			name:       "concurrent publish reports the existing pull request",
+			status:     publicationintent.ResultAlreadyPublished,
+			wantCode:   http.StatusConflict,
+			wantInBody: "PR_EXISTS",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should be created")
+			defer mock.Close()
+
+			now := time.Now()
+			snapshotKey := "snap-TestSessionHandler_CreatePR_CoordinatorOutcomes"
+			orgID, sessionID, issueID := uuid.New(), uuid.New(), uuid.New()
+			handler := newSessionHandler(t, mock)
+			coordinator := &internalPRCoordinatorStub{result: &publicationintent.PublicationIntentResult{
+				Status: tt.status, SessionID: sessionID, PublicationID: &publicationID, Reason: tt.reason,
+			}}
+			handler.SetPublicationIntentCoordinator(coordinator, true)
+
+			diff := "--- a/file.go\n+++ b/file.go\n@@ -1 +1 @@\n-old\n+new"
+			mock.ExpectQuery("SELECT .+ FROM sessions").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(
+					addSessionRow(pgxmock.NewRows(sessionColumns),
+						sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+						nil, nil, nil, nil,
+						nil, false, &now, &now, nil,
+						nil, nil, nil, false,
+						nil, nil, nil, nil, &diff,
+						nil, nil, nil, nil,
+						nil, nil,
+						nil,
+						nil, 0, now, "none", &snapshotKey,
+						nil, nil, nil, nil, nil, nil,
+						nil, nil,
+						nil,
+						"idle",
+						(*string)(nil),
+						nil,
+						now,
+					),
+				)
+			mock.ExpectQuery("SELECT .+ FROM pull_requests").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("id", sessionID.String())
+			ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+			ctx = middleware.WithOrgID(ctx, orgID)
+			req = req.WithContext(ctx)
+			w := httptest.NewRecorder()
+
+			handler.CreatePR(w, req)
+
+			require.Equal(t, tt.wantCode, w.Code, "coordinator outcome should map onto the documented status: %s", w.Body.String())
+			require.Contains(t, w.Body.String(), tt.wantInBody, "response should describe the real outcome")
+			require.NotNil(t, coordinator.requested, "the handler should reach the publication coordinator")
+			require.Equal(t, models.SessionPublicationSourceUser, coordinator.requested.Source,
+				"an operator clicking Create PR is a user-channel publication, not an agent tool one")
+			require.Equal(t, models.SessionPublicationTriggerExplicitAction, coordinator.requested.TriggerKind,
+				"a UI click is always an explicit action")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }

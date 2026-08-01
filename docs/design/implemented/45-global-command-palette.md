@@ -12,7 +12,7 @@ Today a user must:
 
 - click through the sidebar to reach major surfaces
 - open the avatar menu to discover settings destinations
-- manually scan Sessions or Projects to jump to a specific item
+- manually scan Sessions to jump to a specific item
 - use the separate repo context switcher for repository scope changes
 
 That is workable for first-run exploration, but not for daily usage. In a multi-repo, agent-heavy app, this creates too much UI travel and too little discoverability.
@@ -25,7 +25,7 @@ Provide a single palette that lets a user:
 
 - open from any authenticated dashboard page with `Cmd+K` / `Ctrl+K`
 - navigate to core pages and settings without hunting through menus
-- jump directly to sessions and projects
+- jump directly to sessions
 - switch repository context without leaving the keyboard
 - launch a new manual session from the current query when no exact match exists
 
@@ -67,7 +67,7 @@ The most useful AI-native behavior is not a chatbot inside the palette. It is le
 
 - global open/close shortcut
 - static navigation and settings actions
-- direct session and project search
+- direct session search
 - repository context switching
 - recent items
 - "start manual session from query" action
@@ -98,7 +98,7 @@ When the query is empty, show these groups in order:
 4. `Navigation`
 5. `Settings`
 
-This ordering puts high-frequency creation actions ("New session", "New project") above lower-frequency settings navigation, reflecting the primary workflow of an AI-agent app where session creation is the most common action.
+This ordering puts high-frequency creation actions such as "New session" above lower-frequency settings navigation, reflecting the primary workflow of an AI-agent app where session creation is the most common action.
 
 ### Query behavior
 
@@ -128,7 +128,7 @@ Each dynamic result row should include enough context to disambiguate entities i
 
 - primary label: title or best human-readable fallback
 - secondary label: repo short name
-- state badge: session status or project status
+- state badge: session status
 - optional metadata: updated time or task counts
 
 Avoid raw UUID-only rows unless there is no better label.
@@ -155,7 +155,6 @@ Sidebar-primary pages (these match the current sidebar `navItems` in `authentica
 
 - `Autopilot` → `/autopilot`
 - `Sessions` → `/sessions`
-- `Projects` → `/projects`
 
 Palette-only pages (these routes exist but are not in the sidebar — the palette is the primary keyboard discovery path for them, so labels and icons must be clear):
 
@@ -179,7 +178,6 @@ Palette-only pages (these routes exist but are not in the sidebar — the palett
 #### Quick actions
 
 - `New session` → `/sessions/new`
-- `New project` → `/projects/new`
 - `Create eval task` → `/settings/evals/new`
 - `Log out` → imperative action via existing auth hook
 
@@ -188,10 +186,6 @@ Palette-only pages (these routes exist but are not in the sidebar — the palett
 #### Sessions
 
 Search across session title first, with fallback matching against related issue title where available.
-
-#### Projects
-
-Search across project title and goal.
 
 #### Repositories
 
@@ -270,18 +264,17 @@ Do not rely on a hook returning `setOpen` from inside the palette subtree while 
 
 - Static items: filter client-side with cmdk.
 - Repositories: use the existing repository summary query already used by `RepoContextSwitcher`.
-- Sessions/projects: fetch with TanStack Query when the deferred query length is `>= 2`.
+- Sessions: fetch with TanStack Query when the deferred query length is `>= 2`.
 
 Prefer using the existing centralized query-key factory in [frontend/src/lib/query-keys.ts](../../frontend/src/lib/query-keys.ts) instead of introducing new ad hoc keys in the palette code.
 
-**Note:** `queryKeys.sessions.list` already exists and accepts a `repo` param. `queryKeys.projects` does not yet have a `list` key — add `projects.list` (and a search-accepting variant if needed) to `query-keys.ts` as part of Phase 2 implementation. Also add `repositories.summary` to the factory — `RepoContextSwitcher` currently uses a raw `["repositories", "summary"]` tuple, and the palette should use the centralized key.
+**Note:** `queryKeys.sessions.list` already exists and accepts a `repo` param. Also add `repositories.summary` to the factory — `RepoContextSwitcher` currently uses a raw `["repositories", "summary"]` tuple, and the palette should use the centralized key.
 
 ### Backend
 
 For MVP, add optional `search` support to the existing list endpoints instead of introducing a new global search endpoint:
 
 - `GET /api/v1/sessions?search=<q>&limit=5`
-- `GET /api/v1/projects?search=<q>&limit=5`
 
 This keeps the first version aligned with current backend patterns:
 
@@ -312,7 +305,6 @@ This is the biggest usability requirement for this app.
 When the user has a repository selected, palette navigation to repo-scoped list pages should preserve that context:
 
 - `/sessions` should keep `?repo=<id>`
-- `/projects` should keep `?repo=<id>`
 - `/automations` should keep `?repo=<id>` if the page continues to honor repo scope
 
 Settings pages should not inherit repo context unless that page already supports it.
@@ -343,7 +335,7 @@ Do not turn the palette itself into a streaming chat surface. That would overloa
 These are not in scope for v1, but worth capturing as natural extensions:
 
 - **Re-run failed session** — For recently failed sessions surfaced in dynamic search results, offer a "Re-run" action inline. This turns the palette into a recovery tool, not just a navigation tool.
-- **Contextual suggestions** — If the user is on a session detail page and opens the palette, surface actions relevant to that session (e.g., "Create project from this session", "View PR") above generic navigation.
+- **Contextual suggestions** — If the user is on a session detail page and opens the palette, surface actions relevant to that session (e.g., "View PR", "Re-run failed session") above generic navigation.
 
 ## Accessibility
 
@@ -374,7 +366,7 @@ Add tests for:
 
 ### Backend
 
-If `search` is added to sessions/projects endpoints, add:
+If `search` is added to the sessions endpoint, add:
 
 - handler tests for valid and invalid search params
 - store tests for search filtering
@@ -393,11 +385,11 @@ Ship:
 
 This is the minimum version that already feels coherent in the current app.
 
-### Phase 2: Session and project search
+### Phase 2: Session search
 
 Ship:
 
-- dynamic search for sessions and projects
+- dynamic search for sessions
 - result metadata with repo labels and status
 - preserved repo-scoped navigation
 
@@ -432,7 +424,7 @@ Evaluate usage and only then consider:
 Track these events to inform Phase 4 prioritization:
 
 - **Palette opened** — distinguish keyboard shortcut vs. trigger button click
-- **Item selected** — log the item type (navigation, session, project, repo switch, quick action, manual-session fallback) and the query length at selection time
+- **Item selected** — log the item type (navigation, session, repo switch, quick action, manual-session fallback) and the query length at selection time
 - **Empty results** — log when the user typed a query and saw no matches (high frequency here signals missing search coverage)
 - **Session-from-query used** — track how often users convert an unmatched query into a manual session
 

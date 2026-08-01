@@ -3,6 +3,8 @@
 import { ChevronDown, Users } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
+import type { ControlDensity } from "@/components/ui/control-sizing";
+import { ControlTrigger } from "@/components/ui/control-trigger";
 import {
   Command,
   CommandCheckItem,
@@ -24,6 +26,7 @@ interface PeopleFilterProps {
   onFilterChange: (value: PeopleFilterParam) => void;
   align?: "start" | "center" | "end";
   className?: string;
+  density?: ControlDensity;
 }
 
 function serializeSelection(selectedUserIDs: string[], currentUser: User | null): string | null {
@@ -42,6 +45,7 @@ export function PeopleFilter({
   onFilterChange,
   align = "end",
   className,
+  density = "compact",
 }: PeopleFilterProps) {
   const [open, setOpen] = useState(false);
   const label = peopleFilterLabel(mode, selectedUserIDs, members, currentUser);
@@ -85,11 +89,15 @@ export function PeopleFilter({
     <div className={cn("min-w-0", className)}>
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
-          <Button variant="outline" className="bg-background min-w-0">
+          <ControlTrigger
+            variant="outline"
+            density={density}
+            className="min-w-0 bg-background"
+          >
             <Users className="h-3.5 w-3.5 text-muted-foreground" />
             <span className="truncate">{label}</span>
             <ChevronDown className="h-3 w-3 text-muted-foreground" />
-          </Button>
+          </ControlTrigger>
         </PopoverTrigger>
         <PopoverContent align={align} className="w-72 p-0">
           <div className="border-b border-border px-3 py-3">

@@ -1,0 +1,2 @@
+-- Validation is intentionally irreversible; validated constraints remain
+-- valid until migration 000267 is rolled back.

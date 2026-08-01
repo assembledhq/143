@@ -7,15 +7,14 @@ import {
   ArrowUpRight,
   CheckCircle2,
   ChevronRight,
-  Loader2,
   MessageCircleWarning,
   Minus,
-  RefreshCw,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { StatusLabel } from "@/components/status-label";
 import { cn, formatDateTime, formatTimeAgo } from "@/lib/utils";
 import type { AutomationRun, AutomationRunStatus, PRCreationState } from "@/lib/types";
 
@@ -151,11 +150,20 @@ function Header({ run, kind }: { run: AutomationRun; kind: FullCardKind }) {
     <div className="flex flex-col gap-1.5 sm:flex-row sm:items-start sm:justify-between">
       <div className="min-w-0 space-y-1.5">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <Icon
-            aria-hidden
-            className={cn("h-4 w-4 shrink-0", headline.iconClass, kind === "running" && "animate-spin")}
-          />
-          <span className={cn("text-sm font-semibold", headline.labelClass)}>{headline.label}</span>
+          {kind === "running" ? (
+            <StatusLabel
+              label={headline.label}
+              tone="info"
+              activity="breathing"
+              stateKey="running"
+              size="md"
+            />
+          ) : (
+            <>
+              <Icon aria-hidden className={cn("h-4 w-4 shrink-0", headline.iconClass)} />
+              <span className={cn("text-sm font-semibold", headline.labelClass)}>{headline.label}</span>
+            </>
+          )}
           {run.session?.failure_category && (kind === "failed" || kind === "needs_input") && (
             <Badge
               variant={kind === "failed" ? "destructive" : "outline"}
@@ -194,7 +202,7 @@ function headlineFor(kind: FullCardKind): {
   switch (kind) {
     case "running":
       return {
-        icon: RefreshCw,
+        icon: CheckCircle2,
         label: "Running",
         iconClass: "text-info",
         labelClass: "text-info",
@@ -417,9 +425,13 @@ function PendingRow({ run }: { run: AutomationRun }) {
     <Card className="border-dashed border-border/70 bg-muted/10">
       <CardContent className="flex items-center justify-between gap-3 px-4 py-3">
         <div className="flex min-w-0 items-center gap-2">
-          <Loader2 aria-hidden className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+          <StatusLabel
+            label="Pending"
+            tone="neutral"
+            activity="indeterminate"
+            stateKey="pending"
+          />
           <div className="min-w-0">
-            <p className="text-sm font-medium text-foreground">Pending</p>
             <p className="text-xs text-muted-foreground">{triggerLabel} · waiting to start</p>
           </div>
         </div>

@@ -17,7 +17,9 @@ import (
 func sessionPublicationTestColumns() []string {
 	return []string{
 		"id", "org_id", "session_id", "changeset_id", "repository_id",
-		"state", "source", "review_gate_state", "job_queue", "request_payload", "request_generation_at",
+		"state", "source", "trigger_kind", "handoff_mode", "initiated_by_user_id",
+		"automatic_pr_policy_source", "review_policy_source",
+		"review_gate_state", "job_queue", "request_payload", "request_generation_at",
 		"base_branch", "head_branch", "desired_head_sha",
 		"published_head_sha", "github_pr_number", "github_pr_url", "attempt_count",
 		"last_error_code", "last_error_message", "requested_at", "last_attempt_at",
@@ -28,7 +30,9 @@ func sessionPublicationTestColumns() []string {
 func sessionPublicationTestRow(publication models.SessionPublication) []any {
 	return []any{
 		publication.ID, publication.OrgID, publication.SessionID, publication.ChangesetID, publication.RepositoryID,
-		publication.State, publication.Source, publication.ReviewGateState, publication.JobQueue, publication.RequestPayload, publication.RequestGenerationAt,
+		publication.State, publication.Source, publication.TriggerKind, publication.HandoffMode, publication.InitiatedByUserID,
+		publication.AutomaticPolicySource, publication.ReviewPolicySource,
+		publication.ReviewGateState, publication.JobQueue, publication.RequestPayload, publication.RequestGenerationAt,
 		publication.BaseBranch, publication.HeadBranch, publication.DesiredHeadSHA,
 		publication.PublishedHeadSHA, publication.GitHubPRNumber, publication.GitHubPRURL, publication.AttemptCount,
 		publication.LastErrorCode, publication.LastErrorMessage, publication.RequestedAt, publication.LastAttemptAt,
@@ -61,8 +65,12 @@ func TestSessionPublicationStoreEnsureRequestedPersistsReplayIntent(t *testing.T
 	mock.ExpectQuery("INSERT INTO session_publications").WithArgs(pgx.NamedArgs{
 		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
 		"repository_id": repositoryID, "source": models.SessionPublicationSourceUser,
-		"review_gate_state": models.SessionPublicationReviewGateNotRequired,
-		"job_queue":         models.SessionPublicationJobQueueAgent, "request_payload": string(payload),
+		"trigger_kind": models.SessionPublicationTriggerPolicy, "handoff_mode": models.PRHandoffModePrePublish,
+		"initiated_by_user_id":       (*uuid.UUID)(nil),
+		"automatic_pr_policy_source": models.PublicationPolicySourceProductDefault,
+		"review_policy_source":       models.PublicationPolicySourceProductDefault,
+		"review_gate_state":          models.SessionPublicationReviewGateNotRequired,
+		"job_queue":                  models.SessionPublicationJobQueueAgent, "request_payload": string(payload),
 		"request_generation_at": now,
 		"base_branch":           "main", "head_branch": "143/session", "desired_head_sha": (*string)(nil),
 	}).WillReturnRows(pgxmock.NewRows(sessionPublicationTestColumns()).AddRow(sessionPublicationTestRow(stored)...))
@@ -100,8 +108,12 @@ func TestSessionPublicationStoreEnsureRequestedReopensRetryableTerminalOutcomeFo
 		WithArgs(pgx.NamedArgs{
 			"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
 			"repository_id": repositoryID, "source": models.SessionPublicationSourceUser,
-			"review_gate_state": models.SessionPublicationReviewGateNotRequired,
-			"job_queue":         models.SessionPublicationJobQueueAgent, "request_payload": string(payload),
+			"trigger_kind": models.SessionPublicationTriggerPolicy, "handoff_mode": models.PRHandoffModePrePublish,
+			"initiated_by_user_id":       (*uuid.UUID)(nil),
+			"automatic_pr_policy_source": models.PublicationPolicySourceProductDefault,
+			"review_policy_source":       models.PublicationPolicySourceProductDefault,
+			"review_gate_state":          models.SessionPublicationReviewGateNotRequired,
+			"job_queue":                  models.SessionPublicationJobQueueAgent, "request_payload": string(payload),
 			"request_generation_at": now,
 			"base_branch":           "main", "head_branch": "143/session", "desired_head_sha": &headSHA,
 		}).WillReturnRows(pgxmock.NewRows(sessionPublicationTestColumns()).AddRow(sessionPublicationTestRow(stored)...))
@@ -148,8 +160,12 @@ func TestSessionPublicationStoreEnsureRequestedGuardsMutableIntentByGeneration(t
 		WithArgs(pgx.NamedArgs{
 			"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
 			"repository_id": repositoryID, "source": models.SessionPublicationSourceReconciler,
-			"review_gate_state": models.SessionPublicationReviewGatePending,
-			"job_queue":         models.SessionPublicationJobQueueDefault, "request_payload": string(oldPayload),
+			"trigger_kind": models.SessionPublicationTriggerPolicy, "handoff_mode": models.PRHandoffModePrePublish,
+			"initiated_by_user_id":       (*uuid.UUID)(nil),
+			"automatic_pr_policy_source": models.PublicationPolicySourceProductDefault,
+			"review_policy_source":       models.PublicationPolicySourceProductDefault,
+			"review_gate_state":          models.SessionPublicationReviewGatePending,
+			"job_queue":                  models.SessionPublicationJobQueueDefault, "request_payload": string(oldPayload),
 			"request_generation_at": olderGeneration,
 			"base_branch":           "stale-base", "head_branch": "stale-head", "desired_head_sha": (*string)(nil),
 		}).WillReturnRows(pgxmock.NewRows(sessionPublicationTestColumns()).AddRow(sessionPublicationTestRow(stored)...))

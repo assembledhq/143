@@ -8,7 +8,7 @@ Browser tabs should always identify both the product and the current workspace c
 143 | <page>
 ```
 
-The root document title falls back to `143` while the app is loading. Once the client route is known, the frontend resolves a page title from a central route registry. Detail pages replace the generic route fallback with the loaded entity name for sessions, projects, automations, repositories, eval tasks, and eval batches.
+The root document title falls back to `143` while the app is loading. Once the client route is known, the frontend resolves a page title from a central route registry. Detail pages replace the generic route fallback with the loaded entity name for sessions, automations, repositories, eval tasks, and eval batches.
 
 ## Route Title Plan
 
@@ -24,9 +24,6 @@ The root document title falls back to `143` while the app is loading. Once the c
 - `/automations/new` -> `143 | New automation`
 - `/automations/templates` -> `143 | Automation templates`
 - `/automations/:id` -> `143 | <automation name>`, falling back to `143 | Automation`
-- `/projects` -> `143 | Projects`
-- `/projects/new` -> `143 | New project`
-- `/projects/:id` -> `143 | <project title>`, falling back to `143 | Project`
 - `/repositories/:id` -> `143 | <owner/repo>`, falling back to `143 | Repository`
 - `/integrations` -> `143 | Integrations`
 - `/team` -> `143 | Team`

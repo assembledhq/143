@@ -20,6 +20,7 @@ import {
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
+import { StatusLabel } from "@/components/status-label";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -710,13 +711,7 @@ function BootstrapDetailSheet({
         <div className="flex items-center justify-between mb-2">
           <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Logs</span>
           {isActive && (
-            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-info opacity-75" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-info" />
-              </span>
-              Live
-            </span>
+            <StatusLabel label="Live" tone="info" activity="breathing" stateKey={bootstrap.status} />
           )}
         </div>
         <div
@@ -724,10 +719,7 @@ function BootstrapDetailSheet({
           className="flex-1 min-h-0 overflow-y-auto rounded-md bg-zinc-950 border border-zinc-800 p-3 font-mono text-xs"
         >
           {logs.length === 0 && isActive && (
-            <div className="flex items-center gap-2 text-zinc-500">
-              <Loader2 className="h-3 w-3 animate-spin" />
-              <span>Waiting for logs...</span>
-            </div>
+            <div className="text-zinc-500">Waiting for the first log...</div>
           )}
           {logs.length === 0 && !isActive && !bootstrap.session_id && (
             <div className="text-zinc-500">No logs available for this run.</div>

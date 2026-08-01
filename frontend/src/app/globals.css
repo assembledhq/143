@@ -33,6 +33,11 @@
    ------------------------------------------------------------------------ */
 
 :root {
+  --motion-control: 120ms;
+  --motion-state: 180ms;
+  --motion-panel: 240ms;
+  --motion-breathe: 2.6s;
+  --motion-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --border: #e1ded5;
   --border-strong: #cac6bb;
   --muted: #efeee8;
@@ -210,51 +215,20 @@
   }
 }
 
-@utility ai-shimmer {
-  background-image: linear-gradient(110deg, transparent 40%, rgba(255, 255, 255, 0.75) 50%, transparent 60%);
-  background-size: 220% 100%;
-  animation: ai-shimmer 2.5s linear infinite;
-}
-
-@utility ai-pulse-halo {
-  animation: ai-pulse-halo 2.4s cubic-bezier(0.16, 1, 0.3, 1) infinite;
-}
-
 @utility mask-fade-r {
   mask-image: linear-gradient(to right, black calc(100% - 24px), transparent 100%);
   -webkit-mask-image: linear-gradient(to right, black calc(100% - 24px), transparent 100%);
 }
 
-/* Animated ellipsis used by <AnimatedEllipsis /> for "Running" / "Pending"
-   states. 1.6s full cycle: each dot fades in 400ms apart, all three fade out
-   together, then the cycle restarts. Calm-but-alive pacing — slower than a
-   loading spinner, faster than a pulse. */
-@keyframes ellipsis-dot-fade-1 {
-  0%, 80%, 100% { opacity: 0; }
-  5%, 75% { opacity: 1; }
-}
-@keyframes ellipsis-dot-fade-2 {
-  0%, 25%, 80%, 100% { opacity: 0; }
-  30%, 75% { opacity: 1; }
-}
-@keyframes ellipsis-dot-fade-3 {
-  0%, 50%, 80%, 100% { opacity: 0; }
-  55%, 75% { opacity: 1; }
-}
-
-.ellipsis-dot {
-  animation-duration: 1.6s;
-  animation-iteration-count: infinite;
-  animation-timing-function: ease-in-out;
-}
-.ellipsis-dot-1 { animation-name: ellipsis-dot-fade-1; }
-.ellipsis-dot-2 { animation-name: ellipsis-dot-fade-2; }
-.ellipsis-dot-3 { animation-name: ellipsis-dot-fade-3; }
-
 @media (prefers-reduced-motion: reduce) {
-  .ellipsis-dot {
-    animation: none;
-    opacity: 1;
+  .status-breathe-halo,
+  .status-indeterminate,
+  [data-transitioning="true"] .status-indicator-core,
+  .animate-ping,
+  .animate-pulse,
+  .animate-spin,
+  .animate-bounce {
+    animation: none !important;
   }
 }
 
@@ -351,14 +325,30 @@
   }
 }
 
-/* Working / "AI thinking" status indicator. A slow gradient sweep on the dot
-   reads as ongoing thought rather than a 1Hz network ping. The accompanying
-   halo breathes at half speed so the two cycles never sync. */
-@keyframes ai-shimmer {
-  0% { background-position: 0% 50%; }
-  100% { background-position: 200% 50%; }
-}
-@keyframes ai-pulse-halo {
+/* Long-lived operational work uses one calm halo. At indicator size, extra
+   shimmer adds noise without communicating any additional meaning. */
+@keyframes status-breathe {
   0%, 100% { transform: scale(1); opacity: 0.55; }
-  50% { transform: scale(1.9); opacity: 0; }
+  50% { transform: scale(1.85); opacity: 0; }
+}
+
+@keyframes status-indeterminate {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes status-settle {
+  0% { transform: scale(0.72); opacity: 0.35; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.status-breathe-halo {
+  animation: status-breathe var(--motion-breathe) var(--motion-ease-out) infinite;
+}
+
+.status-indeterminate {
+  animation: status-indeterminate 900ms linear infinite;
+}
+
+[data-transitioning="true"] .status-indicator-core {
+  animation: status-settle var(--motion-state) var(--motion-ease-out) both;
 }

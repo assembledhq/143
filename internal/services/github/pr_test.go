@@ -3010,58 +3010,6 @@ func TestFormatPRBody_SessionLinkUsesConfiguredAppBaseURL(t *testing.T) {
 	require.NotContains(t, body, "//sessions/", "should trim trailing slashes when building the session link")
 }
 
-func TestFormatPRBody_AppendsReadinessFooter(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "pgxmock pool should be created")
-	defer mock.Close()
-
-	orgID := uuid.New()
-	sessionID := uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789")
-	runID := uuid.New()
-	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
-	snapshotKey := "snap-current"
-	mock.ExpectQuery("FROM pr_readiness_runs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "session_id", "repository_id", "status",
-			"evaluated_workspace_revision", "evaluated_snapshot_key", "summary", "review_packet",
-			"triggered_by_user_id", "started_at", "completed_at", "created_at", "updated_at",
-		}).AddRow(runID, orgID, sessionID, nil, models.PRReadinessRunStatusWarnings, int64(3), &snapshotKey, "Ready with warnings", []byte(`{"risk_flags":["migration"]}`), nil, now, &now, now, now))
-	mock.ExpectQuery("FROM pr_readiness_checks").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "run_id", "session_id", "check_type", "status",
-			"enforcement", "title", "summary", "details", "action", "created_at",
-			"check_key", "enforcement_builder", "enforcement_engineer", "enforcement_admin", "provenance", "source",
-		}).AddRow(uuid.New(), orgID, runID, sessionID, models.PRReadinessCheckTypeRiskFlags, models.PRReadinessCheckStatusWarning,
-			models.PRReadinessEnforcementAdvisory, "Risk flags detected", "Migration changed.", []byte(`{"flags":["migration"]}`), "View files", now,
-			"risk_flags", models.PRReadinessEnforcementAdvisory, models.PRReadinessEnforcementAdvisory, models.PRReadinessEnforcementAdvisory, "builtin", ""))
-	mock.ExpectQuery("FROM pr_readiness_bypasses").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "readiness_run_id", "session_id", "repository_id", "pull_request_id", "bypassed_by_user_id", "reason", "bypassed_checks", "created_at",
-		}).AddRow(uuid.New(), orgID, runID, sessionID, nil, nil, uuid.New(), "manual schema review completed", []byte(`["agent_review_clean"]`), now))
-
-	svc := &PRService{logger: zerolog.Nop(), appBaseURL: defaultAppBaseURL}
-	svc.SetReadinessStore(db.NewPRReadinessStore(mock))
-	summary := "Updated migration"
-	body := svc.formatPRBody(context.Background(), &models.Session{
-		ID:                sessionID,
-		OrgID:             orgID,
-		WorkspaceRevision: 3,
-		SnapshotKey:       &snapshotKey,
-		ResultSummary:     &summary,
-	}, nil)
-
-	require.Contains(t, body, "143 readiness", "PR body should include the readiness footer heading")
-	require.Contains(t, body, "Ready with warnings", "readiness footer should include the latest fresh run summary")
-	require.Contains(t, body, "Bypassed: agent_review_clean", "readiness footer should disclose bypassed checks")
-	require.Contains(t, body, "Bypass reason: manual schema review completed", "readiness footer should disclose bypass reasons")
-	require.NoError(t, mock.ExpectationsWereMet(), "all readiness footer database expectations should be met")
-}
-
 func TestPRPreviewURLCreatesDurablePreviewOriginTarget(t *testing.T) {
 	t.Parallel()
 
@@ -6460,8 +6408,12 @@ func TestPreparePublicationAttemptPersistsExactBranchAndGatesTerminalReplay(t *t
 			mock.ExpectQuery("INSERT INTO session_publications").WithArgs(pgx.NamedArgs{
 				"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
 				"repository_id": repositoryID, "source": models.SessionPublicationSourceUser,
-				"review_gate_state": models.SessionPublicationReviewGateNotRequired,
-				"job_queue":         models.SessionPublicationJobQueueAgent, "request_payload": string(payload),
+				"trigger_kind": models.SessionPublicationTriggerPolicy, "handoff_mode": models.PRHandoffModePrePublish,
+				"initiated_by_user_id":       (*uuid.UUID)(nil),
+				"automatic_pr_policy_source": models.PublicationPolicySourceProductDefault,
+				"review_policy_source":       models.PublicationPolicySourceProductDefault,
+				"review_gate_state":          models.SessionPublicationReviewGateNotRequired,
+				"job_queue":                  models.SessionPublicationJobQueueAgent, "request_payload": string(payload),
 				"request_generation_at": now,
 				"base_branch":           "main", "head_branch": headBranch, "desired_head_sha": (*string)(nil),
 			}).WillReturnRows(pgxmock.NewRows(publicationHealthTestColumns).AddRow(publicationHealthTestRow(stored)...))
@@ -6642,6 +6594,8 @@ func TestCheckpointExistingPullRequestPublicationReplaysDurableCheckpoints(t *te
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows(publicationHealthTestColumns).AddRow(publicationHealthTestRow(storedPublication)...))
@@ -6710,7 +6664,7 @@ func TestCheckpointExistingPullRequestPublicationPreservesMergedLifecycle(t *tes
 		RequestedAt: now, CreatedAt: now, UpdatedAt: now,
 	}
 
-	mock.ExpectQuery("INSERT INTO session_publications").WithArgs(githubAnyArgs(12)...).
+	mock.ExpectQuery("INSERT INTO session_publications").WithArgs(githubAnyArgs(17)...).
 		WillReturnRows(pgxmock.NewRows(publicationHealthTestColumns).AddRow(publicationHealthTestRow(storedPublication)...))
 	mock.ExpectExec("UPDATE session_publications[\\s\\S]*published_head_sha").WithArgs(pgx.NamedArgs{
 		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "head_sha": headSHA,

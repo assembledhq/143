@@ -18,6 +18,7 @@ import (
 	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/publicationintent"
 )
 
 const prHandlerSecret = "test-secret-32-chars-long-enough-xxx"
@@ -45,6 +46,56 @@ func newPRHandler(mock pgxmock.PgxPoolIface) *InternalPullRequestHandler {
 		prHandlerSecret,
 		zerolog.Nop(),
 	)
+}
+
+type internalPRCoordinatorStub struct {
+	result    *publicationintent.PublicationIntentResult
+	err       error
+	requested *publicationintent.RequestPullRequest
+}
+
+func (s *internalPRCoordinatorStub) RequestPullRequest(
+	_ context.Context,
+	_ uuid.UUID,
+	_ uuid.UUID,
+	req publicationintent.RequestPullRequest,
+) (*publicationintent.PublicationIntentResult, error) {
+	s.requested = &req
+	return s.result, s.err
+}
+
+func TestInternalPullRequestHandler_CreateWithCoordinatorReturnsFlatTypedResponse(t *testing.T) {
+	t.Parallel()
+
+	sessionID, publicationID := uuid.New(), uuid.New()
+	reason := "automatic handoff disabled"
+	coordinator := &internalPRCoordinatorStub{result: &publicationintent.PublicationIntentResult{
+		Status: publicationintent.ResultManualPublicationRequired, SessionID: sessionID,
+		PublicationID: &publicationID, Reason: &reason,
+	}}
+	handler := &InternalPullRequestHandler{
+		coordinator: coordinator,
+		logger:      zerolog.Nop(),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/internal/session/pr", nil)
+	rr := httptest.NewRecorder()
+
+	handler.createWithCoordinator(rr, req, uuid.New(), sessionID, internalCreatePullRequestRequest{
+		TriggerKind: string(models.SessionPublicationTriggerExplicitAction),
+	})
+
+	require.Equal(t, http.StatusAccepted, rr.Code, "every typed coordinator result should preserve the additive 202 contract")
+	var response internalCreatePullRequestResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response), "coordinator response should be flat valid JSON")
+	require.Equal(t, string(publicationintent.ResultManualPublicationRequired), response.Status, "response should preserve the typed coordinator status")
+	require.Equal(t, sessionID.String(), response.SessionID, "response should preserve the authoritative session")
+	require.NotNil(t, response.PublicationID, "response should expose publication identity when present")
+	require.Equal(t, publicationID.String(), *response.PublicationID, "response should expose the exact publication identity")
+	require.Equal(t, &reason, response.Reason, "response should expose the coordinator reason")
+	require.NotContains(t, rr.Body.String(), `"data"`, "internal client response must not use the public API envelope")
+	require.Equal(t, models.SessionPublicationTriggerExplicitAction, coordinator.requested.TriggerKind, "explicit user action should override automatic publication preference")
+	require.Equal(t, models.SessionPublicationSourceAgentTool, coordinator.requested.Source,
+		"this endpoint is only reachable with a sandbox token, so the channel stays the agent tool even when the agent relays an explicit user instruction")
 }
 
 func TestInternalPullRequestHandler_Create_MissingToken(t *testing.T) {
@@ -204,4 +255,38 @@ func TestInternalPullRequestHandler_Create_CurrentSessionDerivesIdentityFromToke
 	require.Equal(t, http.StatusBadRequest, rr.Code, "current-session route should derive the valid session ID from token claims before body validation")
 	require.Contains(t, rr.Body.String(), "INVALID_AUTHOR_MODE", "current-session route should reach body validation without a path session ID")
 	require.NoError(t, mock.ExpectationsWereMet(), "current-session identity validation should not query the database for an invalid body")
+}
+
+func TestAgentPublicationAuditDetailsPreservesRequestedTrigger(t *testing.T) {
+	t.Parallel()
+
+	publicationID := uuid.New()
+	tests := []struct {
+		name    string
+		trigger models.SessionPublicationTriggerKind
+	}{
+		{name: "agent readiness", trigger: models.SessionPublicationTriggerAgentReady},
+		{name: "explicit user action", trigger: models.SessionPublicationTriggerExplicitAction},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			raw, err := agentPublicationAuditDetails(&publicationintent.PublicationIntentResult{
+				Status: publicationintent.ResultPRQueued, PublicationID: &publicationID,
+			}, tt.trigger)
+			require.NoError(t, err, "audit details should encode")
+
+			var details struct {
+				Status        string `json:"status"`
+				TriggerKind   string `json:"trigger_kind"`
+				PublicationID string `json:"publication_id"`
+			}
+			require.NoError(t, json.Unmarshal(raw, &details), "audit details should be valid JSON")
+			require.Equal(t, string(tt.trigger), details.TriggerKind, "audit trail must record the trigger the caller actually requested")
+			require.Equal(t, publicationID.String(), details.PublicationID, "audit trail should reference the durable publication")
+			require.Equal(t, string(publicationintent.ResultPRQueued), details.Status, "audit trail should record the coordinator outcome")
+		})
+	}
 }

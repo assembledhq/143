@@ -717,6 +717,22 @@ func (s *SessionStore) GetLatestDiffSnapshot(ctx context.Context, orgID, session
 	return snapshot, nil
 }
 
+// HasSessionPublicationIntent reports whether any durable publication intent
+// exists for the session. Turn completion uses this to distinguish an agent
+// that already called create_pr from a missing readiness signal.
+func (s *SessionStore) HasSessionPublicationIntent(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error) {
+	var exists bool
+	err := s.db.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1
+		FROM session_publications
+		WHERE org_id = @org_id AND session_id = @session_id
+	)`, pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check session publication intent: %w", err)
+	}
+	return exists, nil
+}
+
 func (s *SessionStore) GetLatestReviewArtifactRef(ctx context.Context, orgID, sessionID uuid.UUID) (models.SessionReviewArtifactRef, error) {
 	query := `
 		SELECT review_artifact_key, review_artifact_version

@@ -905,7 +905,7 @@ function RepoPreviewCard({
               onValueChange={onSelectPreviewConfig}
             >
               <SelectTrigger
-                size="sm"
+                density="compact"
                 className="w-auto min-w-40"
                 aria-label={`Select build profile for ${policy.repository_full_name}`}
               >

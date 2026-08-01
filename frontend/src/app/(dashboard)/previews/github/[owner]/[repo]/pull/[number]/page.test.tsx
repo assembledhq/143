@@ -427,7 +427,7 @@ describe("PullRequestPreviewPage", () => {
     expect(screen.getByText("Unhealthy")).toBeInTheDocument();
   });
 
-  it("shows spinners inside starting preview status badges", async () => {
+  it("shows indeterminate progress inside starting preview status badges", async () => {
     server.use(
       http.get("*/api/v1/previews/github/acme/web/pull/42", () =>
         HttpResponse.json({
@@ -467,7 +467,7 @@ describe("PullRequestPreviewPage", () => {
     const startingBadges = startingLabels.filter((label) => label.closest('[data-slot="status-label"]'));
     expect(startingBadges.length).toBeGreaterThan(0);
     for (const label of startingBadges) {
-      expect(label.closest('[data-slot="status-label"]')?.querySelector('[data-slot="status-spinner"]')).toBeInTheDocument();
+      expect(label.closest('[data-slot="status-label"]')?.querySelector('[data-slot="status-indicator"][data-activity="indeterminate"]')).toBeInTheDocument();
     }
   });
 

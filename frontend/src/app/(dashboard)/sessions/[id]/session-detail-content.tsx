@@ -1,6 +1,6 @@
 "use client";
 
-import { forwardRef, memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -26,7 +26,6 @@ import {
   Plus,
   Minus,
   Square,
-  Settings2,
   PanelRightOpen,
   PanelRightClose,
   Clock,
@@ -70,11 +69,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
-import {
   Select,
   SelectContent,
   SelectItem,
@@ -94,7 +88,8 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
 import { ContextHeader } from "@/components/context-header";
-import { StatusLabel, type StatusTone } from "@/components/status-label";
+import { StatusLabel } from "@/components/status-label";
+import { StatusIndicator } from "@/components/status-indicator";
 import { SessionComposerAttachmentMenu } from "@/components/session-composer-attachment-menu";
 import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
 import { useSessionComposerSlashCommands } from "@/hooks/use-session-composer-slash-commands";
@@ -145,7 +140,7 @@ import {
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
 import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
-import type { ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionPublication, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
+import type { ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionPublication, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -166,6 +161,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useDocumentVisible } from "@/hooks/use-document-visible";
 import { usePageTitle } from "@/hooks/use-page-title";
+import { useOperationalFavicon } from "@/hooks/use-operational-favicon";
 import {
   useSessionKeyboardShortcuts,
   type SessionDetailTab,
@@ -178,6 +174,7 @@ import { isProvisionalSessionDetail } from "@/lib/session-detail-cache";
 import { useReconcileOptimisticAction } from "./use-optimistic-pr-action";
 import { pollMs } from "@/lib/poll-intervals";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
+import { deriveSessionDisplayStatus } from "@/lib/session-display-status";
 import { MobileSessionTopBar } from "./mobile-session-top-bar";
 import { RecoverableInboxNotice } from "./recoverable-inbox-notice";
 import { SessionDetailLoadingContent, SessionTimelineSkeleton } from "./session-detail-loading-skeleton";
@@ -215,16 +212,6 @@ import {
 
 const loadReviewDiffView = () =>
   import("@/components/code-review/review-diff-view").then((m) => ({ default: m.ReviewDiffView }));
-
-function sessionStatusTone(status: SessionStatus, prStatus?: PullRequestStatus | null): StatusTone {
-  if (status === "failed") return "destructive";
-  if (status === "awaiting_input") return "warning";
-  if (status === "needs_human_guidance") return "attention";
-  if (status === "pr_created" && prStatus === "closed") return "neutral";
-  if (status === "completed" || status === "pr_created" || prStatus === "merged") return "success";
-  if (status === "running" || status === "idle") return "primary";
-  return "neutral";
-}
 
 const publicationStatePresentation: Record<SessionPublication["state"], { label: string; variant: "secondary" | "success" | "warning" | "destructive" | "info" }> = {
   requested: { label: "Publication queued", variant: "secondary" },
@@ -459,7 +446,7 @@ function isRuntimeRecoveryActive(session: Session): boolean {
 function RuntimeRecoveryNotice({ border = "border-t" }: { border?: "border-t" | "border-b" | "border" }) {
   return (
     <div className={`flex items-center gap-2 px-4 py-2.5 text-xs ${border} bg-info/10 border-info/30 text-info`}>
-      <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+      <StatusIndicator tone="info" activity="breathing" stateKey="runtime-recovery" />
       <span>
         <span className="font-medium">Restoring runtime from checkpoint</span>
         <span className="mx-1">·</span>
@@ -467,247 +454,6 @@ function RuntimeRecoveryNotice({ border = "border-t" }: { border?: "border-t" | 
       </span>
     </div>
   );
-}
-
-function readinessIsStale(readiness: PRReadinessRun | undefined, session: Session) {
-  return !!readiness && (
-    readiness.evaluated_workspace_revision !== session.workspace_revision ||
-    (readiness.evaluated_snapshot_key ?? "") !== (session.snapshot_key ?? "")
-  );
-}
-
-function ReadinessCheckGroup({
-  title,
-  checks,
-  empty,
-  onAction,
-  actionDisabled,
-}: {
-  title: string;
-  checks: PRReadinessCheck[];
-  empty: string;
-  onAction?: (check: PRReadinessCheck) => void;
-  actionDisabled?: (check: PRReadinessCheck) => boolean;
-}) {
-  return (
-    <div className="space-y-1">
-      <div className="font-medium text-foreground">{title}</div>
-      {checks.length === 0 ? (
-        <div className="text-muted-foreground">{empty}</div>
-      ) : (
-        <div className="space-y-1">
-          {checks.map((check) => (
-            <ReadinessCheckRow key={check.id || check.check_key || check.check_type} check={check} onAction={onAction} actionDisabled={actionDisabled?.(check) ?? false} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ReadinessCheckList({
-  checks,
-  onAction,
-  actionDisabled,
-}: {
-  checks: PRReadinessCheck[];
-  onAction?: (check: PRReadinessCheck) => void;
-  actionDisabled?: (check: PRReadinessCheck) => boolean;
-}) {
-  if (checks.length === 0) return null;
-  return (
-    <div className="space-y-1">
-      {checks.map((check) => (
-        <ReadinessCheckRow key={check.id || check.check_key || check.check_type} check={check} onAction={onAction} actionDisabled={actionDisabled?.(check) ?? false} />
-      ))}
-    </div>
-  );
-}
-
-function ReadinessCheckRow({ check, onAction, actionDisabled }: { check: PRReadinessCheck; onAction?: (check: PRReadinessCheck) => void; actionDisabled: boolean }) {
-  const [open, setOpen] = useState(false);
-  const evidence = formatReadinessCheckDetails(check.details);
-  return (
-    <div className="grid grid-cols-[16px_1fr] gap-2 text-muted-foreground">
-      <ReadinessCheckStatusIcon status={check.status} className="mt-0.5 h-3.5 w-3.5" />
-      <div className="min-w-0 flex-1 space-y-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-foreground">{check.title}</span>
-          {check.provenance && check.provenance !== "builtin" ? (
-            <span className="text-xs uppercase text-muted-foreground">{readinessCheckProvenanceLabel(check)}</span>
-          ) : null}
-          {check.action ? (
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={actionDisabled}
-              onClick={() => onAction?.(check)}
-            >
-              {check.action}
-            </Button>
-          ) : null}
-          {evidence ? (
-            <Collapsible open={open} onOpenChange={setOpen}>
-              <CollapsibleTrigger asChild>
-                <Button size="xs" variant="ghost" aria-label={`${open ? "Hide" : "Show"} evidence for ${check.title}`}>
-                  {open ? "Hide evidence" : "Evidence"}
-                </Button>
-              </CollapsibleTrigger>
-              <CollapsibleContent className="basis-full">
-                <pre className="mt-1 max-h-40 overflow-auto rounded-md bg-muted px-2 py-1 text-xs leading-relaxed text-muted-foreground">
-                  {evidence}
-                </pre>
-              </CollapsibleContent>
-            </Collapsible>
-          ) : null}
-        </div>
-        {check.summary ? <div className="text-xs">{check.summary}</div> : null}
-      </div>
-    </div>
-  );
-}
-
-function ReadinessCheckStatusIcon({ status, className }: { status: PRReadinessCheck["status"]; className?: string }) {
-  if (status === "passed") return <CheckCircle2 className={cn("text-success", className)} />;
-  if (status === "failed" || status === "error") return <AlertTriangle className={cn("text-destructive", className)} />;
-  if (status === "warning") return <AlertTriangle className={cn("text-warning", className)} />;
-  return <Clock className={cn("text-muted-foreground", className)} />;
-}
-
-function formatReadinessCheckDetails(value: unknown) {
-  if (!value || (typeof value === "object" && Object.keys(value as Record<string, unknown>).length === 0)) {
-    return "";
-  }
-  if (typeof value === "string") {
-    return value;
-  }
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-function readinessCheckProvenanceLabel(check: PRReadinessCheck) {
-  if (check.provenance === "repo_config" || check.source === "repo_config") {
-    return ".143/config.json";
-  }
-  if (check.provenance === "org_settings") {
-    return check.source === "repository" ? "repo settings" : "org settings";
-  }
-  return check.provenance;
-}
-
-function staleReadinessCheck(readiness: PRReadinessRun, session: Session, enforcementForCheck: (check: PRReadinessCheck) => PRReadinessEnforcement): PRReadinessCheck {
-  const freshness = readiness.checks?.find((check) => check.check_type === "freshness");
-  const base: PRReadinessCheck = freshness ?? {
-    id: "__stale_readiness__",
-    org_id: readiness.org_id,
-    run_id: readiness.id,
-    session_id: readiness.session_id,
-    check_key: "__stale_readiness__",
-    check_type: "freshness",
-    status: "failed",
-    enforcement: "blocking",
-    effective_enforcement: "blocking",
-    title: "Readiness is stale",
-    summary: "Workspace files changed after this readiness result was produced.",
-    action: "Re-run",
-    created_at: readiness.updated_at,
-  };
-  const enforcement = enforcementForCheck(base);
-  return {
-    ...base,
-    id: "__stale_readiness__",
-    check_key: "__stale_readiness__",
-    status: "failed",
-    enforcement: enforcement === "off" ? "blocking" : enforcement,
-    effective_enforcement: enforcement === "off" ? "blocking" : enforcement,
-    title: "Readiness is stale",
-    summary: "Workspace files changed after this readiness result was produced.",
-    details: {
-      current_workspace_revision: session.workspace_revision,
-      evaluated_workspace_revision: readiness.evaluated_workspace_revision,
-      current_snapshot_key: session.snapshot_key,
-      evaluated_snapshot_key: readiness.evaluated_snapshot_key,
-    },
-    action: "Re-run",
-  };
-}
-
-function isDerivedStaleReadinessCheck(check: PRReadinessCheck) {
-  return check.check_key === "__stale_readiness__";
-}
-
-type ReadinessPacket = {
-  what_changed?: { changed_files?: string[]; diff_stats?: unknown };
-  why_changed?: { linked_issue_count?: number; issue_less_reason?: string };
-  checked_at?: string;
-  risk_flags?: string[];
-  unknowns?: string[];
-  bypasses?: PRReadinessBypass[];
-};
-
-function readinessPacket(value: unknown): ReadinessPacket | null {
-  if (!value || typeof value !== "object") return null;
-  return value as ReadinessPacket;
-}
-
-function enforcementForRole(check: PRReadinessCheck, role?: string | null): PRReadinessEnforcement | undefined {
-  if (!check.enforcement_by_role) return undefined;
-  if (role === "admin") return check.enforcement_by_role.admin;
-  if (role === "member") return check.enforcement_by_role.engineer;
-  if (role === "builder") return check.enforcement_by_role.builder;
-  return undefined;
-}
-
-function policyRequiresRoleReadiness(config: PRReadinessPolicyConfig, role: "builder" | "engineer" | "admin") {
-  if (role === "builder" && config.enabled_for_builders === false) {
-    return false;
-  }
-  return Object.values(config.checks ?? {}).some((check) => {
-    const enforcement = check.enforcement;
-    if (!enforcement) return false;
-    return enforcement[role] !== undefined && enforcement[role] !== "off";
-  });
-}
-
-const ReadinessPacketSummary = forwardRef<HTMLDivElement, { packet: ReadinessPacket }>(function ReadinessPacketSummary({ packet }, ref) {
-  const changedFiles = Array.isArray(packet.what_changed?.changed_files) ? packet.what_changed.changed_files : [];
-  const riskFlags = Array.isArray(packet.risk_flags) ? packet.risk_flags : [];
-  const unknowns = Array.isArray(packet.unknowns) ? packet.unknowns : [];
-  const bypasses = Array.isArray(packet.bypasses) ? packet.bypasses : [];
-
-  return (
-    <div ref={ref} className="space-y-2 border-t border-border pt-3">
-      <div className="font-medium text-foreground">Review packet</div>
-      <div className="flex flex-wrap gap-2 text-muted-foreground">
-        <Badge variant="outline">{changedFiles.length} files</Badge>
-        {packet.why_changed?.linked_issue_count !== undefined ? (
-          <Badge variant="outline">{packet.why_changed.linked_issue_count} linked issues</Badge>
-        ) : null}
-        {riskFlags.slice(0, 4).map((flag) => (
-          <Badge key={flag} variant="secondary">{flag.replaceAll("_", " ")}</Badge>
-        ))}
-        {unknowns.slice(0, 4).map((unknown) => (
-          <Badge key={unknown} variant="outline">unknown {unknown.replaceAll("_", " ")}</Badge>
-        ))}
-        {bypasses.length ? <Badge variant="destructive">{bypasses.length} bypass</Badge> : null}
-      </div>
-      {packet.why_changed?.issue_less_reason ? (
-        <div className="text-muted-foreground">{packet.why_changed.issue_less_reason}</div>
-      ) : null}
-      {packet.checked_at ? <div className="text-muted-foreground">Checked {formatTimeAgo(packet.checked_at)}</div> : null}
-    </div>
-  );
-});
-
-function readinessStatusIcon(readiness: PRReadinessRun | undefined, stale: boolean | undefined, running: boolean) {
-  if (running) return <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />;
-  if (!readiness) return <ClipboardList className="h-3.5 w-3.5 text-muted-foreground" />;
-  if (stale || readiness.status === "blocked" || readiness.status === "failed") return <AlertTriangle className="h-3.5 w-3.5 text-warning" />;
-  if (readiness.status === "warnings") return <AlertTriangle className="h-3.5 w-3.5 text-warning" />;
-  return <CheckCircle2 className="h-3.5 w-3.5 text-success" />;
 }
 
 function hasVisibleThreadFailure(thread?: SessionThread | null): thread is SessionThread {
@@ -802,7 +548,7 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
   const showThreadFailureDetails = session.status !== "failed" && hasVisibleThreadFailure(activeThread);
   const checkpointRetryUnavailable = !session.snapshot_key || session.sandbox_state === "destroyed" || recoveryActive;
 
-  const status = getDisplayStatus(session.status, prStatus);
+  const operationalStatus = deriveSessionDisplayStatus(session, prStatus);
   const isActive = !terminalSessionStatuses.has(session.status);
   const isDeployRecovery = session.runtime_stop_reason === "deploy_budget_expired";
   const originDisplay = getSessionOriginDisplay(session);
@@ -975,15 +721,13 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
       {/* Session vitals — identity row (status + agent + who triggered) */}
       <div className="space-y-2">
         <div className="flex items-center gap-x-3 gap-y-1 flex-wrap text-xs">
-          <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-medium ${status.color}`}>
-            {isActive && (
-              <span className="relative mr-1.5 flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-info/60 opacity-75" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-info" />
-              </span>
-            )}
-            {status.label}
-          </span>
+          <StatusLabel
+            label={operationalStatus.label}
+            tone={operationalStatus.tone}
+            activity={operationalStatus.activity}
+            stateKey={`${session.status}:${operationalStatus.kind}`}
+            size="md"
+          />
           <span className="inline-flex items-center gap-x-1.5 text-muted-foreground">
             <AgentBadge agentType={session.agent_type} labelClassName="text-xs" />
             <span aria-hidden="true" className="text-muted-foreground/50">·</span>
@@ -1576,7 +1320,7 @@ function SessionComposer({
         <div className="space-y-2">
           <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Agent</Label>
           <Select value={editableAgentType} onValueChange={onEditableAgentTypeChange} disabled={agentUpdatePending}>
-            <SelectTrigger className="h-11 rounded-xl border-border/70 bg-background text-sm" aria-label="Agent">
+            <SelectTrigger className="rounded-xl border-border/70 bg-background text-sm" aria-label="Agent">
               <SelectValue placeholder="Select agent" />
             </SelectTrigger>
             <SelectContent>
@@ -1594,7 +1338,7 @@ function SessionComposer({
         <div className="space-y-2">
           <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Model</Label>
           <Select value={selectedModel} onValueChange={onSelectedModelChange}>
-            <SelectTrigger className="h-11 rounded-xl border-border/70 bg-background text-sm" aria-label="Model override">
+            <SelectTrigger className="rounded-xl border-border/70 bg-background text-sm" aria-label="Model override">
               <SelectValue placeholder="Default model" />
             </SelectTrigger>
             <SelectContent>
@@ -1830,7 +1574,7 @@ function SessionComposer({
                 onChange={(event) => setImageURL(event.target.value)}
                 placeholder="https://example.com/screenshot.png"
                 aria-label="Image URL"
-                className="h-8"
+                density="compact"
               />
               <Button type="button" variant="outline" size="sm" onClick={addImageURL}>
                 Add
@@ -1865,7 +1609,7 @@ function SessionComposer({
                   placeholder="ACS-1234 or https://linear.app/acme/issue/ACS-1234"
                   aria-label="Linear issue id or URL"
                   aria-invalid={linearInputError ? true : undefined}
-                  className="h-8"
+                density="compact"
                 />
                 <Button type="button" variant="outline" size="sm" onClick={addLinearLink}>
                   Add
@@ -1972,7 +1716,7 @@ function SessionComposer({
 
                 {editableAgents && editableAgents.length > 0 && editableAgentType && onEditableAgentTypeChange && (
                   <Select value={editableAgentType} onValueChange={onEditableAgentTypeChange} disabled={agentUpdatePending}>
-                    <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Agent">
+                    <SelectTrigger density="compact" className="w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Agent">
                       <SelectValue placeholder="Agent" />
                     </SelectTrigger>
                     <SelectContent>
@@ -1987,7 +1731,7 @@ function SessionComposer({
 
                 {availableModels.length > 0 && (
                   <Select value={selectedModel} onValueChange={onSelectedModelChange}>
-                    <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
+                    <SelectTrigger density="compact" className="w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
                       <SelectValue placeholder="Default model" />
                     </SelectTrigger>
                     <SelectContent>
@@ -3951,6 +3695,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   // title matches what the user just clicked, so don't wait for the
   // authoritative detail to label the tab.
   usePageTitle(rawSession ? sessionTitle(rawSession) : null, "Session");
+  useOperationalFavicon(rawSession?.status);
   const members = membersData?.data ?? [];
   const shouldLoadDiff = (
     !isProvisionalSession &&
@@ -4821,65 +4566,20 @@ export function SessionDetailContent({ id }: { id: string }) {
     queryFn: () => api.sessions.listReviewLoops(id),
     enabled: !!session,
   });
-  const { data: readinessData } = useQuery({
-    queryKey: queryKeys.sessions.readiness(id, selectedChangeset?.id),
-    queryFn: () => api.sessions.getReadiness(id, selectedChangeset?.id),
-    enabled: !!session && (selectedIsPrimary || !!selectedChangeset?.worktree_path),
-    refetchInterval: (query) => {
-      const status = query.state.data?.data.latest?.status;
-      return status === "queued" || status === "running" ? pollMs(3000) : false;
-    },
-  });
-  const runReadinessMutation = useMutation({
-    mutationFn: () => api.sessions.runReadiness(id, selectedChangeset?.id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.readiness(id, selectedChangeset?.id) });
-      toast.success("Readiness checks queued");
-    },
-    onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Readiness checks could not be queued");
-    },
-  });
-  const { data: readinessPolicyResponse } = useQuery({
-    queryKey: queryKeys.settings.prReadinessPolicy(session?.repository_id ?? null),
-    queryFn: () => api.settings.getPRReadinessPolicy(session?.repository_id ?? undefined),
-    enabled: !!session && canManageSession,
-  });
   const latestReviewLoop = reviewLoopsData?.data?.[0] ?? null;
-  const builderRequiresReviewBeforePR = user?.role === "builder" && (
-    readinessPolicyResponse?.data.config
-      ? policyRequiresRoleReadiness(readinessPolicyResponse.data.config, "builder")
-      : true
-  );
-  const latestReadiness = readinessData?.data.latest;
-  const latestReadinessStale = !!latestReadiness && (selectedChangeset?.worktree_path
-    ? (latestReadiness.evaluated_head_sha ?? "") !== (selectedChangeset.head_sha ?? "")
-    : latestReadiness.evaluated_workspace_revision !== session?.workspace_revision ||
-      (latestReadiness.evaluated_snapshot_key ?? "") !== (session?.snapshot_key ?? ""));
-  const latestBypassedKeys = new Set((latestReadiness?.bypasses ?? []).flatMap((bypass) => bypass.bypassed_checks));
-  const hasUnbypassedReadinessBlocker = (latestReadiness?.checks ?? []).some((check) => {
-    const key = check.check_key || check.check_type;
-    const enforcement = check.effective_enforcement || check.enforcement_by_role?.builder || check.enforcement;
-    return (check.status === "failed" || check.status === "error") && enforcement === "blocking" && !latestBypassedKeys.has(key);
-  });
-  const readinessFresh = !!latestReadiness &&
-    latestReadiness.status !== "queued" &&
-    latestReadiness.status !== "running" &&
-    latestReadiness.status !== "failed" &&
-    !latestReadinessStale &&
-    !hasUnbypassedReadinessBlocker;
-  const builderReviewAllowsPR = !builderRequiresReviewBeforePR || readinessFresh;
-  const readinessAutoRunOnCreatePR = readinessPolicyResponse?.data.config.auto_run?.on_create_pr === true;
-  const readinessAutoRunCanQueue = builderRequiresReviewBeforePR &&
-    readinessAutoRunOnCreatePR &&
-    (!latestReadiness ||
-      latestReadinessStale ||
-      latestReadiness.status === "queued" ||
-      latestReadiness.status === "running");
-  const createPRAllowsSubmission = builderReviewAllowsPR || readinessAutoRunCanQueue;
+  // Mirror the server-side builder gate so the action is disabled with a reason
+  // instead of failing with 409 REVIEW_REQUIRED_BEFORE_PR on click. The API
+  // compares against the session snapshot key for the primary changeset, so
+  // this does not key off branch-head state. Branch creation has no server gate.
+  const builderReviewAllowsPR = user?.role !== "builder" ||
+    (reviewLoopsData?.data ?? []).some((loop) =>
+      loop.status === "clean" && (loop.latest_checkpoint_key ?? "") === (session?.snapshot_key ?? ""));
+  // A non-primary materialized changeset is a separate worktree that no review
+  // loop describes, so the server refuses builder publication outright.
+  const builderTargetUnreviewable = user?.role === "builder" && !selectedIsPrimary && !!selectedChangeset?.worktree_path;
   const canAttemptCreatePR = canShipPR && hasSnapshot && !hasPR && !isRunning && selectedIsPrimary;
-  const canCreatePR = canAttemptCreatePR && createPRAllowsSubmission;
-  const canCreateBranch = canAttemptCreatePR && builderReviewAllowsPR;
+  const canCreatePR = canAttemptCreatePR && builderReviewAllowsPR;
+  const canCreateBranch = canAttemptCreatePR;
   const needsGitHubStatus = canCreatePR || (hasPR && selectedPR?.status === "open");
   const reviewLoopRunning = latestReviewLoop?.status === "running";
   const canStartReviewLoop = !!session && canManageSession && canUseNativeReviewLoop && hasSnapshot && !isRunning && !reviewLoopRunning;
@@ -4914,13 +4614,6 @@ export function SessionDetailContent({ id }: { id: string }) {
       setLocalPRState("submitting");
     },
     onSuccess: (data, options) => {
-      if (data.status === "readiness_queued") {
-        setLocalPRActionError(null);
-        setLocalPRState("idle");
-        queryClient.invalidateQueries({ queryKey: queryKeys.sessions.readiness(id) });
-        toast.success("Readiness checks queued");
-        return;
-      }
       setLocalPRActionError(null);
       setLocalPRState("queued");
       markSessionActionInFlight("pr_creation_state");
@@ -5037,178 +4730,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   const reviewActionDisabledReason = startReviewLoopMutation.isPending
     ? "Starting review loop..."
     : reviewUnavailableReason;
-
-  const readinessRunning =
-    latestReadiness?.status === "queued" ||
-    latestReadiness?.status === "running" ||
-    runReadinessMutation.isPending;
-  const readinessStale = !!session && readinessIsStale(latestReadiness, session);
-  const readinessCheckDisabled = readinessRunning || isRunning || (!selectedIsPrimary && !selectedChangeset?.worktree_path);
-
-  // Readiness findings, grouped with role-aware enforcement so the merged
-  // Review card can surface blockers, bypasses, and the review packet inline.
-  const [readinessBypassOpen, setReadinessBypassOpen] = useState(false);
-  const [readinessBypassReason, setReadinessBypassReason] = useState("");
-  const resetSessionReadinessBypassState = useCallback(() => {
-    setReadinessBypassOpen(false);
-    setReadinessBypassReason("");
-  }, []);
-  useSessionScopedReset(id, [
-    { name: "session readiness bypass state", reset: resetSessionReadinessBypassState },
-  ]);
-  const readinessPacketRef = useRef<HTMLDivElement | null>(null);
-  const readinessBypassMutation = useMutation({
-    mutationFn: () => api.sessions.createReadinessBypass(id, readinessBypassReason),
-    onSuccess: () => {
-      setReadinessBypassOpen(false);
-      setReadinessBypassReason("");
-      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.readiness(id) });
-      toast.success("Readiness blocker bypassed");
-    },
-    onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Readiness blocker could not be bypassed");
-    },
-  });
-  const readinessChecks = latestReadiness?.checks ?? [];
-  const readinessCheckKey = (check: PRReadinessCheck) => check.check_key || check.check_type;
-  const readinessCheckEnforcement = (check: PRReadinessCheck) =>
-    check.effective_enforcement || enforcementForRole(check, user?.role) || check.enforcement;
-  const readinessStaleCheck = readinessStale && latestReadiness && session
-    ? staleReadinessCheck(latestReadiness, session, readinessCheckEnforcement)
-    : null;
-  const readinessVisibleChecks = readinessStale
-    ? readinessChecks.filter((check) => check.check_type !== "freshness")
-    : readinessChecks;
-  const readinessPassedChecks = readinessVisibleChecks.filter((check) => check.status === "passed");
-  const readinessBlockedChecks = [
-    ...readinessVisibleChecks.filter((check) =>
-      (check.status === "failed" || check.status === "error") &&
-      readinessCheckEnforcement(check) === "blocking" &&
-      !latestBypassedKeys.has(readinessCheckKey(check))
-    ),
-    ...(readinessStaleCheck ? [readinessStaleCheck] : []),
-  ];
-  const readinessBypassedChecks = readinessChecks.filter((check) => latestBypassedKeys.has(readinessCheckKey(check)));
-  const readinessWarningChecks = readinessVisibleChecks.filter((check) =>
-    check.status === "warning" ||
-    ((check.status === "failed" || check.status === "error") && readinessCheckEnforcement(check) !== "blocking")
-  );
-  const readinessBypassPolicy = readinessPolicyResponse?.data.config.bypass;
-  const readinessBypassRoleAllowed = !readinessBypassPolicy || (
-    readinessBypassPolicy.enabled !== false &&
-    (readinessBypassPolicy.allowed_roles ?? ["admin", "member", "builder"]).includes(user?.role ?? "") &&
-    (readinessBypassPolicy.scopes ?? ["completed_blocking_checks"]).includes("completed_blocking_checks")
-  );
-  const readinessNonBypassableChecks = new Set(readinessBypassPolicy?.non_bypassable_checks ?? []);
-  const readinessBypassableBlocked = readinessBlockedChecks.filter((check) =>
-    !readinessStale &&
-    !isDerivedStaleReadinessCheck(check) &&
-    readinessBypassRoleAllowed &&
-    !readinessNonBypassableChecks.has(readinessCheckKey(check)) &&
-    !readinessNonBypassableChecks.has(check.check_type)
-  );
-  const readinessReviewPacket = readinessPacket(latestReadiness?.review_packet);
-  const handleReadinessCheckAction = (check: PRReadinessCheck) => {
-    const action = (check.action ?? "").toLowerCase();
-    if (!action) return;
-    if (action.includes("re-run") || action.includes("run readiness")) {
-      if (!readinessCheckDisabled) runReadinessMutation.mutate();
-      return;
-    }
-    if (action.includes("view files") || action.includes("view changes")) {
-      setDetailTab("changes");
-      return;
-    }
-    if (action.includes("run review") || action.includes("fix with agent") || action.includes("view review")) {
-      if (!reviewActionDisabled) setReviewConfigOpen(true);
-      return;
-    }
-    if (action.includes("view packet")) {
-      readinessPacketRef.current?.scrollIntoView({ block: "nearest" });
-      return;
-    }
-    if (action.includes("configuration")) {
-      router.push("/settings");
-    }
-  };
-  const readinessCheckActionDisabled = (check: PRReadinessCheck) => {
-    const action = (check.action ?? "").toLowerCase();
-    if (action.includes("re-run") || action.includes("run readiness")) {
-      return readinessCheckDisabled;
-    }
-    if (action.includes("run review") || action.includes("fix with agent") || action.includes("view review")) {
-      return reviewActionDisabled;
-    }
-    return false;
-  };
-  const readinessNeedsActionChecks = [...readinessBlockedChecks, ...readinessWarningChecks];
-  const readinessOptionalCount = readinessWarningChecks.length + readinessBypassedChecks.length;
-  const readinessDetailCount = readinessNeedsActionChecks.length + readinessPassedChecks.length + readinessBypassedChecks.length + (readinessReviewPacket ? 1 : 0);
-  const readinessPrimaryCopy = (() => {
-    if (reviewLoopRunning) {
-      return {
-        title: `Fixing with ${AGENTS_BY_KEY[latestReviewLoop?.agent_type ?? ""]?.label ?? latestReviewLoop?.agent_type ?? "agent"}`,
-        description: `Pass ${Math.min((latestReviewLoop?.completed_passes ?? 0) + 1, latestReviewLoop?.max_passes ?? 1)} of ${latestReviewLoop?.max_passes ?? 1}`,
-      };
-    }
-    if (readinessRunning) {
-      return { title: "Checking readiness", description: "Reviewing the latest changes before PR." };
-    }
-    if (!latestReadiness) {
-      return { title: "Review before PR", description: "Run a quick readiness check before opening a PR." };
-    }
-    if (readinessStale) {
-      return { title: "Not ready yet", description: "Files changed since the last check." };
-    }
-    if (latestReadiness.status === "failed") {
-      return { title: "Check failed", description: "Readiness could not finish. Try running it again." };
-    }
-    if (readinessBlockedChecks.length > 0) {
-      return {
-        title: "Not ready yet",
-        description: readinessBlockedChecks.length === 1
-          ? `${readinessBlockedChecks[0].title} needs attention.`
-          : `${readinessBlockedChecks.length} readiness checks need attention.`,
-      };
-    }
-    if (readinessWarningChecks.length > 0) {
-      return {
-        title: "Ready with notes",
-        description: readinessWarningChecks.length === 1
-          ? "1 optional improvement is available."
-          : `${readinessWarningChecks.length} optional improvements are available.`,
-      };
-    }
-    return { title: "Ready for PR", description: "The latest checks passed." };
-  })();
-  const readinessPrimaryAction = (() => {
-    if (reviewLoopRunning) return null;
-    if (!latestReadiness || readinessStale || readinessRunning || latestReadiness.status === "failed") {
-      return {
-        label: latestReadiness ? "Re-check readiness" : "Check readiness",
-        icon: readinessRunning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />,
-        disabled: readinessCheckDisabled,
-        onClick: () => runReadinessMutation.mutate(),
-      };
-    }
-    if (readinessBlockedChecks.length > 0 && canUseNativeReviewLoop) {
-      return {
-        label: "Review & fix",
-        icon: startReviewLoopMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Settings2 className="h-3.5 w-3.5" />,
-        disabled: reviewActionDisabled,
-        onClick: () => setReviewConfigOpen(true),
-      };
-    }
-    return null;
-  })();
-  const readinessSecondaryReviewAction = !reviewLoopRunning && !latestReadiness && canUseNativeReviewLoop
-    ? {
-      label: "Review & fix",
-      icon: startReviewLoopMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Settings2 className="h-3.5 w-3.5" />,
-      disabled: reviewActionDisabled,
-      onClick: () => setReviewConfigOpen(true),
-    }
-    : null;
 
   const pushChangesMutation = useMutation({
     mutationFn: (options?: { authorMode?: PRAuthorMode; resumeToken?: string }) =>
@@ -6330,7 +5851,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     pr: {
       canCreate: canCreatePR && localPRState === "idle" && !createPRMutation.isPending,
       canView: !!selectedPR?.github_pr_url,
-      canPush: selectedIsPrimary && !prHealthActionsBlocked && canShipPR && builderReviewAllowsPR && hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending && !continueFromPRBranchMutation.isPending,
+      canPush: selectedIsPrimary && !prHealthActionsBlocked && canShipPR && builderReviewAllowsPR && !builderTargetUnreviewable && hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending && !continueFromPRBranchMutation.isPending,
       canFixTests: !prHealthActionsBlocked && canManagePR && hasRepairableFailedChecks(prHealth) && pendingPRAction === null,
       canResolveConflicts: !prHealthActionsBlocked && canManagePR && !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
       canMerge: !prHealthActionsBlocked && canManagePR && prHealthAllowsMerge(prHealth) && pendingPRAction === null,
@@ -6386,7 +5907,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     );
   }
 
-  const status = getDisplayStatus(session.status, prStatus);
+  const operationalStatus = deriveSessionDisplayStatus(session, prStatus);
   const prState = session.pr_creation_state;
   const snapshotState = classifyPRSnapshotState({
     sessionSnapshotKey: session.snapshot_key,
@@ -6411,7 +5932,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     hasSessionChanges,
     hasSnapshot,
     isRunning,
-    builderReviewAllowsPR: createPRAllowsSubmission,
+    builderReviewAllowsPR,
+    builderTargetUnreviewable,
     snapshotUnavailable,
     snapshotMessage,
     ghBlocked,
@@ -6443,9 +5965,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       : branchState === "failed" || localBranchActionError
         ? "Retry branch"
         : "Create branch";
-  const branchActionTitle = !canCreateBranch && !queueingBranch && !creatingBranch
-    ? "Run readiness checks successfully before creating a branch"
-    : localBranchActionError?.message ||
+  const branchActionTitle = localBranchActionError?.message ||
     (branchState === "failed" ? session.branch_creation_error || "Branch creation failed" : undefined);
   const branchURL = !hasPR && branchState === "succeeded" ? session.branch_url : undefined;
 
@@ -6468,6 +5988,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     hasSnapshot: selectedChangeset?.worktree_path ? true : hasSnapshot,
     isRunning,
     builderReviewAllowsPR,
+    builderTargetUnreviewable,
     snapshotUnavailable,
     snapshotMessage,
     ghBlocked,
@@ -6725,7 +6246,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               : "This session did not produce any file changes."
           }
           isMobile={isMobileReviewViewport}
-          diffLoadErrorText={diffLoadErrorText}
+          diffLoadErrorText={diffLoadErrorText ?? undefined}
           diffTruncationNotice={diffTruncationNotice}
           onRetryDiffLoad={retryDiffLoad}
         />
@@ -6820,7 +6341,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 </div>
                 {!selectedChangeset.is_primary && !selectedChangeset.worktree_path && (
                   <p className="pt-2 text-xs text-muted-foreground" data-testid="branch-actions-unavailable">
-                    Changes, preview, readiness, review, publishing, and agent editing become available after branch materialization.
+                    Changes, preview, review, publishing, and agent editing become available after branch materialization.
                   </p>
                 )}
               </CardContent>
@@ -6882,164 +6403,49 @@ export function SessionDetailContent({ id }: { id: string }) {
               </Card>
             ) : null
           )}
-          {selectedIsPrimary && canManageSession && !hasPR && hasSessionChanges ? (
+          {selectedIsPrimary && canManageSession && canUseNativeReviewLoop && !hasPR && hasSessionChanges ? (
             <Card className="border-border/60">
-              <CardContent className="@container/readiness space-y-3 p-4">
+              <CardContent className="@container/review space-y-3 p-4">
                 <div className="flex flex-col gap-3">
                   <div className="flex min-w-0 flex-1 items-start gap-2">
                     <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-                      {reviewLoopRunning || readinessRunning ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        readinessStatusIcon(latestReadiness, readinessStale, false)
-                      )}
+                      {reviewLoopRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
                     </div>
                     <div className="min-w-0">
                       <p className="text-sm font-medium text-foreground">
-                        {readinessPrimaryCopy.title}
+                        {reviewLoopRunning
+                          ? `Fixing with ${AGENTS_BY_KEY[latestReviewLoop?.agent_type ?? ""]?.label ?? "review agent"}`
+                          : "Review before PR"}
                       </p>
                       <p className="text-xs leading-relaxed text-muted-foreground">
-                        {readinessPrimaryCopy.description}
+                        {reviewLoopRunning
+                          ? "The review loop is checking the changes and applying fixes."
+                          : "Run an agent review loop before creating the pull request."}
                       </p>
                     </div>
                   </div>
-                  {readinessPrimaryAction || readinessSecondaryReviewAction ? (
-                    <div
-                      className="grid shrink-0 grid-cols-1 gap-2 @min-[24rem]/readiness:grid-cols-[max-content_max-content] @min-[24rem]/readiness:items-center"
-                      data-testid="readiness-actions"
-                    >
-                      {readinessPrimaryAction ? (
-                        readinessPrimaryAction.label === "Review & fix" ? (
-                          <DisabledTooltip disabled={readinessPrimaryAction.disabled} content={reviewActionDisabledReason}>
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              className="w-full gap-1.5 sm:w-fit"
-                              disabled={readinessPrimaryAction.disabled}
-                              title={reviewActionDisabledReason}
-                              onClick={readinessPrimaryAction.onClick}
-                            >
-                              {readinessPrimaryAction.icon}
-                              {readinessPrimaryAction.label}
-                            </Button>
-                          </DisabledTooltip>
-                        ) : (
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            className="w-full gap-1.5 sm:w-fit"
-                            disabled={readinessPrimaryAction.disabled}
-                            onClick={readinessPrimaryAction.onClick}
-                          >
-                            {readinessPrimaryAction.icon}
-                            {readinessPrimaryAction.label}
-                          </Button>
-                        )
-                      ) : null}
-                      {readinessSecondaryReviewAction ? (
-                        <DisabledTooltip disabled={readinessSecondaryReviewAction.disabled} content={reviewActionDisabledReason}>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            className="w-full gap-1.5 sm:w-fit"
-                            disabled={readinessSecondaryReviewAction.disabled}
-                            title={reviewActionDisabledReason}
-                            onClick={readinessSecondaryReviewAction.onClick}
-                          >
-                            {readinessSecondaryReviewAction.icon}
-                            {readinessSecondaryReviewAction.label}
-                          </Button>
-                        </DisabledTooltip>
-                      ) : null}
+                  {!reviewLoopRunning ? (
+                    <div className="grid shrink-0 grid-cols-1 gap-2 @min-[24rem]/review:grid-cols-[max-content] @min-[24rem]/review:items-center">
+                      <DisabledTooltip disabled={reviewActionDisabled} content={reviewActionDisabledReason}>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="w-full gap-1.5 sm:w-fit"
+                          disabled={reviewActionDisabled}
+                          title={reviewActionDisabledReason}
+                          onClick={() => setReviewConfigOpen(true)}
+                        >
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          Review &amp; fix
+                        </Button>
+                      </DisabledTooltip>
                     </div>
                   ) : null}
                 </div>
-                {readinessRunning ? (
-                  <div className="space-y-1 text-xs text-muted-foreground">
-                    <div>Collecting diff</div>
-                    <div>Running agent review</div>
-                    <div>Checking risk signals</div>
-                  </div>
-                ) : null}
-                {!readinessRunning && latestReadiness ? (
-                  <Collapsible defaultOpen={readinessBlockedChecks.length > 0 && !readinessStale}>
-                    <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
-                      <div className="text-xs text-muted-foreground">
-                        {readinessBlockedChecks.length === 0 && readinessOptionalCount > 0
-                          ? `${readinessOptionalCount} optional ${readinessOptionalCount === 1 ? "item" : "items"}`
-                          : readinessDetailCount > 0
-                            ? `${readinessDetailCount} readiness ${readinessDetailCount === 1 ? "detail" : "details"}`
-                            : "No additional details"}
-                      </div>
-                      <CollapsibleTrigger asChild>
-                        <Button type="button" variant="ghost" size="xs" className="gap-1.5" aria-label="Show readiness details">
-                          Details
-                          <ChevronDown className="h-3.5 w-3.5" />
-                        </Button>
-                      </CollapsibleTrigger>
-                    </div>
-                    <CollapsibleContent className="pt-3">
-                      <div className="space-y-3 text-xs">
-                        {readinessNeedsActionChecks.length > 0 ? (
-                          <div className="space-y-1">
-                            <div className="font-medium text-foreground">Needs attention</div>
-                            <ReadinessCheckList checks={readinessNeedsActionChecks} onAction={handleReadinessCheckAction} actionDisabled={readinessCheckActionDisabled} />
-                          </div>
-                        ) : null}
-                        <ReadinessCheckGroup title="Passed" checks={readinessPassedChecks} empty="None" onAction={handleReadinessCheckAction} actionDisabled={readinessCheckActionDisabled} />
-                        <ReadinessCheckGroup title="Bypassed" checks={readinessBypassedChecks} empty="None" onAction={handleReadinessCheckAction} actionDisabled={readinessCheckActionDisabled} />
-                        {readinessReviewPacket && <ReadinessPacketSummary ref={readinessPacketRef} packet={readinessReviewPacket} />}
-                        {readinessBlockedChecks.length > 0 && !readinessStale && readinessBypassableBlocked.length > 0 && (
-                          <Button size="xs" variant="outline" onClick={() => setReadinessBypassOpen(true)}>
-                            Bypass blockers
-                          </Button>
-                        )}
-                      </div>
-                    </CollapsibleContent>
-                  </Collapsible>
-                ) : null}
               </CardContent>
             </Card>
           ) : null}
-          <Dialog open={readinessBypassOpen} onOpenChange={setReadinessBypassOpen}>
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>Bypass readiness blockers</DialogTitle>
-                <DialogDescription>Bypass applies only to the current completed readiness run and will be shown in the PR footer.</DialogDescription>
-              </DialogHeader>
-              <div className="space-y-2 rounded-md border border-border px-3 py-2 text-xs">
-                <div className="font-medium text-foreground">Blockers being bypassed</div>
-                <div className="space-y-1">
-                  {readinessBypassableBlocked.map((check) => (
-                    <div key={readinessCheckKey(check)}>
-                      <div className="font-medium text-foreground">{check.title}</div>
-                      {check.summary ? <div className="text-muted-foreground">{check.summary}</div> : null}
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <Textarea
-                value={readinessBypassReason}
-                onChange={(event) => setReadinessBypassReason(event.target.value)}
-                rows={4}
-                placeholder="Reason for bypass"
-              />
-              <DialogFooter>
-                <Button variant="outline" onClick={() => setReadinessBypassOpen(false)}>Cancel</Button>
-                <Button
-                  variant="destructive"
-                  disabled={readinessBypassMutation.isPending || readinessBypassReason.trim().length < 8}
-                  onClick={() => readinessBypassMutation.mutate()}
-                >
-                  {readinessBypassMutation.isPending ? <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> : null}
-                  Bypass
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
           {pullRequestId && prStatus === "closed" && (
             <Card className="border-border/60">
               <CardContent className="p-4">
@@ -7162,7 +6568,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                       aria-label="Session title"
                       value={draftTitle}
                       onChange={(e) => setDraftTitle(e.target.value)}
-                      className="h-8 max-w-xl"
+                      density="compact"
+                      className="max-w-xl"
                       disabled={updateSessionMutation.isPending}
                     />
                     <DisabledTooltip disabled={!canSaveTitle} content={saveTitleDisabledReason}>
@@ -7211,9 +6618,10 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </>
                 )}
                 <StatusLabel
-                  label={status.label}
-                  tone={sessionStatusTone(session.status, prStatus)}
-                  active={session.status === "running"}
+                  label={operationalStatus.label}
+                  tone={operationalStatus.tone}
+                  activity={operationalStatus.activity}
+                  stateKey={`${session.status}:${operationalStatus.kind}`}
                   className="shrink-0"
                 />
                 {diffStats && (
@@ -7481,7 +6889,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 onValueChange={setReviewAgentType}
                 disabled={startReviewLoopMutation.isPending}
               >
-                <SelectTrigger id="review-agent-type" aria-label="Review coding agent" className="h-9 w-full">
+                <SelectTrigger id="review-agent-type" aria-label="Review coding agent" className="w-full">
                   <SelectValue placeholder="Select coding agent" />
                 </SelectTrigger>
                 <SelectContent>
@@ -7565,7 +6973,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                     }
                     setReviewPasses(Math.min(5, Math.max(1, next)));
                   }}
-                  className="h-9 text-center"
+                      className="text-center"
                 />
                 <Button
                   type="button"

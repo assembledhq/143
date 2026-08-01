@@ -15,6 +15,7 @@ import { AGENTS_BY_KEY } from "@/lib/agents";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { MobileBackButton } from "@/components/mobile-back-button";
+import { StatusIndicator } from "@/components/status-indicator";
 import {
   Sheet,
   SheetContent,
@@ -23,6 +24,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
+import { deriveSessionStatusPresentation } from "@/lib/session-display-status";
 import type { SessionThread } from "@/lib/types";
 
 interface MobileSessionTopBarProps {
@@ -43,30 +45,7 @@ interface MobileSessionTopBarProps {
 }
 
 function threadStatusLabel(status: string): string {
-  switch (status) {
-    case "pending":
-      return "Pending";
-    case "running":
-      return "Running";
-    case "idle":
-      return "Idle";
-    case "awaiting_input":
-      return "Awaiting input";
-    case "needs_human_guidance":
-      return "Needs guidance";
-    case "completed":
-      return "Completed";
-    case "pr_created":
-      return "PR created";
-    case "failed":
-      return "Failed";
-    case "cancelled":
-      return "Cancelled";
-    case "skipped":
-      return "Skipped";
-    default:
-      return status.replace(/_/g, " ");
-  }
+  return deriveSessionStatusPresentation(status as SessionThread["status"]).label;
 }
 
 function isActiveStatus(status: string): boolean {
@@ -74,11 +53,7 @@ function isActiveStatus(status: string): boolean {
 }
 
 function shouldShowUnreadDot(thread: SessionThread, viewedThreadIds: ReadonlySet<string>): boolean {
-  if (!viewedThreadIds.has(thread.id)) {
-    return true;
-  }
-
-  return thread.status === "pending" || thread.status === "running";
+  return !viewedThreadIds.has(thread.id);
 }
 
 function canArchiveThread(thread: SessionThread, threadCount: number): boolean {
@@ -169,6 +144,7 @@ export function MobileSessionTopBar({
                   const statusLabel = threadStatusLabel(thread.status);
                   const isActive = thread.id === activeThreadId;
                   const showUnreadDot = shouldShowUnreadDot(thread, viewedThreadIds);
+                  const operationalStatus = deriveSessionStatusPresentation(thread.status);
                   const showArchiveButton = canArchiveThread(thread, threads.length);
                   const isNonInteractive = nonInteractiveThreadIds?.has(thread.id) ?? false;
                   const closeLabel = `Close ${thread.label}${thread.label.toLowerCase().endsWith(" tab") ? "" : " tab"}`;
@@ -190,20 +166,18 @@ export function MobileSessionTopBar({
                         }}
                       >
                         <div className="flex w-full items-start gap-3">
-                          {showUnreadDot ? (
-                            <span
-                              className={cn(
-                                "mt-1.5 h-2 w-2 shrink-0 rounded-full bg-primary",
-                                thread.status === "running" && "animate-pulse",
-                              )}
-                              aria-hidden
-                            />
-                          ) : (
-                            <span className="mt-1.5 h-2 w-2 shrink-0" aria-hidden />
-                          )}
+                          <StatusIndicator
+                            tone={operationalStatus.tone}
+                            activity={operationalStatus.activity}
+                            stateKey={thread.status}
+                            className="mt-1.5"
+                          />
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-2">
                               <span className="truncate text-sm font-medium text-foreground">{thread.label}</span>
+                              {showUnreadDot ? (
+                                <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-label="Unread activity" />
+                              ) : null}
                               {isActive ? <Badge variant="secondary" className="text-xs">Active</Badge> : null}
                             </div>
                             <p className="truncate text-xs text-muted-foreground">
