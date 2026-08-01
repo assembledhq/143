@@ -472,10 +472,21 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 			Err:     fmt.Errorf("this session's sandbox snapshot has expired; send a new message to rebuild it"),
 		}
 	}
-	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
-		return acquireSandboxResult{
-			ErrCode: "SNAPSHOT_UNAVAILABLE",
-			Err:     fmt.Errorf("session has no live sandbox and no saved snapshot; send a new message to rebuild it"),
+	// Only a session that owns no container can be diagnosed as a snapshot
+	// problem. When container_id is still set the peek below decides: an
+	// initial turn publishes container_id as soon as the container exists but
+	// only marks sandbox_state='running' once the workspace is cloned, and it
+	// captures no snapshot until the turn completes — so a preview requested
+	// in that window would fail permanently here with "no saved snapshot"
+	// instead of retrying. startPreviewLocal's SANDBOX_BUSY loop re-reads the
+	// session each attempt precisely so the reuse branch above can pick the
+	// container up once the turn marks it running.
+	if session.ContainerID == nil || *session.ContainerID == "" {
+		if session.SnapshotKey == nil || *session.SnapshotKey == "" {
+			return acquireSandboxResult{
+				ErrCode: "SNAPSHOT_UNAVAILABLE",
+				Err:     fmt.Errorf("session has no live sandbox and no saved snapshot; send a new message to rebuild it"),
+			}
 		}
 	}
 	if h.sandboxProvider == nil || h.snapshots == nil {
@@ -535,6 +546,16 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 		return acquireSandboxResult{
 			ErrCode: "SANDBOX_BUSY",
 			Err:     fmt.Errorf("another process attached to this session's sandbox first; please retry"),
+		}
+	}
+
+	// Reaching here means the peek found no container_id, so a session that
+	// owned one at read time has since had it cleared. Run the snapshot check
+	// deferred above before the dereference below.
+	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
+		return acquireSandboxResult{
+			ErrCode: "SNAPSHOT_UNAVAILABLE",
+			Err:     fmt.Errorf("session has no live sandbox and no saved snapshot; send a new message to rebuild it"),
 		}
 	}
 

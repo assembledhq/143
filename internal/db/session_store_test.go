@@ -2517,6 +2517,34 @@ func TestSessionStore_AcquireTurnHold(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
+	t.Run("does not advertise the sandbox as running before the workspace exists", func(t *testing.T) {
+		t.Parallel()
+
+		var issuedSQL string
+		mock, err := pgxmock.NewPool(pgxmock.QueryMatcherOption(pgxmock.QueryMatcherFunc(
+			func(_, actualSQL string) error {
+				issuedSQL = actualSQL
+				return nil
+			},
+		)))
+		require.NoError(t, err)
+		defer mock.Close()
+
+		store := NewSessionStore(mock)
+		mock.ExpectQuery("").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("container-xyz"))
+
+		_, err = store.AcquireTurnHold(context.Background(), uuid.New(), uuid.New(), "container-xyz")
+		require.NoError(t, err)
+		// The hold is taken as soon as the container exists — before CloneRepo
+		// has populated the workspace. sandbox_state='running' is the signal
+		// the preview reuse path keys off, so writing it here would let a
+		// preview attach to a workspace git clone is still filling in.
+		require.NotContains(t, issuedSQL, "sandbox_state",
+			"the turn hold must not advertise the sandbox as running before the workspace is prepared")
+	})
+
 	t.Run("returns existing ID when another holder published first", func(t *testing.T) {
 		t.Parallel()
 

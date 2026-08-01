@@ -1619,13 +1619,35 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 		}
 	}
 
+	// 'destroyed' is checked first and stays terminal: it means the snapshot
+	// was deliberately deleted (PR merge, archive, reaper expiry), which no
+	// amount of retrying recovers. A turn still provisioning its sandbox is
+	// never in this state — an initial turn's row reads 'none'.
 	if session.SandboxState == models.SandboxStateDestroyed {
 		return acquireSandboxResult{ErrCode: "SNAPSHOT_EXPIRED", Err: fmt.Errorf("this session's sandbox snapshot has expired; send a new message to rebuild it")}
 	}
-	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
-		return acquireSandboxResult{ErrCode: "SNAPSHOT_UNAVAILABLE", Err: fmt.Errorf("session has no live sandbox and no saved snapshot; send a new message to rebuild it")}
+
+	// Only a session that owns no container can be diagnosed as a snapshot
+	// problem. When container_id is still set the ownership peek below decides:
+	// an initial turn publishes container_id as soon as the container exists
+	// but only marks sandbox_state='running' once the workspace is cloned, and
+	// it captures no snapshot until the turn completes — so a preview requested
+	// in that window would fail permanently here with "no saved snapshot"
+	// instead of retrying. SNAPSHOT_UNAVAILABLE is terminal (the start_preview
+	// job dead-letters on it) whereas the peek's SANDBOX_BUSY is retried and
+	// re-routed to the recorded owner, converging once the turn finishes
+	// provisioning. Retries are still bounded by the job runner's
+	// maxRetryableDuration, so a turn that takes longer than that window ends
+	// in a dead-letter with an accurate "sandbox stayed busy" message rather
+	// than a misleading snapshot error.
+	if session.ContainerID == nil || *session.ContainerID == "" {
+		if session.SnapshotKey == nil || *session.SnapshotKey == "" {
+			return acquireSandboxResult{ErrCode: "SNAPSHOT_UNAVAILABLE", Err: fmt.Errorf("session has no live sandbox and no saved snapshot; send a new message to rebuild it")}
+		}
 	}
-	if r.sandboxProvider == nil || r.snapshots == nil {
+	// r.sessions is required by the ownership peek below, which a
+	// container-owning session now always reaches.
+	if r.sandboxProvider == nil || r.snapshots == nil || r.sessions == nil {
 		return acquireSandboxResult{ErrCode: "NO_SANDBOX", Err: fmt.Errorf("preview hydrate is not configured on this worker")}
 	}
 
@@ -1639,6 +1661,11 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 		return acquireSandboxResult{ErrCode: "STATIC_EGRESS_UNAVAILABLE", Err: err}
 	}
 
+	// Resolve container ownership from a fresh read rather than the session
+	// row the caller loaded: a peer (typically a continue_session turn) may
+	// have published or cleared container_id since. A dead orphan is
+	// CAS-cleared so the retry can hydrate cleanly; a live container yields a
+	// retryable SANDBOX_BUSY that the worker re-routes to the recorded owner.
 	winningID, winningWorkerID, freshErr := r.sessions.PeekContainerOwnership(ctx, orgID, session.ID)
 	switch {
 	case freshErr != nil:
@@ -1653,6 +1680,13 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 			return acquireSandboxResult{ErrCode: "STALE_SANDBOX_CLEARED", Err: fmt.Errorf("%w", agent.ErrStaleSandboxIDCleared)}
 		}
 		return acquireSandboxResult{ErrCode: "SANDBOX_BUSY", Err: fmt.Errorf("another process attached to this session's sandbox first; please retry")}
+	}
+
+	// Reaching here means the peek found no container_id, so a session that
+	// owned one at read time has since had it cleared. Run the snapshot check
+	// deferred above before hydrating.
+	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
+		return acquireSandboxResult{ErrCode: "SNAPSHOT_UNAVAILABLE", Err: fmt.Errorf("session has no live sandbox and no saved snapshot; send a new message to rebuild it")}
 	}
 
 	var capacityReservation *agent.SandboxCapacityReservation

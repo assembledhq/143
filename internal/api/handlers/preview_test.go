@@ -3092,6 +3092,53 @@ func TestPreviewHandlerAcquireSandboxRejectsLiveContainerOnWrongStaticEgressNetw
 	require.Error(t, result.Err, "network mismatch should surface an actionable error")
 }
 
+// TestPreviewHandlerAcquireSandboxRetriesWhileInitialTurnIsStillProvisioning
+// is the startPreviewLocal twin of the StartRunner regression test: an initial
+// turn publishes container_id as soon as the container exists but only marks
+// sandbox_state='running' once the workspace is cloned, and has no snapshot
+// until the turn completes. The container peek must run ahead of the terminal
+// SNAPSHOT_UNAVAILABLE branch so startPreviewLocal's SANDBOX_BUSY retry loop
+// gets a chance to pick the container up instead of failing the preview.
+func TestPreviewHandlerAcquireSandboxRetriesWhileInitialTurnIsStillProvisioning(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	containerID := "initial-turn-container"
+
+	h := newPreviewTestHandler()
+	h.sessionStore = db.NewSessionStore(mock)
+	h.snapshots = &fakeHydrateSnapshotStore{payload: []byte("snap")}
+	sp := testutil.NewMockSandboxProvider()
+	sp.IsAliveFn = func(_ context.Context, _ *agent.Sandbox) (bool, error) {
+		t.Error("the reuse branch must not probe a sandbox that is not marked running")
+		return false, nil
+	}
+	h.sandboxProvider = sp
+
+	mock.ExpectQuery(`SELECT COALESCE\(container_id, ''\)\s+FROM sessions`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"container_id"}).AddRow(containerID))
+
+	result := h.acquireSandbox(context.Background(), orgID, &models.Session{
+		ID:          sessionID,
+		OrgID:       orgID,
+		ContainerID: &containerID,
+		// Turn holds the container but has not finished cloning into it, and
+		// an initial turn has captured no snapshot yet.
+		SandboxState: models.SandboxStateNone,
+		SnapshotKey:  nil,
+	}, nil)
+
+	require.Equal(t, "SANDBOX_BUSY", result.ErrCode, "a container still being provisioned by the turn should be retryable, not a terminal snapshot error")
+	require.Nil(t, result.Sandbox, "the preview must not attach to a workspace the turn is still populating")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestClassifyAcquireSandboxErrorPreservesNetworkErrors(t *testing.T) {
 	t.Parallel()
 

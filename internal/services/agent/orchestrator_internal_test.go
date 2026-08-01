@@ -111,6 +111,29 @@ func TestRunAgentRecordsUsageOnlyAfterTurnHoldIsPublished(t *testing.T) {
 	require.Less(t, hold, usage, "RunAgent should record usage only after the DB row owns the container so pre-hold crashes do not create open usage events for unowned containers")
 }
 
+func TestRunAgentMarksSandboxRunningOnlyAfterWorkspaceIsCloned(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("orchestrator.go")
+	require.NoError(t, err, "orchestrator.go should be readable for sandbox-state ordering regression test")
+
+	body := string(src)
+	runStart := strings.Index(body, "func (o *Orchestrator) RunAgent(")
+	continueStart := strings.Index(body, "func (o *Orchestrator) ContinueSession(")
+	require.NotEqual(t, -1, runStart, "RunAgent should exist")
+	require.NotEqual(t, -1, continueStart, "ContinueSession should exist")
+
+	runBody := body[runStart:continueStart]
+	hold := strings.Index(runBody, "o.sessions.AcquireTurnHold")
+	clone := strings.Index(runBody, "o.provider.CloneRepo")
+	running := strings.Index(runBody, "o.sessions.UpdateSandboxState(ctx, run.OrgID, run.ID, models.SandboxStateRunning)")
+	require.NotEqual(t, -1, hold, "RunAgent should publish the turn hold")
+	require.NotEqual(t, -1, clone, "RunAgent should clone the repo into the sandbox")
+	require.NotEqual(t, -1, running, "RunAgent should mark the sandbox running so previews can reuse the initial turn's container")
+	require.Less(t, hold, clone, "the turn hold is taken before the clone")
+	require.Less(t, clone, running, "sandbox_state='running' is the preview reuse signal, so it must be published only after CloneRepo has populated the workspace — otherwise a preview attaches to, and runs build steps inside, a directory git clone is still filling")
+}
+
 func TestContinueSessionWaitsForReusedCodeReviewWorkspaceBeforeTurnHold(t *testing.T) {
 	t.Parallel()
 

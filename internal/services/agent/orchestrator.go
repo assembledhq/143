@@ -3291,6 +3291,24 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 
+	// 8e. Advertise the live sandbox now that the workspace is populated.
+	// sandbox_state='running' is the flag the preview reuse path keys off
+	// (see preview.StartRunner.acquireSandbox) to attach to this session's
+	// container instead of hydrating from a snapshot. Without this an initial
+	// turn left the row at 'none' for its whole lifetime, so a preview started
+	// during the first turn found no live sandbox and no snapshot yet and
+	// stalled in 'reserved'.
+	//
+	// It must be published here rather than alongside AcquireTurnHold: the
+	// hold is taken right after container create, and a preview attaching in
+	// that window would read a config from — and run install/build steps
+	// inside — a workspace that CloneRepo above is still populating (git clone
+	// also fails outright on a non-empty directory). Best-effort: a failure
+	// only costs the preview a snapshot hydrate, so it must not fail the turn.
+	if err := o.sessions.UpdateSandboxState(ctx, run.OrgID, run.ID, models.SandboxStateRunning); err != nil {
+		log.Warn().Err(err).Msg("failed to update sandbox state to running")
+	}
+
 	// 9. Inject auth credentials into the sandbox. Done after clone so the
 	//    workspace is available.
 	//    - Codex: auth.json is the primary (and only) auth mechanism.
