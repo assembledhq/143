@@ -29,14 +29,13 @@ import {
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { formatTimeAgo, sessionTitle } from "@/lib/utils";
-import { StatusDot } from "@/components/status-dot";
+import { StatusLabel } from "@/components/status-label";
 import { SortableTableHeader, sortDirectionAriaValue } from "@/components/sortable-table-header";
-import { AnimatedEllipsis } from "@/components/animated-ellipsis";
 import { AgentBadge } from "@/components/agent-badge";
 import { usePeopleFilter } from "@/hooks/use-people-filter";
 import { provisionalSessionDetailFromListItem } from "@/lib/session-detail-cache";
 import { preloadSessionDetailContent } from "./[id]/session-detail-page-client";
-import { deriveSessionDisplayStatus, type SessionDisplayStatus } from "@/lib/session-display-status";
+import { deriveSessionDisplayStatus } from "@/lib/session-display-status";
 import type { Session, SessionDetail, SessionListItem, SingleResponse, User } from "@/lib/types";
 import {
   filterToStatusParam as baseFilterToStatusParam,
@@ -55,13 +54,6 @@ function filterToStatusParam(filter: string | null): string | undefined {
 // ---------------------------------------------------------------------------
 // Inline cell components
 // ---------------------------------------------------------------------------
-
-function SessionStatusDot({ displayStatus }: { displayStatus: SessionDisplayStatus }) {
-  if (displayStatus.animated) {
-    return <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />;
-  }
-  return <StatusDot color={displayStatus.dotClass} />;
-}
 
 function SortableHeader({ label, column }: { label: string; column: { toggleSorting: (desc?: boolean) => void; getIsSorted: () => false | "asc" | "desc" } }) {
   const direction = column.getIsSorted();
@@ -82,13 +74,12 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
       cell: ({ row }) => {
         const displayStatus = deriveSessionDisplayStatus(row.original);
         return (
-          <div className="flex items-center gap-2">
-            <SessionStatusDot displayStatus={displayStatus} />
-            <span className={`text-xs font-medium ${displayStatus.textClass}`}>
-              <span>{displayStatus.label}</span>
-              {displayStatus.animated && <AnimatedEllipsis />}
-            </span>
-          </div>
+          <StatusLabel
+            label={displayStatus.label}
+            tone={displayStatus.tone}
+            activity={displayStatus.activity}
+            stateKey={`${row.original.status}:${displayStatus.kind}`}
+          />
         );
       },
     },

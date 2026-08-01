@@ -1,39 +1,37 @@
-import { prMergedAccent } from "./pr-status-styles";
-import { workingSet } from "./session-status-groups";
+import type { OperationalStatePresentation } from "./operational-state";
 import type { PRCreationState, PRPushState, Session, SessionStatus } from "./types";
 
 export type SessionDisplayStatusKind = "session" | "pr_creation" | "pr_push";
 
-export type SessionDisplayStatus = {
+export type SessionDisplayStatus = OperationalStatePresentation & {
   kind: SessionDisplayStatusKind;
-  label: string;
-  dotClass: string;
-  textClass: string;
-  bgClass: string;
-  animated: boolean;
 };
 
-const sessionStatusConfig: Record<SessionStatus, Omit<SessionDisplayStatus, "kind" | "animated">> = {
-  pending: { dotClass: "bg-muted-foreground/50", textClass: "text-muted-foreground", bgClass: "bg-muted", label: "Pending" },
-  running: { dotClass: "bg-primary", textClass: "text-primary", bgClass: "bg-primary/10", label: "Running" },
-  idle: { dotClass: "bg-primary", textClass: "text-primary", bgClass: "bg-primary/10", label: "Idle" },
-  awaiting_input: { dotClass: "bg-warning", textClass: "text-warning", bgClass: "bg-warning/10", label: "Awaiting input" },
-  needs_human_guidance: { dotClass: "bg-attention", textClass: "text-attention", bgClass: "bg-attention/10", label: "Needs guidance" },
-  completed: { dotClass: "bg-success", textClass: "text-success", bgClass: "bg-success/10", label: "Completed" },
-  pr_created: { dotClass: prMergedAccent.dot, textClass: prMergedAccent.text, bgClass: prMergedAccent.bg, label: "PR created" },
-  failed: { dotClass: "bg-destructive", textClass: "text-destructive", bgClass: "bg-destructive/10", label: "Failed" },
-  cancelled: { dotClass: "bg-muted-foreground/50", textClass: "text-muted-foreground", bgClass: "bg-muted", label: "Cancelled" },
-  skipped: { dotClass: "bg-muted-foreground/30", textClass: "text-muted-foreground", bgClass: "bg-muted", label: "Skipped" },
+const sessionStatusConfig: Record<SessionStatus, OperationalStatePresentation> = {
+  pending: { label: "Starting", tone: "neutral", activity: "indeterminate", attention: "none" },
+  running: { label: "Running", tone: "primary", activity: "breathing", attention: "none" },
+  idle: { label: "Ready to continue", tone: "neutral", activity: "none", attention: "informational" },
+  awaiting_input: { label: "Waiting for you", tone: "warning", activity: "none", attention: "action_required" },
+  needs_human_guidance: { label: "Needs guidance", tone: "attention", activity: "none", attention: "blocking" },
+  completed: { label: "Completed", tone: "success", activity: "none", attention: "none" },
+  pr_created: { label: "PR created", tone: "success", activity: "none", attention: "none" },
+  failed: { label: "Failed", tone: "destructive", activity: "none", attention: "blocking" },
+  cancelled: { label: "Cancelled", tone: "neutral", activity: "none", attention: "none" },
+  skipped: { label: "Skipped", tone: "neutral", activity: "none", attention: "none" },
 };
 
-const prActionStatus = {
-  dotClass: "bg-primary",
-  textClass: "text-primary",
-  bgClass: "bg-primary/10",
+const prActionStatus: Omit<OperationalStatePresentation, "label"> = {
+  tone: "primary",
+  activity: "indeterminate",
+  attention: "none",
 };
 
 function isInFlightState(state?: PRCreationState | PRPushState): boolean {
   return state === "queued" || state === "pushing";
+}
+
+export function deriveSessionStatusPresentation(status: SessionStatus): OperationalStatePresentation {
+  return sessionStatusConfig[status] ?? sessionStatusConfig.pending;
 }
 
 export function deriveSessionDisplayStatus(session: Pick<Session, "status" | "pr_creation_state" | "pr_push_state">): SessionDisplayStatus {
@@ -41,7 +39,6 @@ export function deriveSessionDisplayStatus(session: Pick<Session, "status" | "pr
     return {
       kind: "pr_push",
       label: "Pushing changes",
-      animated: true,
       ...prActionStatus,
     };
   }
@@ -50,15 +47,13 @@ export function deriveSessionDisplayStatus(session: Pick<Session, "status" | "pr
     return {
       kind: "pr_creation",
       label: "Creating PR",
-      animated: true,
       ...prActionStatus,
     };
   }
 
-  const config = sessionStatusConfig[session.status] ?? sessionStatusConfig.pending;
+  const config = deriveSessionStatusPresentation(session.status);
   return {
     kind: "session",
-    animated: workingSet.has(session.status),
     ...config,
   };
 }

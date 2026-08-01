@@ -525,7 +525,7 @@ describe("AgentTabStrip", () => {
 
     expect(container.querySelectorAll(".bg-primary").length).toBe(1);
 
-    await user.click(screen.getByRole("tab", { name: "Review" }));
+    await user.click(screen.getByRole("tab", { name: /Review/ }));
 
     expect(container.querySelector(".bg-primary")).toBeNull();
   });

@@ -94,7 +94,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
 import { ContextHeader } from "@/components/context-header";
-import { StatusLabel, type StatusTone } from "@/components/status-label";
+import { StatusLabel } from "@/components/status-label";
 import { SessionComposerAttachmentMenu } from "@/components/session-composer-attachment-menu";
 import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
 import { useSessionComposerSlashCommands } from "@/hooks/use-session-composer-slash-commands";
@@ -178,6 +178,7 @@ import { isProvisionalSessionDetail } from "@/lib/session-detail-cache";
 import { useReconcileOptimisticAction } from "./use-optimistic-pr-action";
 import { pollMs } from "@/lib/poll-intervals";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
+import { deriveSessionDisplayStatus } from "@/lib/session-display-status";
 import { MobileSessionTopBar } from "./mobile-session-top-bar";
 import { RecoverableInboxNotice } from "./recoverable-inbox-notice";
 import { SessionDetailLoadingContent, SessionTimelineSkeleton } from "./session-detail-loading-skeleton";
@@ -215,16 +216,6 @@ import {
 
 const loadReviewDiffView = () =>
   import("@/components/code-review/review-diff-view").then((m) => ({ default: m.ReviewDiffView }));
-
-function sessionStatusTone(status: SessionStatus, prStatus?: PullRequestStatus | null): StatusTone {
-  if (status === "failed") return "destructive";
-  if (status === "awaiting_input") return "warning";
-  if (status === "needs_human_guidance") return "attention";
-  if (status === "pr_created" && prStatus === "closed") return "neutral";
-  if (status === "completed" || status === "pr_created" || prStatus === "merged") return "success";
-  if (status === "running" || status === "idle") return "primary";
-  return "neutral";
-}
 
 const publicationStatePresentation: Record<SessionPublication["state"], { label: string; variant: "secondary" | "success" | "warning" | "destructive" | "info" }> = {
   requested: { label: "Publication queued", variant: "secondary" },
@@ -777,7 +768,7 @@ function ThreadFailureDetailsCard({ thread }: { thread: SessionThread }) {
   );
 }
 
-function OverviewTab({ session, activeThread, members, prStatus }: { session: Session; activeThread?: SessionThread | null; members: User[]; prStatus?: PullRequestStatus | null }) {
+function OverviewTab({ session, activeThread, members }: { session: Session; activeThread?: SessionThread | null; members: User[] }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
   const [showStartOverRetryDialog, setShowStartOverRetryDialog] = useState(false);
@@ -802,7 +793,7 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
   const showThreadFailureDetails = session.status !== "failed" && hasVisibleThreadFailure(activeThread);
   const checkpointRetryUnavailable = !session.snapshot_key || session.sandbox_state === "destroyed" || recoveryActive;
 
-  const status = getDisplayStatus(session.status, prStatus);
+  const operationalStatus = deriveSessionDisplayStatus(session);
   const isActive = !terminalSessionStatuses.has(session.status);
   const isDeployRecovery = session.runtime_stop_reason === "deploy_budget_expired";
   const originDisplay = getSessionOriginDisplay(session);
@@ -975,15 +966,13 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
       {/* Session vitals — identity row (status + agent + who triggered) */}
       <div className="space-y-2">
         <div className="flex items-center gap-x-3 gap-y-1 flex-wrap text-xs">
-          <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-medium ${status.color}`}>
-            {isActive && (
-              <span className="relative mr-1.5 flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-info/60 opacity-75" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-info" />
-              </span>
-            )}
-            {status.label}
-          </span>
+          <StatusLabel
+            label={operationalStatus.label}
+            tone={operationalStatus.tone}
+            activity={operationalStatus.activity}
+            stateKey={`${session.status}:${operationalStatus.kind}`}
+            size="md"
+          />
           <span className="inline-flex items-center gap-x-1.5 text-muted-foreground">
             <AgentBadge agentType={session.agent_type} labelClassName="text-xs" />
             <span aria-hidden="true" className="text-muted-foreground/50">·</span>
@@ -6386,7 +6375,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     );
   }
 
-  const status = getDisplayStatus(session.status, prStatus);
+  const operationalStatus = deriveSessionDisplayStatus(session);
   const prState = session.pr_creation_state;
   const snapshotState = classifyPRSnapshotState({
     sessionSnapshotKey: session.snapshot_key,
@@ -7076,7 +7065,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </CardContent>
             </Card>
           )}
-          <OverviewTab session={session} activeThread={activeThread} members={members} prStatus={prStatus} />
+          <OverviewTab session={session} activeThread={activeThread} members={members} />
         </div>
       </TabsContent>
       <TabsContent value="preview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
@@ -7211,9 +7200,10 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </>
                 )}
                 <StatusLabel
-                  label={status.label}
-                  tone={sessionStatusTone(session.status, prStatus)}
-                  active={session.status === "running"}
+                  label={operationalStatus.label}
+                  tone={operationalStatus.tone}
+                  activity={operationalStatus.activity}
+                  stateKey={`${session.status}:${operationalStatus.kind}`}
                   className="shrink-0"
                 />
                 {diffStats && (

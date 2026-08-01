@@ -959,7 +959,7 @@ describe('SessionDetailPage session states', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
-    expect(screen.getAllByText('Awaiting input').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('Waiting for you').length).toBeGreaterThanOrEqual(1);
   });
 
   it('shows needs_human_guidance status', async () => {
