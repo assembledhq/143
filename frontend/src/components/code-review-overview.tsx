@@ -8,7 +8,9 @@ import { ErrorNotice } from "@/components/ui/error-notice";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { TimeRangePicker } from "@/components/time-range-picker";
 import type { CodeReviewListOutcome, CodeReviewStats, Repository } from "@/lib/types";
+import type { TimeRangeFilter } from "@/lib/time-range";
 
 export const ALL_REPOSITORIES = "all";
 export const ALL_OUTCOMES = "all";
@@ -116,7 +118,7 @@ export interface CodeReviewFilterValues {
   status: string;
   author: string;
   search: string;
-  timeRange: string;
+  timeRange: TimeRangeFilter;
 }
 
 export function CodeReviewFilters({
@@ -186,12 +188,11 @@ export function CodeReviewFilters({
             </div>
           </>
         )}
-        <FilterSelect label={timeRangeLabel} value={values.timeRange} onValueChange={(value) => onChange("timeRange", value)}>
-          <SelectItem value="7d">Last 7 days</SelectItem>
-          <SelectItem value="30d">Last 30 days</SelectItem>
-          <SelectItem value="90d">Last 90 days</SelectItem>
-          <SelectItem value="all">All time</SelectItem>
-        </FilterSelect>
+        <TimeRangePicker
+          label={timeRangeLabel}
+          value={values.timeRange}
+          onValueChange={(value) => onChange("timeRange", value)}
+        />
       </div>
       {analyticsMode ? (
         <p className="text-xs text-muted-foreground">
