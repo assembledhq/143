@@ -143,6 +143,9 @@ const CODE_REVIEW_REASONING_OPTIONS = [
   { value: "max", label: "Max" },
 ] as const;
 const CODE_REVIEW_PROMPT_MAX_LENGTH = 8000;
+// The character count only becomes useful near the limit, so it stays hidden
+// until a prompt is long enough for the ceiling to matter.
+const CODE_REVIEW_PROMPT_COUNT_VISIBLE_AT = Math.round(CODE_REVIEW_PROMPT_MAX_LENGTH * 0.75);
 // Policy textareas create a new version on every commit. Give authors enough
 // time to pause while composing without turning ordinary typing into a stream
 // of short-lived versions; leaving the field still flushes immediately.
@@ -1376,55 +1379,83 @@ export default function CodeReviewsPage() {
 
           <PageTabContent value="policy">
             <SectionGroup
+              title="Review policy"
+              description="How the reviewer bot handles pull requests across this organization."
               action={<AutosaveIndicator status={autosave.status} />}
-              className="max-w-5xl"
+              className="max-w-5xl space-y-6"
             >
               {!canManagePolicy ? (
-                <div className="rounded-md bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
+                <p className="text-sm text-muted-foreground">
                   You have view-only access to this policy. An organization administrator can change review behavior and GitHub setup.
-                </div>
+                </p>
               ) : null}
               <fieldset disabled={!canManagePolicy} className="space-y-6">
-                <section className="space-y-4" aria-labelledby="review-behavior-heading">
-                  <PolicyBehaviorSection
-                      config={config}
-                  onChange={(outcome) => {
-                    const prior = policyOutcome(config);
-                    commitPolicy((next) => {
-                      if (outcome === "disabled") next.enabled = false;
-                      else {
-                        next.enabled = true;
-                        next.approval_mode = (outcome === "approve" ? "approve_acceptable" : "comment_only") as CodeReviewApprovalMode;
-                      }
-                    });
-                    if ((prior === "disabled") !== (outcome === "disabled")) trackCodeReviewPolicyEvent({ event: "code_review_policy_enabled", scope: "organization", configured: outcome !== "disabled" });
-                    if (outcome !== "disabled" && outcome !== prior) trackCodeReviewPolicyEvent({ event: "code_review_approval_mode_changed", scope: "organization", configured: true });
-                  }}
-                    />
-                  <PolicySummary config={config} />
-                </section>
-                <SectionGroup
-                  title="Review instructions"
-                  description="Guide what reviewers focus on and how the orchestrator decides whether to approve."
-                  className="border-t border-border pt-6"
-                >
-                  <PolicyPromptComposers
+                <SectionGroup title="Review behavior" variant="bordered" headingLevel={3}>
+                  <OutcomeControl
                     config={config}
-                    autosave={autosave}
-                    commitPolicy={commitPolicy}
-                    examples={promptExamplesQuery.data?.data}
-                    examplesError={apiErrorMessage(promptExamplesQuery.error) ?? undefined}
-                    onRetryExamples={() => void promptExamplesQuery.refetch()}
-                    onChooseExample={(field, example) => { setPromptExample({ field, example }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_example_previewed", scope: "organization", example_key: example.key, configured: true }); }}
-                    onDraftHandle={registerPromptDraft}
-                    invalidPolicyField={invalidPolicyField}
+                    disabled={!config}
+                    onChange={(outcome) => {
+                      const prior = policyOutcome(config);
+                      commitPolicy((next) => {
+                        if (outcome === "disabled") next.enabled = false;
+                        else {
+                          next.enabled = true;
+                          next.approval_mode = (outcome === "approve" ? "approve_acceptable" : "comment_only") as CodeReviewApprovalMode;
+                        }
+                      });
+                      if ((prior === "disabled") !== (outcome === "disabled")) trackCodeReviewPolicyEvent({ event: "code_review_policy_enabled", scope: "organization", configured: outcome !== "disabled" });
+                      if (outcome !== "disabled" && outcome !== prior) trackCodeReviewPolicyEvent({ event: "code_review_approval_mode_changed", scope: "organization", configured: true });
+                    }}
                   />
+                  <PolicySummary config={config} />
                 </SectionGroup>
+                <PolicyPromptComposer
+                  field="automated_approval_policy"
+                  config={config}
+                  autosave={autosave}
+                  commitPolicy={commitPolicy}
+                  examples={promptExamplesQuery.data?.data}
+                  examplesError={apiErrorMessage(promptExamplesQuery.error) ?? undefined}
+                  onRetryExamples={() => void promptExamplesQuery.refetch()}
+                  onChooseExample={(field, example) => { setPromptExample({ field, example }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_example_previewed", scope: "organization", example_key: example.key, configured: true }); }}
+                  onDraftHandle={registerPromptDraft}
+                  invalidPolicyField={invalidPolicyField}
+                />
+                <PolicyPromptComposer
+                  field="review_instructions"
+                  config={config}
+                  autosave={autosave}
+                  commitPolicy={commitPolicy}
+                  examples={promptExamplesQuery.data?.data}
+                  onRetryExamples={() => void promptExamplesQuery.refetch()}
+                  onChooseExample={(field, example) => { setPromptExample({ field, example }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_example_previewed", scope: "organization", example_key: example.key, configured: true }); }}
+                  onDraftHandle={registerPromptDraft}
+                  invalidPolicyField={invalidPolicyField}
+                />
+                <AdvancedPolicySettings
+                  selectedTemplateKey={selectedTemplateKey}
+                  setSelectedTemplateKey={setSelectedTemplateKey}
+                  templates={templates}
+                  selectedTemplate={selectedTemplate}
+                  selectedTemplateAlreadyApplied={selectedTemplateAlreadyApplied}
+                  config={config}
+                  readLatestConfig={readLatestConfig}
+                  setPendingTemplateApply={setPendingTemplateApply}
+                  autosave={autosave}
+                  buildConfig={buildConfig}
+                  commitPolicy={commitPolicy}
+                  codeReviewModelGroups={codeReviewModelGroups}
+                  codeReviewOpenCodeAvailability={codeReviewOpenCodeAvailability}
+                  setEditingRequirementKey={setEditingRequirementKey}
+                  invalidPolicyField={invalidPolicyField}
+                  analyticsScope="organization"
+                />
               </fieldset>
               <SectionGroup
                 title="GitHub setup"
                 description="See which repositories can receive review requests from GitHub and manage each reviewer entry point."
-                className="border-t border-border pt-6"
+                variant="bordered"
+                headingLevel={3}
               >
                 <div className="space-y-3" aria-label="GitHub reviewer repositories">
                   {repositoriesQuery.isLoading ? (
@@ -1455,26 +1486,6 @@ export default function CodeReviewsPage() {
                   })}
                 </div>
               </SectionGroup>
-              <fieldset disabled={!canManagePolicy} className="border-t border-border pt-2">
-                <AdvancedPolicySettings
-                    selectedTemplateKey={selectedTemplateKey}
-                    setSelectedTemplateKey={setSelectedTemplateKey}
-                    templates={templates}
-                    selectedTemplate={selectedTemplate}
-                    selectedTemplateAlreadyApplied={selectedTemplateAlreadyApplied}
-                    config={config}
-                    readLatestConfig={readLatestConfig}
-                    setPendingTemplateApply={setPendingTemplateApply}
-                    autosave={autosave}
-                    buildConfig={buildConfig}
-                    commitPolicy={commitPolicy}
-                    codeReviewModelGroups={codeReviewModelGroups}
-                    codeReviewOpenCodeAvailability={codeReviewOpenCodeAvailability}
-                    setEditingRequirementKey={setEditingRequirementKey}
-                    invalidPolicyField={invalidPolicyField}
-                    analyticsScope="organization"
-                />
-              </fieldset>
               <AuditLogTrigger
                 filters={{ resource_type: "code_review_policy" }}
                 title="Review policy history"
@@ -1528,7 +1539,8 @@ export default function CodeReviewsPage() {
 
 type PromptDraftHandle = { value: string; dirty: boolean; flush(): void; replace(value: string): void };
 
-function PolicyPromptComposers({
+function PolicyPromptComposer({
+  field,
   config,
   autosave,
   commitPolicy,
@@ -1539,6 +1551,7 @@ function PolicyPromptComposers({
   onDraftHandle,
   invalidPolicyField,
 }: {
+  field: "review_instructions" | "automated_approval_policy";
   config: CodeReviewPolicyConfig | null;
   autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
   commitPolicy: (mutate: (next: CodeReviewPolicyConfig) => void, source?: CodeReviewPolicyEditSource) => void;
@@ -1549,23 +1562,30 @@ function PolicyPromptComposers({
   onDraftHandle: (field: "review_instructions" | "automated_approval_policy", handle: PromptDraftHandle) => void;
   invalidPolicyField: string | null;
 }) {
+  if (field === "automated_approval_policy") {
+    return (
+      <>
+        {examplesError ? <ErrorNotice title="Could not load prompt examples" description={examplesError} action={{ label: "Retry", onClick: onRetryExamples }} /> : null}
+        <CodeReviewAutomatedApprovalPolicyComposer
+          value={config?.automated_approval_policy ?? ""}
+          disabled={!config}
+          inactive={Boolean(config && config.approval_mode !== "approve_acceptable")}
+          autosave={autosave}
+          onCommit={(value) => { commitPolicy((next) => { next.automated_approval_policy = value; }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: "organization", source: "manual", character_bucket: promptCharacterBucket(value.trim()), configured: true }); }}
+          resetValue={DEFAULT_AUTOMATED_APPROVAL_POLICY}
+          onReset={() => { const resetValue = DEFAULT_AUTOMATED_APPROVAL_POLICY; commitPolicy((next) => { next.automated_approval_policy = resetValue; }, "reset"); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: "organization", source: "reset", character_bucket: promptCharacterBucket(resetValue), configured: true }); }}
+          resetLabel="Reset to default"
+          examples={examples?.automated_approval_policies ?? []}
+          onChooseExample={(example) => onChooseExample("automated_approval_policy", example)}
+          onDraftHandle={(handle) => onDraftHandle("automated_approval_policy", handle)}
+          focusOnError={invalidPolicyField === "automated_approval_policy"}
+        />
+      </>
+    );
+  }
+
   return (
-    <div className="divide-y divide-border">
-      {examplesError ? <ErrorNotice title="Could not load prompt examples" description={examplesError} action={{ label: "Retry", onClick: onRetryExamples }} /> : null}
-      <CodeReviewAutomatedApprovalPolicyComposer
-        value={config?.automated_approval_policy ?? ""}
-        disabled={!config}
-        hidden={config?.approval_mode !== "approve_acceptable"}
-        autosave={autosave}
-        onCommit={(value) => { commitPolicy((next) => { next.automated_approval_policy = value; }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: "organization", source: "manual", character_bucket: promptCharacterBucket(value.trim()), configured: true }); }}
-        resetValue={DEFAULT_AUTOMATED_APPROVAL_POLICY}
-        onReset={() => { const resetValue = DEFAULT_AUTOMATED_APPROVAL_POLICY; commitPolicy((next) => { next.automated_approval_policy = resetValue; }, "reset"); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: "organization", source: "reset", character_bucket: promptCharacterBucket(resetValue), configured: true }); }}
-        resetLabel="Reset to default"
-        examples={examples?.automated_approval_policies ?? []}
-        onChooseExample={(example) => onChooseExample("automated_approval_policy", example)}
-        onDraftHandle={(handle) => onDraftHandle("automated_approval_policy", handle)}
-        focusOnError={invalidPolicyField === "automated_approval_policy"}
-      />
+    <>
       <CodeReviewInstructionsComposer
         value={config?.review_instructions ?? ""}
         disabled={!config}
@@ -1579,12 +1599,12 @@ function PolicyPromptComposers({
         onDraftHandle={(handle) => onDraftHandle("review_instructions", handle)}
         focusOnError={invalidPolicyField === "review_instructions"}
       />
-    </div>
+    </>
   );
 }
 
 type CodeReviewPromptComposerProps = {
-  value: string; disabled: boolean; hidden?: boolean; autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
+  value: string; disabled: boolean; inactive?: boolean; autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
   onCommit: (value: string) => void; onReset: () => void; resetValue: string; resetLabel: string;
   examples: Array<CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption>;
   onChooseExample: (example: CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption) => void;
@@ -1600,8 +1620,8 @@ function CodeReviewInstructionsComposer(props: CodeReviewPromptComposerProps) {
   return <CodeReviewPromptComposerBase {...props} title="Additional review instructions (optional)" description="Add team-specific priorities or comment style. Empty means every reviewer uses its native /review behavior without extra guidance." tooltip="Optional guidance appended after each reviewer's native /review command and also supplied to the orchestrator. Leave empty for built-in review behavior; it does not grant approval authority." secondary />;
 }
 
-function CodeReviewPromptComposerBase({ title, description, tooltip, value, disabled, hidden, required, autosave, onCommit, onReset, resetValue, resetLabel, secondary, examples, onChooseExample, onDraftHandle, focusOnError }: {
-  title: string; description: string; tooltip: string; value: string; disabled: boolean; hidden?: boolean; required?: boolean;
+function CodeReviewPromptComposerBase({ title, description, tooltip, value, disabled, inactive, required, autosave, onCommit, onReset, resetValue, resetLabel, secondary, examples, onChooseExample, onDraftHandle, focusOnError }: {
+  title: string; description: string; tooltip: string; value: string; disabled: boolean; inactive?: boolean; required?: boolean;
   autosave: UseAutosaveResult<CodeReviewPolicyConfig>; onCommit: (value: string) => void; onReset: () => void; resetValue: string; resetLabel: string; secondary?: boolean;
   examples: Array<CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption>; onChooseExample: (example: CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption) => void;
   onDraftHandle: (handle: PromptDraftHandle) => void;
@@ -1611,7 +1631,8 @@ function CodeReviewPromptComposerBase({ title, description, tooltip, value, disa
   // persists and validates, so basing the length check on the raw value would
   // reject content that fits the limit once trailing whitespace (e.g. a pasted
   // trailing newline) is stripped.
-  const invalidValue = (next: string) => [...next.trim()].length > CODE_REVIEW_PROMPT_MAX_LENGTH || Boolean(required && !next.trim());
+  const requiresValue = Boolean(required && !inactive && !disabled);
+  const invalidValue = (next: string) => [...next.trim()].length > CODE_REVIEW_PROMPT_MAX_LENGTH || Boolean(requiresValue && !next.trim());
   const field = useDebouncedTextField({
     serverValue: value,
     onCommit: (next) => { if (!invalidValue(next)) onCommit(next); },
@@ -1623,23 +1644,56 @@ function CodeReviewPromptComposerBase({ title, description, tooltip, value, disa
   useEffect(() => { onDraftHandle({ value: field.value, dirty: field.dirty, flush: field.flush, replace: field.replace }); }, [field.value, field.dirty, field.flush, field.replace, onDraftHandle]);
   useEffect(() => { if (focusOnError) textareaRef.current?.focus(); }, [focusOnError]);
   const count = [...field.value.trim()].length;
-  const invalid = count > CODE_REVIEW_PROMPT_MAX_LENGTH || Boolean(required && !field.value.trim());
+  const invalid = count > CODE_REVIEW_PROMPT_MAX_LENGTH || Boolean(requiresValue && !field.value.trim());
+  // A running count is only worth reading as the limit approaches; showing it
+  // permanently puts a line of noise under every editor on the page.
+  const showCount = invalid || count >= CODE_REVIEW_PROMPT_COUNT_VISIBLE_AT;
+  const fieldId = `prompt-${title.replaceAll(" ", "-")}`;
+  const countId = `prompt-count-${title.replaceAll(" ", "-")}`;
   return (
-    <section className={`${hidden ? "hidden" : ""} space-y-2 py-4 first:pt-0 last:pb-0`} aria-label={title}>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5"><Label htmlFor={`prompt-${title.replaceAll(" ", "-")}`}>{title}</Label><SettingInfoTooltip label={title} description={tooltip} /></div>
+    <section className="space-y-4 rounded-xl border border-border bg-card p-4 sm:p-5" aria-label={title}>
+      <div className="space-y-1">
+        <div className="flex items-center gap-1.5">
+          <h3>
+            <Label htmlFor={fieldId} className="font-display text-lg leading-6 font-semibold tracking-[-0.025em] text-foreground">
+              {title}
+            </Label>
+          </h3>
+          <SettingInfoTooltip label={title} description={tooltip} />
+        </div>
+        <p className="max-w-3xl text-sm leading-6 text-muted-foreground">{description}</p>
+        {inactive ? (
+          <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
+            This policy is saved and ready, but it is only used when “Approve acceptable PRs” is selected above.
+          </p>
+        ) : null}
+      </div>
+      <Textarea
+        ref={textareaRef}
+        id={fieldId}
+        // Prose measure: the card may be wide, but a policy someone has to read
+        // and edit should not run to 130 characters a line.
+        className={`max-w-3xl resize-y text-sm leading-6 ${secondary ? "min-h-32" : "min-h-72"}`}
+        value={field.value}
+        disabled={disabled}
+        rows={secondary ? 5 : 12}
+        onChange={(event) => field.onChange(event.target.value)}
+        onBlur={field.onBlur}
+        aria-invalid={invalid || focusOnError}
+        aria-describedby={showCount ? countId : undefined}
+      />
+      <div className="flex max-w-3xl flex-wrap items-center justify-between gap-2">
+        <span id={countId} className={`text-xs ${invalid ? "text-destructive" : "text-muted-foreground"}`}>
+          {showCount ? `${count} / ${CODE_REVIEW_PROMPT_MAX_LENGTH}` : null}
+        </span>
         <div className="flex flex-wrap items-center justify-end gap-1" role="group" aria-label={`${title} actions`}>
-          <AutosaveIndicator status={autosave.status} />
           {examples.length > 0 ? <Select value="" disabled={disabled} onValueChange={(key) => { const example = examples.find((candidate) => candidate.key === key); if (example) onChooseExample(example); }}><SelectTrigger size="sm" className="w-auto min-w-0 border-0 bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:bg-accent hover:text-accent-foreground" aria-label={`${title} prompt example`}><SelectValue placeholder="Examples" /></SelectTrigger><SelectContent><SelectGroup><SelectLabel>Prompt examples</SelectLabel>{examples.map((example) => <SelectItem key={example.key} value={example.key}>{example.title}</SelectItem>)}</SelectGroup></SelectContent></Select> : null}
           <DisabledTooltip disabled={disabled} content="Policy settings are still loading.">
-            <Button type="button" variant="ghost" size="sm" className="sm:h-8" disabled={disabled} onClick={() => { field.replace(resetValue); onReset(); }}>{resetLabel}</Button>
+            <Button type="button" variant="ghost" size="sm" className="text-xs text-muted-foreground sm:h-8" disabled={disabled} onClick={() => { field.replace(resetValue); onReset(); }}>{resetLabel}</Button>
           </DisabledTooltip>
         </div>
       </div>
-      <p className="text-xs text-muted-foreground">{description}</p>
-      <Textarea ref={textareaRef} id={`prompt-${title.replaceAll(" ", "-")}`} value={field.value} disabled={disabled} rows={secondary ? 6 : 10} onChange={(event) => field.onChange(event.target.value)} onBlur={field.onBlur} aria-invalid={invalid || focusOnError} aria-describedby={`prompt-count-${title.replaceAll(" ", "-")}`} />
-      <span id={`prompt-count-${title.replaceAll(" ", "-")}`} className={`block text-xs ${invalid ? "text-destructive" : "text-muted-foreground"}`}>{count} / {CODE_REVIEW_PROMPT_MAX_LENGTH}</span>
-      {invalid ? <p className="text-xs text-destructive">{count > CODE_REVIEW_PROMPT_MAX_LENGTH ? "Prompt is too long." : "An automated approval policy is required while approval is enabled."}</p> : null}
+      {invalid ? <p className="max-w-3xl text-xs text-destructive">{count > CODE_REVIEW_PROMPT_MAX_LENGTH ? "Prompt is too long." : "An automated approval policy is required while approval is enabled."}</p> : null}
     </section>
   );
 }
@@ -1706,7 +1760,7 @@ function AdvancedPolicySettings({
   return (
                 <AdvancedPolicyControls forceOpen={Boolean(invalidPolicyField && ["risk_policy", "inline_comment_limit", "agent_roster", "description_policy"].includes(invalidPolicyField))} onOpened={() => trackCodeReviewPolicyEvent({ event: "code_review_advanced_opened", scope: analyticsScope, subsection: "all", configured: true })}>
                   {invalidPolicyField ? <ErrorNotice title="Could not save this policy setting" description={`Correct the highlighted ${invalidPolicyField.replaceAll("_", " ")} setting and try again.`} /> : null}
-                  <div className="grid gap-3 bg-muted/30 px-4 py-3 md:grid-cols-[1fr_auto] md:items-end">
+                  <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
                     <FilterSelect
                       label="Advanced policy preset"
                       value={selectedTemplateKey}
@@ -1947,22 +2001,26 @@ function AdvancedPolicyControls({ children, forceOpen, onOpened }: { children: R
   const [open, setOpen] = useState(false);
   return (
     <Collapsible open={open || forceOpen} onOpenChange={(next) => { setOpen(next); if (next) onOpened(); }}>
-      <div className="flex items-center gap-1 border-border pr-3">
-        <CollapsibleTrigger asChild>
-          <Button variant="ghost" className="group h-auto min-w-0 flex-1 justify-between whitespace-normal rounded-md p-4 text-left sm:h-auto" aria-label="Advanced controls">
-            <span className="min-w-0">
-              <span className="block font-display text-lg font-semibold tracking-[-0.025em] text-foreground">Advanced settings</span>
-              <span className="mt-0.5 block text-xs font-normal text-muted-foreground">Safety gates, paths, agents, limits, and structured checks</span>
-            </span>
-            <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
-          </Button>
-        </CollapsibleTrigger>
-        <SettingInfoTooltip
-          label="Advanced controls"
-          description="Contains deterministic approval safeguards, reviewer configuration, limits, structured PR-description checks, and whole-policy presets. Defaults remain enforced while this section is closed."
-        />
+      <div className="rounded-xl border border-border bg-card">
+        <div className="flex items-center gap-1 pr-3">
+          <h3 className="min-w-0 flex-1">
+            <CollapsibleTrigger asChild>
+              <Button variant="ghost" className="group h-auto w-full min-w-0 justify-between whitespace-normal rounded-xl p-4 text-left sm:h-auto sm:p-5" aria-label="Safeguards">
+                <span className="min-w-0">
+                  <span className="block font-display text-lg leading-6 font-semibold tracking-[-0.025em] text-foreground">Safeguards</span>
+                  <span className="mt-0.5 block text-xs font-normal text-muted-foreground">These settings apply whether or not this section is open.</span>
+                </span>
+                <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+              </Button>
+            </CollapsibleTrigger>
+          </h3>
+          <SettingInfoTooltip
+            label="Safeguards"
+            description="Contains deterministic approval safeguards, reviewer configuration, limits, structured PR-description checks, and whole-policy presets. Defaults remain enforced while this section is closed."
+          />
+        </div>
+        <CollapsibleContent className="space-y-4 border-t border-border p-4 sm:p-5">{children}</CollapsibleContent>
       </div>
-      <CollapsibleContent className="space-y-5 border-t border-border pt-5">{children}</CollapsibleContent>
     </Collapsible>
   );
 }
@@ -1983,8 +2041,11 @@ function PolicySummary({
 
   const outcome = policyOutcome(config);
   const reviewers = config.agent_roster.reviewers.length;
+  // Deliberately excludes the selected outcome: the switch and radio group
+  // immediately above already state it. This line's job is to report the
+  // settings that live inside the collapsed Safeguards section.
   const summaryItems = [
-    outcome === "disabled" ? "Reviews paused" : outcome === "approve" ? "Comments + eligible approval" : "Comments only",
+    ...(outcome === "disabled" ? ["Reviews paused"] : []),
     `${reviewers} ${reviewers === 1 ? "reviewer" : "reviewers"}`,
     `quorum ${config.agent_roster.require_reviewer_quorum}`,
   ];
@@ -1998,23 +2059,6 @@ function PolicySummary({
       <span className="font-medium text-foreground">Current behavior:</span>{" "}
       {summaryItems.join(" · ")}
     </p>
-  );
-}
-
-function PolicyBehaviorSection({
-  config,
-  onChange,
-}: {
-  config: CodeReviewPolicyConfig | null;
-  onChange: (outcome: "disabled" | "comment" | "approve") => void;
-}) {
-  return (
-    <div className="space-y-3">
-      <div id="review-behavior-heading" className="font-display text-lg font-semibold tracking-[-0.025em] text-foreground">
-        Review behavior
-      </div>
-      <OutcomeControl config={config} disabled={!config} onChange={onChange} />
-    </div>
   );
 }
 
@@ -2046,8 +2090,8 @@ function OutcomeControl({
   ];
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between gap-4 rounded-md border border-border p-4">
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-1.5">
             <Label htmlFor="code-reviews-enabled" className="text-sm text-foreground">
@@ -2063,7 +2107,7 @@ function OutcomeControl({
         <Switch
           id="code-reviews-enabled"
           checked={selected !== "disabled"}
-      disabled={disabled}
+          disabled={disabled}
           onCheckedChange={(checked) => onChange(checked ? (config?.approval_mode === "approve_acceptable" ? "approve" : "comment") : "disabled")}
         />
       </div>
@@ -2080,17 +2124,17 @@ function OutcomeControl({
         aria-label="Review outcome"
         className="grid gap-3 md:grid-cols-2"
         onValueChange={(value) => onChange(value as "comment" | "approve")}
-    >
-      {options.map((option) => (
-        <Label key={option.value} className="flex cursor-pointer items-start gap-3 rounded-md border border-border p-3">
-          <RadioGroupItem value={option.value} aria-label={option.title} className="mt-0.5" />
-          <span className="flex min-w-0 flex-col gap-1">
-            <span className="text-sm font-medium text-foreground">{option.title}</span>
-            <span className="text-xs font-normal leading-5 text-muted-foreground">{option.description}</span>
-          </span>
-        </Label>
-      ))}
-    </RadioGroup>
+      >
+        {options.map((option) => (
+          <Label key={option.value} className="flex cursor-pointer items-start gap-3 rounded-md border border-border p-3">
+            <RadioGroupItem value={option.value} aria-label={option.title} className="mt-0.5" />
+            <span className="flex min-w-0 flex-col gap-1">
+              <span className="text-sm font-medium text-foreground">{option.title}</span>
+              <span className="text-xs font-normal leading-5 text-muted-foreground">{option.description}</span>
+            </span>
+          </Label>
+        ))}
+      </RadioGroup>
       {config?.approval_mode === "approve_acceptable" ? (
         <p className="text-xs text-muted-foreground">
           Automatic approval is eligible only when all hard safeguards pass; uncertain or blocked changes still require a human.
