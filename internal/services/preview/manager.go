@@ -244,7 +244,11 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 	}
 	launched, err := m.LaunchPreview(ctx, instance, input)
 	if err != nil {
-		m.AbortReservation(ctx, instance, "", fmt.Sprintf("launch failed: %v", err))
+		acquiredContainerID := ""
+		if input.Sandbox != nil {
+			acquiredContainerID = input.Sandbox.ID
+		}
+		m.AbortReservation(ctx, instance, acquiredContainerID, fmt.Sprintf("launch failed: %v", err))
 		return nil, err
 	}
 	return launched, nil
@@ -774,19 +778,19 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 
 // AbortReservation tears down a reservation created by ReservePreview.
 //
-// It releases the preview hold, finalize-destroys the hydrated container (if
-// any) only when the CAS confirms no other holder is keeping the session's
-// container alive, and marks the preview row failed so the partial unique
-// index releases for a retry.
+// It releases the preview hold, finalize-destroys the acquired container only
+// when the CAS confirms no other holder is keeping the session's container
+// alive, and marks the preview row failed so the partial unique index releases
+// for a retry.
 //
-// hydratedContainerID is the container id the caller published via
-// PublishHydratedContainerID. Pass "" when the sandbox was reused from a
-// turn (not hydrated) — AbortReservation must NOT destroy a reused container
-// because the turn still owns it.
+// acquiredContainerID is the exact container the caller hydrated or reused.
+// Reused containers are safe to pass: ReleasePreviewHold and
+// FinalizeContainerDestroy both re-check turn/sibling holders, so a running
+// turn keeps ownership while a preview that became the last holder cleans up.
 //
 // Uses a detached context with its own timeout so a shutdown mid-abort still
 // completes the hold release and container destroy.
-func (m *Manager) AbortReservation(parentCtx context.Context, instance *models.PreviewInstance, hydratedContainerID, reason string) {
+func (m *Manager) AbortReservation(parentCtx context.Context, instance *models.PreviewInstance, acquiredContainerID, reason string) {
 	if instance == nil {
 		return
 	}
@@ -804,12 +808,12 @@ func (m *Manager) AbortReservation(parentCtx context.Context, instance *models.P
 	if instance.SessionID == uuid.Nil {
 		// Standalone branch preview: owns a dedicated sandbox, no session
 		// container lifecycle to coordinate. Destroy the sandbox directly.
-		if hydratedContainerID != "" && m.sandboxProvider != nil {
-			sb := &agent.Sandbox{ID: hydratedContainerID, Provider: ProviderDocker}
+		if acquiredContainerID != "" && m.sandboxProvider != nil {
+			sb := &agent.Sandbox{ID: acquiredContainerID, Provider: ProviderDocker}
 			if err := m.sandboxProvider.Destroy(ctx, sb); err != nil {
 				m.logger.Error().Err(err).
 					Str("preview_id", instance.ID.String()).
-					Str("container_id", hydratedContainerID).
+					Str("container_id", acquiredContainerID).
 					Msg("abort branch reservation: destroy failed; container orphaned on host")
 			}
 		}
@@ -834,27 +838,27 @@ func (m *Manager) AbortReservation(parentCtx context.Context, instance *models.P
 		return
 	}
 
-	// Only destroy when (a) we hydrated a container the caller vouches for,
+	// Only destroy when (a) we acquired a container the caller vouches for,
 	// (b) no turn still holds it, and (c) the session's current container_id
-	// still matches the hydrated id. If the caller didn't hydrate (reuse
-	// path) or a new holder has acquired, leave the container alone.
-	if hydratedContainerID == "" || !destroyNow || m.sandboxProvider == nil || m.sessionStore == nil {
+	// still matches the acquired id. If acquisition never produced a container
+	// or a new holder has acquired, leave the container alone.
+	if acquiredContainerID == "" || !destroyNow || m.sandboxProvider == nil || m.sessionStore == nil {
 		return
 	}
-	if sessionContainerID != "" && sessionContainerID != hydratedContainerID {
+	if sessionContainerID != "" && sessionContainerID != acquiredContainerID {
 		m.logger.Info().
 			Str("preview_id", instance.ID.String()).
-			Str("hydrated_container_id", hydratedContainerID).
+			Str("acquired_container_id", acquiredContainerID).
 			Str("session_container_id", sessionContainerID).
-			Msg("abort reservation: session now tracks a different container; leaving hydrated id alone")
+			Msg("abort reservation: session now tracks a different container; leaving acquired id alone")
 		return
 	}
 
-	cleared, err := m.sessionStore.FinalizeContainerDestroy(ctx, instance.OrgID, instance.SessionID, hydratedContainerID)
+	cleared, err := m.sessionStore.FinalizeContainerDestroy(ctx, instance.OrgID, instance.SessionID, acquiredContainerID)
 	if err != nil {
 		m.logger.Warn().Err(err).
 			Str("preview_id", instance.ID.String()).
-			Str("container_id", hydratedContainerID).
+			Str("container_id", acquiredContainerID).
 			Msg("abort reservation: FinalizeContainerDestroy failed; container may be orphaned")
 		return
 	}
@@ -863,11 +867,11 @@ func (m *Manager) AbortReservation(parentCtx context.Context, instance *models.P
 		// is someone else's responsibility.
 		return
 	}
-	sb := &agent.Sandbox{ID: hydratedContainerID, Provider: ProviderDocker}
+	sb := &agent.Sandbox{ID: acquiredContainerID, Provider: ProviderDocker}
 	if err := m.sandboxProvider.Destroy(ctx, sb); err != nil {
 		m.logger.Error().Err(err).
 			Str("preview_id", instance.ID.String()).
-			Str("container_id", hydratedContainerID).
+			Str("container_id", acquiredContainerID).
 			Msg("abort reservation: destroy failed; container orphaned on host")
 	}
 }

@@ -3094,7 +3094,7 @@ func TestAbortReservation_NilInstanceIsNoop(t *testing.T) {
 	mgr.AbortReservation(context.Background(), nil, "", "")
 }
 
-func TestAbortReservation_LeavesContainerWhenNotHydrated(t *testing.T) {
+func TestAbortReservation_LeavesContainerWhenNoContainerWasAcquired(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -3126,11 +3126,50 @@ func TestAbortReservation_LeavesContainerWhenNotHydrated(t *testing.T) {
 				AddRow(instance.SessionID, "container-1", false),
 		)
 
-	// hydratedContainerID="" → skip destroy even though destroyNow=true.
+	// acquiredContainerID="" → skip destroy even though destroyNow=true.
 	mgr.AbortReservation(context.Background(), instance, "", "launch failed")
 
 	require.Equal(t, 0, sandboxProvider.GetDestroyCalls())
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAbortReservation_LeavesAcquiredContainerWhenTurnStillHolds(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock pool should be created")
+	defer mock.Close()
+
+	sandboxProvider := testutil.NewMockSandboxProvider()
+	mgr := NewManager(ManagerConfig{
+		Store:           db.NewPreviewStore(mock),
+		SessionStore:    db.NewSessionStore(mock),
+		Provider:        &mockProvider{},
+		SandboxProvider: sandboxProvider,
+		Logger:          zerolog.Nop(),
+		WorkerNodeID:    "worker-1",
+	})
+
+	containerID := "turn-owned-container"
+	instance := &models.PreviewInstance{
+		ID:                      uuid.New(),
+		OrgID:                   uuid.New(),
+		SessionID:               uuid.New(),
+		PreviewHoldingContainer: true,
+	}
+
+	expectUpdatePreviewStatusFailed(mock)
+	mock.ExpectQuery(`WITH released AS`).
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+				AddRow(instance.SessionID, containerID, true),
+		)
+
+	mgr.AbortReservation(context.Background(), instance, containerID, "launch failed")
+
+	require.Equal(t, 0, sandboxProvider.GetDestroyCalls(), "an active turn should retain its acquired container after preview abort")
+	require.NoError(t, mock.ExpectationsWereMet(), "preview abort should release its hold without finalizing the turn-owned container")
 }
 
 func TestAbortReservation_LeavesContainerWhenSessionTracksDifferent(t *testing.T) {

@@ -1064,7 +1064,7 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 			r.registerSandboxBusyDeadLetter(ctx, reservation)
 			return fmt.Errorf("%s: %w: %v", acq.ErrCode, ErrSandboxBusy, acq.Err)
 		}
-		r.abort(ctx, reservation, "", fmt.Sprintf("acquire sandbox: %v", acq.Err))
+		r.abort(ctx, reservation, acq.CleanupContainerID, fmt.Sprintf("acquire sandbox: %v", acq.Err))
 		return fmt.Errorf("%s: %w", acq.ErrCodeOr("PREVIEW_HYDRATE_FAILED"), acq.Err)
 	}
 	sandboxMessage := "Using existing session sandbox"
@@ -1089,10 +1089,7 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 		WorkspaceRevision:          payload.WorkspaceRevision,
 		WorkspaceRevisionUpdatedAt: payload.WorkspaceRevisionUpdatedAt,
 	}
-	hydratedID := ""
-	if acq.Hydrated {
-		hydratedID = acq.Sandbox.ID
-	}
+	cleanupContainerID := acq.CleanupContainerID
 
 	if input.Config == nil {
 		r.createStartupLog(ctx, payload.OrgID, payload.PreviewID, "info", models.PreviewLogStepBuild, "Reading preview config", map[string]any{
@@ -1102,14 +1099,14 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 		if err != nil {
 			if errors.Is(err, ErrInvalidConfig) {
 				msg := InvalidConfigMessage(err)
-				r.abort(ctx, reservation, hydratedID, msg)
+				r.abort(ctx, reservation, cleanupContainerID, msg)
 				return fmt.Errorf("PREVIEW_CONFIG_INVALID: %s: %w", msg, err)
 			}
-			r.abort(ctx, reservation, hydratedID, fmt.Sprintf("read workspace config: %v", err))
+			r.abort(ctx, reservation, cleanupContainerID, fmt.Sprintf("read workspace config: %v", err))
 			return fmt.Errorf("PREVIEW_CONFIG_READ_FAILED: %w", err)
 		}
 		if cfg == nil {
-			r.abort(ctx, reservation, hydratedID, previewNoConfigMessage)
+			r.abort(ctx, reservation, cleanupContainerID, previewNoConfigMessage)
 			return fmt.Errorf("PREVIEW_NO_CONFIG: %s", previewNoConfigMessage)
 		}
 		input.Config = cfg
@@ -1121,7 +1118,7 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 	_, err = r.manager.LaunchPreview(ctx, reservation, input)
 	if err != nil {
 		classified := ClassifyLaunchFailure(err, reservation.MemoryLimitMB)
-		r.abort(ctx, reservation, hydratedID, classified.Message)
+		r.abort(ctx, reservation, cleanupContainerID, classified.Message)
 		r.logger.Warn().Err(err).Str("session_id", payload.SessionID.String()).Msg("preview launch failed")
 		return fmt.Errorf("%s: %s: %w", classified.Code, classified.Message, err)
 	}
@@ -1214,24 +1211,21 @@ func (r *StartRunner) WarmSessionPreview(ctx context.Context, payload SessionPre
 		failRun(fmt.Sprintf("reserve preview: %v", err))
 		return fmt.Errorf("reserve preview: %w", err)
 	}
-	hydratedID := ""
 	acq := r.acquireSandbox(ctx, payload.OrgID, &session, reservation)
 	if acq.Err != nil {
-		r.manager.AbortReservation(ctx, reservation, "", fmt.Sprintf("acquire sandbox: %v", acq.Err))
+		r.manager.AbortReservation(ctx, reservation, acq.CleanupContainerID, fmt.Sprintf("acquire sandbox: %v", acq.Err))
 		failRun(fmt.Sprintf("acquire sandbox: %v", acq.Err))
 		return fmt.Errorf("%s: %w", acq.ErrCodeOr("PREVIEW_HYDRATE_FAILED"), acq.Err)
 	}
-	if acq.Hydrated {
-		hydratedID = acq.Sandbox.ID
-	}
+	cleanupContainerID := acq.CleanupContainerID
 	cfg, err := r.readWorkspacePreviewConfig(ctx, acq.Sandbox, payload.SessionID, "")
 	if err != nil {
-		r.manager.AbortReservation(ctx, reservation, hydratedID, fmt.Sprintf("read workspace config: %v", err))
+		r.manager.AbortReservation(ctx, reservation, cleanupContainerID, fmt.Sprintf("read workspace config: %v", err))
 		failRun(fmt.Sprintf("read workspace config: %v", err))
 		return fmt.Errorf("read workspace config: %w", err)
 	}
 	if cfg == nil {
-		r.manager.AbortReservation(ctx, reservation, hydratedID, previewNoConfigMessage)
+		r.manager.AbortReservation(ctx, reservation, cleanupContainerID, previewNoConfigMessage)
 		failRun(previewNoConfigMessage)
 		return fmt.Errorf("PREVIEW_NO_CONFIG: %s", previewNoConfigMessage)
 	}
@@ -1241,7 +1235,7 @@ func (r *StartRunner) WarmSessionPreview(ctx context.Context, payload SessionPre
 	launched, err := r.manager.LaunchPreview(ctx, reservation, input)
 	if err != nil {
 		classified := ClassifyLaunchFailure(err, reservation.MemoryLimitMB)
-		r.manager.AbortReservation(ctx, reservation, hydratedID, classified.Message)
+		r.manager.AbortReservation(ctx, reservation, cleanupContainerID, classified.Message)
 		failRun(classified.Message)
 		return fmt.Errorf("%s: %s: %w", classified.Code, classified.Message, err)
 	}
@@ -1471,11 +1465,11 @@ func (r *StartRunner) registerSandboxBusyDeadLetter(ctx context.Context, reserva
 	})
 }
 
-func (r *StartRunner) abort(ctx context.Context, reservation *models.PreviewInstance, hydratedID, reason string) {
+func (r *StartRunner) abort(ctx context.Context, reservation *models.PreviewInstance, cleanupContainerID, reason string) {
 	if r.manager == nil || reservation == nil {
 		return
 	}
-	r.manager.AbortReservation(ctx, reservation, hydratedID, reason)
+	r.manager.AbortReservation(ctx, reservation, cleanupContainerID, reason)
 }
 
 type StartFailure struct {
@@ -1538,10 +1532,11 @@ func classifyLaunchFailureCode(err error, cause string) StartFailure {
 }
 
 type acquireSandboxResult struct {
-	Sandbox  *agent.Sandbox
-	Hydrated bool
-	ErrCode  string
-	Err      error
+	Sandbox            *agent.Sandbox
+	Hydrated           bool
+	CleanupContainerID string
+	ErrCode            string
+	Err                error
 }
 
 func (r acquireSandboxResult) ErrCodeOr(fallback string) string {
@@ -1584,8 +1579,17 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 	if expectedErr != nil {
 		return acquireSandboxResult{ErrCode: "STATIC_EGRESS_UNAVAILABLE", Err: expectedErr}
 	}
+	// A completed turn publishes sandbox_state='snapshotted' before releasing
+	// its turn hold. If this preview already reserved its own hold, the release
+	// deliberately leaves the container alive for us; treating that container
+	// as busy would strand the reservation because no holder remains to change
+	// the state back to 'running'. Provisioning turns are still excluded: their
+	// state is 'none' until the workspace is ready.
+	reservedCompletedContainer := reservation != nil &&
+		reservation.PreviewHoldingContainer &&
+		session.SandboxState == models.SandboxStateSnapshotted
 	if session.ContainerID != nil && *session.ContainerID != "" &&
-		session.SandboxState == models.SandboxStateRunning {
+		(session.SandboxState == models.SandboxStateRunning || reservedCompletedContainer) {
 		if ownerCheck := r.checkLiveContainerWorker(session.WorkerNodeID); ownerCheck.Err != nil {
 			return ownerCheck
 		}
@@ -1611,11 +1615,11 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 				} else if !match {
 					return acquireSandboxResult{ErrCode: "NETWORK_SETTING_RESTART_REQUIRED", Err: fmt.Errorf("restart environment to apply network setting")}
 				} else {
-					return acquireSandboxResult{Sandbox: candidate}
+					return acquireSandboxResult{Sandbox: candidate, CleanupContainerID: candidate.ID}
 				}
 			}
 		} else {
-			return acquireSandboxResult{Sandbox: candidate}
+			return acquireSandboxResult{Sandbox: candidate, CleanupContainerID: candidate.ID}
 		}
 	}
 
@@ -1625,6 +1629,21 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 	// never in this state — an initial turn's row reads 'none'.
 	if session.SandboxState == models.SandboxStateDestroyed {
 		return acquireSandboxResult{ErrCode: "SNAPSHOT_EXPIRED", Err: fmt.Errorf("this session's sandbox snapshot has expired; send a new message to rebuild it")}
+	}
+	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
+		if session.ContainerID == nil || *session.ContainerID == "" {
+			if session.Status == models.SessionStatusRunning && session.SandboxState == models.SandboxStateNone {
+				return acquireSandboxResult{ErrCode: "SANDBOX_BUSY", Err: fmt.Errorf("session sandbox is still being provisioned; please retry")}
+			}
+		} else if session.SandboxState == models.SandboxStateNone &&
+			!session.TurnHoldingContainer &&
+			reservation != nil && reservation.PreviewHoldingContainer {
+			return acquireSandboxResult{
+				CleanupContainerID: *session.ContainerID,
+				ErrCode:            "SANDBOX_PROVISIONING_FAILED",
+				Err:                fmt.Errorf("session sandbox provisioning ended before the workspace was ready"),
+			}
+		}
 	}
 
 	// Only a session that owns no container can be diagnosed as a snapshot
@@ -1647,8 +1666,8 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 	}
 	// r.sessions is required by the ownership peek below, which a
 	// container-owning session now always reaches.
-	if r.sandboxProvider == nil || r.snapshots == nil || r.sessions == nil {
-		return acquireSandboxResult{ErrCode: "NO_SANDBOX", Err: fmt.Errorf("preview hydrate is not configured on this worker")}
+	if r.sandboxProvider == nil || r.sessions == nil {
+		return acquireSandboxResult{ErrCode: "NO_SANDBOX", Err: fmt.Errorf("preview sandbox access is not configured on this worker")}
 	}
 
 	sandboxCfg := agent.DefaultSandboxConfig()
@@ -1688,6 +1707,9 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
 		return acquireSandboxResult{ErrCode: "SNAPSHOT_UNAVAILABLE", Err: fmt.Errorf("session has no live sandbox and no saved snapshot; send a new message to rebuild it")}
 	}
+	if r.snapshots == nil {
+		return acquireSandboxResult{ErrCode: "NO_SANDBOX", Err: fmt.Errorf("preview hydrate is not configured on this worker")}
+	}
 
 	var capacityReservation *agent.SandboxCapacityReservation
 	if r.sandboxCapacity != nil {
@@ -1723,7 +1745,7 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 		return acquireSandboxResult{ErrCode: "SANDBOX_BUSY", Err: fmt.Errorf("another process attached to this session's sandbox first; please retry")}
 	}
 
-	return acquireSandboxResult{Sandbox: sandbox, Hydrated: true}
+	return acquireSandboxResult{Sandbox: sandbox, Hydrated: true, CleanupContainerID: sandbox.ID}
 }
 
 func (r *StartRunner) checkLiveContainerWorker(workerNodeID *string) acquireSandboxResult {

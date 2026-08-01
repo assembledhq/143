@@ -2527,7 +2527,7 @@ func TestSessionStore_AcquireTurnHold(t *testing.T) {
 				return nil
 			},
 		)))
-		require.NoError(t, err)
+		require.NoError(t, err, "pgx mock pool should be created")
 		defer mock.Close()
 
 		store := NewSessionStore(mock)
@@ -2536,7 +2536,7 @@ func TestSessionStore_AcquireTurnHold(t *testing.T) {
 			WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("container-xyz"))
 
 		_, err = store.AcquireTurnHold(context.Background(), uuid.New(), uuid.New(), "container-xyz")
-		require.NoError(t, err)
+		require.NoError(t, err, "AcquireTurnHold should publish the container without changing readiness state")
 		// The hold is taken as soon as the container exists — before CloneRepo
 		// has populated the workspace. sandbox_state='running' is the signal
 		// the preview reuse path keys off, so writing it here would let a
