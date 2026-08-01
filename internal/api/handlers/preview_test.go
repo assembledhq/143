@@ -3092,6 +3092,197 @@ func TestPreviewHandlerAcquireSandboxRejectsLiveContainerOnWrongStaticEgressNetw
 	require.Error(t, result.Err, "network mismatch should surface an actionable error")
 }
 
+// TestPreviewHandlerAcquireSandboxRetriesWhileInitialTurnIsStillProvisioning
+// is the startPreviewLocal twin of the StartRunner regression test: an initial
+// turn publishes container_id as soon as the container exists but only marks
+// sandbox_state='running' once the workspace is cloned, and has no snapshot
+// until the turn completes. The container peek must run ahead of the terminal
+// SNAPSHOT_UNAVAILABLE branch so startPreviewLocal's SANDBOX_BUSY retry loop
+// gets a chance to pick the container up instead of failing the preview.
+func TestPreviewHandlerAcquireSandboxRetriesWhileInitialTurnIsStillProvisioning(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	containerID := "initial-turn-container"
+
+	h := newPreviewTestHandler()
+	h.sessionStore = db.NewSessionStore(mock)
+	sp := testutil.NewMockSandboxProvider()
+	sp.IsAliveFn = func(_ context.Context, _ *agent.Sandbox) (bool, error) {
+		t.Error("the reuse branch must not probe a sandbox that is not marked running")
+		return false, nil
+	}
+	h.sandboxProvider = sp
+
+	mock.ExpectQuery(`SELECT COALESCE\(container_id, ''\)\s+FROM sessions`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"container_id"}).AddRow(containerID))
+
+	result := h.acquireSandbox(context.Background(), orgID, &models.Session{
+		ID:                   sessionID,
+		OrgID:                orgID,
+		Status:               models.SessionStatusRunning,
+		ContainerID:          &containerID,
+		TurnHoldingContainer: true,
+		// Turn holds the container but has not finished cloning into it, and
+		// an initial turn has captured no snapshot yet.
+		SandboxState: models.SandboxStateNone,
+		SnapshotKey:  nil,
+	}, &models.PreviewInstance{PreviewHoldingContainer: true})
+
+	require.Equal(t, "SANDBOX_BUSY", result.ErrCode, "a container still being provisioned by the turn should be retryable, not a terminal snapshot error")
+	require.Nil(t, result.Sandbox, "the preview must not attach to a workspace the turn is still populating")
+	require.Empty(t, result.CleanupContainerID, "an actively provisioning turn should retain cleanup responsibility")
+	require.NoError(t, mock.ExpectationsWereMet(), "the provisioning check should resolve current container ownership")
+}
+
+func TestPreviewHandlerAcquireSandboxRejectsAbandonedProvisioningContainer(t *testing.T) {
+	t.Parallel()
+
+	containerID := "abandoned-provisioning-container"
+	result := newPreviewTestHandler().acquireSandbox(context.Background(), uuid.New(), &models.Session{
+		ID:                   uuid.New(),
+		OrgID:                uuid.New(),
+		Status:               models.SessionStatusFailed,
+		ContainerID:          &containerID,
+		TurnHoldingContainer: false,
+		SandboxState:         models.SandboxStateNone,
+	}, &models.PreviewInstance{PreviewHoldingContainer: true})
+
+	require.Equal(t, "SANDBOX_PROVISIONING_FAILED", result.ErrCode, "an abandoned partial workspace should fail immediately")
+	require.Equal(t, containerID, result.CleanupContainerID, "the last preview holder should clean up the abandoned container")
+	require.Nil(t, result.Sandbox, "an abandoned partial workspace must not be used for preview startup")
+}
+
+func TestPreviewHandlerAcquireSandboxRetriesBeforeInitialContainerPublish(t *testing.T) {
+	t.Parallel()
+
+	result := newPreviewTestHandler().acquireSandbox(context.Background(), uuid.New(), &models.Session{
+		ID:           uuid.New(),
+		OrgID:        uuid.New(),
+		Status:       models.SessionStatusRunning,
+		SandboxState: models.SandboxStateNone,
+	}, &models.PreviewInstance{PreviewHoldingContainer: true})
+
+	require.Equal(t, "SANDBOX_BUSY", result.ErrCode, "a running initial turn should remain retryable before container publication")
+	require.Nil(t, result.Sandbox, "preview startup should wait until the initial container is published")
+}
+
+func TestPreviewHandlerAcquireSandboxReusesCompletedTurnContainerHeldByReservation(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	containerID := "completed-turn-container"
+
+	h := newPreviewTestHandler()
+	sp := testutil.NewMockSandboxProvider()
+	sp.IsAliveFn = func(_ context.Context, sandbox *agent.Sandbox) (bool, error) {
+		require.Equal(t, containerID, sandbox.ID, "completed-turn handoff should inspect the recorded container")
+		return true, nil
+	}
+	h.sandboxProvider = sp
+
+	result := h.acquireSandbox(context.Background(), orgID, &models.Session{
+		ID:           sessionID,
+		OrgID:        orgID,
+		ContainerID:  &containerID,
+		SandboxState: models.SandboxStateSnapshotted,
+	}, &models.PreviewInstance{PreviewHoldingContainer: true})
+
+	require.NoError(t, result.Err, "a reserved preview should reuse the completed turn container kept alive by its hold")
+	require.NotNil(t, result.Sandbox, "completed-turn handoff should return the held live sandbox")
+	require.Equal(t, containerID, result.Sandbox.ID, "completed-turn handoff should attach to the recorded container")
+	require.False(t, result.Hydrated, "a held completed-turn container should be reused rather than hydrated")
+	require.Equal(t, containerID, result.CleanupContainerID, "a completed-turn container should be cleaned up if later preview startup fails")
+}
+
+func TestShouldRetrySandboxBusyAcquire(t *testing.T) {
+	t.Parallel()
+
+	containerID := "provisioning-container"
+	tests := []struct {
+		name     string
+		session  *models.Session
+		attempt  int
+		expected bool
+	}{
+		{
+			name:     "ordinary race retries through short window",
+			session:  &models.Session{},
+			attempt:  sandboxBusyAcquireRetries,
+			expected: true,
+		},
+		{
+			name:     "ordinary race stops after short window",
+			session:  &models.Session{},
+			attempt:  sandboxBusyAcquireRetries + 1,
+			expected: false,
+		},
+		{
+			name: "initial provisioning continues after short window",
+			session: &models.Session{
+				ContainerID:          &containerID,
+				TurnHoldingContainer: true,
+				SandboxState:         models.SandboxStateNone,
+			},
+			attempt:  sandboxBusyAcquireRetries + 1,
+			expected: true,
+		},
+		{
+			name: "initial provisioning stops at extended bound",
+			session: &models.Session{
+				ContainerID:          &containerID,
+				TurnHoldingContainer: true,
+				SandboxState:         models.SandboxStateNone,
+			},
+			attempt:  sandboxProvisioningAcquireRetries + 1,
+			expected: false,
+		},
+		{
+			name: "pre-container provisioning continues after short window",
+			session: &models.Session{
+				Status:       models.SessionStatusRunning,
+				SandboxState: models.SandboxStateNone,
+			},
+			attempt:  sandboxBusyAcquireRetries + 1,
+			expected: true,
+		},
+		{
+			name: "released provisioning container does not extend retries",
+			session: &models.Session{
+				ContainerID:          &containerID,
+				TurnHoldingContainer: false,
+				SandboxState:         models.SandboxStateNone,
+			},
+			attempt:  sandboxBusyAcquireRetries + 1,
+			expected: false,
+		},
+		{
+			name: "running container does not extend busy retries",
+			session: &models.Session{
+				ContainerID:  &containerID,
+				SandboxState: models.SandboxStateRunning,
+			},
+			attempt:  sandboxBusyAcquireRetries + 1,
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, shouldRetrySandboxBusyAcquire(tt.session, tt.attempt), "retry policy should match the sandbox lifecycle state")
+		})
+	}
+}
+
 func TestClassifyAcquireSandboxErrorPreservesNetworkErrors(t *testing.T) {
 	t.Parallel()
 

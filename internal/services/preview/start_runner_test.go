@@ -566,6 +566,161 @@ func (p *acquireSandboxProvider) ExecStream(context.Context, *agent.Sandbox, str
 	panic("not used")
 }
 
+// TestStartRunnerAcquireSandbox_RetriesWhileInitialTurnIsStillProvisioning
+// covers the stalled-preview bug: an initial turn publishes container_id as
+// soon as the container exists, but only marks sandbox_state='running' once
+// the workspace is cloned. A preview requested in that window must retry
+// rather than dead-ending on "no saved snapshot" — an initial turn has no
+// snapshot yet, and the SNAPSHOT_* codes fail the start_preview job for good.
+func TestStartRunnerAcquireSandbox_RetriesWhileInitialTurnIsStillProvisioning(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	containerID := "initial-turn-container"
+	workerNodeID := "worker-a"
+	provider := &acquireSandboxProvider{aliveByID: map[string]bool{containerID: true}}
+	runner := &StartRunner{
+		sessions:        db.NewSessionStore(mock),
+		sandboxProvider: provider,
+		nodeID:          workerNodeID,
+		logger:          zerolog.Nop(),
+	}
+	session := &models.Session{
+		ID:                   sessionID,
+		OrgID:                orgID,
+		Status:               models.SessionStatusRunning,
+		ContainerID:          &containerID,
+		WorkerNodeID:         &workerNodeID,
+		TurnHoldingContainer: true,
+		// The turn holds the container but has not finished cloning into it,
+		// and an initial turn has not captured a snapshot yet.
+		SandboxState: models.SandboxStateNone,
+		SnapshotKey:  nil,
+	}
+
+	mock.ExpectQuery(`SELECT COALESCE\(container_id, ''\), COALESCE\(worker_node_id, ''\)\s+FROM sessions`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"container_id", "worker_node_id"}).AddRow(containerID, workerNodeID))
+
+	result := runner.acquireSandbox(context.Background(), orgID, session, &models.PreviewInstance{PreviewHoldingContainer: true})
+
+	require.Equal(t, "SANDBOX_BUSY", result.ErrCode, "a container still being provisioned by the turn should be retryable, not a terminal snapshot error")
+	require.NotErrorIs(t, result.Err, agent.ErrStaleSandboxIDCleared, "a live container must not be cleared out from under the turn that owns it")
+	require.Nil(t, result.Sandbox, "the preview must not attach to a workspace the turn is still populating")
+	require.Empty(t, result.CleanupContainerID, "an actively provisioning turn should retain cleanup responsibility")
+	require.Equal(t, []string{containerID}, provider.probedIDs, "the runner should confirm the recorded container is alive before reporting it busy")
+	require.NoError(t, mock.ExpectationsWereMet(), "ownership should be resolved from the fresh peek, not the caller's session row")
+}
+
+func TestStartRunnerAcquireSandbox_RejectsAbandonedProvisioningContainer(t *testing.T) {
+	t.Parallel()
+
+	containerID := "abandoned-provisioning-container"
+	result := (&StartRunner{logger: zerolog.Nop()}).acquireSandbox(context.Background(), uuid.New(), &models.Session{
+		ID:                   uuid.New(),
+		OrgID:                uuid.New(),
+		Status:               models.SessionStatusFailed,
+		ContainerID:          &containerID,
+		TurnHoldingContainer: false,
+		SandboxState:         models.SandboxStateNone,
+	}, &models.PreviewInstance{PreviewHoldingContainer: true})
+
+	require.Equal(t, "SANDBOX_PROVISIONING_FAILED", result.ErrCode, "an abandoned partial workspace should fail immediately")
+	require.Equal(t, containerID, result.CleanupContainerID, "the last preview holder should clean up the abandoned container")
+	require.Nil(t, result.Sandbox, "an abandoned partial workspace must not be used for preview startup")
+}
+
+func TestStartRunnerAcquireSandbox_RetriesBeforeInitialContainerPublish(t *testing.T) {
+	t.Parallel()
+
+	result := (&StartRunner{logger: zerolog.Nop()}).acquireSandbox(context.Background(), uuid.New(), &models.Session{
+		ID:           uuid.New(),
+		OrgID:        uuid.New(),
+		Status:       models.SessionStatusRunning,
+		SandboxState: models.SandboxStateNone,
+	}, &models.PreviewInstance{PreviewHoldingContainer: true})
+
+	require.Equal(t, "SANDBOX_BUSY", result.ErrCode, "a running initial turn should remain retryable before container publication")
+	require.Nil(t, result.Sandbox, "preview startup should wait until the initial container is published")
+}
+
+// TestStartRunnerAcquireSandbox_ReusesCompletedTurnContainerHeldByReservation
+// covers the provisioning-to-completion handoff. Turn completion marks the
+// row snapshotted, but the preview's already-acquired hold intentionally keeps
+// the container alive after the turn releases its hold. The preview must use
+// that container instead of retrying forever waiting for a state change that
+// no remaining turn will publish.
+func TestStartRunnerAcquireSandbox_ReusesCompletedTurnContainerHeldByReservation(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	containerID := "completed-turn-container"
+	workerNodeID := "worker-a"
+	provider := &acquireSandboxProvider{aliveByID: map[string]bool{containerID: true}}
+	runner := &StartRunner{
+		sandboxProvider: provider,
+		nodeID:          workerNodeID,
+		logger:          zerolog.Nop(),
+	}
+	session := &models.Session{
+		ID:           sessionID,
+		OrgID:        orgID,
+		ContainerID:  &containerID,
+		WorkerNodeID: &workerNodeID,
+		SandboxState: models.SandboxStateSnapshotted,
+	}
+	reservation := &models.PreviewInstance{PreviewHoldingContainer: true}
+
+	result := runner.acquireSandbox(context.Background(), orgID, session, reservation)
+
+	require.NoError(t, result.Err, "a reserved preview should reuse the completed turn container kept alive by its hold")
+	require.NotNil(t, result.Sandbox, "completed-turn handoff should return the held live sandbox")
+	require.Equal(t, containerID, result.Sandbox.ID, "completed-turn handoff should attach to the recorded container")
+	require.False(t, result.Hydrated, "a held completed-turn container should be reused rather than hydrated")
+	require.Equal(t, containerID, result.CleanupContainerID, "a completed-turn container should be cleaned up if later preview startup fails")
+	require.Equal(t, []string{containerID}, provider.probedIDs, "completed-turn handoff should verify the held container is alive")
+}
+
+// TestStartRunnerAcquireSandbox_ReusesRunningTurnContainer pins the happy
+// reuse path: once the turn has marked the sandbox running, preview startup
+// attaches to that container instead of hydrating a duplicate.
+func TestStartRunnerAcquireSandbox_ReusesRunningTurnContainer(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	containerID := "turn-container"
+	workerNodeID := "worker-a"
+	provider := &acquireSandboxProvider{aliveByID: map[string]bool{containerID: true}}
+	runner := &StartRunner{
+		sandboxProvider: provider,
+		nodeID:          workerNodeID,
+		logger:          zerolog.Nop(),
+	}
+	session := &models.Session{
+		ID:           sessionID,
+		OrgID:        orgID,
+		ContainerID:  &containerID,
+		WorkerNodeID: &workerNodeID,
+		SandboxState: models.SandboxStateRunning,
+	}
+
+	result := runner.acquireSandbox(context.Background(), orgID, session, nil)
+
+	require.NoError(t, result.Err, "preview startup should reuse the turn's running sandbox")
+	require.NotNil(t, result.Sandbox, "preview startup should return the live turn sandbox")
+	require.Equal(t, containerID, result.Sandbox.ID, "preview startup should attach to the turn-owned container")
+	require.False(t, result.Hydrated, "reusing a live sandbox should not be reported as hydration")
+	require.Equal(t, containerID, result.CleanupContainerID, "a reused running container should be cleanup-eligible once the turn releases it")
+	require.Equal(t, []string{containerID}, provider.probedIDs, "preview startup should verify the live container before reuse")
+}
+
 func TestStartRunnerAcquireSandbox_ClearsStaleContainerIDBeforeHydrateRetry(t *testing.T) {
 	t.Parallel()
 

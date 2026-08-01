@@ -3209,6 +3209,17 @@ func (s *SessionStore) ReapStrandedPendingSnapshots(ctx context.Context, olderTh
 // isn't clobbered — and so the loser's subsequent ReleaseTurnHold can only
 // ever drop its own flag, never someone else's.
 //
+// Deliberately does NOT flip sandbox_state to 'running'. The hold is taken as
+// soon as the container exists, which is before CloneRepo has populated the
+// workspace inside it. sandbox_state='running' is what the preview reuse path
+// keys off to attach to a session's live container, so advertising it here
+// would let a preview attach to — and run install/build steps inside — a
+// workspace that git clone is still filling (git clone also fails outright on
+// a non-empty directory). RunAgent publishes 'running' itself once the clone
+// has landed. ContinueSession sets it earlier, before the container exists,
+// which is safe only because the reuse path additionally requires a non-NULL
+// container_id — this method's COALESCE is what publishes that.
+//
 // Paired with ReleaseTurnHold, it forms half of the refcount that governs
 // container destruction (the other half is preview_holding_container on the
 // preview_instances row).
