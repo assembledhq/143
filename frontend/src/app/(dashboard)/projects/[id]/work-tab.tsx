@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { StatusIndicator } from "@/components/status-indicator";
 import { api } from "@/lib/api";
 import type { Project, ProjectTask } from "@/lib/types";
 import { CollapsibleSection, taskStatusConfig } from "./shared";
@@ -102,7 +103,16 @@ function BoardSection({
                       <Card key={task.id}>
                         <CardContent className="p-3">
                           <div className="flex items-start gap-2">
-                            <StatusIcon className={`h-3.5 w-3.5 mt-0.5 flex-shrink-0 ${task.status === "running" ? "animate-spin text-info" : task.status === "completed" ? "text-success" : task.status === "failed" ? "text-destructive" : "text-muted-foreground"}`} />
+                            {task.status === "running" ? (
+                              <StatusIndicator
+                                tone="info"
+                                activity="breathing"
+                                stateKey={task.status}
+                                className="mt-1"
+                              />
+                            ) : (
+                              <StatusIcon className={`h-3.5 w-3.5 mt-0.5 flex-shrink-0 ${task.status === "completed" ? "text-success" : task.status === "failed" ? "text-destructive" : "text-muted-foreground"}`} />
+                            )}
                             <div className="min-w-0 flex-1">
                               <p className="text-xs font-medium truncate">{task.title}</p>
                               {task.description && (

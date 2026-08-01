@@ -465,7 +465,7 @@ describe("PreviewLandingPage launch mode", () => {
 });
 
 describe("PreviewLandingPage detail mode", () => {
-  it("shows a spinner inside the starting status badge", async () => {
+  it("shows indeterminate progress inside the starting status badge", async () => {
     searchParams = new URLSearchParams("");
 
     server.use(
@@ -495,7 +495,7 @@ describe("PreviewLandingPage detail mode", () => {
     const statusBadge = startingLabels
       .map((label) => label.closest('[data-slot="status-label"]'))
       .find((badge): badge is Element => Boolean(badge));
-    expect(statusBadge?.querySelector('[data-slot="status-spinner"]')).toBeInTheDocument();
+    expect(statusBadge?.querySelector('[data-slot="status-indicator"][data-activity="indeterminate"]')).toBeInTheDocument();
   });
 
   it("prioritizes the open command and keeps lifecycle controls in preview actions", async () => {

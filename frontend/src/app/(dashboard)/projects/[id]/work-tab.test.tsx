@@ -283,6 +283,8 @@ describe("WorkTab", () => {
     );
 
     const runLink = screen.getByText("Session").closest("a");
+    const runningCard = screen.getByText("Task with Run").closest('[data-slot="card"]');
+    expect(runningCard?.querySelector('[data-activity="breathing"]')).toBeInTheDocument();
     expect(runLink).toHaveAttribute("href", "/sessions/run-123");
   });
 });

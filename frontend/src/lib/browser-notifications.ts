@@ -1,16 +1,14 @@
-const terminalSessionStatuses = new Set([
-  'completed',
-  'pr_created',
-  'failed',
-  'cancelled',
-  'skipped',
+import type { SessionStatus } from './types';
+
+const settledSessionStatuses = new Set<SessionStatus>([
+  'completed', 'pr_created', 'failed', 'cancelled', 'skipped',
 ]);
 
 type VisibilityState = 'visible' | 'hidden' | 'prerender';
 
 interface NotifySessionCompletedOptions {
-  previousStatus?: string;
-  nextStatus?: string;
+  previousStatus?: SessionStatus;
+  nextStatus?: SessionStatus;
   sessionId: string;
   title?: string;
   visibilityState: VisibilityState;
@@ -25,11 +23,17 @@ export async function maybeNotifySessionCompleted(options: NotifySessionComplete
     visibilityState,
   } = options;
 
-  if (!nextStatus || !terminalSessionStatuses.has(nextStatus)) {
+  if (!nextStatus || !settledSessionStatuses.has(nextStatus)) {
     return;
   }
 
-  if (previousStatus && terminalSessionStatuses.has(previousStatus)) {
+  if (previousStatus && settledSessionStatuses.has(previousStatus)) {
+    return;
+  }
+
+  // Cancelled and skipped are settled but routine; the favicon simply
+  // returns to normal without promoting those transitions to notifications.
+  if (nextStatus === 'cancelled' || nextStatus === 'skipped') {
     return;
   }
 
@@ -50,8 +54,9 @@ export async function maybeNotifySessionCompleted(options: NotifySessionComplete
     return;
   }
 
-  new Notification('Session completed', {
-    body: title || 'Your session has finished running.',
+  const failed = nextStatus === 'failed';
+  new Notification(failed ? 'Session failed' : 'Session completed', {
+    body: title || (failed ? 'Your session needs attention.' : 'Your session has finished running.'),
     tag: sessionId,
   });
 }

@@ -2966,21 +2966,6 @@ export interface ProjectDetail {
   specs: ProjectSpec[];
 }
 
-export const projectStatusConfig: Record<
-  string,
-  { color: string; label: string }
-> = {
-  draft: { color: "bg-muted text-muted-foreground", label: "Draft" },
-  active: { color: "bg-info/10 text-info", label: "Active" },
-  completed: { color: "bg-success/10 text-success", label: "Done" },
-};
-
-export const projectStatusDotColor: Record<string, string> = {
-  draft: "bg-muted-foreground/50",
-  active: "bg-info",
-  completed: "bg-success",
-};
-
 // --- Session file browsing types ---
 
 export interface FileEntry {

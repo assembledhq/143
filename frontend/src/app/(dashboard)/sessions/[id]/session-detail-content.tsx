@@ -95,6 +95,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
 import { ContextHeader } from "@/components/context-header";
 import { StatusLabel } from "@/components/status-label";
+import { StatusIndicator } from "@/components/status-indicator";
 import { SessionComposerAttachmentMenu } from "@/components/session-composer-attachment-menu";
 import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
 import { useSessionComposerSlashCommands } from "@/hooks/use-session-composer-slash-commands";
@@ -166,6 +167,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useDocumentVisible } from "@/hooks/use-document-visible";
 import { usePageTitle } from "@/hooks/use-page-title";
+import { useOperationalFavicon } from "@/hooks/use-operational-favicon";
 import {
   useSessionKeyboardShortcuts,
   type SessionDetailTab,
@@ -450,7 +452,7 @@ function isRuntimeRecoveryActive(session: Session): boolean {
 function RuntimeRecoveryNotice({ border = "border-t" }: { border?: "border-t" | "border-b" | "border" }) {
   return (
     <div className={`flex items-center gap-2 px-4 py-2.5 text-xs ${border} bg-info/10 border-info/30 text-info`}>
-      <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+      <StatusIndicator tone="info" activity="breathing" stateKey="runtime-recovery" />
       <span>
         <span className="font-medium">Restoring runtime from checkpoint</span>
         <span className="mx-1">·</span>
@@ -694,7 +696,7 @@ const ReadinessPacketSummary = forwardRef<HTMLDivElement, { packet: ReadinessPac
 });
 
 function readinessStatusIcon(readiness: PRReadinessRun | undefined, stale: boolean | undefined, running: boolean) {
-  if (running) return <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />;
+  if (running) return <StatusIndicator tone="neutral" activity="indeterminate" stateKey="readiness-running" size="md" />;
   if (!readiness) return <ClipboardList className="h-3.5 w-3.5 text-muted-foreground" />;
   if (stale || readiness.status === "blocked" || readiness.status === "failed") return <AlertTriangle className="h-3.5 w-3.5 text-warning" />;
   if (readiness.status === "warnings") return <AlertTriangle className="h-3.5 w-3.5 text-warning" />;
@@ -768,7 +770,7 @@ function ThreadFailureDetailsCard({ thread }: { thread: SessionThread }) {
   );
 }
 
-function OverviewTab({ session, activeThread, members }: { session: Session; activeThread?: SessionThread | null; members: User[] }) {
+function OverviewTab({ session, activeThread, members, prStatus }: { session: Session; activeThread?: SessionThread | null; members: User[]; prStatus?: PullRequestStatus | null }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
   const [showStartOverRetryDialog, setShowStartOverRetryDialog] = useState(false);
@@ -793,7 +795,7 @@ function OverviewTab({ session, activeThread, members }: { session: Session; act
   const showThreadFailureDetails = session.status !== "failed" && hasVisibleThreadFailure(activeThread);
   const checkpointRetryUnavailable = !session.snapshot_key || session.sandbox_state === "destroyed" || recoveryActive;
 
-  const operationalStatus = deriveSessionDisplayStatus(session);
+  const operationalStatus = deriveSessionDisplayStatus(session, prStatus);
   const isActive = !terminalSessionStatuses.has(session.status);
   const isDeployRecovery = session.runtime_stop_reason === "deploy_budget_expired";
   const originDisplay = getSessionOriginDisplay(session);
@@ -3940,6 +3942,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   // title matches what the user just clicked, so don't wait for the
   // authoritative detail to label the tab.
   usePageTitle(rawSession ? sessionTitle(rawSession) : null, "Session");
+  useOperationalFavicon(rawSession?.status);
   const members = membersData?.data ?? [];
   const shouldLoadDiff = (
     !isProvisionalSession &&
@@ -6375,7 +6378,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     );
   }
 
-  const operationalStatus = deriveSessionDisplayStatus(session);
+  const operationalStatus = deriveSessionDisplayStatus(session, prStatus);
   const prState = session.pr_creation_state;
   const snapshotState = classifyPRSnapshotState({
     sessionSnapshotKey: session.snapshot_key,
@@ -7065,7 +7068,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </CardContent>
             </Card>
           )}
-          <OverviewTab session={session} activeThread={activeThread} members={members} />
+          <OverviewTab session={session} activeThread={activeThread} members={members} prStatus={prStatus} />
         </div>
       </TabsContent>
       <TabsContent value="preview" className="flex-1 overflow-y-auto scrollbar-hide p-4">

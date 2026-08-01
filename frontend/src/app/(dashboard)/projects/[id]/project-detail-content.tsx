@@ -26,7 +26,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { api } from "@/lib/api";
-import { projectStatusConfig } from "@/lib/types";
 import { BranchPicker } from "@/components/branch-picker";
 import { ProgressBar } from "./shared";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
@@ -34,6 +33,8 @@ import { PlanTab } from "./plan-tab";
 import { WorkTab } from "./work-tab";
 import { MobileBackButton } from "@/components/mobile-back-button";
 import { usePageTitle } from "@/hooks/use-page-title";
+import { StatusLabel } from "@/components/status-label";
+import { deriveProjectStatusPresentation } from "@/lib/project-status-presentation";
 
 const PRIORITY_OPTIONS = [
   { value: "low", label: "Low", numeric: 75 },
@@ -207,8 +208,7 @@ export function ProjectDetailContent({ id }: { id: string }) {
   }
 
   const { project, tasks, attachments, specs } = detail;
-  const status = projectStatusConfig[project.status] || projectStatusConfig.draft;
-  const isActive = project.status === "active";
+  const status = deriveProjectStatusPresentation(project.status);
 
   const runningCount = tasks.filter((t) => t.status === "running").length;
   const prCount = tasks.filter((t) => t.pr_url).length;
@@ -221,15 +221,13 @@ export function ProjectDetailContent({ id }: { id: string }) {
         <div className="flex items-center gap-3">
           <MobileBackButton to="/projects" label="Back to projects" />
           <h1 className="text-lg font-semibold text-foreground">{project.title}</h1>
-          <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${status.color}`}>
-            {isActive && (
-              <span className="relative mr-1.5 flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-info/60 opacity-75" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-info" />
-              </span>
-            )}
-            {status.label}
-          </span>
+          <StatusLabel
+            label={status.label}
+            tone={status.tone}
+            activity={status.activity}
+            stateKey={project.status}
+            size="md"
+          />
         </div>
 
         <div className="mt-2">

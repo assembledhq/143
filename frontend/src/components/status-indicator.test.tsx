@@ -9,6 +9,7 @@ describe("StatusIndicator", () => {
 
     expect(container.querySelector('[data-slot="status-indicator-core"]')).toHaveClass("bg-success");
     expect(container.querySelector('[data-slot="status-indicator"]')).toHaveAttribute("data-activity", "none");
+    expect(container.querySelector('[data-slot="status-indicator-halo"]')).not.toHaveClass("status-breathe-halo");
   });
 
   it("uses one breathing halo for persistent work", () => {

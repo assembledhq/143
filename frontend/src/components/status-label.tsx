@@ -12,13 +12,10 @@ type StatusLabelProps = {
   detail?: ReactNode;
   activity?: ActivityTreatment;
   size?: "sm" | "md";
-  /** Boolean values are retained temporarily for existing call sites. */
-  indicator?: "dot" | "icon" | "none" | boolean;
+  indicator?: "dot" | "icon" | "none";
   icon?: ReactNode;
   announcement?: "none" | "polite";
   stateKey?: string;
-  /** @deprecated Use activity="indeterminate" for short-lived operations. */
-  active?: boolean;
   className?: string;
 };
 
@@ -32,11 +29,8 @@ export function StatusLabel({
   icon,
   announcement = "none",
   stateKey,
-  active = false,
   className,
 }: StatusLabelProps) {
-  const resolvedActivity = active ? "indeterminate" : activity;
-  const resolvedIndicator = indicator === true ? "dot" : indicator === false ? "none" : indicator;
   return (
     <span
       data-slot="status-label"
@@ -48,10 +42,10 @@ export function StatusLabel({
         className,
       )}
     >
-      {resolvedIndicator === "icon" && icon ? (
+      {indicator === "icon" && icon ? (
         <span aria-hidden="true" className="inline-flex shrink-0">{icon}</span>
-      ) : resolvedIndicator === "dot" ? (
-        <StatusIndicator tone={tone} activity={resolvedActivity} size={size} stateKey={stateKey} />
+      ) : indicator === "dot" ? (
+        <StatusIndicator tone={tone} activity={activity} size={size} stateKey={stateKey} />
       ) : null}
       <span className={cn("font-medium", statusToneTextClass(tone))}>{label}</span>
       {detail ? <span className="truncate text-muted-foreground">{detail}</span> : null}

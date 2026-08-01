@@ -96,4 +96,16 @@ describe("deriveSessionDisplayStatus", () => {
     expect(status.label, "failed PR actions should not make the whole session look failed").toBe("Completed");
     expect(status.kind, "failed PR actions should leave the primary status as session status").toBe("session");
   });
+
+  it.each([
+    ["merged", "PR merged", "success"],
+    ["closed", "PR closed", "neutral"],
+  ] as const)("preserves the %s pull request terminal state", (prStatus, label, tone) => {
+    const status = deriveSessionDisplayStatus(makeSession({ status: "pr_created" }), prStatus);
+
+    expect(status.label, `${prStatus} pull requests should retain their terminal label`).toBe(label);
+    expect(status.kind, `${prStatus} pull requests should be classified separately`).toBe("pull_request");
+    expect(status.tone, `${prStatus} pull requests should retain their semantic tone`).toBe(tone);
+    expect(status.activity, `${prStatus} pull requests should remain still`).toBe("none");
+  });
 });

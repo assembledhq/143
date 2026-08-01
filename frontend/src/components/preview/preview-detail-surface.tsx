@@ -22,6 +22,7 @@ import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { OpenPreviewButton } from "@/components/preview/open-preview-button";
 import { PreviewStatusBadge } from "@/components/preview/preview-status-badge";
+import { StatusIndicator } from "@/components/status-indicator";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -382,19 +383,22 @@ function PreviewProgress({ preview, prominent }: { preview: BranchPreviewRespons
 
 function PreviewStep({ name, status }: { name: string; status: string }) {
   const tone = getStepTone(status);
-  const Icon = tone === "complete" ? CheckCircle2 : tone === "active" ? Loader2 : tone === "failed" ? XCircle : Circle;
+  const Icon = tone === "complete" ? CheckCircle2 : tone === "failed" ? XCircle : Circle;
 
   return (
     <div className="flex min-h-16 items-start gap-2 rounded-md border border-border px-3 py-2">
-      <Icon
-        className={cn(
-          "mt-0.5 h-4 w-4 shrink-0",
-          tone === "complete" && "text-primary",
-          tone === "active" && "animate-spin text-muted-foreground",
-          tone === "failed" && "text-destructive",
-          tone === "pending" && "text-muted-foreground/60",
-        )}
-      />
+      {tone === "active" ? (
+        <StatusIndicator tone="primary" activity="indeterminate" stateKey={status} className="mt-1" />
+      ) : (
+        <Icon
+          className={cn(
+            "mt-0.5 h-4 w-4 shrink-0",
+            tone === "complete" && "text-primary",
+            tone === "failed" && "text-destructive",
+            tone === "pending" && "text-muted-foreground/60",
+          )}
+        />
+      )}
       <div className="min-w-0">
         <p className="text-sm font-medium text-foreground">{formatStepName(name)}</p>
         <p className="text-xs capitalize text-muted-foreground">{status.replaceAll("_", " ")}</p>

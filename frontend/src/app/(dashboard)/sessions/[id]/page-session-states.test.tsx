@@ -817,6 +817,8 @@ describe('SessionDetailPage session states', () => {
 
     expect(await screen.findAllByText('Restoring runtime from checkpoint')).not.toHaveLength(0);
     expect(screen.getAllByText('Follow-up messages will be queued and delivered after the runtime is restored.')).not.toHaveLength(0);
+    const recoveryNotices = screen.getAllByText('Restoring runtime from checkpoint');
+    expect(recoveryNotices.every((notice) => notice.parentElement?.parentElement?.querySelector('[data-activity="breathing"]'))).toBe(true);
     const composer = screen.getByPlaceholderText('Send a follow-up message...');
     expect(composer).toBeEnabled();
   });

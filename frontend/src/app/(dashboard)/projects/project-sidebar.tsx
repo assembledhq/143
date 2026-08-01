@@ -12,12 +12,12 @@ import { SwipeActionRow } from "@/components/swipe-action-row";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn, formatTimeAgo } from "@/lib/utils";
-import { StatusDot } from "@/components/status-dot";
+import { StatusIndicator } from "@/components/status-indicator";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import { useFilterSuffix, usePeopleFilter } from "@/hooks/use-people-filter";
-import { projectStatusConfig, projectStatusDotColor } from "@/lib/types";
 import type { Project } from "@/lib/types";
+import { deriveProjectStatusPresentation } from "@/lib/project-status-presentation";
 const filterTabs = [
   { value: "all", label: "All" },
   { value: "active", label: "Active" },
@@ -248,8 +248,7 @@ export function ProjectSidebar() {
 
         {displayedProjects.map((project) => {
           const isSelected = selectedId === project.id;
-          const cfg = projectStatusConfig[project.status] || projectStatusConfig.draft;
-          const isActiveProject = project.status === "active";
+          const status = deriveProjectStatusPresentation(project.status);
           const ts = project.completed_at || project.updated_at;
           const pct = project.total_tasks > 0
             ? Math.round((project.completed_tasks / project.total_tasks) * 100)
@@ -283,11 +282,11 @@ export function ProjectSidebar() {
               >
                 <div className="flex items-start gap-2.5 min-w-0">
                   <div className="mt-1.5 shrink-0">
-                    {isActiveProject ? (
-                      <StatusDot animate color="bg-info" pingColor="bg-info/60" />
-                    ) : (
-                      <StatusDot color={projectStatusDotColor[project.status] || "bg-muted-foreground/50"} />
-                    )}
+                    <StatusIndicator
+                      tone={status.tone}
+                      activity={status.activity}
+                      stateKey={project.status}
+                    />
                   </div>
 
                   <div className="min-w-0 flex-1">
@@ -297,7 +296,7 @@ export function ProjectSidebar() {
 
                     <div className="flex items-center gap-3 mt-0.5">
                       <span className="text-xs text-muted-foreground shrink-0">
-                        {cfg.label}
+                        {status.label}
                       </span>
                       <span className="text-xs text-muted-foreground/50 truncate">
                         {formatTimeAgo(ts)}

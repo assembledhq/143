@@ -85,10 +85,10 @@ export function StatusIndicator({
       <span
         data-slot="status-indicator-halo"
         className={cn(
-          "status-breathe-halo absolute rounded-full opacity-0",
+          "absolute rounded-full opacity-0",
           dimensions.dot,
           colors.dot,
-          showHalo && "opacity-55",
+          showHalo && "status-breathe-halo opacity-55",
         )}
       />
       <span

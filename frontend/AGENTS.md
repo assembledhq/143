@@ -334,16 +334,18 @@ stable geometry, and optional activity treatment:
 ```
 
 Use `StatusIndicator` only when the adjacent accessible label already provides
-the state text. Do not hand-build `animate-ping` dots. `StatusDot` is a temporary
-compatibility adapter for unmigrated code and must not be used by new code.
+the state text. Do not hand-build `animate-ping` dots.
 
 ### Status Badges
 
-Use `<span>` with inline status colors for row status indicators:
+Use `StatusLabel` with a domain-to-presentation mapping for row status indicators:
 ```tsx
-<span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${status.color}`}>
-  {status.label}
-</span>
+<StatusLabel
+  label={status.label}
+  tone={status.tone}
+  activity={status.activity}
+  stateKey={domainStatus}
+/>
 ```
 
 ### Empty State
@@ -519,7 +521,6 @@ State tokens (`success`, `warning`, `attention`, `info`, `destructive`) adapt to
 | `PageHeader` | `src/components/page-header.tsx` | Standard page title + description + action |
 | `EmptyState` | `src/components/empty-state.tsx` | Empty list/data placeholder |
 | `AuthenticatedLayout` | `src/components/authenticated-layout.tsx` | Sidebar + main content shell |
-| `StatusDot` | `src/components/status-dot.tsx` | Animated/static status dots |
 | `StatusIndicator` | `src/components/status-indicator.tsx` | Semantic status indicator internals |
 | `StatusLabel` | `src/components/status-label.tsx` | Canonical operational status + activity treatment |
 | `Kbd` | `src/components/ui/kbd.tsx` | Keyboard shortcut hints |

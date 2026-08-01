@@ -1,7 +1,7 @@
 import type { OperationalStatePresentation } from "./operational-state";
-import type { PRCreationState, PRPushState, Session, SessionStatus } from "./types";
+import type { PRCreationState, PRPushState, PullRequestStatus, Session, SessionStatus } from "./types";
 
-export type SessionDisplayStatusKind = "session" | "pr_creation" | "pr_push";
+export type SessionDisplayStatusKind = "session" | "pull_request" | "pr_creation" | "pr_push";
 
 export type SessionDisplayStatus = OperationalStatePresentation & {
   kind: SessionDisplayStatusKind;
@@ -34,7 +34,30 @@ export function deriveSessionStatusPresentation(status: SessionStatus): Operatio
   return sessionStatusConfig[status] ?? sessionStatusConfig.pending;
 }
 
-export function deriveSessionDisplayStatus(session: Pick<Session, "status" | "pr_creation_state" | "pr_push_state">): SessionDisplayStatus {
+export function deriveSessionDisplayStatus(
+  session: Pick<Session, "status" | "pr_creation_state" | "pr_push_state">,
+  prStatus?: PullRequestStatus | null,
+): SessionDisplayStatus {
+  if (session.status === "pr_created" && prStatus === "merged") {
+    return {
+      kind: "pull_request",
+      label: "PR merged",
+      tone: "success",
+      activity: "none",
+      attention: "none",
+    };
+  }
+
+  if (session.status === "pr_created" && prStatus === "closed") {
+    return {
+      kind: "pull_request",
+      label: "PR closed",
+      tone: "neutral",
+      activity: "none",
+      attention: "none",
+    };
+  }
+
   if (isInFlightState(session.pr_push_state)) {
     return {
       kind: "pr_push",

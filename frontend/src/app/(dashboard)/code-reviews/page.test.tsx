@@ -1269,6 +1269,7 @@ describe("CodeReviewsPage", () => {
 
     const mobileActivity = await screen.findByLabelText("Code review activity");
     expect(within(mobileActivity).getByText("Queued")).toBeInTheDocument();
+    expect(mobileActivity.querySelector('[data-activity="indeterminate"]')).toBeInTheDocument();
     expect(within(mobileActivity).queryByText("-")).not.toBeInTheDocument();
   });
 
