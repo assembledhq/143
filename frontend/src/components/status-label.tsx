@@ -1,26 +1,24 @@
 import type { ReactNode } from "react";
-import { LoaderCircle } from "lucide-react";
 
+import { StatusIndicator, statusToneTextClass } from "@/components/status-indicator";
+import type { ActivityTreatment, OperationalTone } from "@/lib/operational-state";
 import { cn } from "@/lib/utils";
 
-export type StatusTone = "neutral" | "primary" | "success" | "warning" | "attention" | "info" | "destructive";
-
-const toneClasses: Record<StatusTone, { dot: string; text: string }> = {
-  neutral: { dot: "bg-muted-foreground/45", text: "text-muted-foreground" },
-  primary: { dot: "bg-primary", text: "text-primary" },
-  success: { dot: "bg-success", text: "text-success" },
-  warning: { dot: "bg-warning", text: "text-warning" },
-  attention: { dot: "bg-attention", text: "text-attention" },
-  info: { dot: "bg-info", text: "text-info" },
-  destructive: { dot: "bg-destructive", text: "text-destructive" },
-};
+export type StatusTone = OperationalTone;
 
 type StatusLabelProps = {
   label: ReactNode;
   tone?: StatusTone;
   detail?: ReactNode;
+  activity?: ActivityTreatment;
+  size?: "sm" | "md";
+  /** Boolean values are retained temporarily for existing call sites. */
+  indicator?: "dot" | "icon" | "none" | boolean;
+  icon?: ReactNode;
+  announcement?: "none" | "polite";
+  stateKey?: string;
+  /** @deprecated Use activity="indeterminate" for short-lived operations. */
   active?: boolean;
-  indicator?: boolean;
   className?: string;
 };
 
@@ -28,19 +26,34 @@ export function StatusLabel({
   label,
   tone = "neutral",
   detail,
+  activity = "none",
+  size = "sm",
+  indicator = "dot",
+  icon,
+  announcement = "none",
+  stateKey,
   active = false,
-  indicator = true,
   className,
 }: StatusLabelProps) {
-  const colors = toneClasses[tone];
+  const resolvedActivity = active ? "indeterminate" : activity;
+  const resolvedIndicator = indicator === true ? "dot" : indicator === false ? "none" : indicator;
   return (
-    <span data-slot="status-label" className={cn("inline-flex min-w-0 items-center gap-1.5 type-dense", className)}>
-      {active ? (
-        <LoaderCircle data-slot="status-spinner" aria-hidden="true" className={cn("size-3.5 shrink-0 animate-spin", colors.text)} />
-      ) : indicator ? (
-        <span aria-hidden="true" className={cn("size-1.5 shrink-0 rounded-full", colors.dot)} />
+    <span
+      data-slot="status-label"
+      role={announcement === "polite" ? "status" : undefined}
+      aria-live={announcement === "polite" ? "polite" : undefined}
+      className={cn(
+        "inline-flex min-w-0 items-center gap-1.5",
+        size === "sm" ? "type-dense" : "text-sm",
+        className,
+      )}
+    >
+      {resolvedIndicator === "icon" && icon ? (
+        <span aria-hidden="true" className="inline-flex shrink-0">{icon}</span>
+      ) : resolvedIndicator === "dot" ? (
+        <StatusIndicator tone={tone} activity={resolvedActivity} size={size} stateKey={stateKey} />
       ) : null}
-      <span className={cn("font-medium", colors.text)}>{label}</span>
+      <span className={cn("font-medium", statusToneTextClass(tone))}>{label}</span>
       {detail ? <span className="truncate text-muted-foreground">{detail}</span> : null}
     </span>
   );

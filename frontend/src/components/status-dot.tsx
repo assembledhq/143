@@ -1,5 +1,6 @@
 import { cn } from "@/lib/utils";
 
+/** @deprecated Migrate feature code to StatusIndicator with a semantic tone. */
 type StatusDotProps = {
   /** Tailwind color class for the dot (e.g. "bg-blue-500", "bg-primary") */
   color: string;
@@ -14,19 +15,15 @@ export function StatusDot({ animate, color, pingColor, className }: StatusDotPro
   if (animate) {
     return (
       <span className={cn("relative flex h-2 w-2", className)}>
-        {/* Soft breathing halo — slower and softer than animate-ping so it
-            reads as ongoing thought rather than a network heartbeat. */}
+        {/* Compatibility adapter for older feature call sites. New code uses
+            StatusIndicator with a semantic tone instead of color classes. */}
         <span
           className={cn(
-            "ai-pulse-halo absolute inline-flex h-full w-full rounded-full",
+            "status-breathe-halo absolute inline-flex h-full w-full rounded-full opacity-55",
             pingColor,
           )}
         />
-        {/* Solid base dot in the requested color, with a slow gradient
-            shimmer overlay for the "AI thinking" feel. */}
-        <span className={cn("relative inline-flex h-2 w-2 overflow-hidden rounded-full", color)}>
-          <span className="ai-shimmer absolute inset-0 rounded-full" />
-        </span>
+        <span className={cn("status-indicator-core relative inline-flex h-2 w-2 rounded-full", color)} />
       </span>
     );
   }

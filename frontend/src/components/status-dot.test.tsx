@@ -15,14 +15,14 @@ describe("StatusDot", () => {
     expect(dot).not.toHaveClass("relative");
   });
 
-  it("renders an animated dot with halo and shimmer layers", () => {
+  it("renders an animated dot with one calm halo and no shimmer", () => {
     const { container } = renderWithProviders(
       <StatusDot animate color="bg-primary" pingColor="bg-primary/40" />,
     );
 
     const wrapper = container.firstElementChild;
     expect(wrapper).toHaveClass("relative");
-    expect(container.querySelector(".ai-pulse-halo")).toHaveClass("bg-primary/40");
-    expect(container.querySelector(".ai-shimmer")).toBeInTheDocument();
+    expect(container.querySelector(".status-breathe-halo")).toHaveClass("bg-primary/40");
+    expect(container.querySelector(".ai-shimmer")).not.toBeInTheDocument();
   });
 });
