@@ -41,6 +41,22 @@ Avoid standalone pages that only report information. If a page has no next actio
 - Prefer persistent layout over surprise: tabs, columns, sidebars, and empty states should stay in place across loading and zero-data states.
 - Keep typing local. Search boxes, composers, and settings forms should not rerender large adjacent panels on every keystroke.
 
+### Control density contract
+
+Single-line form controls share the typed density scale in
+`frontend/src/components/ui/control-sizing.ts`. The `default`, `compact`, and
+`dense` variants map to 36px, 32px, and 28px desktop heights respectively;
+every density retains a 44px mobile height and minimum touch target. Shared
+primitives and the `ControlTrigger` button-based picker primitive own this
+behavior. Feature code selects a density through component props and must not
+set control height, minimum-height, or vertical-padding utilities directly.
+
+The ESLint `custom/no-ad-hoc-control-sizing` rule enforces the boundary. The
+authenticated `/design-system` control gallery is the visual reference for all
+supported densities and control families. Textareas and controls with different
+interaction geometry, such as checkboxes, switches, sliders, and icon actions,
+remain outside the single-line density contract.
+
 ## Navigation
 
 The authenticated app is organized around team-visible agent work, not raw backend tables.
@@ -121,7 +137,7 @@ Use SSE or polling only for surfaces that need it:
 
 - session transcripts and run state
 - preview startup state
-- PR health/readiness state
+- PR health and review-loop state
 - queues that operators actively watch
 
 Durable backend state remains authoritative. Optimistic UI is fine, but live updates should not imply a state transition that has not been committed.

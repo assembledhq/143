@@ -105,7 +105,7 @@ reviewer/fixer lanes.
 
 ### Manual session entry point
 
-Session detail exposes a `Review` action in the Overview publish-readiness area
+Session detail exposes a `Review` action in the Overview review card
 rather than in the persistent header action cluster. Before a PR exists, the
 action appears in a compact review card. After a PR exists, it moves into the PR
 health action row next to `Merge`, `Fix tests`, and related PR actions.
@@ -653,7 +653,7 @@ Adapter responsibilities:
 If an agent does not support `/review`, hide it from the review-loop selector
 in v1. A later version can expose `generic prompt review` if users ask for it.
 
-## Validation And PR Readiness
+## Validation And Publication
 
 A clean review loop does not replace platform validation. It advances the
 session toward validation:

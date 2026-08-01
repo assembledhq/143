@@ -179,7 +179,8 @@ export function DiffToolbar({
                 }
               }}
               placeholder="Search in diff..."
-              className="h-8 border-border/60 bg-background text-xs placeholder:text-muted-foreground/60"
+              density="compact"
+              className="border-border/60 bg-background text-xs placeholder:text-muted-foreground/60"
             />
             {searchQuery ? (
               <Button
@@ -305,7 +306,8 @@ export function DiffToolbar({
               }
             }}
             placeholder="Search in diff..."
-            className="h-8 flex-1 border-border/60 bg-background text-xs placeholder:text-muted-foreground/60"
+            density="compact"
+            className="flex-1 border-border/60 bg-background text-xs placeholder:text-muted-foreground/60"
           />
           {searchQuery && (
             <Button

@@ -112,7 +112,7 @@ export function UsageExportButton({ start, end, dimension = "user", filters }: U
             <div className="space-y-1.5">
               <Label className="text-xs font-medium text-muted-foreground">Granularity</Label>
               <Select value={granularity} onValueChange={(v) => setGranularity(v as "daily" | "hourly")}>
-                <SelectTrigger className="h-8 text-xs">
+                <SelectTrigger density="compact" className="text-xs">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -124,7 +124,7 @@ export function UsageExportButton({ start, end, dimension = "user", filters }: U
             <div className="space-y-1.5">
               <Label className="text-xs font-medium text-muted-foreground">Breakdown</Label>
               <Select value={exportDimension} onValueChange={(v) => setExportDimension(v as "none" | "user" | "agent" | "model" | "reasoning")}>
-                <SelectTrigger className="h-8 text-xs">
+                <SelectTrigger density="compact" className="text-xs">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>

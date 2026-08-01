@@ -5,8 +5,7 @@
 > **Depends on:** [overall.md](../overall.md),
 > [review agent loops](../implemented/78-review-agent-loops.md),
 > [PR creation](../implemented/40-pr-creation-revamp.md),
-> [PR readiness](../implemented/107-pr-readiness-checks.md),
-> [automatic PR follow-through](../implemented/113-automated-pr-repair-and-readiness.md),
+> [automatic PR repair](../implemented/113-automated-pr-repair.md),
 > and [durable publication](../implemented/118-durable-session-publication.md)
 
 ## Decision
@@ -159,7 +158,7 @@ retries cannot switch agents.
 
 ### PR lifecycle
 
-The linked session remains canonical for CI, conflicts, readiness, feedback,
+The linked session remains canonical for CI, conflicts, review, feedback,
 and follow-up; ending or archiving it does not close the PR. There are no
 external notifications: all states use normal 143 product surfaces.
 
@@ -228,7 +227,7 @@ unsafe once personal overrides exist. Organization settings do not have this
 constraint (`ParseOrgSettings` tolerates unknown fields).
 
 Resolve against the session initiator captured at creation. Personal settings
-cannot grant permissions, bypass readiness, override automation
+cannot grant permissions, bypass review requirements, override automation
 `publish_policy = none`, or publish from read-only/review-only sessions.
 
 Organization **Session automation** shows two independent toggles; Account

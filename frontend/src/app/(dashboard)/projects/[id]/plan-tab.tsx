@@ -174,7 +174,8 @@ export function SpecsSection({
                       <Input
                         value={editTitle}
                         onChange={(e) => setEditTitle(e.target.value)}
-                        className="h-7 text-sm font-semibold"
+                        density="dense"
+                        className="text-sm font-semibold"
                       />
                     ) : (
                       <CardTitle className="text-sm">{spec.title}</CardTitle>
@@ -410,7 +411,7 @@ export function AnalysisSection({ project }: { project: Project }) {
         </p>
         <div className="flex items-center gap-3">
           <Select value={target} onValueChange={setTarget}>
-            <SelectTrigger aria-label="Analysis target" className="h-8 w-32 text-xs">
+            <SelectTrigger aria-label="Analysis target" density="compact" className="w-32 text-xs">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -420,7 +421,13 @@ export function AnalysisSection({ project }: { project: Project }) {
               <SelectItem value="all">Everything</SelectItem>
             </SelectContent>
           </Select>
-          <Input value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Focus on..." className="h-8 text-xs flex-1" />
+          <Input
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            placeholder="Focus on..."
+            density="compact"
+            className="flex-1 text-xs"
+          />
           <Button size="sm" className="h-8" onClick={() => analyzeMutation.mutate()} disabled={analyzeMutation.isPending}>
             {analyzeMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
             <span className="ml-1">Analyze</span>

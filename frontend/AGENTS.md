@@ -160,6 +160,7 @@ Numbers that users compare or scan (counts, costs, durations, dates in tables/me
 | Context | Pattern |
 |---------|---------|
 | Page-level section spacing | `space-y-6` |
+| Page-bottom scroll clearance | `pb-24 md:pb-20` via `PageContainer` |
 | Within sections (header → content) | `space-y-3` |
 | Within cards | `space-y-4` to `space-y-6` |
 | Form field groups (label → input → hint) | `space-y-2` |
@@ -167,6 +168,35 @@ Numbers that users compare or scan (counts, costs, durations, dates in tables/me
 | Button groups | `gap-3` |
 | Sidebar/panel header padding | `px-4 pt-3 pb-3` — minimum `pb-3` (12px) bottom padding to prevent scrollable content from overlapping with the last header element (e.g., filter tabs, buttons) |
 | Gap between fixed header and scrollable list | Always ensure at least 12px (`pb-3`) of bottom padding on the fixed header container so interactive elements (tabs, buttons) are fully visible and not clipped by the scroll area |
+
+### Control Density
+
+The source of truth for single-line control heights is
+`src/components/ui/control-sizing.ts`. `Input`, `SelectTrigger`,
+`CommandInput`, and the `ControlTrigger` button-based picker primitive consume
+its typed `density` variant.
+
+| Density | Mobile | Desktop | Use |
+|---------|--------|---------|-----|
+| `default` | 44px | 36px | Forms and settings |
+| `compact` | 44px | 32px | Filters, toolbars, and sidebars |
+| `dense` | 44px | 28px | Dense desktop property rails |
+
+Rules:
+
+- Choose `density="default"`, `density="compact"`, or `density="dense"`
+  through the component API. Omit the prop for the default density.
+- Do not put `h-*`, `min-h-*`, or `py-*` classes on `Input`,
+  `SelectTrigger`, `CommandInput`, or shared picker triggers in feature code.
+  ESLint enforces this with `custom/no-ad-hoc-control-sizing`.
+- Button-based selectors and comboboxes must use `ControlTrigger`; ordinary
+  action buttons continue to use the `Button` component's own size variants.
+- Compact and dense controls retain a 44px mobile minimum touch target. Their
+  smaller rhythm begins at the `sm` breakpoint.
+- Multi-line textareas, checkboxes, switches, sliders, and icon-only actions do
+  not share the single-line control height. Use their own primitive APIs.
+- The authenticated, unlinked `/design-system` route renders every density for
+  visual comparison. Update it when adding a new single-line control family.
 
 ### Border Radius
 
@@ -180,7 +210,7 @@ Cards use `shadow-sm` by default. Buttons (default/outline/destructive variants)
 
 ### Page Container
 
-Use `PageContainer` (`src/components/page-container.tsx`) for ALL dashboard pages:
+Use `PageContainer` (`src/components/page-container.tsx`) for ALL dashboard pages. It owns the standard width constraint and responsive bottom scroll clearance, so pages must not add one-off bottom padding:
 
 ```tsx
 <PageContainer size="default">
@@ -517,7 +547,7 @@ State tokens (`success`, `warning`, `attention`, `info`, `destructive`) adapt to
 
 | Component | Location | Purpose |
 |-----------|----------|---------|
-| `PageContainer` | `src/components/page-container.tsx` | Page width constraint |
+| `PageContainer` | `src/components/page-container.tsx` | Page width constraint + bottom scroll clearance |
 | `PageHeader` | `src/components/page-header.tsx` | Standard page title + description + action |
 | `EmptyState` | `src/components/empty-state.tsx` | Empty list/data placeholder |
 | `AuthenticatedLayout` | `src/components/authenticated-layout.tsx` | Sidebar + main content shell |
@@ -541,7 +571,7 @@ Use the `Kbd` primitive (`src/components/ui/kbd.tsx`) for every keyboard shortcu
 | Secondary action / Back | `outline` | `sm` |
 | Filter tabs | `default`/`ghost` toggle | `sm` |
 | Inline destructive | `ghost` + `text-destructive` | `sm` |
-| Save/Submit | `default` | default (h-8) |
+| Save/Submit | `default` | default |
 | Modal cancel | via `AlertDialogCancel` or `outline` | default |
 
 ## Text Casing

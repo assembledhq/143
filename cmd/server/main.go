@@ -494,7 +494,6 @@ func main() {
 			Automations:         automationStore,
 			AutomationRuns:      automationRunStore,
 			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
-			PRReadiness:         db.NewPRReadinessStore(pool),
 			CodeReviews:         codeReviewStore,
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 			Previews:            previewStore,
@@ -1518,7 +1517,6 @@ func buildServices(
 		AutomationGoalImprovements: automationGoalImprovementUpdater,
 		Issues:                     issueStore,
 		Repositories:               repoStore,
-		PRReadiness:                db.NewPRReadinessStore(pool),
 		Orgs:                       orgStore,
 		Jobs:                       jobStore,
 		GitHub:                     ghSvc,
@@ -1575,7 +1573,6 @@ func buildServices(
 		orgStore,
 		llmClient,
 		prTemplateStore,
-		db.NewPRReadinessStore(pool),
 		sessionThreadStore,
 		reviewLoopStore,
 		redisClient,
@@ -1613,7 +1610,6 @@ func buildServices(
 			Sessions: sessionStore,
 			Threads:  threadSvc,
 		},
-		reviewloopservice.WithAutoReadinessDependencies(orgStore, userStore, pool, jobStore),
 	)
 
 	logger.Info().
@@ -1889,7 +1885,6 @@ func wireWorkerPRService(
 	orgStore *db.OrganizationStore,
 	llmClient llm.Client,
 	prTemplateStore *db.PRTemplateStore,
-	prReadinessStore *db.PRReadinessStore,
 	sessionThreadStore *db.SessionThreadStore,
 	reviewLoopStore *db.SessionReviewLoopStore,
 	redisClient *cache.Client,
@@ -1909,7 +1904,6 @@ func wireWorkerPRService(
 	prService.SetOrgStore(orgStore)
 	prService.SetLLMClient(llmClient)
 	prService.SetPRTemplateStore(prTemplateStore)
-	prService.SetReadinessStore(prReadinessStore)
 	prService.SetSessionThreadStore(sessionThreadStore)
 	prService.SetSessionReviewLoopStore(reviewLoopStore)
 	prService.SetRedisClient(redisClient)

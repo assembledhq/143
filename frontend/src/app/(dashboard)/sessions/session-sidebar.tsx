@@ -1062,7 +1062,8 @@ export function SessionSidebar() {
                   e.currentTarget.blur();
                 }
               }}
-              className="h-8 pl-8 pr-8 text-xs sm:h-8"
+              density="compact"
+              className="pl-8 pr-8 text-xs"
             />
             <Kbd className="absolute right-2 top-1/2 hidden -translate-y-1/2 md:inline-flex">/</Kbd>
           </div>

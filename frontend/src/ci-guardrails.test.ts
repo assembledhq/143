@@ -18,6 +18,16 @@ describe("frontend CI guardrails", () => {
     expect(packageJson.scripts?.["test:ci"]).toBe("vitest run --reporter=dot");
   });
 
+  it("enforces shared control density through ESLint", () => {
+    const eslintConfig = fs.readFileSync(
+      path.join(frontendDir, "eslint.config.mjs"),
+      "utf8"
+    );
+
+    expect(eslintConfig).toContain('"custom/no-ad-hoc-control-sizing": "error"');
+    expect(eslintConfig).toContain("no-ad-hoc-control-sizing.mjs");
+  });
+
   it("does not run duplicate lint in the frontend test workflow", () => {
     const workflow = fs.readFileSync(
       path.join(repoRoot, ".github", "workflows", "ci.yml"),

@@ -30,7 +30,6 @@ import (
 	humaninputsvc "github.com/assembledhq/143/internal/services/humaninput"
 	"github.com/assembledhq/143/internal/services/linear"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
-	prreadinesssvc "github.com/assembledhq/143/internal/services/prreadiness"
 	"github.com/assembledhq/143/internal/services/sessiontimeline"
 	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/go-chi/chi/v5"
@@ -83,22 +82,18 @@ type SessionHandler struct {
 	txStarter          db.TxStarter
 	messageStore       *db.SessionMessageStore
 	reviewLoopStore    *db.SessionReviewLoopStore
-	readinessStore     *db.PRReadinessStore
 	reviewCommentStore *db.SessionReviewCommentStore
 	linkStore          *db.SessionIssueLinkStore
 	slackSessionLinks  *db.SlackSessionLinkStore
 	issueSnapshots     *db.SessionTurnIssueSnapshotStore
 	threadStore        *db.SessionThreadStore
-	readinessRunner    interface {
-		EnqueueRun(ctx context.Context, req prreadinesssvc.EnqueueRunRequest) (*models.PRReadinessRun, error)
-	}
-	threadInboxStore *db.ThreadInboxStore
-	attributionStore *db.SessionAttributionStore
-	sandboxHolders   *db.SessionSandboxHolderStore
-	viewStore        *db.SessionViewStore
-	memberships      sessionMembershipStore
-	prCredentials    githubStatusCredentialStore
-	prAuthChecker    interface {
+	threadInboxStore   *db.ThreadInboxStore
+	attributionStore   *db.SessionAttributionStore
+	sandboxHolders     *db.SessionSandboxHolderStore
+	viewStore          *db.SessionViewStore
+	memberships        sessionMembershipStore
+	prCredentials      githubStatusCredentialStore
+	prAuthChecker      interface {
 		HasValidCredential(ctx context.Context, orgID, userID uuid.UUID) (bool, error)
 	}
 	snapshotStore    storage.SnapshotStore // optional — enables snapshot cleanup on archive
@@ -2692,461 +2687,26 @@ func (h *SessionHandler) SetReviewLoopStore(store *db.SessionReviewLoopStore) {
 	h.reviewLoopStore = store
 }
 
-func (h *SessionHandler) SetReadinessStore(store *db.PRReadinessStore) {
-	h.readinessStore = store
-}
-
-func (h *SessionHandler) SetReadinessRunner(runner interface {
-	EnqueueRun(ctx context.Context, req prreadinesssvc.EnqueueRunRequest) (*models.PRReadinessRun, error)
-}) {
-	h.readinessRunner = runner
-}
-
-func (h *SessionHandler) GetReadiness(w http.ResponseWriter, r *http.Request) {
-	if h.readinessStore == nil {
-		writeError(w, r, http.StatusNotImplemented, "READINESS_NOT_CONFIGURED", "PR readiness is not configured")
-		return
-	}
-	orgID := middleware.OrgIDFromContext(r.Context())
-	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
-		return
-	}
-	if _, err := h.runStore.GetByID(r.Context(), orgID, sessionID); err != nil {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
-		return
-	}
-	target, err := h.requestedChangeset(r.Context(), orgID, sessionID, r.URL.Query().Get("changeset_id"))
-	if err != nil {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "pull request not found")
-		return
-	}
-	run, err := h.readinessStore.GetLatestByChangeset(r.Context(), orgID, sessionID, target.ID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeJSON(w, http.StatusOK, models.SingleResponse[models.PRReadinessResponse]{Data: models.PRReadinessResponse{}})
-			return
-		}
-		writeError(w, r, http.StatusInternalServerError, "READINESS_LOAD_FAILED", "failed to load PR readiness", err)
-		return
-	}
-	role := models.Role(middleware.ActiveRoleFromContext(r.Context()))
-	for i := range run.Checks {
-		run.Checks[i] = run.Checks[i].WithEffectiveRole(role)
-	}
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.PRReadinessResponse]{Data: models.PRReadinessResponse{Latest: run}})
-}
-
-func (h *SessionHandler) GetReadinessContext(w http.ResponseWriter, r *http.Request) {
-	if h.readinessStore == nil {
-		writeError(w, r, http.StatusNotImplemented, "READINESS_NOT_CONFIGURED", "PR readiness is not configured")
-		return
-	}
-	orgID := middleware.OrgIDFromContext(r.Context())
-	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
-		return
-	}
-	if _, err := h.runStore.GetByID(r.Context(), orgID, sessionID); err != nil {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
-		return
-	}
-	contextValue, err := h.readinessStore.GetContext(r.Context(), orgID, sessionID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeJSON(w, http.StatusOK, models.SingleResponse[models.PRReadinessContext]{Data: models.PRReadinessContext{OrgID: orgID, SessionID: sessionID}})
-			return
-		}
-		writeError(w, r, http.StatusInternalServerError, "READINESS_CONTEXT_LOAD_FAILED", "failed to load PR readiness context", err)
-		return
-	}
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.PRReadinessContext]{Data: contextValue})
-}
-
-func (h *SessionHandler) UpsertReadinessContext(w http.ResponseWriter, r *http.Request) {
-	if h.readinessStore == nil {
-		writeError(w, r, http.StatusNotImplemented, "READINESS_NOT_CONFIGURED", "PR readiness is not configured")
-		return
-	}
-	switch models.Role(middleware.ActiveRoleFromContext(r.Context())) {
-	case models.RoleAdmin, models.RoleMember, models.RoleBuilder:
-	default:
-		writeError(w, r, http.StatusForbidden, "FORBIDDEN", "insufficient permissions")
-		return
-	}
-	orgID := middleware.OrgIDFromContext(r.Context())
-	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
-		return
-	}
-	if _, err := h.runStore.GetByID(r.Context(), orgID, sessionID); err != nil {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
-		return
-	}
-	var req struct {
-		IssueLessReason string `json:"issue_less_reason"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
-		return
-	}
-	if len(req.IssueLessReason) > maxReadinessReasonLength {
-		writeError(w, r, http.StatusBadRequest, "READINESS_REASON_TOO_LONG", fmt.Sprintf("issue_less_reason must not exceed %d characters", maxReadinessReasonLength))
-		return
-	}
-	user := middleware.UserFromContext(r.Context())
-	if user == nil {
-		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user is required")
-		return
-	}
-	contextValue, err := h.readinessStore.UpsertContext(r.Context(), orgID, sessionID, req.IssueLessReason, user.ID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "READINESS_CONTEXT_SAVE_FAILED", "failed to save PR readiness context", err)
-		return
-	}
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.PRReadinessContext]{Data: contextValue})
-}
-
-func (h *SessionHandler) RunReadiness(w http.ResponseWriter, r *http.Request) {
-	if h.readinessRunner == nil {
-		writeError(w, r, http.StatusNotImplemented, "READINESS_NOT_CONFIGURED", "PR readiness is not configured")
-		return
-	}
-	orgID := middleware.OrgIDFromContext(r.Context())
-	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
-		return
-	}
-	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
-	if err != nil {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
-		return
-	}
-	target, err := h.requestedChangeset(r.Context(), orgID, sessionID, r.URL.Query().Get("changeset_id"))
-	if err != nil {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "pull request not found")
-		return
-	}
-	if target.IsPrimary {
-		if !h.requireSnapshotQuiescent(w, r, orgID, session, "running readiness checks") {
-			return
-		}
-	} else if target.WorktreePath == nil || target.HeadSHA == nil {
-		writeError(w, r, http.StatusConflict, "CHANGESET_NOT_MATERIALIZED", "materialize this pull request before running readiness checks")
-		return
-	}
-	var triggeredByUserID *uuid.UUID
-	if user := middleware.UserFromContext(r.Context()); user != nil {
-		triggeredByUserID = &user.ID
-	}
-	run, err := h.readinessRunner.EnqueueRun(r.Context(), prreadinesssvc.EnqueueRunRequest{
-		OrgID:             orgID,
-		Session:           session,
-		TriggeredByUserID: triggeredByUserID,
-		ChangesetID:       &target.ID,
-		ChangesetHeadSHA:  target.HeadSHA,
-	})
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "READINESS_ENQUEUE_FAILED", "failed to enqueue PR readiness checks", err)
-		return
-	}
-	writeJSON(w, http.StatusAccepted, models.SingleResponse[models.PRReadinessRun]{Data: *run})
-}
-
-// maxReadinessReasonLength caps free-text reasons (bypass reason, issue-less
-// context) so they can't bloat their text columns under the 1 MB body limit.
-const maxReadinessReasonLength = 2000
-
-func (h *SessionHandler) CreateReadinessBypass(w http.ResponseWriter, r *http.Request) {
-	if h.readinessStore == nil {
-		writeError(w, r, http.StatusNotImplemented, "READINESS_NOT_CONFIGURED", "PR readiness is not configured")
-		return
-	}
-	orgID := middleware.OrgIDFromContext(r.Context())
-	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
-		return
-	}
-	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
-	if err != nil {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
-		return
-	}
-	var req struct {
-		Reason string `json:"reason"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
-		return
-	}
-	if len(req.Reason) > maxReadinessReasonLength {
-		writeError(w, r, http.StatusBadRequest, "READINESS_REASON_TOO_LONG", fmt.Sprintf("reason must not exceed %d characters", maxReadinessReasonLength))
-		return
-	}
-	user := middleware.UserFromContext(r.Context())
-	if user == nil {
-		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user is required")
-		return
-	}
-	run, err := h.readinessStore.GetLatestBySession(r.Context(), orgID, sessionID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, r, http.StatusConflict, "READINESS_REQUIRED_BEFORE_BYPASS", "Readiness must complete before blockers can be bypassed")
-			return
-		}
-		writeError(w, r, http.StatusInternalServerError, "READINESS_LOAD_FAILED", "failed to load PR readiness", err)
-		return
-	}
-	if run.Status == models.PRReadinessRunStatusQueued || run.Status == models.PRReadinessRunStatusRunning {
-		writeError(w, r, http.StatusConflict, "READINESS_RUNNING", "Readiness is still running and cannot be bypassed")
-		return
-	}
-	if run.EvaluatedWorkspaceRevision != session.WorkspaceRevision || stringPtrValue(run.EvaluatedSnapshotKey) != stringPtrValue(session.SnapshotKey) {
-		writeError(w, r, http.StatusConflict, "READINESS_STALE", "Stale readiness cannot be bypassed; re-run checks first")
-		return
-	}
-	policy, err := h.readinessStore.ResolvePolicy(r.Context(), orgID, session.RepositoryID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "READINESS_POLICY_LOAD_FAILED", "failed to load PR readiness policy", err)
-		return
-	}
-	role := models.Role(middleware.ActiveRoleFromContext(r.Context()))
-	bypass, err := h.readinessStore.CreateBypassWithPolicy(r.Context(), orgID, run.ID, user.ID, req.Reason, role, policy.Config)
-	if err != nil {
-		switch {
-		case errors.Is(err, db.ErrBypassNotAllowed):
-			writeError(w, r, http.StatusConflict, "READINESS_BYPASS_NOT_ALLOWED", err.Error())
-		case errors.Is(err, db.ErrBypassNotEligible):
-			writeError(w, r, http.StatusConflict, "READINESS_BYPASS_NOT_ELIGIBLE", err.Error())
-		default:
-			writeError(w, r, http.StatusInternalServerError, "READINESS_BYPASS_FAILED", "failed to record PR readiness bypass", err)
-		}
-		return
-	}
-	bypassID := bypass.ID.String()
-	sessionIDCopy := sessionID
-	details, _ := json.Marshal(map[string]any{
-		"readiness_run_id": bypass.ReadinessRunID,
-		"bypassed_checks":  bypass.BypassedChecks,
-		"reason":           bypass.Reason,
-	})
-	emitUserAuditWithSession(h.audit, r, models.AuditActionPRReadinessBypassed, models.AuditResourcePRReadinessBypass, &bypassID, &sessionIDCopy, nil, json.RawMessage(details))
-	writeJSON(w, http.StatusCreated, models.SingleResponse[models.PRReadinessBypass]{Data: bypass})
-}
-
-func (h *SessionHandler) GetReadinessPolicy(w http.ResponseWriter, r *http.Request) {
-	if h.readinessStore == nil {
-		writeError(w, r, http.StatusNotImplemented, "READINESS_NOT_CONFIGURED", "PR readiness is not configured")
-		return
-	}
-	orgID := middleware.OrgIDFromContext(r.Context())
-	repositoryID, ok := parseOptionalUUIDQuery(w, r, "repository_id")
-	if !ok {
-		return
-	}
-	if !h.validateReadinessRepositoryScope(w, r, orgID, repositoryID) {
-		return
-	}
-	policy, err := h.readinessStore.ResolvePolicy(r.Context(), orgID, repositoryID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "READINESS_POLICY_LOAD_FAILED", "failed to load PR readiness policy", err)
-		return
-	}
-	counts, err := h.readinessStore.ListBypassCounts(r.Context(), orgID, repositoryID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "READINESS_BYPASS_COUNTS_LOAD_FAILED", "failed to load PR readiness bypass counts", err)
-		return
-	}
-	policy.BypassCounts = &counts
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.PRReadinessResolvedPolicy]{Data: policy})
-}
-
-func (h *SessionHandler) PutReadinessPolicy(w http.ResponseWriter, r *http.Request) {
-	if h.readinessStore == nil {
-		writeError(w, r, http.StatusNotImplemented, "READINESS_NOT_CONFIGURED", "PR readiness is not configured")
-		return
-	}
-	orgID := middleware.OrgIDFromContext(r.Context())
-	var req struct {
-		RepositoryID *uuid.UUID                     `json:"repository_id,omitempty"`
-		Config       models.PRReadinessPolicyConfig `json:"config"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
-		return
-	}
-	user := middleware.UserFromContext(r.Context())
-	if user == nil {
-		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user is required")
-		return
-	}
-	if !h.validateReadinessRepositoryScope(w, r, orgID, req.RepositoryID) {
-		return
-	}
-	if err := req.Config.Validate(); err != nil {
-		writeError(w, r, http.StatusBadRequest, "READINESS_POLICY_INVALID", "invalid PR readiness policy", err)
-		return
-	}
-	record, err := h.readinessStore.SavePolicy(r.Context(), orgID, req.RepositoryID, req.Config, &user.ID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "READINESS_POLICY_SAVE_FAILED", "failed to save PR readiness policy", err)
-		return
-	}
-	resourceID := record.ID.String()
-	details, _ := json.Marshal(map[string]any{
-		"repository_id": record.RepositoryID,
-		"source":        "api",
-	})
-	emitUserAudit(h.audit, r, models.AuditActionPRReadinessPolicyUpdated, models.AuditResourcePRReadinessPolicy, &resourceID, json.RawMessage(details))
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.PRReadinessPolicyRecord]{Data: record})
-}
-
-func (h *SessionHandler) ListReadinessCustomChecks(w http.ResponseWriter, r *http.Request) {
-	if h.readinessStore == nil {
-		writeError(w, r, http.StatusNotImplemented, "READINESS_NOT_CONFIGURED", "PR readiness is not configured")
-		return
-	}
-	orgID := middleware.OrgIDFromContext(r.Context())
-	repositoryID, ok := parseOptionalUUIDQuery(w, r, "repository_id")
-	if !ok {
-		return
-	}
-	if !h.validateReadinessRepositoryScope(w, r, orgID, repositoryID) {
-		return
-	}
-	checks, err := h.readinessStore.ListCustomChecks(r.Context(), orgID, repositoryID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "READINESS_CUSTOM_CHECKS_LOAD_FAILED", "failed to load PR readiness custom checks", err)
-		return
-	}
-	writeJSON(w, http.StatusOK, models.ListResponse[models.PRReadinessCustomCheck]{Data: checks})
-}
-
-func (h *SessionHandler) CreateReadinessCustomCheck(w http.ResponseWriter, r *http.Request) {
-	_ = middleware.OrgIDFromContext(r.Context())
-	h.saveReadinessCustomCheck(w, r, nil)
-}
-
-func (h *SessionHandler) UpdateReadinessCustomCheck(w http.ResponseWriter, r *http.Request) {
-	_ = middleware.OrgIDFromContext(r.Context())
-	id, err := uuid.Parse(chi.URLParam(r, "check_id"))
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid custom check ID")
-		return
-	}
-	h.saveReadinessCustomCheck(w, r, &id)
-}
-
-func (h *SessionHandler) saveReadinessCustomCheck(w http.ResponseWriter, r *http.Request, id *uuid.UUID) {
-	if h.readinessStore == nil {
-		writeError(w, r, http.StatusNotImplemented, "READINESS_NOT_CONFIGURED", "PR readiness is not configured")
-		return
-	}
-	orgID := middleware.OrgIDFromContext(r.Context())
-	var req models.PRReadinessCustomCheck
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
-		return
-	}
-	if id != nil {
-		req.ID = *id
-	}
-	req.Source = models.PRReadinessCustomCheckSourceOrgSettings
-	if err := req.Validate(); err != nil {
-		writeError(w, r, http.StatusBadRequest, "READINESS_CUSTOM_CHECK_INVALID", err.Error())
-		return
-	}
-	user := middleware.UserFromContext(r.Context())
-	if user == nil {
-		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user is required")
-		return
-	}
-	if id == nil && !h.validateReadinessRepositoryScope(w, r, orgID, req.RepositoryID) {
-		return
-	}
-	var check models.PRReadinessCustomCheck
-	var err error
-	if id != nil {
-		check, err = h.readinessStore.UpdateCustomCheck(r.Context(), orgID, *id, req, &user.ID)
-	} else {
-		check, err = h.readinessStore.SaveCustomCheck(r.Context(), orgID, req, &user.ID)
-	}
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "READINESS_CUSTOM_CHECK_SAVE_FAILED", "failed to save PR readiness custom check", err)
-		return
-	}
-	resourceID := check.ID.String()
-	details, _ := json.Marshal(map[string]any{
-		"check_key":     check.CheckKey,
-		"repository_id": check.RepositoryID,
-	})
-	emitUserAudit(h.audit, r, models.AuditActionPRReadinessCustomCheckUpdated, models.AuditResourcePRReadinessCustomCheck, &resourceID, json.RawMessage(details))
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.PRReadinessCustomCheck]{Data: check})
-}
-
-func (h *SessionHandler) DeleteReadinessCustomCheck(w http.ResponseWriter, r *http.Request) {
-	if h.readinessStore == nil {
-		writeError(w, r, http.StatusNotImplemented, "READINESS_NOT_CONFIGURED", "PR readiness is not configured")
-		return
-	}
-	orgID := middleware.OrgIDFromContext(r.Context())
-	id, err := uuid.Parse(chi.URLParam(r, "check_id"))
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid custom check ID")
-		return
-	}
-	if err := h.readinessStore.DeleteCustomCheck(r.Context(), orgID, id); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "custom check not found")
-			return
-		}
-		writeError(w, r, http.StatusInternalServerError, "READINESS_CUSTOM_CHECK_DELETE_FAILED", "failed to delete PR readiness custom check", err)
-		return
-	}
-	resourceID := id.String()
-	emitUserAudit(h.audit, r, models.AuditActionPRReadinessCustomCheckDeleted, models.AuditResourcePRReadinessCustomCheck, &resourceID, nil)
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (h *SessionHandler) validateReadinessRepositoryScope(w http.ResponseWriter, r *http.Request, orgID uuid.UUID, repositoryID *uuid.UUID) bool {
-	if repositoryID == nil {
+// requireBuilderReviewForTarget is the builder publication gate. Review
+// evidence is session-scoped: a clean review loop describes the session
+// workspace at a snapshot key. A non-primary materialized changeset is a
+// separate worktree that no review loop describes, so there is no evidence to
+// gate on and the request is refused rather than admitted on unrelated
+// evidence. Engineers and admins are unaffected.
+func (h *SessionHandler) requireBuilderReviewForTarget(w http.ResponseWriter, r *http.Request, orgID uuid.UUID, session models.Session, changeset *models.SessionChangeset) bool {
+	if middleware.ActiveRoleFromContext(r.Context()) != string(models.RoleBuilder) {
 		return true
 	}
-	if _, err := requireActiveRepo(r.Context(), h.repoStore, orgID, *repositoryID); err != nil {
-		switch {
-		case errors.Is(err, errRepoDisconnected):
-			writeError(w, r, http.StatusBadRequest, "REPO_DISCONNECTED", "repository is disconnected; reconnect it before configuring PR readiness")
-		case errors.Is(err, errRepoStoreUnconfigured):
-			writeError(w, r, http.StatusInternalServerError, "REPO_STORE_UNCONFIGURED", "repository lookup not configured")
-		default:
-			writeError(w, r, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "repository not found")
-		}
+	if changeset != nil && !changeset.IsPrimary && changeset.WorktreePath != nil {
+		writeError(w, r, http.StatusConflict, "REVIEW_REQUIRED_BEFORE_PR",
+			"Builders cannot publish a separate pull request branch: Review only produces evidence for the primary session workspace")
 		return false
 	}
-	return true
-}
-
-func parseOptionalUUIDQuery(w http.ResponseWriter, r *http.Request, key string) (*uuid.UUID, bool) {
-	value := strings.TrimSpace(r.URL.Query().Get(key))
-	if value == "" {
-		return nil, true
-	}
-	id, err := uuid.Parse(value)
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_QUERY", "invalid "+key)
-		return nil, false
-	}
-	return &id, true
+	return h.requireBuilderReviewForCurrentSnapshot(w, r, orgID, session.ID, stringPtrValue(session.SnapshotKey))
 }
 
 func (h *SessionHandler) requireBuilderReviewForCurrentSnapshot(w http.ResponseWriter, r *http.Request, orgID, sessionID uuid.UUID, snapshotKey string) bool {
-	role := middleware.ActiveRoleFromContext(r.Context())
-	if role != string(models.RoleBuilder) {
+	if middleware.ActiveRoleFromContext(r.Context()) != string(models.RoleBuilder) {
 		return true
 	}
 	if h.reviewLoopStore == nil {
@@ -3167,68 +2727,6 @@ func (h *SessionHandler) requireBuilderReviewForCurrentSnapshot(w http.ResponseW
 	return false
 }
 
-func (h *SessionHandler) requirePRReadinessForBuilder(w http.ResponseWriter, r *http.Request, orgID uuid.UUID, session models.Session, changeset *models.SessionChangeset) bool {
-	role := middleware.ActiveRoleFromContext(r.Context())
-	if role != string(models.RoleBuilder) {
-		return true
-	}
-	if h.readinessStore == nil {
-		if changeset != nil && changeset.WorktreePath != nil {
-			writeError(w, r, http.StatusConflict, "READINESS_REQUIRED_BEFORE_PR", "Changeset readiness is not configured")
-			return false
-		}
-		return h.requireBuilderReviewForCurrentSnapshot(w, r, orgID, session.ID, stringPtrValue(session.SnapshotKey))
-	}
-	resolved, err := h.readinessStore.ResolvePolicy(r.Context(), orgID, session.RepositoryID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "READINESS_POLICY_CHECK_FAILED", "failed to check PR readiness policy", err)
-		return false
-	}
-	if !resolved.Config.RequiresRoleReadiness(models.RoleBuilder) {
-		return true
-	}
-	var run *models.PRReadinessRun
-	if changeset != nil {
-		run, err = h.readinessStore.GetLatestByChangeset(r.Context(), orgID, session.ID, changeset.ID)
-	} else {
-		run, err = h.readinessStore.GetLatestBySession(r.Context(), orgID, session.ID)
-	}
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, r, http.StatusConflict, "READINESS_REQUIRED_BEFORE_PR", "Builders must run readiness checks before creating a PR")
-			return false
-		}
-		writeError(w, r, http.StatusInternalServerError, "READINESS_POLICY_CHECK_FAILED", "failed to check PR readiness", err)
-		return false
-	}
-	if run.Status == models.PRReadinessRunStatusQueued || run.Status == models.PRReadinessRunStatusRunning {
-		writeError(w, r, http.StatusConflict, "READINESS_RUNNING", "PR readiness checks are still running")
-		return false
-	}
-	stale := run.EvaluatedWorkspaceRevision != session.WorkspaceRevision || stringPtrValue(run.EvaluatedSnapshotKey) != stringPtrValue(session.SnapshotKey)
-	if changeset != nil && changeset.WorktreePath != nil {
-		stale = stringPtrValue(run.EvaluatedHeadSHA) != stringPtrValue(changeset.HeadSHA)
-	}
-	if stale {
-		writeError(w, r, http.StatusConflict, "READINESS_STALE", "Readiness is stale after the latest file changes; re-run readiness checks")
-		return false
-	}
-	if run.Status == models.PRReadinessRunStatusFailed {
-		writeError(w, r, http.StatusConflict, "READINESS_BLOCKED", "PR readiness blockers must pass before builders can create a PR")
-		return false
-	}
-	if blockers := run.UnbypassedBlockingCheckKeys(models.RoleBuilder); len(blockers) > 0 {
-		writeError(w, r, http.StatusConflict, "READINESS_BLOCKED", "PR readiness blockers must pass or be bypassed before builders can create a PR")
-		return false
-	}
-	return true
-}
-
-// CreatePR handles POST /sessions/{id}/pr — enqueues a job that pushes the
-// session's snapshot to GitHub and opens a pull request. The session must
-// still have a snapshot and must not already have an associated PR. While a
-// prior attempt is in flight (queued or pushing), returns 409 to prevent
-// double-submits; a failed prior attempt may be retried.
 func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -3341,11 +2839,7 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if h.maybeAutoRunPRReadinessOnCreatePR(w, r, orgID, session, &targetChangeset) {
-		return
-	}
-
-	if !h.requirePRReadinessForBuilder(w, r, orgID, session, &targetChangeset) {
+	if !h.requireBuilderReviewForTarget(w, r, orgID, session, &targetChangeset) {
 		return
 	}
 
@@ -3431,73 +2925,6 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionPRRequested, models.AuditResourceSession, &sessionIDStr, &session.ID, nil,
 		marshalAuditDetails(h.logger, prDetails))
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
-}
-
-func (h *SessionHandler) maybeAutoRunPRReadinessOnCreatePR(w http.ResponseWriter, r *http.Request, orgID uuid.UUID, session models.Session, changeset *models.SessionChangeset) bool {
-	if h.readinessStore == nil || h.readinessRunner == nil {
-		return false
-	}
-	resolved, err := h.readinessStore.ResolvePolicy(r.Context(), orgID, session.RepositoryID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "READINESS_POLICY_CHECK_FAILED", "failed to check PR readiness policy", err)
-		return true
-	}
-	if !resolved.Config.AutoRun.OnCreatePR {
-		return false
-	}
-	var latest *models.PRReadinessRun
-	if changeset != nil {
-		latest, err = h.readinessStore.GetLatestByChangeset(r.Context(), orgID, session.ID, changeset.ID)
-	} else {
-		latest, err = h.readinessStore.GetLatestBySession(r.Context(), orgID, session.ID)
-	}
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, r, http.StatusInternalServerError, "READINESS_LOAD_FAILED", "failed to load PR readiness", err)
-		return true
-	}
-	stale := latest != nil && (latest.EvaluatedWorkspaceRevision != session.WorkspaceRevision || stringPtrValue(latest.EvaluatedSnapshotKey) != stringPtrValue(session.SnapshotKey))
-	if changeset != nil && changeset.WorktreePath != nil && latest != nil {
-		stale = stringPtrValue(latest.EvaluatedHeadSHA) != stringPtrValue(changeset.HeadSHA)
-	}
-	needsRun := errors.Is(err, pgx.ErrNoRows) ||
-		latest == nil ||
-		latest.Status == models.PRReadinessRunStatusQueued ||
-		latest.Status == models.PRReadinessRunStatusRunning || stale
-	if !needsRun {
-		return false
-	}
-	var userID *uuid.UUID
-	if user := middleware.UserFromContext(r.Context()); user != nil {
-		userID = &user.ID
-	}
-	run, err := h.readinessRunner.EnqueueRun(r.Context(), prreadinesssvc.EnqueueRunRequest{
-		OrgID:             orgID,
-		Session:           session,
-		TriggeredByUserID: userID,
-		ChangesetID:       optionalChangesetID(changeset),
-		ChangesetHeadSHA:  optionalChangesetHeadSHA(changeset),
-	})
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "READINESS_ENQUEUE_FAILED", "failed to enqueue PR readiness checks", err)
-		return true
-	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"status": "readiness_queued", "readiness_run_id": run.ID})
-	return true
-}
-
-func optionalChangesetID(changeset *models.SessionChangeset) *uuid.UUID {
-	if changeset == nil {
-		return nil
-	}
-	id := changeset.ID
-	return &id
-}
-
-func optionalChangesetHeadSHA(changeset *models.SessionChangeset) *string {
-	if changeset == nil {
-		return nil
-	}
-	return changeset.HeadSHA
 }
 
 // CreateBranch handles POST /sessions/{id}/branch — enqueues a job that
@@ -3717,7 +3144,7 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if !h.requirePRReadinessForBuilder(w, r, orgID, session, &targetChangeset) {
+	if !h.requireBuilderReviewForTarget(w, r, orgID, session, &targetChangeset) {
 		return
 	}
 
@@ -5528,4 +4955,17 @@ func (h *SessionHandler) UnarchiveSession(w http.ResponseWriter, r *http.Request
 // paths all enforce identical rules (see internal/gitref).
 func isValidGitRef(s string) bool {
 	return gitref.IsValidRef(s)
+}
+
+func parseOptionalUUIDQuery(w http.ResponseWriter, r *http.Request, key string) (*uuid.UUID, bool) {
+	value := strings.TrimSpace(r.URL.Query().Get(key))
+	if value == "" {
+		return nil, true
+	}
+	id, err := uuid.Parse(value)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_QUERY", "invalid "+key)
+		return nil, false
+	}
+	return &id, true
 }

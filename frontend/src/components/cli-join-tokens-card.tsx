@@ -151,7 +151,7 @@ export function CLIJoinTokensCard() {
             <div className="space-y-1.5">
               <Label htmlFor="join-token-role">Role granted</Label>
               <Select value={role} onValueChange={setRole}>
-                <SelectTrigger id="join-token-role" className="h-11 w-full sm:h-9 sm:w-32">
+                <SelectTrigger id="join-token-role" className="w-full sm:w-32">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>

@@ -1,12 +1,12 @@
 "use client";
 
-import type { InputHTMLAttributes, TextareaHTMLAttributes } from "react";
+import type { ComponentProps, TextareaHTMLAttributes } from "react";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
 
 type DebouncedInputProps = Omit<
-  InputHTMLAttributes<HTMLInputElement>,
+  ComponentProps<typeof Input>,
   "value" | "onChange" | "onBlur"
 > & {
   serverValue: string;

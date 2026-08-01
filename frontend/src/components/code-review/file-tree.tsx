@@ -272,7 +272,8 @@ export const FileTree = memo(function FileTree({
             placeholder="Filter files..."
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            className="h-8 border-border/70 bg-background pl-7 pr-2 text-xs placeholder:text-muted-foreground/50"
+            density="compact"
+            className="border-border/70 bg-background pl-7 pr-2 text-xs placeholder:text-muted-foreground/50"
           />
         </div>
         {variant === "sheet" ? (

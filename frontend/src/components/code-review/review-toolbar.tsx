@@ -165,7 +165,9 @@ export function ReviewToolbar({
               }
             }}
             placeholder="Search in diff..."
-            className="h-7 flex-1 border-none bg-transparent px-0 py-0 text-xs text-foreground shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0"
+            density="dense"
+            inset="none"
+            className="flex-1 border-none bg-transparent text-xs text-foreground shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0"
           />
           {searchQuery && (
             <Button

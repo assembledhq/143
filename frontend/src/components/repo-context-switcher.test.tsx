@@ -83,6 +83,14 @@ describe("RepoContextSwitcher", () => {
     });
 
     expect(screen.getByText("All repositories")).toBeInTheDocument();
+    expect(screen.getByTestId("repo-context-switcher")).toHaveAttribute(
+      "data-density",
+      "compact",
+    );
+    expect(screen.getByTestId("repo-context-switcher")).toHaveClass(
+      "h-11",
+      "sm:h-8",
+    );
   });
 
   it("opens dropdown and shows repo items on click", async () => {

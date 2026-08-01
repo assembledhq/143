@@ -16,6 +16,7 @@ import { PageHeader } from "@/components/page-header";
 import { SettingsLastActivity } from "@/components/settings/settings-last-activity";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { controlHeightVariants } from "@/components/ui/control-sizing";
 import { DisclosureCard } from "@/components/ui/disclosure-card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -268,7 +269,11 @@ function BoundedNumberInput({
       <div
         role="group"
         aria-label={`${label} controls`}
-        className="flex h-9 min-w-0 overflow-hidden rounded-md border border-input bg-background shadow-xs focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/20"
+        data-density="default"
+        className={cn(
+          "flex min-w-0 overflow-hidden rounded-md border border-input bg-background shadow-xs focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/20",
+          controlHeightVariants(),
+        )}
       >
         <Button
           type="button"
@@ -295,7 +300,7 @@ function BoundedNumberInput({
             onChange={onChange}
             onBlur={onBlur}
             aria-label={label}
-            className="h-full rounded-none border-0 focus-visible:ring-0"
+            className="rounded-none border-0 focus-visible:ring-0"
           />
         </UnitInput>
         <Button

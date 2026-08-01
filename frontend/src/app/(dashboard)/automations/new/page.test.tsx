@@ -122,9 +122,14 @@ describe("NewAutomationPage", () => {
     await user.click(screen.getByRole("option", { name: "weeks" }));
 
     expect(screen.getByText("at")).toBeInTheDocument();
-    expect(screen.getByLabelText("Interval value")).toHaveClass("h-9");
-    expect(screen.getByRole("combobox", { name: "Interval unit" })).toHaveClass("h-9");
-    expect(screen.getByRole("combobox", { name: "Run time" })).toHaveClass("h-9");
+    for (const control of [
+      screen.getByLabelText("Interval value"),
+      screen.getByRole("combobox", { name: "Interval unit" }),
+      screen.getByRole("combobox", { name: "Run time" }),
+    ]) {
+      expect(control).toHaveAttribute("data-density", "default");
+      expect(control).toHaveClass("h-11", "sm:h-9");
+    }
   });
 
   it("keeps timezone in the primary schedule controls and moves execution defaults into advanced settings", async () => {

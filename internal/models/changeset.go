@@ -114,14 +114,13 @@ const (
 	ChangesetLeaseTypeMaterialize ChangesetLeaseType = "materialize"
 	ChangesetLeaseTypePublish     ChangesetLeaseType = "publish"
 	ChangesetLeaseTypeRestack     ChangesetLeaseType = "restack"
-	ChangesetLeaseTypeReadiness   ChangesetLeaseType = "readiness"
 	ChangesetLeaseTypePreview     ChangesetLeaseType = "preview"
 )
 
 func (t ChangesetLeaseType) Validate() error {
 	switch t {
 	case ChangesetLeaseTypeAgentTurn, ChangesetLeaseTypeMaterialize, ChangesetLeaseTypePublish,
-		ChangesetLeaseTypeRestack, ChangesetLeaseTypeReadiness, ChangesetLeaseTypePreview:
+		ChangesetLeaseTypeRestack, ChangesetLeaseTypePreview:
 		return nil
 	default:
 		return fmt.Errorf("invalid ChangesetLeaseType: %q", t)

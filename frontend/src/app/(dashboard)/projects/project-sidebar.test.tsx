@@ -122,11 +122,12 @@ describe('ProjectSidebar', () => {
     expect(createdByValues).toContain('user-1');
   });
 
-  it('shows the people filter trigger', async () => {
+  it('keeps the search field aligned with the people filter at mobile and desktop sizes', async () => {
     renderWithProviders(<ProjectSidebar />);
     await screen.findByText('Test Project');
 
-    expect(screen.getByRole('button', { name: /Mine/ })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Search projects...')).toHaveClass('h-11', 'sm:h-8');
+    expect(screen.getByRole('button', { name: /Mine/ })).toHaveClass('h-11', 'sm:h-8');
   });
 
   it('displays New project link at top', () => {
