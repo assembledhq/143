@@ -147,6 +147,7 @@ Numbers that users compare or scan (counts, costs, durations, dates in tables/me
 | Context | Pattern |
 |---------|---------|
 | Page-level section spacing | `space-y-6` |
+| Page-bottom scroll clearance | `pb-24 md:pb-20` via `PageContainer` |
 | Within sections (header → content) | `space-y-3` |
 | Within cards | `space-y-4` to `space-y-6` |
 | Form field groups (label → input → hint) | `space-y-2` |
@@ -167,7 +168,7 @@ Cards use `shadow-sm` by default. Buttons (default/outline/destructive variants)
 
 ### Page Container
 
-Use `PageContainer` (`src/components/page-container.tsx`) for ALL dashboard pages:
+Use `PageContainer` (`src/components/page-container.tsx`) for ALL dashboard pages. It owns the standard width constraint and responsive bottom scroll clearance, so pages must not add one-off bottom padding:
 
 ```tsx
 <PageContainer size="default">
@@ -496,7 +497,7 @@ State tokens (`success`, `warning`, `attention`, `info`, `destructive`) adapt to
 
 | Component | Location | Purpose |
 |-----------|----------|---------|
-| `PageContainer` | `src/components/page-container.tsx` | Page width constraint |
+| `PageContainer` | `src/components/page-container.tsx` | Page width constraint + bottom scroll clearance |
 | `PageHeader` | `src/components/page-header.tsx` | Standard page title + description + action |
 | `EmptyState` | `src/components/empty-state.tsx` | Empty list/data placeholder |
 | `AuthenticatedLayout` | `src/components/authenticated-layout.tsx` | Sidebar + main content shell |
