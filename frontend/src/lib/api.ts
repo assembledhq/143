@@ -341,7 +341,6 @@ export const api = {
       const qs = searchParams.toString();
       return get<import('./types').SingleResponse<import('./types').CodeReviewAnalytics>>(`/api/v1/code-reviews/analytics${qs ? `?${qs}` : ''}`);
     },
-    templates: () => get<import('./types').ListResponse<import('./types').CodeReviewTemplateOption>>('/api/v1/code-reviews/templates'),
     promptExamples: () => get<import('./types').SingleResponse<import('./types').CodeReviewPromptExamplesResponse>>('/api/v1/code-reviews/prompt-examples'),
     policyEvent: (body: import('./types').CodeReviewPolicyAnalyticsEvent) => post<void>('/api/v1/code-reviews/policy-events', body),
     evidence: (sessionId: string) =>
