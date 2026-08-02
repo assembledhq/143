@@ -629,6 +629,7 @@ func TestCoordinatorRequestPullRequestRejoinsOrReopensExistingIntent(t *testing.
 	tests := []struct {
 		name             string
 		existing         models.SessionPublication
+		changesetStatus  models.ChangesetStatus
 		ensureKeepsState models.SessionPublicationState
 		wantStatus       ResultStatus
 		wantReopened     bool
@@ -642,9 +643,10 @@ func TestCoordinatorRequestPullRequestRejoinsOrReopensExistingIntent(t *testing.
 			wantStatus: ResultReviewInProgress,
 		},
 		{
-			name:       "a completed publication stays published",
-			existing:   models.SessionPublication{State: models.SessionPublicationStateCompleted},
-			wantStatus: ResultAlreadyPublished,
+			name:            "a completed publication stays published",
+			existing:        models.SessionPublication{State: models.SessionPublicationStateCompleted},
+			changesetStatus: models.ChangesetStatusPROpen,
+			wantStatus:      ResultAlreadyPublished,
 		},
 		{
 			name:         "a no-op publication can be retried once there is something to publish",
@@ -674,6 +676,10 @@ func TestCoordinatorRequestPullRequestRejoinsOrReopensExistingIntent(t *testing.
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, nil, true, nil)
+			if tt.changesetStatus != "" {
+				f.changeset.Status = tt.changesetStatus
+				f.changesets.changeset = f.changeset
+			}
 			existing := tt.existing
 			existing.ID = uuid.New()
 			existing.SessionID = f.sessionID
@@ -726,6 +732,26 @@ func TestCoordinatorRequestPullRequestReopensTerminalDraftWithExistingPR(t *test
 	require.NotNil(t, f.publications.captured, "the reopened draft publication should be persisted")
 	require.Equal(t, models.PRHandoffModeDraftFirst, f.publications.captured.HandoffMode, "the reopened publication should retain the existing draft handoff")
 	require.Equal(t, true, f.jobs.payload["draft"], "the resumed worker should reuse the existing draft lifecycle")
+}
+
+func TestCoordinatorRequestPullRequestAdoptsExistingPROpenBeforeTargetValidation(t *testing.T) {
+	t.Parallel()
+
+	f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, nil, true, nil)
+	f.changeset.Status = models.ChangesetStatusPROpen
+	f.changesets.changeset = f.changeset
+	f.coordinator.pullRequests = coordinatorPullRequestStore{pr: &models.PullRequest{
+		ID: uuid.New(), OrgID: f.orgID, SessionID: &f.sessionID, ChangesetID: &f.changesetID,
+	}}
+
+	result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{
+		Source: models.SessionPublicationSourceUser, TriggerKind: models.SessionPublicationTriggerExplicitAction,
+	})
+
+	require.NoError(t, err, "a repeated request should adopt the existing pull request")
+	require.Equal(t, ResultAlreadyPublished, result.Status, "an existing pull request is the authoritative idempotent result")
+	require.Nil(t, f.publications.captured, "adopting an existing pull request should not create another publication intent")
+	require.Nil(t, f.jobs.payload, "adopting an existing pull request should not enqueue duplicate work")
 }
 
 func TestExistingPublicationResult(t *testing.T) {

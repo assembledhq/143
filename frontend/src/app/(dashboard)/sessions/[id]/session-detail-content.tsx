@@ -274,6 +274,7 @@ function PublicationWorkflowCard({
   pullRequest,
   canManage,
   canBypassReview,
+  executionPaused,
   actionPending,
   onCreateDraft,
   onOpenReview,
@@ -285,6 +286,7 @@ function PublicationWorkflowCard({
   pullRequest?: PullRequest | null;
   canManage: boolean;
   canBypassReview: boolean;
+  executionPaused: boolean;
   actionPending: boolean;
   onCreateDraft: () => void;
   onOpenReview: () => void;
@@ -292,12 +294,14 @@ function PublicationWorkflowCard({
   onRetry: () => void;
 }) {
   const completedNoop = publication.state === "completed_noop";
-  const needsAttention = publication.review_gate_state === "needs_human" ||
+  const published = publication.state === "completed";
+  const executionActuallyPaused = executionPaused && !published && !completedNoop;
+  const needsAttention = executionActuallyPaused ||
+    publication.review_gate_state === "needs_human" ||
     publication.review_gate_state === "failed" ||
     publication.state === "terminal_failed";
   // draft_first deliberately has a linked PR while review is still pending;
   // only the durable completed checkpoint means the workflow is published.
-  const published = publication.state === "completed";
   const settled = published || completedNoop;
   const reviewing = !published && !completedNoop && !needsAttention && publication.review_gate_state === "pending";
   const reviewPassed = publication.review_gate_state === "passed";
@@ -323,7 +327,11 @@ function PublicationWorkflowCard({
     : published
       ? (pullRequest?.title ?? "The pull request is ready for team review.")
     : needsAttention
-      ? (publication.last_error_message ?? "Publication stopped safely and needs a decision before it can continue.")
+      ? executionActuallyPaused
+        ? canManage
+          ? "Publication automation is temporarily paused. Continue with the agent for next steps."
+          : "Publication automation is temporarily paused. A member can continue the session with the agent."
+        : (publication.last_error_message ?? "Publication stopped safely and needs a decision before it can continue.")
       : reviewing
         ? `Pass ${passNumber} of ${maxPasses} · ${activity}`
         // Only a gate that actually passed may be described as reviewed. This
@@ -6564,6 +6572,10 @@ export function SessionDetailContent({ id }: { id: string }) {
               pullRequest={selectedPR}
               canManage={canManageSession}
               canBypassReview={user?.role === "admin" || user?.role === "member"}
+              executionPaused={
+                (selectedPublication.source === "agent_tool" && session.publication_policy?.agent_publication_execution_enabled === false) ||
+                (selectedPublication.review_gate_state === "pending" && session.publication_policy?.review_execution_enabled === false)
+              }
               actionPending={createPRMutation.isPending}
               onCreateDraft={() => createPRMutation.mutate({ draft: true })}
               onOpenReview={() => {

@@ -435,6 +435,54 @@ describe('SessionDetailPage PR creation', () => {
     expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
   });
 
+  it('shows an actionable pause instead of an endless review when review execution is disabled', async () => {
+    const now = '2026-07-15T12:00:00Z';
+    const detail: SessionDetail = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      threads: [],
+      publication_policy: {
+        create_pr_when_agent_ready: true,
+        create_pr_source: 'organization',
+        review_before_pr: true,
+        review_execution_enabled: false,
+        agent_publication_execution_enabled: true,
+        review_source: 'organization',
+        review_max_passes: 2,
+        pr_handoff_mode: 'pre_publish',
+      },
+      changesets: [{
+        id: 'changeset-primary', is_primary: true, order_index: 0,
+        title: 'Primary pull request', summary: '', status: 'ready',
+        target_branch: 'main', base_branch: 'main', working_branch: '143/session-branch',
+        created_at: now, updated_at: now,
+      }],
+      publications: [{
+        id: 'publication-1', session_id: mockSessions[0].id, changeset_id: 'changeset-primary',
+        repository_id: mockSessions[0].repository_id ?? 'repository-1', state: 'review_pending',
+        source: 'user', trigger_kind: 'explicit_action', handoff_mode: 'pre_publish',
+        review_gate_state: 'pending', review_max_passes: 2,
+        base_branch: 'main', head_branch: '143/session-branch', attempt_count: 0,
+        requested_at: now, updated_at: now,
+      }],
+    };
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: detail } satisfies SingleResponse<SessionDetail>)),
+      http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json({ error: { code: 'NOT_FOUND', message: 'pull request not found' } }, { status: 404 })),
+    );
+
+    renderWithProviders(<SessionDetailContent id={detail.id} />);
+
+    const workflow = await screen.findByTestId('publication-workflow-card');
+    expect(within(workflow).getByText('Needs attention')).toBeInTheDocument();
+    expect(within(workflow).getByText(/temporarily paused/)).toBeInTheDocument();
+    expect(within(workflow).getByRole('button', { name: 'Continue with agent' })).toBeInTheDocument();
+    expect(within(workflow).queryByText('Reviewing')).not.toBeInTheDocument();
+  });
+
   it('uses the same workflow card for a selected stack child and hides its legacy create action', async () => {
     const now = '2026-07-15T12:00:00Z';
     const primaryID = '11111111-1111-4111-8111-111111111111';

@@ -39,6 +39,52 @@ func changesetRequest(method, target, sessionID string, changesetID *uuid.UUID, 
 	return req.WithContext(middleware.WithOrgID(ctx, orgID))
 }
 
+func TestPublicationRequestFromContextPreservesCallerProvenance(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	tests := []struct {
+		name            string
+		ctx             context.Context
+		wantSource      models.SessionPublicationSource
+		wantTrigger     models.SessionPublicationTriggerKind
+		wantRequestedBy *uuid.UUID
+		wantRole        string
+	}{
+		{
+			name: "authenticated UI action is user owned",
+			ctx: middleware.WithActiveRole(
+				middleware.WithUser(context.Background(), &models.User{ID: userID}),
+				string(models.RoleMember),
+			),
+			wantSource: models.SessionPublicationSourceUser, wantTrigger: models.SessionPublicationTriggerExplicitAction,
+			wantRequestedBy: &userID, wantRole: string(models.RoleMember),
+		},
+		{
+			name: "internal changeset action remains agent owned",
+			ctx: withPublicationRequestProvenance(
+				middleware.WithUser(context.Background(), &models.User{ID: userID}),
+				models.SessionPublicationSourceAgentTool,
+				models.SessionPublicationTriggerExplicitAction,
+			),
+			wantSource: models.SessionPublicationSourceAgentTool, wantTrigger: models.SessionPublicationTriggerExplicitAction,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			source, trigger, requestedBy, role := publicationRequestFromContext(tt.ctx)
+
+			require.Equal(t, tt.wantSource, source, "request source should retain the caller channel")
+			require.Equal(t, tt.wantTrigger, trigger, "request trigger should retain why publication was requested")
+			require.Equal(t, tt.wantRequestedBy, requestedBy, "only user-channel requests should claim a requesting user")
+			require.Equal(t, tt.wantRole, role, "only user-channel requests should claim an active role")
+		})
+	}
+}
+
 func TestSessionHandlerCreateChangeset(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -151,6 +197,8 @@ func TestSessionHandlerPublishChangesetStackUsesCoordinator(t *testing.T) {
 	require.Len(t, coordinator.requests, 2, "stack publication should coordinate every active changeset")
 	require.Equal(t, firstID, *coordinator.requests[0].ChangesetID, "first stack request should retain changeset order")
 	require.Equal(t, secondID, *coordinator.requests[1].ChangesetID, "second stack request should retain changeset order")
+	require.Equal(t, models.SessionPublicationSourceUser, coordinator.requests[0].Source, "dashboard stack publication should retain user provenance")
+	require.Equal(t, models.SessionPublicationTriggerExplicitAction, coordinator.requests[0].TriggerKind, "dashboard stack publication should retain its explicit trigger")
 }
 
 // Aborting mid-stack would report failure for changesets whose durable intent
@@ -197,6 +245,8 @@ func TestSessionHandlerPublishChangesetStackReportsPartialRejection(t *testing.T
 	require.Contains(t, body, `"status":"rejected"`, "the response should surface the rejected changeset")
 	require.Contains(t, body, secondID.String(), "the rejection should name the changeset it belongs to")
 	require.Contains(t, body, string(publicationintent.ErrorWorkspaceNotReady), "the rejection should retain the coordinator's typed error code")
+	require.Contains(t, body, "This pull request is not ready to publish.", "the rejection should return actionable safe copy")
+	require.NotContains(t, body, "worktree is missing", "the response must not expose the coordinator's internal error detail")
 	require.Contains(t, body, firstID.String(), "the response should still report the changeset that was queued")
 	require.NoError(t, mock.ExpectationsWereMet(), "stack endpoint should consume the scoped session and changeset queries")
 }

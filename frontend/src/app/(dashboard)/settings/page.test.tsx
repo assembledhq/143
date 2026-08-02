@@ -254,6 +254,38 @@ describe('SettingsPage', () => {
     });
   });
 
+  it('sends sparse automation patches so rapid toggles cannot restore stale sibling values', async () => {
+    settingsGetMock.mockResolvedValue({
+      data: {
+        id: 'org-1',
+        name: 'Test Org',
+        settings: {
+          session_automation: {
+            automatic_follow_through: {
+              create_pr_when_agent_ready: false,
+              resolve_conflicts_when_idle: false,
+            },
+          },
+        },
+        created_at: '2026-05-01T12:00:00Z',
+        updated_at: '2026-05-01T12:00:00Z',
+      },
+    });
+    renderWithProviders(<SettingsPage />);
+
+    await userEvent.click(await screen.findByRole('switch', { name: 'Run a two-pass review/fix cycle before creating the PR' }));
+
+    await waitFor(() => {
+      expect(settingsUpdateMock).toHaveBeenCalledWith({
+        settings: {
+          session_automation: {
+            automatic_follow_through: { review_before_pr: false },
+          },
+        },
+      });
+    });
+  });
+
   it('keeps the organization name field disabled for non-admins', async () => {
     useAuthMock.mockReturnValue({
       user: { role: 'member' },

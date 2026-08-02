@@ -1,6 +1,6 @@
 # Design: Agent-Initiated PR Publication with Automatic Review
 
-> **Status:** Implemented (PRs 1-3) | **Last reviewed:** 2026-08-02
+> **Status:** Implemented | **Last reviewed:** 2026-08-02
 >
 > **Depends on:** [overall.md](../overall.md),
 > [review agent loops](../implemented/78-review-agent-loops.md),
@@ -874,6 +874,8 @@ Session detail adds resolved policy:
     "create_pr_when_agent_ready": true,
     "create_pr_source": "organization",
     "review_before_pr": false,
+    "review_execution_enabled": true,
+    "agent_publication_execution_enabled": true,
     "review_source": "personal",
     "review_max_passes": 2,
     "pr_handoff_mode": "pre_publish"
@@ -892,6 +894,7 @@ automatic progress:
 | --- | --- |
 | Reviewing | Pass N of 2 and current review/fix activity |
 | Needs attention | Draft bypass, open review, and continue actions |
+| Execution paused | Needs attention with a continue action; never an indefinite reviewing spinner |
 | Publishing | Review passed; publication queued |
 | Published | PR number, title, and review link |
 

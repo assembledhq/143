@@ -261,13 +261,6 @@ func (c *Coordinator) RequestPullRequest(
 	if err != nil {
 		return nil, &Error{Code: ErrorWorkspaceNotReady, Err: fmt.Errorf("resolve publication changeset: %w", err)}
 	}
-	if changeset.MaterializationError != nil || changeset.RestackConfirmationRequired {
-		return nil, &Error{Code: ErrorWorkspaceNotReady, Err: errors.New("primary changeset is not in a publishable state")}
-	}
-	headBranch, desiredHeadSHA, err := resolvePublicationTarget(session, changeset)
-	if err != nil {
-		return nil, err
-	}
 	existingPublication, publicationErr := c.publications.GetByChangeset(ctx, orgID, sessionID, changeset.ID)
 	if publicationErr != nil && !errors.Is(publicationErr, pgx.ErrNoRows) {
 		return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("check existing publication intent: %w", publicationErr)}
@@ -310,6 +303,17 @@ func (c *Coordinator) RequestPullRequest(
 		} else if !errors.Is(prErr, pgx.ErrNoRows) {
 			return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("check existing pull request: %w", prErr)}
 		}
+	}
+	// Idempotent replays resolve above before checking whether the mutable
+	// changeset still looks publishable. A completed intent or an adopted PR is
+	// already the authoritative outcome; statuses such as pr_open must not turn
+	// a repeated request into a workspace error.
+	if changeset.MaterializationError != nil || changeset.RestackConfirmationRequired {
+		return nil, &Error{Code: ErrorWorkspaceNotReady, Err: errors.New("primary changeset is not in a publishable state")}
+	}
+	headBranch, desiredHeadSHA, err := resolvePublicationTarget(session, changeset)
+	if err != nil {
+		return nil, err
 	}
 
 	policy := EffectivePolicy{

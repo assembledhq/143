@@ -155,6 +155,47 @@ func (h *SessionHandler) SetPublicationIntentCoordinator(
 	h.publicationCoordinatorEnabled = enabled
 }
 
+type publicationRequestProvenance struct {
+	source      models.SessionPublicationSource
+	triggerKind models.SessionPublicationTriggerKind
+}
+
+type publicationRequestProvenanceContextKey struct{}
+
+func withPublicationRequestProvenance(
+	ctx context.Context,
+	source models.SessionPublicationSource,
+	triggerKind models.SessionPublicationTriggerKind,
+) context.Context {
+	return context.WithValue(ctx, publicationRequestProvenanceContextKey{}, publicationRequestProvenance{
+		source: source, triggerKind: triggerKind,
+	})
+}
+
+func publicationRequestFromContext(ctx context.Context) (
+	models.SessionPublicationSource,
+	models.SessionPublicationTriggerKind,
+	*uuid.UUID,
+	string,
+) {
+	provenance, ok := ctx.Value(publicationRequestProvenanceContextKey{}).(publicationRequestProvenance)
+	if ok {
+		// Agent-tool requests are authorized with a session-scoped token. The
+		// synthetic user installed by the internal handler exists for shared
+		// authorization and audit plumbing; it must not turn agent provenance
+		// into a user-owned publication request.
+		return provenance.source, provenance.triggerKind, nil, ""
+	}
+	var requestedByUserID *uuid.UUID
+	if user := middleware.UserFromContext(ctx); user != nil {
+		requestedByUserID = &user.ID
+	}
+	return models.SessionPublicationSourceUser,
+		models.SessionPublicationTriggerExplicitAction,
+		requestedByUserID,
+		middleware.ActiveRoleFromContext(ctx)
+}
+
 // resolveSessionPublicationPolicy snapshots the effective publication policy
 // for a session detail response, or returns nil when it cannot be resolved.
 // It is best-effort by design: the policy is advisory UI data, and failing the
@@ -206,14 +247,30 @@ func (h *SessionHandler) resolveSessionPublicationPolicy(
 	return &models.SessionPublicationPolicy{
 		CreatePRWhenAgentReady: policy.CreatePRWhenAgentReady,
 		CreatePRSource:         policy.CreatePRSource,
-		// Mirror the orchestrator's prompt gate: the review is only reported
-		// as on when the cycle can actually run, so the API and the agent
-		// never describe the same policy differently.
-		ReviewBeforePR:  policy.ReviewBeforePR && h.prePRReviewEnabled,
-		ReviewSource:    policy.ReviewSource,
-		ReviewMaxPasses: policy.ReviewMaxPasses,
-		PRHandoffMode:   handoffMode,
+		// Runtime switches never rewrite stored customer policy. Expose their
+		// execution state separately so a parked workflow is actionable rather
+		// than looking like a review that is still running.
+		ReviewBeforePR:                   policy.ReviewBeforePR,
+		ReviewExecutionEnabled:           h.reviewExecutionEnabled(models.SessionPublicationSourceUser),
+		AgentPublicationExecutionEnabled: h.publicationExecutionEnabled(models.SessionPublicationSourceAgentTool),
+		ReviewSource:                     policy.ReviewSource,
+		ReviewMaxPasses:                  policy.ReviewMaxPasses,
+		PRHandoffMode:                    handoffMode,
 	}
+}
+
+func (h *SessionHandler) publicationExecutionEnabled(source models.SessionPublicationSource) bool {
+	if h.publicationCoordinator != nil {
+		return h.publicationCoordinator.PublicationExecutionEnabled(source)
+	}
+	return true
+}
+
+func (h *SessionHandler) reviewExecutionEnabled(source models.SessionPublicationSource) bool {
+	if h.publicationCoordinator != nil {
+		return h.publicationCoordinator.ReviewExecutionEnabled(source)
+	}
+	return h.prePRReviewEnabled
 }
 
 const (
@@ -1340,10 +1397,7 @@ func (h *SessionHandler) PublishChangesetStack(w http.ResponseWriter, r *http.Re
 		writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "publication coordinator is unavailable")
 		return
 	}
-	var requestedByUserID *uuid.UUID
-	if user := middleware.UserFromContext(r.Context()); user != nil {
-		requestedByUserID = &user.ID
-	}
+	source, triggerKind, requestedByUserID, requestedRole := publicationRequestFromContext(r.Context())
 	results := make([]map[string]any, 0, active)
 	responseStatus := string(publicationintent.ResultAlreadyPublished)
 	hasQueued := false
@@ -1358,10 +1412,10 @@ func (h *SessionHandler) PublishChangesetStack(w http.ResponseWriter, r *http.Re
 			ChangesetID:       &changeset.ID,
 			Draft:             req.Draft,
 			AuthorMode:        req.AuthorMode,
-			Source:            models.SessionPublicationSourceUser,
-			TriggerKind:       models.SessionPublicationTriggerExplicitAction,
+			Source:            source,
+			TriggerKind:       triggerKind,
 			RequestedByUserID: requestedByUserID,
-			RequestedRole:     middleware.ActiveRoleFromContext(r.Context()),
+			RequestedRole:     requestedRole,
 		})
 		if result == nil && requestErr == nil {
 			requestErr = errors.New("publication coordinator returned no result")
@@ -1378,7 +1432,17 @@ func (h *SessionHandler) PublishChangesetStack(w http.ResponseWriter, r *http.Re
 				if errors.As(requestErr, &intentErr) {
 					code = string(intentErr.Code)
 				}
-				message := requestErr.Error()
+				message := "This pull request could not be queued."
+				switch code {
+				case string(publicationintent.ErrorWorkspaceNotReady):
+					message = "This pull request is not ready to publish."
+				case string(publicationintent.ErrorSessionNotEligible):
+					message = "This session cannot publish this pull request."
+				}
+				zerolog.Ctx(r.Context()).Error().Err(requestErr).
+					Str("changeset_id", changeset.ID.String()).
+					Str("publication_error_code", code).
+					Msg("stack publication changeset was rejected after an earlier intent was accepted")
 				results = append(results, map[string]any{
 					"changeset_id": changeset.ID,
 					"status":       "rejected",
@@ -3033,21 +3097,17 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "publication coordinator is unavailable")
 			return
 		}
-		var requestedByUserID *uuid.UUID
-		if user := middleware.UserFromContext(r.Context()); user != nil {
-			requestedByUserID = &user.ID
-		}
+		source, triggerKind, requestedByUserID, requestedRole := publicationRequestFromContext(r.Context())
 		if req.MergeWhenReady && requestedByUserID == nil {
 			writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "not authenticated")
 			return
 		}
 		intentResult, intentErr := h.publicationCoordinator.RequestPullRequest(r.Context(), orgID, sessionID, publicationintent.RequestPullRequest{
 			Draft: req.Draft, AuthorMode: string(authorMode), ChangesetID: &targetChangeset.ID,
-			// An authenticated operator clicked "Create PR" in the UI.
-			Source:         models.SessionPublicationSourceUser,
-			TriggerKind:    models.SessionPublicationTriggerExplicitAction,
+			Source:         source,
+			TriggerKind:    triggerKind,
 			MergeWhenReady: req.MergeWhenReady, RequestedByUserID: requestedByUserID,
-			RequestedRole: middleware.ActiveRoleFromContext(r.Context()),
+			RequestedRole: requestedRole,
 		})
 		if intentErr != nil {
 			var typedErr *publicationintent.Error

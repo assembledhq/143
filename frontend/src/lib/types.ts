@@ -1547,6 +1547,8 @@ export interface SessionPublicationPolicy {
   create_pr_when_agent_ready: boolean;
   create_pr_source: PublicationPolicySource;
   review_before_pr: boolean;
+  review_execution_enabled?: boolean;
+  agent_publication_execution_enabled?: boolean;
   review_source: PublicationPolicySource;
   review_max_passes: number;
   pr_handoff_mode: PRHandoffMode;

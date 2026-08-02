@@ -61,16 +61,10 @@ const REPAIR_AUTOMATION_COPY: Record<RepairAutomationKey, { title: string; descr
   },
 };
 
-function sessionAutomationPatch(
-  current: AutomaticFollowThroughOrgSettings,
-  patch: Partial<AutomaticFollowThroughOrgSettings>,
-): Partial<OrgSettings> {
+function sessionAutomationPatch(patch: Partial<AutomaticFollowThroughOrgSettings>): Partial<OrgSettings> {
   return {
     session_automation: {
-      automatic_follow_through: {
-        ...current,
-        ...patch,
-      },
+      automatic_follow_through: patch,
     },
   };
 }
@@ -109,7 +103,7 @@ function PRAuthorshipSettings() {
 
   const { save, status } = useOrgSettingsAutosave();
   const saveAutomaticFollowThrough = (patch: Partial<AutomaticFollowThroughOrgSettings>) => {
-    save({ settings: sessionAutomationPatch(automaticFollowThrough, patch) });
+    save({ settings: sessionAutomationPatch(patch) });
   };
   // Absent repair flags mean "on" for every org, so the effective value has to
   // come from the same default the switch renders; reading the raw field here
