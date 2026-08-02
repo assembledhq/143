@@ -144,12 +144,6 @@ func (h *RepositoryHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	repo, err := h.repoStore.GetByID(r.Context(), orgID, repoID)
-	if err != nil {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "repository not found")
-		return
-	}
-
 	if req.Settings != nil {
 		var settings map[string]json.RawMessage
 		if parseErr := json.Unmarshal(*req.Settings, &settings); parseErr != nil {
@@ -160,11 +154,26 @@ func (h *RepositoryHandler) Update(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusBadRequest, "REMOVED_SETTINGS", "repository PM settings are no longer supported")
 			return
 		}
-		repo.Settings = *req.Settings
+		if _, _, parseErr := models.ApplyRepositorySettingsMergePatch(nil, *req.Settings); parseErr != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_SETTINGS", "invalid repository settings", parseErr)
+			return
+		}
+		repo, mergeErr := h.repoStore.MergeSettings(r.Context(), orgID, repoID, *req.Settings)
+		if mergeErr != nil {
+			if errors.Is(mergeErr, pgx.ErrNoRows) {
+				writeError(w, r, http.StatusNotFound, "NOT_FOUND", "repository not found")
+				return
+			}
+			writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update repository", mergeErr)
+			return
+		}
+		writeJSON(w, http.StatusOK, models.SingleResponse[models.Repository]{Data: repo})
+		return
 	}
 
-	if err := h.repoStore.Update(r.Context(), &repo); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update repository", err)
+	repo, err := h.repoStore.GetByID(r.Context(), orgID, repoID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "repository not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Repository]{Data: repo})

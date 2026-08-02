@@ -9943,8 +9943,16 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 						Msg("failed to persist session thread turn result")
 				}
 				if services.ReviewLoops != nil {
-					if err := services.ReviewLoops.OnThreadTurnComplete(ctx, orgID, threadID, lastTurnResult.Summary); err != nil && !errors.Is(err, reviewloopsvc.ErrNoRunningReviewLoop) {
-						logger.Warn().Err(err).
+					var reviewErr error
+					if changeAware, ok := services.ReviewLoops.(interface {
+						OnThreadTurnCompleteWithChange(context.Context, uuid.UUID, uuid.UUID, string, bool) error
+					}); ok {
+						reviewErr = changeAware.OnThreadTurnCompleteWithChange(ctx, orgID, threadID, lastTurnResult.Summary, turnWorkspaceChanged(session.Diff, lastTurnResult.Diff))
+					} else {
+						reviewErr = services.ReviewLoops.OnThreadTurnComplete(ctx, orgID, threadID, lastTurnResult.Summary)
+					}
+					if reviewErr != nil && !errors.Is(reviewErr, reviewloopsvc.ErrNoRunningReviewLoop) {
+						logger.Warn().Err(reviewErr).
 							Str("session_id", sessionID.String()).
 							Str("thread_id", threadID.String()).
 							Msg("failed to advance review loop after thread turn")
@@ -10059,6 +10067,20 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		enqueueSessionPreviewWarmBuildIfCandidate(ctx, stores, services, logger, orgID, sessionID, "continue_session_completed")
 		return nil
 	}
+}
+
+// turnWorkspaceChanged compares the review turn's resulting workspace diff to
+// the durable diff loaded immediately before that turn. Agent adapters report
+// the whole workspace diff, not a per-turn patch, so non-empty alone would
+// incorrectly classify every clean review of existing changes as a mutation.
+func turnWorkspaceChanged(before *string, after string) bool {
+	if strings.TrimSpace(after) == "" {
+		return false
+	}
+	if before == nil {
+		return true
+	}
+	return strings.TrimSpace(*before) != strings.TrimSpace(after)
 }
 
 func enqueueSessionPreviewCachePrewarm(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, sessionID uuid.UUID, reason string) {
@@ -11119,12 +11141,30 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			}
 		}
 
-		ready, err := ensureAutomationPrePRReview(ctx, stores, services, logger, run, changesetID)
+		ready, err := ensurePublicationPrePRReview(ctx, stores, services, logger, run, changesetID, activePublication)
 		if err != nil {
 			return err
 		}
 		if !ready {
 			return nil
+		}
+		if activePublication != nil && activePublication.HandoffMode == models.PRHandoffModeDraftFirst &&
+			activePublication.GitHubPRNumber != nil && activePublication.ReviewGateState == models.SessionPublicationReviewGatePassed {
+			if stores.PullRequests == nil {
+				return errors.New("draft-first pull request store is unavailable")
+			}
+			existing, err := stores.PullRequests.GetByChangesetID(ctx, orgID, runID, *changesetID)
+			if err != nil {
+				return fmt.Errorf("load draft-first pull request: %w", err)
+			}
+			finalized, err := finalizeDraftFirstPublication(ctx, stores, services, &run, input, changesetID, &existing, activePublication)
+			if err != nil {
+				return err
+			}
+			if !finalized {
+				return nil
+			}
+			return completeOpenPRJob(ctx, stores, services, logger, run, input, changesetID, &existing)
 		}
 
 		logger.Info().
@@ -11287,6 +11327,52 @@ func completeOpenPRJob(
 		}
 		return errors.New("open_pr service returned nil pull request")
 	}
+	if changesetID != nil && stores != nil && stores.SessionPublications != nil {
+		publication, err := stores.SessionPublications.GetByChangeset(ctx, run.OrgID, run.ID, *changesetID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("load draft-first publication state: %w", err)
+		}
+		if err == nil && !publication.State.Terminal() &&
+			publication.HandoffMode == models.PRHandoffModeDraftFirst &&
+			publication.ReviewGateState == models.SessionPublicationReviewGatePending {
+			if err := stores.SessionPublications.MarkRecorded(ctx, run.OrgID, run.ID, *changesetID); err != nil {
+				return fmt.Errorf("record draft-first pull request: %w", err)
+			}
+			freshRun, err := stores.Sessions.GetByID(ctx, run.OrgID, run.ID)
+			if err != nil {
+				return fmt.Errorf("reload draft-first session for review: %w", err)
+			}
+			publication.State = models.SessionPublicationStateRecorded
+			ready, err := ensurePublicationPrePRReview(ctx, stores, services, logger, freshRun, changesetID, &publication)
+			if err != nil {
+				return err
+			}
+			if !ready {
+				if stateErr := updateChangesetPRCreationState(ctx, stores, run.OrgID, run.ID, changesetID, models.PRCreationStatePushing, "Draft pull request is awaiting review."); stateErr != nil {
+					logger.Warn().Err(stateErr).Msg("failed to retain draft-first review progress state")
+				}
+				return nil
+			}
+		}
+		// A terminal publication has already been finalized — by an earlier
+		// attempt, or by the openPRHandler branch that called this function
+		// after finalizing. Re-entering would push and mark ready a second
+		// time, and a head that moved in between would try to block a
+		// completed row.
+		if err == nil && !publication.State.Terminal() &&
+			publication.HandoffMode == models.PRHandoffModeDraftFirst &&
+			publication.ReviewPolicySource != models.PublicationPolicySourceExplicitBypass &&
+			(publication.ReviewGateState == models.SessionPublicationReviewGatePassed ||
+				publication.ReviewGateState == models.SessionPublicationReviewGateNotRequired) {
+			finalized, err := finalizeDraftFirstPublication(ctx, stores, services, &run, input, changesetID, pr, &publication)
+			if err != nil {
+				return err
+			}
+			if !finalized {
+				return nil
+			}
+		}
+	}
 	if input.MergeWhenReady {
 		requestedByUserID, err := uuid.Parse(input.RequestedByUserID)
 		if err != nil {
@@ -11323,6 +11409,77 @@ func completeOpenPRJob(
 		PullRequestURL: pr.GitHubPRURL,
 	})
 	return nil
+}
+
+func finalizeDraftFirstPublication(
+	ctx context.Context,
+	stores *Stores,
+	services *Services,
+	run *models.Session,
+	input openPRJobInput,
+	changesetID *uuid.UUID,
+	pr *models.PullRequest,
+	publication *models.SessionPublication,
+) (bool, error) {
+	if run == nil || changesetID == nil || pr == nil || publication == nil || stores == nil || stores.SessionPublications == nil {
+		return false, errors.New("draft-first publication dependencies are unavailable")
+	}
+	if publication.ReviewGateState == models.SessionPublicationReviewGatePassed {
+		pushed, err := services.PR.PushChangesToPR(ctx, run, ghservice.CreatePRParams{ChangesetID: changesetID, AuthorMode: input.AuthorMode})
+		if errors.Is(err, ghservice.ErrNoChanges) && stores.SessionChangesets != nil {
+			changeset, loadErr := stores.SessionChangesets.GetByID(ctx, run.OrgID, run.ID, *changesetID)
+			if loadErr != nil {
+				return false, fmt.Errorf("load unchanged reviewed draft head: %w", loadErr)
+			}
+			pushed = &models.PullRequest{HeadSHA: changeset.HeadSHA}
+			err = nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("publish reviewed draft head: %w", err)
+		}
+		if pushed == nil || pushed.HeadSHA == nil || publication.ReviewDesiredHeadSHA == nil ||
+			*pushed.HeadSHA != *publication.ReviewDesiredHeadSHA {
+			return blockDraftForMovedHead(ctx, stores, run, changesetID)
+		}
+	}
+	readyMarker, ok := services.PR.(interface {
+		MarkPullRequestReady(context.Context, uuid.UUID, uuid.UUID, string) error
+	})
+	if !ok {
+		return false, errors.New("draft readiness service is unavailable")
+	}
+	expectedHeadSHA := ""
+	if publication.ReviewGateState == models.SessionPublicationReviewGatePassed && publication.ReviewDesiredHeadSHA != nil {
+		expectedHeadSHA = *publication.ReviewDesiredHeadSHA
+	}
+	if err := readyMarker.MarkPullRequestReady(ctx, run.OrgID, pr.ID, expectedHeadSHA); err != nil {
+		// GitHub is the authority on the draft's head. If it disagrees with the
+		// reviewed head, no amount of retrying reconciles them — this is a
+		// review decision, not an infrastructure failure.
+		if errors.Is(err, ghservice.ErrDraftHeadMoved) {
+			return blockDraftForMovedHead(ctx, stores, run, changesetID)
+		}
+		return false, fmt.Errorf("mark reviewed draft ready: %w", err)
+	}
+	if err := stores.SessionPublications.MarkCompleted(ctx, run.OrgID, run.ID, *changesetID); err != nil {
+		return false, fmt.Errorf("complete draft-first publication: %w", err)
+	}
+	return true, nil
+}
+
+// blockDraftForMovedHead parks a draft-first publication for human attention
+// because its head no longer matches the reviewed head. The draft stays open;
+// only the gate moves.
+func blockDraftForMovedHead(ctx context.Context, stores *Stores, run *models.Session, changesetID *uuid.UUID) (bool, error) {
+	if err := stores.SessionPublications.SetReviewGate(
+		ctx, run.OrgID, run.ID, *changesetID, models.SessionPublicationReviewGateNeedsHuman,
+	); err != nil {
+		// Deliberately not wrapped in ErrDraftHeadMoved: failing to *record*
+		// the decision is a retryable infrastructure failure, and callers
+		// branch on that sentinel to stop retrying.
+		return false, fmt.Errorf("block draft whose head moved after review: %w", err)
+	}
+	return false, nil
 }
 
 // registerOpenPRPublicationDeadLetter closes the durable publication state if
@@ -11494,6 +11651,268 @@ func ensureBuilderReviewFresh(ctx context.Context, stores *Stores, run models.Se
 		}
 	}
 	return errors.New("builder publication requires a clean Review for the current snapshot")
+}
+
+func ensurePublicationPrePRReview(
+	ctx context.Context,
+	stores *Stores,
+	services *Services,
+	logger zerolog.Logger,
+	run models.Session,
+	changesetID *uuid.UUID,
+	publication *models.SessionPublication,
+) (bool, error) {
+	if publication == nil {
+		return ensureAutomationPrePRReview(ctx, stores, services, logger, run, changesetID)
+	}
+	if publication.ReviewMaxPasses == nil && run.AutomationRunID != nil && stores != nil && stores.AutomationRuns != nil {
+		automationRun, err := stores.AutomationRuns.GetByRunID(ctx, run.OrgID, *run.AutomationRunID)
+		if err != nil {
+			return false, fmt.Errorf("fetch automation publication review policy: %w", err)
+		}
+		passCount, err := automationPrePRReviewPasses(automationRun.ConfigSnapshot)
+		if err != nil {
+			return false, err
+		}
+		if passCount == 0 {
+			if err := stores.SessionPublications.SetReviewGate(ctx, run.OrgID, run.ID, publication.ChangesetID, models.SessionPublicationReviewGatePassed); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+		publication.ReviewMaxPasses = &passCount
+		if err := stores.SessionPublications.ParkForReview(ctx, run.OrgID, run.ID, publication.ChangesetID, passCount); err != nil {
+			return false, err
+		}
+	}
+	if publication.ReviewMaxPasses == nil {
+		return true, nil
+	}
+	if publication.ReviewGateState == models.SessionPublicationReviewGateNotRequired {
+		return true, nil
+	}
+	if publication.ReviewGateState == models.SessionPublicationReviewGatePassed {
+		if changesetID == nil || stores == nil || stores.SessionChangesets == nil {
+			return false, errors.New("passed publication review cannot be revalidated")
+		}
+		changeset, err := stores.SessionChangesets.GetByID(ctx, run.OrgID, run.ID, *changesetID)
+		if err != nil {
+			return false, fmt.Errorf("revalidate publication review changeset: %w", err)
+		}
+		currentHeadSHA := stringValue(changeset.HeadSHA)
+		if publication.ReviewWorkspaceRevision != nil && publication.ReviewDesiredHeadSHA != nil &&
+			*publication.ReviewWorkspaceRevision == run.WorkspaceRevision &&
+			*publication.ReviewDesiredHeadSHA == currentHeadSHA {
+			return true, nil
+		}
+		if err := stores.SessionPublications.InvalidateReviewEvidence(ctx, run.OrgID, run.ID, *changesetID, currentHeadSHA); err != nil {
+			return false, err
+		}
+		publication.ReviewGateState = models.SessionPublicationReviewGatePending
+		publication.ReviewLoopID = nil
+		publication.ReviewWorkspaceRevision = nil
+		publication.ReviewDesiredHeadSHA = nil
+		publication.DesiredHeadSHA = &currentHeadSHA
+	}
+	if publication.ReviewGateState == models.SessionPublicationReviewGateNeedsHuman ||
+		publication.ReviewGateState == models.SessionPublicationReviewGateFailed {
+		return false, nil
+	}
+	if publication.ReviewGateState == models.SessionPublicationReviewGatePending && publication.ReviewLoopID != nil {
+		// The terminal loop transition owns the atomic gate advance and enqueue.
+		// A replayed open_pr job must not repush or start a competing loop while
+		// that linked review is still in progress.
+		return false, nil
+	}
+	// Draft-first must create the one durable draft before PR-dependent review
+	// begins. The completion path re-enters this helper after the draft row and
+	// head SHA have been checkpointed.
+	if publication.HandoffMode == models.PRHandoffModeDraftFirst && publication.GitHubPRNumber == nil {
+		return true, nil
+	}
+	if stores == nil || stores.SessionPublications == nil || stores.ReviewLoops == nil ||
+		services == nil || services.ReviewLoops == nil || changesetID == nil {
+		return false, errors.New("publication review dependencies are unavailable")
+	}
+
+	var desiredHeadSHA string
+	if publication.HandoffMode == models.PRHandoffModeDraftFirst && publication.GitHubPRNumber != nil {
+		pushed, err := services.PR.PushChangesToPR(ctx, &run, ghservice.CreatePRParams{ChangesetID: changesetID})
+		if errors.Is(err, ghservice.ErrNoChanges) {
+			changeset, loadErr := stores.SessionChangesets.GetByID(ctx, run.OrgID, run.ID, *changesetID)
+			if loadErr != nil {
+				return false, fmt.Errorf("load unchanged draft review target: %w", loadErr)
+			}
+			desiredHeadSHA = stringValue(changeset.HeadSHA)
+		} else if err != nil {
+			return false, fmt.Errorf("checkpoint draft head for publication review: %w", err)
+		} else if pushed != nil {
+			desiredHeadSHA = stringValue(pushed.HeadSHA)
+		}
+	} else {
+		branch, err := services.PR.CreateBranch(ctx, &run, ghservice.CreatePRParams{ChangesetID: changesetID})
+		if errors.Is(err, ghservice.ErrNoChanges) {
+			changeset, loadErr := stores.SessionChangesets.GetByID(ctx, run.OrgID, run.ID, *changesetID)
+			if loadErr != nil {
+				return false, fmt.Errorf("load unchanged publication review target: %w", loadErr)
+			}
+			desiredHeadSHA = stringValue(changeset.HeadSHA)
+		} else if err != nil {
+			return false, fmt.Errorf("checkpoint publication branch for review: %w", err)
+		} else if branch != nil {
+			desiredHeadSHA = branch.HeadSHA
+		}
+	}
+	if desiredHeadSHA == "" {
+		return false, errors.New("publication review checkpoint did not produce a head SHA")
+	}
+	if err := stores.SessionPublications.RecordReviewTarget(ctx, run.OrgID, run.ID, *changesetID, desiredHeadSHA); err != nil {
+		return false, err
+	}
+	publication.DesiredHeadSHA = &desiredHeadSHA
+	// CreateBranch/PushChangesToPR may promote a post-push snapshot
+	// asynchronously, and that promotion advances workspace_revision. Wait for
+	// it before binding review evidence so infrastructure checkpointing cannot
+	// make a clean review look stale.
+	services.PR.WaitForPostPRSnapshotUploads()
+	freshRun, err := stores.Sessions.GetByID(ctx, run.OrgID, run.ID)
+	if err != nil {
+		return false, fmt.Errorf("reload publication review revision: %w", err)
+	}
+	run = freshRun
+	workspaceRevision := freshRun.WorkspaceRevision
+
+	running, err := stores.ReviewLoops.GetRunningLoopBySession(ctx, run.OrgID, run.ID)
+	if err == nil {
+		if running.Source == models.ReviewLoopSourcePublication && running.ChangesetID != nil &&
+			*running.ChangesetID == *changesetID && running.WorkspaceRevision != nil &&
+			*running.WorkspaceRevision == workspaceRevision && running.DesiredHeadSHA != nil &&
+			*running.DesiredHeadSHA == desiredHeadSHA {
+			if err := stores.SessionPublications.LinkReviewLoop(ctx, run.OrgID, run.ID, *changesetID, running.ID, running.MaxPasses, workspaceRevision, desiredHeadSHA); err != nil {
+				return false, err
+			}
+			publication.ReviewLoopID = &running.ID
+			publication.ReviewWorkspaceRevision = &workspaceRevision
+			publication.ReviewDesiredHeadSHA = &desiredHeadSHA
+			return false, nil
+		}
+		if err := stores.SessionPublications.ParkForReview(ctx, run.OrgID, run.ID, *changesetID, *publication.ReviewMaxPasses); err != nil {
+			return false, err
+		}
+		logger.Info().Str("session_id", run.ID.String()).Str("review_loop_id", running.ID.String()).
+			Msg("publication review parked behind existing session review loop")
+		return false, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return false, fmt.Errorf("load running publication review loop: %w", err)
+	}
+
+	fresh, err := stores.ReviewLoops.GetFreshCleanPublicationLoop(
+		ctx, run.OrgID, run.ID, *changesetID, workspaceRevision, desiredHeadSHA,
+	)
+	if err == nil {
+		if err := stores.SessionPublications.ReuseCleanReview(ctx, run.OrgID, run.ID, *changesetID, fresh.ID, fresh.MaxPasses, workspaceRevision, desiredHeadSHA); err != nil {
+			return false, err
+		}
+		publication.ReviewGateState = models.SessionPublicationReviewGatePassed
+		publication.ReviewLoopID = &fresh.ID
+		publication.ReviewWorkspaceRevision = &workspaceRevision
+		publication.ReviewDesiredHeadSHA = &desiredHeadSHA
+		return true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return false, fmt.Errorf("find fresh publication review: %w", err)
+	}
+
+	reviewer, err := selectPublicationReviewer(ctx, stores, services, run, publication.InitiatedByUserID)
+	if err != nil {
+		return false, err
+	}
+	model := ""
+	if reviewer == run.AgentType {
+		model = stringValue(run.ModelOverride)
+	}
+	loop, err := services.ReviewLoops.Start(ctx, run.OrgID, run.ID, reviewloopsvc.StartReviewLoopRequest{
+		AgentType: reviewer, Model: model, MaxPasses: *publication.ReviewMaxPasses,
+		Source: models.ReviewLoopSourcePublication, AutomationRunID: run.AutomationRunID,
+		StartedByUserID: publication.InitiatedByUserID,
+		ReviewRequired:  true, ChangesetID: changesetID, WorkspaceRevision: &workspaceRevision,
+		DesiredHeadSHA: &desiredHeadSHA,
+	})
+	if errors.Is(err, reviewloopsvc.ErrReviewLoopAlreadyRunning) {
+		if parkErr := stores.SessionPublications.ParkForReview(ctx, run.OrgID, run.ID, *changesetID, *publication.ReviewMaxPasses); parkErr != nil {
+			return false, parkErr
+		}
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("start publication review loop: %w", err)
+	}
+	if err := stores.SessionPublications.LinkReviewLoop(ctx, run.OrgID, run.ID, *changesetID, loop.ID, loop.MaxPasses, workspaceRevision, desiredHeadSHA); err != nil {
+		return false, err
+	}
+	publication.ReviewLoopID = &loop.ID
+	publication.ReviewWorkspaceRevision = &workspaceRevision
+	publication.ReviewDesiredHeadSHA = &desiredHeadSHA
+	logger.Info().Str("session_id", run.ID.String()).Str("review_loop_id", loop.ID.String()).
+		Str("reviewer_agent_type", string(reviewer)).Int("max_passes", loop.MaxPasses).
+		Msg("started revision-bound publication review loop")
+	return false, nil
+}
+
+func selectPublicationReviewer(
+	ctx context.Context,
+	stores *Stores,
+	services *Services,
+	run models.Session,
+	initiatorID *uuid.UUID,
+) (models.AgentType, error) {
+	candidates := make([]models.AgentType, 0, 6)
+	if stores != nil && stores.Organizations != nil {
+		org, err := stores.Organizations.GetByID(ctx, run.OrgID)
+		if err != nil {
+			return "", fmt.Errorf("load publication reviewer policy: %w", err)
+		}
+		settings, err := models.ParseOrgSettings(org.Settings)
+		if err != nil {
+			return "", fmt.Errorf("parse publication reviewer policy: %w", err)
+		}
+		candidates = append(candidates, settings.DefaultAgentType)
+	}
+	candidates = append(candidates,
+		models.AgentTypeCodex, models.AgentTypeClaudeCode, models.AgentTypeAmp,
+		models.AgentTypePi, models.AgentTypeOpenCode, run.AgentType,
+	)
+	seen := map[models.AgentType]bool{}
+	// Prefer every supported alternative before falling back to the
+	// implementation agent, regardless of candidate configuration order.
+	ordered := make([]models.AgentType, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate != run.AgentType {
+			ordered = append(ordered, candidate)
+		}
+	}
+	ordered = append(ordered, run.AgentType)
+	for _, candidate := range ordered {
+		if seen[candidate] || !models.AgentSupportsNativeReview(candidate) {
+			continue
+		}
+		seen[candidate] = true
+		if services.CodingAgents == nil {
+			if candidate == run.AgentType {
+				return candidate, nil
+			}
+			continue
+		}
+		available, err := services.CodingAgents.IsAgentAvailable(ctx, run.OrgID, initiatorID, candidate, "")
+		if err != nil {
+			return "", fmt.Errorf("check publication reviewer availability: %w", err)
+		}
+		if available {
+			return candidate, nil
+		}
+	}
+	return "", reviewloopsvc.ErrUnsupportedReviewAgent
 }
 
 func ensureAutomationPrePRReview(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, run models.Session, changesetID *uuid.UUID) (bool, error) {

@@ -192,6 +192,17 @@ func (h *SessionHandler) resolveSessionPublicationPolicy(
 		}
 	}
 	policy := publicationintent.ResolvePolicy(orgSettings.SessionAutomation.AutomaticFollowThrough, personal)
+	handoffMode := models.PRHandoffModePrePublish
+	if run.RepositoryID != nil && h.repoStore != nil {
+		repo, repoErr := h.repoStore.GetByID(ctx, orgID, *run.RepositoryID)
+		if repoErr != nil {
+			h.logger.Warn().Err(repoErr).Str("session_id", run.ID.String()).Msg("falling back to pre-publish repository handoff policy")
+		} else if settings, settingsErr := models.ParseRepositorySettings(repo.Settings); settingsErr != nil {
+			h.logger.Warn().Err(settingsErr).Str("session_id", run.ID.String()).Msg("falling back from invalid repository handoff policy")
+		} else {
+			handoffMode = settings.PRHandoffMode
+		}
+	}
 	return &models.SessionPublicationPolicy{
 		CreatePRWhenAgentReady: policy.CreatePRWhenAgentReady,
 		CreatePRSource:         policy.CreatePRSource,
@@ -201,7 +212,7 @@ func (h *SessionHandler) resolveSessionPublicationPolicy(
 		ReviewBeforePR:  policy.ReviewBeforePR && h.prePRReviewEnabled,
 		ReviewSource:    policy.ReviewSource,
 		ReviewMaxPasses: policy.ReviewMaxPasses,
-		PRHandoffMode:   models.PRHandoffModePrePublish,
+		PRHandoffMode:   handoffMode,
 	}
 }
 
@@ -2854,18 +2865,25 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	if targetChangeset.IsPrimary {
 		state = session.PRCreationState
 	}
-	switch state {
-	case models.PRCreationStateQueued, models.PRCreationStatePushing:
+	coordinatedPrimaryPublication := h.publicationCoordinatorEnabled && targetChangeset.IsPrimary
+	switch {
+	case coordinatedPrimaryPublication:
+		// The durable coordinator resolves active review, draft-first, bypass,
+		// and replay states. Legacy PR creation state would otherwise reject an
+		// authorized draft bypass before the request body is even parsed.
+	case state == models.PRCreationStateQueued || state == models.PRCreationStatePushing:
 		writeError(w, r, http.StatusConflict, "PR_IN_FLIGHT", "PR creation already in progress")
 		return
-	case models.PRCreationStateSucceeded:
+	case state == models.PRCreationStateSucceeded:
 		// Succeeded means a PR row should exist; fall through to the
 		// PR_EXISTS check below so the 409 path is consistent.
 	}
 
 	// Check whether a PR already exists for this session.
 	var prErr error
-	if targetChangeset.IsPrimary {
+	if coordinatedPrimaryPublication {
+		prErr = pgx.ErrNoRows
+	} else if targetChangeset.IsPrimary {
 		_, prErr = h.pullRequestStore.GetPrimaryBySessionID(r.Context(), orgID, sessionID)
 	} else {
 		_, prErr = h.pullRequestStore.GetByChangesetID(r.Context(), orgID, sessionID, targetChangeset.ID)
@@ -2878,7 +2896,8 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to check for existing PR", prErr)
 		return
 	}
-	if targetChangeset.PRCreationState == models.PRCreationStateSucceeded || session.PRCreationState == models.PRCreationStateSucceeded {
+	if !coordinatedPrimaryPublication &&
+		(targetChangeset.PRCreationState == models.PRCreationStateSucceeded || session.PRCreationState == models.PRCreationStateSucceeded) {
 		writeError(w, r, http.StatusConflict, "PR_ALREADY_CREATED", "PR creation already completed for this session")
 		return
 	}
@@ -2979,7 +2998,7 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		switch intentResult.Status {
-		case publicationintent.ResultPRQueued:
+		case publicationintent.ResultPRQueued, publicationintent.ResultReviewInProgress:
 			// Fall through to the audit event and the queued response.
 		case publicationintent.ResultAlreadyPublished:
 			writeError(w, r, http.StatusConflict, "PR_EXISTS", "a pull request already exists for this session")
@@ -3011,9 +3030,22 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		if req.MergeWhenReady {
 			prDetails["merge_when_ready"] = true
 		}
+		prDetails["publication_status"] = intentResult.Status
+		prDetails["publication_id"] = intentResult.PublicationID
+		prDetails["review_bypassed"] = intentResult.ReviewBypassed
 		emitUserAuditWithSession(h.audit, r, models.AuditActionSessionPRRequested, models.AuditResourceSession, &sessionIDStr, &session.ID, nil,
 			marshalAuditDetails(h.logger, prDetails))
-		writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
+		responseStatus := string(intentResult.Status)
+		if intentResult.Status == publicationintent.ResultPRQueued {
+			responseStatus = "queued"
+		}
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"status": responseStatus, "session_id": sessionID,
+			"publication_id":   intentResult.PublicationID,
+			"review_loop_id":   intentResult.ReviewLoopID,
+			"pull_request_url": intentResult.PullRequestURL,
+			"reason":           intentResult.Reason,
+		})
 		return
 	}
 

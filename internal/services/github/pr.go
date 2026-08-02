@@ -838,6 +838,7 @@ func (s *PRService) completePublicationLocalState(
 	run *models.Session,
 	changeset *models.SessionChangeset,
 	headSHA string,
+	holdDraftForReview bool,
 ) error {
 	if run == nil {
 		return errors.New("session is required to complete publication state")
@@ -863,6 +864,12 @@ func (s *PRService) completePublicationLocalState(
 		}
 	}
 	if changeset != nil && s.publications != nil {
+		if holdDraftForReview {
+			if err := s.publications.MarkRecorded(ctx, run.OrgID, run.ID, changeset.ID); err != nil {
+				return fmt.Errorf("retain draft session publication for review: %w", err)
+			}
+			return nil
+		}
 		if err := s.publications.MarkCompleted(ctx, run.OrgID, run.ID, changeset.ID); err != nil {
 			return fmt.Errorf("complete session publication: %w", err)
 		}
@@ -891,6 +898,7 @@ func (s *PRService) checkpointExistingPullRequestPublication(
 		return errors.New("recovered pull request is missing its head SHA")
 	}
 
+	holdDraftForReview := false
 	if s.publications != nil && run.RepositoryID != nil {
 		headBranch := strings.TrimSpace(stringValue(changeset.WorkingBranch))
 		if headBranch == "" {
@@ -915,6 +923,8 @@ func (s *PRService) checkpointExistingPullRequestPublication(
 		if publication.State.Terminal() {
 			return nil
 		}
+		holdDraftForReview = publication.HandoffMode == models.PRHandoffModeDraftFirst &&
+			publication.ReviewPolicySource != models.PublicationPolicySourceExplicitBypass
 		if existing.Status == models.PullRequestStatusMerged || existing.Status == models.PullRequestStatusClosed {
 			return s.completeReconciledSessionPublication(ctx, *publication, *existing, "")
 		}
@@ -932,7 +942,7 @@ func (s *PRService) checkpointExistingPullRequestPublication(
 		}
 	}
 
-	return s.completePublicationLocalState(ctx, run, changeset, headSHA)
+	return s.completePublicationLocalState(ctx, run, changeset, headSHA, holdDraftForReview)
 }
 
 // CreatePR opens a GitHub PR from a completed agent session by restoring the
@@ -1335,7 +1345,9 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		s.linearMilestones(ctx, run.OrgID, run.ID, "pr_opened", prNumber)
 	}
 
-	if err := s.completePublicationLocalState(ctx, run, targetChangeset, headSHA); err != nil {
+	holdDraftForReview := opts.PublicationHandoffMode == models.PRHandoffModeDraftFirst &&
+		opts.ReviewPolicySource != models.PublicationPolicySourceExplicitBypass
+	if err := s.completePublicationLocalState(ctx, run, targetChangeset, headSHA, holdDraftForReview); err != nil {
 		return nil, err
 	}
 	if targetChangeset != nil && s.publications != nil {

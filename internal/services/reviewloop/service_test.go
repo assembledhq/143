@@ -136,6 +136,54 @@ func TestService_StartRejectsExistingRunningLoop(t *testing.T) {
 	require.Empty(t, threads.created, "Start should not create an orphan review thread")
 }
 
+func TestService_StartPublicationRequiresAndPersistsEvidence(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		changesetID    *uuid.UUID
+		revision       *int64
+		desiredHeadSHA *string
+		wantErr        bool
+	}{
+		{name: "complete evidence is persisted", changesetID: reviewUUIDPtr(uuid.New()), revision: reviewInt64Ptr(7), desiredHeadSHA: reviewStringPtr("0123456789abcdef0123456789abcdef01234567")},
+		{name: "missing changeset is rejected", revision: reviewInt64Ptr(7), desiredHeadSHA: reviewStringPtr("0123456789abcdef0123456789abcdef01234567"), wantErr: true},
+		{name: "missing revision is rejected", changesetID: reviewUUIDPtr(uuid.New()), desiredHeadSHA: reviewStringPtr("0123456789abcdef0123456789abcdef01234567"), wantErr: true},
+		{name: "missing head is rejected", changesetID: reviewUUIDPtr(uuid.New()), revision: reviewInt64Ptr(7), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID, sessionID, threadID := uuid.New(), uuid.New(), uuid.New()
+			snapshotKey := "snapshots/publication-review.tar.zst"
+			store := &fakeReviewLoopStore{}
+			threads := &fakeThreadService{
+				session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Status: models.SessionStatusIdle, SnapshotKey: &snapshotKey},
+				thread:  models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex},
+				message: models.SessionMessage{ID: 77, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID},
+			}
+			_, err := NewService(store, threads).Start(context.Background(), orgID, sessionID, StartReviewLoopRequest{
+				AgentType: models.AgentTypeCodex, MaxPasses: 2, Source: models.ReviewLoopSourcePublication,
+				ChangesetID: tt.changesetID, WorkspaceRevision: tt.revision, DesiredHeadSHA: tt.desiredHeadSHA,
+			})
+			if tt.wantErr {
+				require.Error(t, err, "publication review should reject incomplete revision-bound evidence")
+				require.Empty(t, store.createdLoops, "invalid publication evidence should not create a review loop")
+				return
+			}
+			require.NoError(t, err, "publication review should accept complete revision-bound evidence")
+			require.Len(t, store.createdLoops, 1, "publication review should create one durable loop")
+			require.Equal(t, tt.changesetID, store.createdLoops[0].ChangesetID, "publication review should persist the changeset evidence")
+			require.Equal(t, tt.revision, store.createdLoops[0].WorkspaceRevision, "publication review should persist the workspace revision")
+			require.Equal(t, tt.desiredHeadSHA, store.createdLoops[0].DesiredHeadSHA, "publication review should persist the desired head")
+		})
+	}
+}
+
+func reviewUUIDPtr(value uuid.UUID) *uuid.UUID { return &value }
+func reviewInt64Ptr(value int64) *int64        { return &value }
+func reviewStringPtr(value string) *string     { return &value }
+
 func TestService_StartRejectsMissingSnapshot(t *testing.T) {
 	t.Parallel()
 
@@ -272,6 +320,30 @@ func TestService_OnThreadTurnCompleteCleanAutomationLoopEnqueuesOpenPR(t *testin
 	require.Equal(t, models.ReviewLoopDecisionClean, store.cleanDecision, "clean decision should be persisted")
 	require.Equal(t, loopID, store.cleanLoopID, "clean decision should mark the loop clean")
 	require.Equal(t, []string{"clean_open_pr"}, store.events, "clean automation review should durably queue PR creation with the terminal state")
+}
+
+func TestService_OnThreadTurnCompleteFinalPassMutationNeedsHuman(t *testing.T) {
+	t.Parallel()
+
+	orgID, sessionID, threadID, loopID, passID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	store := &fakeReviewLoopStore{
+		runningLoop: models.SessionReviewLoop{
+			ID: loopID, OrgID: orgID, SessionID: sessionID, ThreadID: &threadID,
+			Status: models.ReviewLoopStatusRunning, Source: models.ReviewLoopSourcePublication,
+			AgentType: models.AgentTypeCodex, MaxPasses: 2,
+		},
+		latestPass: models.SessionReviewLoopPass{
+			ID: passID, OrgID: orgID, LoopID: loopID, SessionID: sessionID,
+			PassIndex: 2, Status: models.ReviewLoopPassStatusReviewing,
+		},
+	}
+
+	err := NewService(store, &fakeThreadService{}).OnThreadTurnCompleteWithChange(
+		context.Background(), orgID, threadID, "REVIEW_CLEAN", true,
+	)
+	require.NoError(t, err, "final-pass mutation should persist a safe terminal decision")
+	require.Equal(t, []string{"needs_human"}, store.events, "final-pass mutation should require human attention instead of publishing")
+	require.Equal(t, models.ReviewLoopDecisionNeedsFix, store.needsHumanDecision, "final-pass mutation should never be recorded as clean evidence")
 }
 
 func TestService_OnThreadTurnCompleteReviewOutputWithCleanSentinelStopsLoop(t *testing.T) {

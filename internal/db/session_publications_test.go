@@ -19,6 +19,7 @@ func sessionPublicationTestColumns() []string {
 		"id", "org_id", "session_id", "changeset_id", "repository_id",
 		"state", "source", "trigger_kind", "handoff_mode", "initiated_by_user_id",
 		"automatic_pr_policy_source", "review_policy_source",
+		"review_max_passes", "review_loop_id", "review_workspace_revision", "review_desired_head_sha",
 		"review_gate_state", "job_queue", "request_payload", "request_generation_at",
 		"base_branch", "head_branch", "desired_head_sha",
 		"published_head_sha", "github_pr_number", "github_pr_url", "attempt_count",
@@ -32,6 +33,7 @@ func sessionPublicationTestRow(publication models.SessionPublication) []any {
 		publication.ID, publication.OrgID, publication.SessionID, publication.ChangesetID, publication.RepositoryID,
 		publication.State, publication.Source, publication.TriggerKind, publication.HandoffMode, publication.InitiatedByUserID,
 		publication.AutomaticPolicySource, publication.ReviewPolicySource,
+		publication.ReviewMaxPasses, publication.ReviewLoopID, publication.ReviewWorkspaceRevision, publication.ReviewDesiredHeadSHA,
 		publication.ReviewGateState, publication.JobQueue, publication.RequestPayload, publication.RequestGenerationAt,
 		publication.BaseBranch, publication.HeadBranch, publication.DesiredHeadSHA,
 		publication.PublishedHeadSHA, publication.GitHubPRNumber, publication.GitHubPRURL, publication.AttemptCount,
@@ -69,6 +71,10 @@ func TestSessionPublicationStoreEnsureRequestedPersistsReplayIntent(t *testing.T
 		"initiated_by_user_id":       (*uuid.UUID)(nil),
 		"automatic_pr_policy_source": models.PublicationPolicySourceProductDefault,
 		"review_policy_source":       models.PublicationPolicySourceProductDefault,
+		"review_max_passes":          (*int)(nil),
+		"review_loop_id":             (*uuid.UUID)(nil),
+		"review_workspace_revision":  (*int64)(nil),
+		"review_desired_head_sha":    (*string)(nil),
 		"review_gate_state":          models.SessionPublicationReviewGateNotRequired,
 		"job_queue":                  models.SessionPublicationJobQueueAgent, "request_payload": string(payload),
 		"request_generation_at": now,
@@ -112,6 +118,10 @@ func TestSessionPublicationStoreEnsureRequestedReopensRetryableTerminalOutcomeFo
 			"initiated_by_user_id":       (*uuid.UUID)(nil),
 			"automatic_pr_policy_source": models.PublicationPolicySourceProductDefault,
 			"review_policy_source":       models.PublicationPolicySourceProductDefault,
+			"review_max_passes":          (*int)(nil),
+			"review_loop_id":             (*uuid.UUID)(nil),
+			"review_workspace_revision":  (*int64)(nil),
+			"review_desired_head_sha":    (*string)(nil),
 			"review_gate_state":          models.SessionPublicationReviewGateNotRequired,
 			"job_queue":                  models.SessionPublicationJobQueueAgent, "request_payload": string(payload),
 			"request_generation_at": now,
@@ -164,6 +174,10 @@ func TestSessionPublicationStoreEnsureRequestedGuardsMutableIntentByGeneration(t
 			"initiated_by_user_id":       (*uuid.UUID)(nil),
 			"automatic_pr_policy_source": models.PublicationPolicySourceProductDefault,
 			"review_policy_source":       models.PublicationPolicySourceProductDefault,
+			"review_max_passes":          (*int)(nil),
+			"review_loop_id":             (*uuid.UUID)(nil),
+			"review_workspace_revision":  (*int64)(nil),
+			"review_desired_head_sha":    (*string)(nil),
 			"review_gate_state":          models.SessionPublicationReviewGatePending,
 			"job_queue":                  models.SessionPublicationJobQueueDefault, "request_payload": string(oldPayload),
 			"request_generation_at": olderGeneration,
@@ -174,6 +188,102 @@ func TestSessionPublicationStoreEnsureRequestedGuardsMutableIntentByGeneration(t
 	require.NoError(t, err, "a stale retry should return the authoritative newer publication intent")
 	require.Equal(t, stored, publication, "a stale retry must not replace newer branch, payload, source, queue, or review metadata")
 	require.NoError(t, mock.ExpectationsWereMet(), "all mutable publication intent should be guarded by request generation")
+}
+
+// TestSessionPublicationStoreEnsureRequestedGuardsPendingReviewGateInSQL asserts
+// the shape of the upsert, not its result: pgxmock never executes SQL, so the
+// returned row is whatever this test hands back. The guard being asserted is
+// that a persisted 'pending' gate carrying a review budget is preserved rather
+// than overwritten by EXCLUDED — the open_pr worker re-runs this upsert with a
+// newer generation and its own default gate before it has read any review
+// state, and without the guard it silently cancels the review it is about to be
+// asked to run. Only a live database can prove the resulting value.
+func TestSessionPublicationStoreEnsureRequestedGuardsPendingReviewGateInSQL(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID, changesetID, repositoryID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","changeset_id":"` + changesetID.String() + `"}`)
+	publication := models.SessionPublication{
+		OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID, RepositoryID: repositoryID,
+		Source: models.SessionPublicationSourceBackend, ReviewGateState: models.SessionPublicationReviewGateNotRequired,
+		JobQueue: models.SessionPublicationJobQueueAgent, RequestPayload: payload,
+		RequestGenerationAt: now,
+		BaseBranch:          "main", HeadBranch: "143/session",
+	}
+	stored := publication
+	stored.ID = uuid.New()
+	stored.State = models.SessionPublicationStateRequested
+	stored.RequestedAt, stored.CreatedAt, stored.UpdatedAt = now, now, now
+
+	mock.ExpectQuery(`review_gate_state = CASE[\s\S]+session_publications\.review_gate_state = 'pending'[\s\S]+session_publications\.review_max_passes IS NOT NULL[\s\S]+THEN session_publications\.review_gate_state[\s\S]+ELSE EXCLUDED\.review_gate_state`).
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+			"repository_id": repositoryID, "source": models.SessionPublicationSourceBackend,
+			"trigger_kind": models.SessionPublicationTriggerPolicy, "handoff_mode": models.PRHandoffModePrePublish,
+			"initiated_by_user_id":       (*uuid.UUID)(nil),
+			"automatic_pr_policy_source": models.PublicationPolicySourceProductDefault,
+			"review_policy_source":       models.PublicationPolicySourceProductDefault,
+			"review_max_passes":          (*int)(nil),
+			"review_loop_id":             (*uuid.UUID)(nil),
+			"review_workspace_revision":  (*int64)(nil),
+			"review_desired_head_sha":    (*string)(nil),
+			"review_gate_state":          models.SessionPublicationReviewGateNotRequired,
+			"job_queue":                  models.SessionPublicationJobQueueAgent, "request_payload": string(payload),
+			"request_generation_at": now,
+			"base_branch":           "main", "head_branch": "143/session", "desired_head_sha": (*string)(nil),
+		}).
+		WillReturnRows(pgxmock.NewRows(sessionPublicationTestColumns()).AddRow(sessionPublicationTestRow(stored)...))
+
+	err = NewSessionPublicationStore(mock).EnsureRequested(context.Background(), orgID, &publication)
+	require.NoError(t, err, "the guarded upsert should remain a valid single statement")
+	require.NoError(t, mock.ExpectationsWereMet(), "the review gate upsert must guard pending gates that carry a review pass budget")
+}
+
+func TestSessionPublicationStoreApplyReviewBypassDetachesEvidence(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID, changesetID, repositoryID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","changeset_id":"` + changesetID.String() + `","draft":true}`)
+	publication := models.SessionPublication{
+		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID, RepositoryID: repositoryID,
+		State: models.SessionPublicationStateReviewPending, Source: models.SessionPublicationSourceUser,
+		TriggerKind: models.SessionPublicationTriggerExplicitAction, HandoffMode: models.PRHandoffModeDraftFirst,
+		AutomaticPolicySource: models.PublicationPolicySourceExplicitAction,
+		ReviewPolicySource:    models.PublicationPolicySourceExplicitBypass,
+		ReviewGateState:       models.SessionPublicationReviewGateNeedsHuman,
+		JobQueue:              models.SessionPublicationJobQueueAgent, RequestPayload: payload, RequestGenerationAt: now,
+		BaseBranch: "main", HeadBranch: "143/session", RequestedAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	stored := publication
+	stored.State = models.SessionPublicationStateReadyToPublish
+	stored.ReviewGateState = models.SessionPublicationReviewGateNotRequired
+	stored.ReviewMaxPasses = nil
+	stored.ReviewLoopID = nil
+	stored.ReviewWorkspaceRevision = nil
+	stored.ReviewDesiredHeadSHA = nil
+
+	mock.ExpectQuery(`UPDATE session_publications[\s\S]+review_loop_id = NULL[\s\S]+review_gate_state = 'not_required'[\s\S]+org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id`).
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+			"source":                  models.SessionPublicationSourceUser,
+			"automatic_policy_source": models.PublicationPolicySourceExplicitAction,
+			"job_queue":               models.SessionPublicationJobQueueAgent, "request_payload": string(payload),
+			"request_generation_at": now,
+		}).
+		WillReturnRows(pgxmock.NewRows(sessionPublicationTestColumns()).AddRow(sessionPublicationTestRow(stored)...))
+
+	err = NewSessionPublicationStore(mock).ApplyReviewBypass(context.Background(), orgID, &publication)
+	require.NoError(t, err, "authorized draft bypass should atomically detach stale review evidence")
+	require.Equal(t, stored, publication, "bypassed publication should be ready with review no longer required")
+	require.NoError(t, mock.ExpectationsWereMet(), "review bypass should remain scoped to org, session, and changeset")
 }
 
 func TestSessionPublicationStoreStartAttempt(t *testing.T) {

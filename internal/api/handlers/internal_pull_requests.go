@@ -178,6 +178,14 @@ func (h *InternalPullRequestHandler) Create(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, http.StatusForbidden, "REPO_MISMATCH", "token is not authorized for this session repository")
 		return
 	}
+	// The coordinator resolves the primary changeset, replay state, and review
+	// gating itself. Legacy PR creation state is not authoritative for it, so
+	// hand off before spending a query on state this path will not read.
+	if h.coordinatorEnabled {
+		h.createWithCoordinator(w, r, claims.OrgID, sessionID, req)
+		return
+	}
+
 	changesetID := sessionID
 	if h.changesetStore != nil {
 		primary, primaryErr := h.changesetStore.GetPrimary(r.Context(), claims.OrgID, sessionID)
@@ -211,11 +219,6 @@ func (h *InternalPullRequestHandler) Create(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to check for existing PR", prErr)
 		return
 	}
-	if h.coordinatorEnabled {
-		h.createWithCoordinator(w, r, claims.OrgID, sessionID, req)
-		return
-	}
-
 	if h.changesetStore == nil {
 		err = h.sessionStore.UpdatePRCreationState(r.Context(), claims.OrgID, sessionID, models.PRCreationStateQueued, "")
 		if err != nil {
@@ -338,8 +341,9 @@ func agentPublicationAuditDetails(
 	triggerKind models.SessionPublicationTriggerKind,
 ) (json.RawMessage, error) {
 	return json.Marshal(map[string]any{
-		"status":         result.Status,
-		"publication_id": result.PublicationID,
-		"trigger_kind":   triggerKind,
+		"status":          result.Status,
+		"publication_id":  result.PublicationID,
+		"trigger_kind":    triggerKind,
+		"review_bypassed": result.ReviewBypassed,
 	})
 }

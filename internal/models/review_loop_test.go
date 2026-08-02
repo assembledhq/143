@@ -35,6 +35,32 @@ func TestReviewLoopStatusValidate(t *testing.T) {
 	}
 }
 
+func TestReviewLoopSourceValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		source  ReviewLoopSource
+		wantErr bool
+	}{
+		{name: "manual", source: ReviewLoopSourceManual},
+		{name: "automation", source: ReviewLoopSourceAutomation},
+		{name: "publication", source: ReviewLoopSourcePublication},
+		{name: "invalid", source: ReviewLoopSource("bogus"), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.source.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "invalid review loop source should be rejected")
+				return
+			}
+			require.NoError(t, err, "known review loop source should validate")
+		})
+	}
+}
+
 func TestReviewLoopPassStatusValidate(t *testing.T) {
 	t.Parallel()
 
