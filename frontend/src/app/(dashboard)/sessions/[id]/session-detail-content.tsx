@@ -3323,7 +3323,10 @@ function AgentActionCard({
           <p className="text-sm font-medium text-foreground">{title}</p>
           <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
         </div>
-        <div className="w-full shrink-0 [&>span]:w-full [&_[data-slot=button]]:w-full @min-[24rem]/agent-action:w-auto @min-[24rem]/agent-action:[&>span]:w-auto @min-[24rem]/agent-action:[&_[data-slot=button]]:w-auto">
+        <div
+          data-slot="agent-action-card-action"
+          className="w-fit shrink-0 self-start @min-[24rem]/agent-action:self-auto"
+        >
           {action}
         </div>
       </CardContent>

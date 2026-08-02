@@ -134,4 +134,19 @@ describe('ChangesetSplitPrompt', () => {
     expect(content?.className).toContain('@min-[24rem]/agent-action:flex-row');
     expect(content?.className).not.toContain('@container/agent-action');
   });
+
+  it('keeps the split action sized to its label on narrow cards', () => {
+    render(
+      <ChangesetSplitPrompt
+        additions={CHANGESET_SPLIT_MIN_ADDITIONS}
+        onRequestSplit={vi.fn()}
+      />,
+    );
+
+    const button = screen.getByRole('button', { name: 'Split PRs' });
+    const action = button.closest('[data-slot="agent-action-card-action"]');
+    expect(action).toHaveClass('w-fit', 'self-start');
+    expect(action).not.toHaveClass('w-full');
+    expect(button).not.toHaveClass('w-full');
+  });
 });
