@@ -45,6 +45,10 @@ const (
 	maxBranchSlugLen  = 60
 	maxLabelsToCreate = 5
 	maxPRTitleLen     = 120
+	// defaultPrimaryChangesetTitle is the schema fallback for sessions that
+	// do not have a title when their primary changeset is created. It is a
+	// placeholder, not an explicit instruction to overwrite generated PR copy.
+	defaultPrimaryChangesetTitle = "Pull request"
 	// minPRTitleSubjectChars is the smallest descriptive subject we'll allow
 	// after Linear key prefixes are applied. Prefixes are trimmed (secondaries
 	// first) before the subject so a session linked to many issues can never
@@ -1212,12 +1216,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	} else {
 		s.logger.Warn().Err(genErr).Msg("LLM PR content generation failed, falling back to static")
 	}
-	if title == "" {
-		title = formatPRTitle(run, issue)
-	}
-	if targetChangeset != nil && strings.TrimSpace(targetChangeset.Title) != "" {
-		title = strings.TrimSpace(targetChangeset.Title)
-	}
+	title = resolvePRTitle(run, issue, title, targetChangeset)
 	if body == "" {
 		body = s.formatPRBody(ctx, run, issue)
 	}
@@ -4886,6 +4885,29 @@ func formatPRTitle(session *models.Session, issue *models.Issue) string {
 		return applyLinearKeyPrefixes(session, title, nil)
 	}
 	return applyLinearKeyPrefixes(session, fmt.Sprintf("Session %s", session.ID.String()[:8]), nil)
+}
+
+// resolvePRTitle lets explicit changeset metadata win while preventing the
+// primary changeset's schema placeholder from erasing generated PR content.
+// Non-primary changesets always treat a non-empty title as explicit because
+// those rows are created intentionally for split or stacked publications.
+func resolvePRTitle(session *models.Session, issue *models.Issue, generated string, changeset *models.SessionChangeset) string {
+	title := strings.TrimSpace(generated)
+	if title == "" {
+		title = formatPRTitle(session, issue)
+	}
+	if changeset == nil {
+		return title
+	}
+
+	changesetTitle := strings.TrimSpace(changeset.Title)
+	if changesetTitle == "" {
+		return title
+	}
+	if changeset.IsPrimary && strings.EqualFold(changesetTitle, defaultPrimaryChangesetTitle) {
+		return title
+	}
+	return changesetTitle
 }
 
 // issueWithLinearHumanKey returns the input issue when no rewrite is needed,
