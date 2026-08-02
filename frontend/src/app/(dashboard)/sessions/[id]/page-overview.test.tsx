@@ -447,6 +447,29 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
   });
 
+  it('keeps PR details at the very top of the overview before the split suggestion', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            diff_stats: { added: CHANGESET_SPLIT_MIN_ADDITIONS, removed: 1, files_changed: 1 },
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={mockSessions[0].id} />);
+
+    const prDetailsTitle = await screen.findByText('PR health');
+    const splitTitle = screen.getByText('Need smaller pull requests?');
+    const prDetailsCard = prDetailsTitle.closest('[data-slot="card"]');
+
+    expect(prDetailsCard).not.toBeNull();
+    expect(prDetailsCard?.parentElement?.firstElementChild).toBe(prDetailsCard);
+    expect(prDetailsTitle.compareDocumentPosition(splitTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it('shows a compact status card while the Overview review loop is running', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
