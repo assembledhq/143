@@ -2,7 +2,7 @@
 --
 -- The CHECK and FOREIGN KEY constraints are installed NOT VALID here so their
 -- validation scans do not run while the ACCESS EXCLUSIVE catalog locks are
--- held; migration 000272 validates them under a SHARE UPDATE EXCLUSIVE lock
+-- held; migration 000273 validates them under a SHARE UPDATE EXCLUSIVE lock
 -- that concurrent writers can tolerate.
 --
 -- Note on locking: the UNIQUE constraint and the index at the bottom of this

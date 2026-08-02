@@ -1423,11 +1423,11 @@ func TestSingleCodeReviewPolicyMigrationPreservesHistoryAndPreventsActiveOverrid
 func TestPublicationReviewEvidenceMigrationsPreserveHistoryAndSplitValidation(t *testing.T) {
 	t.Parallel()
 
-	upBody, err := os.ReadFile("../../migrations/000271_publication_review_evidence.up.sql")
+	upBody, err := os.ReadFile("../../migrations/000272_publication_review_evidence.up.sql")
 	require.NoError(t, err, "test should read the publication review evidence migration")
-	validateBody, err := os.ReadFile("../../migrations/000272_validate_publication_review_evidence.up.sql")
+	validateBody, err := os.ReadFile("../../migrations/000273_validate_publication_review_evidence.up.sql")
 	require.NoError(t, err, "test should read the publication review evidence validation migration")
-	downBody, err := os.ReadFile("../../migrations/000271_publication_review_evidence.down.sql")
+	downBody, err := os.ReadFile("../../migrations/000272_publication_review_evidence.down.sql")
 	require.NoError(t, err, "test should read the publication review evidence down migration")
 
 	upSQL := string(upBody)
