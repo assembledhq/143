@@ -377,8 +377,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		cfg.FrontendURL,
 		logger,
 		codereviewsvc.DisputeConfig{
-			ReassessmentsEnabled:   cfg.CodeReviewDisputeReassessmentsEnabled,
-			MaxActiveReassessments: cfg.CodeReviewDisputeMaxActiveReassessments,
+			ReassessmentsEnabled:          cfg.CodeReviewDisputeReassessmentsEnabled,
+			MaxActiveReassessments:        cfg.CodeReviewDisputeMaxActiveReassessments,
+			UntrustedIntakePerLogin:       cfg.CodeReviewDisputeUntrustedIntakePerLogin,
+			UntrustedIntakePerPullRequest: cfg.CodeReviewDisputeUntrustedIntakePerPullRequest,
 		},
 	)
 	codeReviewDisputeSvc.SetAuditEmitter(auditEmitter)

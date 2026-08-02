@@ -73,7 +73,7 @@ func newReplyCodeReviewDisputeHandler(stores *Stores, services *Services, logger
 		if services.CodeReviewDisputePublisher == nil {
 			return fmt.Errorf("code review dispute GitHub publisher unavailable")
 		}
-		reserved, err := stores.CodeReviewDisputes.ReserveReplyCycle(ctx, input.OrgID, input.DisputeID, codeReviewDisputeMachineCycleBudget)
+		reserved, firstAttempt, err := stores.CodeReviewDisputes.ReserveReplyCycle(ctx, input.OrgID, input.DisputeID, codeReviewDisputeMachineCycleBudget)
 		if err != nil {
 			return err
 		}
@@ -96,6 +96,11 @@ func newReplyCodeReviewDisputeHandler(stores *Stores, services *Services, logger
 			OrgID: input.OrgID, InstallationID: repo.InstallationID, Repository: pr.GitHubRepo,
 			PullRequestNumber: pr.GitHubPRNumber, ThreadRootCommentID: dispute.GitHubThreadRootCommentID,
 			KnownReplyCommentID: dispute.ReplyCommentID, Body: body,
+			// The reservation commits before publication, so only a retry can
+			// have left an orphaned reply behind. Scanning the comment list on
+			// a first attempt would page a busy pull request for a marker that
+			// cannot be there yet.
+			SearchExistingReply: !firstAttempt,
 		})
 		if err != nil {
 			if markErr := stores.CodeReviewDisputes.MarkReplyFailed(ctx, input.OrgID, input.DisputeID, "GitHub reply publication failed; retrying."); markErr != nil {

@@ -21,9 +21,15 @@ type captureDisputeStore struct {
 	authorizations   []models.CodeReviewDisputeAuthorization
 	admitted         bool
 	admittedCooldown time.Duration
+	guards           []db.CodeReviewDisputeIntakeGuard
+	createErr        error
 }
 
-func (s *captureDisputeStore) CreateAndEnqueueTriage(_ context.Context, dispute *models.CodeReviewDispute) (bool, error) {
+func (s *captureDisputeStore) CreateAndEnqueueTriage(_ context.Context, dispute *models.CodeReviewDispute, guard db.CodeReviewDisputeIntakeGuard) (bool, error) {
+	s.guards = append(s.guards, guard)
+	if s.createErr != nil {
+		return false, s.createErr
+	}
 	dispute.ID = uuid.New()
 	s.created = *dispute
 	return true, nil
@@ -189,6 +195,100 @@ func TestDisputeService_FileInAppCapturesImmutableSemanticInput(t *testing.T) {
 	require.NoError(t, json.Unmarshal(dispute.QueueSignals, &signals), "queue context should be valid JSON")
 	require.Equal(t, "Fix payment authorization", signals["pull_request_title"], "queue context should preserve the reviewed pull request title")
 	require.Equal(t, "https://github.com/acme/payments/pull/42", signals["github_pr_url"], "queue context should link policy owners to the pull request")
+}
+
+func TestDisputeService_FileFromGitHubAppliesUntrustedIntakeGuard(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	pullRequestID := uuid.New()
+	decision := models.CodeReviewDecisionBlocked
+	reviews := disputeReviewStoreStub{
+		metadata: models.CodeReviewSessionMetadata{
+			OrgID: orgID, SessionID: sessionID, PullRequestID: pullRequestID,
+			RepositoryID: uuid.New(), PolicyID: uuid.New(), HeadSHA: "abc123",
+			Status: models.CodeReviewSessionStatusCompleted, Decision: &decision,
+		},
+		item: models.CodeReviewListItem{PullRequestAuthor: "octocat"},
+	}
+	config := DisputeConfig{ReassessmentsEnabled: true, UntrustedIntakePerLogin: 5, UntrustedIntakePerPullRequest: 20}
+	tests := []struct {
+		name          string
+		association   string
+		createErr     error
+		expectedGuard db.CodeReviewDisputeIntakeGuard
+		expectCapture bool
+	}{
+		{
+			name: "untrusted filing is admitted under a guard", association: "NONE",
+			expectedGuard: db.CodeReviewDisputeIntakeGuard{
+				Window: codeReviewDisputeUntrustedIntakeWindow, PerLoginMax: 5, PerPullRequestMax: 20,
+			},
+			expectCapture: true,
+		},
+		{
+			name: "capped untrusted filing is declined without an error", association: "NONE",
+			createErr: db.ErrCodeReviewDisputeIntakeCapped,
+			expectedGuard: db.CodeReviewDisputeIntakeGuard{
+				Window: codeReviewDisputeUntrustedIntakeWindow, PerLoginMax: 5, PerPullRequestMax: 20,
+			},
+		},
+		{
+			name: "trusted filing carries no guard", association: "MEMBER",
+			expectedGuard: db.CodeReviewDisputeIntakeGuard{}, expectCapture: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &captureDisputeStore{createErr: tt.createErr}
+			service := NewDisputeService(store, reviews, disputePullRequestStoreStub{}, disputeJobStoreStub{}, nil, "", zerolog.Nop(), config)
+
+			dispute, captured, err := service.FileFromGitHub(context.Background(), FileGitHubCodeReviewDisputeInput{
+				OrgID: orgID, PullRequestID: pullRequestID, AuthorLogin: "drive-by",
+				AuthorType: models.PRFeedbackAuthorTypeUser, AuthorAssociation: tt.association,
+				Body: "This should never have been blocked.", GitHubCommentID: 99, SourceVersion: 1,
+			})
+
+			require.NoError(t, err, "an intake ceiling is an admission decision, not an error the webhook should retry")
+			require.Equal(t, tt.expectCapture, captured, "only a stored dispute may suppress ordinary PR feedback handling")
+			require.Equal(t, []db.CodeReviewDisputeIntakeGuard{tt.expectedGuard}, store.guards,
+				"the ceiling must be evaluated in the same transaction as the insert, so it travels with the create call")
+			if tt.expectCapture {
+				require.NotEqual(t, uuid.Nil, dispute.ID, "a captured dispute should carry its stored identity")
+			} else {
+				require.Equal(t, uuid.Nil, dispute.ID, "a declined dispute must not look stored to the caller")
+			}
+		})
+	}
+}
+
+func TestDisputeService_TriageRecordsTrustNotEligibilityInAuthorizationSnapshot(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	disputeID := uuid.New()
+	store := &captureDisputeStore{current: models.CodeReviewDispute{
+		ID: disputeID, OrgID: orgID, SessionID: uuid.New(),
+		Source: models.CodeReviewDisputeSourceGitHubComment, Decision: models.CodeReviewDecisionBlocked,
+		Body: "Why did this get blocked?", AuthorAssociation: "MEMBER",
+		RepositoryVisibility: models.CodeReviewRepositoryVisibilityPublic,
+		IntakeStatus:         models.CodeReviewDisputeIntakePending,
+		ReassessmentStatus:   models.CodeReviewDisputeReassessmentNotRequested,
+	}}
+	reviews := disputeReviewStoreStub{item: models.CodeReviewListItem{PullRequestAuthor: "octocat"}}
+	service := NewDisputeService(store, reviews, disputePullRequestStoreStub{}, disputeJobStoreStub{}, nil, "", zerolog.Nop())
+
+	err := service.Triage(context.Background(), orgID, disputeID)
+
+	require.NoError(t, err, "an explanation question should still be triaged")
+	require.Equal(t, models.CodeReviewDisputeRoutingAnswerOnly, store.triage.Routing, "a question without disagreement should route to answer_only")
+	require.Len(t, store.authorizations, 1, "queue influence should record exactly one authorization snapshot")
+	require.True(t, store.authorizations[0].Trusted, "the snapshot must record the trust decision, not adjudication eligibility")
+	require.Equal(t, "trusted GitHub association", store.authorizations[0].DecisionReason, "the recorded reason must agree with the recorded trust")
 }
 
 func TestDisputeService_TriageDoesNotLetTrustedNonAuthorStartReassessment(t *testing.T) {

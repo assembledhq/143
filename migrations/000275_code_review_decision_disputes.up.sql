@@ -1,10 +1,24 @@
-CREATE UNIQUE INDEX idx_sessions_org_id_id_for_code_review_disputes
+-- Composite (org_id, id) unique indexes are the referenced-key requirement for
+-- the tenant-scoped foreign keys below. They are built on hot parent tables,
+-- and a plain CREATE UNIQUE INDEX holds a SHARE lock for the whole build, which
+-- blocks writes to sessions and pull_requests until it finishes.
+-- NOTE: For production, create these four indexes with CONCURRENTLY before
+-- running the migration; IF NOT EXISTS then makes this step a no-op. If such a
+-- pre-build failed it leaves an INVALID index that IF NOT EXISTS will skip and
+-- the composite foreign keys below will then fail with "no unique constraint
+-- matching given keys" -- drop the invalid index before rerunning.
+-- lock_timeout bounds how long each statement waits to ACQUIRE a lock. It does
+-- not bound how long an acquired lock is held, so it makes this migration fail
+-- fast against concurrent DDL rather than making the index builds cheap.
+SET LOCAL lock_timeout = '5s';
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_org_id_id_for_code_review_disputes
     ON sessions (org_id, id);
-CREATE UNIQUE INDEX idx_pull_requests_org_id_id_for_code_review_disputes
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pull_requests_org_id_id_for_code_review_disputes
     ON pull_requests (org_id, id);
-CREATE UNIQUE INDEX idx_repositories_org_id_id_for_code_review_disputes
+CREATE UNIQUE INDEX IF NOT EXISTS idx_repositories_org_id_id_for_code_review_disputes
     ON repositories (org_id, id);
-CREATE UNIQUE INDEX idx_code_review_policies_org_id_id_for_disputes
+CREATE UNIQUE INDEX IF NOT EXISTS idx_code_review_policies_org_id_id_for_disputes
     ON code_review_policies (org_id, id);
 
 CREATE TABLE code_review_decision_disputes (
@@ -95,9 +109,30 @@ CREATE INDEX idx_code_review_disputes_pending_intake
 CREATE INDEX idx_code_review_disputes_session
     ON code_review_decision_disputes (org_id, session_id, created_at DESC, id DESC);
 
-CREATE INDEX idx_code_review_disputes_queue
-    ON code_review_decision_disputes (org_id, repository_id, queue_priority DESC, id)
+-- The adjudication UI always asks for adjudication_status = 'pending', so that
+-- stays a narrow partial index: resolved disputes accumulate forever and must
+-- not sit in the hot path's index. repository_id is an optional filter and
+-- cannot lead the key without breaking the ordering for the unfiltered case.
+CREATE INDEX idx_code_review_disputes_queue_pending
+    ON code_review_decision_disputes (org_id, queue_priority DESC, created_at DESC, id DESC)
     WHERE adjudication_status = 'pending';
+
+-- Serves the API's repository-scoped adjudication list with the same ordering.
+-- The unfiltered "any status" list still sorts: repository_id has to lead the
+-- key to answer that filter, which leaves the ordering columns unreachable when
+-- no repository is supplied.
+CREATE INDEX idx_code_review_disputes_queue_repository
+    ON code_review_decision_disputes (org_id, repository_id, queue_priority DESC, created_at DESC, id DESC)
+    WHERE adjudication_status IS NOT NULL;
+
+-- Backs the untrusted intake caps. Both ceilings are counted from one scan of
+-- this pull request's window (the per-login figure is a FILTER over the same
+-- rows, not a separate predicate), so the login does not belong in the key --
+-- it could never serve as an access predicate and would only widen the index.
+-- The per-pull-request ceiling bounds that scan.
+CREATE INDEX idx_code_review_disputes_pull_request_intake
+    ON code_review_decision_disputes (org_id, pull_request_id, created_at DESC)
+    WHERE source = 'github_comment';
 
 CREATE INDEX idx_code_review_disputes_upheld
     ON code_review_decision_disputes (org_id, adjudicated_at DESC)
@@ -183,6 +218,13 @@ ALTER TABLE code_review_session_metadata
         REFERENCES code_review_decision_disputes(org_id, id)
         ON DELETE SET NULL (triggering_dispute_id);
 
+-- Adding the columns is metadata-only (non-volatile defaults), but validating
+-- the CHECK scans every pull_requests row under ACCESS EXCLUSIVE.
+-- ADD CONSTRAINT ... NOT VALID plus a separate VALIDATE would not help here:
+-- golang-migrate's postgres driver executes this whole file as one statement,
+-- so it runs in a single implicit transaction and the ACCESS EXCLUSIVE lock is
+-- held until commit either way. Splitting the validation requires splitting the
+-- migration, which is not worth it for a scan of a table this size.
 ALTER TABLE pull_requests
     ADD COLUMN code_review_dispute_epoch bigint NOT NULL DEFAULT 0,
     ADD COLUMN code_review_dispute_cycles_in_epoch integer NOT NULL DEFAULT 0,

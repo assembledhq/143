@@ -89,8 +89,10 @@ func TestCodeReviewDispute_CurrentTrust(t *testing.T) {
 		{name: "private repository", dispute: CodeReviewDispute{RepositoryVisibility: CodeReviewRepositoryVisibilityPrivate}, expectedTrust: true, expectedReason: "private repository contributor"},
 		{name: "trusted association", dispute: CodeReviewDispute{RepositoryVisibility: CodeReviewRepositoryVisibilityPublic, AuthorAssociation: "member"}, expectedTrust: true, expectedReason: "trusted GitHub association"},
 		{name: "outside contributor", dispute: CodeReviewDispute{RepositoryVisibility: CodeReviewRepositoryVisibilityPublic, AuthorAssociation: "none"}, expectedReason: "external contributor"},
-		{name: "positive override", dispute: CodeReviewDispute{TrustOverride: &trusted}, expectedTrust: true, expectedReason: "dispute trust override"},
-		{name: "negative override", dispute: CodeReviewDispute{RepositoryVisibility: CodeReviewRepositoryVisibilityPrivate, TrustOverride: &untrusted}, expectedReason: "dispute trust override"},
+		// The two override directions must read differently: the reason is shown
+		// next to the trust badge in the admin queue.
+		{name: "positive override", dispute: CodeReviewDispute{TrustOverride: &trusted}, expectedTrust: true, expectedReason: "admin promoted this dispute"},
+		{name: "negative override", dispute: CodeReviewDispute{RepositoryVisibility: CodeReviewRepositoryVisibilityPrivate, TrustOverride: &untrusted}, expectedReason: "admin demoted this dispute"},
 	}
 
 	for _, tt := range tests {

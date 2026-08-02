@@ -28,6 +28,34 @@ func TestCodeReviewDisputesMigrationEnforcesTenantScopedParents(t *testing.T) {
 	require.NotContains(t, sql, "REFERENCES pull_requests(id)", "pull request references should not permit a mismatched organization carrier")
 	require.NotContains(t, sql, "REFERENCES repositories(id)", "repository references should not permit a mismatched organization carrier")
 	require.NotContains(t, sql, "REFERENCES code_review_policies(id)", "policy references should not permit a mismatched organization carrier")
+
+	// The composite referenced-key indexes are built on hot parent tables. The
+	// migration should fail fast rather than queue behind concurrent DDL, and
+	// must no-op when an operator pre-created them CONCURRENTLY.
+	require.Contains(t, sql, "SET LOCAL lock_timeout", "the migration should bound how long it waits to acquire parent-table locks")
+	for _, parent := range []string{"sessions", "pull_requests", "repositories", "code_review_policies"} {
+		require.Regexp(t, `CREATE UNIQUE INDEX IF NOT EXISTS \w+\n?\s+ON `+parent+` \(org_id, id\)`, sql,
+			"parent index builds should be idempotent so they can be pre-created CONCURRENTLY")
+	}
+	// golang-migrate runs this file as a single implicit transaction, so
+	// ADD CONSTRAINT ... NOT VALID plus VALIDATE would hold ACCESS EXCLUSIVE
+	// across both and buy nothing. Keep the honest single-statement form.
+	require.Contains(t, sql, "CHECK (code_review_dispute_cycles_in_epoch >= 0);",
+		"the loop-guard CHECK should be added and validated in one statement")
+	require.NotContains(t, sql, "VALIDATE CONSTRAINT",
+		"a deferred CHECK validation cannot help inside a single-transaction migration")
+
+	// The adjudication UI always filters to pending; a broader partial index
+	// would accumulate every resolved dispute in the hot path.
+	require.Contains(t, sql, "ON code_review_decision_disputes (org_id, queue_priority DESC, created_at DESC, id DESC)\n    WHERE adjudication_status = 'pending'",
+		"the hot-path queue index should match the pending filter and the list ordering")
+	require.Contains(t, sql, "ON code_review_decision_disputes (org_id, repository_id, queue_priority DESC, created_at DESC, id DESC)\n    WHERE adjudication_status IS NOT NULL",
+		"the repository-scoped queue index should keep the same ordering")
+	// Both intake ceilings come from one windowed scan of the pull request, so
+	// the index only needs to reach that window; the login is a FILTER over the
+	// same rows and can never act as an access predicate.
+	require.Contains(t, sql, "ON code_review_decision_disputes (org_id, pull_request_id, created_at DESC)\n    WHERE source = 'github_comment'",
+		"the intake-cap index should reach the pull request's window without carrying an unusable login column")
 }
 
 func TestSessionChangesetsMigrationPinsPrimaryCompatibilityContract(t *testing.T) {

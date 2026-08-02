@@ -21,6 +21,7 @@ import (
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog"
 )
 
 type WebhookHandler struct {
@@ -182,6 +183,11 @@ func (h *WebhookHandler) handleIssueComment(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
 }
 
+// handleCodeReviewMentioned captures decision disputes and, for newly created
+// comments only, starts a mention-triggered review. Edited comments are
+// re-triaged as disputes but must not start another review: every edit carries
+// a fresh delivery ID, which explicit rerequests treat as an intentional
+// rerequest and would turn a typo fix into a full agent fan-out.
 func (h *WebhookHandler) handleCodeReviewMentioned(w http.ResponseWriter, r *http.Request, event ghservice.IssueCommentEvent, owner db.GitHubRepoOwner) (bool, bool) {
 	if !codereviewsvc.HasGitHubTeamMention(event.Comment.Body) {
 		return true, false
@@ -198,10 +204,16 @@ func (h *WebhookHandler) handleCodeReviewMentioned(w http.ResponseWriter, r *htt
 	if !matched {
 		return true, false
 	}
-	if !codeReviewMentionAuthorTrusted(event) &&
-		(h.codeReviewDisputes == nil || event.Comment.PerformedViaGitHubApp != nil ||
-			strings.EqualFold(strings.TrimSpace(event.Comment.User.Type), "bot") ||
-			strings.EqualFold(strings.TrimSpace(event.Sender.Type), "bot")) {
+	disputeCandidate := h.codeReviewDisputes != nil &&
+		!codeReviewCommentIsMachineAuthored(event.Comment.PerformedViaGitHubApp, event.Comment.User.Type, event.Sender.Type) &&
+		codereviewsvc.IsLikelyDisputeMention(event.Comment.Body)
+	if !codeReviewMentionAuthorTrusted(event) && !disputeCandidate {
+		return true, false
+	}
+	// An edited comment can only reach dispute intake. Spending a GitHub
+	// request to mirror the pull request for an edit that cannot start a
+	// review or a dispute is pure waste.
+	if event.Action != "created" && !disputeCandidate {
 		return true, false
 	}
 	if h.codeReviewPRs == nil {
@@ -265,15 +277,16 @@ func (h *WebhookHandler) handleCodeReviewMentioned(w http.ResponseWriter, r *htt
 		pr.BaseSHA = snapshot.BaseSHA
 	}
 
-	if h.codeReviewDisputes != nil && codereviewsvc.IsLikelyDisputeMention(event.Comment.Body) {
-		privateRepo := false
-		if h.repoStore != nil {
-			repository, repoErr := h.repoStore.GetByID(r.Context(), owner.OrgID, owner.RepositoryID)
-			if repoErr != nil {
-				writeError(w, r, http.StatusInternalServerError, "REPOSITORY_LOAD_FAILED", "failed to load repository for code review dispute", repoErr)
-				return false, false
-			}
-			privateRepo = repository.Private
+	if disputeCandidate {
+		// A capture that fails must not fall through to HandleReviewMentioned:
+		// answering a transient failure with a whole new agent fan-out is the
+		// opposite of what the commenter asked for. Let the comment land as
+		// ordinary PR feedback instead. Capture returning "not a dispute"
+		// (no completed review yet) does fall through, which is how a plain
+		// "@team can you look?" still starts a review.
+		privateRepo, ok := h.codeReviewDisputeRepositoryPrivate(r, owner)
+		if !ok {
+			return true, false
 		}
 		authorType := models.PRFeedbackAuthorType(event.Comment.User.Type)
 		if authorType.Validate() != nil {
@@ -286,17 +299,14 @@ func (h *WebhookHandler) handleCodeReviewMentioned(w http.ResponseWriter, r *htt
 			GitHubCommentID: event.Comment.ID, SourceVersion: codeReviewCommentSourceVersion(event),
 		})
 		if disputeErr != nil {
-			if errors.Is(disputeErr, codereviewsvc.ErrCodeReviewDisputeInvalidBody) {
-				return true, false
-			}
-			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_DISPUTE_CAPTURE_FAILED", "failed to capture code review dispute", disputeErr)
-			return false, false
+			logCodeReviewDisputeCaptureFailure(r, event.Comment.ID, disputeErr)
+			return true, false
 		}
 		if captured {
 			return true, true
 		}
 	}
-	if !codeReviewMentionAuthorTrusted(event) {
+	if event.Action != "created" || !codeReviewMentionAuthorTrusted(event) {
 		return true, false
 	}
 
@@ -331,6 +341,36 @@ func codeReviewCommentSourceVersion(event ghservice.IssueCommentEvent) int64 {
 	return codeReviewSourceVersion(event.Comment.UpdatedAt, event.Comment.Body)
 }
 
+// codeReviewDisputeRepositoryPrivate resolves repository visibility for dispute
+// intake. A lookup failure skips capture rather than failing the delivery:
+// dispute intake is secondary to recording the comment as PR feedback.
+func (h *WebhookHandler) codeReviewDisputeRepositoryPrivate(r *http.Request, owner db.GitHubRepoOwner) (bool, bool) {
+	if h.repoStore == nil {
+		return false, true
+	}
+	repository, err := h.repoStore.GetByID(r.Context(), owner.OrgID, owner.RepositoryID)
+	if err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).
+			Str("repository_id", owner.RepositoryID.String()).
+			Msg("skipped code review dispute capture: repository visibility unavailable")
+		return false, false
+	}
+	return repository.Private, true
+}
+
+// logCodeReviewDisputeCaptureFailure records a capture failure without failing
+// the webhook. Dispute intake runs ahead of PR feedback ingestion, so returning
+// an error here would drop the comment from the feedback record entirely and
+// leave GitHub redelivering a comment we can never accept.
+func logCodeReviewDisputeCaptureFailure(r *http.Request, commentID int64, err error) {
+	if errors.Is(err, codereviewsvc.ErrCodeReviewDisputeInvalidBody) {
+		return
+	}
+	zerolog.Ctx(r.Context()).Warn().Err(err).
+		Int64("github_comment_id", commentID).
+		Msg("failed to capture code review dispute; recording the comment as ordinary PR feedback")
+}
+
 func codeReviewSourceVersion(updatedAt *time.Time, body string) int64 {
 	seed := strings.TrimSpace(body)
 	if updatedAt != nil {
@@ -349,10 +389,17 @@ func codeReviewSourceVersion(updatedAt *time.Time, body string) int64 {
 	return version
 }
 
+// codeReviewCommentIsMachineAuthored reports whether a comment came from an app
+// or bot rather than a person. Dispute intake, the mention trust gate, and the
+// inline reply path all need the same answer, so they share this one.
+func codeReviewCommentIsMachineAuthored(performedViaGitHubApp *ghservice.FeedbackGitHubAppIdentity, authorType, senderType string) bool {
+	return performedViaGitHubApp != nil ||
+		strings.EqualFold(strings.TrimSpace(authorType), "bot") ||
+		strings.EqualFold(strings.TrimSpace(senderType), "bot")
+}
+
 func codeReviewMentionAuthorTrusted(event ghservice.IssueCommentEvent) bool {
-	if event.Comment.PerformedViaGitHubApp != nil ||
-		strings.EqualFold(strings.TrimSpace(event.Comment.User.Type), "bot") ||
-		strings.EqualFold(strings.TrimSpace(event.Sender.Type), "bot") {
+	if codeReviewCommentIsMachineAuthored(event.Comment.PerformedViaGitHubApp, event.Comment.User.Type, event.Sender.Type) {
 		return false
 	}
 	switch strings.ToUpper(strings.TrimSpace(event.Comment.AuthorAssociation)) {
@@ -789,11 +836,7 @@ func (h *WebhookHandler) handlePullRequestReviewComment(w http.ResponseWriter, r
 	}
 
 	if (event.Action == "created" || event.Action == "edited") && event.Comment.InReplyToID != nil && h.codeReviewDisputes != nil && h.pullRequests != nil {
-		ok, captured := h.handleCodeReviewInlineDispute(w, r, event, owner)
-		if !ok {
-			return
-		}
-		event.RecordOnly = captured
+		event.RecordOnly = h.handleCodeReviewInlineDispute(r, event, owner)
 	}
 	if err := h.prService.HandlePullRequestReviewCommentEvent(r.Context(), event); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "REVIEW_COMMENT_EVENT_FAILED", "failed to process pull_request_review_comment event", err)
@@ -803,28 +846,24 @@ func (h *WebhookHandler) handlePullRequestReviewComment(w http.ResponseWriter, r
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
 }
 
-func (h *WebhookHandler) handleCodeReviewInlineDispute(w http.ResponseWriter, r *http.Request, event ghservice.PullRequestReviewCommentEvent, owner db.GitHubRepoOwner) (bool, bool) {
-	if event.Comment.PerformedViaGitHubApp != nil ||
-		strings.EqualFold(strings.TrimSpace(event.Comment.User.Type), "bot") ||
-		strings.EqualFold(strings.TrimSpace(event.Sender.Type), "bot") {
-		return true, false
+// handleCodeReviewInlineDispute reports whether an inline reply was captured as
+// a decision dispute. Every failure path is non-fatal: this runs ahead of PR
+// feedback ingestion, so failing the delivery would drop the comment from the
+// feedback record entirely.
+func (h *WebhookHandler) handleCodeReviewInlineDispute(r *http.Request, event ghservice.PullRequestReviewCommentEvent, owner db.GitHubRepoOwner) bool {
+	if codeReviewCommentIsMachineAuthored(event.Comment.PerformedViaGitHubApp, event.Comment.User.Type, event.Sender.Type) {
+		return false
 	}
 	pr, err := h.pullRequests.GetByOrgRepoAndNumber(r.Context(), owner.OrgID, event.Repository.FullName, event.PullRequest.Number)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return true, false
-	}
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "PR_LOAD_FAILED", "failed to load pull request for code review dispute", err)
-		return false, false
-	}
-	privateRepo := false
-	if h.repoStore != nil {
-		repo, repoErr := h.repoStore.GetByID(r.Context(), owner.OrgID, owner.RepositoryID)
-		if repoErr != nil {
-			writeError(w, r, http.StatusInternalServerError, "REPOSITORY_LOAD_FAILED", "failed to load repository for code review dispute", repoErr)
-			return false, false
+		if !errors.Is(err, pgx.ErrNoRows) {
+			logCodeReviewDisputeCaptureFailure(r, event.Comment.ID, err)
 		}
-		privateRepo = repo.Private
+		return false
+	}
+	privateRepo, ok := h.codeReviewDisputeRepositoryPrivate(r, owner)
+	if !ok {
+		return false
 	}
 	authorType := models.PRFeedbackAuthorType(event.Comment.User.Type)
 	if authorType.Validate() != nil {
@@ -837,13 +876,10 @@ func (h *WebhookHandler) handleCodeReviewInlineDispute(w http.ResponseWriter, r 
 		Body: event.Comment.Body, GitHubCommentID: event.Comment.ID, SourceVersion: codeReviewSourceVersion(event.Comment.UpdatedAt, event.Comment.Body),
 	})
 	if err != nil {
-		if errors.Is(err, codereviewsvc.ErrCodeReviewDisputeInvalidBody) {
-			return true, false
-		}
-		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_DISPUTE_CAPTURE_FAILED", "failed to capture code review dispute", err)
-		return false, false
+		logCodeReviewDisputeCaptureFailure(r, event.Comment.ID, err)
+		return false
 	}
-	return true, captured
+	return captured
 }
 
 func feedbackWebhookMetadata(r *http.Request, body []byte, eventType string) (ghservice.FeedbackWebhookMetadata, error) {

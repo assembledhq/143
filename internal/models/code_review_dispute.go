@@ -222,9 +222,9 @@ type CodeReviewDispute struct {
 func (d CodeReviewDispute) CurrentTrust() (bool, string) {
 	if d.TrustOverride != nil {
 		if *d.TrustOverride {
-			return true, "dispute trust override"
+			return true, "admin promoted this dispute"
 		}
-		return false, "dispute trust override"
+		return false, "admin demoted this dispute"
 	}
 	if d.RepositoryVisibility == CodeReviewRepositoryVisibilityPrivate {
 		return true, "private repository contributor"

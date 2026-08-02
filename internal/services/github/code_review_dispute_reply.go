@@ -19,6 +19,11 @@ type CodeReviewDisputeReplyRequest struct {
 	ThreadRootCommentID *int64
 	KnownReplyCommentID *int64
 	Body                string
+	// SearchExistingReply scans the pull request's comments for this dispute's
+	// marker before creating one. It recovers a reply that was published but
+	// never recorded, and costs one GitHub request per 100 comments, so callers
+	// enable it only when a previous attempt could have left one behind.
+	SearchExistingReply bool
 }
 
 func (s *PRService) PublishCodeReviewDisputeReply(ctx context.Context, req CodeReviewDisputeReplyRequest) (int64, error) {
@@ -53,9 +58,12 @@ func (s *PRService) PublishCodeReviewDisputeReply(ctx context.Context, req CodeR
 			return 0, err
 		}
 	}
-	markerID, err := s.findCodeReviewDisputeReply(ctx, token, owner, repo, req.PullRequestNumber, body, req.ThreadRootCommentID != nil)
-	if err != nil {
-		return 0, err
+	var markerID *int64
+	if req.SearchExistingReply {
+		markerID, err = s.findCodeReviewDisputeReply(ctx, token, owner, repo, req.PullRequestNumber, body, req.ThreadRootCommentID != nil)
+		if err != nil {
+			return 0, err
+		}
 	}
 	if markerID != nil {
 		if req.ThreadRootCommentID != nil {

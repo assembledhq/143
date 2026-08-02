@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,7 +25,32 @@ const codeReviewDisputeColumns = `id, org_id, session_id, pull_request_id, repos
 	escalated_by_user_id, queue_signals, queue_priority, reply_status, reply_cycle_reserved, status_detail, version,
 	created_at, updated_at`
 
-var ErrCodeReviewDisputeVersionConflict = errors.New("code review dispute version conflict")
+var (
+	ErrCodeReviewDisputeVersionConflict = errors.New("code review dispute version conflict")
+	// ErrCodeReviewDisputeIntakeCapped reports that an untrusted filer reached
+	// the rolling intake ceiling for a pull request. It is an admission
+	// decision, not a failure: callers record the comment as ordinary feedback.
+	ErrCodeReviewDisputeIntakeCapped = errors.New("code review dispute intake cap reached")
+)
+
+// CodeReviewDisputeIntakeGuard bounds how much untrusted GitHub traffic may
+// open disputes on one pull request. A zero value disables the guard.
+//
+// PerPullRequestMax counts every GitHub-sourced dispute on the pull request,
+// including ones filed by trusted maintainers. That keeps the trust rule in one
+// place (models.CodeReviewDispute.CurrentTrust) instead of duplicating it in
+// SQL, at the cost of a coupling: enough trusted objections on one pull request
+// inside the window will also turn away an untrusted filer. The default ratio
+// against PerLoginMax makes that unlikely outside genuine abuse.
+type CodeReviewDisputeIntakeGuard struct {
+	Window            time.Duration
+	PerLoginMax       int
+	PerPullRequestMax int
+}
+
+func (g CodeReviewDisputeIntakeGuard) enabled() bool {
+	return g.Window > 0 && (g.PerLoginMax > 0 || g.PerPullRequestMax > 0)
+}
 
 type CodeReviewDisputeStore struct {
 	db   TxStarter
@@ -46,7 +72,11 @@ func nilIfZeroTime(value time.Time) any {
 // lint:allow-no-orgid reason="process-wide dependency injection for the durable job queue"
 func (s *CodeReviewDisputeStore) SetJobStore(jobs *JobStore) { s.jobs = jobs }
 
-func (s *CodeReviewDisputeStore) CreateAndEnqueueTriage(ctx context.Context, dispute *models.CodeReviewDispute) (bool, error) {
+// CreateAndEnqueueTriage stores a dispute and enqueues its triage atomically.
+// When guard is enabled the intake ceilings are evaluated inside the same
+// transaction, so concurrent webhook deliveries cannot each observe room under
+// the cap and both insert.
+func (s *CodeReviewDisputeStore) CreateAndEnqueueTriage(ctx context.Context, dispute *models.CodeReviewDispute, guard CodeReviewDisputeIntakeGuard) (bool, error) {
 	if dispute == nil || dispute.OrgID == uuid.Nil || dispute.SessionID == uuid.Nil || dispute.PullRequestID == uuid.Nil || dispute.RepositoryID == uuid.Nil || dispute.PolicyID == uuid.Nil {
 		return false, fmt.Errorf("org, session, pull request, repository, and policy are required")
 	}
@@ -61,6 +91,51 @@ func (s *CodeReviewDisputeStore) CreateAndEnqueueTriage(ctx context.Context, dis
 		return false, fmt.Errorf("begin code review dispute create: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	if guard.enabled() {
+		// Serialize intake decisions per pull request. Collisions across pull
+		// requests only add brief serialization, never a wrong verdict.
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(@namespace, @pull_request_key)`, pgx.NamedArgs{
+			"namespace": int32(codeReviewDisputeIntakeLockNamespace), "pull_request_key": advisoryLockKeyForUUID(dispute.PullRequestID),
+		}); err != nil {
+			return false, fmt.Errorf("lock code review dispute intake: %w", err)
+		}
+		// Recognize a redelivery before judging admission. A stored dispute
+		// counts toward its own ceiling, so the comment that consumed the last
+		// slot would otherwise be reported as capped -- and therefore as never
+		// captured -- on any redelivery of it. Without the guard the insert's
+		// ON CONFLICT path below already handles this, so the extra read only
+		// runs on the capped path.
+		if dispute.GitHubCommentID != nil {
+			existing, getErr := getCodeReviewDisputeByGitHubSource(ctx, tx, dispute.OrgID, *dispute.GitHubCommentID, dispute.SourceVersion)
+			if getErr == nil {
+				*dispute = existing
+				return false, nil
+			}
+			if !errors.Is(getErr, pgx.ErrNoRows) {
+				return false, fmt.Errorf("look up existing GitHub dispute source: %w", getErr)
+			}
+		}
+		var byLogin, byPullRequest int
+		if err := tx.QueryRow(ctx, `SELECT
+				count(*) FILTER (WHERE lower(btrim(filed_by_login)) = lower(btrim(@filed_by_login))),
+				count(*)
+			FROM code_review_decision_disputes
+			WHERE org_id = @org_id
+			  AND pull_request_id = @pull_request_id
+			  AND source = 'github_comment'
+			  AND created_at >= now() - make_interval(secs => @window_seconds)`, pgx.NamedArgs{
+			"org_id": dispute.OrgID, "pull_request_id": dispute.PullRequestID,
+			"filed_by_login": strings.TrimSpace(dispute.FiledByLogin),
+			"window_seconds": int64(guard.Window / time.Second),
+		}).Scan(&byLogin, &byPullRequest); err != nil {
+			return false, fmt.Errorf("count recent code review dispute intake: %w", err)
+		}
+		if (guard.PerLoginMax > 0 && byLogin >= guard.PerLoginMax) ||
+			(guard.PerPullRequestMax > 0 && byPullRequest >= guard.PerPullRequestMax) {
+			return false, ErrCodeReviewDisputeIntakeCapped
+		}
+	}
 
 	created, err := insertCodeReviewDispute(ctx, tx, dispute)
 	if err != nil {
@@ -218,11 +293,14 @@ func (s *CodeReviewDisputeStore) ListQueue(ctx context.Context, orgID uuid.UUID,
 		args["direction"] = *filters.Direction
 	}
 	if filters.Cursor != nil {
-		where += ` AND (queue_priority, id) < (SELECT queue_priority, id FROM code_review_decision_disputes WHERE org_id = @org_id AND id = @cursor)`
+		where += ` AND (queue_priority, created_at, id) < (SELECT queue_priority, created_at, id FROM code_review_decision_disputes WHERE org_id = @org_id AND id = @cursor)`
 		args["cursor"] = *filters.Cursor
 	}
+	// queue_priority stays uniformly 0 until Phase 1B computes ranking signals,
+	// so created_at carries the order today. Without it the tiebreak is a
+	// random v4 id and the queue looks shuffled on every page.
 	rows, err := s.db.Query(ctx, `SELECT `+codeReviewDisputeColumns+` FROM code_review_decision_disputes`+where+`
-		ORDER BY queue_priority DESC, id DESC LIMIT @limit`, args)
+		ORDER BY queue_priority DESC, created_at DESC, id DESC LIMIT @limit`, args)
 	if err != nil {
 		return models.CodeReviewDisputePage{}, fmt.Errorf("list code review dispute queue: %w", err)
 	}
@@ -251,6 +329,20 @@ func (s *CodeReviewDisputeStore) ListRecentKinds(ctx context.Context, orgID uuid
 		return nil, fmt.Errorf("collect recent code review dispute kinds: %w", err)
 	}
 	return kinds, nil
+}
+
+// codeReviewDisputeIntakeLockNamespace scopes the per-pull-request advisory
+// lock that serializes intake admission.
+const codeReviewDisputeIntakeLockNamespace = 143122
+
+// advisoryLockKeyForUUID derives a stable int32 advisory-lock key. Postgres's
+// two-argument advisory locks take int32s, and deriving the key here avoids
+// depending on the undocumented hashtext() builtin. The sign bit is masked off
+// so the conversion is representable in int32 rather than an overflowing cast;
+// losing one bit only widens key collisions, which cost brief extra
+// serialization and never a wrong verdict.
+func advisoryLockKeyForUUID(value uuid.UUID) int32 {
+	return int32(binary.BigEndian.Uint32(value[:4]) & 0x7fffffff)
 }
 
 // CountActiveReassessments supports the operator-wide emergency ceiling.
@@ -584,14 +676,16 @@ func (s *CodeReviewDisputeStore) MarkReplyPublished(ctx context.Context, orgID, 
 
 // ReserveReplyCycle applies the machine-only conversation budget before the
 // first GitHub reply for a dispute. Updating that same reply later reuses the
-// reservation and does not consume another cycle.
-func (s *CodeReviewDisputeStore) ReserveReplyCycle(ctx context.Context, orgID, disputeID uuid.UUID, maxCycles int) (bool, error) {
+// reservation and does not consume another cycle. The second return value
+// reports whether this call took the reservation, which is the durable marker
+// that no GitHub reply has ever been attempted for this dispute.
+func (s *CodeReviewDisputeStore) ReserveReplyCycle(ctx context.Context, orgID, disputeID uuid.UUID, maxCycles int) (bool, bool, error) {
 	if maxCycles <= 0 {
-		return false, fmt.Errorf("reply cycle budget must be positive")
+		return false, false, fmt.Errorf("reply cycle budget must be positive")
 	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
-		return false, fmt.Errorf("begin dispute reply cycle reservation: %w", err)
+		return false, false, fmt.Errorf("begin dispute reply cycle reservation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var pullRequestID uuid.UUID
@@ -606,13 +700,13 @@ func (s *CodeReviewDisputeStore) ReserveReplyCycle(ctx context.Context, orgID, d
 		FOR UPDATE OF dispute, pull_request`, pgx.NamedArgs{
 		"org_id": orgID, "dispute_id": disputeID,
 	}).Scan(&pullRequestID, &reserved, &cycles); err != nil {
-		return false, fmt.Errorf("load dispute reply cycle state: %w", err)
+		return false, false, fmt.Errorf("load dispute reply cycle state: %w", err)
 	}
 	if reserved {
 		if err := tx.Commit(ctx); err != nil {
-			return false, fmt.Errorf("commit existing dispute reply reservation: %w", err)
+			return false, false, fmt.Errorf("commit existing dispute reply reservation: %w", err)
 		}
-		return true, nil
+		return true, false, nil
 	}
 	if cycles >= maxCycles {
 		if _, err := tx.Exec(ctx, `UPDATE code_review_decision_disputes
@@ -622,31 +716,31 @@ func (s *CodeReviewDisputeStore) ReserveReplyCycle(ctx context.Context, orgID, d
 			WHERE org_id = @org_id AND id = @dispute_id`, pgx.NamedArgs{
 			"org_id": orgID, "dispute_id": disputeID,
 		}); err != nil {
-			return false, fmt.Errorf("record dispute reply loop guard: %w", err)
+			return false, false, fmt.Errorf("record dispute reply loop guard: %w", err)
 		}
 		if err := tx.Commit(ctx); err != nil {
-			return false, fmt.Errorf("commit dispute reply loop guard: %w", err)
+			return false, false, fmt.Errorf("commit dispute reply loop guard: %w", err)
 		}
-		return false, nil
+		return false, false, nil
 	}
 	if _, err := tx.Exec(ctx, `UPDATE pull_requests
 		SET code_review_dispute_cycles_in_epoch = code_review_dispute_cycles_in_epoch + 1
 		WHERE org_id = @org_id AND id = @pull_request_id`, pgx.NamedArgs{
 		"org_id": orgID, "pull_request_id": pullRequestID,
 	}); err != nil {
-		return false, fmt.Errorf("spend dispute reply cycle: %w", err)
+		return false, false, fmt.Errorf("spend dispute reply cycle: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE code_review_decision_disputes
 		SET reply_cycle_reserved = true, updated_at = now(), version = version + 1
 		WHERE org_id = @org_id AND id = @dispute_id`, pgx.NamedArgs{
 		"org_id": orgID, "dispute_id": disputeID,
 	}); err != nil {
-		return false, fmt.Errorf("reserve dispute reply cycle: %w", err)
+		return false, false, fmt.Errorf("reserve dispute reply cycle: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("commit dispute reply cycle reservation: %w", err)
+		return false, false, fmt.Errorf("commit dispute reply cycle reservation: %w", err)
 	}
-	return true, nil
+	return true, true, nil
 }
 
 func (s *CodeReviewDisputeStore) MarkReplyFailed(ctx context.Context, orgID, disputeID uuid.UUID, detail string) error {
@@ -703,13 +797,21 @@ func (s *CodeReviewDisputeStore) Adjudicate(ctx context.Context, orgID, disputeI
 	if update.ExpectedVersion <= 0 {
 		return models.CodeReviewDispute{}, fmt.Errorf("expected_version must be positive")
 	}
+	// Promotion may only open an adjudication slot for a dispute the table's
+	// own CHECK allows one on. Without the routing guard, promoting an
+	// answer_only, not_a_dispute, or intake-failed dispute writes 'pending'
+	// and trips the constraint instead of just recording the override.
 	rows, err := s.db.Query(ctx, `UPDATE code_review_decision_disputes
 		SET adjudication_status = CASE
 				WHEN @adjudication_status::text IS NOT NULL THEN @adjudication_status
 				WHEN @trust_override_present AND COALESCE(
 					@trust_override,
 					repository_visibility = 'private' OR upper(btrim(author_association)) IN ('OWNER', 'MEMBER', 'COLLABORATOR')
-				) THEN COALESCE(adjudication_status, 'pending')
+				) THEN CASE
+					WHEN intake_status = 'triaged' AND routing IN ('reassess', 'policy_signal_only') AND direction IS NOT NULL
+						THEN COALESCE(adjudication_status, 'pending')
+					ELSE adjudication_status
+				END
 				WHEN @trust_override_present AND adjudication_status = 'pending' THEN NULL
 				ELSE adjudication_status
 			END,

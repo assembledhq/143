@@ -21,7 +21,6 @@ func PRFeedbackHiddenMarker(id string) string {
 }
 
 type PRFeedbackProvenanceInput struct {
-	PrivateRepo bool
 	AuthorLogin string
 	AuthorType  models.PRFeedbackAuthorType
 	Association string
@@ -31,7 +30,13 @@ type PRFeedbackProvenanceInput struct {
 }
 
 type PRFeedbackProvenance struct {
-	Recordable   bool
+	Recordable bool
+	// Trusted mirrors the long-standing association-only rule used by feedback
+	// follow-through. Repository visibility deliberately does not widen it:
+	// disputes apply their own private-repo relaxation in
+	// models.CodeReviewDispute.CurrentTrust, and folding that here would
+	// silently make every private-repo commenter eligible for automatic
+	// follow-through.
 	Trusted      bool
 	IgnoreReason string
 }
@@ -59,7 +64,7 @@ func EvaluatePRFeedbackProvenance(input PRFeedbackProvenanceInput) PRFeedbackPro
 		return PRFeedbackProvenance{IgnoreReason: "bot_authored"}
 	}
 	trustedAssociation := input.Association == "OWNER" || input.Association == "MEMBER" || input.Association == "COLLABORATOR"
-	return PRFeedbackProvenance{Recordable: true, Trusted: input.PrivateRepo || trustedAssociation}
+	return PRFeedbackProvenance{Recordable: true, Trusted: trustedAssociation}
 }
 
 type prFeedbackEligibilityInput struct {
@@ -85,7 +90,7 @@ type prFeedbackEligibility struct {
 
 func evaluatePRFeedbackEligibility(input prFeedbackEligibilityInput) prFeedbackEligibility {
 	provenance := EvaluatePRFeedbackProvenance(PRFeedbackProvenanceInput{
-		PrivateRepo: input.PrivateRepo, AuthorLogin: input.AuthorLogin, AuthorType: input.AuthorType,
+		AuthorLogin: input.AuthorLogin, AuthorType: input.AuthorType,
 		Association: input.Association, OwnAppLogin: input.OwnAppLogin, Body: input.Body, Deleted: input.Deleted,
 	})
 	if !provenance.Recordable && (input.AuthorType != models.PRFeedbackAuthorTypeBot || provenance.IgnoreReason != "bot_authored") {

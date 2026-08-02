@@ -1264,6 +1264,53 @@ describe("CodeReviewsPage", () => {
     }));
   });
 
+  it("pages the dispute queue past the first cursor page", async () => {
+    const user = userEvent.setup();
+    const baseDispute: CodeReviewDispute = {
+      id: "dispute-page-1", org_id: "org-1", session_id: "session-1", pull_request_id: "pr-1",
+      repository_id: "repo-1", policy_id: "policy-1", reviewed_head_sha: review.head_sha,
+      decision: "blocked", direction: "should_have_approved", filed_by_login: "anya",
+      author_association: "MEMBER", author_is_pr_author: true, repository_visibility: "private",
+      trusted: true, source: "app_ui", body: "First page objection.",
+      contested_reason_codes: [], intake_status: "triaged", routing: "policy_signal_only",
+      reassessment_status: "not_requested", adjudication_status: "pending", queue_signals: {}, queue_priority: 0,
+      reply_status: "not_applicable", version: 3, created_at: "2026-06-26T12:06:00Z", updated_at: "2026-06-26T12:06:00Z",
+    };
+    const requestedCursors: (string | null)[] = [];
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-review-disputes", ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get("cursor");
+        requestedCursors.push(cursor);
+        if (cursor === "dispute-page-1") {
+          return HttpResponse.json({
+            data: [{ ...baseDispute, id: "dispute-page-2", body: "Second page objection." }],
+            meta: {},
+          } satisfies ListResponse<CodeReviewDispute>);
+        }
+        return HttpResponse.json({
+          data: [baseDispute],
+          meta: { next_cursor: "dispute-page-1" },
+        } satisfies ListResponse<CodeReviewDispute>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: "Disputes" }));
+    expect(await screen.findByText("First page objection.")).toBeInTheDocument();
+    // Without the cursor the badge would cap at the page size and the rest of
+    // the queue would be unreachable.
+    expect(await screen.findByText("1+")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Load more disputes" }));
+
+    expect(await screen.findByText("Second page objection.")).toBeInTheDocument();
+    expect(screen.getByText("First page objection.")).toBeInTheDocument();
+    expect(requestedCursors).toEqual([null, "dispute-page-1"]);
+    expect(screen.queryByRole("button", { name: "Load more disputes" })).not.toBeInTheDocument();
+  });
+
   it("lets an admin promote an untrusted timeline dispute without adjudicating it", async () => {
     const user = userEvent.setup();
     let updateBody: unknown;

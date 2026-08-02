@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent, ComponentProps, KeyboardEvent, ReactNode } from "react";
-import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createParser, parseAsString, parseAsStringLiteral, useQueryState } from "nuqs";
 import {
   AlertTriangle,
@@ -535,6 +535,13 @@ export default function CodeReviewsPage() {
   }, [search, setSearchParam]);
   const [selectedTemplateKey, setSelectedTemplateKey] = useState(NO_TEMPLATE);
   const [pendingTemplateApply, setPendingTemplateApply] = useState<{ key: string; title: string } | null>(null);
+  // The dispute queue deep-links here with ?evidence=<session id>, so the open
+  // sheet is URL state. Unlike the filter params this one writes the URL
+  // directly rather than through the nuqs setter: the sheet is driven by local
+  // state, and the setter's optimistic-then-settle update would re-run the sync
+  // effect and close the sheet on the click that just opened it. nuqs patches
+  // history.replaceState and syncs from it, so evidenceParam still tracks the
+  // write and back/forward still work.
   const [evidenceParam] = useQueryState("evidence", parseAsString);
   const [selectedEvidenceSessionId, setSelectedEvidenceSessionId] = useState<string | null>(evidenceParam);
   useEffect(() => {
@@ -830,11 +837,17 @@ export default function CodeReviewsPage() {
     queryFn: () => api.codeReviews.evidence(selectedEvidenceSessionId ?? ""),
     enabled: Boolean(selectedEvidenceSessionId),
   });
-  const disputeQueueQuery = useQuery({
+  const disputeQueueQuery = useInfiniteQuery({
     queryKey: queryKeys.codeReviews.disputeQueue({ adjudication_status: "pending" }),
-    queryFn: () => api.codeReviews.disputeQueue({ adjudication_status: "pending" }),
+    queryFn: ({ pageParam }) => api.codeReviews.disputeQueue({ adjudication_status: "pending", cursor: pageParam }),
     enabled: canManagePolicy,
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.meta?.next_cursor || undefined,
   });
+  const pendingDisputes = useMemo(
+    () => disputeQueueQuery.data?.pages.flatMap((page) => page.data ?? []) ?? [],
+    [disputeQueueQuery.data],
+  );
   const adjudicateDispute = useMutation({
     mutationFn: ({ dispute, status, note }: { dispute: CodeReviewDispute; status: "upheld" | "rejected" | "needs_context"; note?: string }) =>
       api.codeReviews.adjudicateDispute(dispute.id, {
@@ -1216,8 +1229,10 @@ export default function CodeReviewsPage() {
             <TabsTrigger value="disputes">
               <MessageSquareText className="h-4 w-4" />
               Disputes
-              {(disputeQueueQuery.data?.data.length ?? 0) > 0 ? (
-                <Badge variant="secondary" aria-hidden="true">{disputeQueueQuery.data?.data.length}</Badge>
+              {pendingDisputes.length > 0 ? (
+                <Badge variant="secondary" aria-hidden="true">
+                  {disputeQueueQuery.hasNextPage ? `${pendingDisputes.length}+` : pendingDisputes.length}
+                </Badge>
               ) : null}
             </TabsTrigger>
           ) : null}
@@ -1380,12 +1395,15 @@ export default function CodeReviewsPage() {
           {canManagePolicy ? (
             <PageTabContent value="disputes">
               <CodeReviewDisputeQueue
-                disputes={disputeQueueQuery.data?.data ?? []}
+                disputes={pendingDisputes}
                 isLoading={disputeQueueQuery.isLoading}
                 error={disputeQueueQuery.error}
                 isSaving={adjudicateDispute.isPending}
+                hasMore={disputeQueueQuery.hasNextPage}
+                isLoadingMore={disputeQueueQuery.isFetchingNextPage}
+                onLoadMore={() => void disputeQueueQuery.fetchNextPage()}
                 onRetry={() => void disputeQueueQuery.refetch()}
-                onAdjudicate={(dispute, status, note) => adjudicateDispute.mutate({ dispute, status, note })}
+                onAdjudicate={(dispute, status, note, onSaved) => adjudicateDispute.mutate({ dispute, status, note }, { onSuccess: onSaved })}
               />
             </PageTabContent>
           ) : null}
@@ -3286,6 +3304,9 @@ function CodeReviewDisputeQueue({
   isLoading,
   error,
   isSaving,
+  hasMore,
+  isLoadingMore,
+  onLoadMore,
   onRetry,
   onAdjudicate,
 }: {
@@ -3293,10 +3314,26 @@ function CodeReviewDisputeQueue({
   isLoading: boolean;
   error: Error | null;
   isSaving: boolean;
+  hasMore: boolean;
+  isLoadingMore: boolean;
+  onLoadMore: () => void;
   onRetry: () => void;
-  onAdjudicate: (dispute: CodeReviewDispute, status: "upheld" | "rejected" | "needs_context", note?: string) => void;
+  onAdjudicate: (dispute: CodeReviewDispute, status: "upheld" | "rejected" | "needs_context", note: string | undefined, onSaved: () => void) => void;
 }) {
   const [notes, setNotes] = useState<Record<string, string>>({});
+  const clearNote = useCallback((disputeID: string) => {
+    setNotes((current) => {
+      if (current[disputeID] === undefined) return current;
+      const next = { ...current };
+      delete next[disputeID];
+      return next;
+    });
+  }, []);
+  // Drop the draft only once the adjudication is durably saved. Clearing it
+  // eagerly loses the admin's typed reasoning whenever the PATCH fails.
+  const adjudicate = (dispute: CodeReviewDispute, status: "upheld" | "rejected" | "needs_context") => {
+    onAdjudicate(dispute, status, notes[dispute.id], () => clearNote(dispute.id));
+  };
   return (
     <SectionGroup title="Decision disputes" description="A flat list of objections awaiting a policy owner's judgment. Reassessments and trust signals provide context but do not decide the outcome.">
       {isLoading ? <div className="py-12 text-center text-sm text-muted-foreground">Loading disputes…</div> : null}
@@ -3351,13 +3388,13 @@ function CodeReviewDisputeQueue({
                     />
                     <div className="flex justify-end gap-1">
                     <DisabledTooltip disabled={isSaving} content="Wait for the current adjudication to finish.">
-                      <Button size="sm" variant="outline" disabled={isSaving} onClick={() => onAdjudicate(dispute, "needs_context", notes[dispute.id])}>Needs context</Button>
+                      <Button size="sm" variant="outline" disabled={isSaving} onClick={() => adjudicate(dispute, "needs_context")}>Needs context</Button>
                     </DisabledTooltip>
                     <DisabledTooltip disabled={isSaving} content="Wait for the current adjudication to finish.">
-                      <Button size="sm" variant="outline" disabled={isSaving} onClick={() => onAdjudicate(dispute, "rejected", notes[dispute.id])}>Reject</Button>
+                      <Button size="sm" variant="outline" disabled={isSaving} onClick={() => adjudicate(dispute, "rejected")}>Reject</Button>
                     </DisabledTooltip>
                     <DisabledTooltip disabled={isSaving} content="Wait for the current adjudication to finish.">
-                      <Button size="sm" disabled={isSaving} onClick={() => onAdjudicate(dispute, "upheld", notes[dispute.id])}>Uphold</Button>
+                      <Button size="sm" disabled={isSaving} onClick={() => adjudicate(dispute, "upheld")}>Uphold</Button>
                     </DisabledTooltip>
                     </div>
                   </div>
@@ -3366,6 +3403,13 @@ function CodeReviewDisputeQueue({
             ))}
           </TableBody>
         </Table>
+      ) : null}
+      {hasMore ? (
+        <div className="flex justify-center pt-2">
+          <Button variant="outline" size="sm" disabled={isLoadingMore} onClick={onLoadMore}>
+            {isLoadingMore ? "Loading…" : "Load more disputes"}
+          </Button>
+        </div>
       ) : null}
     </SectionGroup>
   );
@@ -3457,11 +3501,19 @@ function CodeReviewEvidenceSheet({
   const findings = evidence?.findings ?? [];
   const artifacts = evidence?.prompt_artifacts ?? [];
   const reasonCodes = evidence?.risk_reason_codes ?? [];
-  const disputesQuery = useQuery({
+  const disputesQuery = useInfiniteQuery({
     queryKey: queryKeys.codeReviews.disputes(review?.session_id ?? ""),
-    queryFn: () => api.codeReviews.disputes(review?.session_id ?? ""),
+    queryFn: ({ pageParam }) => api.codeReviews.disputes(review?.session_id ?? "", pageParam),
     enabled: open && canFileDisputes && Boolean(review?.session_id),
-    refetchInterval: open && canFileDisputes ? 5000 : false,
+    // Intake and reassessment states move on their own, so the timeline polls.
+    // React Query refetches *every* loaded page on each interval, so stretch
+    // the interval by the number of loaded pages: the request rate stays flat
+    // as the admin pages into history, and the newest page — the one whose
+    // state is still moving — keeps updating instead of going stale.
+    refetchInterval: (query) =>
+      open && canFileDisputes ? 5000 * Math.max(1, query.state.data?.pages.length ?? 1) : false,
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.meta?.next_cursor || undefined,
   });
   const createDispute = useMutation({
     mutationFn: () => api.codeReviews.createDispute(review?.session_id ?? "", { body: disputeBody, contested_reason_codes: selectedReasonCodes }),
@@ -3494,7 +3546,7 @@ function CodeReviewEvidenceSheet({
     },
     onError: () => toast.error("Dispute could not be promoted"),
   });
-  const disputes = disputesQuery.data?.data ?? [];
+  const disputes = disputesQuery.data?.pages.flatMap((page) => page.data ?? []) ?? [];
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-[calc(100vw-1rem)] p-0 sm:max-w-xl">
@@ -3586,6 +3638,16 @@ function CodeReviewEvidenceSheet({
                       {dispute.status_detail ? <div className="text-xs leading-5 text-muted-foreground">{dispute.status_detail}</div> : null}
                     </div>
                   ))}
+                  {disputesQuery.hasNextPage ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={disputesQuery.isFetchingNextPage}
+                      onClick={() => void disputesQuery.fetchNextPage()}
+                    >
+                      {disputesQuery.isFetchingNextPage ? "Loading…" : "Show earlier feedback"}
+                    </Button>
+                  ) : null}
                 </section>
               ) : null}
 

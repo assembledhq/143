@@ -1770,8 +1770,10 @@ func buildServices(
 		cfg.FrontendURL,
 		logger,
 		codereviewsvc.DisputeConfig{
-			ReassessmentsEnabled:   cfg.CodeReviewDisputeReassessmentsEnabled,
-			MaxActiveReassessments: cfg.CodeReviewDisputeMaxActiveReassessments,
+			ReassessmentsEnabled:          cfg.CodeReviewDisputeReassessmentsEnabled,
+			MaxActiveReassessments:        cfg.CodeReviewDisputeMaxActiveReassessments,
+			UntrustedIntakePerLogin:       cfg.CodeReviewDisputeUntrustedIntakePerLogin,
+			UntrustedIntakePerPullRequest: cfg.CodeReviewDisputeUntrustedIntakePerPullRequest,
 		},
 	)
 	codeReviewDisputes.SetAuditEmitter(auditEmitter)

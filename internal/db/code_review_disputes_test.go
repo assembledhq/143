@@ -58,7 +58,7 @@ func TestCodeReviewDisputeStore_CreateAndEnqueueTriageDedupesGitHubSourceWithout
 
 	store := NewCodeReviewDisputeStore(mock)
 	store.SetJobStore(NewJobStore(mock))
-	created, err := store.CreateAndEnqueueTriage(context.Background(), &dispute)
+	created, err := store.CreateAndEnqueueTriage(context.Background(), &dispute, CodeReviewDisputeIntakeGuard{})
 
 	require.NoError(t, err, "GitHub source redelivery should reuse the immutable dispute row")
 	require.False(t, created, "GitHub source redelivery should not report a new filing mutation")
@@ -88,6 +88,158 @@ func codeReviewDisputeMockRows(dispute models.CodeReviewDispute) *pgxmock.Rows {
 		dispute.EscalatedByUserID, dispute.QueueSignals, dispute.QueuePriority, dispute.ReplyStatus, dispute.ReplyCycleReserved, dispute.StatusDetail,
 		dispute.Version, dispute.CreatedAt, dispute.UpdatedAt,
 	)
+}
+
+func TestCodeReviewDisputeStore_CreateAndEnqueueTriageIntakeGuard(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		byLogin       int
+		byPullRequest int
+		expectInsert  bool
+	}{
+		{name: "admits under both ceilings", byLogin: 4, byPullRequest: 19, expectInsert: true},
+		{name: "declines at the per-login ceiling", byLogin: 5, byPullRequest: 6},
+		{name: "declines at the per-pull-request ceiling", byLogin: 1, byPullRequest: 20},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "test should create the database mock")
+			defer mock.Close()
+
+			commentID := int64(4242)
+			now := time.Date(2026, time.August, 2, 8, 0, 0, 0, time.UTC)
+			dispute := models.CodeReviewDispute{
+				OrgID: uuid.New(), SessionID: uuid.New(), PullRequestID: uuid.New(), RepositoryID: uuid.New(), PolicyID: uuid.New(),
+				ReviewedHeadSHA: "abc123", Decision: models.CodeReviewDecisionBlocked,
+				FiledByLogin: "drive-by", AuthorAssociation: "NONE",
+				RepositoryVisibility: models.CodeReviewRepositoryVisibilityPublic,
+				Source:               models.CodeReviewDisputeSourceGitHubComment, GitHubCommentID: &commentID,
+				SourceBodyHash: "body-hash", SourceVersion: 7, Body: "This should have been approved.",
+				SemanticInputHashAtFiling: "semantic-hash", ReplyStatus: models.CodeReviewDisputeReplyPending,
+			}
+			guard := CodeReviewDisputeIntakeGuard{Window: 24 * time.Hour, PerLoginMax: 5, PerPullRequestMax: 20}
+
+			mock.ExpectBegin()
+			// The ceilings must be read inside the insert's transaction, behind
+			// the per-pull-request lock, or two concurrent deliveries could each
+			// see room under the cap.
+			mock.ExpectExec("pg_advisory_xact_lock").
+				WithArgs(pgx.NamedArgs{
+					"namespace": int32(codeReviewDisputeIntakeLockNamespace), "pull_request_key": advisoryLockKeyForUUID(dispute.PullRequestID),
+				}).
+				WillReturnResult(pgxmock.NewResult("SELECT", 1))
+			mock.ExpectQuery("SELECT[\\s\\S]+FROM code_review_decision_disputes[\\s\\S]+github_comment_id").
+				WithArgs(dispute.OrgID, commentID, int64(7)).
+				WillReturnRows(pgxmock.NewRows(codeReviewDisputeColumnNames()))
+			mock.ExpectQuery("count\\(\\*\\) FILTER").
+				WithArgs(pgx.NamedArgs{
+					"org_id": dispute.OrgID, "pull_request_id": dispute.PullRequestID,
+					"filed_by_login": "drive-by", "window_seconds": int64(86400),
+				}).
+				WillReturnRows(pgxmock.NewRows([]string{"count", "count"}).AddRow(tt.byLogin, tt.byPullRequest))
+			if tt.expectInsert {
+				created := dispute
+				created.ID = uuid.New()
+				created.IntakeStatus = models.CodeReviewDisputeIntakePending
+				created.ReassessmentStatus = models.CodeReviewDisputeReassessmentNotRequested
+				created.QueueSignals = json.RawMessage(`{}`)
+				created.Version = 1
+				created.CreatedAt = now
+				created.UpdatedAt = now
+				mock.ExpectQuery("INSERT INTO code_review_decision_disputes").
+					WithArgs(
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					).
+					WillReturnRows(codeReviewDisputeMockRows(created))
+				mock.ExpectExec("UPDATE pull_requests").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+				mock.ExpectCommit()
+			} else {
+				mock.ExpectRollback()
+			}
+
+			store := NewCodeReviewDisputeStore(mock)
+			store.SetJobStore(NewJobStore(mock))
+			created, err := store.CreateAndEnqueueTriage(context.Background(), &dispute, guard)
+
+			if tt.expectInsert {
+				require.NoError(t, err, "a filing under both ceilings should be stored")
+				require.True(t, created, "an admitted filing should report that it was created")
+			} else {
+				require.ErrorIs(t, err, ErrCodeReviewDisputeIntakeCapped, "a capped filing should report the admission sentinel")
+				require.False(t, created, "a capped filing must not be stored")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestCodeReviewDisputeStore_IntakeGuardDedupesRedeliveryAtTheCeiling(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	defer mock.Close()
+
+	commentID := int64(4242)
+	now := time.Date(2026, time.August, 2, 8, 0, 0, 0, time.UTC)
+	dispute := models.CodeReviewDispute{
+		OrgID: uuid.New(), SessionID: uuid.New(), PullRequestID: uuid.New(), RepositoryID: uuid.New(), PolicyID: uuid.New(),
+		ReviewedHeadSHA: "abc123", Decision: models.CodeReviewDecisionBlocked,
+		FiledByLogin: "drive-by", AuthorAssociation: "NONE",
+		RepositoryVisibility: models.CodeReviewRepositoryVisibilityPublic,
+		Source:               models.CodeReviewDisputeSourceGitHubComment, GitHubCommentID: &commentID,
+		SourceBodyHash: "body-hash", SourceVersion: 7, Body: "This should have been approved.",
+		SemanticInputHashAtFiling: "semantic-hash", ReplyStatus: models.CodeReviewDisputeReplyPending,
+	}
+	existing := dispute
+	existing.ID = uuid.New()
+	existing.IntakeStatus = models.CodeReviewDisputeIntakePending
+	existing.ReassessmentStatus = models.CodeReviewDisputeReassessmentNotRequested
+	existing.QueueSignals = json.RawMessage(`{}`)
+	existing.Version = 1
+	existing.CreatedAt = now
+	existing.UpdatedAt = now
+	guard := CodeReviewDisputeIntakeGuard{Window: 24 * time.Hour, PerLoginMax: 5, PerPullRequestMax: 20}
+
+	mock.ExpectBegin()
+	mock.ExpectExec("pg_advisory_xact_lock").
+		WithArgs(pgx.NamedArgs{
+			"namespace": int32(codeReviewDisputeIntakeLockNamespace), "pull_request_key": advisoryLockKeyForUUID(dispute.PullRequestID),
+		}).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	// A stored dispute counts toward its own ceiling, so the comment that took
+	// the last slot would be judged capped -- and reported as never captured --
+	// on any redelivery. The lookup has to precede the count, not follow it.
+	mock.ExpectQuery(`SELECT[\s\S]+FROM code_review_decision_disputes[\s\S]+github_comment_id`).
+		WithArgs(dispute.OrgID, commentID, int64(7)).
+		WillReturnRows(codeReviewDisputeMockRows(existing))
+	mock.ExpectRollback()
+
+	store := NewCodeReviewDisputeStore(mock)
+	store.SetJobStore(NewJobStore(mock))
+	created, err := store.CreateAndEnqueueTriage(context.Background(), &dispute, guard)
+
+	require.NoError(t, err, "a redelivery of a stored dispute is not an admission decision")
+	require.False(t, created, "a redelivery should not report a fresh insert")
+	require.Equal(t, existing.ID, dispute.ID, "the caller should receive the dispute already on record, not a capped verdict")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestCodeReviewDisputeStore_AdmissionGuards(t *testing.T) {
@@ -276,19 +428,58 @@ func TestCodeReviewDisputeStore_AdjudicateDemotesUntrustedPendingItem(t *testing
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestCodeReviewDisputeStore_AdjudicatePromotionRespectsAdjudicableRouting(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	defer mock.Close()
+	orgID := uuid.New()
+	disputeID := uuid.New()
+	userID := uuid.New()
+	trusted := true
+	now := time.Date(2026, time.August, 2, 12, 0, 0, 0, time.UTC)
+	answerOnly := models.CodeReviewDisputeRoutingAnswerOnly
+	dispute := models.CodeReviewDispute{
+		ID: disputeID, OrgID: orgID, SessionID: uuid.New(), PullRequestID: uuid.New(), RepositoryID: uuid.New(), PolicyID: uuid.New(),
+		Routing: &answerOnly, IntakeStatus: models.CodeReviewDisputeIntakeTriaged, TrustOverride: &trusted,
+		QueueSignals: json.RawMessage(`{}`), Version: 4, CreatedAt: now, UpdatedAt: now,
+	}
+	update := models.CodeReviewDisputeAdjudicationUpdate{
+		ExpectedVersion: 3, TrustOverride: &trusted, TrustOverridePresent: true,
+	}
+	// The table's CHECK only allows a non-null adjudication_status on a triaged
+	// reassess/policy_signal_only dispute. Promoting anything else must record
+	// the override alone rather than write 'pending' and trip the constraint.
+	mock.ExpectQuery(`intake_status = 'triaged' AND routing IN \('reassess', 'policy_signal_only'\) AND direction IS NOT NULL[\s\S]+THEN COALESCE\(adjudication_status, 'pending'\)`).
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "id": disputeID, "user_id": userID, "expected_version": 3,
+			"adjudication_status": (*models.CodeReviewDisputeAdjudicationStatus)(nil), "adjudication_note": (*string)(nil),
+			"trust_override_present": true, "trust_override": &trusted,
+		}).
+		WillReturnRows(codeReviewDisputeMockRows(dispute))
+
+	actual, err := NewCodeReviewDisputeStore(mock).Adjudicate(context.Background(), orgID, disputeID, userID, update)
+
+	require.NoError(t, err, "promoting a non-adjudicable dispute should record the override without failing")
+	require.Nil(t, actual.AdjudicationStatus, "an answer_only dispute must not be given a queue slot the CHECK forbids")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestCodeReviewDisputeStore_ReserveReplyCycle(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name             string
-		alreadyReserved  bool
-		cycles           int
-		expectedReserved bool
-		expectSpend      bool
-		expectLoopGuard  bool
+		name                 string
+		alreadyReserved      bool
+		cycles               int
+		expectedReserved     bool
+		expectedFirstAttempt bool
+		expectSpend          bool
+		expectLoopGuard      bool
 	}{
 		{name: "reuses an existing reservation", alreadyReserved: true, cycles: 2, expectedReserved: true},
-		{name: "spends one cycle for the first reply", cycles: 1, expectedReserved: true, expectSpend: true},
+		{name: "spends one cycle for the first reply", cycles: 1, expectedReserved: true, expectedFirstAttempt: true, expectSpend: true},
 		{name: "stops at the machine cycle ceiling", cycles: 2, expectLoopGuard: true},
 	}
 
@@ -323,10 +514,11 @@ func TestCodeReviewDisputeStore_ReserveReplyCycle(t *testing.T) {
 			}
 			mock.ExpectCommit()
 
-			reserved, err := NewCodeReviewDisputeStore(mock).ReserveReplyCycle(context.Background(), orgID, disputeID, 2)
+			reserved, firstAttempt, err := NewCodeReviewDisputeStore(mock).ReserveReplyCycle(context.Background(), orgID, disputeID, 2)
 
 			require.NoError(t, err, "reply cycle reservation should complete atomically")
 			require.Equal(t, tt.expectedReserved, reserved, "reservation result should match the durable loop-guard state")
+			require.Equal(t, tt.expectedFirstAttempt, firstAttempt, "only the call that takes the reservation may report a first publication attempt")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
