@@ -52,6 +52,11 @@ type internalPRCoordinatorStub struct {
 	result    *publicationintent.PublicationIntentResult
 	err       error
 	requested *publicationintent.RequestPullRequest
+	requests  []publicationintent.RequestPullRequest
+	// failOnCall makes the Nth (1-based) request fail, which is how a stack
+	// publish that partially succeeds is reproduced.
+	failOnCall int
+	failWith   error
 }
 
 func (s *internalPRCoordinatorStub) RequestPullRequest(
@@ -61,7 +66,19 @@ func (s *internalPRCoordinatorStub) RequestPullRequest(
 	req publicationintent.RequestPullRequest,
 ) (*publicationintent.PublicationIntentResult, error) {
 	s.requested = &req
+	s.requests = append(s.requests, req)
+	if s.failOnCall > 0 && len(s.requests) == s.failOnCall {
+		return nil, s.failWith
+	}
 	return s.result, s.err
+}
+
+func (s *internalPRCoordinatorStub) PublicationExecutionEnabled(models.SessionPublicationSource) bool {
+	return true
+}
+
+func (s *internalPRCoordinatorStub) ReviewExecutionEnabled(models.SessionPublicationSource) bool {
+	return true
 }
 
 func TestInternalPullRequestHandler_CreateWithCoordinatorReturnsFlatTypedResponse(t *testing.T) {

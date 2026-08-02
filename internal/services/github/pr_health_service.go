@@ -1057,6 +1057,7 @@ func (s *PRService) reconcileSessionPublications(ctx context.Context, orgID uuid
 	for _, publication := range candidates {
 		if err := s.reconcileSessionPublication(ctx, publication); err != nil {
 			metrics.RecordSessionPublicationReconciliation(ctx, "error")
+			metrics.RecordPRPublicationFailure(ctx, false)
 			if markErr := s.publications.MarkFailed(
 				ctx,
 				publication.OrgID,
@@ -1244,6 +1245,13 @@ func (s *PRService) completeReconciledSessionPublication(
 
 	if err := s.publications.MarkCompleted(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID); err != nil {
 		return err
+	}
+	if !publication.RequestedAt.IsZero() {
+		// The ordinary worker records this after its local completion work. A
+		// crash between the GitHub side effect and that checkpoint is completed
+		// here instead, so reconciliation must contribute the same time-to-PR
+		// signal or recovered publications disappear from rollout telemetry.
+		metrics.RecordPRPublicationLatency(ctx, time.Since(publication.RequestedAt))
 	}
 	return nil
 }

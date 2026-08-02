@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
 	threadsvc "github.com/assembledhq/143/internal/services/thread"
@@ -79,6 +80,22 @@ type Service struct {
 	store             Store
 	runtime           Runtime
 	evidenceRefresher PublicationEvidenceRefresher
+	metrics           reviewLoopMetrics
+}
+
+type reviewLoopMetrics interface {
+	RecordLoop(ctx context.Context, outcome string, passes int)
+	RecordFix(ctx context.Context)
+}
+
+type otelReviewLoopMetrics struct{}
+
+func (otelReviewLoopMetrics) RecordLoop(ctx context.Context, outcome string, passes int) {
+	metrics.RecordPrePRReviewLoop(ctx, outcome, passes)
+}
+
+func (otelReviewLoopMetrics) RecordFix(ctx context.Context) {
+	metrics.RecordPrePRReviewFix(ctx)
 }
 
 type PublicationEvidenceRefresher interface {
@@ -86,7 +103,7 @@ type PublicationEvidenceRefresher interface {
 }
 
 func NewService(store Store, runtime Runtime) *Service {
-	return &Service{store: store, runtime: runtime}
+	return &Service{store: store, runtime: runtime, metrics: otelReviewLoopMetrics{}}
 }
 
 func (s *Service) SetPublicationEvidenceRefresher(refresher PublicationEvidenceRefresher) {
@@ -206,8 +223,7 @@ func (s *Service) Start(ctx context.Context, orgID, sessionID uuid.UUID, req Sta
 	}
 	msg, err := s.sendReview(ctx, loop, pass, req.StartedByUserID)
 	if err != nil {
-		_ = s.failLoop(ctx, orgID, *loop, fmt.Sprintf("failed to start review pass: %s", err))
-		return nil, err
+		return nil, errors.Join(err, s.failLoop(ctx, orgID, *loop, pass.PassIndex, fmt.Sprintf("failed to start review pass: %s", err)))
 	}
 	if err := s.store.SetPassReviewMessage(ctx, orgID, pass.ID, msg.ID); err != nil {
 		return nil, err
@@ -241,12 +257,15 @@ func (s *Service) OnThreadTurnCompleteWithChange(ctx context.Context, orgID, thr
 	if err != nil {
 		return err
 	}
+	if loop.Source == models.ReviewLoopSourcePublication && workspaceChanged {
+		s.metrics.RecordFix(ctx)
+	}
 	summary := strings.TrimSpace(assistantSummary)
 	if workspaceChanged && pass.PassIndex >= loop.MaxPasses &&
 		(pass.Status == models.ReviewLoopPassStatusReviewing || pass.Status == models.ReviewLoopPassStatusDeciding) {
 		return s.markPassNeedsHumanDecision(
 			ctx, orgID, loop.ID, pass.ID, models.ReviewLoopDecisionNeedsFix,
-			"The final review pass changed the workspace; those changes have not been independently reviewed.", loop,
+			"The final review pass changed the workspace; those changes have not been independently reviewed.", loop, pass.PassIndex,
 		)
 	}
 	switch pass.Status {
@@ -260,8 +279,7 @@ func (s *Service) OnThreadTurnCompleteWithChange(ctx context.Context, orgID, thr
 		}
 		msg, err := s.sendPlain(ctx, loop, prompts.ReviewLoopDecisionPrompt(), nil, withContinuationDedupeKey(reviewLoopContinuationDedupeKey(loop.ID, pass.ID, "decision")))
 		if err != nil {
-			_ = s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to request review decision: %s", err))
-			return err
+			return errors.Join(err, s.failLoop(ctx, orgID, loop, pass.PassIndex, fmt.Sprintf("failed to request review decision: %s", err)))
 		}
 		return s.store.MarkPassDeciding(ctx, orgID, pass.ID, summary, msg.ID)
 	case models.ReviewLoopPassStatusDeciding:
@@ -275,11 +293,9 @@ func (s *Service) OnThreadTurnCompleteWithChange(ctx context.Context, orgID, thr
 		case err == nil && decision == models.ReviewLoopDecisionNeedsFix:
 			return s.startLegacyFixPass(ctx, orgID, loop, pass, decision)
 		case summary == "":
-			_ = s.failLoop(ctx, orgID, loop, ErrUnrecognizedDecision.Error())
-			return ErrUnrecognizedDecision
+			return errors.Join(ErrUnrecognizedDecision, s.failLoop(ctx, orgID, loop, pass.PassIndex, ErrUnrecognizedDecision.Error()))
 		case isMalformedDecision(summary):
-			_ = s.failLoop(ctx, orgID, loop, ErrUnrecognizedDecision.Error())
-			return ErrUnrecognizedDecision
+			return errors.Join(ErrUnrecognizedDecision, s.failLoop(ctx, orgID, loop, pass.PassIndex, ErrUnrecognizedDecision.Error()))
 		default:
 			return s.completeFixAndStartNextReview(ctx, orgID, loop, pass, summary)
 		}
@@ -292,15 +308,14 @@ func (s *Service) OnThreadTurnCompleteWithChange(ctx context.Context, orgID, thr
 
 func (s *Service) startLegacyFixPass(ctx context.Context, orgID uuid.UUID, loop models.SessionReviewLoop, pass models.SessionReviewLoopPass, decision models.ReviewLoopDecision) error {
 	if pass.PassIndex >= loop.MaxPasses {
-		if err := s.markPassNeedsHumanDecision(ctx, orgID, loop.ID, pass.ID, decision, "Review pass limit reached with remaining issues.", loop); err != nil {
+		if err := s.markPassNeedsHumanDecision(ctx, orgID, loop.ID, pass.ID, decision, "Review pass limit reached with remaining issues.", loop, pass.PassIndex); err != nil {
 			return err
 		}
 		return nil
 	}
 	msg, err := s.sendPlain(ctx, loop, prompts.ReviewLoopFixPrompt(prompts.ReviewLoopFixPromptData{FixMode: loop.FixMode}), nil, withContinuationDedupeKey(reviewLoopContinuationDedupeKey(loop.ID, pass.ID, "fix")))
 	if err != nil {
-		_ = s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to start fix pass: %s", err))
-		return err
+		return errors.Join(err, s.failLoop(ctx, orgID, loop, pass.PassIndex, fmt.Sprintf("failed to start fix pass: %s", err)))
 	}
 	return s.store.MarkPassFixing(ctx, orgID, pass.ID, decision, msg.ID)
 }
@@ -311,13 +326,13 @@ func (s *Service) completeFixAndStartNextReview(ctx context.Context, orgID uuid.
 	}
 	if pass.PassIndex >= loop.MaxPasses {
 		terminalSummary := "Review pass limit reached after fixes; confirmation review is still needed."
-		if err := s.markPassNeedsHumanDecision(ctx, orgID, loop.ID, pass.ID, models.ReviewLoopDecisionNeedsFix, terminalSummary, loop); err != nil {
+		if err := s.markPassNeedsHumanDecision(ctx, orgID, loop.ID, pass.ID, models.ReviewLoopDecisionNeedsFix, terminalSummary, loop, pass.PassIndex); err != nil {
 			return err
 		}
 		return nil
 	}
 	if loop.Source == models.ReviewLoopSourcePublication {
-		workspaceRevision, desiredHeadSHA, err := s.refreshPublicationEvidence(ctx, orgID, loop)
+		workspaceRevision, desiredHeadSHA, err := s.refreshPublicationEvidence(ctx, orgID, loop, pass.PassIndex)
 		if err != nil {
 			return err
 		}
@@ -332,12 +347,11 @@ func (s *Service) completeFixAndStartNextReview(ctx context.Context, orgID uuid.
 		Status:    models.ReviewLoopPassStatusReviewing,
 	}
 	if err := s.store.CreatePass(ctx, next); err != nil {
-		return errors.Join(err, s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to create confirmation review pass: %s", err)))
+		return errors.Join(err, s.failLoop(ctx, orgID, loop, pass.PassIndex, fmt.Sprintf("failed to create confirmation review pass: %s", err)))
 	}
 	msg, err := s.sendReview(ctx, &loop, next, nil, withContinuationDedupeKey(reviewLoopContinuationDedupeKey(loop.ID, next.ID, "review")))
 	if err != nil {
-		_ = s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to start confirmation review: %s", err))
-		return err
+		return errors.Join(err, s.failLoop(ctx, orgID, loop, next.PassIndex, fmt.Sprintf("failed to start confirmation review: %s", err)))
 	}
 	return s.store.SetPassReviewMessage(ctx, orgID, next.ID, msg.ID)
 }
@@ -350,67 +364,92 @@ func (s *Service) OnThreadTurnFailed(ctx context.Context, orgID, threadID uuid.U
 		}
 		return err
 	}
-	return s.failLoop(ctx, orgID, loop, strings.TrimSpace(summary))
+	pass, passErr := s.store.GetLatestPass(ctx, orgID, loop.ID)
+	if passErr != nil {
+		return errors.Join(passErr, s.failLoop(ctx, orgID, loop, max(loop.CompletedPasses, 1), strings.TrimSpace(summary)))
+	}
+	return s.failLoop(ctx, orgID, loop, pass.PassIndex, strings.TrimSpace(summary))
 }
 
-func (s *Service) failLoop(ctx context.Context, orgID uuid.UUID, loop models.SessionReviewLoop, summary string) error {
+func (s *Service) failLoop(ctx context.Context, orgID uuid.UUID, loop models.SessionReviewLoop, passCount int, summary string) error {
+	var markErr error
 	if isLegacyAutomationLoop(loop) {
-		payload, dedupeKey, err := s.automationOpenPRTarget(ctx, orgID, loop)
-		if err != nil {
-			return err
+		payload, dedupeKey, targetErr := s.automationOpenPRTarget(ctx, orgID, loop)
+		if targetErr != nil {
+			return targetErr
 		}
-		return s.store.MarkLoopFailedAndEnqueueOpenPR(ctx, orgID, loop.ID, summary, payload, dedupeKey)
+		markErr = s.store.MarkLoopFailedAndEnqueueOpenPR(ctx, orgID, loop.ID, summary, payload, dedupeKey)
+	} else {
+		markErr = s.store.MarkLoopFailed(ctx, orgID, loop.ID, summary)
 	}
-	return s.store.MarkLoopFailed(ctx, orgID, loop.ID, summary)
+	if markErr == nil && loop.Source == models.ReviewLoopSourcePublication {
+		s.metrics.RecordLoop(ctx, "failed", max(passCount, 1))
+	}
+	return markErr
 }
 
 func (s *Service) markPassClean(ctx context.Context, orgID uuid.UUID, loop models.SessionReviewLoop, pass models.SessionReviewLoopPass, decision models.ReviewLoopDecision, summary string) error {
+	var markErr error
 	if isLegacyAutomationLoop(loop) {
 		payload, dedupeKey, err := s.automationOpenPRTarget(ctx, orgID, loop)
 		if err != nil {
 			return err
 		}
-		return s.store.MarkPassCleanAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, decision, summary, payload, dedupeKey)
-	}
-	if loop.Source == models.ReviewLoopSourcePublication {
-		if _, _, err := s.refreshPublicationEvidence(ctx, orgID, loop); err != nil {
+		markErr = s.store.MarkPassCleanAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, decision, summary, payload, dedupeKey)
+	} else if loop.Source == models.ReviewLoopSourcePublication {
+		if _, _, err := s.refreshPublicationEvidence(ctx, orgID, loop, pass.PassIndex); err != nil {
 			return err
 		}
+		markErr = s.store.MarkPassClean(ctx, orgID, loop.ID, pass.ID, decision, summary)
+	} else {
+		markErr = s.store.MarkPassClean(ctx, orgID, loop.ID, pass.ID, decision, summary)
 	}
-	return s.store.MarkPassClean(ctx, orgID, loop.ID, pass.ID, decision, summary)
+	if markErr == nil && loop.Source == models.ReviewLoopSourcePublication {
+		s.metrics.RecordLoop(ctx, "clean", pass.PassIndex)
+	}
+	return markErr
 }
 
-func (s *Service) refreshPublicationEvidence(ctx context.Context, orgID uuid.UUID, loop models.SessionReviewLoop) (int64, string, error) {
+func (s *Service) refreshPublicationEvidence(ctx context.Context, orgID uuid.UUID, loop models.SessionReviewLoop, passCount int) (int64, string, error) {
 	if s.evidenceRefresher == nil {
 		failure := errors.New("publication review evidence refresher is unavailable")
-		return 0, "", errors.Join(failure, s.failLoop(ctx, orgID, loop, failure.Error()))
+		return 0, "", errors.Join(failure, s.failLoop(ctx, orgID, loop, passCount, failure.Error()))
 	}
 	workspaceRevision, desiredHeadSHA, err := s.evidenceRefresher.RefreshPublicationEvidence(ctx, loop)
 	if err != nil {
-		return 0, "", errors.Join(err, s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to refresh publication review evidence: %s", err)))
+		return 0, "", errors.Join(err, s.failLoop(ctx, orgID, loop, passCount, fmt.Sprintf("failed to refresh publication review evidence: %s", err)))
 	}
 	evidenceStore, ok := s.store.(interface {
 		RefreshPublicationEvidence(context.Context, uuid.UUID, uuid.UUID, int64, string) error
 	})
 	if !ok {
 		failure := errors.New("publication review evidence store is unavailable")
-		return 0, "", errors.Join(failure, s.failLoop(ctx, orgID, loop, failure.Error()))
+		return 0, "", errors.Join(failure, s.failLoop(ctx, orgID, loop, passCount, failure.Error()))
 	}
 	if err := evidenceStore.RefreshPublicationEvidence(ctx, orgID, loop.ID, workspaceRevision, desiredHeadSHA); err != nil {
-		return 0, "", errors.Join(err, s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to persist refreshed publication review evidence: %s", err)))
+		return 0, "", errors.Join(err, s.failLoop(ctx, orgID, loop, passCount, fmt.Sprintf("failed to persist refreshed publication review evidence: %s", err)))
 	}
 	return workspaceRevision, desiredHeadSHA, nil
 }
 
-func (s *Service) markPassNeedsHumanDecision(ctx context.Context, orgID, loopID, passID uuid.UUID, decision models.ReviewLoopDecision, summary string, loop models.SessionReviewLoop) error {
+// passCount is the index of the pass that stopped for a human, not the loop's
+// configured ceiling: a replayed or restarted loop can stop past MaxPasses, and
+// the outcome telemetry has to describe the work that actually ran.
+func (s *Service) markPassNeedsHumanDecision(ctx context.Context, orgID, loopID, passID uuid.UUID, decision models.ReviewLoopDecision, summary string, loop models.SessionReviewLoop, passCount int) error {
+	var markErr error
 	if isLegacyAutomationLoop(loop) {
-		payload, dedupeKey, err := s.automationOpenPRTarget(ctx, orgID, loop)
-		if err != nil {
-			return err
+		payload, dedupeKey, targetErr := s.automationOpenPRTarget(ctx, orgID, loop)
+		if targetErr != nil {
+			return targetErr
 		}
-		return s.store.MarkPassNeedsHumanDecisionAndEnqueueOpenPR(ctx, orgID, loopID, passID, decision, summary, payload, dedupeKey)
+		markErr = s.store.MarkPassNeedsHumanDecisionAndEnqueueOpenPR(ctx, orgID, loopID, passID, decision, summary, payload, dedupeKey)
+	} else {
+		markErr = s.store.MarkPassNeedsHumanDecision(ctx, orgID, loopID, passID, decision, summary)
 	}
-	return s.store.MarkPassNeedsHumanDecision(ctx, orgID, loopID, passID, decision, summary)
+	if markErr == nil && loop.Source == models.ReviewLoopSourcePublication {
+		s.metrics.RecordLoop(ctx, "needs_human", max(passCount, 1))
+	}
+	return markErr
 }
 
 func isLegacyAutomationLoop(loop models.SessionReviewLoop) bool {

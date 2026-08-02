@@ -233,6 +233,27 @@ describe('SettingsPage', () => {
     });
   });
 
+  it('shows both default-on agent PR handoff controls and persists an explicit off value', async () => {
+    renderWithProviders(<SettingsPage />);
+
+    const createSwitch = await screen.findByRole('switch', { name: 'Create a PR when the coding agent is ready' });
+    const reviewSwitch = screen.getByRole('switch', { name: 'Run a two-pass review/fix cycle before creating the PR' });
+    expect(createSwitch).toBeChecked();
+    expect(reviewSwitch).toBeChecked();
+
+    await userEvent.click(createSwitch);
+
+    await waitFor(() => {
+      expect(settingsUpdateMock).toHaveBeenCalledWith({
+        settings: {
+          session_automation: {
+            automatic_follow_through: { create_pr_when_agent_ready: false },
+          },
+        },
+      });
+    });
+  });
+
   it('keeps the organization name field disabled for non-admins', async () => {
     useAuthMock.mockReturnValue({
       user: { role: 'member' },

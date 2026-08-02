@@ -105,6 +105,8 @@ export interface UserSettings {
 export type AutomaticFollowThroughPreference = "inherit" | "on" | "off";
 
 export interface AutomaticPRFollowThroughUserSettings {
+  create_pr_when_agent_ready?: AutomaticFollowThroughPreference;
+  review_before_pr?: AutomaticFollowThroughPreference;
   resolve_conflicts_when_idle?: AutomaticFollowThroughPreference;
   fix_tests_when_idle?: AutomaticFollowThroughPreference;
   respond_to_pr_feedback?: AutomaticFollowThroughPreference;
@@ -1464,7 +1466,7 @@ export type ReviewLoopStatus =
   | "needs_human_decision"
   | "failed"
   | "cancelled";
-export type ReviewLoopSource = "manual" | "automation";
+export type ReviewLoopSource = "manual" | "automation" | "publication";
 export type ReviewLoopFixMode = "minimal" | "exhaustive";
 export type ReviewLoopPassStatus =
   | "reviewing"
@@ -1528,6 +1530,26 @@ export interface SessionDetail extends Session {
   changesets: ChangesetSummary[];
   publications?: SessionPublication[];
   changeset_stack_state?: ChangesetStackState;
+  publication_policy?: SessionPublicationPolicy;
+}
+
+export type PublicationPolicySource =
+  | "product_default"
+  | "organization"
+  | "personal"
+  | "automation"
+  | "explicit_action"
+  | "explicit_bypass";
+
+export type PRHandoffMode = "pre_publish" | "draft_first";
+
+export interface SessionPublicationPolicy {
+  create_pr_when_agent_ready: boolean;
+  create_pr_source: PublicationPolicySource;
+  review_before_pr: boolean;
+  review_source: PublicationPolicySource;
+  review_max_passes: number;
+  pr_handoff_mode: PRHandoffMode;
 }
 
 export type SessionPublicationState =
@@ -1556,6 +1578,15 @@ export interface SessionPublication {
   repository_id: string;
   state: SessionPublicationState;
   source: "user" | "automation" | "agent_tool" | "backend" | "webhook" | "reconciler" | "backfill";
+  trigger_kind?: "agent_ready" | "explicit_action" | "policy";
+  handoff_mode?: PRHandoffMode;
+  initiated_by_user_id?: string;
+  automatic_pr_policy_source?: PublicationPolicySource;
+  review_policy_source?: PublicationPolicySource;
+  review_max_passes?: number;
+  review_loop_id?: string;
+  review_workspace_revision?: number;
+  review_desired_head_sha?: string;
   review_gate_state: SessionPublicationReviewGateState;
   base_branch: string;
   head_branch: string;
@@ -2109,6 +2140,8 @@ export interface SessionAutomationSettings {
 }
 
 export interface AutomaticFollowThroughOrgSettings {
+  create_pr_when_agent_ready?: boolean;
+  review_before_pr?: boolean;
   resolve_conflicts_when_idle?: boolean;
   fix_tests_when_idle?: boolean;
   pr_feedback_mode?: "all_trusted_humans" | "mentions" | "off";

@@ -5048,7 +5048,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 	}
 }
 
-func TestSessionHandler_EndSession_EnqueuesOpenPR(t *testing.T) {
+func TestSessionHandler_EndSession_DoesNotPublishIssueSession(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -5059,7 +5059,6 @@ func TestSessionHandler_EndSession_EnqueuesOpenPR(t *testing.T) {
 	orgID := uuid.New()
 	sessionID := uuid.New()
 	issueID := uuid.New()
-	jobID := uuid.New()
 	handler := newSessionHandler(t, mock)
 
 	mock.ExpectQuery("SELECT .+ FROM sessions").
@@ -5116,18 +5115,6 @@ func TestSessionHandler_EndSession_EnqueuesOpenPR(t *testing.T) {
 				now,
 			),
 		)
-	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO session_publish_state").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
-			snapshotKey:     "snapshots/test.tar",
-			prCreationState: "queued",
-		}))
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	mock.ExpectCommit()
-
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/end", nil)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", sessionID.String())
@@ -5138,12 +5125,12 @@ func TestSessionHandler_EndSession_EnqueuesOpenPR(t *testing.T) {
 
 	handler.EndSession(w, req)
 
-	require.Equal(t, http.StatusOK, w.Code, "ending an idle non-manual session should enqueue PR creation")
+	require.Equal(t, http.StatusOK, w.Code, "ending an idle issue session should succeed without publishing")
 	require.Contains(t, w.Body.String(), `"status":"completed"`, "response should return the completed session")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	require.NoError(t, mock.ExpectationsWereMet(), "ending the session should not issue publication queries or enqueue a job")
 }
 
-func TestSessionHandler_EndSession_ManualEnqueuesOpenPR(t *testing.T) {
+func TestSessionHandler_EndSession_ManualDoesNotPublishOnCompletion(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -5155,7 +5142,6 @@ func TestSessionHandler_EndSession_ManualEnqueuesOpenPR(t *testing.T) {
 	sessionID := uuid.New()
 	issueID := uuid.New()
 	userID := uuid.New()
-	jobID := uuid.New()
 	handler := newSessionHandler(t, mock)
 
 	mock.ExpectQuery("SELECT .+ FROM sessions").
@@ -5212,19 +5198,6 @@ func TestSessionHandler_EndSession_ManualEnqueuesOpenPR(t *testing.T) {
 				now,
 			),
 		)
-	// Expect open_pr job instead of validate.
-	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO session_publish_state").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
-			snapshotKey:     "snapshots/test.tar",
-			prCreationState: "queued",
-		}))
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	mock.ExpectCommit()
-
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/end", nil)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", sessionID.String())
@@ -5235,9 +5208,9 @@ func TestSessionHandler_EndSession_ManualEnqueuesOpenPR(t *testing.T) {
 
 	handler.EndSession(w, req)
 
-	require.Equal(t, http.StatusOK, w.Code, "ending a manual session should enqueue open_pr")
+	require.Equal(t, http.StatusOK, w.Code, "ending a manual session should not treat process completion as publication intent")
 	require.Contains(t, w.Body.String(), `"status":"completed"`, "response should return the completed session")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	require.NoError(t, mock.ExpectationsWereMet(), "manual completion should not issue publication queries or enqueue a job")
 }
 
 func TestBuildManualSessionDescription(t *testing.T) {
@@ -11146,8 +11119,8 @@ func TestSessionHandler_RequireBuilderReviewForTarget_RefusesSeparateWorktree(t 
 
 // The UI's Create PR button routes through the same coordinator as the agent
 // tool, so the handler must name its own channel (recording it as agent_tool
-// would mis-attribute the durable row) and must not report "queued" for
-// outcomes that did not reach the queue.
+// would mis-attribute the durable row) and preserve every typed idempotent
+// outcome instead of translating it back into retired conflicts.
 func TestSessionHandler_CreatePR_CoordinatorOutcomes(t *testing.T) {
 	t.Parallel()
 
@@ -11167,20 +11140,17 @@ func TestSessionHandler_CreatePR_CoordinatorOutcomes(t *testing.T) {
 			wantInBody: `"status":"queued"`,
 		},
 		{
-			// The durable row exists and reconciliation will retry, but
-			// nothing is on the queue and the changeset never entered the
-			// queued state, so the operator must not be told otherwise.
-			name:       "failed enqueue is not reported as queued",
+			name:       "failed enqueue reports durable blocked state",
 			status:     publicationintent.ResultBlocked,
 			reason:     &blockedReason,
-			wantCode:   http.StatusInternalServerError,
-			wantInBody: "ENQUEUE_FAILED",
+			wantCode:   http.StatusAccepted,
+			wantInBody: `"status":"blocked"`,
 		},
 		{
-			name:       "concurrent publish reports the existing pull request",
+			name:       "repeated publish reports the existing pull request idempotently",
 			status:     publicationintent.ResultAlreadyPublished,
-			wantCode:   http.StatusConflict,
-			wantInBody: "PR_EXISTS",
+			wantCode:   http.StatusAccepted,
+			wantInBody: `"status":"already_published"`,
 		},
 	}
 
@@ -11244,4 +11214,73 @@ func TestSessionHandler_CreatePR_CoordinatorOutcomes(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestSessionHandler_CreatePR_CoordinatesNonPrimaryInFlightChangeset(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	t.Cleanup(mock.Close)
+
+	now := time.Now().UTC()
+	snapshotKey := "snap-non-primary-coordinator"
+	worktreePath := "/workspace/changeset-2"
+	workingBranch := "143/changeset-2"
+	headSHA := "changeset-2-head"
+	orgID, sessionID, issueID, changesetID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	publicationID := uuid.New()
+	handler := newSessionHandler(t, mock)
+	handler.SetChangesetStore(db.NewSessionChangesetStore(mock))
+	coordinator := &internalPRCoordinatorStub{result: &publicationintent.PublicationIntentResult{
+		Status: publicationintent.ResultPRQueued, SessionID: sessionID, PublicationID: &publicationID,
+	}}
+	handler.SetPublicationIntentCoordinator(coordinator, true)
+
+	diff := "--- a/file.go\n+++ b/file.go\n@@ -1 +1 @@\n-old\n+new"
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(addSessionRow(pgxmock.NewRows(sessionColumns),
+			sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+			nil, nil, nil, nil,
+			nil, false, &now, &now, nil,
+			nil, nil, nil, false,
+			nil, nil, nil, nil, &diff,
+			nil, nil, nil, nil,
+			nil, nil,
+			nil,
+			nil, 0, now, "none", &snapshotKey,
+			nil, nil, nil, nil, nil, nil,
+			nil, nil,
+			nil,
+			"idle",
+			(*string)(nil),
+			nil,
+			now,
+		))
+	mock.ExpectQuery("SELECT .*FROM session_changesets").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionChangesetColumns).AddRow(
+			changesetID, orgID, sessionID, false, 1, "Second", "", models.ChangesetStatusReady,
+			"main", "main", &workingBranch, nil, &headSHA, nil, nil, &worktreePath, nil, &diff,
+			nil, nil, false, models.PRCreationStatePushing, nil, now, now,
+		))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr?changeset_id="+changesetID.String(), nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithActiveRole(ctx, string(models.RoleMember))
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreatePR(w, req)
+
+	require.Equal(t, http.StatusAccepted, w.Code, "non-primary coordinated retries should return the typed accepted outcome: %s", w.Body.String())
+	require.Contains(t, w.Body.String(), `"status":"queued"`, "non-primary coordinated retries should not revive PR_IN_FLIGHT")
+	require.NotNil(t, coordinator.requested, "non-primary publication should reach the coordinator")
+	require.NotNil(t, coordinator.requested.ChangesetID, "coordinator request should target the selected changeset")
+	require.Equal(t, changesetID, *coordinator.requested.ChangesetID, "coordinator should retain the non-primary changeset target")
+	require.NoError(t, mock.ExpectationsWereMet(), "all tenant-scoped lookups should be satisfied")
 }

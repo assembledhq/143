@@ -583,7 +583,16 @@ export const api = {
     publishChangeset: (sessionId: string, changesetId: string) =>
       post<{ status: string; job_id?: string }>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/publish`),
     publishChangesetStack: (sessionId: string) =>
-      post<{ status: string; job_id: string }>(`/api/v1/sessions/${sessionId}/changesets/publish-stack`),
+      post<{
+        status: string;
+        publications: Array<{
+          changeset_id: string;
+          status: string;
+          publication_id?: string | null;
+          error_code?: string;
+          reason?: string | null;
+        }>;
+      }>(`/api/v1/sessions/${sessionId}/changesets/publish-stack`),
     restackChangesetDescendants: (sessionId: string, changesetId: string) =>
       post<{ status: string; job_id: string }>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/restack-descendants`),
     confirmChangesetRestack: (sessionId: string, changesetId: string) =>

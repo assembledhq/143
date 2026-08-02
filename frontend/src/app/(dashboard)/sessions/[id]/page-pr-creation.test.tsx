@@ -224,6 +224,125 @@ describe('SessionDetailPage PR creation', () => {
     expect(publicationBadge).toHaveAttribute('aria-atomic', 'true');
   });
 
+  it('renders a completed no-op publication as a successful terminal outcome', async () => {
+    const now = '2026-07-15T12:00:00Z';
+    const detail: SessionDetail = {
+      ...mockSessions[0],
+      status: 'completed',
+      threads: [],
+      changesets: [{
+        id: 'changeset-primary', is_primary: true, order_index: 0,
+        title: 'Primary pull request', summary: '', status: 'ready',
+        target_branch: 'main', base_branch: 'main', working_branch: '143/session-branch',
+        created_at: now, updated_at: now,
+      }],
+      publications: [{
+        id: 'publication-1', session_id: mockSessions[0].id, changeset_id: 'changeset-primary',
+        repository_id: mockSessions[0].repository_id ?? 'repository-1', state: 'completed_noop',
+        source: 'automation', trigger_kind: 'policy', handoff_mode: 'pre_publish',
+        review_gate_state: 'not_required', base_branch: 'main', head_branch: '143/session-branch',
+        attempt_count: 1, requested_at: now, completed_at: now, updated_at: now,
+      }],
+    };
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: detail } satisfies SingleResponse<SessionDetail>)),
+      http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json({ error: { code: 'NOT_FOUND', message: 'pull request not found' } }, { status: 404 })),
+    );
+
+    renderWithProviders(<SessionDetailContent id={detail.id} />);
+
+    const workflow = await screen.findByTestId('publication-workflow-card');
+    expect(within(workflow).getByText('No publication needed')).toBeInTheDocument();
+    expect(within(workflow).getByText('The completed workflow found no changes to publish.')).toBeInTheDocument();
+    expect(within(workflow).queryByText('Needs attention')).not.toBeInTheDocument();
+  });
+
+  // A no-op publication is the one settled outcome with neither a pull request
+  // nor a workflow-card action. Later changes must still be publishable, or the
+  // session is stranded with no way to open a PR at all.
+  it('restores the ordinary Create PR path after a no-op publication when the session has changes', async () => {
+    const now = '2026-07-15T12:00:00Z';
+    const detail: SessionDetail = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-noop',
+      threads: [],
+      changesets: [{
+        id: 'changeset-primary', is_primary: true, order_index: 0,
+        title: 'Primary pull request', summary: '', status: 'ready',
+        target_branch: 'main', base_branch: 'main', working_branch: '143/session-branch',
+        created_at: now, updated_at: now,
+      }],
+      publications: [{
+        id: 'publication-1', session_id: mockSessions[0].id, changeset_id: 'changeset-primary',
+        repository_id: mockSessions[0].repository_id ?? 'repository-1', state: 'completed_noop',
+        source: 'agent_tool', trigger_kind: 'agent_ready', handoff_mode: 'pre_publish',
+        review_gate_state: 'not_required', base_branch: 'main', head_branch: '143/session-branch',
+        attempt_count: 1, requested_at: now, completed_at: now, updated_at: now,
+      }],
+    };
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: detail } satisfies SingleResponse<SessionDetail>)),
+      http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json({ error: { code: 'NOT_FOUND', message: 'pull request not found' } }, { status: 404 })),
+    );
+
+    renderWithProviders(<SessionDetailContent id={detail.id} />);
+
+    const workflow = await screen.findByTestId('publication-workflow-card');
+    expect(within(workflow).getByText('No publication needed')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Create PR' })).toBeInTheDocument();
+  });
+
+  // The endpoint coordinates each changeset independently and returns 202 even
+  // when some were rejected, so a blanket success toast would hide the gap.
+  it('reports rejected entries when only part of the stack could be queued', async () => {
+    const now = '2026-07-15T12:00:00Z';
+    const primaryID = '33333333-3333-4333-8333-333333333333';
+    const childID = '44444444-4444-4444-8444-444444444444';
+    const detail: SessionDetail = {
+      ...mockSessions[0],
+      status: 'completed',
+      threads: [],
+      changesets: [
+        {
+          id: primaryID, is_primary: true, order_index: 0,
+          title: 'Foundation', summary: '', status: 'ready',
+          target_branch: 'main', base_branch: 'main', working_branch: '143/foundation',
+          worktree_path: '/workspace/foundation', created_at: now, updated_at: now,
+        },
+        {
+          id: childID, is_primary: false, order_index: 1,
+          title: 'API integration', summary: '', status: 'ready',
+          target_branch: 'main', base_branch: '143/foundation', working_branch: '143/api',
+          stacked_on_changeset_id: primaryID, worktree_path: '/workspace/api',
+          created_at: now, updated_at: now,
+        },
+      ],
+    };
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: detail } satisfies SingleResponse<SessionDetail>)),
+      http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json({ error: { code: 'NOT_FOUND', message: 'pull request not found' } }, { status: 404 })),
+      http.post('/api/v1/sessions/:id/changesets/publish-stack', () => HttpResponse.json({
+        status: 'rejected',
+        publications: [
+          { changeset_id: primaryID, status: 'pr_queued', publication_id: 'publication-1' },
+          { changeset_id: childID, status: 'rejected', error_code: 'WORKSPACE_NOT_READY', reason: 'worktree is missing' },
+        ],
+      }, { status: 202 })),
+    );
+
+    renderWithProviders(<SessionDetailContent id={detail.id} />);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Publish stack' }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('1 of 2 pull requests could not be queued: worktree is missing');
+    });
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
   it('keeps a review-gate warning visible after the pull request exists', async () => {
     const now = '2026-07-15T12:00:00Z';
     const detail: SessionDetail = {
@@ -276,6 +395,138 @@ describe('SessionDetailPage PR creation', () => {
 
     expect(await screen.findByRole('link', { name: /View PR/ })).toBeInTheDocument();
     expect(screen.getByText('Review gate bypassed')).toBeInTheDocument();
+  });
+
+  it('shows one reviewing workflow card and suppresses duplicate publication actions', async () => {
+    const now = '2026-07-15T12:00:00Z';
+    const detail: SessionDetail = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      threads: [],
+      changesets: [{
+        id: 'changeset-primary', is_primary: true, order_index: 0,
+        title: 'Primary pull request', summary: '', status: 'ready',
+        target_branch: 'main', base_branch: 'main', working_branch: '143/session-branch',
+        created_at: now, updated_at: now,
+      }],
+      publications: [{
+        id: 'publication-1', session_id: mockSessions[0].id, changeset_id: 'changeset-primary',
+        repository_id: mockSessions[0].repository_id ?? 'repository-1', state: 'review_pending',
+        source: 'agent_tool', trigger_kind: 'agent_ready', handoff_mode: 'pre_publish',
+        review_gate_state: 'pending', review_max_passes: 2,
+        base_branch: 'main', head_branch: '143/session-branch', attempt_count: 0,
+        requested_at: now, updated_at: now,
+      }],
+    };
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: detail } satisfies SingleResponse<SessionDetail>)),
+      http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json({ error: { code: 'NOT_FOUND', message: 'pull request not found' } }, { status: 404 })),
+    );
+
+    renderWithProviders(<SessionDetailContent id={detail.id} />);
+
+    const workflow = await screen.findByTestId('publication-workflow-card');
+    expect(within(workflow).getByText('Reviewing')).toBeInTheDocument();
+    expect(within(workflow).getByText(/Pass 1 of 2/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Create PR' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
+  });
+
+  it('uses the same workflow card for a selected stack child and hides its legacy create action', async () => {
+    const now = '2026-07-15T12:00:00Z';
+    const primaryID = '11111111-1111-4111-8111-111111111111';
+    const childID = '22222222-2222-4222-8222-222222222222';
+    const detail: SessionDetail = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-stack',
+      threads: [],
+      changesets: [
+        {
+          id: primaryID, is_primary: true, order_index: 0,
+          title: 'Foundation', summary: '', status: 'ready',
+          target_branch: 'main', base_branch: 'main', working_branch: '143/foundation',
+          worktree_path: '/workspace/foundation', created_at: now, updated_at: now,
+        },
+        {
+          id: childID, is_primary: false, order_index: 1,
+          title: 'API integration', summary: 'Connect the API', status: 'ready',
+          target_branch: 'main', base_branch: '143/foundation', working_branch: '143/api',
+          stacked_on_changeset_id: primaryID, worktree_path: '/workspace/api', created_at: now, updated_at: now,
+        },
+      ],
+      publications: [{
+        id: 'publication-child', session_id: mockSessions[0].id, changeset_id: childID,
+        repository_id: mockSessions[0].repository_id ?? 'repository-1', state: 'review_pending',
+        source: 'user', trigger_kind: 'explicit_action', handoff_mode: 'pre_publish',
+        review_gate_state: 'pending', review_max_passes: 2,
+        base_branch: '143/foundation', head_branch: '143/api', attempt_count: 0,
+        requested_at: now, updated_at: now,
+      }],
+    };
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: detail } satisfies SingleResponse<SessionDetail>)),
+      http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json({ error: { code: 'NOT_FOUND', message: 'pull request not found' } }, { status: 404 })),
+    );
+
+    renderWithProviders(<SessionDetailContent id={detail.id} />);
+    await userEvent.click(await screen.findByRole('button', { name: /API integration/ }));
+
+    const workflow = await screen.findByTestId('publication-workflow-card');
+    expect(within(workflow).getByText('Reviewing')).toBeInTheDocument();
+    const selectedPanel = screen.getByTestId('selected-pull-request-panel');
+    expect(within(selectedPanel).queryByRole('button', { name: 'Create PR' })).not.toBeInTheDocument();
+    expect(screen.getAllByTestId('publication-workflow-card')).toHaveLength(1);
+  });
+
+  it('offers the audited draft bypass when publication review needs attention', async () => {
+    const now = '2026-07-15T12:00:00Z';
+    let requestBody: unknown;
+    const detail: SessionDetail = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      threads: [],
+      changesets: [{
+        id: 'changeset-primary', is_primary: true, order_index: 0,
+        title: 'Primary pull request', summary: '', status: 'ready',
+        target_branch: 'main', base_branch: 'main', working_branch: '143/session-branch',
+        created_at: now, updated_at: now,
+      }],
+      publications: [{
+        id: 'publication-1', session_id: mockSessions[0].id, changeset_id: 'changeset-primary',
+        repository_id: mockSessions[0].repository_id ?? 'repository-1', state: 'review_pending',
+        source: 'agent_tool', trigger_kind: 'agent_ready', handoff_mode: 'pre_publish',
+        review_gate_state: 'needs_human', review_max_passes: 2,
+        base_branch: 'main', head_branch: '143/session-branch', attempt_count: 0,
+        requested_at: now, updated_at: now,
+      }],
+    };
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: detail } satisfies SingleResponse<SessionDetail>)),
+      http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json({ error: { code: 'NOT_FOUND', message: 'pull request not found' } }, { status: 404 })),
+      http.post('/api/v1/sessions/:id/pr', async ({ request }) => {
+        requestBody = await request.json();
+        return HttpResponse.json({ status: 'pr_queued', session_id: detail.id }, { status: 202 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={detail.id} />);
+
+    const workflow = await screen.findByTestId('publication-workflow-card');
+    expect(within(workflow).getByText('Needs attention')).toBeInTheDocument();
+    await userEvent.click(within(workflow).getByRole('button', { name: 'Create draft PR' }));
+
+    await waitFor(() => {
+      expect(requestBody).toMatchObject({ draft: true });
+    });
   });
 
   it('uses xs publish actions on mobile', async () => {

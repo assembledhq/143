@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/publicationintent"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -106,6 +108,136 @@ func TestSessionHandlerUpdateChangeset(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, "metadata update should succeed")
 	require.Contains(t, w.Body.String(), `"title":"API integration"`, "response should contain normalized title")
 	require.NoError(t, mock.ExpectationsWereMet(), "update should scope by org, session, and changeset")
+}
+
+func TestSessionHandlerPublishChangesetStackUsesCoordinator(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID := uuid.New(), uuid.New()
+	firstID, secondID := uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	mock.ExpectQuery("SELECT .+ FROM sessions").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(retrySessionRow(
+			sessionID, orgID, models.SessionStatusCompleted, nil, nil, models.SandboxStateSnapshotted, nil, now,
+		)...))
+	firstBranch, secondBranch := "143/stack-1", "143/stack-2"
+	firstWorktree, secondWorktree := "/workspace/stack-1", "/workspace/stack-2"
+	firstHead, secondHead := "head-1", "head-2"
+	mock.ExpectQuery("SELECT .*FROM session_changesets").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionChangesetColumns).
+			AddRow(firstID, orgID, sessionID, true, 0, "First", "", models.ChangesetStatusReady,
+				"main", "main", &firstBranch, nil, &firstHead, nil, nil, &firstWorktree, nil, nil, nil, nil, false, models.PRCreationStateIdle, nil, now, now).
+			AddRow(secondID, orgID, sessionID, false, 1, "Second", "", models.ChangesetStatusReady,
+				firstBranch, firstBranch, &secondBranch, &firstID, &secondHead, nil, nil, &secondWorktree, nil, nil, nil, nil, false, models.PRCreationStateIdle, nil, now, now))
+	coordinator := &internalPRCoordinatorStub{result: &publicationintent.PublicationIntentResult{
+		Status: publicationintent.ResultPRQueued, SessionID: sessionID,
+	}}
+	h := newSessionHandler(t, mock)
+	h.SetChangesetStore(db.NewSessionChangesetStore(mock))
+	h.SetPublicationIntentCoordinator(coordinator, true)
+	req := changesetRequest(http.MethodPost, "/sessions/"+sessionID.String()+"/changesets/publish-stack", sessionID.String(), nil, orgID, `{"author_mode":"auto"}`)
+	req = req.WithContext(middleware.WithActiveRole(req.Context(), string(models.RoleMember)))
+	w := httptest.NewRecorder()
+
+	h.PublishChangesetStack(w, req)
+
+	require.NoError(t, mock.ExpectationsWereMet(), "stack endpoint should consume the scoped session and changeset queries")
+	require.Equal(t, http.StatusAccepted, w.Code, "stack publication should return the coordinator's asynchronous contract: %s", w.Body.String())
+	require.Contains(t, w.Body.String(), `"status":"queued"`, "stack publication should report coordinated queueing")
+	require.Contains(t, w.Body.String(), `"publication_id":`, "stack publication should use the typed snake-case publication response")
+	require.Len(t, coordinator.requests, 2, "stack publication should coordinate every active changeset")
+	require.Equal(t, firstID, *coordinator.requests[0].ChangesetID, "first stack request should retain changeset order")
+	require.Equal(t, secondID, *coordinator.requests[1].ChangesetID, "second stack request should retain changeset order")
+}
+
+// Aborting mid-stack would report failure for changesets whose durable intent
+// is already queued, so a later rejection has to be reported per changeset
+// alongside the work that did start.
+func TestSessionHandlerPublishChangesetStackReportsPartialRejection(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID := uuid.New(), uuid.New()
+	firstID, secondID := uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	mock.ExpectQuery("SELECT .+ FROM sessions").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(retrySessionRow(
+			sessionID, orgID, models.SessionStatusCompleted, nil, nil, models.SandboxStateSnapshotted, nil, now,
+		)...))
+	firstBranch, secondBranch := "143/stack-1", "143/stack-2"
+	firstWorktree, secondWorktree := "/workspace/stack-1", "/workspace/stack-2"
+	firstHead, secondHead := "head-1", "head-2"
+	mock.ExpectQuery("SELECT .*FROM session_changesets").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionChangesetColumns).
+			AddRow(firstID, orgID, sessionID, true, 0, "First", "", models.ChangesetStatusReady,
+				"main", "main", &firstBranch, nil, &firstHead, nil, nil, &firstWorktree, nil, nil, nil, nil, false, models.PRCreationStateIdle, nil, now, now).
+			AddRow(secondID, orgID, sessionID, false, 1, "Second", "", models.ChangesetStatusReady,
+				firstBranch, firstBranch, &secondBranch, &firstID, &secondHead, nil, nil, &secondWorktree, nil, nil, nil, nil, false, models.PRCreationStateIdle, nil, now, now))
+	coordinator := &internalPRCoordinatorStub{
+		result:     &publicationintent.PublicationIntentResult{Status: publicationintent.ResultPRQueued, SessionID: sessionID},
+		failOnCall: 2,
+		failWith:   &publicationintent.Error{Code: publicationintent.ErrorWorkspaceNotReady, Err: errors.New("worktree is missing")},
+	}
+	h := newSessionHandler(t, mock)
+	h.SetChangesetStore(db.NewSessionChangesetStore(mock))
+	h.SetPublicationIntentCoordinator(coordinator, true)
+	req := changesetRequest(http.MethodPost, "/sessions/"+sessionID.String()+"/changesets/publish-stack", sessionID.String(), nil, orgID, `{"author_mode":"auto"}`)
+	req = req.WithContext(middleware.WithActiveRole(req.Context(), string(models.RoleMember)))
+	w := httptest.NewRecorder()
+
+	h.PublishChangesetStack(w, req)
+
+	require.Equal(t, http.StatusAccepted, w.Code, "a stack that partially started must not be reported as a failed request: %s", w.Body.String())
+	body := w.Body.String()
+	require.Contains(t, body, `"status":"rejected"`, "the response should surface the rejected changeset")
+	require.Contains(t, body, secondID.String(), "the rejection should name the changeset it belongs to")
+	require.Contains(t, body, string(publicationintent.ErrorWorkspaceNotReady), "the rejection should retain the coordinator's typed error code")
+	require.Contains(t, body, firstID.String(), "the response should still report the changeset that was queued")
+	require.NoError(t, mock.ExpectationsWereMet(), "stack endpoint should consume the scoped session and changeset queries")
+}
+
+// The first changeset failing means nothing was coordinated, so the caller
+// should still get the ordinary typed error rather than a 202 describing a
+// stack that never started.
+func TestSessionHandlerPublishChangesetStackRejectsBeforeAnyIntent(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID := uuid.New(), uuid.New()
+	firstID := uuid.New()
+	now := time.Now().UTC()
+	mock.ExpectQuery("SELECT .+ FROM sessions").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(retrySessionRow(
+			sessionID, orgID, models.SessionStatusCompleted, nil, nil, models.SandboxStateSnapshotted, nil, now,
+		)...))
+	firstBranch, firstWorktree, firstHead := "143/stack-1", "/workspace/stack-1", "head-1"
+	mock.ExpectQuery("SELECT .*FROM session_changesets").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionChangesetColumns).
+			AddRow(firstID, orgID, sessionID, true, 0, "First", "", models.ChangesetStatusReady,
+				"main", "main", &firstBranch, nil, &firstHead, nil, nil, &firstWorktree, nil, nil, nil, nil, false, models.PRCreationStateIdle, nil, now, now))
+	coordinator := &internalPRCoordinatorStub{
+		failOnCall: 1,
+		failWith:   &publicationintent.Error{Code: publicationintent.ErrorSessionNotEligible, Err: errors.New("session cannot create a new pull request")},
+	}
+	h := newSessionHandler(t, mock)
+	h.SetChangesetStore(db.NewSessionChangesetStore(mock))
+	h.SetPublicationIntentCoordinator(coordinator, true)
+	req := changesetRequest(http.MethodPost, "/sessions/"+sessionID.String()+"/changesets/publish-stack", sessionID.String(), nil, orgID, `{"author_mode":"auto"}`)
+	req = req.WithContext(middleware.WithActiveRole(req.Context(), string(models.RoleMember)))
+	w := httptest.NewRecorder()
+
+	h.PublishChangesetStack(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "an entirely rejected stack should keep the typed conflict: %s", w.Body.String())
+	require.Contains(t, w.Body.String(), string(publicationintent.ErrorSessionNotEligible), "the conflict should retain the coordinator's error code")
+	require.NoError(t, mock.ExpectationsWereMet(), "stack endpoint should consume the scoped session and changeset queries")
 }
 
 func TestSessionHandlerListChangesetsHandlesSessionLookupErrors(t *testing.T) {

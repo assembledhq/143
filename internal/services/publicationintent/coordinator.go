@@ -30,6 +30,10 @@ const (
 type RequestPullRequest struct {
 	Draft      *bool
 	AuthorMode string
+	// ChangesetID selects a specific changeset for UI/API stack publication.
+	// Agent and automation requests omit it and therefore target the primary
+	// changeset. The store lookup remains tenant- and session-scoped.
+	ChangesetID *uuid.UUID
 	// Source is the channel the request arrived through — the sandbox
 	// internal API or the authenticated UI. It is deliberately independent of
 	// TriggerKind, which records why the request was made: an agent may relay
@@ -40,6 +44,7 @@ type RequestPullRequest struct {
 	MergeWhenReady    bool
 	RequestedByUserID *uuid.UUID
 	RequestedRole     string
+	IssueSnapshotID   *uuid.UUID
 }
 
 type PublicationIntentResult struct {
@@ -59,6 +64,8 @@ type PublicationIntentCoordinator interface {
 		sessionID uuid.UUID,
 		req RequestPullRequest,
 	) (*PublicationIntentResult, error)
+	PublicationExecutionEnabled(source models.SessionPublicationSource) bool
+	ReviewExecutionEnabled(source models.SessionPublicationSource) bool
 }
 
 type ErrorCode string
@@ -67,7 +74,6 @@ const (
 	ErrorSessionNotEligible ErrorCode = "SESSION_NOT_PUBLICATION_ELIGIBLE"
 	ErrorWorkspaceNotReady  ErrorCode = "WORKSPACE_NOT_READY"
 	ErrorPublicationFailed  ErrorCode = "PUBLICATION_INTENT_FAILED"
-	ErrorPRInFlight         ErrorCode = "PR_IN_FLIGHT"
 )
 
 type Error struct {
@@ -90,10 +96,11 @@ type SessionStore interface {
 
 type ChangesetStore interface {
 	GetPrimary(ctx context.Context, orgID, sessionID uuid.UUID) (models.SessionChangeset, error)
+	GetByID(ctx context.Context, orgID, sessionID, changesetID uuid.UUID) (models.SessionChangeset, error)
 }
 
 type PullRequestStore interface {
-	GetPrimaryBySessionID(ctx context.Context, orgID, sessionID uuid.UUID) (models.PullRequest, error)
+	GetByChangesetID(ctx context.Context, orgID, sessionID, changesetID uuid.UUID) (models.PullRequest, error)
 }
 
 type OrganizationStore interface {
@@ -119,16 +126,17 @@ type JobStore interface {
 }
 
 type Coordinator struct {
-	sessions      SessionStore
-	changesets    ChangesetStore
-	pullRequests  PullRequestStore
-	organizations OrganizationStore
-	users         UserStore
-	publications  PublicationStore
-	jobs          JobStore
-	repositories  RepositoryStore
-	reviewEnabled bool
-	logger        zerolog.Logger
+	sessions           SessionStore
+	changesets         ChangesetStore
+	pullRequests       PullRequestStore
+	organizations      OrganizationStore
+	users              UserStore
+	publications       PublicationStore
+	jobs               JobStore
+	repositories       RepositoryStore
+	publicationEnabled bool
+	reviewEnabled      bool
+	logger             zerolog.Logger
 }
 
 func (c *Coordinator) SetRepositoryStore(store RepositoryStore) {
@@ -137,6 +145,33 @@ func (c *Coordinator) SetRepositoryStore(store RepositoryStore) {
 
 func (c *Coordinator) SetReviewEnabled(enabled bool) {
 	c.reviewEnabled = enabled
+}
+
+// SetPublicationEnabled controls execution without changing stored customer
+// policy. Handlers keep using the coordinator while this is off so the wire
+// contract stays typed and idempotent during an emergency rollback.
+func (c *Coordinator) SetPublicationEnabled(enabled bool) {
+	c.publicationEnabled = enabled
+}
+
+// PublicationExecutionEnabled is consulted both at intent admission and by
+// workers immediately before publication side effects. The agent publication
+// switch deliberately affects only the agent-tool path. Explicit user
+// publication remains the manual fallback, while configured automation and
+// backend-owned project publication retain their independent policies.
+func (c *Coordinator) PublicationExecutionEnabled(source models.SessionPublicationSource) bool {
+	return c.publicationEnabled || source != models.SessionPublicationSourceAgentTool
+}
+
+// ReviewExecutionEnabled is a runtime gate, not stored customer policy. The
+// review switch applies to every pre-publication loop; disabling agent
+// publication additionally parks agent-tool review without weakening an
+// explicit user's manual path or an automation's snapshotted policy.
+func (c *Coordinator) ReviewExecutionEnabled(source models.SessionPublicationSource) bool {
+	if !c.reviewEnabled {
+		return false
+	}
+	return c.PublicationExecutionEnabled(source)
 }
 
 func NewCoordinator(
@@ -152,7 +187,24 @@ func NewCoordinator(
 	return &Coordinator{
 		sessions: sessions, changesets: changesets, pullRequests: pullRequests,
 		organizations: organizations, users: users, publications: publications,
-		jobs: jobs, reviewEnabled: true, logger: logger,
+		jobs: jobs, publicationEnabled: true, reviewEnabled: true, logger: logger,
+	}
+}
+
+func publicationDisabledResult(sessionID uuid.UUID) *PublicationIntentResult {
+	reason := "PR publication is temporarily disabled; verified changes remain available for manual follow-up"
+	return &PublicationIntentResult{
+		Status:    ResultManualPublicationRequired,
+		SessionID: sessionID,
+		Reason:    &reason,
+	}
+}
+
+func reviewDisabledResult(sessionID uuid.UUID, publicationID *uuid.UUID) *PublicationIntentResult {
+	reason := "pre-PR review is temporarily disabled; publication remains pending for manual follow-up"
+	return &PublicationIntentResult{
+		Status: ResultManualPublicationRequired, SessionID: sessionID,
+		PublicationID: publicationID, Reason: &reason,
 	}
 }
 
@@ -185,18 +237,29 @@ func (c *Coordinator) RequestPullRequest(
 			Err:  errors.New("agent-ready publication must originate from the agent tool"),
 		}
 	}
+	if req.Source == models.SessionPublicationSourceAutomation &&
+		req.TriggerKind != models.SessionPublicationTriggerPolicy {
+		return nil, &Error{Code: ErrorPublicationFailed, Err: errors.New("automation publication must use a policy trigger")}
+	}
 
 	session, err := c.sessions.GetByID(ctx, orgID, sessionID)
 	if err != nil {
 		return nil, err
 	}
+	automationRequest := req.Source == models.SessionPublicationSourceAutomation &&
+		req.TriggerKind == models.SessionPublicationTriggerPolicy && session.AutomationRunID != nil
 	if session.RepositoryID == nil || session.Origin == models.SessionOriginCodeReview ||
-		session.Origin == models.SessionOriginRevision || session.AutomationRunID != nil {
+		session.Origin == models.SessionOriginRevision || (session.AutomationRunID != nil) != automationRequest {
 		return nil, &Error{Code: ErrorSessionNotEligible, Err: errors.New("session cannot create a new pull request")}
 	}
-	changeset, err := c.changesets.GetPrimary(ctx, orgID, sessionID)
+	var changeset models.SessionChangeset
+	if req.ChangesetID == nil {
+		changeset, err = c.changesets.GetPrimary(ctx, orgID, sessionID)
+	} else {
+		changeset, err = c.changesets.GetByID(ctx, orgID, sessionID, *req.ChangesetID)
+	}
 	if err != nil {
-		return nil, &Error{Code: ErrorWorkspaceNotReady, Err: fmt.Errorf("resolve primary changeset: %w", err)}
+		return nil, &Error{Code: ErrorWorkspaceNotReady, Err: fmt.Errorf("resolve publication changeset: %w", err)}
 	}
 	if changeset.MaterializationError != nil || changeset.RestackConfirmationRequired {
 		return nil, &Error{Code: ErrorWorkspaceNotReady, Err: errors.New("primary changeset is not in a publishable state")}
@@ -222,11 +285,19 @@ func (c *Coordinator) RequestPullRequest(
 	// is the only path back. Anything else is a live intent the caller rejoins.
 	retryingTerminalPublication := hasExistingPublication && retryablePublicationOutcome(existingPublication.State)
 	if hasExistingPublication && !bypassRequested && !retryingTerminalPublication {
+		if !existingPublication.State.Terminal() && !c.PublicationExecutionEnabled(existingPublication.Source) {
+			return publicationDisabledResult(sessionID), nil
+		}
+		if !existingPublication.State.Terminal() &&
+			existingPublication.ReviewGateState == models.SessionPublicationReviewGatePending &&
+			!c.ReviewExecutionEnabled(existingPublication.Source) {
+			return reviewDisabledResult(sessionID, &existingPublication.ID), nil
+		}
 		return existingPublicationResult(existingPublication), nil
 	}
 	resumingRecordedDraft := false
 	if !hasExistingPublication || retryingTerminalPublication {
-		if _, prErr := c.pullRequests.GetPrimaryBySessionID(ctx, orgID, sessionID); prErr == nil {
+		if _, prErr := c.pullRequests.GetByChangesetID(ctx, orgID, sessionID, changeset.ID); prErr == nil {
 			// A terminal draft-first intent already owns a PR by design. It is
 			// not published yet: reopen the intent and let the worker reuse and
 			// finalize that draft. All other existing PRs remain final results.
@@ -241,15 +312,29 @@ func (c *Coordinator) RequestPullRequest(
 		}
 	}
 
-	policy, err := c.resolvePolicy(ctx, orgID, session.TriggeredByUserID)
-	if err != nil {
-		return nil, &Error{Code: ErrorPublicationFailed, Err: err}
+	policy := EffectivePolicy{
+		CreatePRWhenAgentReady: true,
+		CreatePRSource:         models.PublicationPolicySourceAutomation,
+		ReviewSource:           models.PublicationPolicySourceAutomation,
 	}
-	if req.TriggerKind == models.SessionPublicationTriggerAgentReady && !policy.CreatePRWhenAgentReady {
-		reason := "automatic PR handoff is disabled by effective policy"
-		return &PublicationIntentResult{
-			Status: ResultManualPublicationRequired, SessionID: sessionID, Reason: &reason,
-		}, nil
+	if !automationRequest {
+		policy, err = c.resolvePolicy(ctx, orgID, session.TriggeredByUserID)
+		if err != nil {
+			return nil, &Error{Code: ErrorPublicationFailed, Err: err}
+		}
+		if req.TriggerKind == models.SessionPublicationTriggerAgentReady && !policy.CreatePRWhenAgentReady {
+			metrics.RecordAutomaticPRManualOverride(ctx, "off")
+			reason := "automatic PR handoff is disabled by effective policy"
+			return &PublicationIntentResult{
+				Status: ResultManualPublicationRequired, SessionID: sessionID, Reason: &reason,
+			}, nil
+		}
+		if req.TriggerKind == models.SessionPublicationTriggerExplicitAction && !policy.CreatePRWhenAgentReady {
+			metrics.RecordAutomaticPRManualOverride(ctx, "on")
+		}
+	}
+	if !c.PublicationExecutionEnabled(req.Source) {
+		return publicationDisabledResult(sessionID), nil
 	}
 	handoffMode := models.PRHandoffModePrePublish
 	if resumingRecordedDraft {
@@ -278,23 +363,44 @@ func (c *Coordinator) RequestPullRequest(
 	if req.TriggerKind == models.SessionPublicationTriggerExplicitAction {
 		automaticSource = models.PublicationPolicySourceExplicitAction
 	}
-	reviewRequired := c.reviewEnabled && policy.ReviewBeforePR
+	// Execution switches must never rewrite effective review policy. If review
+	// is required while execution is stopped, persist a pending gate and park
+	// the intent; treating the switch as review=off would publish unreviewed.
+	reviewRequired := !automationRequest && policy.ReviewBeforePR
 	reviewBypassed := bypassRequested
+	reviewExecutionBlocked := reviewRequired && !reviewBypassed && !c.ReviewExecutionEnabled(req.Source)
 	reviewPolicySource := policy.ReviewSource
 	if reviewBypassed {
+		metrics.RecordAutomaticPRManualOverride(ctx, "review_bypass")
 		reviewPolicySource = models.PublicationPolicySourceExplicitBypass
+	}
+	publicationQueue := models.SessionPublicationJobQueueAgent
+	queue := "agent"
+	priority := 5
+	// Backend policy requests are project-owned work. Preserve the historical
+	// default-worker routing and priority while still running them through the
+	// same durable coordinator as every other entry point.
+	backendPolicyRequest := req.Source == models.SessionPublicationSourceBackend &&
+		req.TriggerKind == models.SessionPublicationTriggerPolicy
+	if automationRequest || backendPolicyRequest {
+		publicationQueue = models.SessionPublicationJobQueueDefault
+		queue = "default"
+		priority = 0
 	}
 	payload := map[string]any{
 		"session_id":                 sessionID.String(),
 		"changeset_id":               changeset.ID.String(),
 		"org_id":                     orgID.String(),
 		"publication_source":         string(req.Source),
-		"publication_queue":          string(models.SessionPublicationJobQueueAgent),
+		"publication_queue":          string(publicationQueue),
 		"publication_trigger_kind":   string(req.TriggerKind),
 		"publication_handoff_mode":   string(handoffMode),
 		"automatic_pr_policy_source": string(automaticSource),
 		"review_policy_source":       string(reviewPolicySource),
 		"initiated_by_user_id":       session.TriggeredByUserID,
+	}
+	if req.IssueSnapshotID != nil {
+		payload["issue_snapshot_id"] = req.IssueSnapshotID.String()
 	}
 	if handoffMode == models.PRHandoffModeDraftFirst {
 		payload["draft"] = true
@@ -321,7 +427,7 @@ func (c *Coordinator) RequestPullRequest(
 		HandoffMode: handoffMode, InitiatedByUserID: session.TriggeredByUserID,
 		AutomaticPolicySource: automaticSource, ReviewPolicySource: reviewPolicySource,
 		ReviewGateState: models.SessionPublicationReviewGateNotRequired,
-		JobQueue:        models.SessionPublicationJobQueueAgent, RequestPayload: encodedPayload,
+		JobQueue:        publicationQueue, RequestPayload: encodedPayload,
 		RequestGenerationAt: time.Now().UTC(), BaseBranch: changeset.BaseBranch,
 		HeadBranch: headBranch, DesiredHeadSHA: desiredHeadSHA,
 	}
@@ -350,7 +456,10 @@ func (c *Coordinator) RequestPullRequest(
 		}
 		publication = bypassIntent
 	}
-	_, queued, queueErr := c.jobs.QueueChangesetPRCreation(ctx, orgID, sessionID, changeset.ID, "agent", payload, 5)
+	if reviewExecutionBlocked {
+		return reviewDisabledResult(sessionID, &publication.ID), nil
+	}
+	_, queued, queueErr := c.jobs.QueueChangesetPRCreation(ctx, orgID, sessionID, changeset.ID, queue, payload, priority)
 	if queueErr != nil {
 		reason := "publication intent is durable, but immediate queueing failed; reconciliation will retry"
 		c.logger.Error().Err(queueErr).
@@ -365,7 +474,10 @@ func (c *Coordinator) RequestPullRequest(
 		}, nil
 	}
 	if !queued {
-		return nil, &Error{Code: ErrorPRInFlight, Err: errors.New("publication was concurrently queued")}
+		// QueueChangesetPRCreation is generation- and changeset-idempotent. A
+		// concurrent caller already owns the same durable request, so return the
+		// state we just ensured instead of reviving the retired PR_IN_FLIGHT 409.
+		return existingPublicationResult(publication), nil
 	}
 	c.logger.Info().
 		Str("org_id", orgID.String()).

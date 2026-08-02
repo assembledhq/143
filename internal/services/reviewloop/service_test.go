@@ -565,6 +565,55 @@ func TestService_OnThreadTurnFailedMarksRunningLoopFailed(t *testing.T) {
 	require.Equal(t, []string{"failed"}, store.events, "manual review-loop failure should not enqueue PR creation")
 }
 
+func TestService_OnThreadTurnFailedRecordsCurrentPublicationPass(t *testing.T) {
+	t.Parallel()
+
+	orgID, sessionID, threadID, loopID, passID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	store := &fakeReviewLoopStore{
+		runningLoop: models.SessionReviewLoop{
+			ID: loopID, OrgID: orgID, SessionID: sessionID, ThreadID: &threadID,
+			Status: models.ReviewLoopStatusRunning, Source: models.ReviewLoopSourcePublication,
+			AgentType: models.AgentTypeCodex, MaxPasses: 2,
+		},
+		latestPass: models.SessionReviewLoopPass{
+			ID: passID, OrgID: orgID, LoopID: loopID, SessionID: sessionID,
+			PassIndex: 2, Status: models.ReviewLoopPassStatusReviewing,
+		},
+	}
+	recorder := &fakeReviewLoopMetrics{}
+	svc := NewService(store, &fakeThreadService{})
+	svc.metrics = recorder
+
+	err := svc.OnThreadTurnFailed(context.Background(), orgID, threadID, "review runtime failed")
+
+	require.NoError(t, err, "second-pass failure should terminalize the publication review")
+	require.Equal(t, []recordedReviewLoopMetric{{outcome: "failed", passes: 2}}, recorder.loops, "failure telemetry should use the active pass rather than stale completed_passes")
+}
+
+// A swallowed terminalization error is the worst possible outcome here: the
+// job is acked, the loop stays running forever, and the automation's PR gate is
+// never enqueued. The failure has to reach the caller so the job retries.
+func TestService_OnThreadTurnFailedSurfacesAutomationTerminalizationFailure(t *testing.T) {
+	t.Parallel()
+
+	orgID, sessionID, threadID, loopID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	automationRunID := uuid.New()
+	store := &fakeReviewLoopStore{
+		runningLoop: models.SessionReviewLoop{
+			ID: loopID, OrgID: orgID, SessionID: sessionID, ThreadID: &threadID,
+			AutomationRunID: &automationRunID, Status: models.ReviewLoopStatusRunning,
+			AgentType: models.AgentTypeCodex, MaxPasses: 1,
+		},
+		terminalErr: errors.New("job enqueue failed"),
+	}
+	svc := NewService(store, &fakeThreadService{})
+
+	err := svc.OnThreadTurnFailed(context.Background(), orgID, threadID, "agent exited")
+
+	require.ErrorContains(t, err, "job enqueue failed", "a failed automation terminalization must not be reported as success")
+	require.Empty(t, store.events, "a failed terminalization should not record a completed gate handoff")
+}
+
 func TestService_OnThreadTurnFailedAutomationEnqueuesOpenPRGate(t *testing.T) {
 	t.Parallel()
 
@@ -645,6 +694,24 @@ type fakeReviewLoopStore struct {
 	fixSummary                   string
 	terminalErr                  error
 	events                       []string
+}
+
+type recordedReviewLoopMetric struct {
+	outcome string
+	passes  int
+}
+
+type fakeReviewLoopMetrics struct {
+	loops []recordedReviewLoopMetric
+	fixes int
+}
+
+func (f *fakeReviewLoopMetrics) RecordLoop(_ context.Context, outcome string, passes int) {
+	f.loops = append(f.loops, recordedReviewLoopMetric{outcome: outcome, passes: passes})
+}
+
+func (f *fakeReviewLoopMetrics) RecordFix(context.Context) {
+	f.fixes++
 }
 
 func (f *fakeReviewLoopStore) GetPrimaryChangesetID(_ context.Context, _ uuid.UUID, sessionID uuid.UUID) (uuid.UUID, error) {
