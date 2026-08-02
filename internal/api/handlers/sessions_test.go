@@ -3819,7 +3819,7 @@ func TestSessionHandler_StreamLogsViaRedis_ContextCanceledAfterSetup(t *testing.
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}))
 
-	rec := httptest.NewRecorder()
+	rec := newLockedRecorder()
 	sw := sse.NewWriter(rec)
 	require.NotNil(t, sw, "SSE writer should initialize")
 
@@ -3828,7 +3828,9 @@ func TestSessionHandler_StreamLogsViaRedis_ContextCanceledAfterSetup(t *testing.
 	go func() {
 		done <- handler.streamLogsViaRedis(ctx, sw, orgID, run, "")
 	}()
-	time.Sleep(20 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		return strings.Contains(rec.BodyString(), "event: status")
+	}, 2*time.Second, 20*time.Millisecond, "Redis stream helper should finish setup before the context is canceled")
 	cancel()
 
 	select {
@@ -3837,7 +3839,7 @@ func TestSessionHandler_StreamLogsViaRedis_ContextCanceledAfterSetup(t *testing.
 	case <-time.After(2 * time.Second):
 		t.Fatal("Redis stream helper did not return after context cancellation")
 	}
-	require.Contains(t, rec.Body.String(), "event: status", "Redis stream helper should still emit the initial status event before honoring cancellation")
+	require.Contains(t, rec.BodyString(), "event: status", "Redis stream helper should still emit the initial status event before honoring cancellation")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
