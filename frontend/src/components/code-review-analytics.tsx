@@ -315,7 +315,12 @@ export function CodeReviewAnalyticsReport({
         description="Unique PR outcomes grouped by the author captured from the first available assessment."
       >
         {analytics.authors.length === 0 ? (
-          <p className="py-6 text-center text-sm text-muted-foreground">No author attribution is available for this report.</p>
+          <EmptyState
+            icon={ChartNoAxesColumnIncreasing}
+            title="No author attribution available"
+            description="Completed reviews in this report could not be matched to a pull request author."
+            variant="inline"
+          />
         ) : (
           <>
           <Card className="overflow-x-auto">
