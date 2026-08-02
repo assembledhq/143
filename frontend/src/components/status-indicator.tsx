@@ -62,12 +62,17 @@ export function StatusIndicator({
 
   if (activity === "indeterminate") {
     return (
-      <LoaderCircle
+      <span
         data-slot="status-indicator"
         data-activity={activity}
         aria-hidden="true"
-        className={cn("status-indeterminate shrink-0", dimensions.spinner, colors.text, className)}
-      />
+        className={cn("inline-flex shrink-0 items-center justify-center", dimensions.wrapper, className)}
+      >
+        <LoaderCircle
+          data-slot="status-indicator-spinner"
+          className={cn("status-indeterminate shrink-0", dimensions.spinner, colors.text)}
+        />
+      </span>
     );
   }
 
