@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,12 +13,46 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/internalapi"
 	"github.com/assembledhq/143/internal/services/mcp"
 )
+
+func TestPreviewToolExecutor_WaitSessionReadyReportsPhaseChanges(t *testing.T) {
+	t.Parallel()
+
+	// These are phases the provider actually reports through notifyPhaseStart,
+	// which is what populates current_phase. The split home build cache emits
+	// one build_cache_home_restore for both sets; its per-set names exist only
+	// as metrics labels and never reach this field.
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		call := calls.Add(1)
+		phase, status := "build_cache_home_restore", "starting"
+		if call == 2 {
+			phase = "service_build"
+		}
+		if call >= 3 {
+			phase, status = "readiness", "ready"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, err := fmt.Fprintf(w, `{"data":{"instance":{"id":"preview-1","session_id":"session-1","status":%q,"current_phase":%q}}}`, status, phase)
+		require.NoError(t, err, "test response should write")
+	}))
+	defer server.Close()
+
+	var progress bytes.Buffer
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"}), progress: &progress, pollInterval: time.Millisecond}
+	result := executor.waitSessionReady(context.Background(), "session-1")
+
+	require.False(t, result.IsError, "wait should complete when the preview becomes ready")
+	require.Contains(t, progress.String(), "build_cache_home_restore", "wait output should surface the first cache phase")
+	require.Contains(t, progress.String(), "service_build", "wait output should surface later phase changes")
+	require.Contains(t, progress.String(), "readiness", "wait output should surface the terminal readiness phase")
+}
 
 func TestPreviewToolExecutor_SessionScreenshotOmitsInlineBase64(t *testing.T) {
 	t.Parallel()
