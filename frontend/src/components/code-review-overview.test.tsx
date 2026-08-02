@@ -73,6 +73,23 @@ describe("TimeRangePicker", () => {
     expect(timeRangeLabel("custom:2026-07-01:2026-07-31")).toBe("Jul 1, 2026 – Jul 31, 2026");
   });
 
+  it("shows boundary dates only in their owning month", async () => {
+    const user = userEvent.setup();
+    render(
+      <TimeRangePicker
+        label="Time window"
+        value="custom:2026-07-30:2026-08-01"
+        onValueChange={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Time window" }));
+
+    for (const date of [new Date(2026, 6, 30), new Date(2026, 6, 31), new Date(2026, 7, 1)]) {
+      expect(document.querySelectorAll(`[data-day="${date.toLocaleDateString()}"]`)).toHaveLength(1);
+    }
+  });
+
   it("applies a custom range after both dates are selected", async () => {
     const user = userEvent.setup();
     const onValueChange = vi.fn();

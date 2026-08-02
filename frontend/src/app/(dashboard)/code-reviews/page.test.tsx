@@ -662,7 +662,7 @@ describe("CodeReviewsPage", () => {
     expect(within(approvalOutcomes).getByRole("button", { name: "About PRs reviewed" })).toBeInTheDocument();
     expect(within(approvalOutcomes).getByText("17")).toBeInTheDocument();
     expect(within(approvalOutcomes).getByText("53%")).toBeInTheDocument();
-    expect(within(approvalOutcomes).getByText("2")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByText("2.0")).toBeInTheDocument();
     expect(within(approvalOutcomes).queryByText("128")).not.toBeInTheDocument();
     expect(screen.getByText("Approval by round")).toBeInTheDocument();
     expect(screen.getByText("Why PRs were not approved right away")).toBeInTheDocument();
@@ -702,14 +702,14 @@ describe("CodeReviewsPage", () => {
       "3",
       "75%",
       "6",
-      "2",
+      "2.0",
       "+52",
       "-20",
     ]);
     expect(within(authorTable).getByText("Overall")).toBeInTheDocument();
     expect(within(authorTable).getByLabelText("32 PRs reviewed overall")).toHaveTextContent("32");
     expect(within(authorTable).getByLabelText("53% overall approval rate")).toHaveTextContent("53%");
-    expect(within(authorTable).getByLabelText("2 median rounds to approval overall")).toHaveTextContent("2");
+    expect(within(authorTable).getByLabelText("2.0 median rounds to approval overall")).toHaveTextContent("2.0");
     expect(within(anyaRow).getByRole("link", { name: "12 reviewed PRs by anya" })).toHaveAttribute(
       "href",
       "/code-reviews?tab=reviews&author=anya&range=30d",
