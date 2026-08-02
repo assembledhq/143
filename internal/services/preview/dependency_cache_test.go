@@ -416,6 +416,26 @@ func TestDependencyCacheWorkerArchiveStagesHonorCancellation(t *testing.T) {
 	}
 }
 
+func TestValidateDependencyCacheArchiveReaderLimitsNonRegularEntries(t *testing.T) {
+	t.Parallel()
+
+	var payload bytes.Buffer
+	gzw := gzip.NewWriter(&payload)
+	tw := tar.NewWriter(gzw)
+	for _, name := range []string{"node_modules/one/", "node_modules/two/", "node_modules/three/"} {
+		require.NoError(t, tw.WriteHeader(&tar.Header{
+			Name:     name,
+			Mode:     0o700,
+			Typeflag: tar.TypeDir,
+		}), "directory archive entry should be written")
+	}
+	require.NoError(t, tw.Close(), "test archive tar writer should close")
+	require.NoError(t, gzw.Close(), "test archive gzip writer should close")
+
+	_, err := validateDependencyCacheArchiveReaderWithEntryLimit(context.Background(), bytes.NewReader(payload.Bytes()), []string{"node_modules"}, 2)
+	require.EqualError(t, err, "archive has too many entries (>2 max)", "directory entries should consume the archive entry budget")
+}
+
 func TestSharedDependencyCache_SaveBatchesEffectivePathExistenceProbe(t *testing.T) {
 	t.Parallel()
 

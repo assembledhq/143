@@ -31,7 +31,7 @@ import (
 
 const dependencyCacheMaxBlobBytes int64 = 1024 * 1024 * 1024
 const dependencyCacheMaxPayloadBytes int64 = 8 * 1024 * 1024 * 1024
-const dependencyCacheMaxFileCount int64 = 1_000_000
+const dependencyCacheMaxEntryCount int64 = 1_000_000
 const dependencyCacheTouchInterval = 10 * time.Minute
 const dependencyCacheDefaultRestoreTimeout = 90 * time.Second
 const dependencyCacheCostMinimumSamples int64 = 3
@@ -157,7 +157,7 @@ type DependencyCacheMetadata struct {
 	Lockfiles           []PreviewInstallLockfileKey `json:"lockfiles,omitempty"`
 	ArchiveBytes        int64                       `json:"archive_bytes,omitempty"`
 	ArchivePayloadBytes int64                       `json:"archive_payload_bytes,omitempty"`
-	ArchiveFileCount    int64                       `json:"archive_file_count,omitempty"`
+	ArchiveEntryCount   int64                       `json:"archive_entry_count,omitempty"`
 	ProducerDurationMS  int64                       `json:"producer_duration_ms,omitempty"`
 }
 
@@ -381,7 +381,7 @@ func (c *SharedDependencyCache) RestorePathCache(ctx context.Context, sb *agent.
 	c.logger.Debug().
 		Str("cache_key", hit.Entry.CacheKey).
 		Int64("archive_payload_bytes", stats.payloadBytes).
-		Int64("archive_file_count", stats.fileCount).
+		Int64("archive_entry_count", stats.entryCount).
 		Msg("dependency cache restore archive validated")
 	cleanArgs := make([]string, 0, len(paths))
 	for _, p := range paths {
@@ -551,7 +551,7 @@ func (c *SharedDependencyCache) SavePathCache(ctx context.Context, sb *agent.San
 	metadata.ChecksumSHA256 = staged.checksum
 	metadata.ArchiveBytes = staged.sizeBytes
 	metadata.ArchivePayloadBytes = stats.payloadBytes
-	metadata.ArchiveFileCount = stats.fileCount
+	metadata.ArchiveEntryCount = stats.entryCount
 	if metadata.PlacementKey == "" {
 		placementKey, err := ComputePreviewDependencyCachePlacementKey(metadata.OrgID, metadata.RepoID, "", "", &models.PreviewInstallConfig{Command: metadata.InstallCommand}, existing)
 		if err == nil {
@@ -835,7 +835,7 @@ func (c *SharedDependencyCache) stageSandboxArchiveAttempt(ctx context.Context, 
 
 type dependencyCacheArchiveStats struct {
 	payloadBytes int64
-	fileCount    int64
+	entryCount   int64
 }
 
 func validateDependencyCacheArchive(ctx context.Context, localPath string, paths []string) (dependencyCacheArchiveStats, error) {
@@ -860,6 +860,10 @@ func (r *contextReader) Read(p []byte) (int, error) {
 }
 
 func validateDependencyCacheArchiveReader(ctx context.Context, reader io.Reader, paths []string) (dependencyCacheArchiveStats, error) {
+	return validateDependencyCacheArchiveReaderWithEntryLimit(ctx, reader, paths, dependencyCacheMaxEntryCount)
+}
+
+func validateDependencyCacheArchiveReaderWithEntryLimit(ctx context.Context, reader io.Reader, paths []string, maxEntryCount int64) (dependencyCacheArchiveStats, error) {
 	gzr, err := gzip.NewReader(&contextReader{ctx: ctx, reader: reader})
 	if err != nil {
 		return dependencyCacheArchiveStats{}, fmt.Errorf("open gzip stream: %w", err)
@@ -901,11 +905,13 @@ func validateDependencyCacheArchiveReader(ctx context.Context, reader io.Reader,
 			}
 			stats.payloadBytes += header.Size
 		}
-		if header.Typeflag == tar.TypeReg {
-			stats.fileCount++
-			if stats.fileCount > dependencyCacheMaxFileCount {
-				return dependencyCacheArchiveStats{}, fmt.Errorf("archive has too many files (>%d max)", dependencyCacheMaxFileCount)
-			}
+		// Every member consumes validation work, and most member types create a
+		// filesystem object during extraction. Count directories, links, and
+		// special entries as well as regular files so zero-payload entries cannot
+		// bypass the archive's resource bound.
+		stats.entryCount++
+		if stats.entryCount > maxEntryCount {
+			return dependencyCacheArchiveStats{}, fmt.Errorf("archive has too many entries (>%d max)", maxEntryCount)
 		}
 	}
 	return stats, nil

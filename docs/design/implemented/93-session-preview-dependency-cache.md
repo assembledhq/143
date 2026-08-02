@@ -47,7 +47,7 @@ The preview gateway keeps a short-lived access-session validation cache so asset
 
 ## 2026-08 Update: Bounded, Cost-Aware Build Caches
 
-Every path-cache restore now has a 90-second wall-clock budget and validates three independent archive limits before extraction: 1 GiB compressed, 8 GiB expanded payload, and one million regular files. Exceeding a bound is non-fatal and falls back to the normal cold producer path.
+Every path-cache restore now has a 90-second wall-clock budget and validates three independent archive limits before extraction: 1 GiB compressed, 8 GiB expanded payload, and one million archive entries. Exceeding a bound is non-fatal and falls back to the normal cold producer path.
 
 The home-rooted Go build cache is split into independently keyed `GOCACHE` (`.cache/go-build`) and `GOMODCACHE` (`go/pkg/mod`) blobs. Lookup and restore run concurrently, each with its own restore budget, and the runtime key was bumped to `preview-build-cache-home-v2-split`. This prevents a large module archive from serializing or invalidating the compiled-object cache.
 
@@ -405,7 +405,7 @@ type DependencyCacheMetadata struct {
     ChecksumSHA256      string            `json:"checksum_sha256"`
     ArchiveBytes        int64             `json:"archive_bytes,omitempty"`
     ArchivePayloadBytes int64             `json:"archive_payload_bytes,omitempty"`
-    ArchiveFileCount    int64             `json:"archive_file_count,omitempty"`
+    ArchiveEntryCount   int64             `json:"archive_entry_count,omitempty"`
     ProducerDurationMS  int64             `json:"producer_duration_ms,omitempty"`
 }
 ```
@@ -767,7 +767,7 @@ Restore should:
 1. Look up the DB record for `(org_id, repo_id, cache_key)`.
 2. Use the DB metadata as the source of truth for effective paths and checksum. If local L1 is configured and has the blob for this `cache_key`, stage that local blob first; otherwise stream the blob from object storage to a bounded worker temp file.
 3. Apply cost-aware admission. Entries with no cold producer baseline are skipped once to force a cold sample and populate that baseline. After three restore attempts and at least one marginal-benefit observation, skip an entry whose average restore duration is no better than its average marginal producer benefit, except for a mandatory re-probe every 24 hours. Failed and timed-out attempts contribute to restore cost. When several restored caches contribute to the same install/build, they share the single measured end-to-end benefit (`cold baseline - remaining producer time`); successful restores that contributed no savings record zero benefit. A producer that failed records nothing — no benefit was observed, so no sample is written.
-4. Reject blobs whose recorded compressed size exceeds 1 GiB before object-store download and reject archives exceeding 8 GiB expanded payload or one million regular files during validation.
+4. Reject blobs whose recorded compressed size exceeds 1 GiB before object-store download and reject archives exceeding 8 GiB expanded payload or one million entries during validation.
 5. Verify checksum against stored hash.
 6. Validate the gzip tar on the worker before sandbox mutation. Every member must be relative, must not traverse with `..`, must not target preview install markers, and must be contained by one of the stored effective paths.
 7. Remove only the effective cache paths listed in `hit.Entry.Metadata.EffectivePaths` from the sandbox.

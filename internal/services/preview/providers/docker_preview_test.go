@@ -1038,6 +1038,89 @@ func TestDockerPreviewProvider_RecordCacheProducerBenefitsSharesMarginalBudget(t
 	require.Equal(t, []uuid.UUID{firstID, secondID, zeroID}, benefitIDs, "benefit telemetry should be attributed to each restored cache exactly once")
 }
 
+func TestObservedColdProducerDurationMS(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		duration        time.Duration
+		producerWasCold bool
+		expected        int64
+	}{
+		{name: "cold producer preserves duration", duration: 1250 * time.Millisecond, producerWasCold: true, expected: 1250},
+		{name: "sub-millisecond cold producer rounds up", duration: time.Microsecond, producerWasCold: true, expected: 1},
+		{name: "warm producer leaves baseline unknown", duration: 30 * time.Second, producerWasCold: false, expected: 0},
+		{name: "missing duration remains unknown", duration: 0, producerWasCold: true, expected: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, observedColdProducerDurationMS(tt.duration, tt.producerWasCold), "producer baseline should only contain a measured cold duration")
+		})
+	}
+}
+
+func TestDockerPreviewProvider_RecordBuildCacheProducerBenefitsSharesWorkdirAndHomeBudget(t *testing.T) {
+	t.Parallel()
+
+	cache := &fakeDependencyCache{}
+	provider := &DockerPreviewProvider{dependencyCache: cache, logger: zerolog.Nop()}
+	workdirID, homeID := uuid.New(), uuid.New()
+	state := &previewState{
+		buildCacheRestoredHit: &preview.DependencyCacheHit{
+			Entry: models.PreviewDependencyCache{ID: workdirID, CacheKey: "workdir", ProducerDurationMS: 100_000},
+		},
+		buildCacheHomeSets: []*previewBuildCacheSet{{
+			name: "gocache",
+			restoredHit: &preview.DependencyCacheHit{
+				Entry: models.PreviewDependencyCache{ID: homeID, CacheKey: "home", ProducerDurationMS: 100_000},
+			},
+		}},
+	}
+
+	provider.recordBuildCacheProducerBenefits(context.Background(), state, 70*time.Second, true)
+	// Repeated phase-end paths must not duplicate either cache's observation.
+	provider.recordBuildCacheProducerBenefits(context.Background(), state, time.Second, true)
+
+	cache.mu.Lock()
+	benefits := append([]time.Duration(nil), cache.producerBenefits...)
+	benefitIDs := append([]uuid.UUID(nil), cache.producerBenefitIDs...)
+	cache.mu.Unlock()
+	require.Equal(t, []time.Duration{15 * time.Second, 15 * time.Second}, benefits, "home and workdir caches should share the single end-to-end producer savings budget")
+	require.Equal(t, []uuid.UUID{workdirID, homeID}, benefitIDs, "each build cache class should record exactly one shared-budget observation")
+	require.Equal(t, 70*time.Second, state.buildCacheProducerDuration, "all build cache saves should retain the full build-plus-readiness producer duration")
+}
+
+func TestDockerPreviewProvider_RunServiceBuildsDefersBuildCacheBenefitUntilReadiness(t *testing.T) {
+	t.Parallel()
+
+	cache := &fakeDependencyCache{}
+	provider := &DockerPreviewProvider{
+		dependencyCache: cache,
+		executor:        &fakeServiceExecutor{},
+		logger:          zerolog.Nop(),
+	}
+	state := &previewState{sandbox: &agent.Sandbox{WorkDir: "/workspace/repo", HomeDir: "/home/codex"}}
+	cfg := &models.PreviewConfig{
+		Primary: "web",
+		Services: map[string]models.ServiceConfig{
+			"web": {Build: []string{"go", "build", "./cmd/web"}},
+		},
+	}
+
+	err := provider.runServiceBuilds(context.Background(), state, cfg, preview.StartPreviewOptions{OrgID: uuid.New()}, nil)
+	require.NoError(t, err, "explicit service build should complete")
+	require.Positive(t, state.serviceBuildDuration, "service build duration should be retained for the final end-to-end observation")
+	require.False(t, state.buildCacheBenefitRecorded, "explicit build completion must not finalize build-cache accounting before boot-time compilation finishes")
+
+	cache.mu.Lock()
+	benefits := append([]time.Duration(nil), cache.producerBenefits...)
+	cache.mu.Unlock()
+	require.Empty(t, benefits, "explicit build completion should not record a partial producer-benefit budget")
+}
+
 func TestDockerPreviewProvider_RecordCacheProducerBenefitsIgnoresFailedProducer(t *testing.T) {
 	t.Parallel()
 
@@ -1618,6 +1701,45 @@ func TestStartPreview_StandardModeFailsFastWhenSiblingExits(t *testing.T) {
 	require.Error(t, err, "StartPreview should fail when any service exits")
 	require.Contains(t, err.Error(), "crash", "failure should identify the exited sibling")
 	require.Less(t, time.Since(started), 3*time.Second, "an exited sibling should fail the launch before the slow service readiness timeout")
+}
+
+func TestWaitForServiceReadinessSet_ProgressiveFailureSuppressesBuildCacheBenefit(t *testing.T) {
+	t.Parallel()
+
+	cache := &fakeDependencyCache{}
+	provider := &DockerPreviewProvider{
+		dependencyCache: cache,
+		executor:        &noopSandboxExecutor{},
+		logger:          zerolog.Nop(),
+	}
+	cacheID := uuid.New()
+	state := &previewState{
+		sandbox: &agent.Sandbox{ID: "sb"},
+		services: map[string]*serviceState{
+			"support": {name: "support", port: 9000, status: models.PreviewServiceStatusFailed, err: "worker crashed"},
+		},
+		buildCacheRestoredHit: &preview.DependencyCacheHit{
+			Entry: models.PreviewDependencyCache{ID: cacheID, CacheKey: "workdir", ProducerDurationMS: 100_000},
+		},
+	}
+	cfg := &models.PreviewConfig{
+		Primary: "web",
+		Services: map[string]models.ServiceConfig{
+			"support": {Port: 9000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+		},
+	}
+	observer := &recordingObserver{}
+
+	failure := provider.waitForServiceReadinessSet(context.Background(), context.Background(), state, cfg, []string{"support"}, observer, false, "progressive")
+	require.NotNil(t, failure, "progressive monitoring should preserve a support-service failure for producer accounting")
+	require.Equal(t, "support", failure.name, "progressive failure should identify the failed support service")
+	provider.recordBuildCacheProducerBenefits(context.Background(), state, time.Second, failure == nil)
+
+	cache.mu.Lock()
+	benefits := append([]time.Duration(nil), cache.producerBenefits...)
+	cache.mu.Unlock()
+	require.Empty(t, benefits, "a failed progressive producer should not add a misleading build-cache benefit sample")
+	require.Len(t, observer.failed(), 1, "progressive monitoring should still report the support-service failure")
 }
 
 func TestStartPreview_RunsPreviewInstallBeforeServices(t *testing.T) {
@@ -2207,6 +2329,15 @@ func TestStartPreview_PackageManagerCacheRestoresWhenInstallMarkerMissing(t *tes
 	restoresObserved := obs.packageManagerCacheRestores()
 	require.Len(t, restoresObserved, 1, "observer should receive one package-manager restore event")
 	require.Equal(t, "restored", restoresObserved[0].status, "observer should report package-manager restored")
+	require.Eventually(t, func() bool {
+		_, _, _, _, specs := cache.pathCounts()
+		for _, spec := range specs {
+			if spec.Kind == models.PreviewCacheKindPackageManager {
+				return spec.Metadata.ProducerDurationMS == 0
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond, "a package-manager blob updated after a restore should keep its cold baseline unknown")
 
 	mu.Lock()
 	calls := append([]string(nil), streamCalls...)

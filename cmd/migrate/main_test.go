@@ -277,6 +277,14 @@ func TestRenumberedDependencyCacheCostMigrationIsReplaySafe(t *testing.T) {
 	}
 }
 
+func TestRenumberedDependencyCacheCostMigrationRepairsDisplacedMainMigration(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000277_repair_code_review_pull_request_history_index.up.sql"))
+	require.NoError(t, err, "displaced migration repair should be readable")
+	require.Contains(t, string(body), "CREATE INDEX IF NOT EXISTS idx_code_review_metadata_pull_request_created", "repair should install the main migration skipped by databases that ran the former branch version 274")
+}
+
 func TestHotTableFKRemovalDownMigrationIsExplicitNoop(t *testing.T) {
 	t.Parallel()
 

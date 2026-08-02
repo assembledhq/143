@@ -3721,9 +3721,10 @@ func (s *PreviewStore) UpsertDependencyCache(ctx context.Context, entry *models.
 			metadata = EXCLUDED.metadata,
 			-- A new blob_key means new content, so the cost history for the old
 			-- content no longer describes this entry. Every counter below
-			-- resets on that transition and the baseline must reset with them:
-			-- keeping a stale, cheaper baseline against a larger blob's real
-			-- restore cost is what makes cost admission disable the entry.
+			-- resets on that transition and the baseline must reset with them.
+			-- Callers pass zero when replacement content was produced after a
+			-- restore; zero keeps the baseline unknown and forces a true cold
+			-- sample before cost admission can judge the new blob.
 			producer_duration_ms = CASE
 				WHEN preview_dependency_cache.blob_key <> EXCLUDED.blob_key THEN EXCLUDED.producer_duration_ms
 				WHEN preview_dependency_cache.producer_duration_ms = 0 AND EXCLUDED.producer_duration_ms > 0 THEN EXCLUDED.producer_duration_ms

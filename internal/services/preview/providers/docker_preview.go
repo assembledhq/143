@@ -161,9 +161,10 @@ type previewState struct {
 
 	buildCacheHomeSets []*previewBuildCacheSet
 
-	installProducerDuration time.Duration
-	buildProducerDuration   time.Duration
-	buildBenefitRecorded    bool
+	installProducerDuration    time.Duration
+	serviceBuildDuration       time.Duration
+	buildCacheProducerDuration time.Duration
+	buildCacheBenefitRecorded  bool
 }
 
 type previewBuildCacheSet struct {
@@ -539,14 +540,15 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 				d.warmPrimaryRoute(svcCtx, state, cfg.Primary, primaryCfg.Port, primaryCfg.Ready.HTTPPath)
 			}
 
-			primaryReadyElapsed := time.Since(phaseStarted)
+			readinessStarted := phaseStarted
 			// Monitor every support service concurrently. A slow probe must not
 			// hide an already-exited sibling until its own timeout expires.
 			state.wg.Add(1)
 			go func() {
 				defer state.wg.Done()
-				d.waitForServiceReadinessSet(svcCtx, svcCtx, state, cfg, supportServiceNames(cfg), observer, false, "progressive")
-				d.recordBuildCacheProducerBenefits(svcCtx, state, primaryReadyElapsed, true)
+				failure := d.waitForServiceReadinessSet(svcCtx, svcCtx, state, cfg, supportServiceNames(cfg), observer, false, "progressive")
+				readinessElapsed := time.Since(readinessStarted)
+				d.recordBuildCacheProducerBenefits(svcCtx, state, state.serviceBuildDuration+readinessElapsed, failure == nil)
 				// All services finished their readiness window: boot-time
 				// builds are done, so capture the build caches now. Both saves
 				// are async; the launch is already reported ready.
@@ -562,7 +564,8 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 			phaseErr = fmt.Errorf("%w: service %q (port %d): %s", preview.ErrServiceNotReady, failure.name, failure.port, failure.message)
 			return phaseErr
 		}
-		d.recordBuildCacheProducerBenefits(ctx, state, time.Since(phaseStarted), true)
+		readinessElapsed := time.Since(phaseStarted)
+		d.recordBuildCacheProducerBenefits(ctx, state, state.serviceBuildDuration+readinessElapsed, true)
 		// All services are ready: boot-time builds are done, so capture the
 		// build caches now. Both saves are async so a large GOCACHE upload does
 		// not delay returning the ready preview.
@@ -622,6 +625,13 @@ func (d *DockerPreviewProvider) PrewarmPreviewBuildSnapshot(ctx context.Context,
 	if err := d.runServiceBuilds(ctx, state, cfg, opts, observer); err != nil {
 		d.flushBuildCachesBeforeCleanup(ctx, state, cfg.Install, opts, observer)
 		return fmt.Errorf("%w: %v", preview.ErrServiceBuildFailed, err)
+	}
+	// Prewarm does not start services, so an explicit service build is its only
+	// observable build-cache producer. With no build command there is no benefit
+	// sample to record; treating zero elapsed time as a successful producer would
+	// credit every restored cache with its full cold baseline.
+	if state.serviceBuildDuration > 0 {
+		d.recordBuildCacheProducerBenefits(ctx, state, state.serviceBuildDuration, true)
 	}
 	d.flushBuildCachesBeforeCleanup(ctx, state, cfg.Install, opts, observer)
 	return nil
@@ -817,12 +827,16 @@ func (d *DockerPreviewProvider) waitForServiceReadinessSet(ctx, warmCtx context.
 		return 0
 	}
 
+	var firstFailure *serviceReadinessFailure
 	for range names {
 		result := <-results
 		if result.err != nil {
 			errMsg, tail := d.recordServiceReadinessFailure(state, result.name, result.err)
 			d.logger.Warn().Err(result.err).Str("service", result.name).Str("readiness_mode", mode).Strs("output_tail", tail).Msg("service readiness failed")
 			notifyServiceFailed(observer, result.name, errMsg, tail)
+			if firstFailure == nil {
+				firstFailure = &serviceReadinessFailure{name: result.name, port: result.port, message: errMsg}
+			}
 			if failFast {
 				cancel()
 				// Siblings that already reported ready still have to land in
@@ -845,7 +859,7 @@ func (d *DockerPreviewProvider) waitForServiceReadinessSet(ctx, warmCtx context.
 						draining = false
 					}
 				}
-				return &serviceReadinessFailure{name: result.name, port: result.port, message: errMsg}
+				return firstFailure
 			}
 			continue
 		}
@@ -858,7 +872,7 @@ func (d *DockerPreviewProvider) waitForServiceReadinessSet(ctx, warmCtx context.
 			d.warmPrimaryRoute(warmCtx, state, result.name, result.port, svcCfg.Ready.HTTPPath)
 		}
 	}
-	return nil
+	return firstFailure
 }
 
 func previewConfigHasInitScripts(cfg *models.PreviewConfig) bool {
@@ -1808,7 +1822,7 @@ func (d *DockerPreviewProvider) runPreviewInstallWithSaveMode(ctx context.Contex
 			}
 			d.logger.Debug().Str("cache_key", dependencyCacheKey).Msg("preview dependency cache save skipped: blob restored this launch")
 		} else {
-			d.saveDependencyCache(ctx, state, install, opts, dependencyCacheKey, placementKey, dependencyPaths, dependencyLockfiles, observer, saveAsync)
+			d.saveDependencyCache(ctx, state, install, opts, dependencyCacheKey, placementKey, dependencyPaths, dependencyLockfiles, observer, saveAsync, 0)
 		}
 		return nil
 	}
@@ -1856,12 +1870,14 @@ func (d *DockerPreviewProvider) runPreviewInstallWithSaveMode(ctx context.Contex
 	metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "install_command", time.Since(installStarted))
 	notifyPhaseEnd(observer, "install_build", nil)
 	d.logger.Info().Str("marker", markerPath).Msg("preview install completed")
-	d.savePackageManagerCache(ctx, state, install, opts, packageManagerCacheKey, packageManagerPlacementKey, packageManagerPaths, packageManagers, packageManagerLockfiles, observer, saveAsync)
-	d.saveDependencyCache(ctx, state, install, opts, dependencyCacheKey, placementKey, dependencyPaths, dependencyLockfiles, observer, saveAsync)
+	packageManagerProducerDurationMS := observedColdProducerDurationMS(state.installProducerDuration, packageManagerRestoredHit == nil)
+	dependencyProducerDurationMS := observedColdProducerDurationMS(state.installProducerDuration, dependencyRestoredHit == nil)
+	d.savePackageManagerCache(ctx, state, install, opts, packageManagerCacheKey, packageManagerPlacementKey, packageManagerPaths, packageManagers, packageManagerLockfiles, observer, saveAsync, packageManagerProducerDurationMS)
+	d.saveDependencyCache(ctx, state, install, opts, dependencyCacheKey, placementKey, dependencyPaths, dependencyLockfiles, observer, saveAsync, dependencyProducerDurationMS)
 	return nil
 }
 
-func (d *DockerPreviewProvider) savePackageManagerCache(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, cacheKey, placementKey string, paths, packageManagers []string, lockfiles []preview.PreviewInstallLockfileKey, observer preview.ServiceObserver, async bool) {
+func (d *DockerPreviewProvider) savePackageManagerCache(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, cacheKey, placementKey string, paths, packageManagers []string, lockfiles []preview.PreviewInstallLockfileKey, observer preview.ServiceObserver, async bool, producerDurationMS int64) {
 	pathCache, ok := d.dependencyCache.(preview.PreviewPathCache)
 	if !d.packageManagerCacheEnabled || d.dependencyCache == nil || !ok || cacheKey == "" || len(paths) == 0 {
 		notifyPackageManagerCacheSave(observer, "skipped", cacheKey, 0, nil)
@@ -1886,7 +1902,7 @@ func (d *DockerPreviewProvider) savePackageManagerCache(ctx context.Context, sta
 		PackageManagers:    append([]string(nil), packageManagers...),
 		LockfileHashes:     lockHashes,
 		Lockfiles:          lockfiles,
-		ProducerDurationMS: observedProducerDurationMS(state.installProducerDuration),
+		ProducerDurationMS: producerDurationMS,
 	}
 	save := func() {
 		saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), previewCacheSaveTimeout)
@@ -1915,7 +1931,7 @@ func (d *DockerPreviewProvider) savePackageManagerCache(ctx context.Context, sta
 	save()
 }
 
-func (d *DockerPreviewProvider) saveDependencyCache(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, cacheKey, placementKey string, paths []string, lockfiles []preview.PreviewInstallLockfileKey, observer preview.ServiceObserver, async bool) {
+func (d *DockerPreviewProvider) saveDependencyCache(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, cacheKey, placementKey string, paths []string, lockfiles []preview.PreviewInstallLockfileKey, observer preview.ServiceObserver, async bool, producerDurationMS int64) {
 	if d.dependencyCache == nil || cacheKey == "" || len(paths) == 0 {
 		notifyDependencyCacheSave(observer, "skipped", cacheKey, 0, nil)
 		if opts.OrgID != uuid.Nil {
@@ -1938,7 +1954,7 @@ func (d *DockerPreviewProvider) saveDependencyCache(ctx context.Context, state *
 		EffectivePaths:     append([]string(nil), paths...),
 		LockfileHashes:     lockHashes,
 		Lockfiles:          lockfiles,
-		ProducerDurationMS: observedProducerDurationMS(state.installProducerDuration),
+		ProducerDurationMS: producerDurationMS,
 	}
 	// Build caches (e.g. turbo's dir inside node_modules) belong to the
 	// build_artifact kind: keeping them out of install-artifact blobs avoids
@@ -2196,6 +2212,13 @@ func observedProducerDurationMS(duration time.Duration) int64 {
 	return max(duration.Milliseconds(), int64(1))
 }
 
+func observedColdProducerDurationMS(duration time.Duration, producerWasCold bool) int64 {
+	if !producerWasCold {
+		return 0
+	}
+	return observedProducerDurationMS(duration)
+}
+
 func compactCacheHits(hits []*preview.DependencyCacheHit) []*preview.DependencyCacheHit {
 	compacted := make([]*preview.DependencyCacheHit, 0, len(hits))
 	seen := make(map[uuid.UUID]struct{}, len(hits))
@@ -2310,12 +2333,12 @@ func coldSampleBuildCacheHits(state *previewState) []*preview.DependencyCacheHit
 }
 
 func (d *DockerPreviewProvider) recordBuildCacheProducerBenefits(ctx context.Context, state *previewState, producerElapsed time.Duration, producerSucceeded bool) {
-	if state == nil || state.buildBenefitRecorded {
+	if state == nil || state.buildCacheBenefitRecorded {
 		return
 	}
-	state.buildBenefitRecorded = true
+	state.buildCacheBenefitRecorded = true
 	if producerSucceeded {
-		state.buildProducerDuration = producerElapsed
+		state.buildCacheProducerDuration = producerElapsed
 	}
 	if pathCache, ok := d.dependencyCache.(preview.PreviewPathCache); ok {
 		if producerSucceeded {
@@ -2451,7 +2474,7 @@ func (d *DockerPreviewProvider) saveBuildCacheSetWithMode(ctx context.Context, s
 		EffectivePaths: append([]string(nil), paths...),
 	}
 	if skipIfChecksum == "" {
-		metadata.ProducerDurationMS = observedProducerDurationMS(state.buildProducerDuration)
+		metadata.ProducerDurationMS = observedProducerDurationMS(state.buildCacheProducerDuration)
 	}
 	saveParent := ctx
 	if detachFromCancellation {
@@ -3107,7 +3130,7 @@ func (d *DockerPreviewProvider) runServiceBuilds(ctx context.Context, state *pre
 		stderrSplitter.flush()
 		cancel()
 		if err != nil || exitCode != 0 {
-			state.buildProducerDuration = 0
+			state.serviceBuildDuration = 0
 			d.recordBuildCacheProducerBenefits(ctx, state, 0, false)
 			var errMsg string
 			if err != nil {
@@ -3123,9 +3146,8 @@ func (d *DockerPreviewProvider) runServiceBuilds(ctx context.Context, state *pre
 		d.logger.Info().Str("service", name).Msg("service build completed")
 	}
 	notifyPhaseEnd(observer, "service_build", nil)
-	state.buildProducerDuration = time.Since(phaseStarted)
-	d.recordBuildCacheProducerBenefits(ctx, state, state.buildProducerDuration, true)
-	metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "service_build", state.buildProducerDuration)
+	state.serviceBuildDuration = time.Since(phaseStarted)
+	metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "service_build", state.serviceBuildDuration)
 	return nil
 }
 
