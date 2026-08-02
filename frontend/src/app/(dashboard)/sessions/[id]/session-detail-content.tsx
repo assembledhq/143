@@ -6446,7 +6446,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </CardContent>
             </Card>
           )}
-          {selectedIsPrimary && canManageSession && canUseNativeReviewLoop && !hasPR && hasSessionChanges ? (
+          {selectedIsPrimary && canManageSession && canUseNativeReviewLoop && !hasPR && !selectedPublicationOwnsActions && hasSessionChanges ? (
             reviewLoopRunning ? (
               <Card className="border-border/60">
                 <CardContent className="p-4">
