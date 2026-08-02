@@ -31,6 +31,7 @@ import {
   Clock,
   MessageSquare,
   Pencil,
+  ScanSearch,
 } from "lucide-react";
 import { LinearIcon } from "@/components/linear-icon";
 import { looksLikeLinearRef } from "@/lib/linear-refs";
@@ -3294,6 +3295,7 @@ export function ChangesetSplitPrompt({
 
   return (
     <AgentActionCard
+      icon={<GitBranch className="h-4 w-4" />}
       title="Need smaller pull requests?"
       description="Ask the coding agent to split the current diff into reviewable branches."
       action={(
@@ -3306,10 +3308,12 @@ export function ChangesetSplitPrompt({
 }
 
 function AgentActionCard({
+  icon,
   title,
   description,
   action,
 }: {
+  icon: ReactNode;
   title: string;
   description: string;
   action: ReactNode;
@@ -3319,9 +3323,18 @@ function AgentActionCard({
     // element is never its own query container.
     <Card className="@container/agent-action border-border/60">
       <CardContent className="flex flex-col gap-3 p-4 @min-[24rem]/agent-action:flex-row @min-[24rem]/agent-action:items-center @min-[24rem]/agent-action:justify-between">
-        <div className="min-w-0">
-          <p className="text-sm font-medium text-foreground">{title}</p>
-          <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
+        <div className="flex min-w-0 items-start gap-3">
+          <div
+            data-slot="agent-action-card-icon"
+            aria-hidden="true"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"
+          >
+            {icon}
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-foreground">{title}</p>
+            <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
+          </div>
         </div>
         <div
           data-slot="agent-action-card-action"
@@ -6329,6 +6342,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </Card>
             ) : (
               <AgentActionCard
+                icon={<ScanSearch className="h-4 w-4" />}
                 title="Review before creating a PR?"
                 description="Ask a review agent to check the current diff and apply fixes."
                 action={(

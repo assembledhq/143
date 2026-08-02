@@ -443,6 +443,10 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(reviewButton).not.toHaveClass('w-full');
     const reviewTitle = screen.getByText('Review before creating a PR?');
     const splitTitle = screen.getByText('Need smaller pull requests?');
+    const reviewCard = reviewTitle.closest('[data-slot="card"]');
+    const splitCard = splitTitle.closest('[data-slot="card"]');
+    expect(reviewCard?.querySelector('[data-slot="agent-action-card-icon"] .lucide-scan-search')).toBeInTheDocument();
+    expect(splitCard?.querySelector('[data-slot="agent-action-card-icon"] .lucide-git-branch')).toBeInTheDocument();
     expect(reviewTitle.compareDocumentPosition(splitTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
   });
