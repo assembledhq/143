@@ -432,10 +432,15 @@ describe('SessionDetailPage overview and review loop', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect(await screen.findByRole('button', { name: 'Review & fix' })).toBeDisabled();
+    const reviewButton = await screen.findByRole('button', { name: 'Review & fix' });
+    expect(reviewButton).toBeDisabled();
     expect(screen.getByText('Review before creating a PR?')).toBeInTheDocument();
     expect(screen.getByText('Ask a review agent to check the current diff and apply fixes.')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Review & fix' })).toHaveAttribute('title', 'A reusable sandbox snapshot is required before review');
+    expect(reviewButton).toHaveAttribute('title', 'A reusable sandbox snapshot is required before review');
+    const reviewAction = reviewButton.closest('[data-slot="agent-action-card-action"]');
+    expect(reviewAction).toHaveClass('w-fit', 'self-start');
+    expect(reviewAction).not.toHaveClass('w-full');
+    expect(reviewButton).not.toHaveClass('w-full');
     const reviewTitle = screen.getByText('Review before creating a PR?');
     const splitTitle = screen.getByText('Need smaller pull requests?');
     expect(reviewTitle.compareDocumentPosition(splitTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
