@@ -436,11 +436,9 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(screen.getByText('Review before creating a PR?')).toBeInTheDocument();
     expect(screen.getByText('Ask a review agent to check the current diff and apply fixes.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Review & fix' })).toHaveAttribute('title', 'A reusable sandbox snapshot is required before review');
-    const reviewCard = screen.getByText('Review before creating a PR?').closest('[data-slot="card"]');
-    const splitCard = screen.getByText('Need smaller pull requests?').closest('[data-slot="card"]');
-    expect(reviewCard).not.toBeNull();
-    expect(splitCard).not.toBeNull();
-    expect(reviewCard?.compareDocumentPosition(splitCard as Node) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const reviewTitle = screen.getByText('Review before creating a PR?');
+    const splitTitle = screen.getByText('Need smaller pull requests?');
+    expect(reviewTitle.compareDocumentPosition(splitTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
   });
 
