@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -3293,10 +3293,39 @@ export function ChangesetSplitPrompt({
   if (!shouldOfferChangesetSplit(additions)) return null;
 
   return (
-    <Card className="border-border/60">
-      <CardContent className="flex items-center justify-between gap-3 p-4">
-        <div><p className="text-sm font-medium">Need smaller pull requests?</p><p className="text-xs text-muted-foreground">Ask the coding agent to split the current diff into reviewable branches.</p></div>
-        <Button size="sm" variant="outline" disabled={requestSplitPending || !onRequestSplit} onClick={onRequestSplit}>Split PRs</Button>
+    <AgentActionCard
+      title="Need smaller pull requests?"
+      description="Ask the coding agent to split the current diff into reviewable branches."
+      action={(
+        <Button size="sm" variant="outline" disabled={requestSplitPending || !onRequestSplit} onClick={onRequestSplit}>
+          Split PRs
+        </Button>
+      )}
+    />
+  );
+}
+
+function AgentActionCard({
+  title,
+  description,
+  action,
+}: {
+  title: string;
+  description: string;
+  action: ReactNode;
+}) {
+  return (
+    // The container must live on an ancestor of the elements querying it: an
+    // element is never its own query container.
+    <Card className="@container/agent-action border-border/60">
+      <CardContent className="flex flex-col gap-3 p-4 @min-[24rem]/agent-action:flex-row @min-[24rem]/agent-action:items-center @min-[24rem]/agent-action:justify-between">
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-foreground">{title}</p>
+          <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
+        </div>
+        <div className="w-full shrink-0 [&>span]:w-full [&_[data-slot=button]]:w-full @min-[24rem]/agent-action:w-auto @min-[24rem]/agent-action:[&>span]:w-auto @min-[24rem]/agent-action:[&_[data-slot=button]]:w-auto">
+          {action}
+        </div>
       </CardContent>
     </Card>
   );
@@ -6276,6 +6305,46 @@ export function SessionDetailContent({ id }: { id: string }) {
               </CardContent>
             </Card>
           )}
+          {selectedIsPrimary && canManageSession && canUseNativeReviewLoop && !hasPR && hasSessionChanges ? (
+            reviewLoopRunning ? (
+              <Card className="border-border/60">
+                <CardContent className="p-4">
+                  <div className="flex min-w-0 items-start gap-2">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-foreground">
+                        Fixing with {AGENTS_BY_KEY[latestReviewLoop?.agent_type ?? ""]?.label ?? "review agent"}
+                      </p>
+                      <p className="text-xs leading-relaxed text-muted-foreground">
+                        The review loop is checking the changes and applying fixes.
+                      </p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            ) : (
+              <AgentActionCard
+                title="Review before creating a PR?"
+                description="Ask a review agent to check the current diff and apply fixes."
+                action={(
+                  <DisabledTooltip disabled={reviewActionDisabled} content={reviewActionDisabledReason}>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={reviewActionDisabled}
+                      title={reviewActionDisabledReason}
+                      onClick={() => setReviewConfigOpen(true)}
+                    >
+                      Review &amp; fix
+                    </Button>
+                  </DisabledTooltip>
+                )}
+              />
+            )
+          ) : null}
           <ChangesetSplitPrompt
             additions={session.diff_stats?.added}
             onRequestSplit={() => queueSend({
@@ -6403,49 +6472,6 @@ export function SessionDetailContent({ id }: { id: string }) {
               </Card>
             ) : null
           )}
-          {selectedIsPrimary && canManageSession && canUseNativeReviewLoop && !hasPR && hasSessionChanges ? (
-            <Card className="border-border/60">
-              <CardContent className="@container/review space-y-3 p-4">
-                <div className="flex flex-col gap-3">
-                  <div className="flex min-w-0 flex-1 items-start gap-2">
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-                      {reviewLoopRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
-                    </div>
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium text-foreground">
-                        {reviewLoopRunning
-                          ? `Fixing with ${AGENTS_BY_KEY[latestReviewLoop?.agent_type ?? ""]?.label ?? "review agent"}`
-                          : "Review before PR"}
-                      </p>
-                      <p className="text-xs leading-relaxed text-muted-foreground">
-                        {reviewLoopRunning
-                          ? "The review loop is checking the changes and applying fixes."
-                          : "Run an agent review loop before creating the pull request."}
-                      </p>
-                    </div>
-                  </div>
-                  {!reviewLoopRunning ? (
-                    <div className="grid shrink-0 grid-cols-1 gap-2 @min-[24rem]/review:grid-cols-[max-content] @min-[24rem]/review:items-center">
-                      <DisabledTooltip disabled={reviewActionDisabled} content={reviewActionDisabledReason}>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="w-full gap-1.5 sm:w-fit"
-                          disabled={reviewActionDisabled}
-                          title={reviewActionDisabledReason}
-                          onClick={() => setReviewConfigOpen(true)}
-                        >
-                          <CheckCircle2 className="h-3.5 w-3.5" />
-                          Review &amp; fix
-                        </Button>
-                      </DisabledTooltip>
-                    </div>
-                  ) : null}
-                </div>
-              </CardContent>
-            </Card>
-          ) : null}
           {pullRequestId && prStatus === "closed" && (
             <Card className="border-border/60">
               <CardContent className="p-4">
