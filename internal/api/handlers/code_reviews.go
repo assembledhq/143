@@ -595,11 +595,6 @@ func (h *CodeReviewHandler) Analytics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewAnalytics]{Data: analytics})
 }
 
-func (h *CodeReviewHandler) Templates(w http.ResponseWriter, r *http.Request) {
-	_ = middleware.OrgIDFromContext(r.Context())
-	writeJSON(w, http.StatusOK, models.ListResponse[models.CodeReviewTemplateOption]{Data: models.CodeReviewPolicyTemplates()})
-}
-
 func (h *CodeReviewHandler) PromptExamples(w http.ResponseWriter, r *http.Request) {
 	_ = middleware.OrgIDFromContext(r.Context())
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewPromptExamplesResponse]{Data: models.CodeReviewPromptExamplesResponse{

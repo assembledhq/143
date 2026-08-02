@@ -1,0 +1,2 @@
+-- Repair is intentionally irreversible: on fresh databases migration 000274
+-- owns this index, so rolling back only the repair must not remove it.

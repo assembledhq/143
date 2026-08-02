@@ -128,9 +128,10 @@ func TestRestorePathCache_RemovesReadOnlyGoModuleCache(t *testing.T) {
 	require.NoError(t, err)
 	hit := &DependencyCacheHit{
 		Entry: models.PreviewDependencyCache{
-			CacheKind: models.PreviewCacheKindBuildArtifact,
-			SizeBytes: int64(len(blob)),
-			Metadata:  meta,
+			CacheKind:          models.PreviewCacheKindBuildArtifact,
+			SizeBytes:          int64(len(blob)),
+			Metadata:           meta,
+			ProducerDurationMS: 1,
 		},
 		BlobKey: blobKey,
 	}
