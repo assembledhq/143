@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { TimeRangePicker } from "@/components/time-range-picker";
+import { MetricInfoTooltip } from "@/components/metric-info-tooltip";
 import type { CodeReviewListOutcome, CodeReviewStats, Repository } from "@/lib/types";
 import type { TimeRangeFilter } from "@/lib/time-range";
 
@@ -17,6 +18,13 @@ export const ALL_OUTCOMES = "all";
 export const ALL_RISKS = "all";
 export const AUTOMATICALLY_APPROVED = "automatically_approved" satisfies CodeReviewListOutcome;
 export const COMPLETED_NOT_APPROVED = "completed_not_approved" satisfies CodeReviewListOutcome;
+
+const REVIEW_SUMMARY_DEFINITIONS = {
+  "Reviews completed": "Review sessions matching the selected filters that finished successfully.",
+  "Automatically approved": "Completed review sessions where 143 posted an approval on GitHub.",
+  "Approval rate": "The percentage of completed review sessions where 143 posted an approval on GitHub.",
+  "Median turnaround": "The median time from a review being queued to that review finishing successfully.",
+} as const;
 
 function percentage(value: number, total: number): string {
   return total > 0 ? `${Math.round((value / total) * 100)}%` : "0%";
@@ -43,26 +51,33 @@ export function CodeReviewSummaryCards({
   isError: boolean;
   onRetry: () => void;
 }) {
-  const unavailable = isError ? "Metrics unavailable" : "Loading selected time window";
   const cards = stats
     ? [
-        { label: "Reviews completed", value: stats.reviews_completed.toLocaleString(), context: "In selected time window" },
+        {
+          label: "Reviews completed",
+          value: stats.reviews_completed.toLocaleString(),
+          definition: REVIEW_SUMMARY_DEFINITIONS["Reviews completed"],
+        },
         {
           label: "Automatically approved",
           value: stats.automatically_approved.toLocaleString(),
-          context: `${percentage(stats.automatically_approved, stats.reviews_completed)} of completed reviews`,
+          definition: REVIEW_SUMMARY_DEFINITIONS["Automatically approved"],
         },
         {
           label: "Approval rate",
           value: percentage(stats.automatically_approved, stats.reviews_completed),
-          context: `${stats.needs_human_review.toLocaleString()} need human review`,
+          definition: REVIEW_SUMMARY_DEFINITIONS["Approval rate"],
         },
-        { label: "Median turnaround", value: formatReviewTurnaround(stats.median_turnaround_seconds), context: "Queued to completed" },
+        {
+          label: "Median turnaround",
+          value: formatReviewTurnaround(stats.median_turnaround_seconds),
+          definition: REVIEW_SUMMARY_DEFINITIONS["Median turnaround"],
+        },
       ]
-    : ["Reviews completed", "Automatically approved", "Approval rate", "Median turnaround"].map((label) => ({
+    : (Object.keys(REVIEW_SUMMARY_DEFINITIONS) as Array<keyof typeof REVIEW_SUMMARY_DEFINITIONS>).map((label) => ({
         label,
         value: "—",
-        context: unavailable,
+        definition: REVIEW_SUMMARY_DEFINITIONS[label],
       }));
 
   return (
@@ -78,9 +93,11 @@ export function CodeReviewSummaryCards({
         {cards.map((card) => (
           <Card key={card.label}>
             <CardContent className="space-y-1.5">
-              <p className="text-xs font-medium text-muted-foreground">{card.label}</p>
+              <div className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+                <span>{card.label}</span>
+                <MetricInfoTooltip label={card.label} definition={card.definition} />
+              </div>
               <p className="text-2xl font-semibold tabular-nums text-foreground">{card.value}</p>
-              <p className="text-xs text-muted-foreground">{card.context}</p>
             </CardContent>
           </Card>
         ))}
