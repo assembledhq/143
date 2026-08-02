@@ -38,6 +38,7 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Switch } from "@/components/ui/switch";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -2259,13 +2260,13 @@ function GitHubTriggerPanel({
 
 function GitHubReviewerManage({ reviewer, teamSlug, deleteDisabled, onDelete }: { reviewer: string; teamSlug?: string; deleteDisabled: boolean; onDelete: () => void }) {
   return (
-    <Collapsible>
-      <CollapsibleTrigger asChild>
-        <Button variant="outline" size="sm">
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button variant="outline" size="sm" disabled={disabled}>
           Manage
         </Button>
-      </CollapsibleTrigger>
-      <CollapsibleContent className="mt-2 w-[min(18rem,calc(100vw-2rem))] space-y-3 rounded-md border border-border bg-card p-3 text-xs">
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-[min(18rem,calc(100vw-2rem))] space-y-3 p-3 text-xs">
         <div>
           <span className="text-muted-foreground">Reviewer</span>
           <div className="font-medium text-foreground">{reviewer}</div>
@@ -2282,8 +2283,8 @@ function GitHubReviewerManage({ reviewer, teamSlug, deleteDisabled, onDelete }: 
           <PowerOff className="h-4 w-4" />
           Disable reviewer
         </Button>
-      </CollapsibleContent>
-    </Collapsible>
+      </PopoverContent>
+    </Popover>
   );
 }
 
