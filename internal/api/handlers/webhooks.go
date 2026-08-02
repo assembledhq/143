@@ -337,7 +337,12 @@ func codeReviewSourceVersion(updatedAt *time.Time, body string) int64 {
 		seed = updatedAt.UTC().Format(time.RFC3339Nano) + "\x00" + seed
 	}
 	digest := sha256.Sum256([]byte(seed))
-	version := int64(binary.BigEndian.Uint64(digest[:8]) & ((uint64(1) << 63) - 1))
+	// Assemble a positive 63-bit value from conversions that are each
+	// representable in int64. Keeping the sign bit clear also satisfies the
+	// database's positive source-version contract without an overflowing cast.
+	high := int64(binary.BigEndian.Uint32(digest[:4]) & 0x7fffffff)
+	low := int64(binary.BigEndian.Uint32(digest[4:8]))
+	version := high<<32 | low
 	if version == 0 {
 		return 1
 	}
