@@ -111,6 +111,8 @@ describe('ChangesetSplitPrompt', () => {
 
     await userEvent.click(await screen.findByRole('button', { name: 'Split PRs' }));
 
+    expect(screen.getByText('Need smaller pull requests?')).toBeInTheDocument();
+    expect(screen.getByText('Ask the coding agent to split the current diff into reviewable branches.')).toBeInTheDocument();
     expect(onRequestSplit).toHaveBeenCalledOnce();
   });
 });
