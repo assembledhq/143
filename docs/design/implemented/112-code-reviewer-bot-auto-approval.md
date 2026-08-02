@@ -380,6 +380,8 @@ Acceptable risk means:
 
 Admins can tune this over time based on false positives, false negatives, team trust, and repository-specific risk.
 
+This design originally recommended whole-policy acceptable-risk starter templates (docs-only, tests-only, small frontend/backend/combined) so admins would not start from a blank page. Those templates shipped and were later removed, because applying one replaced unrelated safeguards, prompts, thresholds, and agent settings rather than only the setting the user was editing; see [117-code-review-policy-simplification.md](117-code-review-policy-simplification.md).
+
 ## Bot Identity
 
 Recommended long-term shape: a **GitHub App-backed bot identity** named something like `143 Code Reviewer`, with optional repository/team routing layered on top in 143.

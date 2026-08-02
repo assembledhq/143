@@ -412,7 +412,6 @@ it("applies an approval example without changing safeguards and does not grant a
 describe("CodeReviewsPage", () => {
   beforeEach(() => {
     toast.success.mockReset();
-    toast.info.mockReset();
     toast.error.mockReset();
     sse.onEvent = undefined;
   });

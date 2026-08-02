@@ -797,7 +797,7 @@ Implementation items:
 3. Move thresholds, quality gates, paths/authors/checks, agent roster, limits, and description requirements into one collapsed **Advanced controls** container.
 4. Rename `Description requirements` to `Structured PR-description checks` and `Reviewer instruction` to `Description check instruction`.
 5. Collapse a ready GitHub trigger into a status row with Manage disclosure; retain full actionable error states.
-6. Remove the whole-policy template selector and templates API so advanced controls are the only path for changing safeguards, thresholds, and agent settings.
+6. Keep the whole-policy template selector inside Advanced controls and relabel it **Advanced policy preset** with explicit replacement copy. The selector and its `GET /api/v1/code-reviews/templates` API were later removed outright, so advanced controls are now the only path for changing safeguards, thresholds, and agent settings.
 7. Keep the effective-policy summary visible and update its wording for the new control hierarchy.
 8. Add the shared `SettingInfoTooltip` and require tooltip content for every existing policy input, including prompt, outcome, GitHub setup, advanced, and inheritance controls.
 9. Add focused frontend tests for information order, enablement/outcome mapping, tooltip presence/accessibility, collapsed advanced state, GitHub statuses, and existing autosave behavior.
