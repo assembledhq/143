@@ -432,14 +432,42 @@ describe('SessionDetailPage overview and review loop', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect(await screen.findByRole('button', { name: 'Review & fix' })).toBeDisabled();
+    const reviewButton = await screen.findByRole('button', { name: 'Review & fix' });
+    expect(reviewButton).toBeDisabled();
     expect(screen.getByText('Review before creating a PR?')).toBeInTheDocument();
     expect(screen.getByText('Ask a review agent to check the current diff and apply fixes.')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Review & fix' })).toHaveAttribute('title', 'A reusable sandbox snapshot is required before review');
+    expect(reviewButton).toHaveAttribute('title', 'A reusable sandbox snapshot is required before review');
+    const reviewAction = reviewButton.closest('[data-slot="agent-action-card-action"]');
+    expect(reviewAction).toHaveClass('w-fit', 'self-start');
+    expect(reviewAction).not.toHaveClass('w-full');
+    expect(reviewButton).not.toHaveClass('w-full');
     const reviewTitle = screen.getByText('Review before creating a PR?');
     const splitTitle = screen.getByText('Need smaller pull requests?');
     expect(reviewTitle.compareDocumentPosition(splitTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
+  });
+
+  it('keeps PR details at the very top of the overview before the split suggestion', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            diff_stats: { added: CHANGESET_SPLIT_MIN_ADDITIONS, removed: 1, files_changed: 1 },
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={mockSessions[0].id} />);
+
+    const prDetailsTitle = await screen.findByText('PR health');
+    const splitTitle = screen.getByText('Need smaller pull requests?');
+    const prDetailsCard = prDetailsTitle.closest('[data-slot="card"]');
+
+    expect(prDetailsCard).not.toBeNull();
+    expect(prDetailsCard?.parentElement?.firstElementChild).toBe(prDetailsCard);
+    expect(prDetailsTitle.compareDocumentPosition(splitTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('shows a compact status card while the Overview review loop is running', async () => {

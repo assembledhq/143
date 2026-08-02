@@ -3494,7 +3494,10 @@ function AgentActionCard({
           <p className="text-sm font-medium text-foreground">{title}</p>
           <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
         </div>
-        <div className="w-full shrink-0 [&>span]:w-full [&_[data-slot=button]]:w-full @min-[24rem]/agent-action:w-auto @min-[24rem]/agent-action:[&>span]:w-auto @min-[24rem]/agent-action:[&_[data-slot=button]]:w-auto">
+        <div
+          data-slot="agent-action-card-action"
+          className="w-fit shrink-0 self-start @min-[24rem]/agent-action:self-auto"
+        >
           {action}
         </div>
       </CardContent>
@@ -6480,6 +6483,98 @@ export function SessionDetailContent({ id }: { id: string }) {
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <div className="space-y-4">
+          {pullRequestId && prStatus === "open" && (
+            prHealth ? (
+              <PRHealthBanner
+                health={prHealth}
+                currentSessionId={id}
+                currentThreadId={activeThread?.id ?? null}
+                pendingAction={pendingPRAction}
+                repairError={repairActionError}
+                mergeAuthRequired={ghBlocked}
+                mergeWhenReadyPending={pendingMergeWhenReady}
+                onFixTests={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: true })}
+                onFixTestsWithoutPushing={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: false })}
+                onResolveConflicts={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: true })}
+                onResolveConflictsWithoutPushing={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: false })}
+                onMerge={handleMergeAction}
+                onQueueMergeWhenReady={handleQueueMergeWhenReady}
+                onCancelMergeWhenReady={handleCancelMergeWhenReady}
+                onOpenRepairSession={(sessionId, threadId) => {
+                  if (sessionId === id && threadId) {
+                    setActiveThreadId(threadId);
+                    return;
+                  }
+                  router.push(`/sessions/${sessionId}`);
+                }}
+                onStopAutoRepair={(sessionId, threadId) => stopAutoRepairMutation.mutate({ sessionId, threadId })}
+                stopAutoRepairPending={stopAutoRepairMutation.isPending}
+                reviewAction={selectedIsPrimary && canManageSession && canUseNativeReviewLoop ? {
+                  disabled: reviewActionDisabled,
+                  spinning: startReviewLoopMutation.isPending || reviewLoopRunning,
+                  title: reviewActionDisabledReason,
+                  onClick: () => setReviewConfigOpen(true),
+                } : undefined}
+                pushChanges={showPushAction ? {
+                  label: pushActionLabel,
+                  disabled: pushActionDisabled,
+                  spinning: pushActionSpinning || (pushActionRequiresBranchSync && continueFromPRBranchMutation.isPending),
+                  showError: pushState === "failed" || !!localPushActionError,
+                  title: pushActionTitle,
+                  onClick: () => {
+                    if (pushActionRequiresBranchSync) {
+                      continueFromPRBranchMutation.mutate();
+                      return;
+                    }
+                    pushChangesMutation.mutate(undefined);
+                  },
+                } : undefined}
+              />
+            ) : isPRHealthLoading ? (
+              <Card className="border-border/60">
+                <CardContent className="flex items-center gap-2 p-4 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>Loading PR health...</span>
+                </CardContent>
+              </Card>
+            ) : null
+          )}
+          {pullRequestId && prStatus === "closed" && (
+            <Card className="border-border/60">
+              <CardContent className="p-4">
+                <div className="flex items-start gap-3">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                    <XCircle className="h-4 w-4" />
+                  </div>
+                  <div className="min-w-0 space-y-1">
+                    <div className="text-sm font-medium text-foreground">{closedPRLabel}</div>
+                    <p className="text-xs text-foreground">{closedPRSummary}</p>
+                    <p className="text-xs text-muted-foreground">
+                      This pull request is no longer active. Create a follow-up revision if you want to ship a new attempt.
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+          {pullRequestId && prStatus === "merged" && (
+            <Card className="border-border/60">
+              <CardContent className="p-4">
+                <div className="flex items-start gap-3">
+                  <div aria-label="Merged PR status" className={cn("flex h-8 w-8 items-center justify-center rounded-full", prMergedAccent.bg, prMergedAccent.text)}>
+                    <CheckCircle2 className="h-4 w-4" />
+                  </div>
+                  <div className="min-w-0 space-y-1">
+                    <div className="text-sm font-medium text-foreground">{mergedPRLabel}</div>
+                    <p className="text-xs text-foreground">{mergedPRSummary}</p>
+                    <p className="text-xs text-muted-foreground">
+                      This change has landed. Open a follow-up session if you need to make another revision.
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
           <PullRequestList
             changesets={changesets}
             selectedID={selectedChangeset?.id ?? ""}
@@ -6645,98 +6740,6 @@ export function SessionDetailContent({ id }: { id: string }) {
               onRetry={() => createPRMutation.mutate(undefined)}
             />
           ) : null}
-          {pullRequestId && prStatus === "open" && (
-            prHealth ? (
-              <PRHealthBanner
-                health={prHealth}
-                currentSessionId={id}
-                currentThreadId={activeThread?.id ?? null}
-                pendingAction={pendingPRAction}
-                repairError={repairActionError}
-                mergeAuthRequired={ghBlocked}
-                mergeWhenReadyPending={pendingMergeWhenReady}
-                onFixTests={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: true })}
-                onFixTestsWithoutPushing={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: false })}
-                onResolveConflicts={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: true })}
-                onResolveConflictsWithoutPushing={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: false })}
-                onMerge={handleMergeAction}
-                onQueueMergeWhenReady={handleQueueMergeWhenReady}
-                onCancelMergeWhenReady={handleCancelMergeWhenReady}
-                onOpenRepairSession={(sessionId, threadId) => {
-                  if (sessionId === id && threadId) {
-                    setActiveThreadId(threadId);
-                    return;
-                  }
-                  router.push(`/sessions/${sessionId}`);
-                }}
-                onStopAutoRepair={(sessionId, threadId) => stopAutoRepairMutation.mutate({ sessionId, threadId })}
-                stopAutoRepairPending={stopAutoRepairMutation.isPending}
-                reviewAction={selectedIsPrimary && canManageSession && canUseNativeReviewLoop ? {
-                  disabled: reviewActionDisabled,
-                  spinning: startReviewLoopMutation.isPending || reviewLoopRunning,
-                  title: reviewActionDisabledReason,
-                  onClick: () => setReviewConfigOpen(true),
-                } : undefined}
-                pushChanges={showPushAction ? {
-                  label: pushActionLabel,
-                  disabled: pushActionDisabled,
-                  spinning: pushActionSpinning || (pushActionRequiresBranchSync && continueFromPRBranchMutation.isPending),
-                  showError: pushState === "failed" || !!localPushActionError,
-                  title: pushActionTitle,
-                  onClick: () => {
-                    if (pushActionRequiresBranchSync) {
-                      continueFromPRBranchMutation.mutate();
-                      return;
-                    }
-                    pushChangesMutation.mutate(undefined);
-                  },
-                } : undefined}
-              />
-            ) : isPRHealthLoading ? (
-              <Card className="border-border/60">
-                <CardContent className="flex items-center gap-2 p-4 text-sm text-muted-foreground">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  <span>Loading PR health...</span>
-                </CardContent>
-              </Card>
-            ) : null
-          )}
-          {pullRequestId && prStatus === "closed" && (
-            <Card className="border-border/60">
-              <CardContent className="p-4">
-                <div className="flex items-start gap-3">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-muted-foreground">
-                    <XCircle className="h-4 w-4" />
-                  </div>
-                  <div className="min-w-0 space-y-1">
-                    <div className="text-sm font-medium text-foreground">{closedPRLabel}</div>
-                    <p className="text-xs text-foreground">{closedPRSummary}</p>
-                    <p className="text-xs text-muted-foreground">
-                      This pull request is no longer active. Create a follow-up revision if you want to ship a new attempt.
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          )}
-          {pullRequestId && prStatus === "merged" && (
-            <Card className="border-border/60">
-              <CardContent className="p-4">
-                <div className="flex items-start gap-3">
-                  <div aria-label="Merged PR status" className={cn("flex h-8 w-8 items-center justify-center rounded-full", prMergedAccent.bg, prMergedAccent.text)}>
-                    <CheckCircle2 className="h-4 w-4" />
-                  </div>
-                  <div className="min-w-0 space-y-1">
-                    <div className="text-sm font-medium text-foreground">{mergedPRLabel}</div>
-                    <p className="text-xs text-foreground">{mergedPRSummary}</p>
-                    <p className="text-xs text-muted-foreground">
-                      This change has landed. Open a follow-up session if you need to make another revision.
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          )}
           <OverviewTab session={session} activeThread={activeThread} members={members} prStatus={prStatus} />
         </div>
       </TabsContent>
