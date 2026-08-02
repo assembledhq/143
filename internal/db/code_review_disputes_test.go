@@ -190,6 +190,28 @@ func TestCodeReviewDisputeStore_CreateAndEnqueueTriageIntakeGuard(t *testing.T) 
 	}
 }
 
+func TestAdvisoryLockKeyForUUID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		value    uuid.UUID
+		expected int32
+	}{
+		{name: "preserves a key below the sign bit", value: uuid.MustParse("00112233-0000-0000-0000-000000000000"), expected: 0x00112233},
+		{name: "clears the sign bit", value: uuid.MustParse("ff223344-0000-0000-0000-000000000000"), expected: 0x7f223344},
+		{name: "accepts the zero key", value: uuid.Nil, expected: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, advisoryLockKeyForUUID(tt.value), "advisory lock key should preserve the masked big-endian UUID prefix")
+		})
+	}
+}
+
 func TestCodeReviewDisputeStore_IntakeGuardDedupesRedeliveryAtTheCeiling(t *testing.T) {
 	t.Parallel()
 

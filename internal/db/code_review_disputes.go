@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -342,7 +341,10 @@ const codeReviewDisputeIntakeLockNamespace = 143122
 // losing one bit only widens key collisions, which cost brief extra
 // serialization and never a wrong verdict.
 func advisoryLockKeyForUUID(value uuid.UUID) int32 {
-	return int32(binary.BigEndian.Uint32(value[:4]) & 0x7fffffff)
+	return int32(value[0]&0x7f)<<24 |
+		int32(value[1])<<16 |
+		int32(value[2])<<8 |
+		int32(value[3])
 }
 
 // CountActiveReassessments supports the operator-wide emergency ceiling.
