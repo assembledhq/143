@@ -321,7 +321,10 @@ func (c *SharedDependencyCache) RestorePathCache(ctx context.Context, sb *agent.
 		}
 		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), 5*time.Second)
 		defer cancel()
-		if err := c.store.RecordDependencyCacheRestore(recordCtx, hit.Entry.OrgID, hit.Entry.ID, time.Since(restoreStarted), restoreErr == nil); err != nil {
+		err := c.store.RecordDependencyCacheRestore(recordCtx, hit.Entry.OrgID, hit.Entry.ID, time.Since(restoreStarted), restoreErr == nil)
+		// A corrupt-blob restore deletes the row on its way out, so the row
+		// being gone is the expected outcome here, not a telemetry failure.
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			c.logger.Warn().Err(err).Str("cache_key", hit.Entry.CacheKey).Msg("failed to record dependency cache restore cost")
 		}
 	}()

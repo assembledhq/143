@@ -173,7 +173,12 @@ type previewBuildCacheSet struct {
 	restoredChecksum string
 	restoredHit      *preview.DependencyCacheHit
 	coldSampleHit    *preview.DependencyCacheHit
-	saveOnce         sync.Once
+	// restoreErr is this set's lookup/restore failure, surfaced through the
+	// shared build_cache_home_restore phase end so a phase that degraded to a
+	// cold build is not reported as clean. Written by the set's own goroutine
+	// and read only after wg.Wait().
+	restoreErr error
+	saveOnce   sync.Once
 }
 
 // serviceState tracks a running application service process.
@@ -766,7 +771,9 @@ func allServiceNames(cfg *models.PreviewConfig) []string {
 }
 
 func supportServiceNames(cfg *models.PreviewConfig) []string {
-	names := make([]string, 0, len(cfg.Services)-1)
+	// Sized from the full map, not len-1: an empty Services map would make
+	// len-1 a negative capacity, which panics in make.
+	names := make([]string, 0, len(cfg.Services))
 	for name := range cfg.Services {
 		if name != cfg.Primary {
 			names = append(names, name)
@@ -800,6 +807,16 @@ func (d *DockerPreviewProvider) waitForServiceReadinessSet(ctx, warmCtx context.
 		}()
 	}
 
+	markReady := func(result serviceReadinessResult) int {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		if ss, ok := state.services[result.name]; ok {
+			ss.status = models.PreviewServiceStatusReady
+			return ss.pid
+		}
+		return 0
+	}
+
 	for range names {
 		result := <-results
 		if result.err != nil {
@@ -808,18 +825,32 @@ func (d *DockerPreviewProvider) waitForServiceReadinessSet(ctx, warmCtx context.
 			notifyServiceFailed(observer, result.name, errMsg, tail)
 			if failFast {
 				cancel()
+				// Siblings that already reported ready still have to land in
+				// state.services and the observer log. The sequential version
+				// recorded everything it had processed before the failure, and
+				// that snapshot is how an operator tells "one service crashed"
+				// apart from "nothing came up". Anything still in flight is
+				// being cancelled and is not worth waiting for; drain only what
+				// has already arrived, and skip warming a route on a launch
+				// that is about to be torn down.
+				for draining := true; draining; {
+					select {
+					case queued := <-results:
+						if queued.err == nil {
+							pid := markReady(queued)
+							d.logger.Info().Str("service", queued.name).Int("port", queued.port).Str("readiness_mode", mode).Msg("service ready")
+							notifyServiceReady(observer, queued.name, queued.port, pid)
+						}
+					default:
+						draining = false
+					}
+				}
 				return &serviceReadinessFailure{name: result.name, port: result.port, message: errMsg}
 			}
 			continue
 		}
 
-		d.mu.Lock()
-		pid := 0
-		if ss, ok := state.services[result.name]; ok {
-			ss.status = models.PreviewServiceStatusReady
-			pid = ss.pid
-		}
-		d.mu.Unlock()
+		pid := markReady(result)
 		d.logger.Info().Str("service", result.name).Int("port", result.port).Str("readiness_mode", mode).Msg("service ready")
 		notifyServiceReady(observer, result.name, result.port, pid)
 		if result.name == cfg.Primary {
@@ -884,6 +915,11 @@ const previewCacheSaveTimeout = 15 * time.Minute
 // Failure-path cache persistence is best effort and must never mask the launch
 // error for minutes. Independent cache sets share this one wall-clock budget.
 const previewFailureCacheFlushTimeout = 30 * time.Second
+
+// previewFailureCacheFlushGrace bounds how long the failure-path flush waits
+// for cancelled saves to unwind after the budget expires. Returning while a
+// save is still driving the sandbox would let cleanup and teardown race it.
+const previewFailureCacheFlushGrace = 5 * time.Second
 
 // waitForGroupBounded blocks until wg is done, ctx is cancelled, or maxWait
 // elapses — whichever first — returning a non-nil error only when it gives up
@@ -1557,7 +1593,13 @@ func (d *DockerPreviewProvider) runPreviewInstallWithSaveMode(ctx context.Contex
 	}
 	markerPath := fmt.Sprintf(".143/cache/preview-install/%s.done", cacheKey)
 	markerExists := d.previewInstallMarkerExists(ctx, state.sandbox, markerPath)
-	installValidBeforeRestore := markerExists && d.previewInstallCacheValid(ctx, state.sandbox, markerPath, cacheRestorableVerifyPaths)
+	// Equivalent to previewInstallCacheValid, minus its re-read of the marker
+	// we just read. This runs on every warm launch, so the saved sandbox
+	// round-trip is latency off the critical path. Matching that helper, an
+	// empty verify_paths list is satisfied by the marker alone.
+	installValidBeforeRestore := markerExists &&
+		(len(cacheRestorableVerifyPaths) == 0 ||
+			d.previewInstallVerifyPathsSatisfied(ctx, state.sandbox, cacheRestorableVerifyPaths))
 	notifyPhaseEnd(observer, "install_marker_check", nil)
 	metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "install_marker_check", time.Since(markerCheckStarted))
 
@@ -2176,9 +2218,16 @@ func compactCacheHits(hits []*preview.DependencyCacheHit) []*preview.DependencyC
 // actually avoided by a restore. Benefit-bearing hits share one aggregate
 // budget, preventing several independently-restored caches from each claiming
 // the full cold install/build duration. zeroBenefitHits record successful but
-// non-contributing restores.
+// non-contributing restores — a restore that demonstrably saved nothing because
+// the work it would have avoided had already been done.
+//
+// A failed producer records nothing at all. The install or build never ran to
+// completion, so there is no marginal benefit to observe; a zero sample there
+// would be a measurement the launch did not make. Recording it anyway drags the
+// admission average toward zero, so a branch that fails to build a few times in
+// a row would switch off its own warm start and then be slower to fix.
 func (d *DockerPreviewProvider) recordCacheProducerBenefits(ctx context.Context, cache preview.PreviewPathCache, benefitHits, zeroBenefitHits []*preview.DependencyCacheHit, producerElapsed time.Duration, producerSucceeded bool) {
-	if cache == nil {
+	if cache == nil || !producerSucceeded {
 		return
 	}
 	benefitHits = compactCacheHits(benefitHits)
@@ -2188,7 +2237,7 @@ func (d *DockerPreviewProvider) recordCacheProducerBenefits(ctx context.Context,
 	}
 
 	var totalBenefit time.Duration
-	if producerSucceeded && len(benefitHits) > 0 {
+	if len(benefitHits) > 0 {
 		var coldBaseline time.Duration
 		for _, hit := range benefitHits {
 			baseline := time.Duration(hit.Entry.ProducerDurationMS) * time.Millisecond
@@ -2325,6 +2374,7 @@ func (d *DockerPreviewProvider) restorePreviewBuildCacheHome(ctx context.Context
 			hit, findErr := pathCache.FindPathCache(ctx, opts.OrgID, opts.RepositoryID, models.PreviewCacheKindBuildArtifact, set.key)
 			metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), phasePrefix+"_lookup", time.Since(lookupStarted))
 			if findErr != nil {
+				set.restoreErr = findErr
 				d.logger.Warn().Err(findErr).Str("cache_set", set.name).Str("cache_key", set.key).Msg("preview home build cache lookup failed; continuing cold")
 				return
 			}
@@ -2340,6 +2390,7 @@ func (d *DockerPreviewProvider) restorePreviewBuildCacheHome(ctx context.Context
 				if errors.Is(restoreErr, preview.ErrDependencyCacheNotWorthRestoring) && hit.Entry.ProducerDurationMS == 0 {
 					set.coldSampleHit = hit
 				}
+				set.restoreErr = restoreErr
 				status := dependencyCacheRestoreStatus(restoreErr)
 				notifyBuildCacheRestore(observer, status, set.key, hit.Entry.SizeBytes, restoreErr)
 				metrics.RecordSessionBuildCacheRestore(ctx, opts.OrgID.String(), status, time.Since(restoreStarted))
@@ -2356,7 +2407,16 @@ func (d *DockerPreviewProvider) restorePreviewBuildCacheHome(ctx context.Context
 		}()
 	}
 	wg.Wait()
-	notifyPhaseEnd(observer, "build_cache_home_restore", nil)
+	// Surface every set's failure on the shared phase end. The pre-split path
+	// reported its restore error here, and dropping it would report a phase
+	// that degraded to a cold build as clean.
+	var restoreErrs []error
+	for _, set := range sets {
+		if set.restoreErr != nil {
+			restoreErrs = append(restoreErrs, fmt.Errorf("%s: %w", set.name, set.restoreErr))
+		}
+	}
+	notifyPhaseEnd(observer, "build_cache_home_restore", errors.Join(restoreErrs...))
 	metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "build_cache_home_restore", time.Since(phaseStarted))
 }
 
@@ -2505,8 +2565,23 @@ func (d *DockerPreviewProvider) flushBuildCachesBeforeCleanupWithBudget(ctx cont
 	}()
 	select {
 	case <-done:
+		return
 	case <-flushCtx.Done():
-		d.logger.Warn().Err(flushCtx.Err()).Dur("budget", budget).Msg("preview failure-path cache flush exceeded shared budget")
+	}
+	d.logger.Warn().Err(flushCtx.Err()).Dur("budget", budget).Msg("preview failure-path cache flush exceeded shared budget")
+	// The budget bounds how long the flush may keep working, not whether this
+	// function may return while saves are still driving state.sandbox. These
+	// goroutines are deliberately not on state.wg (the caller is about to run
+	// cleanupState, whose own wg wait would then block on them), so nothing
+	// else stops teardown from racing an in-flight save or an observer event
+	// from landing after the launch is reported failed. flushCtx is already
+	// cancelled, so every save is unwinding; join them.
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(previewFailureCacheFlushGrace):
+		d.logger.Warn().Dur("grace", previewFailureCacheFlushGrace).
+			Msg("preview failure-path cache flush did not unwind after cancellation; a save may still be touching the sandbox")
 	}
 }
 

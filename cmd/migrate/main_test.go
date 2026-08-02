@@ -232,6 +232,51 @@ func TestRenumberedPreviewResourceMigrationIsReplaySafe(t *testing.T) {
 	}
 }
 
+// TestRenumberedDependencyCacheCostMigrationIsReplaySafe guards the same hazard
+// as TestRenumberedPreviewResourceMigrationIsReplaySafe: this migration shipped
+// as 000274 before that slot was claimed on main, so databases that applied the
+// former version already hold these columns and constraints. Plain ADD COLUMN /
+// ADD CONSTRAINT would abort the replay and leave schema_migrations dirty.
+func TestRenumberedDependencyCacheCostMigrationIsReplaySafe(t *testing.T) {
+	t.Parallel()
+
+	columns := []string{
+		"restore_attempt_count",
+		"restore_success_count",
+		"restore_total_duration_ms",
+		"producer_duration_ms",
+		"producer_benefit_count",
+		"producer_benefit_total_ms",
+		"last_restore_at",
+	}
+	constraints := []string{
+		"preview_dependency_cache_restore_attempt_count_nonnegative",
+		"preview_dependency_cache_restore_success_count_nonnegative",
+		"preview_dependency_cache_restore_total_duration_nonnegative",
+		"preview_dependency_cache_producer_duration_nonnegative",
+		"preview_dependency_cache_producer_benefit_count_nonnegative",
+		"preview_dependency_cache_producer_benefit_total_nonnegative",
+		"preview_dependency_cache_restore_success_lte_attempts",
+	}
+
+	body, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000275_preview_dependency_cache_costs.up.sql"))
+	require.NoError(t, err, "renumbered dependency cache cost migration should be readable")
+	sql := string(body)
+
+	for _, column := range columns {
+		require.Contains(t, sql, "ADD COLUMN IF NOT EXISTS "+column,
+			"renumbered migration should tolerate %s already existing from its former version", column)
+	}
+	for _, constraint := range constraints {
+		// Postgres has no ADD CONSTRAINT IF NOT EXISTS, so replay safety comes
+		// from dropping the constraint before re-adding it.
+		require.Contains(t, sql, "DROP CONSTRAINT IF EXISTS "+constraint,
+			"renumbered migration should drop %s before re-adding it", constraint)
+		require.Contains(t, sql, "ADD CONSTRAINT "+constraint,
+			"renumbered migration should re-add %s", constraint)
+	}
+}
+
 func TestHotTableFKRemovalDownMigrationIsExplicitNoop(t *testing.T) {
 	t.Parallel()
 

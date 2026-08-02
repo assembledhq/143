@@ -1038,6 +1038,24 @@ func TestDockerPreviewProvider_RecordCacheProducerBenefitsSharesMarginalBudget(t
 	require.Equal(t, []uuid.UUID{firstID, secondID, zeroID}, benefitIDs, "benefit telemetry should be attributed to each restored cache exactly once")
 }
 
+func TestDockerPreviewProvider_RecordCacheProducerBenefitsIgnoresFailedProducer(t *testing.T) {
+	t.Parallel()
+
+	cache := &fakeDependencyCache{}
+	provider := &DockerPreviewProvider{logger: zerolog.Nop()}
+	restored := []*preview.DependencyCacheHit{
+		{Entry: models.PreviewDependencyCache{ID: uuid.New(), CacheKey: "package-manager", ProducerDurationMS: 100_000}},
+		{Entry: models.PreviewDependencyCache{ID: uuid.New(), CacheKey: "install-artifact", ProducerDurationMS: 100_000}},
+	}
+	// This is the shape the install-failed and build-failed call sites use.
+	provider.recordCacheProducerBenefits(context.Background(), cache, nil, restored, 0, false)
+
+	cache.mu.Lock()
+	benefits := append([]time.Duration(nil), cache.producerBenefits...)
+	cache.mu.Unlock()
+	require.Empty(t, benefits, "a failed install/build observes no marginal benefit, so it must not record a zero sample that drags the admission average down and disables a working cache")
+}
+
 func TestDockerPreviewProvider_RecordCacheProducerBaselinesPersistsLegacyColdSample(t *testing.T) {
 	t.Parallel()
 
