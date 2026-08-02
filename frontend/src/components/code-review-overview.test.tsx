@@ -67,10 +67,16 @@ describe("TimeRangePicker", () => {
     const startButton = document.querySelector<HTMLElement>(`[data-day="${start.toLocaleDateString()}"]`);
     expect(startButton).not.toBeNull();
     await user.click(startButton as HTMLElement);
+    const applyButton = screen.getByRole("button", { name: "Apply range" });
+    expect(applyButton).toBeDisabled();
+    await user.hover(applyButton.parentElement as HTMLElement);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Select a start and end date to apply the range.",
+    );
     const endButton = document.querySelector<HTMLElement>(`[data-day="${end.toLocaleDateString()}"]`);
     expect(endButton).not.toBeNull();
     await user.click(endButton as HTMLElement);
-    await user.click(screen.getByRole("button", { name: "Apply range" }));
+    await user.click(applyButton);
 
     expect(onValueChange).toHaveBeenCalledWith(customTimeRange(start, end));
   });

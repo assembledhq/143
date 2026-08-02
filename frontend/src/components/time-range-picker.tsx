@@ -7,6 +7,7 @@ import type { DateRange } from "react-day-picker";
 
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
+import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Separator } from "@/components/ui/separator";
@@ -153,14 +154,19 @@ export function TimeRangePicker({
                   <Button type="button" variant="ghost" size="sm" onClick={() => setOpen(false)}>
                     Cancel
                   </Button>
-                  <Button
-                    type="button"
-                    size="sm"
+                  <DisabledTooltip
                     disabled={!draft.from || !draft.to}
-                    onClick={applyCustomRange}
+                    content="Select a start and end date to apply the range."
                   >
-                    Apply range
-                  </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={!draft.from || !draft.to}
+                      onClick={applyCustomRange}
+                    >
+                      Apply range
+                    </Button>
+                  </DisabledTooltip>
                 </div>
               </div>
             </div>
