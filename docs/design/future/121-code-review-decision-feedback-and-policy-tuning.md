@@ -1,17 +1,13 @@
 # Design: Code Review Decision Feedback And Policy Tuning
 
-> **Status:** Not Started | **Last reviewed:** 2026-07-30
+> **Status:** Not Started | **Last reviewed:** 2026-07-31
 >
 > **Depends on:** [../implemented/112-code-reviewer-bot-auto-approval.md](../implemented/112-code-reviewer-bot-auto-approval.md), [../backlog/11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md), [../future/116-automatic-pr-feedback-follow-through.md](116-automatic-pr-feedback-follow-through.md), [../future/16-ai-agent-evals.md](16-ai-agent-evals.md)
 
 ## Summary
 
-Today the Code Reviewer decides and nobody can argue with it. If the bot won't
-approve your PR, your only option is to go find a human. That disagreement is the
-best data we could possibly collect about whether our policy is right, and we
-throw all of it away.
-
-This adds a feedback loop:
+Today developers cannot challenge a Code Reviewer decision, and admins cannot see
+whether policy is calibrated. This design adds a feedback loop:
 
 - **Disagree in plain English.** Reply to the bot like you'd reply to a person —
   no command to remember, no form to fill in.
@@ -24,9 +20,8 @@ This adds a feedback loop:
   sample the risky ones and ask a human.
 - **One rule for changing policy: an admin agreed.** Every other signal ranks the
   admin's queue rather than deciding anything.
-- **Turn what we learn into policy changes** — edits to the review prompts, each
-  showing what it would have changed before anyone clicks approve. That machinery
-  waits for a volume trigger; until then admins tune by hand from Insights.
+- **Propose policy changes when volume warrants it.** Replay prompt edits before
+  activation; until then admins tune manually from Insights.
 
 Doc 112 deferred both "automatic policy learning" and "aggregate insights." This
 covers both, because insights without a way to disagree only measure the bot's
@@ -43,46 +38,25 @@ opinion of itself.
 - Policies are versioned and insert-only, so every decision points at the exact
   policy that produced it.
 
-The raw material is there. The loop isn't.
-
 ### Why people can't tell why
 
-1. **Every blocker looks the same.** "6 files, limit is 5" (a threshold you can
-   edit), "possible auth bug" (a model's code judgment), and "needs architectural
-   review" (a model saying ask a human) render as identical bullets. You can't
-   tell which lever to pull, and "I don't know why" usually means "I don't know
-   what to change or who to ask."
-2. **No sense of how close you were.** One threshold away and blocked on eleven
-   things read exactly alike.
-3. **Advisory findings are just a number.** "4 non-blocking observations" without
-   showing them reads as the bot hiding something.
-4. **Our failures look like your fault.** `context_unavailable` means 143 broke,
-   but it sits in the same blocker list as a real policy violation.
-5. **Cheap checks run last.** `EvaluateCodeReviewRisk` runs after the full agent
-   fan-out, so a PR that trips the file limit waits minutes to be told something
-   we knew from one API call.
+1. Thresholds, model findings, and human-review requirements look identical.
+2. The result does not show whether one blocker or many prevented approval.
+3. Advisory findings are reduced to a count.
+4. Platform failures such as `context_unavailable` look like user risk.
+5. Cheap deterministic checks run after the full agent fan-out.
 
 ### Why admins can't fix it either
 
-Doc 112 lists "top non-approval reasons" as a success metric. We can't compute
-it. There's no aggregate view — the Code reviews page has only Reviews and
-Configurations — and `policy-events` tracks which config sections admins opened,
-not how decisions turned out. So an admin asking "is our policy too strict?" has
-no data, and a developer who thinks the bot was wrong has nowhere to say so.
+There is no aggregate decision view. `policy-events` records configuration activity,
+not outcomes, so admins cannot answer whether policy is too strict or unsafe.
 
 ### Two traps
 
-**Complaints alone will loosen policy forever.** The person most likely to complain
-is the author whose PR was blocked — the most biased judge available — and they're
-arguing with a safety control. Build the obvious version and you get a system that
-relaxes its own rules whenever someone pushes back, with nobody acting in bad faith.
+- Complaints skew toward blocked authors and would bias policy toward loosening.
+- Bad approvals rarely generate complaints and require proactive sampling.
 
-**Nobody complains about a bad approval.** False approvals are the dangerous error
-and they're invisible: the PR merges and everyone moves on. A complaint-driven loop
-can therefore only ever find evidence for loosening. That's why disputes go both
-directions and why we sample approvals proactively.
-
-A dispute is a claim, not a fact. The evidence rules below keep both traps closed.
+A dispute is a claim, not evidence.
 
 ## What Counts As Evidence
 
@@ -90,22 +64,13 @@ A dispute is a claim, not a fact. The evidence rules below keep both traps close
 changes policy — not a rerun that flipped, not a clean merge, not a revert three
 weeks later, not a complaint that reads convincingly.
 
-That's the highest bar available, and it's set there because nothing sits behind
-it: there's no clustering step, so one upheld dispute drafts one proposal.
-**Throughput is limited by admin attention on purpose.** The alternative is more
-proposals than anyone reads properly, which turns the human approval step into a
-rubber stamp. Spot-check verdicts are adjudications too, so the approval direction
-feeds the same gate.
+Once Phase 2 is enabled, one upheld dispute may draft one proposal. Admin attention
+intentionally limits throughput; spot-check verdicts use the same evidence gate.
 
 ### Why "an independent human contradicted the bot" isn't a second rule
 
-It's the tempting one — someone who is neither the author nor the disputer approved a
-PR we blocked — and it doesn't hold up. When the bot blocks a PR and a teammate
-clicks approve, that approval *is* the escalation path we told them to use. It can't
-tell a careful second look from an unblock-my-colleague rubber stamp, and since we
-don't track branch protection it can't rule out a self-merge with extra steps. On a
-small team, "independent" approvers are the people sitting next to the author. That
-objection sinks every automatic signal we could think of.
+A teammate approval may be a careful escalation or a rubber stamp. Without branch
+protection context, it is useful for ranking but not policy evidence.
 
 ### Signals rank the queue instead
 
@@ -119,17 +84,25 @@ what an admin sees first. These order the queue and decide nothing:
 | The filer isn't the PR author | Nothing at stake in the complaint, so less of the bias the whole design is guarding against |
 | Repeat disputes against the same reason code in the same repo | One person may be wrong; five in a fortnight is a pattern, and it's the closest thing to clustering we need |
 
-Two things stay out entirely, even as ranking: **reverts and incidents** (attribution
-is guesswork and it arrives months late) and **a rerun that flipped** — the PR
-description can change without the head SHA changing, which is why doc 112 hashes
-title and body separately, so someone reading the blocker, fixing their description,
-and getting approved is the system working rather than proof the first call was wrong.
+Exclude reverts and incidents because attribution is weak. Also exclude a rerun that
+flipped: title or body may have changed without a new SHA, making the flip evidence
+that reassessment worked, not that the original decision was wrong.
 
 ### Who gets to influence policy
 
-Capturing a complaint and acting on it are different privileges. Reuse
-`evaluatePRFeedbackEligibility` (`internal/services/github/pr_feedback_policy.go`)
-rather than writing a new eligibility check.
+Capturing a complaint and acting on it are different privileges. Reuse the
+**provenance and trust half** of `evaluatePRFeedbackEligibility`
+(`internal/services/github/pr_feedback_policy.go`) — self-authored detection, bot
+detection, the hidden-marker check, and the `OWNER` / `MEMBER` / `COLLABORATOR`
+association tiers — factored out so both callers share one implementation.
+
+Do **not** reuse its mode gates. `human_mode_off` and `mention_required` come from
+doc 116's PR-feedback settings, which are a different product surface: an org that
+never turned on feedback follow-through would silently drop every dispute, with no
+acknowledgement, because of a setting they never associated with code review. Its
+`untrusted_human_without_mention` branch also contradicts the table below, which
+records and answers outside contributors. **Dispute intake is enabled by the
+code-review policy that produced the decision**, not by the feedback-bot settings.
 
 | Who | Recorded | Answered | Can trigger a rerun | Queued for adjudication |
 | --- | --- | --- | --- | --- |
@@ -138,18 +111,16 @@ rather than writing a new eligibility check.
 | Everyone else, including fork contributors | yes | yes | **no** | **not by default** |
 | Bots | no | no | no | no |
 
-Outside contributors still get recorded, triaged, and answered — silently ignoring
-them is exactly the failure we're fixing — and show up in Insights marked untrusted,
-so an admin who notices one is consistently right can pull it into the queue
-deliberately. They can't trigger reruns, because a rerun is the expensive action and
-on a public repo an unlimited supply of anonymous people triggering unlimited agent
-runs is a denial-of-service hole. Spending the org's compute is a form of influence.
+Outside contributors are recorded, answered, and shown as untrusted in Insights.
+Admins may promote them, but they cannot spend org compute by default. The reply
+says that plainly — *"external contributors can't trigger a re-review; ask a
+maintainer to re-request one"* — because on public repositories this is the person
+most confused by a block, and a clear no is worth more than a vague yes.
 
-**Trust is derived, not frozen.** Store `author_association` as observed and compute
-`trusted` at read time from an org setting, with a per-person and per-dispute admin
-override. The rule above is a default we fully expect to get wrong — the contractor
-with fork-only access who is functionally on the team is a real case — and changing
-a derivation is a deploy while changing a stored boolean is a backfill.
+Compute current trust from observed facts and current org settings, with per-person
+and per-dispute overrides. Snapshot every authorization decision and its inputs,
+settings version, evaluator version, override, and time so later rule changes do not
+rewrite history.
 
 Bots can't file at all. `evaluatePRFeedbackEligibility` already blocks self-authored
 comments, and a bot arguing with approval policy has no good use case.
@@ -170,10 +141,9 @@ system that relaxes its own controls under pressure from blocked authors is unso
 however good the rollback is, and "reverted within 7 days" is far too slow when the
 failure mode is unreviewed code reaching main.
 
-C's real costs: biggest build; a classifier decides what counts as a dispute, so it
-must err toward recording; prompt changes are the hardest kind to review, which is
-why replay is mandatory rather than nice-to-have; and agent spend scales with how
-much people argue.
+Option C costs more, depends on conservative classification, requires replay for
+prompt edits, and increases agent spend with dispute volume. That spend is
+deliberately uncapped per tenant at launch and measured instead; see *Reruns*.
 
 ## Phase 0 — Make the decision readable
 
@@ -191,101 +161,133 @@ No new subsystem. Changes to `code_review_output.go`, the worker, and session de
    blocker list.
 4. **Show advisory findings** in a collapsed `<details>` instead of a count.
    Still non-blocking, still no inline comments.
-5. **Run cheap checks first.** Evaluate size, path, author, and fork eligibility
-   from the file list *before* the agent fan-out. If the PR can't be approved
-   either way, say so in seconds and skip the agent run.
+5. **Run cheap checks first without withholding review.** Publish deterministic
+   failures immediately, then continue substantive review by default. Repositories
+   may enable `stop_after_deterministic_failure`; Insights tracks savings and
+   subsequent requests for full review.
 
-This probably fixes most of "I'm not sure why" on its own, and everything later
-depends on the grouping it introduces.
+   Early publication is a **provisional update to the rolling comment** — not a
+   GitHub review event, and not a decision row. Only the terminal session write is
+   a decision, so `code_review_decision_outcomes` still carries exactly one row per
+   session and Insights does not double-count.
+
+   Publish only gates that are **stable for a given head**:
+   `files_limit_exceeded`, `lines_limit_exceeded`, `blocked_path`,
+   `path_outside_scope`, `fork_ineligible`, `author_ineligible`. Hold
+   `checks_failing`, `required_check_failing`, `branch_out_of_date`, and
+   `head_changed` for the terminal decision — they can resolve while the review is
+   still running, and a bot that blocks on a red check at 20 seconds and approves at
+   60 has contradicted itself in public.
 
 ## Phase 1 — Capture, triage, rerun
 
 ### Capture
 
-Two ways in, one record, no syntax anywhere. **On GitHub (primary):** reply in the
-bot's comment thread, or mention `@143-code-reviewer` on any PR it reviewed —
-"this is test-only, why is it blocked?" and "hold on, this shouldn't have been
-auto-approved, it touches auth" both work. The `issue_comment` and
-`pull_request_review_comment` webhooks are already wired up. **In 143
-(secondary):** a "Disagree with this decision" button on the session opening a text
-box, with reason codes shown for reference and tickable, though prose alone is
-enough.
+**GitHub (primary):** mention `@143-code-reviewer` in a flat PR comment or reply in
+an inline review thread. **143:** use **Ask for reconsideration** on non-approvals or
+**Report an unsafe approval** on approvals. Both open a free-text form tied to the
+decision, with optional reason-code selection. The form explains that objections
+cannot waive deterministic policy, identifies who can change the rule, and only
+shows settings links to authorized viewers.
 
-Capture on the generous side. Eligibility comes from
-`evaluatePRFeedbackEligibility`; what a comment *means* is triage's job, not the
-webhook handler's.
+Capture on the generous side. Eligibility comes from the shared provenance/trust
+check described above — not the feedback-bot mode gates; what a comment *means* is
+triage's job, not the webhook handler's.
 
 ### Triage
 
-Every captured comment runs `triage_code_review_dispute`:
-`deterministicPRFeedbackTriage` first as a free filter for acknowledgements and
-empty bodies, then one LLM pass over the comment, the decision it's answering,
-that decision's reason codes, the diff summary, and the surrounding thread. It
-works out whether this is actually a disagreement, which direction
-(`should_have_approved` / `should_not_have_approved`), which reason codes it's
-arguing with, whether it contains information the review didn't have, and what to
-do about it.
+`triage_code_review_dispute` runs `deterministicPRFeedbackTriage`, then one LLM pass
+over the comment, decision, reason codes, diff summary, and surrounding context. It
+classifies direction, contested reasons, new information, and route.
 
 | Route | When | What happens |
 | --- | --- | --- |
 | `reassess` | Contains new information, or argues with a judgment call. Trusted author, blocked direction only | Rerun the review now |
-| `policy_signal_only` | Argues with a threshold or path rule | A rerun would change nothing — the threshold evaluates the same way every time. Say so, name the setting and its value, link to it, record the dispute |
+| `policy_signal_only` | Argues with a threshold or path rule, or triage wasn't confident enough to rerun | A rerun would change nothing — the threshold evaluates the same way every time. Say so, name the setting and its value, link to it, record the dispute, and offer **Send this to a policy owner** |
 | `answer_only` | It's a question, not a disagreement | Answer from the session evidence. No dispute record |
 | `not_a_dispute` | Chatter | Recorded as discarded, with a one-line acknowledgement carrying the override link. No influence |
 
-**A wrong `not_a_dispute` produces exactly the silence this doc exists to fix**, so
-it doesn't get to be silent. The acknowledgement is one line — *"noted; if you meant
-to challenge this decision, [say so here]"* — and the link opens the in-app form,
-which files unconditionally, because an explicit human act never needs a classifier's
-permission to count. Triage's worst failure goes from invisible to one click
-recoverable.
+`not_a_dispute` always receives a one-line acknowledgement with a link to file
+explicitly in-app. That explicit action bypasses classification.
+
+**Route to `reassess` only above a confidence floor.** One LLM pass decides whether
+to spend agent compute and, on a blocked PR, whether an approval becomes reachable.
+When `intake_confidence` falls below the floor, route to `policy_signal_only` with an
+honest reply — *"we weren't sure what you were disputing; file explicitly to force a
+re-review"* — rather than guessing. The expensive route fails closed, and the
+explicit in-app action is always available to override it.
+
+**`policy_signal_only` must not be a dead end.** Telling a developer "this is a
+threshold, here's the setting, here's who can change it" and then doing nothing is
+the low point of the whole flow: they took the trouble to explain themselves and got
+a link they can't click. **Send this to a policy owner** routes the dispute with its
+PR context into the owner's queue and digest and notifies them. The plumbing already
+exists for both, and the click doubles as the cleanest demand signal we have for
+Phase 2's volume trigger — a threshold nobody escalates is a threshold nobody
+actually minds.
 
 A `should_not_have_approved` dispute never reruns. Doc 112 makes approval
 monotonic and we're not touching that — automation must never walk back an
 approval it already gave. That direction is record-and-propose only, which makes
 it simpler than the blocked direction, not harder.
 
+It does, however, **notify**. When a `should_not_have_approved` dispute or
+spot-check verdict lands on a PR that already merged, the PR author and the
+repository's code-review owners are told, with links to the decision and the
+objection. If the bot approved something unsafe and it shipped, the people who own
+that code hearing about it *is* the safety story — filing it silently as Phase 2
+input would be the wrong trade.
+
 ### Reruns
 
-A `reassess` goes through the normal review path with a new trigger source
-`dispute_reassessment`, keyed by dispute id. This needs no change to doc 112's
-idempotency model: a new explicit request after a non-approval already creates a
-fresh assessment at the same head SHA, and requests arriving mid-review are
-already queued behind a starter job. A dispute is just another explicit request.
+A `reassess` uses the normal review path with trigger `dispute_reassessment`, keyed
+by dispute id. Existing explicit-request idempotency and starter-job behavior apply.
+
+**A reassessment only runs against the head it was filed on.** If the live head no
+longer equals `reviewed_head_sha`, the rerun does not start. The dispute is answered
+with *"the PR changed after you filed this — the review for `def5678` covers it"* and
+remains queued for adjudication on its own merits. Doc 112 already validates the live
+PR head on `POST /retry`, and this is the same guard for the same reason: a
+reassessment that inherits an argument about an older diff can submit a monotonic,
+unrevokable approval on code nobody actually vouched for. This is the only path in
+the design where user-supplied text can end in an approval, so it fails closed.
 
 The dispute text goes in as **untrusted evidence**, screened the same way PR
 descriptions and diffs already are. It's a claim to check against the code, not
 an instruction. "Approve this" is prompt injection, not information.
 
-**No rerun limit as a security control.** A limit wouldn't be one: doc 112 already
-queues a fresh assessment on every new commit until approval, so `git commit
---allow-empty && git push` is an unlimited rerun path that exists today, and
-rationing arguments while that stays open buys nothing. What actually bounds the
-risk is that deterministic gates are re-checked from source on every rerun and can
-never be waived by a dispute, untrusted authors can't trigger reruns at all, and
-approval stays monotonic with each rerun its own immutable session.
+**No user-facing reassessment quotas.** No per-PR budget, no per-user daily rate, no
+per-org monthly ceiling. A quota on a feature nobody has used yet is a guess about
+demand priced as a restriction, and the first thing a frustrated developer would hit
+is a wall saying they've run out of arguing. Insights measures reassessment spend
+from day one; if the cost turns out to matter, we'll have real numbers to set a limit
+from instead of inventing one now.
 
-**A soft spend budget, though, yes.** The real cost of unlimited reassessment is the
-agent bill — a product problem, not a security one, so it gets a product answer:
-after N reassessments on one PR, stop rerunning and reply with where the argument
-goes next — *"this PR has used its reassessment budget; here's the setting, and
-here's how to ask a human."* A per-org monthly ceiling behind it, surfaced in
-Insights, both numbers org settings so nobody has to guess right the first time.
-Degrading beats blocking because the person still gets an answer, and the outcome to
-avoid is discovering any of this on an invoice.
+What remains is **not** a cost control and stays:
 
-If rerolling until the bot gives in is a worry, the fix isn't here — it's judgment
-variance in doc 112, and the empty-commit path is the one to close. Watch flip rate
-by attempt number: if attempt 2 flips as often as attempt 1 on unchanged input, fix
-the judge rather than ration the reruns.
+- **Semantic dedupe** over head, title/body, dispute evidence, and policy, with a
+  short cooldown for semantically unchanged input. This is idempotency, not
+  rationing: without it, three "please reconsider" comments produce three identical
+  reruns and three identical replies on the same PR. Apply the same dedupe to
+  empty-commit reviews.
+- **The head guard above**, which now carries more weight — with no per-PR cap, it
+  and semantic dedupe are the only things standing between a disputed decision and
+  unbounded reruns.
+- **The bot-loop cycle budget** below, which stops two machines arguing forever.
+- **An operator hard ceiling and kill switch**, platform-side and invisible in normal
+  operation. This is not a product limit; it's the thing you reach for at 2am when an
+  integration goes berserk, and its absence means the only mitigation is a deploy.
+
+A dedupe or cooldown hit still records and answers the dispute — it says we already
+answered this, not that you've spent your allowance.
+
+Watch flip rate by attempt number: if attempt 2 flips as often as attempt 1 on
+unchanged input, that's a judge problem, and with no quota absorbing it the fix has to
+be the judge.
 
 ### Don't let the bots talk to each other
 
-The bot's reply is a PR comment, and doc 116's follow-through reads PR comments —
-including from bots, and an installed app on a private repo qualifies under two of
-its rules. Reply → ingested → commit pushed → doc 112 queues a review → new reply.
-That loop forms with everyone behaving correctly, and with no rerun limit nothing
-counts it. Two guards, both already built for doc 116:
+Reuse doc 116's two loop guards:
 
 - Dispute replies carry the hidden marker doc 116 checks for
   (`prFeedbackHiddenMarker`), so follow-through skips them and the loop never
@@ -298,125 +300,172 @@ counts it. Two guards, both already built for doc 116:
 
 ### Keeping the PR quiet
 
-Doc 112 works hard to keep exactly one visible 143 comment per PR, and unlimited
-disputes could wreck that. Rerun results **update the rolling comment in place**,
-like every other assessment. `policy_signal_only` and `answer_only` get **one
-threaded reply** each — these are conversations, and silence is the thing we're
-fixing — nested by GitHub under the comment they answer, never a chain. The
-rolling comment carries a one-line summary: *"2 objections · 1 rerun ·
-[view](link)"*. Everything else lives on the session.
+Reruns update the rolling comment. Other routes get one inline reply or one flat PR
+comment referencing the source and carrying the hidden marker. The rolling comment
+shows a compact summary; full history lives in 143.
 
-Queue ranking runs as a scheduled job once the rerun settles, the PR closes, or the
-window expires. Ship the **adjudication queue**, the **Insights** tab, and a weekly
-digest to policy owners in this phase. That's the whole loop end to end at low
-volume: developers get answers, admins see the pattern and edit policy by hand. It's
-worth having on its own, and it's what tells us whether Phase 2 is warranted.
+The session shows a durable timeline: received, triaging, reassessment started or
+not applicable, decision changed or unchanged, queued for a policy owner, and
+adjudicated/expired. GitHub and 143 notify the filer on terminal changes. Triage
+delay, triage failure, deduped-as-already-answered, head moved since filing,
+reassessment failure, and reply-publication failure each have explicit user-visible
+states; reconciliation retries publication without repeating the reassessment.
+
+Rank the queue after rerun completion, PR closure, window expiry, or supersession of
+the dispute's base policy. Phase 1 ships the queue, Insights, and a weekly
+policy-owner digest; admins still edit policy manually.
+
+The digest leads with **what changed**, not with a to-do list: *"blocks up 14% this
+week; three people disagreed with `lines_limit_exceeded` in `payments-api`."* An
+admin opening a weekly email wants a diagnosis first and the next item second. All
+the ranking work feeds that sentence rather than replacing it.
+
+### Delivery sequence
+
+Keep the first release narrower than the full machinery:
+
+1. **Phase 0A:** readable decisions, advisory details, platform-failure separation,
+   and immediate deterministic outcomes while substantive review continues.
+2. **Phase 0B:** Insights with reason distributions and actual-versus-limit data,
+   plus the **baseline objection rate** — how often a blocked author escalates by any
+   means today (re-request, slash command, comment at the bot, or going to find a
+   human). Phase 1 is justified by that number rather than assumed. Much of "I
+   disagree" is really "I don't understand," and Phase 0A may retire most of it; if
+   the rate collapses after 0A, Phase 1A is a smaller feature than this doc describes.
+3. **Phase 1A:** in-app reconsideration, GitHub mention/inline intake, durable
+   acknowledgement and timeline, semantic dedupe and loop guards, and reassessment.
+   Adjudication-eligible disputes land in a flat, unranked list a human reads.
+4. **Phase 1B(i) — spot-checks:** blinded approval sampling and the false-approval
+   estimator. **Ships on approval volume, not dispute volume** — an org averaging
+   **50+ auto-approvals a month** has a population worth sampling. Gating this on
+   disputes would be a category error: the whole reason spot-checks exist is that bad
+   approvals don't generate complaints, so waiting for complaints to justify them
+   inverts the argument.
+5. **Phase 1B(ii) — the ranked queue and digest.** Build when **10+
+   adjudication-eligible disputes a month in a single org, sustained over two
+   months**, prove the flat list has stopped working. Ranking exists to decide what a
+   busy admin sees first; below that volume they see everything anyway, and the four
+   signals in *Signals rank the queue instead* are guesses that a hundred real
+   disputes will improve far more than argument will. Phase 1A already records
+   `queue_signals` for every dispute, so the ranking arrives with history to
+   calibrate against rather than starting cold.
+6. **Phase 2:** proposal generation only after volume, relevant curated coverage,
+   and repeated costly manual edits prove generation is the bottleneck.
+
+Starting operating defaults are deliberately small and changeable: a 15-minute
+cooldown for semantically unchanged inputs and six approval audits per org per week,
+split evenly between frontier and uniform random sampling. The machine-only bot-loop
+budget is a constant two cycles per human-reset epoch. Guard members expire from
+gating after 180 days unless re-adjudicated, though expired members remain historical
+evidence. Insights shows when these defaults bind; policy owners tune them from
+observed demand and cost.
 
 ## Phase 2 — Propose changes
 
 ### Start it on a volume trigger, not a date
 
-Phase 2 is a proposal generator, a replay harness, and a guard set with a curation
-lifecycle. It's worth building when hand-editing policy is the bottleneck and not
-before — at low volume an admin reading Insights and editing the rubric directly is
-genuinely competitive, and that path already exists.
-
-**Build it when both hold, sustained over two months:** at least **5 upheld disputes
-a month**, and a guard set of **30+ members** with a meaningful share adjudicated
-rather than bootstrapped. Below that an admin is handling about one case a week by
-hand, and a pipeline would be ceremony around a trickle.
-
-Waiting is cheap because Phase 1 produces the inputs: the wait is spent gathering the
-data that says what shape a proposal should take, including the real distribution of
-`dispute_kind`, which we're currently guessing. **Spot-checking shouldn't wait** —
-it's a scheduled job and a queue, it yields the false-approval rate on its own, and
-it's the source of curated guard members. Ship it in Phase 1 if there's room.
-
-That same low volume is why there's **no clustering**: one upheld dispute drafts one
-proposal. Split across repos, reason codes, and dispute kinds, most clusters would
-have exactly one member, so de-noising would throw away the entire signal — and
-per-dispute cuts the loop from a month to days. If proposal volume ever becomes the
-complaint, clustering can come later.
+**Build it when all hold, sustained over two months:** at least **5 upheld disputes
+a month**, a guard set of **30+ members** with a meaningful share adjudicated rather
+than bootstrapped, and evidence that policy owners repeatedly make similar manual
+prompt edits whose preparation and validation consume meaningful time. Phase 1
+already collects the needed data and curated guard members. Do not cluster initially:
+one upheld dispute produces one proposal; add clustering only if proposal volume
+becomes a problem.
 
 ### Proposals change prompts, and only prompts
 
-A 143 session reads the dispute, its review, the findings, and the current prompt
-text, then proposes a scoped edit to the acceptable-risk rubric or a description
-requirement. Edits are limited to a named section and can **add or remove** —
-additions-only would mean the rubric can only ever grow and a genuinely wrong rule
-could never be deleted. Dispute text enters as untrusted evidence.
-
-**Thresholds are not proposed at all.** An earlier draft added a second,
-deterministic generator for limits, path rules, categories, checks, and author
-eligibility; it's cut. The Approach section argues thresholds are the lever that
-matters least, and a whole second generator for the least important lever — one that
-then has to stay consistent with the first — is the wrong trade. Insights already
-knows the numbers: *"11 non-approvals this month tripped the 5-file limit; median was
-6."* Show that with a deep link to the setting and let the admin type a 7. One
-generator, one replay path, and the arithmetic stays a chart rather than a subsystem.
+A session proposes a scoped add/remove edit to one named acceptable-risk or
+description-prompt section. Dispute text is untrusted evidence. Thresholds, paths,
+categories, checks, and author eligibility are not generated; Insights shows their
+distributions and links admins to manual settings.
 
 ### Replay is what makes review real
 
-Nobody can evaluate a reworded rubric by reading it. So every proposal is replayed
-before an admin sees it, against two sets, and both are shown: the **target set**
-(the dispute that prompted it — did it fix the problem?) and the **guard set**
-(held-out decisions we believe were right, weighted toward approvals near the
-frontier).
+Replay every proposal against the triggering **target** and a **guard set** of
+held-out decisions, weighted toward approvals near the frontier.
 
-The guard set is the important half. Replaying only the target set proves nothing:
-the prompt was written to fix that case, so it always passes. The guard set is what
-catches "fixed 1 complaint, would have flipped 11 good approvals."
+Replay cost depends on what the edited section influenced. Every editable section
+is classified in a registry as one of:
 
-Replaying a prompt change **doesn't require rerunning the review**. The editable
-prompts feed the orchestrator, `code_review_agent_results` already stores each
-reviewer's raw and structured output, and doc 112 requires rendered prompts to be
-recoverable. So replay reruns **only the orchestrator step against stored reviewer
-output** — no sandboxes, no clones, no fan-out. One cheap call per historical
-review, 20–30 per proposal.
+- **Orchestrator-replayable** — rerun only orchestration against stored reviewer
+  output.
+- **Description-reassessment required** — rerun description assessment and
+  orchestration.
+- **Reviewer-rerun required** — cached reviewer output was conditioned on the old
+  text, so a full reviewer replay is required.
+- **Not replayable** — show the edit for human review without a causal replay claim.
 
-**Seeding the guard set, and not trusting it yet.** Day one has no corpus of
-known-good decisions, so bootstrap from decisions that merged with no blocking human
-review, then curate from spot-check verdicts, which are real judgments.
+The acceptable-risk rubric is normally orchestrator-replayable from stored reviewer
+results. Never use cached output as a counterfactual when edited text influenced the
+reviewers.
 
-Those bootstrapped members carry a label this doc rejects everywhere else, and it's
-wrong in one specific direction: a bad approval that merged quietly enters the set
-marked correct. Replay a proposal that rightly *tightens* policy against it and the
-proposal is charged with a regression for fixing the thing we wanted fixed. Early
-guard numbers therefore run pessimistic against tightening, and that bias doesn't
-average out with more members — only with better-labelled ones.
+**Unregistered sections default to *not replayable*, and a test enumerates every
+renderable section against the registry.** The classification is a causality claim
+that nothing else enforces: add a prompt section, forget to register it, and a
+proposal will claim orchestrator-replayable evidence for an edit that actually
+conditioned the reviewers. Fail closed and let the test catch the omission.
 
-So **guard regressions are advisory until the set holds 30+ members added by
-`spot_check` or `admin`**, with composition shown beside the count — *"3 regressions ·
-12 of 40 members adjudicated."* After that they can gate. Gating on a bootstrapped set
-would block good tightening on mislabels, admins would learn to override, and an
-override people always click is worth less than no gate. The guard set doubles as a
-small eval corpus, giving doc 16 something to build on.
+Persist immutable replay provenance: model/settings, rendered prompt, parser and
+implementation versions, policy, input hashes, reviewer outputs/artifacts, and
+guard-member versions.
+
+**Replay measures candidate effect against a replayed baseline, not only history.**
+Run the unchanged prompt beside the candidate. Mark non-reproduced baseline cases
+unstable and exclude them from headline flips. Use deterministic settings where
+possible; otherwise repeat runs and show distributions.
+
+Bootstrap from approvals merged without blocking human review, then replace them
+with spot-check/admin judgments. Bootstrapped labels may hide bad approvals, so
+regressions remain advisory until there are 30+ curated members. Gating also
+requires relevant repository/language, risk/path, direction, decision balance,
+policy-family, and recency coverage. Missing coverage requires explicit heightened
+review. The set also seeds doc 16's eval corpus.
+
+**Crossing 30 is not permanent.** Members expire from gating after 180 days, while
+curated members accrue only from spot-check `correct` verdicts and admin
+adjudications — six audits per org per week, of which only some verdict `correct`,
+and only some of those are *relevant* to a given proposal's coverage dimensions. A
+set that crossed the threshold can decay back below it. When it does, regressions
+revert to advisory and open proposals are re-flagged rather than silently
+grandfathered on the coverage they had at creation. If Insights shows relevant
+coverage sitting under threshold for a quarter, the audit rate is too low for the
+guarantee we're claiming — raise sampling rather than lower the bar.
 
 ### Spot-checking approvals
 
-Since nobody reports a bad approval, go looking. A scheduled job scores each
-approval by how close it came to the edge of policy and queues the top few per week
-for an admin:
+A scheduled job queues frontier approvals using:
 
 - **Margin** — how near the limits: 5 of 5 files, 296 of 300 lines.
 - **Thin judgment** — approved despite P2 findings, low-confidence clean verdicts,
   or reviewer disagreement that didn't quite block.
-- **Novelty** — first approval touching a path or category this policy has never
-  approved before. Weight this highest: margin means the policy is being used at
-  its edge, novelty means it's being used somewhere untested, and untested is
-  where a bad rule hides.
+- **Novelty** — first approval touching a path/category not previously approved;
+  weight this highest.
 
-Mix in a **blind random sample** the admin can't tell from the frontier picks. If
-random spot-checks find bad approvals at the same rate as targeted ones, the score
-is worthless and there's no other way to learn that. The random arm also gives an
-unbiased false-approval rate — doc 112's headline safety metric, currently
-uncomputable.
+Mix in a blinded uniform random sample. Hide arm, score, and factors while queued;
+persist population, inclusion probability, stratum, and run, including skipped and
+expired audits. Report **estimated false-approval rate among adjudicated random
+samples** with sample size, response rate, and confidence interval. Compare random
+and frontier hit rates to validate ranking.
 
-Keep the queue to a few minutes a week. A "shouldn't have been approved" verdict is
-an admin adjudication, so it writes a dispute that's already upheld — spot-checking
-needs no evidence rule of its own, it just manufactures cases for the one rule we
-have. A "correct" verdict adds the session to the guard set as a curated member,
-which is the other reason to start spot-checking early.
+**Budget 20–30 minutes per policy owner per week and design against that number.**
+Six audits plus queued disputes, each needing a diff and a policy version read, is
+not a five-minute chore, and understating the cost is how a feature like this quietly
+dies in month three. The queue is capped rather than unbounded: owners see the top N
+by `queue_priority`, the remainder expire, and Insights reports what expired so a
+growing tail is visible instead of silent. Policy-owner minutes per resolution is
+already half the north-star pair — this is the budget it's measured against.
+
+Cards show the decision/policy, disputed text, evidence, rerun changes, and ranking
+signals, with **Uphold**, **Reject**, and **Need more context** plus assignment,
+snooze, expiry, age, and ownership. A card whose base policy is no longer active is
+marked **policy changed since filing** and de-ranked: upholding it drafts a proposal
+against a superseded base, which activation rejects with `409` anyway, so the admin
+shouldn't spend attention there before re-confirming the dispute still applies.
+Digests open the next item. Label/audit self-adjudication; high-risk loosening may
+require a second owner.
+
+A “shouldn't have been approved” verdict creates an upheld dispute; “correct” adds
+a curated guard member.
 
 ### Guardrails
 
@@ -426,35 +475,46 @@ which is the other reason to start spot-checking early.
 - Every activation is attributed to a user, audit-logged, and reversible by
   activating the previous version — policies are insert-only, so revert is one
   click.
-- Insights tracks decision mix and false-approval rate per policy version, so a
-  bad prompt change shows up in days rather than via an incident.
+- Insights tracks decision mix and the estimated false-approval rate per policy
+  version, with sample size and uncertainty, so a bad prompt change can surface
+  through leading evidence rather than waiting for an incident.
 
 ## Database Schema
 
-Every table below carries `id uuid PRIMARY KEY`, `org_id uuid NOT NULL REFERENCES
-organizations(id)`, and `created_at timestamptz NOT NULL DEFAULT now()`. Tenancy
-is `org_id` throughout. Only the distinctive columns are listed.
+Unless a table explicitly names another primary key, every table below carries
+`id uuid PRIMARY KEY`, `org_id uuid NOT NULL REFERENCES organizations(id)`, and
+`created_at timestamptz NOT NULL DEFAULT now()`. Tenancy is `org_id` throughout.
+Independent foreign keys do not by themselves prove that a session, PR,
+repository, policy, dispute, and organization belong together: store methods take
+`orgID`, every query filters by it, and create/update transactions validate all
+linked ownership under the same organization. Use composite ownership constraints
+where the existing schema makes them practical. Only distinctive columns are
+listed.
 
 **`code_review_decision_disputes`** — one row per objection.
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `session_id`, `pull_request_id`, `repository_id`, `policy_id` | uuid NOT NULL | FKs; session/PR cascade on delete |
+| `session_id`, `pull_request_id`, `repository_id`, `policy_id` | uuid NOT NULL | FKs; deletion follows the explicit retention/tombstone policy below rather than blind cascade |
 | `reviewed_head_sha`, `decision` | text NOT NULL | What was being disputed |
-| `direction` | text NOT NULL | `should_have_approved` \| `should_not_have_approved` |
-| `filed_by_user_id`, `filed_by_login`, `author_association`, `author_is_pr_author` | uuid / text / bool | Filer identity. `author_association` is stored as observed; trust is derived from it at read time, never stored as a verdict |
+| `direction` | text | Nullable until triage; then `should_have_approved` \| `should_not_have_approved` |
+| `filed_by_user_id`, `filed_by_login`, `author_association`, `author_is_pr_author` | uuid / text / bool | Filer identity and association observed at intake |
+| `repository_visibility`, `membership_evidence` | text / jsonb | Raw authorization inputs observed at intake |
 | `trust_override` | boolean | Admin escape hatch. NULL means "use the org rule" |
 | `source` | text NOT NULL | `github_comment` \| `app_ui` \| `api` \| `spot_check` |
-| `github_comment_id`, `github_delivery_id`, `github_thread_root_comment_id`, `reply_comment_id` | bigint / text | Dedupe, threading, and the one reply |
+| `github_comment_id`, `github_thread_root_comment_id`, `reply_comment_id` | bigint | Source identity, inline threading where available, and the one reply |
+| `source_body_hash`, `source_version` | text / integer | Immutable source version that triage consumed |
 | `body` | text NOT NULL | Verbatim. No syntax is parsed from it |
 | `contested_reason_codes` | text[] | Inferred by triage |
 | `dispute_kind` | text | **Free text from triage, no constraint.** See below |
-| `asserts_new_information` | boolean NOT NULL | Drives the `reassess` route |
+| `asserts_new_information` | boolean | Nullable until triage; drives the `reassess` route |
 | `routing` | text | `reassess` \| `policy_signal_only` \| `answer_only` \| `not_a_dispute` |
-| `intake_status`, `intake_confidence` | text | `pending` \| `triaged` \| `discarded` \| `failed` |
+| `intake_status`, `intake_confidence` | text | `pending` \| `triaged` \| `discarded` \| `failed`; confidence is nullable until triage |
 | `reassessment_session_id`, `reassessment_decision`, `reassessment_flipped` | uuid / text / bool | Rerun linkage |
-| `adjudication_status` | text NOT NULL | `pending` \| `upheld` \| `rejected` \| `expired`. `upheld` is the only thing that drafts a proposal |
+| `semantic_input_hash_at_filing`, `semantic_input_hash_at_rerun` | text | Both hashes, so a reader can tell a flip caused by changed input from an unstable judge. Makes the "exclude flips as evidence" rule auditable rather than asserted |
+| `adjudication_status` | text | NULL when not adjudication-eligible; otherwise `pending` \| `upheld` \| `rejected` \| `expired` \| `needs_context`. `upheld` is the only status eligible to draft a proposal when Phase 2 is enabled |
 | `adjudicated_by_user_id`, `adjudicated_at`, `adjudication_note` | uuid / timestamptz / text | Who decided, and why |
+| `escalated_at`, `escalated_by_user_id` | timestamptz / uuid | Set by **Send this to a policy owner**. Also a ranking signal: a filer who bothered to escalate cares more than one who didn't |
 | `queue_signals` | jsonb | The ranking signals observed on this dispute, with their inputs |
 | `queue_priority` | numeric | Derived from `queue_signals`; orders the admin queue and decides nothing |
 
@@ -465,47 +525,114 @@ slug, Insights charts the frequencies, and the values that turn out to be real g
 promoted to a constraint later. `direction` and `contested_reason_codes` stay
 structured; those we actually know.
 
-Indexes: unique on `github_comment_id` and on `github_delivery_id` (both partial,
-`WHERE NOT NULL`) so redelivery and edits update in place — deliberately *not*
-unique per `(session, filer)`, since one person may raise two genuinely different
-objections. Partial index on `intake_status = 'pending'`; partial on `(org_id,
-repository_id, queue_priority DESC)` where `adjudication_status = 'pending'` and
-triage kept it, to build the admin queue; partial on `(org_id, adjudicated_at DESC)`
-where `upheld`, to find disputes awaiting a proposal.
+Unconstrained is not unbounded. Normalize on write — lowercase, trim, collapse
+whitespace and separators — and give triage the slugs already seen in this org so it
+reuses a close match instead of minting a synonym. Without that, Insights charts four
+hundred near-duplicates and the promotion step never gets a signal to act on.
+
+State-dependent checks require classified fields after `triaged`, require routing
+and direction for an adjudication-eligible dispute, and require adjudicator/time for
+terminal adjudication. `answer_only`, `not_a_dispute`, failed intake, and untrusted
+items not explicitly promoted have NULL adjudication status and cannot enter the
+queue.
+
+**`code_review_dispute_authorizations`** — immutable action-level authorization
+decisions. `dispute_id`, `action` (`rerun` | `queue_influence` | `admin_promotion`),
+`trusted`, observed-input snapshot, settings/policy version, evaluator version,
+override provenance, decision reason, and `decided_at`. A dispute may encounter more
+than one gate; current trust remains derived separately and never rewrites these
+events.
+
+GitHub deliveries use the existing immutable webhook-ingress ledger: one delivery
+record per delivery id, idempotent processing per delivery, and one source object
+identity per GitHub comment id. Comment edits create a new source version/body hash
+and never overwrite which version produced an earlier triage or rerun. Redelivery
+of an old version is a no-op. An edit after reassessment does not trigger another
+reassessment without a new explicit mention/action, which is a new semantic input and
+therefore a new admission row.
+
+Indexes: unique on `(org_id, github_comment_id, source_version)` where the comment
+id is non-NULL — deliberately *not* unique per `(session, filer)`, since one person
+may raise two genuinely different objections. Partial index on `intake_status =
+'pending'`; partial on `(org_id, repository_id, queue_priority DESC)` where
+`adjudication_status = 'pending'`, to build the admin queue; partial on `(org_id,
+adjudicated_at DESC)` where `adjudication_status = 'upheld'`, to find disputes
+awaiting a proposal.
 
 **`code_review_policy_proposals`** — one row per proposal. `repository_id`,
 `base_policy_id`, and `source_dispute_id` (uuid; exactly one, no clustering);
 `direction` (`loosen` | `tighten`); `origin` (`agent_session` | `manual`) with
 `generator_session_id`; `status` (`replaying` | `open` | `activated` | `dismissed` |
-`superseded` | `expired`); `proposed_changes jsonb NOT NULL` — a structured validated
-prompt-section delta, never a raw config replacement; `rationale text NOT NULL`
-citing its dispute and review; `replay_status`, `replay_target_result jsonb`,
-`replay_guard_result jsonb`, `guard_regressions int`, and `guard_set_size` /
+`superseded` | `expired`); `current_revision_id` points to an immutable structured,
+validated prompt-section delta; `rationale` cites the dispute and review;
+`replay_status`, `replay_target_result jsonb`,
+`replay_guard_result jsonb`, `replay_artifact_id`, `baseline_stable`,
+`guard_regressions int`, and `guard_set_size` /
 `guard_set_adjudicated int` so a reader can tell a meaningful regression count from a
 provisional one; and the outcome columns `activated_policy_id`, `decided_by_user_id`,
 `decided_at`, `decision_note`. There's no `change_kind` — every proposal is a prompt
-edit. Unique index on `source_dispute_id` where status is `replaying` or `open`; plus
-`(org_id, status, created_at DESC)`.
+edit. Unique index on `source_dispute_id` so retries cannot draft a second proposal
+for the same upheld dispute; plus `(org_id, status, created_at DESC)`.
+
+**`code_review_policy_proposal_revisions`** — immutable edits to a proposal.
+`proposal_id`, `revision`, `proposed_changes jsonb NOT NULL`, `changes_hash`,
+`created_by_user_id`, replay status/artifact linkage, and supersession metadata.
+Unique `(proposal_id, revision)` and `changes_hash`; revising a proposal inserts a
+new row and advances `current_revision_id` rather than overwriting the delta that an
+earlier replay evaluated.
+
+**`code_review_policy_replay_artifacts`** — immutable replay provenance.
+`proposal_id`, `replay_kind`, model/version and inference settings, rendered prompt
+or artifact reference, parser/schema and implementation versions, policy id,
+title/body/head/diff hashes, reviewer-output artifact references, guard-member
+versions, baseline/candidate repetitions, and raw structured results. Large prompt
+and output bodies use the existing bounded artifact path.
 
 **`code_review_approval_audits`** — the spot-check queue. `session_id`,
-`repository_id`, `pull_request_id`, `policy_id` identify the approval under
-review. `selection` (`frontier` | `random`) is **never exposed while queued** —
-the control only works blind. `frontier_score numeric` and `frontier_factors
-jsonb` record margin, thin judgment, and novelty. `status` (`queued` | `reviewed`
-| `expired`) and `verdict` (`correct` | `should_not_have_approved`) carry the
-outcome, with `resulting_dispute_id`, `reviewed_by_user_id`, `reviewed_at`, and
-`note`. Unique index on `session_id`; partial on `(org_id, status, created_at)`
-where queued.
+`repository_id`, `pull_request_id`, and `policy_id` identify the approval.
+`selection` (`frontier` | `random`), `frontier_score`, and `frontier_factors` stay
+hidden while queued.
+`sampling_run_id`, `eligible_population`, `inclusion_probability`, and
+`sampling_stratum` make the estimator auditable. `status` (`queued` | `reviewed` |
+`expired` | `skipped`) and `verdict` (`correct` |
+`should_not_have_approved`) carry the outcome, with `resulting_dispute_id`,
+`reviewed_by_user_id`, `reviewed_at`, and `note`. Unique index on
+`(org_id, session_id)` — composite so tenancy is structural rather than a query
+convention; partial on `(org_id, status, created_at)` where queued.
 
 **`code_review_guard_set_members`** — held-out decisions for replay.
 `session_id` (unique where active), `repository_id`, `expected_decision`,
-`added_by` (`bootstrap` \| `spot_check` \| `admin`), `active boolean`.
+`added_by` (`bootstrap` \| `spot_check` \| `admin`), `active boolean`,
+`version`, `adjudicated_at`, `expires_at`, language/risk/path coverage tags, and
+the policy-family/version against which the judgment was made.
 
 **`code_review_decision_outcomes`** — denormalized per-decision facts, keyed by
-`session_id` as PK, so Insights and queue ranking don't re-derive PR history on every
-read. Carries `decision`, `reason_codes text[]` (GIN indexed), `merged`, `merged_at`,
-`independent_approver_login`, `independent_blocking_review_login`,
-`human_review_comment_count`, `reverted`, `terminal`, `observed_until`.
+`(org_id, session_id)` as a composite PK so Insights and queue ranking don't
+re-derive PR history on every read, and so the tenancy invariant is enforced by the
+key rather than by every query remembering to filter. Carries `decision`, `reason_codes text[]` (GIN
+indexed), `merged`, `merged_at`, `independent_approver_login`,
+`independent_blocking_review_login`, `human_review_comment_count`, `terminal`,
+`observed_until`, and `projection_updated_at`. Reverts and incidents remain outside
+this projection because the design does not use them even for ranking.
+
+Durable GitHub events update the projection idempotently; dismissal and late reviews
+may revise non-terminal facts. Periodic reconciliation repairs recent/non-terminal
+PRs and the same projector handles backfill. Insights shows freshness, ranking
+ignores stale absence, and independence uses membership observed at event time.
+
+**`code_review_reassessment_admissions`** — one immutable row per semantic
+reassessment request, for dedupe and observability rather than rationing. Carries
+`dispute_id`, `pull_request_id`, `repository_id`, `user_id`, `semantic_input_hash`,
+`status` (`admitted` | `deduped` | `denied`), denial reason, and timestamps. Unique
+on `(org_id, pull_request_id, semantic_input_hash)` — that single constraint *is* the
+dedupe and the cooldown check, so admission is one insert whose conflict means "we
+already answered this," not a multi-counter transaction with a lock order to get
+wrong. Enqueue through the same transaction/outbox boundary. Retries reuse the row.
+
+There are no usage counters, no reservation/release lifecycle, and no per-tenant
+budget rows, because there are no quotas to enforce. Reassessment spend is a
+**reporting fact** in Insights; the operator kill switch and hard ceiling live in
+platform configuration and are checked here without a per-tenant ledger.
 
 **Changes to existing tables:**
 
@@ -524,13 +651,21 @@ ALTER TABLE code_review_session_metadata
     ADD COLUMN files_changed int,
     ADD COLUMN lines_changed int;
 
--- Bot-loop budget, mirroring the doc 116 epoch mechanic.
+-- Bot-loop cycle budget, mirroring the doc 116 epoch mechanic. This is a loop
+-- guard, not a cost cap: it bounds machine-only rounds, and any human comment
+-- resets it. There is no per-PR reassessment quota.
 ALTER TABLE pull_requests
     ADD COLUMN code_review_dispute_epoch bigint NOT NULL DEFAULT 0,
     ADD COLUMN code_review_dispute_cycles_in_epoch integer NOT NULL DEFAULT 0,
     ADD CONSTRAINT chk_pr_code_review_dispute_cycles
         CHECK (code_review_dispute_cycles_in_epoch >= 0);
 ```
+
+Versioned org/repository policy settings gain `stop_after_deterministic_failure` and
+the semantic-dedupe cooldown. They gain **no reassessment quotas** — no per-PR
+budget, no per-user rate, no per-org ceiling. The operator-wide hard ceiling and kill
+switch remain platform configuration, not tenant-editable policy, and being
+platform-side they never surface to a user as a quota.
 
 **Jobs**, on the existing queue:
 
@@ -539,17 +674,20 @@ ALTER TABLE pull_requests
 | `triage_code_review_dispute` | `feedback` | A comment is captured, or a dispute is filed in-app |
 | `run_code_review` (existing) | `agent` | Triage routed `reassess`; deduped on dispute id |
 | `reply_code_review_dispute` | `feedback` | Triage routed `policy_signal_only` / `answer_only` / `not_a_dispute`, or a rerun finished |
-| `rank_code_review_dispute` | `feedback` | Rerun settles, PR closes, or the window expires. Recomputes `queue_signals` and `queue_priority` |
+| `rank_code_review_dispute` | `feedback` | Rerun settles, PR closes, the window expires, or the dispute's base policy is superseded. Recomputes `queue_signals` and `queue_priority` |
 | `generate_code_review_policy_proposal` | `agent` | An admin upholds a dispute |
 | `replay_code_review_policy_proposal` | `agent` | Proposal created |
 | `sample_code_review_approvals` | `feedback` | Weekly per org |
 | `digest_code_review_insights` | `feedback` | Weekly per org |
+| `reconcile_code_review_decision_outcomes` | `feedback` | Periodically repairs recent/non-terminal GitHub outcome projections |
 
-Reruns reuse the existing `run_code_review` handler unchanged; only request
-orchestration learns the new trigger source, the trust gate, and the reassessment
-budget. The budget needs no new columns — per-PR spend is a count of sessions with
-`trigger_source = 'dispute_reassessment'`, and the org ceiling is the same count over
-a month.
+Reruns reuse the existing `run_code_review` handler unchanged; request orchestration
+learns the new trigger source, authorization snapshot, head guard, and semantic
+dedupe with its cooldown. Session and reassessment counts remain reporting facts, not
+admission controls. Proposal-generation jobs are feature-gated until the Phase 2
+volume, curated-coverage, and repeated-manual-edit conditions hold; upholding a
+dispute before then leaves it visible for manual tuning without enqueueing a
+generator.
 
 **Audit actions:** `code_review_dispute.filed`, `.reassessed`, `.adjudicated`,
 `code_review_approval_audit.reviewed`,
@@ -557,69 +695,91 @@ a month.
 
 ## API Contract
 
-Org-scoped, existing auth conventions. Filing and reading are member-level;
-adjudication, spot-check verdicts, and proposal decisions are admin-level.
+Org-scoped, existing auth conventions. Filing and reading a session's own disputes
+are member-level; aggregate Insights, the cross-session queue, adjudication,
+spot-check verdicts, trust overrides, and proposal decisions are admin-level. Every
+list uses the standard `{data, meta: {next_cursor}}` cursor contract. Bodies are
+trimmed, non-empty, valid UTF-8, and bounded by the normal request limit plus a
+smaller dispute-body limit.
 
 | Route | Body / query | Returns |
 | --- | --- | --- |
-| `POST /api/v1/code-reviews/{session_id}/disputes` | `{ body: string, contested_reason_codes?: string[] }` | `201` dispute with `intake_status: "pending"`. `422` if body empty, `404` if no such review. **No 409** — several distinct objections on one review are legitimate; only GitHub-sourced ones dedupe, on comment id. Direction is inferred, never supplied |
-| `GET /api/v1/code-reviews/{session_id}/disputes` | — | Disputes with routing, trust, and rerun linkage |
-| `GET /api/v1/code-review-disputes` *(admin)* | `adjudication_status?`, `repository_id?`, `direction?` | The adjudication queue, ordered by `queue_priority`, each dispute showing which signals raised it |
-| `PATCH /api/v1/code-review-disputes/{id}` *(admin)* | `{ adjudication_status: "upheld"\|"rejected", adjudication_note?, trust_override? }` | Updated dispute. `upheld` enqueues proposal generation. `409` if already adjudicated |
-| `GET /api/v1/code-review-approval-audits` *(admin)* | `status?`, `repository_id?` | Spot-check queue. `selection` is **omitted while queued** — the random control only works if the reviewer can't see the arm |
-| `POST /api/v1/code-review-approval-audits/{id}/verdict` *(admin)* | `{ verdict: "correct"\|"should_not_have_approved", note? }` | `should_not_have_approved` creates an already-upheld dispute; `correct` adds the session to the guard set |
-| `GET /api/v1/code-review-insights` | `repository_id?`, `from?`, `to?`, `decision?`, `reason_code?`, `direction?` | Decisions and dispute rate by reason code, with actual-vs-limit distributions and a deep link to each setting — this is what admins tune from before Phase 2 exists; totals; disputes by direction; **`dispute_kind` frequencies**, the input to eventually constraining that column; flip rate by attempt; reassessment spend against budget; `spot_check` (frontier vs random hit rate, false-approval rate); median decision time; per-policy-version decision mix |
-| `GET /api/v1/code-review-policy-proposals` | `status?`, `repository_id?`, `direction?` | Proposals including replay results |
-| `POST /api/v1/code-review-policy-proposals/{id}/activate` *(admin)* | `{ proposed_changes? }` (optional edited delta) | New policy + proposal. `409` if not open, replay incomplete, or base policy superseded; `422` invalid delta; `403` touches a locked dimension |
-| `POST /api/v1/code-review-policy-proposals/{id}/dismiss` *(admin)* | `{ decision_note }` | Updated proposal |
+| `POST /api/v1/code-reviews/{session_id}/disputes` | `{ body: string, contested_reason_codes?: string[] }` | `201` dispute with `intake_status: "pending"`. `422` if body empty, `404` if no such review. **No 409** — several distinct objections on one review are legitimate; GitHub source versions dedupe through the ingress ledger. Direction is inferred, never supplied |
+| `GET /api/v1/code-reviews/{session_id}/disputes` | `cursor?` | Disputes with routing, trust, and rerun linkage |
+| `POST /api/v1/code-review-disputes/{id}/escalate` | `{ note?: string }` | Member-level. Routes a `policy_signal_only` dispute to the repository's policy owners with PR context, notifies them, and marks it for the next digest. Idempotent per `(dispute, user)`; `409` if the dispute isn't in a route where escalation is meaningful |
+| `GET /api/v1/code-review-disputes` *(admin)* | `adjudication_status?`, `repository_id?`, `direction?`, `cursor?` | The adjudication queue, ordered by stable `(queue_priority, id)`, each dispute showing which signals raised it |
+| `PATCH /api/v1/code-review-disputes/{id}` *(admin)* | `{ expected_version: int, adjudication_status?: "upheld"\|"rejected"\|"needs_context", adjudication_note?, trust_override? }` | CAS update; trust override can promote an untrusted item without adjudicating it. `upheld` enqueues proposal generation only when Phase 2 is enabled. `409` if the supplied version lost a race |
+| `GET /api/v1/code-review-approval-audits` *(admin)* | `status?`, `repository_id?`, `cursor?` | Spot-check queue. `selection`, `frontier_score`, and `frontier_factors` are **omitted while queued** — the random control only works if the reviewer cannot infer the arm |
+| `POST /api/v1/code-review-approval-audits/{id}/verdict` *(admin)* | `{ expected_version: int, verdict: "correct"\|"should_not_have_approved", note? }` | CAS verdict; `should_not_have_approved` creates an already-upheld dispute; `correct` adds the session to the guard set |
+| `GET /api/v1/code-review-insights` *(admin)* | `repository_id?`, `from?`, `to?`, `decision?`, `reason_code?`, `direction?` | Decisions and dispute rate by reason code, with actual-vs-limit distributions and an authorization-aware deep link to each setting; totals; disputes by direction; **`dispute_kind` frequencies**; flip rate by attempt; reassessment spend; estimated false-approval rate with sample size/response rate/confidence interval; median decision time; projection freshness; policy-owner minutes; per-policy-version decision mix |
+| `GET /api/v1/code-review-policy-proposals` *(admin)* | `status?`, `repository_id?`, `direction?`, `cursor?` | Proposals including baseline stability, replay results, and relevant guard coverage |
+| `POST /api/v1/code-review-policy-proposals/{id}/activate` *(admin)* | `{ expected_version: int, replayed_changes_hash: string, confirm_insufficient_guard_coverage?: boolean }` | New policy + proposal. Activation accepts only the exact replayed delta; `409` if not open, replay incomplete/unstable beyond policy, hash differs, required coverage confirmation or second high-risk-loosening confirmation is absent, or base policy is superseded; `422` invalid delta; `403` touches a locked dimension |
+| `POST /api/v1/code-review-policy-proposals/{id}/revise` *(admin)* | `{ proposed_changes: object }` | Validates and stores a new proposal revision, invalidates prior replay, and enqueues replay. Editing can never activate an unreplayed delta |
+| `POST /api/v1/code-review-policy-proposals/{id}/dismiss` *(admin)* | `{ expected_version: int, decision_note: string }` | CAS-updated proposal |
 
-The GitHub path adds no route and parses no syntax. The existing `issue_comment`
-and `pull_request_review_comment` handlers capture replies in the bot's thread and
-mentions on reviewed PRs, check eligibility, dedupe on `github_delivery_id`, and
-enqueue triage. Whether a comment is a dispute is triage's call, not the
-handler's.
+Existing comment handlers capture flat-comment mentions and inline-thread replies.
+The durable ingress ledger handles delivery/source-version dedupe before triage;
+handlers do not classify meaning or parse syntax.
 
-Activation runs the same validation as `PUT /api/v1/code-review-policies`, then
-writes a new insert-only version. It never patches a policy row in place, so
-approvals keep pointing at the version that produced them.
+Activation atomically locks/CASes the proposal and replayed revision, validates the
+active base policy and exact delta, deactivates the old policy, inserts the new
+version, marks activation, and writes audit/outbox state. Concurrent activation
+returns `409`; retries are idempotent. Adjudication and audit verdicts use the same
+CAS/outbox pattern.
+
+### Retention and sensitive text
+
+Bound dispute/context inputs. Retain source text for the audit window, then allow
+redaction to a tombstone while preserving provenance. Edits/deletions never rewrite
+the version acted on; the UI and retention/deletion workflows reflect current
+source state. Session/PR deletion follows explicit tombstone rules.
+
+Treat all user/repository text as delimited untrusted data. Secret-scan before
+long-term storage; bound, protect, export/delete, and never log raw artifacts.
 
 ## Success Metrics
 
-- **How often non-approvals get an objection.** The miscalibration signal we don't
-  have today. Expect it to jump when intake becomes free-text — that's the feature
-  working, not the bot getting worse.
-- **Triage accuracy**, hand-sampled. Objections wrongly filed as `not_a_dispute`
-  are the silent failure this exists to prevent, and matter far more than the
-  opposite error.
-- **Frontier hit rate vs random hit rate.** If they're equal the frontier score is
-  worthless, and this is the only way to find that out.
-- **False approval rate** from the random arm — unbiased, and doc 112's headline
-  safety metric.
-- **Guard-set regressions per activated proposal**, always read next to the set's
-  adjudicated share. How often a change broke decisions that were right; the number
-  that says whether one-click activation is safe, and it means little until the set
-  is mostly curated.
-- **Upheld disputes per month**, the Phase 2 volume trigger. Also the number that
-  tells us whether hand-tuning from Insights was enough all along.
-- **Reassessment spend per PR and per org.** Hitting the budget is a product signal
-  and not just a bill — a PR that exhausts it is an argument the loop couldn't
-  settle.
-- **Flip rate by rerun attempt.** Flips on new information mean the loop works;
-  flips on unchanged input mean judgment variance, a different bug.
-- **Time from objection to a real reply**, and to a flipped decision.
-- **Activation and dismissal rates by direction.** Lasting asymmetry means drift.
+**North-star:** disputes reaching useful resolution without ad hoc escalation,
+provided estimated false-approval rate does not worsen. Pair it with policy-owner
+minutes per resolution.
+
+- Objection and upheld-dispute rates; the latter gates Phase 2.
+- Objection rate before and after Phase 0, to separate confusion from disagreement.
+  If readable decisions retire most of it, Phase 1 is smaller than planned.
+- Hand-sampled triage accuracy, weighted against false `not_a_dispute`.
+- Frontier versus random hit rate.
+- Estimated false-approval rate with inclusion probability, sample/response size,
+  and confidence interval.
+- Guard regressions with curated share and relevant coverage.
+- Reassessment spend and flip rate by attempt/input change. With no quota in the
+  way, spend per org and per dispute is the number that would justify introducing
+  one later — and the distribution's tail matters more than its mean.
+- Time to acknowledgement, reply, reassessment, and terminal state. Initial targets:
+  acknowledgement within one minute and healthy-provider triage p95 under five.
+- Queue age, expiry/non-response, digest conversion, and admin minutes.
+- Repeat objections, full-review requests after early termination, and proposal
+  activation/dismissal by direction.
 
 ## Open Questions
 
-- How big should the weekly spot-check queue be, and what frontier/random split?
-  Too big and nobody opens it; too small and the random arm never says anything.
-- What are the starting numbers for the reassessment budget — per PR and per org per
-  month? Cheap to change, but the first guess sets the tone.
-- How long should a guard-set member stay valid? Codebases move, and a two-year-old
-  decision may no longer be the right baseline.
-- Should a dispute from someone other than the PR author be `reassess`-eligible on
-  more reason codes, given the weaker bias?
-- Does the bot-loop budget need to be configurable, or is a constant fine given the
-  marker should stop the loop outright?
-- Should a `should_not_have_approved` dispute on an already-merged PR notify anyone
-  beyond creating the proposal?
+- After observing Phase 1 traffic, should trusted non-authors become
+  `reassess`-eligible for additional judgment reason codes? They pass through the
+  same head guard and dedupe; the initial release keeps the narrower rule until
+  demand is measured.
+- Does uncapped reassessment spend concentrate in a small number of orgs or PRs? If
+  the tail is thin, it stays uncapped indefinitely. If one org is generating most of
+  it, the answer is more likely a conversation with that org than a global quota.
+
+### Settled
+
+- **Phase 1B carries a volume trigger, and splits in two.** Spot-checks ship on
+  approval volume; the ranked queue and digest wait for sustained dispute volume.
+  Ranking is a solution to a scarcity of admin attention, and until that scarcity is
+  observed a flat list is both cheaper and more informative. Recorded in *Delivery
+  sequence*.
+- **Reassessment limits were cost caps, so they're gone.** Rationing a feature before
+  anyone has used it prices a guess about demand as a restriction on the user, and
+  the first person to hit it would be someone already frustrated enough to argue with
+  a bot. Spend is measured rather than capped; dedupe, the head guard, the bot-loop
+  budget, and an operator kill switch remain, because none of those are about cost.
+  Recorded in *Reruns*.
