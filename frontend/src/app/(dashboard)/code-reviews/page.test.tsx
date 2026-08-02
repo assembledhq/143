@@ -980,14 +980,16 @@ describe("CodeReviewsPage", () => {
   });
 
   it("keeps rows and metrics visible while the rolling window refreshes", async () => {
-    const originalSetInterval = globalThis.setInterval.bind(globalThis);
+    const originalSetTimeout = globalThis.setTimeout.bind(globalThis);
     let refreshRollingWindow: (() => void) | undefined;
-    const intervalSpy = vi.spyOn(globalThis, "setInterval").mockImplementation((handler, timeout) => {
-      if (timeout === 60_000) {
-        refreshRollingWindow = () => handler();
-        return originalSetInterval(() => undefined, timeout);
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation((handler, timeout, ...args) => {
+      if (typeof timeout === "number" && timeout >= 59_000 && timeout <= 60_000) {
+        refreshRollingWindow = () => {
+          if (typeof handler === "function") handler(...args);
+        };
+        return originalSetTimeout(() => undefined, timeout);
       }
-      return originalSetInterval(handler, timeout);
+      return originalSetTimeout(handler, timeout, ...args);
     });
     const createdAfterValues: string[] = [];
     let blockListRefresh = false;
@@ -1053,7 +1055,7 @@ describe("CodeReviewsPage", () => {
     } finally {
       releaseListRefresh?.();
       releaseStatsRefresh?.();
-      intervalSpy.mockRestore();
+      timeoutSpy.mockRestore();
     }
   });
 
