@@ -6173,6 +6173,117 @@ func workerPublicationTestRow(publication models.SessionPublication) []any {
 	}
 }
 
+type openPRChangesetLeaseStoreStub struct {
+	acquireCalls    int
+	acquiredOrgID   uuid.UUID
+	acquiredSession uuid.UUID
+	acquiredTarget  uuid.UUID
+	acquiredHolder  uuid.UUID
+	acquiredType    models.ChangesetLeaseType
+	acquiredLabel   string
+	acquiredTTL     time.Duration
+	takeoverExpired bool
+	acquireErr      error
+}
+
+func (s *openPRChangesetLeaseStoreStub) AcquireLease(
+	_ context.Context,
+	orgID, sessionID, changesetID, holderID uuid.UUID,
+	holderType models.ChangesetLeaseType,
+	holderLabel string,
+	ttl time.Duration,
+	takeoverExpired bool,
+) (models.SessionChangesetLease, error) {
+	s.acquireCalls++
+	s.acquiredOrgID = orgID
+	s.acquiredSession = sessionID
+	s.acquiredTarget = changesetID
+	s.acquiredHolder = holderID
+	s.acquiredType = holderType
+	s.acquiredLabel = holderLabel
+	s.acquiredTTL = ttl
+	s.takeoverExpired = takeoverExpired
+	return models.SessionChangesetLease{HolderID: holderID}, s.acquireErr
+}
+
+func (s *openPRChangesetLeaseStoreStub) ReleaseLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+
+func TestAcquireOpenPRChangesetLease(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		changeset   models.SessionChangeset
+		acquireErr  error
+		wantAcquire bool
+		wantErr     bool
+	}{
+		{
+			name: "primary workspace remains protected by session quiescence",
+			changeset: models.SessionChangeset{
+				ID: uuid.New(), OrgID: uuid.New(), SessionID: uuid.New(), IsPrimary: true,
+			},
+		},
+		{
+			name: "unmaterialized non-primary changeset does not acquire a lease",
+			changeset: models.SessionChangeset{
+				ID: uuid.New(), OrgID: uuid.New(), SessionID: uuid.New(), IsPrimary: false,
+			},
+		},
+		{
+			name: "materialized non-primary changeset acquires the publication lease",
+			changeset: func() models.SessionChangeset {
+				worktree := "/workspace/stack-child"
+				return models.SessionChangeset{
+					ID: uuid.New(), OrgID: uuid.New(), SessionID: uuid.New(), IsPrimary: false, WorktreePath: &worktree,
+				}
+			}(),
+			wantAcquire: true,
+		},
+		{
+			name: "lease contention prevents publication",
+			changeset: func() models.SessionChangeset {
+				worktree := "/workspace/stack-child"
+				return models.SessionChangeset{
+					ID: uuid.New(), OrgID: uuid.New(), SessionID: uuid.New(), IsPrimary: false, WorktreePath: &worktree,
+				}
+			}(),
+			acquireErr: errors.New("lease held by agent turn"), wantAcquire: true, wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &openPRChangesetLeaseStoreStub{acquireErr: tt.acquireErr}
+			holderID, err := acquireOpenPRChangesetLease(context.Background(), store, tt.changeset)
+
+			if tt.wantErr {
+				require.Error(t, err, "lease contention should be returned to the publication worker")
+				require.Nil(t, holderID, "failed lease acquisition should not return a holder ID")
+			} else {
+				require.NoError(t, err, "supported publication target should complete lease acquisition")
+			}
+			require.Equal(t, tt.wantAcquire, store.acquireCalls == 1, "only materialized non-primary worktrees should acquire a lease")
+			if !tt.wantAcquire || tt.wantErr {
+				return
+			}
+			require.NotNil(t, holderID, "successful lease acquisition should return its holder ID")
+			require.Equal(t, tt.changeset.OrgID, store.acquiredOrgID, "lease should use the changeset organization")
+			require.Equal(t, tt.changeset.SessionID, store.acquiredSession, "lease should use the changeset session")
+			require.Equal(t, tt.changeset.ID, store.acquiredTarget, "lease should protect the publication target")
+			require.Equal(t, *holderID, store.acquiredHolder, "lease holder should match the release token")
+			require.Equal(t, models.ChangesetLeaseTypePublish, store.acquiredType, "publication should use the publish lease type")
+			require.Equal(t, "publish pull request", store.acquiredLabel, "lease should identify direct pull request publication")
+			require.Equal(t, 5*time.Minute, store.acquiredTTL, "publication lease should cover a normal publish attempt")
+			require.True(t, store.takeoverExpired, "publication should recover leases whose owners have expired")
+		})
+	}
+}
+
 func TestOpenPRHandlerCompletedPublicationResumesPostPublicationWork(t *testing.T) {
 	t.Parallel()
 

@@ -410,12 +410,20 @@ func TestCoordinatorRequestPullRequest_ExplicitUserTakesOverParkedAgentIntent(t 
 
 	f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, nil, true, nil)
 	maxPasses := 2
+	issueSnapshotID := uuid.New()
+	parkedPayload := json.RawMessage(`{"session_id":"` + f.sessionID.String() + `","changeset_id":"` + f.changesetID.String() + `","org_id":"` + f.orgID.String() + `","publication_source":"agent_tool","publication_queue":"agent","publication_handoff_mode":"draft_first","draft":true,"author_mode":"app","issue_snapshot_id":"` + issueSnapshotID.String() + `"}`)
 	f.publications.captured = &models.SessionPublication{
 		ID: uuid.New(), OrgID: f.orgID, SessionID: f.sessionID, ChangesetID: f.changesetID,
 		Source: models.SessionPublicationSourceAgentTool, State: models.SessionPublicationStateReviewPending,
+		HandoffMode: models.PRHandoffModeDraftFirst, RequestPayload: parkedPayload,
 		ReviewGateState: models.SessionPublicationReviewGatePending, ReviewMaxPasses: &maxPasses,
 	}
 	f.publications.ensureReturnsSource = models.SessionPublicationSourceAgentTool
+	// The repository changed after the intent was recorded. A manual takeover
+	// must keep the durable draft-first contract rather than reinterpret it.
+	f.coordinator.SetRepositoryStore(coordinatorRepositoryStore{repository: models.Repository{
+		ID: f.repositoryID, OrgID: f.orgID, Settings: json.RawMessage(`{"pr_handoff_mode":"pre_publish"}`),
+	}})
 	f.coordinator.SetPublicationEnabled(false)
 	requesterID := uuid.New()
 
@@ -430,7 +438,78 @@ func TestCoordinatorRequestPullRequest_ExplicitUserTakesOverParkedAgentIntent(t 
 	require.Equal(t, models.SessionPublicationReviewGatePending, f.publications.captured.ReviewGateState, "manual takeover must not weaken recorded review")
 	require.Equal(t, string(models.SessionPublicationSourceAgentTool), f.jobs.payload["publication_source"], "queued work should preserve the original entry-point provenance")
 	require.Equal(t, string(models.SessionPublicationSourceUser), f.jobs.payload["publication_execution_source"], "queued work should use the explicit user as runtime authority")
+	require.Equal(t, string(models.PRHandoffModeDraftFirst), f.jobs.payload["publication_handoff_mode"], "manual takeover should retain the recorded handoff mode")
+	require.Equal(t, true, f.jobs.payload["draft"], "manual takeover should retain the original draft choice")
+	require.Equal(t, "app", f.jobs.payload["author_mode"], "manual takeover should retain the original authorship choice")
+	require.Equal(t, issueSnapshotID.String(), f.jobs.payload["issue_snapshot_id"], "manual takeover should retain the original issue snapshot")
 	require.NotNil(t, f.jobs.payload, "manual takeover should resume the parked durable job")
+}
+
+func TestCoordinatorRequestPullRequest_NonPrimarySafetyGates(t *testing.T) {
+	t.Parallel()
+
+	disabled := false
+	tests := []struct {
+		name         string
+		materialized bool
+		orgPolicy    models.AutomaticFollowThroughOrgSettings
+		role         models.Role
+		wantErrCode  ErrorCode
+		wantQueued   bool
+		wantStatus   ResultStatus
+	}{
+		{
+			name: "unmaterialized changeset is rejected before intent creation",
+			role: models.RoleMember, wantErrCode: ErrorWorkspaceNotReady,
+		},
+		{
+			name:         "materialized changeset queues its own targeted review",
+			materialized: true, role: models.RoleMember, wantQueued: true, wantStatus: ResultReviewInProgress,
+		},
+		{
+			name:         "builder evidence cannot attest a separate worktree even with publication review off",
+			materialized: true,
+			orgPolicy:    models.AutomaticFollowThroughOrgSettings{ReviewBeforePR: &disabled},
+			role:         models.RoleBuilder, wantErrCode: ErrorSessionNotEligible,
+		},
+		{
+			name:         "member can publish a materialized changeset when review is explicitly off",
+			materialized: true,
+			orgPolicy:    models.AutomaticFollowThroughOrgSettings{ReviewBeforePR: &disabled},
+			role:         models.RoleMember, wantQueued: true, wantStatus: ResultPRQueued,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newCoordinatorFixture(t, tt.orgPolicy, nil, func(_ *models.Session, changeset *models.SessionChangeset) {
+				changeset.IsPrimary = false
+				if tt.materialized {
+					worktree := "/workspace/stack-child"
+					changeset.WorktreePath = &worktree
+				}
+			}, true, nil)
+			requesterID := uuid.New()
+
+			result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{
+				ChangesetID: &f.changesetID,
+				Source:      models.SessionPublicationSourceUser, TriggerKind: models.SessionPublicationTriggerExplicitAction,
+				RequestedByUserID: &requesterID, RequestedRole: string(tt.role),
+			})
+
+			if tt.wantErrCode != "" {
+				var intentErr *Error
+				require.ErrorAs(t, err, &intentErr, "unsupported non-primary publication should return a typed error")
+				require.Equal(t, tt.wantErrCode, intentErr.Code, "non-primary publication should fail at the expected safety gate")
+				require.Nil(t, f.jobs.payload, "rejected non-primary publication must not enqueue work")
+				return
+			}
+			require.NoError(t, err, "supported non-primary publication should be coordinated")
+			require.Equal(t, tt.wantStatus, result.Status, "non-primary publication should report its review-aware queue state")
+			require.Equal(t, tt.wantQueued, f.jobs.payload != nil, "supported non-primary publication should enqueue work")
+		})
+	}
 }
 
 func TestCoordinatorRequestPullRequest_DraftBypassesReviewExecutionPause(t *testing.T) {

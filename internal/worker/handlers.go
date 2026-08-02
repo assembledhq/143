@@ -11003,6 +11003,46 @@ func stackParentPublicationBlocked(parent models.SessionChangeset, parentPublica
 	return parent.PRCreationState == models.PRCreationStateFailed
 }
 
+type openPRChangesetLeaseStore interface {
+	AcquireLease(
+		ctx context.Context,
+		orgID, sessionID, changesetID, holderID uuid.UUID,
+		holderType models.ChangesetLeaseType,
+		holderLabel string,
+		ttl time.Duration,
+		takeoverExpired bool,
+	) (models.SessionChangesetLease, error)
+	ReleaseLease(ctx context.Context, orgID, sessionID, changesetID, holderID uuid.UUID) error
+}
+
+func acquireOpenPRChangesetLease(
+	ctx context.Context,
+	store openPRChangesetLeaseStore,
+	changeset models.SessionChangeset,
+) (*uuid.UUID, error) {
+	// The session snapshot/quiescence guard remains authoritative for the
+	// primary workspace. Separate worktrees use changeset leases, so publication
+	// must participate in that protocol before it reads, commits, or pushes one.
+	if store == nil || changeset.IsPrimary || changeset.WorktreePath == nil {
+		return nil, nil
+	}
+	holderID := uuid.New()
+	if _, err := store.AcquireLease(
+		ctx,
+		changeset.OrgID,
+		changeset.SessionID,
+		changeset.ID,
+		holderID,
+		models.ChangesetLeaseTypePublish,
+		"publish pull request",
+		5*time.Minute,
+		true,
+	); err != nil {
+		return nil, err
+	}
+	return &holderID, nil
+}
+
 func publicationRequestGenerationAt(ctx context.Context) time.Time {
 	if createdAt, ok := jobctx.JobCreatedAtFromContext(ctx); ok && !createdAt.IsZero() {
 		return createdAt.UTC()
@@ -11180,6 +11220,22 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 				Str("publication_execution_source", string(executionSource)).
 				Msg("open_pr parked by publication execution kill switch")
 			return nil
+		}
+		leaseHolderID, err := acquireOpenPRChangesetLease(ctx, stores.SessionChangesets, targetChangeset)
+		if err != nil {
+			return fmt.Errorf("acquire changeset publication lease: %w", err)
+		}
+		if leaseHolderID != nil {
+			defer func() {
+				if releaseErr := stores.SessionChangesets.ReleaseLease(
+					context.WithoutCancel(ctx), orgID, runID, targetChangeset.ID, *leaseHolderID,
+				); releaseErr != nil {
+					logger.Warn().Err(releaseErr).
+						Str("session_id", runID.String()).
+						Str("changeset_id", targetChangeset.ID.String()).
+						Msg("failed to release pull request publication lease")
+				}
+			}()
 		}
 		publicationQueue := models.SessionPublicationJobQueue(input.PublicationQueue)
 		if publicationQueue == "" {

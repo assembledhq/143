@@ -4,8 +4,8 @@ import { renderWithProviders, screen, userEvent, waitFor, within } from '@/test/
 import { act } from '@testing-library/react';
 import { server } from '@/test/mocks/server';
 import { mockSessions, mockPR } from '@/test/mocks/handlers';
-import { SessionDetailContent } from './session-detail-content';
-import type { Session, SessionDetail, SingleResponse } from '@/lib/types';
+import { publicationIsVolatile, SessionDetailContent } from './session-detail-content';
+import type { Session, SessionDetail, SessionPublication, SingleResponse } from '@/lib/types';
 import { installSessionDetailPageTestHooks, mockSessionDetailWithLazyDiff, setMobileViewport } from './session-detail-test-kit';
 
 const { toast } = vi.hoisted(() => ({
@@ -56,6 +56,62 @@ vi.mock('next/image', () => ({
 }));
 
 installSessionDetailPageTestHooks({ toast, routerPush });
+
+describe('publication polling', () => {
+  const publication: SessionPublication = {
+    id: 'publication-1',
+    session_id: 'session-1',
+    changeset_id: 'changeset-1',
+    repository_id: 'repository-1',
+    state: 'review_pending',
+    source: 'agent_tool',
+    review_gate_state: 'pending',
+    base_branch: 'main',
+    head_branch: 'feature',
+    attempt_count: 0,
+    requested_at: '2026-08-02T00:00:00Z',
+    updated_at: '2026-08-02T00:00:00Z',
+  };
+
+  it('stops polling while publication execution is administratively paused', () => {
+    expect(publicationIsVolatile(publication, {
+      create_pr_when_agent_ready: true,
+      create_pr_source: 'automation',
+      review_before_pr: true,
+      review_execution_enabled: true,
+      agent_publication_execution_enabled: false,
+      review_source: 'automation',
+      review_max_passes: 2,
+      pr_handoff_mode: 'pre_publish',
+    })).toBe(false);
+  });
+
+  it('stops polling while review execution is administratively paused', () => {
+    expect(publicationIsVolatile({ ...publication, source: 'user' }, {
+      create_pr_when_agent_ready: true,
+      create_pr_source: 'automation',
+      review_before_pr: true,
+      review_execution_enabled: false,
+      agent_publication_execution_enabled: true,
+      review_source: 'automation',
+      review_max_passes: 2,
+      pr_handoff_mode: 'pre_publish',
+    })).toBe(false);
+  });
+
+  it('keeps polling an executable non-terminal publication', () => {
+    expect(publicationIsVolatile(publication, {
+      create_pr_when_agent_ready: true,
+      create_pr_source: 'automation',
+      review_before_pr: true,
+      review_execution_enabled: true,
+      agent_publication_execution_enabled: true,
+      review_source: 'automation',
+      review_max_passes: 2,
+      pr_handoff_mode: 'pre_publish',
+    })).toBe(true);
+  });
+});
 
 describe('SessionDetailPage PR creation', () => {
   beforeEach(() => {

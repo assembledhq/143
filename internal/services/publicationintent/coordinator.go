@@ -326,6 +326,9 @@ func (c *Coordinator) RequestPullRequest(
 	if changeset.MaterializationError != nil || changeset.RestackConfirmationRequired {
 		return nil, &Error{Code: ErrorWorkspaceNotReady, Err: errors.New("primary changeset is not in a publishable state")}
 	}
+	if !changeset.IsPrimary && changeset.WorktreePath == nil {
+		return nil, &Error{Code: ErrorWorkspaceNotReady, Err: errors.New("non-primary changeset must be materialized before publication")}
+	}
 	headBranch, desiredHeadSHA, err := resolvePublicationTarget(session, changeset)
 	if err != nil {
 		return nil, err
@@ -402,6 +405,9 @@ func (c *Coordinator) RequestPullRequest(
 		policy.ReviewSource = existingPublication.ReviewPolicySource
 	}
 	reviewBypassed := bypassRequested
+	if !changeset.IsPrimary && req.RequestedRole == string(models.RoleBuilder) {
+		return nil, &Error{Code: ErrorSessionNotEligible, Err: errors.New("builder review evidence does not cover a separate changeset worktree")}
+	}
 	reviewExecutionBlocked := reviewRequired && !reviewBypassed && !c.ReviewExecutionEnabled(req.Source)
 	reviewPolicySource := policy.ReviewSource
 	if reviewBypassed {
@@ -419,42 +425,56 @@ func (c *Coordinator) RequestPullRequest(
 		queue = "default"
 		priority = 0
 	}
-	payload := map[string]any{
-		"session_id":                 sessionID.String(),
-		"changeset_id":               changeset.ID.String(),
-		"org_id":                     orgID.String(),
-		"publication_source":         string(req.Source),
-		"publication_queue":          string(publicationQueue),
-		"publication_trigger_kind":   string(req.TriggerKind),
-		"publication_handoff_mode":   string(handoffMode),
-		"automatic_pr_policy_source": string(automaticSource),
-		"review_policy_source":       string(reviewPolicySource),
-		"initiated_by_user_id":       session.TriggeredByUserID,
-	}
+	payload := map[string]any{}
 	if manualTakeoverRequested && !bypassRequested {
-		// Keep source as immutable entry-point provenance while allowing the
-		// explicit user request to become the runtime authority for kill-switch
-		// and authorization checks.
+		// A takeover transfers only runtime authority. Preserve the original
+		// handoff mode and every caller option (draft, authorship, issue snapshot,
+		// merge intent) so a later settings change or an option-less Resume click
+		// cannot reinterpret the durable request.
+		if err := json.Unmarshal(existingPublication.RequestPayload, &payload); err != nil {
+			return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("decode parked publication request: %w", err)}
+		}
+		handoffMode = existingPublication.HandoffMode
+		payload["session_id"] = sessionID.String()
+		payload["changeset_id"] = changeset.ID.String()
+		payload["org_id"] = orgID.String()
 		payload["publication_source"] = string(existingPublication.Source)
 		payload["publication_execution_source"] = string(req.Source)
-	}
-	if req.IssueSnapshotID != nil {
-		payload["issue_snapshot_id"] = req.IssueSnapshotID.String()
-	}
-	if handoffMode == models.PRHandoffModeDraftFirst {
-		payload["draft"] = true
-	} else if req.Draft != nil {
-		payload["draft"] = *req.Draft
-	}
-	if req.AuthorMode != "" && req.AuthorMode != "auto" {
-		payload["author_mode"] = req.AuthorMode
-	}
-	if req.MergeWhenReady {
-		payload["merge_when_ready"] = true
-		payload["requested_by_user_id"] = req.RequestedByUserID
-	}
-	if req.RequestedRole != "" {
-		payload["requested_role"] = req.RequestedRole
+		payload["publication_queue"] = string(publicationQueue)
+		if req.RequestedRole != "" {
+			payload["requested_role"] = req.RequestedRole
+		}
+	} else {
+		payload = map[string]any{
+			"session_id":                 sessionID.String(),
+			"changeset_id":               changeset.ID.String(),
+			"org_id":                     orgID.String(),
+			"publication_source":         string(req.Source),
+			"publication_queue":          string(publicationQueue),
+			"publication_trigger_kind":   string(req.TriggerKind),
+			"publication_handoff_mode":   string(handoffMode),
+			"automatic_pr_policy_source": string(automaticSource),
+			"review_policy_source":       string(reviewPolicySource),
+			"initiated_by_user_id":       session.TriggeredByUserID,
+		}
+		if req.IssueSnapshotID != nil {
+			payload["issue_snapshot_id"] = req.IssueSnapshotID.String()
+		}
+		if handoffMode == models.PRHandoffModeDraftFirst {
+			payload["draft"] = true
+		} else if req.Draft != nil {
+			payload["draft"] = *req.Draft
+		}
+		if req.AuthorMode != "" && req.AuthorMode != "auto" {
+			payload["author_mode"] = req.AuthorMode
+		}
+		if req.MergeWhenReady {
+			payload["merge_when_ready"] = true
+			payload["requested_by_user_id"] = req.RequestedByUserID
+		}
+		if req.RequestedRole != "" {
+			payload["requested_role"] = req.RequestedRole
+		}
 	}
 	encodedPayload, err := json.Marshal(payload)
 	if err != nil {

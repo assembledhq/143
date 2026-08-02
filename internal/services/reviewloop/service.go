@@ -544,11 +544,12 @@ func (s *Service) sendPlain(ctx context.Context, loop models.SessionReviewLoop, 
 		return nil, fmt.Errorf("review loop has no thread")
 	}
 	input := threadsvc.SendMessageInput{
-		SessionID: loop.SessionID,
-		OrgID:     loop.OrgID,
-		ThreadID:  *loop.ThreadID,
-		UserID:    userID,
-		Message:   message,
+		SessionID:   loop.SessionID,
+		OrgID:       loop.OrgID,
+		ThreadID:    *loop.ThreadID,
+		ChangesetID: loop.ChangesetID,
+		UserID:      userID,
+		Message:     message,
 	}
 	for _, opt := range opts {
 		opt(&input)

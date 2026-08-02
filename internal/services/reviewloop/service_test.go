@@ -176,6 +176,7 @@ func TestService_StartPublicationRequiresAndPersistsEvidence(t *testing.T) {
 			require.Equal(t, tt.changesetID, store.createdLoops[0].ChangesetID, "publication review should persist the changeset evidence")
 			require.Equal(t, tt.revision, store.createdLoops[0].WorkspaceRevision, "publication review should persist the workspace revision")
 			require.Equal(t, tt.desiredHeadSHA, store.createdLoops[0].DesiredHeadSHA, "publication review should persist the desired head")
+			require.Equal(t, tt.changesetID, threads.sent[0].ChangesetID, "publication review should execute in the target changeset worktree")
 		})
 	}
 }

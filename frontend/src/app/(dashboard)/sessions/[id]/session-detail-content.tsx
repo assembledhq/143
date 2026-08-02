@@ -251,8 +251,21 @@ function publicationHasReviewWarning(publication: SessionPublication) {
       publication.state !== "ready_to_publish");
 }
 
-function publicationIsVolatile(publication: SessionPublication) {
-  return publication.review_gate_state !== "needs_human" &&
+export function publicationExecutionIsPaused(
+  publication: SessionPublication,
+  policy?: SessionDetail["publication_policy"],
+) {
+  return ((publication.execution_source ?? publication.source) === "agent_tool" &&
+      policy?.agent_publication_execution_enabled === false) ||
+    (publication.review_gate_state === "pending" && policy?.review_execution_enabled === false);
+}
+
+export function publicationIsVolatile(
+  publication: SessionPublication,
+  policy?: SessionDetail["publication_policy"],
+) {
+  return !publicationExecutionIsPaused(publication, policy) &&
+    publication.review_gate_state !== "needs_human" &&
     publication.state !== "completed" &&
     publication.state !== "completed_noop" &&
     publication.state !== "terminal_failed";
@@ -3748,7 +3761,8 @@ export function SessionDetailContent({ id }: { id: string }) {
       if (isProvisionalSessionDetail(s)) return false;
       const sessionVolatile = workingStatusesSet.has(s.status);
       const threadVolatile = (s.threads ?? []).some((thread) => workingStatusesSet.has(thread.status));
-      const publicationVolatile = (s.publications ?? []).some(publicationIsVolatile);
+      const publicationVolatile = (s.publications ?? []).some((publication) =>
+        publicationIsVolatile(publication, s.publication_policy));
       const serverInFlight = s.pr_creation_state === "queued" || s.pr_creation_state === "pushing";
       const waitingForServer = localPRState !== "idle" &&
         s.pr_creation_state !== "failed" &&
@@ -6617,11 +6631,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               pullRequest={selectedPR}
               canManage={canManageSession}
               canBypassReview={user?.role === "admin" || user?.role === "member"}
-              executionPaused={
-                ((selectedPublication.execution_source ?? selectedPublication.source) === "agent_tool" &&
-                  session.publication_policy?.agent_publication_execution_enabled === false) ||
-                (selectedPublication.review_gate_state === "pending" && session.publication_policy?.review_execution_enabled === false)
-              }
+              executionPaused={publicationExecutionIsPaused(selectedPublication, session.publication_policy)}
               reviewExecutionPaused={
                 selectedPublication.review_gate_state === "pending" &&
                 session.publication_policy?.review_execution_enabled === false
