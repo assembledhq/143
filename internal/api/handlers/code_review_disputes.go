@@ -1,0 +1,281 @@
+package handlers
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
+	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+)
+
+func (h *CodeReviewHandler) CreateDispute(w http.ResponseWriter, r *http.Request) {
+	if h.disputes == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "CODE_REVIEW_DISPUTES_UNAVAILABLE", "code review disputes are unavailable")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SESSION_ID", "invalid code review session ID")
+		return
+	}
+	var req struct {
+		Body                 string                            `json:"body"`
+		ContestedReasonCodes []models.CodeReviewRiskReasonCode `json:"contested_reason_codes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	req.Body = strings.TrimSpace(req.Body)
+	if req.Body == "" || !utf8.ValidString(req.Body) || utf8.RuneCountInString(req.Body) > models.CodeReviewDisputeBodyMaxRunes {
+		writeError(w, r, http.StatusUnprocessableEntity, "INVALID_DISPUTE_BODY", "body must contain between 1 and 8000 valid UTF-8 characters")
+		return
+	}
+	for _, code := range req.ContestedReasonCodes {
+		if err := code.Validate(); err != nil {
+			writeError(w, r, http.StatusUnprocessableEntity, "INVALID_REASON_CODE", "contested_reason_codes contains an invalid code", err)
+			return
+		}
+	}
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user is required")
+		return
+	}
+	login := user.Name
+	if user.GitHubLogin != nil {
+		login = *user.GitHubLogin
+	}
+	dispute, err := h.disputes.FileInApp(r.Context(), codereviewsvc.FileCodeReviewDisputeInput{
+		OrgID: orgID, SessionID: sessionID, FiledByUserID: &user.ID, FiledByLogin: login,
+		AuthorAssociation: "MEMBER", RepositoryVisibility: "unknown", Body: req.Body,
+		ContestedReasonCodes: req.ContestedReasonCodes, Source: models.CodeReviewDisputeSourceAppUI,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			writeError(w, r, http.StatusNotFound, "CODE_REVIEW_NOT_FOUND", "code review not found")
+		case errors.Is(err, codereviewsvc.ErrCodeReviewDisputeNotReady):
+			writeError(w, r, http.StatusConflict, "CODE_REVIEW_NOT_DISPUTABLE", "the code review does not have a completed decision yet")
+		case errors.Is(err, codereviewsvc.ErrCodeReviewDisputeInvalidBody):
+			writeError(w, r, http.StatusUnprocessableEntity, "INVALID_DISPUTE_BODY", "body must contain between 1 and 8000 valid UTF-8 characters")
+		default:
+			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_DISPUTE_CREATE_FAILED", "failed to file code review dispute", err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusCreated, models.SingleResponse[models.CodeReviewDispute]{Data: dispute})
+	resourceID := dispute.ID.String()
+	emitUserAuditWithSession(h.audit, r, models.AuditActionCodeReviewDisputeFiled, models.AuditResourceCodeReviewDispute, &resourceID, &sessionID, nil, nil)
+}
+
+func (h *CodeReviewHandler) ListSessionDisputes(w http.ResponseWriter, r *http.Request) {
+	if h.disputes == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "CODE_REVIEW_DISPUTES_UNAVAILABLE", "code review disputes are unavailable")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SESSION_ID", "invalid code review session ID")
+		return
+	}
+	cursor, ok := parseOptionalDisputeCursor(w, r)
+	if !ok {
+		return
+	}
+	page, err := h.disputes.ListBySession(r.Context(), orgID, sessionID, cursor, 50)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "CODE_REVIEW_NOT_FOUND", "code review not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_DISPUTES_LIST_FAILED", "failed to list code review disputes", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, disputeListResponse(page))
+}
+
+func (h *CodeReviewHandler) EscalateDispute(w http.ResponseWriter, r *http.Request) {
+	if h.disputes == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "CODE_REVIEW_DISPUTES_UNAVAILABLE", "code review disputes are unavailable")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	disputeID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_DISPUTE_ID", "invalid dispute ID")
+		return
+	}
+	var req struct {
+		Note string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user is required")
+		return
+	}
+	dispute, err := h.disputes.Escalate(r.Context(), orgID, disputeID, user.ID, req.Note)
+	if err != nil {
+		switch {
+		case errors.Is(err, codereviewsvc.ErrCodeReviewDisputeNotEscalatable), errors.Is(err, pgx.ErrNoRows):
+			writeError(w, r, http.StatusConflict, "DISPUTE_NOT_ESCALATABLE", "this dispute cannot be sent to a policy owner")
+		default:
+			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_DISPUTE_ESCALATE_FAILED", "failed to send dispute to a policy owner", err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewDispute]{Data: dispute})
+}
+
+func (h *CodeReviewHandler) ListDisputeQueue(w http.ResponseWriter, r *http.Request) {
+	if h.disputes == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "CODE_REVIEW_DISPUTES_UNAVAILABLE", "code review disputes are unavailable")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	filters := models.CodeReviewDisputeListFilters{Limit: 50}
+	if raw := strings.TrimSpace(r.URL.Query().Get("adjudication_status")); raw != "" {
+		value := models.CodeReviewDisputeAdjudicationStatus(raw)
+		if err := value.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_ADJUDICATION_STATUS", "invalid adjudication_status", err)
+			return
+		}
+		filters.AdjudicationStatus = &value
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("repository_id")); raw != "" {
+		value, err := uuid.Parse(raw)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
+			return
+		}
+		filters.RepositoryID = &value
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("direction")); raw != "" {
+		value := models.CodeReviewDisputeDirection(raw)
+		if err := value.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_DIRECTION", "invalid direction", err)
+			return
+		}
+		filters.Direction = &value
+	}
+	cursor, ok := parseOptionalDisputeCursor(w, r)
+	if !ok {
+		return
+	}
+	filters.Cursor = cursor
+	page, err := h.disputes.ListQueue(r.Context(), orgID, filters)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_DISPUTE_QUEUE_FAILED", "failed to list the code review dispute queue", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, disputeListResponse(page))
+}
+
+func (h *CodeReviewHandler) UpdateDispute(w http.ResponseWriter, r *http.Request) {
+	if h.disputes == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "CODE_REVIEW_DISPUTES_UNAVAILABLE", "code review disputes are unavailable")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	disputeID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_DISPUTE_ID", "invalid dispute ID")
+		return
+	}
+	var req struct {
+		ExpectedVersion    int                                         `json:"expected_version"`
+		AdjudicationStatus *models.CodeReviewDisputeAdjudicationStatus `json:"adjudication_status"`
+		AdjudicationNote   *string                                     `json:"adjudication_note"`
+		TrustOverride      json.RawMessage                             `json:"trust_override"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	if req.AdjudicationStatus != nil && !validCodeReviewDisputeAdjudicationUpdate(*req.AdjudicationStatus) {
+		writeError(w, r, http.StatusUnprocessableEntity, "INVALID_ADJUDICATION_STATUS", "adjudication_status must be upheld, rejected, or needs_context")
+		return
+	}
+	trustOverridePresent := req.TrustOverride != nil
+	var trustOverride *bool
+	if trustOverridePresent && string(req.TrustOverride) != "null" {
+		var value bool
+		if err := json.Unmarshal(req.TrustOverride, &value); err != nil {
+			writeError(w, r, http.StatusUnprocessableEntity, "INVALID_TRUST_OVERRIDE", "trust_override must be true, false, or null")
+			return
+		}
+		trustOverride = &value
+	}
+	if req.ExpectedVersion <= 0 || (req.AdjudicationStatus == nil && !trustOverridePresent) {
+		writeError(w, r, http.StatusUnprocessableEntity, "INVALID_DISPUTE_UPDATE", "expected_version and at least one update are required")
+		return
+	}
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user is required")
+		return
+	}
+	dispute, err := h.disputes.Adjudicate(r.Context(), orgID, disputeID, user.ID, models.CodeReviewDisputeAdjudicationUpdate{
+		ExpectedVersion: req.ExpectedVersion, AdjudicationStatus: req.AdjudicationStatus,
+		AdjudicationNote: req.AdjudicationNote, TrustOverride: trustOverride,
+		TrustOverridePresent: trustOverridePresent,
+	})
+	if err != nil {
+		if errors.Is(err, db.ErrCodeReviewDisputeVersionConflict) {
+			writeError(w, r, http.StatusConflict, "CODE_REVIEW_DISPUTE_VERSION_CONFLICT", "the dispute changed; refresh and try again")
+			return
+		}
+		writeError(w, r, http.StatusUnprocessableEntity, "CODE_REVIEW_DISPUTE_UPDATE_FAILED", "failed to update code review dispute", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewDispute]{Data: dispute})
+	resourceID := dispute.ID.String()
+	emitUserAudit(h.audit, r, models.AuditActionCodeReviewDisputeAdjudicated, models.AuditResourceCodeReviewDispute, &resourceID, nil)
+}
+
+func validCodeReviewDisputeAdjudicationUpdate(status models.CodeReviewDisputeAdjudicationStatus) bool {
+	switch status {
+	case models.CodeReviewDisputeAdjudicationUpheld,
+		models.CodeReviewDisputeAdjudicationRejected,
+		models.CodeReviewDisputeAdjudicationNeedsContext:
+		return true
+	default:
+		return false
+	}
+}
+
+func parseOptionalDisputeCursor(w http.ResponseWriter, r *http.Request) (*uuid.UUID, bool) {
+	raw := strings.TrimSpace(r.URL.Query().Get("cursor"))
+	if raw == "" {
+		return nil, true
+	}
+	value, err := uuid.Parse(raw)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid cursor")
+		return nil, false
+	}
+	return &value, true
+}
+
+func disputeListResponse(page models.CodeReviewDisputePage) models.ListResponse[models.CodeReviewDispute] {
+	meta := models.PaginationMeta{}
+	if page.NextCursor != nil {
+		meta.NextCursor = page.NextCursor.String()
+	}
+	return models.ListResponse[models.CodeReviewDispute]{Data: page.Items, Meta: meta}
+}

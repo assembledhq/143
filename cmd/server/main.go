@@ -470,6 +470,8 @@ func main() {
 
 		workerPullRequestFeedbackStore := db.NewPullRequestFeedbackStore(pool)
 		workerPullRequestFeedbackStore.SetJobStore(jobStore)
+		workerCodeReviewDisputeStore := db.NewCodeReviewDisputeStore(pool)
+		workerCodeReviewDisputeStore.SetJobStore(jobStore)
 		stores := &worker.Stores{
 			Issues:              issueStore,
 			Users:               db.NewUserStore(pool),
@@ -504,6 +506,7 @@ func main() {
 			AutomationRuns:      automationRunStore,
 			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
 			CodeReviews:         codeReviewStore,
+			CodeReviewDisputes:  workerCodeReviewDisputeStore,
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 			Previews:            previewStore,
 			PullRequests:        pullRequestStore,
@@ -1756,6 +1759,22 @@ func buildServices(
 		},
 	)
 	codeReviewLifecycle.SetReviewStatusCommentJobs(jobStore)
+	codeReviewDisputeStore := db.NewCodeReviewDisputeStore(pool)
+	codeReviewDisputeStore.SetJobStore(jobStore)
+	codeReviewDisputes := codereviewsvc.NewDisputeService(
+		codeReviewDisputeStore,
+		codeReviewLifecycleStore,
+		pullRequestStore,
+		jobStore,
+		llmClient,
+		cfg.FrontendURL,
+		logger,
+		codereviewsvc.DisputeConfig{
+			ReassessmentsEnabled:   cfg.CodeReviewDisputeReassessmentsEnabled,
+			MaxActiveReassessments: cfg.CodeReviewDisputeMaxActiveReassessments,
+		},
+	)
+	codeReviewDisputes.SetAuditEmitter(auditEmitter)
 	svc := &worker.Services{
 		Orchestrator:    orchestrator,
 		PR:              prService,
@@ -1771,19 +1790,21 @@ func buildServices(
 			ghSvc,
 			codereviewsvc.WithGitHubSubmitterHTTPClient(githubtelemetry.NewHTTPClient(15*time.Second, logger)),
 		),
-		CodeReviewLifecycle: codeReviewLifecycle,
-		CodingAgents:        agentEnv,
-		GitHubOrgRoster:     ghSvc,
-		Snapshots:           snapshotStore,
-		TitleService:        titleService,
-		Linear:              linearService,
-		SlackbotMetrics:     workerSlackbotMetrics,
-		Redis:               redisClient,
-		FrontendURL:         cfg.FrontendURL,
-		ReviewLoops:         reviewLoopSvc,
-		RuntimeSampler:      runtimeSampler,
-		SandboxGC:           sandboxGC,
-		SandboxAuthBroker:   sandboxAuthBroker,
+		CodeReviewLifecycle:        codeReviewLifecycle,
+		CodeReviewDisputes:         codeReviewDisputes,
+		CodeReviewDisputePublisher: prService,
+		CodingAgents:               agentEnv,
+		GitHubOrgRoster:            ghSvc,
+		Snapshots:                  snapshotStore,
+		TitleService:               titleService,
+		Linear:                     linearService,
+		SlackbotMetrics:            workerSlackbotMetrics,
+		Redis:                      redisClient,
+		FrontendURL:                cfg.FrontendURL,
+		ReviewLoops:                reviewLoopSvc,
+		RuntimeSampler:             runtimeSampler,
+		SandboxGC:                  sandboxGC,
+		SandboxAuthBroker:          sandboxAuthBroker,
 	}
 	pagerDutyTriggerer := automations.NewPagerDutyEventTriggerService(
 		db.NewAutomationEventTriggerStore(pool),

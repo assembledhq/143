@@ -67,9 +67,13 @@ func upsertPRFeedbackItem(ctx context.Context, q DBTX, orgID uuid.UUID, item *mo
 	 diff_hunk=EXCLUDED.diff_hunk,comment_commit_sha=EXCLUDED.comment_commit_sha,observed_head_sha=EXCLUDED.observed_head_sha,
 	 intent=EXCLUDED.intent,ignore_reason=EXCLUDED.ignore_reason,provider_created_at=COALESCE(pull_request_feedback_items.provider_created_at,EXCLUDED.provider_created_at),
 	 provider_updated_at=EXCLUDED.provider_updated_at, updated_at=now(),
- status=CASE WHEN pull_request_feedback_items.body_hash IS DISTINCT FROM EXCLUDED.body_hash THEN 'pending' ELSE pull_request_feedback_items.status END,
- batch_id=CASE WHEN pull_request_feedback_items.body_hash IS DISTINCT FROM EXCLUDED.body_hash THEN NULL ELSE pull_request_feedback_items.batch_id END,
- automatic_attempt_count=CASE WHEN pull_request_feedback_items.body_hash IS DISTINCT FROM EXCLUDED.body_hash THEN 0 ELSE pull_request_feedback_items.automatic_attempt_count END
+ status=CASE
+   WHEN EXCLUDED.status='ignored' THEN 'ignored'
+   WHEN pull_request_feedback_items.body_hash IS DISTINCT FROM EXCLUDED.body_hash THEN 'pending'
+   ELSE pull_request_feedback_items.status
+ END,
+ batch_id=CASE WHEN EXCLUDED.status='ignored' OR pull_request_feedback_items.body_hash IS DISTINCT FROM EXCLUDED.body_hash THEN NULL ELSE pull_request_feedback_items.batch_id END,
+ automatic_attempt_count=CASE WHEN EXCLUDED.status='ignored' OR pull_request_feedback_items.body_hash IS DISTINCT FROM EXCLUDED.body_hash THEN 0 ELSE pull_request_feedback_items.automatic_attempt_count END
  WHERE pull_request_feedback_items.org_id=EXCLUDED.org_id
  RETURNING ` + prFeedbackItemColumns
 	args := pgx.NamedArgs{"org_id": orgID, "pull_request_id": item.PullRequestID, "surface": item.Surface, "provider_object_id": item.ProviderObjectID, "github_delivery_id": item.GitHubDeliveryID, "github_review_id": item.GitHubReviewID, "github_thread_root_comment_id": item.GitHubThreadRootCommentID, "in_reply_to_comment_id": item.InReplyToCommentID, "github_app_id": item.GitHubAppID, "github_app_slug": item.GitHubAppSlug, "author_login": item.AuthorLogin, "author_type": item.AuthorType, "author_association": item.AuthorAssociation, "bot_eligibility_source": item.BotEligibilitySource, "body": item.Body, "body_hash": item.BodyHash, "provider_finding_key": item.ProviderFindingKey, "finding_fingerprint": item.FindingFingerprint, "path": item.Path, "line": item.Line, "side": item.Side, "diff_hunk": item.DiffHunk, "comment_commit_sha": item.CommentCommitSHA, "observed_head_sha": item.ObservedHeadSHA, "intent": item.Intent, "status": item.Status, "ignore_reason": item.IgnoreReason, "provider_created_at": item.ProviderCreatedAt, "provider_updated_at": item.ProviderUpdatedAt}
@@ -108,6 +112,12 @@ func (s *PullRequestFeedbackStore) Ingest(ctx context.Context, delivery *models.
 	delivery.ID = deliveryID
 	if err := upsertPRFeedbackItem(ctx, tx, delivery.OrgID, item); err != nil {
 		return false, err
+	}
+	if item.Status == models.PRFeedbackItemStatusIgnored {
+		if err := tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf("commit record-only PR feedback ingest: %w", err)
+		}
+		return true, nil
 	}
 	if _, err := tx.Exec(ctx, `UPDATE pull_request_feedback_batches SET debounce_until=LEAST(max_collect_until,now()+interval '5 seconds'),updated_at=now() WHERE org_id=$1 AND pull_request_id=$2 AND status='collecting'`, delivery.OrgID, item.PullRequestID); err != nil {
 		return false, fmt.Errorf("extend PR feedback collection window: %w", err)

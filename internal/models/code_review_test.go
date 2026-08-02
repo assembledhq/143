@@ -281,6 +281,8 @@ func TestCodeReviewPolicyConfigValidate(t *testing.T) {
 		{name: "rejects invalid UTF-8 approval policy", mutate: func(c *CodeReviewPolicyConfig) { c.AutomatedApprovalPolicy = string([]byte{0xff}) }, expectErr: true},
 		{name: "rejects zero inline comments", mutate: func(c *CodeReviewPolicyConfig) { c.InlineCommentLimit = 0 }, expectErr: true},
 		{name: "rejects too many inline comments", mutate: func(c *CodeReviewPolicyConfig) { c.InlineCommentLimit = 11 }, expectErr: true},
+		{name: "rejects too short semantic cooldown", mutate: func(c *CodeReviewPolicyConfig) { c.RiskPolicy.SemanticDedupeCooldownSeconds = 59 }, expectErr: true},
+		{name: "rejects too long semantic cooldown", mutate: func(c *CodeReviewPolicyConfig) { c.RiskPolicy.SemanticDedupeCooldownSeconds = 86401 }, expectErr: true},
 		{name: "rejects no reviewers", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.Reviewers = nil }, expectErr: true},
 		{name: "rejects unsupported reviewer", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.Reviewers = []AgentType{AgentTypePMAgent} }, expectErr: true},
 		{name: "rejects reviewer model count mismatch", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.ReviewerModels = []string{DefaultCodexModel} }, expectErr: true},

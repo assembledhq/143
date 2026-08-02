@@ -209,6 +209,7 @@ type CodeReviewHandler struct {
 	audit        *db.AuditEmitter
 	memberships  codeReviewMembershipStore
 	retryService codeReviewRetryService
+	disputes     *codereviewsvc.DisputeService
 }
 
 func (h *CodeReviewHandler) SetAuditEmitter(audit *db.AuditEmitter) { h.audit = audit }
@@ -231,6 +232,10 @@ func (h *CodeReviewHandler) SetMembershipStore(store codeReviewMembershipStore) 
 
 func (h *CodeReviewHandler) SetRetryService(service codeReviewRetryService) {
 	h.retryService = service
+}
+
+func (h *CodeReviewHandler) SetDisputeService(service *codereviewsvc.DisputeService) {
+	h.disputes = service
 }
 
 // StreamUpdates is the org-scoped SSE endpoint backing the live code reviews
@@ -664,7 +669,14 @@ func (h *CodeReviewHandler) Evidence(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_PROMPTS_LOAD_FAILED", "failed to load code review prompt artifacts", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewEvidence]{Data: models.CodeReviewEvidence{AgentResults: results, Findings: findings, PromptArtifacts: artifacts}})
+	reasonCodes, err := h.store.GetRiskReasonCodesBySession(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REASONS_LOAD_FAILED", "failed to load code review reason codes", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewEvidence]{Data: models.CodeReviewEvidence{
+		AgentResults: results, Findings: findings, PromptArtifacts: artifacts, RiskReasonCodes: reasonCodes,
+	}})
 }
 
 func (h *CodeReviewHandler) Retry(w http.ResponseWriter, r *http.Request) {

@@ -38,6 +38,7 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Switch } from "@/components/ui/switch";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -92,6 +93,7 @@ import type {
   CodeReviewApprovalMode,
   CodeReviewActivityStatus,
   CodeReviewDecision,
+  CodeReviewDispute,
   CodeReviewDescriptionApplicabilityKind,
   CodeReviewEvidence,
   CodeReviewGitHubTriggerResponse,
@@ -109,7 +111,7 @@ import type {
   SingleResponse,
 } from "@/lib/types";
 
-const CODE_REVIEW_TAB_VALUES = ["reviews", "analytics", "policy"] as const;
+const CODE_REVIEW_TAB_VALUES = ["reviews", "analytics", "disputes", "policy"] as const;
 type CodeReviewTab = (typeof CODE_REVIEW_TAB_VALUES)[number];
 const OUTCOME_FILTER_VALUES = [ALL_OUTCOMES, AUTOMATICALLY_APPROVED, COMPLETED_NOT_APPROVED, "needs_human_review", "comment_only", "blocked"] as const;
 type OutcomeFilter = (typeof OUTCOME_FILTER_VALUES)[number];
@@ -484,15 +486,16 @@ export default function CodeReviewsPage() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const canManagePolicy = user?.role === "admin";
-  const canRetryReviews = user?.role === "admin" || user?.role === "member";
+  const canFileDisputes = user?.role === "admin" || user?.role === "member";
+  const canRetryReviews = canFileDisputes;
   const [tabParam] = useQueryState(
     "tab",
     parseAsStringLiteral(CODE_REVIEW_TAB_VALUES).withDefault("reviews"),
   );
   const [activeTab, setActiveTabState] = useState<CodeReviewTab>(tabParam);
   useEffect(() => {
-    setActiveTabState(tabParam);
-  }, [tabParam]);
+    setActiveTabState(tabParam === "disputes" && !canManagePolicy ? "reviews" : tabParam);
+  }, [canManagePolicy, tabParam]);
   const setActiveTab = useCallback(
     (value: string) => {
       setActiveTabState(value as CodeReviewTab);
@@ -532,7 +535,18 @@ export default function CodeReviewsPage() {
   }, [search, setSearchParam]);
   const [selectedTemplateKey, setSelectedTemplateKey] = useState(NO_TEMPLATE);
   const [pendingTemplateApply, setPendingTemplateApply] = useState<{ key: string; title: string } | null>(null);
-  const [selectedEvidenceSessionId, setSelectedEvidenceSessionId] = useState<string | null>(null);
+  const [evidenceParam] = useQueryState("evidence", parseAsString);
+  const [selectedEvidenceSessionId, setSelectedEvidenceSessionId] = useState<string | null>(evidenceParam);
+  useEffect(() => {
+    setSelectedEvidenceSessionId(evidenceParam);
+  }, [evidenceParam]);
+  const selectEvidenceSession = useCallback((sessionID: string | null) => {
+    setSelectedEvidenceSessionId(sessionID);
+    const url = new URL(window.location.href);
+    if (sessionID) url.searchParams.set("evidence", sessionID);
+    else url.searchParams.delete("evidence");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  }, []);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [editingRequirementKey, setEditingRequirementKey] = useState<string | null>(null);
   const [promptExample, setPromptExample] = useState<{ field: "review_instructions" | "automated_approval_policy"; example: CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption } | null>(null);
@@ -816,6 +830,24 @@ export default function CodeReviewsPage() {
     queryFn: () => api.codeReviews.evidence(selectedEvidenceSessionId ?? ""),
     enabled: Boolean(selectedEvidenceSessionId),
   });
+  const disputeQueueQuery = useQuery({
+    queryKey: queryKeys.codeReviews.disputeQueue({ adjudication_status: "pending" }),
+    queryFn: () => api.codeReviews.disputeQueue({ adjudication_status: "pending" }),
+    enabled: canManagePolicy,
+  });
+  const adjudicateDispute = useMutation({
+    mutationFn: ({ dispute, status, note }: { dispute: CodeReviewDispute; status: "upheld" | "rejected" | "needs_context"; note?: string }) =>
+      api.codeReviews.adjudicateDispute(dispute.id, {
+        expected_version: dispute.version,
+        adjudication_status: status,
+        adjudication_note: note?.trim() || undefined,
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["code-reviews", "dispute-queue"] });
+      toast.success("Dispute adjudication saved");
+    },
+    onError: () => toast.error("Dispute adjudication could not be saved"),
+  });
 
   // The policy is autosaved as a single whole-config PUT. Each control reads
   // the live config straight from the query cache and commits a fully-merged
@@ -900,7 +932,7 @@ export default function CodeReviewsPage() {
       setRetryingReviewSessionIds((current) => new Set(current).add(sessionId));
     },
     onSuccess: (_result, sessionId) => {
-      setSelectedEvidenceSessionId((current) => (current === sessionId ? null : current));
+      if (selectedEvidenceSessionId === sessionId) selectEvidenceSession(null);
       if (isViewingReviewHistory) setNewReviewsAvailable(true);
       else {
         void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.lists() });
@@ -1125,9 +1157,7 @@ export default function CodeReviewsPage() {
           isRetrying={retryingReviewSessionIds.has(review.session_id)}
           evidenceSelected={selectedEvidenceSessionId === review.session_id}
           onRetry={() => retryReview.mutate(review.session_id)}
-          onToggleEvidence={() => setSelectedEvidenceSessionId((current) => (
-            current === review.session_id ? null : review.session_id
-          ))}
+          onToggleEvidence={() => selectEvidenceSession(selectedEvidenceSessionId === review.session_id ? null : review.session_id)}
         />
       ),
     },
@@ -1182,6 +1212,15 @@ export default function CodeReviewsPage() {
             <ChartNoAxesColumnIncreasing className="h-4 w-4" />
             Analytics
           </TabsTrigger>
+          {canManagePolicy ? (
+            <TabsTrigger value="disputes">
+              <MessageSquareText className="h-4 w-4" />
+              Disputes
+              {(disputeQueueQuery.data?.data.length ?? 0) > 0 ? (
+                <Badge variant="secondary" aria-hidden="true">{disputeQueueQuery.data?.data.length}</Badge>
+              ) : null}
+            </TabsTrigger>
+          ) : null}
           <TabsTrigger value="policy">
             <Settings2 className="h-4 w-4" />
             Policy
@@ -1304,9 +1343,7 @@ export default function CodeReviewsPage() {
                           isRetrying={retryingReviewSessionIds.has(review.session_id)}
                           evidenceSelected={selectedEvidenceSessionId === review.session_id}
                           onRetry={() => retryReview.mutate(review.session_id)}
-                          onToggleEvidence={() => setSelectedEvidenceSessionId((current) => (
-                            current === review.session_id ? null : review.session_id
-                          ))}
+                          onToggleEvidence={() => selectEvidenceSession(selectedEvidenceSessionId === review.session_id ? null : review.session_id)}
                           className="ml-auto w-auto"
                         />
                       </div>
@@ -1316,12 +1353,15 @@ export default function CodeReviewsPage() {
                   )}
                 />
                 <CodeReviewEvidenceSheet
+                  key={selectedEvidenceReview?.session_id ?? "no-review"}
                   review={selectedEvidenceReview}
                   evidence={evidenceQuery.data?.data}
                   isLoading={evidenceQuery.isLoading}
                   error={evidenceQuery.error}
                   nowMs={countdownNowMs}
                   canRetryReview={canRetryReviews}
+                  canFileDisputes={canFileDisputes}
+                  canManagePolicy={canManagePolicy}
                   isRetryingReview={Boolean(selectedEvidenceReview && retryingReviewSessionIds.has(selectedEvidenceReview.session_id))}
                   onRetryEvidence={() => void evidenceQuery.refetch()}
                   onRetryReview={() => {
@@ -1329,13 +1369,26 @@ export default function CodeReviewsPage() {
                   }}
                   open={Boolean(selectedEvidenceReview)}
                   onOpenChange={(open) => {
-                    if (!open) setSelectedEvidenceSessionId(null);
+                    if (!open) selectEvidenceSession(null);
                   }}
                 />
                 </>
               )}
             </SectionGroup>
           </PageTabContent>
+
+          {canManagePolicy ? (
+            <PageTabContent value="disputes">
+              <CodeReviewDisputeQueue
+                disputes={disputeQueueQuery.data?.data ?? []}
+                isLoading={disputeQueueQuery.isLoading}
+                error={disputeQueueQuery.error}
+                isSaving={adjudicateDispute.isPending}
+                onRetry={() => void disputeQueueQuery.refetch()}
+                onAdjudicate={(dispute, status, note) => adjudicateDispute.mutate({ dispute, status, note })}
+              />
+            </PageTabContent>
+          ) : null}
 
           <PageTabContent value="analytics">
             <CodeReviewAnalyticsReport
@@ -1834,6 +1887,22 @@ function AdvancedPolicySettings({
                         disabled={!config}
                         autosave={autosave}
                         buildPatch={(value) => buildConfig((next) => { next.inline_comment_limit = value; })}
+                      />
+                      <DurationInput
+                        label="Reassessment cooldown"
+                        labelAction={
+                          <SettingInfoTooltip
+                            label="Reassessment cooldown"
+                            description="Deduplicates semantically unchanged reconsideration requests for the same pull request. It prevents duplicate work without limiting distinct objections."
+                          />
+                        }
+                        valueSeconds={config?.risk_policy.semantic_dedupe_cooldown_seconds ?? 900}
+                        minSeconds={60}
+                        disabled={!config}
+                        defaultUnit="minutes"
+                        onChangeSeconds={(seconds) =>
+                          autosave.save(buildConfig((next) => { next.risk_policy.semantic_dedupe_cooldown_seconds = Math.min(86400, seconds); }))
+                        }
                       />
                       <DurationInput
                         label="Timeout"
@@ -3212,6 +3281,145 @@ function FineTuningSection({ title, summary, defaultOpen = false, forceOpen = fa
   );
 }
 
+function CodeReviewDisputeQueue({
+  disputes,
+  isLoading,
+  error,
+  isSaving,
+  onRetry,
+  onAdjudicate,
+}: {
+  disputes: CodeReviewDispute[];
+  isLoading: boolean;
+  error: Error | null;
+  isSaving: boolean;
+  onRetry: () => void;
+  onAdjudicate: (dispute: CodeReviewDispute, status: "upheld" | "rejected" | "needs_context", note?: string) => void;
+}) {
+  const [notes, setNotes] = useState<Record<string, string>>({});
+  return (
+    <SectionGroup title="Decision disputes" description="A flat list of objections awaiting a policy owner's judgment. Reassessments and trust signals provide context but do not decide the outcome.">
+      {isLoading ? <div className="py-12 text-center text-sm text-muted-foreground">Loading disputes…</div> : null}
+      {error ? <ErrorNotice title="Disputes could not be loaded" description="Retry the request to view the adjudication list." action={{ label: "Retry", onClick: onRetry }} /> : null}
+      {!isLoading && !error && disputes.length === 0 ? <EmptyState icon={MessageSquareText} title="No disputes need adjudication" description="New trusted objections will appear here after intake." /> : null}
+      {disputes.length > 0 ? (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Dispute</TableHead>
+              <TableHead>Decision</TableHead>
+              <TableHead>Reassessment</TableHead>
+              <TableHead>Queue signals</TableHead>
+              <TableHead>Trust</TableHead>
+              <TableHead className="text-right">Adjudicate</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {disputes.map((dispute) => (
+              <TableRow key={dispute.id}>
+                <TableCell className="max-w-md align-top">
+                  <div className="space-y-1">
+                    <div className="line-clamp-3 text-sm text-foreground">{dispute.body}</div>
+                    <div className="text-xs text-muted-foreground">{dispute.filed_by_login || "143 user"} · {formatDate(dispute.created_at)} · {codeReviewDisputeStatusLabel(dispute.source)} · {dispute.reviewed_head_sha.slice(0, 7)}</div>
+                    <CodeReviewDisputeContextLinks dispute={dispute} />
+                    {dispute.contested_reason_codes.length > 0 ? (
+                      <div className="flex flex-wrap gap-1 pt-1">
+                        {dispute.contested_reason_codes.map((code) => <Badge key={code} variant="outline">{codeReviewDisputeStatusLabel(code)}</Badge>)}
+                      </div>
+                    ) : null}
+                  </div>
+                </TableCell>
+                <TableCell className="align-top">
+                  <div className="space-y-1">
+                    <Badge variant="outline">{decisionLabelText(dispute.decision)}</Badge>
+                    <div className="text-xs text-muted-foreground">{dispute.direction ? codeReviewDisputeStatusLabel(dispute.direction) : "Classifying"}</div>
+                  </div>
+                </TableCell>
+                <TableCell className="align-top"><StatusLabel label={codeReviewDisputeStatusLabel(dispute.reassessment_status)} tone={dispute.reassessment_flipped ? "warning" : "neutral"} /></TableCell>
+                <TableCell className="align-top"><CodeReviewDisputeQueueSignals dispute={dispute} /></TableCell>
+                <TableCell className="align-top"><StatusLabel label={dispute.trusted ? "Trusted" : "Untrusted"} tone={dispute.trusted ? "success" : "warning"} /></TableCell>
+                <TableCell className="align-top">
+                  <div className="ml-auto w-56 space-y-2">
+                    <Textarea
+                      aria-label={`Adjudication note for dispute ${dispute.id}`}
+                      value={notes[dispute.id] ?? ""}
+                      rows={2}
+                      maxLength={2000}
+                      placeholder="Optional decision note"
+                      disabled={isSaving}
+                      onChange={(event) => setNotes((current) => ({ ...current, [dispute.id]: event.target.value }))}
+                    />
+                    <div className="flex justify-end gap-1">
+                    <DisabledTooltip disabled={isSaving} content="Wait for the current adjudication to finish.">
+                      <Button size="sm" variant="outline" disabled={isSaving} onClick={() => onAdjudicate(dispute, "needs_context", notes[dispute.id])}>Needs context</Button>
+                    </DisabledTooltip>
+                    <DisabledTooltip disabled={isSaving} content="Wait for the current adjudication to finish.">
+                      <Button size="sm" variant="outline" disabled={isSaving} onClick={() => onAdjudicate(dispute, "rejected", notes[dispute.id])}>Reject</Button>
+                    </DisabledTooltip>
+                    <DisabledTooltip disabled={isSaving} content="Wait for the current adjudication to finish.">
+                      <Button size="sm" disabled={isSaving} onClick={() => onAdjudicate(dispute, "upheld", notes[dispute.id])}>Uphold</Button>
+                    </DisabledTooltip>
+                    </div>
+                  </div>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      ) : null}
+    </SectionGroup>
+  );
+}
+
+function CodeReviewDisputeQueueSignals({ dispute }: { dispute: CodeReviewDispute }) {
+  const pullRequestAuthor = typeof dispute.queue_signals.pull_request_author === "string"
+    ? dispute.queue_signals.pull_request_author.trim()
+    : "";
+  const trustedAtFiling = typeof dispute.queue_signals.trusted_at_filing === "boolean" ? dispute.queue_signals.trusted_at_filing : null;
+  const filerIsAuthor = typeof dispute.queue_signals.filer_is_pr_author === "boolean" ? dispute.queue_signals.filer_is_pr_author : null;
+  return (
+    <div className="flex max-w-56 flex-wrap gap-1">
+      {pullRequestAuthor ? <Badge variant="outline">PR author: {pullRequestAuthor}</Badge> : null}
+      {filerIsAuthor !== null ? <Badge variant="outline">{filerIsAuthor ? "Filed by PR author" : "Filed by another contributor"}</Badge> : null}
+      {trustedAtFiling !== null ? <Badge variant="outline">{trustedAtFiling ? "Trusted at filing" : "Untrusted at filing"}</Badge> : null}
+      {!pullRequestAuthor && filerIsAuthor === null && trustedAtFiling === null ? <span className="text-xs text-muted-foreground">No queue signals</span> : null}
+    </div>
+  );
+}
+
+function CodeReviewDisputeContextLinks({ dispute }: { dispute: CodeReviewDispute }) {
+  const title = typeof dispute.queue_signals.pull_request_title === "string" ? dispute.queue_signals.pull_request_title.trim() : "";
+  const repository = typeof dispute.queue_signals.github_repository === "string" ? dispute.queue_signals.github_repository.trim() : "";
+  const number = typeof dispute.queue_signals.github_pr_number === "number" ? dispute.queue_signals.github_pr_number : null;
+  const url = typeof dispute.queue_signals.github_pr_url === "string" ? dispute.queue_signals.github_pr_url.trim() : "";
+  return (
+    <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+      {url ? (
+        <Button size="sm" variant="link" className="h-auto p-0 text-xs" asChild>
+          <a href={url} target="_blank" rel="noreferrer">{repository && number ? `${repository} #${number}` : title || "Open pull request"}</a>
+        </Button>
+      ) : null}
+      <Button size="sm" variant="link" className="h-auto p-0 text-xs" asChild>
+        <Link href={`/code-reviews?evidence=${dispute.session_id}`}>View evidence</Link>
+      </Button>
+    </div>
+  );
+}
+
+function decisionLabelText(decision: CodeReviewDecision): string {
+  switch (decision) {
+    case "approved": return "Approved";
+    case "needs_human_review": return "Needs human review";
+    case "comment_only": return "Comment only";
+    case "blocked": return "Blocked";
+  }
+}
+
+function codeReviewDisputeStatusLabel(value: string): string {
+  const normalized = value.replaceAll("_", " ");
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
 function CodeReviewEvidenceSheet({
   review,
   evidence,
@@ -3219,6 +3427,8 @@ function CodeReviewEvidenceSheet({
   error,
   nowMs,
   canRetryReview,
+  canFileDisputes,
+  canManagePolicy,
   isRetryingReview,
   onRetryEvidence,
   onRetryReview,
@@ -3231,15 +3441,60 @@ function CodeReviewEvidenceSheet({
   error: Error | null;
   nowMs: number;
   canRetryReview: boolean;
+  canFileDisputes: boolean;
+  canManagePolicy: boolean;
   isRetryingReview: boolean;
   onRetryEvidence: () => void;
   onRetryReview: () => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const queryClient = useQueryClient();
+  const [disputeDialogOpen, setDisputeDialogOpen] = useState(false);
+  const [disputeBody, setDisputeBody] = useState("");
+  const [selectedReasonCodes, setSelectedReasonCodes] = useState<string[]>([]);
   const agentResults = evidence?.agent_results ?? [];
   const findings = evidence?.findings ?? [];
   const artifacts = evidence?.prompt_artifacts ?? [];
+  const reasonCodes = evidence?.risk_reason_codes ?? [];
+  const disputesQuery = useQuery({
+    queryKey: queryKeys.codeReviews.disputes(review?.session_id ?? ""),
+    queryFn: () => api.codeReviews.disputes(review?.session_id ?? ""),
+    enabled: open && canFileDisputes && Boolean(review?.session_id),
+    refetchInterval: open && canFileDisputes ? 5000 : false,
+  });
+  const createDispute = useMutation({
+    mutationFn: () => api.codeReviews.createDispute(review?.session_id ?? "", { body: disputeBody, contested_reason_codes: selectedReasonCodes }),
+    onSuccess: () => {
+      if (review) void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.disputes(review.session_id) });
+      setDisputeDialogOpen(false);
+      setDisputeBody("");
+      setSelectedReasonCodes([]);
+      toast.success("Reconsideration request recorded");
+    },
+    onError: () => toast.error("Reconsideration request could not be recorded"),
+  });
+  const escalateDispute = useMutation({
+    mutationFn: (disputeID: string) => api.codeReviews.escalateDispute(disputeID),
+    onSuccess: () => {
+      if (review) void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.disputes(review.session_id) });
+      toast.success("Dispute sent to a policy owner");
+    },
+    onError: () => toast.error("Dispute could not be escalated"),
+  });
+  const promoteDispute = useMutation({
+    mutationFn: (dispute: CodeReviewDispute) => api.codeReviews.adjudicateDispute(dispute.id, {
+      expected_version: dispute.version,
+      trust_override: true,
+    }),
+    onSuccess: () => {
+      if (review) void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.disputes(review.session_id) });
+      void queryClient.invalidateQueries({ queryKey: ["code-reviews", "dispute-queue"] });
+      toast.success("Dispute promoted to the policy queue");
+    },
+    onError: () => toast.error("Dispute could not be promoted"),
+  });
+  const disputes = disputesQuery.data?.data ?? [];
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-[calc(100vw-1rem)] p-0 sm:max-w-xl">
@@ -3285,6 +3540,54 @@ function CodeReviewEvidenceSheet({
                 <EvidenceMetric label="Findings" value={findings.length} />
                 <EvidenceMetric label="Prompts" value={artifacts.length} />
               </div>
+
+              {canFileDisputes && review?.status === "completed" && review.decision ? (
+                <section className="space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <EvidenceSectionHeader title="Decision feedback" empty={disputes.length === 0} />
+                    <Button size="sm" variant="outline" onClick={() => setDisputeDialogOpen(true)}>
+                      <MessageSquareText className="h-4 w-4" />
+                      {review.decision === "approved" ? "Report an unsafe approval" : "Ask for reconsideration"}
+                    </Button>
+                  </div>
+                  {disputesQuery.isLoading ? <div className="text-sm text-muted-foreground">Loading decision feedback…</div> : null}
+                  {disputesQuery.error ? <ErrorNotice title="Decision feedback could not be loaded" description="Retry to view the dispute timeline." action={{ label: "Retry", onClick: () => void disputesQuery.refetch() }} /> : null}
+                  {!disputesQuery.isLoading && !disputesQuery.error && disputes.length === 0 ? <div className="text-sm text-muted-foreground">No one has challenged this decision.</div> : null}
+                  {disputes.map((dispute) => (
+                    <div key={dispute.id} className="space-y-2 border-t border-border pt-3 first:border-t-0 first:pt-0">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium text-foreground">{dispute.filed_by_login || "143 user"}</div>
+                          <div className="text-xs text-muted-foreground">{formatDate(dispute.created_at)} · {codeReviewDisputeStatusLabel(dispute.source)}</div>
+                        </div>
+                        <StatusLabel label={codeReviewDisputeStatusLabel(dispute.intake_status)} tone={dispute.intake_status === "failed" ? "destructive" : "neutral"} />
+                      </div>
+                      <div className="text-sm leading-6 text-muted-foreground">{dispute.body}</div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant="outline">{dispute.direction ? codeReviewDisputeStatusLabel(dispute.direction) : "Classifying"}</Badge>
+                        <Badge variant="outline">{codeReviewDisputeStatusLabel(dispute.reassessment_status)}</Badge>
+                        {dispute.reassessment_status === "completed" && dispute.reassessment_flipped !== undefined ? <Badge variant="outline">{dispute.reassessment_flipped ? "Decision changed" : "Decision unchanged"}</Badge> : null}
+                        {dispute.adjudication_status ? <Badge variant="outline">Policy owner: {codeReviewDisputeStatusLabel(dispute.adjudication_status)}</Badge> : null}
+                        {dispute.reply_status === "failed" ? <Badge variant="destructive">GitHub reply failed</Badge> : null}
+                        <Badge variant="outline">{dispute.trusted ? "Trusted" : "Untrusted"}</Badge>
+                        {dispute.reassessment_session_id ? <Button size="sm" variant="ghost" asChild><Link href={`/sessions/${dispute.reassessment_session_id}`}>View reassessment</Link></Button> : null}
+                        {dispute.routing === "policy_signal_only" && canManagePolicy ? <Button size="sm" variant="ghost" asChild><Link href="/code-reviews?tab=policy">Review policy</Link></Button> : null}
+                        {canManagePolicy && !dispute.trusted && dispute.intake_status === "triaged" && (dispute.routing === "reassess" || dispute.routing === "policy_signal_only") ? (
+                          <DisabledTooltip disabled={promoteDispute.isPending} content="Wait for this promotion to finish.">
+                            <Button size="sm" variant="outline" disabled={promoteDispute.isPending} onClick={() => promoteDispute.mutate(dispute)}>Promote to policy queue</Button>
+                          </DisabledTooltip>
+                        ) : null}
+                        {dispute.routing === "policy_signal_only" && !dispute.escalated_at ? (
+                          <DisabledTooltip disabled={escalateDispute.isPending} content="Wait for this escalation to finish.">
+                            <Button size="sm" variant="ghost" disabled={escalateDispute.isPending} onClick={() => escalateDispute.mutate(dispute.id)}>Send to policy owner</Button>
+                          </DisabledTooltip>
+                        ) : null}
+                      </div>
+                      {dispute.status_detail ? <div className="text-xs leading-5 text-muted-foreground">{dispute.status_detail}</div> : null}
+                    </div>
+                  ))}
+                </section>
+              ) : null}
 
               <section className="space-y-3">
                 <EvidenceSectionHeader title="Agent results" empty={agentResults.length === 0} />
@@ -3375,6 +3678,42 @@ function CodeReviewEvidenceSheet({
           ) : null}
         </div>
       </SheetContent>
+      <Dialog open={disputeDialogOpen} onOpenChange={setDisputeDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{review?.decision === "approved" ? "Report an unsafe approval" : "Ask for reconsideration"}</DialogTitle>
+            <DialogDescription>Explain what the reviewer got wrong or what evidence it missed. Reconsideration cannot waive deterministic safeguards; a policy owner must change those rules. The original decision remains part of the record.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="code-review-dispute-body">What should be reconsidered?</Label>
+              <Textarea id="code-review-dispute-body" value={disputeBody} maxLength={8000} rows={5} placeholder="Describe the part of the decision you disagree with…" onChange={(event) => setDisputeBody(event.target.value)} />
+            </div>
+            {reasonCodes.length > 0 ? (
+              <div className="space-y-2">
+                <Label>Contested policy reasons</Label>
+                <div className="space-y-2">
+                  {reasonCodes.map((code) => (
+                    <Label key={code} className="flex items-center gap-2 font-normal">
+                      <Checkbox checked={selectedReasonCodes.includes(code)} onCheckedChange={(checked) => setSelectedReasonCodes((current) => checked ? [...current, code] : current.filter((value) => value !== code))} />
+                      {codeReviewDisputeStatusLabel(code)}
+                    </Label>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDisputeDialogOpen(false)}>Cancel</Button>
+            <DisabledTooltip
+              disabled={createDispute.isPending || disputeBody.trim().length === 0}
+              content={createDispute.isPending ? "Wait for the feedback to be recorded." : "Describe what should be reconsidered."}
+            >
+              <Button disabled={createDispute.isPending || disputeBody.trim().length === 0} onClick={() => createDispute.mutate()}>{createDispute.isPending ? "Recording…" : "Record feedback"}</Button>
+            </DisabledTooltip>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Sheet>
   );
 }

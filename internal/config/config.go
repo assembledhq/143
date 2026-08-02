@@ -173,15 +173,17 @@ type Config struct {
 	PagerDutyIntegrationEnabled bool   `env:"PAGERDUTY_INTEGRATION_ENABLED" envDefault:"true"`
 
 	// GitHub App
-	GitHubAppID                 int64    `env:"GITHUB_APP_ID"`
-	GitHubAppClientID           string   `env:"GITHUB_APP_CLIENT_ID"`
-	GitHubAppClientSecret       string   `env:"GITHUB_APP_CLIENT_SECRET"`
-	GitHubAppPrivateKey         string   `env:"GITHUB_APP_PRIVATE_KEY"`
-	GitHubWebhookSecret         string   `env:"GITHUB_WEBHOOK_SECRET"`
-	GitHubAppSlug               string   `env:"GITHUB_APP_SLUG"`
-	CodeReviewAppReviewerLogins []string `env:"CODE_REVIEW_APP_REVIEWER_LOGINS" envSeparator:","`
-	CodeReviewAliasLogins       []string `env:"CODE_REVIEW_ALIAS_LOGINS"        envSeparator:","`
-	CodeReviewTeamSlugs         []string `env:"CODE_REVIEW_TEAM_SLUGS"          envSeparator:","`
+	GitHubAppID                             int64    `env:"GITHUB_APP_ID"`
+	GitHubAppClientID                       string   `env:"GITHUB_APP_CLIENT_ID"`
+	GitHubAppClientSecret                   string   `env:"GITHUB_APP_CLIENT_SECRET"`
+	GitHubAppPrivateKey                     string   `env:"GITHUB_APP_PRIVATE_KEY"`
+	GitHubWebhookSecret                     string   `env:"GITHUB_WEBHOOK_SECRET"`
+	GitHubAppSlug                           string   `env:"GITHUB_APP_SLUG"`
+	CodeReviewAppReviewerLogins             []string `env:"CODE_REVIEW_APP_REVIEWER_LOGINS" envSeparator:","`
+	CodeReviewAliasLogins                   []string `env:"CODE_REVIEW_ALIAS_LOGINS"        envSeparator:","`
+	CodeReviewTeamSlugs                     []string `env:"CODE_REVIEW_TEAM_SLUGS"          envSeparator:","`
+	CodeReviewDisputeReassessmentsEnabled   bool     `env:"CODE_REVIEW_DISPUTE_REASSESSMENTS_ENABLED" envDefault:"true"`
+	CodeReviewDisputeMaxActiveReassessments int      `env:"CODE_REVIEW_DISPUTE_MAX_ACTIVE_REASSESSMENTS" envDefault:"1000"`
 
 	// CSRF
 	CSRFSigningKey string `env:"CSRF_SIGNING_KEY"`
@@ -406,6 +408,9 @@ func Load() *Config {
 	}
 	if cfg.WorkerMaxActiveSandboxes < 0 {
 		cfg.WorkerMaxActiveSandboxes = 0
+	}
+	if cfg.CodeReviewDisputeMaxActiveReassessments <= 0 {
+		cfg.CodeReviewDisputeMaxActiveReassessments = 1000
 	}
 	if cfg.DatabaseMaxConns < 0 {
 		cfg.DatabaseMaxConns = 0

@@ -30,6 +30,24 @@ type webhookAutomationEventRecorder struct {
 	calls []automationevents.GitHubEventTriggerRequest
 }
 
+func TestCodeReviewCommentSourceVersion(t *testing.T) {
+	t.Parallel()
+
+	updatedAt := time.Date(2026, time.August, 2, 7, 30, 45, 123_000_000, time.UTC)
+	var original ghservice.IssueCommentEvent
+	original.Comment.UpdatedAt = &updatedAt
+	original.Comment.Body = "Please reconsider the authorization finding."
+	redelivery := original
+	edited := original
+	edited.Comment.Body = "Please reconsider the authorization and tenancy findings."
+
+	originalVersion := codeReviewCommentSourceVersion(original)
+
+	require.Positive(t, originalVersion, "source versions should be valid positive database values")
+	require.Equal(t, originalVersion, codeReviewCommentSourceVersion(redelivery), "an identical webhook redelivery should retain its source version")
+	require.NotEqual(t, originalVersion, codeReviewCommentSourceVersion(edited), "distinct bodies should retain separate immutable versions even when GitHub timestamps match")
+}
+
 func (r *webhookAutomationEventRecorder) TriggerGitHubEvent(_ context.Context, req automationevents.GitHubEventTriggerRequest) error {
 	r.calls = append(r.calls, req)
 	return nil
@@ -1123,11 +1141,12 @@ func TestWebhook_HandleCodeReviewMentionedStartsContextualReview(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", nil)
 	rr := httptest.NewRecorder()
 
-	ok := handler.handleCodeReviewMentioned(rr, req, event, db.GitHubRepoOwner{
+	ok, captured := handler.handleCodeReviewMentioned(rr, req, event, db.GitHubRepoOwner{
 		OrgID: orgID, RepositoryID: repoID, FullName: "assembledhq/assembled", Status: "active",
 	})
 
 	require.True(t, ok, "configured team mention should be processed: %s", rr.Body.String())
+	require.False(t, captured, "ordinary review request should not be captured as a dispute")
 	require.Equal(t, orgID, loader.orgID, "handler should scope the GitHub snapshot to the owning organization")
 	require.Equal(t, repoID, loader.repositoryID, "handler should load the configured repository")
 	require.Equal(t, 54903, loader.number, "handler should load the commented pull request")
@@ -1163,11 +1182,12 @@ func TestWebhook_HandleCodeReviewMentionedIgnoresUnconfiguredTeamBeforeGitHubLoa
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", nil)
 	rr := httptest.NewRecorder()
 
-	ok := handler.handleCodeReviewMentioned(rr, req, event, db.GitHubRepoOwner{
+	ok, captured := handler.handleCodeReviewMentioned(rr, req, event, db.GitHubRepoOwner{
 		OrgID: orgID, RepositoryID: repoID, FullName: "assembledhq/assembled", Status: "active",
 	})
 
 	require.True(t, ok, "unconfigured team mention should be ignored")
+	require.False(t, captured, "unconfigured team mention should not be captured as a dispute")
 	require.Equal(t, 0, loader.number, "unconfigured team mention should not spend a GitHub API request")
 	require.Empty(t, rr.Body.String(), "ignored team mention should not write an error response")
 }
@@ -1229,11 +1249,12 @@ func TestWebhook_HandleCodeReviewMentionedRejectsUntrustedAuthorsBeforeGitHubLoa
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", nil)
 			rr := httptest.NewRecorder()
 
-			ok := handler.handleCodeReviewMentioned(rr, req, event, db.GitHubRepoOwner{
+			ok, captured := handler.handleCodeReviewMentioned(rr, req, event, db.GitHubRepoOwner{
 				OrgID: orgID, RepositoryID: repoID, FullName: "assembledhq/assembled", Status: "active",
 			})
 
 			require.True(t, ok, "untrusted mention should be ignored without failing the webhook")
+			require.False(t, captured, "untrusted mention without dispute intake should not suppress ordinary feedback")
 			require.Equal(t, 0, loader.number, "untrusted mention should not spend a GitHub API request")
 			require.Empty(t, rr.Body.String(), "ignored mention should not write an error response")
 		})

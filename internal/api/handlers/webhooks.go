@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/db"
@@ -31,6 +33,7 @@ type WebhookHandler struct {
 	prService           *ghservice.PRService
 	pullRequests        *db.PullRequestStore
 	codeReviews         *codereviewsvc.Service
+	codeReviewDisputes  *codereviewsvc.DisputeService
 	codeReviewPRs       codeReviewPullRequestLoader
 }
 
@@ -57,6 +60,10 @@ func (h *WebhookHandler) SetGitHubInstallationStore(store *db.GitHubInstallation
 func (h *WebhookHandler) SetCodeReviewService(service *codereviewsvc.Service, pullRequests *db.PullRequestStore) {
 	h.codeReviews = service
 	h.pullRequests = pullRequests
+}
+
+func (h *WebhookHandler) SetCodeReviewDisputeService(service *codereviewsvc.DisputeService) {
+	h.codeReviewDisputes = service
 }
 
 func (h *WebhookHandler) HandleGitHub(w http.ResponseWriter, r *http.Request) {
@@ -160,25 +167,24 @@ func (h *WebhookHandler) handleIssueComment(w http.ResponseWriter, r *http.Reque
 		event.OwnerOrgID = &owner.OrgID
 	}
 
+	if (event.Action == "created" || event.Action == "edited") && event.Issue.PullRequest != nil && h.codeReviews != nil && h.pullRequests != nil {
+		ok, captured := h.handleCodeReviewMentioned(w, r, event, owner)
+		if !ok {
+			return
+		}
+		event.RecordOnly = captured
+	}
 	if err := h.prService.HandleIssueCommentEvent(r.Context(), event); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ISSUE_COMMENT_EVENT_FAILED", "failed to process issue_comment event", err)
 		return
-	}
-	if event.Action == "created" && event.Issue.PullRequest != nil && h.codeReviews != nil && h.pullRequests != nil {
-		if ok := h.handleCodeReviewMentioned(w, r, event, owner); !ok {
-			return
-		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
 }
 
-func (h *WebhookHandler) handleCodeReviewMentioned(w http.ResponseWriter, r *http.Request, event ghservice.IssueCommentEvent, owner db.GitHubRepoOwner) bool {
+func (h *WebhookHandler) handleCodeReviewMentioned(w http.ResponseWriter, r *http.Request, event ghservice.IssueCommentEvent, owner db.GitHubRepoOwner) (bool, bool) {
 	if !codereviewsvc.HasGitHubTeamMention(event.Comment.Body) {
-		return true
-	}
-	if !codeReviewMentionAuthorTrusted(event) {
-		return true
+		return true, false
 	}
 	repo := strings.TrimSpace(event.Repository.FullName)
 	if repo == "" {
@@ -187,22 +193,28 @@ func (h *WebhookHandler) handleCodeReviewMentioned(w http.ResponseWriter, r *htt
 	matched, err := h.codeReviews.MatchesReviewMention(r.Context(), owner.OrgID, owner.RepositoryID, repo, event.Comment.Body)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_MENTION_MATCH_FAILED", "failed to match code review mention", err)
-		return false
+		return false, false
 	}
 	if !matched {
-		return true
+		return true, false
+	}
+	if !codeReviewMentionAuthorTrusted(event) &&
+		(h.codeReviewDisputes == nil || event.Comment.PerformedViaGitHubApp != nil ||
+			strings.EqualFold(strings.TrimSpace(event.Comment.User.Type), "bot") ||
+			strings.EqualFold(strings.TrimSpace(event.Sender.Type), "bot")) {
+		return true, false
 	}
 	if h.codeReviewPRs == nil {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_PR_LOAD_FAILED", "failed to load pull request for code review mention")
-		return false
+		return false, false
 	}
 	remote, err := h.codeReviewPRs.GetCodeReviewPullRequestSnapshot(r.Context(), owner.OrgID, owner.RepositoryID, event.Issue.Number)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_PR_LOAD_FAILED", "failed to load pull request for code review mention", err)
-		return false
+		return false, false
 	}
 	if state := strings.TrimSpace(remote.State); state != "" && !strings.EqualFold(state, "open") {
-		return true
+		return true, false
 	}
 	number := remote.Number
 	if number <= 0 {
@@ -234,16 +246,16 @@ func (h *WebhookHandler) handleCodeReviewMentioned(w http.ResponseWriter, r *htt
 		}
 		if err := h.pullRequests.Create(r.Context(), created); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "PR_MIRROR_CREATE_FAILED", "failed to create pull request mirror", err)
-			return false
+			return false, false
 		}
 		pr = *created
 	} else if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "PR_LOAD_FAILED", "failed to load pull request mirror", err)
-		return false
+		return false, false
 	} else {
 		if err := h.pullRequests.UpdateGitHubSnapshot(r.Context(), owner.OrgID, pr.ID, snapshot); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "PR_MIRROR_UPDATE_FAILED", "failed to update pull request mirror", err)
-			return false
+			return false, false
 		}
 		pr.GitHubPRURL = snapshot.GitHubPRURL
 		pr.Title = snapshot.Title
@@ -251,6 +263,41 @@ func (h *WebhookHandler) handleCodeReviewMentioned(w http.ResponseWriter, r *htt
 		pr.HeadSHA = snapshot.HeadSHA
 		pr.HeadRef = snapshot.HeadRef
 		pr.BaseSHA = snapshot.BaseSHA
+	}
+
+	if h.codeReviewDisputes != nil && codereviewsvc.IsLikelyDisputeMention(event.Comment.Body) {
+		privateRepo := false
+		if h.repoStore != nil {
+			repository, repoErr := h.repoStore.GetByID(r.Context(), owner.OrgID, owner.RepositoryID)
+			if repoErr != nil {
+				writeError(w, r, http.StatusInternalServerError, "REPOSITORY_LOAD_FAILED", "failed to load repository for code review dispute", repoErr)
+				return false, false
+			}
+			privateRepo = repository.Private
+		}
+		authorType := models.PRFeedbackAuthorType(event.Comment.User.Type)
+		if authorType.Validate() != nil {
+			authorType = models.PRFeedbackAuthorTypeUnknown
+		}
+		_, captured, disputeErr := h.codeReviewDisputes.FileFromGitHub(r.Context(), codereviewsvc.FileGitHubCodeReviewDisputeInput{
+			OrgID: owner.OrgID, PullRequestID: pr.ID, AuthorLogin: event.Comment.User.Login,
+			AuthorType: authorType, AuthorAssociation: event.Comment.AuthorAssociation,
+			RepositoryPrivate: privateRepo, Body: event.Comment.Body,
+			GitHubCommentID: event.Comment.ID, SourceVersion: codeReviewCommentSourceVersion(event),
+		})
+		if disputeErr != nil {
+			if errors.Is(disputeErr, codereviewsvc.ErrCodeReviewDisputeInvalidBody) {
+				return true, false
+			}
+			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_DISPUTE_CAPTURE_FAILED", "failed to capture code review dispute", disputeErr)
+			return false, false
+		}
+		if captured {
+			return true, true
+		}
+	}
+	if !codeReviewMentionAuthorTrusted(event) {
+		return true, false
 	}
 
 	_, err = h.codeReviews.HandleReviewMentioned(r.Context(), codereviewsvc.ReviewMentionedInput{
@@ -275,9 +322,26 @@ func (h *WebhookHandler) handleCodeReviewMentioned(w http.ResponseWriter, r *htt
 	})
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REQUEST_FAILED", "failed to process code review mention", err)
-		return false
+		return false, false
 	}
-	return true
+	return true, false
+}
+
+func codeReviewCommentSourceVersion(event ghservice.IssueCommentEvent) int64 {
+	return codeReviewSourceVersion(event.Comment.UpdatedAt, event.Comment.Body)
+}
+
+func codeReviewSourceVersion(updatedAt *time.Time, body string) int64 {
+	seed := strings.TrimSpace(body)
+	if updatedAt != nil {
+		seed = updatedAt.UTC().Format(time.RFC3339Nano) + "\x00" + seed
+	}
+	digest := sha256.Sum256([]byte(seed))
+	version := int64(binary.BigEndian.Uint64(digest[:8]) & ((uint64(1) << 63) - 1))
+	if version == 0 {
+		return 1
+	}
+	return version
 }
 
 func codeReviewMentionAuthorTrusted(event ghservice.IssueCommentEvent) bool {
@@ -719,12 +783,62 @@ func (h *WebhookHandler) handlePullRequestReviewComment(w http.ResponseWriter, r
 		event.OwnerOrgID = &owner.OrgID
 	}
 
+	if (event.Action == "created" || event.Action == "edited") && event.Comment.InReplyToID != nil && h.codeReviewDisputes != nil && h.pullRequests != nil {
+		ok, captured := h.handleCodeReviewInlineDispute(w, r, event, owner)
+		if !ok {
+			return
+		}
+		event.RecordOnly = captured
+	}
 	if err := h.prService.HandlePullRequestReviewCommentEvent(r.Context(), event); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "REVIEW_COMMENT_EVENT_FAILED", "failed to process pull_request_review_comment event", err)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
+}
+
+func (h *WebhookHandler) handleCodeReviewInlineDispute(w http.ResponseWriter, r *http.Request, event ghservice.PullRequestReviewCommentEvent, owner db.GitHubRepoOwner) (bool, bool) {
+	if event.Comment.PerformedViaGitHubApp != nil ||
+		strings.EqualFold(strings.TrimSpace(event.Comment.User.Type), "bot") ||
+		strings.EqualFold(strings.TrimSpace(event.Sender.Type), "bot") {
+		return true, false
+	}
+	pr, err := h.pullRequests.GetByOrgRepoAndNumber(r.Context(), owner.OrgID, event.Repository.FullName, event.PullRequest.Number)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true, false
+	}
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PR_LOAD_FAILED", "failed to load pull request for code review dispute", err)
+		return false, false
+	}
+	privateRepo := false
+	if h.repoStore != nil {
+		repo, repoErr := h.repoStore.GetByID(r.Context(), owner.OrgID, owner.RepositoryID)
+		if repoErr != nil {
+			writeError(w, r, http.StatusInternalServerError, "REPOSITORY_LOAD_FAILED", "failed to load repository for code review dispute", repoErr)
+			return false, false
+		}
+		privateRepo = repo.Private
+	}
+	authorType := models.PRFeedbackAuthorType(event.Comment.User.Type)
+	if authorType.Validate() != nil {
+		authorType = models.PRFeedbackAuthorTypeUnknown
+	}
+	_, captured, err := h.codeReviewDisputes.FileFromGitHub(r.Context(), codereviewsvc.FileGitHubCodeReviewDisputeInput{
+		OrgID: owner.OrgID, PullRequestID: pr.ID, InlineThreadRootID: event.Comment.InReplyToID,
+		AuthorLogin: event.Comment.User.Login, AuthorType: authorType,
+		AuthorAssociation: event.Comment.AuthorAssociation, RepositoryPrivate: privateRepo,
+		Body: event.Comment.Body, GitHubCommentID: event.Comment.ID, SourceVersion: codeReviewSourceVersion(event.Comment.UpdatedAt, event.Comment.Body),
+	})
+	if err != nil {
+		if errors.Is(err, codereviewsvc.ErrCodeReviewDisputeInvalidBody) {
+			return true, false
+		}
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_DISPUTE_CAPTURE_FAILED", "failed to capture code review dispute", err)
+		return false, false
+	}
+	return true, captured
 }
 
 func feedbackWebhookMetadata(r *http.Request, body []byte, eventType string) (ghservice.FeedbackWebhookMetadata, error) {

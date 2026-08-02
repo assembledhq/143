@@ -14,6 +14,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestCodeReviewDisputesMigrationEnforcesTenantScopedParents(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000274_code_review_decision_disputes.up.sql")
+	require.NoError(t, err, "test should read the code review disputes migration")
+	sql := string(body)
+
+	for _, parent := range []string{"sessions", "pull_requests", "repositories", "code_review_policies"} {
+		require.Contains(t, sql, "REFERENCES "+parent+"(org_id, id)", "dispute parent references should enforce organization ownership")
+	}
+	require.NotContains(t, sql, "REFERENCES sessions(id)", "session references should not permit a mismatched organization carrier")
+	require.NotContains(t, sql, "REFERENCES pull_requests(id)", "pull request references should not permit a mismatched organization carrier")
+	require.NotContains(t, sql, "REFERENCES repositories(id)", "repository references should not permit a mismatched organization carrier")
+	require.NotContains(t, sql, "REFERENCES code_review_policies(id)", "policy references should not permit a mismatched organization carrier")
+}
+
 func TestSessionChangesetsMigrationPinsPrimaryCompatibilityContract(t *testing.T) {
 	t.Parallel()
 

@@ -55,6 +55,8 @@ export const queryKeys = {
     templates: ["code-reviews", "templates"] as const,
     promptExamples: ["code-reviews", "prompt-examples"] as const,
     evidence: (sessionId: string) => ["code-reviews", "evidence", sessionId] as const,
+    disputes: (sessionId: string) => ["code-reviews", "disputes", sessionId] as const,
+    disputeQueue: (params?: unknown) => ["code-reviews", "dispute-queue", params ?? null] as const,
   },
   sessionComposer: {
     files: (repositoryId: string, branch: string, query: string) => ["session-composer", "files", repositoryId, branch, query] as const,

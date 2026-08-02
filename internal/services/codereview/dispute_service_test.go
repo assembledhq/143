@@ -1,0 +1,461 @@
+package codereview
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+	"time"
+
+	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
+	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/require"
+)
+
+type captureDisputeStore struct {
+	created          models.CodeReviewDispute
+	current          models.CodeReviewDispute
+	triage           models.CodeReviewDisputeTriageResult
+	authorizations   []models.CodeReviewDisputeAuthorization
+	admitted         bool
+	admittedCooldown time.Duration
+}
+
+func (s *captureDisputeStore) CreateAndEnqueueTriage(_ context.Context, dispute *models.CodeReviewDispute) (bool, error) {
+	dispute.ID = uuid.New()
+	s.created = *dispute
+	return true, nil
+}
+func (s *captureDisputeStore) GetByID(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewDispute, error) {
+	return s.current, nil
+}
+func (s *captureDisputeStore) ListBySession(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID, int) (models.CodeReviewDisputePage, error) {
+	return models.CodeReviewDisputePage{}, nil
+}
+func (s *captureDisputeStore) ListQueue(context.Context, uuid.UUID, models.CodeReviewDisputeListFilters) (models.CodeReviewDisputePage, error) {
+	return models.CodeReviewDisputePage{}, nil
+}
+func (s *captureDisputeStore) ListRecentKinds(context.Context, uuid.UUID, int) ([]string, error) {
+	return nil, nil
+}
+func (s *captureDisputeStore) SetTriage(_ context.Context, _ uuid.UUID, _ uuid.UUID, result models.CodeReviewDisputeTriageResult, adjudicationEligible bool, detail string) (models.CodeReviewDispute, error) {
+	s.triage = result
+	s.current.Direction = &result.Direction
+	s.current.Routing = &result.Routing
+	s.current.IntakeStatus = models.CodeReviewDisputeIntakeTriaged
+	s.current.StatusDetail = &detail
+	if adjudicationEligible {
+		status := models.CodeReviewDisputeAdjudicationPending
+		s.current.AdjudicationStatus = &status
+	}
+	return s.current, nil
+}
+func (s *captureDisputeStore) FailTriage(context.Context, uuid.UUID, uuid.UUID, string) error {
+	return nil
+}
+
+func (s *captureDisputeStore) RecordAuthorization(_ context.Context, authorization models.CodeReviewDisputeAuthorization) error {
+	s.authorizations = append(s.authorizations, authorization)
+	return nil
+}
+func (s *captureDisputeStore) AdmitAndEnqueueReassessment(_ context.Context, _ models.CodeReviewDispute, _ *uuid.UUID, _ string, cooldown time.Duration, _ int, _ any) (bool, error) {
+	s.admitted = true
+	s.admittedCooldown = cooldown
+	return false, nil
+}
+func (s *captureDisputeStore) CompleteReassessment(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.CodeReviewSessionStatus, *models.CodeReviewDecision, string) error {
+	return nil
+}
+func (s *captureDisputeStore) MarkHeadChanged(context.Context, uuid.UUID, uuid.UUID, string) error {
+	return nil
+}
+func (s *captureDisputeStore) MarkReassessmentFailed(context.Context, uuid.UUID, uuid.UUID, string) error {
+	return nil
+}
+func (s *captureDisputeStore) Escalate(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string) (models.CodeReviewDispute, error) {
+	return models.CodeReviewDispute{}, nil
+}
+func (s *captureDisputeStore) Adjudicate(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.CodeReviewDisputeAdjudicationUpdate) (models.CodeReviewDispute, error) {
+	return models.CodeReviewDispute{}, nil
+}
+
+type disputeReviewStoreStub struct {
+	metadata models.CodeReviewSessionMetadata
+	item     models.CodeReviewListItem
+	reasons  []models.CodeReviewRiskReasonCode
+	details  []models.CodeReviewRiskReason
+	policy   models.CodeReviewPolicyRecord
+}
+
+func (s disputeReviewStoreStub) GetBySessionID(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	return s.metadata, nil
+}
+func (s disputeReviewStoreStub) GetLatestCompletedByPullRequest(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	return s.metadata, nil
+}
+func (s disputeReviewStoreStub) GetByGitHubFindingComment(context.Context, uuid.UUID, int64) (models.CodeReviewSessionMetadata, error) {
+	return s.metadata, nil
+}
+func (s disputeReviewStoreStub) GetListItemBySessionID(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewListItem, error) {
+	return s.item, nil
+}
+func (s disputeReviewStoreStub) GetRiskReasonCodesBySession(context.Context, uuid.UUID, uuid.UUID) ([]models.CodeReviewRiskReasonCode, error) {
+	return s.reasons, nil
+}
+func (s disputeReviewStoreStub) ListFindings(context.Context, uuid.UUID, uuid.UUID, bool) ([]models.CodeReviewFinding, error) {
+	return nil, nil
+}
+func (s disputeReviewStoreStub) GetPolicyByID(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewPolicyRecord, error) {
+	return s.policy, nil
+}
+func (s disputeReviewStoreStub) GetRiskReasonsBySession(context.Context, uuid.UUID, uuid.UUID) ([]models.CodeReviewRiskReason, error) {
+	return s.details, nil
+}
+
+type disputePullRequestStoreStub struct {
+	pullRequest models.PullRequest
+}
+
+func (s disputePullRequestStoreStub) GetByID(context.Context, uuid.UUID, uuid.UUID) (models.PullRequest, error) {
+	return s.pullRequest, nil
+}
+func (disputePullRequestStoreStub) GetHealthCurrent(context.Context, uuid.UUID, uuid.UUID) (models.PullRequestHealthCurrent, error) {
+	return models.PullRequestHealthCurrent{}, nil
+}
+
+type disputeJobStoreStub struct{}
+
+func (disputeJobStoreStub) EnqueueWithOpts(context.Context, uuid.UUID, db.EnqueueOpts) (uuid.UUID, error) {
+	return uuid.New(), nil
+}
+
+type disputeLLMStub struct {
+	response   string
+	userPrompt string
+}
+
+func (s *disputeLLMStub) Complete(_ context.Context, _ string, userPrompt string) (string, error) {
+	s.userPrompt = userPrompt
+	return s.response, nil
+}
+
+func TestDisputeService_FileInAppCapturesImmutableSemanticInput(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	pullRequestID := uuid.New()
+	repositoryID := uuid.New()
+	policyID := uuid.New()
+	decision := models.CodeReviewDecisionBlocked
+	pullRequestBody := "Existing test and rollout details"
+	store := &captureDisputeStore{}
+	reviews := disputeReviewStoreStub{
+		metadata: models.CodeReviewSessionMetadata{
+			OrgID: orgID, SessionID: sessionID, PullRequestID: pullRequestID,
+			RepositoryID: repositoryID, PolicyID: policyID, HeadSHA: "abc123",
+			Status: models.CodeReviewSessionStatusCompleted, Decision: &decision,
+		},
+		item: models.CodeReviewListItem{
+			PullRequestAuthor: "octocat", PullRequestTitle: "Fix payment authorization",
+			GitHubRepo: "acme/payments", GitHubPRNumber: 42, GitHubPRURL: "https://github.com/acme/payments/pull/42",
+		},
+		reasons: []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonBlockingFindings},
+	}
+	pullRequests := disputePullRequestStoreStub{pullRequest: models.PullRequest{
+		ID: pullRequestID, OrgID: orgID, Title: "Fix payment authorization", Body: &pullRequestBody,
+	}}
+	service := NewDisputeService(store, reviews, pullRequests, disputeJobStoreStub{}, nil, "", zerolog.Nop())
+
+	dispute, err := service.FileInApp(context.Background(), FileCodeReviewDisputeInput{
+		OrgID: orgID, SessionID: sessionID, FiledByLogin: "octocat", AuthorAssociation: "MEMBER",
+		RepositoryVisibility: "private", Body: "The blocking finding was already addressed.",
+		ContestedReasonCodes: []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonBlockingFindings},
+	})
+
+	require.NoError(t, err, "filing a dispute against a completed review should succeed")
+	require.Equal(t, store.created.ID, dispute.ID, "the returned dispute should reference the immutable row sent to storage")
+	require.True(t, dispute.Trusted, "private-repository member evidence should be trusted at filing")
+	require.True(t, dispute.AuthorIsPRAuthor, "the filing snapshot should identify the pull request author")
+	require.Equal(t,
+		codeReviewDisputeSemanticHash("abc123", policyID, dispute.Body, "Fix payment authorization", pullRequestBody),
+		dispute.SemanticInputHashAtFiling,
+		"the filing fingerprint should include the exact PR title and body context",
+	)
+	require.Equal(t, []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonBlockingFindings}, dispute.ContestedReasonCodes, "only available risk reasons should be retained")
+	var signals map[string]any
+	require.NoError(t, json.Unmarshal(dispute.QueueSignals, &signals), "queue context should be valid JSON")
+	require.Equal(t, "Fix payment authorization", signals["pull_request_title"], "queue context should preserve the reviewed pull request title")
+	require.Equal(t, "https://github.com/acme/payments/pull/42", signals["github_pr_url"], "queue context should link policy owners to the pull request")
+}
+
+func TestDisputeService_TriageDoesNotLetTrustedNonAuthorStartReassessment(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	disputeID := uuid.New()
+	sessionID := uuid.New()
+	store := &captureDisputeStore{current: models.CodeReviewDispute{
+		ID: disputeID, OrgID: orgID, SessionID: sessionID,
+		Source: models.CodeReviewDisputeSourceAppUI, Decision: models.CodeReviewDecisionBlocked,
+		Body: "The review missed new evidence.", AuthorAssociation: "MEMBER",
+		RepositoryVisibility: models.CodeReviewRepositoryVisibilityPublic,
+		AuthorIsPRAuthor:     false, IntakeStatus: models.CodeReviewDisputeIntakePending,
+		ReassessmentStatus: models.CodeReviewDisputeReassessmentNotRequested,
+	}}
+	reviews := disputeReviewStoreStub{
+		item:    models.CodeReviewListItem{PullRequestAuthor: "octocat"},
+		reasons: []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonBlockingFindings},
+	}
+	service := NewDisputeService(store, reviews, disputePullRequestStoreStub{}, disputeJobStoreStub{}, nil, "", zerolog.Nop())
+
+	err := service.Triage(context.Background(), orgID, disputeID)
+
+	require.NoError(t, err, "trusted maintainer feedback should still be recorded and routed")
+	require.Equal(t, models.CodeReviewDisputeRoutingPolicySignalOnly, store.triage.Routing, "only the pull request author may start a Phase 1A reassessment")
+	require.Equal(t, "Only the pull request author can trigger an automatic re-review right now. The objection was recorded for a policy owner.", store.triage.Reply, "the filer should receive a clear authorization explanation")
+	require.False(t, store.admitted, "a trusted non-author must not reach reassessment admission")
+	actions := make([]models.CodeReviewDisputeAuthorizationAction, 0, len(store.authorizations))
+	for _, authorization := range store.authorizations {
+		actions = append(actions, authorization.Action)
+	}
+	require.Equal(t, []models.CodeReviewDisputeAuthorizationAction{models.CodeReviewDisputeAuthorizationQueueInfluence}, actions, "queue influence should have one exact durable authorization snapshot")
+}
+
+func TestDisputeService_QueueReassessmentUsesCapturedPolicyCooldown(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		cooldownSeconds int
+		expected        time.Duration
+	}{
+		{name: "uses default for legacy policy", expected: 15 * time.Minute},
+		{name: "uses versioned policy value", cooldownSeconds: 30 * 60, expected: 30 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			policyID := uuid.New()
+			pullRequestID := uuid.New()
+			headSHA := "abc123"
+			store := &captureDisputeStore{}
+			reviews := disputeReviewStoreStub{policy: models.CodeReviewPolicyRecord{
+				ID: policyID,
+				RiskPolicy: models.CodeReviewRiskPolicy{
+					SemanticDedupeCooldownSeconds: tt.cooldownSeconds,
+				},
+			}}
+			pullRequests := disputePullRequestStoreStub{pullRequest: models.PullRequest{
+				ID: pullRequestID, OrgID: orgID, Title: "Fix authorization", HeadSHA: &headSHA,
+			}}
+			service := NewDisputeService(store, reviews, pullRequests, disputeJobStoreStub{}, nil, "", zerolog.Nop())
+
+			err := service.queueReassessment(context.Background(), models.CodeReviewDispute{
+				ID: uuid.New(), OrgID: orgID, PullRequestID: pullRequestID, PolicyID: policyID,
+				ReviewedHeadSHA: headSHA, Body: "The check missed the authorization guard.",
+			})
+
+			require.NoError(t, err, "queueReassessment should admit a matching-head dispute")
+			require.True(t, store.admitted, "queueReassessment should reach admission")
+			require.Equal(t, tt.expected, store.admittedCooldown, "admission should use the captured policy cooldown")
+		})
+	}
+}
+
+func TestDisputeService_TriageResultDeterministic(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		dispute  models.CodeReviewDispute
+		expected models.CodeReviewDisputeTriageResult
+	}{
+		{
+			name: "explicit non-approval requests reassessment",
+			dispute: models.CodeReviewDispute{
+				Source: models.CodeReviewDisputeSourceAppUI, Decision: models.CodeReviewDecisionBlocked,
+				ContestedReasonCodes: []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonBlockingFindings},
+			},
+			expected: models.CodeReviewDisputeTriageResult{
+				Direction:            models.CodeReviewDisputeDirectionShouldHaveApproved,
+				ContestedReasonCodes: []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonBlockingFindings},
+				DisputeKind:          "explicit_reconsideration", AssertsNewInformation: true,
+				Routing: models.CodeReviewDisputeRoutingReassess, Confidence: 1,
+			},
+		},
+		{
+			name: "explicit unsafe approval becomes policy signal",
+			dispute: models.CodeReviewDispute{
+				Source: models.CodeReviewDisputeSourceAppUI, Decision: models.CodeReviewDecisionApproved,
+			},
+			expected: models.CodeReviewDisputeTriageResult{
+				Direction:   models.CodeReviewDisputeDirectionShouldNotHaveApproved,
+				DisputeKind: "explicit_reconsideration", AssertsNewInformation: true,
+				Routing: models.CodeReviewDisputeRoutingPolicySignalOnly, Confidence: 1,
+			},
+		},
+		{
+			name: "acknowledgement is not a dispute",
+			dispute: models.CodeReviewDispute{
+				Source: models.CodeReviewDisputeSourceGitHubComment, Decision: models.CodeReviewDecisionBlocked, Body: "Thanks!",
+			},
+			expected: models.CodeReviewDisputeTriageResult{
+				Direction:   models.CodeReviewDisputeDirectionShouldHaveApproved,
+				DisputeKind: "acknowledgement", Routing: models.CodeReviewDisputeRoutingNotADispute,
+				Confidence: 1, Reply: "Noted. If you meant to challenge this decision, use the reconsideration action in 143.",
+			},
+		},
+	}
+
+	service := &DisputeService{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual, err := service.triageResult(context.Background(), tt.dispute, nil, models.CodeReviewListItem{}, nil, nil)
+			require.NoError(t, err, "deterministic dispute triage should not require an LLM")
+			require.Equal(t, tt.expected, actual, "triage should return the exact deterministic classification")
+		})
+	}
+}
+
+func TestDisputeService_TriageAnswerOnlyUsesReviewEvidence(t *testing.T) {
+	t.Parallel()
+
+	client := &disputeLLMStub{response: `{"direction":"should_have_approved","contested_reason_codes":[],"dispute_kind":"explanation_question","asserts_new_information":false,"routing":"answer_only","confidence":0.99,"reply":"The review blocked because the authorization finding is P1."}`}
+	service := &DisputeService{llm: client}
+
+	result, err := service.triageResult(context.Background(), models.CodeReviewDispute{
+		Source: models.CodeReviewDisputeSourceGitHubComment, Decision: models.CodeReviewDecisionBlocked,
+		Body: "Why did this block?", FiledByLogin: "octocat",
+	}, []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonBlockingFindings}, models.CodeReviewListItem{
+		CodeReviewSessionMetadata: models.CodeReviewSessionMetadata{FinalReviewBody: stringPtrForDisputeTest("A P1 authorization finding blocked approval.")},
+		PullRequestTitle:          "Fix authorization",
+	}, nil, nil)
+
+	require.NoError(t, err, "an explanation question should be answered from review evidence")
+	require.Equal(t, models.CodeReviewDisputeRoutingAnswerOnly, result.Routing, "the evidence answer should remain answer-only")
+	require.Equal(t, "The review blocked because the authorization finding is P1.", result.Reply, "the reply should contain the evidence-grounded answer")
+	require.Contains(t, client.userPrompt, `"deterministic_route_hint":"answer_only"`, "the LLM should receive the deterministic answer-only hint")
+	require.Contains(t, client.userPrompt, "A P1 authorization finding blocked approval.", "the LLM should receive the bounded review evidence")
+}
+
+func TestDeterministicPolicySignalReplyNamesSettingsAndValues(t *testing.T) {
+	t.Parallel()
+
+	reply := deterministicPolicySignalReply(
+		[]models.CodeReviewRiskReasonCode{
+			models.CodeReviewRiskReasonLinesLimitExceeded,
+			models.CodeReviewRiskReasonBlockedPath,
+		},
+		[]models.CodeReviewRiskReason{
+			{Code: models.CodeReviewRiskReasonLinesLimitExceeded, Actual: 431, Limit: 300},
+			{Code: models.CodeReviewRiskReasonBlockedPath, Subject: "migrations/unsafe.sql"},
+		},
+	)
+
+	require.Equal(t, "This objection concerns deterministic policy: Lines changed limit is 300 (observed 431); Blocked paths includes `migrations/unsafe.sql`. Reassessment would apply the same rule, so it was recorded for a policy owner instead.", reply, "the deterministic reply should identify the binding settings and observed values")
+}
+
+func stringPtrForDisputeTest(value string) *string {
+	return &value
+}
+
+func TestBuildCodeReviewDisputeReply(t *testing.T) {
+	t.Parallel()
+
+	unsafeDirection := models.CodeReviewDisputeDirectionShouldNotHaveApproved
+	upheld := models.CodeReviewDisputeAdjudicationUpheld
+	disputeID := uuid.New()
+	sessionID := uuid.New()
+	tests := []struct {
+		name     string
+		dispute  models.CodeReviewDispute
+		expected string
+	}{
+		{
+			name: "unsafe approval mentions pull request author",
+			dispute: models.CodeReviewDispute{
+				ID: disputeID, SessionID: sessionID, Direction: &unsafeDirection,
+				QueueSignals: json.RawMessage(`{"pull_request_author":"octocat"}`),
+			},
+			expected: "@octocat I recorded this objection for review. [View the dispute](https://app.example.com/code-reviews?evidence=" + sessionID.String() + ")\n\n" +
+				ghservice.PRFeedbackHiddenMarker("code-review-dispute:"+disputeID.String()),
+		},
+		{
+			name: "adjudication replaces interim status",
+			dispute: models.CodeReviewDispute{
+				ID: disputeID, SessionID: sessionID, AdjudicationStatus: &upheld,
+				ReassessmentStatus: models.CodeReviewDisputeReassessmentFailed,
+			},
+			expected: "A policy owner upheld this objection. The decision is retained as feedback for policy tuning. " +
+				"[View the dispute](https://app.example.com/code-reviews?evidence=" + sessionID.String() + ")\n\n" +
+				ghservice.PRFeedbackHiddenMarker("code-review-dispute:"+disputeID.String()),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := buildCodeReviewDisputeReply(tt.dispute, "https://app.example.com")
+			require.Equal(t, tt.expected, actual, "reply should include the exact durable status detail")
+		})
+	}
+}
+
+func TestCodeReviewDisputeSemanticHashNormalization(t *testing.T) {
+	t.Parallel()
+
+	policyID := uuid.New()
+	baseline := codeReviewDisputeSemanticHash("ABC123", policyID, "New   EVIDENCE", "Fix Payment", "Body text")
+	tests := []struct {
+		name     string
+		head     string
+		evidence string
+		title    string
+		body     string
+		expected bool
+	}{
+		{name: "case and whitespace are semantic no-ops", head: "abc123", evidence: " new evidence ", title: "fix  payment", body: "BODY TEXT", expected: true},
+		{name: "changed evidence changes the semantic input", head: "abc123", evidence: "different evidence", title: "fix payment", body: "body text", expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := codeReviewDisputeSemanticHash(tt.head, policyID, tt.evidence, tt.title, tt.body)
+			require.Equal(t, tt.expected, baseline == actual, "semantic input hashing should normalize non-meaningful text changes")
+		})
+	}
+}
+
+func TestIsLikelyDisputeMention(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		body     string
+		expected bool
+	}{
+		{name: "bare review request is not diverted", body: "@acme/reviewers review this PR", expected: false},
+		{name: "explicit disagreement is captured", body: "@acme/reviewers this is wrong; the test already covers it", expected: true},
+		{name: "explanation question is captured", body: "@acme/reviewers why was this blocked?", expected: true},
+		{name: "unsafe approval report is captured", body: "@acme/reviewers this approval is unsafe", expected: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := IsLikelyDisputeMention(tt.body)
+			require.Equal(t, tt.expected, actual, "mention routing should distinguish objections from ordinary review requests")
+		})
+	}
+}

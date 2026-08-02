@@ -145,18 +145,21 @@ const (
 	AuditActionCredentialDeleted                   AuditAction = "credential.deleted" // #nosec G101 -- not a credential
 
 	// Preview secret bundle actions
-	AuditActionPreviewSecretBundleUpdated  AuditAction = "preview_secret_bundle.updated"  // #nosec G101 -- not a credential
-	AuditActionPreviewSecretBundleDeleted  AuditAction = "preview_secret_bundle.deleted"  // #nosec G101 -- not a credential
-	AuditActionPreviewSecretBundleRevealed AuditAction = "preview_secret_bundle.revealed" // #nosec G101 -- not a credential
-	AuditActionPreviewSecretBundleResolved AuditAction = "preview_secret_bundle.resolved" // #nosec G101 -- not a credential
-	AuditActionPreviewSecretBundleFailed   AuditAction = "preview_secret_bundle.failed"   // #nosec G101 -- not a credential
-	AuditActionPreviewPolicyUpdated        AuditAction = "preview_policy.updated"
-	AuditActionPreviewToolInvoked          AuditAction = "preview.tool_invoked"
-	AuditActionPreviewUpdated              AuditAction = "preview.updated"
-	AuditActionPreviewScreenshotCaptured   AuditAction = "preview.screenshot_captured"
-	AuditActionCodeReviewPolicyUpdated     AuditAction = "code_review_policy.updated"
-	AuditActionCodeReviewPolicyReset       AuditAction = "code_review_policy.reset"
-	AuditActionCodeReviewRetried           AuditAction = "code_review.retried"
+	AuditActionPreviewSecretBundleUpdated   AuditAction = "preview_secret_bundle.updated"  // #nosec G101 -- not a credential
+	AuditActionPreviewSecretBundleDeleted   AuditAction = "preview_secret_bundle.deleted"  // #nosec G101 -- not a credential
+	AuditActionPreviewSecretBundleRevealed  AuditAction = "preview_secret_bundle.revealed" // #nosec G101 -- not a credential
+	AuditActionPreviewSecretBundleResolved  AuditAction = "preview_secret_bundle.resolved" // #nosec G101 -- not a credential
+	AuditActionPreviewSecretBundleFailed    AuditAction = "preview_secret_bundle.failed"   // #nosec G101 -- not a credential
+	AuditActionPreviewPolicyUpdated         AuditAction = "preview_policy.updated"
+	AuditActionPreviewToolInvoked           AuditAction = "preview.tool_invoked"
+	AuditActionPreviewUpdated               AuditAction = "preview.updated"
+	AuditActionPreviewScreenshotCaptured    AuditAction = "preview.screenshot_captured"
+	AuditActionCodeReviewPolicyUpdated      AuditAction = "code_review_policy.updated"
+	AuditActionCodeReviewPolicyReset        AuditAction = "code_review_policy.reset"
+	AuditActionCodeReviewRetried            AuditAction = "code_review.retried"
+	AuditActionCodeReviewDisputeFiled       AuditAction = "code_review_dispute.filed"
+	AuditActionCodeReviewDisputeReassessed  AuditAction = "code_review_dispute.reassessed"
+	AuditActionCodeReviewDisputeAdjudicated AuditAction = "code_review_dispute.adjudicated"
 
 	// Auth actions
 	AuditActionAuthLogin    AuditAction = "auth.login"
@@ -232,6 +235,7 @@ func (a AuditAction) Validate() error {
 		AuditActionPreviewSecretBundleRevealed, AuditActionPreviewSecretBundleResolved, AuditActionPreviewSecretBundleFailed,
 		AuditActionPreviewPolicyUpdated, AuditActionPreviewToolInvoked, AuditActionPreviewUpdated, AuditActionPreviewScreenshotCaptured,
 		AuditActionCodeReviewPolicyUpdated, AuditActionCodeReviewPolicyReset, AuditActionCodeReviewRetried,
+		AuditActionCodeReviewDisputeFiled, AuditActionCodeReviewDisputeReassessed, AuditActionCodeReviewDisputeAdjudicated,
 		AuditActionAuthLogin, AuditActionAuthLogout, AuditActionAuthRegister,
 		AuditActionAuthCLILogin, AuditActionAuthCLILogout,
 		AuditActionOrgJoinTokenCreated, AuditActionOrgJoinTokenRevealed, AuditActionOrgJoinTokenRevoked, AuditActionOrgJoinTokenUsed,
@@ -278,6 +282,7 @@ const (
 	AuditResourcePreview                    AuditResourceType = "preview"
 	AuditResourceCodeReviewPolicy           AuditResourceType = "code_review_policy"
 	AuditResourceCodeReview                 AuditResourceType = "code_review"
+	AuditResourceCodeReviewDispute          AuditResourceType = "code_review_dispute"
 	AuditResourceAPIClient                  AuditResourceType = "api_client"
 	AuditResourceAPIToken                   AuditResourceType = "api_token"      // #nosec G101 -- audit resource type
 	AuditResourceCLIToken                   AuditResourceType = "cli_token"      // #nosec G101 -- audit resource type
@@ -298,6 +303,7 @@ func (t AuditResourceType) Validate() error {
 		AuditResourceAutomation, AuditResourceOrganization, AuditResourcePreviewSecretBundle, AuditResourcePreviewPolicy, AuditResourcePreview,
 		AuditResourceCodeReviewPolicy,
 		AuditResourceCodeReview,
+		AuditResourceCodeReviewDispute,
 		AuditResourceAPIClient, AuditResourceAPIToken,
 		AuditResourceCLIToken, AuditResourceOrgJoinToken, AuditResourceCLITool,
 		AuditResourceOrgDomain:

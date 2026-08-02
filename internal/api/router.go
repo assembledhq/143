@@ -366,8 +366,25 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if prService != nil {
 		codeReviewSvc.SetRetryDependencies(pullRequestStore, prService)
 	}
+	codeReviewDisputeStore := db.NewCodeReviewDisputeStore(pool)
+	codeReviewDisputeStore.SetJobStore(jobStore)
+	codeReviewDisputeSvc := codereviewsvc.NewDisputeService(
+		codeReviewDisputeStore,
+		codeReviewStore,
+		pullRequestStore,
+		jobStore,
+		llmClient,
+		cfg.FrontendURL,
+		logger,
+		codereviewsvc.DisputeConfig{
+			ReassessmentsEnabled:   cfg.CodeReviewDisputeReassessmentsEnabled,
+			MaxActiveReassessments: cfg.CodeReviewDisputeMaxActiveReassessments,
+		},
+	)
+	codeReviewDisputeSvc.SetAuditEmitter(auditEmitter)
 	codeReviewTriggerSetupSvc := codereviewsvc.NewGitHubTriggerSetupService(codeReviewStore, repoStore, appUserAuthSvc, logger)
 	webhookHandler.SetCodeReviewService(codeReviewSvc, pullRequestStore)
+	webhookHandler.SetCodeReviewDisputeService(codeReviewDisputeSvc)
 	sessionThreadFileEventStore := db.NewSessionThreadFileEventStore(pool)
 	sessionViewStore := db.NewSessionViewStore(pool)
 	pullRequestHandler := handlers.NewPullRequestHandler(prService)
@@ -378,6 +395,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	codeReviewHandler.SetRetryService(codeReviewSvc)
 	codeReviewHandler.SetAuditEmitter(auditEmitter)
 	codeReviewHandler.SetGitHubTriggerSetupService(codeReviewTriggerSetupSvc)
+	codeReviewHandler.SetDisputeService(codeReviewDisputeSvc)
 	prHealthStreams := cache.NewPullRequestStreams(redisClient, logger)
 	publicationIntentCoordinator := publicationintent.NewCoordinator(
 		sessionStore,
@@ -1559,6 +1577,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 				r.Patch("/api/v1/repositories/{id}", repoHandler.Update)
 				r.Post("/api/v1/code-reviews/{id}/retry", codeReviewHandler.Retry)
+				r.Post("/api/v1/code-reviews/{id}/disputes", codeReviewHandler.CreateDispute)
+				r.Get("/api/v1/code-reviews/{id}/disputes", codeReviewHandler.ListSessionDisputes)
+				r.Post("/api/v1/code-review-disputes/{id}/escalate", codeReviewHandler.EscalateDispute)
 				r.Post("/api/v1/repositories/{id}/disconnect", repoHandler.Disconnect)
 				r.Post("/api/v1/repositories/{id}/reconnect", repoHandler.Reconnect)
 
@@ -1647,6 +1668,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/code-review-github-trigger", codeReviewHandler.DeleteGitHubTrigger)
 				r.Post("/api/v1/code-reviews/{id}/agent-results", codeReviewHandler.CreateAgentResult)
 				r.Post("/api/v1/code-reviews/{id}/findings", codeReviewHandler.CreateFinding)
+				r.Get("/api/v1/code-review-disputes", codeReviewHandler.ListDisputeQueue)
+				r.Patch("/api/v1/code-review-disputes/{id}", codeReviewHandler.UpdateDispute)
 				r.Put("/api/v1/repositories/{repository_id}/preview-policy", branchPreviewHandler.UpdatePolicy)
 				r.Post("/api/v1/repositories/{repository_id}/preview-policy/test-preview", branchPreviewHandler.TestPolicyPreview)
 				r.Get("/api/v1/previews/api-tokens", branchPreviewHandler.ListAPITokens)

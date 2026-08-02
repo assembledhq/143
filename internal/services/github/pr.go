@@ -3374,6 +3374,7 @@ type PullRequestReviewCommentEvent struct {
 	OwnerOrgID       *uuid.UUID              `json:"-"`
 	DeliveryID       string                  `json:"-"`
 	FeedbackMetadata FeedbackWebhookMetadata `json:"-"`
+	RecordOnly       bool                    `json:"-"`
 	Sender           struct {
 		Login string `json:"login"`
 		Type  string `json:"type"`
@@ -3394,6 +3395,7 @@ type PullRequestReviewCommentEvent struct {
 		Side                  string                     `json:"side"`
 		DiffHunk              string                     `json:"diff_hunk"`
 		CommitID              string                     `json:"commit_id"`
+		UpdatedAt             *time.Time                 `json:"updated_at"`
 		PerformedViaGitHubApp *FeedbackGitHubAppIdentity `json:"performed_via_github_app"`
 	} `json:"comment"`
 	PullRequest struct {
@@ -3426,7 +3428,7 @@ func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, eve
 		if event.Action == "deleted" {
 			body = ""
 		}
-		if err := s.ingestPRFeedback(ctx, normalizedPRFeedback{Metadata: event.FeedbackMetadata, OwnerOrgID: event.OwnerOrgID, RepositoryID: event.Repository.ID, Repository: event.Repository.FullName, PullRequestNumber: event.PullRequest.Number, Surface: models.PRFeedbackSurfaceReviewComment, ProviderObjectID: event.Comment.ID, GitHubReviewID: &event.Comment.PullRequestReviewID, ThreadRootID: &rootID, InReplyToID: event.Comment.InReplyToID, AuthorLogin: event.Comment.User.Login, AuthorType: event.Comment.User.Type, AuthorAssociation: event.Comment.AuthorAssociation, GitHubAppID: appID, GitHubAppSlug: appSlug, Body: body, Path: &event.Comment.Path, Line: event.Comment.Line, Side: &event.Comment.Side, DiffHunk: &event.Comment.DiffHunk, CommitSHA: &event.Comment.CommitID}); err != nil {
+		if err := s.ingestPRFeedback(ctx, normalizedPRFeedback{Metadata: event.FeedbackMetadata, OwnerOrgID: event.OwnerOrgID, RepositoryID: event.Repository.ID, Repository: event.Repository.FullName, PullRequestNumber: event.PullRequest.Number, Surface: models.PRFeedbackSurfaceReviewComment, ProviderObjectID: event.Comment.ID, GitHubReviewID: &event.Comment.PullRequestReviewID, ThreadRootID: &rootID, InReplyToID: event.Comment.InReplyToID, AuthorLogin: event.Comment.User.Login, AuthorType: event.Comment.User.Type, AuthorAssociation: event.Comment.AuthorAssociation, GitHubAppID: appID, GitHubAppSlug: appSlug, Body: body, Path: &event.Comment.Path, Line: event.Comment.Line, Side: &event.Comment.Side, DiffHunk: &event.Comment.DiffHunk, CommitSHA: &event.Comment.CommitID, RecordOnly: event.RecordOnly}); err != nil {
 			return err
 		}
 	}
@@ -3449,6 +3451,9 @@ func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, eve
 		DedupeGroupID:     githubReviewCommentDedupeGroup(event.Comment.PullRequestReviewID),
 		Path:              event.Comment.Path,
 	}, event.OwnerOrgID, event.Repository.ID)
+	if event.RecordOnly {
+		return nil
+	}
 
 	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.PullRequest.Number)
 	if err != nil {
@@ -3489,15 +3494,17 @@ type IssueCommentEvent struct {
 	OwnerOrgID       *uuid.UUID              `json:"-"`
 	DeliveryID       string                  `json:"-"`
 	FeedbackMetadata FeedbackWebhookMetadata `json:"-"`
+	RecordOnly       bool                    `json:"-"`
 	Sender           struct {
 		Login string `json:"login"`
 		Type  string `json:"type"`
 	} `json:"sender"`
 	Comment struct {
-		ID      int64  `json:"id"`
-		Body    string `json:"body"`
-		HTMLURL string `json:"html_url"`
-		User    struct {
+		ID        int64      `json:"id"`
+		Body      string     `json:"body"`
+		HTMLURL   string     `json:"html_url"`
+		UpdatedAt *time.Time `json:"updated_at"`
+		User      struct {
 			Login string `json:"login"`
 			Type  string `json:"type"`
 		} `json:"user"`
@@ -3564,7 +3571,7 @@ func (s *PRService) HandleIssueCommentEvent(ctx context.Context, event IssueComm
 		if event.Action == "deleted" {
 			body = ""
 		}
-		if err := s.ingestPRFeedback(ctx, normalizedPRFeedback{Metadata: event.FeedbackMetadata, OwnerOrgID: event.OwnerOrgID, RepositoryID: event.Repository.ID, Repository: event.Repository.FullName, PullRequestNumber: event.Issue.Number, Surface: models.PRFeedbackSurfaceIssueComment, ProviderObjectID: event.Comment.ID, AuthorLogin: event.Comment.User.Login, AuthorType: event.Comment.User.Type, AuthorAssociation: event.Comment.AuthorAssociation, GitHubAppID: appID, GitHubAppSlug: appSlug, Body: body}); err != nil {
+		if err := s.ingestPRFeedback(ctx, normalizedPRFeedback{Metadata: event.FeedbackMetadata, OwnerOrgID: event.OwnerOrgID, RepositoryID: event.Repository.ID, Repository: event.Repository.FullName, PullRequestNumber: event.Issue.Number, Surface: models.PRFeedbackSurfaceIssueComment, ProviderObjectID: event.Comment.ID, AuthorLogin: event.Comment.User.Login, AuthorType: event.Comment.User.Type, AuthorAssociation: event.Comment.AuthorAssociation, GitHubAppID: appID, GitHubAppSlug: appSlug, Body: body, RecordOnly: event.RecordOnly}); err != nil {
 			return err
 		}
 	}
