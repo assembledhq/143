@@ -11,6 +11,11 @@ import (
 	"github.com/google/uuid"
 )
 
+// ErrDraftHeadMoved reports that GitHub's draft is no longer at the head that
+// was reviewed. Callers must resolve this as a review decision — retrying can
+// never make an already-moved head match again.
+var ErrDraftHeadMoved = errors.New("draft pull request head moved after review")
+
 // MarkPullRequestReady transitions a 143-owned draft to ready-for-review.
 // The REST read makes replays idempotent; GraphQL is only called while the PR
 // is still a draft.
@@ -46,7 +51,7 @@ func (s *PRService) MarkPullRequestReady(ctx context.Context, orgID, pullRequest
 		return fmt.Errorf("decode draft pull request: %w", err)
 	}
 	if expected := strings.TrimSpace(expectedHeadSHA); expected != "" && current.Head.SHA != expected {
-		return fmt.Errorf("draft pull request head moved after review: expected %s, got %s", expected, current.Head.SHA)
+		return fmt.Errorf("%w: expected %s, got %s", ErrDraftHeadMoved, expected, current.Head.SHA)
 	}
 	if !current.Draft {
 		return nil

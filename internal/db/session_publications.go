@@ -30,6 +30,14 @@ const sessionPublicationSelectColumns = `id, org_id, session_id, changeset_id, r
 	last_error_code, last_error_message, requested_at, last_attempt_at,
 	branch_published_at, pr_resolved_at, completed_at, created_at, updated_at`
 
+// EnsureRequested upserts durable publication intent. Every mutable column is
+// guarded so a later replay cannot undo a decision an earlier writer already
+// made. review_gate_state is the strictest of those: once a coordinator has
+// recorded that review applies (a 'pending' gate with review_max_passes set),
+// no later request may downgrade it to 'not_required'. The open_pr worker
+// re-runs this upsert before it knows anything about review, so without that
+// guard the worker's default gate would silently skip the review it is about
+// to be asked to run.
 func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uuid.UUID, publication *models.SessionPublication) error {
 	if publication == nil {
 		return errors.New("session publication is required")
@@ -258,6 +266,9 @@ func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uui
 			WHEN EXCLUDED.request_generation_at < session_publications.request_generation_at
 			THEN session_publications.review_gate_state
 			WHEN session_publications.review_gate_state IN ('passed', 'needs_human', 'failed')
+			THEN session_publications.review_gate_state
+			WHEN session_publications.review_gate_state = 'pending'
+			 AND session_publications.review_max_passes IS NOT NULL
 			THEN session_publications.review_gate_state
 			ELSE EXCLUDED.review_gate_state
 		END,

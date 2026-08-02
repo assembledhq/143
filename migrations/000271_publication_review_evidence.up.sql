@@ -1,13 +1,30 @@
--- Add revision-bound evidence for publication review loops. Constraints are
--- installed NOT VALID here so existing rows are not scanned while the
--- ACCESS EXCLUSIVE catalog locks are held; migration 000272 validates them.
+-- Add revision-bound evidence for publication review loops.
+--
+-- The CHECK and FOREIGN KEY constraints are installed NOT VALID here so their
+-- validation scans do not run while the ACCESS EXCLUSIVE catalog locks are
+-- held; migration 000272 validates them under a SHARE UPDATE EXCLUSIVE lock
+-- that concurrent writers can tolerate.
+--
+-- Note on locking: the UNIQUE constraint and the index at the bottom of this
+-- file cannot be deferred that way — a UNIQUE constraint has no NOT VALID form,
+-- and our migrator wraps each file in a single transaction, which rules out
+-- CREATE INDEX CONCURRENTLY. Both therefore build under ACCESS EXCLUSIVE and
+-- block writes to their table for the duration.
+--
+-- Deploy check: `session_review_loops` holds one row per review loop and
+-- `session_publications` one row per changeset publication — both narrow tables
+-- with no per-pass, per-message, or per-turn fan-out. Confirm their row counts
+-- before rolling this out; at the low-hundreds-of-thousands scale these builds
+-- are sub-second, and if either has grown beyond that, split the index build
+-- into its own release with the transaction disabled so it can run
+-- CONCURRENTLY.
 SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE session_review_loops
     ADD CONSTRAINT session_review_loops_id_org_id_key UNIQUE (id, org_id);
 
 ALTER TABLE session_review_loops
-    DROP CONSTRAINT chk_session_review_loops_source;
+    DROP CONSTRAINT IF EXISTS chk_session_review_loops_source;
 ALTER TABLE session_review_loops
     ADD CONSTRAINT chk_session_review_loops_source
         CHECK (source IN ('manual', 'automation', 'publication')) NOT VALID;

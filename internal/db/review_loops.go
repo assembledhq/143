@@ -531,40 +531,54 @@ func markLoopTerminalOn(ctx context.Context, q DBTX, orgID, loopID uuid.UUID, st
 		if err := finishPublicationReviewOn(ctx, q, orgID, loopID, status); err != nil {
 			return err
 		}
-		// A publication loop can own the session-wide review slot while a
-		// second publication is parked. Re-evaluate the parked intent after
-		// advancing the linked publication, regardless of terminal outcome.
-		return resumeParkedPublicationOn(ctx, q, orgID, sessionID)
 	}
+	// Any terminal loop frees the session-wide review slot, so a publication
+	// parked behind it can start its own review — regardless of which kind of
+	// loop just ended, or how it ended.
 	return resumeParkedPublicationOn(ctx, q, orgID, sessionID)
 }
 
 func finishPublicationReviewOn(ctx context.Context, q DBTX, orgID, loopID uuid.UUID, status models.ReviewLoopStatus) error {
-	gate := models.SessionPublicationReviewGateFailed
-	state := models.SessionPublicationStateReviewPending
-	if status == models.ReviewLoopStatusClean {
-		gate = models.SessionPublicationReviewGatePassed
-		state = models.SessionPublicationStateReadyToPublish
-	} else if status == models.ReviewLoopStatusNeedsHumanDecision {
-		gate = models.SessionPublicationReviewGateNeedsHuman
+	// The gate value alone must determine whether the publication is terminal,
+	// because that is all a reader has: SetReviewGate makes 'failed' terminal,
+	// so this writer must too, or the same gate would mean "retryable" from one
+	// path and "settled" from the other. A cancelled loop is not a failure —
+	// somebody stopped it, so it needs a human decision and stays live.
+	gate, state := models.SessionPublicationReviewGateFailed, models.SessionPublicationStateTerminalFailed
+	switch status {
+	case models.ReviewLoopStatusClean:
+		gate, state = models.SessionPublicationReviewGatePassed, models.SessionPublicationStateReadyToPublish
+	case models.ReviewLoopStatusNeedsHumanDecision, models.ReviewLoopStatusCancelled:
+		gate, state = models.SessionPublicationReviewGateNeedsHuman, models.SessionPublicationStateReviewPending
 	}
 	var payload json.RawMessage
 	var queue models.SessionPublicationJobQueue
 	var changesetID uuid.UUID
 	err := q.QueryRow(ctx, `UPDATE session_publications AS publication
-		SET review_gate_state = @gate, state = @state, updated_at = now()
+		SET review_gate_state = @gate, state = @state,
+			completed_at = CASE WHEN @state = 'terminal_failed' THEN COALESCE(completed_at, now()) ELSE completed_at END,
+			updated_at = now()
+		-- session and changeset are joined for the clean-evidence comparison
+		-- below. They are keyed to the publication here so the join stays
+		-- bounded on every status, including the ones that read nothing from
+		-- them; do not drop these predicates when simplifying the OR.
 		FROM session_review_loops AS loop, sessions AS session, session_changesets AS changeset
 		WHERE publication.org_id = @org_id AND publication.review_loop_id = @loop_id
 		  AND loop.org_id = publication.org_id AND loop.id = publication.review_loop_id
 		  AND session.org_id = publication.org_id AND session.id = publication.session_id
 		  AND changeset.org_id = publication.org_id AND changeset.session_id = publication.session_id
 		  AND changeset.id = publication.changeset_id
-		  AND publication.review_workspace_revision = loop.workspace_revision
-		  AND publication.review_desired_head_sha = loop.desired_head_sha
 		  AND (
+			-- Only a clean result must prove its evidence is still current. A
+			-- non-clean result blocks its linked publication unconditionally:
+			-- declining to block on drifted evidence would leave the intent
+			-- pending against a loop that has already finished, which no
+			-- recovery path can see.
 			@status <> 'clean'
 			OR (
-				session.workspace_revision = loop.workspace_revision
+				publication.review_workspace_revision = loop.workspace_revision
+				AND publication.review_desired_head_sha = loop.desired_head_sha
+				AND session.workspace_revision = loop.workspace_revision
 				AND changeset.head_sha = loop.desired_head_sha
 			)
 		  )

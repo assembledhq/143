@@ -11332,7 +11332,8 @@ func completeOpenPRJob(
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("load draft-first publication state: %w", err)
 		}
-		if err == nil && publication.HandoffMode == models.PRHandoffModeDraftFirst &&
+		if err == nil && !publication.State.Terminal() &&
+			publication.HandoffMode == models.PRHandoffModeDraftFirst &&
 			publication.ReviewGateState == models.SessionPublicationReviewGatePending {
 			if err := stores.SessionPublications.MarkRecorded(ctx, run.OrgID, run.ID, *changesetID); err != nil {
 				return fmt.Errorf("record draft-first pull request: %w", err)
@@ -11353,7 +11354,13 @@ func completeOpenPRJob(
 				return nil
 			}
 		}
-		if err == nil && publication.HandoffMode == models.PRHandoffModeDraftFirst &&
+		// A terminal publication has already been finalized — by an earlier
+		// attempt, or by the openPRHandler branch that called this function
+		// after finalizing. Re-entering would push and mark ready a second
+		// time, and a head that moved in between would try to block a
+		// completed row.
+		if err == nil && !publication.State.Terminal() &&
+			publication.HandoffMode == models.PRHandoffModeDraftFirst &&
 			publication.ReviewPolicySource != models.PublicationPolicySourceExplicitBypass &&
 			(publication.ReviewGateState == models.SessionPublicationReviewGatePassed ||
 				publication.ReviewGateState == models.SessionPublicationReviewGateNotRequired) {
@@ -11432,10 +11439,7 @@ func finalizeDraftFirstPublication(
 		}
 		if pushed == nil || pushed.HeadSHA == nil || publication.ReviewDesiredHeadSHA == nil ||
 			*pushed.HeadSHA != *publication.ReviewDesiredHeadSHA {
-			if stateErr := stores.SessionPublications.SetReviewGate(ctx, run.OrgID, run.ID, *changesetID, models.SessionPublicationReviewGateNeedsHuman); stateErr != nil {
-				return false, errors.Join(errors.New("draft head moved after review"), stateErr)
-			}
-			return false, nil
+			return blockDraftForMovedHead(ctx, stores, run, changesetID)
 		}
 	}
 	readyMarker, ok := services.PR.(interface {
@@ -11449,12 +11453,33 @@ func finalizeDraftFirstPublication(
 		expectedHeadSHA = *publication.ReviewDesiredHeadSHA
 	}
 	if err := readyMarker.MarkPullRequestReady(ctx, run.OrgID, pr.ID, expectedHeadSHA); err != nil {
+		// GitHub is the authority on the draft's head. If it disagrees with the
+		// reviewed head, no amount of retrying reconciles them — this is a
+		// review decision, not an infrastructure failure.
+		if errors.Is(err, ghservice.ErrDraftHeadMoved) {
+			return blockDraftForMovedHead(ctx, stores, run, changesetID)
+		}
 		return false, fmt.Errorf("mark reviewed draft ready: %w", err)
 	}
 	if err := stores.SessionPublications.MarkCompleted(ctx, run.OrgID, run.ID, *changesetID); err != nil {
 		return false, fmt.Errorf("complete draft-first publication: %w", err)
 	}
 	return true, nil
+}
+
+// blockDraftForMovedHead parks a draft-first publication for human attention
+// because its head no longer matches the reviewed head. The draft stays open;
+// only the gate moves.
+func blockDraftForMovedHead(ctx context.Context, stores *Stores, run *models.Session, changesetID *uuid.UUID) (bool, error) {
+	if err := stores.SessionPublications.SetReviewGate(
+		ctx, run.OrgID, run.ID, *changesetID, models.SessionPublicationReviewGateNeedsHuman,
+	); err != nil {
+		// Deliberately not wrapped in ErrDraftHeadMoved: failing to *record*
+		// the decision is a retryable infrastructure failure, and callers
+		// branch on that sentinel to stop retrying.
+		return false, fmt.Errorf("block draft whose head moved after review: %w", err)
+	}
+	return false, nil
 }
 
 // registerOpenPRPublicationDeadLetter closes the durable publication state if
@@ -11667,9 +11692,6 @@ func ensurePublicationPrePRReview(
 		return true, nil
 	}
 	if publication.ReviewGateState == models.SessionPublicationReviewGatePassed {
-		if publication.ReviewMaxPasses == nil {
-			return true, nil
-		}
 		if changesetID == nil || stores == nil || stores.SessionChangesets == nil {
 			return false, errors.New("passed publication review cannot be revalidated")
 		}
@@ -11713,7 +11735,6 @@ func ensurePublicationPrePRReview(
 		return false, errors.New("publication review dependencies are unavailable")
 	}
 
-	workspaceRevision := run.WorkspaceRevision
 	var desiredHeadSHA string
 	if publication.HandoffMode == models.PRHandoffModeDraftFirst && publication.GitHubPRNumber != nil {
 		pushed, err := services.PR.PushChangesToPR(ctx, &run, ghservice.CreatePRParams{ChangesetID: changesetID})
@@ -11759,7 +11780,7 @@ func ensurePublicationPrePRReview(
 		return false, fmt.Errorf("reload publication review revision: %w", err)
 	}
 	run = freshRun
-	workspaceRevision = freshRun.WorkspaceRevision
+	workspaceRevision := freshRun.WorkspaceRevision
 
 	running, err := stores.ReviewLoops.GetRunningLoopBySession(ctx, run.OrgID, run.ID)
 	if err == nil {

@@ -54,10 +54,19 @@ func (s coordinatorRepositoryStore) GetByID(context.Context, uuid.UUID, uuid.UUI
 	return s.repository, nil
 }
 
-type coordinatorPublicationStore struct{ captured *models.SessionPublication }
+type coordinatorPublicationStore struct {
+	captured *models.SessionPublication
+	// ensureReturnsState models the row EnsureRequested actually wrote back.
+	// Setting it to a terminal state reproduces a generation-guarded reopen
+	// that did not fire.
+	ensureReturnsState models.SessionPublicationState
+}
 
 func (s *coordinatorPublicationStore) EnsureRequested(_ context.Context, _ uuid.UUID, publication *models.SessionPublication) error {
 	publication.ID = uuid.New()
+	if s.ensureReturnsState != "" {
+		publication.State = s.ensureReturnsState
+	}
 	copy := *publication
 	s.captured = &copy
 	return nil
@@ -392,9 +401,14 @@ func TestCoordinatorRequestPullRequestRepositoryHandoffAndDraftBypass(t *testing
 	t.Parallel()
 
 	draft := true
+	explicitDraftRequest := RequestPullRequest{
+		Source: models.SessionPublicationSourceUser, TriggerKind: models.SessionPublicationTriggerExplicitAction,
+		Draft: &draft, RequestedByUserID: coordinatorUUIDPtr(uuid.New()), RequestedRole: string(models.RoleMember),
+	}
 	tests := []struct {
 		name                 string
 		req                  RequestPullRequest
+		existing             *models.SessionPublication
 		expectedStatus       ResultStatus
 		expectedGate         models.SessionPublicationReviewGateState
 		expectedReviewSource models.PublicationPolicySource
@@ -407,10 +421,17 @@ func TestCoordinatorRequestPullRequestRepositoryHandoffAndDraftBypass(t *testing
 			expectedReviewSource: models.PublicationPolicySourceProductDefault,
 		},
 		{
-			name: "authorized explicit draft action bypasses review",
-			req: RequestPullRequest{
-				Source: models.SessionPublicationSourceUser, TriggerKind: models.SessionPublicationTriggerExplicitAction,
-				Draft: &draft, RequestedByUserID: coordinatorUUIDPtr(uuid.New()), RequestedRole: string(models.RoleMember),
+			name:           "a first draft request is not a review bypass",
+			req:            explicitDraftRequest,
+			expectedStatus: ResultReviewInProgress, expectedGate: models.SessionPublicationReviewGatePending,
+			expectedReviewSource: models.PublicationPolicySourceProductDefault,
+		},
+		{
+			name: "authorized explicit draft action bypasses a blocked review",
+			req:  explicitDraftRequest,
+			existing: &models.SessionPublication{
+				State:           models.SessionPublicationStateReviewPending,
+				ReviewGateState: models.SessionPublicationReviewGateNeedsHuman,
 			},
 			expectedStatus: ResultPRQueued, expectedGate: models.SessionPublicationReviewGateNotRequired,
 			expectedReviewSource: models.PublicationPolicySourceExplicitBypass, expectedBypass: true,
@@ -423,6 +444,7 @@ func TestCoordinatorRequestPullRequestRepositoryHandoffAndDraftBypass(t *testing
 			f.coordinator.SetRepositoryStore(coordinatorRepositoryStore{repository: models.Repository{
 				ID: f.repositoryID, OrgID: f.orgID, Settings: json.RawMessage(`{"pr_handoff_mode":"draft_first"}`),
 			}})
+			f.publications.captured = tt.existing
 
 			result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, tt.req)
 			require.NoError(t, err, "repository handoff request should be accepted")
@@ -437,6 +459,111 @@ func TestCoordinatorRequestPullRequestRepositoryHandoffAndDraftBypass(t *testing
 }
 
 func coordinatorUUIDPtr(value uuid.UUID) *uuid.UUID { return &value }
+
+func TestCoordinatorRequestPullRequestRejoinsOrReopensExistingIntent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		existing         models.SessionPublication
+		ensureKeepsState models.SessionPublicationState
+		wantStatus       ResultStatus
+		wantReopened     bool
+		wantNotQueued    bool
+	}{
+		{
+			name: "a live intent is rejoined rather than duplicated",
+			existing: models.SessionPublication{
+				State: models.SessionPublicationStateReviewPending, ReviewGateState: models.SessionPublicationReviewGatePending,
+			},
+			wantStatus: ResultReviewInProgress,
+		},
+		{
+			name:       "a completed publication stays published",
+			existing:   models.SessionPublication{State: models.SessionPublicationStateCompleted},
+			wantStatus: ResultAlreadyPublished,
+		},
+		{
+			name:         "a no-op publication can be retried once there is something to publish",
+			existing:     models.SessionPublication{State: models.SessionPublicationStateCompletedNoop},
+			wantStatus:   ResultReviewInProgress,
+			wantReopened: true,
+		},
+		{
+			name:         "a terminally failed publication can be retried",
+			existing:     models.SessionPublication{State: models.SessionPublicationStateTerminalFailed},
+			wantStatus:   ResultReviewInProgress,
+			wantReopened: true,
+		},
+		{
+			// The reopen is guarded on request generation, and the two clocks
+			// involved have different sources. If it does not fire, queueing
+			// anyway would hand the caller a success the worker discards as a
+			// terminal replay.
+			name:             "a reopen that did not take reports the durable state",
+			existing:         models.SessionPublication{State: models.SessionPublicationStateTerminalFailed},
+			ensureKeepsState: models.SessionPublicationStateTerminalFailed,
+			wantStatus:       ResultManualPublicationRequired,
+			wantNotQueued:    true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, nil, true, nil)
+			existing := tt.existing
+			existing.ID = uuid.New()
+			existing.SessionID = f.sessionID
+			f.publications.captured = &existing
+			f.publications.ensureReturnsState = tt.ensureKeepsState
+
+			result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{
+				Source: models.SessionPublicationSourceUser, TriggerKind: models.SessionPublicationTriggerExplicitAction,
+			})
+			require.NoError(t, err, "a repeated publication request should be accepted")
+			require.Equal(t, tt.wantStatus, result.Status, "a repeated request should report the existing intent's durable state")
+			if tt.wantNotQueued {
+				require.Nil(t, f.jobs.payload, "a publication that is still terminal must not be queued")
+				require.NotNil(t, result.Reason, "a settled publication should explain why it cannot advance")
+				return
+			}
+			if tt.wantReopened {
+				require.NotEqual(t, existing.ID, *result.PublicationID, "a retryable terminal outcome should be reopened through EnsureRequested")
+				require.NotNil(t, f.jobs.payload, "a reopened publication should be queued again")
+				return
+			}
+			require.Equal(t, existing.ID, *result.PublicationID, "a live intent should be rejoined, not replaced")
+			require.Nil(t, f.jobs.payload, "rejoining a live intent should not queue a duplicate job")
+		})
+	}
+}
+
+func TestCoordinatorRequestPullRequestReopensTerminalDraftWithExistingPR(t *testing.T) {
+	t.Parallel()
+
+	f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, nil, true, nil)
+	publicationID, prNumber := uuid.New(), 42
+	f.publications.captured = &models.SessionPublication{
+		ID: publicationID, SessionID: f.sessionID,
+		State:          models.SessionPublicationStateTerminalFailed,
+		HandoffMode:    models.PRHandoffModeDraftFirst,
+		GitHubPRNumber: &prNumber,
+	}
+	f.coordinator.pullRequests = coordinatorPullRequestStore{pr: &models.PullRequest{
+		ID: uuid.New(), OrgID: f.orgID, GitHubPRNumber: prNumber,
+	}}
+
+	result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{
+		Source: models.SessionPublicationSourceUser, TriggerKind: models.SessionPublicationTriggerExplicitAction,
+	})
+
+	require.NoError(t, err, "a terminal draft-first publication should reopen around its existing draft")
+	require.Equal(t, ResultReviewInProgress, result.Status, "the existing draft should resume review instead of reporting an already-published PR")
+	require.NotNil(t, f.jobs.payload, "the reopened draft publication should enqueue its durable worker")
+	require.NotNil(t, f.publications.captured, "the reopened draft publication should be persisted")
+	require.Equal(t, models.PRHandoffModeDraftFirst, f.publications.captured.HandoffMode, "the reopened publication should retain the existing draft handoff")
+	require.Equal(t, true, f.jobs.payload["draft"], "the resumed worker should reuse the existing draft lifecycle")
+}
 
 func TestExistingPublicationResult(t *testing.T) {
 	t.Parallel()
@@ -466,11 +593,14 @@ func TestExistingPublicationResult(t *testing.T) {
 			wantStatus: ResultPRQueued,
 		},
 		{
-			name: "review attention remains blocked",
+			// ResultBlocked means "durable but nothing enqueued", which callers
+			// surface as a retryable 500. A review awaiting a human is a settled
+			// state the user must act on, so it must not borrow that status.
+			name: "review attention needs a manual decision",
 			publication: models.SessionPublication{
 				ID: publicationID, SessionID: sessionID, ReviewGateState: models.SessionPublicationReviewGateNeedsHuman,
 			},
-			wantStatus: ResultBlocked, wantReason: true,
+			wantStatus: ResultManualPublicationRequired, wantReason: true,
 		},
 		{
 			name: "completed publication is already published",
@@ -478,6 +608,22 @@ func TestExistingPublicationResult(t *testing.T) {
 				ID: publicationID, SessionID: sessionID, State: models.SessionPublicationStateCompleted,
 			},
 			wantStatus: ResultAlreadyPublished,
+		},
+		{
+			// Reachable when the generation-guarded reopen does not take: the
+			// caller must be told the row is still settled.
+			name: "a no-op outcome that could not be reopened needs attention",
+			publication: models.SessionPublication{
+				ID: publicationID, SessionID: sessionID, State: models.SessionPublicationStateCompletedNoop,
+			},
+			wantStatus: ResultManualPublicationRequired, wantReason: true,
+		},
+		{
+			name: "a terminal failure that could not be reopened needs attention",
+			publication: models.SessionPublication{
+				ID: publicationID, SessionID: sessionID, State: models.SessionPublicationStateTerminalFailed,
+			},
+			wantStatus: ResultManualPublicationRequired, wantReason: true,
 		},
 	}
 	for _, tt := range tests {

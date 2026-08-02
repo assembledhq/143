@@ -81,6 +81,5 @@ func (r *publicationReviewEvidenceRefresher) RefreshPublicationEvidence(
 	if err == nil {
 		session = fresh
 	}
-	_ = changeset // Scope validation above is intentional even for primary snapshots.
 	return session.WorkspaceRevision, headSHA, nil
 }

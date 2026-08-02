@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 
@@ -187,7 +188,10 @@ func TestFinishPublicationReviewBlocksNonCleanResultEvenWhenEvidenceMoved(t *tes
 	t.Cleanup(mock.Close)
 	orgID, changesetID, loopID := uuid.New(), uuid.New(), uuid.New()
 	payload := json.RawMessage(`{"changeset_id":"` + changesetID.String() + `"}`)
-	mock.ExpectQuery("UPDATE session_publications AS publication[\\s\\S]+@status <> 'clean'").
+	// Every evidence comparison must sit behind the `@status <> 'clean'` guard.
+	// A non-clean result that declined to block on drifted evidence would strand
+	// the publication pending against an already-finished loop.
+	mock.ExpectQuery("UPDATE session_publications AS publication[\\s\\S]+@status <> 'clean'[\\s\\S]+publication.review_workspace_revision = loop.workspace_revision[\\s\\S]+publication.review_desired_head_sha = loop.desired_head_sha[\\s\\S]+session.workspace_revision = loop.workspace_revision").
 		WithArgs(anyArgs(5)...).
 		WillReturnRows(pgxmock.NewRows([]string{"request_payload", "job_queue", "changeset_id"}).
 			AddRow(payload, models.SessionPublicationJobQueueAgent, changesetID))
@@ -195,6 +199,64 @@ func TestFinishPublicationReviewBlocksNonCleanResultEvenWhenEvidenceMoved(t *tes
 	err = finishPublicationReviewOn(context.Background(), mock, orgID, loopID, models.ReviewLoopStatusNeedsHumanDecision)
 	require.NoError(t, err, "a non-clean terminal review should block its linked publication without requiring fresh clean evidence")
 	require.NoError(t, mock.ExpectationsWereMet(), "non-clean review completion should not enqueue publication")
+}
+
+func TestFinishPublicationReviewMapsLoopOutcomeToOneGateMeaning(t *testing.T) {
+	t.Parallel()
+
+	// The gate value alone tells a reader whether the publication is settled,
+	// so each gate must imply exactly one publication state — the same one
+	// SetReviewGate writes for it. A cancelled loop is somebody stopping the
+	// review, not a failure, so it stays live and awaits a human.
+	tests := []struct {
+		name          string
+		status        models.ReviewLoopStatus
+		expectedGate  models.SessionPublicationReviewGateState
+		expectedState models.SessionPublicationState
+	}{
+		{
+			name: "clean", status: models.ReviewLoopStatusClean,
+			expectedGate: models.SessionPublicationReviewGatePassed, expectedState: models.SessionPublicationStateReadyToPublish,
+		},
+		{
+			name: "needs human decision", status: models.ReviewLoopStatusNeedsHumanDecision,
+			expectedGate: models.SessionPublicationReviewGateNeedsHuman, expectedState: models.SessionPublicationStateReviewPending,
+		},
+		{
+			name: "cancelled", status: models.ReviewLoopStatusCancelled,
+			expectedGate: models.SessionPublicationReviewGateNeedsHuman, expectedState: models.SessionPublicationStateReviewPending,
+		},
+		{
+			name: "failed", status: models.ReviewLoopStatusFailed,
+			expectedGate: models.SessionPublicationReviewGateFailed, expectedState: models.SessionPublicationStateTerminalFailed,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "test should create a database mock")
+			t.Cleanup(mock.Close)
+			orgID, changesetID, loopID, jobID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			payload := json.RawMessage(`{"changeset_id":"` + changesetID.String() + `"}`)
+			mock.ExpectQuery("UPDATE session_publications AS publication").
+				WithArgs(pgx.NamedArgs{
+					"org_id": orgID, "loop_id": loopID, "gate": tt.expectedGate,
+					"state": tt.expectedState, "status": tt.status,
+				}).
+				WillReturnRows(pgxmock.NewRows([]string{"request_payload", "job_queue", "changeset_id"}).
+					AddRow(payload, models.SessionPublicationJobQueueAgent, changesetID))
+			if tt.status == models.ReviewLoopStatusClean {
+				mock.ExpectQuery("INSERT INTO jobs").WithArgs(anyArgs(6)...).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+			}
+
+			err = finishPublicationReviewOn(context.Background(), mock, orgID, loopID, tt.status)
+			require.NoError(t, err, "a terminal review loop should settle its linked publication")
+			require.NoError(t, mock.ExpectationsWereMet(), "each review outcome should write one gate and its matching publication state")
+		})
+	}
 }
 
 func TestSessionReviewLoopStore_TerminalManualLoopResumesParkedPublication(t *testing.T) {

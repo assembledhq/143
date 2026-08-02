@@ -178,6 +178,14 @@ func (h *InternalPullRequestHandler) Create(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, http.StatusForbidden, "REPO_MISMATCH", "token is not authorized for this session repository")
 		return
 	}
+	// The coordinator resolves the primary changeset, replay state, and review
+	// gating itself. Legacy PR creation state is not authoritative for it, so
+	// hand off before spending a query on state this path will not read.
+	if h.coordinatorEnabled {
+		h.createWithCoordinator(w, r, claims.OrgID, sessionID, req)
+		return
+	}
+
 	changesetID := sessionID
 	if h.changesetStore != nil {
 		primary, primaryErr := h.changesetStore.GetPrimary(r.Context(), claims.OrgID, sessionID)
@@ -188,10 +196,6 @@ func (h *InternalPullRequestHandler) Create(w http.ResponseWriter, r *http.Reque
 		changesetID = primary.ID
 		session.PRCreationState = primary.PRCreationState
 		session.PRCreationError = primary.PRCreationError
-	}
-	if h.coordinatorEnabled {
-		h.createWithCoordinator(w, r, claims.OrgID, sessionID, req)
-		return
 	}
 
 	switch session.PRCreationState {

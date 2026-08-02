@@ -6176,6 +6176,7 @@ func TestFinalizeDraftFirstPublication(t *testing.T) {
 		gate              models.SessionPublicationReviewGateState
 		reviewedHead      string
 		pushedHead        string
+		readyErr          error
 		expectedFinalized bool
 		expectedPushes    int
 		expectedReady     int
@@ -6183,6 +6184,14 @@ func TestFinalizeDraftFirstPublication(t *testing.T) {
 		{name: "reviewed head is pushed and marked ready", gate: models.SessionPublicationReviewGatePassed, reviewedHead: "reviewed", pushedHead: "reviewed", expectedFinalized: true, expectedPushes: 1, expectedReady: 1},
 		{name: "head race leaves draft blocked", gate: models.SessionPublicationReviewGatePassed, reviewedHead: "reviewed", pushedHead: "moved", expectedPushes: 1},
 		{name: "review not required marks existing draft ready", gate: models.SessionPublicationReviewGateNotRequired, expectedFinalized: true, expectedReady: 1},
+		{
+			// GitHub is the authority on the draft's head. Its disagreement is a
+			// review decision, not an infrastructure failure to retry.
+			name: "github reporting a moved head blocks instead of retrying",
+			gate: models.SessionPublicationReviewGatePassed, reviewedHead: "reviewed", pushedHead: "reviewed",
+			readyErr:       fmt.Errorf("%w: expected reviewed, got moved", ghservice.ErrDraftHeadMoved),
+			expectedPushes: 1, expectedReady: 1,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -6205,18 +6214,20 @@ func TestFinalizeDraftFirstPublication(t *testing.T) {
 					require.Equal(t, orgID, gotOrgID, "draft readiness should retain tenant scope")
 					require.Equal(t, prID, gotPRID, "draft readiness should target the recorded pull request")
 					require.Equal(t, tt.reviewedHead, expectedHeadSHA, "draft readiness should be bound to the reviewed head")
-					return nil
+					return tt.readyErr
 				},
 			}
 			publication := &models.SessionPublication{ReviewGateState: tt.gate}
 			if tt.reviewedHead != "" {
 				publication.ReviewDesiredHeadSHA = &tt.reviewedHead
 			}
-			if tt.gate == models.SessionPublicationReviewGatePassed && tt.pushedHead != tt.reviewedHead {
-				mock.ExpectExec("UPDATE session_publications").WithArgs(workerAnyArgs(5)...).
+			if tt.expectedFinalized {
+				// MarkCompleted carries the terminal state and error columns.
+				mock.ExpectExec("UPDATE session_publications").WithArgs(workerAnyArgs(7)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			} else {
-				mock.ExpectExec("UPDATE session_publications").WithArgs(workerAnyArgs(7)...).
+				// SetReviewGate parks the draft for human attention.
+				mock.ExpectExec("UPDATE session_publications").WithArgs(workerAnyArgs(5)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			}
 
@@ -6230,6 +6241,118 @@ func TestFinalizeDraftFirstPublication(t *testing.T) {
 			require.Equal(t, tt.expectedPushes, pushes, "draft-first finalization should push only reviewed workflows")
 			require.Equal(t, tt.expectedReady, readyCalls, "draft-first finalization should mark ready only after safe head validation")
 			require.NoError(t, mock.ExpectationsWereMet(), "draft-first finalization should persist the expected tenant-scoped state")
+		})
+	}
+}
+
+func TestEnsurePublicationPrePRReviewGatesWithoutSideEffects(t *testing.T) {
+	t.Parallel()
+
+	reviewedHead := "reviewed"
+	currentHead := "reviewed"
+	movedHead := "moved"
+	maxPasses := 2
+	revision := int64(7)
+	staleRevision := int64(6)
+	loopID := uuid.New()
+
+	tests := []struct {
+		name             string
+		publication      models.SessionPublication
+		changesetHead    *string
+		expectChangeset  bool
+		expectInvalidate bool
+		expectedReady    bool
+	}{
+		{
+			name:          "no review budget means review does not apply",
+			publication:   models.SessionPublication{ReviewGateState: models.SessionPublicationReviewGatePending},
+			expectedReady: true,
+		},
+		{
+			name: "an explicitly not-required gate publishes directly",
+			publication: models.SessionPublication{
+				ReviewMaxPasses: &maxPasses, ReviewGateState: models.SessionPublicationReviewGateNotRequired,
+			},
+			expectedReady: true,
+		},
+		{
+			name: "a linked running review owns the transition",
+			publication: models.SessionPublication{
+				ReviewMaxPasses: &maxPasses, ReviewGateState: models.SessionPublicationReviewGatePending,
+				ReviewLoopID: &loopID,
+			},
+		},
+		{
+			name: "a review stopped for a human stays blocked",
+			publication: models.SessionPublication{
+				ReviewMaxPasses: &maxPasses, ReviewGateState: models.SessionPublicationReviewGateNeedsHuman,
+			},
+		},
+		{
+			name: "clean evidence for the current revision and head publishes",
+			publication: models.SessionPublication{
+				ReviewMaxPasses: &maxPasses, ReviewGateState: models.SessionPublicationReviewGatePassed,
+				ReviewWorkspaceRevision: &revision, ReviewDesiredHeadSHA: &reviewedHead,
+			},
+			changesetHead: &currentHead, expectChangeset: true, expectedReady: true,
+		},
+		{
+			name: "evidence for a head the workspace has left is invalidated",
+			publication: models.SessionPublication{
+				ReviewMaxPasses: &maxPasses, ReviewGateState: models.SessionPublicationReviewGatePassed,
+				ReviewWorkspaceRevision: &revision, ReviewDesiredHeadSHA: &reviewedHead,
+				// draft_first with no draft yet defers to the creation path, so
+				// the assertion stops at the invalidation itself.
+				HandoffMode: models.PRHandoffModeDraftFirst,
+			},
+			changesetHead: &movedHead, expectChangeset: true, expectInvalidate: true, expectedReady: true,
+		},
+		{
+			name: "evidence for a superseded revision is invalidated",
+			publication: models.SessionPublication{
+				ReviewMaxPasses: &maxPasses, ReviewGateState: models.SessionPublicationReviewGatePassed,
+				ReviewWorkspaceRevision: &staleRevision, ReviewDesiredHeadSHA: &reviewedHead,
+				HandoffMode: models.PRHandoffModeDraftFirst,
+			},
+			changesetHead: &currentHead, expectChangeset: true, expectInvalidate: true, expectedReady: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "test should create a database mock")
+			t.Cleanup(mock.Close)
+			orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+			if tt.expectChangeset {
+				mock.ExpectQuery("SELECT .*FROM session_changesets").
+					WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID}).
+					WillReturnRows(pgxmock.NewRows(workerChangesetTestColumns).AddRow(workerChangesetTestRow(models.SessionChangeset{
+						ID: changesetID, OrgID: orgID, SessionID: sessionID, IsPrimary: true, HeadSHA: tt.changesetHead,
+					})...))
+			}
+			if tt.expectInvalidate {
+				mock.ExpectExec("UPDATE session_publications").WithArgs(workerAnyArgs(4)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			}
+			stores := &Stores{
+				SessionPublications: db.NewSessionPublicationStore(mock),
+				SessionChangesets:   db.NewSessionChangesetStore(mock),
+			}
+			publication := tt.publication
+			publication.ChangesetID = changesetID
+			run := models.Session{ID: sessionID, OrgID: orgID, WorkspaceRevision: revision}
+
+			// Services and review-loop stores are deliberately absent: none of
+			// these branches may reach GitHub or start a loop.
+			ready, err := ensurePublicationPrePRReview(
+				context.Background(), stores, nil, zerolog.Nop(), run, &changesetID, &publication,
+			)
+			require.NoError(t, err, "gate evaluation should not fail on durable state alone")
+			require.Equal(t, tt.expectedReady, ready, "gate evaluation should report whether publication may proceed")
+			require.NoError(t, mock.ExpectationsWereMet(), "gate evaluation should perform only the expected tenant-scoped writes")
 		})
 	}
 }

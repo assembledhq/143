@@ -190,6 +190,59 @@ func TestSessionPublicationStoreEnsureRequestedGuardsMutableIntentByGeneration(t
 	require.NoError(t, mock.ExpectationsWereMet(), "all mutable publication intent should be guarded by request generation")
 }
 
+// TestSessionPublicationStoreEnsureRequestedGuardsPendingReviewGateInSQL asserts
+// the shape of the upsert, not its result: pgxmock never executes SQL, so the
+// returned row is whatever this test hands back. The guard being asserted is
+// that a persisted 'pending' gate carrying a review budget is preserved rather
+// than overwritten by EXCLUDED — the open_pr worker re-runs this upsert with a
+// newer generation and its own default gate before it has read any review
+// state, and without the guard it silently cancels the review it is about to be
+// asked to run. Only a live database can prove the resulting value.
+func TestSessionPublicationStoreEnsureRequestedGuardsPendingReviewGateInSQL(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID, changesetID, repositoryID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","changeset_id":"` + changesetID.String() + `"}`)
+	publication := models.SessionPublication{
+		OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID, RepositoryID: repositoryID,
+		Source: models.SessionPublicationSourceBackend, ReviewGateState: models.SessionPublicationReviewGateNotRequired,
+		JobQueue: models.SessionPublicationJobQueueAgent, RequestPayload: payload,
+		RequestGenerationAt: now,
+		BaseBranch:          "main", HeadBranch: "143/session",
+	}
+	stored := publication
+	stored.ID = uuid.New()
+	stored.State = models.SessionPublicationStateRequested
+	stored.RequestedAt, stored.CreatedAt, stored.UpdatedAt = now, now, now
+
+	mock.ExpectQuery(`review_gate_state = CASE[\s\S]+session_publications\.review_gate_state = 'pending'[\s\S]+session_publications\.review_max_passes IS NOT NULL[\s\S]+THEN session_publications\.review_gate_state[\s\S]+ELSE EXCLUDED\.review_gate_state`).
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+			"repository_id": repositoryID, "source": models.SessionPublicationSourceBackend,
+			"trigger_kind": models.SessionPublicationTriggerPolicy, "handoff_mode": models.PRHandoffModePrePublish,
+			"initiated_by_user_id":       (*uuid.UUID)(nil),
+			"automatic_pr_policy_source": models.PublicationPolicySourceProductDefault,
+			"review_policy_source":       models.PublicationPolicySourceProductDefault,
+			"review_max_passes":          (*int)(nil),
+			"review_loop_id":             (*uuid.UUID)(nil),
+			"review_workspace_revision":  (*int64)(nil),
+			"review_desired_head_sha":    (*string)(nil),
+			"review_gate_state":          models.SessionPublicationReviewGateNotRequired,
+			"job_queue":                  models.SessionPublicationJobQueueAgent, "request_payload": string(payload),
+			"request_generation_at": now,
+			"base_branch":           "main", "head_branch": "143/session", "desired_head_sha": (*string)(nil),
+		}).
+		WillReturnRows(pgxmock.NewRows(sessionPublicationTestColumns()).AddRow(sessionPublicationTestRow(stored)...))
+
+	err = NewSessionPublicationStore(mock).EnsureRequested(context.Background(), orgID, &publication)
+	require.NoError(t, err, "the guarded upsert should remain a valid single statement")
+	require.NoError(t, mock.ExpectationsWereMet(), "the review gate upsert must guard pending gates that carry a review pass budget")
+}
+
 func TestSessionPublicationStoreApplyReviewBypassDetachesEvidence(t *testing.T) {
 	t.Parallel()
 
