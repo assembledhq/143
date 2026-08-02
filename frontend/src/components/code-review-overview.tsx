@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronDown, SlidersHorizontal } from "lucide-react";
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ErrorNotice } from "@/components/ui/error-notice";
@@ -100,11 +100,13 @@ function FilterSelect({
   onValueChange: (value: string) => void;
   children: ReactNode;
 }) {
+  const selectId = useId();
+
   return (
     <div className="flex flex-col gap-2">
-      <Label className="text-xs text-muted-foreground">{label}</Label>
+      <Label htmlFor={selectId} className="text-xs text-muted-foreground">{label}</Label>
       <Select value={value} onValueChange={onValueChange}>
-        <SelectTrigger aria-label={label}><SelectValue /></SelectTrigger>
+        <SelectTrigger id={selectId}><SelectValue /></SelectTrigger>
         <SelectContent>{children}</SelectContent>
       </Select>
     </div>
@@ -142,13 +144,16 @@ export function CodeReviewFilters({
   analyticsMode?: boolean;
   mobileLabel?: string;
 }) {
+  const authorId = useId();
+  const searchId = useId();
+
   return (
     <>
       <Button type="button" variant="outline" size="sm" className="w-full justify-between md:hidden" aria-expanded={mobileOpen} aria-controls={id} onClick={() => onMobileOpenChange(!mobileOpen)}>
         <span className="flex items-center gap-2"><SlidersHorizontal className="h-4 w-4" />{mobileLabel}</span>
         <ChevronDown className={`h-4 w-4 transition-transform ${mobileOpen ? "rotate-180" : ""}`} />
       </Button>
-      <div id={id} className={`${mobileOpen ? "grid" : "hidden"} gap-3 rounded-xl border border-border bg-card p-3 shadow-sm md:grid md:grid-cols-2 md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none ${analyticsMode ? "lg:grid-cols-2 xl:grid-cols-[minmax(12rem,18rem)_minmax(12rem,18rem)]" : "lg:grid-cols-3 xl:grid-cols-[minmax(12rem,18rem)_repeat(3,minmax(9rem,11rem))_minmax(12rem,1fr)_minmax(9rem,11rem)]"}`}>
+      <Card id={id} className={`${mobileOpen ? "grid" : "hidden"} gap-3 p-3 shadow-sm md:grid md:grid-cols-2 md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none ${analyticsMode ? "lg:grid-cols-2 xl:grid-cols-[minmax(12rem,18rem)_minmax(12rem,18rem)]" : "lg:grid-cols-3 xl:grid-cols-[minmax(12rem,18rem)_repeat(3,minmax(9rem,11rem))_minmax(12rem,1fr)_minmax(9rem,11rem)]"}`}>
         <FilterSelect label="Repository" value={values.repository} onValueChange={(value) => onChange("repository", value)}>
           <SelectItem value={ALL_REPOSITORIES}>All repositories</SelectItem>
           {repositories.map((repo) => <SelectItem key={repo.id} value={repo.id}>{repo.full_name}</SelectItem>)}
@@ -179,12 +184,12 @@ export function CodeReviewFilters({
               <SelectItem value="all">All attempts</SelectItem>
             </FilterSelect>
             <div className="flex flex-col gap-2">
-              <Label className="text-xs text-muted-foreground">PR author</Label>
-              <Input value={values.author} onChange={(event) => onChange("author", event.target.value)} placeholder="GitHub handle" aria-label="PR author" />
+              <Label htmlFor={authorId} className="text-xs text-muted-foreground">PR author</Label>
+              <Input id={authorId} value={values.author} onChange={(event) => onChange("author", event.target.value)} placeholder="GitHub handle" />
             </div>
             <div className="flex flex-col gap-2">
-              <Label className="text-xs text-muted-foreground">Search</Label>
-              <Input value={values.search} onChange={(event) => onChange("search", event.target.value)} placeholder="PR, repo, or title" aria-label="Search code reviews" />
+              <Label htmlFor={searchId} className="text-xs text-muted-foreground">Search</Label>
+              <Input id={searchId} value={values.search} onChange={(event) => onChange("search", event.target.value)} placeholder="PR, repo, or title" aria-label="Search code reviews" />
             </div>
           </>
         )}
@@ -193,7 +198,7 @@ export function CodeReviewFilters({
           value={values.timeRange}
           onValueChange={(value) => onChange("timeRange", value)}
         />
-      </div>
+      </Card>
       {analyticsMode ? (
         <p className="text-xs text-muted-foreground">
           Analytics covers every PR in the selected repository and window. Outcome, risk, status, author,
