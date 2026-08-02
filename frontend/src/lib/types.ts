@@ -250,13 +250,6 @@ export interface CodeReviewGitHubTriggerResponse {
   message?: string;
 }
 
-export interface CodeReviewTemplateOption {
-  key: string;
-  title: string;
-  description: string;
-  config: CodeReviewPolicyConfig;
-}
-
 export interface CodeReviewPromptExampleOption {
   key: "balanced" | "security_focused" | "minimal";
   title: string;

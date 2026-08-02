@@ -41,7 +41,6 @@ import type {
   CodeReviewPolicyRecord,
   CodeReviewResolvedPolicy,
   CodeReviewStats,
-  CodeReviewTemplateOption,
   CodeReviewPromptExamplesResponse,
   AuditLog,
   ListResponse,
@@ -263,20 +262,6 @@ const reviewAnalytics: CodeReviewAnalytics = {
   ],
 };
 
-const template: CodeReviewTemplateOption = {
-  key: "small_backend_change",
-  title: "Small backend change",
-  description: "Small backend changes outside sensitive packages.",
-  config: {
-    ...policy.config,
-    approval_mode: "approve_acceptable",
-    risk_policy: {
-      ...policy.config.risk_policy,
-      max_files_changed: 4,
-    },
-  },
-};
-
 const githubTriggerReady: CodeReviewGitHubTriggerResponse = {
   status: "ready",
   repository_id: "repo-1",
@@ -343,12 +328,6 @@ function mockCodeReviewBaseHandlers(
       HttpResponse.json({
         data: evidence,
       } satisfies SingleResponse<CodeReviewEvidence>),
-    ),
-    http.get("/api/v1/code-reviews/templates", () =>
-      HttpResponse.json({
-        data: [template],
-        meta: {},
-      } satisfies ListResponse<CodeReviewTemplateOption>),
     ),
     http.get("/api/v1/code-reviews/prompt-examples", () =>
       HttpResponse.json({ data: {
@@ -632,18 +611,6 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByRole("combobox", { name: "Reviewer 1 reasoning level" })).toHaveTextContent("High");
     expect(screen.getByRole("combobox", { name: "Reviewer 2 reasoning level" })).toHaveTextContent("High");
     expect(screen.getByRole("combobox", { name: "Orchestrator reasoning level" })).toHaveTextContent("High");
-
-    // Autosave: applying a template persists without a Save button.
-    await user.click(screen.getByRole("combobox", { name: /Advanced policy preset/i }));
-    await user.click(await screen.findByRole("option", { name: "Small backend change" }));
-    await user.click(screen.getByRole("button", { name: /Apply preset/i }));
-    await waitFor(() => {
-      expect(toast.success).toHaveBeenCalledWith("Applied Small backend change");
-    });
-    await user.click(screen.getByRole("button", { name: /Approval criteria/i }));
-    expect((await screen.findAllByDisplayValue("4")).length).toBeGreaterThan(0);
-    expect(screen.getByLabelText("Timeout value")).toHaveValue(30);
-    expect(screen.getByRole("combobox", { name: "Timeout unit" })).toHaveTextContent("Minutes");
 
     await user.click(screen.getByRole("button", { name: /Add requirement/i }));
     expect(await screen.findByDisplayValue("Custom requirement")).toBeInTheDocument();
@@ -1803,13 +1770,12 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByRole("button", { name: "Disable reviewer" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Safeguards" }));
-    expect(screen.getByText(/Applying a preset replaces safety controls/i)).toBeVisible();
+    expect(screen.queryByRole("combobox", { name: /Advanced policy preset/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Apply preset/i })).not.toBeInTheDocument();
     for (const section of ["Approval criteria", "Paths, authors & checks", "Reviewers & agents"]) {
       await user.click(screen.getByRole("button", { name: new RegExp(section, "i") }));
     }
     for (const label of [
-      "Advanced policy preset",
-      "Apply advanced policy preset",
       "Files changed",
       "Lines changed",
       "Inline comments",
@@ -2426,36 +2392,6 @@ describe("CodeReviewsPage", () => {
     expect(within(requiredChecksEditor as HTMLElement).getByText("test")).toBeInTheDocument();
 
     expect(screen.getByRole("button", { name: "Add required check" })).toBeInTheDocument();
-  });
-
-  it("surfaces template apply save failures through the shared toast", async () => {
-    const user = userEvent.setup();
-    mockCodeReviewBaseHandlers();
-    server.use(
-      http.put("/api/v1/code-review-policies", () =>
-        HttpResponse.json(
-          {
-            error: {
-              code: "SAVE_FAILED",
-              message: "Policy could not be saved",
-            },
-          },
-          { status: 500 },
-        ),
-      ),
-    );
-
-    renderWithProviders(<CodeReviewsPage />);
-
-    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("button", { name: "Safeguards" }));
-    await user.click(screen.getByRole("combobox", { name: /Advanced policy preset/i }));
-    await user.click(await screen.findByRole("option", { name: "Small backend change" }));
-    await user.click(screen.getByRole("button", { name: /Apply preset/i }));
-
-    await waitFor(() => {
-      expect(toast.error).toHaveBeenCalledWith("Couldn't save. Your change was reverted.");
-    });
   });
 
   it("saves code review timeout in seconds from the selected unit", async () => {

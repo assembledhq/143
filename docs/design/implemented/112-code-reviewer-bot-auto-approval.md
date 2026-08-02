@@ -1,6 +1,6 @@
 # Design: Code Reviewer Bot And Acceptable-Risk Auto-Approval
 
-> **Status:** Implemented | **Last reviewed:** 2026-07-30
+> **Status:** Implemented | **Last reviewed:** 2026-08-02
 >
 > **Depends on:** [../overall.md](../overall.md), [78-review-agent-loops.md](78-review-agent-loops.md), [61-pr-state-sync-and-repair-actions.md](61-pr-state-sync-and-repair-actions.md), [../backlog/11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md)
 
@@ -19,7 +19,7 @@ Implemented:
 - lossless policy persistence for final review templates
 - code review session metadata, agent result, finding, and prompt-artifact tables tied to normal `sessions`
 - typed Go models and `pgx` stores for policies, review metadata, agent evidence, and findings
-- deterministic acceptable-risk evaluator, starter policy templates, final-review body rendering, and inline finding selection helpers
+- deterministic acceptable-risk evaluator, final-review body rendering, and inline finding selection helpers
 - GitHub `review_requested` and PR issue-comment mention webhook adapters for configured bot reviewer identities, including authoritative PR snapshot loading and local mirror creation for human-authored PRs
 - event-driven reassessment after the initial reviewer request when the PR head changes, plus delivery-keyed explicit rerequests that can reassess the same head after a non-approval; durable follow-up jobs serialize requests behind active work and a terminal stop applies once 143 approves, while PR metadata, readiness, human reviews/comments/threads, checks, and commit statuses continue to synchronize without starting reviewer sessions
 - service-layer code review request orchestration that resolves/materializes policy, marks stale older heads, reuses running sessions, creates normal code-review sessions, and enqueues `run_code_review`
@@ -36,7 +36,7 @@ Implemented:
 - stale requested-reviewer cleanup after final review submission for reviewer-login and team-slug triggers carried in the durable job payload
 - productized GitHub team-trigger setup that creates or repairs the `143-code-reviewer` org team, grants repository read access, and persists repo-scoped active trigger settings
 - final-review template rendering from persisted policy data with safe fallback to the built-in body
-- `/api/v1/code-reviews`, `/api/v1/code-reviews/stats`, `/api/v1/code-reviews/analytics`, `/api/v1/code-reviews/templates`, `/api/v1/code-reviews/{id}/evidence`, `/api/v1/code-review-policies`, and `/api/v1/code-review-github-trigger` API surface
+- `/api/v1/code-reviews`, `/api/v1/code-reviews/stats`, `/api/v1/code-reviews/analytics`, `/api/v1/code-reviews/{id}/evidence`, `/api/v1/code-review-policies`, and `/api/v1/code-review-github-trigger` API surface
 - top-level `Code reviews` dashboard surface with Reviews, Analytics, and Policy tabs; repository/decision/risk/status/search filtering on the Reviews tab; approval-usage, PR-author, finding, and non-approval-reason reporting; and organization-wide policy controls. The Analytics tab was later narrowed to repository and time-window cohort filters and re-based on unique pull requests; see [122-pr-centric-code-review-analytics.md](122-pr-centric-code-review-analytics.md).
 
 Deferred:
@@ -76,7 +76,7 @@ Recommended v1 scope:
 - `review_requested` trigger for selected repositories.
 - `issue_comment` trigger when a PR conversation comment mentions the configured team, with the bounded comment supplied to the orchestrator as untrusted request context.
 - Normal 143 code review sessions keyed by org, repository, PR, head SHA, and policy version.
-- Editable PR-description policy and acceptable-risk starter templates.
+- Editable PR-description policy and acceptable-risk safeguards.
 - Two reviewer agents plus one orchestrator by default.
 - Each reviewer has a policy-versioned reasoning-effort value aligned by index with `reviewers` and `reviewer_models`; the orchestrator keeps its own `reasoning_effort`. Omitted legacy reviewer values inherit the former roster-wide value, or `high` when that value is also absent.
 - One rolling PR comment with the visible summary, plus a formal GitHub review that converges from a visible fallback to marker-only and a configurable number of inline comments.
@@ -379,22 +379,6 @@ Acceptable risk means:
 ```
 
 Admins can tune this over time based on false positives, false negatives, team trust, and repository-specific risk.
-
-### Acceptable-Risk Templates
-
-The configuration UI should offer starter templates so admins do not start from a blank page.
-
-Recommended templates:
-
-| Template | Default behavior |
-| --- | --- |
-| Docs and comments only | Eligible for approval when only docs, comments, or markdown paths change, PR description passes, and no generated/security/config paths are touched. |
-| Tests only | Eligible for approval when changes are limited to test files and fixtures, no snapshots/golden files exceed configured churn, and required checks pass. |
-| Small frontend change | Eligible for approval when file/line thresholds are low, screenshots or preview link are present when required, and no auth/billing/data-fetching paths are touched. |
-| Small backend change | Eligible for approval only outside sensitive packages, with test evidence, passing checks, and no schema, permissions, auth, billing, dependency, or infra changes. |
-| Small combined feature | Eligible for approval when a limited-scope feature touches both frontend and backend within tighter file/line thresholds, includes test evidence, includes screenshot or preview evidence when UI-visible, and avoids sensitive paths, schema changes, permissions, auth, billing, dependency, and infra changes. |
-
-Each template expands into editable rules rather than hidden presets: thresholds, path categories, PR description prompts, required checks, reviewer quorum, and orchestrator rubric.
 
 ## Bot Identity
 
