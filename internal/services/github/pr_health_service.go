@@ -1083,7 +1083,19 @@ func (s *PRService) reconcileSessionPublications(ctx context.Context, orgID uuid
 }
 
 func (s *PRService) reconcileSessionPublication(ctx context.Context, publication models.SessionPublication) error {
+	executionSource, err := reconciliationPublicationExecutionSource(publication)
+	if err != nil {
+		return err
+	}
+	if s.publicationPolicy != nil && !s.publicationPolicy.PublicationExecutionEnabled(executionSource) {
+		metrics.RecordSessionPublicationReconciliation(ctx, "publication_paused")
+		return nil
+	}
 	if publication.ReviewGateState == models.SessionPublicationReviewGatePending {
+		if s.publicationPolicy != nil && !s.publicationPolicy.ReviewExecutionEnabled(executionSource) {
+			metrics.RecordSessionPublicationReconciliation(ctx, "review_paused")
+			return nil
+		}
 		if publication.ReviewLoopID == nil {
 			metrics.RecordSessionPublicationReconciliation(ctx, "review_resumed")
 			return s.resumeSessionPublicationCreation(ctx, publication)
@@ -1193,6 +1205,30 @@ func (s *PRService) reconcileSessionPublication(ctx context.Context, publication
 		Msg("reconciled durable session publication")
 	metrics.RecordSessionPublicationReconciliation(ctx, "adopted")
 	return nil
+}
+
+func reconciliationPublicationExecutionSource(publication models.SessionPublication) (models.SessionPublicationSource, error) {
+	source := publication.Source
+	if source == "" {
+		// Legacy rows and lightweight internal callers predate the typed source;
+		// they represent explicit publication rather than agent-tool execution.
+		source = models.SessionPublicationSourceUser
+	}
+	if len(bytes.TrimSpace(publication.RequestPayload)) > 0 {
+		var payload struct {
+			PublicationExecutionSource string `json:"publication_execution_source"`
+		}
+		if err := json.Unmarshal(publication.RequestPayload, &payload); err != nil {
+			return "", fmt.Errorf("decode publication execution source: %w", err)
+		}
+		if payload.PublicationExecutionSource != "" {
+			source = models.SessionPublicationSource(payload.PublicationExecutionSource)
+		}
+	}
+	if err := source.Validate(); err != nil {
+		return "", fmt.Errorf("validate publication execution source: %w", err)
+	}
+	return source, nil
 }
 
 // completeReconciledSessionPublication applies every required local

@@ -549,6 +549,9 @@ func main() {
 				workerPublicationCoordinator.SetPublicationEnabled(cfg.AgentPRPublicationEnabled)
 				workerPublicationCoordinator.SetReviewEnabled(cfg.PrePRReviewEnabled)
 				services.PublicationIntents = workerPublicationCoordinator
+				if prSvc, ok := services.PR.(*ghservice.PRService); ok {
+					prSvc.SetPublicationExecutionPolicy(workerPublicationCoordinator)
+				}
 				if concreteOrchestrator, ok := services.Orchestrator.(*agent.Orchestrator); ok {
 					concreteOrchestrator.SetPublicationIntentCoordinator(workerPublicationCoordinator)
 				}

@@ -6016,6 +6016,7 @@ func TestCompleteOpenPRJobRetriesPostPublicationWork(t *testing.T) {
 		nil,
 		&models.PullRequest{ID: prID, OrgID: orgID, GitHubPRURL: prURL},
 		nil,
+		models.PRCreationStateIdle,
 	)
 	require.NoError(t, err, "a completed publication retry should finish auto-merge and success-state work")
 	require.Equal(t, 1, mergeCalls, "post-publication replay should queue auto-merge exactly once per handler attempt")
@@ -6031,22 +6032,29 @@ func TestIsCompletedPublicationReplay(t *testing.T) {
 	tests := []struct {
 		name        string
 		publication *models.SessionPublication
+		state       models.PRCreationState
 		expected    bool
 	}{
 		{name: "legacy job without a durable row is not a replay", expected: false},
 		{name: "publishing attempt is the one that opens the pull request", publication: &models.SessionPublication{State: models.SessionPublicationStateRequested}},
 		{name: "recorded draft-first attempt still owns its side effects", publication: &models.SessionPublication{State: models.SessionPublicationStateRecorded}},
 		{
-			name:        "completed publication is resuming local work only",
+			name:        "completed publication with completed local effects is a replay",
 			publication: &models.SessionPublication{State: models.SessionPublicationStateCompleted},
+			state:       models.PRCreationStateSucceeded,
 			expected:    true,
+		},
+		{
+			name:        "completed publication with incomplete local effects retries them",
+			publication: &models.SessionPublication{State: models.SessionPublicationStateCompleted},
+			state:       models.PRCreationStatePushing,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			require.Equal(t, tt.expected, isCompletedPublicationReplay(tt.publication), "one-shot publication side effects should run only on the attempt that opened the pull request")
+			require.Equal(t, tt.expected, isCompletedPublicationReplay(tt.publication, tt.state), "one-shot publication side effects should retry until local completion is durably checkpointed")
 		})
 	}
 }
@@ -6667,6 +6675,43 @@ func TestTurnWorkspaceChangedComparesWholeWorkspaceDiff(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tt.expected, turnWorkspaceChanged(tt.before, tt.after), "review mutation detection should compare before and after workspace content")
+		})
+	}
+}
+
+func TestReviewWorkspaceDiffBeforeUsesExecutedWorkspace(t *testing.T) {
+	t.Parallel()
+
+	primaryDiff := "diff --git a/primary b/primary"
+	childDiff := "diff --git a/child b/child"
+	tests := []struct {
+		name     string
+		session  models.Session
+		target   *models.SessionChangeset
+		expected *string
+	}{
+		{
+			name:     "primary review uses session diff",
+			session:  models.Session{Diff: &primaryDiff},
+			expected: &primaryDiff,
+		},
+		{
+			name:     "stack child review uses materialized diff",
+			session:  models.Session{Diff: &primaryDiff},
+			target:   &models.SessionChangeset{MaterializedDiff: &childDiff},
+			expected: &childDiff,
+		},
+		{
+			name:    "new stack child worktree has an empty baseline",
+			session: models.Session{Diff: &primaryDiff},
+			target:  &models.SessionChangeset{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, reviewWorkspaceDiffBefore(tt.session, tt.target), "review mutation detection should use the diff from the executed workspace")
 		})
 	}
 }

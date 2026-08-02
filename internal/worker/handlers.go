@@ -9979,7 +9979,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					if changeAware, ok := services.ReviewLoops.(interface {
 						OnThreadTurnCompleteWithChange(context.Context, uuid.UUID, uuid.UUID, string, bool) error
 					}); ok {
-						reviewErr = changeAware.OnThreadTurnCompleteWithChange(ctx, orgID, threadID, lastTurnResult.Summary, turnWorkspaceChanged(session.Diff, lastTurnResult.Diff))
+						reviewErr = changeAware.OnThreadTurnCompleteWithChange(ctx, orgID, threadID, lastTurnResult.Summary, turnWorkspaceChanged(reviewWorkspaceDiffBefore(session, targetChangeset), lastTurnResult.Diff))
 					} else {
 						reviewErr = services.ReviewLoops.OnThreadTurnComplete(ctx, orgID, threadID, lastTurnResult.Summary)
 					}
@@ -10113,6 +10113,17 @@ func turnWorkspaceChanged(before *string, after string) bool {
 		return true
 	}
 	return strings.TrimSpace(*before) != strings.TrimSpace(after)
+}
+
+// reviewWorkspaceDiffBefore selects the workspace snapshot that the review
+// turn actually opened. Stack children run in their materialized worktrees;
+// comparing them with the primary session diff would report a mutation even
+// when the reviewer made no changes.
+func reviewWorkspaceDiffBefore(session models.Session, targetChangeset *models.SessionChangeset) *string {
+	if targetChangeset != nil {
+		return targetChangeset.MaterializedDiff
+	}
+	return session.Diff
 }
 
 func enqueueSessionPreviewCachePrewarm(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, sessionID uuid.UUID, reason string) {
@@ -11331,7 +11342,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 						Str("changeset_id", changesetID.String()).
 						Int("pr_number", existing.GitHubPRNumber).
 						Msg("resuming post-publication work for completed pull request")
-					return completeOpenPRJob(ctx, stores, services, logger, run, input, changesetID, &existing, publicationContext)
+					return completeOpenPRJob(ctx, stores, services, logger, run, input, changesetID, &existing, publicationContext, targetChangeset.PRCreationState)
 				}
 				logger.Info().
 					Str("session_id", runID.String()).
@@ -11401,7 +11412,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			if !finalized {
 				return nil
 			}
-			return completeOpenPRJob(ctx, stores, services, logger, run, input, changesetID, &existing, publicationContext)
+			return completeOpenPRJob(ctx, stores, services, logger, run, input, changesetID, &existing, publicationContext, targetChangeset.PRCreationState)
 		}
 
 		logger.Info().
@@ -11460,6 +11471,9 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 					}
 				}
 				metrics.RecordSessionPublicationTransition(ctx, string(publicationState), string(publicationSource))
+				if !noChanges && publicationFailureHandled {
+					metrics.RecordPRPublicationFailure(ctx, shouldDeadLetterPRError(createErr))
+				}
 			}
 			// ErrNoChanges is a benign terminal outcome (session ran fine
 			// but produced no diff), so log at info to keep `open_pr failed`
@@ -11509,7 +11523,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			return createErr
 		}
 
-		return completeOpenPRJob(ctx, stores, services, logger, run, input, changesetID, pr, publicationContext)
+		return completeOpenPRJob(ctx, stores, services, logger, run, input, changesetID, pr, publicationContext, targetChangeset.PRCreationState)
 	}
 }
 
@@ -11558,6 +11572,7 @@ func completeOpenPRJob(
 	changesetID *uuid.UUID,
 	pr *models.PullRequest,
 	publicationContext *models.SessionPublication,
+	priorPRCreationState models.PRCreationState,
 ) error {
 	if pr == nil {
 		if stateErr := updateChangesetPRCreationState(ctx, stores, run.OrgID, run.ID, changesetID, models.PRCreationStateFailed, "Could not finish publishing this pull request."); stateErr != nil {
@@ -11627,10 +11642,8 @@ func completeOpenPRJob(
 			return fmt.Errorf("queue merge when ready after open_pr: %w", err)
 		}
 	}
-	if stateErr := updateChangesetPRCreationState(ctx, stores, run.OrgID, run.ID, changesetID, models.PRCreationStateSucceeded, ""); stateErr != nil {
-		return fmt.Errorf("mark PR creation as succeeded: %w", stateErr)
-	}
-	if services.PagerDutyWrites != nil {
+	replayingCompletedPublication := isCompletedPublicationReplay(publicationContext, priorPRCreationState)
+	if !replayingCompletedPublication && services.PagerDutyWrites != nil {
 		if err := services.PagerDutyWrites.OnPROpened(ctx, run, *pr); err != nil {
 			logger.Warn().
 				Err(err).
@@ -11638,7 +11651,6 @@ func completeOpenPRJob(
 				Msg("failed to write PagerDuty PR-open note")
 		}
 	}
-	replayingCompletedPublication := isCompletedPublicationReplay(publicationContext)
 	if !replayingCompletedPublication && publicationContext != nil && !publicationContext.RequestedAt.IsZero() {
 		// A zero RequestedAt would record the entire Unix epoch, so this mirrors
 		// the guard the reconciliation path applies to the same signal.
@@ -11661,6 +11673,12 @@ func completeOpenPRJob(
 			PullRequestURL: pr.GitHubPRURL,
 		})
 	}
+	// This durable state is the checkpoint for the best-effort one-shot work
+	// above. A completed publication whose local state is still pushing/failed
+	// must retry those effects; once succeeded, later job replays suppress them.
+	if stateErr := updateChangesetPRCreationState(ctx, stores, run.OrgID, run.ID, changesetID, models.PRCreationStateSucceeded, ""); stateErr != nil {
+		return fmt.Errorf("mark PR creation as succeeded: %w", stateErr)
+	}
 	return nil
 }
 
@@ -11669,9 +11687,10 @@ func completeOpenPRJob(
 // Those replays are routine under the durable coordinator (reconciliation and
 // review continuations both re-enter open_pr), so every one-shot side effect
 // here has to be suppressed for them.
-func isCompletedPublicationReplay(publicationContext *models.SessionPublication) bool {
+func isCompletedPublicationReplay(publicationContext *models.SessionPublication, priorPRCreationState models.PRCreationState) bool {
 	return publicationContext != nil &&
-		publicationContext.State == models.SessionPublicationStateCompleted
+		publicationContext.State == models.SessionPublicationStateCompleted &&
+		priorPRCreationState == models.PRCreationStateSucceeded
 }
 
 func finalizeDraftFirstPublication(

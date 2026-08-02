@@ -142,11 +142,13 @@ func TestService_StartPublicationRequiresAndPersistsEvidence(t *testing.T) {
 	tests := []struct {
 		name           string
 		changesetID    *uuid.UUID
+		primary        bool
 		revision       *int64
 		desiredHeadSHA *string
 		wantErr        bool
 	}{
-		{name: "complete evidence is persisted", changesetID: reviewUUIDPtr(uuid.New()), revision: reviewInt64Ptr(7), desiredHeadSHA: reviewStringPtr("0123456789abcdef0123456789abcdef01234567")},
+		{name: "stack child evidence targets its materialized worktree", changesetID: reviewUUIDPtr(uuid.New()), revision: reviewInt64Ptr(7), desiredHeadSHA: reviewStringPtr("0123456789abcdef0123456789abcdef01234567")},
+		{name: "primary evidence uses the session workspace", primary: true, revision: reviewInt64Ptr(7), desiredHeadSHA: reviewStringPtr("0123456789abcdef0123456789abcdef01234567")},
 		{name: "missing changeset is rejected", revision: reviewInt64Ptr(7), desiredHeadSHA: reviewStringPtr("0123456789abcdef0123456789abcdef01234567"), wantErr: true},
 		{name: "missing revision is rejected", changesetID: reviewUUIDPtr(uuid.New()), desiredHeadSHA: reviewStringPtr("0123456789abcdef0123456789abcdef01234567"), wantErr: true},
 		{name: "missing head is rejected", changesetID: reviewUUIDPtr(uuid.New()), revision: reviewInt64Ptr(7), wantErr: true},
@@ -155,8 +157,13 @@ func TestService_StartPublicationRequiresAndPersistsEvidence(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			orgID, sessionID, threadID := uuid.New(), uuid.New(), uuid.New()
+			changesetID := tt.changesetID
+			primaryChangesetID := uuid.New()
+			if tt.primary {
+				changesetID = reviewUUIDPtr(primaryChangesetID)
+			}
 			snapshotKey := "snapshots/publication-review.tar.zst"
-			store := &fakeReviewLoopStore{}
+			store := &fakeReviewLoopStore{primaryChangesetID: primaryChangesetID}
 			threads := &fakeThreadService{
 				session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Status: models.SessionStatusIdle, SnapshotKey: &snapshotKey},
 				thread:  models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex},
@@ -164,7 +171,7 @@ func TestService_StartPublicationRequiresAndPersistsEvidence(t *testing.T) {
 			}
 			_, err := NewService(store, threads).Start(context.Background(), orgID, sessionID, StartReviewLoopRequest{
 				AgentType: models.AgentTypeCodex, MaxPasses: 2, Source: models.ReviewLoopSourcePublication,
-				ChangesetID: tt.changesetID, WorkspaceRevision: tt.revision, DesiredHeadSHA: tt.desiredHeadSHA,
+				ChangesetID: changesetID, WorkspaceRevision: tt.revision, DesiredHeadSHA: tt.desiredHeadSHA,
 			})
 			if tt.wantErr {
 				require.Error(t, err, "publication review should reject incomplete revision-bound evidence")
@@ -173,10 +180,14 @@ func TestService_StartPublicationRequiresAndPersistsEvidence(t *testing.T) {
 			}
 			require.NoError(t, err, "publication review should accept complete revision-bound evidence")
 			require.Len(t, store.createdLoops, 1, "publication review should create one durable loop")
-			require.Equal(t, tt.changesetID, store.createdLoops[0].ChangesetID, "publication review should persist the changeset evidence")
+			require.Equal(t, changesetID, store.createdLoops[0].ChangesetID, "publication review should persist the changeset evidence")
 			require.Equal(t, tt.revision, store.createdLoops[0].WorkspaceRevision, "publication review should persist the workspace revision")
 			require.Equal(t, tt.desiredHeadSHA, store.createdLoops[0].DesiredHeadSHA, "publication review should persist the desired head")
-			require.Equal(t, tt.changesetID, threads.sent[0].ChangesetID, "publication review should execute in the target changeset worktree")
+			if tt.primary {
+				require.Nil(t, threads.sent[0].ChangesetID, "primary publication review should execute in the session workspace")
+			} else {
+				require.Equal(t, changesetID, threads.sent[0].ChangesetID, "stack child publication review should execute in its materialized worktree")
+			}
 		})
 	}
 }
@@ -695,6 +706,7 @@ type fakeReviewLoopStore struct {
 	fixSummary                   string
 	terminalErr                  error
 	events                       []string
+	primaryChangesetID           uuid.UUID
 }
 
 type recordedReviewLoopMetric struct {
@@ -716,6 +728,9 @@ func (f *fakeReviewLoopMetrics) RecordFix(context.Context) {
 }
 
 func (f *fakeReviewLoopStore) GetPrimaryChangesetID(_ context.Context, _ uuid.UUID, sessionID uuid.UUID) (uuid.UUID, error) {
+	if f.primaryChangesetID != uuid.Nil {
+		return f.primaryChangesetID, nil
+	}
 	return sessionID, nil
 }
 

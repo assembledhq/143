@@ -543,11 +543,23 @@ func (s *Service) sendPlain(ctx context.Context, loop models.SessionReviewLoop, 
 	if loop.ThreadID == nil {
 		return nil, fmt.Errorf("review loop has no thread")
 	}
+	var targetChangesetID *uuid.UUID
+	if loop.ChangesetID != nil {
+		primaryChangesetID, err := s.store.GetPrimaryChangesetID(ctx, loop.OrgID, loop.SessionID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve primary changeset for review message: %w", err)
+		}
+		// The primary changeset is represented by the session workspace and has
+		// no materialized worktree. Only stack children need an explicit target.
+		if *loop.ChangesetID != primaryChangesetID {
+			targetChangesetID = loop.ChangesetID
+		}
+	}
 	input := threadsvc.SendMessageInput{
 		SessionID:   loop.SessionID,
 		OrgID:       loop.OrgID,
 		ThreadID:    *loop.ThreadID,
-		ChangesetID: loop.ChangesetID,
+		ChangesetID: targetChangesetID,
 		UserID:      userID,
 		Message:     message,
 	}
