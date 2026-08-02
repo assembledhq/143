@@ -10919,22 +10919,23 @@ func newMergePullRequestWhenReadyHandler(services *Services, logger zerolog.Logg
 // pr_creation_state through pushing -> succeeded/failed so the UI can reflect
 // progress without needing to poll PR rows.
 type openPRJobInput struct {
-	SessionID              string `json:"session_id"`
-	ChangesetID            string `json:"changeset_id,omitempty"`
-	OrgID                  string `json:"org_id"`
-	IssueSnapshotID        string `json:"issue_snapshot_id,omitempty"`
-	Draft                  *bool  `json:"draft,omitempty"`
-	AuthorMode             string `json:"author_mode,omitempty"`
-	MergeWhenReady         bool   `json:"merge_when_ready,omitempty"`
-	RequestedByUserID      string `json:"requested_by_user_id,omitempty"`
-	RequestedRole          string `json:"requested_role,omitempty"`
-	PublicationSource      string `json:"publication_source,omitempty"`
-	PublicationQueue       string `json:"publication_queue,omitempty"`
-	PublicationTriggerKind string `json:"publication_trigger_kind,omitempty"`
-	PublicationHandoffMode string `json:"publication_handoff_mode,omitempty"`
-	InitiatedByUserID      string `json:"initiated_by_user_id,omitempty"`
-	AutomaticPolicySource  string `json:"automatic_pr_policy_source,omitempty"`
-	ReviewPolicySource     string `json:"review_policy_source,omitempty"`
+	SessionID                  string `json:"session_id"`
+	ChangesetID                string `json:"changeset_id,omitempty"`
+	OrgID                      string `json:"org_id"`
+	IssueSnapshotID            string `json:"issue_snapshot_id,omitempty"`
+	Draft                      *bool  `json:"draft,omitempty"`
+	AuthorMode                 string `json:"author_mode,omitempty"`
+	MergeWhenReady             bool   `json:"merge_when_ready,omitempty"`
+	RequestedByUserID          string `json:"requested_by_user_id,omitempty"`
+	RequestedRole              string `json:"requested_role,omitempty"`
+	PublicationSource          string `json:"publication_source,omitempty"`
+	PublicationExecutionSource string `json:"publication_execution_source,omitempty"`
+	PublicationQueue           string `json:"publication_queue,omitempty"`
+	PublicationTriggerKind     string `json:"publication_trigger_kind,omitempty"`
+	PublicationHandoffMode     string `json:"publication_handoff_mode,omitempty"`
+	InitiatedByUserID          string `json:"initiated_by_user_id,omitempty"`
+	AutomaticPolicySource      string `json:"automatic_pr_policy_source,omitempty"`
+	ReviewPolicySource         string `json:"review_policy_source,omitempty"`
 }
 
 func publicationExecutionEnabled(services *Services, source models.SessionPublicationSource) bool {
@@ -10943,6 +10944,40 @@ func publicationExecutionEnabled(services *Services, source models.SessionPublic
 
 func reviewExecutionEnabled(services *Services, source models.SessionPublicationSource) bool {
 	return services == nil || services.PublicationIntents == nil || services.PublicationIntents.ReviewExecutionEnabled(source)
+}
+
+func effectivePublicationExecutionSource(input openPRJobInput, fallback models.SessionPublicationSource) (models.SessionPublicationSource, error) {
+	source := fallback
+	if input.PublicationExecutionSource != "" {
+		source = models.SessionPublicationSource(input.PublicationExecutionSource)
+	}
+	if err := source.Validate(); err != nil {
+		return "", fmt.Errorf("validate publication execution source: %w", err)
+	}
+	return source, nil
+}
+
+func effectivePublicationRequestedRole(
+	ctx context.Context,
+	stores *Stores,
+	run models.Session,
+	source models.SessionPublicationSource,
+	requestedRole string,
+) (string, error) {
+	if source != models.SessionPublicationSourceAgentTool || run.TriggeredByUserID == nil {
+		return requestedRole, nil
+	}
+	if stores == nil || stores.Users == nil {
+		return "", errors.New("user store is required to authorize agent-tool publication")
+	}
+	user, err := stores.Users.GetByIDGlobalWithSettings(ctx, *run.TriggeredByUserID)
+	if err != nil {
+		return "", fmt.Errorf("load agent publication initiator: %w", err)
+	}
+	if user.OrgID != run.OrgID {
+		return "", errors.New("agent publication initiator is outside organization scope")
+	}
+	return string(user.Role), nil
 }
 
 func stackParentPublicationComplete(parent models.SessionChangeset) bool {
@@ -11134,10 +11169,15 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 		if err := publicationSource.Validate(); err != nil {
 			return fmt.Errorf("validate publication source: %w", err)
 		}
-		if !publicationExecutionEnabled(services, publicationSource) {
+		executionSource, err := effectivePublicationExecutionSource(input, publicationSource)
+		if err != nil {
+			return err
+		}
+		if !publicationExecutionEnabled(services, executionSource) {
 			logger.Info().
 				Str("session_id", runID.String()).
 				Str("publication_source", string(publicationSource)).
+				Str("publication_execution_source", string(executionSource)).
 				Msg("open_pr parked by publication execution kill switch")
 			return nil
 		}
@@ -11200,11 +11240,16 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 				publicationSource = publication.Source
 				publicationQueue = publication.JobQueue
 			}
-			if !publicationExecutionEnabled(services, publication.Source) {
+			executionSource, err = effectivePublicationExecutionSource(input, publication.Source)
+			if err != nil {
+				return err
+			}
+			if !publicationExecutionEnabled(services, executionSource) {
 				logger.Info().
 					Str("session_id", runID.String()).
 					Str("changeset_id", changesetID.String()).
 					Str("publication_source", string(publication.Source)).
+					Str("publication_execution_source", string(executionSource)).
 					Msg("durable open_pr replay parked by publication execution kill switch")
 				return nil
 			}
@@ -11264,6 +11309,10 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			run.LinkedIssues = links
 		}
 
+		input.RequestedRole, err = effectivePublicationRequestedRole(ctx, stores, run, executionSource, input.RequestedRole)
+		if err != nil {
+			return err
+		}
 		if input.RequestedRole == string(models.RoleBuilder) {
 			if err := ensureBuilderReviewFresh(ctx, stores, run, changesetID); err != nil {
 				if stateErr := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStateFailed, "A clean Review for the current snapshot is required before creating a pull request."); stateErr != nil {
@@ -11880,11 +11929,21 @@ func ensurePublicationPrePRReview(
 	// only on entry would let that path push a branch and start a fresh review
 	// loop while review execution is stopped — exactly what the switch exists
 	// to prevent.
-	if publication.ReviewGateState == models.SessionPublicationReviewGatePending && !reviewExecutionEnabled(services, publication.Source) {
+	executionSource := publication.Source
+	if persistedInput, persisted, err := persistedOpenPRJobInput(*publication); err != nil {
+		return false, err
+	} else if persisted {
+		executionSource, err = effectivePublicationExecutionSource(persistedInput, publication.Source)
+		if err != nil {
+			return false, err
+		}
+	}
+	if publication.ReviewGateState == models.SessionPublicationReviewGatePending && !reviewExecutionEnabled(services, executionSource) {
 		logger.Info().
 			Str("session_id", run.ID.String()).
 			Str("changeset_id", publication.ChangesetID.String()).
 			Str("publication_source", string(publication.Source)).
+			Str("publication_execution_source", string(executionSource)).
 			Msg("publication review parked by review execution kill switch")
 		return false, nil
 	}

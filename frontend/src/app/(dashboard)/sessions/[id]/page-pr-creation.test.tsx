@@ -218,7 +218,8 @@ describe('SessionDetailPage PR creation', () => {
     renderWithProviders(<SessionDetailContent id={detail.id} />);
 
     const publicationBadge = await screen.findByText('Publication retrying');
-    expect(publicationBadge).toHaveAttribute('title', 'GitHub accepted the PR; reconciling local state.');
+    expect(publicationBadge).toHaveAttribute('title', 'Publication stopped safely and needs a decision before it can continue.');
+    expect(screen.queryByText('GitHub accepted the PR; reconciling local state.')).not.toBeInTheDocument();
     expect(publicationBadge).toHaveAttribute('role', 'status');
     expect(publicationBadge).toHaveAttribute('aria-live', 'polite');
     expect(publicationBadge).toHaveAttribute('aria-atomic', 'true');
@@ -397,7 +398,7 @@ describe('SessionDetailPage PR creation', () => {
     expect(screen.getByText('Review gate bypassed')).toBeInTheDocument();
   });
 
-  it('shows one reviewing workflow card and suppresses duplicate publication actions', async () => {
+  it('offers manual resume when agent publication is paused without weakening review', async () => {
     const now = '2026-07-15T12:00:00Z';
     const detail: SessionDetail = {
       ...mockSessions[0],
@@ -406,6 +407,16 @@ describe('SessionDetailPage PR creation', () => {
       diff_stats: { added: 1, removed: 1, files_changed: 1 },
       snapshot_key: 'snap-abc',
       threads: [],
+      publication_policy: {
+        create_pr_when_agent_ready: true,
+        create_pr_source: 'organization',
+        review_before_pr: true,
+        review_execution_enabled: true,
+        agent_publication_execution_enabled: false,
+        review_source: 'organization',
+        review_max_passes: 2,
+        pr_handoff_mode: 'pre_publish',
+      },
       changesets: [{
         id: 'changeset-primary', is_primary: true, order_index: 0,
         title: 'Primary pull request', summary: '', status: 'ready',
@@ -429,8 +440,9 @@ describe('SessionDetailPage PR creation', () => {
     renderWithProviders(<SessionDetailContent id={detail.id} />);
 
     const workflow = await screen.findByTestId('publication-workflow-card');
-    expect(within(workflow).getByText('Reviewing')).toBeInTheDocument();
-    expect(within(workflow).getByText(/Pass 1 of 2/)).toBeInTheDocument();
+    expect(within(workflow).getByText('Needs attention')).toBeInTheDocument();
+    expect(within(workflow).getByRole('button', { name: 'Resume publication' })).toBeInTheDocument();
+    expect(within(workflow).queryByRole('button', { name: 'Create draft PR' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Create PR' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
   });
@@ -479,6 +491,7 @@ describe('SessionDetailPage PR creation', () => {
     const workflow = await screen.findByTestId('publication-workflow-card');
     expect(within(workflow).getByText('Needs attention')).toBeInTheDocument();
     expect(within(workflow).getByText(/temporarily paused/)).toBeInTheDocument();
+    expect(within(workflow).getByRole('button', { name: 'Create draft PR' })).toBeInTheDocument();
     expect(within(workflow).getByRole('button', { name: 'Continue with agent' })).toBeInTheDocument();
     expect(within(workflow).queryByText('Reviewing')).not.toBeInTheDocument();
   });
@@ -494,6 +507,16 @@ describe('SessionDetailPage PR creation', () => {
       diff_stats: { added: 1, removed: 1, files_changed: 1 },
       snapshot_key: 'snap-stack',
       threads: [],
+      publication_policy: {
+        create_pr_when_agent_ready: true,
+        create_pr_source: 'organization',
+        review_before_pr: true,
+        review_execution_enabled: true,
+        agent_publication_execution_enabled: false,
+        review_source: 'organization',
+        review_max_passes: 2,
+        pr_handoff_mode: 'pre_publish',
+      },
       changesets: [
         {
           id: primaryID, is_primary: true, order_index: 0,
@@ -511,7 +534,7 @@ describe('SessionDetailPage PR creation', () => {
       publications: [{
         id: 'publication-child', session_id: mockSessions[0].id, changeset_id: childID,
         repository_id: mockSessions[0].repository_id ?? 'repository-1', state: 'review_pending',
-        source: 'user', trigger_kind: 'explicit_action', handoff_mode: 'pre_publish',
+        source: 'agent_tool', execution_source: 'user', trigger_kind: 'explicit_action', handoff_mode: 'pre_publish',
         review_gate_state: 'pending', review_max_passes: 2,
         base_branch: '143/foundation', head_branch: '143/api', attempt_count: 0,
         requested_at: now, updated_at: now,
@@ -526,7 +549,7 @@ describe('SessionDetailPage PR creation', () => {
     await userEvent.click(await screen.findByRole('button', { name: /API integration/ }));
 
     const workflow = await screen.findByTestId('publication-workflow-card');
-    expect(within(workflow).getByText('Reviewing')).toBeInTheDocument();
+    expect(within(workflow).getByText('Review queued')).toBeInTheDocument();
     const selectedPanel = screen.getByTestId('selected-pull-request-panel');
     expect(within(selectedPanel).queryByRole('button', { name: 'Create PR' })).not.toBeInTheDocument();
     expect(screen.getAllByTestId('publication-workflow-card')).toHaveLength(1);

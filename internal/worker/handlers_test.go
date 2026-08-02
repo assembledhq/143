@@ -9947,8 +9947,9 @@ func TestPersistedOpenPRJobInputRestoresCallerChoices(t *testing.T) {
 		SessionID: sessionID.String(), ChangesetID: changesetID.String(), OrgID: orgID.String(),
 		IssueSnapshotID: uuid.NewString(), Draft: &draft, AuthorMode: "user", MergeWhenReady: true,
 		RequestedByUserID: uuid.NewString(), RequestedRole: string(models.RoleBuilder),
-		PublicationSource: string(models.SessionPublicationSourceAutomation),
-		PublicationQueue:  string(models.SessionPublicationJobQueueAgent),
+		PublicationSource:          string(models.SessionPublicationSourceAutomation),
+		PublicationExecutionSource: string(models.SessionPublicationSourceUser),
+		PublicationQueue:           string(models.SessionPublicationJobQueueAgent),
 	}
 	payload, err := json.Marshal(expected)
 	require.NoError(t, err, "test should encode a complete durable open_pr intent")
@@ -9962,6 +9963,41 @@ func TestPersistedOpenPRJobInputRestoresCallerChoices(t *testing.T) {
 	require.NoError(t, err, "a scoped durable open_pr intent should be restorable")
 	require.True(t, restored, "a nonempty durable open_pr intent should replace a minimal continuation payload")
 	require.Equal(t, expected, actual, "restored intent should preserve draft, authorship, merge, role, actor, and issue snapshot choices")
+	executionSource, err := effectivePublicationExecutionSource(actual, publication.Source)
+	require.NoError(t, err, "restored manual execution authority should be valid")
+	require.Equal(t, models.SessionPublicationSourceUser, executionSource, "manual takeover should execute independently of immutable publication provenance")
+}
+
+func TestEffectivePublicationRequestedRoleOverridesLegacyAgentPayload(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+	orgID, userID := uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	mock.ExpectQuery(`SELECT .+FROM users.+WHERE id = @id`).
+		WithArgs(pgx.NamedArgs{"id": userID}).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url",
+			"google_id", "email_verified_at", "created_at", "settings",
+		}).AddRow(
+			userID, orgID, "builder@example.com", "Builder", models.RoleBuilder,
+			nil, nil, nil, nil, &now, now, json.RawMessage(`{}`),
+		))
+	run := models.Session{OrgID: orgID, TriggeredByUserID: &userID}
+
+	role, err := effectivePublicationRequestedRole(
+		context.Background(),
+		&Stores{Users: db.NewUserStore(mock)},
+		run,
+		models.SessionPublicationSourceAgentTool,
+		string(models.RoleMember),
+	)
+
+	require.NoError(t, err, "legacy agent work should resolve current initiator authority")
+	require.Equal(t, string(models.RoleBuilder), role, "persisted sandbox input must not downgrade a builder initiator")
+	require.NoError(t, mock.ExpectationsWereMet(), "initiator lookup should use the scoped durable user identity")
 }
 
 func TestPersistedOpenPRJobInputRejectsScopeDrift(t *testing.T) {

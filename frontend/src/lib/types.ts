@@ -1580,6 +1580,7 @@ export interface SessionPublication {
   repository_id: string;
   state: SessionPublicationState;
   source: "user" | "automation" | "agent_tool" | "backend" | "webhook" | "reconciler" | "backfill";
+  execution_source?: "user" | "automation" | "agent_tool" | "backend" | "webhook" | "reconciler" | "backfill";
   trigger_kind?: "agent_ready" | "explicit_action" | "policy";
   handoff_mode?: PRHandoffMode;
   initiated_by_user_id?: string;

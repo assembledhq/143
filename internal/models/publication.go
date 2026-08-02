@@ -187,6 +187,7 @@ type SessionPublication struct {
 	RepositoryID            uuid.UUID                         `db:"repository_id" json:"repository_id"`
 	State                   SessionPublicationState           `db:"state" json:"state"`
 	Source                  SessionPublicationSource          `db:"source" json:"source"`
+	ExecutionSource         SessionPublicationSource          `db:"-" json:"execution_source,omitempty"`
 	TriggerKind             SessionPublicationTriggerKind     `db:"trigger_kind" json:"trigger_kind"`
 	HandoffMode             PRHandoffMode                     `db:"handoff_mode" json:"handoff_mode"`
 	InitiatedByUserID       *uuid.UUID                        `db:"initiated_by_user_id" json:"initiated_by_user_id,omitempty"`

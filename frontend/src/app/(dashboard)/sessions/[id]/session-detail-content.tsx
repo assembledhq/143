@@ -268,6 +268,23 @@ function publicationOwnsPublishActions(publication: SessionPublication) {
   return publication.state !== "completed_noop";
 }
 
+function publicationErrorDescription(publication: SessionPublication) {
+  switch (publication.last_error_code) {
+    case "no_diff_against_base":
+      return "There are no changes to publish against the target branch.";
+    case "remote_diverged":
+      return "The remote branch changed. Review the branch and retry publication.";
+    case "push_rejected":
+      return "The branch could not be pushed. Check repository access and retry publication.";
+    case "sandbox_auth_unavailable":
+      return "GitHub authorization is required before this pull request can be published.";
+    case "stack_parent_publication_failed":
+      return "Publish the parent pull request, then retry this one.";
+    default:
+      return "Publication stopped safely and needs a decision before it can continue.";
+  }
+}
+
 function PublicationWorkflowCard({
   publication,
   reviewLoop,
@@ -275,6 +292,7 @@ function PublicationWorkflowCard({
   canManage,
   canBypassReview,
   executionPaused,
+  reviewExecutionPaused,
   actionPending,
   onCreateDraft,
   onOpenReview,
@@ -287,6 +305,7 @@ function PublicationWorkflowCard({
   canManage: boolean;
   canBypassReview: boolean;
   executionPaused: boolean;
+  reviewExecutionPaused: boolean;
   actionPending: boolean;
   onCreateDraft: () => void;
   onOpenReview: () => void;
@@ -304,6 +323,7 @@ function PublicationWorkflowCard({
   // only the durable completed checkpoint means the workflow is published.
   const settled = published || completedNoop;
   const reviewing = !published && !completedNoop && !needsAttention && publication.review_gate_state === "pending";
+  const reviewQueued = reviewing && !reviewLoop;
   const reviewPassed = publication.review_gate_state === "passed";
   const activePass = reviewLoop?.passes?.at(-1);
   const passNumber = activePass?.pass_index ?? Math.min((reviewLoop?.completed_passes ?? 0) + 1, publication.review_max_passes ?? reviewLoop?.max_passes ?? 2);
@@ -320,7 +340,9 @@ function PublicationWorkflowCard({
     : needsAttention
       ? "Needs attention"
       : reviewing
-        ? "Reviewing"
+        ? reviewQueued
+          ? "Review queued"
+          : "Reviewing"
         : "Publishing";
   const description = completedNoop
     ? "The completed workflow found no changes to publish."
@@ -331,9 +353,11 @@ function PublicationWorkflowCard({
         ? canManage
           ? "Publication automation is temporarily paused. Continue with the agent for next steps."
           : "Publication automation is temporarily paused. A member can continue the session with the agent."
-        : (publication.last_error_message ?? "Publication stopped safely and needs a decision before it can continue.")
+        : publicationErrorDescription(publication)
       : reviewing
-        ? `Pass ${passNumber} of ${maxPasses} · ${activity}`
+        ? reviewQueued
+          ? "Waiting for publication review to start."
+          : `Pass ${passNumber} of ${maxPasses} · ${activity}`
         // Only a gate that actually passed may be described as reviewed. This
         // branch is also reached when review was not required or was bypassed,
         // and claiming a review ran for those would misrepresent the PR.
@@ -368,13 +392,22 @@ function PublicationWorkflowCard({
               </a>
             </Button>
           ) : null}
-          {canBypassReview && needsAttention && publication.review_gate_state === "needs_human" ? (
+          {canBypassReview && needsAttention && (
+            publication.review_gate_state === "needs_human" ||
+            (executionActuallyPaused && reviewExecutionPaused && publication.review_gate_state === "pending")
+          ) ? (
             <Button size="sm" disabled={actionPending} onClick={onCreateDraft}>
               {actionPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GitPullRequest className="h-3.5 w-3.5" />}
               Create draft PR
             </Button>
           ) : null}
           {needsAttention && reviewLoop?.thread_id ? <Button size="sm" variant="outline" onClick={onOpenReview}>Open review</Button> : null}
+          {canManage && executionActuallyPaused && !reviewExecutionPaused ? (
+            <Button size="sm" variant="outline" disabled={actionPending} onClick={onRetry}>
+              {actionPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              Resume publication
+            </Button>
+          ) : null}
           {canManage && needsAttention && publication.state === "terminal_failed" ? <Button size="sm" variant="outline" disabled={actionPending} onClick={onRetry}>Retry</Button> : null}
           {canManage && needsAttention ? <Button size="sm" variant="ghost" onClick={onContinue}>Continue with agent</Button> : null}
         </div>
@@ -6289,7 +6322,9 @@ export function SessionDetailContent({ id }: { id: string }) {
                 role="status"
                 aria-live="polite"
                 aria-atomic="true"
-                title={selectedPublication.last_error_message || selectedPublicationPresentation.label}
+                title={selectedPublication.last_error_code
+                  ? publicationErrorDescription(selectedPublication)
+                  : selectedPublicationPresentation.label}
               >
                 {selectedPublicationPresentation.label}
               </Badge>
@@ -6555,7 +6590,17 @@ export function SessionDetailContent({ id }: { id: string }) {
                       ? "Reconcile with agent"
                       : "Ask agent"}
                 </Button>
-                {hasMultipleChangesets && <Button type="button" size="sm" variant="outline" disabled={changesetLifecycleMutation.isPending || publishStackMutation.isPending || changesets.some((item) => item.status !== "abandoned" && !item.worktree_path)} onClick={() => publishStackMutation.mutate()}>Publish stack</Button>}
+                {hasMultipleChangesets && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={changesetLifecycleMutation.isPending || publishStackMutation.isPending}
+                    onClick={() => publishStackMutation.mutate()}
+                  >
+                    Publish stack
+                  </Button>
+                )}
                 </div>
                 {!selectedChangeset.is_primary && !selectedChangeset.worktree_path && (
                   <p className="pt-2 text-xs text-muted-foreground" data-testid="branch-actions-unavailable">
@@ -6573,8 +6618,13 @@ export function SessionDetailContent({ id }: { id: string }) {
               canManage={canManageSession}
               canBypassReview={user?.role === "admin" || user?.role === "member"}
               executionPaused={
-                (selectedPublication.source === "agent_tool" && session.publication_policy?.agent_publication_execution_enabled === false) ||
+                ((selectedPublication.execution_source ?? selectedPublication.source) === "agent_tool" &&
+                  session.publication_policy?.agent_publication_execution_enabled === false) ||
                 (selectedPublication.review_gate_state === "pending" && session.publication_policy?.review_execution_enabled === false)
+              }
+              reviewExecutionPaused={
+                selectedPublication.review_gate_state === "pending" &&
+                session.publication_policy?.review_execution_enabled === false
               }
               actionPending={createPRMutation.isPending}
               onCreateDraft={() => createPRMutation.mutate({ draft: true })}

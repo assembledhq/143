@@ -101,6 +101,7 @@ type ChangesetStore interface {
 
 type PullRequestStore interface {
 	GetByChangesetID(ctx context.Context, orgID, sessionID, changesetID uuid.UUID) (models.PullRequest, error)
+	GetPrimaryBySessionID(ctx context.Context, orgID, sessionID uuid.UUID) (models.PullRequest, error)
 }
 
 type OrganizationStore interface {
@@ -114,6 +115,7 @@ type UserStore interface {
 type PublicationStore interface {
 	EnsureRequested(ctx context.Context, orgID uuid.UUID, publication *models.SessionPublication) error
 	ApplyReviewBypass(ctx context.Context, orgID uuid.UUID, publication *models.SessionPublication) error
+	ApplyManualTakeover(ctx context.Context, orgID uuid.UUID, publication *models.SessionPublication) error
 	GetByChangeset(ctx context.Context, orgID, sessionID, changesetID uuid.UUID) (models.SessionPublication, error)
 }
 
@@ -248,6 +250,8 @@ func (c *Coordinator) RequestPullRequest(
 	}
 	automationRequest := req.Source == models.SessionPublicationSourceAutomation &&
 		req.TriggerKind == models.SessionPublicationTriggerPolicy && session.AutomationRunID != nil
+	backendPolicyRequest := req.Source == models.SessionPublicationSourceBackend &&
+		req.TriggerKind == models.SessionPublicationTriggerPolicy && session.ProjectTaskID != nil
 	if session.RepositoryID == nil || session.Origin == models.SessionOriginCodeReview ||
 		session.Origin == models.SessionOriginRevision || (session.AutomationRunID != nil) != automationRequest {
 		return nil, &Error{Code: ErrorSessionNotEligible, Err: errors.New("session cannot create a new pull request")}
@@ -270,14 +274,19 @@ func (c *Coordinator) RequestPullRequest(
 	// review already stopped for human attention. It is deliberately not a way
 	// to open a first-time request without review: "give me a draft PR" and
 	// "skip the review gate" must not be the same request.
+	executionParked := hasExistingPublication && !existingPublication.State.Terminal() &&
+		(!c.PublicationExecutionEnabled(existingPublication.Source) ||
+			(existingPublication.ReviewGateState == models.SessionPublicationReviewGatePending &&
+				!c.ReviewExecutionEnabled(existingPublication.Source)))
 	bypassRequested := hasExistingPublication &&
-		reviewBlocksPublication(existingPublication) &&
+		(reviewBlocksPublication(existingPublication) || executionParked) &&
 		authorizedDraftBypass(req)
+	manualTakeoverRequested := executionParked && authorizedManualTakeover(req)
 	// A retryable terminal outcome (no-op or failed) is not a durable answer:
 	// re-requesting must reach EnsureRequested, whose generation-guarded reopen
 	// is the only path back. Anything else is a live intent the caller rejoins.
 	retryingTerminalPublication := hasExistingPublication && retryablePublicationOutcome(existingPublication.State)
-	if hasExistingPublication && !bypassRequested && !retryingTerminalPublication {
+	if hasExistingPublication && !bypassRequested && !manualTakeoverRequested && !retryingTerminalPublication {
 		if !existingPublication.State.Terminal() && !c.PublicationExecutionEnabled(existingPublication.Source) {
 			return publicationDisabledResult(sessionID), nil
 		}
@@ -286,11 +295,17 @@ func (c *Coordinator) RequestPullRequest(
 			!c.ReviewExecutionEnabled(existingPublication.Source) {
 			return reviewDisabledResult(sessionID, &existingPublication.ID), nil
 		}
-		return existingPublicationResult(existingPublication), nil
+		return ExistingPublicationResult(existingPublication), nil
 	}
 	resumingRecordedDraft := false
 	if !hasExistingPublication || retryingTerminalPublication {
-		if _, prErr := c.pullRequests.GetByChangesetID(ctx, orgID, sessionID, changeset.ID); prErr == nil {
+		var prErr error
+		if changeset.IsPrimary {
+			_, prErr = c.pullRequests.GetPrimaryBySessionID(ctx, orgID, sessionID)
+		} else {
+			_, prErr = c.pullRequests.GetByChangesetID(ctx, orgID, sessionID, changeset.ID)
+		}
+		if prErr == nil {
 			// A terminal draft-first intent already owns a PR by design. It is
 			// not published yet: reopen the intent and let the worker reuse and
 			// finalize that draft. All other existing PRs remain final results.
@@ -321,10 +336,17 @@ func (c *Coordinator) RequestPullRequest(
 		CreatePRSource:         models.PublicationPolicySourceAutomation,
 		ReviewSource:           models.PublicationPolicySourceAutomation,
 	}
-	if !automationRequest {
-		policy, err = c.resolvePolicy(ctx, orgID, session.TriggeredByUserID)
+	if !automationRequest && !backendPolicyRequest {
+		var initiatorRole string
+		policy, initiatorRole, err = c.resolvePolicy(ctx, orgID, session.TriggeredByUserID)
 		if err != nil {
 			return nil, &Error{Code: ErrorPublicationFailed, Err: err}
+		}
+		// Agent-tool callers authenticate the sandbox, not a mutable browser
+		// role. Always derive their authority from the session initiator so a
+		// forged or omitted requested_role cannot bypass the builder review gate.
+		if req.Source == models.SessionPublicationSourceAgentTool {
+			req.RequestedRole = initiatorRole
 		}
 		if req.TriggerKind == models.SessionPublicationTriggerAgentReady && !policy.CreatePRWhenAgentReady {
 			metrics.RecordAutomaticPRManualOverride(ctx, "off")
@@ -370,7 +392,15 @@ func (c *Coordinator) RequestPullRequest(
 	// Execution switches must never rewrite effective review policy. If review
 	// is required while execution is stopped, persist a pending gate and park
 	// the intent; treating the switch as review=off would publish unreviewed.
-	reviewRequired := !automationRequest && policy.ReviewBeforePR
+	reviewRequired := !automationRequest && !backendPolicyRequest && policy.ReviewBeforePR
+	if manualTakeoverRequested && existingPublication.ReviewGateState == models.SessionPublicationReviewGatePending &&
+		existingPublication.ReviewMaxPasses != nil {
+		// A manual takeover changes execution authority, never the review
+		// decision already recorded on the durable intent.
+		reviewRequired = true
+		policy.ReviewMaxPasses = *existingPublication.ReviewMaxPasses
+		policy.ReviewSource = existingPublication.ReviewPolicySource
+	}
 	reviewBypassed := bypassRequested
 	reviewExecutionBlocked := reviewRequired && !reviewBypassed && !c.ReviewExecutionEnabled(req.Source)
 	reviewPolicySource := policy.ReviewSource
@@ -384,8 +414,6 @@ func (c *Coordinator) RequestPullRequest(
 	// Backend policy requests are project-owned work. Preserve the historical
 	// default-worker routing and priority while still running them through the
 	// same durable coordinator as every other entry point.
-	backendPolicyRequest := req.Source == models.SessionPublicationSourceBackend &&
-		req.TriggerKind == models.SessionPublicationTriggerPolicy
 	if automationRequest || backendPolicyRequest {
 		publicationQueue = models.SessionPublicationJobQueueDefault
 		queue = "default"
@@ -402,6 +430,13 @@ func (c *Coordinator) RequestPullRequest(
 		"automatic_pr_policy_source": string(automaticSource),
 		"review_policy_source":       string(reviewPolicySource),
 		"initiated_by_user_id":       session.TriggeredByUserID,
+	}
+	if manualTakeoverRequested && !bypassRequested {
+		// Keep source as immutable entry-point provenance while allowing the
+		// explicit user request to become the runtime authority for kill-switch
+		// and authorization checks.
+		payload["publication_source"] = string(existingPublication.Source)
+		payload["publication_execution_source"] = string(req.Source)
 	}
 	if req.IssueSnapshotID != nil {
 		payload["issue_snapshot_id"] = req.IssueSnapshotID.String()
@@ -441,6 +476,7 @@ func (c *Coordinator) RequestPullRequest(
 		publication.ReviewGateState = models.SessionPublicationReviewGatePending
 	}
 	bypassIntent := publication
+	takeoverIntent := publication
 	if ensureErr := c.publications.EnsureRequested(ctx, orgID, &publication); ensureErr != nil {
 		return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("persist publication intent: %w", ensureErr)}
 	}
@@ -451,7 +487,7 @@ func (c *Coordinator) RequestPullRequest(
 	// as a terminal replay, which would leave the caller watching a UI that
 	// never moves.
 	if publication.State.Terminal() {
-		return existingPublicationResult(publication), nil
+		return ExistingPublicationResult(publication), nil
 	}
 	if reviewBypassed {
 		bypassIntent.ID = publication.ID
@@ -459,6 +495,18 @@ func (c *Coordinator) RequestPullRequest(
 			return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("persist publication review bypass: %w", bypassErr)}
 		}
 		publication = bypassIntent
+	} else if manualTakeoverRequested {
+		takeoverIntent.ID = publication.ID
+		if takeoverErr := c.publications.ApplyManualTakeover(ctx, orgID, &takeoverIntent); takeoverErr != nil {
+			if errors.Is(takeoverErr, pgx.ErrNoRows) {
+				current, currentErr := c.publications.GetByChangeset(ctx, orgID, sessionID, changeset.ID)
+				if currentErr == nil && current.State.Terminal() {
+					return ExistingPublicationResult(current), nil
+				}
+			}
+			return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("persist publication manual takeover: %w", takeoverErr)}
+		}
+		publication = takeoverIntent
 	}
 	if reviewExecutionBlocked {
 		return reviewDisabledResult(sessionID, &publication.ID), nil
@@ -481,7 +529,7 @@ func (c *Coordinator) RequestPullRequest(
 		// QueueChangesetPRCreation is generation- and changeset-idempotent. A
 		// concurrent caller already owns the same durable request, so return the
 		// state we just ensured instead of reviving the retired PR_IN_FLIGHT 409.
-		return existingPublicationResult(publication), nil
+		return ExistingPublicationResult(publication), nil
 	}
 	c.logger.Info().
 		Str("org_id", orgID.String()).
@@ -519,6 +567,15 @@ func authorizedDraftBypass(req RequestPullRequest) bool {
 		(req.RequestedRole == string(models.RoleAdmin) || req.RequestedRole == string(models.RoleMember))
 }
 
+func authorizedManualTakeover(req RequestPullRequest) bool {
+	return req.Source == models.SessionPublicationSourceUser &&
+		req.TriggerKind == models.SessionPublicationTriggerExplicitAction &&
+		req.RequestedByUserID != nil &&
+		(req.RequestedRole == string(models.RoleAdmin) ||
+			req.RequestedRole == string(models.RoleMember) ||
+			req.RequestedRole == string(models.RoleBuilder))
+}
+
 // retryablePublicationOutcome reports whether a terminal publication may be
 // reopened by a newer request. A completed publication has a pull request and
 // is final; a no-op or failed one is a dead end the caller can legitimately
@@ -528,12 +585,12 @@ func retryablePublicationOutcome(state models.SessionPublicationState) bool {
 		state == models.SessionPublicationStateTerminalFailed
 }
 
-// existingPublicationResult maps a durable publication onto the caller's view
+// ExistingPublicationResult maps a durable publication onto the caller's view
 // of it. ResultBlocked is deliberately not used here: it means "the intent is
 // durable but nothing was enqueued", which callers surface as a retryable
 // server error. Everything below is a settled state the caller must act on,
 // so it carries a reason and maps onto a conflict instead.
-func existingPublicationResult(publication models.SessionPublication) *PublicationIntentResult {
+func ExistingPublicationResult(publication models.SessionPublication) *PublicationIntentResult {
 	result := &PublicationIntentResult{
 		SessionID: publication.SessionID, PublicationID: &publication.ID,
 		ReviewLoopID: publication.ReviewLoopID, PullRequestURL: publication.GitHubPRURL,
@@ -649,25 +706,27 @@ func trimmedPointer(value *string) string {
 	return strings.TrimSpace(*value)
 }
 
-func (c *Coordinator) resolvePolicy(ctx context.Context, orgID uuid.UUID, initiatorID *uuid.UUID) (EffectivePolicy, error) {
+func (c *Coordinator) resolvePolicy(ctx context.Context, orgID uuid.UUID, initiatorID *uuid.UUID) (EffectivePolicy, string, error) {
 	org, err := c.organizations.GetByID(ctx, orgID)
 	if err != nil {
-		return EffectivePolicy{}, fmt.Errorf("load organization policy: %w", err)
+		return EffectivePolicy{}, "", fmt.Errorf("load organization policy: %w", err)
 	}
 	settings, err := models.ParseOrgSettings(org.Settings)
 	if err != nil {
-		return EffectivePolicy{}, fmt.Errorf("parse organization policy: %w", err)
+		return EffectivePolicy{}, "", fmt.Errorf("parse organization policy: %w", err)
 	}
 	var personal *models.AutomaticPRFollowThroughSettings
+	initiatorRole := ""
 	if initiatorID != nil {
 		user, userErr := c.users.GetByIDGlobalWithSettings(ctx, *initiatorID)
 		if userErr != nil {
-			return EffectivePolicy{}, fmt.Errorf("load session initiator policy: %w", userErr)
+			return EffectivePolicy{}, "", fmt.Errorf("load session initiator policy: %w", userErr)
 		}
 		if user.OrgID != orgID {
-			return EffectivePolicy{}, errors.New("session initiator is outside organization scope")
+			return EffectivePolicy{}, "", errors.New("session initiator is outside organization scope")
 		}
 		personal = user.Settings.AutomaticPRFollowThrough
+		initiatorRole = string(user.Role)
 	}
-	return ResolvePolicy(settings.SessionAutomation.AutomaticFollowThrough, personal), nil
+	return ResolvePolicy(settings.SessionAutomation.AutomaticFollowThrough, personal), initiatorRole, nil
 }

@@ -679,6 +679,12 @@ duplicated:
   `trigger_kind = 'agent_ready'`.
   `session_publications_agent_ready_source_check` pins the one combination that
   must never diverge.
+  An authorized user may take over execution of an intent parked by a kill
+  switch without rewriting that provenance. The durable request payload then
+  records `publication_execution_source = user`; workers use that value for
+  runtime authorization and execution gates, and session detail exposes it as
+  `execution_source` so the UI does not continue to show the original agent
+  channel as paused while the manual path is running.
 - **`review_gate_state` is the single source of truth for whether review is
   required.** This design deliberately does *not* add a `review_required`
   boolean to `session_publications`, because
