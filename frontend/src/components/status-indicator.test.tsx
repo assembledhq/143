@@ -19,6 +19,20 @@ describe("StatusIndicator", () => {
     expect(container.querySelectorAll('[data-slot="status-indicator-core"]')).toHaveLength(1);
   });
 
+  it("centers an indeterminate spinner in the same alignment box as a static dot", () => {
+    const { container, rerender } = render(<StatusIndicator tone="primary" activity="indeterminate" />);
+
+    expect(container.querySelector('[data-slot="status-indicator"]')).toHaveClass(
+      "size-2",
+      "items-center",
+      "justify-center",
+    );
+    expect(container.querySelector('[data-slot="status-indicator-spinner"]')).toHaveClass("size-3");
+
+    rerender(<StatusIndicator tone="success" />);
+    expect(container.querySelector('[data-slot="status-indicator"]')).toHaveClass("size-2");
+  });
+
   it("settles once when operational state changes", () => {
     const animate = vi.fn();
     const { container, rerender } = render(<StatusIndicator tone="primary" activity="breathing" stateKey="running" />);
