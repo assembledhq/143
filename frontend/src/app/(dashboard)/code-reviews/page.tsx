@@ -64,9 +64,9 @@ import { useOpenCodeAvailability, type OpenCodeModelAvailability } from "@/hooks
 import { useAuth } from "@/hooks/use-auth";
 import {
   DEFAULT_TIME_RANGE,
-  isRollingTimeRange,
   parseTimeRange,
   timeRangeBounds,
+  timeRangeRefreshDelayMs,
   type TimeRangeFilter,
 } from "@/lib/time-range";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
@@ -142,6 +142,7 @@ const CODE_REVIEW_INVALIDATE_COALESCE_MS = 300;
 const CODE_REVIEW_PAGE_SIZE = 50;
 const CODE_REVIEW_SEARCH_DEBOUNCE_MS = 300;
 const CODE_REVIEW_TIME_WINDOW_REFRESH_MS = 60_000;
+const MAX_BROWSER_TIMEOUT_MS = 2_147_000_000;
 const MAX_REVIEWER_MODELS = 3;
 const CODE_REVIEW_REASONING_OPTIONS = [
   { value: "low", label: "Low" },
@@ -692,7 +693,7 @@ export default function CodeReviewsPage() {
     queryKey: queryKeys.repositories.all,
     queryFn: () => api.repositories.list(),
   });
-  const refreshRollingReviewWindow = useCallback(() => {
+  const refreshRelativeReviewWindow = useCallback(() => {
     timeRangeAnchorMsRef.current = Date.now();
     void queryClient.invalidateQueries({
       queryKey: queryKeys.codeReviews.lists(),
@@ -705,13 +706,38 @@ export default function CodeReviewsPage() {
     });
   }, [queryClient]);
   useEffect(() => {
-    if (!isRollingTimeRange(timeRangeFilter) || (isViewingReviewHistory && activeTab === "reviews")) return;
-    const timer = window.setInterval(
-      refreshRollingReviewWindow,
-      CODE_REVIEW_TIME_WINDOW_REFRESH_MS,
-    );
-    return () => window.clearInterval(timer);
-  }, [activeTab, isViewingReviewHistory, refreshRollingReviewWindow, timeRangeFilter]);
+    if (isViewingReviewHistory && activeTab === "reviews") return;
+
+    let timer: number | undefined;
+    const waitUntil = (refreshAtMs: number) => {
+      const remainingMs = refreshAtMs - Date.now();
+      if (remainingMs <= 0) {
+        refreshRelativeReviewWindow();
+        scheduleRefresh();
+        return;
+      }
+
+      timer = window.setTimeout(
+        () => waitUntil(refreshAtMs),
+        Math.min(remainingMs, MAX_BROWSER_TIMEOUT_MS),
+      );
+    };
+    const scheduleRefresh = () => {
+      const anchor = new Date(timeRangeAnchorMsRef.current);
+      const delay = timeRangeRefreshDelayMs(
+        timeRangeFilter,
+        anchor,
+        CODE_REVIEW_TIME_WINDOW_REFRESH_MS,
+      );
+      if (delay === null) return;
+      waitUntil(anchor.getTime() + delay);
+    };
+
+    scheduleRefresh();
+    return () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [activeTab, isViewingReviewHistory, refreshRelativeReviewWindow, timeRangeFilter]);
   // The reviews list refreshes live via the org-scoped SSE stream below; the
   // polling backstop only kicks in (faster) while the stream is unhealthy so a
   // Redis hiccup still surfaces new reviews. Replaces the old manual Refresh
@@ -737,9 +763,9 @@ export default function CodeReviewsPage() {
     if (invalidateTimerRef.current) return;
     invalidateTimerRef.current = setTimeout(() => {
       invalidateTimerRef.current = null;
-      refreshRollingReviewWindow();
+      refreshRelativeReviewWindow();
     }, pollMs(CODE_REVIEW_INVALIDATE_COALESCE_MS));
-  }, [activeTab, isViewingReviewHistory, refreshRollingReviewWindow]);
+  }, [activeTab, isViewingReviewHistory, refreshRelativeReviewWindow]);
   useEffect(
     () => () => {
       if (invalidateTimerRef.current) clearTimeout(invalidateTimerRef.current);
