@@ -20,14 +20,12 @@ type PendingAttachmentStripProps = {
 const sizeStyles = {
   sm: {
     tile: "h-14 w-14",
-    removeButton: "size-4",
     removeIcon: "h-2.5 w-2.5",
     fileTile: "h-14 px-3 text-xs",
     spinnerTile: "h-14 w-14",
   },
   md: {
     tile: "h-16 w-16",
-    removeButton: "size-5",
     removeIcon: "h-3 w-3",
     fileTile: "h-16 px-3 text-xs",
     spinnerTile: "h-16 w-16",
@@ -137,13 +135,10 @@ export function PendingAttachmentStrip({
           <Button
             type="button"
             variant="outline"
-            size="icon-compact"
+            size="icon-xs"
             onClick={() => onRemove(url)}
             aria-label={`Remove ${fileName}`}
-            className={cn(
-              "absolute top-0 right-0 rounded-full bg-background p-0 shadow-sm",
-              styles.removeButton,
-            )}
+            className="absolute top-0 right-0 rounded-full bg-background p-0 shadow-sm"
           >
             <X className={styles.removeIcon} />
           </Button>

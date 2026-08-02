@@ -495,17 +495,30 @@ describe("CodeReviewsPage", () => {
     expect(within(stats).getByText("128")).toBeInTheDocument();
     expect(within(stats).getByText("Automatically approved")).toBeInTheDocument();
     expect(within(stats).getByText("92")).toBeInTheDocument();
-    expect(within(stats).getByText("72% of completed reviews")).toBeInTheDocument();
+    expect(within(stats).getByRole("button", { name: "About Automatically approved" })).toBeInTheDocument();
     expect(within(stats).getByText("Approval rate")).toBeInTheDocument();
     expect(within(stats).getByText("72%")).toBeInTheDocument();
-    expect(within(stats).getByText("21 need human review")).toBeInTheDocument();
+    expect(within(stats).getByRole("button", { name: "About Approval rate" })).toBeInTheDocument();
     expect(within(stats).getByText("Median turnaround")).toBeInTheDocument();
     expect(within(stats).getByText("8m")).toBeInTheDocument();
     const timeWindow = screen.getByRole("button", { name: "Time window" });
     expect(timeWindow).toHaveTextContent("Last 30 days");
     const filters = timeWindow.closest("#code-review-filters");
+    expect(filters).toHaveAttribute("data-slot", "card");
     expect(filters).toContainElement(screen.getByRole("combobox", { name: "Repository" }));
     expect(filters?.lastElementChild).toContainElement(timeWindow);
+    expect(screen.getByText("Repository", { selector: "label" })).toHaveAttribute(
+      "for",
+      screen.getByRole("combobox", { name: "Repository" }).id,
+    );
+    expect(screen.getByText("PR author", { selector: "label" })).toHaveAttribute(
+      "for",
+      screen.getByRole("textbox", { name: "PR author" }).id,
+    );
+    expect(screen.getByText("Search", { selector: "label" })).toHaveAttribute(
+      "for",
+      screen.getByRole("textbox", { name: "Search code reviews" }).id,
+    );
     expect(screen.getByRole("heading", { level: 2, name: "Review activity" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Status" })).toHaveTextContent("Current reviews");
     expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
@@ -659,10 +672,10 @@ describe("CodeReviewsPage", () => {
     expect(screen.queryByRole("region", { name: "Code review statistics" })).not.toBeInTheDocument();
     const approvalOutcomes = screen.getByLabelText("Approval outcomes");
     expect(within(approvalOutcomes).getByText("32")).toBeInTheDocument();
-    expect(within(approvalOutcomes).getByText("First sent to 143 in this period")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByRole("button", { name: "About PRs reviewed" })).toBeInTheDocument();
     expect(within(approvalOutcomes).getByText("17")).toBeInTheDocument();
     expect(within(approvalOutcomes).getByText("53%")).toBeInTheDocument();
-    expect(within(approvalOutcomes).getByText("2")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByText("2.0")).toBeInTheDocument();
     expect(within(approvalOutcomes).queryByText("128")).not.toBeInTheDocument();
     expect(screen.getByText("Approval by round")).toBeInTheDocument();
     expect(screen.getByText("Why PRs were not approved right away")).toBeInTheDocument();
@@ -702,14 +715,14 @@ describe("CodeReviewsPage", () => {
       "3",
       "75%",
       "6",
-      "2",
+      "2.0",
       "+52",
       "-20",
     ]);
     expect(within(authorTable).getByText("Overall")).toBeInTheDocument();
     expect(within(authorTable).getByLabelText("32 PRs reviewed overall")).toHaveTextContent("32");
     expect(within(authorTable).getByLabelText("53% overall approval rate")).toHaveTextContent("53%");
-    expect(within(authorTable).getByLabelText("2 median rounds to approval overall")).toHaveTextContent("2");
+    expect(within(authorTable).getByLabelText("2.0 median rounds to approval overall")).toHaveTextContent("2.0");
     expect(within(anyaRow).getByRole("link", { name: "12 reviewed PRs by anya" })).toHaveAttribute(
       "href",
       "/code-reviews?tab=reviews&author=anya&range=30d",
@@ -790,9 +803,33 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
     await user.click(await screen.findByRole("tab", { name: "Analytics" }));
 
-    expect(await screen.findByText("First sent to 143 in this period")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "About PRs reviewed" })).toBeInTheDocument();
     expect(screen.getByText(/4 PRs had a failed attempt/)).toBeInTheDocument();
     expect(screen.getByText("Not yet approved")).toBeInTheDocument();
+  });
+
+  it("uses the shared empty state when completed reviews have no author attribution", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews/analytics", () =>
+        HttpResponse.json({
+          data: {
+            ...reviewAnalytics,
+            authors: [],
+          },
+        } satisfies SingleResponse<CodeReviewAnalytics>),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
+    await user.click(await screen.findByRole("tab", { name: "Analytics" }));
+
+    expect(await screen.findByText("No author attribution available")).toBeInTheDocument();
+    expect(
+      screen.getByText("Completed reviews in this report could not be matched to a pull request author."),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("table", { name: "Code review analytics by PR author" })).not.toBeInTheDocument();
   });
 
   it("applies shared filters to rows and stats while status scopes review activity only", async () => {

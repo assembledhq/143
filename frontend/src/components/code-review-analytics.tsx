@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { ChartNoAxesColumnIncreasing } from "lucide-react";
 import { DataTableSummaryRow } from "@/components/data-table-summary-row";
 import { EmptyState } from "@/components/empty-state";
+import { MetricInfoTooltip } from "@/components/metric-info-tooltip";
 import { SectionGroup } from "@/components/section-group";
 import { Badge } from "@/components/ui/badge";
 import { SortableTableHeader, sortDirectionAriaValue } from "@/components/sortable-table-header";
@@ -60,6 +61,14 @@ function percentage(value: number, total: number): string {
 function roundedMetric(value: number | null): string {
   if (value === null || !Number.isFinite(value)) return "—";
   return Math.round(value).toLocaleString();
+}
+
+function decimalMetric(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "—";
+  return value.toLocaleString(undefined, {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  });
 }
 
 function signedRoundedMetric(value: number | null, sign: "+" | "-"): string {
@@ -146,17 +155,22 @@ function MetricCard({
   label,
   value,
   context,
+  definition,
 }: {
   label: string;
   value: string;
-  context: string;
+  context?: string;
+  definition?: string;
 }) {
   return (
     <Card>
       <CardContent className="space-y-1.5">
-        <p className="text-xs font-medium text-muted-foreground">{label}</p>
+        <div className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+          <span>{label}</span>
+          {definition ? <MetricInfoTooltip label={label} definition={definition} /> : null}
+        </div>
         <p className="text-2xl font-semibold tabular-nums text-foreground">{value}</p>
-        <p className="text-xs text-muted-foreground">{context}</p>
+        {context ? <p className="text-xs text-muted-foreground">{context}</p> : null}
       </CardContent>
     </Card>
   );
@@ -171,22 +185,22 @@ function ApprovalOutcomeCards({ summary }: { summary: CodeReviewAnalytics["summa
       <MetricCard
         label="PRs reviewed"
         value={summary.prs_reviewed.toLocaleString()}
-        context="First sent to 143 in this period"
+        definition="Unique pull requests first sent to 143 during the selected time period."
       />
       <MetricCard
         label="Approved by 143"
         value={summary.approved_by_143.toLocaleString()}
-        context={`${percentage(summary.approved_by_143, summary.prs_reviewed)} of PRs reviewed`}
+        definition="Reviewed pull requests where 143 posted an approval on GitHub."
       />
       <MetricCard
         label="Approval rate"
         value={percentage(summary.approved_by_143, summary.prs_reviewed)}
-        context={`${summary.approved_by_143.toLocaleString()} approved PRs`}
+        definition="The percentage of reviewed pull requests where 143 posted an approval on GitHub."
       />
       <MetricCard
         label="Median rounds to approval"
-        value={roundedMetric(summary.median_rounds_to_approval)}
-        context="Approved PRs only"
+        value={decimalMetric(summary.median_rounds_to_approval)}
+        definition="The median number of distinct completed revisions before 143 first posted an approval, among approved pull requests."
       />
     </div>
   );
@@ -307,7 +321,12 @@ export function CodeReviewAnalyticsReport({
         description="Unique PR outcomes grouped by the author captured from the first available assessment."
       >
         {analytics.authors.length === 0 ? (
-          <p className="py-6 text-center text-sm text-muted-foreground">No author attribution is available for this report.</p>
+          <EmptyState
+            icon={ChartNoAxesColumnIncreasing}
+            title="No author attribution available"
+            description="Completed reviews in this report could not be matched to a pull request author."
+            variant="inline"
+          />
         ) : (
           <>
           <Card className="overflow-x-auto">
@@ -375,7 +394,7 @@ export function CodeReviewAnalyticsReport({
                       {percentage(author.approved_by_143, author.prs_reviewed)}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">{author.approved_first_round.toLocaleString()}</TableCell>
-                    <TableCell className="text-right tabular-nums">{roundedMetric(author.median_rounds_to_approval)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{decimalMetric(author.median_rounds_to_approval)}</TableCell>
                     <TableCell className="text-right tabular-nums">{signedRoundedMetric(author.median_additions, "+")}</TableCell>
                     <TableCell className="text-right tabular-nums">{signedRoundedMetric(author.median_deletions, "-")}</TableCell>
                   </TableRow>
@@ -410,11 +429,11 @@ export function CodeReviewAnalyticsReport({
                     ariaLabel: `${summary.approved_first_round.toLocaleString()} PRs approved in the first round overall`,
                   },
                   {
-                    content: roundedMetric(summary.median_rounds_to_approval),
+                    content: decimalMetric(summary.median_rounds_to_approval),
                     className: "text-right",
                     ariaLabel: summary.median_rounds_to_approval === null
                       ? "No rounds to approval data overall"
-                      : `${roundedMetric(summary.median_rounds_to_approval)} median rounds to approval overall`,
+                      : `${decimalMetric(summary.median_rounds_to_approval)} median rounds to approval overall`,
                   },
                   {
                     content: signedRoundedMetric(summary.median_additions, "+"),

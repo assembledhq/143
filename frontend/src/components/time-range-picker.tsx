@@ -156,6 +156,7 @@ export function TimeRangePicker({
                 onSelect={(nextRange) => setDraft(nextRange ?? { from: undefined, to: undefined })}
                 defaultMonth={draft.from}
                 numberOfMonths={showTwoMonths ? 2 : 1}
+                showOutsideDays={false}
                 disabled={{ after: today }}
                 resetOnSelect
                 className="mx-auto p-2 [--cell-size:--spacing(8)] sm:[--cell-size:--spacing(7)] [&_.rdp-month]:gap-2 [&_.rdp-months]:gap-3 [&_.rdp-week]:mt-1"

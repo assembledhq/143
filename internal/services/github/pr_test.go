@@ -500,6 +500,63 @@ func TestFormatPRTitle(t *testing.T) {
 	}
 }
 
+func TestResolvePRTitle(t *testing.T) {
+	t.Parallel()
+
+	sessionID := uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789")
+	tests := []struct {
+		name      string
+		generated string
+		changeset *models.SessionChangeset
+		expected  string
+	}{
+		{
+			name:      "uses generated title without changeset",
+			generated: "Fix attachment removal sizing",
+			expected:  "Fix attachment removal sizing",
+		},
+		{
+			name:      "explicit primary changeset title wins",
+			generated: "Generated title",
+			changeset: &models.SessionChangeset{IsPrimary: true, Title: "Explicit changeset title"},
+			expected:  "Explicit changeset title",
+		},
+		{
+			name:      "primary placeholder preserves generated title",
+			generated: "Centralize audit log construction",
+			changeset: &models.SessionChangeset{IsPrimary: true, Title: "Pull request"},
+			expected:  "Centralize audit log construction",
+		},
+		{
+			name:      "primary placeholder preserves static fallback",
+			changeset: &models.SessionChangeset{IsPrimary: true, Title: " Pull request "},
+			expected:  "Session abcdef01",
+		},
+		{
+			name:      "blank primary title preserves generated title",
+			generated: "Normalize mention index entries",
+			changeset: &models.SessionChangeset{IsPrimary: true, Title: "  "},
+			expected:  "Normalize mention index entries",
+		},
+		{
+			name:      "non primary placeholder remains an explicit changeset title",
+			generated: "Generated stacked title",
+			changeset: &models.SessionChangeset{Title: "Pull request"},
+			expected:  "Pull request",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			session := &models.Session{ID: sessionID}
+			actual := resolvePRTitle(session, nil, tt.generated, tt.changeset)
+			require.Equal(t, tt.expected, actual, "resolved PR title should respect generated and explicit changeset precedence")
+		})
+	}
+}
+
 func TestPRService_SettersAndCheckRunHandler(t *testing.T) {
 	t.Parallel()
 

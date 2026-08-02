@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronDown, SlidersHorizontal } from "lucide-react";
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ErrorNotice } from "@/components/ui/error-notice";
@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { TimeRangePicker } from "@/components/time-range-picker";
+import { MetricInfoTooltip } from "@/components/metric-info-tooltip";
 import type { CodeReviewListOutcome, CodeReviewStats, Repository } from "@/lib/types";
 import type { TimeRangeFilter } from "@/lib/time-range";
 
@@ -17,6 +18,13 @@ export const ALL_OUTCOMES = "all";
 export const ALL_RISKS = "all";
 export const AUTOMATICALLY_APPROVED = "automatically_approved" satisfies CodeReviewListOutcome;
 export const COMPLETED_NOT_APPROVED = "completed_not_approved" satisfies CodeReviewListOutcome;
+
+const REVIEW_SUMMARY_DEFINITIONS = {
+  "Reviews completed": "Review sessions matching the selected filters that finished successfully.",
+  "Automatically approved": "Completed review sessions where 143 posted an approval on GitHub.",
+  "Approval rate": "The percentage of completed review sessions where 143 posted an approval on GitHub.",
+  "Median turnaround": "The median time from a review being queued to that review finishing successfully.",
+} as const;
 
 function percentage(value: number, total: number): string {
   return total > 0 ? `${Math.round((value / total) * 100)}%` : "0%";
@@ -43,26 +51,33 @@ export function CodeReviewSummaryCards({
   isError: boolean;
   onRetry: () => void;
 }) {
-  const unavailable = isError ? "Metrics unavailable" : "Loading selected time window";
   const cards = stats
     ? [
-        { label: "Reviews completed", value: stats.reviews_completed.toLocaleString(), context: "In selected time window" },
+        {
+          label: "Reviews completed",
+          value: stats.reviews_completed.toLocaleString(),
+          definition: REVIEW_SUMMARY_DEFINITIONS["Reviews completed"],
+        },
         {
           label: "Automatically approved",
           value: stats.automatically_approved.toLocaleString(),
-          context: `${percentage(stats.automatically_approved, stats.reviews_completed)} of completed reviews`,
+          definition: REVIEW_SUMMARY_DEFINITIONS["Automatically approved"],
         },
         {
           label: "Approval rate",
           value: percentage(stats.automatically_approved, stats.reviews_completed),
-          context: `${stats.needs_human_review.toLocaleString()} need human review`,
+          definition: REVIEW_SUMMARY_DEFINITIONS["Approval rate"],
         },
-        { label: "Median turnaround", value: formatReviewTurnaround(stats.median_turnaround_seconds), context: "Queued to completed" },
+        {
+          label: "Median turnaround",
+          value: formatReviewTurnaround(stats.median_turnaround_seconds),
+          definition: REVIEW_SUMMARY_DEFINITIONS["Median turnaround"],
+        },
       ]
-    : ["Reviews completed", "Automatically approved", "Approval rate", "Median turnaround"].map((label) => ({
+    : (Object.keys(REVIEW_SUMMARY_DEFINITIONS) as Array<keyof typeof REVIEW_SUMMARY_DEFINITIONS>).map((label) => ({
         label,
         value: "—",
-        context: unavailable,
+        definition: REVIEW_SUMMARY_DEFINITIONS[label],
       }));
 
   return (
@@ -78,9 +93,11 @@ export function CodeReviewSummaryCards({
         {cards.map((card) => (
           <Card key={card.label}>
             <CardContent className="space-y-1.5">
-              <p className="text-xs font-medium text-muted-foreground">{card.label}</p>
+              <div className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+                <span>{card.label}</span>
+                <MetricInfoTooltip label={card.label} definition={card.definition} />
+              </div>
               <p className="text-2xl font-semibold tabular-nums text-foreground">{card.value}</p>
-              <p className="text-xs text-muted-foreground">{card.context}</p>
             </CardContent>
           </Card>
         ))}
@@ -100,11 +117,13 @@ function FilterSelect({
   onValueChange: (value: string) => void;
   children: ReactNode;
 }) {
+  const selectId = useId();
+
   return (
     <div className="flex flex-col gap-2">
-      <Label className="text-xs text-muted-foreground">{label}</Label>
+      <Label htmlFor={selectId} className="text-xs text-muted-foreground">{label}</Label>
       <Select value={value} onValueChange={onValueChange}>
-        <SelectTrigger aria-label={label}><SelectValue /></SelectTrigger>
+        <SelectTrigger id={selectId}><SelectValue /></SelectTrigger>
         <SelectContent>{children}</SelectContent>
       </Select>
     </div>
@@ -142,13 +161,16 @@ export function CodeReviewFilters({
   analyticsMode?: boolean;
   mobileLabel?: string;
 }) {
+  const authorId = useId();
+  const searchId = useId();
+
   return (
     <>
       <Button type="button" variant="outline" size="sm" className="w-full justify-between md:hidden" aria-expanded={mobileOpen} aria-controls={id} onClick={() => onMobileOpenChange(!mobileOpen)}>
         <span className="flex items-center gap-2"><SlidersHorizontal className="h-4 w-4" />{mobileLabel}</span>
         <ChevronDown className={`h-4 w-4 transition-transform ${mobileOpen ? "rotate-180" : ""}`} />
       </Button>
-      <div id={id} className={`${mobileOpen ? "grid" : "hidden"} gap-3 rounded-xl border border-border bg-card p-3 shadow-sm md:grid md:grid-cols-2 md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none ${analyticsMode ? "lg:grid-cols-2 xl:grid-cols-[minmax(12rem,18rem)_minmax(12rem,18rem)]" : "lg:grid-cols-3 xl:grid-cols-[minmax(12rem,18rem)_repeat(3,minmax(9rem,11rem))_minmax(12rem,1fr)_minmax(9rem,11rem)]"}`}>
+      <Card id={id} className={`${mobileOpen ? "grid" : "hidden"} gap-3 p-3 shadow-sm md:grid md:grid-cols-2 md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none ${analyticsMode ? "lg:grid-cols-2 xl:grid-cols-[minmax(12rem,18rem)_minmax(12rem,18rem)]" : "lg:grid-cols-3 xl:grid-cols-[minmax(12rem,18rem)_repeat(3,minmax(9rem,11rem))_minmax(12rem,1fr)_minmax(9rem,11rem)]"}`}>
         <FilterSelect label="Repository" value={values.repository} onValueChange={(value) => onChange("repository", value)}>
           <SelectItem value={ALL_REPOSITORIES}>All repositories</SelectItem>
           {repositories.map((repo) => <SelectItem key={repo.id} value={repo.id}>{repo.full_name}</SelectItem>)}
@@ -179,12 +201,12 @@ export function CodeReviewFilters({
               <SelectItem value="all">All attempts</SelectItem>
             </FilterSelect>
             <div className="flex flex-col gap-2">
-              <Label className="text-xs text-muted-foreground">PR author</Label>
-              <Input value={values.author} onChange={(event) => onChange("author", event.target.value)} placeholder="GitHub handle" aria-label="PR author" />
+              <Label htmlFor={authorId} className="text-xs text-muted-foreground">PR author</Label>
+              <Input id={authorId} value={values.author} onChange={(event) => onChange("author", event.target.value)} placeholder="GitHub handle" />
             </div>
             <div className="flex flex-col gap-2">
-              <Label className="text-xs text-muted-foreground">Search</Label>
-              <Input value={values.search} onChange={(event) => onChange("search", event.target.value)} placeholder="PR, repo, or title" aria-label="Search code reviews" />
+              <Label htmlFor={searchId} className="text-xs text-muted-foreground">Search</Label>
+              <Input id={searchId} value={values.search} onChange={(event) => onChange("search", event.target.value)} placeholder="PR, repo, or title" aria-label="Search code reviews" />
             </div>
           </>
         )}
@@ -193,7 +215,7 @@ export function CodeReviewFilters({
           value={values.timeRange}
           onValueChange={(value) => onChange("timeRange", value)}
         />
-      </div>
+      </Card>
       {analyticsMode ? (
         <p className="text-xs text-muted-foreground">
           Analytics covers every PR in the selected repository and window. Outcome, risk, status, author,
