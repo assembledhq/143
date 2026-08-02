@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -85,6 +86,31 @@ create infers --repo from the cwd's git remote and --branch from HEAD when omitt
 
 func runPreviewViaTools(ctx context.Context, cfg Config, args []string, stdout, stderr io.Writer) int {
 	source := newPreviewAugmentedToolSource(mcp.NewToolRegistry(mcp.BuildRegistryFromEnv(stderr)), NewClient(cfg))
+	if augmented, ok := source.(*previewAugmentedToolSource); ok && hasFlag(args, "--wait") {
+		augmented.preview.progress = stderr
+	}
+	return mcp.RunCLI(ctx, source, append([]string{"preview"}, args...), stdout, stderr)
+}
+
+func runSandboxPreview(args []string, stdout, stderr io.Writer) int {
+	token, apiURL := os.Getenv("INTERNAL_API_TOKEN"), os.Getenv("INTERNAL_API_URL")
+	if token == "" || apiURL == "" {
+		fmt.Fprintln(stderr, "error: sandbox preview requires INTERNAL_API_TOKEN and INTERNAL_API_URL")
+		return 1
+	}
+	executor := &previewToolExecutor{
+		client:   NewClient(Config{ServerURL: apiURL, Token: token}),
+		internal: true,
+	}
+	if hasFlag(args, "--wait") {
+		executor.progress = stderr
+	}
+	source := &previewAugmentedToolSource{
+		base:    mcp.NewToolRegistry(mcp.BuildRegistryFromEnv(stderr)),
+		preview: executor,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), previewWaitTimeout)
+	defer cancel()
 	return mcp.RunCLI(ctx, source, append([]string{"preview"}, args...), stdout, stderr)
 }
 

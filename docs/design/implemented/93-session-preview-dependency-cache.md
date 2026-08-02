@@ -1,6 +1,6 @@
 # Design: Session Preview Dependency Cache
 
-> **Status:** Implemented | **Last reviewed:** 2026-05-30
+> **Status:** Implemented | **Last reviewed:** 2026-08-02
 
 ## Summary
 
@@ -44,6 +44,16 @@ Preview startup uses cache placement as a scheduling hint, not a correctness pri
 Cache saves are kept out of the readiness-critical path. Normal preview launches compute cache keys during install, but defer package-manager and install-artifact archive/upload work until after the primary readiness path succeeds. Prewarm jobs still save synchronously because cache creation is their primary work.
 
 The preview gateway keeps a short-lived access-session validation cache so asset-heavy preview page loads do not hit Postgres for every JS/CSS/image request. The cache is scoped to the decoded org, public host, and runtime preview ID, and is intentionally short TTL so revocation/expiry changes converge quickly while protecting hot page-load latency.
+
+## 2026-08 Update: Bounded, Cost-Aware Build Caches
+
+Every path-cache restore now has a 90-second wall-clock budget and validates three independent archive limits before extraction: 1 GiB compressed, 8 GiB expanded payload, and one million regular files. Exceeding a bound is non-fatal and falls back to the normal cold producer path.
+
+The home-rooted Go build cache is split into independently keyed `GOCACHE` (`.cache/go-build`) and `GOMODCACHE` (`go/pkg/mod`) blobs. Lookup and restore run concurrently, each with its own restore budget, and the runtime key was bumped to `preview-build-cache-home-v2-split`. This prevents a large module archive from serializing or invalidating the compiled-object cache.
+
+Failure-path build-cache persistence is best effort. Independent workdir, `GOCACHE`, and `GOMODCACHE` saves start concurrently and share one 30-second wall-clock budget before preview cleanup proceeds; their individual normal-serving save timeout must not serialize or hide the original launch failure.
+
+Cache admission is cost-aware. `preview_dependency_cache` records compressed bytes, a cold producer baseline, marginal-benefit observations, restore attempts, successful restores, total restore duration, and last restore time. Unknown legacy baselines force one cold sample. After three attempts, restore is skipped when its historical average is at least the measured average marginal benefit; complementary caches share one end-to-end benefit budget rather than each claiming the full cold duration. Failed and timed-out attempts count toward restore cost. A skipped entry is re-probed after 24 hours so worker, network, or archive-shape improvements can recover automatically. The terminal observer statuses are `skipped_cost` and `restore_timeout`; both are accelerator fallbacks and never fail preview startup.
 
 Prewarming is implemented as a low-priority `preview_cache_prewarm` worker job with branch and session payload sources. The automatic triggers are branch/PR preview target creation or commit update, plus successful snapshot-producing `run_agent` and `continue_session` turns. The runner creates an ephemeral sandbox with purpose `preview_cache_prewarm`, checks out, hydrates, or live-clones the workspace when the session sandbox is still owned by the same worker, reads the selected preview config, and skips only when both install caches and the exact branch startup snapshot are already warm. Session-source jobs still prewarm install/package-manager caches only. Branch-source jobs use providers that support build-snapshot prewarm to run install, restore build caches, run service build commands without starting runtime services, save build caches synchronously, create the exact startup snapshot, and then destroy the sandbox. Capacity exhaustion returns `skipped_capacity` and does not retry or dead-letter. Runtime rollout is controlled by `PREVIEW_CACHE_PREWARM_ENABLED=false` by default, `PREVIEW_CACHE_PREWARM_TIMEOUT=15m`, and `PREVIEW_CACHE_PREWARM_PRIORITY=-50`.
 
@@ -396,10 +406,11 @@ type DependencyCacheMetadata struct {
     ArchiveBytes        int64             `json:"archive_bytes,omitempty"`
     ArchivePayloadBytes int64             `json:"archive_payload_bytes,omitempty"`
     ArchiveFileCount    int64             `json:"archive_file_count,omitempty"`
+    ProducerDurationMS  int64             `json:"producer_duration_ms,omitempty"`
 }
 ```
 
-`DependencyCacheMetadata.EffectivePaths` is the authoritative list of paths in the blob. `Restore` reads this field from `hit.Entry.Metadata` rather than accepting a separate `paths` argument. This eliminates the class of bugs where the caller passes a different path list than what was saved, and makes the restore self-contained. `LockfileHashes` is stored for debugging stale-cache incidents without requiring a session config lookup. Archive byte and file-count metadata is for operations/debugging and future cache admission policy; correctness still comes from checksum and member validation.
+`DependencyCacheMetadata.EffectivePaths` is the authoritative list of paths in the blob. `Restore` reads this field from `hit.Entry.Metadata` rather than accepting a separate `paths` argument. This eliminates the class of bugs where the caller passes a different path list than what was saved, and makes the restore self-contained. `LockfileHashes` is stored for debugging stale-cache incidents without requiring a session config lookup. Archive byte/file-count metadata enforces restore bounds. `ProducerDurationMS` is the cold producer baseline for this cache key; cost admission uses separately accumulated marginal-benefit observations so multiple complementary caches cannot each claim the full baseline. Correctness still comes from checksum and member validation.
 
 The concrete implementation should use the same executor shape as `SnapshotCache`:
 
@@ -583,6 +594,13 @@ CREATE TABLE preview_dependency_cache (
     blob_key      text        NOT NULL DEFAULT '', -- object storage key, e.g. preview-dependency-cache/{org}/{repo}/{key}/{checksum}.tar.gz
     size_bytes    bigint      NOT NULL DEFAULT 0,
     metadata      jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    restore_attempt_count bigint NOT NULL DEFAULT 0 CHECK (restore_attempt_count >= 0),
+    restore_success_count bigint NOT NULL DEFAULT 0 CHECK (restore_success_count >= 0),
+    restore_total_duration_ms bigint NOT NULL DEFAULT 0 CHECK (restore_total_duration_ms >= 0),
+    producer_duration_ms bigint NOT NULL DEFAULT 0 CHECK (producer_duration_ms >= 0),
+    producer_benefit_count bigint NOT NULL DEFAULT 0 CHECK (producer_benefit_count >= 0),
+    producer_benefit_total_ms bigint NOT NULL DEFAULT 0 CHECK (producer_benefit_total_ms >= 0),
+    last_restore_at timestamptz,
     last_used_at  timestamptz NOT NULL DEFAULT now(),
     created_at    timestamptz NOT NULL DEFAULT now()
 );
@@ -641,6 +659,13 @@ type PreviewDependencyCache struct {
     BlobKey      string          `db:"blob_key" json:"-"` // excluded from JSON: internal object-storage key
     SizeBytes    int64           `db:"size_bytes" json:"size_bytes"`
     Metadata     json.RawMessage `db:"metadata" json:"metadata"`
+    RestoreAttemptCount int64 `db:"restore_attempt_count" json:"restore_attempt_count"`
+    RestoreSuccessCount int64 `db:"restore_success_count" json:"restore_success_count"`
+    RestoreTotalDurationMS int64 `db:"restore_total_duration_ms" json:"restore_total_duration_ms"`
+    ProducerDurationMS int64 `db:"producer_duration_ms" json:"producer_duration_ms"`
+    ProducerBenefitCount int64 `db:"producer_benefit_count" json:"producer_benefit_count"`
+    ProducerBenefitTotalMS int64 `db:"producer_benefit_total_ms" json:"producer_benefit_total_ms"`
+    LastRestoreAt *time.Time `db:"last_restore_at" json:"last_restore_at,omitempty"`
     LastUsedAt   time.Time       `db:"last_used_at" json:"last_used_at"`
     CreatedAt    time.Time       `db:"created_at" json:"created_at"`
 }
@@ -741,12 +766,13 @@ Restore should:
 
 1. Look up the DB record for `(org_id, repo_id, cache_key)`.
 2. Use the DB metadata as the source of truth for effective paths and checksum. If local L1 is configured and has the blob for this `cache_key`, stage that local blob first; otherwise stream the blob from object storage to a bounded worker temp file.
-3. Reject blobs whose recorded compressed size exceeds the restore cap before object-store download.
-4. Verify checksum against stored hash.
-5. Validate the gzip tar on the worker before sandbox mutation. Every member must be relative, must not traverse with `..`, must not target preview install markers, and must be contained by one of the stored effective paths.
-6. Remove only the effective cache paths listed in `hit.Entry.Metadata.EffectivePaths` from the sandbox.
-7. Stream the tarball into `tar xzf - -C <workdir>` so restore does not create an extra compressed archive under sandbox `/tmp`.
-8. Touch the DB `last_used_at` entry.
+3. Apply cost-aware admission. Entries with no cold producer baseline are skipped once to force a cold sample and populate that baseline. After three restore attempts and at least one marginal-benefit observation, skip an entry whose average restore duration is no better than its average marginal producer benefit, except for a mandatory re-probe every 24 hours. Failed and timed-out attempts contribute to restore cost. When several restored caches contribute to the same install/build, they share the single measured end-to-end benefit (`cold baseline - remaining producer time`); successful restores that contributed no savings record zero benefit.
+4. Reject blobs whose recorded compressed size exceeds 1 GiB before object-store download and reject archives exceeding 8 GiB expanded payload or one million regular files during validation.
+5. Verify checksum against stored hash.
+6. Validate the gzip tar on the worker before sandbox mutation. Every member must be relative, must not traverse with `..`, must not target preview install markers, and must be contained by one of the stored effective paths.
+7. Remove only the effective cache paths listed in `hit.Entry.Metadata.EffectivePaths` from the sandbox.
+8. Stream the tarball into `tar xzf - -C <workdir>` so restore does not create an extra compressed archive under sandbox `/tmp`.
+9. Record restore duration/success and touch the DB `last_used_at` entry. The entire restore is bounded to 90 seconds, including worker-local L1 hashing and gzip/tar validation, not only object-store and sandbox-executor calls.
 
 On checksum mismatch or object-not-found, delete the DB record and fall through to a cold install. Other restore failures do not delete durable metadata unless they prove the blob is corrupt, but they still force the normal install path for that launch.
 
@@ -771,7 +797,7 @@ Add OpenTelemetry metrics:
 
 - `preview.session.dependency_cache.restore_duration` histogram, seconds
 - `preview.session.dependency_cache.save_duration` histogram, seconds
-- `preview.session.dependency_cache.restores` counter with `result=disabled|restored|miss|restore_failed`
+- `preview.session.dependency_cache.restores` counter with `result=disabled|restored|miss|restore_failed|restore_timeout|skipped_cost`
 - `preview.session.dependency_cache.saves` counter with `result=saved|skipped|save_failed`
 - `preview.session.dependency_cache.scheduler_decisions` counter with `decision=live_session|local_cache_holder|rendezvous|least_loaded|cross_region|fallback_error`
 - `preview.session.phase_duration` histogram with `phase=hydrate|config|install_marker_check|dependency_cache_key|dependency_cache_lookup|dependency_cache_restore|install_build|install_command|start_services|readiness`

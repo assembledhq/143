@@ -29,8 +29,17 @@ import (
 	"github.com/assembledhq/143/internal/services/storage"
 )
 
-const dependencyCacheMaxBlobBytes int64 = 2 * 1024 * 1024 * 1024
+const dependencyCacheMaxBlobBytes int64 = 1024 * 1024 * 1024
+const dependencyCacheMaxPayloadBytes int64 = 8 * 1024 * 1024 * 1024
+const dependencyCacheMaxFileCount int64 = 1_000_000
 const dependencyCacheTouchInterval = 10 * time.Minute
+const dependencyCacheDefaultRestoreTimeout = 90 * time.Second
+const dependencyCacheCostMinimumSamples int64 = 3
+const dependencyCacheCostRetryInterval = 24 * time.Hour
+
+// ErrDependencyCacheNotWorthRestoring signals a deliberate cold-build fallback,
+// not cache corruption. Providers surface it separately from restore failures.
+var ErrDependencyCacheNotWorthRestoring = errors.New("dependency cache restore cost exceeds producer cost")
 
 // Sandbox exec steps in the cache save/restore path (probe, archive, pre-extract
 // cleanup) share a preview sandbox with the running app and agent, so they are
@@ -115,6 +124,8 @@ type PreviewPathCache interface {
 	FindPathCache(ctx context.Context, orgID, repoID uuid.UUID, kind models.PreviewCacheKind, cacheKey string) (*DependencyCacheHit, error)
 	RestorePathCache(ctx context.Context, sb *agent.Sandbox, hit *DependencyCacheHit, root models.PreviewCacheRoot) error
 	SavePathCache(ctx context.Context, sb *agent.Sandbox, spec PreviewPathCacheSaveSpec) (DependencyCacheSaveResult, error)
+	RecordPathCacheProducerBenefit(ctx context.Context, hit *DependencyCacheHit, benefit time.Duration) error
+	RecordPathCacheProducerBaseline(ctx context.Context, hit *DependencyCacheHit, baseline time.Duration) error
 }
 
 type DependencyCacheHit struct {
@@ -147,6 +158,7 @@ type DependencyCacheMetadata struct {
 	ArchiveBytes        int64                       `json:"archive_bytes,omitempty"`
 	ArchivePayloadBytes int64                       `json:"archive_payload_bytes,omitempty"`
 	ArchiveFileCount    int64                       `json:"archive_file_count,omitempty"`
+	ProducerDurationMS  int64                       `json:"producer_duration_ms,omitempty"`
 }
 
 type PreviewPathCacheSaveSpec struct {
@@ -166,27 +178,29 @@ type PreviewPathCacheSaveSpec struct {
 }
 
 type DependencyCacheConfig struct {
-	Store         *db.PreviewStore
-	Executor      SnapshotExecutor
-	BlobStore     storage.SnapshotStore
-	Logger        zerolog.Logger
-	WorkerNodeID  string
-	Prefix        string
-	LocalDir      string
-	StagingDir    string
-	LocalMaxBytes int64
+	Store          *db.PreviewStore
+	Executor       SnapshotExecutor
+	BlobStore      storage.SnapshotStore
+	Logger         zerolog.Logger
+	WorkerNodeID   string
+	Prefix         string
+	LocalDir       string
+	StagingDir     string
+	LocalMaxBytes  int64
+	RestoreTimeout time.Duration
 }
 
 type SharedDependencyCache struct {
-	store         *db.PreviewStore
-	executor      SnapshotExecutor
-	blobStore     storage.SnapshotStore
-	logger        zerolog.Logger
-	workerNodeID  string
-	prefix        string
-	localDir      string
-	stagingDir    string
-	localMaxBytes int64
+	store          *db.PreviewStore
+	executor       SnapshotExecutor
+	blobStore      storage.SnapshotStore
+	logger         zerolog.Logger
+	workerNodeID   string
+	prefix         string
+	localDir       string
+	stagingDir     string
+	localMaxBytes  int64
+	restoreTimeout time.Duration
 }
 
 // sandboxStdinExecutor is the optional streaming-stdin capability a
@@ -226,6 +240,10 @@ func NewDependencyCache(cfg DependencyCacheConfig) (*SharedDependencyCache, erro
 	if cfg.BlobStore == nil {
 		return nil, fmt.Errorf("dependency cache: blob store must be non-nil")
 	}
+	restoreTimeout := cfg.RestoreTimeout
+	if restoreTimeout <= 0 {
+		restoreTimeout = dependencyCacheDefaultRestoreTimeout
+	}
 	prefix := strings.Trim(strings.TrimSpace(cfg.Prefix), "/")
 	if prefix == "" {
 		prefix = "preview-dependency-cache"
@@ -245,15 +263,16 @@ func NewDependencyCache(cfg DependencyCacheConfig) (*SharedDependencyCache, erro
 		}
 	}
 	return &SharedDependencyCache{
-		store:         cfg.Store,
-		executor:      cfg.Executor,
-		blobStore:     cfg.BlobStore,
-		logger:        cfg.Logger.With().Str("component", "preview_dependency_cache").Logger(),
-		workerNodeID:  cfg.WorkerNodeID,
-		prefix:        prefix,
-		localDir:      cfg.LocalDir,
-		stagingDir:    stagingDir,
-		localMaxBytes: cfg.LocalMaxBytes,
+		store:          cfg.Store,
+		executor:       cfg.Executor,
+		blobStore:      cfg.BlobStore,
+		logger:         cfg.Logger.With().Str("component", "preview_dependency_cache").Logger(),
+		workerNodeID:   cfg.WorkerNodeID,
+		prefix:         prefix,
+		localDir:       cfg.LocalDir,
+		stagingDir:     stagingDir,
+		localMaxBytes:  cfg.LocalMaxBytes,
+		restoreTimeout: restoreTimeout,
 	}, nil
 }
 
@@ -282,10 +301,30 @@ func (c *SharedDependencyCache) Restore(ctx context.Context, sb *agent.Sandbox, 
 	return c.RestorePathCache(ctx, sb, hit, models.PreviewCacheRootWorkDir)
 }
 
-func (c *SharedDependencyCache) RestorePathCache(ctx context.Context, sb *agent.Sandbox, hit *DependencyCacheHit, root models.PreviewCacheRoot) error {
+func (c *SharedDependencyCache) RestorePathCache(ctx context.Context, sb *agent.Sandbox, hit *DependencyCacheHit, root models.PreviewCacheRoot) (restoreErr error) {
 	if hit == nil {
 		return fmt.Errorf("dependency cache restore: hit is required")
 	}
+	if reason, skip := dependencyCacheCostAdmission(hit.Entry, time.Now()); skip {
+		c.logger.Info().Str("cache_key", hit.Entry.CacheKey).Str("reason", reason).
+			Int64("size_bytes", hit.Entry.SizeBytes).Msg("skipping preview cache restore; cold producer is historically cheaper")
+		return fmt.Errorf("%w: %s", ErrDependencyCacheNotWorthRestoring, reason)
+	}
+	parentCtx := ctx
+	restoreStarted := time.Now()
+	restoreCtx, cancelRestore := context.WithTimeout(ctx, c.restoreTimeout)
+	defer cancelRestore()
+	ctx = restoreCtx
+	defer func() {
+		if !c.store.Configured() {
+			return
+		}
+		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), 5*time.Second)
+		defer cancel()
+		if err := c.store.RecordDependencyCacheRestore(recordCtx, hit.Entry.OrgID, hit.Entry.ID, time.Since(restoreStarted), restoreErr == nil); err != nil {
+			c.logger.Warn().Err(err).Str("cache_key", hit.Entry.CacheKey).Msg("failed to record dependency cache restore cost")
+		}
+	}()
 	if root == "" {
 		root = models.PreviewCacheRootWorkDir
 	}
@@ -329,7 +368,7 @@ func (c *SharedDependencyCache) RestorePathCache(ctx context.Context, sb *agent.
 	if err := blob.rewind(); err != nil {
 		return fmt.Errorf("dependency cache restore: %w", err)
 	}
-	stats, err := validateDependencyCacheArchiveReader(blob.file, paths)
+	stats, err := validateDependencyCacheArchiveReader(ctx, blob.file, paths)
 	if err != nil {
 		if blob.fromLocal {
 			c.removeLocalBlob(ctx, hit.Entry.CacheKind, hit.Entry.CacheKey)
@@ -498,7 +537,7 @@ func (c *SharedDependencyCache) SavePathCache(ctx context.Context, sb *agent.San
 	if spec.SkipIfChecksum != "" && staged.checksum == spec.SkipIfChecksum {
 		return DependencyCacheSaveResult{SizeBytes: staged.sizeBytes, Unchanged: true}, nil
 	}
-	stats, err := validateDependencyCacheArchive(staged.path, existing)
+	stats, err := validateDependencyCacheArchive(ctx, staged.path, existing)
 	if err != nil {
 		return DependencyCacheSaveResult{}, fmt.Errorf("dependency cache save: validate archive: %w", err)
 	}
@@ -547,14 +586,15 @@ func (c *SharedDependencyCache) SavePathCache(ctx context.Context, sb *agent.San
 		return DependencyCacheSaveResult{}, fmt.Errorf("dependency cache save: upload checksum: %w", err)
 	}
 	entry := &models.PreviewDependencyCache{
-		OrgID:        metadata.OrgID,
-		RepoID:       metadata.RepoID,
-		CacheKind:    spec.Kind,
-		CacheKey:     spec.CacheKey,
-		PlacementKey: metadata.PlacementKey,
-		BlobKey:      blobKey,
-		SizeBytes:    staged.sizeBytes,
-		Metadata:     metadataJSON,
+		OrgID:              metadata.OrgID,
+		RepoID:             metadata.RepoID,
+		CacheKind:          spec.Kind,
+		CacheKey:           spec.CacheKey,
+		PlacementKey:       metadata.PlacementKey,
+		BlobKey:            blobKey,
+		SizeBytes:          staged.sizeBytes,
+		Metadata:           metadataJSON,
+		ProducerDurationMS: metadata.ProducerDurationMS,
 	}
 	if err := c.store.UpsertDependencyCache(ctx, entry); err != nil {
 		return DependencyCacheSaveResult{}, fmt.Errorf("dependency cache save: upsert db: %w", err)
@@ -583,7 +623,7 @@ func (c *SharedDependencyCache) makeStagingDir(pattern string) (string, error) {
 func (c *SharedDependencyCache) stageBlob(ctx context.Context, hit *DependencyCacheHit, expectedChecksum string) (*dependencyCacheStagedBlob, error) {
 	if c.localDir != "" {
 		localPath := c.localBlobPath(hit.Entry.CacheKind, hit.Entry.CacheKey)
-		if blob, err := c.stageLocalBlob(localPath); err == nil {
+		if blob, err := c.stageLocalBlob(ctx, localPath); err == nil {
 			if expectedChecksum != "" && !strings.EqualFold(expectedChecksum, blob.checksum) {
 				blob.cleanup()
 				c.logger.Warn().
@@ -603,7 +643,7 @@ func (c *SharedDependencyCache) stageBlob(ctx context.Context, hit *DependencyCa
 			c.logger.Warn().Err(err).Str("path", localPath).Msg("failed to read dependency cache local blob; falling back to object storage")
 		} else if hit.Entry.CacheKind == "" || hit.Entry.CacheKind == models.PreviewCacheKindInstallArtifact {
 			legacyLocalPath := c.legacyLocalBlobPath(hit.Entry.CacheKey)
-			if blob, legacyErr := c.stageLocalBlob(legacyLocalPath); legacyErr == nil {
+			if blob, legacyErr := c.stageLocalBlob(ctx, legacyLocalPath); legacyErr == nil {
 				if expectedChecksum != "" && !strings.EqualFold(expectedChecksum, blob.checksum) {
 					blob.cleanup()
 					c.logger.Warn().
@@ -669,7 +709,7 @@ func (c *SharedDependencyCache) stageBlob(ctx context.Context, hit *DependencyCa
 	}, nil
 }
 
-func (c *SharedDependencyCache) stageLocalBlob(path string) (*dependencyCacheStagedBlob, error) {
+func (c *SharedDependencyCache) stageLocalBlob(ctx context.Context, path string) (*dependencyCacheStagedBlob, error) {
 	file, err := os.Open(path) // #nosec G304 -- path is derived from localBlobPath.
 	if err != nil {
 		return nil, err
@@ -685,7 +725,7 @@ func (c *SharedDependencyCache) stageLocalBlob(path string) (*dependencyCacheSta
 	}
 	hasher := sha256.New()
 	counter := &cappedCountingWriter{limit: dependencyCacheMaxBlobBytes}
-	if _, err := io.Copy(io.MultiWriter(hasher, counter), file); err != nil {
+	if _, err := io.Copy(io.MultiWriter(hasher, counter), &contextReader{ctx: ctx, reader: file}); err != nil {
 		_ = file.Close()
 		return nil, err
 	}
@@ -795,17 +835,29 @@ type dependencyCacheArchiveStats struct {
 	fileCount    int64
 }
 
-func validateDependencyCacheArchive(localPath string, paths []string) (dependencyCacheArchiveStats, error) {
+func validateDependencyCacheArchive(ctx context.Context, localPath string, paths []string) (dependencyCacheArchiveStats, error) {
 	file, err := os.Open(localPath) // #nosec G304 -- localPath is staged by dependency cache.
 	if err != nil {
 		return dependencyCacheArchiveStats{}, err
 	}
 	defer file.Close()
-	return validateDependencyCacheArchiveReader(file, paths)
+	return validateDependencyCacheArchiveReader(ctx, file, paths)
 }
 
-func validateDependencyCacheArchiveReader(reader io.Reader, paths []string) (dependencyCacheArchiveStats, error) {
-	gzr, err := gzip.NewReader(reader)
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
+}
+
+func validateDependencyCacheArchiveReader(ctx context.Context, reader io.Reader, paths []string) (dependencyCacheArchiveStats, error) {
+	gzr, err := gzip.NewReader(&contextReader{ctx: ctx, reader: reader})
 	if err != nil {
 		return dependencyCacheArchiveStats{}, fmt.Errorf("open gzip stream: %w", err)
 	}
@@ -817,6 +869,9 @@ func validateDependencyCacheArchiveReader(reader io.Reader, paths []string) (dep
 	tr := tar.NewReader(gzr)
 	var stats dependencyCacheArchiveStats
 	for {
+		if err := ctx.Err(); err != nil {
+			return dependencyCacheArchiveStats{}, err
+		}
 		header, err := tr.Next()
 		if errors.Is(err, io.EOF) {
 			break
@@ -838,13 +893,57 @@ func validateDependencyCacheArchiveReader(reader io.Reader, paths []string) (dep
 			return dependencyCacheArchiveStats{}, fmt.Errorf("archive entry %q is outside effective cache paths", header.Name)
 		}
 		if header.Size > 0 {
+			if header.Size > dependencyCacheMaxPayloadBytes-stats.payloadBytes {
+				return dependencyCacheArchiveStats{}, fmt.Errorf("archive payload too large (>%d bytes max)", dependencyCacheMaxPayloadBytes)
+			}
 			stats.payloadBytes += header.Size
 		}
 		if header.Typeflag == tar.TypeReg {
 			stats.fileCount++
+			if stats.fileCount > dependencyCacheMaxFileCount {
+				return dependencyCacheArchiveStats{}, fmt.Errorf("archive has too many files (>%d max)", dependencyCacheMaxFileCount)
+			}
 		}
 	}
 	return stats, nil
+}
+
+func dependencyCacheCostAdmission(entry models.PreviewDependencyCache, now time.Time) (string, bool) {
+	if entry.ProducerDurationMS <= 0 {
+		return "producer cost unknown; cold sample required", true
+	}
+	if entry.RestoreAttemptCount < dependencyCacheCostMinimumSamples || entry.ProducerBenefitCount == 0 {
+		return "", false
+	}
+	if entry.LastRestoreAt == nil || now.Sub(*entry.LastRestoreAt) >= dependencyCacheCostRetryInterval {
+		return "", false
+	}
+	averageRestoreMS := entry.RestoreTotalDurationMS / entry.RestoreAttemptCount
+	averageBenefitMS := entry.ProducerBenefitTotalMS / entry.ProducerBenefitCount
+	if averageRestoreMS < averageBenefitMS {
+		return "", false
+	}
+	return fmt.Sprintf("average restore %dms >= marginal producer benefit %dms; retry after %s", averageRestoreMS, averageBenefitMS, entry.LastRestoreAt.Add(dependencyCacheCostRetryInterval).UTC().Format(time.RFC3339)), true
+}
+
+func (c *SharedDependencyCache) RecordPathCacheProducerBenefit(ctx context.Context, hit *DependencyCacheHit, benefit time.Duration) error {
+	if hit == nil {
+		return fmt.Errorf("dependency cache producer benefit: hit is required")
+	}
+	if !c.store.Configured() {
+		return nil
+	}
+	return c.store.RecordDependencyCacheProducerBenefit(ctx, hit.Entry.OrgID, hit.Entry.ID, benefit)
+}
+
+func (c *SharedDependencyCache) RecordPathCacheProducerBaseline(ctx context.Context, hit *DependencyCacheHit, baseline time.Duration) error {
+	if hit == nil {
+		return fmt.Errorf("dependency cache producer baseline: hit is required")
+	}
+	if !c.store.Configured() {
+		return nil
+	}
+	return c.store.RecordDependencyCacheProducerBaseline(ctx, hit.Entry.OrgID, hit.Entry.ID, baseline)
 }
 
 func cleanDependencyCacheArchiveName(raw string) (string, error) {

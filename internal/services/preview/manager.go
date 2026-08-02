@@ -1334,13 +1334,15 @@ func (o *managerServiceObserver) OnInstallFailed(errMsg string, tail []string) {
 
 func (o *managerServiceObserver) OnDependencyCacheRestore(status string, cacheKey string, sizeBytes int64, err error) {
 	switch status {
-	case "disabled", "miss", "restore_failed", "restored", "restored_satisfied_install", "skipped_marker_missing":
+	case "disabled", "miss", "restore_failed", "restore_timeout", "skipped_cost", "restored", "restored_satisfied_install", "skipped_marker_missing":
 	default:
 		return
 	}
 	level := "info"
 	msg := fmt.Sprintf("preview dependency cache %s", status)
-	if err != nil {
+	if status == "skipped_cost" {
+		msg = fmt.Sprintf("preview dependency cache skipped by cost policy: %v", err)
+	} else if err != nil {
 		level = "warn"
 		msg = fmt.Sprintf("preview dependency cache restore failed: %v", err)
 	}
@@ -1365,13 +1367,15 @@ func (o *managerServiceObserver) OnDependencyCacheSave(status string, cacheKey s
 
 func (o *managerServiceObserver) OnPackageManagerCacheRestore(status string, cacheKey string, sizeBytes int64, err error) {
 	switch status {
-	case "disabled", "miss", "restore_failed", "restored", "key_failed", "skipped_no_paths":
+	case "disabled", "miss", "restore_failed", "restore_timeout", "skipped_cost", "restored", "key_failed", "skipped_no_paths":
 	default:
 		return
 	}
 	level := "info"
 	msg := fmt.Sprintf("preview package-manager cache %s", status)
-	if err != nil {
+	if status == "skipped_cost" {
+		msg = fmt.Sprintf("preview package-manager cache skipped by cost policy: %v", err)
+	} else if err != nil {
 		level = "warn"
 		msg = fmt.Sprintf("preview package-manager cache restore failed: %v", err)
 	}
@@ -1396,13 +1400,15 @@ func (o *managerServiceObserver) OnPackageManagerCacheSave(status string, cacheK
 
 func (o *managerServiceObserver) OnBuildCacheRestore(status string, cacheKey string, sizeBytes int64, err error) {
 	switch status {
-	case "disabled", "miss", "restore_failed", "restored", "key_failed":
+	case "disabled", "miss", "restore_failed", "restore_timeout", "skipped_cost", "restored", "key_failed":
 	default:
 		return
 	}
 	level := "info"
 	msg := fmt.Sprintf("preview build cache %s", status)
-	if err != nil {
+	if status == "skipped_cost" {
+		msg = fmt.Sprintf("preview build cache skipped by cost policy: %v", err)
+	} else if err != nil {
 		level = "warn"
 		msg = fmt.Sprintf("preview build cache restore failed: %v", err)
 	}

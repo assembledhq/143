@@ -846,31 +846,35 @@ func (r *recordingObserver) phasesEnded() []string {
 }
 
 type fakeDependencyCache struct {
-	mu              sync.Mutex
-	findHit         *preview.DependencyCacheHit
-	findErr         error
-	restoreErr      error
-	saveErr         error
-	pmFindHit       *preview.DependencyCacheHit
-	pmFindErr       error
-	pmRestoreErr    error
-	pmSaveErr       error
-	buildFindHit    *preview.DependencyCacheHit
-	buildFindErr    error
-	buildRestoreErr error
-	buildSaveErr    error
-	finds           int
-	restores        int
-	saves           int
-	savePaths       []string
-	pathFinds       map[models.PreviewCacheKind]int
-	pathRestores    map[models.PreviewCacheKind]int
-	pathSaves       map[models.PreviewCacheKind]int
-	restoreRoots    []models.PreviewCacheRoot
-	saveSpecs       []preview.PreviewPathCacheSaveSpec
-	saveStarted     chan models.PreviewCacheKind
-	// buildSaveBlock, when set, makes the workdir build-artifact save block until
-	// the channel is closed — used to prove StopPreview awaits the save.
+	mu                  sync.Mutex
+	findHit             *preview.DependencyCacheHit
+	findErr             error
+	restoreErr          error
+	saveErr             error
+	pmFindHit           *preview.DependencyCacheHit
+	pmFindErr           error
+	pmRestoreErr        error
+	pmSaveErr           error
+	buildFindHit        *preview.DependencyCacheHit
+	buildFindErr        error
+	buildRestoreErr     error
+	buildSaveErr        error
+	finds               int
+	restores            int
+	saves               int
+	savePaths           []string
+	pathFinds           map[models.PreviewCacheKind]int
+	pathRestores        map[models.PreviewCacheKind]int
+	pathSaves           map[models.PreviewCacheKind]int
+	restoreRoots        []models.PreviewCacheRoot
+	saveSpecs           []preview.PreviewPathCacheSaveSpec
+	producerBenefits    []time.Duration
+	producerBenefitIDs  []uuid.UUID
+	producerBaselines   []time.Duration
+	producerBaselineIDs []uuid.UUID
+	saveStarted         chan models.PreviewCacheKind
+	// buildSaveBlock, when set, makes build-artifact saves block until the channel
+	// is closed — used to prove StopPreview awaits the save.
 	buildSaveBlock chan struct{}
 }
 
@@ -936,15 +940,19 @@ func (f *fakeDependencyCache) RestorePathCache(_ context.Context, _ *agent.Sandb
 	}
 }
 
-func (f *fakeDependencyCache) SavePathCache(_ context.Context, _ *agent.Sandbox, spec preview.PreviewPathCacheSaveSpec) (preview.DependencyCacheSaveResult, error) {
+func (f *fakeDependencyCache) SavePathCache(ctx context.Context, _ *agent.Sandbox, spec preview.PreviewPathCacheSaveSpec) (preview.DependencyCacheSaveResult, error) {
 	if f.saveStarted != nil {
 		select {
 		case f.saveStarted <- spec.Kind:
 		default:
 		}
 	}
-	if f.buildSaveBlock != nil && spec.Kind == models.PreviewCacheKindBuildArtifact && spec.Root == models.PreviewCacheRootWorkDir {
-		<-f.buildSaveBlock
+	if f.buildSaveBlock != nil && spec.Kind == models.PreviewCacheKindBuildArtifact {
+		select {
+		case <-f.buildSaveBlock:
+		case <-ctx.Done():
+			return preview.DependencyCacheSaveResult{}, ctx.Err()
+		}
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -963,6 +971,26 @@ func (f *fakeDependencyCache) SavePathCache(_ context.Context, _ *agent.Sandbox,
 		f.savePaths = append([]string(nil), spec.Paths...)
 		return preview.DependencyCacheSaveResult{SizeBytes: 123}, f.saveErr
 	}
+}
+
+func (f *fakeDependencyCache) RecordPathCacheProducerBenefit(_ context.Context, hit *preview.DependencyCacheHit, benefit time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.producerBenefits = append(f.producerBenefits, benefit)
+	if hit != nil {
+		f.producerBenefitIDs = append(f.producerBenefitIDs, hit.Entry.ID)
+	}
+	return nil
+}
+
+func (f *fakeDependencyCache) RecordPathCacheProducerBaseline(_ context.Context, hit *preview.DependencyCacheHit, baseline time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.producerBaselines = append(f.producerBaselines, baseline)
+	if hit != nil {
+		f.producerBaselineIDs = append(f.producerBaselineIDs, hit.Entry.ID)
+	}
+	return nil
 }
 
 func (f *fakeDependencyCache) counts() (int, int, int, []string) {
@@ -987,6 +1015,71 @@ func (f *fakeDependencyCache) pathCounts() (map[models.PreviewCacheKind]int, map
 		saves[kind] = count
 	}
 	return finds, restores, saves, append([]models.PreviewCacheRoot(nil), f.restoreRoots...), append([]preview.PreviewPathCacheSaveSpec(nil), f.saveSpecs...)
+}
+
+func TestDockerPreviewProvider_RecordCacheProducerBenefitsSharesMarginalBudget(t *testing.T) {
+	t.Parallel()
+
+	cache := &fakeDependencyCache{}
+	provider := &DockerPreviewProvider{logger: zerolog.Nop()}
+	firstID, secondID, zeroID := uuid.New(), uuid.New(), uuid.New()
+	provider.recordCacheProducerBenefits(context.Background(), cache, []*preview.DependencyCacheHit{
+		{Entry: models.PreviewDependencyCache{ID: firstID, CacheKey: "first", ProducerDurationMS: 100_000}},
+		{Entry: models.PreviewDependencyCache{ID: secondID, CacheKey: "second", ProducerDurationMS: 100_000}},
+	}, []*preview.DependencyCacheHit{
+		{Entry: models.PreviewDependencyCache{ID: zeroID, CacheKey: "zero", ProducerDurationMS: 100_000}},
+	}, 40*time.Second, true)
+
+	cache.mu.Lock()
+	benefits := append([]time.Duration(nil), cache.producerBenefits...)
+	benefitIDs := append([]uuid.UUID(nil), cache.producerBenefitIDs...)
+	cache.mu.Unlock()
+	require.Equal(t, []time.Duration{30 * time.Second, 30 * time.Second, 0}, benefits, "restored caches should share only the aggregate cold-work savings and record non-contributors as zero")
+	require.Equal(t, []uuid.UUID{firstID, secondID, zeroID}, benefitIDs, "benefit telemetry should be attributed to each restored cache exactly once")
+}
+
+func TestDockerPreviewProvider_RecordCacheProducerBaselinesPersistsLegacyColdSample(t *testing.T) {
+	t.Parallel()
+
+	cache := &fakeDependencyCache{}
+	provider := &DockerPreviewProvider{logger: zerolog.Nop()}
+	firstID, secondID := uuid.New(), uuid.New()
+	provider.recordCacheProducerBaselines(context.Background(), cache, []*preview.DependencyCacheHit{
+		{Entry: models.PreviewDependencyCache{ID: firstID, CacheKey: "first"}},
+		{Entry: models.PreviewDependencyCache{ID: secondID, CacheKey: "second"}},
+	}, 5*time.Second)
+
+	cache.mu.Lock()
+	baselines := append([]time.Duration(nil), cache.producerBaselines...)
+	baselineIDs := append([]uuid.UUID(nil), cache.producerBaselineIDs...)
+	cache.mu.Unlock()
+	require.Equal(t, []time.Duration{5 * time.Second, 5 * time.Second}, baselines, "each legacy cache skipped for a cold sample should receive the observed producer baseline")
+	require.Equal(t, []uuid.UUID{firstID, secondID}, baselineIDs, "baseline telemetry should target each legacy cache row exactly once")
+}
+
+func TestDockerPreviewProvider_FailureCacheFlushIsConcurrentAndSharedBudgeted(t *testing.T) {
+	t.Parallel()
+
+	saveStarted := make(chan models.PreviewCacheKind, 3)
+	cache := &fakeDependencyCache{
+		saveStarted:    saveStarted,
+		buildSaveBlock: make(chan struct{}),
+	}
+	provider := &DockerPreviewProvider{dependencyCache: cache, logger: zerolog.Nop()}
+	state := &previewState{
+		sandbox:         &agent.Sandbox{WorkDir: "/workspace/repo", HomeDir: "/home/codex"},
+		buildCacheKey:   "workdir",
+		buildCachePaths: []string{"node_modules/.cache/turbo"},
+		buildCacheHomeSets: []*previewBuildCacheSet{
+			{name: "gocache", key: "gocache", paths: []string{".cache/go-build"}},
+			{name: "gomodcache", key: "gomodcache", paths: []string{"go/pkg/mod"}},
+		},
+	}
+	started := time.Now()
+	provider.flushBuildCachesBeforeCleanupWithBudget(context.Background(), state, &models.PreviewInstallConfig{Command: []string{"go", "mod", "download"}}, preview.StartPreviewOptions{OrgID: uuid.New()}, nil, 50*time.Millisecond)
+
+	require.Less(t, time.Since(started), time.Second, "failure-path cache flushing should return at the one shared budget")
+	require.Equal(t, 3, len(saveStarted), "all independent cache sets should begin concurrently instead of serializing their individual timeouts")
 }
 
 // fakeServiceExecutor lets a single test customize what each kind of exec
@@ -1477,6 +1570,36 @@ func TestStartPreview_StandardMode_NotifiesObserverPerService(t *testing.T) {
 	// Cleanup.
 	close(release)
 	require.NoError(t, d.StopPreview(context.Background(), handle.Handle))
+}
+
+func TestStartPreview_StandardModeFailsFastWhenSiblingExits(t *testing.T) {
+	t.Parallel()
+
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, cmd string, _ func([]byte)) (int, error) {
+			if strings.Contains(cmd, "crash-now") {
+				return 17, nil
+			}
+			<-ctx.Done()
+			return 0, ctx.Err()
+		},
+		execFn: func(_ context.Context, _ string) (int, error) { return 1, nil },
+	}
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, exec, zerolog.Nop())
+	cfg := &models.PreviewConfig{
+		Name:    "fail-fast",
+		Primary: "slow",
+		Services: map[string]models.ServiceConfig{
+			"slow":  {Command: []string{"serve-forever"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/", TimeoutSeconds: 10}},
+			"crash": {Command: []string{"crash-now"}, Port: 3001, Ready: models.ReadinessProbe{HTTPPath: "/", TimeoutSeconds: 10}},
+		},
+	}
+
+	started := time.Now()
+	_, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, preview.StartPreviewOptions{}, &recordingObserver{})
+	require.Error(t, err, "StartPreview should fail when any service exits")
+	require.Contains(t, err.Error(), "crash", "failure should identify the exited sibling")
+	require.Less(t, time.Since(started), 3*time.Second, "an exited sibling should fail the launch before the slow service readiness timeout")
 }
 
 func TestStartPreview_RunsPreviewInstallBeforeServices(t *testing.T) {
@@ -3568,16 +3691,25 @@ func TestStartPreview_BuildPhaseRunsBeforeStartAndSavesHomeCache(t *testing.T) {
 	require.Contains(t, buildCmd, `mkdir -p "$HOME/.cache/go-build-tmp" &&`, "the build should create GOTMPDIR before compiling")
 	mu.Unlock()
 
-	// The home build cache (Root=HomeDir) is saved asynchronously after readiness.
+	// GOCACHE and GOMODCACHE are saved as separate home-rooted blobs.
 	require.Eventually(t, func() bool {
 		_, _, _, _, specs := cache.pathCounts()
+		var homePaths [][]string
 		for _, spec := range specs {
 			if spec.Kind == models.PreviewCacheKindBuildArtifact && spec.Root == models.PreviewCacheRootHomeDir {
-				return true
+				homePaths = append(homePaths, spec.Paths)
 			}
 		}
-		return false
-	}, 5*time.Second, 10*time.Millisecond, "home build cache should be saved after a successful launch")
+		return len(homePaths) == 2
+	}, 5*time.Second, 10*time.Millisecond, "both split home build caches should be saved after a successful launch")
+	_, _, _, _, specs := cache.pathCounts()
+	var homePaths [][]string
+	for _, spec := range specs {
+		if spec.Kind == models.PreviewCacheKindBuildArtifact && spec.Root == models.PreviewCacheRootHomeDir {
+			homePaths = append(homePaths, spec.Paths)
+		}
+	}
+	require.ElementsMatch(t, [][]string{{".cache/go-build"}, {"go/pkg/mod"}}, homePaths, "GOCACHE and GOMODCACHE should occupy independent cache blobs")
 
 	close(release)
 	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")

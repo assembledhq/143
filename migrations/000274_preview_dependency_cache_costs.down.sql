@@ -1,0 +1,15 @@
+ALTER TABLE preview_dependency_cache
+    DROP CONSTRAINT IF EXISTS preview_dependency_cache_restore_success_lte_attempts,
+    DROP CONSTRAINT IF EXISTS preview_dependency_cache_producer_benefit_total_nonnegative,
+    DROP CONSTRAINT IF EXISTS preview_dependency_cache_producer_benefit_count_nonnegative,
+    DROP CONSTRAINT IF EXISTS preview_dependency_cache_producer_duration_nonnegative,
+    DROP CONSTRAINT IF EXISTS preview_dependency_cache_restore_total_duration_nonnegative,
+    DROP CONSTRAINT IF EXISTS preview_dependency_cache_restore_success_count_nonnegative,
+    DROP CONSTRAINT IF EXISTS preview_dependency_cache_restore_attempt_count_nonnegative,
+    DROP COLUMN IF EXISTS last_restore_at,
+    DROP COLUMN IF EXISTS producer_benefit_total_ms,
+    DROP COLUMN IF EXISTS producer_benefit_count,
+    DROP COLUMN IF EXISTS producer_duration_ms,
+    DROP COLUMN IF EXISTS restore_total_duration_ms,
+    DROP COLUMN IF EXISTS restore_success_count,
+    DROP COLUMN IF EXISTS restore_attempt_count;
