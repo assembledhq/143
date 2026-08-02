@@ -1,6 +1,30 @@
-export const PRESET_TIME_RANGE_VALUES = ["7d", "30d", "90d", "all"] as const;
+import {
+  addDays,
+  addMonths,
+  addWeeks,
+  endOfDay,
+  endOfMonth,
+  endOfWeek,
+  startOfMonth,
+  startOfWeek,
+  subMonths,
+  subWeeks,
+} from "date-fns";
+
+export const ROLLING_TIME_RANGE_VALUES = ["7d", "30d", "90d"] as const;
+
+export const PRESET_TIME_RANGE_VALUES = [
+  "this_week",
+  "last_week",
+  "last_2_weeks",
+  "this_month",
+  "last_month",
+  ...ROLLING_TIME_RANGE_VALUES,
+  "all",
+] as const;
 
 export type PresetTimeRange = (typeof PRESET_TIME_RANGE_VALUES)[number];
+export type RollingTimeRange = (typeof ROLLING_TIME_RANGE_VALUES)[number];
 export type CustomTimeRange = `custom:${string}:${string}`;
 export type TimeRangeFilter = PresetTimeRange | CustomTimeRange;
 
@@ -51,8 +75,35 @@ export function customTimeRangeDates(range: TimeRangeFilter): { from: Date; to: 
   return from && to ? { from, to } : null;
 }
 
-export function isRollingTimeRange(range: TimeRangeFilter): range is Exclude<PresetTimeRange, "all"> {
-  return range !== "all" && !range.startsWith("custom:");
+export function isRollingTimeRange(range: TimeRangeFilter): range is RollingTimeRange {
+  return (ROLLING_TIME_RANGE_VALUES as readonly string[]).includes(range);
+}
+
+export function timeRangeRefreshDelayMs(
+  range: TimeRangeFilter,
+  anchor: Date,
+  rollingRefreshMs: number,
+): number | null {
+  if (isRollingTimeRange(range)) return rollingRefreshMs;
+
+  let nextRefresh: Date;
+  switch (range) {
+    case "this_week":
+    case "this_month":
+      nextRefresh = new Date(addDays(anchor, 1).setHours(0, 0, 0, 0));
+      break;
+    case "last_week":
+    case "last_2_weeks":
+      nextRefresh = startOfWeek(addWeeks(anchor, 1));
+      break;
+    case "last_month":
+      nextRefresh = startOfMonth(addMonths(anchor, 1));
+      break;
+    default:
+      return null;
+  }
+
+  return Math.max(1, nextRefresh.getTime() - anchor.getTime());
 }
 
 export function timeRangeBounds(
@@ -71,8 +122,40 @@ export function timeRangeBounds(
     };
   }
 
+  const calendarRange = calendarTimeRangeDates(range, anchor);
+  if (calendarRange) {
+    return {
+      created_after: calendarRange.from.toISOString(),
+      created_before: calendarRange.to.toISOString(),
+    };
+  }
+
   const days = Number.parseInt(range, 10);
   return {
     created_after: new Date(anchor.getTime() - days * 24 * 60 * 60 * 1000).toISOString(),
   };
+}
+
+function calendarTimeRangeDates(
+  range: TimeRangeFilter,
+  anchor: Date,
+): { from: Date; to: Date } | null {
+  switch (range) {
+    case "this_week":
+      return { from: startOfWeek(anchor), to: endOfDay(anchor) };
+    case "last_week": {
+      const previousWeek = subWeeks(anchor, 1);
+      return { from: startOfWeek(previousWeek), to: endOfWeek(previousWeek) };
+    }
+    case "last_2_weeks":
+      return { from: startOfWeek(subWeeks(anchor, 2)), to: endOfWeek(subWeeks(anchor, 1)) };
+    case "this_month":
+      return { from: startOfMonth(anchor), to: endOfDay(anchor) };
+    case "last_month": {
+      const previousMonth = subMonths(anchor, 1);
+      return { from: startOfMonth(previousMonth), to: endOfMonth(previousMonth) };
+    }
+    default:
+      return null;
+  }
 }

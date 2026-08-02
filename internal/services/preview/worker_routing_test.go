@@ -779,6 +779,9 @@ func TestWorkerSelector_SelectCachePlacementWorkerBatchesCapacityChecks(t *testi
 			AddRow("worker-2", 0))
 
 	selector := NewWorkerSelectorWithMaxPerWorker(db.NewNodeStore(mock), db.NewPreviewStore(mock), 2)
+	// Keep this mocked database test independent of scheduler delays under
+	// coverage instrumentation in CI without changing the production timeout.
+	selector.cacheLookupTimeout = 5 * time.Second
 	worker, ok, err := selector.selectCachePlacementWorker(context.Background(), orgID, repoID, []WorkerCachePlacement{{Kind: models.PreviewCacheKindInstallArtifact, PlacementKey: "placement"}}, true, WorkerSelectionRequirements{})
 	require.NoError(t, err, "cache placement worker lookup should not fail")
 	require.True(t, ok, "cache placement worker lookup should find a candidate")

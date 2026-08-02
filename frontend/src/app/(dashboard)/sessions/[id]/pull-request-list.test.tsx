@@ -111,6 +111,27 @@ describe('ChangesetSplitPrompt', () => {
 
     await userEvent.click(await screen.findByRole('button', { name: 'Split PRs' }));
 
+    expect(screen.getByText('Need smaller pull requests?')).toBeInTheDocument();
+    expect(screen.getByText('Ask the coding agent to split the current diff into reviewable branches.')).toBeInTheDocument();
     expect(onRequestSplit).toHaveBeenCalledOnce();
+  });
+
+  it('declares the layout container above the elements that query it', () => {
+    render(
+      <ChangesetSplitPrompt
+        additions={CHANGESET_SPLIT_MIN_ADDITIONS}
+        onRequestSplit={vi.fn()}
+      />,
+    );
+
+    const card = screen.getByText('Need smaller pull requests?').closest('[data-slot="card"]');
+    const content = card?.querySelector('[data-slot="card-content"]');
+
+    // jsdom cannot evaluate container queries, so guard the placement instead:
+    // an element is never its own query container, so the row layout would be
+    // dead if the container were declared on the element that queries it.
+    expect(card?.className).toContain('@container/agent-action');
+    expect(content?.className).toContain('@min-[24rem]/agent-action:flex-row');
+    expect(content?.className).not.toContain('@container/agent-action');
   });
 });
