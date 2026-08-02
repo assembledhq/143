@@ -86,8 +86,8 @@ export function MobileSessionTopBar({
 
   return (
     <>
-      <div className="sticky top-0 z-20 flex items-center gap-1 border-b border-border bg-background/95 px-2 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/85 md:hidden">
-        <MobileBackButton to={backTo} label="Back to sessions" className="h-9 w-9" />
+      <div className="sticky top-0 z-20 flex items-center gap-1 border-b border-border bg-background/95 px-2 py-1.5 backdrop-blur supports-[backdrop-filter]:bg-background/85 md:hidden">
+        <MobileBackButton to={backTo} label="Back to sessions" />
         <p className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
           {sessionTitle}
         </p>
@@ -95,23 +95,23 @@ export function MobileSessionTopBar({
           type="button"
           size="icon"
           variant="ghost"
-          className="h-9 w-9 shrink-0"
+          className="size-11 shrink-0 sm:size-11"
           aria-label="Open session actions"
           aria-expanded={actionsOpen}
           onClick={() => setActionsOpen(true)}
         >
-          <MoreVertical className="h-5 w-5" />
+          <MoreVertical className="size-5" />
         </Button>
         <Button
           type="button"
           size="icon"
           variant="ghost"
-          className="h-9 w-9 shrink-0"
+          className="size-11 shrink-0 sm:size-11"
           aria-label={detailButtonLabel}
           aria-controls="session-detail-sheet"
           onClick={onOpenDetails}
         >
-          <PanelBottomOpen className="h-5 w-5" />
+          <PanelBottomOpen className="size-5" />
         </Button>
       </div>
 

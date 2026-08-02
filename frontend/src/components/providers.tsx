@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { NuqsAdapter } from "nuqs/adapters/next/app";
 import { useState, useEffect, useRef } from "react";
 import { ErrorBoundary } from "@/components/error-boundary";
+import { ConnectivityNotice } from "@/components/connectivity-notice";
 import { ThemeProvider } from "@/components/theme-provider";
 import { DocumentTitle } from "@/components/document-title";
 import { ACTIVE_ORG_CHANGED_EVENT, getActiveOrgId } from "@/lib/active-org";
@@ -129,6 +130,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
           <ErrorBoundary>
             <DocumentTitle />
             {children}
+            <ConnectivityNotice />
           </ErrorBoundary>
         </QueryClientProvider>
       </NuqsAdapter>

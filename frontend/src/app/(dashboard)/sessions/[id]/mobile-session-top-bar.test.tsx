@@ -58,9 +58,9 @@ describe("MobileSessionTopBar", () => {
       />,
     );
 
-    expect(screen.getByRole("link", { name: "Back to sessions" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open session details" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open session actions" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Back to sessions" })).toHaveClass("size-11", "sm:size-11");
+    expect(screen.getByRole("button", { name: "Open session details" })).toHaveClass("size-11", "sm:size-11");
+    expect(screen.getByRole("button", { name: "Open session actions" })).toHaveClass("size-11", "sm:size-11");
     expect(screen.queryByRole("tablist", { name: "Agent tabs" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Add agent tab" })).not.toBeInTheDocument();
 
