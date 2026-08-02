@@ -135,6 +135,7 @@ export function TimeRangePicker({
                 onSelect={(nextRange) => setDraft(nextRange ?? { from: undefined, to: undefined })}
                 defaultMonth={draft.from}
                 numberOfMonths={2}
+                showOutsideDays={false}
                 disabled={{ after: today }}
                 resetOnSelect
                 className="mx-auto"
