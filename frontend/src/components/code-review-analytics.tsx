@@ -62,6 +62,14 @@ function roundedMetric(value: number | null): string {
   return Math.round(value).toLocaleString();
 }
 
+function decimalMetric(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "—";
+  return value.toLocaleString(undefined, {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  });
+}
+
 function signedRoundedMetric(value: number | null, sign: "+" | "-"): string {
   const formatted = roundedMetric(value);
   return formatted === "—" ? formatted : `${sign}${formatted}`;
@@ -185,7 +193,7 @@ function ApprovalOutcomeCards({ summary }: { summary: CodeReviewAnalytics["summa
       />
       <MetricCard
         label="Median rounds to approval"
-        value={roundedMetric(summary.median_rounds_to_approval)}
+        value={decimalMetric(summary.median_rounds_to_approval)}
         context="Approved PRs only"
       />
     </div>
@@ -375,7 +383,7 @@ export function CodeReviewAnalyticsReport({
                       {percentage(author.approved_by_143, author.prs_reviewed)}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">{author.approved_first_round.toLocaleString()}</TableCell>
-                    <TableCell className="text-right tabular-nums">{roundedMetric(author.median_rounds_to_approval)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{decimalMetric(author.median_rounds_to_approval)}</TableCell>
                     <TableCell className="text-right tabular-nums">{signedRoundedMetric(author.median_additions, "+")}</TableCell>
                     <TableCell className="text-right tabular-nums">{signedRoundedMetric(author.median_deletions, "-")}</TableCell>
                   </TableRow>
@@ -410,11 +418,11 @@ export function CodeReviewAnalyticsReport({
                     ariaLabel: `${summary.approved_first_round.toLocaleString()} PRs approved in the first round overall`,
                   },
                   {
-                    content: roundedMetric(summary.median_rounds_to_approval),
+                    content: decimalMetric(summary.median_rounds_to_approval),
                     className: "text-right",
                     ariaLabel: summary.median_rounds_to_approval === null
                       ? "No rounds to approval data overall"
-                      : `${roundedMetric(summary.median_rounds_to_approval)} median rounds to approval overall`,
+                      : `${decimalMetric(summary.median_rounds_to_approval)} median rounds to approval overall`,
                   },
                   {
                     content: signedRoundedMetric(summary.median_additions, "+"),

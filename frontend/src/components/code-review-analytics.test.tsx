@@ -92,6 +92,22 @@ describe("CodeReviewAnalyticsReport PR cohort states", () => {
     expect(screen.getByText(/3 PRs had a failed attempt/)).toBeInTheDocument();
   });
 
+  it("shows median rounds to approval with one decimal place", () => {
+    const analytics = emptyAnalytics(3);
+    analytics.summary.approved_by_143 = 2;
+    analytics.summary.median_rounds_to_approval = 1.5;
+    analytics.authors[0]!.approved_by_143 = 2;
+    analytics.authors[0]!.median_rounds_to_approval = 1.5;
+    renderReport(analytics);
+
+    const outcomes = screen.getByLabelText("Approval outcomes");
+    expect(within(outcomes).getByText("1.5")).toBeInTheDocument();
+
+    const authorTable = screen.getByRole("table", { name: "Code review analytics by PR author" });
+    expect(within(authorTable).getAllByText("1.5")).toHaveLength(2);
+    expect(within(authorTable).getByLabelText("1.5 median rounds to approval overall")).toHaveTextContent("1.5");
+  });
+
   it("reports how many PRs backed the author medians", () => {
     const analytics = emptyAnalytics(4);
     analytics.summary.prs_with_change_breakdown = 1;
