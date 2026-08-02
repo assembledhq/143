@@ -495,10 +495,10 @@ describe("CodeReviewsPage", () => {
     expect(within(stats).getByText("128")).toBeInTheDocument();
     expect(within(stats).getByText("Automatically approved")).toBeInTheDocument();
     expect(within(stats).getByText("92")).toBeInTheDocument();
-    expect(within(stats).getByText("72% of completed reviews")).toBeInTheDocument();
+    expect(within(stats).getByRole("button", { name: "About Automatically approved" })).toBeInTheDocument();
     expect(within(stats).getByText("Approval rate")).toBeInTheDocument();
     expect(within(stats).getByText("72%")).toBeInTheDocument();
-    expect(within(stats).getByText("21 need human review")).toBeInTheDocument();
+    expect(within(stats).getByRole("button", { name: "About Approval rate" })).toBeInTheDocument();
     expect(within(stats).getByText("Median turnaround")).toBeInTheDocument();
     expect(within(stats).getByText("8m")).toBeInTheDocument();
     const timeWindow = screen.getByRole("button", { name: "Time window" });
@@ -659,7 +659,7 @@ describe("CodeReviewsPage", () => {
     expect(screen.queryByRole("region", { name: "Code review statistics" })).not.toBeInTheDocument();
     const approvalOutcomes = screen.getByLabelText("Approval outcomes");
     expect(within(approvalOutcomes).getByText("32")).toBeInTheDocument();
-    expect(within(approvalOutcomes).getByText("First sent to 143 in this period")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByRole("button", { name: "About PRs reviewed" })).toBeInTheDocument();
     expect(within(approvalOutcomes).getByText("17")).toBeInTheDocument();
     expect(within(approvalOutcomes).getByText("53%")).toBeInTheDocument();
     expect(within(approvalOutcomes).getByText("2")).toBeInTheDocument();
@@ -790,7 +790,7 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
     await user.click(await screen.findByRole("tab", { name: "Analytics" }));
 
-    expect(await screen.findByText("First sent to 143 in this period")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "About PRs reviewed" })).toBeInTheDocument();
     expect(screen.getByText(/4 PRs had a failed attempt/)).toBeInTheDocument();
     expect(screen.getByText("Not yet approved")).toBeInTheDocument();
   });

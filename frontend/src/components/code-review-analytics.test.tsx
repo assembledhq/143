@@ -1,4 +1,5 @@
 import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { CodeReviewAnalyticsReport } from "@/components/code-review-analytics";
 import type { CodeReviewAnalytics } from "@/lib/types";
@@ -64,6 +65,29 @@ function renderReport(analytics: CodeReviewAnalytics) {
 }
 
 describe("CodeReviewAnalyticsReport PR cohort states", () => {
+  it("shows headline metric definitions in tooltips without subdescriptions", async () => {
+    const user = userEvent.setup();
+    const analytics = emptyAnalytics(4);
+    analytics.summary.approved_by_143 = 2;
+    analytics.summary.median_rounds_to_approval = 2;
+    renderReport(analytics);
+
+    const outcomes = screen.getByLabelText("Approval outcomes");
+    expect(within(outcomes).queryByText("First sent to 143 in this period")).not.toBeInTheDocument();
+    expect(within(outcomes).queryByText("50% of PRs reviewed")).not.toBeInTheDocument();
+    expect(within(outcomes).queryByText("Approved PRs only")).not.toBeInTheDocument();
+
+    const trigger = within(outcomes).getByRole("button", { name: "About Median rounds to approval" });
+    await user.hover(trigger);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "The median number of distinct completed revisions before 143 first posted an approval, among approved pull requests.",
+    );
+
+    expect(within(outcomes).getByRole("button", { name: "About PRs reviewed" })).toBeInTheDocument();
+    expect(within(outcomes).getByRole("button", { name: "About Approved by 143" })).toBeInTheDocument();
+    expect(within(outcomes).getByRole("button", { name: "About Approval rate" })).toBeInTheDocument();
+  });
+
   it("shows PR-oriented empty copy when the cohort has no PRs", () => {
     renderReport(emptyAnalytics());
 
