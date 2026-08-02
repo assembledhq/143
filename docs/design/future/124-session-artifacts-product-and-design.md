@@ -503,6 +503,30 @@ already an org-scoped team product where sessions, PRs, and reviews are visible
 to the team, so private-by-default would be inconsistent with everything around
 it and would add a share step to the most common case.
 
+### Keeping the default narrowable
+
+Org-scoped-by-default is the right call for 143 and is **decided**. It is also
+the kind of default that is painful to tighten once links are circulating, so
+v1 must not encode it as an assumption.
+
+Two requirements make a future narrowing a configuration change rather than a
+breaking one:
+
+1. **Visibility is an explicit stored field**, set to `org` on every artifact at
+   creation. It is not inferred from session ownership at read time. Adding
+   `private` or `session-participants` later is then a new value on an existing
+   column, not a schema migration that also has to reinterpret every link
+   already in a Slack thread.
+2. **One authorization point.** Every read path — viewer, collection, thumbnail,
+   raw content on the isolated origin, and Slack unfurl — resolves access
+   through a single check that reads that field. The isolated artifact origin is
+   the easy one to get wrong, because it serves bytes outside the normal
+   application request path.
+
+An org that wants stricter defaults should be servable by an org setting that
+changes the value written at creation, without touching artifacts already
+published or the links pointing at them.
+
 ### Slack
 
 143 already has a Slack surface, and Slack is where a link to a prototype
@@ -1009,7 +1033,10 @@ The product should be considered successful when:
     zoom, with keyboard navigation, and in both themes.
 12. Untrusted HTML and SVG never execute on the 143 application origin and make
     no outbound network requests.
-13. `Artifact` labels exactly one concept in every user-facing surface.
+13. Every read path enforces the same stored visibility check, including raw
+    content served from the isolated origin. No path serves artifact bytes on
+    knowledge of an ID alone.
+14. `Artifact` labels exactly one concept in every user-facing surface.
 
 ### Measures
 
@@ -1056,9 +1083,10 @@ Per `docs/design/AGENTS.md`, stated explicitly rather than left implicit:
   columns, indexes, and tenancy scope for logical artifacts, immutable versions,
   and the `published`/`evidence` kind discriminator are defined in the
   implementation design that follows. This document constrains that schema in
-  three ways: one durable-output model rather than two, globally unique
-  org-scoped artifact IDs, and identity derivable from `(session, path)` or
-  `(session, key)` without an agent-supplied UUID.
+  four ways: one durable-output model rather than two, globally unique
+  org-scoped artifact IDs, identity derivable from `(session, path)` or
+  `(session, key)` without an agent-supplied UUID, and an explicit stored
+  visibility field rather than access inferred from session ownership.
 - **API contract:** deferred to the same implementation design, constrained by
   the reserved URL space in
   [URL and identity space](#url-and-identity-space), org-scoped authorization,
@@ -1077,8 +1105,9 @@ A separate implementation phase should define:
 - session-token capability, org policy plumbing, audit event shapes, and
   `143-tools` registration;
 - bundle packaging and isolated artifact-origin serving with CSP enforcement;
-- durable link resolution, Slack unfurl handling, and cross-session access
-  authorization;
+- durable link resolution, Slack unfurl handling, and a single authorization
+  check covering the viewer, collection, thumbnails, isolated-origin raw
+  content, and unfurls;
 - transcript event representation, same-turn collapse, and live-update delivery;
 - API pagination and cache behavior;
 - viewer components and safe format handlers;
