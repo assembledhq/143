@@ -3315,8 +3315,10 @@ function AgentActionCard({
   action: ReactNode;
 }) {
   return (
-    <Card className="border-border/60">
-      <CardContent className="@container/agent-action flex flex-col gap-3 p-4 @min-[24rem]/agent-action:flex-row @min-[24rem]/agent-action:items-center @min-[24rem]/agent-action:justify-between">
+    // The container must live on an ancestor of the elements querying it: an
+    // element is never its own query container.
+    <Card className="@container/agent-action border-border/60">
+      <CardContent className="flex flex-col gap-3 p-4 @min-[24rem]/agent-action:flex-row @min-[24rem]/agent-action:items-center @min-[24rem]/agent-action:justify-between">
         <div className="min-w-0">
           <p className="text-sm font-medium text-foreground">{title}</p>
           <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
@@ -6307,7 +6309,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             reviewLoopRunning ? (
               <Card className="border-border/60">
                 <CardContent className="p-4">
-                  <div className="flex min-w-0 flex-1 items-start gap-2">
+                  <div className="flex min-w-0 items-start gap-2">
                     <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
                       <Loader2 className="h-4 w-4 animate-spin" />
                     </div>
