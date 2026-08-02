@@ -1102,6 +1102,8 @@ describe('SessionSidebar', () => {
     // The unread session title gets "text-foreground" class
     const titleEl = screen.getByText('Unread session');
     expect(titleEl.className).toContain('text-foreground');
+    expect(screen.getByText('(unread)')).toHaveClass('sr-only');
+    expect(document.querySelectorAll('[data-slot="status-indicator"]')).toHaveLength(1);
   });
 
   it('marks sessions with activity but no last_viewed_at as unread', async () => {

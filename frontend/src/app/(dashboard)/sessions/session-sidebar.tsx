@@ -991,19 +991,14 @@ export function SessionSidebar() {
               <div className="min-w-0 flex-1">
                 <div className="flex items-start justify-between gap-2">
                   <p className={cn(
-                    "type-dense flex min-w-0 items-center gap-1.5 font-medium",
+                    "type-dense flex min-w-0 items-center font-medium",
                     hasUnread || isWorkingSession ? "text-foreground" : "text-muted-foreground"
                   )}>
                     <span className={cn(
                       "truncate",
                       hasUnread || isWorkingSession ? "text-foreground" : "text-muted-foreground",
                     )}>{title}</span>
-                    {hasUnread ? (
-                      <span
-                        aria-label="Unread activity"
-                        className="size-1.5 shrink-0 rounded-full bg-primary"
-                      />
-                    ) : null}
+                    {hasUnread ? <span className="sr-only"> (unread)</span> : null}
                   </p>
                 </div>
                 <div className="mt-0.5 flex min-w-0 items-center gap-2">
