@@ -438,7 +438,8 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(screen.getByText('Ask a review agent to check the current diff and apply fixes.')).toBeInTheDocument();
     expect(reviewButton).toHaveAttribute('title', 'A reusable sandbox snapshot is required before review');
     const reviewAction = reviewButton.closest('[data-slot="agent-action-card-action"]');
-    expect(reviewAction).toHaveClass('w-fit', 'self-start');
+    expect(reviewAction).toHaveClass('ml-11', 'w-fit', 'self-start');
+    expect(reviewAction).toHaveClass('@min-[24rem]/agent-action:ml-0');
     expect(reviewAction).not.toHaveClass('w-full');
     expect(reviewButton).not.toHaveClass('w-full');
     const reviewTitle = screen.getByText('Review before creating a PR?');
