@@ -153,7 +153,6 @@ export function PRHealthBanner({
       role="region"
       aria-label={`Pull request #${health.pull_request_number}`}
       className="border-border/60"
-      data-testid="pr-health-card"
     >
       <CardContent className="p-3.5">
         <div className="space-y-2.5">

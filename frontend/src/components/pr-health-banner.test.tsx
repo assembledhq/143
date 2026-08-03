@@ -87,6 +87,72 @@ describe("PRHealthBanner", () => {
     expect(screen.queryByText("Ready")).not.toBeInTheDocument();
   });
 
+  // The status badge is the card's headline state, so every branch of the
+  // derivation needs a guard — the ordering between them is what decides which
+  // one wins when a PR is, say, repairing *and* conflicted.
+  it.each([
+    {
+      label: "Repairing",
+      variant: "info",
+      health: {
+        checks_confirmed: true,
+        has_conflicts: true,
+        active_repairs: [{
+          action_type: "resolve_conflicts",
+          session_id: "session-456",
+          session_status: "running",
+          health_version: 2,
+        }],
+      },
+    },
+    {
+      label: "Conflicts",
+      variant: "warning",
+      health: {
+        checks_confirmed: true,
+        has_conflicts: true,
+        checks: [{ name: "unit", category: "test", status: "failed" }],
+      },
+    },
+    {
+      label: "Checks failing",
+      variant: "destructive",
+      health: {
+        checks_confirmed: true,
+        checks: [{ name: "unit", category: "test", status: "failed" }],
+      },
+    },
+    {
+      label: "Behind",
+      variant: "warning",
+      health: { checks_confirmed: true, merge_state: "behind" },
+    },
+    {
+      label: "Blocked",
+      variant: "warning",
+      health: { checks_confirmed: true, merge_state: "blocked" },
+    },
+    {
+      label: "Open",
+      variant: "secondary",
+      health: { checks_confirmed: true, merge_state: "clean" },
+    },
+  ])("labels the pull request $label", ({ label, variant, health }) => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{ ...baseHealth, ...health } as PullRequestHealthResponse}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(label, { selector: "[data-slot='badge']" })).toHaveAttribute("data-variant", variant);
+  });
+
   it("keeps the Merge button visible but disabled when can_merge is false", async () => {
     renderWithProviders(
       <PRHealthBanner
