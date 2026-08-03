@@ -482,10 +482,7 @@ func (e *previewToolExecutor) waitSessionReady(ctx context.Context, sessionID st
 }
 
 func (e *previewToolExecutor) waitForNextPreviewPoll(ctx context.Context, deadline <-chan time.Time, minimumDelay time.Duration, timeoutMessage string) *mcp.ToolCallResult {
-	delay := e.pollInterval
-	if delay <= 0 {
-		delay = 3 * time.Second
-	}
+	delay := e.pollDelay()
 	if minimumDelay > delay {
 		delay = minimumDelay
 	}
@@ -499,6 +496,15 @@ func (e *previewToolExecutor) waitForNextPreviewPoll(ctx context.Context, deadli
 	case <-timer.C:
 		return nil
 	}
+}
+
+// pollDelay is the gap between status polls, shared by the tool wait loops and
+// the human-facing `preview create --wait` loop so both honour a test override.
+func (e *previewToolExecutor) pollDelay() time.Duration {
+	if e.pollInterval > 0 {
+		return e.pollInterval
+	}
+	return 3 * time.Second
 }
 
 func previewRetryDelay(err error) time.Duration {
@@ -779,13 +785,9 @@ func (e *previewToolExecutor) list(ctx context.Context, args json.RawMessage) *m
 		params.SessionID = codingSessionIDFromEnv()
 	}
 	if strings.TrimSpace(params.SessionID) != "" {
-		result := e.sessionStatus(ctx, params.SessionID)
-		if result.IsError {
-			return result
-		}
-		var status map[string]any
-		if err := json.Unmarshal([]byte(firstText(result)), &status); err != nil {
-			return result
+		status, err := e.sessionStatusView(ctx, params.SessionID)
+		if err != nil {
+			return mcp.ErrorResult(fmt.Sprintf("preview list failed: %s", err))
 		}
 		return jsonResult([]map[string]any{status})
 	}
