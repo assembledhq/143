@@ -17,7 +17,7 @@ import (
 func TestCodeReviewDisputesMigrationEnforcesTenantScopedParents(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile("../../migrations/000278_code_review_decision_disputes.up.sql")
+	body, err := os.ReadFile("../../migrations/000280_code_review_decision_disputes.up.sql")
 	require.NoError(t, err, "test should read the code review disputes migration")
 	sql := string(body)
 
