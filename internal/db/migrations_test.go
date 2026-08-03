@@ -1651,6 +1651,19 @@ func TestRenamedOutputTermMigrationsInvertThemselves(t *testing.T) {
 				"CHECK (role IN ('reviewer', 'orchestrator', 'description_policy')) NOT VALID",
 			},
 		},
+		{
+			// A legacy installation sits at version 225 with only the artifacts
+			// table, so replaying this up after a deep rollback must not assume
+			// the records table exists.
+			name: "prompt record roles replay",
+			path: "../../migrations/000226_code_review_output_record_roles.up.sql",
+			contains: []string{
+				"to_regclass('code_review_prompt_records')",
+				"chk_code_review_prompt_records_role",
+				"to_regclass('code_review_prompt_artifacts')",
+				"chk_code_review_prompt_artifacts_role",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1658,9 +1671,9 @@ func TestRenamedOutputTermMigrationsInvertThemselves(t *testing.T) {
 			t.Parallel()
 
 			body, err := os.ReadFile(tt.path)
-			require.NoError(t, err, "test should read the rollback")
+			require.NoError(t, err, "test should read the migration")
 			for _, needle := range tt.contains {
-				require.Contains(t, string(body), needle, "rollback should handle both the fresh and contracted schema shapes")
+				require.Contains(t, string(body), needle, "migration should handle both the fresh and contracted schema shapes")
 			}
 		})
 	}
