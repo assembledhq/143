@@ -33,7 +33,7 @@ func TestRenameLegacyOutputTermsMigrationPostgresBehavior(t *testing.T) {
 		_, cleanupErr := conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS `+schema+` CASCADE`)
 		require.NoError(t, cleanupErr, "test should remove the isolated migration schema")
 	}()
-	_, err = conn.Exec(ctx, `SET search_path TO `+schema+`, public`)
+	_, err = conn.Exec(ctx, `SET search_path TO `+schema)
 	require.NoError(t, err, "test should isolate migration objects")
 
 	_, err = conn.Exec(ctx, legacyOutputNameTestSchema)
