@@ -70,6 +70,13 @@ describe("time ranges", () => {
         to: new Date(2026, 6, 31, 23, 59, 59, 999),
       },
     },
+    {
+      range: "custom:2026-07-01:2026-07-31" as const,
+      expected: {
+        from: new Date(2026, 6, 1),
+        to: new Date(2026, 6, 31),
+      },
+    },
     { range: "all" as const, expected: null },
   ])("returns calendar display dates for $range", ({ range, expected }) => {
     expect(timeRangeDisplayDates(range, new Date(2026, 7, 1, 12, 0, 0, 0))).toEqual(expected);
