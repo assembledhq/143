@@ -131,9 +131,10 @@ func (disputePullRequestStoreStub) GetHealthCurrent(context.Context, uuid.UUID, 
 	return models.PullRequestHealthCurrent{}, nil
 }
 
-type disputeJobStoreStub struct{}
+type disputeJobStoreStub struct{ enqueued []db.EnqueueOpts }
 
-func (disputeJobStoreStub) EnqueueWithOpts(context.Context, uuid.UUID, db.EnqueueOpts) (uuid.UUID, error) {
+func (s *disputeJobStoreStub) EnqueueWithOpts(_ context.Context, _ uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+	s.enqueued = append(s.enqueued, opts)
 	return uuid.New(), nil
 }
 
@@ -173,7 +174,7 @@ func TestDisputeService_FileInAppCapturesImmutableSemanticInput(t *testing.T) {
 	pullRequests := disputePullRequestStoreStub{pullRequest: models.PullRequest{
 		ID: pullRequestID, OrgID: orgID, Title: "Fix payment authorization", Body: &pullRequestBody,
 	}}
-	service := NewDisputeService(store, reviews, pullRequests, disputeJobStoreStub{}, nil, "", zerolog.Nop())
+	service := NewDisputeService(store, reviews, pullRequests, &disputeJobStoreStub{}, nil, "", zerolog.Nop())
 
 	dispute, err := service.FileInApp(context.Background(), FileCodeReviewDisputeInput{
 		OrgID: orgID, SessionID: sessionID, FiledByLogin: "octocat", AuthorAssociation: "MEMBER",
@@ -212,7 +213,7 @@ func TestDisputeService_FileFromGitHubAppliesUntrustedIntakeGuard(t *testing.T) 
 		},
 		item: models.CodeReviewListItem{PullRequestAuthor: "octocat"},
 	}
-	config := DisputeConfig{ReassessmentsEnabled: true, UntrustedIntakePerLogin: 5, UntrustedIntakePerPullRequest: 20}
+	config := DisputeConfig{ReassessmentsEnabled: true, IntakePerUntrustedLogin: 5, IntakePerPullRequest: 20}
 	tests := []struct {
 		name          string
 		association   string
@@ -223,7 +224,7 @@ func TestDisputeService_FileFromGitHubAppliesUntrustedIntakeGuard(t *testing.T) 
 		{
 			name: "untrusted filing is admitted under a guard", association: "NONE",
 			expectedGuard: db.CodeReviewDisputeIntakeGuard{
-				Window: codeReviewDisputeUntrustedIntakeWindow, PerLoginMax: 5, PerPullRequestMax: 20,
+				Window: codeReviewDisputeIntakeWindow, PerLoginMax: 5, PerPullRequestMax: 20,
 			},
 			expectCapture: true,
 		},
@@ -231,12 +232,18 @@ func TestDisputeService_FileFromGitHubAppliesUntrustedIntakeGuard(t *testing.T) 
 			name: "capped untrusted filing is declined without an error", association: "NONE",
 			createErr: db.ErrCodeReviewDisputeIntakeCapped,
 			expectedGuard: db.CodeReviewDisputeIntakeGuard{
-				Window: codeReviewDisputeUntrustedIntakeWindow, PerLoginMax: 5, PerPullRequestMax: 20,
+				Window: codeReviewDisputeIntakeWindow, PerLoginMax: 5, PerPullRequestMax: 20,
 			},
 		},
 		{
-			name: "trusted filing carries no guard", association: "MEMBER",
-			expectedGuard: db.CodeReviewDisputeIntakeGuard{}, expectCapture: true,
+			// Trust removes the per-login ceiling but not the per-pull-request
+			// one: every edit of one comment files a fresh dispute, so trusted
+			// GitHub traffic still has to be bounded somewhere.
+			name: "trusted filing keeps the per-pull-request ceiling", association: "MEMBER",
+			expectedGuard: db.CodeReviewDisputeIntakeGuard{
+				Window: codeReviewDisputeIntakeWindow, PerPullRequestMax: 20,
+			},
+			expectCapture: true,
 		},
 	}
 
@@ -245,7 +252,7 @@ func TestDisputeService_FileFromGitHubAppliesUntrustedIntakeGuard(t *testing.T) 
 			t.Parallel()
 
 			store := &captureDisputeStore{createErr: tt.createErr}
-			service := NewDisputeService(store, reviews, disputePullRequestStoreStub{}, disputeJobStoreStub{}, nil, "", zerolog.Nop(), config)
+			service := NewDisputeService(store, reviews, disputePullRequestStoreStub{}, &disputeJobStoreStub{}, nil, "", zerolog.Nop(), config)
 
 			dispute, captured, err := service.FileFromGitHub(context.Background(), FileGitHubCodeReviewDisputeInput{
 				OrgID: orgID, PullRequestID: pullRequestID, AuthorLogin: "drive-by",
@@ -280,7 +287,7 @@ func TestDisputeService_TriageRecordsTrustNotEligibilityInAuthorizationSnapshot(
 		ReassessmentStatus:   models.CodeReviewDisputeReassessmentNotRequested,
 	}}
 	reviews := disputeReviewStoreStub{item: models.CodeReviewListItem{PullRequestAuthor: "octocat"}}
-	service := NewDisputeService(store, reviews, disputePullRequestStoreStub{}, disputeJobStoreStub{}, nil, "", zerolog.Nop())
+	service := NewDisputeService(store, reviews, disputePullRequestStoreStub{}, &disputeJobStoreStub{}, nil, "", zerolog.Nop())
 
 	err := service.Triage(context.Background(), orgID, disputeID)
 
@@ -309,7 +316,7 @@ func TestDisputeService_TriageDoesNotLetTrustedNonAuthorStartReassessment(t *tes
 		item:    models.CodeReviewListItem{PullRequestAuthor: "octocat"},
 		reasons: []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonBlockingFindings},
 	}
-	service := NewDisputeService(store, reviews, disputePullRequestStoreStub{}, disputeJobStoreStub{}, nil, "", zerolog.Nop())
+	service := NewDisputeService(store, reviews, disputePullRequestStoreStub{}, &disputeJobStoreStub{}, nil, "", zerolog.Nop())
 
 	err := service.Triage(context.Background(), orgID, disputeID)
 
@@ -322,6 +329,47 @@ func TestDisputeService_TriageDoesNotLetTrustedNonAuthorStartReassessment(t *tes
 		actions = append(actions, authorization.Action)
 	}
 	require.Equal(t, []models.CodeReviewDisputeAuthorizationAction{models.CodeReviewDisputeAuthorizationQueueInfluence}, actions, "queue influence should have one exact durable authorization snapshot")
+}
+
+// A triage job is enqueued at insert, so it still runs after a later edit of
+// the same GitHub comment replaced the objection. The reply belongs to the live
+// dispute and a reassessment would spend a whole agent run on a body nobody
+// will be shown a verdict for.
+func TestDisputeService_TriageSkipsWorkForASupersededDispute(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	disputeID := uuid.New()
+	supersededBy := uuid.New()
+	store := &captureDisputeStore{current: models.CodeReviewDispute{
+		ID: disputeID, OrgID: orgID, SessionID: uuid.New(),
+		Source: models.CodeReviewDisputeSourceAppUI, Decision: models.CodeReviewDecisionBlocked,
+		Body: "The review missed new evidence.", AuthorAssociation: "MEMBER",
+		RepositoryVisibility: models.CodeReviewRepositoryVisibilityPrivate,
+		AuthorIsPRAuthor:     true, IntakeStatus: models.CodeReviewDisputeIntakePending,
+		ReassessmentStatus:    models.CodeReviewDisputeReassessmentNotRequested,
+		SupersededByDisputeID: &supersededBy,
+	}}
+	reviews := disputeReviewStoreStub{
+		item:    models.CodeReviewListItem{PullRequestAuthor: "octocat"},
+		reasons: []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonBlockingFindings},
+	}
+	jobs := &disputeJobStoreStub{}
+	service := NewDisputeService(store, reviews, disputePullRequestStoreStub{}, jobs, nil, "", zerolog.Nop())
+
+	err := service.Triage(context.Background(), orgID, disputeID)
+
+	require.NoError(t, err, "a superseded dispute should still triage cleanly")
+	require.Equal(t, models.CodeReviewDisputeRoutingReassess, store.triage.Routing,
+		"the classification is still recorded; only the follow-on work is skipped")
+	require.False(t, store.admitted, "a superseded objection must not spend an agent reassessment run")
+	require.Empty(t, jobs.enqueued, "a superseded objection must not enqueue a reply the live dispute owns")
+	actions := make([]models.CodeReviewDisputeAuthorizationAction, 0, len(store.authorizations))
+	for _, authorization := range store.authorizations {
+		actions = append(actions, authorization.Action)
+	}
+	require.Equal(t, []models.CodeReviewDisputeAuthorizationAction{models.CodeReviewDisputeAuthorizationQueueInfluence}, actions,
+		"the authorization snapshot is the audit trail of what we decided about this filer and is still recorded")
 }
 
 func TestDisputeService_QueueReassessmentUsesCapturedPolicyCooldown(t *testing.T) {
@@ -353,7 +401,7 @@ func TestDisputeService_QueueReassessmentUsesCapturedPolicyCooldown(t *testing.T
 			pullRequests := disputePullRequestStoreStub{pullRequest: models.PullRequest{
 				ID: pullRequestID, OrgID: orgID, Title: "Fix authorization", HeadSHA: &headSHA,
 			}}
-			service := NewDisputeService(store, reviews, pullRequests, disputeJobStoreStub{}, nil, "", zerolog.Nop())
+			service := NewDisputeService(store, reviews, pullRequests, &disputeJobStoreStub{}, nil, "", zerolog.Nop())
 
 			err := service.queueReassessment(context.Background(), models.CodeReviewDispute{
 				ID: uuid.New(), OrgID: orgID, PullRequestID: pullRequestID, PolicyID: policyID,
@@ -556,6 +604,30 @@ func TestIsLikelyDisputeMention(t *testing.T) {
 
 			actual := IsLikelyDisputeMention(tt.body)
 			require.Equal(t, tt.expected, actual, "mention routing should distinguish objections from ordinary review requests")
+		})
+	}
+}
+
+func TestContainsDisputeObjection(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		body     string
+		expected bool
+	}{
+		{name: "re-review request is not an objection", body: "@acme/reviewers can you re-review this?", expected: false},
+		{name: "plain question is not an objection", body: "@acme/reviewers what triggered this?", expected: false},
+		{name: "disagreement is an objection", body: "@acme/reviewers I disagree, this is covered", expected: true},
+		{name: "should-have phrasing is an objection", body: "@acme/reviewers this should have been approved", expected: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, ContainsDisputeObjection(tt.body),
+				"a question mark alone must not divert an explicit review request into dispute intake")
 		})
 	}
 }

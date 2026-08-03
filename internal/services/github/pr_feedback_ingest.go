@@ -88,7 +88,7 @@ func (s *PRService) ingestPRFeedback(ctx context.Context, input normalizedPRFeed
 		Status: models.PRFeedbackItemStatusPending,
 	}
 	if input.RecordOnly {
-		reason := "handled_as_code_review_dispute"
+		reason := models.PRFeedbackIgnoreReasonCodeReviewDispute
 		item.Status = models.PRFeedbackItemStatusIgnored
 		item.IgnoreReason = &reason
 	}

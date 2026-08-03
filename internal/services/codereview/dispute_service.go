@@ -28,9 +28,9 @@ const (
 	// compute. Reassessment is the expensive branch, so the floor sits well
 	// above even odds rather than at 0.5.
 	codeReviewDisputeConfidenceFloor = 0.72
-	// codeReviewDisputeUntrustedIntakeWindow is the rolling window the intake
-	// ceilings in DisputeConfig are measured over.
-	codeReviewDisputeUntrustedIntakeWindow = 24 * time.Hour
+	// codeReviewDisputeIntakeWindow is the rolling window the intake ceilings in
+	// DisputeConfig are measured over.
+	codeReviewDisputeIntakeWindow = 24 * time.Hour
 )
 
 var (
@@ -38,6 +38,9 @@ var (
 	ErrCodeReviewDisputeNotConfigured  = errors.New("code review dispute service is not configured")
 	ErrCodeReviewDisputeNotEscalatable = errors.New("code review dispute is not eligible for escalation")
 	ErrCodeReviewDisputeInvalidBody    = errors.New("invalid code review dispute body")
+	// ErrCodeReviewDisputeInvalidUpdate separates a caller mistake from a server
+	// failure so the handler can answer 422 without swallowing real 5xx errors.
+	ErrCodeReviewDisputeInvalidUpdate = errors.New("invalid code review dispute update")
 )
 
 type DisputeStore interface {
@@ -98,23 +101,26 @@ func (s *DisputeService) SetAuditEmitter(audit *db.AuditEmitter) {
 type DisputeConfig struct {
 	ReassessmentsEnabled   bool
 	MaxActiveReassessments int
-	// Rolling ceilings on untrusted GitHub intake, measured over
-	// codeReviewDisputeUntrustedIntakeWindow. Zero disables that ceiling.
+	// Rolling ceilings on GitHub intake, measured over
+	// codeReviewDisputeIntakeWindow. Zero disables that ceiling.
 	//
 	// Untrusted authors can file disputes so external contributors get an
 	// answer, but each intake costs an LLM triage plus GitHub reads and a
-	// published reply. The conversation loop guard cannot bound this because
-	// every new dispute opens a fresh epoch, so intake carries its own limits:
-	// per login, and per pull request so a crowd of throwaway accounts is
-	// bounded too.
-	UntrustedIntakePerLogin       int
-	UntrustedIntakePerPullRequest int
+	// published reply, and editing one comment files a fresh dispute every time.
+	// IntakePerUntrustedLogin bounds drive-by traffic; IntakePerPullRequest
+	// applies to trusted filers too, because "trusted" is not "free".
+	//
+	// Both are populated from the CODE_REVIEW_DISPUTE_UNTRUSTED_INTAKE_*
+	// environment variables, whose names predate the per-pull-request ceiling
+	// covering trusted filers.
+	IntakePerUntrustedLogin int
+	IntakePerPullRequest    int
 }
 
 func NewDisputeService(disputes DisputeStore, reviews DisputeReviewStore, pullRequests PullRequestStore, jobs DisputeJobStore, llmClient llm.Client, frontendURL string, logger zerolog.Logger, configs ...DisputeConfig) *DisputeService {
 	config := DisputeConfig{
 		ReassessmentsEnabled: true, MaxActiveReassessments: 1000,
-		UntrustedIntakePerLogin: 5, UntrustedIntakePerPullRequest: 20,
+		IntakePerUntrustedLogin: 5, IntakePerPullRequest: 20,
 	}
 	if len(configs) > 0 {
 		config = configs[0]
@@ -135,6 +141,7 @@ type FileCodeReviewDisputeInput struct {
 	GitHubCommentID      *int64
 	GitHubThreadRootID   *int64
 	SourceVersion        int64
+	SourceUpdatedAt      *time.Time
 }
 
 type FileGitHubCodeReviewDisputeInput struct {
@@ -149,6 +156,7 @@ type FileGitHubCodeReviewDisputeInput struct {
 	Body               string
 	GitHubCommentID    int64
 	SourceVersion      int64
+	SourceUpdatedAt    *time.Time
 }
 
 func (s *DisputeService) FileInApp(ctx context.Context, input FileCodeReviewDisputeInput) (models.CodeReviewDispute, error) {
@@ -198,14 +206,14 @@ func (s *DisputeService) FileFromGitHub(ctx context.Context, input FileGitHubCod
 		AuthorAssociation: input.AuthorAssociation, RepositoryVisibility: visibility,
 		Body: input.Body, Source: models.CodeReviewDisputeSourceGitHubComment,
 		GitHubCommentID: &commentID, GitHubThreadRootID: input.InlineThreadRootID,
-		SourceVersion: input.SourceVersion,
+		SourceVersion: input.SourceVersion, SourceUpdatedAt: input.SourceUpdatedAt,
 	})
 	if errors.Is(err, db.ErrCodeReviewDisputeIntakeCapped) {
 		s.logger.Warn().
 			Str("org_id", input.OrgID.String()).
 			Str("pull_request_id", input.PullRequestID.String()).
 			Str("filed_by_login", strings.TrimSpace(input.AuthorLogin)).
-			Msg("declined code review dispute intake at the untrusted rolling cap")
+			Msg("declined code review dispute intake at the rolling cap")
 		return models.CodeReviewDispute{}, false, nil
 	}
 	if err != nil {
@@ -294,7 +302,8 @@ func (s *DisputeService) fileAgainstSessionResult(ctx context.Context, input Fil
 		AuthorIsPRAuthor:     strings.EqualFold(strings.TrimSpace(input.FiledByLogin), strings.TrimSpace(item.PullRequestAuthor)),
 		RepositoryVisibility: models.CodeReviewRepositoryVisibility(input.RepositoryVisibility), MembershipEvidence: evidence, Source: input.Source,
 		GitHubCommentID: input.GitHubCommentID, GitHubThreadRootCommentID: input.GitHubThreadRootID,
-		SourceBodyHash: hex.EncodeToString(bodyHash[:]), SourceVersion: version, Body: body,
+		SourceBodyHash: hex.EncodeToString(bodyHash[:]), SourceVersion: version,
+		SourceUpdatedAt: input.SourceUpdatedAt, Body: body,
 		ContestedReasonCodes: contested, SemanticInputHashAtFiling: semanticHash, ReplyStatus: replyStatus,
 	}
 	trustedAtFiling, _ := dispute.CurrentTrust()
@@ -321,19 +330,30 @@ func (s *DisputeService) fileAgainstSessionResult(ctx context.Context, input Fil
 }
 
 // intakeGuard returns the rolling admission ceilings that apply to this filing.
-// Only untrusted GitHub traffic is capped: in-app filings are already behind
-// org membership, and a trusted contributor is not the spend risk. Because
-// CurrentTrust treats every private-repository filer as trusted, this makes
-// the ceilings a public-repository protection by construction.
+// In-app filings are uncapped: they are already behind org membership and cost
+// no GitHub reads or published reply.
+//
+// A trusted GitHub filer is not the abuse risk the per-login ceiling exists for,
+// but "trusted" is not "free": every edit of one comment yields a fresh
+// source_version and therefore a fresh dispute, each costing an LLM triage and
+// possibly a reassessment run. So trusted GitHub traffic still carries the
+// per-pull-request ceiling -- which the store already counts across all
+// GitHub-sourced disputes on the pull request -- and only the per-login ceiling
+// is reserved for untrusted filers. Because CurrentTrust treats every
+// private-repository filer as trusted, the per-login ceiling remains a
+// public-repository protection by construction.
 func (s *DisputeService) intakeGuard(source models.CodeReviewDisputeSource, trustedAtFiling bool) db.CodeReviewDisputeIntakeGuard {
-	if source != models.CodeReviewDisputeSourceGitHubComment || trustedAtFiling {
+	if source != models.CodeReviewDisputeSourceGitHubComment {
 		return db.CodeReviewDisputeIntakeGuard{}
 	}
-	return db.CodeReviewDisputeIntakeGuard{
-		Window:            codeReviewDisputeUntrustedIntakeWindow,
-		PerLoginMax:       s.config.UntrustedIntakePerLogin,
-		PerPullRequestMax: s.config.UntrustedIntakePerPullRequest,
+	guard := db.CodeReviewDisputeIntakeGuard{
+		Window:            codeReviewDisputeIntakeWindow,
+		PerPullRequestMax: s.config.IntakePerPullRequest,
 	}
+	if !trustedAtFiling {
+		guard.PerLoginMax = s.config.IntakePerUntrustedLogin
+	}
+	return guard
 }
 
 func validContestedReasonCodes(requested, available []models.CodeReviewRiskReasonCode) []models.CodeReviewRiskReasonCode {
@@ -441,6 +461,18 @@ func (s *DisputeService) completeTriagedWorkflow(ctx context.Context, dispute mo
 }
 
 func (s *DisputeService) completeTriagedWorkflowWithTrust(ctx context.Context, dispute models.CodeReviewDispute, trusted bool, trustReason string) error {
+	// A later edit of the same GitHub comment already replaced this objection.
+	// Its triage job was enqueued before that happened, so it still arrives here
+	// -- but the reply belongs to the live dispute, and a reassessment would
+	// spend a whole agent run answering a body nobody will be shown a verdict
+	// for. The authorization snapshot is still worth recording: it is the audit
+	// trail of what we decided about this filer at this moment.
+	if dispute.SupersededByDisputeID != nil {
+		if dispute.IntakeStatus != models.CodeReviewDisputeIntakeTriaged || dispute.Routing == nil {
+			return nil
+		}
+		return s.recordAuthorization(ctx, dispute, models.CodeReviewDisputeAuthorizationQueueInfluence, trusted, trustReason)
+	}
 	if dispute.IntakeStatus == models.CodeReviewDisputeIntakeDiscarded {
 		return s.EnqueueReply(ctx, dispute.OrgID, dispute.ID, "triaged")
 	}
@@ -583,12 +615,19 @@ func containsDisagreementLanguage(value string) bool {
 }
 
 // IsLikelyDisputeMention separates plain-language objections and questions
-// from bare team mentions that are requesting a normal code review. Inline
-// replies do not need this heuristic because their thread root supplies the
-// dispute context.
+// from bare team mentions that are requesting a normal code review.
 func IsLikelyDisputeMention(body string) bool {
 	normalized := strings.ToLower(strings.Join(strings.Fields(body), " "))
 	return strings.Contains(body, "?") || containsDisagreementLanguage(normalized)
+}
+
+// ContainsDisputeObjection is the narrower half of IsLikelyDisputeMention: text
+// that disagrees with the decision rather than merely asking about it. Callers
+// that must not divert an explicit review request use this instead, because a
+// question mark alone does not distinguish "why was this blocked?" from
+// "@team can you re-review?".
+func ContainsDisputeObjection(body string) bool {
+	return containsDisagreementLanguage(strings.ToLower(strings.Join(strings.Fields(body), " ")))
 }
 
 func directionForDecision(decision models.CodeReviewDecision) models.CodeReviewDisputeDirection {
@@ -855,12 +894,18 @@ func (s *DisputeService) ListBySession(ctx context.Context, orgID, sessionID uui
 		return models.CodeReviewDisputePage{}, err
 	}
 	page, err := s.disputes.ListBySession(ctx, orgID, sessionID, cursor, limit)
-	return enrichCodeReviewDisputePage(page), err
+	if err != nil {
+		return models.CodeReviewDisputePage{}, err
+	}
+	return enrichCodeReviewDisputePage(page), nil
 }
 
 func (s *DisputeService) ListQueue(ctx context.Context, orgID uuid.UUID, filters models.CodeReviewDisputeListFilters) (models.CodeReviewDisputePage, error) {
 	page, err := s.disputes.ListQueue(ctx, orgID, filters)
-	return enrichCodeReviewDisputePage(page), err
+	if err != nil {
+		return models.CodeReviewDisputePage{}, err
+	}
+	return enrichCodeReviewDisputePage(page), nil
 }
 
 func enrichCodeReviewDisputePage(page models.CodeReviewDisputePage) models.CodeReviewDisputePage {
@@ -894,10 +939,10 @@ func (s *DisputeService) Escalate(ctx context.Context, orgID, disputeID, userID 
 func (s *DisputeService) Adjudicate(ctx context.Context, orgID, disputeID, userID uuid.UUID, update models.CodeReviewDisputeAdjudicationUpdate) (models.CodeReviewDispute, error) {
 	if update.AdjudicationStatus != nil {
 		if err := update.AdjudicationStatus.Validate(); err != nil {
-			return models.CodeReviewDispute{}, err
+			return models.CodeReviewDispute{}, fmt.Errorf("%w: %w", ErrCodeReviewDisputeInvalidUpdate, err)
 		}
 		if *update.AdjudicationStatus == models.CodeReviewDisputeAdjudicationPending || *update.AdjudicationStatus == models.CodeReviewDisputeAdjudicationExpired {
-			return models.CodeReviewDispute{}, fmt.Errorf("adjudication_status must be upheld, rejected, or needs_context")
+			return models.CodeReviewDispute{}, fmt.Errorf("%w: adjudication_status must be upheld, rejected, or needs_context", ErrCodeReviewDisputeInvalidUpdate)
 		}
 	}
 	result, err := s.disputes.Adjudicate(ctx, orgID, disputeID, userID, update)

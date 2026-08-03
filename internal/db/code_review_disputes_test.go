@@ -43,12 +43,13 @@ func TestCodeReviewDisputeStore_CreateAndEnqueueTriageDedupesGitHubSourceWithout
 	existing.UpdatedAt = now
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO code_review_decision_disputes").
+	mock.ExpectQuery("INSERT INTO code_review_decision_disputes[\\s\\S]+reply_comment_id[\\s\\S]+reply_cycle_reserved").
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows(codeReviewDisputeColumnNames()))
 	mock.ExpectQuery("SELECT[\\s\\S]+FROM code_review_decision_disputes[\\s\\S]+github_comment_id").
@@ -81,11 +82,13 @@ func codeReviewDisputeMockRows(dispute models.CodeReviewDispute) *pgxmock.Rows {
 		dispute.ReviewedHeadSHA, dispute.Decision, dispute.Direction, dispute.FiledByUserID, dispute.FiledByLogin, dispute.AuthorAssociation,
 		dispute.AuthorIsPRAuthor, dispute.RepositoryVisibility, dispute.MembershipEvidence, dispute.TrustOverride, dispute.Source,
 		dispute.GitHubCommentID, dispute.GitHubThreadRootCommentID, dispute.ReplyCommentID, dispute.SourceBodyHash, dispute.SourceVersion,
+		dispute.SourceUpdatedAt,
 		dispute.Body, dispute.ContestedReasonCodes, dispute.DisputeKind, dispute.AssertsNewInformation, dispute.Routing, dispute.IntakeStatus,
 		dispute.IntakeConfidence, dispute.ReassessmentSessionID, dispute.ReassessmentDecision, dispute.ReassessmentFlipped,
 		dispute.ReassessmentStatus, dispute.SemanticInputHashAtFiling, dispute.SemanticInputHashAtRerun,
 		dispute.AdjudicationStatus, dispute.AdjudicatedByUserID, dispute.AdjudicatedAt, dispute.AdjudicationNote, dispute.EscalatedAt,
-		dispute.EscalatedByUserID, dispute.QueueSignals, dispute.QueuePriority, dispute.ReplyStatus, dispute.ReplyCycleReserved, dispute.StatusDetail,
+		dispute.EscalatedByUserID, dispute.QueueSignals, dispute.QueuePriority, dispute.ReplyStatus, dispute.ReplyCycleReserved,
+		dispute.SupersededByDisputeID, dispute.StatusDetail,
 		dispute.Version, dispute.CreatedAt, dispute.UpdatedAt,
 	)
 }
@@ -152,16 +155,32 @@ func TestCodeReviewDisputeStore_CreateAndEnqueueTriageIntakeGuard(t *testing.T) 
 				created.Version = 1
 				created.CreatedAt = now
 				created.UpdatedAt = now
-				mock.ExpectQuery("INSERT INTO code_review_decision_disputes").
+				mock.ExpectQuery("INSERT INTO code_review_decision_disputes[\\s\\S]+reply_comment_id[\\s\\S]+reply_cycle_reserved").
 					WithArgs(
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(),
 					).
 					WillReturnRows(codeReviewDisputeMockRows(created))
-				mock.ExpectExec("UPDATE pull_requests").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				// Editing one GitHub comment files a fresh dispute, so the epoch
+				// must not reopen for it: a reset per edit would hand every edit a
+				// new reply budget and the loop guard could never fire.
+				mock.ExpectExec("UPDATE pull_requests[\\s\\S]+NOT EXISTS[\\s\\S]+code_review_decision_disputes").
+					WithArgs(pgx.NamedArgs{
+						"org_id": created.OrgID, "pull_request_id": created.PullRequestID,
+						"github_comment_id": created.GitHubCommentID, "dispute_id": created.ID,
+					}).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				// The new dispute inherits the thread's reply comment, so the
+				// rows it replaced must be retired in the same transaction --
+				// otherwise two live disputes share one GitHub comment and a
+				// late reply job overwrites the current answer.
+				mock.ExpectExec("WITH newest AS[\\s\\S]+superseded_by_dispute_id = NULLIF\\(newest.id, dispute.id\\)").
+					WithArgs(pgx.NamedArgs{
+						"org_id": created.OrgID, "github_comment_id": created.GitHubCommentID,
+					}).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				mock.ExpectQuery("INSERT INTO jobs").
 					WithArgs(

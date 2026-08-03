@@ -377,10 +377,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		cfg.FrontendURL,
 		logger,
 		codereviewsvc.DisputeConfig{
-			ReassessmentsEnabled:          cfg.CodeReviewDisputeReassessmentsEnabled,
-			MaxActiveReassessments:        cfg.CodeReviewDisputeMaxActiveReassessments,
-			UntrustedIntakePerLogin:       cfg.CodeReviewDisputeUntrustedIntakePerLogin,
-			UntrustedIntakePerPullRequest: cfg.CodeReviewDisputeUntrustedIntakePerPullRequest,
+			ReassessmentsEnabled:    cfg.CodeReviewDisputeReassessmentsEnabled,
+			MaxActiveReassessments:  cfg.CodeReviewDisputeMaxActiveReassessments,
+			IntakePerUntrustedLogin: cfg.CodeReviewDisputeUntrustedIntakePerLogin,
+			IntakePerPullRequest:    cfg.CodeReviewDisputeUntrustedIntakePerPullRequest,
 		},
 	)
 	codeReviewDisputeSvc.SetAuditEmitter(auditEmitter)
@@ -1280,6 +1280,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/code-reviews/stream", codeReviewHandler.StreamUpdates)
 				r.Get("/api/v1/code-reviews/prompt-examples", codeReviewHandler.PromptExamples)
 				r.Post("/api/v1/code-reviews/policy-events", codeReviewHandler.PolicyEvent)
+				r.Get("/api/v1/code-reviews/{id}", codeReviewHandler.Get)
 				r.Get("/api/v1/code-reviews/{id}/evidence", codeReviewHandler.Evidence)
 				r.Get("/api/v1/code-review-policies", codeReviewHandler.GetPolicy)
 				r.Get("/api/v1/code-review-github-trigger", codeReviewHandler.GetGitHubTrigger)

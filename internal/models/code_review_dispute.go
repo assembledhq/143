@@ -166,57 +166,66 @@ func (s CodeReviewDisputeReplyStatus) Validate() error {
 }
 
 type CodeReviewDispute struct {
-	ID                         uuid.UUID                            `db:"id" json:"id"`
-	OrgID                      uuid.UUID                            `db:"org_id" json:"org_id"`
-	SessionID                  uuid.UUID                            `db:"session_id" json:"session_id"`
-	PullRequestID              uuid.UUID                            `db:"pull_request_id" json:"pull_request_id"`
-	RepositoryID               uuid.UUID                            `db:"repository_id" json:"repository_id"`
-	PolicyID                   uuid.UUID                            `db:"policy_id" json:"policy_id"`
-	ReviewedHeadSHA            string                               `db:"reviewed_head_sha" json:"reviewed_head_sha"`
-	Decision                   CodeReviewDecision                   `db:"decision" json:"decision"`
-	Direction                  *CodeReviewDisputeDirection          `db:"direction" json:"direction,omitempty"`
-	FiledByUserID              *uuid.UUID                           `db:"filed_by_user_id" json:"filed_by_user_id,omitempty"`
-	FiledByLogin               string                               `db:"filed_by_login" json:"filed_by_login"`
-	AuthorAssociation          string                               `db:"author_association" json:"author_association"`
-	AuthorIsPRAuthor           bool                                 `db:"author_is_pr_author" json:"author_is_pr_author"`
-	RepositoryVisibility       CodeReviewRepositoryVisibility       `db:"repository_visibility" json:"repository_visibility"`
-	MembershipEvidence         json.RawMessage                      `db:"membership_evidence" json:"-"`
-	TrustOverride              *bool                                `db:"trust_override" json:"trust_override,omitempty"`
-	Source                     CodeReviewDisputeSource              `db:"source" json:"source"`
-	GitHubCommentID            *int64                               `db:"github_comment_id" json:"github_comment_id,omitempty"`
-	GitHubThreadRootCommentID  *int64                               `db:"github_thread_root_comment_id" json:"github_thread_root_comment_id,omitempty"`
-	ReplyCommentID             *int64                               `db:"reply_comment_id" json:"reply_comment_id,omitempty"`
-	SourceBodyHash             string                               `db:"source_body_hash" json:"-"`
-	SourceVersion              int64                                `db:"source_version" json:"source_version"`
-	Body                       string                               `db:"body" json:"body"`
-	ContestedReasonCodes       []CodeReviewRiskReasonCode           `db:"contested_reason_codes" json:"contested_reason_codes"`
-	DisputeKind                *string                              `db:"dispute_kind" json:"dispute_kind,omitempty"`
-	AssertsNewInformation      *bool                                `db:"asserts_new_information" json:"asserts_new_information,omitempty"`
-	Routing                    *CodeReviewDisputeRouting            `db:"routing" json:"routing,omitempty"`
-	IntakeStatus               CodeReviewDisputeIntakeStatus        `db:"intake_status" json:"intake_status"`
-	IntakeConfidence           *float64                             `db:"intake_confidence" json:"intake_confidence,omitempty"`
-	ReassessmentSessionID      *uuid.UUID                           `db:"reassessment_session_id" json:"reassessment_session_id,omitempty"`
-	ReassessmentDecision       *CodeReviewDecision                  `db:"reassessment_decision" json:"reassessment_decision,omitempty"`
-	ReassessmentFlipped        *bool                                `db:"reassessment_flipped" json:"reassessment_flipped,omitempty"`
-	ReassessmentStatus         CodeReviewDisputeReassessmentStatus  `db:"reassessment_status" json:"reassessment_status"`
-	SemanticInputHashAtFiling  string                               `db:"semantic_input_hash_at_filing" json:"-"`
-	SemanticInputHashAtRerun   *string                              `db:"semantic_input_hash_at_rerun" json:"-"`
-	AdjudicationStatus         *CodeReviewDisputeAdjudicationStatus `db:"adjudication_status" json:"adjudication_status,omitempty"`
-	AdjudicatedByUserID        *uuid.UUID                           `db:"adjudicated_by_user_id" json:"adjudicated_by_user_id,omitempty"`
-	AdjudicatedAt              *time.Time                           `db:"adjudicated_at" json:"adjudicated_at,omitempty"`
-	AdjudicationNote           *string                              `db:"adjudication_note" json:"adjudication_note,omitempty"`
-	EscalatedAt                *time.Time                           `db:"escalated_at" json:"escalated_at,omitempty"`
-	EscalatedByUserID          *uuid.UUID                           `db:"escalated_by_user_id" json:"escalated_by_user_id,omitempty"`
-	QueueSignals               json.RawMessage                      `db:"queue_signals" json:"queue_signals"`
-	QueuePriority              float64                              `db:"queue_priority" json:"queue_priority"`
-	ReplyStatus                CodeReviewDisputeReplyStatus         `db:"reply_status" json:"reply_status"`
-	ReplyCycleReserved         bool                                 `db:"reply_cycle_reserved" json:"-"`
-	StatusDetail               *string                              `db:"status_detail" json:"status_detail,omitempty"`
-	Version                    int                                  `db:"version" json:"version"`
-	CreatedAt                  time.Time                            `db:"created_at" json:"created_at"`
-	UpdatedAt                  time.Time                            `db:"updated_at" json:"updated_at"`
-	Trusted                    bool                                 `db:"-" json:"trusted"`
-	CurrentAuthorizationReason string                               `db:"-" json:"current_authorization_reason,omitempty"`
+	ID                        uuid.UUID                      `db:"id" json:"id"`
+	OrgID                     uuid.UUID                      `db:"org_id" json:"org_id"`
+	SessionID                 uuid.UUID                      `db:"session_id" json:"session_id"`
+	PullRequestID             uuid.UUID                      `db:"pull_request_id" json:"pull_request_id"`
+	RepositoryID              uuid.UUID                      `db:"repository_id" json:"repository_id"`
+	PolicyID                  uuid.UUID                      `db:"policy_id" json:"policy_id"`
+	ReviewedHeadSHA           string                         `db:"reviewed_head_sha" json:"reviewed_head_sha"`
+	Decision                  CodeReviewDecision             `db:"decision" json:"decision"`
+	Direction                 *CodeReviewDisputeDirection    `db:"direction" json:"direction,omitempty"`
+	FiledByUserID             *uuid.UUID                     `db:"filed_by_user_id" json:"filed_by_user_id,omitempty"`
+	FiledByLogin              string                         `db:"filed_by_login" json:"filed_by_login"`
+	AuthorAssociation         string                         `db:"author_association" json:"author_association"`
+	AuthorIsPRAuthor          bool                           `db:"author_is_pr_author" json:"author_is_pr_author"`
+	RepositoryVisibility      CodeReviewRepositoryVisibility `db:"repository_visibility" json:"repository_visibility"`
+	MembershipEvidence        json.RawMessage                `db:"membership_evidence" json:"-"`
+	TrustOverride             *bool                          `db:"trust_override" json:"trust_override,omitempty"`
+	Source                    CodeReviewDisputeSource        `db:"source" json:"source"`
+	GitHubCommentID           *int64                         `db:"github_comment_id" json:"github_comment_id,omitempty"`
+	GitHubThreadRootCommentID *int64                         `db:"github_thread_root_comment_id" json:"github_thread_root_comment_id,omitempty"`
+	ReplyCommentID            *int64                         `db:"reply_comment_id" json:"reply_comment_id,omitempty"`
+	SourceBodyHash            string                         `db:"source_body_hash" json:"-"`
+	SourceVersion             int64                          `db:"source_version" json:"source_version"`
+	// SourceUpdatedAt is the provider's last-edited time for the source
+	// comment. It orders the disputes filed against one comment, which
+	// SourceVersion cannot: that is a content hash.
+	SourceUpdatedAt           *time.Time                           `db:"source_updated_at" json:"-"`
+	Body                      string                               `db:"body" json:"body"`
+	ContestedReasonCodes      []CodeReviewRiskReasonCode           `db:"contested_reason_codes" json:"contested_reason_codes"`
+	DisputeKind               *string                              `db:"dispute_kind" json:"dispute_kind,omitempty"`
+	AssertsNewInformation     *bool                                `db:"asserts_new_information" json:"asserts_new_information,omitempty"`
+	Routing                   *CodeReviewDisputeRouting            `db:"routing" json:"routing,omitempty"`
+	IntakeStatus              CodeReviewDisputeIntakeStatus        `db:"intake_status" json:"intake_status"`
+	IntakeConfidence          *float64                             `db:"intake_confidence" json:"intake_confidence,omitempty"`
+	ReassessmentSessionID     *uuid.UUID                           `db:"reassessment_session_id" json:"reassessment_session_id,omitempty"`
+	ReassessmentDecision      *CodeReviewDecision                  `db:"reassessment_decision" json:"reassessment_decision,omitempty"`
+	ReassessmentFlipped       *bool                                `db:"reassessment_flipped" json:"reassessment_flipped,omitempty"`
+	ReassessmentStatus        CodeReviewDisputeReassessmentStatus  `db:"reassessment_status" json:"reassessment_status"`
+	SemanticInputHashAtFiling string                               `db:"semantic_input_hash_at_filing" json:"-"`
+	SemanticInputHashAtRerun  *string                              `db:"semantic_input_hash_at_rerun" json:"-"`
+	AdjudicationStatus        *CodeReviewDisputeAdjudicationStatus `db:"adjudication_status" json:"adjudication_status,omitempty"`
+	AdjudicatedByUserID       *uuid.UUID                           `db:"adjudicated_by_user_id" json:"adjudicated_by_user_id,omitempty"`
+	AdjudicatedAt             *time.Time                           `db:"adjudicated_at" json:"adjudicated_at,omitempty"`
+	AdjudicationNote          *string                              `db:"adjudication_note" json:"adjudication_note,omitempty"`
+	EscalatedAt               *time.Time                           `db:"escalated_at" json:"escalated_at,omitempty"`
+	EscalatedByUserID         *uuid.UUID                           `db:"escalated_by_user_id" json:"escalated_by_user_id,omitempty"`
+	QueueSignals              json.RawMessage                      `db:"queue_signals" json:"queue_signals"`
+	QueuePriority             float64                              `db:"queue_priority" json:"queue_priority"`
+	ReplyStatus               CodeReviewDisputeReplyStatus         `db:"reply_status" json:"reply_status"`
+	ReplyCycleReserved        bool                                 `db:"reply_cycle_reserved" json:"-"`
+	// SupersededByDisputeID is set when a later edit of the same GitHub comment
+	// replaced this objection. It is separate from ReplyStatus on purpose:
+	// reassessment and triage transitions rewrite ReplyStatus, so a retirement
+	// recorded there would be undone and the stale answer republished.
+	SupersededByDisputeID      *uuid.UUID `db:"superseded_by_dispute_id" json:"superseded_by_dispute_id,omitempty"`
+	StatusDetail               *string    `db:"status_detail" json:"status_detail,omitempty"`
+	Version                    int        `db:"version" json:"version"`
+	CreatedAt                  time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt                  time.Time  `db:"updated_at" json:"updated_at"`
+	Trusted                    bool       `db:"-" json:"trusted"`
+	CurrentAuthorizationReason string     `db:"-" json:"current_authorization_reason,omitempty"`
 }
 
 func (d CodeReviewDispute) CurrentTrust() (bool, string) {

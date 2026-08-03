@@ -1130,6 +1130,90 @@ describe("CodeReviewsPage", () => {
     expect(statsRequests).toBeGreaterThanOrEqual(3);
   });
 
+  // The dispute queue and every GitHub dispute reply deep-link to
+  // ?evidence=<session id>. The reviews list is windowed to 30 days and paged at
+  // 50, so the sheet has to be able to open a review the list never loaded.
+  it("opens the evidence sheet for a deep link to a review outside the loaded list", async () => {
+    mockCodeReviewBaseHandlers();
+    const archived: CodeReviewListItem = {
+      ...review,
+      id: "review-9",
+      session_id: "session-9",
+      github_pr_number: 311,
+      pull_request_title: "Archived rounding fix",
+    };
+    let detailRequests = 0;
+    server.use(
+      // The list only ever returns the recent review, exactly as a 30-day
+      // window would.
+      http.get("/api/v1/code-reviews", () =>
+        HttpResponse.json({ data: [review], meta: { total_count: 1 } } satisfies ListResponse<CodeReviewListItem>),
+      ),
+      http.get("/api/v1/code-reviews/session-9", () => {
+        detailRequests += 1;
+        return HttpResponse.json({ data: archived } satisfies SingleResponse<CodeReviewListItem>);
+      }),
+      http.get("/api/v1/code-reviews/session-9/evidence", () =>
+        HttpResponse.json({ data: evidence } satisfies SingleResponse<CodeReviewEvidence>),
+      ),
+      http.get("/api/v1/code-reviews/session-9/disputes", () =>
+        HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<CodeReviewDispute>),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, {
+      searchParams: { evidence: "session-9" },
+      nuqsHasMemory: true,
+    });
+
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #311/i });
+    expect(within(evidenceSheet).getByText("Archived rounding fix")).toBeInTheDocument();
+    expect(detailRequests).toBe(1);
+  });
+
+  it("explains an unresolvable evidence deep link instead of doing nothing", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews/session-9", () =>
+        HttpResponse.json({ error: { code: "CODE_REVIEW_NOT_FOUND", message: "code review not found" } }, { status: 404 }),
+      ),
+      // The evidence query keys off the same URL param, so it fires and 404s too.
+      http.get("/api/v1/code-reviews/session-9/evidence", () =>
+        HttpResponse.json({ error: { code: "CODE_REVIEW_NOT_FOUND", message: "code review not found" } }, { status: 404 }),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, {
+      searchParams: { evidence: "session-9" },
+      nuqsHasMemory: true,
+    });
+
+    const notice = await screen.findByRole("alert");
+    expect(notice).toHaveTextContent("That code review could not be opened");
+    // Clearing the link must return the page to its ordinary state.
+    await user.click(within(notice).getByRole("button", { name: "Clear the evidence link" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+  });
+
+  it("does not fetch a review detail when the deep link is already in the loaded list", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+    let detailRequests = 0;
+    server.use(
+      http.get("/api/v1/code-reviews/session-1", () => {
+        detailRequests += 1;
+        return HttpResponse.json({ data: review } satisfies SingleResponse<CodeReviewListItem>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
+
+    await user.click((await screen.findAllByRole("button", { name: /Evidence/i }))[0]);
+    expect(await screen.findByRole("dialog", { name: /Evidence for #428/i })).toBeInTheDocument();
+    expect(detailRequests).toBe(0);
+  });
+
   it("uses the standard error notice and retries evidence loading", async () => {
     const user = userEvent.setup();
     let evidenceRequests = 0;

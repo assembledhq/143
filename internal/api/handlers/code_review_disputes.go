@@ -236,11 +236,18 @@ func (h *CodeReviewHandler) UpdateDispute(w http.ResponseWriter, r *http.Request
 		TrustOverridePresent: trustOverridePresent,
 	})
 	if err != nil {
-		if errors.Is(err, db.ErrCodeReviewDisputeVersionConflict) {
+		switch {
+		// A dispute that does not exist also matches no rows, so the store
+		// reports it as a version conflict rather than a separate not-found.
+		case errors.Is(err, db.ErrCodeReviewDisputeVersionConflict):
 			writeError(w, r, http.StatusConflict, "CODE_REVIEW_DISPUTE_VERSION_CONFLICT", "the dispute changed; refresh and try again")
-			return
+		case errors.Is(err, codereviewsvc.ErrCodeReviewDisputeInvalidUpdate):
+			writeError(w, r, http.StatusUnprocessableEntity, "CODE_REVIEW_DISPUTE_UPDATE_FAILED", "failed to update code review dispute", err)
+		default:
+			// Anything else is ours, not the caller's: reporting a database or
+			// enqueue failure as 4xx hides it from error budgets and alerting.
+			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_DISPUTE_UPDATE_FAILED", "failed to update code review dispute", err)
 		}
-		writeError(w, r, http.StatusUnprocessableEntity, "CODE_REVIEW_DISPUTE_UPDATE_FAILED", "failed to update code review dispute", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewDispute]{Data: dispute})

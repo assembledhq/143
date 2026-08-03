@@ -1791,10 +1791,10 @@ func buildServices(
 		cfg.FrontendURL,
 		logger,
 		codereviewsvc.DisputeConfig{
-			ReassessmentsEnabled:          cfg.CodeReviewDisputeReassessmentsEnabled,
-			MaxActiveReassessments:        cfg.CodeReviewDisputeMaxActiveReassessments,
-			UntrustedIntakePerLogin:       cfg.CodeReviewDisputeUntrustedIntakePerLogin,
-			UntrustedIntakePerPullRequest: cfg.CodeReviewDisputeUntrustedIntakePerPullRequest,
+			ReassessmentsEnabled:    cfg.CodeReviewDisputeReassessmentsEnabled,
+			MaxActiveReassessments:  cfg.CodeReviewDisputeMaxActiveReassessments,
+			IntakePerUntrustedLogin: cfg.CodeReviewDisputeUntrustedIntakePerLogin,
+			IntakePerPullRequest:    cfg.CodeReviewDisputeUntrustedIntakePerPullRequest,
 		},
 	)
 	codeReviewDisputes.SetAuditEmitter(auditEmitter)

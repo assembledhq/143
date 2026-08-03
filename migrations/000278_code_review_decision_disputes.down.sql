@@ -3,6 +3,14 @@ ALTER TABLE pull_requests
     DROP COLUMN IF EXISTS code_review_dispute_cycles_in_epoch,
     DROP COLUMN IF EXISTS code_review_dispute_epoch;
 
+-- Any reassessment that already ran carries a trigger_source the restored CHECK
+-- does not allow, and ADD CONSTRAINT validates immediately -- so without this
+-- the rollback fails outright. 'slash_command' is the closest surviving value:
+-- a dispute reassessment is an explicit human re-request.
+UPDATE code_review_session_metadata
+    SET trigger_source = 'slash_command'
+    WHERE trigger_source = 'dispute_reassessment';
+
 ALTER TABLE code_review_session_metadata
     DROP CONSTRAINT IF EXISTS fk_code_review_metadata_triggering_dispute_org,
     DROP COLUMN IF EXISTS triggering_dispute_id,

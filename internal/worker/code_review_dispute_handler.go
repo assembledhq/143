@@ -113,6 +113,17 @@ func newReplyCodeReviewDisputeHandler(stores *Stores, services *Services, logger
 }
 
 func shouldPublishCodeReviewDisputeReply(dispute models.CodeReviewDispute) bool {
+	// A superseded dispute shares the live one's reply comment, so publishing
+	// would overwrite the current answer with a stale one. This is checked on
+	// superseded_by_dispute_id rather than reply_status because every lifecycle
+	// transition -- including the CompleteReassessment that BuildReply performs
+	// immediately before this call -- resets reply_status back to 'pending'.
+	if dispute.SupersededByDisputeID != nil {
+		return false
+	}
+	if dispute.ReplyStatus == models.CodeReviewDisputeReplyNotApplicable {
+		return false
+	}
 	return dispute.Source == models.CodeReviewDisputeSourceGitHubComment ||
 		(dispute.Direction != nil && *dispute.Direction == models.CodeReviewDisputeDirectionShouldNotHaveApproved)
 }

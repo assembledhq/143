@@ -477,6 +477,7 @@ export interface CodeReviewDispute {
   queue_signals: Record<string, unknown>;
   queue_priority: number;
   reply_status: "pending" | "not_applicable" | "published" | "failed";
+  superseded_by_dispute_id?: string;
   status_detail?: string;
   version: number;
   created_at: string;

@@ -45,6 +45,11 @@ CREATE TABLE code_review_decision_disputes (
     reply_comment_id bigint,
     source_body_hash text NOT NULL,
     source_version bigint NOT NULL DEFAULT 1 CHECK (source_version > 0),
+    -- The provider's own last-edited timestamp for the source comment.
+    -- source_version is a content hash and so carries no order, but deciding
+    -- which of several disputes on one comment is the live one needs one:
+    -- webhook redelivery can present an edit before the creation it replaced.
+    source_updated_at timestamptz,
     body text NOT NULL CHECK (length(btrim(body)) > 0 AND char_length(body) <= 8000),
     contested_reason_codes text[] NOT NULL DEFAULT '{}',
     dispute_kind text,
@@ -72,6 +77,13 @@ CREATE TABLE code_review_decision_disputes (
     reply_status text NOT NULL DEFAULT 'pending'
         CHECK (reply_status IN ('pending', 'not_applicable', 'published', 'failed')),
     reply_cycle_reserved boolean NOT NULL DEFAULT false,
+    -- Editing one GitHub comment files a new dispute, because source_version is
+    -- content-derived. The replaced rows point here at the row that replaced
+    -- them. This is deliberately its own column rather than a reply_status or
+    -- intake_status value: those are lifecycle states that reassessment and
+    -- triage transitions rewrite, and a retirement that a later transition can
+    -- undo lets a stale objection republish over the live answer.
+    superseded_by_dispute_id uuid CHECK (superseded_by_dispute_id <> id),
     status_detail text,
     version integer NOT NULL DEFAULT 1 CHECK (version > 0),
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -97,6 +109,14 @@ CREATE TABLE code_review_decision_disputes (
 
 CREATE UNIQUE INDEX idx_code_review_disputes_org_id_id
     ON code_review_decision_disputes (org_id, id);
+
+-- Added after the index rather than inline: a self-referencing composite key
+-- needs its referenced unique index to already exist.
+ALTER TABLE code_review_decision_disputes
+    ADD CONSTRAINT fk_code_review_disputes_superseded_by
+        FOREIGN KEY (org_id, superseded_by_dispute_id)
+        REFERENCES code_review_decision_disputes(org_id, id)
+        ON DELETE SET NULL (superseded_by_dispute_id);
 
 CREATE UNIQUE INDEX idx_code_review_disputes_github_source
     ON code_review_decision_disputes (org_id, github_comment_id, source_version)

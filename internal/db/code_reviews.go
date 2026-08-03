@@ -442,6 +442,7 @@ func (s *CodeReviewStore) CreateSessionMetadata(ctx context.Context, metadata *m
 	}
 	triggeringDisputeColumn := ""
 	triggeringDisputeValue := ""
+	triggeringDisputeUpdate := ""
 	args := pgx.NamedArgs{
 		"org_id":                   metadata.OrgID,
 		"session_id":               metadata.SessionID,
@@ -474,6 +475,12 @@ func (s *CodeReviewStore) CreateSessionMetadata(ctx context.Context, metadata *m
 	if metadata.TriggeringDisputeID != nil {
 		triggeringDisputeColumn = ", triggering_dispute_id"
 		triggeringDisputeValue = ", @triggering_dispute_id"
+		// The conflict path returns an equivalent review that already exists for
+		// this output key. Without this the dispute link is silently dropped, and
+		// the status-comment handler's GetTriggeringDisputeID recovery -- the only
+		// way a reply gets reconciled when the job payload is lost -- finds NULL.
+		// COALESCE keeps the first dispute that claimed the review.
+		triggeringDisputeUpdate = `, triggering_dispute_id = COALESCE(code_review_session_metadata.triggering_dispute_id, EXCLUDED.triggering_dispute_id)`
 		args["triggering_dispute_id"] = metadata.TriggeringDisputeID
 	}
 	rows, err := s.db.Query(ctx, `
@@ -491,7 +498,7 @@ func (s *CodeReviewStore) CreateSessionMetadata(ctx context.Context, metadata *m
 			@failure_reason, @completed_at`+triggeringDisputeValue+`
 		)
 		ON CONFLICT (org_id, review_output_key) DO UPDATE
-		SET review_output_key = EXCLUDED.review_output_key
+		SET review_output_key = EXCLUDED.review_output_key`+triggeringDisputeUpdate+`
 		RETURNING `+codeReviewMetadataColumns, args)
 	if err != nil {
 		var pgErr *pgconn.PgError

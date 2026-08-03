@@ -207,6 +207,20 @@ func (h *WebhookHandler) handleCodeReviewMentioned(w http.ResponseWriter, r *htt
 	disputeCandidate := h.codeReviewDisputes != nil &&
 		!codeReviewCommentIsMachineAuthored(event.Comment.PerformedViaGitHubApp, event.Comment.User.Type, event.Sender.Type) &&
 		codereviewsvc.IsLikelyDisputeMention(event.Comment.Body)
+	// A trusted author's mention is an explicit review request first. A bare
+	// question mark must not divert it: capture suppresses HandleReviewMentioned
+	// below, and triage routes a non-author's objection to policy_signal_only,
+	// so "@team can you re-review?" would start nothing at all. Only language
+	// that actually disagrees with the decision diverts.
+	//
+	// This deliberately ignores event.Action. Gating it on "created" would make
+	// a typo fix on that same comment file a dispute, spending an LLM triage to
+	// answer an edit with "only the pull request author can trigger a re-review"
+	// -- and the created event already answered the question with a review.
+	if disputeCandidate && codeReviewMentionAuthorTrusted(event) &&
+		!codereviewsvc.ContainsDisputeObjection(event.Comment.Body) {
+		disputeCandidate = false
+	}
 	if !codeReviewMentionAuthorTrusted(event) && !disputeCandidate {
 		return true, false
 	}
@@ -295,8 +309,10 @@ func (h *WebhookHandler) handleCodeReviewMentioned(w http.ResponseWriter, r *htt
 		_, captured, disputeErr := h.codeReviewDisputes.FileFromGitHub(r.Context(), codereviewsvc.FileGitHubCodeReviewDisputeInput{
 			OrgID: owner.OrgID, PullRequestID: pr.ID, AuthorLogin: event.Comment.User.Login,
 			AuthorType: authorType, AuthorAssociation: event.Comment.AuthorAssociation,
+			OwnAppLogin:       h.codeReviewDisputeOwnAppLogin(),
 			RepositoryPrivate: privateRepo, Body: event.Comment.Body,
 			GitHubCommentID: event.Comment.ID, SourceVersion: codeReviewCommentSourceVersion(event),
+			SourceUpdatedAt: event.Comment.UpdatedAt,
 		})
 		if disputeErr != nil {
 			logCodeReviewDisputeCaptureFailure(r, event.Comment.ID, disputeErr)
@@ -356,6 +372,19 @@ func (h *WebhookHandler) codeReviewDisputeRepositoryPrivate(r *http.Request, own
 		return false, false
 	}
 	return repository.Private, true
+}
+
+// codeReviewDisputeOwnAppLogin names our own GitHub app so provenance can
+// reject a comment we authored. Both dispute call sites already reject
+// machine-authored comments before they get here, so this is defence in depth
+// rather than the only guard -- it means provenance stays correct on its own if
+// that earlier check is ever relaxed or the app posts without the
+// performed_via_github_app marker.
+func (h *WebhookHandler) codeReviewDisputeOwnAppLogin() string {
+	if h.cfg == nil {
+		return ""
+	}
+	return h.cfg.GitHubAppSlug
 }
 
 // logCodeReviewDisputeCaptureFailure records a capture failure without failing
@@ -854,6 +883,14 @@ func (h *WebhookHandler) handleCodeReviewInlineDispute(r *http.Request, event gh
 	if codeReviewCommentIsMachineAuthored(event.Comment.PerformedViaGitHubApp, event.Comment.User.Type, event.Sender.Type) {
 		return false
 	}
+	// A finding thread is also the main channel for PR feedback follow-through.
+	// Capturing every reply as a dispute marks the feedback item ignored, and
+	// nothing reverses that once triage decides it was not a dispute -- so an
+	// actionable "please apply this" would never reach the follow-through agent.
+	// Require the same objection-or-question signal the mention surface uses.
+	if !codereviewsvc.IsLikelyDisputeMention(event.Comment.Body) {
+		return false
+	}
 	pr, err := h.pullRequests.GetByOrgRepoAndNumber(r.Context(), owner.OrgID, event.Repository.FullName, event.PullRequest.Number)
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
@@ -873,7 +910,10 @@ func (h *WebhookHandler) handleCodeReviewInlineDispute(r *http.Request, event gh
 		OrgID: owner.OrgID, PullRequestID: pr.ID, InlineThreadRootID: event.Comment.InReplyToID,
 		AuthorLogin: event.Comment.User.Login, AuthorType: authorType,
 		AuthorAssociation: event.Comment.AuthorAssociation, RepositoryPrivate: privateRepo,
-		Body: event.Comment.Body, GitHubCommentID: event.Comment.ID, SourceVersion: codeReviewSourceVersion(event.Comment.UpdatedAt, event.Comment.Body),
+		OwnAppLogin: h.codeReviewDisputeOwnAppLogin(),
+		Body:        event.Comment.Body, GitHubCommentID: event.Comment.ID,
+		SourceVersion:   codeReviewSourceVersion(event.Comment.UpdatedAt, event.Comment.Body),
+		SourceUpdatedAt: event.Comment.UpdatedAt,
 	})
 	if err != nil {
 		logCodeReviewDisputeCaptureFailure(r, event.Comment.ID, err)

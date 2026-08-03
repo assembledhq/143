@@ -343,6 +343,8 @@ export const api = {
     },
     promptExamples: () => get<import('./types').SingleResponse<import('./types').CodeReviewPromptExamplesResponse>>('/api/v1/code-reviews/prompt-examples'),
     policyEvent: (body: import('./types').CodeReviewPolicyAnalyticsEvent) => post<void>('/api/v1/code-reviews/policy-events', body),
+    get: (sessionId: string) =>
+      get<import('./types').SingleResponse<import('./types').CodeReviewListItem>>(`/api/v1/code-reviews/${sessionId}`),
     evidence: (sessionId: string) =>
       get<import('./types').SingleResponse<import('./types').CodeReviewEvidence>>(`/api/v1/code-reviews/${sessionId}/evidence`),
     disputes: (sessionId: string, cursor?: string) =>

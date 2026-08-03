@@ -1031,10 +1031,34 @@ export default function CodeReviewsPage() {
     const timer = window.setInterval(() => setCountdownNowMs(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, [hasScheduledReviewRetry]);
-  const selectedEvidenceReview = useMemo(
+  const listedEvidenceReview = useMemo(
     () => reviews.find((review) => review.session_id === selectedEvidenceSessionId) ?? null,
     [reviews, selectedEvidenceSessionId],
   );
+  // The list is windowed (default 30d) and paginated, but ?evidence=<session id>
+  // is deep-linked from the dispute queue and from every GitHub dispute reply.
+  // Without this fallback the sheet silently never opens for a review that has
+  // scrolled out of the loaded page or the selected time range.
+  const evidenceReviewQuery = useQuery({
+    queryKey: queryKeys.codeReviews.detail(selectedEvidenceSessionId ?? ""),
+    queryFn: () => api.codeReviews.get(selectedEvidenceSessionId ?? ""),
+    enabled: Boolean(selectedEvidenceSessionId) && !listedEvidenceReview,
+    // A deep link to a deleted or wrong session is a permanent 404, and
+    // retrying it only delays the error notice below. Transient failures still
+    // get one retry.
+    retry: (failureCount, error) =>
+      !(error instanceof ApiError && error.status === 404) && failureCount < 1,
+  });
+  const selectedEvidenceReview = listedEvidenceReview ?? (
+    selectedEvidenceSessionId && evidenceReviewQuery.data?.data?.session_id === selectedEvidenceSessionId
+      ? evidenceReviewQuery.data.data
+      : null
+  );
+  // A deep link that cannot be resolved must say so. Leaving the sheet closed
+  // reproduces the silent no-op this fallback exists to remove.
+  const evidenceDeepLinkError = Boolean(selectedEvidenceSessionId) && !listedEvidenceReview
+    ? evidenceReviewQuery.error
+    : null;
   const orgSettings = (settingsQuery.data?.data?.settings ?? {}) as OrgSettings;
   const orgCodingCredentials = useMemo(() => orgCodingCredentialsQuery.data?.data ?? [], [orgCodingCredentialsQuery.data?.data]);
   const codeReviewResolvedCredentials = useMemo(
@@ -1368,6 +1392,15 @@ export default function CodeReviewsPage() {
                   />
                   )}
                 />
+                {evidenceDeepLinkError ? (
+                  <ErrorNotice
+                    title="That code review could not be opened"
+                    description="The link may point at a review that no longer exists. Retry, or clear it to return to the list."
+                    action={{ label: "Retry", onClick: () => void evidenceReviewQuery.refetch() }}
+                    onDismiss={() => selectEvidenceSession(null)}
+                    dismissLabel="Clear the evidence link"
+                  />
+                ) : null}
                 <CodeReviewEvidenceSheet
                   key={selectedEvidenceReview?.session_id ?? "no-review"}
                   review={selectedEvidenceReview}
@@ -3521,15 +3554,18 @@ function CodeReviewEvidenceSheet({
                         {dispute.reassessment_status === "completed" && dispute.reassessment_flipped !== undefined ? <Badge variant="outline">{dispute.reassessment_flipped ? "Decision changed" : "Decision unchanged"}</Badge> : null}
                         {dispute.adjudication_status ? <Badge variant="outline">Policy owner: {codeReviewDisputeStatusLabel(dispute.adjudication_status)}</Badge> : null}
                         {dispute.reply_status === "failed" ? <Badge variant="destructive">GitHub reply failed</Badge> : null}
+                        {/* Editing a GitHub comment files a new dispute, so the
+                            timeline shows both. Say which one is live. */}
+                        {dispute.superseded_by_dispute_id ? <Badge variant="secondary">Replaced by a later edit</Badge> : null}
                         <Badge variant="outline">{dispute.trusted ? "Trusted" : "Untrusted"}</Badge>
                         {dispute.reassessment_session_id ? <Button size="sm" variant="ghost" asChild><Link href={`/sessions/${dispute.reassessment_session_id}`}>View reassessment</Link></Button> : null}
                         {dispute.routing === "policy_signal_only" && canManagePolicy ? <Button size="sm" variant="ghost" asChild><Link href="/code-reviews?tab=policy">Review policy</Link></Button> : null}
-                        {canManagePolicy && !dispute.trusted && dispute.intake_status === "triaged" && (dispute.routing === "reassess" || dispute.routing === "policy_signal_only") ? (
+                        {canManagePolicy && !dispute.trusted && !dispute.superseded_by_dispute_id && dispute.intake_status === "triaged" && (dispute.routing === "reassess" || dispute.routing === "policy_signal_only") ? (
                           <DisabledTooltip disabled={promoteDispute.isPending} content="Wait for this promotion to finish.">
                             <Button size="sm" variant="outline" disabled={promoteDispute.isPending} onClick={() => promoteDispute.mutate(dispute)}>Promote to policy queue</Button>
                           </DisabledTooltip>
                         ) : null}
-                        {dispute.routing === "policy_signal_only" && !dispute.escalated_at ? (
+                        {dispute.routing === "policy_signal_only" && !dispute.escalated_at && !dispute.superseded_by_dispute_id ? (
                           <DisabledTooltip disabled={escalateDispute.isPending} content="Wait for this escalation to finish.">
                             <Button size="sm" variant="ghost" disabled={escalateDispute.isPending} onClick={() => escalateDispute.mutate(dispute.id)}>Send to policy owner</Button>
                           </DisabledTooltip>

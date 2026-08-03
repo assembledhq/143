@@ -17,30 +17,32 @@ const codeReviewDisputeColumns = `id, org_id, session_id, pull_request_id, repos
 	reviewed_head_sha, decision, direction, filed_by_user_id, filed_by_login, author_association,
 	author_is_pr_author, repository_visibility, membership_evidence, trust_override, source,
 	github_comment_id, github_thread_root_comment_id, reply_comment_id, source_body_hash, source_version,
+	source_updated_at,
 	body, contested_reason_codes, dispute_kind, asserts_new_information, routing, intake_status,
 	intake_confidence, reassessment_session_id, reassessment_decision, reassessment_flipped,
 	reassessment_status, semantic_input_hash_at_filing, semantic_input_hash_at_rerun,
 	adjudication_status, adjudicated_by_user_id, adjudicated_at, adjudication_note, escalated_at,
-	escalated_by_user_id, queue_signals, queue_priority, reply_status, reply_cycle_reserved, status_detail, version,
+	escalated_by_user_id, queue_signals, queue_priority, reply_status, reply_cycle_reserved,
+	superseded_by_dispute_id, status_detail, version,
 	created_at, updated_at`
 
 var (
 	ErrCodeReviewDisputeVersionConflict = errors.New("code review dispute version conflict")
-	// ErrCodeReviewDisputeIntakeCapped reports that an untrusted filer reached
-	// the rolling intake ceiling for a pull request. It is an admission
-	// decision, not a failure: callers record the comment as ordinary feedback.
+	// ErrCodeReviewDisputeIntakeCapped reports that a filer reached a rolling
+	// intake ceiling for a pull request. It is an admission decision, not a
+	// failure: callers record the comment as ordinary feedback.
 	ErrCodeReviewDisputeIntakeCapped = errors.New("code review dispute intake cap reached")
 )
 
-// CodeReviewDisputeIntakeGuard bounds how much untrusted GitHub traffic may
-// open disputes on one pull request. A zero value disables the guard.
+// CodeReviewDisputeIntakeGuard bounds how much GitHub traffic may open disputes
+// on one pull request. A zero value disables the guard.
 //
 // PerPullRequestMax counts every GitHub-sourced dispute on the pull request,
-// including ones filed by trusted maintainers. That keeps the trust rule in one
+// trusted or not, and callers apply it to both. That keeps the trust rule in one
 // place (models.CodeReviewDispute.CurrentTrust) instead of duplicating it in
-// SQL, at the cost of a coupling: enough trusted objections on one pull request
-// inside the window will also turn away an untrusted filer. The default ratio
-// against PerLoginMax makes that unlikely outside genuine abuse.
+// SQL. PerLoginMax is the untrusted-only ceiling, so the two together mean a
+// crowd of throwaway accounts and a single busy maintainer are both bounded,
+// with the per-login figure biting first for drive-by traffic.
 type CodeReviewDisputeIntakeGuard struct {
 	Window            time.Duration
 	PerLoginMax       int
@@ -148,13 +150,28 @@ func (s *CodeReviewDisputeStore) CreateAndEnqueueTriage(ctx context.Context, dis
 		}
 		return false, err
 	}
+	// A new epoch means a new human turn in the conversation. Editing one GitHub
+	// comment is not a new turn: every edit yields a fresh source_version and so
+	// a fresh dispute row, and resetting here would hand each edit a full reply
+	// budget again -- the loop guard could then never fire. Only the first
+	// dispute filed against a given comment (and every non-GitHub filing) opens
+	// an epoch.
 	if _, err := tx.Exec(ctx, `UPDATE pull_requests
 		SET code_review_dispute_epoch = code_review_dispute_epoch + 1,
 		    code_review_dispute_cycles_in_epoch = 0
-		WHERE org_id = @org_id AND id = @pull_request_id`, pgx.NamedArgs{
+		WHERE org_id = @org_id AND id = @pull_request_id
+		  AND (@github_comment_id::bigint IS NULL OR NOT EXISTS (
+			SELECT 1 FROM code_review_decision_disputes prior
+			WHERE prior.org_id = @org_id AND prior.github_comment_id = @github_comment_id
+			  AND prior.id <> @dispute_id
+		  ))`, pgx.NamedArgs{
 		"org_id": created.OrgID, "pull_request_id": created.PullRequestID,
+		"github_comment_id": created.GitHubCommentID, "dispute_id": created.ID,
 	}); err != nil {
 		return false, fmt.Errorf("reset code review dispute bot-loop epoch: %w", err)
+	}
+	if err := reconcileCodeReviewDisputeSupersession(ctx, tx, created); err != nil {
+		return false, err
 	}
 	dedupeKey := "triage_code_review_dispute:" + created.ID.String()
 	jobID, err := s.jobs.EnqueueInTxWithOpts(ctx, tx, created.OrgID, EnqueueOpts{
@@ -173,6 +190,69 @@ func (s *CodeReviewDisputeStore) CreateAndEnqueueTriage(ctx context.Context, dis
 	return true, nil
 }
 
+// reconcileCodeReviewDisputeSupersession re-points every dispute filed against
+// one GitHub comment at whichever of them is currently newest, and clears the
+// pointer on that newest one. Every edit files a new row (source_version is
+// content-derived) and each inherits the thread's single reply comment, so
+// without exactly one live row two disputes share one GitHub comment and
+// whichever reply job runs last wins -- adjudicating a replaced objection would
+// rewrite the answer to the current one.
+//
+// The retirement is recorded in superseded_by_dispute_id, not in reply_status.
+// reply_status is a lifecycle column that CompleteReassessment, FailTriage,
+// MarkHeadChanged, and MarkReassessmentFailed all reset to 'pending' -- and
+// BuildReply calls CompleteReassessment itself, so a retirement stored there
+// would be undone by the very read that precedes the publish check.
+//
+// Newest is decided by source_updated_at, the provider's own edit time, not by
+// insert order: a failed 'created' delivery can be redelivered after the
+// 'edited' that replaced it, and ordering on arrival would then let the stale
+// body win. Recomputing the whole set rather than retiring "everything except
+// me" also makes this idempotent and independent of arrival order -- a late
+// insert cannot leave two live rows, and two of them cannot retire each other.
+//
+// adjudication_status moves pending -> expired so the queue stops showing one
+// row per keystroke-fix, while the row itself stays auditable.
+//
+// This does not stop a reply job that already passed the publish check before
+// this transaction committed. That window is a single job's runtime and cannot
+// be closed without holding a lock across a GitHub round trip.
+func reconcileCodeReviewDisputeSupersession(ctx context.Context, db DBTX, created models.CodeReviewDispute) error {
+	if created.GitHubCommentID == nil {
+		return nil
+	}
+	if _, err := db.Exec(ctx, `WITH newest AS (
+			SELECT id FROM code_review_decision_disputes
+			WHERE org_id = @org_id AND github_comment_id = @github_comment_id
+			ORDER BY COALESCE(source_updated_at, created_at) DESC, created_at DESC, id DESC
+			LIMIT 1
+		)
+		UPDATE code_review_decision_disputes dispute
+		SET superseded_by_dispute_id = NULLIF(newest.id, dispute.id),
+		    adjudication_status = CASE
+				WHEN newest.id <> dispute.id AND dispute.adjudication_status = 'pending' THEN 'expired'
+				ELSE dispute.adjudication_status
+			END,
+		    -- COALESCE, not an overwrite: a completed reassessment's detail is
+		    -- the record of what this objection achieved.
+		    status_detail = CASE
+				WHEN newest.id <> dispute.id
+					THEN COALESCE(dispute.status_detail, 'A newer edit of this comment replaced this objection.')
+				ELSE dispute.status_detail
+			END,
+		    updated_at = now(), version = version + 1
+		FROM newest
+		WHERE dispute.org_id = @org_id AND dispute.github_comment_id = @github_comment_id
+		  -- Skip rows already pointing where they should, so a redelivery does
+		  -- not bump version and invalidate an admin's open adjudication form.
+		  AND dispute.superseded_by_dispute_id IS DISTINCT FROM NULLIF(newest.id, dispute.id)`, pgx.NamedArgs{
+		"org_id": created.OrgID, "github_comment_id": created.GitHubCommentID,
+	}); err != nil {
+		return fmt.Errorf("reconcile code review dispute supersession: %w", err)
+	}
+	return nil
+}
+
 func insertCodeReviewDispute(ctx context.Context, db DBTX, dispute *models.CodeReviewDispute) (models.CodeReviewDispute, error) {
 	queueSignals := dispute.QueueSignals
 	if len(queueSignals) == 0 {
@@ -183,14 +263,27 @@ func insertCodeReviewDispute(ctx context.Context, db DBTX, dispute *models.CodeR
 			org_id, session_id, pull_request_id, repository_id, policy_id, reviewed_head_sha,
 			decision, direction, filed_by_user_id, filed_by_login, author_association, author_is_pr_author,
 			repository_visibility, membership_evidence, source, github_comment_id,
-			github_thread_root_comment_id, source_body_hash, source_version, body,
-			contested_reason_codes, semantic_input_hash_at_filing, queue_signals, reply_status
+			github_thread_root_comment_id, source_body_hash, source_version, source_updated_at, body,
+			contested_reason_codes, semantic_input_hash_at_filing, queue_signals, reply_status,
+			reply_comment_id, reply_cycle_reserved
 		) SELECT
 			@org_id, @session_id, @pull_request_id, @repository_id, @policy_id, @reviewed_head_sha,
 			@decision, @direction, @filed_by_user_id, @filed_by_login, @author_association, @author_is_pr_author,
 			@repository_visibility, @membership_evidence, @source, @github_comment_id,
-			@github_thread_root_comment_id, @source_body_hash, @source_version, @body,
-			@contested_reason_codes, @semantic_input_hash_at_filing, @queue_signals, @reply_status
+			@github_thread_root_comment_id, @source_body_hash, @source_version, @source_updated_at, @body,
+			@contested_reason_codes, @semantic_input_hash_at_filing, @queue_signals, @reply_status,
+			-- Editing one GitHub comment files a new dispute (the source_version
+			-- is content-derived), so inherit the reply this thread already has.
+			-- Without this each edit posts an additional bot comment instead of
+			-- updating the answer, and re-spends a conversation cycle for a turn
+			-- the human never took.
+			(SELECT prior.reply_comment_id FROM code_review_decision_disputes prior
+			 WHERE prior.org_id = @org_id AND prior.github_comment_id = @github_comment_id
+			   AND prior.reply_comment_id IS NOT NULL
+			 ORDER BY prior.created_at DESC, prior.id DESC LIMIT 1),
+			COALESCE((SELECT true FROM code_review_decision_disputes prior
+			 WHERE prior.org_id = @org_id AND prior.github_comment_id = @github_comment_id
+			   AND prior.reply_cycle_reserved LIMIT 1), false)
 		FROM code_review_session_metadata reviewed
 		JOIN sessions review_session ON review_session.id = reviewed.session_id AND review_session.org_id = @org_id
 		JOIN pull_requests pull_request ON pull_request.id = reviewed.pull_request_id AND pull_request.org_id = @org_id
@@ -213,7 +306,8 @@ func insertCodeReviewDispute(ctx context.Context, db DBTX, dispute *models.CodeR
 		"membership_evidence": dispute.MembershipEvidence, "source": dispute.Source,
 		"github_comment_id": dispute.GitHubCommentID, "github_thread_root_comment_id": dispute.GitHubThreadRootCommentID,
 		"source_body_hash": dispute.SourceBodyHash, "source_version": dispute.SourceVersion,
-		"body": strings.TrimSpace(dispute.Body), "contested_reason_codes": dispute.ContestedReasonCodes,
+		"source_updated_at": dispute.SourceUpdatedAt,
+		"body":              strings.TrimSpace(dispute.Body), "contested_reason_codes": dispute.ContestedReasonCodes,
 		"semantic_input_hash_at_filing": dispute.SemanticInputHashAtFiling, "queue_signals": queueSignals,
 		"reply_status": dispute.ReplyStatus,
 	})
@@ -414,7 +508,7 @@ func normalizeCodeReviewDisputeKind(value string) any {
 
 func (s *CodeReviewDisputeStore) FailTriage(ctx context.Context, orgID, disputeID uuid.UUID, detail string) error {
 	_, err := s.db.Exec(ctx, `UPDATE code_review_decision_disputes
-		SET intake_status = 'failed', reply_status = CASE WHEN source = 'github_comment' THEN 'pending' ELSE 'not_applicable' END,
+		SET intake_status = 'failed', reply_status = CASE WHEN source = 'github_comment' OR direction = 'should_not_have_approved' THEN 'pending' ELSE 'not_applicable' END,
 		    status_detail = @detail, updated_at = now(), version = version + 1
 		WHERE org_id = @org_id AND id = @id AND intake_status = 'pending'`, pgx.NamedArgs{"org_id": orgID, "id": disputeID, "detail": strings.TrimSpace(detail)})
 	if err != nil {
@@ -625,7 +719,7 @@ func (s *CodeReviewDisputeStore) CompleteReassessmentOnce(ctx context.Context, o
 		SET reassessment_session_id = @session_id, reassessment_decision = @decision,
 		    reassessment_flipped = CASE WHEN @decision::text IS NULL THEN NULL ELSE decision IS DISTINCT FROM @decision END,
 		    reassessment_status = @reassessment_status, status_detail = NULLIF(@detail, ''),
-		    reply_status = CASE WHEN source = 'github_comment' AND reply_status <> 'published' THEN 'pending' ELSE reply_status END,
+		    reply_status = CASE WHEN (source = 'github_comment' OR direction = 'should_not_have_approved') AND reply_status <> 'published' THEN 'pending' ELSE reply_status END,
 		    updated_at = now(), version = version + 1
 		WHERE org_id = @org_id AND id = @id
 		  AND reassessment_status IN ('queued', 'running')`, pgx.NamedArgs{
@@ -641,7 +735,7 @@ func (s *CodeReviewDisputeStore) CompleteReassessmentOnce(ctx context.Context, o
 func (s *CodeReviewDisputeStore) MarkHeadChanged(ctx context.Context, orgID, disputeID uuid.UUID, detail string) error {
 	_, err := s.db.Exec(ctx, `UPDATE code_review_decision_disputes
 		SET reassessment_status = 'head_changed', status_detail = @detail,
-		    reply_status = CASE WHEN source = 'github_comment' THEN 'pending' ELSE 'not_applicable' END,
+		    reply_status = CASE WHEN source = 'github_comment' OR direction = 'should_not_have_approved' THEN 'pending' ELSE 'not_applicable' END,
 		    updated_at = now(), version = version + 1
 		WHERE org_id = @org_id AND id = @id`, pgx.NamedArgs{"org_id": orgID, "id": disputeID, "detail": strings.TrimSpace(detail)})
 	if err != nil {
@@ -653,7 +747,7 @@ func (s *CodeReviewDisputeStore) MarkHeadChanged(ctx context.Context, orgID, dis
 func (s *CodeReviewDisputeStore) MarkReassessmentFailed(ctx context.Context, orgID, disputeID uuid.UUID, detail string) error {
 	_, err := s.db.Exec(ctx, `UPDATE code_review_decision_disputes
 		SET reassessment_status = 'failed', status_detail = @detail,
-		    reply_status = CASE WHEN source = 'github_comment' THEN 'pending' ELSE 'not_applicable' END,
+		    reply_status = CASE WHEN source = 'github_comment' OR direction = 'should_not_have_approved' THEN 'pending' ELSE 'not_applicable' END,
 		    updated_at = now(), version = version + 1
 		WHERE org_id = @org_id AND id = @id
 		  AND reassessment_status IN ('not_requested', 'queued', 'running')`, pgx.NamedArgs{
@@ -767,6 +861,7 @@ func (s *CodeReviewDisputeStore) Escalate(ctx context.Context, orgID, disputeID,
 		SELECT @org_id, id, @user_id, @note
 		FROM code_review_decision_disputes
 		WHERE org_id = @org_id AND id = @id AND routing = 'policy_signal_only'
+		  AND superseded_by_dispute_id IS NULL
 		  AND (adjudication_status IS NULL OR adjudication_status = 'pending')
 		ON CONFLICT (org_id, dispute_id, user_id) DO NOTHING`, pgx.NamedArgs{
 		"org_id": orgID, "id": disputeID, "user_id": userID, "note": note,
@@ -780,6 +875,7 @@ func (s *CodeReviewDisputeStore) Escalate(ctx context.Context, orgID, disputeID,
 		    updated_at = CASE WHEN escalated_at IS NULL THEN now() ELSE updated_at END,
 		    version = CASE WHEN escalated_at IS NULL THEN version + 1 ELSE version END
 		WHERE org_id = @org_id AND id = @id AND routing = 'policy_signal_only'
+		  AND superseded_by_dispute_id IS NULL
 		  AND (adjudication_status IS NULL OR adjudication_status = 'pending')
 		RETURNING `+codeReviewDisputeColumns, pgx.NamedArgs{"org_id": orgID, "id": disputeID, "user_id": userID, "note": note})
 	if err != nil {
