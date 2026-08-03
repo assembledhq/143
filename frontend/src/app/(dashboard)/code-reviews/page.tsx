@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent, ComponentProps, KeyboardEvent, ReactNode } from "react";
-import { useInfiniteQuery, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createParser, parseAsString, parseAsStringLiteral, useQueryState } from "nuqs";
 import {
   AlertTriangle,
