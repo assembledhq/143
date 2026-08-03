@@ -10132,8 +10132,8 @@ func TestEffectivePublicationRequestedRoleOverridesLegacyAgentPayload(t *testing
 	t.Cleanup(mock.Close)
 	orgID, userID := uuid.New(), uuid.New()
 	now := time.Now().UTC()
-	mock.ExpectQuery(`SELECT .+FROM users.+WHERE id = @id`).
-		WithArgs(pgx.NamedArgs{"id": userID}).
+	mock.ExpectQuery(`SELECT u\.id, @org_id::uuid AS org_id.+JOIN organization_memberships m.+m\.org_id = @org_id.+WHERE u\.id = @user_id`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "user_id": userID}).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url",
 			"google_id", "email_verified_at", "created_at", "settings",
@@ -10151,9 +10151,9 @@ func TestEffectivePublicationRequestedRoleOverridesLegacyAgentPayload(t *testing
 		string(models.RoleMember),
 	)
 
-	require.NoError(t, err, "legacy agent work should resolve current initiator authority")
-	require.Equal(t, string(models.RoleBuilder), role, "persisted sandbox input must not downgrade a builder initiator")
-	require.NoError(t, mock.ExpectationsWereMet(), "initiator lookup should use the scoped durable user identity")
+	require.NoError(t, err, "secondary-organization agent work should resolve current initiator authority")
+	require.Equal(t, string(models.RoleBuilder), role, "persisted sandbox input must not downgrade the active membership role")
+	require.NoError(t, mock.ExpectationsWereMet(), "worker authorization should use the session organization membership")
 }
 
 func TestPersistedOpenPRJobInputRejectsScopeDrift(t *testing.T) {

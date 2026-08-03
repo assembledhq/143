@@ -6907,3 +6907,52 @@ func TestCollectLinearIdentifiers(t *testing.T) {
 		require.Nil(t, got)
 	})
 }
+
+func TestPRServiceRestoreChildPROpenAfterBaseReconciliationRequiresExpectedHead(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		remoteHeadSHA      string
+		expectedRemoteHead *string
+		expectRestore      bool
+	}{
+		{
+			name:               "restores after base and head reconciliation",
+			remoteHeadSHA:      "verified-head",
+			expectedRemoteHead: ptrString("verified-head"),
+			expectRestore:      true,
+		},
+		{
+			name:               "preserves blocker when remote head still differs",
+			remoteHeadSHA:      "external-head",
+			expectedRemoteHead: ptrString("checkpoint-head"),
+			expectRestore:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgx mock should initialize")
+			t.Cleanup(mock.Close)
+			child := models.SessionChangeset{
+				ID: uuid.New(), OrgID: uuid.New(), SessionID: uuid.New(),
+				Status:                models.ChangesetStatusExternalUpdateDetected,
+				ExpectedRemoteHeadSHA: tt.expectedRemoteHead,
+			}
+			if tt.expectRestore {
+				mock.ExpectExec(`UPDATE session_changesets[\s\S]+SET status = 'pr_open'[\s\S]+EXISTS \([\s\S]+FROM pull_requests pr`).
+					WithArgs(pgx.NamedArgs{"org_id": child.OrgID, "session_id": child.SessionID, "changeset_id": child.ID}).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			}
+			service := &PRService{changesets: db.NewSessionChangesetStore(mock), logger: zerolog.Nop()}
+
+			service.restoreChildPROpenAfterBaseReconciliation(context.Background(), child, tt.remoteHeadSHA)
+
+			require.NoError(t, mock.ExpectationsWereMet(), "only a child PR with reconciled base and head should restore its open lifecycle state")
+		})
+	}
+}

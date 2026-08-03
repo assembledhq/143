@@ -444,7 +444,7 @@ func TestSessionChangesetStoreImportRemoteHeadRequiresSafeCheckpointToReconcile(
 			t.Cleanup(mock.Close)
 			orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
 			remoteHeadSHA := strings.Repeat("a", 40)
-			mock.ExpectQuery(`UPDATE session_changesets SET[\s\S]+WHEN status IN \('materializing', 'needs_restack', 'restacking', 'restack_conflict', 'pr_open', 'merged', 'abandoned'\) THEN status[\s\S]+WHEN status IN \('external_update_detected', 'published_branch'\)[\s\S]+AND @local_head_sha <> ''[\s\S]+head_sha = @local_head_sha[\s\S]+@local_head_sha = @remote_head_sha OR @remote_is_ancestor[\s\S]+THEN 'published_branch'[\s\S]+ELSE 'external_update_detected'[\s\S]+WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id`).
+			mock.ExpectQuery(`UPDATE session_changesets SET[\s\S]+WHEN status IN \('materializing', 'needs_restack', 'restacking', 'restack_conflict', 'pr_open', 'merged', 'abandoned'\) THEN status[\s\S]+WHEN status = 'published_branch'[\s\S]+WHEN status = 'external_update_detected'[\s\S]+AND NOT EXISTS \([\s\S]+FROM pull_requests pr[\s\S]+pr\.org_id = @org_id AND pr\.session_id = @session_id[\s\S]+pr\.changeset_id = @changeset_id[\s\S]+AND @local_head_sha <> ''[\s\S]+head_sha = @local_head_sha[\s\S]+@local_head_sha = @remote_head_sha OR @remote_is_ancestor[\s\S]+THEN 'published_branch'[\s\S]+ELSE 'external_update_detected'[\s\S]+WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id`).
 				WithArgs(pgx.NamedArgs{
 					"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
 					"remote_head_sha": remoteHeadSHA, "local_head_sha": tt.localHeadSHA,
@@ -460,6 +460,23 @@ func TestSessionChangesetStoreImportRemoteHeadRequiresSafeCheckpointToReconcile(
 			require.NoError(t, mock.ExpectationsWereMet(), "remote-head reconciliation should remain tenant scoped and require a safe local checkpoint")
 		})
 	}
+}
+
+func TestSessionChangesetStoreRestorePROpenAfterExternalUpdateRequiresExistingPR(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	t.Cleanup(mock.Close)
+	orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+	mock.ExpectExec(`UPDATE session_changesets[\s\S]+SET status = 'pr_open'[\s\S]+status = 'external_update_detected'[\s\S]+EXISTS \([\s\S]+FROM pull_requests pr[\s\S]+pr\.org_id = @org_id AND pr\.session_id = @session_id[\s\S]+pr\.changeset_id = @changeset_id`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = NewSessionChangesetStore(mock).RestorePROpenAfterExternalUpdate(context.Background(), orgID, sessionID, changesetID)
+
+	require.NoError(t, err, "verified PR metadata reconciliation should restore the open-PR lifecycle state")
+	require.NoError(t, mock.ExpectationsWereMet(), "PR-state restoration should remain tenant scoped and require an existing PR")
 }
 
 func TestSessionChangesetStoreRecordLocalHeadMarksDescendantsStale(t *testing.T) {

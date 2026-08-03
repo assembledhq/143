@@ -355,7 +355,17 @@ func (s *SessionChangesetStore) ImportRemoteHead(ctx context.Context, orgID, ses
 		expected_remote_head_sha = @remote_head_sha,
 		status = CASE
 			WHEN status IN ('materializing', 'needs_restack', 'restacking', 'restack_conflict', 'pr_open', 'merged', 'abandoned') THEN status
-			WHEN status IN ('external_update_detected', 'published_branch')
+			WHEN status = 'published_branch'
+			 AND @local_head_sha <> ''
+			 AND head_sha = @local_head_sha
+			 AND (@local_head_sha = @remote_head_sha OR @remote_is_ancestor)
+			THEN 'published_branch'
+			WHEN status = 'external_update_detected'
+			 AND NOT EXISTS (
+				SELECT 1 FROM pull_requests pr
+				WHERE pr.org_id = @org_id AND pr.session_id = @session_id
+				  AND pr.changeset_id = @changeset_id
+			 )
 			 AND @local_head_sha <> ''
 			 AND head_sha = @local_head_sha
 			 AND (@local_head_sha = @remote_head_sha OR @remote_is_ancestor)
@@ -375,6 +385,29 @@ func (s *SessionChangesetStore) ImportRemoteHead(ctx context.Context, orgID, ses
 		return "", fmt.Errorf("import remote changeset head: %w", err)
 	}
 	return status, nil
+}
+
+// RestorePROpenAfterExternalUpdate restores the lifecycle state only after a
+// caller has independently verified that an existing pull request's external
+// metadata (for example, its stacked base branch) matches the changeset again.
+func (s *SessionChangesetStore) RestorePROpenAfterExternalUpdate(ctx context.Context, orgID, sessionID, changesetID uuid.UUID) error {
+	_, err := s.db.Exec(ctx, `UPDATE session_changesets
+		SET status = 'pr_open', updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id
+		  AND status = 'external_update_detected'
+		  AND EXISTS (
+			SELECT 1 FROM pull_requests pr
+			WHERE pr.org_id = @org_id AND pr.session_id = @session_id
+			  AND pr.changeset_id = @changeset_id
+		  )`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+	})
+	if err != nil {
+		return fmt.Errorf("restore reconciled changeset pull request state: %w", err)
+	}
+	// A concurrent webhook may already have restored or terminalized the row;
+	// treating a zero-row update as success keeps reconciliation idempotent.
+	return nil
 }
 
 func (s *SessionChangesetStore) MarkExternalUpdateDetected(ctx context.Context, orgID, sessionID, changesetID uuid.UUID) error {

@@ -3907,6 +3907,30 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Pull request action failed"),
   });
+  const publishChangesetMutation = useMutation({
+    mutationFn: (target: ChangesetSummary) => api.sessions.publishChangeset(id, target.id),
+    onMutate: () => {
+      setLocalPRActionError(null);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["session", id] });
+      toast.success("Pull request action queued");
+    },
+    onError: (error, target) => {
+      const blockerDetails = error instanceof ApiError ? publicationBlockerDetails(error.details) : {};
+      if (blockerDetails.changesetStatus) {
+        setLocalPRActionError({
+          code: error instanceof ApiError ? error.code : undefined,
+          message: blockerDetails.reason || (error instanceof Error ? error.message : "Pull request action failed"),
+          changesetID: target.id,
+          changesetUpdatedAt: target.updated_at,
+          changesetStatus: blockerDetails.changesetStatus,
+        });
+        void queryClient.invalidateQueries({ queryKey: ["session", id] });
+      }
+      toast.error(blockerDetails.reason || (error instanceof Error ? error.message : "Pull request action failed"));
+    },
+  });
   // Stack publishing coordinates each changeset independently, so the request
   // can succeed while individual entries are rejected. A generic success toast
   // would hide that, leaving the user to discover the gap on their own.
@@ -6765,15 +6789,15 @@ export function SessionDetailContent({ id }: { id: string }) {
                 <div className="flex flex-wrap gap-2 pt-2">
                 {!selectedChangeset.pull_request && !selectedPublicationOwnsActions && (
                   <DisabledTooltip
-                    disabled={!selectedChangeset.worktree_path || !!selectedChangesetActionBlocker}
-                    content={selectedChangesetActionBlocker || "Create PR becomes available after branch materialization"}
+                    disabled={!selectedChangeset.worktree_path || !!selectedChangesetActionBlocker || publishChangesetMutation.isPending}
+                    content={selectedChangesetActionBlocker || (!selectedChangeset.worktree_path ? "Create PR becomes available after branch materialization" : "Publishing pull request…")}
                   >
                     <Button
                       type="button"
                       size="sm"
-                      disabled={!selectedChangeset.worktree_path || !!selectedChangesetActionBlocker || changesetLifecycleMutation.isPending}
-                      title={selectedChangesetActionBlocker || (!selectedChangeset.worktree_path ? "Create PR becomes available after branch materialization" : undefined)}
-                      onClick={() => changesetLifecycleMutation.mutate(() => api.sessions.publishChangeset(id, selectedChangeset.id))}
+                      disabled={!selectedChangeset.worktree_path || !!selectedChangesetActionBlocker || publishChangesetMutation.isPending}
+                      title={selectedChangesetActionBlocker || (!selectedChangeset.worktree_path ? "Create PR becomes available after branch materialization" : publishChangesetMutation.isPending ? "Publishing pull request…" : undefined)}
+                      onClick={() => publishChangesetMutation.mutate(selectedChangeset)}
                     >
                       <GitPullRequest className="h-3.5 w-3.5" />
                       Create PR
