@@ -37,10 +37,10 @@ const baseHealth: PullRequestHealthResponse = {
 };
 
 describe("PRHealthBanner", () => {
-  it("uses text-sm for the header and text-xs for non-header copy", () => {
+  it("uses an entity-first header with compact supporting copy", () => {
     renderWithProviders(
       <PRHealthBanner
-        health={{ ...baseHealth, checks_confirmed: true }}
+        health={{ ...baseHealth, checks_confirmed: true, can_merge: true }}
         pendingAction={null}
         repairError={null}
         mergeAuthRequired={false}
@@ -50,9 +50,41 @@ describe("PRHealthBanner", () => {
       />,
     );
 
-    expect(screen.getByText("PR health")).toHaveClass("text-sm");
-    expect(screen.getByText("PR #42 · acme/widgets")).toHaveClass("text-xs");
-    expect(screen.getByText("PR #42 is healthy.")).toHaveClass("text-xs");
+    expect(screen.getByRole("region", { name: "Pull request #42" })).toBeInTheDocument();
+    expect(screen.getByText("PR #42")).toHaveClass("text-sm");
+    expect(screen.getByText("Ready")).toHaveAttribute("data-variant", "success");
+    expect(screen.getByText("acme/widgets")).toHaveClass("text-xs");
+    expect(screen.getByText("Healthy.")).toHaveClass("text-xs");
+  });
+
+  it.each([
+    {
+      name: "unconfirmed checks",
+      health: { checks_confirmed: false, can_merge: true },
+    },
+    {
+      name: "a pending check",
+      health: {
+        checks_confirmed: true,
+        can_merge: true,
+        checks: [{ name: "Unit tests", category: "test", status: "pending" }],
+      },
+    },
+  ])("labels the pull request as checking while $name remain", ({ health }) => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{ ...baseHealth, ...health } as PullRequestHealthResponse}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Checking")).toHaveAttribute("data-variant", "info");
+    expect(screen.queryByText("Ready")).not.toBeInTheDocument();
   });
 
   it("keeps the Merge button visible but disabled when can_merge is false", async () => {
@@ -70,11 +102,11 @@ describe("PRHealthBanner", () => {
 
     const button = screen.getByRole("button", { name: /^Merge$/ });
     expect(button).toBeDisabled();
-
+    expect(button).toHaveAttribute("data-variant", "outline");
     expect(button).toHaveAttribute("title", "GitHub is not allowing this PR to merge yet.");
   });
 
-  it("uses compact spacing for the merge and review actions", () => {
+  it("promotes merge when ready while keeping review secondary", () => {
     renderWithProviders(
       <PRHealthBanner
         health={{ ...baseHealth, checks_confirmed: true }}
@@ -90,8 +122,9 @@ describe("PRHealthBanner", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "More merge actions" })).toHaveClass("w-8", "sm:w-6");
-    expect(screen.getByRole("button", { name: /^Merge$/ }).querySelector("svg")).not.toHaveClass("mr-1.5");
+    expect(screen.queryByRole("button", { name: "More merge actions" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Merge when ready" })).toHaveAttribute("data-variant", "default");
+    expect(screen.getByRole("button", { name: "Merge when ready" }).querySelector("svg")).not.toHaveClass("mr-1.5");
     expect(screen.getByRole("button", { name: "Review" }).querySelector("svg")).not.toHaveClass("mr-1.5");
   });
 
@@ -250,8 +283,9 @@ describe("PRHealthBanner", () => {
       />,
     );
 
-    expect(screen.getByText("PR health")).toBeInTheDocument();
-    expect(screen.getByText(/cannot be refreshed because acme\/widgets is disconnected from GitHub/)).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Pull request #42" })).toBeInTheDocument();
+    expect(screen.getByText("Disconnected")).toHaveAttribute("data-variant", "warning");
+    expect(screen.getByText(/Cannot be refreshed because acme\/widgets is disconnected from GitHub/)).toBeInTheDocument();
     const link = screen.getByRole("link", { name: /Open GitHub settings|Reconnect repository/ });
     expect(link).toHaveAttribute("href", "/settings/integrations");
     expect(screen.queryByRole("button", { name: /Checking mergeability…/ })).not.toBeInTheDocument();
@@ -329,7 +363,7 @@ describe("PRHealthBanner", () => {
     );
   });
 
-  it("keeps merge disabled while allowing merge when ready from the dropdown", async () => {
+  it("offers merge when ready directly when GitHub requirements are pending", async () => {
     const onQueue = vi.fn();
     renderWithProviders(
       <PRHealthBanner
@@ -349,13 +383,12 @@ describe("PRHealthBanner", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Merge" })).toBeDisabled();
-    await userEvent.setup().click(screen.getByRole("button", { name: "More merge actions" }));
-    await userEvent.setup().click(await screen.findByRole("menuitem", { name: "Merge when ready" }));
+    expect(screen.queryByRole("button", { name: "Merge" })).not.toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Merge when ready" }));
     expect(onQueue).toHaveBeenCalledTimes(1);
   });
 
-  it("uses compact shared sizing for PR actions and keeps the menu aligned", async () => {
+  it("uses compact shared sizing for the promoted merge action", () => {
     renderWithProviders(
       <PRHealthBanner
         health={{
@@ -374,22 +407,11 @@ describe("PRHealthBanner", () => {
       />,
     );
 
-    const mergeAction = screen.getByRole("button", { name: "Merge" });
-    const moreActions = screen.getByRole("button", { name: "More merge actions" });
-    const actionGroup = moreActions.closest("[data-slot='button-group']");
-    expect(actionGroup).toHaveAttribute("data-size", "xs");
+    const mergeAction = screen.getByRole("button", { name: "Merge when ready" });
     expect(mergeAction).toHaveAttribute("data-size", "xs");
-    expect(mergeAction).toHaveClass("h-10", "sm:h-6", "shadow-none");
-    expect(moreActions).toHaveAttribute("data-size", "icon-xs");
-    expect(moreActions).toHaveClass("size-10", "sm:size-6", "rounded-l-none", "shadow-none");
-    expect(moreActions).not.toHaveClass("h-7", "w-7");
-
-    await userEvent.setup().click(moreActions);
-    const menuItem = await screen.findByRole("menuitem", { name: "Merge when ready" });
-    expect(menuItem.closest("[data-slot='dropdown-menu-content']")).toHaveAttribute(
-      "data-align",
-      "end",
-    );
+    expect(mergeAction).toHaveClass("h-10", "sm:h-6");
+    expect(mergeAction).toHaveAttribute("data-variant", "default");
+    expect(screen.queryByRole("button", { name: "More merge actions" })).not.toBeInTheDocument();
   });
 
   it("shows queued auto-merge state and allows turning it off from the merge menu", async () => {
@@ -411,6 +433,7 @@ describe("PRHealthBanner", () => {
     );
 
     expect(screen.getByRole("button", { name: "Auto-merge on" })).toBeDisabled();
+    expect(screen.getByText("Auto-merge on", { selector: "span" })).toHaveAttribute("data-variant", "info");
     expect(screen.getByText("Waiting for GitHub requirements.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
     await userEvent.setup().click(screen.getByRole("button", { name: "More merge actions" }));
@@ -418,7 +441,7 @@ describe("PRHealthBanner", () => {
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
 
-  it("shows the disabled Review action reason in a hover tooltip", async () => {
+  it("hides an unavailable secondary Review action", () => {
     renderWithProviders(
       <PRHealthBanner
         health={baseHealth}
@@ -437,12 +460,7 @@ describe("PRHealthBanner", () => {
       />,
     );
 
-    const button = screen.getByRole("button", { name: /^Review$/ });
-    expect(button).toBeDisabled();
-
-    await userEvent.setup().hover(button.parentElement as HTMLElement);
-
-    expect(await screen.findByRole("tooltip", { name: "Review can start after the current turn finishes" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Review$/ })).not.toBeInTheDocument();
   });
 
 	it("renders the Merge button when can_merge is true and invokes onMerge", async () => {
@@ -729,7 +747,7 @@ describe("PRHealthBanner", () => {
       />,
     );
 
-    expect(screen.getByText("PR #42 is blocked by merge conflicts.")).toBeInTheDocument();
+    expect(screen.getByText("Blocked by merge conflicts.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Resolve conflicts" })).toBeInTheDocument();
     expect(screen.queryByText(/^conflicts$/)).toBeNull();
   });
