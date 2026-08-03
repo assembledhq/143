@@ -301,22 +301,6 @@ export function CodeReviewAnalyticsReport({
       {filters}
 
       <SectionGroup
-        title="Approval by round"
-        description="Each PR appears once, based on the first distinct completed head that received a posted 143 approval."
-      >
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5" aria-label="Approval by round">
-          {analytics.approval_rounds.map((bucket) => (
-            <MetricCard
-              key={bucket.bucket}
-              label={APPROVAL_ROUND_LABELS[bucket.bucket]}
-              value={bucket.prs.toLocaleString()}
-              context={`${percentage(bucket.prs, summary.prs_reviewed)} of PRs reviewed`}
-            />
-          ))}
-        </div>
-      </SectionGroup>
-
-      <SectionGroup
         title="Usage by PR author"
         description="Unique PR outcomes grouped by the author captured from the first available assessment."
       >
@@ -457,6 +441,22 @@ export function CodeReviewAnalyticsReport({
           </p>
           </>
         )}
+      </SectionGroup>
+
+      <SectionGroup
+        title="Approval by round"
+        description="Each PR appears once, based on the first distinct completed head that received a posted 143 approval."
+      >
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5" aria-label="Approval by round">
+          {analytics.approval_rounds.map((bucket) => (
+            <MetricCard
+              key={bucket.bucket}
+              label={APPROVAL_ROUND_LABELS[bucket.bucket]}
+              value={bucket.prs.toLocaleString()}
+              context={`${percentage(bucket.prs, summary.prs_reviewed)} of PRs reviewed`}
+            />
+          ))}
+        </div>
       </SectionGroup>
 
       <div className="grid gap-6 xl:grid-cols-2">
