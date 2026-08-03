@@ -239,6 +239,7 @@ const (
 	CodeReviewGitHubTriggerStatusReady              CodeReviewGitHubTriggerStatus = "ready"
 	CodeReviewGitHubTriggerStatusAuthRequired       CodeReviewGitHubTriggerStatus = "auth_required"
 	CodeReviewGitHubTriggerStatusPermissionRequired CodeReviewGitHubTriggerStatus = "permission_required"
+	CodeReviewGitHubTriggerStatusDisconnected       CodeReviewGitHubTriggerStatus = "disconnected"
 	CodeReviewGitHubTriggerStatusError              CodeReviewGitHubTriggerStatus = "error"
 )
 
@@ -246,7 +247,7 @@ func (s CodeReviewGitHubTriggerStatus) Validate() error {
 	switch s {
 	case CodeReviewGitHubTriggerStatusUnconfigured, CodeReviewGitHubTriggerStatusReady,
 		CodeReviewGitHubTriggerStatusAuthRequired, CodeReviewGitHubTriggerStatusPermissionRequired,
-		CodeReviewGitHubTriggerStatusError:
+		CodeReviewGitHubTriggerStatusDisconnected, CodeReviewGitHubTriggerStatusError:
 		return nil
 	default:
 		return fmt.Errorf("invalid CodeReviewGitHubTriggerStatus: %q", s)
@@ -272,6 +273,7 @@ type CodeReviewGitHubTriggerResponse struct {
 	Status             CodeReviewGitHubTriggerStatus         `json:"status"`
 	RepositoryID       uuid.UUID                             `json:"repository_id"`
 	RepositoryFullName string                                `json:"repository_full_name,omitempty"`
+	RepositoryStatus   RepositoryStatus                      `json:"repository_status"`
 	GitHubOrg          string                                `json:"github_org,omitempty"`
 	TeamSlug           string                                `json:"team_slug"`
 	TeamName           string                                `json:"team_name"`

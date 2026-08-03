@@ -18,6 +18,11 @@ export function DisabledTooltip({ children, content, disabled = false }: Disable
   React.useEffect(() => {
     if (content) setEverHadContent(true);
   }, [content]);
+  const canOpen = disabled && !!content;
+  const [open, setOpen] = React.useState(false);
+  React.useEffect(() => {
+    if (!canOpen && open) setOpen(false);
+  }, [canOpen, open]);
 
   if (!everHadContent) {
     return children;
@@ -25,7 +30,7 @@ export function DisabledTooltip({ children, content, disabled = false }: Disable
 
   return (
     <TooltipProvider delayDuration={150}>
-      <Tooltip open={disabled && !!content ? undefined : false}>
+      <Tooltip open={canOpen && open} onOpenChange={(nextOpen) => setOpen(canOpen && nextOpen)}>
         <TooltipTrigger asChild>
           <span
             className={disabled ? "inline-flex cursor-not-allowed" : "inline-flex"}

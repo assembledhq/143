@@ -1229,6 +1229,10 @@ func (s *triggerStub) GetActiveGitHubTrigger(_ context.Context, orgID, repositor
 	return models.CodeReviewGitHubTriggerSetting{}, pgx.ErrNoRows
 }
 
+func (s *triggerStub) ListActiveGitHubTriggers(context.Context, uuid.UUID) ([]models.CodeReviewGitHubTriggerSetting, error) {
+	return nil, nil
+}
+
 func (s *triggerStub) SaveGitHubTrigger(context.Context, uuid.UUID, db.SaveCodeReviewGitHubTriggerParams) (models.CodeReviewGitHubTriggerSetting, error) {
 	return models.CodeReviewGitHubTriggerSetting{}, nil
 }

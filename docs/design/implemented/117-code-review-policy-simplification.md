@@ -251,6 +251,9 @@ Whole-policy starter templates are not offered. They made a full policy replacem
 - An unconfigured repository shows one primary `Set up GitHub reviewer` action.
 - Ready state shows reviewer name, status, and Manage; repository permission and team slug move into the management disclosure.
 - Error, auth-required, and permission-required states remain visible and actionable.
+- `GitHub reviewer connections` includes an `Add repository` sheet that lists repositories exposed to the GitHub App. It can claim, reconnect, or transfer a repository and then set up its reviewer without navigating to Integrations. If claiming succeeds but reviewer setup fails, the connected repository remains visible with a retryable partial-failure state.
+- The policy page loads repository reviewer state through one org-scoped aggregate endpoint rather than issuing a status request per repository. Configured disconnected repositories remain visible as needing reconnection.
+- GitHub App installation and personal GitHub authorization may return to `/code-reviews?tab=policy&add_repository=1`; the backend accepts only allowlisted relative application paths and binds the return target to the signed setup state or an HTTP-only, OAuth-state-scoped cookie.
 
 #### Advanced validation
 
@@ -451,6 +454,12 @@ type CodeReviewAutomatedApprovalExampleOption struct {
 `CodeReviewPromptExamples()` and `CodeReviewAutomatedApprovalExamples()` return deterministic built-in lists. Examples contain no organization data and require no database persistence. Whole-policy templates and their API are not supported; examples can replace only their corresponding prompt field.
 
 ### API changes
+
+#### GitHub reviewer connections
+
+`GET /api/v1/code-review-github-triggers` is an authenticated, organization-scoped read available to `admin`, `builder`, `member`, and `viewer` roles. It returns the standard list envelope with one `CodeReviewGitHubTriggerResponse` per repository, including disconnected repositories that still have an active reviewer setting. Each response includes `repository_status`; reviewer `status` may also be `disconnected`. The endpoint has no query parameters or request body. Failures use `GITHUB_TRIGGER_SETUP_NOT_CONFIGURED` (503), `UNAUTHORIZED` (401), or `GITHUB_TRIGGER_STATUS_FAILED` (500).
+
+`GET /api/v1/integrations/github/login` and `GET /api/v1/users/me/github/connect` accept an optional `return_to` query parameter. Only relative `/code-reviews` and `/settings/integrations` paths are accepted; their query strings are preserved. Invalid targets return `INVALID_RETURN_TO` (400). Successful callbacks add `github=connected` or `github_pr=connected` to the preserved target. GitHub App setup binds the target into signed setup state, while personal and legacy OAuth flows use an HTTP-only, OAuth-state-scoped cookie with a ten-minute lifetime.
 
 #### Policy response and update
 

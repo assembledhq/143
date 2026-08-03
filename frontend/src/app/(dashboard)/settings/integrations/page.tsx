@@ -49,6 +49,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { useAutosave } from "@/hooks/useAutosave";
 import { useDisconnectIntegration } from "@/hooks/use-disconnect-integration";
+import { useGitHubRepositoryClaims } from "@/hooks/use-github-repository-claims";
 import { queryKeys } from "@/lib/query-keys";
 import { useAuth } from "@/hooks/use-auth";
 import {
@@ -283,23 +284,11 @@ function GitHubRepositoryClaims({
   accountConnected: boolean;
   onConnectAccount: () => void;
 }) {
-  const queryClient = useQueryClient();
   const [transferRepo, setTransferRepo] = useState<GitHubRepositoryClaimCandidate | null>(null);
-  const { data, isLoading, error } = useQuery({
-    queryKey: queryKeys.integrations.githubRepositories(installationId),
-    queryFn: () => api.integrations.listGitHubRepositories(installationId),
-    enabled: enabled && !!installationId,
-  });
-  const claimMutation = useMutation({
-    mutationFn: ({ githubId, allowTransfer }: { githubId: number; allowTransfer: boolean }) =>
-      api.integrations.claimGitHubRepositories(installationId ?? 0, [githubId], allowTransfer),
-    onSuccess: () => {
-      setTransferRepo(null);
-      queryClient.invalidateQueries({ queryKey: queryKeys.integrations.all });
-      queryClient.invalidateQueries({ queryKey: queryKeys.repositories.all });
-      queryClient.invalidateQueries({ queryKey: ["repositories", "integrations", "include-disconnected"] });
-      queryClient.invalidateQueries({ queryKey: queryKeys.integrations.githubRepositories(installationId) });
-    },
+  const { candidatesQuery: { data, isLoading, error }, claimMutation } = useGitHubRepositoryClaims({
+    installationId,
+    enabled,
+    onClaimSuccess: () => setTransferRepo(null),
   });
 
   if (!enabled || !installationId) return null;

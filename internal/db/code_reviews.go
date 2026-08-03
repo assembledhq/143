@@ -119,6 +119,19 @@ func (s *CodeReviewStore) GetActiveGitHubTrigger(ctx context.Context, orgID, rep
 	return collectOneCodeReviewGitHubTriggerSetting(rows)
 }
 
+func (s *CodeReviewStore) ListActiveGitHubTriggers(ctx context.Context, orgID uuid.UUID) ([]models.CodeReviewGitHubTriggerSetting, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT `+codeReviewGitHubTriggerSettingColumns+`
+		FROM code_review_github_trigger_settings
+		WHERE org_id = @org_id
+		  AND active = true
+		ORDER BY repository_id ASC`, pgx.NamedArgs{"org_id": orgID})
+	if err != nil {
+		return nil, fmt.Errorf("query active code review GitHub triggers: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.CodeReviewGitHubTriggerSetting])
+}
+
 func (s *CodeReviewStore) SaveGitHubTrigger(ctx context.Context, orgID uuid.UUID, params SaveCodeReviewGitHubTriggerParams) (models.CodeReviewGitHubTriggerSetting, error) {
 	if params.RepositoryID == uuid.Nil {
 		return models.CodeReviewGitHubTriggerSetting{}, fmt.Errorf("repository_id is required")

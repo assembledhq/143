@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -372,6 +373,50 @@ func TestGitHubStatusHandler_StartConnect_StoresResumeCookie(t *testing.T) {
 	require.True(t, found, "connect should set a resume cookie when resume_token is provided")
 }
 
+func TestGitHubStatusHandler_StartConnectValidatesReturnTo(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		returnTo   string
+		wantStatus int
+		wantCookie bool
+	}{
+		{name: "code review policy", returnTo: "/code-reviews?tab=policy&add_repository=1", wantStatus: http.StatusTemporaryRedirect, wantCookie: true},
+		{name: "external URL", returnTo: "https://evil.example/steal", wantStatus: http.StatusBadRequest},
+		{name: "scheme relative URL", returnTo: "//evil.example/steal", wantStatus: http.StatusBadRequest},
+		{name: "unsupported application path", returnTo: "/sessions/one", wantStatus: http.StatusBadRequest},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := NewGitHubStatusHandler(
+				&stubGHCredentialStore{}, &stubGHOrgReader{},
+				"test-client-id", "test-secret", "https://app.143.dev", "https://app.143.dev",
+			)
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me/github/connect?return_to="+url.QueryEscape(tt.returnTo), nil)
+			rr := httptest.NewRecorder()
+
+			handler.StartConnect(rr, req)
+
+			require.Equal(t, tt.wantStatus, rr.Code, "return path validation should produce the expected response")
+			cookies := rr.Result().Cookies()
+			found := false
+			for _, cookie := range cookies {
+				if strings.HasPrefix(cookie.Name, githubConnectReturnCookiePrefix) && cookie.MaxAge > 0 {
+					found = true
+					decoded, err := url.QueryUnescape(cookie.Value)
+					require.NoError(t, err, "stored return path should decode")
+					require.Equal(t, tt.returnTo, decoded, "return cookie should preserve the allowed application path")
+				}
+			}
+			require.Equal(t, tt.wantCookie, found, "only supported return paths should create a return cookie")
+		})
+	}
+}
+
 func TestGitHubStatusHandler_HandleConnectCallback_RedirectsBackToSessionResume(t *testing.T) {
 	t.Parallel()
 
@@ -573,6 +618,43 @@ func TestGitHubStatusHandler_HandleConnectCallback_RedirectsToIntegrations(t *te
 	require.NoError(t, parseErr, "redirect location should parse")
 	require.Equal(t, "/settings/integrations", parsed.Path, "non-resume callback should return to the integrations page where the connect button lives")
 	require.Equal(t, "connected", parsed.Query().Get("github_pr"), "redirect should note successful GitHub PR auth")
+}
+
+func TestGitHubStatusHandler_HandleConnectCallback_ReturnsToCodeReviewRepositoryFlow(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	handler := NewGitHubStatusHandler(
+		&stubGHCredentialStore{}, &stubGHOrgReader{},
+		"test-client-id", "test-secret", "https://app.143.dev", "https://app.143.dev",
+	)
+	handler.appUserAuth = &stubGitHubAppUserAuthService{
+		exchangeCodeFunc: func(context.Context, string) (*models.GitHubAppUserConfig, error) {
+			return &models.GitHubAppUserConfig{AccessToken: "ghu_test"}, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me/github/callback?state=policy-state&code=abc", nil)
+	req.AddCookie(&http.Cookie{Name: githubPRConnectStateCookie, Value: "policy-state"})
+	req.AddCookie(&http.Cookie{
+		Name:  githubConnectReturnCookiePrefix + "policy-state",
+		Value: url.QueryEscape("/code-reviews?tab=policy&add_repository=1"),
+	})
+	ctx := middleware.WithUser(req.Context(), &models.User{ID: userID, OrgID: orgID})
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.HandleConnectCallback(rr, req)
+
+	require.Equal(t, http.StatusTemporaryRedirect, rr.Code, "callback should return to the code review repository flow")
+	parsed, err := url.Parse(rr.Header().Get("Location"))
+	require.NoError(t, err, "callback redirect should parse")
+	require.Equal(t, "/code-reviews", parsed.Path, "callback should return to the code reviews page")
+	require.Equal(t, "policy", parsed.Query().Get("tab"), "callback should restore the policy tab")
+	require.Equal(t, "1", parsed.Query().Get("add_repository"), "callback should reopen the add repository sheet")
+	require.Equal(t, "connected", parsed.Query().Get("github_pr"), "callback should report successful GitHub account connection")
 }
 
 func TestGitHubStatusHandler_GetStatus_Unauthorized(t *testing.T) {

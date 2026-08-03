@@ -832,6 +832,28 @@ func (h *CodeReviewHandler) GetGitHubTrigger(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewGitHubTriggerResponse]{Data: resp})
 }
 
+func (h *CodeReviewHandler) ListGitHubTriggers(w http.ResponseWriter, r *http.Request) {
+	if h.triggerSetup == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "GITHUB_TRIGGER_SETUP_NOT_CONFIGURED", "GitHub reviewer trigger setup is not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user is required")
+		return
+	}
+	responses, err := h.triggerSetup.ListStatus(r.Context(), orgID, user.ID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "GITHUB_TRIGGER_STATUS_FAILED", "failed to load GitHub reviewer trigger statuses", err)
+		return
+	}
+	if responses == nil {
+		responses = []models.CodeReviewGitHubTriggerResponse{}
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.CodeReviewGitHubTriggerResponse]{Data: responses})
+}
+
 func (h *CodeReviewHandler) SetupGitHubTrigger(w http.ResponseWriter, r *http.Request) {
 	if h.triggerSetup == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "GITHUB_TRIGGER_SETUP_NOT_CONFIGURED", "GitHub reviewer trigger setup is not configured")
@@ -865,6 +887,8 @@ func (h *CodeReviewHandler) SetupGitHubTrigger(w http.ResponseWriter, r *http.Re
 			writeError(w, r, http.StatusConflict, "GITHUB_USER_AUTH_REQUIRED", "connect your GitHub account before creating the reviewer team", err)
 		case errors.Is(err, codereviewsvc.ErrGitHubTriggerPermissionRequired):
 			writeError(w, r, http.StatusForbidden, "GITHUB_TRIGGER_PERMISSION_REQUIRED", "GitHub rejected setup; an org owner may need to approve Organization Members write and Repository Administration write permissions for the GitHub App", err)
+		case errors.Is(err, codereviewsvc.ErrGitHubTriggerRepoDisconnected):
+			writeError(w, r, http.StatusConflict, "GITHUB_REPOSITORY_DISCONNECTED", "reconnect this repository before setting up its GitHub reviewer", err)
 		case errors.Is(err, pgx.ErrNoRows):
 			writeError(w, r, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "repository not found")
 		default:
