@@ -80,15 +80,18 @@ func TestFinishPublicationReviewPostgresQualifiesCompletedAtAcrossJoinedTables(t
 
 	orgID, sessionID, changesetID, loopID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	headSHA := "0123456789abcdef0123456789abcdef01234567"
+	_, err = pool.Exec(ctx, `INSERT INTO sessions (id, org_id, workspace_revision) VALUES ($1, $2, 7)`, sessionID, orgID)
+	require.NoError(t, err, "test should seed the reviewed session")
+	_, err = pool.Exec(ctx, `INSERT INTO session_changesets (id, org_id, session_id, head_sha) VALUES ($1, $2, $3, $4)`, changesetID, orgID, sessionID, headSHA)
+	require.NoError(t, err, "test should seed the reviewed changeset")
+	_, err = pool.Exec(ctx, `INSERT INTO session_review_loops (id, org_id, session_id, workspace_revision, desired_head_sha) VALUES ($1, $2, $3, 7, $4)`, loopID, orgID, sessionID, headSHA)
+	require.NoError(t, err, "test should seed the publication review loop")
 	_, err = pool.Exec(ctx, `
-		INSERT INTO sessions (id, org_id, workspace_revision) VALUES ($1, $2, 7);
-		INSERT INTO session_changesets (id, org_id, session_id, head_sha) VALUES ($3, $2, $1, $5);
-		INSERT INTO session_review_loops (id, org_id, session_id, workspace_revision, desired_head_sha) VALUES ($4, $2, $1, 7, $5);
 		INSERT INTO session_publications (
 			org_id, session_id, changeset_id, review_loop_id, state, review_gate_state,
 			review_workspace_revision, review_desired_head_sha
-		) VALUES ($2, $1, $3, $4, 'review_pending', 'pending', 7, $5)`,
-		sessionID, orgID, changesetID, loopID, headSHA)
+		) VALUES ($1, $2, $3, $4, 'review_pending', 'pending', 7, $5)`,
+		orgID, sessionID, changesetID, loopID, headSHA)
 	require.NoError(t, err, "test should seed a linked publication review")
 
 	err = finishPublicationReviewOn(ctx, pool, orgID, loopID, models.ReviewLoopStatusFailed)
