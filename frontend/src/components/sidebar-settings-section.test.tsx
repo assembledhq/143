@@ -24,7 +24,7 @@ describe("SidebarSettingsSection", () => {
       <SidebarSettingsSection pathname="/sessions" userRole="admin" variant="mobile" />,
     );
 
-    expect(screen.getByRole("button", { name: /Settings/ })).toHaveClass("px-2.5", "py-3", "text-sm");
+    expect(screen.getByRole("button", { name: /Settings/ })).toHaveClass("px-2.5", "py-3", "text-sm!");
   });
 
   it("opens collapsed settings in a floating menu", async () => {
