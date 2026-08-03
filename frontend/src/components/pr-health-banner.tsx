@@ -127,6 +127,11 @@ export function PRHealthBanner({
     (canShowSnapshotDetails && !!activeRepairState.openSessionID);
   const failedChecks = orderedChecks.filter((check) => check.status === "failed").length;
   const hasFailedCheckDetails = failedChecks > 0 || health.failing_test_count > 0;
+  // The badge row lost its always-present child when the sync time moved into
+  // the header, so it has to be gated or it contributes a stray space-y gap.
+  const hasStatusBadges =
+    isRepositoryDisconnected ||
+    (canShowSnapshotDetails && (hasFailedCheckDetails || !!health.obsolete_active_repair_sessions));
   const failedSummaryLabel = orderedChecks.length > 0
     ? `${failedChecks}/${orderedChecks.length} failed`
     : `${health.failing_test_count} failing test${health.failing_test_count === 1 ? "" : "s"}`;
@@ -185,66 +190,68 @@ export function PRHealthBanner({
           <div className="space-y-2 pl-[2.375rem]">
             <p className="text-xs text-foreground">{compactSummary}</p>
 
-            <div className="flex flex-wrap items-center gap-2">
-              {isRepositoryDisconnected && (
-                <Badge variant="secondary" className="bg-warning/10 text-warning text-xs">
-                  Repository disconnected
-                </Badge>
-              )}
-              {canShowSnapshotDetails && hasFailedCheckDetails && (
-                orderedChecks.length > 0 ? (
-                  <HoverCard openDelay={100} closeDelay={100}>
-                    <HoverCardTrigger asChild>
-                      <Badge variant="secondary" className="bg-destructive/10 text-destructive text-xs cursor-default">
-                        {failedSummaryLabel}
-                      </Badge>
-                    </HoverCardTrigger>
-                    <HoverCardContent align="start" className="w-80 p-3">
-                      <div className="space-y-2">
-                        <div className="text-xs font-medium text-foreground">CI jobs</div>
-                        <div className="space-y-1.5">
-                          {orderedChecks.map((check) => (
-                            check.details_url ? (
-                              <a
-                                key={`${check.name}-${check.status}`}
-                                href={check.details_url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="flex items-center justify-between gap-3 rounded-sm px-1 py-1 text-xs transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                              >
-                                <div className="flex min-w-0 items-center gap-1.5">
-                                  <span className="min-w-0 truncate text-foreground">{check.name}</span>
-                                  <ExternalLink aria-hidden="true" className="h-3 w-3 shrink-0 text-muted-foreground" />
-                                </div>
-                                <Badge variant="secondary" className={cn("shrink-0 text-xs", checkStatusBadgeClassName(check.status))}>
-                                  {checkStatusLabel(check.status)}
-                                </Badge>
-                              </a>
-                            ) : (
-                              <div key={`${check.name}-${check.status}`} className="flex items-center justify-between gap-3 px-1 py-1">
-                                <div className="min-w-0 text-xs text-foreground truncate">{check.name}</div>
-                                <Badge variant="secondary" className={cn("shrink-0 text-xs", checkStatusBadgeClassName(check.status))}>
-                                  {checkStatusLabel(check.status)}
-                                </Badge>
-                              </div>
-                            )
-                          ))}
-                        </div>
-                      </div>
-                    </HoverCardContent>
-                  </HoverCard>
-                ) : (
-                  <Badge variant="secondary" className="bg-destructive/10 text-destructive text-xs">
-                    {failedSummaryLabel}
+            {hasStatusBadges && (
+              <div className="flex flex-wrap items-center gap-2">
+                {isRepositoryDisconnected && (
+                  <Badge variant="secondary" className="bg-warning/10 text-warning text-xs">
+                    Repository disconnected
                   </Badge>
-                )
-              )}
-              {canShowSnapshotDetails && health.obsolete_active_repair_sessions && (
-                <Badge variant="secondary" className="text-xs">
-                  newer repair context available
-                </Badge>
-              )}
-            </div>
+                )}
+                {canShowSnapshotDetails && hasFailedCheckDetails && (
+                  orderedChecks.length > 0 ? (
+                    <HoverCard openDelay={100} closeDelay={100}>
+                      <HoverCardTrigger asChild>
+                        <Badge variant="secondary" className="bg-destructive/10 text-destructive text-xs cursor-default">
+                          {failedSummaryLabel}
+                        </Badge>
+                      </HoverCardTrigger>
+                      <HoverCardContent align="start" className="w-80 p-3">
+                        <div className="space-y-2">
+                          <div className="text-xs font-medium text-foreground">CI jobs</div>
+                          <div className="space-y-1.5">
+                            {orderedChecks.map((check) => (
+                              check.details_url ? (
+                                <a
+                                  key={`${check.name}-${check.status}`}
+                                  href={check.details_url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="flex items-center justify-between gap-3 rounded-sm px-1 py-1 text-xs transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                >
+                                  <div className="flex min-w-0 items-center gap-1.5">
+                                    <span className="min-w-0 truncate text-foreground">{check.name}</span>
+                                    <ExternalLink aria-hidden="true" className="h-3 w-3 shrink-0 text-muted-foreground" />
+                                  </div>
+                                  <Badge variant="secondary" className={cn("shrink-0 text-xs", checkStatusBadgeClassName(check.status))}>
+                                    {checkStatusLabel(check.status)}
+                                  </Badge>
+                                </a>
+                              ) : (
+                                <div key={`${check.name}-${check.status}`} className="flex items-center justify-between gap-3 px-1 py-1">
+                                  <div className="min-w-0 text-xs text-foreground truncate">{check.name}</div>
+                                  <Badge variant="secondary" className={cn("shrink-0 text-xs", checkStatusBadgeClassName(check.status))}>
+                                    {checkStatusLabel(check.status)}
+                                  </Badge>
+                                </div>
+                              )
+                            ))}
+                          </div>
+                        </div>
+                      </HoverCardContent>
+                    </HoverCard>
+                  ) : (
+                    <Badge variant="secondary" className="bg-destructive/10 text-destructive text-xs">
+                      {failedSummaryLabel}
+                    </Badge>
+                  )
+                )}
+                {canShowSnapshotDetails && health.obsolete_active_repair_sessions && (
+                  <Badge variant="secondary" className="text-xs">
+                    newer repair context available
+                  </Badge>
+                )}
+              </div>
+            )}
 
             {repairError && (
               <div className="flex items-start gap-2 rounded-md border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive">

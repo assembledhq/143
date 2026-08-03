@@ -447,6 +447,13 @@ describe('SessionDetailPage overview and review loop', () => {
     const reviewCard = reviewTitle.closest('[data-slot="card"]');
     const splitSuggestion = splitTitle.closest('[data-slot="overview-suggestion"]');
     expect(reviewCard?.querySelector('[data-slot="agent-action-card-icon"] .lucide-scan-search')).toBeInTheDocument();
+    // jsdom cannot evaluate container queries, so guard the placement instead:
+    // an element is never its own query container, so the row layout would be
+    // dead if the container were declared on the element that queries it.
+    const reviewCardContent = reviewCard?.querySelector('[data-slot="card-content"]');
+    expect(reviewCard?.className).toContain('@container/agent-action');
+    expect(reviewCardContent?.className).toContain('@min-[24rem]/agent-action:flex-row');
+    expect(reviewCardContent?.className).not.toContain('@container/agent-action');
     expect(splitSuggestion?.querySelector('[data-slot="overview-suggestion-icon"] .lucide-git-branch')).toBeInTheDocument();
     expect(splitTitle.closest('[data-slot="card"]')).toBeNull();
     expect(reviewTitle.compareDocumentPosition(splitTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
