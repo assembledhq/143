@@ -142,34 +142,60 @@ func (s *UserStore) GetByIDGlobalWithSettings(ctx context.Context, userID uuid.U
 	if err != nil {
 		return models.UserWithSettings{}, fmt.Errorf("query user with settings: %w", err)
 	}
-	return pgx.CollectOneRow(rows, func(row pgx.CollectableRow) (models.UserWithSettings, error) {
-		var user models.UserWithSettings
-		var rawSettings json.RawMessage
-		var emailVerifiedAt *time.Time
-		if err := row.Scan(
-			&user.ID,
-			&user.OrgID,
-			&user.Email,
-			&user.Name,
-			&user.Role,
-			&user.GitHubID,
-			&user.GitHubLogin,
-			&user.AvatarURL,
-			&user.GoogleID,
-			&emailVerifiedAt,
-			&user.CreatedAt,
-			&rawSettings,
-		); err != nil {
-			return models.UserWithSettings{}, err
-		}
-		user.EmailVerified = emailVerifiedAt != nil
-		settings, err := models.ParseUserSettings(rawSettings)
-		if err != nil {
-			return models.UserWithSettings{}, fmt.Errorf("parse user settings: %w", err)
-		}
-		user.Settings = settings
-		return user, nil
+	return pgx.CollectOneRow(rows, collectUserWithSettings)
+}
+
+// GetByIDWithSettings looks up a user's settings through an active
+// organization membership. The returned OrgID and Role describe the requested
+// organization rather than the user's legacy primary organization, which is
+// essential for sessions created in a secondary organization.
+func (s *UserStore) GetByIDWithSettings(ctx context.Context, orgID, userID uuid.UUID) (models.UserWithSettings, error) {
+	query := `
+		SELECT u.id, @org_id::uuid AS org_id, u.email, u.name, m.role,
+		       u.github_id, u.github_login, u.avatar_url, u.google_id,
+		       u.email_verified_at, u.created_at, u.settings
+		FROM users u
+		JOIN organization_memberships m
+		  ON m.user_id = u.id AND m.org_id = @org_id
+		WHERE u.id = @user_id`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":  orgID,
+		"user_id": userID,
 	})
+	if err != nil {
+		return models.UserWithSettings{}, fmt.Errorf("query organization member with settings: %w", err)
+	}
+	return pgx.CollectOneRow(rows, collectUserWithSettings)
+}
+
+func collectUserWithSettings(row pgx.CollectableRow) (models.UserWithSettings, error) {
+	var user models.UserWithSettings
+	var rawSettings json.RawMessage
+	var emailVerifiedAt *time.Time
+	if err := row.Scan(
+		&user.ID,
+		&user.OrgID,
+		&user.Email,
+		&user.Name,
+		&user.Role,
+		&user.GitHubID,
+		&user.GitHubLogin,
+		&user.AvatarURL,
+		&user.GoogleID,
+		&emailVerifiedAt,
+		&user.CreatedAt,
+		&rawSettings,
+	); err != nil {
+		return models.UserWithSettings{}, err
+	}
+	user.EmailVerified = emailVerifiedAt != nil
+	settings, err := models.ParseUserSettings(rawSettings)
+	if err != nil {
+		return models.UserWithSettings{}, fmt.Errorf("parse user settings: %w", err)
+	}
+	user.Settings = settings
+	return user, nil
 }
 
 // GetLastOrgID returns the user's persisted cross-login active-org preference.

@@ -63,7 +63,7 @@ func TestRenameLegacyOutputTermsMigrationPostgresBehavior(t *testing.T) {
 		orgID, sessionID, uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New())
 	require.NoError(t, err, "test should seed legacy rows")
 
-	upBody, err := os.ReadFile("../../migrations/000275_rename_legacy_output_terms.up.sql")
+	upBody, err := os.ReadFile("../../migrations/000280_rename_legacy_output_terms.up.sql")
 	require.NoError(t, err, "test should read the output-name up migration")
 	_, err = conn.Exec(ctx, string(upBody))
 	require.NoError(t, err, "output-name up migration should apply to a deployed schema")
@@ -152,7 +152,7 @@ func TestRenameLegacyOutputTermsMigrationPostgresBehavior(t *testing.T) {
 	require.Contains(t, structuredResult, "prompt_record_key", "migration should rename persisted prompt result keys")
 	require.Contains(t, structuredResult, "raw_record_key", "migration should rename persisted raw result keys")
 
-	downBody, err := os.ReadFile("../../migrations/000275_rename_legacy_output_terms.down.sql")
+	downBody, err := os.ReadFile("../../migrations/000280_rename_legacy_output_terms.down.sql")
 	require.NoError(t, err, "test should read the output-name down migration")
 	_, err = conn.Exec(ctx, string(downBody))
 	require.NoError(t, err, "output-name down migration should restore the deployed schema")

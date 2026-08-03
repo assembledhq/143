@@ -74,3 +74,29 @@ export function prErrorTitle(snapshotState: PRSnapshotState | null, errorCode?: 
   }
   return "Couldn't create the PR";
 }
+
+// The API now sends product copy for typed publication rejections, but a
+// server still running the previous build sends the raw coordinator string.
+// Translating that string here keeps the notice readable across a rollout;
+// anything more specific is already user-facing and passes through untouched.
+export function formatPRCreationError(errorCode?: string, message?: string | null): string {
+  const trimmedMessage = message?.trim();
+  const useCoordinatorFallback = !trimmedMessage ||
+    /^pull request publication request was rejected[.!]?$/i.test(trimmedMessage);
+
+  if (useCoordinatorFallback && errorCode === "WORKSPACE_NOT_READY") {
+    return "This workspace is not ready to publish a pull request. Review its status, then try again.";
+  }
+  if (useCoordinatorFallback && errorCode === "SESSION_NOT_PUBLICATION_ELIGIBLE") {
+    return "This session cannot create a pull request in its current state.";
+  }
+
+  if (!trimmedMessage) {
+    return "Something went wrong while creating the pull request. Try again.";
+  }
+
+  const sentenceCasedMessage = `${trimmedMessage.charAt(0).toUpperCase()}${trimmedMessage.slice(1)}`;
+  return /[.!?]$/.test(sentenceCasedMessage)
+    ? sentenceCasedMessage
+    : `${sentenceCasedMessage}.`;
+}

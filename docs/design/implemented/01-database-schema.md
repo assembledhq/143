@@ -8,7 +8,7 @@ This document defines the PostgreSQL schema for 143.dev. All entities flow throu
 
 Use [golang-migrate/migrate](https://github.com/golang-migrate/migrate) for schema migrations. Migrations live in `migrations/` as numbered SQL files (e.g. `000001_init.up.sql`, `000001_init.down.sql`).
 
-Migration 275 reserves `artifact` for session-produced files by moving older
+Migration 280 reserves `artifact` for session-produced files by moving older
 product concepts to prompt records, review bundles, preview captures, and cache
 outputs. Existing installations use an expand/migrate/contract window: old and
 new prompt tables and renamed columns are synchronized by compatibility
@@ -19,7 +19,7 @@ after the minimum supported CLI version and the entire worker fleet have moved
 past the compatibility release.
 
 Because migrations 219, 225, and 226 create the new names directly, a fresh
-installation already has them at version 274. Migration 275's rollback
+installation already has them before version 280. Migration 280's rollback
 therefore only removes the expansion it added — it never renames a fresh
 installation's objects — and the 219/225/226 rollbacks drop whichever of the
 two naming shapes the database carries.

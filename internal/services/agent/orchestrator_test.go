@@ -25,6 +25,7 @@ import (
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/linear"
+	"github.com/assembledhq/143/internal/services/publicationintent"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
@@ -1119,6 +1120,36 @@ type mockAutomationRunUpdater struct {
 	statuses  []models.SessionStatus
 }
 
+type mockPublicationIntentCoordinator struct {
+	mu       sync.Mutex
+	requests []publicationintent.RequestPullRequest
+}
+
+func (m *mockPublicationIntentCoordinator) RequestPullRequest(
+	_ context.Context,
+	_, _ uuid.UUID,
+	req publicationintent.RequestPullRequest,
+) (*publicationintent.PublicationIntentResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.requests = append(m.requests, req)
+	return &publicationintent.PublicationIntentResult{Status: publicationintent.ResultPRQueued}, nil
+}
+
+func (m *mockPublicationIntentCoordinator) PublicationExecutionEnabled(models.SessionPublicationSource) bool {
+	return true
+}
+
+func (m *mockPublicationIntentCoordinator) ReviewExecutionEnabled(models.SessionPublicationSource) bool {
+	return true
+}
+
+func (m *mockPublicationIntentCoordinator) getRequests() []publicationintent.RequestPullRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]publicationintent.RequestPullRequest(nil), m.requests...)
+}
+
 func (m *mockAutomationRunUpdater) OnSessionComplete(_ context.Context, _ *models.Session, status models.SessionStatus) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1373,6 +1404,7 @@ type testDeps struct {
 	logger                    *zerolog.Logger
 	agentPRPublicationEnabled bool
 	agentPRPromptEnabled      bool
+	publicationIntents        *mockPublicationIntentCoordinator
 }
 
 // mockSessionThreadStore captures thread-status writes the orchestrator
@@ -1551,10 +1583,11 @@ func defaultDeps() testDeps {
 		humanInputs: &mockSessionHumanInputRequestStore{
 			requests: make([]models.HumanInputRequest, 0),
 		},
-		messages:  &mockSessionMessageStore{},
-		jobs:      &mockJobStore{},
-		github:    &mockGitHubTokenProvider{token: "ghp_test123"},
-		codexAuth: nil,
+		messages:           &mockSessionMessageStore{},
+		jobs:               &mockJobStore{},
+		publicationIntents: &mockPublicationIntentCoordinator{},
+		github:             &mockGitHubTokenProvider{token: "ghp_test123"},
+		codexAuth:          nil,
 		creds: &mockCredentialProvider{
 			byProvider: map[models.ProviderName]*models.DecryptedCredential{
 				// Seed an Anthropic API key so ensureClaudeCodeAuth's fallback
@@ -1669,6 +1702,7 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		MaxConcurrent:             3,
 		AgentPRPublicationEnabled: d.agentPRPublicationEnabled,
 		AgentPRPromptEnabled:      d.agentPRPromptEnabled,
+		PublicationIntents:        d.publicationIntents,
 	})
 }
 
@@ -1734,18 +1768,44 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 	require.Len(t, results, 1)
 	require.Equal(t, models.SessionStatusCompleted, results[0].status)
 
-	// open_pr job should be enqueued.
-	require.Contains(t, d.jobs.getEnqueued(), "open_pr")
-	openPRPayload, ok := d.jobs.getPayload("open_pr").(map[string]interface{})
-	require.True(t, ok, "open_pr job payload should be a map")
-	require.Equal(t, run.ID.String(), openPRPayload["session_id"], "open_pr payload should include agent run ID")
-	require.Equal(t, run.OrgID.String(), openPRPayload["org_id"], "open_pr payload should include org ID")
+	// Ordinary process completion is not publication intent. The agent tool or
+	// an explicit user action owns that decision for manual sessions.
+	require.NotContains(t, d.jobs.getEnqueued(), "open_pr", "successful completion should not publish without durable intent")
 
 	// Logs should be persisted.
 	require.GreaterOrEqual(t, d.logs.getCount(), 2)
 
 	// Sandbox should be destroyed.
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
+}
+
+func TestRunAgent_ProjectTaskRetainsCoordinatedPublication(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	projectTaskID := uuid.New()
+	run.ProjectTaskID = &projectTaskID
+
+	d := defaultDeps()
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Diff:     "--- a/main.go\n+++ b/main.go",
+			Summary:  "Implemented project task",
+			ExitCode: 0,
+		}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.NoError(t, err, "successful project task should complete")
+
+	requests := d.publicationIntents.getRequests()
+	require.Equal(t, []publicationintent.RequestPullRequest{{
+		Source:      models.SessionPublicationSourceBackend,
+		TriggerKind: models.SessionPublicationTriggerPolicy,
+	}}, requests, "project completion should request backend-owned publication through the shared coordinator")
+	require.Equal(t, []string{"completed"}, d.projects.getStatuses(), "project completion should still update its parent task")
 }
 
 func TestRunAgent_ResultErrorMarksRunFailed(t *testing.T) {
@@ -4028,7 +4088,7 @@ func TestRunAgent_FailureLogIncludesPlatformHealthFields(t *testing.T) {
 	require.GreaterOrEqual(t, durationMS, float64(0), "failure duration should be non-negative")
 }
 
-func TestRunAgent_SuccessEnqueuesOpenPR(t *testing.T) {
+func TestRunAgent_SuccessDoesNotTreatCompletionAsPublicationIntent(t *testing.T) {
 	t.Parallel()
 
 	orgID := testOrg()
@@ -4052,7 +4112,7 @@ func TestRunAgent_SuccessEnqueuesOpenPR(t *testing.T) {
 	require.Len(t, results, 1)
 	require.Equal(t, models.SessionStatusCompleted, results[0].status)
 
-	require.Contains(t, d.jobs.getEnqueued(), "open_pr")
+	require.NotContains(t, d.jobs.getEnqueued(), "open_pr", "ordinary completion should leave publication to the agent tool or an explicit action")
 }
 
 func TestRunAgent_AutomaticPRPublishingGuards(t *testing.T) {
@@ -4094,25 +4154,18 @@ func TestRunAgent_AutomaticPRPublishingGuards(t *testing.T) {
 			promptFlag:      true,
 		},
 		{
-			// Enabling the backend before the prompt is a natural staged
-			// rollout order. The agent was never told it could publish, so
-			// the legacy completion trigger must still fire or the diff is
-			// stranded with nothing left to open a PR.
-			name:            "publication flag without prompt flag keeps the legacy trigger",
+			name:            "publication flag without prompt leaves changes for manual handoff",
 			diff:            "--- a/fix.go\n+++ b/fix.go",
 			publicationFlag: true,
-			expectOpenPR:    true,
 		},
 		{
-			// Code review turns never receive the handoff instruction and the
-			// coordinator refuses them, so the two gates must agree that they
-			// keep the legacy trigger.
-			name:             "ineligible origin keeps the legacy trigger under full rollout",
+			// Code review turns never receive the handoff instruction and never
+			// create a second PR from process completion.
+			name:             "ineligible origin never publishes from completion",
 			diff:             "--- a/fix.go\n+++ b/fix.go",
 			publicationFlag:  true,
 			promptFlag:       true,
 			ineligibleOrigin: true,
-			expectOpenPR:     true,
 		},
 		{
 			// A follow-up turn on a session that already published must stand
@@ -4159,10 +4212,13 @@ func TestRunAgent_AutomaticPRPublishingGuards(t *testing.T) {
 				require.Equal(t, string(linear.MilestoneEndedNoPR), payload["event"], "no-diff session should complete Linear without a PR")
 			}
 			if tt.expectOpenPR {
-				require.Contains(t, d.jobs.getEnqueued(), "open_pr", "eligible automation should queue pull request creation")
+				requests := d.publicationIntents.getRequests()
+				require.Len(t, requests, 1, "eligible automation should submit one durable publication request")
+				require.Equal(t, models.SessionPublicationSourceAutomation, requests[0].Source, "automation should retain its publication source")
+				require.Equal(t, models.SessionPublicationTriggerPolicy, requests[0].TriggerKind, "automation should retain policy authority")
 				return
 			}
-			require.NotContains(t, d.jobs.getEnqueued(), "open_pr", "ineligible session should not queue pull request creation")
+			require.Empty(t, d.publicationIntents.getRequests(), "ineligible session should not request publication")
 		})
 	}
 }

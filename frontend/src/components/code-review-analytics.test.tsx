@@ -58,7 +58,6 @@ function renderReport(analytics: CodeReviewAnalytics) {
       authorSortOrder="desc"
       onAuthorSort={vi.fn()}
       reviewLinkFilters={{ range: "30d" }}
-      onNavigateToReviews={vi.fn()}
       filters={null}
     />,
   );
@@ -114,6 +113,11 @@ describe("CodeReviewAnalyticsReport PR cohort states", () => {
     }
     expect(within(rounds).getByText("3")).toBeInTheDocument();
     expect(screen.getByText(/3 PRs had a failed attempt/)).toBeInTheDocument();
+
+    const authorUsage = screen.getByText("Usage by PR author");
+    const approvalByRound = screen.getByText("Approval by round");
+    expect(authorUsage.compareDocumentPosition(approvalByRound) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
   });
 
   it("shows median rounds to approval with one decimal place", () => {

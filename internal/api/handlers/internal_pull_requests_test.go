@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -52,6 +53,11 @@ type internalPRCoordinatorStub struct {
 	result    *publicationintent.PublicationIntentResult
 	err       error
 	requested *publicationintent.RequestPullRequest
+	requests  []publicationintent.RequestPullRequest
+	// failOnCall makes the Nth (1-based) request fail, which is how a stack
+	// publish that partially succeeds is reproduced.
+	failOnCall int
+	failWith   error
 }
 
 func (s *internalPRCoordinatorStub) RequestPullRequest(
@@ -61,7 +67,19 @@ func (s *internalPRCoordinatorStub) RequestPullRequest(
 	req publicationintent.RequestPullRequest,
 ) (*publicationintent.PublicationIntentResult, error) {
 	s.requested = &req
+	s.requests = append(s.requests, req)
+	if s.failOnCall > 0 && len(s.requests) == s.failOnCall {
+		return nil, s.failWith
+	}
 	return s.result, s.err
+}
+
+func (s *internalPRCoordinatorStub) PublicationExecutionEnabled(models.SessionPublicationSource) bool {
+	return true
+}
+
+func (s *internalPRCoordinatorStub) ReviewExecutionEnabled(models.SessionPublicationSource) bool {
+	return true
 }
 
 func TestInternalPullRequestHandler_CreateWithCoordinatorReturnsFlatTypedResponse(t *testing.T) {
@@ -96,6 +114,39 @@ func TestInternalPullRequestHandler_CreateWithCoordinatorReturnsFlatTypedRespons
 	require.Equal(t, models.SessionPublicationTriggerExplicitAction, coordinator.requested.TriggerKind, "explicit user action should override automatic publication preference")
 	require.Equal(t, models.SessionPublicationSourceAgentTool, coordinator.requested.Source,
 		"this endpoint is only reachable with a sandbox token, so the channel stays the agent tool even when the agent relays an explicit user instruction")
+}
+
+func TestInternalPullRequestHandler_CreateWithCoordinatorReturnsPublicationBlockerDetails(t *testing.T) {
+	t.Parallel()
+
+	reason := "The remote pull request branch differs from the session checkpoint. Reconcile the remote branch with the session before creating the PR."
+	coordinator := &internalPRCoordinatorStub{err: &publicationintent.Error{
+		Code: publicationintent.ErrorWorkspaceNotReady,
+		Err:  errors.New("primary changeset is external_update_detected"),
+		Details: map[string]any{
+			"changeset_status": models.ChangesetStatusExternalUpdateDetected,
+			"reason":           reason,
+		},
+	}}
+	handler := &InternalPullRequestHandler{coordinator: coordinator, logger: zerolog.Nop()}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/internal/session/pr", nil)
+	rr := httptest.NewRecorder()
+
+	handler.createWithCoordinator(rr, req, uuid.New(), uuid.New(), internalCreatePullRequestRequest{
+		TriggerKind: string(models.SessionPublicationTriggerExplicitAction),
+	})
+
+	require.Equal(t, http.StatusConflict, rr.Code, "an unpublishable changeset should return a conflict")
+	var response struct {
+		Error struct {
+			Code    string         `json:"code"`
+			Details map[string]any `json:"details"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response), "publication blocker response should be valid JSON")
+	require.Equal(t, string(publicationintent.ErrorWorkspaceNotReady), response.Error.Code, "response should preserve the typed coordinator code")
+	require.Equal(t, string(models.ChangesetStatusExternalUpdateDetected), response.Error.Details["changeset_status"], "response should identify the blocking changeset state")
+	require.Equal(t, reason, response.Error.Details["reason"], "response should preserve actionable reconciliation guidance")
 }
 
 func TestInternalPullRequestHandler_Create_MissingToken(t *testing.T) {

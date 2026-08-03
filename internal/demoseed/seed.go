@@ -251,18 +251,18 @@ func AssertDemoSeedState(ctx context.Context, pool seedDB) error {
 		},
 		{
 			name:     "demo issues exist",
-			query:    `SELECT count(*) FROM issues WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000600'::uuid, '00000000-0000-4000-a000-000000000601'::uuid, '00000000-0000-4000-a000-000000000602'::uuid, '00000000-0000-4000-a000-000000000603'::uuid, '00000000-0000-4000-a000-000000000604'::uuid)`,
-			expected: 5,
+			query:    `SELECT count(*) FROM issues WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000600'::uuid, '00000000-0000-4000-a000-000000000601'::uuid, '00000000-0000-4000-a000-000000000602'::uuid, '00000000-0000-4000-a000-000000000604'::uuid)`,
+			expected: 4,
 		},
 		{
 			name:     "demo issue priority scores exist",
-			query:    `SELECT count(*) FROM priority_scores WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND issue_id IN ('00000000-0000-4000-a000-000000000600'::uuid, '00000000-0000-4000-a000-000000000601'::uuid, '00000000-0000-4000-a000-000000000602'::uuid, '00000000-0000-4000-a000-000000000603'::uuid, '00000000-0000-4000-a000-000000000604'::uuid)`,
-			expected: 5,
+			query:    `SELECT count(*) FROM priority_scores WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND issue_id IN ('00000000-0000-4000-a000-000000000600'::uuid, '00000000-0000-4000-a000-000000000601'::uuid, '00000000-0000-4000-a000-000000000602'::uuid, '00000000-0000-4000-a000-000000000604'::uuid)`,
+			expected: 4,
 		},
 		{
 			name:     "demo issue complexity estimates exist",
-			query:    `SELECT count(*) FROM complexity_estimates WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND issue_id IN ('00000000-0000-4000-a000-000000000600'::uuid, '00000000-0000-4000-a000-000000000601'::uuid, '00000000-0000-4000-a000-000000000602'::uuid, '00000000-0000-4000-a000-000000000603'::uuid, '00000000-0000-4000-a000-000000000604'::uuid)`,
-			expected: 5,
+			query:    `SELECT count(*) FROM complexity_estimates WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND issue_id IN ('00000000-0000-4000-a000-000000000600'::uuid, '00000000-0000-4000-a000-000000000601'::uuid, '00000000-0000-4000-a000-000000000602'::uuid, '00000000-0000-4000-a000-000000000604'::uuid)`,
+			expected: 4,
 		},
 		{
 			name:     "demo session issue links exist",

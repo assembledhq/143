@@ -619,6 +619,12 @@ This command queues the durable 143 publication workflow; it does not call the
 GitHub PR API from the sandbox. Sandbox GitHub API access is read-only for pull
 requests, while git push uses a separate repository-bound contents token.
 
+The command returns the workflow's actual asynchronous status:
+`review_in_progress`, `pr_queued`, `already_published`,
+`manual_publication_required`, or `blocked`. A running review or queued
+publication is not a created pull request; report the returned state and wait
+for the session Overview to converge.
+
 ### `eval add`
 
 Add a candidate eval task from a session launched by the eval settings bootstrap flow. This namespace is not exposed to ordinary coding sessions.

@@ -471,12 +471,14 @@ type SessionDetail struct {
 }
 
 type SessionPublicationPolicy struct {
-	CreatePRWhenAgentReady bool                    `json:"create_pr_when_agent_ready"`
-	CreatePRSource         PublicationPolicySource `json:"create_pr_source"`
-	ReviewBeforePR         bool                    `json:"review_before_pr"`
-	ReviewSource           PublicationPolicySource `json:"review_source"`
-	ReviewMaxPasses        int                     `json:"review_max_passes"`
-	PRHandoffMode          PRHandoffMode           `json:"pr_handoff_mode"`
+	CreatePRWhenAgentReady           bool                    `json:"create_pr_when_agent_ready"`
+	CreatePRSource                   PublicationPolicySource `json:"create_pr_source"`
+	ReviewBeforePR                   bool                    `json:"review_before_pr"`
+	ReviewExecutionEnabled           bool                    `json:"review_execution_enabled"`
+	AgentPublicationExecutionEnabled bool                    `json:"agent_publication_execution_enabled"`
+	ReviewSource                     PublicationPolicySource `json:"review_source"`
+	ReviewMaxPasses                  int                     `json:"review_max_passes"`
+	PRHandoffMode                    PRHandoffMode           `json:"pr_handoff_mode"`
 }
 
 // SessionDiff is the large, lazily-loaded diff payload for a session. It is
@@ -1104,6 +1106,7 @@ const (
 	JobTypeCollectPullRequestFeedback    = "collect_pull_request_feedback"
 	JobTypePublishPRFeedbackResponses    = "publish_pull_request_feedback_responses"
 	JobTypeReconcilePullRequestFeedback  = "reconcile_pull_request_feedback"
+	JobTypeReconcileSessionReviewLoop    = "reconcile_session_review_loop"
 )
 
 // Job represents an async work queue item.

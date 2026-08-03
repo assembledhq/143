@@ -36,6 +36,7 @@ import (
 	pagerdutysvc "github.com/assembledhq/143/internal/services/pagerduty"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/prioritization"
+	"github.com/assembledhq/143/internal/services/publicationintent"
 	reviewloopsvc "github.com/assembledhq/143/internal/services/reviewloop"
 	slackbotsvc "github.com/assembledhq/143/internal/services/slackbot"
 	"github.com/assembledhq/143/internal/services/storage"
@@ -46,6 +47,10 @@ const sandboxCapacityRetryDelay = 10 * time.Second
 const previewCapacityRetryDelay = 5 * time.Second
 const previewStartupInterruptedRetryDelay = 2 * time.Second
 const prePRReviewRetryDelay = 5 * time.Second
+const reviewLoopRecoveryDelay = 30 * time.Second
+const reviewLoopRecoveryInactiveFor = 15 * time.Second
+const periodicReviewLoopRecoveryInactiveFor = 2 * time.Minute
+const reviewLoopRecoveryBatchSize = 50
 const continuePostSuccessActionPushPRChanges = "push_pr_changes"
 
 var enqueuePRPushChangesJobAfterContinue = enqueuePRPushChangesJob
@@ -449,6 +454,9 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 			w.Register(models.JobTypeStartCodeReviewReassessment, newStartCodeReviewReassessmentHandler(stores, services, logger))
 		}
 	}
+	if services != nil && services.ReviewLoops != nil {
+		w.Register(models.JobTypeReconcileSessionReviewLoop, newReconcileSessionReviewLoopHandler(services, logger))
+	}
 	if services != nil && services.PagerDuty != nil {
 		w.Register(models.JobTypePagerDutyIngestEvent, newPagerDutyIngestEventHandler(services.PagerDuty, logger))
 	}
@@ -794,21 +802,22 @@ type Services struct {
 	AutomationRuns      agent.AutomationRunUpdater // nil-safe: updates automation runs on terminal session fallback paths
 	Prioritization      *prioritization.Service
 	Feedback            *feedback.Service
-	Memory              MemoryReinforcer              // optional — enables memory reinforcement on PR approval
-	SlackSummarizer     *ingestion.SlackSummarizer    // nil-safe: Slack summarization disabled if nil
-	LLM                 llmClient                     // nil-safe: needed for eval LLM judge grading
-	GitHub              agent.GitHubTokenProvider     // nil-safe: needed for eval repo cloning
-	GitHubOrgRoster     githubOrgRosterService        // nil-safe: needed for GitHub org auto-join roster sync
-	Snapshots           storage.SnapshotStore         // nil-safe: needed for eval code_check grading
-	TitleService        *services.SessionTitleService // nil-safe: session title regeneration
-	Linear              *linear.Service               // nil-safe: Linear session-linking disabled if nil
-	PagerDuty           pagerDutyEventProcessor       // nil-safe: PagerDuty incident ingestion disabled if nil
-	PagerDutySync       pagerDutySyncer               // nil-safe: PagerDuty reconciliation disabled if nil
-	PagerDutyWrites     pagerDutyPRWritebacker        // nil-safe: PagerDuty writeback disabled if nil
-	CodeReviews         codeReviewSubmitter           // nil-safe: GitHub review submission disabled if nil
-	CodeReviewLifecycle codeReviewLifecycle           // nil-safe: starts durable follow-up assessments after webhook changes
-	CodingAgents        codingAgentAvailability       // nil-safe: code review falls back to the configured roster when nil
-	SlackbotMetrics     *metrics.SlackbotMetrics      // nil-safe: Slackbot observability disabled if nil
+	Memory              MemoryReinforcer                               // optional — enables memory reinforcement on PR approval
+	SlackSummarizer     *ingestion.SlackSummarizer                     // nil-safe: Slack summarization disabled if nil
+	LLM                 llmClient                                      // nil-safe: needed for eval LLM judge grading
+	GitHub              agent.GitHubTokenProvider                      // nil-safe: needed for eval repo cloning
+	GitHubOrgRoster     githubOrgRosterService                         // nil-safe: needed for GitHub org auto-join roster sync
+	Snapshots           storage.SnapshotStore                          // nil-safe: needed for eval code_check grading
+	TitleService        *services.SessionTitleService                  // nil-safe: session title regeneration
+	Linear              *linear.Service                                // nil-safe: Linear session-linking disabled if nil
+	PagerDuty           pagerDutyEventProcessor                        // nil-safe: PagerDuty incident ingestion disabled if nil
+	PagerDutySync       pagerDutySyncer                                // nil-safe: PagerDuty reconciliation disabled if nil
+	PagerDutyWrites     pagerDutyPRWritebacker                         // nil-safe: PagerDuty writeback disabled if nil
+	CodeReviews         codeReviewSubmitter                            // nil-safe: GitHub review submission disabled if nil
+	CodeReviewLifecycle codeReviewLifecycle                            // nil-safe: starts durable follow-up assessments after webhook changes
+	CodingAgents        codingAgentAvailability                        // nil-safe: code review falls back to the configured roster when nil
+	PublicationIntents  publicationintent.PublicationIntentCoordinator // nil-safe: Slack falls back to an actionable error when publication is unavailable
+	SlackbotMetrics     *metrics.SlackbotMetrics                       // nil-safe: Slackbot observability disabled if nil
 	// Redis is optional and used for non-authoritative shared caches such as
 	// Slack user display names. Losing it should only increase provider lookups.
 	Redis       *cache.Client
@@ -822,6 +831,7 @@ type Services struct {
 		OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid.UUID, assistantSummary string) error
 		OnThreadTurnFailed(ctx context.Context, orgID, threadID uuid.UUID, summary string) error
 		Start(ctx context.Context, orgID, sessionID uuid.UUID, req reviewloopsvc.StartReviewLoopRequest) (*models.SessionReviewLoop, error)
+		ReconcileStrandedPublicationLoops(ctx context.Context, orgID uuid.UUID, inactiveBefore time.Time, limit int) (int, error)
 	}
 	// EvalBatchStreams publishes lightweight pub/sub signals on every batch
 	// or run state transition so the eval-batch detail page can replace its
@@ -1189,6 +1199,33 @@ func newPublishChangesetStackHandler(stores *Stores, services *Services, logger 
 		changesets, err := stores.SessionChangesets.ListFullBySession(ctx, orgID, sessionID)
 		if err != nil {
 			return err
+		}
+		if services != nil && services.PublicationIntents != nil {
+			for i := range changesets {
+				changeset := &changesets[i]
+				if changeset.Status == models.ChangesetStatusAbandoned || changeset.Status == models.ChangesetStatusMerged {
+					continue
+				}
+				result, requestErr := services.PublicationIntents.RequestPullRequest(ctx, orgID, sessionID, publicationintent.RequestPullRequest{
+					ChangesetID: &changeset.ID,
+					Draft:       input.Draft,
+					AuthorMode:  input.AuthorMode,
+					Source:      models.SessionPublicationSourceUser,
+					TriggerKind: models.SessionPublicationTriggerExplicitAction,
+				})
+				if requestErr != nil {
+					return fmt.Errorf("coordinate legacy stack publication for changeset %s: %w", changeset.ID, requestErr)
+				}
+				if result == nil {
+					return fmt.Errorf("coordinate legacy stack publication for changeset %s: coordinator returned no result", changeset.ID)
+				}
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Str("changeset_id", changeset.ID.String()).
+					Str("publication_status", string(result.Status)).
+					Msg("migrated legacy stack job to coordinated publication")
+			}
+			return nil
 		}
 		published := make(map[uuid.UUID]bool, len(changesets))
 		for _, changeset := range changesets {
@@ -6011,40 +6048,23 @@ func handleSlackSpecializedSessionAction(ctx context.Context, stores *Stores, se
 	}
 	switch input.ActionID {
 	case "slack_create_pr":
-		if stores == nil || stores.Jobs == nil {
+		if services == nil || services.PublicationIntents == nil {
 			return fmt.Errorf("slack PR creation dependencies are not configured")
 		}
-		changesetID := sessionID
-		if stores.SessionChangesets != nil {
-			primary, primaryErr := stores.SessionChangesets.GetPrimary(ctx, orgID, sessionID)
-			if primaryErr != nil {
-				return fmt.Errorf("resolve Slack PR primary changeset: %w", primaryErr)
-			}
-			changesetID = primary.ID
+		result, requestErr := services.PublicationIntents.RequestPullRequest(ctx, orgID, sessionID, publicationintent.RequestPullRequest{
+			Source:            models.SessionPublicationSourceUser,
+			TriggerKind:       models.SessionPublicationTriggerExplicitAction,
+			RequestedByUserID: &auth.ActorUserID,
+			RequestedRole:     string(auth.ActorRole),
+		})
+		if requestErr != nil {
+			return fmt.Errorf("request Slack PR publication: %w", requestErr)
 		}
-		payload := map[string]string{
-			"org_id":               orgID.String(),
-			"session_id":           sessionID.String(),
-			"changeset_id":         changesetID.String(),
-			"requested_by_user_id": auth.ActorUserID.String(),
-			"publication_source":   string(models.SessionPublicationSourceUser),
-			"publication_queue":    string(models.SessionPublicationJobQueueDefault),
+		message, messageErr := slackPublicationOutcomeMessage(result)
+		if messageErr != nil {
+			return messageErr
 		}
-		if stores.SessionChangesets != nil {
-			_, queued, queueErr := stores.Jobs.QueueChangesetPRCreation(ctx, orgID, sessionID, changesetID, "default", payload, 5)
-			if queueErr != nil {
-				return fmt.Errorf("enqueue Slack PR creation: %w", queueErr)
-			}
-			if !queued {
-				return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, "Pull request creation is already in progress for this branch.")
-			}
-		} else {
-			dedupeKey := "slack_create_pr:" + changesetID.String()
-			if _, err := stores.Jobs.Enqueue(ctx, orgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
-				return fmt.Errorf("enqueue Slack PR creation: %w", err)
-			}
-		}
-		return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, "Pull request creation requested for this session.")
+		return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, message)
 	case "slack_repair_pr", "slack_start_work":
 		prompt := "Continue this session and repair the pull request or branch publication failure. Report the outcome and any next action."
 		if input.ActionID == "slack_start_work" {
@@ -6089,6 +6109,25 @@ func handleSlackSpecializedSessionAction(ctx context.Context, stores *Stores, se
 	default:
 		return nil
 	}
+}
+
+func slackPublicationOutcomeMessage(result *publicationintent.PublicationIntentResult) (string, error) {
+	if result == nil {
+		return "", errors.New("request Slack PR publication: coordinator returned no result")
+	}
+	message := "Pull request workflow requested for this session."
+	switch result.Status {
+	case publicationintent.ResultAlreadyPublished:
+		message = "This session already has a published pull request."
+	case publicationintent.ResultReviewStarted, publicationintent.ResultReviewInProgress:
+		message = "Pre-PR review is in progress for this session."
+	case publicationintent.ResultManualPublicationRequired, publicationintent.ResultBlocked:
+		message = "Pull request publication needs attention in 143."
+		if result.Reason != nil {
+			message = *result.Reason
+		}
+	}
+	return message, nil
 }
 
 func enqueueSlackSessionContinuationPrompt(ctx context.Context, stores *Stores, orgID, sessionID uuid.UUID, prompt string) error {
@@ -6172,6 +6211,7 @@ func postSlackEphemeralIfPossible(ctx context.Context, stores *Stores, slackClie
 
 type slackActionAuthorizationDecision struct {
 	ActorUserID uuid.UUID
+	ActorRole   models.Role
 }
 
 func authorizeSlackSessionAction(ctx context.Context, stores *Stores, input models.SlackInteractionJobPayload, orgID, sessionID uuid.UUID, capability slackbotsvc.Capability, requireMapped bool) (slackActionAuthorizationDecision, error) {
@@ -6210,7 +6250,7 @@ func authorizeSlackSessionAction(ctx context.Context, stores *Stores, input mode
 	if decision.MappedUserID == nil {
 		return slackActionAuthorizationDecision{}, fmt.Errorf("slack action requires a linked 143 user")
 	}
-	return slackActionAuthorizationDecision{ActorUserID: *decision.MappedUserID}, nil
+	return slackActionAuthorizationDecision{ActorUserID: *decision.MappedUserID, ActorRole: decision.Role}, nil
 }
 
 func authorizeSlackPreviewAction(ctx context.Context, stores *Stores, input models.SlackInteractionJobPayload, orgID uuid.UUID) (slackActionAuthorizationDecision, error) {
@@ -6259,7 +6299,7 @@ func authorizeSlackPreviewAction(ctx context.Context, stores *Stores, input mode
 	if decision.MappedUserID == nil {
 		return slackActionAuthorizationDecision{}, nil
 	}
-	return slackActionAuthorizationDecision{ActorUserID: *decision.MappedUserID}, nil
+	return slackActionAuthorizationDecision{ActorUserID: *decision.MappedUserID, ActorRole: decision.Role}, nil
 }
 
 func stringSliceContains(values []string, target string) bool {
@@ -9947,7 +9987,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					if changeAware, ok := services.ReviewLoops.(interface {
 						OnThreadTurnCompleteWithChange(context.Context, uuid.UUID, uuid.UUID, string, bool) error
 					}); ok {
-						reviewErr = changeAware.OnThreadTurnCompleteWithChange(ctx, orgID, threadID, lastTurnResult.Summary, turnWorkspaceChanged(session.Diff, lastTurnResult.Diff))
+						reviewErr = changeAware.OnThreadTurnCompleteWithChange(ctx, orgID, threadID, lastTurnResult.Summary, turnWorkspaceChanged(reviewWorkspaceDiffBefore(session, targetChangeset), lastTurnResult.Diff))
 					} else {
 						reviewErr = services.ReviewLoops.OnThreadTurnComplete(ctx, orgID, threadID, lastTurnResult.Summary)
 					}
@@ -9956,6 +9996,14 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 							Str("session_id", sessionID.String()).
 							Str("thread_id", threadID.String()).
 							Msg("failed to advance review loop after thread turn")
+						recoveryCtx, cancelRecovery := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+						if enqueueErr := enqueueSessionReviewLoopReconciliation(recoveryCtx, stores, orgID, threadID, time.Now().UTC()); enqueueErr != nil {
+							logger.Error().Err(enqueueErr).
+								Str("session_id", sessionID.String()).
+								Str("thread_id", threadID.String()).
+								Msg("failed to enqueue review loop recovery")
+						}
+						cancelRecovery()
 					}
 				}
 			} else {
@@ -10081,6 +10129,17 @@ func turnWorkspaceChanged(before *string, after string) bool {
 		return true
 	}
 	return strings.TrimSpace(*before) != strings.TrimSpace(after)
+}
+
+// reviewWorkspaceDiffBefore selects the workspace snapshot that the review
+// turn actually opened. Stack children run in their materialized worktrees;
+// comparing them with the primary session diff would report a mutation even
+// when the reviewer made no changes.
+func reviewWorkspaceDiffBefore(session models.Session, targetChangeset *models.SessionChangeset) *string {
+	if targetChangeset != nil {
+		return targetChangeset.MaterializedDiff
+	}
+	return session.Diff
 }
 
 func enqueueSessionPreviewCachePrewarm(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, sessionID uuid.UUID, reason string) {
@@ -10797,6 +10856,64 @@ func newSyncPRPreviewSurfacesHandler(services *Services, logger zerolog.Logger) 
 	}
 }
 
+func enqueueSessionReviewLoopReconciliation(
+	ctx context.Context,
+	stores *Stores,
+	orgID, threadID uuid.UUID,
+	now time.Time,
+) error {
+	if stores == nil || stores.Jobs == nil {
+		return errors.New("review loop recovery job store is unavailable")
+	}
+	runAt := now.Add(reviewLoopRecoveryDelay)
+	dedupeKey := models.JobTypeReconcileSessionReviewLoop + ":" + threadID.String()
+	_, err := stores.Jobs.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue:     "default",
+		JobType:   models.JobTypeReconcileSessionReviewLoop,
+		Payload:   map[string]any{"org_id": orgID.String(), "limit": reviewLoopRecoveryBatchSize},
+		Priority:  5,
+		RunAt:     &runAt,
+		DedupeKey: &dedupeKey,
+	})
+	if err != nil {
+		return fmt.Errorf("enqueue session review loop reconciliation: %w", err)
+	}
+	return nil
+}
+
+func newReconcileSessionReviewLoopHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID string `json:"org_id"`
+			Limit int    `json:"limit"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal reconcile_session_review_loop payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		if input.Limit <= 0 {
+			input.Limit = reviewLoopRecoveryBatchSize
+		}
+		if services == nil || services.ReviewLoops == nil {
+			return errors.New("review loop recovery service is unavailable")
+		}
+		restarted, err := services.ReviewLoops.ReconcileStrandedPublicationLoops(
+			ctx, orgID, time.Now().UTC().Add(-reviewLoopRecoveryInactiveFor), input.Limit,
+		)
+		if err != nil {
+			return fmt.Errorf("reconcile stranded publication reviews: %w", err)
+		}
+		if restarted > 0 {
+			logger.Warn().Str("org_id", orgID.String()).Int("restarted", restarted).
+				Msg("restarted stranded publication review loops")
+		}
+		return nil
+	}
+}
+
 func newReconcilePullRequestStateHandler(services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
@@ -10814,7 +10931,19 @@ func newReconcilePullRequestStateHandler(services *Services, logger zerolog.Logg
 			input.Limit = 50
 		}
 		logger.Info().Str("org_id", orgID.String()).Int("limit", input.Limit).Msg("starting reconcile_pull_request_state job")
-		return services.PR.ReconcilePullRequestState(ctx, orgID, input.Limit)
+		prErr := services.PR.ReconcilePullRequestState(ctx, orgID, input.Limit)
+		var reviewErr error
+		if services.ReviewLoops != nil {
+			var restarted int
+			restarted, reviewErr = services.ReviewLoops.ReconcileStrandedPublicationLoops(
+				ctx, orgID, time.Now().UTC().Add(-periodicReviewLoopRecoveryInactiveFor), input.Limit,
+			)
+			if restarted > 0 {
+				logger.Warn().Str("org_id", orgID.String()).Int("restarted", restarted).
+					Msg("periodic reconciliation restarted stranded publication review loops")
+			}
+		}
+		return errors.Join(prErr, reviewErr)
 	}
 }
 
@@ -10887,22 +11016,125 @@ func newMergePullRequestWhenReadyHandler(services *Services, logger zerolog.Logg
 // pr_creation_state through pushing -> succeeded/failed so the UI can reflect
 // progress without needing to poll PR rows.
 type openPRJobInput struct {
-	SessionID              string `json:"session_id"`
-	ChangesetID            string `json:"changeset_id,omitempty"`
-	OrgID                  string `json:"org_id"`
-	IssueSnapshotID        string `json:"issue_snapshot_id,omitempty"`
-	Draft                  *bool  `json:"draft,omitempty"`
-	AuthorMode             string `json:"author_mode,omitempty"`
-	MergeWhenReady         bool   `json:"merge_when_ready,omitempty"`
-	RequestedByUserID      string `json:"requested_by_user_id,omitempty"`
-	RequestedRole          string `json:"requested_role,omitempty"`
-	PublicationSource      string `json:"publication_source,omitempty"`
-	PublicationQueue       string `json:"publication_queue,omitempty"`
-	PublicationTriggerKind string `json:"publication_trigger_kind,omitempty"`
-	PublicationHandoffMode string `json:"publication_handoff_mode,omitempty"`
-	InitiatedByUserID      string `json:"initiated_by_user_id,omitempty"`
-	AutomaticPolicySource  string `json:"automatic_pr_policy_source,omitempty"`
-	ReviewPolicySource     string `json:"review_policy_source,omitempty"`
+	SessionID                  string `json:"session_id"`
+	ChangesetID                string `json:"changeset_id,omitempty"`
+	OrgID                      string `json:"org_id"`
+	IssueSnapshotID            string `json:"issue_snapshot_id,omitempty"`
+	Draft                      *bool  `json:"draft,omitempty"`
+	AuthorMode                 string `json:"author_mode,omitempty"`
+	MergeWhenReady             bool   `json:"merge_when_ready,omitempty"`
+	RequestedByUserID          string `json:"requested_by_user_id,omitempty"`
+	RequestedRole              string `json:"requested_role,omitempty"`
+	PublicationSource          string `json:"publication_source,omitempty"`
+	PublicationExecutionSource string `json:"publication_execution_source,omitempty"`
+	PublicationQueue           string `json:"publication_queue,omitempty"`
+	PublicationTriggerKind     string `json:"publication_trigger_kind,omitempty"`
+	PublicationHandoffMode     string `json:"publication_handoff_mode,omitempty"`
+	InitiatedByUserID          string `json:"initiated_by_user_id,omitempty"`
+	AutomaticPolicySource      string `json:"automatic_pr_policy_source,omitempty"`
+	ReviewPolicySource         string `json:"review_policy_source,omitempty"`
+}
+
+func publicationExecutionEnabled(services *Services, source models.SessionPublicationSource) bool {
+	return services == nil || services.PublicationIntents == nil || services.PublicationIntents.PublicationExecutionEnabled(source)
+}
+
+func reviewExecutionEnabled(services *Services, source models.SessionPublicationSource) bool {
+	return services == nil || services.PublicationIntents == nil || services.PublicationIntents.ReviewExecutionEnabled(source)
+}
+
+func effectivePublicationExecutionSource(input openPRJobInput, fallback models.SessionPublicationSource) (models.SessionPublicationSource, error) {
+	source := fallback
+	if input.PublicationExecutionSource != "" {
+		source = models.SessionPublicationSource(input.PublicationExecutionSource)
+	}
+	if err := source.Validate(); err != nil {
+		return "", fmt.Errorf("validate publication execution source: %w", err)
+	}
+	return source, nil
+}
+
+func effectivePublicationRequestedRole(
+	ctx context.Context,
+	stores *Stores,
+	run models.Session,
+	source models.SessionPublicationSource,
+	requestedRole string,
+) (string, error) {
+	if source != models.SessionPublicationSourceAgentTool || run.TriggeredByUserID == nil {
+		return requestedRole, nil
+	}
+	if stores == nil || stores.Users == nil {
+		return "", errors.New("user store is required to authorize agent-tool publication")
+	}
+	user, err := stores.Users.GetByIDWithSettings(ctx, run.OrgID, *run.TriggeredByUserID)
+	if err != nil {
+		return "", fmt.Errorf("load agent publication initiator: %w", err)
+	}
+	return string(user.Role), nil
+}
+
+func stackParentPublicationComplete(parent models.SessionChangeset) bool {
+	return parent.PRCreationState == models.PRCreationStateSucceeded ||
+		parent.Status == models.ChangesetStatusAbandoned || parent.Status == models.ChangesetStatusMerged
+}
+
+// stackParentPublicationBlocked reports whether waiting on the parent is futile.
+// terminal_failed and completed_noop both leave the parent branch unpublished
+// until a human acts, so the child's base will never appear on its own and it
+// cannot park behind them: reconciliation requeues a parked job every cycle with
+// no attempt cap. A 'completed' parent is excluded because the changeset's
+// pr_creation_state catches up moments later, and parking is correct in that
+// window.
+func stackParentPublicationBlocked(parent models.SessionChangeset, parentPublication *models.SessionPublication) bool {
+	if stackParentPublicationComplete(parent) {
+		return false
+	}
+	if parentPublication != nil && parentPublication.State.Terminal() &&
+		parentPublication.State != models.SessionPublicationStateCompleted {
+		return true
+	}
+	return parent.PRCreationState == models.PRCreationStateFailed
+}
+
+type openPRChangesetLeaseStore interface {
+	AcquireLease(
+		ctx context.Context,
+		orgID, sessionID, changesetID, holderID uuid.UUID,
+		holderType models.ChangesetLeaseType,
+		holderLabel string,
+		ttl time.Duration,
+		takeoverExpired bool,
+	) (models.SessionChangesetLease, error)
+	ReleaseLease(ctx context.Context, orgID, sessionID, changesetID, holderID uuid.UUID) error
+}
+
+func acquireOpenPRChangesetLease(
+	ctx context.Context,
+	store openPRChangesetLeaseStore,
+	changeset models.SessionChangeset,
+) (*uuid.UUID, error) {
+	// The session snapshot/quiescence guard remains authoritative for the
+	// primary workspace. Separate worktrees use changeset leases, so publication
+	// must participate in that protocol before it reads, commits, or pushes one.
+	if store == nil || changeset.IsPrimary || changeset.WorktreePath == nil {
+		return nil, nil
+	}
+	holderID := uuid.New()
+	if _, err := store.AcquireLease(
+		ctx,
+		changeset.OrgID,
+		changeset.SessionID,
+		changeset.ID,
+		holderID,
+		models.ChangesetLeaseTypePublish,
+		"publish pull request",
+		5*time.Minute,
+		true,
+	); err != nil {
+		return nil, err
+	}
+	return &holderID, nil
 }
 
 func publicationRequestGenerationAt(ctx context.Context) time.Time {
@@ -10942,6 +11174,7 @@ func persistedOpenPRJobInput(publication models.SessionPublication) (openPRJobIn
 func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) (handlerErr error) {
 		var activePublication *models.SessionPublication
+		var publicationContext *models.SessionPublication
 		publicationFailureHandled := false
 		defer func() {
 			if handlerErr == nil || activePublication == nil || publicationFailureHandled || stores == nil || stores.SessionPublications == nil {
@@ -10970,6 +11203,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 				publicationState = models.SessionPublicationStateTerminalFailed
 			}
 			metrics.RecordSessionPublicationTransition(ctx, string(publicationState), string(activePublication.Source))
+			metrics.RecordPRPublicationFailure(ctx, terminal)
 		}()
 
 		var input openPRJobInput
@@ -11006,6 +11240,57 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 				return fmt.Errorf("resolve open_pr changeset: %w", err)
 			}
 			changesetID = &targetChangeset.ID
+			if targetChangeset.StackedOnChangesetID != nil {
+				parent, parentErr := stores.SessionChangesets.GetByID(ctx, orgID, runID, *targetChangeset.StackedOnChangesetID)
+				if parentErr != nil {
+					return fmt.Errorf("load stack parent before publication: %w", parentErr)
+				}
+				if !stackParentPublicationComplete(parent) {
+					// The parent's own durable row is the authoritative signal: the
+					// dead-letter hook and the deferred failure handler terminalize
+					// the publication without ever writing the changeset's
+					// pr_creation_state, so the changeset field alone would miss the
+					// most common way a parent fails.
+					var parentPublication *models.SessionPublication
+					if stores.SessionPublications != nil {
+						loaded, loadErr := stores.SessionPublications.GetByChangeset(ctx, orgID, runID, parent.ID)
+						if loadErr != nil && !errors.Is(loadErr, pgx.ErrNoRows) {
+							return fmt.Errorf("load stack parent publication before publication: %w", loadErr)
+						}
+						if loadErr == nil {
+							parentPublication = &loaded
+						}
+					}
+					if stackParentPublicationBlocked(parent, parentPublication) && stores.SessionPublications != nil {
+						// Parking here would never end: the child's row stays a
+						// reconciliation candidate, and every cycle requeues a job
+						// that parks again. Make it terminal instead so the session
+						// shows "Needs attention" with a Retry that reopens the
+						// intent once the parent has been republished.
+						logger.Warn().
+							Str("session_id", runID.String()).
+							Str("changeset_id", targetChangeset.ID.String()).
+							Str("parent_changeset_id", parent.ID.String()).
+							Msg("failing stack child publication behind an unresolvable parent")
+						return stores.SessionPublications.MarkFailed(
+							ctx, orgID, runID, targetChangeset.ID,
+							"stack_parent_publication_failed",
+							"The pull request this one stacks on could not be published. Republish it, then retry this one.",
+							true,
+						)
+					}
+					// Complete this child job without consuming retries. Its durable
+					// publication remains requested, so reconciliation resumes it
+					// after the parent advances instead of polling every few seconds
+					// while a parent review may legitimately take minutes.
+					logger.Info().
+						Str("session_id", runID.String()).
+						Str("changeset_id", targetChangeset.ID.String()).
+						Str("parent_changeset_id", parent.ID.String()).
+						Msg("stack child publication parked behind parent")
+					return nil
+				}
+			}
 		}
 		publicationSource := models.SessionPublicationSource(input.PublicationSource)
 		if publicationSource == "" {
@@ -11017,6 +11302,34 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 		}
 		if err := publicationSource.Validate(); err != nil {
 			return fmt.Errorf("validate publication source: %w", err)
+		}
+		executionSource, err := effectivePublicationExecutionSource(input, publicationSource)
+		if err != nil {
+			return err
+		}
+		if !publicationExecutionEnabled(services, executionSource) {
+			logger.Info().
+				Str("session_id", runID.String()).
+				Str("publication_source", string(publicationSource)).
+				Str("publication_execution_source", string(executionSource)).
+				Msg("open_pr parked by publication execution kill switch")
+			return nil
+		}
+		leaseHolderID, err := acquireOpenPRChangesetLease(ctx, stores.SessionChangesets, targetChangeset)
+		if err != nil {
+			return fmt.Errorf("acquire changeset publication lease: %w", err)
+		}
+		if leaseHolderID != nil {
+			defer func() {
+				if releaseErr := stores.SessionChangesets.ReleaseLease(
+					context.WithoutCancel(ctx), orgID, runID, targetChangeset.ID, *leaseHolderID,
+				); releaseErr != nil {
+					logger.Warn().Err(releaseErr).
+						Str("session_id", runID.String()).
+						Str("changeset_id", targetChangeset.ID.String()).
+						Msg("failed to release pull request publication lease")
+				}
+			}()
 		}
 		publicationQueue := models.SessionPublicationJobQueue(input.PublicationQueue)
 		if publicationQueue == "" {
@@ -11058,6 +11371,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 				return fmt.Errorf("prepare open_pr publication: %w", prepareErr)
 			}
 			publication := attempt.Publication
+			publicationContext = &publication
 			if attempt.Started {
 				activePublication = &publication
 				registerOpenPRPublicationDeadLetter(ctx, stores, logger, publication)
@@ -11075,6 +11389,19 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 				payload = append(json.RawMessage(nil), publication.RequestPayload...)
 				publicationSource = publication.Source
 				publicationQueue = publication.JobQueue
+			}
+			executionSource, err = effectivePublicationExecutionSource(input, publication.Source)
+			if err != nil {
+				return err
+			}
+			if !publicationExecutionEnabled(services, executionSource) {
+				logger.Info().
+					Str("session_id", runID.String()).
+					Str("changeset_id", changesetID.String()).
+					Str("publication_source", string(publication.Source)).
+					Str("publication_execution_source", string(executionSource)).
+					Msg("durable open_pr replay parked by publication execution kill switch")
+				return nil
 			}
 			if input.IssueSnapshotID != hydratedIssueSnapshotID {
 				if err := hydrateOpenPRPrimaryIssue(ctx, stores.IssueSnapshots, orgID, &run, input.IssueSnapshotID); err != nil {
@@ -11098,7 +11425,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 						Str("changeset_id", changesetID.String()).
 						Int("pr_number", existing.GitHubPRNumber).
 						Msg("resuming post-publication work for completed pull request")
-					return completeOpenPRJob(ctx, stores, services, logger, run, input, changesetID, &existing)
+					return completeOpenPRJob(ctx, stores, services, logger, run, input, changesetID, &existing, publicationContext, targetChangeset.PRCreationState)
 				}
 				logger.Info().
 					Str("session_id", runID.String()).
@@ -11132,6 +11459,10 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			run.LinkedIssues = links
 		}
 
+		input.RequestedRole, err = effectivePublicationRequestedRole(ctx, stores, run, executionSource, input.RequestedRole)
+		if err != nil {
+			return err
+		}
 		if input.RequestedRole == string(models.RoleBuilder) {
 			if err := ensureBuilderReviewFresh(ctx, stores, run, changesetID); err != nil {
 				if stateErr := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStateFailed, "A clean Review for the current snapshot is required before creating a pull request."); stateErr != nil {
@@ -11164,7 +11495,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			if !finalized {
 				return nil
 			}
-			return completeOpenPRJob(ctx, stores, services, logger, run, input, changesetID, &existing)
+			return completeOpenPRJob(ctx, stores, services, logger, run, input, changesetID, &existing, publicationContext, targetChangeset.PRCreationState)
 		}
 
 		logger.Info().
@@ -11223,6 +11554,9 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 					}
 				}
 				metrics.RecordSessionPublicationTransition(ctx, string(publicationState), string(publicationSource))
+				if !noChanges && publicationFailureHandled {
+					metrics.RecordPRPublicationFailure(ctx, shouldDeadLetterPRError(createErr))
+				}
 			}
 			// ErrNoChanges is a benign terminal outcome (session ran fine
 			// but produced no diff), so log at info to keep `open_pr failed`
@@ -11272,7 +11606,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			return createErr
 		}
 
-		return completeOpenPRJob(ctx, stores, services, logger, run, input, changesetID, pr)
+		return completeOpenPRJob(ctx, stores, services, logger, run, input, changesetID, pr, publicationContext, targetChangeset.PRCreationState)
 	}
 }
 
@@ -11320,6 +11654,8 @@ func completeOpenPRJob(
 	input openPRJobInput,
 	changesetID *uuid.UUID,
 	pr *models.PullRequest,
+	publicationContext *models.SessionPublication,
+	priorPRCreationState models.PRCreationState,
 ) error {
 	if pr == nil {
 		if stateErr := updateChangesetPRCreationState(ctx, stores, run.OrgID, run.ID, changesetID, models.PRCreationStateFailed, "Could not finish publishing this pull request."); stateErr != nil {
@@ -11389,10 +11725,8 @@ func completeOpenPRJob(
 			return fmt.Errorf("queue merge when ready after open_pr: %w", err)
 		}
 	}
-	if stateErr := updateChangesetPRCreationState(ctx, stores, run.OrgID, run.ID, changesetID, models.PRCreationStateSucceeded, ""); stateErr != nil {
-		return fmt.Errorf("mark PR creation as succeeded: %w", stateErr)
-	}
-	if services.PagerDutyWrites != nil {
+	replayingCompletedPublication := isCompletedPublicationReplay(publicationContext, priorPRCreationState)
+	if !replayingCompletedPublication && services.PagerDutyWrites != nil {
 		if err := services.PagerDutyWrites.OnPROpened(ctx, run, *pr); err != nil {
 			logger.Warn().
 				Err(err).
@@ -11400,15 +11734,46 @@ func completeOpenPRJob(
 				Msg("failed to write PagerDuty PR-open note")
 		}
 	}
-	enqueueSlackNotificationSubscribers(ctx, stores, logger, run.OrgID, slackNotificationFanoutInput{
-		EventKind:      string(models.SlackNotificationPROpened),
-		Title:          "Pull request opened",
-		Body:           "A pull request was opened for the session.",
-		SessionID:      &run.ID,
-		PullRequestID:  &pr.ID,
-		PullRequestURL: pr.GitHubPRURL,
-	})
+	if !replayingCompletedPublication && publicationContext != nil && !publicationContext.RequestedAt.IsZero() {
+		// A zero RequestedAt would record the entire Unix epoch, so this mirrors
+		// the guard the reconciliation path applies to the same signal.
+		metrics.RecordPRPublicationLatency(ctx, time.Since(publicationContext.RequestedAt))
+	}
+	if !replayingCompletedPublication {
+		// The design's "no external notifications" rule covers the publication
+		// workflow's own states (reviewing, needs attention, publishing). A pull
+		// request actually opening is the pre-existing, separately subscribed
+		// pr_opened event, and routing a session through the coordinator is not a
+		// reason to stop delivering it. It must fire only on the attempt that
+		// opened the PR: the job dedupe index is partial on pending/running, so a
+		// replay would deliver a second identical message.
+		enqueueSlackNotificationSubscribers(ctx, stores, logger, run.OrgID, slackNotificationFanoutInput{
+			EventKind:      string(models.SlackNotificationPROpened),
+			Title:          "Pull request opened",
+			Body:           "A pull request was opened for the session.",
+			SessionID:      &run.ID,
+			PullRequestID:  &pr.ID,
+			PullRequestURL: pr.GitHubPRURL,
+		})
+	}
+	// This durable state is the checkpoint for the best-effort one-shot work
+	// above. A completed publication whose local state is still pushing/failed
+	// must retry those effects; once succeeded, later job replays suppress them.
+	if stateErr := updateChangesetPRCreationState(ctx, stores, run.OrgID, run.ID, changesetID, models.PRCreationStateSucceeded, ""); stateErr != nil {
+		return fmt.Errorf("mark PR creation as succeeded: %w", stateErr)
+	}
 	return nil
+}
+
+// isCompletedPublicationReplay reports whether this attempt is resuming local
+// post-publication work for a pull request an earlier attempt already opened.
+// Those replays are routine under the durable coordinator (reconciliation and
+// review continuations both re-enter open_pr), so every one-shot side effect
+// here has to be suppressed for them.
+func isCompletedPublicationReplay(publicationContext *models.SessionPublication, priorPRCreationState models.PRCreationState) bool {
+	return publicationContext != nil &&
+		publicationContext.State == models.SessionPublicationStateCompleted &&
+		priorPRCreationState == models.PRCreationStateSucceeded
 }
 
 func finalizeDraftFirstPublication(
@@ -11678,12 +12043,14 @@ func ensurePublicationPrePRReview(
 			if err := stores.SessionPublications.SetReviewGate(ctx, run.OrgID, run.ID, publication.ChangesetID, models.SessionPublicationReviewGatePassed); err != nil {
 				return false, err
 			}
+			publication.ReviewGateState = models.SessionPublicationReviewGatePassed
 			return true, nil
 		}
 		publication.ReviewMaxPasses = &passCount
 		if err := stores.SessionPublications.ParkForReview(ctx, run.OrgID, run.ID, publication.ChangesetID, passCount); err != nil {
 			return false, err
 		}
+		publication.ReviewGateState = models.SessionPublicationReviewGatePending
 	}
 	if publication.ReviewMaxPasses == nil {
 		return true, nil
@@ -11708,11 +12075,35 @@ func ensurePublicationPrePRReview(
 		if err := stores.SessionPublications.InvalidateReviewEvidence(ctx, run.OrgID, run.ID, *changesetID, currentHeadSHA); err != nil {
 			return false, err
 		}
+		metrics.RecordPrePRReviewStale(ctx)
 		publication.ReviewGateState = models.SessionPublicationReviewGatePending
 		publication.ReviewLoopID = nil
 		publication.ReviewWorkspaceRevision = nil
 		publication.ReviewDesiredHeadSHA = nil
 		publication.DesiredHeadSHA = &currentHeadSHA
+	}
+	// This has to sit below the staleness block, not above it. A gate that was
+	// 'passed' becomes 'pending' when its evidence is invalidated, and checking
+	// only on entry would let that path push a branch and start a fresh review
+	// loop while review execution is stopped — exactly what the switch exists
+	// to prevent.
+	executionSource := publication.Source
+	if persistedInput, persisted, err := persistedOpenPRJobInput(*publication); err != nil {
+		return false, err
+	} else if persisted {
+		executionSource, err = effectivePublicationExecutionSource(persistedInput, publication.Source)
+		if err != nil {
+			return false, err
+		}
+	}
+	if publication.ReviewGateState == models.SessionPublicationReviewGatePending && !reviewExecutionEnabled(services, executionSource) {
+		logger.Info().
+			Str("session_id", run.ID.String()).
+			Str("changeset_id", publication.ChangesetID.String()).
+			Str("publication_source", string(publication.Source)).
+			Str("publication_execution_source", string(executionSource)).
+			Msg("publication review parked by review execution kill switch")
+		return false, nil
 	}
 	if publication.ReviewGateState == models.SessionPublicationReviewGateNeedsHuman ||
 		publication.ReviewGateState == models.SessionPublicationReviewGateFailed {

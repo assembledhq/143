@@ -141,7 +141,9 @@ const repositoryPreviewPolicyColumns = `id, org_id, repository_id, auto_mode,
 	preview_config_name, updated_by_user_id, created_at, updated_at`
 
 const previewDependencyCacheColumns = `id, org_id, repo_id, cache_kind, cache_key, placement_key,
-	blob_key, size_bytes, metadata, last_used_at, created_at`
+	blob_key, size_bytes, metadata, restore_attempt_count, restore_success_count,
+	restore_total_duration_ms, producer_duration_ms, producer_benefit_count,
+	producer_benefit_total_ms, last_restore_at, last_used_at, created_at`
 
 const previewDependencyCacheLocationColumns = `id, org_id, repo_id, cache_kind, cache_key, placement_key,
 	worker_node_id, size_bytes, last_used_at, created_at`
@@ -3708,26 +3710,44 @@ func (s *PreviewStore) UpsertDependencyCache(ctx context.Context, entry *models.
 	}
 	query := fmt.Sprintf(`
 		INSERT INTO preview_dependency_cache (
-			org_id, repo_id, cache_kind, cache_key, placement_key, blob_key, size_bytes, metadata
+			org_id, repo_id, cache_kind, cache_key, placement_key, blob_key, size_bytes, metadata, producer_duration_ms
 		) VALUES (
-			@org_id, @repo_id, @cache_kind, @cache_key, @placement_key, @blob_key, @size_bytes, @metadata
+			@org_id, @repo_id, @cache_kind, @cache_key, @placement_key, @blob_key, @size_bytes, @metadata, @producer_duration_ms
 		)
 		ON CONFLICT (org_id, repo_id, cache_kind, cache_key)
 		DO UPDATE SET placement_key = EXCLUDED.placement_key,
 			blob_key = EXCLUDED.blob_key,
 			size_bytes = EXCLUDED.size_bytes,
 			metadata = EXCLUDED.metadata,
+			-- A new blob_key means new content, so the cost history for the old
+			-- content no longer describes this entry. Every counter below
+			-- resets on that transition and the baseline must reset with them.
+			-- Callers pass zero when replacement content was produced after a
+			-- restore; zero keeps the baseline unknown and forces a true cold
+			-- sample before cost admission can judge the new blob.
+			producer_duration_ms = CASE
+				WHEN preview_dependency_cache.blob_key <> EXCLUDED.blob_key THEN EXCLUDED.producer_duration_ms
+				WHEN preview_dependency_cache.producer_duration_ms = 0 AND EXCLUDED.producer_duration_ms > 0 THEN EXCLUDED.producer_duration_ms
+				ELSE preview_dependency_cache.producer_duration_ms
+			END,
+			restore_attempt_count = CASE WHEN preview_dependency_cache.blob_key = EXCLUDED.blob_key THEN preview_dependency_cache.restore_attempt_count ELSE 0 END,
+			restore_success_count = CASE WHEN preview_dependency_cache.blob_key = EXCLUDED.blob_key THEN preview_dependency_cache.restore_success_count ELSE 0 END,
+			restore_total_duration_ms = CASE WHEN preview_dependency_cache.blob_key = EXCLUDED.blob_key THEN preview_dependency_cache.restore_total_duration_ms ELSE 0 END,
+			producer_benefit_count = CASE WHEN preview_dependency_cache.blob_key = EXCLUDED.blob_key THEN preview_dependency_cache.producer_benefit_count ELSE 0 END,
+			producer_benefit_total_ms = CASE WHEN preview_dependency_cache.blob_key = EXCLUDED.blob_key THEN preview_dependency_cache.producer_benefit_total_ms ELSE 0 END,
+			last_restore_at = CASE WHEN preview_dependency_cache.blob_key = EXCLUDED.blob_key THEN preview_dependency_cache.last_restore_at ELSE NULL END,
 			last_used_at = now()
 		RETURNING %s`, previewDependencyCacheColumns)
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
-		"org_id":        entry.OrgID,
-		"repo_id":       entry.RepoID,
-		"cache_kind":    entry.CacheKind,
-		"cache_key":     entry.CacheKey,
-		"placement_key": entry.PlacementKey,
-		"blob_key":      entry.BlobKey,
-		"size_bytes":    entry.SizeBytes,
-		"metadata":      entry.Metadata,
+		"org_id":               entry.OrgID,
+		"repo_id":              entry.RepoID,
+		"cache_kind":           entry.CacheKind,
+		"cache_key":            entry.CacheKey,
+		"placement_key":        entry.PlacementKey,
+		"blob_key":             entry.BlobKey,
+		"size_bytes":           entry.SizeBytes,
+		"metadata":             entry.Metadata,
+		"producer_duration_ms": entry.ProducerDurationMS,
 	})
 	if err != nil {
 		return fmt.Errorf("upsert dependency cache: %w", err)
@@ -3737,6 +3757,65 @@ func (s *PreviewStore) UpsertDependencyCache(ctx context.Context, entry *models.
 		return fmt.Errorf("scan dependency cache: %w", err)
 	}
 	*entry = row
+	return nil
+}
+
+// RecordDependencyCacheRestore records one restore attempt, scoped to org.
+func (s *PreviewStore) RecordDependencyCacheRestore(ctx context.Context, orgID, id uuid.UUID, duration time.Duration, success bool) error {
+	durationMS := max(duration.Milliseconds(), int64(1))
+	result, err := s.db.Exec(ctx, `UPDATE preview_dependency_cache
+		SET restore_attempt_count = restore_attempt_count + 1,
+			restore_success_count = restore_success_count + CASE WHEN @success THEN 1 ELSE 0 END,
+			restore_total_duration_ms = restore_total_duration_ms + @duration_ms,
+			last_restore_at = now(),
+			last_used_at = now()
+		WHERE id = @id AND org_id = @org_id`, pgx.NamedArgs{
+		"id": id, "org_id": orgID, "duration_ms": durationMS, "success": success,
+	})
+	if err != nil {
+		return fmt.Errorf("record dependency cache restore: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+// RecordDependencyCacheProducerBenefit records the marginal producer work
+// avoided by one successful restore. A zero benefit is meaningful: it teaches
+// admission that the restore did not improve end-to-end startup.
+func (s *PreviewStore) RecordDependencyCacheProducerBenefit(ctx context.Context, orgID, id uuid.UUID, benefit time.Duration) error {
+	benefitMS := max(benefit.Milliseconds(), int64(0))
+	result, err := s.db.Exec(ctx, `UPDATE preview_dependency_cache
+		SET producer_benefit_count = producer_benefit_count + 1,
+			producer_benefit_total_ms = producer_benefit_total_ms + @benefit_ms
+		WHERE id = @id AND org_id = @org_id`, pgx.NamedArgs{
+		"id": id, "org_id": orgID, "benefit_ms": benefitMS,
+	})
+	if err != nil {
+		return fmt.Errorf("record dependency cache producer benefit: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+// RecordDependencyCacheProducerBaseline fills the cold producer baseline for a
+// legacy row exactly once. Later warm observations must not overwrite it.
+func (s *PreviewStore) RecordDependencyCacheProducerBaseline(ctx context.Context, orgID, id uuid.UUID, baseline time.Duration) error {
+	baselineMS := max(baseline.Milliseconds(), int64(1))
+	result, err := s.db.Exec(ctx, `UPDATE preview_dependency_cache
+		SET producer_duration_ms = CASE WHEN producer_duration_ms = 0 THEN @baseline_ms ELSE producer_duration_ms END
+		WHERE id = @id AND org_id = @org_id`, pgx.NamedArgs{
+		"id": id, "org_id": orgID, "baseline_ms": baselineMS,
+	})
+	if err != nil {
+		return fmt.Errorf("record dependency cache producer baseline: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
 	return nil
 }
 

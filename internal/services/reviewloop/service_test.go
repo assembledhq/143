@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	threadsvc "github.com/assembledhq/143/internal/services/thread"
 )
@@ -136,17 +137,46 @@ func TestService_StartRejectsExistingRunningLoop(t *testing.T) {
 	require.Empty(t, threads.created, "Start should not create an orphan review thread")
 }
 
+func TestService_ReconcileStrandedPublicationLoopsRestartsEveryCandidate(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	inactiveBefore := time.Now().UTC().Add(-2 * time.Minute)
+	candidates := []db.StrandedPublicationReviewLoop{
+		{LoopID: uuid.New(), ThreadID: uuid.New()},
+		{LoopID: uuid.New(), ThreadID: uuid.New()},
+		{LoopID: uuid.New(), ThreadID: uuid.New()},
+	}
+	store := &fakeRecoveryReviewLoopStore{
+		fakeReviewLoopStore: &fakeReviewLoopStore{},
+		candidates:          candidates,
+	}
+
+	restarted, err := NewService(store, &fakeThreadService{}).ReconcileStrandedPublicationLoops(
+		context.Background(), orgID, inactiveBefore, 25,
+	)
+
+	require.NoError(t, err, "stranded publication review reconciliation should succeed")
+	require.Equal(t, len(candidates), restarted, "reconciliation should restart every eligible loop")
+	require.Equal(t, candidates, store.restarted, "reconciliation should restart the listed loops in order")
+	require.Equal(t, orgID, store.seenOrgID, "reconciliation should remain scoped to the requested organization")
+	require.Equal(t, inactiveBefore, store.seenInactiveBefore, "reconciliation should preserve the inactivity cutoff")
+	require.Equal(t, 25, store.seenLimit, "reconciliation should preserve the bounded batch size")
+}
+
 func TestService_StartPublicationRequiresAndPersistsEvidence(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name           string
 		changesetID    *uuid.UUID
+		primary        bool
 		revision       *int64
 		desiredHeadSHA *string
 		wantErr        bool
 	}{
-		{name: "complete evidence is persisted", changesetID: reviewUUIDPtr(uuid.New()), revision: reviewInt64Ptr(7), desiredHeadSHA: reviewStringPtr("0123456789abcdef0123456789abcdef01234567")},
+		{name: "stack child evidence targets its materialized worktree", changesetID: reviewUUIDPtr(uuid.New()), revision: reviewInt64Ptr(7), desiredHeadSHA: reviewStringPtr("0123456789abcdef0123456789abcdef01234567")},
+		{name: "primary evidence uses the session workspace", primary: true, revision: reviewInt64Ptr(7), desiredHeadSHA: reviewStringPtr("0123456789abcdef0123456789abcdef01234567")},
 		{name: "missing changeset is rejected", revision: reviewInt64Ptr(7), desiredHeadSHA: reviewStringPtr("0123456789abcdef0123456789abcdef01234567"), wantErr: true},
 		{name: "missing revision is rejected", changesetID: reviewUUIDPtr(uuid.New()), desiredHeadSHA: reviewStringPtr("0123456789abcdef0123456789abcdef01234567"), wantErr: true},
 		{name: "missing head is rejected", changesetID: reviewUUIDPtr(uuid.New()), revision: reviewInt64Ptr(7), wantErr: true},
@@ -155,8 +185,13 @@ func TestService_StartPublicationRequiresAndPersistsEvidence(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			orgID, sessionID, threadID := uuid.New(), uuid.New(), uuid.New()
+			changesetID := tt.changesetID
+			primaryChangesetID := uuid.New()
+			if tt.primary {
+				changesetID = reviewUUIDPtr(primaryChangesetID)
+			}
 			snapshotKey := "snapshots/publication-review.tar.zst"
-			store := &fakeReviewLoopStore{}
+			store := &fakeReviewLoopStore{primaryChangesetID: primaryChangesetID}
 			threads := &fakeThreadService{
 				session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Status: models.SessionStatusIdle, SnapshotKey: &snapshotKey},
 				thread:  models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex},
@@ -164,7 +199,7 @@ func TestService_StartPublicationRequiresAndPersistsEvidence(t *testing.T) {
 			}
 			_, err := NewService(store, threads).Start(context.Background(), orgID, sessionID, StartReviewLoopRequest{
 				AgentType: models.AgentTypeCodex, MaxPasses: 2, Source: models.ReviewLoopSourcePublication,
-				ChangesetID: tt.changesetID, WorkspaceRevision: tt.revision, DesiredHeadSHA: tt.desiredHeadSHA,
+				ChangesetID: changesetID, WorkspaceRevision: tt.revision, DesiredHeadSHA: tt.desiredHeadSHA,
 			})
 			if tt.wantErr {
 				require.Error(t, err, "publication review should reject incomplete revision-bound evidence")
@@ -173,9 +208,14 @@ func TestService_StartPublicationRequiresAndPersistsEvidence(t *testing.T) {
 			}
 			require.NoError(t, err, "publication review should accept complete revision-bound evidence")
 			require.Len(t, store.createdLoops, 1, "publication review should create one durable loop")
-			require.Equal(t, tt.changesetID, store.createdLoops[0].ChangesetID, "publication review should persist the changeset evidence")
+			require.Equal(t, changesetID, store.createdLoops[0].ChangesetID, "publication review should persist the changeset evidence")
 			require.Equal(t, tt.revision, store.createdLoops[0].WorkspaceRevision, "publication review should persist the workspace revision")
 			require.Equal(t, tt.desiredHeadSHA, store.createdLoops[0].DesiredHeadSHA, "publication review should persist the desired head")
+			if tt.primary {
+				require.Nil(t, threads.sent[0].ChangesetID, "primary publication review should execute in the session workspace")
+			} else {
+				require.Equal(t, changesetID, threads.sent[0].ChangesetID, "stack child publication review should execute in its materialized worktree")
+			}
 		})
 	}
 }
@@ -565,6 +605,55 @@ func TestService_OnThreadTurnFailedMarksRunningLoopFailed(t *testing.T) {
 	require.Equal(t, []string{"failed"}, store.events, "manual review-loop failure should not enqueue PR creation")
 }
 
+func TestService_OnThreadTurnFailedRecordsCurrentPublicationPass(t *testing.T) {
+	t.Parallel()
+
+	orgID, sessionID, threadID, loopID, passID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	store := &fakeReviewLoopStore{
+		runningLoop: models.SessionReviewLoop{
+			ID: loopID, OrgID: orgID, SessionID: sessionID, ThreadID: &threadID,
+			Status: models.ReviewLoopStatusRunning, Source: models.ReviewLoopSourcePublication,
+			AgentType: models.AgentTypeCodex, MaxPasses: 2,
+		},
+		latestPass: models.SessionReviewLoopPass{
+			ID: passID, OrgID: orgID, LoopID: loopID, SessionID: sessionID,
+			PassIndex: 2, Status: models.ReviewLoopPassStatusReviewing,
+		},
+	}
+	recorder := &fakeReviewLoopMetrics{}
+	svc := NewService(store, &fakeThreadService{})
+	svc.metrics = recorder
+
+	err := svc.OnThreadTurnFailed(context.Background(), orgID, threadID, "review runtime failed")
+
+	require.NoError(t, err, "second-pass failure should terminalize the publication review")
+	require.Equal(t, []recordedReviewLoopMetric{{outcome: "failed", passes: 2}}, recorder.loops, "failure telemetry should use the active pass rather than stale completed_passes")
+}
+
+// A swallowed terminalization error is the worst possible outcome here: the
+// job is acked, the loop stays running forever, and the automation's PR gate is
+// never enqueued. The failure has to reach the caller so the job retries.
+func TestService_OnThreadTurnFailedSurfacesAutomationTerminalizationFailure(t *testing.T) {
+	t.Parallel()
+
+	orgID, sessionID, threadID, loopID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	automationRunID := uuid.New()
+	store := &fakeReviewLoopStore{
+		runningLoop: models.SessionReviewLoop{
+			ID: loopID, OrgID: orgID, SessionID: sessionID, ThreadID: &threadID,
+			AutomationRunID: &automationRunID, Status: models.ReviewLoopStatusRunning,
+			AgentType: models.AgentTypeCodex, MaxPasses: 1,
+		},
+		terminalErr: errors.New("job enqueue failed"),
+	}
+	svc := NewService(store, &fakeThreadService{})
+
+	err := svc.OnThreadTurnFailed(context.Background(), orgID, threadID, "agent exited")
+
+	require.ErrorContains(t, err, "job enqueue failed", "a failed automation terminalization must not be reported as success")
+	require.Empty(t, store.events, "a failed terminalization should not record a completed gate handoff")
+}
+
 func TestService_OnThreadTurnFailedAutomationEnqueuesOpenPRGate(t *testing.T) {
 	t.Parallel()
 
@@ -645,9 +734,68 @@ type fakeReviewLoopStore struct {
 	fixSummary                   string
 	terminalErr                  error
 	events                       []string
+	primaryChangesetID           uuid.UUID
+}
+
+type fakeRecoveryReviewLoopStore struct {
+	*fakeReviewLoopStore
+	candidates         []db.StrandedPublicationReviewLoop
+	restarted          []db.StrandedPublicationReviewLoop
+	seenOrgID          uuid.UUID
+	seenInactiveBefore time.Time
+	seenLimit          int
+}
+
+func (f *fakeRecoveryReviewLoopStore) ListStrandedPublicationLoops(
+	_ context.Context,
+	orgID uuid.UUID,
+	inactiveBefore time.Time,
+	limit int,
+) ([]db.StrandedPublicationReviewLoop, error) {
+	f.seenOrgID = orgID
+	f.seenInactiveBefore = inactiveBefore
+	f.seenLimit = limit
+	return f.candidates, nil
+}
+
+func (f *fakeRecoveryReviewLoopStore) RestartStrandedPublicationLoop(
+	_ context.Context,
+	_ uuid.UUID,
+	loopID uuid.UUID,
+	_ time.Time,
+	_ string,
+) (bool, error) {
+	for _, candidate := range f.candidates {
+		if candidate.LoopID == loopID {
+			f.restarted = append(f.restarted, candidate)
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+type recordedReviewLoopMetric struct {
+	outcome string
+	passes  int
+}
+
+type fakeReviewLoopMetrics struct {
+	loops []recordedReviewLoopMetric
+	fixes int
+}
+
+func (f *fakeReviewLoopMetrics) RecordLoop(_ context.Context, outcome string, passes int) {
+	f.loops = append(f.loops, recordedReviewLoopMetric{outcome: outcome, passes: passes})
+}
+
+func (f *fakeReviewLoopMetrics) RecordFix(context.Context) {
+	f.fixes++
 }
 
 func (f *fakeReviewLoopStore) GetPrimaryChangesetID(_ context.Context, _ uuid.UUID, sessionID uuid.UUID) (uuid.UUID, error) {
+	if f.primaryChangesetID != uuid.Nil {
+		return f.primaryChangesetID, nil
+	}
 	return sessionID, nil
 }
 

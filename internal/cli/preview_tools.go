@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -29,8 +30,10 @@ var pngSignature = []byte{'\x89', 'P', 'N', 'G', '\r', '\n', '\x1a', '\n'}
 // /sessions/{id}/preview..., while branch preview lifecycle keeps using
 // /previews*. The executor never constructs worker URLs or preview RPC tokens.
 type previewToolExecutor struct {
-	client   *Client
-	internal bool
+	client       *Client
+	internal     bool
+	progress     io.Writer
+	pollInterval time.Duration
 }
 
 func (e *previewToolExecutor) handles(name string) bool {
@@ -427,8 +430,14 @@ func (w sessionPreviewStatusWire) view(sessionID string) map[string]any {
 func (e *previewToolExecutor) waitSessionReady(ctx context.Context, sessionID string) *mcp.ToolCallResult {
 	deadline := time.NewTimer(previewWaitTimeout)
 	defer deadline.Stop()
-	ticker := time.NewTicker(3 * time.Second)
+	pollInterval := e.pollInterval
+	if pollInterval <= 0 {
+		pollInterval = 3 * time.Second
+	}
+	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
+	started := time.Now()
+	lastPhase := ""
 	for {
 		result := e.sessionStatus(ctx, sessionID)
 		if result.IsError {
@@ -439,6 +448,14 @@ func (e *previewToolExecutor) waitSessionReady(ctx context.Context, sessionID st
 			return result
 		}
 		state, _ := status["status"].(string)
+		phase, _ := status["current_phase"].(string)
+		if phase == "" {
+			phase = state
+		}
+		if e.progress != nil && phase != "" && phase != lastPhase {
+			fmt.Fprintf(e.progress, "preview: %s (%s elapsed)\n", phase, time.Since(started).Round(time.Second))
+			lastPhase = phase
+		}
 		switch state {
 		case "ready", "partially_ready", "running":
 			return result

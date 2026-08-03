@@ -399,6 +399,100 @@ func TestPRServiceReconcileDraftFirstResumesFinalizationWorker(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "draft-first reconciliation should not adopt the recorded draft as completed")
 }
 
+type reconciliationExecutionPolicy struct {
+	publicationEnabled bool
+	reviewEnabled      bool
+}
+
+func (p reconciliationExecutionPolicy) PublicationExecutionEnabled(models.SessionPublicationSource) bool {
+	return p.publicationEnabled
+}
+
+func (p reconciliationExecutionPolicy) ReviewExecutionEnabled(models.SessionPublicationSource) bool {
+	return p.reviewEnabled
+}
+
+func TestPRServiceReconcileSessionPublicationHonorsExecutionPolicy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		policy      reconciliationExecutionPolicy
+		reviewState models.SessionPublicationReviewGateState
+	}{
+		{
+			name:        "publication kill switch parks reconciliation",
+			policy:      reconciliationExecutionPolicy{reviewEnabled: true},
+			reviewState: models.SessionPublicationReviewGateNotRequired,
+		},
+		{
+			name:        "review kill switch parks pending review",
+			policy:      reconciliationExecutionPolicy{publicationEnabled: true},
+			reviewState: models.SessionPublicationReviewGatePending,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			service := &PRService{publicationPolicy: tt.policy, logger: zerolog.New(io.Discard)}
+			err := service.reconcileSessionPublication(context.Background(), models.SessionPublication{
+				Source: models.SessionPublicationSourceAgentTool, ReviewGateState: tt.reviewState,
+			})
+
+			require.NoError(t, err, "paused publication reconciliation should remain parked without enqueueing work")
+		})
+	}
+}
+
+func TestReconciliationPublicationExecutionSource(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		publication models.SessionPublication
+		expected    models.SessionPublicationSource
+		wantErr     bool
+	}{
+		{
+			name:        "legacy empty source defaults to explicit user execution",
+			publication: models.SessionPublication{},
+			expected:    models.SessionPublicationSourceUser,
+		},
+		{
+			name:        "stored source is the fallback",
+			publication: models.SessionPublication{Source: models.SessionPublicationSourceAutomation},
+			expected:    models.SessionPublicationSourceAutomation,
+		},
+		{
+			name: "manual takeover execution source is restored from payload",
+			publication: models.SessionPublication{
+				Source:         models.SessionPublicationSourceAgentTool,
+				RequestPayload: json.RawMessage(`{"publication_execution_source":"user"}`),
+			},
+			expected: models.SessionPublicationSourceUser,
+		},
+		{
+			name:        "malformed payload is rejected",
+			publication: models.SessionPublication{Source: models.SessionPublicationSourceUser, RequestPayload: json.RawMessage(`{`)},
+			wantErr:     true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual, err := reconciliationPublicationExecutionSource(tt.publication)
+			if tt.wantErr {
+				require.Error(t, err, "invalid persisted execution policy should fail reconciliation safely")
+				return
+			}
+			require.NoError(t, err, "valid persisted execution policy should resolve")
+			require.Equal(t, tt.expected, actual, "reconciliation should use the effective persisted execution source")
+		})
+	}
+}
+
 func (a pullRequestHealthSummaryArg) Match(value interface{}) bool {
 	var payload []byte
 	switch v := value.(type) {

@@ -113,6 +113,7 @@ describe('ChangesetSplitPrompt', () => {
 
     expect(screen.getByText('Need smaller pull requests?')).toBeInTheDocument();
     expect(screen.getByText('Ask the coding agent to split the current diff into reviewable branches.')).toBeInTheDocument();
+    expect(document.querySelector('[data-slot="agent-action-card-icon"] .lucide-git-branch')).toBeInTheDocument();
     expect(onRequestSplit).toHaveBeenCalledOnce();
   });
 
@@ -133,5 +134,21 @@ describe('ChangesetSplitPrompt', () => {
     expect(card?.className).toContain('@container/agent-action');
     expect(content?.className).toContain('@min-[24rem]/agent-action:flex-row');
     expect(content?.className).not.toContain('@container/agent-action');
+  });
+
+  it('keeps the split action sized to its label on narrow cards', () => {
+    render(
+      <ChangesetSplitPrompt
+        additions={CHANGESET_SPLIT_MIN_ADDITIONS}
+        onRequestSplit={vi.fn()}
+      />,
+    );
+
+    const button = screen.getByRole('button', { name: 'Split PRs' });
+    const action = button.closest('[data-slot="agent-action-card-action"]');
+    expect(action).toHaveClass('ml-11', 'w-fit', 'self-start');
+    expect(action).toHaveClass('@min-[24rem]/agent-action:ml-0');
+    expect(action).not.toHaveClass('w-full');
+    expect(button).not.toHaveClass('w-full');
   });
 });

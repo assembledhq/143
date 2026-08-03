@@ -1555,7 +1555,7 @@ func TestActivityPhaseTranscriptAssociationMigration(t *testing.T) {
 func TestRenameLegacyOutputTermsMigrationPinsNamespaceContracts(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile("../../migrations/000275_rename_legacy_output_terms.up.sql")
+	body, err := os.ReadFile("../../migrations/000280_rename_legacy_output_terms.up.sql")
 	require.NoError(t, err, "test should read the legacy output terminology migration")
 	sql := string(body)
 
@@ -1573,7 +1573,7 @@ func TestRenameLegacyOutputTermsMigrationPinsNamespaceContracts(t *testing.T) {
 	require.Contains(t, sql, "jsonb_build_object('raw_record_key'", "migration should preserve persisted raw output references")
 	require.Contains(t, sql, "preview_verification_runs_captures_check", "migration should enforce the new verification collection while compatibility is active")
 
-	downBody, err := os.ReadFile("../../migrations/000275_rename_legacy_output_terms.down.sql")
+	downBody, err := os.ReadFile("../../migrations/000280_rename_legacy_output_terms.down.sql")
 	require.NoError(t, err, "test should read the legacy output terminology rollback")
 	downSQL := string(downBody)
 	require.Contains(t, downSQL, "DROP FUNCTION IF EXISTS sync_code_review_prompt_record_compatibility", "rollback should remove prompt table synchronization")
@@ -1611,7 +1611,7 @@ func TestRenameLegacyOutputTermsMigrationPinsNamespaceContracts(t *testing.T) {
 // the 219/225/226 rollbacks wrong when they were rewritten for the new names:
 // each down file must undo its own up on a fresh database (where those
 // migrations create the new names directly) while still working on a database
-// that migration 275 expanded and then contracted back to the legacy names.
+// that migration 280 expanded and then contracted back to the legacy names.
 func TestRenamedOutputTermMigrationsInvertThemselves(t *testing.T) {
 	t.Parallel()
 
@@ -1677,4 +1677,19 @@ func TestRenamedOutputTermMigrationsInvertThemselves(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPublicationInitiatorMembershipScopeMigration(t *testing.T) {
+	t.Parallel()
+
+	upBody, err := os.ReadFile("../../migrations/000278_fix_publication_initiator_membership_scope.up.sql")
+	require.NoError(t, err, "test should read the publication initiator membership migration")
+	validateBody, err := os.ReadFile("../../migrations/000279_validate_publication_initiator_membership_scope.up.sql")
+	require.NoError(t, err, "test should read the publication initiator validation migration")
+
+	upSQL := string(upBody)
+	require.Contains(t, upSQL, "REFERENCES organization_memberships(user_id, org_id)", "publication attribution should follow authoritative multi-org membership")
+	require.Contains(t, upSQL, "ON DELETE SET NULL (initiated_by_user_id)", "membership removal should preserve publications while clearing stale attribution")
+	require.Contains(t, upSQL, "NOT VALID", "constraint replacement should avoid scanning rows under the catalog lock")
+	require.Contains(t, string(validateBody), "VALIDATE CONSTRAINT session_publications_initiator_scope_fkey", "a separate migration should validate existing publication attribution")
 }
