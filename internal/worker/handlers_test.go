@@ -5718,6 +5718,66 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 	}
 }
 
+func TestEnqueueSessionReviewLoopReconciliationDefersDedicatedRecoveryJob(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	t.Cleanup(mock.Close)
+	orgID, threadID, jobID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Date(2026, 8, 3, 7, 0, 0, 0, time.UTC)
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(workerAnyArgs(7)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	err := enqueueSessionReviewLoopReconciliation(context.Background(), stores, orgID, threadID, now)
+
+	require.NoError(t, err, "review advancement failure should enqueue durable recovery")
+	require.NoError(t, mock.ExpectationsWereMet(), "recovery enqueue should include a deferred run time and thread-scoped dedupe key")
+}
+
+func TestReconcileSessionReviewLoopHandlerRestartsStrandedPublicationReviews(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	reviews := &stubWorkerReviewLoops{restarted: 3}
+	handler := newReconcileSessionReviewLoopHandler(&Services{ReviewLoops: reviews}, zerolog.Nop())
+	startedAt := time.Now().UTC()
+
+	err := handler(
+		context.Background(),
+		models.JobTypeReconcileSessionReviewLoop,
+		json.RawMessage(`{"org_id":"`+orgID.String()+`","limit":25}`),
+	)
+
+	require.NoError(t, err, "review loop recovery handler should restart eligible loops")
+	require.Len(t, reviews.reconciliations, 1, "recovery handler should run one bounded reconciliation pass")
+	require.Equal(t, orgID, reviews.reconciliations[0].orgID, "recovery should remain scoped to the job organization")
+	require.Equal(t, 25, reviews.reconciliations[0].limit, "recovery should preserve the requested batch size")
+	require.WithinDuration(t, startedAt.Add(-reviewLoopRecoveryInactiveFor), reviews.reconciliations[0].inactiveBefore, time.Second, "recovery should only restart threads idle past the safety window")
+}
+
+func TestPullRequestReconciliationAlsoRecoversStrandedPublicationReviews(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	reviews := &stubWorkerReviewLoops{restarted: 2}
+	services := &Services{PR: &stubPRService{}, ReviewLoops: reviews}
+	handler := newReconcilePullRequestStateHandler(services, zerolog.Nop())
+	startedAt := time.Now().UTC()
+
+	err := handler(
+		context.Background(),
+		"reconcile_pull_request_state",
+		json.RawMessage(`{"org_id":"`+orgID.String()+`","limit":10}`),
+	)
+
+	require.NoError(t, err, "periodic pull request reconciliation should include review recovery")
+	require.Len(t, reviews.reconciliations, 1, "periodic reconciliation should inspect stranded publication reviews")
+	require.Equal(t, orgID, reviews.reconciliations[0].orgID, "periodic recovery should remain tenant scoped")
+	require.Equal(t, 10, reviews.reconciliations[0].limit, "periodic recovery should share the bounded reconciliation batch")
+	require.WithinDuration(t, startedAt.Add(-periodicReviewLoopRecoveryInactiveFor), reviews.reconciliations[0].inactiveBefore, time.Second, "periodic recovery should use the conservative inactivity threshold")
+}
+
 func TestRebuildPullRequestHealthHandlerSkipsAutoRepairAfterNoOp(t *testing.T) {
 	t.Parallel()
 
@@ -8762,8 +8822,11 @@ func workerReviewLoopColumns() []string {
 }
 
 type stubWorkerReviewLoops struct {
-	starts   []stubWorkerReviewLoopStart
-	failures []stubWorkerReviewLoopFailure
+	starts            []stubWorkerReviewLoopStart
+	failures          []stubWorkerReviewLoopFailure
+	reconciliations   []stubWorkerReviewLoopReconciliation
+	restarted         int
+	reconciliationErr error
 }
 
 type stubPublicationExecutionCoordinator struct {
@@ -8802,6 +8865,12 @@ type stubWorkerReviewLoopFailure struct {
 	summary  string
 }
 
+type stubWorkerReviewLoopReconciliation struct {
+	orgID          uuid.UUID
+	inactiveBefore time.Time
+	limit          int
+}
+
 func (s *stubWorkerReviewLoops) OnThreadTurnComplete(context.Context, uuid.UUID, uuid.UUID, string) error {
 	return nil
 }
@@ -8809,6 +8878,18 @@ func (s *stubWorkerReviewLoops) OnThreadTurnComplete(context.Context, uuid.UUID,
 func (s *stubWorkerReviewLoops) OnThreadTurnFailed(_ context.Context, orgID, threadID uuid.UUID, summary string) error {
 	s.failures = append(s.failures, stubWorkerReviewLoopFailure{orgID: orgID, threadID: threadID, summary: summary})
 	return nil
+}
+
+func (s *stubWorkerReviewLoops) ReconcileStrandedPublicationLoops(
+	_ context.Context,
+	orgID uuid.UUID,
+	inactiveBefore time.Time,
+	limit int,
+) (int, error) {
+	s.reconciliations = append(s.reconciliations, stubWorkerReviewLoopReconciliation{
+		orgID: orgID, inactiveBefore: inactiveBefore, limit: limit,
+	})
+	return s.restarted, s.reconciliationErr
 }
 
 func (s *stubWorkerReviewLoops) Start(_ context.Context, orgID, sessionID uuid.UUID, req reviewloopsvc.StartReviewLoopRequest) (*models.SessionReviewLoop, error) {

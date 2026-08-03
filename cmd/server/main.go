@@ -555,11 +555,7 @@ func main() {
 				if concreteOrchestrator, ok := services.Orchestrator.(*agent.Orchestrator); ok {
 					concreteOrchestrator.SetPublicationIntentCoordinator(workerPublicationCoordinator)
 				}
-				if publicationReviewService, ok := services.ReviewLoops.(*reviewloopservice.Service); ok {
-					publicationReviewService.SetPublicationEvidenceRefresher(
-						worker.NewPublicationReviewEvidenceRefresher(stores, services.PR),
-					)
-				}
+				wirePublicationReviewEvidenceRefresher(services, stores)
 				sandboxAuthShutdown = services.SandboxAuthShutdown
 				registerInternalSandboxAuthRoutes(router, services.SandboxAuthBroker, cfg, logger)
 				if previewManager != nil && pvProvider != nil {
