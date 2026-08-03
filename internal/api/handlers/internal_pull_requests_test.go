@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -113,6 +114,39 @@ func TestInternalPullRequestHandler_CreateWithCoordinatorReturnsFlatTypedRespons
 	require.Equal(t, models.SessionPublicationTriggerExplicitAction, coordinator.requested.TriggerKind, "explicit user action should override automatic publication preference")
 	require.Equal(t, models.SessionPublicationSourceAgentTool, coordinator.requested.Source,
 		"this endpoint is only reachable with a sandbox token, so the channel stays the agent tool even when the agent relays an explicit user instruction")
+}
+
+func TestInternalPullRequestHandler_CreateWithCoordinatorReturnsPublicationBlockerDetails(t *testing.T) {
+	t.Parallel()
+
+	reason := "The remote pull request branch differs from the session checkpoint. Reconcile the remote branch with the session before creating the PR."
+	coordinator := &internalPRCoordinatorStub{err: &publicationintent.Error{
+		Code: publicationintent.ErrorWorkspaceNotReady,
+		Err:  errors.New("primary changeset is external_update_detected"),
+		Details: map[string]any{
+			"changeset_status": models.ChangesetStatusExternalUpdateDetected,
+			"reason":           reason,
+		},
+	}}
+	handler := &InternalPullRequestHandler{coordinator: coordinator, logger: zerolog.Nop()}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/internal/session/pr", nil)
+	rr := httptest.NewRecorder()
+
+	handler.createWithCoordinator(rr, req, uuid.New(), uuid.New(), internalCreatePullRequestRequest{
+		TriggerKind: string(models.SessionPublicationTriggerExplicitAction),
+	})
+
+	require.Equal(t, http.StatusConflict, rr.Code, "an unpublishable changeset should return a conflict")
+	var response struct {
+		Error struct {
+			Code    string         `json:"code"`
+			Details map[string]any `json:"details"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response), "publication blocker response should be valid JSON")
+	require.Equal(t, string(publicationintent.ErrorWorkspaceNotReady), response.Error.Code, "response should preserve the typed coordinator code")
+	require.Equal(t, string(models.ChangesetStatusExternalUpdateDetected), response.Error.Details["changeset_status"], "response should identify the blocking changeset state")
+	require.Equal(t, reason, response.Error.Details["reason"], "response should preserve actionable reconciliation guidance")
 }
 
 func TestInternalPullRequestHandler_Create_MissingToken(t *testing.T) {

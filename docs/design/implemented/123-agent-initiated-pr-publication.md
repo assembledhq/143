@@ -95,13 +95,16 @@ implement -> create draft PR -> PR-dependent checks/review/fix
 ```
 
 Draft-first is an explicit repository setting, not a model judgment. It covers
-PR-only CI, previews, security scans, and policy bots. 143 never opens a normal
-non-draft PR before self-review.
+PR-only CI, previews, security scans, and policy bots. Automatic handoff never
+opens a normal non-draft PR before self-review; an authenticated user may make
+the explicit publication decision with **Create PR**.
 
 ### Two-pass review gate
 
-When effective pre-PR review is on, publication intent starts or joins one
-review loop tied to the current changeset, workspace revision, and head SHA:
+When effective pre-PR review is on, an automatic agent-ready publication
+intent starts or joins one review loop tied to the current changeset,
+workspace revision, and head SHA. An authenticated user **Create PR** action
+queues publication without this automatic review gate:
 
 1. Pass 1 reviews and fixes actionable findings.
 2. Pass 2 reviews the updated diff.
@@ -232,8 +235,8 @@ cannot grant permissions, bypass review requirements, override automation
 
 Organization **Session automation** shows two independent toggles; Account
 Settings shows `Use organization default (On) / On / Off`. Review remains
-editable when automatic creation is off because it also governs explicit
-publication.
+independently editable so an organization default and a personal automatic
+handoff override can be configured separately.
 
 ### Repository exception
 
@@ -281,6 +284,12 @@ create_pr
        other terminal result -> leave draft and show attention
 ```
 
+An authenticated user-channel `explicit_action` skips the automatic review
+gate and queues `open_pr` directly. It still uses the durable publication row,
+authorship and builder authorization, repository handoff mode, deduplication,
+and recovery paths above. Agent-ready requests continue to use the configured
+review gate.
+
 Repeated requests join existing state; later edits invalidate clean evidence.
 
 ### Missing tool call
@@ -293,8 +302,9 @@ If an eligible implementation turn ends with a diff but no publication intent:
 - emit `agent_pr_intent_missing`
 
 V1 does not spend another model turn asking whether the agent forgot. UI,
-Slack, and API `Create PR` actions are explicit intent: they ignore the
-automatic-creation preference but still respect review or an authorized bypass.
+Slack, and API `Create PR` actions attributed to an authenticated user are
+explicit publication decisions: they ignore automatic-creation and automatic-
+review preferences while retaining authorization and repository policy.
 
 ### Automations and projects
 
@@ -303,9 +313,10 @@ automatic-creation preference but still respect review or an authorized bypass.
   for a successful non-empty result.
 - Project/stack publication remains parent-controlled.
 
-Two passes is the fixed count for **agent- and user-initiated** publication
-only. Automation-initiated publication keeps its configured
-`pre_pr_review_loops` (validated 0-5, passed straight through as `MaxPasses` by
+Two passes is the fixed count for **agent-ready** publication. Explicit
+user-channel publication queues directly. Automation-initiated publication
+keeps its configured `pre_pr_review_loops` (validated 0-5, passed straight
+through as `MaxPasses` by
 the existing worker path) and records that value in `review_max_passes`. The
 schema therefore bounds `review_max_passes` to 1-5 rather than pinning it to 2;
 pinning it would reject every automation not configured for exactly two loops.

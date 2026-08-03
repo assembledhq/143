@@ -142,7 +142,7 @@ import {
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
 import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
-import type { ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionPublication, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequest, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
+import type { ChangesetStatus, ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionPublication, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequest, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -170,7 +170,7 @@ import {
   type UseSessionKeyboardShortcutsOptions,
 } from "@/hooks/use-session-keyboard-shortcuts";
 import { prMergedAccent } from "@/lib/pr-status-styles";
-import { continueFromPRBranchMessage, deriveCreatePRActionState, derivePushChangesActionState, hasRepairableFailedChecks, prHealthBlocksPRActions } from "@/lib/session-pr-action-state";
+import { changesetPublicationBlocker, continueFromPRBranchMessage, deriveCreatePRActionState, derivePushChangesActionState, hasRepairableFailedChecks, prHealthBlocksPRActions } from "@/lib/session-pr-action-state";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { isProvisionalSessionDetail } from "@/lib/session-detail-cache";
 import { useReconcileOptimisticAction } from "./use-optimistic-pr-action";
@@ -600,7 +600,33 @@ type PRAuthPromptState =
 type PRActionErrorState = {
   code?: string;
   message: string;
+  changesetID?: string;
+  changesetUpdatedAt?: string;
+  changesetStatus?: ChangesetStatus;
 };
+
+function publicationBlockerDetails(value: unknown): { reason?: string; changesetStatus?: ChangesetStatus } {
+  if (!value || typeof value !== "object") return {};
+  const details = value as { reason?: unknown; changeset_status?: unknown };
+  const candidateStatus = typeof details.changeset_status === "string"
+    ? details.changeset_status as ChangesetStatus
+    : undefined;
+  return {
+    reason: typeof details.reason === "string" ? details.reason : undefined,
+    changesetStatus: changesetPublicationBlocker(candidateStatus) ? candidateStatus : undefined,
+  };
+}
+
+function changesetAgentRecoveryMessage(changeset: ChangesetSummary, status = changeset.status): string | null {
+  switch (status) {
+    case "restack_conflict":
+      return "Resolve the restack conflict while preserving this pull request's intent. Explain any semantic changes and do not push; I will review and confirm the result.";
+    case "external_update_detected":
+      return "Run `143-tools changesets import-remote --changeset " + changeset.id + "` first. If it reports `reconciled`, stop and tell me Create PR is ready. Otherwise, fetch the remote branch and reconcile its commits with the local worktree without dropping either side's intended changes. Do not push. After the turn is checkpointed, run the import command again in a follow-up so the platform can verify that the checkpoint matches local HEAD and safely contains the remote HEAD.";
+    default:
+      return null;
+  }
+}
 
 const terminalSessionStatuses = new Set<SessionStatus>(["completed", "pr_created", "failed", "cancelled", "skipped"]);
 
@@ -3856,6 +3882,18 @@ export function SessionDetailContent({ id }: { id: string }) {
   const primaryChangeset = changesets.find((changeset) => changeset.is_primary) ?? changesets[0];
   const [selectedChangesetID, setSelectedChangesetID] = useState<string | null>(changesetParam);
   const selectedChangeset = changesets.find((changeset) => changeset.id === selectedChangesetID) ?? primaryChangeset;
+  const selectedLocalPRActionError = localPRActionError &&
+    (!localPRActionError.changesetID || localPRActionError.changesetID === selectedChangeset?.id) &&
+    (!localPRActionError.changesetUpdatedAt ||
+      localPRActionError.changesetUpdatedAt === selectedChangeset?.updated_at ||
+      localPRActionError.changesetStatus === selectedChangeset?.status)
+    ? localPRActionError
+    : null;
+  useEffect(() => {
+    if (localPRActionError && !selectedLocalPRActionError) {
+      setLocalPRActionError(null);
+    }
+  }, [localPRActionError, selectedLocalPRActionError]);
   const selectedPublication = (session?.publications ?? []).find((publication) => publication.changeset_id === selectedChangeset?.id);
   const selectedPublicationPresentation = selectedPublication ? publicationPresentation(selectedPublication) : null;
   const selectedPublicationHasReviewWarning = selectedPublication ? publicationHasReviewWarning(selectedPublication) : false;
@@ -3869,6 +3907,30 @@ export function SessionDetailContent({ id }: { id: string }) {
       toast.success("Pull request action queued");
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Pull request action failed"),
+  });
+  const publishChangesetMutation = useMutation({
+    mutationFn: (target: ChangesetSummary) => api.sessions.publishChangeset(id, target.id),
+    onMutate: () => {
+      setLocalPRActionError(null);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["session", id] });
+      toast.success("Pull request action queued");
+    },
+    onError: (error, target) => {
+      const blockerDetails = error instanceof ApiError ? publicationBlockerDetails(error.details) : {};
+      if (blockerDetails.changesetStatus) {
+        setLocalPRActionError({
+          code: error instanceof ApiError ? error.code : undefined,
+          message: blockerDetails.reason || (error instanceof Error ? error.message : "Pull request action failed"),
+          changesetID: target.id,
+          changesetUpdatedAt: target.updated_at,
+          changesetStatus: blockerDetails.changesetStatus,
+        });
+        void queryClient.invalidateQueries({ queryKey: ["session", id] });
+      }
+      toast.error(blockerDetails.reason || (error instanceof Error ? error.message : "Pull request action failed"));
+    },
   });
   // Stack publishing coordinates each changeset independently, so the request
   // can succeed while individual entries are rejected. A generic success toast
@@ -4851,6 +4913,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     onMutate: () => {
       setLocalPRActionError(null);
       setLocalPRState("submitting");
+      return {
+        changesetID: selectedChangeset?.id,
+        changesetUpdatedAt: selectedChangeset?.updated_at,
+      };
     },
     onSuccess: (data, options) => {
       setLocalPRActionError(null);
@@ -4862,7 +4928,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       queryClient.invalidateQueries({ queryKey: ["session", id] });
       queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
     },
-    onError: (err, options) => {
+    onError: (err, options, context) => {
       if (err instanceof ApiError &&
         (err.code === "GITHUB_PR_AUTHORSHIP_REQUIRED" || err.code === "GITHUB_PR_AUTHORSHIP_REAUTH_REQUIRED") &&
         isPRAuthInterceptDetails(err.details)) {
@@ -4873,11 +4939,18 @@ export function SessionDetailContent({ id }: { id: string }) {
         return;
       }
       setLocalPRState("idle");
-      const msg = err instanceof Error ? err.message : PR_ERROR_TOAST_MESSAGE;
+      const blockerDetails = err instanceof ApiError ? publicationBlockerDetails(err.details) : {};
+      const msg = blockerDetails.reason || (err instanceof Error ? err.message : PR_ERROR_TOAST_MESSAGE);
       setLocalPRActionError({
         code: err instanceof ApiError ? err.code : undefined,
         message: msg,
+        changesetID: context?.changesetID,
+        changesetUpdatedAt: context?.changesetUpdatedAt,
+        changesetStatus: blockerDetails.changesetStatus,
       });
+      if (blockerDetails.changesetStatus) {
+        void queryClient.invalidateQueries({ queryKey: ["session", id] });
+      }
       if (options?.resumeToken) {
         clearPRResumeParams();
       }
@@ -6152,22 +6225,35 @@ export function SessionDetailContent({ id }: { id: string }) {
     sessionSnapshotKey: session.snapshot_key,
     sessionSandboxState: session.sandbox_state,
     serverMessage: session.pr_creation_error,
-    localCode: localPRActionError?.code,
+    localCode: selectedLocalPRActionError?.code,
     allowImplicitMissingSnapshot: showExpiredPRAction,
   });
   const snapshotUnavailable = snapshotState !== null;
   const snapshotMessage = snapshotPRMessage(
     snapshotState,
-    localPRActionError?.code ? localPRActionError.message : session.pr_creation_error,
+    selectedLocalPRActionError?.code ? selectedLocalPRActionError.message : session.pr_creation_error,
   );
   // The button tooltip repeats the notice copy, so it reads the same polished
   // sentence the notice renders instead of the raw server detail.
-  const localPRActionMessage = localPRActionError?.message
-    ? formatPRCreationError(localPRActionError.code, localPRActionError.message)
+  const selectedLocalPRActionMessage = selectedLocalPRActionError?.message
+    ? formatPRCreationError(selectedLocalPRActionError.code, selectedLocalPRActionError.message)
     : undefined;
+  const blockingChangesetStatus = selectedLocalPRActionError?.changesetStatus ?? selectedChangeset?.status;
+  const publicationBlocker = changesetPublicationBlocker(blockingChangesetStatus);
+  const selectedChangesetActionBlocker = publicationBlocker;
+  const selectedChangesetRecoveryMessage = selectedChangeset
+    ? changesetAgentRecoveryMessage(selectedChangeset, blockingChangesetStatus)
+    : null;
+  const requestSelectedChangesetRecovery = () => {
+    if (!selectedChangeset || !selectedChangesetRecoveryMessage) return;
+    setComposerChangesetID(selectedChangeset.id);
+    setComposerMessage(selectedChangesetRecoveryMessage);
+    focusComposerFromKeyboard();
+  };
   const prActionError = hasPR
     ? null
-    : (localPRActionError?.code && snapshotState ? snapshotMessage : localPRActionError?.message) ||
+    : publicationBlocker ||
+      (selectedLocalPRActionError?.code && snapshotState ? snapshotMessage : selectedLocalPRActionMessage) ||
       (snapshotUnavailable ? snapshotMessage : null) ||
       (prState === "failed" ? session.pr_creation_error || PR_ERROR_TOAST_MESSAGE : null);
   const createPRAction = deriveCreatePRActionState({
@@ -6185,8 +6271,9 @@ export function SessionDetailContent({ id }: { id: string }) {
     creatingPR,
     finalizingPR,
     prState,
+    changesetStatus: blockingChangesetStatus,
     prCreationError: session.pr_creation_error,
-    localError: snapshotUnavailable ? undefined : localPRActionMessage,
+    localError: snapshotUnavailable ? undefined : selectedLocalPRActionMessage,
     hasRecoverableError: Boolean(prActionError),
   });
   // A durable publication owns the workflow until it settles. Its Overview
@@ -6276,9 +6363,16 @@ export function SessionDetailContent({ id }: { id: string }) {
   }
 
   const prErrorNotice = prActionError ? {
-    title: prErrorTitle(snapshotState, localPRActionError?.code),
-    description: formatPRCreationError(localPRActionError?.code, prActionError),
-    action: prActionDisabled ? undefined : {
+    title: blockingChangesetStatus === "external_update_detected"
+      ? "Branch reconciliation required"
+      : publicationBlocker
+        ? "Publication blocked"
+        : prErrorTitle(snapshotState, selectedLocalPRActionError?.code),
+    description: publicationBlocker || formatPRCreationError(selectedLocalPRActionError?.code, prActionError),
+    action: selectedChangesetRecoveryMessage ? {
+      label: blockingChangesetStatus === "external_update_detected" ? "Reconcile with agent" : "Resolve with agent",
+      onClick: requestSelectedChangesetRecovery,
+    } : prActionDisabled ? undefined : {
       label: prActionLabel,
       onClick: () => submitCreatePR(undefined),
     },
@@ -6400,7 +6494,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                       title={prActionTitle ? `${prActionTitle} (p c)` : `${prActionLabel} (p c)`}
                       onClick={() => submitCreatePR(undefined)}
                     >
-                      {!prActionSpinning && (prState === "failed" || localPRActionError ? (
+                      {!prActionSpinning && (prState === "failed" || selectedLocalPRActionError ? (
                         <AlertTriangle className="h-3 w-3" />
                       ) : (
                         <GitPullRequest className="h-3 w-3" />
@@ -6598,6 +6692,9 @@ export function SessionDetailContent({ id }: { id: string }) {
             changesets={changesets}
             selectedID={selectedChangeset?.id ?? ""}
             onSelect={(changesetID) => {
+              if (localPRActionError?.changesetID && localPRActionError.changesetID !== changesetID) {
+                setLocalPRActionError(null);
+              }
               setSelectedChangesetID(changesetID);
               void setChangesetParam(changesetID);
             }}
@@ -6665,7 +6762,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             })}
             requestSplitPending={sendMutation.isPending || !composerCanSendMessage}
           />
-          {hasMultipleChangesets && selectedChangeset && (
+          {(hasMultipleChangesets || selectedChangesetRecoveryMessage) && selectedChangeset && (
             <Card className="border-border/60" data-testid="selected-pull-request-panel">
               <CardContent className="space-y-1 p-4">
                 <div className="text-sm font-medium">{selectedChangeset.title}</div>
@@ -6697,25 +6794,33 @@ export function SessionDetailContent({ id }: { id: string }) {
                 ) : null}
                 <div className="flex flex-wrap gap-2 pt-2">
                 {!selectedChangeset.pull_request && !selectedPublicationOwnsActions && (
-                  <DisabledTooltip disabled={!!selectedChangeset.worktree_path} content="Create PR becomes available after branch materialization">
-                    <Button type="button" size="sm" disabled={!selectedChangeset.worktree_path || changesetLifecycleMutation.isPending} onClick={() => changesetLifecycleMutation.mutate(() => api.sessions.publishChangeset(id, selectedChangeset.id))}>
+                  <DisabledTooltip
+                    disabled={!selectedChangeset.worktree_path || !!selectedChangesetActionBlocker || publishChangesetMutation.isPending}
+                    content={selectedChangesetActionBlocker || (!selectedChangeset.worktree_path ? "Create PR becomes available after branch materialization" : "Publishing pull request…")}
+                  >
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={!selectedChangeset.worktree_path || !!selectedChangesetActionBlocker || publishChangesetMutation.isPending}
+                      title={selectedChangesetActionBlocker || (!selectedChangeset.worktree_path ? "Create PR becomes available after branch materialization" : publishChangesetMutation.isPending ? "Publishing pull request…" : undefined)}
+                      onClick={() => publishChangesetMutation.mutate(selectedChangeset)}
+                    >
                       <GitPullRequest className="h-3.5 w-3.5" />
                       Create PR
                     </Button>
                   </DisabledTooltip>
                 )}
                 <Button type="button" size="sm" variant="outline" disabled={!selectedChangeset.worktree_path} onClick={() => {
-                  setComposerChangesetID(selectedChangeset.id);
-                  if (selectedChangeset.status === "restack_conflict") {
-                    setComposerMessage("Resolve the restack conflict while preserving this pull request's intent. Explain any semantic changes and do not push; I will review and confirm the result.");
-                  } else if (selectedChangeset.status === "external_update_detected") {
-                    setComposerMessage("Run `143-tools changesets import-remote --changeset " + selectedChangeset.id + "`, fetch this pull request's remote branch, and reconcile its remote commits with the local worktree without dropping either side's intended changes. Do not push; I will review and confirm the result.");
+                  if (selectedChangesetRecoveryMessage) {
+                    requestSelectedChangesetRecovery();
+                  } else {
+                    setComposerChangesetID(selectedChangeset.id);
+                    focusComposerFromKeyboard();
                   }
-                  focusComposerFromKeyboard();
                 }}>
-                  {selectedChangeset.status === "restack_conflict"
+                  {blockingChangesetStatus === "restack_conflict"
                     ? "Resolve with agent"
-                    : selectedChangeset.status === "external_update_detected"
+                    : blockingChangesetStatus === "external_update_detected"
                       ? "Reconcile with agent"
                       : "Ask agent"}
                 </Button>

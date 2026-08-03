@@ -47,6 +47,10 @@ const sandboxCapacityRetryDelay = 10 * time.Second
 const previewCapacityRetryDelay = 5 * time.Second
 const previewStartupInterruptedRetryDelay = 2 * time.Second
 const prePRReviewRetryDelay = 5 * time.Second
+const reviewLoopRecoveryDelay = 30 * time.Second
+const reviewLoopRecoveryInactiveFor = 15 * time.Second
+const periodicReviewLoopRecoveryInactiveFor = 2 * time.Minute
+const reviewLoopRecoveryBatchSize = 50
 const continuePostSuccessActionPushPRChanges = "push_pr_changes"
 
 var enqueuePRPushChangesJobAfterContinue = enqueuePRPushChangesJob
@@ -450,6 +454,9 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 			w.Register(models.JobTypeStartCodeReviewReassessment, newStartCodeReviewReassessmentHandler(stores, services, logger))
 		}
 	}
+	if services != nil && services.ReviewLoops != nil {
+		w.Register(models.JobTypeReconcileSessionReviewLoop, newReconcileSessionReviewLoopHandler(services, logger))
+	}
 	if services != nil && services.PagerDuty != nil {
 		w.Register(models.JobTypePagerDutyIngestEvent, newPagerDutyIngestEventHandler(services.PagerDuty, logger))
 	}
@@ -824,6 +831,7 @@ type Services struct {
 		OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid.UUID, assistantSummary string) error
 		OnThreadTurnFailed(ctx context.Context, orgID, threadID uuid.UUID, summary string) error
 		Start(ctx context.Context, orgID, sessionID uuid.UUID, req reviewloopsvc.StartReviewLoopRequest) (*models.SessionReviewLoop, error)
+		ReconcileStrandedPublicationLoops(ctx context.Context, orgID uuid.UUID, inactiveBefore time.Time, limit int) (int, error)
 	}
 	// EvalBatchStreams publishes lightweight pub/sub signals on every batch
 	// or run state transition so the eval-batch detail page can replace its
@@ -9988,6 +9996,14 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 							Str("session_id", sessionID.String()).
 							Str("thread_id", threadID.String()).
 							Msg("failed to advance review loop after thread turn")
+						recoveryCtx, cancelRecovery := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+						if enqueueErr := enqueueSessionReviewLoopReconciliation(recoveryCtx, stores, orgID, threadID, time.Now().UTC()); enqueueErr != nil {
+							logger.Error().Err(enqueueErr).
+								Str("session_id", sessionID.String()).
+								Str("thread_id", threadID.String()).
+								Msg("failed to enqueue review loop recovery")
+						}
+						cancelRecovery()
 					}
 				}
 			} else {
@@ -10840,6 +10856,64 @@ func newSyncPRPreviewSurfacesHandler(services *Services, logger zerolog.Logger) 
 	}
 }
 
+func enqueueSessionReviewLoopReconciliation(
+	ctx context.Context,
+	stores *Stores,
+	orgID, threadID uuid.UUID,
+	now time.Time,
+) error {
+	if stores == nil || stores.Jobs == nil {
+		return errors.New("review loop recovery job store is unavailable")
+	}
+	runAt := now.Add(reviewLoopRecoveryDelay)
+	dedupeKey := models.JobTypeReconcileSessionReviewLoop + ":" + threadID.String()
+	_, err := stores.Jobs.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue:     "default",
+		JobType:   models.JobTypeReconcileSessionReviewLoop,
+		Payload:   map[string]any{"org_id": orgID.String(), "limit": reviewLoopRecoveryBatchSize},
+		Priority:  5,
+		RunAt:     &runAt,
+		DedupeKey: &dedupeKey,
+	})
+	if err != nil {
+		return fmt.Errorf("enqueue session review loop reconciliation: %w", err)
+	}
+	return nil
+}
+
+func newReconcileSessionReviewLoopHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID string `json:"org_id"`
+			Limit int    `json:"limit"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal reconcile_session_review_loop payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		if input.Limit <= 0 {
+			input.Limit = reviewLoopRecoveryBatchSize
+		}
+		if services == nil || services.ReviewLoops == nil {
+			return errors.New("review loop recovery service is unavailable")
+		}
+		restarted, err := services.ReviewLoops.ReconcileStrandedPublicationLoops(
+			ctx, orgID, time.Now().UTC().Add(-reviewLoopRecoveryInactiveFor), input.Limit,
+		)
+		if err != nil {
+			return fmt.Errorf("reconcile stranded publication reviews: %w", err)
+		}
+		if restarted > 0 {
+			logger.Warn().Str("org_id", orgID.String()).Int("restarted", restarted).
+				Msg("restarted stranded publication review loops")
+		}
+		return nil
+	}
+}
+
 func newReconcilePullRequestStateHandler(services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
@@ -10857,7 +10931,19 @@ func newReconcilePullRequestStateHandler(services *Services, logger zerolog.Logg
 			input.Limit = 50
 		}
 		logger.Info().Str("org_id", orgID.String()).Int("limit", input.Limit).Msg("starting reconcile_pull_request_state job")
-		return services.PR.ReconcilePullRequestState(ctx, orgID, input.Limit)
+		prErr := services.PR.ReconcilePullRequestState(ctx, orgID, input.Limit)
+		var reviewErr error
+		if services.ReviewLoops != nil {
+			var restarted int
+			restarted, reviewErr = services.ReviewLoops.ReconcileStrandedPublicationLoops(
+				ctx, orgID, time.Now().UTC().Add(-periodicReviewLoopRecoveryInactiveFor), input.Limit,
+			)
+			if restarted > 0 {
+				logger.Warn().Str("org_id", orgID.String()).Int("restarted", restarted).
+					Msg("periodic reconciliation restarted stranded publication review loops")
+			}
+		}
+		return errors.Join(prErr, reviewErr)
 	}
 }
 
@@ -10981,12 +11067,9 @@ func effectivePublicationRequestedRole(
 	if stores == nil || stores.Users == nil {
 		return "", errors.New("user store is required to authorize agent-tool publication")
 	}
-	user, err := stores.Users.GetByIDGlobalWithSettings(ctx, *run.TriggeredByUserID)
+	user, err := stores.Users.GetByIDWithSettings(ctx, run.OrgID, *run.TriggeredByUserID)
 	if err != nil {
 		return "", fmt.Errorf("load agent publication initiator: %w", err)
-	}
-	if user.OrgID != run.OrgID {
-		return "", errors.New("agent publication initiator is outside organization scope")
 	}
 	return string(user.Role), nil
 }
