@@ -41,27 +41,45 @@ func TestRenameLegacyOutputTermsMigrationPostgresBehavior(t *testing.T) {
 
 	orgID := uuid.New()
 	sessionID := uuid.New()
-	_, err = conn.Exec(ctx, `
-		INSERT INTO organizations (id) VALUES ($1);
-		INSERT INTO sessions (id, org_id) VALUES ($2, $1);
-		INSERT INTO code_review_prompt_artifacts
-			(id, org_id, session_id, artifact_key, role, content)
-		VALUES ($3, $1, $2, 'prompt-before', 'reviewer', 'before');
-		INSERT INTO code_review_session_metadata (id, prompt_artifact_key)
-		VALUES ($4, 'prompt-before');
-		INSERT INTO preview_verification_runs (id, steps, artifacts)
-		VALUES ($5, '[{"index":1,"artifact":{"id":"capture-before"}}]', '[{"id":"capture-before"}]');
-		INSERT INTO session_diff_snapshots
-			(id, org_id, session_id, review_artifact_key, review_artifact_version, review_artifact_file_count)
-		VALUES ($6, $1, $2, 'review-before', 1, 3);
-		INSERT INTO preview_dependency_cache (id, cache_kind, metadata)
-		VALUES ($7, 'install_artifact', '{"kind":"install_artifact"}');
-		INSERT INTO preview_dependency_cache_locations (id, cache_kind)
-		VALUES ($8, 'build_artifact');
-		INSERT INTO code_review_agent_results (id, structured_result)
-		VALUES ($9, '{"prompt_artifact_key":"prompt-before","raw_artifact_key":"raw-before"}')`,
-		orgID, sessionID, uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New())
-	require.NoError(t, err, "test should seed legacy rows")
+	legacySeeds := []struct {
+		name  string
+		query string
+		args  []any
+	}{
+		{name: "organization", query: `INSERT INTO organizations (id) VALUES ($1)`, args: []any{orgID}},
+		{name: "session", query: `INSERT INTO sessions (id, org_id) VALUES ($1, $2)`, args: []any{sessionID, orgID}},
+		{
+			name: "prompt record",
+			query: `INSERT INTO code_review_prompt_artifacts
+				(id, org_id, session_id, artifact_key, role, content)
+				VALUES ($1, $2, $3, 'prompt-before', 'reviewer', 'before')`,
+			args: []any{uuid.New(), orgID, sessionID},
+		},
+		{name: "prompt reference", query: `INSERT INTO code_review_session_metadata (id, prompt_artifact_key) VALUES ($1, 'prompt-before')`, args: []any{uuid.New()}},
+		{
+			name:  "verification run",
+			query: `INSERT INTO preview_verification_runs (id, steps, artifacts) VALUES ($1, '[{"index":1,"artifact":{"id":"capture-before"}}]', '[{"id":"capture-before"}]')`,
+			args:  []any{uuid.New()},
+		},
+		{
+			name: "review bundle",
+			query: `INSERT INTO session_diff_snapshots
+				(id, org_id, session_id, review_artifact_key, review_artifact_version, review_artifact_file_count)
+				VALUES ($1, $2, $3, 'review-before', 1, 3)`,
+			args: []any{uuid.New(), orgID, sessionID},
+		},
+		{name: "dependency cache", query: `INSERT INTO preview_dependency_cache (id, cache_kind, metadata) VALUES ($1, 'install_artifact', '{"kind":"install_artifact"}')`, args: []any{uuid.New()}},
+		{name: "cache location", query: `INSERT INTO preview_dependency_cache_locations (id, cache_kind) VALUES ($1, 'build_artifact')`, args: []any{uuid.New()}},
+		{
+			name:  "agent result",
+			query: `INSERT INTO code_review_agent_results (id, structured_result) VALUES ($1, '{"prompt_artifact_key":"prompt-before","raw_artifact_key":"raw-before"}')`,
+			args:  []any{uuid.New()},
+		},
+	}
+	for _, seed := range legacySeeds {
+		_, err = conn.Exec(ctx, seed.query, seed.args...)
+		require.NoError(t, err, "test should seed legacy %s", seed.name)
+	}
 
 	upBody, err := os.ReadFile("../../migrations/000280_rename_legacy_output_terms.up.sql")
 	require.NoError(t, err, "test should read the output-name up migration")
@@ -73,15 +91,30 @@ func TestRenameLegacyOutputTermsMigrationPostgresBehavior(t *testing.T) {
 	require.NoError(t, err, "migrated prompt record should be queryable")
 	require.Equal(t, 1, count, "migration should copy existing prompt records")
 
-	_, err = conn.Exec(ctx, `
-		INSERT INTO code_review_prompt_artifacts
-			(id, org_id, session_id, artifact_key, role, content)
-		VALUES ($1, $2, $3, 'prompt-from-old', 'reviewer', 'old writer');
-		INSERT INTO code_review_prompt_records
-			(id, org_id, session_id, record_key, role, content)
-		VALUES ($4, $2, $3, 'prompt-from-new', 'reviewer', 'new writer')`,
-		uuid.New(), orgID, sessionID, uuid.New())
-	require.NoError(t, err, "both prompt writer generations should remain writable")
+	promptWriterSeeds := []struct {
+		name  string
+		query string
+		args  []any
+	}{
+		{
+			name: "legacy writer",
+			query: `INSERT INTO code_review_prompt_artifacts
+				(id, org_id, session_id, artifact_key, role, content)
+				VALUES ($1, $2, $3, 'prompt-from-old', 'reviewer', 'old writer')`,
+			args: []any{uuid.New(), orgID, sessionID},
+		},
+		{
+			name: "current writer",
+			query: `INSERT INTO code_review_prompt_records
+				(id, org_id, session_id, record_key, role, content)
+				VALUES ($1, $2, $3, 'prompt-from-new', 'reviewer', 'new writer')`,
+			args: []any{uuid.New(), orgID, sessionID},
+		},
+	}
+	for _, seed := range promptWriterSeeds {
+		_, err = conn.Exec(ctx, seed.query, seed.args...)
+		require.NoError(t, err, "the %s should remain writable", seed.name)
+	}
 	err = conn.QueryRow(ctx, `
 		SELECT count(*)
 		FROM code_review_prompt_records
