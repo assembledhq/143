@@ -120,6 +120,7 @@ import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, flattenTra
 import { formatReviewMessage } from "@/lib/format-review-message";
 import {
   classifyPRSnapshotState,
+  formatPRCreationError,
   prErrorTitle,
   snapshotPRMessage,
 } from "@/lib/session-pr-snapshot";
@@ -6271,7 +6272,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const prErrorNotice = prActionError ? {
     title: prErrorTitle(snapshotState, localPRActionError?.code),
-    description: prActionError,
+    description: formatPRCreationError(localPRActionError?.code, prActionError),
     action: prActionDisabled ? undefined : {
       label: prActionLabel,
       onClick: () => submitCreatePR(undefined),
@@ -6460,7 +6461,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         </div>
         {prErrorNotice && (
           <ErrorNotice
-            className="mx-2 mt-2"
+            className="mx-4 mt-2"
             title={prErrorNotice.title}
             description={prErrorNotice.description}
             action={prErrorNotice.action}

@@ -11245,11 +11245,12 @@ func TestSessionHandler_CreatePR_CoordinatorOutcomes(t *testing.T) {
 	publicationID := uuid.New()
 	blockedReason := "publication intent is durable, but immediate queueing failed"
 	tests := []struct {
-		name       string
-		status     publicationintent.ResultStatus
-		reason     *string
-		wantCode   int
-		wantInBody string
+		name           string
+		status         publicationintent.ResultStatus
+		reason         *string
+		coordinatorErr error
+		wantCode       int
+		wantInBody     string
 	}{
 		{
 			name:       "queued intent reports queued",
@@ -11270,6 +11271,24 @@ func TestSessionHandler_CreatePR_CoordinatorOutcomes(t *testing.T) {
 			wantCode:   http.StatusAccepted,
 			wantInBody: `"status":"already_published"`,
 		},
+		{
+			name: "workspace rejection returns actionable product copy",
+			coordinatorErr: &publicationintent.Error{
+				Code: publicationintent.ErrorWorkspaceNotReady,
+				Err:  errors.New("primary changeset has no working branch to publish"),
+			},
+			wantCode:   http.StatusConflict,
+			wantInBody: "This workspace is not ready to publish a pull request. Review its status, then try again.",
+		},
+		{
+			name: "ineligible session rejection explains the current state",
+			coordinatorErr: &publicationintent.Error{
+				Code: publicationintent.ErrorSessionNotEligible,
+				Err:  errors.New("session cannot create a new pull request"),
+			},
+			wantCode:   http.StatusConflict,
+			wantInBody: "This session cannot create a pull request in its current state.",
+		},
 	}
 
 	for _, tt := range tests {
@@ -11286,7 +11305,7 @@ func TestSessionHandler_CreatePR_CoordinatorOutcomes(t *testing.T) {
 			handler := newSessionHandler(t, mock)
 			coordinator := &internalPRCoordinatorStub{result: &publicationintent.PublicationIntentResult{
 				Status: tt.status, SessionID: sessionID, PublicationID: &publicationID, Reason: tt.reason,
-			}}
+			}, err: tt.coordinatorErr}
 			handler.SetPublicationIntentCoordinator(coordinator, true)
 
 			diff := "--- a/file.go\n+++ b/file.go\n@@ -1 +1 @@\n-old\n+new"

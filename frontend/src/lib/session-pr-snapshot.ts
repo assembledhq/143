@@ -74,3 +74,25 @@ export function prErrorTitle(snapshotState: PRSnapshotState | null, errorCode?: 
   }
   return "Couldn't create the PR";
 }
+
+export function formatPRCreationError(errorCode?: string, message?: string | null): string {
+  const trimmedMessage = message?.trim();
+  const useCoordinatorFallback = !trimmedMessage ||
+    /^pull request publication request was rejected[.!]?$/i.test(trimmedMessage);
+
+  if (useCoordinatorFallback && errorCode === "WORKSPACE_NOT_READY") {
+    return "This workspace is not ready to publish a pull request. Review its status, then try again.";
+  }
+  if (useCoordinatorFallback && errorCode === "SESSION_NOT_PUBLICATION_ELIGIBLE") {
+    return "This session cannot create a pull request in its current state.";
+  }
+
+  if (!trimmedMessage) {
+    return "Something went wrong while creating the pull request. Try again.";
+  }
+
+  const sentenceCasedMessage = `${trimmedMessage.charAt(0).toLocaleUpperCase()}${trimmedMessage.slice(1)}`;
+  return /[.!?]$/.test(sentenceCasedMessage)
+    ? sentenceCasedMessage
+    : `${sentenceCasedMessage}.`;
+}

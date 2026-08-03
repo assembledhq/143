@@ -969,7 +969,8 @@ describe('SessionDetailPage PR creation', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     const alert = await screen.findByRole('alert');
-    expect(alert.className).toContain('mx-2');
+    expect(alert).toHaveClass('mx-4');
+    expect(alert).not.toHaveClass('mx-2');
   });
 
   it('shows a resume-specific PR error instead of session expiry when the GitHub resume token is stale', async () => {
@@ -1386,7 +1387,7 @@ describe('SessionDetailPage PR creation', () => {
     resolveCreatePR?.();
   });
 
-  it('shows the immediate create PR error in a 10-second toast', async () => {
+  it('shows a polished, aligned create PR error with a 10-second toast', async () => {
     const sessionWithDiff: Session = {
       ...mockSessions[0],
       status: 'completed',
@@ -1408,8 +1409,8 @@ describe('SessionDetailPage PR creation', () => {
       }),
       http.post('/api/v1/sessions/:id/pr', () => {
         return HttpResponse.json(
-          { error: { code: 'PUSH_FAILED', message: 'GitHub rejected the branch push.' } },
-          { status: 500 },
+          { error: { code: 'WORKSPACE_NOT_READY', message: 'pull request publication request was rejected' } },
+          { status: 409 },
         );
       }),
     );
@@ -1425,7 +1426,10 @@ describe('SessionDetailPage PR creation', () => {
     });
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent("Couldn't create the PR");
-    expect(alert).toHaveTextContent('GitHub rejected the branch push.');
+    expect(alert).toHaveTextContent('This workspace is not ready to publish a pull request. Review its status, then try again.');
+    expect(alert).not.toHaveTextContent('pull request publication request was rejected');
+    expect(alert).toHaveClass('mx-4');
+    expect(alert).not.toHaveClass('mx-2');
     expect(within(alert).getByRole('button', { name: 'Retry' })).toBeInTheDocument();
   });
 

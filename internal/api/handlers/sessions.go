@@ -1460,13 +1460,7 @@ func (h *SessionHandler) PublishChangesetStack(w http.ResponseWriter, r *http.Re
 				if errors.As(requestErr, &intentErr) {
 					code = string(intentErr.Code)
 				}
-				message := "This pull request could not be queued."
-				switch code {
-				case string(publicationintent.ErrorWorkspaceNotReady):
-					message = "This pull request is not ready to publish."
-				case string(publicationintent.ErrorSessionNotEligible):
-					message = "This session cannot publish this pull request."
-				}
+				message := publicationIntentRejectionMessage(code)
 				zerolog.Ctx(r.Context()).Error().Err(requestErr).
 					Str("changeset_id", changeset.ID.String()).
 					Str("publication_error_code", code).
@@ -1483,7 +1477,7 @@ func (h *SessionHandler) PublishChangesetStack(w http.ResponseWriter, r *http.Re
 			var intentErr *publicationintent.Error
 			if errors.As(requestErr, &intentErr) &&
 				(intentErr.Code == publicationintent.ErrorSessionNotEligible || intentErr.Code == publicationintent.ErrorWorkspaceNotReady) {
-				writeError(w, r, http.StatusConflict, string(intentErr.Code), "stack publication request was rejected", requestErr)
+				writeError(w, r, http.StatusConflict, string(intentErr.Code), publicationIntentRejectionMessage(string(intentErr.Code)), requestErr)
 				return
 			}
 			writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "failed to record stack publication intent", requestErr)
@@ -3042,6 +3036,17 @@ func writePublicationIntentAccepted(w http.ResponseWriter, result *publicationin
 	})
 }
 
+func publicationIntentRejectionMessage(code string) string {
+	switch code {
+	case string(publicationintent.ErrorWorkspaceNotReady):
+		return "This workspace is not ready to publish a pull request. Review its status, then try again."
+	case string(publicationintent.ErrorSessionNotEligible):
+		return "This session cannot create a pull request in its current state."
+	default:
+		return "This pull request could not be queued. Try again."
+	}
+}
+
 func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -3248,7 +3253,7 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 			if errors.As(intentErr, &typedErr) {
 				switch typedErr.Code {
 				case publicationintent.ErrorSessionNotEligible, publicationintent.ErrorWorkspaceNotReady:
-					writeError(w, r, http.StatusConflict, string(typedErr.Code), "pull request publication request was rejected", intentErr)
+					writeError(w, r, http.StatusConflict, string(typedErr.Code), publicationIntentRejectionMessage(string(typedErr.Code)), intentErr)
 				default:
 					writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "failed to record publication intent", intentErr)
 				}
