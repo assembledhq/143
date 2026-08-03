@@ -98,6 +98,7 @@ func (s *coordinatorPublicationStore) EnsureRequested(_ context.Context, _ uuid.
 }
 
 func (s *coordinatorPublicationStore) ApplyReviewBypass(_ context.Context, _ uuid.UUID, publication *models.SessionPublication) error {
+	publication.State = models.SessionPublicationStateReadyToPublish
 	publication.ReviewGateState = models.SessionPublicationReviewGateNotRequired
 	publication.ReviewMaxPasses = nil
 	publication.ReviewLoopID = nil
@@ -448,7 +449,7 @@ func TestCoordinatorRequestPullRequest_KillSwitchParksExistingLiveIntent(t *test
 	require.Nil(t, f.jobs.payload, "kill switch should not enqueue another execution job")
 }
 
-func TestCoordinatorRequestPullRequest_ExplicitUserTakesOverParkedAgentIntent(t *testing.T) {
+func TestCoordinatorRequestPullRequest_ExplicitUserReplacesReviewOnParkedAgentIntent(t *testing.T) {
 	t.Parallel()
 
 	f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, nil, true, nil)
@@ -462,8 +463,9 @@ func TestCoordinatorRequestPullRequest_ExplicitUserTakesOverParkedAgentIntent(t 
 		ReviewGateState: models.SessionPublicationReviewGatePending, ReviewMaxPasses: &maxPasses,
 	}
 	f.publications.ensureReturnsSource = models.SessionPublicationSourceAgentTool
-	// The repository changed after the intent was recorded. A manual takeover
-	// must keep the durable draft-first contract rather than reinterpret it.
+	// The repository changed after the automatic intent was recorded. The
+	// explicit Create PR action is a new publication decision, so it uses the
+	// current direct-publication options instead of replaying automatic review.
 	f.coordinator.SetRepositoryStore(coordinatorRepositoryStore{repository: models.Repository{
 		ID: f.repositoryID, OrgID: f.orgID, Settings: json.RawMessage(`{"pr_handoff_mode":"pre_publish"}`),
 	}})
@@ -475,17 +477,17 @@ func TestCoordinatorRequestPullRequest_ExplicitUserTakesOverParkedAgentIntent(t 
 		RequestedByUserID: &requesterID, RequestedRole: string(models.RoleMember),
 	})
 
-	require.NoError(t, err, "an authorized user should be able to take over parked agent execution")
-	require.Equal(t, ResultReviewInProgress, result.Status, "manual takeover should preserve the pending review gate")
-	require.Equal(t, models.SessionPublicationSourceAgentTool, f.publications.captured.Source, "manual takeover should preserve the durable entry-point provenance")
-	require.Equal(t, models.SessionPublicationReviewGatePending, f.publications.captured.ReviewGateState, "manual takeover must not weaken recorded review")
-	require.Equal(t, string(models.SessionPublicationSourceAgentTool), f.jobs.payload["publication_source"], "queued work should preserve the original entry-point provenance")
-	require.Equal(t, string(models.SessionPublicationSourceUser), f.jobs.payload["publication_execution_source"], "queued work should use the explicit user as runtime authority")
-	require.Equal(t, string(models.PRHandoffModeDraftFirst), f.jobs.payload["publication_handoff_mode"], "manual takeover should retain the recorded handoff mode")
-	require.Equal(t, true, f.jobs.payload["draft"], "manual takeover should retain the original draft choice")
-	require.Equal(t, "app", f.jobs.payload["author_mode"], "manual takeover should retain the original authorship choice")
-	require.Equal(t, issueSnapshotID.String(), f.jobs.payload["issue_snapshot_id"], "manual takeover should retain the original issue snapshot")
-	require.NotNil(t, f.jobs.payload, "manual takeover should resume the parked durable job")
+	require.NoError(t, err, "an authorized user should be able to replace parked automatic review")
+	require.Equal(t, ResultPRQueued, result.Status, "explicit Create PR should queue direct publication")
+	require.True(t, result.ReviewBypassed, "the result should report removal of the persisted automatic review gate")
+	require.Equal(t, models.SessionPublicationSourceUser, f.publications.captured.Source, "the durable intent should record explicit user provenance")
+	require.Equal(t, models.SessionPublicationReviewGateNotRequired, f.publications.captured.ReviewGateState, "explicit Create PR should remove recorded automatic review")
+	require.Equal(t, string(models.SessionPublicationSourceUser), f.jobs.payload["publication_source"], "queued work should use explicit user provenance")
+	require.Equal(t, string(models.PRHandoffModePrePublish), f.jobs.payload["publication_handoff_mode"], "explicit publication should use the current repository handoff shape")
+	require.NotContains(t, f.jobs.payload, "draft", "ordinary Create PR should not replay the automatic draft choice")
+	require.NotContains(t, f.jobs.payload, "author_mode", "ordinary Create PR should not replay automatic authorship")
+	require.NotContains(t, f.jobs.payload, "issue_snapshot_id", "ordinary Create PR should not replay the automatic issue snapshot request")
+	require.NotNil(t, f.jobs.payload, "explicit Create PR should queue the durable job")
 }
 
 func TestCoordinatorRequestPullRequest_NonPrimarySafetyGates(t *testing.T) {
@@ -923,6 +925,39 @@ func TestCoordinatorRequestPullRequestRejoinsOrReopensExistingIntent(t *testing.
 			require.Nil(t, f.jobs.payload, "rejoining a live intent should not queue a duplicate job")
 		})
 	}
+}
+
+func TestCoordinatorRequestPullRequestExplicitActionReplacesExistingReview(t *testing.T) {
+	t.Parallel()
+
+	f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, nil, true, nil)
+	reviewLoopID := uuid.New()
+	maxPasses := 2
+	existing := models.SessionPublication{
+		ID: f.changesetID, OrgID: f.orgID, SessionID: f.sessionID, ChangesetID: f.changesetID,
+		RepositoryID: f.repositoryID, State: models.SessionPublicationStateReviewPending,
+		Source: models.SessionPublicationSourceUser, TriggerKind: models.SessionPublicationTriggerExplicitAction,
+		HandoffMode: models.PRHandoffModePrePublish, AutomaticPolicySource: models.PublicationPolicySourceExplicitAction,
+		ReviewPolicySource: models.PublicationPolicySourceProductDefault, ReviewMaxPasses: &maxPasses,
+		ReviewLoopID: &reviewLoopID, ReviewGateState: models.SessionPublicationReviewGatePending,
+		JobQueue: models.SessionPublicationJobQueueAgent, RequestPayload: json.RawMessage(`{"session_id":"old"}`),
+		BaseBranch: "main", HeadBranch: "143/change",
+	}
+	f.publications.captured = &existing
+
+	result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{
+		Source: models.SessionPublicationSourceUser, TriggerKind: models.SessionPublicationTriggerExplicitAction,
+		RequestedByUserID: &f.userID, RequestedRole: string(models.RoleMember),
+	})
+
+	require.NoError(t, err, "an explicit Create PR action should replace an older automatic review intent")
+	require.Equal(t, ResultPRQueued, result.Status, "the explicit action should queue pull request creation directly")
+	require.True(t, result.ReviewBypassed, "the result should report that the older persisted review gate was removed")
+	require.Equal(t, models.SessionPublicationStateReadyToPublish, f.publications.captured.State, "the durable intent should advance past review")
+	require.Equal(t, models.SessionPublicationReviewGateNotRequired, f.publications.captured.ReviewGateState, "the durable intent should no longer require review")
+	require.Nil(t, f.publications.captured.ReviewLoopID, "the durable intent should detach the superseded review loop")
+	require.NotNil(t, f.jobs.payload, "the explicit action should queue publication work")
+	require.NotContains(t, f.jobs.payload, "draft", "the ordinary Create PR action should not force a draft")
 }
 
 func TestCoordinatorRequestPullRequestReopensTerminalDraftWithExistingPR(t *testing.T) {

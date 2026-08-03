@@ -309,7 +309,7 @@ function PublicationWorkflowCard({
   executionPaused,
   reviewExecutionPaused,
   actionPending,
-  onCreateDraft,
+  onCreatePR,
   onOpenReview,
   onContinue,
   onRetry,
@@ -322,7 +322,7 @@ function PublicationWorkflowCard({
   executionPaused: boolean;
   reviewExecutionPaused: boolean;
   actionPending: boolean;
-  onCreateDraft: () => void;
+  onCreatePR: () => void;
   onOpenReview: () => void;
   onContinue: () => void;
   onRetry: () => void;
@@ -411,9 +411,9 @@ function PublicationWorkflowCard({
             publication.review_gate_state === "needs_human" ||
             (executionActuallyPaused && reviewExecutionPaused && publication.review_gate_state === "pending")
           ) ? (
-            <Button size="sm" disabled={actionPending} onClick={onCreateDraft}>
+            <Button size="sm" disabled={actionPending} onClick={onCreatePR}>
               {actionPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GitPullRequest className="h-3.5 w-3.5" />}
-              Create draft PR
+              Create PR
             </Button>
           ) : null}
           {needsAttention && reviewLoop?.thread_id ? <Button size="sm" variant="outline" onClick={onOpenReview}>Open review</Button> : null}
@@ -6857,7 +6857,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 session.publication_policy?.review_execution_enabled === false
               }
               actionPending={createPRMutation.isPending}
-              onCreateDraft={() => createPRMutation.mutate({ draft: true })}
+              onCreatePR={() => createPRMutation.mutate(undefined)}
               onOpenReview={() => {
                 if (publicationReviewLoop?.thread_id) setActiveThreadId(publicationReviewLoop.thread_id);
               }}

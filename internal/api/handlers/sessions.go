@@ -3009,7 +3009,10 @@ func (h *SessionHandler) rejoinPublicationIntent(
 		memberDraftBypass := privilegedUserAction && requestedRole != string(models.RoleBuilder) &&
 			draft != nil && *draft &&
 			(publication.ReviewGateState == models.SessionPublicationReviewGateNeedsHuman || parked)
-		if !retryable && !memberDraftBypass && !(parked && privilegedUserAction) {
+		explicitReviewReplacement := privilegedUserAction && !publication.State.Terminal() &&
+			(publication.ReviewGateState == models.SessionPublicationReviewGatePending ||
+				publication.ReviewGateState == models.SessionPublicationReviewGateNeedsHuman)
+		if !retryable && !memberDraftBypass && !(parked && privilegedUserAction) && !explicitReviewReplacement {
 			return publicationintent.ExistingPublicationResult(publication), true, nil
 		}
 		return nil, false, nil

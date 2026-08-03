@@ -128,6 +128,48 @@ func TestSessionHandlerCreatePRRejoinsCompletedPublicationBeforeSnapshotChecks(t
 	require.Empty(t, coordinator.requests, "a harmless replay should not enqueue or mutate publication work")
 }
 
+func TestSessionHandlerCreatePRDoesNotRejoinExistingReviewForExplicitAction(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+	handler := newSessionHandler(t, mock)
+	handler.SetPublicationStore(db.NewSessionPublicationStore(mock))
+	handler.SetPublicationIntentCoordinator(&internalPRCoordinatorStub{}, true)
+
+	orgID, sessionID, changesetID, repositoryID, userID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	loopID := uuid.New()
+	maxPasses := 2
+	publication := models.SessionPublication{
+		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID, RepositoryID: repositoryID,
+		State: models.SessionPublicationStateReviewPending, Source: models.SessionPublicationSourceUser,
+		TriggerKind: models.SessionPublicationTriggerExplicitAction, HandoffMode: models.PRHandoffModePrePublish,
+		AutomaticPolicySource: models.PublicationPolicySourceExplicitAction,
+		ReviewPolicySource:    models.PublicationPolicySourceProductDefault, ReviewMaxPasses: &maxPasses,
+		ReviewLoopID: &loopID, ReviewGateState: models.SessionPublicationReviewGatePending,
+		JobQueue: models.SessionPublicationJobQueueAgent, RequestPayload: json.RawMessage(`{"session_id":"old"}`),
+		RequestGenerationAt: now, BaseBranch: "main", HeadBranch: "143/change",
+		RequestedAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("(?s)SELECT .*FROM session_publications").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID}).
+		WillReturnRows(pgxmock.NewRows(handlerSessionPublicationColumns).AddRow(handlerSessionPublicationRow(publication)...))
+
+	result, found, err := handler.rejoinPublicationIntent(
+		context.Background(), orgID, sessionID,
+		models.SessionChangeset{ID: changesetID, OrgID: orgID, SessionID: sessionID, IsPrimary: true},
+		nil, models.SessionPublicationSourceUser, models.SessionPublicationTriggerExplicitAction,
+		&userID, string(models.RoleMember),
+	)
+
+	require.NoError(t, err, "explicit Create PR should inspect the existing publication without failing")
+	require.False(t, found, "an older review-pending intent should continue to the coordinator for explicit takeover")
+	require.Nil(t, result, "the rejoin helper should not return the older review workflow")
+	require.NoError(t, mock.ExpectationsWereMet(), "the publication lookup should remain tenant and changeset scoped")
+}
+
 type failingSSEWriter struct {
 	header       http.Header
 	failOnSubstr string

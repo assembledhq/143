@@ -271,18 +271,23 @@ func (c *Coordinator) RequestPullRequest(
 		return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("check existing publication intent: %w", publicationErr)}
 	}
 	hasExistingPublication := publicationErr == nil
-	// The audited draft bypass is the resolution offered for a publication whose
-	// review already stopped for human attention. It is deliberately not a way
-	// to open a first-time request without review: "give me a draft PR" and
-	// "skip the review gate" must not be the same request.
+	// Existing review gates predate or originate from automatic handoff. An
+	// authenticated explicit Create PR action is a new publication decision and
+	// replaces that gate, while first-time explicit requests continue to skip
+	// review through the ordinary policy path below.
 	executionParked := hasExistingPublication && !existingPublication.State.Terminal() &&
 		(!c.PublicationExecutionEnabled(existingPublication.Source) ||
 			(existingPublication.ReviewGateState == models.SessionPublicationReviewGatePending &&
 				!c.ReviewExecutionEnabled(existingPublication.Source)))
-	bypassRequested := hasExistingPublication &&
+	explicitReviewReplacement := hasExistingPublication && !existingPublication.State.Terminal() &&
+		(existingPublication.ReviewGateState == models.SessionPublicationReviewGatePending ||
+			existingPublication.ReviewGateState == models.SessionPublicationReviewGateNeedsHuman) &&
+		authorizedManualTakeover(req)
+	draftBypassRequested := hasExistingPublication &&
 		(reviewBlocksPublication(existingPublication) || executionParked) &&
 		authorizedDraftBypass(req)
-	manualTakeoverRequested := executionParked && authorizedManualTakeover(req)
+	bypassRequested := explicitReviewReplacement || draftBypassRequested
+	manualTakeoverRequested := executionParked && authorizedManualTakeover(req) && !bypassRequested
 	// A retryable terminal outcome (no-op or failed) is not a durable answer:
 	// re-requesting must reach EnsureRequested, whose generation-guarded reopen
 	// is the only path back. Anything else is a live intent the caller rejoins.
