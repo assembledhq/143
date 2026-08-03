@@ -119,7 +119,6 @@ function AuthorReviewCountLink({
   outcome,
   repository,
   range,
-  onNavigate,
 }: {
   author: string;
   count: number;
@@ -127,24 +126,12 @@ function AuthorReviewCountLink({
   outcome?: "automatically_approved" | "completed_not_approved";
   repository?: string;
   range: string;
-  onNavigate: () => void;
 }) {
   return (
     <Link
       href={authorReviewsHref({ author, outcome, repository, range })}
       className="font-medium text-primary underline-offset-4 hover:underline focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       aria-label={`${count.toLocaleString()} ${label} by ${author}`}
-      onClick={(event) => {
-        if (
-          event.button === 0
-          && !event.metaKey
-          && !event.ctrlKey
-          && !event.shiftKey
-          && !event.altKey
-        ) {
-          onNavigate();
-        }
-      }}
     >
       {count.toLocaleString()}
     </Link>
@@ -215,7 +202,6 @@ export function CodeReviewAnalyticsReport({
   authorSortOrder,
   onAuthorSort,
   reviewLinkFilters,
-  onNavigateToReviews,
   filters,
 }: {
   analytics?: CodeReviewAnalytics;
@@ -229,7 +215,6 @@ export function CodeReviewAnalyticsReport({
     repository?: string;
     range: string;
   };
-  onNavigateToReviews: () => void;
   filters: ReactNode;
 }) {
   if (!analytics && isLoading) {
@@ -349,7 +334,6 @@ export function CodeReviewAnalyticsReport({
                         label="reviewed PRs"
                         repository={reviewLinkFilters.repository}
                         range={reviewLinkFilters.range}
-                        onNavigate={onNavigateToReviews}
                       />
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
@@ -360,7 +344,6 @@ export function CodeReviewAnalyticsReport({
                         outcome="automatically_approved"
                         repository={reviewLinkFilters.repository}
                         range={reviewLinkFilters.range}
-                        onNavigate={onNavigateToReviews}
                       />
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
@@ -371,7 +354,6 @@ export function CodeReviewAnalyticsReport({
                         outcome="completed_not_approved"
                         repository={reviewLinkFilters.repository}
                         range={reviewLinkFilters.range}
-                        onNavigate={onNavigateToReviews}
                       />
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
