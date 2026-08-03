@@ -180,7 +180,9 @@ export function PRHealthBanner({
             )}
           </div>
 
-          <div className="space-y-2 pl-9">
+          {/* Indent matches the header's icon tile (h-7) plus its gap-2.5 so the
+              body copy lines up with "PR #<n>" instead of the icon. */}
+          <div className="space-y-2 pl-[2.375rem]">
             <p className="text-xs text-foreground">{compactSummary}</p>
 
             <div className="flex flex-wrap items-center gap-2">

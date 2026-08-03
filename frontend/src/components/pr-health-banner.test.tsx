@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { PullRequestHealthResponse } from "@/lib/types";
 import { renderWithProviders, screen, userEvent } from "@/test/test-utils";
 
-import { PRHealthBanner } from "./pr-health-banner";
+import { compactPRHealthSummary, PRHealthBanner } from "./pr-health-banner";
 
 const baseHealth: PullRequestHealthResponse = {
   pull_request_id: "pr-123",
@@ -1057,5 +1057,25 @@ describe("PRHealthBanner", () => {
 
     expect(container.querySelector("svg.lucide-git-pull-request")).toBeInTheDocument();
     expect(container.querySelector("svg.lucide-check-circle-2")).toBeNull();
+  });
+});
+
+describe("compactPRHealthSummary", () => {
+  it.each([
+    ["PR #42 is mergeable and all required test checks are passing.", "Mergeable and all required test checks are passing."],
+    ["PR #42 has merge conflicts.", "Merge conflicts."],
+    ["PR #42 is blocked by conflicts and 2 failing test jobs.", "Blocked by conflicts and 2 failing test jobs."],
+    // Only a standalone "is"/"has" is dropped, not a word that starts with one.
+    ["PR #42 issues remain.", "Issues remain."],
+  ])("drops the redundant entity prefix from %j", (summary, expected) => {
+    expect(compactPRHealthSummary(summary, 42)).toBe(expected);
+  });
+
+  it.each([
+    ["Draft PR #42 is stale.", "a summary that does not lead with the entity"],
+    ["PR #7 is healthy.", "a summary about a different pull request"],
+    ["", "an empty summary"],
+  ])("leaves %j untouched for %s", (summary) => {
+    expect(compactPRHealthSummary(summary, 42)).toBe(summary);
   });
 });
