@@ -44,7 +44,7 @@ const PUBLICATION_AUTOMATION_COPY: Record<PublicationAutomationKey, { title: str
   },
   review_before_pr: {
     title: "Run a two-pass review/fix cycle before creating the PR",
-    description: "Review the current changes, apply fixes, and confirm the result before publishing. Explicit Create PR actions use this review policy too.",
+    description: "Review the current changes, apply fixes, and confirm the result before automatic publication. Clicking Create PR publishes directly.",
   },
 };
 

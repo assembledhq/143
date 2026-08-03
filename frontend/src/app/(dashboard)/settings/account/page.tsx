@@ -252,7 +252,7 @@ const PERSONAL_AUTOMATION_COPY: Record<PersonalAutomationKey, { title: string; d
   },
   review_before_pr: {
     title: "Run a two-pass review/fix cycle before creating the PR",
-    description: "Choose whether your PR requests run the two-pass review/fix cycle before publication.",
+    description: "Choose whether automatic PR handoff runs the two-pass review/fix cycle. Clicking Create PR publishes directly.",
   },
   resolve_conflicts_when_idle: {
     title: "Resolve conflicts when idle",
