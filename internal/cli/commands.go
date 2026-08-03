@@ -42,7 +42,7 @@ func HandleSubcommand(args []string, stdout, stderr io.Writer) (handled bool, ex
 		return true, runSetup(args[1:], stdout, stderr)
 	case "preview":
 		if InSandbox() {
-			return false, 0
+			return true, runSandboxPreview(args[1:], stdout, stderr)
 		}
 		return true, runPreview(args[1:], stdout, stderr)
 	case "changesets":

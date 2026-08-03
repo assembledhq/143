@@ -1551,3 +1551,18 @@ func TestActivityPhaseTranscriptAssociationMigration(t *testing.T) {
 		)
 	}
 }
+
+func TestPublicationInitiatorMembershipScopeMigration(t *testing.T) {
+	t.Parallel()
+
+	upBody, err := os.ReadFile("../../migrations/000278_fix_publication_initiator_membership_scope.up.sql")
+	require.NoError(t, err, "test should read the publication initiator membership migration")
+	validateBody, err := os.ReadFile("../../migrations/000279_validate_publication_initiator_membership_scope.up.sql")
+	require.NoError(t, err, "test should read the publication initiator validation migration")
+
+	upSQL := string(upBody)
+	require.Contains(t, upSQL, "REFERENCES organization_memberships(user_id, org_id)", "publication attribution should follow authoritative multi-org membership")
+	require.Contains(t, upSQL, "ON DELETE SET NULL (initiated_by_user_id)", "membership removal should preserve publications while clearing stale attribution")
+	require.Contains(t, upSQL, "NOT VALID", "constraint replacement should avoid scanning rows under the catalog lock")
+	require.Contains(t, string(validateBody), "VALIDATE CONSTRAINT session_publications_initiator_scope_fkey", "a separate migration should validate existing publication attribution")
+}

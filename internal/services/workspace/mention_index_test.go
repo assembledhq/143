@@ -141,6 +141,47 @@ func TestBuildMentionIndex_UsesRecursiveReaderFastPath(t *testing.T) {
 	}, index.Entries, "BuildMentionIndex should still filter ignored paths returned by the recursive reader")
 }
 
+func TestBuildMentionIndex_ReaderPathsNormalizeEntriesConsistently(t *testing.T) {
+	t.Parallel()
+
+	entries := []sandbox.FileEntry{
+		{Type: " DIR ", Path: " ./src/ "},
+		{Type: " FILE ", Path: " ./src/main.go "},
+		{Type: "symlink", Path: "src/current.go"},
+		{Type: "file", Path: " ./node_modules/pkg/index.js "},
+		{Type: "file", Path: " . "},
+	}
+	tests := []struct {
+		name   string
+		reader Reader
+	}{
+		{
+			name: "directory reader",
+			reader: &stubMentionReader{listings: map[string][]sandbox.FileEntry{
+				".":   entries,
+				"src": {},
+			}},
+		},
+		{
+			name:   "recursive reader",
+			reader: &recursiveMentionReader{entries: entries},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			index, err := BuildMentionIndex(context.Background(), tt.reader)
+			require.NoError(t, err, "BuildMentionIndex should accept normalizable entries")
+			require.Equal(t, []MentionIndexEntry{
+				{Kind: string(models.SessionInputReferenceKindDirectory), Path: "src"},
+				{Kind: string(models.SessionInputReferenceKindFile), Path: "src/main.go"},
+			}, index.Entries, "reader paths should normalize and filter the same entries")
+		})
+	}
+}
+
 func TestBuildMentionIndex_FiltersLanguageCachesAndArtifacts(t *testing.T) {
 	t.Parallel()
 

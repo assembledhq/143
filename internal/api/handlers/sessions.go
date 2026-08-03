@@ -155,6 +155,47 @@ func (h *SessionHandler) SetPublicationIntentCoordinator(
 	h.publicationCoordinatorEnabled = enabled
 }
 
+type publicationRequestProvenance struct {
+	source      models.SessionPublicationSource
+	triggerKind models.SessionPublicationTriggerKind
+}
+
+type publicationRequestProvenanceContextKey struct{}
+
+func withPublicationRequestProvenance(
+	ctx context.Context,
+	source models.SessionPublicationSource,
+	triggerKind models.SessionPublicationTriggerKind,
+) context.Context {
+	return context.WithValue(ctx, publicationRequestProvenanceContextKey{}, publicationRequestProvenance{
+		source: source, triggerKind: triggerKind,
+	})
+}
+
+func publicationRequestFromContext(ctx context.Context) (
+	models.SessionPublicationSource,
+	models.SessionPublicationTriggerKind,
+	*uuid.UUID,
+	string,
+) {
+	provenance, ok := ctx.Value(publicationRequestProvenanceContextKey{}).(publicationRequestProvenance)
+	if ok {
+		// Agent-tool requests are authorized with a session-scoped token. The
+		// synthetic user installed by the internal handler exists for shared
+		// authorization and audit plumbing; it must not turn agent provenance
+		// into a user-owned publication request.
+		return provenance.source, provenance.triggerKind, nil, ""
+	}
+	var requestedByUserID *uuid.UUID
+	if user := middleware.UserFromContext(ctx); user != nil {
+		requestedByUserID = &user.ID
+	}
+	return models.SessionPublicationSourceUser,
+		models.SessionPublicationTriggerExplicitAction,
+		requestedByUserID,
+		middleware.ActiveRoleFromContext(ctx)
+}
+
 // resolveSessionPublicationPolicy snapshots the effective publication policy
 // for a session detail response, or returns nil when it cannot be resolved.
 // It is best-effort by design: the policy is advisory UI data, and failing the
@@ -177,16 +218,12 @@ func (h *SessionHandler) resolveSessionPublicationPolicy(
 	}
 	var personal *models.AutomaticPRFollowThroughSettings
 	if run.TriggeredByUserID != nil && h.userStore != nil {
-		initiator, initiatorErr := h.userStore.GetByIDGlobalWithSettings(ctx, *run.TriggeredByUserID)
+		initiator, initiatorErr := h.userStore.GetByIDWithSettings(ctx, orgID, *run.TriggeredByUserID)
 		switch {
 		case initiatorErr != nil:
 			h.logger.Warn().Err(initiatorErr).
 				Str("session_id", run.ID.String()).
 				Msg("falling back to organization publication policy; session initiator could not be loaded")
-		case initiator.OrgID != orgID:
-			h.logger.Warn().
-				Str("session_id", run.ID.String()).
-				Msg("falling back to organization publication policy; session initiator is outside organization scope")
 		default:
 			personal = initiator.Settings.AutomaticPRFollowThrough
 		}
@@ -206,14 +243,30 @@ func (h *SessionHandler) resolveSessionPublicationPolicy(
 	return &models.SessionPublicationPolicy{
 		CreatePRWhenAgentReady: policy.CreatePRWhenAgentReady,
 		CreatePRSource:         policy.CreatePRSource,
-		// Mirror the orchestrator's prompt gate: the review is only reported
-		// as on when the cycle can actually run, so the API and the agent
-		// never describe the same policy differently.
-		ReviewBeforePR:  policy.ReviewBeforePR && h.prePRReviewEnabled,
-		ReviewSource:    policy.ReviewSource,
-		ReviewMaxPasses: policy.ReviewMaxPasses,
-		PRHandoffMode:   handoffMode,
+		// Runtime switches never rewrite stored customer policy. Expose their
+		// execution state separately so a parked workflow is actionable rather
+		// than looking like a review that is still running.
+		ReviewBeforePR:                   policy.ReviewBeforePR,
+		ReviewExecutionEnabled:           h.reviewExecutionEnabled(models.SessionPublicationSourceUser),
+		AgentPublicationExecutionEnabled: h.publicationExecutionEnabled(models.SessionPublicationSourceAgentTool),
+		ReviewSource:                     policy.ReviewSource,
+		ReviewMaxPasses:                  policy.ReviewMaxPasses,
+		PRHandoffMode:                    handoffMode,
 	}
+}
+
+func (h *SessionHandler) publicationExecutionEnabled(source models.SessionPublicationSource) bool {
+	if h.publicationCoordinator != nil {
+		return h.publicationCoordinator.PublicationExecutionEnabled(source)
+	}
+	return true
+}
+
+func (h *SessionHandler) reviewExecutionEnabled(source models.SessionPublicationSource) bool {
+	if h.publicationCoordinator != nil {
+		return h.publicationCoordinator.ReviewExecutionEnabled(source)
+	}
+	return h.prePRReviewEnabled
 }
 
 const (
@@ -645,17 +698,6 @@ func (h *SessionHandler) SetPublicationStore(store *db.SessionPublicationStore) 
 	h.publicationStore = store
 }
 
-func (h *SessionHandler) primaryChangesetID(ctx context.Context, orgID, sessionID uuid.UUID) (uuid.UUID, error) {
-	if h.changesetStore == nil {
-		return sessionID, nil
-	}
-	changeset, err := h.changesetStore.GetPrimary(ctx, orgID, sessionID)
-	if err != nil {
-		return uuid.Nil, err
-	}
-	return changeset.ID, nil
-}
-
 // errInvalidChangesetID marks a malformed changeset_id query parameter so
 // callers can distinguish a client error (400) from a store/DB failure (500).
 var errInvalidChangesetID = errors.New("invalid changeset ID")
@@ -990,6 +1032,7 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusInternalServerError, "PUBLICATIONS_FAILED", "failed to load publication status", publicationErr)
 			return
 		}
+		sanitizePublicationErrors(publications)
 		detail.Publications = publications
 	}
 	if h.repoStore != nil && run.RepositoryID != nil {
@@ -1017,6 +1060,37 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionDetail]{Data: detail})
+}
+
+func sanitizePublicationErrors(publications []models.SessionPublication) {
+	for i := range publications {
+		publications[i].ExecutionSource = publications[i].Source
+		var payload struct {
+			ExecutionSource models.SessionPublicationSource `json:"publication_execution_source"`
+		}
+		if err := json.Unmarshal(publications[i].RequestPayload, &payload); err == nil && payload.ExecutionSource.Validate() == nil {
+			publications[i].ExecutionSource = payload.ExecutionSource
+		}
+		if publications[i].LastErrorMessage == nil {
+			continue
+		}
+		message := "Pull request publication stopped safely. Retry the workflow or continue with the agent for help."
+		if publications[i].LastErrorCode != nil {
+			switch *publications[i].LastErrorCode {
+			case "no_diff_against_base":
+				message = "There are no changes to publish against the target branch."
+			case "remote_diverged":
+				message = "The remote branch changed. Review the branch and retry publication."
+			case "push_rejected":
+				message = "The branch could not be pushed. Check repository access and retry publication."
+			case "sandbox_auth_unavailable":
+				message = "GitHub authorization is required before this pull request can be published."
+			case "stack_parent_publication_failed":
+				message = "Publish the parent pull request, then retry this one."
+			}
+		}
+		publications[i].LastErrorMessage = &message
+	}
 }
 
 func (h *SessionHandler) listChangesetSummaries(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.ChangesetSummary, error) {
@@ -1312,7 +1386,7 @@ func (h *SessionHandler) PublishChangesetStack(w http.ResponseWriter, r *http.Re
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
 		return
 	}
-	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
+	_, err = h.runStore.GetByID(r.Context(), orgID, sessionID)
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
 		return
@@ -1328,10 +1402,6 @@ func (h *SessionHandler) PublishChangesetStack(w http.ResponseWriter, r *http.Re
 			continue
 		}
 		active++
-		if changeset.WorktreePath == nil || changeset.WorkingBranch == nil {
-			writeError(w, r, http.StatusConflict, "CHANGESET_NOT_MATERIALIZED", "every pull request must be materialized before publishing the stack")
-			return
-		}
 	}
 	if active == 0 {
 		writeError(w, r, http.StatusConflict, "EMPTY_STACK", "the session has no publishable pull requests")
@@ -1347,17 +1417,104 @@ func (h *SessionHandler) PublishChangesetStack(w http.ResponseWriter, r *http.Re
 			return
 		}
 	}
-	dedupeKey := "publish_changeset_stack:" + sessionID.String()
-	payload := map[string]any{"org_id": orgID.String(), "session_id": sessionID.String(), "author_mode": req.AuthorMode}
-	if req.Draft != nil {
-		payload["draft"] = *req.Draft
-	}
-	jobID, err := h.jobStore.EnqueueWithTarget(r.Context(), orgID, "agent", models.JobTypePublishChangesetStack, payload, 5, &dedupeKey, models.SessionWorkerTarget(&session))
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to queue stack publishing", err)
+	if h.publicationCoordinator == nil {
+		writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "publication coordinator is unavailable")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued", "job_id": jobID})
+	source, triggerKind, requestedByUserID, requestedRole := publicationRequestFromContext(r.Context())
+	results := make([]map[string]any, 0, active)
+	responseStatus := string(publicationintent.ResultAlreadyPublished)
+	hasQueued := false
+	reviewStatus := ""
+	attentionStatus := ""
+	for i := range changesets {
+		changeset := &changesets[i]
+		if changeset.Status == models.ChangesetStatusAbandoned || changeset.Status == models.ChangesetStatusMerged {
+			continue
+		}
+		result, requestErr := h.publicationCoordinator.RequestPullRequest(r.Context(), orgID, sessionID, publicationintent.RequestPullRequest{
+			ChangesetID:       &changeset.ID,
+			Draft:             req.Draft,
+			AuthorMode:        req.AuthorMode,
+			Source:            source,
+			TriggerKind:       triggerKind,
+			RequestedByUserID: requestedByUserID,
+			RequestedRole:     requestedRole,
+		})
+		if result == nil && requestErr == nil {
+			requestErr = errors.New("publication coordinator returned no result")
+		}
+		if requestErr != nil {
+			// Once an earlier changeset has a durable intent, aborting would
+			// report failure for a stack that is already publishing. Record the
+			// rejection against its own changeset and keep going so the response
+			// describes every entry; the client retries the whole stack
+			// idempotently.
+			if len(results) > 0 {
+				code := string(publicationintent.ErrorPublicationFailed)
+				var intentErr *publicationintent.Error
+				if errors.As(requestErr, &intentErr) {
+					code = string(intentErr.Code)
+				}
+				message := "This pull request could not be queued."
+				switch code {
+				case string(publicationintent.ErrorWorkspaceNotReady):
+					message = "This pull request is not ready to publish."
+				case string(publicationintent.ErrorSessionNotEligible):
+					message = "This session cannot publish this pull request."
+				}
+				zerolog.Ctx(r.Context()).Error().Err(requestErr).
+					Str("changeset_id", changeset.ID.String()).
+					Str("publication_error_code", code).
+					Msg("stack publication changeset was rejected after an earlier intent was accepted")
+				results = append(results, map[string]any{
+					"changeset_id": changeset.ID,
+					"status":       "rejected",
+					"error_code":   code,
+					"reason":       &message,
+				})
+				attentionStatus = "rejected"
+				continue
+			}
+			var intentErr *publicationintent.Error
+			if errors.As(requestErr, &intentErr) &&
+				(intentErr.Code == publicationintent.ErrorSessionNotEligible || intentErr.Code == publicationintent.ErrorWorkspaceNotReady) {
+				writeError(w, r, http.StatusConflict, string(intentErr.Code), "stack publication request was rejected", requestErr)
+				return
+			}
+			writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "failed to record stack publication intent", requestErr)
+			return
+		}
+		results = append(results, map[string]any{
+			"changeset_id":     changeset.ID,
+			"status":           result.Status,
+			"session_id":       result.SessionID,
+			"publication_id":   result.PublicationID,
+			"review_loop_id":   result.ReviewLoopID,
+			"pull_request_url": result.PullRequestURL,
+			"reason":           result.Reason,
+		})
+		switch result.Status {
+		case publicationintent.ResultManualPublicationRequired, publicationintent.ResultBlocked:
+			attentionStatus = string(result.Status)
+		case publicationintent.ResultReviewStarted, publicationintent.ResultReviewInProgress:
+			// Both are reported identically; the coordinator only ever produces
+			// review_in_progress today, and either means the stack is reviewing.
+			if reviewStatus == "" {
+				reviewStatus = string(result.Status)
+			}
+		case publicationintent.ResultPRQueued:
+			hasQueued = true
+		}
+	}
+	if attentionStatus != "" {
+		responseStatus = attentionStatus
+	} else if reviewStatus != "" {
+		responseStatus = reviewStatus
+	} else if hasQueued {
+		responseStatus = "queued"
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": responseStatus, "publications": results})
 }
 
 func (h *SessionHandler) RestackChangesetDescendants(w http.ResponseWriter, r *http.Request) {
@@ -1405,17 +1562,33 @@ func (h *SessionHandler) ImportChangesetRemote(w http.ResponseWriter, r *http.Re
 		return
 	}
 	var req struct {
-		HeadSHA string `json:"head_sha"`
+		HeadSHA          string `json:"head_sha"`
+		LocalHeadSHA     string `json:"local_head_sha"`
+		RemoteIsAncestor bool   `json:"remote_is_ancestor"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(req.HeadSHA) {
+	headPattern := regexp.MustCompile(`^[0-9a-f]{40}$`)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !headPattern.MatchString(req.HeadSHA) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_HEAD_SHA", "a 40-character remote head SHA is required")
 		return
 	}
-	if err := h.changesetStore.ImportRemoteHead(r.Context(), orgID, sessionID, changesetID, req.HeadSHA); err != nil {
+	if req.LocalHeadSHA != "" && !headPattern.MatchString(req.LocalHeadSHA) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_LOCAL_HEAD_SHA", "local_head_sha must be a 40-character SHA when provided")
+		return
+	}
+	status, err := h.changesetStore.ImportRemoteHead(
+		r.Context(), orgID, sessionID, changesetID, req.HeadSHA, req.LocalHeadSHA, req.RemoteIsAncestor,
+	)
+	if err != nil {
 		writeError(w, r, http.StatusNotFound, "CHANGESET_NOT_FOUND", "pull request not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "imported"})
+	result := "imported"
+	if status == models.ChangesetStatusPublishedBranch {
+		result = "reconciled"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": result, "changeset_status": status,
+	})
 }
 
 func (h *SessionHandler) ConfirmChangesetRestack(w http.ResponseWriter, r *http.Request) {
@@ -2815,6 +2988,72 @@ func (h *SessionHandler) requireBuilderReviewForCurrentSnapshot(w http.ResponseW
 	return false
 }
 
+func (h *SessionHandler) rejoinPublicationIntent(
+	ctx context.Context,
+	orgID, sessionID uuid.UUID,
+	changeset models.SessionChangeset,
+	draft *bool,
+	source models.SessionPublicationSource,
+	trigger models.SessionPublicationTriggerKind,
+	requestedByUserID *uuid.UUID,
+	requestedRole string,
+) (*publicationintent.PublicationIntentResult, bool, error) {
+	if h.publicationStore == nil {
+		return nil, false, nil
+	}
+	publication, err := h.publicationStore.GetByChangeset(ctx, orgID, sessionID, changeset.ID)
+	if err == nil {
+		retryable := publication.State == models.SessionPublicationStateCompletedNoop ||
+			publication.State == models.SessionPublicationStateTerminalFailed
+		privilegedUserAction := source == models.SessionPublicationSourceUser &&
+			trigger == models.SessionPublicationTriggerExplicitAction && requestedByUserID != nil &&
+			(requestedRole == string(models.RoleAdmin) || requestedRole == string(models.RoleMember) || requestedRole == string(models.RoleBuilder))
+		parked := !publication.State.Terminal() && h.publicationCoordinator != nil &&
+			(!h.publicationCoordinator.PublicationExecutionEnabled(publication.Source) ||
+				(publication.ReviewGateState == models.SessionPublicationReviewGatePending &&
+					!h.publicationCoordinator.ReviewExecutionEnabled(publication.Source)))
+		memberDraftBypass := privilegedUserAction && requestedRole != string(models.RoleBuilder) &&
+			draft != nil && *draft &&
+			(publication.ReviewGateState == models.SessionPublicationReviewGateNeedsHuman || parked)
+		if !retryable && !memberDraftBypass && !(parked && privilegedUserAction) {
+			return publicationintent.ExistingPublicationResult(publication), true, nil
+		}
+		return nil, false, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, fmt.Errorf("load existing publication: %w", err)
+	}
+
+	if changeset.IsPrimary {
+		_, err = h.pullRequestStore.GetPrimaryBySessionID(ctx, orgID, sessionID)
+	} else {
+		_, err = h.pullRequestStore.GetByChangesetID(ctx, orgID, sessionID, changeset.ID)
+	}
+	if err == nil {
+		return &publicationintent.PublicationIntentResult{
+			Status: publicationintent.ResultAlreadyPublished, SessionID: sessionID,
+		}, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, fmt.Errorf("load existing pull request: %w", err)
+	}
+	return nil, false, nil
+}
+
+func writePublicationIntentAccepted(w http.ResponseWriter, result *publicationintent.PublicationIntentResult) {
+	responseStatus := string(result.Status)
+	if result.Status == publicationintent.ResultPRQueued {
+		responseStatus = "queued"
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"status": responseStatus, "session_id": result.SessionID,
+		"publication_id":   result.PublicationID,
+		"review_loop_id":   result.ReviewLoopID,
+		"pull_request_url": result.PullRequestURL,
+		"reason":           result.Reason,
+	})
+}
+
 func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -2840,34 +3079,39 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if targetChangeset.WorktreePath == nil && !targetChangeset.IsPrimary {
-		writeError(w, r, http.StatusConflict, "CHANGESET_NOT_MATERIALIZED", "this pull request branch must be materialized before it can be created")
-		return
+	if !h.publicationCoordinatorEnabled {
+		if targetChangeset.WorktreePath == nil && !targetChangeset.IsPrimary {
+			writeError(w, r, http.StatusConflict, "CHANGESET_NOT_MATERIALIZED", "this pull request branch must be materialized before it can be created")
+			return
+		}
+		if targetChangeset.RestackConfirmationRequired {
+			writeError(w, r, http.StatusConflict, "RESTACK_CONFIRMATION_REQUIRED", "review and confirm the restack delta before publishing this pull request")
+			return
+		}
+		if session.SandboxState == models.SandboxStateDestroyed {
+			writeError(w, r, http.StatusGone, "SNAPSHOT_EXPIRED", ghservice.SnapshotExpiredPRMessage)
+			return
+		}
+		if targetChangeset.WorktreePath == nil && (session.SnapshotKey == nil || *session.SnapshotKey == "") {
+			writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_CAPTURED", ghservice.SnapshotNotCapturedPRMessage)
+			return
+		}
+		if !h.requireSnapshotQuiescent(w, r, orgID, session, "creating a PR") {
+			return
+		}
 	}
-	if targetChangeset.RestackConfirmationRequired {
-		writeError(w, r, http.StatusConflict, "RESTACK_CONFIRMATION_REQUIRED", "review and confirm the restack delta before publishing this pull request")
-		return
-	}
-
-	if session.SandboxState == models.SandboxStateDestroyed {
-		writeError(w, r, http.StatusGone, "SNAPSHOT_EXPIRED", ghservice.SnapshotExpiredPRMessage)
-		return
-	}
-	if targetChangeset.WorktreePath == nil && (session.SnapshotKey == nil || *session.SnapshotKey == "") {
-		writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_CAPTURED", ghservice.SnapshotNotCapturedPRMessage)
-		return
-	}
-	if !h.requireSnapshotQuiescent(w, r, orgID, session, "creating a PR") {
-		return
-	}
-
 	state := targetChangeset.PRCreationState
 	if targetChangeset.IsPrimary {
 		state = session.PRCreationState
 	}
-	coordinatedPrimaryPublication := h.publicationCoordinatorEnabled && targetChangeset.IsPrimary
+	// Once the coordinator is enabled it owns every changeset publication,
+	// including non-primary stack entries. Running stack children through the
+	// legacy state guards would revive PR_IN_FLIGHT / PR_EXISTS /
+	// PR_ALREADY_CREATED for exactly the requests that need durable idempotent
+	// replay.
+	coordinatedPublication := h.publicationCoordinatorEnabled
 	switch {
-	case coordinatedPrimaryPublication:
+	case coordinatedPublication:
 		// The durable coordinator resolves active review, draft-first, bypass,
 		// and replay states. Legacy PR creation state would otherwise reject an
 		// authorized draft bypass before the request body is even parsed.
@@ -2881,7 +3125,7 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 
 	// Check whether a PR already exists for this session.
 	var prErr error
-	if coordinatedPrimaryPublication {
+	if coordinatedPublication {
 		prErr = pgx.ErrNoRows
 	} else if targetChangeset.IsPrimary {
 		_, prErr = h.pullRequestStore.GetPrimaryBySessionID(r.Context(), orgID, sessionID)
@@ -2896,7 +3140,7 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to check for existing PR", prErr)
 		return
 	}
-	if !coordinatedPrimaryPublication &&
+	if !coordinatedPublication &&
 		(targetChangeset.PRCreationState == models.PRCreationStateSucceeded || session.PRCreationState == models.PRCreationStateSucceeded) {
 		writeError(w, r, http.StatusConflict, "PR_ALREADY_CREATED", "PR creation already completed for this session")
 		return
@@ -2923,6 +3167,46 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	if req.ResumeToken != "" && len(h.prAuthSigningKey) > 0 {
 		if claims, tokenErr := parsePRAuthResumeToken(h.prAuthSigningKey, req.ResumeToken, time.Now()); tokenErr == nil && claims.MergeWhenReady {
 			req.MergeWhenReady = true
+		}
+	}
+	if coordinatedPublication {
+		source, triggerKind, requestedByUserID, requestedRole := publicationRequestFromContext(r.Context())
+		rejoined, found, lookupErr := h.rejoinPublicationIntent(
+			r.Context(), orgID, sessionID, targetChangeset, req.Draft,
+			source, triggerKind, requestedByUserID, requestedRole,
+		)
+		if lookupErr != nil {
+			writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "failed to inspect publication state", lookupErr)
+			return
+		}
+		if found {
+			writePublicationIntentAccepted(w, rejoined)
+			return
+		}
+	}
+
+	// Mutable workspace and authorization preconditions apply only when this
+	// request can start or advance work. Harmless retries above rejoin their
+	// durable result even after the sandbox or credentials have changed.
+	if coordinatedPublication {
+		if targetChangeset.WorktreePath == nil && !targetChangeset.IsPrimary {
+			writeError(w, r, http.StatusConflict, "CHANGESET_NOT_MATERIALIZED", "this pull request branch must be materialized before it can be created")
+			return
+		}
+		if targetChangeset.RestackConfirmationRequired {
+			writeError(w, r, http.StatusConflict, "RESTACK_CONFIRMATION_REQUIRED", "review and confirm the restack delta before publishing this pull request")
+			return
+		}
+		if session.SandboxState == models.SandboxStateDestroyed {
+			writeError(w, r, http.StatusGone, "SNAPSHOT_EXPIRED", ghservice.SnapshotExpiredPRMessage)
+			return
+		}
+		if targetChangeset.WorktreePath == nil && (session.SnapshotKey == nil || *session.SnapshotKey == "") {
+			writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_CAPTURED", ghservice.SnapshotNotCapturedPRMessage)
+			return
+		}
+		if !h.requireSnapshotQuiescent(w, r, orgID, session, "creating a PR") {
+			return
 		}
 	}
 
@@ -2954,33 +3238,29 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	}) {
 		return
 	}
-	if h.publicationCoordinatorEnabled && targetChangeset.IsPrimary {
+	if h.publicationCoordinatorEnabled {
 		if h.publicationCoordinator == nil {
 			writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "publication coordinator is unavailable")
 			return
 		}
-		var requestedByUserID *uuid.UUID
-		if user := middleware.UserFromContext(r.Context()); user != nil {
-			requestedByUserID = &user.ID
-		}
+		source, triggerKind, requestedByUserID, requestedRole := publicationRequestFromContext(r.Context())
 		if req.MergeWhenReady && requestedByUserID == nil {
 			writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "not authenticated")
 			return
 		}
 		intentResult, intentErr := h.publicationCoordinator.RequestPullRequest(r.Context(), orgID, sessionID, publicationintent.RequestPullRequest{
-			Draft: req.Draft, AuthorMode: string(authorMode),
-			// An authenticated operator clicked "Create PR" in the UI.
-			Source:         models.SessionPublicationSourceUser,
-			TriggerKind:    models.SessionPublicationTriggerExplicitAction,
+			Draft: req.Draft, AuthorMode: string(authorMode), ChangesetID: &targetChangeset.ID,
+			Source:         source,
+			TriggerKind:    triggerKind,
 			MergeWhenReady: req.MergeWhenReady, RequestedByUserID: requestedByUserID,
-			RequestedRole: middleware.ActiveRoleFromContext(r.Context()),
+			RequestedRole: requestedRole,
 		})
 		if intentErr != nil {
 			var typedErr *publicationintent.Error
 			if errors.As(intentErr, &typedErr) {
 				switch typedErr.Code {
-				case publicationintent.ErrorSessionNotEligible, publicationintent.ErrorWorkspaceNotReady, publicationintent.ErrorPRInFlight:
-					writeError(w, r, http.StatusConflict, string(typedErr.Code), "pull request publication request was rejected", intentErr)
+				case publicationintent.ErrorSessionNotEligible, publicationintent.ErrorWorkspaceNotReady:
+					writeErrorWithDetails(w, r, http.StatusConflict, string(typedErr.Code), "pull request publication request was rejected", typedErr.Details, intentErr)
 				default:
 					writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "failed to record publication intent", intentErr)
 				}
@@ -2989,37 +3269,11 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "failed to record publication intent", intentErr)
 			return
 		}
-		// Not every non-error outcome means the job is on the queue. Reporting
-		// "queued" for the others would leave the operator watching a UI that
-		// never moves, so each maps onto a response this endpoint already
-		// returns for the same underlying condition.
+		// Every durable or policy outcome is a typed accepted response. The
+		// Overview workflow card interprets the status and current publication
+		// row; retries join that state instead of receiving a legacy conflict.
 		if intentResult == nil {
 			writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "publication coordinator returned no result")
-			return
-		}
-		switch intentResult.Status {
-		case publicationintent.ResultPRQueued, publicationintent.ResultReviewInProgress:
-			// Fall through to the audit event and the queued response.
-		case publicationintent.ResultAlreadyPublished:
-			writeError(w, r, http.StatusConflict, "PR_EXISTS", "a pull request already exists for this session")
-			return
-		case publicationintent.ResultBlocked:
-			// The intent is durable and reconciliation will retry it, but
-			// nothing was enqueued and the changeset never entered the queued
-			// state — that write lives in the same rolled-back transaction.
-			// Match the legacy enqueue-failure contract so retrying is the
-			// obvious next step; retries are idempotent.
-			h.logger.Error().
-				Str("session_id", sessionID.String()).
-				Msg("publication intent recorded but enqueue failed; awaiting reconciliation")
-			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation job")
-			return
-		default:
-			message := "pull request creation was not queued"
-			if intentResult.Reason != nil {
-				message = *intentResult.Reason
-			}
-			writeError(w, r, http.StatusConflict, "PUBLICATION_NOT_QUEUED", message)
 			return
 		}
 		sessionIDStr := sessionID.String()
@@ -3035,17 +3289,7 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		prDetails["review_bypassed"] = intentResult.ReviewBypassed
 		emitUserAuditWithSession(h.audit, r, models.AuditActionSessionPRRequested, models.AuditResourceSession, &sessionIDStr, &session.ID, nil,
 			marshalAuditDetails(h.logger, prDetails))
-		responseStatus := string(intentResult.Status)
-		if intentResult.Status == publicationintent.ResultPRQueued {
-			responseStatus = "queued"
-		}
-		writeJSON(w, http.StatusAccepted, map[string]any{
-			"status": responseStatus, "session_id": sessionID,
-			"publication_id":   intentResult.PublicationID,
-			"review_loop_id":   intentResult.ReviewLoopID,
-			"pull_request_url": intentResult.PullRequestURL,
-			"reason":           intentResult.Reason,
-		})
+		writePublicationIntentAccepted(w, intentResult)
 		return
 	}
 
@@ -4231,54 +4475,12 @@ func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	changesetID, err := h.primaryChangesetID(r.Context(), orgID, sessionID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "PRIMARY_CHANGESET_FAILED", "failed to resolve the primary pull request target", err)
-		return
-	}
-	payload := map[string]string{
-		"session_id":         sessionID.String(),
-		"changeset_id":       changesetID.String(),
-		"org_id":             orgID.String(),
-		"publication_source": string(models.SessionPublicationSourceUser),
-		"publication_queue":  string(models.SessionPublicationJobQueueDefault),
-	}
-	if h.issueSnapshots != nil && session.CurrentTurn > 0 {
-		if issueSnapshot, snapErr := h.issueSnapshots.GetByTurn(r.Context(), orgID, sessionID, session.CurrentTurn); snapErr == nil {
-			payload["issue_snapshot_id"] = issueSnapshot.ID.String()
-		}
-	}
-	dedupeKey := db.OpenPRDedupeKey(changesetID)
-	queued, err := h.enqueuePublishActionInTx(
-		r.Context(),
-		orgID,
-		sessionID,
-		"default",
-		"open_pr",
-		payload,
-		dedupeKey,
-		func(ctx context.Context, sessions *db.SessionStore, changesets *db.SessionChangesetStore) (bool, error) {
-			if h.changesetStore != nil {
-				return changesets.TryMarkPRCreationQueued(ctx, orgID, sessionID, changesetID)
-			}
-			return sessions.TryMarkPRCreationQueued(ctx, orgID, sessionID)
-		},
-	)
-	if err != nil {
-		if txErr := (*publishActionTxError)(nil); errors.As(err, &txErr) && txErr.phase == "state" {
-			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to mark PR creation as queued", err)
-			return
-		}
-		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation", err)
-		return
-	}
-	if !queued {
-		writeError(w, r, http.StatusConflict, "PR_IN_FLIGHT", "PR creation already in progress")
-		return
-	}
-
+	// Ending an ordinary idle session is no longer a publication signal. The
+	// agent tool or an explicit Create PR action owns readiness; retaining the
+	// old enqueue here would publish solely because the process was ended and
+	// would bypass the durable coordinator and review policy.
 	// Snapshot cleanup is handled by the reaper, which will find this session
-	// because it's now status=completed with sandbox_state=snapshotted.
+	// because it is now completed with a snapshotted workspace.
 
 	session.Status = models.SessionStatusCompleted
 	h.enrichSessionLinks(r.Context(), orgID, &session)

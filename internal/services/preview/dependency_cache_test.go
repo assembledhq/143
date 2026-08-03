@@ -41,6 +41,15 @@ type evictingDependencyCacheExec struct {
 	localPath string
 }
 
+type timeoutDependencyCacheExec struct {
+	*dependencyCacheExec
+}
+
+func (e *timeoutDependencyCacheExec) ExecWithStdin(ctx context.Context, _ *agent.Sandbox, _ string, _ io.Reader, _, _ io.Writer) (int, error) {
+	<-ctx.Done()
+	return -1, ctx.Err()
+}
+
 func (e *evictingDependencyCacheExec) Exec(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 	if strings.Contains(cmd, "rm -rf --") {
 		if err := os.Remove(e.localPath); err != nil && !os.IsNotExist(err) {
@@ -272,11 +281,11 @@ func TestSharedDependencyCache_SaveUploadsBlobChecksumAndReturnsSize(t *testing.
 	defer mock.Close()
 
 	mock.ExpectQuery("INSERT INTO preview_dependency_cache").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "last_used_at", "created_at",
+			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "restore_attempt_count", "restore_success_count", "restore_total_duration_ms", "producer_duration_ms", "producer_benefit_count", "producer_benefit_total_ms", "last_restore_at", "last_used_at", "created_at",
 		}).
-			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallArtifact, cacheKey, "placement", "deps/"+cacheKey+".tar.gz", int64(len(payload)), []byte(`{}`), now, now))
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallArtifact, cacheKey, "placement", "deps/"+cacheKey+".tar.gz", int64(len(payload)), []byte(`{}`), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), nil, now, now))
 
 	blobStore := newMemorySnapshotStore()
 	cache, err := NewDependencyCache(DependencyCacheConfig{
@@ -308,6 +317,125 @@ func TestSharedDependencyCache_SaveUploadsBlobChecksumAndReturnsSize(t *testing.
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestDependencyCacheCostAdmission(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.August, 2, 12, 0, 0, 0, time.UTC)
+	recent := now.Add(-time.Hour)
+	stale := now.Add(-25 * time.Hour)
+	tests := []struct {
+		name  string
+		entry models.PreviewDependencyCache
+		skip  bool
+	}{
+		{name: "forces cold sample when producer is unknown", entry: models.PreviewDependencyCache{}, skip: true},
+		{name: "collects minimum samples", entry: models.PreviewDependencyCache{RestoreAttemptCount: 2, RestoreSuccessCount: 2, RestoreTotalDurationMS: 20_000, ProducerDurationMS: 1_000, ProducerBenefitCount: 2, ProducerBenefitTotalMS: 2_000, LastRestoreAt: &recent}},
+		{name: "waits for first marginal benefit observation", entry: models.PreviewDependencyCache{RestoreAttemptCount: 3, RestoreSuccessCount: 3, RestoreTotalDurationMS: 30_000, ProducerDurationMS: 10_000, LastRestoreAt: &recent}},
+		{name: "restores when historically cheaper", entry: models.PreviewDependencyCache{RestoreAttemptCount: 3, RestoreSuccessCount: 3, RestoreTotalDurationMS: 2_700, ProducerDurationMS: 1_000, ProducerBenefitCount: 3, ProducerBenefitTotalMS: 3_000, LastRestoreAt: &recent}},
+		{name: "skips when restore costs at least marginal benefit", entry: models.PreviewDependencyCache{RestoreAttemptCount: 3, RestoreSuccessCount: 3, RestoreTotalDurationMS: 3_600, ProducerDurationMS: 10_000, ProducerBenefitCount: 3, ProducerBenefitTotalMS: 3_000, LastRestoreAt: &recent}, skip: true},
+		{name: "failed attempts count toward cost", entry: models.PreviewDependencyCache{RestoreAttemptCount: 3, RestoreSuccessCount: 1, RestoreTotalDurationMS: 270_000, ProducerDurationMS: 10_000, ProducerBenefitCount: 3, ProducerBenefitTotalMS: 30_000, LastRestoreAt: &recent}, skip: true},
+		{name: "reprobes after cooldown", entry: models.PreviewDependencyCache{RestoreAttemptCount: 3, RestoreSuccessCount: 3, RestoreTotalDurationMS: 3_600, ProducerDurationMS: 1_000, ProducerBenefitCount: 3, ProducerBenefitTotalMS: 3_000, LastRestoreAt: &stale}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, skip := dependencyCacheCostAdmission(tt.entry, now)
+			require.Equal(t, tt.skip, skip, "admission should make the expected cost-aware restore decision")
+		})
+	}
+}
+
+func TestSharedDependencyCache_RestoreHonorsConfiguredTimeout(t *testing.T) {
+	t.Parallel()
+
+	payload := makeDependencyCacheTarGz(t, map[string]string{"node_modules/pkg/index.js": "ok"})
+	blobStore := newMemorySnapshotStore()
+	cacheKey := strings.Repeat("b", 64)
+	blobKey := "deps/timeout.tar.gz"
+	require.NoError(t, blobStore.Save(context.Background(), blobKey, bytes.NewReader(payload)), "restore fixture should be stored")
+	metadata, err := json.Marshal(DependencyCacheMetadata{EffectivePaths: []string{"node_modules"}})
+	require.NoError(t, err, "restore metadata should marshal")
+	cache, err := NewDependencyCache(DependencyCacheConfig{
+		Store:          db.NewPreviewStore(nil),
+		Executor:       &timeoutDependencyCacheExec{dependencyCacheExec: &dependencyCacheExec{}},
+		BlobStore:      blobStore,
+		Logger:         zerolog.Nop(),
+		RestoreTimeout: 10 * time.Millisecond,
+	})
+	require.NoError(t, err, "dependency cache should initialize")
+
+	started := time.Now()
+	err = cache.RestorePathCache(context.Background(), &agent.Sandbox{HomeDir: "/home/codex"}, &DependencyCacheHit{
+		Entry:   models.PreviewDependencyCache{ID: uuid.New(), OrgID: uuid.New(), CacheKind: models.PreviewCacheKindBuildArtifact, CacheKey: cacheKey, BlobKey: blobKey, SizeBytes: int64(len(payload)), Metadata: metadata, ProducerDurationMS: 1},
+		BlobKey: blobKey,
+	}, models.PreviewCacheRootHomeDir)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "restore should return the configured deadline error")
+	require.Less(t, time.Since(started), time.Second, "restore should stop promptly at its configured budget")
+}
+
+func TestDependencyCacheWorkerArchiveStagesHonorCancellation(t *testing.T) {
+	t.Parallel()
+
+	payload := makeDependencyCacheTarGz(t, map[string]string{"node_modules/pkg/index.js": "ok"})
+	localPath := filepath.Join(t.TempDir(), "cache.tar.gz")
+	require.NoError(t, os.WriteFile(localPath, payload, 0o600), "local cache fixture should be written")
+	cache, err := NewDependencyCache(DependencyCacheConfig{
+		Store:     db.NewPreviewStore(nil),
+		Executor:  &dependencyCacheExec{},
+		BlobStore: newMemorySnapshotStore(),
+		Logger:    zerolog.Nop(),
+	})
+	require.NoError(t, err, "dependency cache should initialize")
+
+	tests := []struct {
+		name string
+		run  func(context.Context) error
+	}{
+		{
+			name: "local blob hashing",
+			run: func(ctx context.Context) error {
+				_, err := cache.stageLocalBlob(ctx, localPath)
+				return err
+			},
+		},
+		{
+			name: "gzip tar validation",
+			run: func(ctx context.Context) error {
+				_, err := validateDependencyCacheArchiveReader(ctx, bytes.NewReader(payload), []string{"node_modules"})
+				return err
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			require.ErrorIs(t, tt.run(ctx), context.Canceled, "worker-side archive work should honor cancellation before doing local IO or decompression")
+		})
+	}
+}
+
+func TestValidateDependencyCacheArchiveReaderLimitsNonRegularEntries(t *testing.T) {
+	t.Parallel()
+
+	var payload bytes.Buffer
+	gzw := gzip.NewWriter(&payload)
+	tw := tar.NewWriter(gzw)
+	for _, name := range []string{"node_modules/one/", "node_modules/two/", "node_modules/three/"} {
+		require.NoError(t, tw.WriteHeader(&tar.Header{
+			Name:     name,
+			Mode:     0o700,
+			Typeflag: tar.TypeDir,
+		}), "directory archive entry should be written")
+	}
+	require.NoError(t, tw.Close(), "test archive tar writer should close")
+	require.NoError(t, gzw.Close(), "test archive gzip writer should close")
+
+	_, err := validateDependencyCacheArchiveReaderWithEntryLimit(context.Background(), bytes.NewReader(payload.Bytes()), []string{"node_modules"}, 2)
+	require.EqualError(t, err, "archive has too many entries (>2 max)", "directory entries should consume the archive entry budget")
+}
+
 func TestSharedDependencyCache_SaveBatchesEffectivePathExistenceProbe(t *testing.T) {
 	t.Parallel()
 
@@ -327,11 +455,11 @@ func TestSharedDependencyCache_SaveBatchesEffectivePathExistenceProbe(t *testing
 	defer mock.Close()
 
 	mock.ExpectQuery("INSERT INTO preview_dependency_cache").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "last_used_at", "created_at",
+			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "restore_attempt_count", "restore_success_count", "restore_total_duration_ms", "producer_duration_ms", "producer_benefit_count", "producer_benefit_total_ms", "last_restore_at", "last_used_at", "created_at",
 		}).
-			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallArtifact, cacheKey, "placement", "deps/"+cacheKey+".tar.gz", int64(len(payload)), []byte(`{}`), now, now))
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallArtifact, cacheKey, "placement", "deps/"+cacheKey+".tar.gz", int64(len(payload)), []byte(`{}`), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), nil, now, now))
 
 	exec := &dependencyCacheExec{payload: payload}
 	cache, err := NewDependencyCache(DependencyCacheConfig{
@@ -419,11 +547,11 @@ func TestSharedDependencyCache_SaveRejectsPreviewInstallMarkerParentPath(t *test
 	require.NoError(t, err, "pgx mock should initialize")
 	defer mock.Close()
 	mock.ExpectQuery("INSERT INTO preview_dependency_cache").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "last_used_at", "created_at",
+			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "restore_attempt_count", "restore_success_count", "restore_total_duration_ms", "producer_duration_ms", "producer_benefit_count", "producer_benefit_total_ms", "last_restore_at", "last_used_at", "created_at",
 		}).
-			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallArtifact, cacheKey, "", "deps/blob.tar.gz", int64(len(payload)), []byte(`{}`), now, now))
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallArtifact, cacheKey, "", "deps/blob.tar.gz", int64(len(payload)), []byte(`{}`), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), nil, now, now))
 
 	cache, err := NewDependencyCache(DependencyCacheConfig{
 		Store:     db.NewPreviewStore(mock),
@@ -511,13 +639,14 @@ func TestSharedDependencyCache_RestoreDeletesMetadataWhenObjectMissing(t *testin
 
 	err = cache.Restore(ctx, &agent.Sandbox{WorkDir: "/workspace/repo"}, &DependencyCacheHit{
 		Entry: models.PreviewDependencyCache{
-			ID:         entryID,
-			OrgID:      orgID,
-			RepoID:     repoID,
-			CacheKey:   cacheKey,
-			BlobKey:    "deps/missing.tar.gz",
-			Metadata:   metadataJSON,
-			LastUsedAt: time.Now().UTC(),
+			ID:                 entryID,
+			OrgID:              orgID,
+			RepoID:             repoID,
+			CacheKey:           cacheKey,
+			BlobKey:            "deps/missing.tar.gz",
+			Metadata:           metadataJSON,
+			ProducerDurationMS: 1,
+			LastUsedAt:         time.Now().UTC(),
 		},
 		BlobKey: "deps/missing.tar.gz",
 	})
@@ -561,13 +690,14 @@ func TestSharedDependencyCache_RestoreDeletesMetadataOnChecksumMismatch(t *testi
 
 	err = cache.Restore(ctx, &agent.Sandbox{WorkDir: "/workspace/repo"}, &DependencyCacheHit{
 		Entry: models.PreviewDependencyCache{
-			ID:         entryID,
-			OrgID:      orgID,
-			RepoID:     repoID,
-			CacheKey:   cacheKey,
-			BlobKey:    "deps/blob.tar.gz",
-			Metadata:   metadataJSON,
-			LastUsedAt: time.Now().UTC(),
+			ID:                 entryID,
+			OrgID:              orgID,
+			RepoID:             repoID,
+			CacheKey:           cacheKey,
+			BlobKey:            "deps/blob.tar.gz",
+			Metadata:           metadataJSON,
+			ProducerDurationMS: 1,
+			LastUsedAt:         time.Now().UTC(),
 		},
 		BlobKey: "deps/blob.tar.gz",
 	})
@@ -628,16 +758,17 @@ func TestSharedDependencyCache_RestoreFallsBackToObjectStoreWhenLocalBlobChecksu
 
 	err = cache.RestorePathCache(ctx, &agent.Sandbox{WorkDir: "/workspace/repo"}, &DependencyCacheHit{
 		Entry: models.PreviewDependencyCache{
-			ID:           entryID,
-			OrgID:        orgID,
-			RepoID:       repoID,
-			CacheKind:    models.PreviewCacheKindBuildArtifact,
-			CacheKey:     cacheKey,
-			PlacementKey: "placement",
-			BlobKey:      "deps/blob.tar.gz",
-			SizeBytes:    int64(len(remotePayload)),
-			Metadata:     metadataJSON,
-			LastUsedAt:   time.Now().UTC(),
+			ID:                 entryID,
+			OrgID:              orgID,
+			RepoID:             repoID,
+			CacheKind:          models.PreviewCacheKindBuildArtifact,
+			CacheKey:           cacheKey,
+			PlacementKey:       "placement",
+			BlobKey:            "deps/blob.tar.gz",
+			SizeBytes:          int64(len(remotePayload)),
+			Metadata:           metadataJSON,
+			ProducerDurationMS: 1,
+			LastUsedAt:         time.Now().UTC(),
 		},
 		BlobKey: "deps/blob.tar.gz",
 	}, models.PreviewCacheRootWorkDir)
@@ -674,14 +805,15 @@ func TestSharedDependencyCache_RestoreRejectsPreviewInstallMarkerParentPath(t *t
 
 	err = cache.Restore(ctx, &agent.Sandbox{WorkDir: "/workspace/repo"}, &DependencyCacheHit{
 		Entry: models.PreviewDependencyCache{
-			ID:         uuid.New(),
-			OrgID:      uuid.New(),
-			RepoID:     uuid.New(),
-			CacheKey:   cacheKey,
-			BlobKey:    "deps/blob.tar.gz",
-			SizeBytes:  int64(len(payload)),
-			Metadata:   metadataJSON,
-			LastUsedAt: time.Now().UTC(),
+			ID:                 uuid.New(),
+			OrgID:              uuid.New(),
+			RepoID:             uuid.New(),
+			CacheKey:           cacheKey,
+			BlobKey:            "deps/blob.tar.gz",
+			SizeBytes:          int64(len(payload)),
+			Metadata:           metadataJSON,
+			ProducerDurationMS: 1,
+			LastUsedAt:         time.Now().UTC(),
 		},
 		BlobKey: "deps/blob.tar.gz",
 	})
@@ -710,14 +842,15 @@ func TestSharedDependencyCache_RestoreSkipsOversizedBlobBeforeSandboxMutation(t 
 
 	err = cache.Restore(ctx, &agent.Sandbox{WorkDir: "/workspace/repo"}, &DependencyCacheHit{
 		Entry: models.PreviewDependencyCache{
-			ID:         uuid.New(),
-			OrgID:      uuid.New(),
-			RepoID:     uuid.New(),
-			CacheKey:   cacheKey,
-			BlobKey:    "deps/oversized.tar.gz",
-			SizeBytes:  dependencyCacheMaxBlobBytes + 1,
-			Metadata:   metadataJSON,
-			LastUsedAt: time.Now().UTC(),
+			ID:                 uuid.New(),
+			OrgID:              uuid.New(),
+			RepoID:             uuid.New(),
+			CacheKey:           cacheKey,
+			BlobKey:            "deps/oversized.tar.gz",
+			SizeBytes:          dependencyCacheMaxBlobBytes + 1,
+			Metadata:           metadataJSON,
+			ProducerDurationMS: 1,
+			LastUsedAt:         time.Now().UTC(),
 		},
 		BlobKey: "deps/oversized.tar.gz",
 	})
@@ -756,14 +889,15 @@ func TestSharedDependencyCache_RestoreStreamsExtractWithoutSandboxTempBlob(t *te
 
 	err = cache.Restore(ctx, &agent.Sandbox{WorkDir: "/workspace/repo"}, &DependencyCacheHit{
 		Entry: models.PreviewDependencyCache{
-			ID:         entryID,
-			OrgID:      orgID,
-			RepoID:     repoID,
-			CacheKey:   cacheKey,
-			BlobKey:    "deps/blob.tar.gz",
-			SizeBytes:  int64(len(payload)),
-			Metadata:   metadataJSON,
-			LastUsedAt: time.Now().UTC(),
+			ID:                 entryID,
+			OrgID:              orgID,
+			RepoID:             repoID,
+			CacheKey:           cacheKey,
+			BlobKey:            "deps/blob.tar.gz",
+			SizeBytes:          int64(len(payload)),
+			Metadata:           metadataJSON,
+			ProducerDurationMS: 1,
+			LastUsedAt:         time.Now().UTC(),
 		},
 		BlobKey: "deps/blob.tar.gz",
 	})
@@ -802,15 +936,16 @@ func TestSharedDependencyCache_RestorePathCacheHomeDirRejectsSensitiveArchiveEnt
 
 	err = cache.RestorePathCache(ctx, &agent.Sandbox{WorkDir: "/workspace/repo", HomeDir: "/home/codex"}, &DependencyCacheHit{
 		Entry: models.PreviewDependencyCache{
-			ID:         uuid.New(),
-			OrgID:      uuid.New(),
-			RepoID:     uuid.New(),
-			CacheKind:  models.PreviewCacheKindPackageManager,
-			CacheKey:   cacheKey,
-			BlobKey:    "deps/home.tar.gz",
-			SizeBytes:  int64(len(payload)),
-			Metadata:   metadataJSON,
-			LastUsedAt: time.Now().UTC(),
+			ID:                 uuid.New(),
+			OrgID:              uuid.New(),
+			RepoID:             uuid.New(),
+			CacheKind:          models.PreviewCacheKindPackageManager,
+			CacheKey:           cacheKey,
+			BlobKey:            "deps/home.tar.gz",
+			SizeBytes:          int64(len(payload)),
+			Metadata:           metadataJSON,
+			ProducerDurationMS: 1,
+			LastUsedAt:         time.Now().UTC(),
 		},
 		BlobKey: "deps/home.tar.gz",
 	}, models.PreviewCacheRootHomeDir)
@@ -847,15 +982,16 @@ func TestSharedDependencyCache_RestorePathCacheHomeDirExtractsUnderHomeDir(t *te
 
 	err = cache.RestorePathCache(ctx, &agent.Sandbox{WorkDir: "/workspace/repo", HomeDir: "/home/codex"}, &DependencyCacheHit{
 		Entry: models.PreviewDependencyCache{
-			ID:         uuid.New(),
-			OrgID:      uuid.New(),
-			RepoID:     uuid.New(),
-			CacheKind:  models.PreviewCacheKindPackageManager,
-			CacheKey:   cacheKey,
-			BlobKey:    "deps/home-valid.tar.gz",
-			SizeBytes:  int64(len(payload)),
-			Metadata:   metadataJSON,
-			LastUsedAt: time.Now().UTC(),
+			ID:                 uuid.New(),
+			OrgID:              uuid.New(),
+			RepoID:             uuid.New(),
+			CacheKind:          models.PreviewCacheKindPackageManager,
+			CacheKey:           cacheKey,
+			BlobKey:            "deps/home-valid.tar.gz",
+			SizeBytes:          int64(len(payload)),
+			Metadata:           metadataJSON,
+			ProducerDurationMS: 1,
+			LastUsedAt:         time.Now().UTC(),
 		},
 		BlobKey: "deps/home-valid.tar.gz",
 	}, models.PreviewCacheRootHomeDir)
@@ -901,14 +1037,15 @@ func TestSharedDependencyCache_RestoreLocalBlobSurvivesConcurrentEviction(t *tes
 
 	err = cache.Restore(ctx, &agent.Sandbox{WorkDir: "/workspace/repo"}, &DependencyCacheHit{
 		Entry: models.PreviewDependencyCache{
-			ID:         uuid.New(),
-			OrgID:      orgID,
-			RepoID:     repoID,
-			CacheKey:   cacheKey,
-			BlobKey:    "deps/blob.tar.gz",
-			SizeBytes:  int64(len(payload)),
-			Metadata:   metadataJSON,
-			LastUsedAt: time.Now().UTC(),
+			ID:                 uuid.New(),
+			OrgID:              orgID,
+			RepoID:             repoID,
+			CacheKey:           cacheKey,
+			BlobKey:            "deps/blob.tar.gz",
+			SizeBytes:          int64(len(payload)),
+			Metadata:           metadataJSON,
+			ProducerDurationMS: 1,
+			LastUsedAt:         time.Now().UTC(),
 		},
 		BlobKey: "deps/blob.tar.gz",
 	})
@@ -934,14 +1071,14 @@ func TestSharedDependencyCache_SavePathCacheExcludesSubtrees(t *testing.T) {
 	mock.ExpectQuery("SELECT (.+) FROM preview_dependency_cache").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "last_used_at", "created_at",
+			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "restore_attempt_count", "restore_success_count", "restore_total_duration_ms", "producer_duration_ms", "producer_benefit_count", "producer_benefit_total_ms", "last_restore_at", "last_used_at", "created_at",
 		}))
 	mock.ExpectQuery("INSERT INTO preview_dependency_cache").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "last_used_at", "created_at",
+			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "restore_attempt_count", "restore_success_count", "restore_total_duration_ms", "producer_duration_ms", "producer_benefit_count", "producer_benefit_total_ms", "last_restore_at", "last_used_at", "created_at",
 		}).
-			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallArtifact, cacheKey, "placement", "deps/"+cacheKey+".tar.gz", int64(len(payload)), []byte(`{}`), now, now))
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallArtifact, cacheKey, "placement", "deps/"+cacheKey+".tar.gz", int64(len(payload)), []byte(`{}`), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), nil, now, now))
 
 	exec := &dependencyCacheExec{payload: payload}
 	cache, err := NewDependencyCache(DependencyCacheConfig{
@@ -993,14 +1130,14 @@ func TestSharedDependencyCache_SavePathCacheSeparatesExistenceProbes(t *testing.
 	mock.ExpectQuery("SELECT (.+) FROM preview_dependency_cache").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "last_used_at", "created_at",
+			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "restore_attempt_count", "restore_success_count", "restore_total_duration_ms", "producer_duration_ms", "producer_benefit_count", "producer_benefit_total_ms", "last_restore_at", "last_used_at", "created_at",
 		}))
 	mock.ExpectQuery("INSERT INTO preview_dependency_cache").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "last_used_at", "created_at",
+			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "restore_attempt_count", "restore_success_count", "restore_total_duration_ms", "producer_duration_ms", "producer_benefit_count", "producer_benefit_total_ms", "last_restore_at", "last_used_at", "created_at",
 		}).
-			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindBuildArtifact, cacheKey, "placement", "deps/"+cacheKey+".tar.gz", int64(len(payload)), []byte(`{}`), now, now))
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindBuildArtifact, cacheKey, "placement", "deps/"+cacheKey+".tar.gz", int64(len(payload)), []byte(`{}`), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), nil, now, now))
 
 	exec := &dependencyCacheExec{payload: payload}
 	cache, err := NewDependencyCache(DependencyCacheConfig{
@@ -1092,15 +1229,15 @@ func TestSharedDependencyCache_SavePathCacheDeletesSupersededBlob(t *testing.T) 
 	mock.ExpectQuery("SELECT (.+) FROM preview_dependency_cache").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "last_used_at", "created_at",
+			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "restore_attempt_count", "restore_success_count", "restore_total_duration_ms", "producer_duration_ms", "producer_benefit_count", "producer_benefit_total_ms", "last_restore_at", "last_used_at", "created_at",
 		}).
-			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindBuildArtifact, cacheKey, "placement", oldBlobKey, int64(10), []byte(`{}`), now, now))
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindBuildArtifact, cacheKey, "placement", oldBlobKey, int64(10), []byte(`{}`), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), nil, now, now))
 	mock.ExpectQuery("INSERT INTO preview_dependency_cache").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "last_used_at", "created_at",
+			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "restore_attempt_count", "restore_success_count", "restore_total_duration_ms", "producer_duration_ms", "producer_benefit_count", "producer_benefit_total_ms", "last_restore_at", "last_used_at", "created_at",
 		}).
-			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindBuildArtifact, cacheKey, "placement", "deps/new.tar.gz", int64(len(payload)), []byte(`{}`), now, now))
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindBuildArtifact, cacheKey, "placement", "deps/new.tar.gz", int64(len(payload)), []byte(`{}`), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), nil, now, now))
 
 	blobStore := newMemorySnapshotStore()
 	require.NoError(t, blobStore.Save(ctx, oldBlobKey, bytes.NewReader([]byte("old"))), "old blob should exist before the save")

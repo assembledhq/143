@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { ChartNoAxesColumnIncreasing } from "lucide-react";
 import { DataTableSummaryRow } from "@/components/data-table-summary-row";
 import { EmptyState } from "@/components/empty-state";
+import { MetricInfoTooltip } from "@/components/metric-info-tooltip";
 import { SectionGroup } from "@/components/section-group";
 import { Badge } from "@/components/ui/badge";
 import { SortableTableHeader, sortDirectionAriaValue } from "@/components/sortable-table-header";
@@ -118,7 +119,6 @@ function AuthorReviewCountLink({
   outcome,
   repository,
   range,
-  onNavigate,
 }: {
   author: string;
   count: number;
@@ -126,24 +126,12 @@ function AuthorReviewCountLink({
   outcome?: "automatically_approved" | "completed_not_approved";
   repository?: string;
   range: string;
-  onNavigate: () => void;
 }) {
   return (
     <Link
       href={authorReviewsHref({ author, outcome, repository, range })}
       className="font-medium text-primary underline-offset-4 hover:underline focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       aria-label={`${count.toLocaleString()} ${label} by ${author}`}
-      onClick={(event) => {
-        if (
-          event.button === 0
-          && !event.metaKey
-          && !event.ctrlKey
-          && !event.shiftKey
-          && !event.altKey
-        ) {
-          onNavigate();
-        }
-      }}
     >
       {count.toLocaleString()}
     </Link>
@@ -154,17 +142,22 @@ function MetricCard({
   label,
   value,
   context,
+  definition,
 }: {
   label: string;
   value: string;
-  context: string;
+  context?: string;
+  definition?: string;
 }) {
   return (
     <Card>
       <CardContent className="space-y-1.5">
-        <p className="text-xs font-medium text-muted-foreground">{label}</p>
+        <div className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+          <span>{label}</span>
+          {definition ? <MetricInfoTooltip label={label} definition={definition} /> : null}
+        </div>
         <p className="text-2xl font-semibold tabular-nums text-foreground">{value}</p>
-        <p className="text-xs text-muted-foreground">{context}</p>
+        {context ? <p className="text-xs text-muted-foreground">{context}</p> : null}
       </CardContent>
     </Card>
   );
@@ -179,22 +172,22 @@ function ApprovalOutcomeCards({ summary }: { summary: CodeReviewAnalytics["summa
       <MetricCard
         label="PRs reviewed"
         value={summary.prs_reviewed.toLocaleString()}
-        context="First sent to 143 in this period"
+        definition="Unique pull requests first sent to 143 during the selected time period."
       />
       <MetricCard
         label="Approved by 143"
         value={summary.approved_by_143.toLocaleString()}
-        context={`${percentage(summary.approved_by_143, summary.prs_reviewed)} of PRs reviewed`}
+        definition="Reviewed pull requests where 143 posted an approval on GitHub."
       />
       <MetricCard
         label="Approval rate"
         value={percentage(summary.approved_by_143, summary.prs_reviewed)}
-        context={`${summary.approved_by_143.toLocaleString()} approved PRs`}
+        definition="The percentage of reviewed pull requests where 143 posted an approval on GitHub."
       />
       <MetricCard
         label="Median rounds to approval"
         value={decimalMetric(summary.median_rounds_to_approval)}
-        context="Approved PRs only"
+        definition="The median number of distinct completed revisions before 143 first posted an approval, among approved pull requests."
       />
     </div>
   );
@@ -209,7 +202,6 @@ export function CodeReviewAnalyticsReport({
   authorSortOrder,
   onAuthorSort,
   reviewLinkFilters,
-  onNavigateToReviews,
   filters,
 }: {
   analytics?: CodeReviewAnalytics;
@@ -223,7 +215,6 @@ export function CodeReviewAnalyticsReport({
     repository?: string;
     range: string;
   };
-  onNavigateToReviews: () => void;
   filters: ReactNode;
 }) {
   if (!analytics && isLoading) {
@@ -295,27 +286,16 @@ export function CodeReviewAnalyticsReport({
       {filters}
 
       <SectionGroup
-        title="Approval by round"
-        description="Each PR appears once, based on the first distinct completed head that received a posted 143 approval."
-      >
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5" aria-label="Approval by round">
-          {analytics.approval_rounds.map((bucket) => (
-            <MetricCard
-              key={bucket.bucket}
-              label={APPROVAL_ROUND_LABELS[bucket.bucket]}
-              value={bucket.prs.toLocaleString()}
-              context={`${percentage(bucket.prs, summary.prs_reviewed)} of PRs reviewed`}
-            />
-          ))}
-        </div>
-      </SectionGroup>
-
-      <SectionGroup
         title="Usage by PR author"
         description="Unique PR outcomes grouped by the author captured from the first available assessment."
       >
         {analytics.authors.length === 0 ? (
-          <p className="py-6 text-center text-sm text-muted-foreground">No author attribution is available for this report.</p>
+          <EmptyState
+            icon={ChartNoAxesColumnIncreasing}
+            title="No author attribution available"
+            description="Completed reviews in this report could not be matched to a pull request author."
+            variant="inline"
+          />
         ) : (
           <>
           <Card className="overflow-x-auto">
@@ -354,7 +334,6 @@ export function CodeReviewAnalyticsReport({
                         label="reviewed PRs"
                         repository={reviewLinkFilters.repository}
                         range={reviewLinkFilters.range}
-                        onNavigate={onNavigateToReviews}
                       />
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
@@ -365,7 +344,6 @@ export function CodeReviewAnalyticsReport({
                         outcome="automatically_approved"
                         repository={reviewLinkFilters.repository}
                         range={reviewLinkFilters.range}
-                        onNavigate={onNavigateToReviews}
                       />
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
@@ -376,7 +354,6 @@ export function CodeReviewAnalyticsReport({
                         outcome="completed_not_approved"
                         repository={reviewLinkFilters.repository}
                         range={reviewLinkFilters.range}
-                        onNavigate={onNavigateToReviews}
                       />
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
@@ -446,6 +423,22 @@ export function CodeReviewAnalyticsReport({
           </p>
           </>
         )}
+      </SectionGroup>
+
+      <SectionGroup
+        title="Approval by round"
+        description="Each PR appears once, based on the first distinct completed head that received a posted 143 approval."
+      >
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5" aria-label="Approval by round">
+          {analytics.approval_rounds.map((bucket) => (
+            <MetricCard
+              key={bucket.bucket}
+              label={APPROVAL_ROUND_LABELS[bucket.bucket]}
+              value={bucket.prs.toLocaleString()}
+              context={`${percentage(bucket.prs, summary.prs_reviewed)} of PRs reviewed`}
+            />
+          ))}
+        </div>
       </SectionGroup>
 
       <div className="grid gap-6 xl:grid-cols-2">

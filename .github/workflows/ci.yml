@@ -36,6 +36,7 @@ jobs:
       backend: ${{ steps.filter.outputs.backend }}
       frontend: ${{ steps.filter.outputs.frontend }}
       migrations: ${{ steps.filter.outputs.migrations }}
+      demo_seed: ${{ steps.filter.outputs.demo_seed }}
       docker: ${{ steps.filter.outputs.docker }}
       deploy: ${{ steps.filter.outputs.deploy }}
       ci: ${{ steps.filter.outputs.ci }}
@@ -57,6 +58,12 @@ jobs:
               - 'cmd/migrate/**'
               - 'go.mod'
               - 'go.sum'
+            demo_seed:
+              - '.143/seed/**'
+              - 'cmd/demo-seed/**'
+              - 'internal/demoseed/**'
+              - 'migrations/**'
+              - 'Makefile'
             docker:
               - 'Dockerfile'
               - 'Dockerfile.*'
@@ -88,7 +95,7 @@ jobs:
   backend-test:
     name: Backend Test
     needs: changes
-    if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
+    if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.demo_seed == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -128,6 +135,10 @@ jobs:
         run: |
           go run cmd/migrate/main.go up
           go vet ./...
+
+      - name: Validate demo seed against the migrated schema
+        if: needs.changes.outputs.demo_seed == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
+        run: make demo-seed-check
 
       - name: Run tests (PR — no race)
         if: github.event_name == 'pull_request'

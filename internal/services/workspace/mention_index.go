@@ -149,23 +149,12 @@ func BuildMentionIndexWithConfig(ctx context.Context, reader Reader, cfg Mention
 				return MentionIndex{}, err
 			}
 
-			cleanPath := strings.Trim(path.Clean(strings.TrimSpace(entry.Path)), "/")
-			if cleanPath == "" || cleanPath == "." {
-				continue
-			}
-			if mentionIndexShouldIgnorePath(cleanPath) {
+			indexEntry, ok := mentionIndexEntryFromFileEntry(entry)
+			if !ok {
 				continue
 			}
 
-			kind := mentionIndexKindForEntryType(entry.Type)
-			if kind == "" {
-				continue
-			}
-
-			index.Entries = append(index.Entries, MentionIndexEntry{
-				Kind: kind,
-				Path: cleanPath,
-			})
+			index.Entries = append(index.Entries, indexEntry)
 			if len(index.Entries) >= cfg.MaxPaths {
 				index.Truncated = true
 				index.EntryCount = len(index.Entries)
@@ -173,12 +162,12 @@ func BuildMentionIndexWithConfig(ctx context.Context, reader Reader, cfg Mention
 				return clampMentionIndexBlob(index, cfg.MaxBlobBytes)
 			}
 
-			if kind == "directory" {
-				if _, ok := seenDirs[cleanPath]; ok {
+			if indexEntry.Kind == "directory" {
+				if _, ok := seenDirs[indexEntry.Path]; ok {
 					continue
 				}
-				seenDirs[cleanPath] = struct{}{}
-				queue = append(queue, cleanPath)
+				seenDirs[indexEntry.Path] = struct{}{}
+				queue = append(queue, indexEntry.Path)
 			}
 		}
 	}
@@ -195,19 +184,11 @@ func buildMentionIndexFromEntries(ctx context.Context, entries []sandbox.FileEnt
 			return MentionIndex{}, err
 		}
 
-		cleanPath := strings.Trim(path.Clean(strings.TrimSpace(entry.Path)), "/")
-		if cleanPath == "" || cleanPath == "." || mentionIndexShouldIgnorePath(cleanPath) {
+		indexEntry, ok := mentionIndexEntryFromFileEntry(entry)
+		if !ok {
 			continue
 		}
-
-		kind := mentionIndexKindForEntryType(entry.Type)
-		if kind == "" {
-			continue
-		}
-		index.Entries = append(index.Entries, MentionIndexEntry{
-			Kind: kind,
-			Path: cleanPath,
-		})
+		index.Entries = append(index.Entries, indexEntry)
 		if len(index.Entries) >= cfg.MaxPaths {
 			index.Truncated = true
 			index.EntryCount = len(index.Entries)
@@ -219,6 +200,19 @@ func buildMentionIndexFromEntries(ctx context.Context, entries []sandbox.FileEnt
 	sortMentionIndexEntries(index.Entries)
 	index.EntryCount = len(index.Entries)
 	return clampMentionIndexBlob(index, cfg.MaxBlobBytes)
+}
+
+func mentionIndexEntryFromFileEntry(entry sandbox.FileEntry) (MentionIndexEntry, bool) {
+	cleanPath := strings.Trim(path.Clean(strings.TrimSpace(entry.Path)), "/")
+	if cleanPath == "" || cleanPath == "." || mentionIndexShouldIgnorePath(cleanPath) {
+		return MentionIndexEntry{}, false
+	}
+
+	kind := mentionIndexKindForEntryType(entry.Type)
+	if kind == "" {
+		return MentionIndexEntry{}, false
+	}
+	return MentionIndexEntry{Kind: kind, Path: cleanPath}, true
 }
 
 func mentionIndexIgnoredDirNameList() []string {

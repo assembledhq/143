@@ -24,21 +24,7 @@ func NewAuditEmitter(store *AuditLogStore, logger zerolog.Logger) *AuditEmitter 
 
 // EmitUserAction logs an action performed by an authenticated user.
 func (e *AuditEmitter) EmitUserAction(ctx context.Context, params UserActionParams) {
-	entry := &models.AuditLog{
-		OrgID:        params.OrgID,
-		ActorType:    models.AuditActorUser,
-		ActorID:      params.UserID.String(),
-		UserID:       &params.UserID,
-		Action:       params.Action,
-		ResourceType: params.ResourceType,
-		ResourceID:   params.ResourceID,
-		Details:      params.Details,
-		RequestID:    params.RequestID,
-		IPAddress:    params.IPAddress,
-		UserAgent:    params.UserAgent,
-		SessionID:    params.SessionID,
-		ProjectID:    params.ProjectID,
-	}
+	entry := userActionAuditLog(params)
 	if err := e.store.Create(ctx, entry); err != nil {
 		e.logger.Warn().Err(err).
 			Str("action", string(params.Action)).
@@ -64,22 +50,7 @@ func (e *AuditEmitter) EmitUserActions(ctx context.Context, paramsList []UserAct
 	orgID := paramsList[0].OrgID
 	entries := make([]*models.AuditLog, 0, len(paramsList))
 	for _, params := range paramsList {
-		userID := params.UserID
-		entries = append(entries, &models.AuditLog{
-			OrgID:        params.OrgID,
-			ActorType:    models.AuditActorUser,
-			ActorID:      userID.String(),
-			UserID:       &userID,
-			Action:       params.Action,
-			ResourceType: params.ResourceType,
-			ResourceID:   params.ResourceID,
-			Details:      params.Details,
-			RequestID:    params.RequestID,
-			IPAddress:    params.IPAddress,
-			UserAgent:    params.UserAgent,
-			SessionID:    params.SessionID,
-			ProjectID:    params.ProjectID,
-		})
+		entries = append(entries, userActionAuditLog(params))
 	}
 	if err := e.store.CreateBatch(ctx, orgID, entries); err != nil {
 		e.logger.Warn().Err(err).
@@ -100,6 +71,25 @@ type UserActionParams struct {
 	UserAgent    *string
 	SessionID    *uuid.UUID
 	ProjectID    *uuid.UUID
+}
+
+func userActionAuditLog(params UserActionParams) *models.AuditLog {
+	userID := params.UserID
+	return &models.AuditLog{
+		OrgID:        params.OrgID,
+		ActorType:    models.AuditActorUser,
+		ActorID:      userID.String(),
+		UserID:       &userID,
+		Action:       params.Action,
+		ResourceType: params.ResourceType,
+		ResourceID:   params.ResourceID,
+		Details:      params.Details,
+		RequestID:    params.RequestID,
+		IPAddress:    params.IPAddress,
+		UserAgent:    params.UserAgent,
+		SessionID:    params.SessionID,
+		ProjectID:    params.ProjectID,
+	}
 }
 
 // EmitAPIAction logs an action performed by an external API client.

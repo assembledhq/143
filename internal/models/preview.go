@@ -673,17 +673,24 @@ const (
 )
 
 type PreviewDependencyCache struct {
-	ID           uuid.UUID        `db:"id" json:"id"`
-	OrgID        uuid.UUID        `db:"org_id" json:"org_id"`
-	RepoID       uuid.UUID        `db:"repo_id" json:"repo_id"`
-	CacheKind    PreviewCacheKind `db:"cache_kind" json:"cache_kind"`
-	CacheKey     string           `db:"cache_key" json:"cache_key"`
-	PlacementKey string           `db:"placement_key" json:"placement_key"`
-	BlobKey      string           `db:"blob_key" json:"-"`
-	SizeBytes    int64            `db:"size_bytes" json:"size_bytes"`
-	Metadata     json.RawMessage  `db:"metadata" json:"metadata"`
-	LastUsedAt   time.Time        `db:"last_used_at" json:"last_used_at"`
-	CreatedAt    time.Time        `db:"created_at" json:"created_at"`
+	ID                     uuid.UUID        `db:"id" json:"id"`
+	OrgID                  uuid.UUID        `db:"org_id" json:"org_id"`
+	RepoID                 uuid.UUID        `db:"repo_id" json:"repo_id"`
+	CacheKind              PreviewCacheKind `db:"cache_kind" json:"cache_kind"`
+	CacheKey               string           `db:"cache_key" json:"cache_key"`
+	PlacementKey           string           `db:"placement_key" json:"placement_key"`
+	BlobKey                string           `db:"blob_key" json:"-"`
+	SizeBytes              int64            `db:"size_bytes" json:"size_bytes"`
+	Metadata               json.RawMessage  `db:"metadata" json:"metadata"`
+	RestoreAttemptCount    int64            `db:"restore_attempt_count" json:"restore_attempt_count"`
+	RestoreSuccessCount    int64            `db:"restore_success_count" json:"restore_success_count"`
+	RestoreTotalDurationMS int64            `db:"restore_total_duration_ms" json:"restore_total_duration_ms"`
+	ProducerDurationMS     int64            `db:"producer_duration_ms" json:"producer_duration_ms"`
+	ProducerBenefitCount   int64            `db:"producer_benefit_count" json:"producer_benefit_count"`
+	ProducerBenefitTotalMS int64            `db:"producer_benefit_total_ms" json:"producer_benefit_total_ms"`
+	LastRestoreAt          *time.Time       `db:"last_restore_at" json:"last_restore_at,omitempty"`
+	LastUsedAt             time.Time        `db:"last_used_at" json:"last_used_at"`
+	CreatedAt              time.Time        `db:"created_at" json:"created_at"`
 }
 
 type PreviewDependencyCacheLocation struct {
