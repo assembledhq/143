@@ -93,7 +93,7 @@ export function timeRangeDisplayDates(
   if (!isRollingTimeRange(range)) return null;
   return {
     from: subDays(anchor, Number.parseInt(range, 10)),
-    to: anchor,
+    to: new Date(anchor),
   };
 }
 
