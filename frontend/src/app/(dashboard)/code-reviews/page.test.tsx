@@ -689,11 +689,11 @@ describe("CodeReviewsPage", () => {
     ).toBeTruthy();
     expect(screen.getByText("Line-count limit exceeded")).toBeInTheDocument();
     expect(screen.getByText("Reviewers found a blocking issue")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "View reviews where line-count limit exceeded" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "View 5 PRs where line-count limit exceeded" })).toHaveAttribute(
       "href",
       "/code-reviews?tab=reviews&outcome=completed_not_approved&reason=lines_limit_exceeded&status=all&range=30d",
     );
-    expect(screen.getByRole("link", { name: "View reviews where reviewers found a blocking issue" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "View 3 PRs where reviewers found a blocking issue" })).toHaveAttribute(
       "href",
       "/code-reviews?tab=reviews&outcome=completed_not_approved&reason=blocking_findings&status=all&range=30d",
     );

@@ -446,7 +446,7 @@ export function CodeReviewAnalyticsReport({
                       range: reviewLinkFilters.range,
                     })}
                     className="group flex items-center justify-between gap-4 px-4 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring hover:bg-muted/50"
-                    aria-label={`View reviews where ${codeReviewReasonLabel(reason.code).toLowerCase()}`}
+                    aria-label={`View ${reason.prs.toLocaleString()} PRs where ${codeReviewReasonLabel(reason.code).toLowerCase()}`}
                   >
                     <span className="text-sm text-foreground underline-offset-4 group-hover:underline">
                       {codeReviewReasonLabel(reason.code)}
