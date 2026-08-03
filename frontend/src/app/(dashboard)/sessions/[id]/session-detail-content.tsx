@@ -3509,7 +3509,7 @@ function AgentActionCard({
         </div>
         <div
           data-slot="agent-action-card-action"
-          className="w-fit shrink-0 self-start @min-[24rem]/agent-action:self-auto"
+          className="ml-11 w-fit shrink-0 self-start @min-[24rem]/agent-action:ml-0 @min-[24rem]/agent-action:self-auto"
         >
           {action}
         </div>

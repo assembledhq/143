@@ -146,7 +146,8 @@ describe('ChangesetSplitPrompt', () => {
 
     const button = screen.getByRole('button', { name: 'Split PRs' });
     const action = button.closest('[data-slot="agent-action-card-action"]');
-    expect(action).toHaveClass('w-fit', 'self-start');
+    expect(action).toHaveClass('ml-11', 'w-fit', 'self-start');
+    expect(action).toHaveClass('@min-[24rem]/agent-action:ml-0');
     expect(action).not.toHaveClass('w-full');
     expect(button).not.toHaveClass('w-full');
   });
