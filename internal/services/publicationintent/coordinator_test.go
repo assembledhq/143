@@ -42,9 +42,13 @@ func (s coordinatorOrganizationStore) GetByID(context.Context, uuid.UUID) (model
 	return s.organization, nil
 }
 
-type coordinatorUserStore struct{ user models.UserWithSettings }
+type coordinatorUserStore struct {
+	user     models.UserWithSettings
+	gotOrgID uuid.UUID
+}
 
-func (s coordinatorUserStore) GetByIDGlobalWithSettings(context.Context, uuid.UUID) (models.UserWithSettings, error) {
+func (s *coordinatorUserStore) GetByIDWithSettings(_ context.Context, orgID, _ uuid.UUID) (models.UserWithSettings, error) {
+	s.gotOrgID = orgID
 	return s.user, nil
 }
 
@@ -112,6 +116,7 @@ type coordinatorFixture struct {
 	changeset                                           models.SessionChangeset
 	publications                                        *coordinatorPublicationStore
 	jobs                                                *coordinatorJobStore
+	users                                               *coordinatorUserStore
 	coordinator                                         *Coordinator
 }
 
@@ -150,19 +155,41 @@ func newCoordinatorFixture(
 
 	f.publications = &coordinatorPublicationStore{}
 	f.jobs = &coordinatorJobStore{queued: queued, err: queueErr}
+	f.users = &coordinatorUserStore{user: models.UserWithSettings{
+		ID: f.userID, OrgID: f.orgID,
+		Settings: models.UserSettings{AutomaticPRFollowThrough: personal},
+	}}
 	f.coordinator = NewCoordinator(
 		coordinatorSessionStore{session: f.session},
 		coordinatorChangesetStore{changeset: f.changeset},
 		coordinatorPullRequestStore{},
 		coordinatorOrganizationStore{organization: models.Organization{ID: f.orgID, Settings: orgSettings}},
-		coordinatorUserStore{user: models.UserWithSettings{
-			ID: f.userID, OrgID: f.orgID,
-			Settings: models.UserSettings{AutomaticPRFollowThrough: personal},
-		}},
+		f.users,
 		f.publications, f.jobs, zerolog.Nop(),
 	)
 	return f
 }
+
+func TestCoordinatorRequestPullRequestScopesInitiatorSettingsThroughMembership(t *testing.T) {
+	t.Parallel()
+
+	disabled := models.AutomaticFollowThroughPreferenceOff
+	f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{
+		CreatePRWhenAgentReady: coordinatorBoolPtr(true),
+	}, &models.AutomaticPRFollowThroughSettings{CreatePRWhenAgentReady: disabled}, nil, true, nil)
+	// Reproduce a multi-organization account whose legacy primary organization
+	// differs from the session organization. The scoped store has already
+	// validated membership, so this legacy field must not reject publication.
+	f.users.user.OrgID = uuid.New()
+
+	result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{})
+
+	require.NoError(t, err, "a secondary-organization member should resolve publication policy")
+	require.Equal(t, f.orgID, f.users.gotOrgID, "the coordinator should scope the settings lookup to the session organization")
+	require.Equal(t, ResultManualPublicationRequired, result.Status, "the member's personal opt-out should still apply in a secondary organization")
+}
+
+func coordinatorBoolPtr(value bool) *bool { return &value }
 
 func TestCoordinatorRequestPullRequest(t *testing.T) {
 	t.Parallel()
@@ -175,6 +202,7 @@ func TestCoordinatorRequestPullRequest(t *testing.T) {
 		personal    *models.AutomaticPRFollowThroughSettings
 		wantStatus  ResultStatus
 		wantErrCode ErrorCode
+		wantReason  string
 		wantQueued  bool
 		queueErr    error
 	}{
@@ -210,6 +238,14 @@ func TestCoordinatorRequestPullRequest(t *testing.T) {
 			wantErrCode: ErrorWorkspaceNotReady,
 		},
 		{
+			name: "external branch update explains reconciliation",
+			edit: func(_ *models.Session, changeset *models.SessionChangeset) {
+				changeset.Status = models.ChangesetStatusExternalUpdateDetected
+			},
+			wantErrCode: ErrorWorkspaceNotReady,
+			wantReason:  "The remote pull request branch differs from the session checkpoint. Reconcile the remote branch with the session before creating the PR.",
+		},
+		{
 			name:       "personal opt-out requires manual publication",
 			orgPolicy:  models.AutomaticFollowThroughOrgSettings{CreatePRWhenAgentReady: &enabled},
 			personal:   &models.AutomaticPRFollowThroughSettings{CreatePRWhenAgentReady: models.AutomaticFollowThroughPreferenceOff},
@@ -234,6 +270,10 @@ func TestCoordinatorRequestPullRequest(t *testing.T) {
 				require.Error(t, err, "ineligible request should return a typed error")
 				require.ErrorAs(t, err, &intentErr, "ineligible request should preserve the coordinator error")
 				require.Equal(t, tt.wantErrCode, intentErr.Code, "coordinator should return the expected error code")
+				if tt.wantReason != "" {
+					require.Equal(t, models.ChangesetStatusExternalUpdateDetected, intentErr.Details["changeset_status"], "the coordinator should identify the blocking changeset lifecycle state")
+					require.Equal(t, tt.wantReason, intentErr.Details["reason"], "the coordinator should return actionable reconciliation guidance")
+				}
 				require.Nil(t, f.publications.captured, "rejected request should not persist publication state")
 				return
 			}

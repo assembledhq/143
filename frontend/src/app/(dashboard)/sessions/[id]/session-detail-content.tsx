@@ -140,7 +140,7 @@ import {
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
 import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
-import type { ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionPublication, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
+import type { ChangesetStatus, ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionPublication, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -168,7 +168,7 @@ import {
   type UseSessionKeyboardShortcutsOptions,
 } from "@/hooks/use-session-keyboard-shortcuts";
 import { prMergedAccent } from "@/lib/pr-status-styles";
-import { continueFromPRBranchMessage, deriveCreatePRActionState, derivePushChangesActionState, hasRepairableFailedChecks, prHealthBlocksPRActions } from "@/lib/session-pr-action-state";
+import { changesetPublicationBlocker, continueFromPRBranchMessage, deriveCreatePRActionState, derivePushChangesActionState, hasRepairableFailedChecks, prHealthBlocksPRActions } from "@/lib/session-pr-action-state";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { isProvisionalSessionDetail } from "@/lib/session-detail-cache";
 import { useReconcileOptimisticAction } from "./use-optimistic-pr-action";
@@ -427,7 +427,31 @@ type PRAuthPromptState =
 type PRActionErrorState = {
   code?: string;
   message: string;
+  changesetStatus?: ChangesetStatus;
 };
+
+function publicationBlockerDetails(value: unknown): { reason?: string; changesetStatus?: ChangesetStatus } {
+  if (!value || typeof value !== "object") return {};
+  const details = value as { reason?: unknown; changeset_status?: unknown };
+  const candidateStatus = typeof details.changeset_status === "string"
+    ? details.changeset_status as ChangesetStatus
+    : undefined;
+  return {
+    reason: typeof details.reason === "string" ? details.reason : undefined,
+    changesetStatus: changesetPublicationBlocker(candidateStatus) ? candidateStatus : undefined,
+  };
+}
+
+function changesetAgentRecoveryMessage(changeset: ChangesetSummary, status = changeset.status): string | null {
+  switch (status) {
+    case "restack_conflict":
+      return "Resolve the restack conflict while preserving this pull request's intent. Explain any semantic changes and do not push; I will review and confirm the result.";
+    case "external_update_detected":
+      return "Run `143-tools changesets import-remote --changeset " + changeset.id + "` first. If it reports `reconciled`, stop and tell me Create PR is ready. Otherwise, fetch the remote branch and reconcile its commits with the local worktree without dropping either side's intended changes. Do not push. After the turn is checkpointed, run the import command again in a follow-up so the platform can verify that the checkpoint matches local HEAD and safely contains the remote HEAD.";
+    default:
+      return null;
+  }
+}
 
 const terminalSessionStatuses = new Set<SessionStatus>(["completed", "pr_created", "failed", "cancelled", "skipped"]);
 
@@ -4634,10 +4658,12 @@ export function SessionDetailContent({ id }: { id: string }) {
         return;
       }
       setLocalPRState("idle");
-      const msg = err instanceof Error ? err.message : PR_ERROR_TOAST_MESSAGE;
+      const blockerDetails = err instanceof ApiError ? publicationBlockerDetails(err.details) : {};
+      const msg = blockerDetails.reason || (err instanceof Error ? err.message : PR_ERROR_TOAST_MESSAGE);
       setLocalPRActionError({
         code: err instanceof ApiError ? err.code : undefined,
         message: msg,
+        changesetStatus: blockerDetails.changesetStatus,
       });
       if (options?.resumeToken) {
         clearPRResumeParams();
@@ -5921,9 +5947,22 @@ export function SessionDetailContent({ id }: { id: string }) {
     snapshotState,
     localPRActionError?.code ? localPRActionError.message : session.pr_creation_error,
   );
+  const blockingChangesetStatus = localPRActionError?.changesetStatus ?? selectedChangeset?.status;
+  const publicationBlocker = changesetPublicationBlocker(blockingChangesetStatus);
+  const selectedChangesetActionBlocker = publicationBlocker;
+  const selectedChangesetRecoveryMessage = selectedChangeset
+    ? changesetAgentRecoveryMessage(selectedChangeset, blockingChangesetStatus)
+    : null;
+  const requestSelectedChangesetRecovery = () => {
+    if (!selectedChangeset || !selectedChangesetRecoveryMessage) return;
+    setComposerChangesetID(selectedChangeset.id);
+    setComposerMessage(selectedChangesetRecoveryMessage);
+    focusComposerFromKeyboard();
+  };
   const prActionError = hasPR
     ? null
-    : (localPRActionError?.code && snapshotState ? snapshotMessage : localPRActionError?.message) ||
+    : publicationBlocker ||
+      (localPRActionError?.code && snapshotState ? snapshotMessage : localPRActionError?.message) ||
       (snapshotUnavailable ? snapshotMessage : null) ||
       (prState === "failed" ? session.pr_creation_error || PR_ERROR_TOAST_MESSAGE : null);
   const createPRAction = deriveCreatePRActionState({
@@ -5941,6 +5980,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     creatingPR,
     finalizingPR,
     prState,
+    changesetStatus: blockingChangesetStatus,
     prCreationError: session.pr_creation_error,
     localError: snapshotUnavailable ? undefined : localPRActionError?.message,
     hasRecoverableError: Boolean(prActionError),
@@ -6029,9 +6069,16 @@ export function SessionDetailContent({ id }: { id: string }) {
   }
 
   const prErrorNotice = prActionError ? {
-    title: prErrorTitle(snapshotState, localPRActionError?.code),
+    title: blockingChangesetStatus === "external_update_detected"
+      ? "Branch reconciliation required"
+      : publicationBlocker
+        ? "Publication blocked"
+        : prErrorTitle(snapshotState, localPRActionError?.code),
     description: prActionError,
-    action: prActionDisabled ? undefined : {
+    action: selectedChangesetRecoveryMessage ? {
+      label: blockingChangesetStatus === "external_update_detected" ? "Reconcile with agent" : "Resolve with agent",
+      onClick: requestSelectedChangesetRecovery,
+    } : prActionDisabled ? undefined : {
       label: prActionLabel,
       onClick: () => submitCreatePR(undefined),
     },
@@ -6283,7 +6330,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             })}
             requestSplitPending={sendMutation.isPending || !composerCanSendMessage}
           />
-          {hasMultipleChangesets && selectedChangeset && (
+          {(hasMultipleChangesets || selectedChangesetRecoveryMessage) && selectedChangeset && (
             <Card className="border-border/60" data-testid="selected-pull-request-panel">
               <CardContent className="space-y-1 p-4">
                 <div className="text-sm font-medium">{selectedChangeset.title}</div>
@@ -6315,25 +6362,28 @@ export function SessionDetailContent({ id }: { id: string }) {
                 ) : null}
                 <div className="flex flex-wrap gap-2 pt-2">
                 {!selectedChangeset.pull_request && (
-                  <DisabledTooltip disabled={!!selectedChangeset.worktree_path} content="Create PR becomes available after branch materialization">
-                    <Button type="button" size="sm" disabled={!selectedChangeset.worktree_path || changesetLifecycleMutation.isPending} onClick={() => changesetLifecycleMutation.mutate(() => api.sessions.publishChangeset(id, selectedChangeset.id))}>
-                      <GitPullRequest className="h-3.5 w-3.5" />
-                      Create PR
-                    </Button>
-                  </DisabledTooltip>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={!selectedChangeset.worktree_path || !!selectedChangesetActionBlocker || changesetLifecycleMutation.isPending}
+                    title={selectedChangesetActionBlocker || (!selectedChangeset.worktree_path ? "Create PR becomes available after branch materialization" : undefined)}
+                    onClick={() => changesetLifecycleMutation.mutate(() => api.sessions.publishChangeset(id, selectedChangeset.id))}
+                  >
+                    <GitPullRequest className="h-3.5 w-3.5" />
+                    Create PR
+                  </Button>
                 )}
                 <Button type="button" size="sm" variant="outline" disabled={!selectedChangeset.worktree_path} onClick={() => {
-                  setComposerChangesetID(selectedChangeset.id);
-                  if (selectedChangeset.status === "restack_conflict") {
-                    setComposerMessage("Resolve the restack conflict while preserving this pull request's intent. Explain any semantic changes and do not push; I will review and confirm the result.");
-                  } else if (selectedChangeset.status === "external_update_detected") {
-                    setComposerMessage("Run `143-tools changesets import-remote --changeset " + selectedChangeset.id + "`, fetch this pull request's remote branch, and reconcile its remote commits with the local worktree without dropping either side's intended changes. Do not push; I will review and confirm the result.");
+                  if (selectedChangesetRecoveryMessage) {
+                    requestSelectedChangesetRecovery();
+                  } else {
+                    setComposerChangesetID(selectedChangeset.id);
+                    focusComposerFromKeyboard();
                   }
-                  focusComposerFromKeyboard();
                 }}>
-                  {selectedChangeset.status === "restack_conflict"
+                  {blockingChangesetStatus === "restack_conflict"
                     ? "Resolve with agent"
-                    : selectedChangeset.status === "external_update_detected"
+                    : blockingChangesetStatus === "external_update_detected"
                       ? "Reconcile with agent"
                       : "Ask agent"}
                 </Button>

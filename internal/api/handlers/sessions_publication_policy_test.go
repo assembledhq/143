@@ -37,29 +37,21 @@ func TestSessionHandler_ResolveSessionPublicationPolicyDegradesOnInitiatorFailur
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		initiatorOrgID func(orgID uuid.UUID) uuid.UUID
-		initiatorErr   bool
-		wantCreatePR   bool
-		wantSource     models.PublicationPolicySource
+		name         string
+		initiatorErr bool
+		wantCreatePR bool
+		wantSource   models.PublicationPolicySource
 	}{
 		{
-			name:           "initiator personal preference applies",
-			initiatorOrgID: func(orgID uuid.UUID) uuid.UUID { return orgID },
-			wantCreatePR:   false,
-			wantSource:     models.PublicationPolicySourcePersonal,
+			name:         "secondary organization member personal preference applies",
+			wantCreatePR: false,
+			wantSource:   models.PublicationPolicySourcePersonal,
 		},
 		{
 			name:         "missing initiator falls back to organization policy",
 			initiatorErr: true,
 			wantCreatePR: true,
 			wantSource:   models.PublicationPolicySourceOrganization,
-		},
-		{
-			name:           "cross-organization initiator falls back to organization policy",
-			initiatorOrgID: func(uuid.UUID) uuid.UUID { return uuid.New() },
-			wantCreatePR:   true,
-			wantSource:     models.PublicationPolicySourceOrganization,
 		},
 	}
 
@@ -78,7 +70,8 @@ func TestSessionHandler_ResolveSessionPublicationPolicyDegradesOnInitiatorFailur
 				WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
 					AddRow(orgID, "acme", orgSettingsWithPublicationPolicy(t, true, true), now, now))
 
-			userQuery := mock.ExpectQuery("FROM users").WithArgs(pgx.NamedArgs{"id": userID})
+			userQuery := mock.ExpectQuery("JOIN organization_memberships").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "user_id": userID})
 			if tt.initiatorErr {
 				userQuery.WillReturnError(pgx.ErrNoRows)
 			} else {
@@ -93,7 +86,7 @@ func TestSessionHandler_ResolveSessionPublicationPolicyDegradesOnInitiatorFailur
 					"github_login", "avatar_url", "google_id", "email_verified_at",
 					"created_at", "settings",
 				}).AddRow(
-					userID, tt.initiatorOrgID(orgID), "dev@acme.test", "Dev", "member",
+					userID, orgID, "dev@acme.test", "Dev", "member",
 					(*int64)(nil), (*string)(nil), (*string)(nil), (*string)(nil),
 					(*time.Time)(nil), now, personal,
 				))

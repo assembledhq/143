@@ -291,11 +291,11 @@ func (h *InternalPullRequestHandler) createWithCoordinator(
 		if errors.As(err, &intentErr) {
 			switch intentErr.Code {
 			case publicationintent.ErrorSessionNotEligible:
-				writeError(w, r, http.StatusConflict, string(intentErr.Code), "session is not eligible for publication", err)
+				writeErrorWithDetails(w, r, http.StatusConflict, string(intentErr.Code), "session is not eligible for publication", intentErr.Details, err)
 			case publicationintent.ErrorWorkspaceNotReady:
-				writeError(w, r, http.StatusConflict, string(intentErr.Code), "workspace is not ready for publication", err)
+				writeErrorWithDetails(w, r, http.StatusConflict, string(intentErr.Code), "workspace is not ready for publication", intentErr.Details, err)
 			case publicationintent.ErrorPRInFlight:
-				writeError(w, r, http.StatusConflict, "PR_IN_FLIGHT", "PR creation already in progress", err)
+				writeErrorWithDetails(w, r, http.StatusConflict, "PR_IN_FLIGHT", "PR creation already in progress", intentErr.Details, err)
 			default:
 				writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "failed to record publication intent", err)
 			}

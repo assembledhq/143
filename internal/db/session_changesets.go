@@ -343,20 +343,37 @@ func (s *SessionChangesetStore) RecordPublishedHead(ctx context.Context, orgID, 
 	return nil
 }
 
-func (s *SessionChangesetStore) ImportRemoteHead(ctx context.Context, orgID, sessionID, changesetID uuid.UUID, headSHA string) error {
-	result, err := s.db.Exec(ctx, `UPDATE session_changesets SET
-		expected_remote_head_sha = @head_sha, status = 'external_update_detected', updated_at = now()
+// ImportRemoteHead records the remote branch head discovered by the scoped
+// session tool. When the caller also supplies the live local head and it agrees
+// with the stored checkpoint and either equals or contains the remote head,
+// the divergence has been reconciled and the changeset can return to
+// published_branch. The push worker independently rechecks ancestry before
+// any force-with-lease, so a stale client claim cannot overwrite remote work.
+// Otherwise the changeset remains explicitly blocked for reconciliation.
+func (s *SessionChangesetStore) ImportRemoteHead(ctx context.Context, orgID, sessionID, changesetID uuid.UUID, remoteHeadSHA, localHeadSHA string, remoteIsAncestor bool) (models.ChangesetStatus, error) {
+	row := s.db.QueryRow(ctx, `UPDATE session_changesets SET
+		expected_remote_head_sha = @remote_head_sha,
+		status = CASE
+			WHEN status IN ('pr_open', 'merged', 'abandoned') THEN status
+			WHEN @local_head_sha <> ''
+			 AND head_sha = @local_head_sha
+			 AND (@local_head_sha = @remote_head_sha OR @remote_is_ancestor)
+			THEN 'published_branch'
+			ELSE 'external_update_detected'
+		END,
+		updated_at = now()
 		WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id
-		  AND working_branch IS NOT NULL`, pgx.NamedArgs{
-		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "head_sha": headSHA,
+		  AND working_branch IS NOT NULL
+		RETURNING status`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+		"remote_head_sha": remoteHeadSHA, "local_head_sha": localHeadSHA,
+		"remote_is_ancestor": remoteIsAncestor,
 	})
-	if err != nil {
-		return fmt.Errorf("import remote changeset head: %w", err)
+	var status models.ChangesetStatus
+	if err := row.Scan(&status); err != nil {
+		return "", fmt.Errorf("import remote changeset head: %w", err)
 	}
-	if result.RowsAffected() == 0 {
-		return pgx.ErrNoRows
-	}
-	return nil
+	return status, nil
 }
 
 func (s *SessionChangesetStore) MarkExternalUpdateDetected(ctx context.Context, orgID, sessionID, changesetID uuid.UUID) error {

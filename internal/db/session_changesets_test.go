@@ -408,6 +408,60 @@ func TestSessionChangesetStoreRecordPublishedHeadPreservesTerminalStatus(t *test
 	}
 }
 
+func TestSessionChangesetStoreImportRemoteHeadRequiresSafeCheckpointToReconcile(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		localHeadSHA   string
+		remoteAncestor bool
+		returnedStatus models.ChangesetStatus
+	}{
+		{
+			name:           "matching stored local and remote heads restore publication readiness",
+			localHeadSHA:   strings.Repeat("a", 40),
+			returnedStatus: models.ChangesetStatusPublishedBranch,
+		},
+		{
+			name:           "divergent heads remain blocked for reconciliation",
+			localHeadSHA:   strings.Repeat("b", 40),
+			returnedStatus: models.ChangesetStatusExternalUpdateDetected,
+		},
+		{
+			name:           "a checkpoint containing the remote head restores publication readiness",
+			localHeadSHA:   strings.Repeat("b", 40),
+			remoteAncestor: true,
+			returnedStatus: models.ChangesetStatusPublishedBranch,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgx mock should initialize")
+			t.Cleanup(mock.Close)
+			orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+			remoteHeadSHA := strings.Repeat("a", 40)
+			mock.ExpectQuery(`UPDATE session_changesets SET[\s\S]+WHEN @local_head_sha <> ''[\s\S]+head_sha = @local_head_sha[\s\S]+@local_head_sha = @remote_head_sha OR @remote_is_ancestor[\s\S]+THEN 'published_branch'[\s\S]+ELSE 'external_update_detected'[\s\S]+WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id`).
+				WithArgs(pgx.NamedArgs{
+					"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+					"remote_head_sha": remoteHeadSHA, "local_head_sha": tt.localHeadSHA,
+					"remote_is_ancestor": tt.remoteAncestor,
+				}).
+				WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow(tt.returnedStatus))
+
+			status, err := NewSessionChangesetStore(mock).ImportRemoteHead(
+				context.Background(), orgID, sessionID, changesetID, remoteHeadSHA, tt.localHeadSHA, tt.remoteAncestor,
+			)
+			require.NoError(t, err, "remote-head import should return the reconciled lifecycle state")
+			require.Equal(t, tt.returnedStatus, status, "remote-head import should surface the persisted lifecycle state")
+			require.NoError(t, mock.ExpectationsWereMet(), "remote-head reconciliation should remain tenant scoped and require a safe local checkpoint")
+		})
+	}
+}
+
 func TestSessionChangesetStoreRecordLocalHeadMarksDescendantsStale(t *testing.T) {
 	t.Parallel()
 
