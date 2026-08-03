@@ -182,7 +182,7 @@ func TestBuildMentionIndex_ReaderPathsNormalizeEntriesConsistently(t *testing.T)
 	}
 }
 
-func TestBuildMentionIndex_FiltersLanguageCachesAndArtifacts(t *testing.T) {
+func TestBuildMentionIndex_FiltersLanguageCachesAndOutputs(t *testing.T) {
 	t.Parallel()
 
 	reader := &recursiveMentionReader{
@@ -217,13 +217,13 @@ func TestBuildMentionIndex_FiltersLanguageCachesAndArtifacts(t *testing.T) {
 	}
 
 	index, err := BuildMentionIndex(context.Background(), reader)
-	require.NoError(t, err, "BuildMentionIndex should succeed while filtering cache and artifact paths")
+	require.NoError(t, err, "BuildMentionIndex should succeed while filtering cache and output paths")
 	require.Equal(t, []MentionIndexEntry{
 		{Kind: string(models.SessionInputReferenceKindFile), Path: "README.md"},
 		{Kind: string(models.SessionInputReferenceKindFile), Path: "migrations/000113_session_threads_backfill_primary.up.sql"},
 		{Kind: string(models.SessionInputReferenceKindDirectory), Path: "src"},
 		{Kind: string(models.SessionInputReferenceKindFile), Path: "src/main.rs"},
-	}, index.Entries, "BuildMentionIndex should keep searchable source files while excluding common cache and generated artifact paths")
+	}, index.Entries, "BuildMentionIndex should keep searchable source files while excluding common cache and generated output paths")
 }
 
 func TestBuildMentionIndexWithConfig_PassesCustomCapToRecursiveReader(t *testing.T) {

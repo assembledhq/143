@@ -3265,7 +3265,7 @@ function CodeReviewEvidenceSheet({
 }) {
   const agentResults = evidence?.agent_results ?? [];
   const findings = evidence?.findings ?? [];
-  const artifacts = evidence?.prompt_artifacts ?? [];
+  const records = evidence?.prompt_records ?? evidence?.prompt_artifacts ?? [];
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-[calc(100vw-1rem)] p-0 sm:max-w-xl">
@@ -3309,7 +3309,7 @@ function CodeReviewEvidenceSheet({
               <div className="grid grid-cols-3 gap-3">
                 <EvidenceMetric label="Agents" value={agentResults.length} />
                 <EvidenceMetric label="Findings" value={findings.length} />
-                <EvidenceMetric label="Prompts" value={artifacts.length} />
+                <EvidenceMetric label="Prompts" value={records.length} />
               </div>
 
               <section className="space-y-3">
@@ -3377,21 +3377,23 @@ function CodeReviewEvidenceSheet({
               </section>
 
               <section className="space-y-3">
-                <EvidenceSectionHeader title="Prompt artifacts" empty={artifacts.length === 0} />
-                {artifacts.length === 0 ? (
-                  <div className="text-sm text-muted-foreground">No prompt artifacts recorded.</div>
+                <EvidenceSectionHeader title="Prompt records" empty={records.length === 0} />
+                {records.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">No prompt records recorded.</div>
                 ) : (
-                  artifacts.map((artifact) => (
-                    <div key={artifact.id} className="space-y-3 border-t border-border pt-3 first:border-t-0 first:pt-0">
+                  records.map((record) => (
+                    <div key={record.id} className="space-y-3 border-t border-border pt-3 first:border-t-0 first:pt-0">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0 space-y-1">
-                          <div className="truncate text-sm font-medium text-foreground">{artifact.artifact_key}</div>
-                          {artifact.agent_provider ? <div className="text-xs text-muted-foreground">{artifact.agent_provider}</div> : null}
+                          <div className="truncate text-sm font-medium text-foreground">
+                            {record.record_key ?? record.artifact_key}
+                          </div>
+                          {record.agent_provider ? <div className="text-xs text-muted-foreground">{record.agent_provider}</div> : null}
                         </div>
-                        <Badge variant="outline">{artifact.role}</Badge>
+                        <Badge variant="outline">{record.role}</Badge>
                       </div>
                       <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">
-                        {artifact.content}
+                        {record.content}
                       </pre>
                     </div>
                   ))

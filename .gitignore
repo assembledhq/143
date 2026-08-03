@@ -11,7 +11,7 @@
 # Test binary, built with `go test -c`
 *.test
 
-# Code coverage profiles and other test artifacts
+# Code coverage profiles and other test outputs
 *.out
 coverage.*
 *.coverprofile
@@ -60,7 +60,7 @@ server
 !cmd/server/session_executor_main.go
 coverage.html
 
-# Root-level `go build` artifacts, one per cmd/ package (rooted so the
+# Root-level `go build` outputs, one per cmd/ package (rooted so the
 # cmd/* source directories stay tracked)
 /preview
 /tools
@@ -90,3 +90,7 @@ node_modules/
 
 # 143-tools CLI cross-compile output (make build-cli)
 dist/
+
+# Platform-owned preview cache markers written into the workspace at runtime
+# (see preview.install). These are per-sandbox state, never source.
+.143/cache/

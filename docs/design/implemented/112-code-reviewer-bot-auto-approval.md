@@ -17,7 +17,7 @@ Implemented:
 
 - versioned insert-only code review policies with org defaults and repository overrides
 - lossless policy persistence for final review templates
-- code review session metadata, agent result, finding, and prompt-artifact tables tied to normal `sessions`
+- code review session metadata, agent result, finding, and prompt-record tables tied to normal `sessions`
 - typed Go models and `pgx` stores for policies, review metadata, agent evidence, and findings
 - deterministic acceptable-risk evaluator, starter policy templates, final-review body rendering, and inline finding selection helpers
 - GitHub `review_requested` and PR issue-comment mention webhook adapters for configured bot reviewer identities, including authoritative PR snapshot loading and local mirror creation for human-authored PRs
@@ -27,7 +27,7 @@ Implemented:
 - live reviewer/orchestrator evidence ingestion harvested from running review threads rather than pre-existing stored result rows
 - evidence-gated approval path that evaluates reviewer results, blocking findings, PR health, reviewed head SHA, required check state, changed-file size/path/category context from GitHub, and the captured policy before choosing approval vs comment-only
 - coding-agent orchestrator evaluation of PR description requirements, structured findings at every severity, and typed non-finding human-review reasons, with prompt-injection screening; an explicit issue-comment trigger is supplied as bounded, untrusted request context, and the backend derives the decision from the resulting explicit signals
-- prompt artifact storage and recovery for rendered reviewer/orchestrator prompts and their structured outputs
+- prompt record storage and recovery for rendered reviewer/orchestrator prompts and their structured outputs
 - inline-comment posting with marker-based dedupe/update and posted-comment id persistence
 - GitHub changed-file fetch support for PR file/line threshold and coarse risk-category evaluation
 - one rolling PR conversation comment that links to the active session while review is running and becomes the sole visible summary when it completes; the formal review retains a visible fallback until that rolling update succeeds, then becomes marker-only, without a redundant commit status that could be mistaken for a required CI check
@@ -347,7 +347,7 @@ Configurable deterministic signals:
 
 - small diff by configured file and line thresholds
 - no sensitive paths touched
-- no migrations, auth, billing, permissions, crypto, infra, dependency lockfile, or generated artifact surprises
+- no migrations, auth, billing, permissions, crypto, infra, dependency lockfile, or generated output surprises
 - CI/checks are green or not required by policy
 - branch is mergeable and up to date according to policy
 - author is in an eligible role or team
@@ -618,7 +618,7 @@ code_review_session_metadata (
     stale boolean not null default false,
     superseded_by_session_id uuid references sessions(id),
     review_output_key text not null,
-    prompt_artifact_key text,
+    prompt_record_key text,
     github_review_id bigint,
     additions integer,
     deletions integer,
@@ -680,7 +680,7 @@ Code review execution state hangs off normal `sessions` through a dedicated sess
 
 Implementation notes:
 
-- Store large raw agent transcripts in the existing session transcript/object-storage path when possible; keep `raw_output` bounded or replace it with an artifact pointer if output size becomes a concern.
+- Store large raw agent transcripts in the existing session transcript/object-storage path when possible; keep `raw_output` bounded or replace it with a prompt-record pointer if output size becomes a concern.
 - Model `approval_mode`, `decision`, `severity`, `confidence`, and `status` as typed string enums in Go models with validation tests.
 - Validate `inline_comment_limit` as `1..10`; default new policies to `4`.
 - Every table and query is tenant-scoped by `org_id`.

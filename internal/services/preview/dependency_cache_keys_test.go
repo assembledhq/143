@@ -58,13 +58,13 @@ func TestComputePreviewDependencyCacheKey(t *testing.T) {
 	verifyChanged.VerifyPaths = []string{"different"}
 	verifyKey, _, err := ComputePreviewDependencyCacheKey(context.Background(), exec, sb, &verifyChanged, []string{"node_modules", ".next/cache"})
 	require.NoError(t, err, "dependency cache key should compute when verify paths change")
-	require.Equal(t, base, verifyKey, "verify paths should not affect dependency artifact identity")
+	require.Equal(t, base, verifyKey, "verify paths should not affect dependency output identity")
 
 	commandChanged := *install
 	commandChanged.Command = []string{"npm", "install"}
 	commandKey, _, err := ComputePreviewDependencyCacheKey(context.Background(), exec, sb, &commandChanged, []string{"node_modules", ".next/cache"})
 	require.NoError(t, err, "dependency cache key should compute when command changes")
-	require.NotEqual(t, base, commandKey, "install command should affect dependency artifact identity")
+	require.NotEqual(t, base, commandKey, "install command should affect dependency output identity")
 
 	imageChanged := &agent.Sandbox{Provider: "docker", Metadata: map[string]string{
 		"image":                       "143-sandbox:deploy-b",
@@ -72,7 +72,7 @@ func TestComputePreviewDependencyCacheKey(t *testing.T) {
 	}}
 	imageKey, _, err := ComputePreviewDependencyCacheKey(context.Background(), exec, imageChanged, install, []string{"node_modules", ".next/cache"})
 	require.NoError(t, err, "dependency cache key should compute when deploy image tag changes")
-	require.Equal(t, base, imageKey, "deploy image tag alone should not affect dependency artifact identity")
+	require.Equal(t, base, imageKey, "deploy image tag alone should not affect dependency output identity")
 
 	abiChanged := &agent.Sandbox{Provider: "docker", Metadata: map[string]string{
 		"image":                       "143-sandbox:deploy-b",
@@ -80,7 +80,7 @@ func TestComputePreviewDependencyCacheKey(t *testing.T) {
 	}}
 	abiKey, _, err := ComputePreviewDependencyCacheKey(context.Background(), exec, abiChanged, install, []string{"node_modules", ".next/cache"})
 	require.NoError(t, err, "dependency cache key should compute when sandbox cache ABI changes")
-	require.NotEqual(t, base, abiKey, "sandbox cache ABI should affect dependency artifact identity")
+	require.NotEqual(t, base, abiKey, "sandbox cache ABI should affect dependency output identity")
 }
 
 func TestComputePreviewPackageManagerCacheKey(t *testing.T) {

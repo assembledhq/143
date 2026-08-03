@@ -8,7 +8,7 @@
 
 - Live session sandbox reuse, which is the fastest path when the coding session container is still running.
 - Branch/PR warm resume, which builds a committed branch preview, saves a startup snapshot, and can stop the runtime while keeping restart fast.
-- Session preview dependency-cache prewarming, which runs `preview.install.command` in a low-priority ephemeral sandbox after successful snapshot-producing turns and stores package-manager and install-artifact caches.
+- Session preview dependency-cache prewarming, which runs `preview.install.command` in a low-priority ephemeral sandbox after successful snapshot-producing turns and stores package-manager and install-output caches.
 
 The missing piece is a policy for starting preview work at session creation, before the user clicks `Preview`. This design uses cheap cache warming broadly, a small platform-LLM classifier to decide when stronger warming is justified, and keeps live speculative previews out of the default path.
 

@@ -402,7 +402,7 @@ export type PreviewVerificationStatus =
   | "skipped"
   | "human_intervention_required";
 
-export interface PreviewVerificationArtifact {
+export interface PreviewVerificationCapture {
   id: string;
   kind: string;
   content_type: string;
@@ -429,10 +429,14 @@ export interface PreviewVerificationRun {
     viewport: { width: number; height: number };
     outcome: string;
     error?: string;
-    artifact?: PreviewVerificationArtifact;
+    capture?: PreviewVerificationCapture;
+    /** @deprecated Compatibility with API instances still draining during rollout. */
+    artifact?: PreviewVerificationCapture;
     console_error_count: number;
   }>;
-  artifacts: PreviewVerificationArtifact[];
+  captures: PreviewVerificationCapture[];
+  /** @deprecated Compatibility with API instances still draining during rollout. */
+  artifacts?: PreviewVerificationCapture[];
   console_error_count: number;
   summary: string;
   failure_reason?: string;

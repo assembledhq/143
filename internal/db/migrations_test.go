@@ -1551,3 +1551,117 @@ func TestActivityPhaseTranscriptAssociationMigration(t *testing.T) {
 		)
 	}
 }
+
+func TestRenameLegacyOutputTermsMigrationPinsNamespaceContracts(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000275_rename_legacy_output_terms.up.sql")
+	require.NoError(t, err, "test should read the legacy output terminology migration")
+	sql := string(body)
+
+	require.Contains(t, sql, "sync_code_review_prompt_record_compatibility", "migration should synchronize both prompt storage tables during rolling deploys")
+	require.Contains(t, sql, "ADD COLUMN prompt_record_key", "migration should expand the prompt reference schema before contracting it")
+	require.Contains(t, sql, "ADD COLUMN captures jsonb", "migration should retain both verification screenshot columns during rolling deploys")
+	require.Contains(t, sql, "'review_bundle_' || suffix", "migration should add every review bundle metadata column")
+	require.Contains(t, sql, "WHEN 'install_artifact' THEN 'install_output'", "migration should rewrite persisted install cache kinds")
+	require.Contains(t, sql, "WHEN 'build_artifact' THEN 'build_output'", "migration should rewrite persisted build cache kinds")
+	require.Contains(t, sql, "ALTER COLUMN cache_kind SET DEFAULT 'install_output'", "migration should update installed cache column defaults")
+	require.Contains(t, sql, "metadata->>'kind'", "migration should rewrite cache kinds embedded in metadata")
+	require.Contains(t, sql, "jsonb_array_elements(steps)", "migration should backfill nested verification step references")
+	require.Contains(t, sql, "trg_normalize_preview_dependency_cache_kind", "migration should normalize cache writes from draining workers")
+	require.Contains(t, sql, "jsonb_build_object('prompt_record_key'", "migration should preserve persisted prompt record references")
+	require.Contains(t, sql, "jsonb_build_object('raw_record_key'", "migration should preserve persisted raw output references")
+	require.Contains(t, sql, "preview_verification_runs_captures_check", "migration should enforce the new verification collection while compatibility is active")
+
+	downBody, err := os.ReadFile("../../migrations/000275_rename_legacy_output_terms.down.sql")
+	require.NoError(t, err, "test should read the legacy output terminology rollback")
+	downSQL := string(downBody)
+	require.Contains(t, downSQL, "DROP FUNCTION IF EXISTS sync_code_review_prompt_record_compatibility", "rollback should remove prompt table synchronization")
+	require.Contains(t, downSQL, "ALTER COLUMN cache_kind SET DEFAULT 'install_artifact'", "rollback should restore installed cache defaults")
+	require.Contains(t, downSQL, "jsonb_array_elements(steps)", "rollback should restore historical verification step keys")
+	require.Contains(t, downSQL, "DROP TABLE code_review_prompt_records", "rollback should contract an expanded existing installation")
+	require.NotContains(t, downSQL, "RENAME TO code_review_prompt_artifacts", "rollback should undo only this migration's expansion; a fresh installation already had the new names at the prior version")
+	require.NotContains(t, downSQL, "RENAME COLUMN captures TO artifacts", "rollback should not rename a fresh installation's verification column")
+	require.NotContains(t, downSQL, "RENAME COLUMN prompt_record_key TO prompt_artifact_key", "rollback should not rename a fresh installation's prompt reference column")
+
+	// Dependency cache lookups match cache_kind exactly with no read-side
+	// fallback, so reverting kinds on a fresh installation (whose up made no
+	// cache changes) would silently miss every lookup.
+	require.Contains(t, downSQL, "is_legacy_installation", "rollback should revert data only on an installation that arrived with the legacy naming")
+	cacheRevert := strings.Index(downSQL, "ALTER COLUMN cache_kind SET DEFAULT 'install_artifact'")
+	require.Positive(t, cacheRevert, "rollback should restore installed cache defaults")
+	guard := strings.Index(downSQL, "IF NOT is_legacy_installation THEN")
+	require.Positive(t, guard, "rollback should guard its data reverts")
+	require.Less(t, guard, cacheRevert, "the cache kind revert should sit behind the legacy-installation guard")
+
+	// The verification and cache compatibility triggers normalize writes toward
+	// the new names, so a data revert that ran before they were dropped would be
+	// undone by them.
+	for _, trigger := range []string{
+		"DROP TRIGGER IF EXISTS trg_sync_preview_verification_captures",
+		"DROP TRIGGER IF EXISTS trg_normalize_preview_dependency_cache_kind",
+	} {
+		dropAt := strings.Index(downSQL, trigger)
+		require.Positive(t, dropAt, "rollback should drop the compatibility trigger %q", trigger)
+		require.Less(t, dropAt, guard, "compatibility triggers should be dropped before any data revert runs")
+	}
+}
+
+// TestRenamedOutputTermMigrationsInvertThemselves pins the property that made
+// the 219/225/226 rollbacks wrong when they were rewritten for the new names:
+// each down file must undo its own up on a fresh database (where those
+// migrations create the new names directly) while still working on a database
+// that migration 275 expanded and then contracted back to the legacy names.
+func TestRenamedOutputTermMigrationsInvertThemselves(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		path     string
+		contains []string
+	}{
+		{
+			name: "review bundle columns",
+			path: "../../migrations/000219_session_diff_review_bundles.down.sql",
+			contains: []string{
+				"DROP COLUMN IF EXISTS review_bundle_key",
+				"DROP COLUMN IF EXISTS review_artifact_key",
+				"DROP INDEX IF EXISTS idx_session_diff_snapshots_review_bundle_key",
+				"DROP INDEX IF EXISTS idx_session_diff_snapshots_review_artifact_key",
+			},
+		},
+		{
+			name: "prompt record table",
+			path: "../../migrations/000225_code_review_prompt_records.down.sql",
+			contains: []string{
+				"DROP TABLE IF EXISTS code_review_prompt_records",
+				"DROP TABLE IF EXISTS code_review_prompt_artifacts",
+			},
+		},
+		{
+			name: "prompt record roles",
+			path: "../../migrations/000226_code_review_output_record_roles.down.sql",
+			contains: []string{
+				"to_regclass('code_review_prompt_records')",
+				"chk_code_review_prompt_records_role",
+				"to_regclass('code_review_prompt_artifacts')",
+				"chk_code_review_prompt_artifacts_role",
+				// Any database with review history holds the *_output roles this
+				// narrowed check rejects; validating them would abort the rollback.
+				"CHECK (role IN ('reviewer', 'orchestrator', 'description_policy')) NOT VALID",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			body, err := os.ReadFile(tt.path)
+			require.NoError(t, err, "test should read the rollback")
+			for _, needle := range tt.contains {
+				require.Contains(t, string(body), needle, "rollback should handle both the fresh and contracted schema shapes")
+			}
+		})
+	}
+}

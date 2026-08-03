@@ -20,8 +20,8 @@ The public homepage positions 143 as shared coding-agent infrastructure for engi
 - **Automation** is a team-owned recurring or event-triggered instruction that creates sessions through the same execution pipeline as manual work.
 - **Project** is the higher-level planning surface for human-authored multi-step work. Projects group related tasks and can feed sessions over time.
 - **Preview** is a temporary isolated web runtime for a session or branch. It is addressed by a preview origin, controlled by backend state, and backed by a worker-owned sandbox/runtime.
-- **Branch or PR** is the publish artifact. 143 creates branches and PRs through GitHub while preserving repository templates, keeping PR descriptions concise and problem-first, and leaving repository-native CI/CD as the validation source of truth.
-- **Code review** is a post-PR review session started by explicit reviewer-bot request or future policy triggers. One organization-wide versioned policy separates optional reviewer instructions, automated-approval guidance, and deterministic safeguards across every repository. The orchestrator emits structured findings and typed non-code human-review reasons; the backend treats P0/P1 findings as blocking and P2/P3 findings as advisory, preventing hidden model vetoes. Reviews store policy version, PR/head SHA metadata, reviewer-agent evidence, findings, risk decision, rendered prompt artifacts, and GitHub review output so decisions remain auditable.
+- **Branch or PR** is the published result. 143 creates branches and PRs through GitHub while preserving repository templates, keeping PR descriptions concise and problem-first, and leaving repository-native CI/CD as the validation source of truth.
+- **Code review** is a post-PR review session started by explicit reviewer-bot request or future policy triggers. One organization-wide versioned policy separates optional reviewer instructions, automated-approval guidance, and deterministic safeguards across every repository. The orchestrator emits structured findings and typed non-code human-review reasons; the backend treats P0/P1 findings as blocking and P2/P3 findings as advisory, preventing hidden model vetoes. Reviews store policy version, PR/head SHA metadata, reviewer-agent evidence, findings, risk decision, rendered prompt records, and GitHub review output so decisions remain auditable.
 
 ## Core Flow
 
@@ -46,7 +46,7 @@ Next.js frontend + Go API (/api/v1)
         |
         +--> PostgreSQL: source of truth, tenancy, jobs, sessions, audit, usage
         +--> Redis: optional cache, pub/sub, SSE fan-out, live wakeups
-        +--> Object storage: session snapshots, uploaded artifacts, preview caches
+        +--> Object storage: session snapshots, uploaded files, preview caches
         |
         v
 Workers and durable session executors
@@ -79,7 +79,7 @@ Vector -> VictoriaLogs / Grafana for centralized logs, dashboards, and alerts
 - Sandboxes are the permission boundary for agent execution. They run with resource limits, gVisor isolation in production, controlled network policy, and per-session GitHub credential access through a worker-owned auth broker rather than long-lived tokens in the container environment.
 - Repository-owned `.143/config.json` can declare sandbox setup for agent work and deterministic validation sandboxes, including supported platform-managed tool dependencies and bootstrap commands that run after clone/checkout and auth setup before the coding agent or lint/test commands start.
 - The sandbox image installs the supported coding-agent CLIs, including Codex, Claude Code, OpenCode, Amp, and Pi. Runtime credentials are resolved from ordered personal/team auth stacks with health and rate-limit state tracked separately from credential config. OpenCode defaults to GLM 5.2; curated OpenRouter open-source model choices must define generated provider routing pinned to audited US inference providers with no fallback to unaudited providers. Native OpenCode routes do not expose equivalent per-provider location controls, so setup copy calls out that distinction.
-- Preview dependency caches key runtime compatibility by a stable sandbox cache ABI (`SANDBOX_CACHE_ABI`) instead of deploy-specific sandbox image tags. Routine deploys should not invalidate install caches; bump the ABI only when baked OS/toolchain/runtime changes can make cached artifacts unsafe.
+- Preview dependency caches key runtime compatibility by a stable sandbox cache ABI (`SANDBOX_CACHE_ABI`) instead of deploy-specific sandbox image tags. Routine deploys should not invalidate install caches; bump the ABI only when baked OS/toolchain/runtime changes can make cached outputs unsafe.
 - Long-running sessions survive routine deploys through durable session executors, leases, checkpointed recovery, snapshots, and worker drain/spin-down controls. See [implemented/82-durable-session-executors.md](implemented/82-durable-session-executors.md).
 - Routine worker deploys verify host support services without activating support-service changes. Mutating shared worker support services such as `sandbox-dns`, Chrome, gVisor checks, bridge config, or Docker daemon config is a maintenance-mode operation because it can affect active sandboxes and previews.
 - Multiple agent tabs can run inside one shared session sandbox when they should share a branch and filesystem. Independent PR streams should remain separate sessions. See [implemented/88-shared-sandbox-thread-runtimes.md](implemented/88-shared-sandbox-thread-runtimes.md).

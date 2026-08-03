@@ -116,7 +116,7 @@ func (e *previewToolExecutor) tools() []mcp.Tool {
 			"viewport_h":    {Type: "number", Description: "Viewport height, default 720"},
 			"full_page":     {Type: "boolean", Description: "Capture full page"},
 			"delay_ms":      {Type: "number", Description: "Delay before capture in milliseconds"},
-			"inline_base64": {Type: "boolean", Description: "Keep png_base64 in output; defaults true until artifact storage is available"},
+			"inline_base64": {Type: "boolean", Description: "Keep png_base64 in output; defaults true until capture storage is available"},
 		})},
 		{Name: "preview_console", Description: "Read browser console messages from a preview.", InputSchema: previewTargetSchema(map[string]mcp.SchemaProperty{
 			"level": {Type: "string", Description: "Optional console level filter, e.g. error"},
@@ -135,8 +135,8 @@ func (e *previewToolExecutor) tools() []mcp.Tool {
 			"delay_ms":  {Type: "number", Description: "Delay before each capture in milliseconds"},
 		})},
 		{Name: "preview_visual_diff", Description: "Compare two stored preview snapshots.", InputSchema: previewTargetSchema(map[string]mcp.SchemaProperty{
-			"before_snapshot_id": {Type: "string", Description: "Before artifact or snapshot ID"},
-			"after_snapshot_id":  {Type: "string", Description: "After artifact or snapshot ID"},
+			"before_snapshot_id": {Type: "string", Description: "Before capture or snapshot ID"},
+			"after_snapshot_id":  {Type: "string", Description: "After capture or snapshot ID"},
 		})},
 		{Name: "preview_assert", Description: "Run browser/visual assertions against a preview. Pass --assertions as JSON array.", InputSchema: previewTargetSchema(map[string]mcp.SchemaProperty{
 			"assertions": {Type: "string", Description: "JSON array of assertion objects"},
@@ -814,8 +814,8 @@ func (e *previewToolExecutor) screenshot(ctx context.Context, args json.RawMessa
 		body["inline_base64"] = *params.InlineBase64
 	} else if target.SessionID != "" {
 		// The session path is served by /observe, whose inline_base64 defaults to
-		// false. Preserve the documented "inline until artifact storage exists"
-		// behavior: request the bytes, then drop them below when an artifact
+		// false. Preserve the documented "inline until capture storage exists"
+		// behavior: request the bytes, then drop them below when a capture
 		// reference is available so the transcript stays lean.
 		body["inline_base64"] = true
 	}
@@ -834,8 +834,9 @@ func (e *previewToolExecutor) screenshot(ctx context.Context, args json.RawMessa
 			if !*params.InlineBase64 {
 				delete(screenshot, "png_base64")
 			}
-		} else if _, hasArtifact := screenshot["artifact"]; hasArtifact {
-			// Smart default: an artifact reference is enough; drop the inline bytes.
+		} else if _, hasCapture := screenshot["capture"]; hasCapture || screenshot["artifact"] != nil {
+			// Smart default: either supported stored-reference key is enough; drop
+			// the inline bytes while API generations overlap.
 			delete(screenshot, "png_base64")
 		}
 		return jsonResult(screenshot)

@@ -4551,7 +4551,7 @@ func TestPreviewStore_DeleteDependencyCacheIfBlobKeyGuardsOnBlobKey(t *testing.T
 
 	id := uuid.New()
 	orgID := uuid.New()
-	blobKey := "deps/build_artifact/abcd/0f1e2d3c.tar.gz"
+	blobKey := "deps/build_output/abcd/0f1e2d3c.tar.gz"
 
 	mock.ExpectExec(`DELETE FROM preview_dependency_cache WHERE id = @id AND org_id = @org_id AND blob_key = @blob_key`).
 		WithArgs(id, orgID, blobKey).

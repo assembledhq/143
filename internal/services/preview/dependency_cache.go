@@ -258,12 +258,12 @@ func NewDependencyCache(cfg DependencyCacheConfig) (*SharedDependencyCache, erro
 }
 
 func (c *SharedDependencyCache) Find(ctx context.Context, orgID, repoID uuid.UUID, cacheKey string) (*DependencyCacheHit, error) {
-	return c.FindPathCache(ctx, orgID, repoID, models.PreviewCacheKindInstallArtifact, cacheKey)
+	return c.FindPathCache(ctx, orgID, repoID, models.PreviewCacheKindInstallOutput, cacheKey)
 }
 
 func (c *SharedDependencyCache) FindPathCache(ctx context.Context, orgID, repoID uuid.UUID, kind models.PreviewCacheKind, cacheKey string) (*DependencyCacheHit, error) {
 	if kind == "" {
-		kind = models.PreviewCacheKindInstallArtifact
+		kind = models.PreviewCacheKindInstallOutput
 	}
 	entry, err := c.store.FindDependencyCache(ctx, orgID, repoID, kind, cacheKey)
 	if err != nil {
@@ -401,7 +401,7 @@ func (c *SharedDependencyCache) RestorePathCache(ctx context.Context, sb *agent.
 
 func (c *SharedDependencyCache) Save(ctx context.Context, sb *agent.Sandbox, cacheKey string, paths []string, metadata DependencyCacheMetadata) (DependencyCacheSaveResult, error) {
 	return c.SavePathCache(ctx, sb, PreviewPathCacheSaveSpec{
-		Kind:     models.PreviewCacheKindInstallArtifact,
+		Kind:     models.PreviewCacheKindInstallOutput,
 		Root:     models.PreviewCacheRootWorkDir,
 		CacheKey: cacheKey,
 		Paths:    paths,
@@ -411,7 +411,7 @@ func (c *SharedDependencyCache) Save(ctx context.Context, sb *agent.Sandbox, cac
 
 func (c *SharedDependencyCache) SavePathCache(ctx context.Context, sb *agent.Sandbox, spec PreviewPathCacheSaveSpec) (DependencyCacheSaveResult, error) {
 	if spec.Kind == "" {
-		spec.Kind = models.PreviewCacheKindInstallArtifact
+		spec.Kind = models.PreviewCacheKindInstallOutput
 	}
 	if spec.Root == "" {
 		spec.Root = models.PreviewCacheRootWorkDir
@@ -522,7 +522,7 @@ func (c *SharedDependencyCache) SavePathCache(ctx context.Context, sb *agent.San
 	}
 	blobKey := c.blobKeyForChecksum(metadata.OrgID, metadata.RepoID, spec.Kind, spec.CacheKey, staged.checksum)
 	// Snapshot the entry being replaced so its checksum-addressed blob can be
-	// deleted after the upsert. Latest-wins kinds (build_artifact) overwrite
+	// deleted after the upsert. Latest-wins kinds (build_output) overwrite
 	// the same row on every content change, which would otherwise leak one
 	// orphaned blob per save.
 	var priorBlobKey string
@@ -582,8 +582,15 @@ func (c *SharedDependencyCache) makeStagingDir(pattern string) (string, error) {
 
 func (c *SharedDependencyCache) stageBlob(ctx context.Context, hit *DependencyCacheHit, expectedChecksum string) (*dependencyCacheStagedBlob, error) {
 	if c.localDir != "" {
-		localPath := c.localBlobPath(hit.Entry.CacheKind, hit.Entry.CacheKey)
-		if blob, err := c.stageLocalBlob(localPath); err == nil {
+		for _, localPath := range c.localBlobPathCandidates(hit.Entry.CacheKind, hit.Entry.CacheKey) {
+			blob, err := c.stageLocalBlob(localPath)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				c.logger.Warn().Err(err).Str("path", localPath).Msg("failed to read dependency cache local blob; falling back to object storage")
+				break
+			}
 			if expectedChecksum != "" && !strings.EqualFold(expectedChecksum, blob.checksum) {
 				blob.cleanup()
 				c.logger.Warn().
@@ -593,35 +600,12 @@ func (c *SharedDependencyCache) stageBlob(ctx context.Context, hit *DependencyCa
 					Str("actual_checksum", blob.checksum).
 					Msg("dependency cache local blob checksum mismatch; falling back to object storage")
 				c.removeLocalBlob(ctx, hit.Entry.CacheKind, hit.Entry.CacheKey)
-			} else {
-				if err := os.Chtimes(localPath, time.Now(), time.Now()); err != nil {
-					c.logger.Warn().Err(err).Str("path", localPath).Msg("failed to touch dependency cache local blob")
-				}
-				return blob, nil
+				break
 			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			c.logger.Warn().Err(err).Str("path", localPath).Msg("failed to read dependency cache local blob; falling back to object storage")
-		} else if hit.Entry.CacheKind == "" || hit.Entry.CacheKind == models.PreviewCacheKindInstallArtifact {
-			legacyLocalPath := c.legacyLocalBlobPath(hit.Entry.CacheKey)
-			if blob, legacyErr := c.stageLocalBlob(legacyLocalPath); legacyErr == nil {
-				if expectedChecksum != "" && !strings.EqualFold(expectedChecksum, blob.checksum) {
-					blob.cleanup()
-					c.logger.Warn().
-						Str("path", legacyLocalPath).
-						Str("cache_key", hit.Entry.CacheKey).
-						Str("expected_checksum", expectedChecksum).
-						Str("actual_checksum", blob.checksum).
-						Msg("legacy dependency cache local blob checksum mismatch; falling back to object storage")
-					c.removeLocalBlobPath(legacyLocalPath)
-				} else {
-					if touchErr := os.Chtimes(legacyLocalPath, time.Now(), time.Now()); touchErr != nil {
-						c.logger.Warn().Err(touchErr).Str("path", legacyLocalPath).Msg("failed to touch legacy dependency cache local blob")
-					}
-					return blob, nil
-				}
-			} else if !errors.Is(legacyErr, os.ErrNotExist) {
-				c.logger.Warn().Err(legacyErr).Str("path", legacyLocalPath).Msg("failed to read legacy dependency cache local blob; falling back to object storage")
+			if err := os.Chtimes(localPath, time.Now(), time.Now()); err != nil {
+				c.logger.Warn().Err(err).Str("path", localPath).Msg("failed to touch dependency cache local blob")
 			}
+			return blob, nil
 		}
 	}
 	dir, err := c.makeStagingDir("preview-dependency-cache-*")
@@ -963,7 +947,7 @@ func (c *SharedDependencyCache) writeLocalBlobFromFile(ctx context.Context, hit 
 
 func (c *SharedDependencyCache) blobKey(orgID, repoID uuid.UUID, kind models.PreviewCacheKind, cacheKey string) string {
 	if kind == "" {
-		kind = models.PreviewCacheKindInstallArtifact
+		kind = models.PreviewCacheKindInstallOutput
 	}
 	return fmt.Sprintf("%s/%s/%s/%s/%s.tar.gz", c.prefix, orgID, repoID, kind, cacheKey)
 }
@@ -973,20 +957,60 @@ func (c *SharedDependencyCache) blobKeyForChecksum(orgID, repoID uuid.UUID, kind
 		return c.blobKey(orgID, repoID, kind, cacheKey)
 	}
 	if kind == "" {
-		kind = models.PreviewCacheKindInstallArtifact
+		kind = models.PreviewCacheKindInstallOutput
 	}
 	return fmt.Sprintf("%s/%s/%s/%s/%s/%s.tar.gz", c.prefix, orgID, repoID, kind, cacheKey, checksum)
 }
 
+// legacyCacheKindDirs maps a cache kind to the local directory names written by
+// earlier releases. The local blob layout embeds the kind, so renaming
+// install_artifact/build_artifact to install_output/build_output would orphan
+// every blob a worker already holds on disk and force each preview through
+// object storage until the cache is rewritten. Reading the old directory keeps
+// the local tier warm across the rename.
+var legacyCacheKindDirs = map[models.PreviewCacheKind][]string{
+	models.PreviewCacheKindInstallOutput: {"install_artifact"},
+	models.PreviewCacheKindBuildOutput:   {"build_artifact"},
+}
+
+// cacheKindForLocalDir maps an on-disk directory name back to the cache kind
+// used in the database, so LRU eviction deletes the matching location row
+// instead of leaving a stale placement hint pointing at a worker that no
+// longer holds the blob.
+var cacheKindForLocalDir = map[string]models.PreviewCacheKind{
+	"install_artifact": models.PreviewCacheKindInstallOutput,
+	"build_artifact":   models.PreviewCacheKindBuildOutput,
+}
+
 func (c *SharedDependencyCache) localBlobPath(kind models.PreviewCacheKind, cacheKey string) string {
 	if kind == "" {
-		kind = models.PreviewCacheKindInstallArtifact
+		kind = models.PreviewCacheKindInstallOutput
 	}
+	return c.localBlobPathForDir(string(kind), cacheKey)
+}
+
+func (c *SharedDependencyCache) localBlobPathForDir(dir, cacheKey string) string {
 	prefix := cacheKey
 	if len(prefix) > 2 {
 		prefix = prefix[:2]
 	}
-	return filepath.Join(c.localDir, string(kind), prefix, cacheKey+".tar.gz")
+	return filepath.Join(c.localDir, dir, prefix, cacheKey+".tar.gz")
+}
+
+// localBlobPathCandidates returns the canonical local path for an entry first,
+// then any path an earlier release could have written it to.
+func (c *SharedDependencyCache) localBlobPathCandidates(kind models.PreviewCacheKind, cacheKey string) []string {
+	if kind == "" {
+		kind = models.PreviewCacheKindInstallOutput
+	}
+	paths := []string{c.localBlobPath(kind, cacheKey)}
+	for _, dir := range legacyCacheKindDirs[kind] {
+		paths = append(paths, c.localBlobPathForDir(dir, cacheKey))
+	}
+	if kind == models.PreviewCacheKindInstallOutput {
+		paths = append(paths, c.legacyLocalBlobPath(cacheKey))
+	}
+	return paths
 }
 
 func (c *SharedDependencyCache) legacyLocalBlobPath(cacheKey string) string {
@@ -1001,8 +1025,9 @@ func (c *SharedDependencyCache) removeLocalBlob(ctx context.Context, kind models
 	if c.localDir == "" {
 		return
 	}
-	path := c.localBlobPath(kind, cacheKey)
-	c.removeLocalBlobPath(path)
+	for _, path := range c.localBlobPathCandidates(kind, cacheKey) {
+		c.removeLocalBlobPath(path)
+	}
 	if c.workerNodeID != "" {
 		if err := c.store.DeleteDependencyCacheLocationByWorkerCacheKey(ctx, c.workerNodeID, kind, cacheKey); err != nil {
 			c.logger.Warn().Err(err).Str("cache_key", cacheKey).Msg("failed to delete dependency cache local location")
@@ -1085,11 +1110,17 @@ func (c *SharedDependencyCache) localBlobEntries() ([]dependencyCacheLocalEntry,
 			return err
 		}
 		cacheKey := strings.TrimSuffix(d.Name(), ".tar.gz")
-		cacheKind := models.PreviewCacheKindInstallArtifact
+		cacheKind := models.PreviewCacheKindInstallOutput
 		if rel, relErr := filepath.Rel(c.localDir, path); relErr == nil {
 			parts := strings.Split(filepath.ToSlash(rel), "/")
 			if len(parts) >= 3 && parts[0] != "" {
 				cacheKind = models.PreviewCacheKind(parts[0])
+				// Directories written before the kind rename must map back to
+				// the current enum value, or eviction deletes the blob while
+				// leaving its placement hint behind.
+				if current, ok := cacheKindForLocalDir[parts[0]]; ok {
+					cacheKind = current
+				}
 			}
 		}
 		entries = append(entries, dependencyCacheLocalEntry{

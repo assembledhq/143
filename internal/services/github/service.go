@@ -111,7 +111,7 @@ func NewService(appID int64, privateKeyPEM string, loggers ...zerolog.Logger) (*
 	}, nil
 }
 
-// GitHubAppID identifies comments and other artifacts authored by this app.
+// GitHubAppID identifies comments and other outputs authored by this app.
 func (s *Service) GitHubAppID() int64 {
 	if s == nil {
 		return 0

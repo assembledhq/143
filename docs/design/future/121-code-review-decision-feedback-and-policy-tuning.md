@@ -406,7 +406,7 @@ proposal will claim orchestrator-replayable evidence for an edit that actually
 conditioned the reviewers. Fail closed and let the test catch the omission.
 
 Persist immutable replay provenance: model/settings, rendered prompt, parser and
-implementation versions, policy, input hashes, reviewer outputs/artifacts, and
+implementation versions, policy, input hashes, reviewer records/outputs, and
 guard-member versions.
 
 **Replay measures candidate effect against a replayed baseline, not only history.**
@@ -566,7 +566,7 @@ awaiting a proposal.
 `superseded` | `expired`); `current_revision_id` points to an immutable structured,
 validated prompt-section delta; `rationale` cites the dispute and review;
 `replay_status`, `replay_target_result jsonb`,
-`replay_guard_result jsonb`, `replay_artifact_id`, `baseline_stable`,
+`replay_guard_result jsonb`, `replay_output_id`, `baseline_stable`,
 `guard_regressions int`, and `guard_set_size` /
 `guard_set_adjudicated int` so a reader can tell a meaningful regression count from a
 provisional one; and the outcome columns `activated_policy_id`, `decided_by_user_id`,
@@ -576,17 +576,17 @@ for the same upheld dispute; plus `(org_id, status, created_at DESC)`.
 
 **`code_review_policy_proposal_revisions`** — immutable edits to a proposal.
 `proposal_id`, `revision`, `proposed_changes jsonb NOT NULL`, `changes_hash`,
-`created_by_user_id`, replay status/artifact linkage, and supersession metadata.
+`created_by_user_id`, replay status/output linkage, and supersession metadata.
 Unique `(proposal_id, revision)` and `changes_hash`; revising a proposal inserts a
 new row and advances `current_revision_id` rather than overwriting the delta that an
 earlier replay evaluated.
 
-**`code_review_policy_replay_artifacts`** — immutable replay provenance.
+**`code_review_policy_replay_outputs`** — immutable replay provenance.
 `proposal_id`, `replay_kind`, model/version and inference settings, rendered prompt
-or artifact reference, parser/schema and implementation versions, policy id,
-title/body/head/diff hashes, reviewer-output artifact references, guard-member
+or output reference, parser/schema and implementation versions, policy id,
+title/body/head/diff hashes, reviewer-output record references, guard-member
 versions, baseline/candidate repetitions, and raw structured results. Large prompt
-and output bodies use the existing bounded artifact path.
+and output bodies use the existing bounded output path.
 
 **`code_review_approval_audits`** — the spot-check queue. `session_id`,
 `repository_id`, `pull_request_id`, and `policy_id` identify the approval.
@@ -735,7 +735,7 @@ the version acted on; the UI and retention/deletion workflows reflect current
 source state. Session/PR deletion follows explicit tombstone rules.
 
 Treat all user/repository text as delimited untrusted data. Secret-scan before
-long-term storage; bound, protect, export/delete, and never log raw artifacts.
+long-term storage; bound, protect, export/delete, and never log raw outputs.
 
 ## Success Metrics
 

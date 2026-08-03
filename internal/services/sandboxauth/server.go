@@ -177,7 +177,7 @@ func (s *Server) Listen(
 			// Best-effort: remove the per-session dir too so we don't leak
 			// empty dirs across thousands of sessions. os.Remove (not
 			// RemoveAll) refuses to delete a non-empty dir, which is the
-			// safety belt: if a future bind-mount artifact lingers, we
+			// safety belt: if a future bind-mount output lingers, we
 			// preserve it for inspection rather than blowing it away.
 			if err := os.Remove(sessionDir); err != nil && !errors.Is(err, os.ErrNotExist) {
 				logger.Debug().Err(err).Msg("sandboxauth: per-session dir not removed (likely still bind-mounted; cleanup will retry on next session-end)")

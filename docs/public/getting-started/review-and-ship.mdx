@@ -53,7 +53,7 @@ live in GitHub.
 
 PR publication is durable. If GitHub accepts the branch or PR while a worker
 restarts or a webhook arrives first, the session shows the current publication
-checkpoint and reconciles the GitHub artifact back into 143. A “Publication
+checkpoint and reconciles the GitHub pull request back into 143. A “Publication
 retrying” state means recovery is active; avoid opening a second PR manually.
 
 Agents use `143-tools pr create` to request this workflow. Direct `gh pr

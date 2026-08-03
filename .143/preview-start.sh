@@ -20,7 +20,7 @@
 #
 # Scratch lives under $HOME on the container's writable rootfs, NOT in $TMPDIR.
 # The sandbox mounts /tmp (256 MiB) and /var/tmp (512 MiB) as tmpfs (see
-# internal/services/agent/providers/docker.go); keeping artifacts off tmpfs also
+# internal/services/agent/providers/docker.go); keeping outputs off tmpfs also
 # frees that footprint from the container's memory cgroup (tmpfs pages count
 # against the memory limit), giving the running server more heap headroom.
 #
@@ -36,7 +36,7 @@
 # $HOME and the repo workdir are both rootfs-only (the only host binds are
 # /etc/resolv.conf and the auth-socket dir; see Mounts in providers/docker.go).
 # If a future change bind-mounts $HOME from the host, move SCRATCH_DIR to a path
-# that's still on the rootfs — otherwise build artifacts will outlive the sandbox.
+# that's still on the rootfs — otherwise build outputs will outlive the sandbox.
 #
 # -u catches typos in required env vars (DATABASE_URL, PREVIEW_ORIGIN) instead of
 # silently substituting empty strings and failing downstream.

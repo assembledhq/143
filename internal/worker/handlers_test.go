@@ -12447,7 +12447,7 @@ func TestEvalRunStatusForSession_Skipped(t *testing.T) {
 	require.NotNil(t, errMsg, "Skipped session should produce a non-nil error message")
 }
 
-func TestGradeEvalRunArtifacts_CodeCheckRequiresSnapshot(t *testing.T) {
+func TestGradeEvalRunOutputs_CodeCheckRequiresSnapshot(t *testing.T) {
 	t.Parallel()
 
 	diff := "diff --git a/app.go b/app.go"
@@ -12464,9 +12464,9 @@ func TestGradeEvalRunArtifacts_CodeCheckRequiresSnapshot(t *testing.T) {
 		PassThreshold:   0.75,
 	}
 
-	result, err := gradeEvalRunArtifacts(context.Background(), run, task, evalGraderDeps{})
+	result, err := gradeEvalRunOutputs(context.Background(), run, task, evalGraderDeps{})
 
-	require.NoError(t, err, "gradeEvalRunArtifacts should record non-executable code checks as criterion failures")
+	require.NoError(t, err, "gradeEvalRunOutputs should record non-executable code checks as criterion failures")
 	require.Equal(t, models.EvalRunStatusCompleted, result.Status, "graded eval run should be completed")
 	require.NotNil(t, result.Passed, "graded eval run should persist pass/fail")
 	require.False(t, *result.Passed, "required code checks without a snapshot should fail the run")
@@ -12476,7 +12476,7 @@ func TestGradeEvalRunArtifacts_CodeCheckRequiresSnapshot(t *testing.T) {
 	require.Equal(t, run.InputManifest, result.InputManifest, "grader should preserve the pinned input manifest")
 }
 
-func TestGradeEvalRunArtifacts_CodeCheckExecutesCommand(t *testing.T) {
+func TestGradeEvalRunOutputs_CodeCheckExecutesCommand(t *testing.T) {
 	t.Parallel()
 
 	diff := "diff --git a/app.go b/app.go"
@@ -12489,7 +12489,7 @@ func TestGradeEvalRunArtifacts_CodeCheckExecutesCommand(t *testing.T) {
 	task := models.EvalTask{ScoringCriteria: criteria, PassThreshold: 1}
 	session := models.Session{ID: uuid.New(), OrgID: uuid.New(), SnapshotKey: &snapshotKey}
 
-	result, err := gradeEvalRunArtifacts(context.Background(), run, task, evalGraderDeps{
+	result, err := gradeEvalRunOutputs(context.Background(), run, task, evalGraderDeps{
 		session:  &session,
 		provider: provider,
 		snapshots: fakeSnapshotStore{
@@ -12501,7 +12501,7 @@ func TestGradeEvalRunArtifacts_CodeCheckExecutesCommand(t *testing.T) {
 		},
 	})
 
-	require.NoError(t, err, "gradeEvalRunArtifacts should run configured code checks")
+	require.NoError(t, err, "gradeEvalRunOutputs should run configured code checks")
 	require.Equal(t, []string{"make test"}, provider.commands, "grader should execute the configured deterministic command")
 	require.NotNil(t, result.Passed, "graded eval run should persist pass/fail")
 	require.True(t, *result.Passed, "successful required code check should pass")
@@ -12509,7 +12509,7 @@ func TestGradeEvalRunArtifacts_CodeCheckExecutesCommand(t *testing.T) {
 	require.Contains(t, string(result.CriterionResults), "ok", "criterion details should include command output")
 }
 
-func TestGradeEvalRunArtifacts_LLMJudgeParsesJSON(t *testing.T) {
+func TestGradeEvalRunOutputs_LLMJudgeParsesJSON(t *testing.T) {
 	t.Parallel()
 
 	diff := "diff --git a/app.go b/app.go"
@@ -12520,9 +12520,9 @@ func TestGradeEvalRunArtifacts_LLMJudgeParsesJSON(t *testing.T) {
 	run := models.EvalRun{AgentDiff: &diff}
 	task := models.EvalTask{ScoringCriteria: criteria, PassThreshold: 0.75, IssueDescription: "Fix the bug"}
 
-	result, err := gradeEvalRunArtifacts(context.Background(), run, task, evalGraderDeps{llm: llm})
+	result, err := gradeEvalRunOutputs(context.Background(), run, task, evalGraderDeps{llm: llm})
 
-	require.NoError(t, err, "gradeEvalRunArtifacts should run LLM judge criteria")
+	require.NoError(t, err, "gradeEvalRunOutputs should run LLM judge criteria")
 	require.NotEmpty(t, llm.userPrompt, "LLM judge should receive the eval prompt and diff")
 	require.NotNil(t, result.Passed, "graded eval run should persist pass/fail")
 	require.True(t, *result.Passed, "passing LLM judge should pass")

@@ -952,7 +952,7 @@ closure/revert, publication success, cost, and latency.
 Kill switches affect execution only and never mutate customer settings.
 
 Step 2 is a hard ordering constraint, not a preference: the server and the
-agent-facing client ship in separate artifacts with independent rollout, so any
+agent-facing client ship in separate outputs with independent rollout, so any
 response-contract change that lands before the client drains breaks in-flight
 sandboxes.
 

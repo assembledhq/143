@@ -3687,7 +3687,7 @@ func (s *PreviewStore) DeleteCache(ctx context.Context, orgID, id uuid.UUID) err
 
 func (s *PreviewStore) FindDependencyCache(ctx context.Context, orgID, repoID uuid.UUID, kind models.PreviewCacheKind, cacheKey string) (*models.PreviewDependencyCache, error) {
 	if kind == "" {
-		kind = models.PreviewCacheKindInstallArtifact
+		kind = models.PreviewCacheKindInstallOutput
 	}
 	query := fmt.Sprintf(`SELECT %s FROM preview_dependency_cache
 		WHERE org_id = @org_id AND repo_id = @repo_id AND cache_kind = @cache_kind AND cache_key = @cache_key`, previewDependencyCacheColumns)
@@ -3704,7 +3704,7 @@ func (s *PreviewStore) FindDependencyCache(ctx context.Context, orgID, repoID uu
 
 func (s *PreviewStore) UpsertDependencyCache(ctx context.Context, entry *models.PreviewDependencyCache) error {
 	if entry.CacheKind == "" {
-		entry.CacheKind = models.PreviewCacheKindInstallArtifact
+		entry.CacheKind = models.PreviewCacheKindInstallOutput
 	}
 	query := fmt.Sprintf(`
 		INSERT INTO preview_dependency_cache (
@@ -3829,7 +3829,7 @@ func (s *PreviewStore) ListDependencyCachesOverLimit(ctx context.Context, keepNe
 
 func (s *PreviewStore) UpsertDependencyCacheLocation(ctx context.Context, location *models.PreviewDependencyCacheLocation) error {
 	if location.CacheKind == "" {
-		location.CacheKind = models.PreviewCacheKindInstallArtifact
+		location.CacheKind = models.PreviewCacheKindInstallOutput
 	}
 	query := fmt.Sprintf(`
 		INSERT INTO preview_dependency_cache_locations (
@@ -3864,7 +3864,7 @@ func (s *PreviewStore) UpsertDependencyCacheLocation(ctx context.Context, locati
 
 func (s *PreviewStore) ListDependencyCacheWorkersByPlacement(ctx context.Context, orgID, repoID uuid.UUID, kind models.PreviewCacheKind, placementKey string, limit int) ([]models.PreviewDependencyCacheLocation, error) {
 	if kind == "" {
-		kind = models.PreviewCacheKindInstallArtifact
+		kind = models.PreviewCacheKindInstallOutput
 	}
 	query := fmt.Sprintf(`SELECT %s FROM preview_dependency_cache_locations
 		WHERE org_id = @org_id AND repo_id = @repo_id AND cache_kind = @cache_kind AND placement_key = @placement_key
@@ -3918,7 +3918,7 @@ func (s *PreviewStore) DeleteExpiredDependencyCacheLocations(ctx context.Context
 // lint:allow-no-orgid reason="worker cleanup deletes ephemeral local cache hints across orgs without exposing tenant data"
 func (s *PreviewStore) DeleteDependencyCacheLocationByWorkerCacheKey(ctx context.Context, workerNodeID string, kind models.PreviewCacheKind, cacheKey string) error {
 	if kind == "" {
-		kind = models.PreviewCacheKindInstallArtifact
+		kind = models.PreviewCacheKindInstallOutput
 	}
 	_, err := s.db.Exec(ctx,
 		`DELETE FROM preview_dependency_cache_locations WHERE worker_node_id = @worker_node_id AND cache_kind = @cache_kind AND cache_key = @cache_key`,

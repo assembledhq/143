@@ -8,6 +8,22 @@ This document defines the PostgreSQL schema for 143.dev. All entities flow throu
 
 Use [golang-migrate/migrate](https://github.com/golang-migrate/migrate) for schema migrations. Migrations live in `migrations/` as numbered SQL files (e.g. `000001_init.up.sql`, `000001_init.down.sql`).
 
+Migration 275 reserves `artifact` for session-produced files by moving older
+product concepts to prompt records, review bundles, preview captures, and cache
+outputs. Existing installations use an expand/migrate/contract window: old and
+new prompt tables and renamed columns are synchronized by compatibility
+triggers while API responses expose both field names. Cache writes from a
+draining worker generation are normalized to the new enum values. A later
+contract migration may remove these legacy database and response aliases only
+after the minimum supported CLI version and the entire worker fleet have moved
+past the compatibility release.
+
+Because migrations 219, 225, and 226 create the new names directly, a fresh
+installation already has them at version 274. Migration 275's rollback
+therefore only removes the expansion it added — it never renames a fresh
+installation's objects — and the 219/225/226 rollbacks drop whichever of the
+two naming shapes the database carries.
+
 ## Core Tables
 
 ### `organizations`
@@ -353,7 +369,7 @@ Per-session publish workflow state for PR creation, follow-up PR pushes, and bra
 Durable per-changeset branch/PR publication operations. Unlike
 `session_publish_state`, which drives action UX, this table checkpoints
 external side effects so retries, webhooks, and reconciliation converge on one
-GitHub artifact.
+GitHub pull request.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -370,7 +386,7 @@ GitHub artifact.
 | request_generation_at | timestamptz | Original job enqueue time; newer explicit requests may reopen retryable terminal outcomes |
 | base_branch, head_branch | text | Desired GitHub branch relationship |
 | desired_head_sha, published_head_sha | text | Expected and observed remote heads |
-| github_pr_number, github_pr_url | integer, text | Resolved GitHub artifact |
+| github_pr_number, github_pr_url | integer, text | Resolved GitHub pull request |
 | attempt_count | integer | Number of accepted nonterminal attempts |
 | last_error_code, last_error_message | text | Latest retryable/terminal failure |
 | requested/attempt/checkpoint timestamps | timestamptz | Recovery and latency evidence |
@@ -547,7 +563,7 @@ compare decisions against the policy active at the time.
 | stale | boolean | Whether a newer PR head superseded the assessment |
 | superseded_by_session_id | uuid | FK -> sessions for an explicit retry/replacement |
 | review_output_key | text | Idempotency key for the review output |
-| prompt_artifact_key | text | Stored prompt/output artifact key |
+| prompt_record_key | text | Stored prompt or raw-output record key |
 | github_review_id | bigint | Posted GitHub review id, nullable |
 | github_review_url | text | Posted GitHub review URL |
 | final_review_body | text | Persisted synthesized review body |
@@ -804,7 +820,7 @@ Per-example results for each eval run.
 | failure_code | text | structured code (`context_missing`, `policy_violation`, etc.), nullable |
 | deterministic_scores | jsonb | deterministic grader outputs |
 | llm_judge_scores | jsonb | LLM judge outputs |
-| trace_ref | text | reference to run trace record/artifact |
+| trace_ref | text | Reference to a run trace record or stored output |
 | created_at | timestamptz | |
 
 **Indexes:**
