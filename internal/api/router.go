@@ -410,7 +410,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		logger,
 	)
 	publicationIntentCoordinator.SetRepositoryStore(repoStore)
-	publicationIntentCoordinator.SetReviewEnabled(cfg.PrePRReviewEnabled && cfg.AgentPRPublicationEnabled)
+	publicationIntentCoordinator.SetPublicationEnabled(cfg.AgentPRPublicationEnabled)
+	publicationIntentCoordinator.SetReviewEnabled(cfg.PrePRReviewEnabled)
 	sessionHandler := handlers.NewSessionHandler(
 		sessionStore,
 		sessionLogStore,
@@ -436,9 +437,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetHumanInputRequestStore(sessionHumanInputStore)
 	sessionHandler.SetCapabilityService(agentCapabilitySvc)
 	sessionHandler.SetUserStore(userStore)
-	sessionHandler.SetPublicationPolicyEnabled(cfg.AgentPRPublicationEnabled)
-	sessionHandler.SetPrePRReviewEnabled(cfg.PrePRReviewEnabled && cfg.AgentPRPublicationEnabled)
-	sessionHandler.SetPublicationIntentCoordinator(publicationIntentCoordinator, cfg.AgentPRPublicationEnabled)
+	// Policy remains visible while execution is killed; kill switches stop
+	// side effects and never rewrite or hide customer settings.
+	sessionHandler.SetPublicationPolicyEnabled(true)
+	sessionHandler.SetPrePRReviewEnabled(true)
+	sessionHandler.SetPublicationIntentCoordinator(publicationIntentCoordinator, true)
 	sessionHandler.SetThreadInboxStore(threadInboxStore)
 	sessionHandler.SetSessionSandboxHolderStore(sessionSandboxHolderStore)
 	sessionHandler.SetTxStarter(pool)
@@ -1062,10 +1065,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		internalPullRequestHandler.SetChangesetStore(sessionChangesetStore)
 		internalPullRequestHandler.SetThreadStore(sessionThreadStore)
 		internalPullRequestHandler.SetAuditEmitter(auditEmitter)
-		internalPullRequestHandler.SetPublicationIntentCoordinator(
-			publicationIntentCoordinator,
-			cfg.AgentPRPublicationEnabled,
-		)
+		internalPullRequestHandler.SetPublicationIntentCoordinator(publicationIntentCoordinator)
 		internalSessionTabsHandler := handlers.NewInternalSessionTabsHandler(threadSvc, sessionStore, orgStore, cfg.SessionSecret, logger)
 		internalAutomationHandler := handlers.NewInternalAutomationHandler(automationHandler, sessionStore, automationStore, cfg.SessionSecret)
 		internalSlackMessageHandler := handlers.NewInternalSlackMessageHandler(sessionStore, slackInstallationStore, credentialStore, db.NewSlackOutboundMessageStore(pool), cfg.SessionSecret, logger)

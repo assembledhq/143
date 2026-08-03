@@ -1,6 +1,6 @@
 # Design: Agent-Initiated PR Publication with Automatic Review
 
-> **Status:** In Progress (PRs 1-2 implemented) | **Last reviewed:** 2026-08-01
+> **Status:** Implemented | **Last reviewed:** 2026-08-02
 >
 > **Depends on:** [overall.md](../overall.md),
 > [review agent loops](../implemented/78-review-agent-loops.md),
@@ -679,6 +679,12 @@ duplicated:
   `trigger_kind = 'agent_ready'`.
   `session_publications_agent_ready_source_check` pins the one combination that
   must never diverge.
+  An authorized user may take over execution of an intent parked by a kill
+  switch without rewriting that provenance. The durable request payload then
+  records `publication_execution_source = user`; workers use that value for
+  runtime authorization and execution gates, and session detail exposes it as
+  `execution_source` so the UI does not continue to show the original agent
+  channel as paused while the manual path is running.
 - **`review_gate_state` is the single source of truth for whether review is
   required.** This design deliberately does *not* add a `review_required`
   boolean to `session_publications`, because
@@ -874,6 +880,8 @@ Session detail adds resolved policy:
     "create_pr_when_agent_ready": true,
     "create_pr_source": "organization",
     "review_before_pr": false,
+    "review_execution_enabled": true,
+    "agent_publication_execution_enabled": true,
     "review_source": "personal",
     "review_max_passes": 2,
     "pr_handoff_mode": "pre_publish"
@@ -892,6 +900,7 @@ automatic progress:
 | --- | --- |
 | Reviewing | Pass N of 2 and current review/fix activity |
 | Needs attention | Draft bypass, open review, and continue actions |
+| Execution paused | Needs attention with a continue action; never an indefinite reviewing spinner |
 | Publishing | Review passed; publication queued |
 | Published | PR number, title, and review link |
 

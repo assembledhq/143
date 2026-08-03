@@ -34,6 +34,9 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	t.Setenv("PREVIEW_CACHE_PREWARM_TIMEOUT", "")
 	t.Setenv("PREVIEW_CACHE_PREWARM_PRIORITY", "")
 	t.Setenv("PREVIEW_IDLE_TIMEOUT", "")
+	t.Setenv("AGENT_PR_PUBLICATION_ENABLED", "")
+	t.Setenv("AGENT_PR_PROMPT_ENABLED", "")
+	t.Setenv("PRE_PR_REVIEW_ENABLED", "")
 	// Prevent .env files from interfering with defaults
 	t.Setenv("GITHUB_OAUTH_CLIENT_ID", "")
 	t.Setenv("GITHUB_OAUTH_CLIENT_SECRET", "")
@@ -72,6 +75,9 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	require.True(t, cfg.PagerDutyIntegrationEnabled, "Load should enable PagerDuty integration by default")
 	require.True(t, cfg.CodeReviewDisputeReassessmentsEnabled, "Load should enable guarded dispute reassessments by default")
 	require.Equal(t, 1000, cfg.CodeReviewDisputeMaxActiveReassessments, "Load should retain a positive operator-wide reassessment ceiling by default")
+	require.True(t, cfg.AgentPRPublicationEnabled, "Load should enable agent PR publication after staged rollout")
+	require.True(t, cfg.AgentPRPromptEnabled, "Load should enable the agent PR prompt after staged rollout")
+	require.True(t, cfg.PrePRReviewEnabled, "Load should enable pre-PR review after staged rollout")
 }
 
 func TestResolvePreviewDependencyCacheLocalDir(t *testing.T) {

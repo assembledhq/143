@@ -95,6 +95,14 @@ type sessionReviewLoopLister interface {
 	ListLoopsBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionReviewLoop, error)
 }
 
+// PublicationExecutionPolicy exposes runtime kill switches to both workers and
+// reconciliation. Keeping the interface here avoids coupling GitHub lifecycle
+// code to the publication-intent coordinator implementation.
+type PublicationExecutionPolicy interface {
+	PublicationExecutionEnabled(source models.SessionPublicationSource) bool
+	ReviewExecutionEnabled(source models.SessionPublicationSource) bool
+}
+
 // PRService handles GitHub PR creation and webhook-based tracking.
 type PRService struct {
 	tokenProvider   *Service
@@ -140,6 +148,7 @@ type PRService struct {
 	linearMilestones         LinearMilestoneEnqueuer // nil-safe: Linear writes disabled if nil
 	prPreviewSurfacesEnabled bool
 	prHealthSyncGroup        singleflight.Group
+	publicationPolicy        PublicationExecutionPolicy
 
 	// cachedResolverMu guards lazy construction of cachedResolver. The
 	// resolver is built from the currently-wired dependencies on first use
@@ -183,6 +192,10 @@ func (s *PRService) SetChangesetStore(store *db.SessionChangesetStore) {
 
 func (s *PRService) SetPublicationStore(store *db.SessionPublicationStore) {
 	s.publications = store
+}
+
+func (s *PRService) SetPublicationExecutionPolicy(policy PublicationExecutionPolicy) {
+	s.publicationPolicy = policy
 }
 
 func NewPRService(
