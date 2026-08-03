@@ -63,6 +63,7 @@ type codeReviewCursorScope struct {
 	ActivityStatus *models.CodeReviewActivityStatus `json:"activity_status,omitempty"`
 	Status         *models.CodeReviewSessionStatus  `json:"status,omitempty"`
 	Acceptable     *bool                            `json:"acceptable,omitempty"`
+	Reason         *models.CodeReviewRiskReasonCode `json:"reason,omitempty"`
 	Author         string                           `json:"author,omitempty"`
 	Search         string                           `json:"search,omitempty"`
 	CreatedAfter   *time.Time                       `json:"created_after,omitempty"`
@@ -80,6 +81,7 @@ func codeReviewListCursorScopeHash(orgID uuid.UUID, filters db.CodeReviewListFil
 		ActivityStatus: filters.ActivityStatus,
 		Status:         filters.Status,
 		Acceptable:     filters.Acceptable,
+		Reason:         filters.Reason,
 		Author:         strings.TrimSpace(filters.Author),
 		Search:         strings.TrimSpace(filters.Search),
 		CreatedAfter:   filters.CreatedAfter,
@@ -415,6 +417,14 @@ func parseCodeReviewFilters(w http.ResponseWriter, r *http.Request) (db.CodeRevi
 			return db.CodeReviewListFilters{}, false
 		}
 	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("reason")); raw != "" {
+		reason := models.CodeReviewRiskReasonCode(raw)
+		if err := reason.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_REASON", "invalid reason")
+			return db.CodeReviewListFilters{}, false
+		}
+		filters.Reason = &reason
+	}
 	return filters, true
 }
 
@@ -523,6 +533,7 @@ func (h *CodeReviewHandler) Stats(w http.ResponseWriter, r *http.Request) {
 		ActivityStatus: filters.ActivityStatus,
 		Status:         filters.Status,
 		Acceptable:     filters.Acceptable,
+		Reason:         filters.Reason,
 		Author:         filters.Author,
 		Search:         filters.Search,
 		CreatedAfter:   filters.CreatedAfter,

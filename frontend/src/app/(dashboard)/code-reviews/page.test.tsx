@@ -689,6 +689,14 @@ describe("CodeReviewsPage", () => {
     ).toBeTruthy();
     expect(screen.getByText("Line-count limit exceeded")).toBeInTheDocument();
     expect(screen.getByText("Reviewers found a blocking issue")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "View reviews where line-count limit exceeded" })).toHaveAttribute(
+      "href",
+      "/code-reviews?tab=reviews&outcome=completed_not_approved&reason=lines_limit_exceeded&status=all&range=30d",
+    );
+    expect(screen.getByRole("link", { name: "View reviews where reviewers found a blocking issue" })).toHaveAttribute(
+      "href",
+      "/code-reviews?tab=reviews&outcome=completed_not_approved&reason=blocking_findings&status=all&range=30d",
+    );
     expect(screen.queryByText("PR size and policy fit")).not.toBeInTheDocument();
     // The list-only filters stay in the URL for the Reviews tab, so Analytics
     // has to say which of them it ignores rather than silently dropping them.
@@ -948,6 +956,8 @@ describe("CodeReviewsPage", () => {
     await user.click(await screen.findByRole("option", { name: "Blocked" }));
     await user.click(screen.getByRole("combobox", { name: "Risk" }));
     await user.click(await screen.findByRole("option", { name: "Needs review" }));
+    await user.click(screen.getByRole("combobox", { name: "Reason" }));
+    await user.click(await screen.findByRole("option", { name: "Reviewers found a blocking issue" }));
     await user.click(screen.getByRole("combobox", { name: "Status" }));
     await user.click(await screen.findByRole("option", { name: "Completed" }));
     await user.type(screen.getByRole("textbox", { name: "Search code reviews" }), "invoice");
@@ -959,6 +969,7 @@ describe("CodeReviewsPage", () => {
         expect(params?.get("repository_id")).toBe(repo.id);
         expect(params?.get("decision")).toBe("blocked");
         expect(params?.get("risk")).toBe("needs_review");
+        expect(params?.get("reason")).toBe("blocking_findings");
         expect(params?.get("search")).toBe("invoice");
         expectCreatedAfterDaysAgo(params?.get("created_after") ?? undefined, 7);
       }

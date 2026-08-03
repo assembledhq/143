@@ -1014,6 +1014,7 @@ func TestCodeReviewStore_ListReviewsAppliesDesignFilters(t *testing.T) {
 	decision := models.CodeReviewDecisionCommentOnly
 	status := models.CodeReviewSessionStatusCompleted
 	acceptable := false
+	reason := models.CodeReviewRiskReasonBlockingFindings
 	title := "Code review for acme/repo#42"
 	repoName := "acme/repo"
 
@@ -1021,11 +1022,11 @@ func TestCodeReviewStore_ListReviewsAppliesDesignFilters(t *testing.T) {
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
 
-	mock.ExpectQuery("(?s)m.status = 'failed'.*pr.status = 'open'.*current_health.head_sha = m.head_sha.*FROM code_review_session_metadata newer.*approved.status = 'completed'.*policy.active = true.*AS retry_eligible.*m.decision = @decision.*LOWER\\(COALESCE\\(NULLIF\\(s.revision_context->>'pull_request_author', ''\\), 'Unknown'\\)\\) = LOWER\\(@author\\)").
+	mock.ExpectQuery("(?s)m.status = 'failed'.*pr.status = 'open'.*current_health.head_sha = m.head_sha.*FROM code_review_session_metadata newer.*approved.status = 'completed'.*policy.active = true.*AS retry_eligible.*m.decision = @decision.*risk_reason->>'code' = @reason.*LOWER\\(COALESCE\\(NULLIF\\(s.revision_context->>'pull_request_author', ''\\), 'Unknown'\\)\\) = LOWER\\(@author\\)").
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
@@ -1045,6 +1046,7 @@ func TestCodeReviewStore_ListReviewsAppliesDesignFilters(t *testing.T) {
 		Decision:     &decision,
 		Status:       &status,
 		Acceptable:   &acceptable,
+		Reason:       &reason,
 		Author:       "Devin",
 		Search:       "auth",
 		Limit:        25,
@@ -1288,15 +1290,16 @@ func TestCodeReviewStore_GetReviewStatsScopesToRepositoryAndTimeWindow(t *testin
 	activityStatus := models.CodeReviewActivityStatusCurrent
 	status := models.CodeReviewSessionStatusCompleted
 	acceptable := false
+	reason := models.CodeReviewRiskReasonBlockingFindings
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
 
-	mock.ExpectQuery(`(?s)COUNT\(\*\) FILTER \(WHERE m\.status = 'completed'\).*percentile_cont\(0\.5\).*FROM code_review_session_metadata m.*WHERE m\.org_id = @org_id.*AND m\.repository_id = @repository_id.*AND m\.decision = @decision.*m\.status <> 'stale'.*m\.superseded_by_session_id IS NULL.*AND m\.status = @status.*AND m\.acceptable = @acceptable.*AND m\.created_at >= @created_after.*AND m\.created_at <= @created_before.*pr\.title ILIKE @search`).
+	mock.ExpectQuery(`(?s)COUNT\(\*\) FILTER \(WHERE m\.status = 'completed'\).*percentile_cont\(0\.5\).*FROM code_review_session_metadata m.*WHERE m\.org_id = @org_id.*AND m\.repository_id = @repository_id.*AND m\.decision = @decision.*m\.status <> 'stale'.*m\.superseded_by_session_id IS NULL.*AND m\.status = @status.*AND m\.acceptable = @acceptable.*risk_reason->>'code' = @reason.*AND m\.created_at >= @created_after.*AND m\.created_at <= @created_before.*pr\.title ILIKE @search`).
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"reviews_completed",
@@ -1311,6 +1314,7 @@ func TestCodeReviewStore_GetReviewStatsScopesToRepositoryAndTimeWindow(t *testin
 		ActivityStatus: &activityStatus,
 		Status:         &status,
 		Acceptable:     &acceptable,
+		Reason:         &reason,
 		Search:         "auth",
 		CreatedAfter:   &createdAfter,
 		CreatedBefore:  &createdBefore,
