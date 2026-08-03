@@ -29,7 +29,7 @@ type previewAugmentedToolSource struct {
 }
 
 func newPreviewAugmentedToolSource(base mcp.ToolSource, client *Client) mcp.ToolSource {
-	preview := &previewToolExecutor{client: client}
+	preview := &previewToolExecutor{client: client.WithRequestTimeout(previewWaitTimeout)}
 	return &previewAugmentedToolSource{base: base, preview: preview}
 }
 
@@ -43,7 +43,7 @@ func newPreviewAugmentedToolSource(base mcp.ToolSource, client *Client) mcp.Tool
 // configure it (e.g. attaching --wait progress output) without reaching back
 // through the capability wrapper, which has to stay on the outside.
 func newInternalToolSource(ctx context.Context, base mcp.ToolSource, token, apiURL string, stderr io.Writer) (mcp.ToolSource, *previewToolExecutor) {
-	preview := &previewToolExecutor{client: NewClient(Config{ServerURL: apiURL, Token: token}), internal: true}
+	preview := &previewToolExecutor{client: NewClient(Config{ServerURL: apiURL, Token: token}).WithRequestTimeout(previewWaitTimeout), internal: true}
 	var source mcp.ToolSource = &previewAugmentedToolSource{
 		base:    mcp.NewInternalMetaToolSource(base, token, apiURL),
 		preview: preview,
@@ -80,7 +80,7 @@ func NewRemoteToolSource(ctx context.Context, cfg Config) (*RemoteToolSource, er
 		return nil, fmt.Errorf("fetch tool list: %w", err)
 	}
 
-	preview := &previewToolExecutor{client: client}
+	preview := &previewToolExecutor{client: client.WithRequestTimeout(previewWaitTimeout)}
 	return &RemoteToolSource{
 		client:  client,
 		tools:   append(resp.Data.Tools, preview.tools()...),

@@ -54,7 +54,7 @@ create infers --repo from the cwd's git remote and --branch from HEAD when omitt
 		fmt.Fprintln(stderr, "error: not logged in — run `143-tools login`")
 		return 1
 	}
-	executor := &previewToolExecutor{client: NewClient(cfg)}
+	executor := &previewToolExecutor{client: NewClient(cfg).WithRequestTimeout(previewWaitTimeout)}
 	ctx, cancel := context.WithTimeout(context.Background(), previewWaitTimeout)
 	defer cancel()
 

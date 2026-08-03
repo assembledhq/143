@@ -5,13 +5,16 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/assembledhq/143/internal/internalapi"
@@ -391,13 +394,21 @@ func (w branchPreviewWire) view() previewView {
 }
 
 func (e *previewToolExecutor) sessionStatus(ctx context.Context, sessionID string) *mcp.ToolCallResult {
+	status, err := e.sessionStatusView(ctx, sessionID)
+	if err != nil {
+		return mcp.ErrorResult(fmt.Sprintf("preview status failed: %s", err))
+	}
+	return jsonResult(status)
+}
+
+func (e *previewToolExecutor) sessionStatusView(ctx context.Context, sessionID string) (map[string]any, error) {
 	var resp struct {
 		Data sessionPreviewStatusWire `json:"data"`
 	}
 	if err := e.client.Do(ctx, http.MethodGet, e.sessionPreviewPath(sessionID), nil, &resp); err != nil {
-		return mcp.ErrorResult(fmt.Sprintf("preview status failed: %s", err))
+		return nil, err
 	}
-	return jsonResult(resp.Data.view(sessionID))
+	return resp.Data.view(sessionID), nil
 }
 
 func (w sessionPreviewStatusWire) view(sessionID string) map[string]any {
@@ -430,23 +441,25 @@ func (w sessionPreviewStatusWire) view(sessionID string) map[string]any {
 func (e *previewToolExecutor) waitSessionReady(ctx context.Context, sessionID string) *mcp.ToolCallResult {
 	deadline := time.NewTimer(previewWaitTimeout)
 	defer deadline.Stop()
-	pollInterval := e.pollInterval
-	if pollInterval <= 0 {
-		pollInterval = 3 * time.Second
-	}
-	ticker := time.NewTicker(pollInterval)
-	defer ticker.Stop()
 	started := time.Now()
 	lastPhase := ""
+	transientReported := false
 	for {
-		result := e.sessionStatus(ctx, sessionID)
-		if result.IsError {
-			return result
+		status, err := e.sessionStatusView(ctx, sessionID)
+		if err != nil {
+			if !isRetryablePreviewWaitError(err) {
+				return mcp.ErrorResult(fmt.Sprintf("preview status failed: %s", err))
+			}
+			if e.progress != nil && !transientReported {
+				fmt.Fprintf(e.progress, "preview: status temporarily unavailable; retrying (%s elapsed)\n", time.Since(started).Round(time.Second))
+				transientReported = true
+			}
+			if result := e.waitForNextPreviewPoll(ctx, deadline.C, previewRetryDelay(err), fmt.Sprintf("timed out waiting for session preview %s", sessionID)); result != nil {
+				return result
+			}
+			continue
 		}
-		var status map[string]any
-		if err := json.Unmarshal([]byte(firstText(result)), &status); err != nil {
-			return result
-		}
+		transientReported = false
 		state, _ := status["status"].(string)
 		phase, _ := status["current_phase"].(string)
 		if phase == "" {
@@ -458,18 +471,63 @@ func (e *previewToolExecutor) waitSessionReady(ctx context.Context, sessionID st
 		}
 		switch state {
 		case "ready", "partially_ready", "running":
-			return result
+			return jsonResult(status)
 		case "failed", "stopped", "expired", "unavailable":
 			return mcp.ErrorResult(fmt.Sprintf("preview %s: %v", state, status["error"]))
 		}
-		select {
-		case <-ctx.Done():
-			return mcp.ErrorResult(ctx.Err().Error())
-		case <-deadline.C:
-			return mcp.ErrorResult(fmt.Sprintf("timed out waiting for session preview %s", sessionID))
-		case <-ticker.C:
+		if result := e.waitForNextPreviewPoll(ctx, deadline.C, 0, fmt.Sprintf("timed out waiting for session preview %s", sessionID)); result != nil {
+			return result
 		}
 	}
+}
+
+func (e *previewToolExecutor) waitForNextPreviewPoll(ctx context.Context, deadline <-chan time.Time, minimumDelay time.Duration, timeoutMessage string) *mcp.ToolCallResult {
+	delay := e.pollInterval
+	if delay <= 0 {
+		delay = 3 * time.Second
+	}
+	if minimumDelay > delay {
+		delay = minimumDelay
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return mcp.ErrorResult(ctx.Err().Error())
+	case <-deadline:
+		return mcp.ErrorResult(timeoutMessage)
+	case <-timer.C:
+		return nil
+	}
+}
+
+func previewRetryDelay(err error) time.Duration {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.RetryAfter
+	}
+	return 0
+}
+
+func isRetryablePreviewWaitError(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.Status {
+		case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return true
+		default:
+			return false
+		}
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary())
 }
 
 func previewSessionAndWait(args json.RawMessage) (string, bool, error) {
@@ -643,32 +701,28 @@ func (e *previewToolExecutor) waitBranchReady(ctx context.Context, previewID str
 	}
 	deadline := time.NewTimer(previewWaitTimeout)
 	defer deadline.Stop()
-	ticker := time.NewTicker(3 * time.Second)
-	defer ticker.Stop()
 	for {
-		result := e.status(ctx, mustJSON(map[string]string{"preview_id": previewID}))
-		if result.IsError {
-			return result
-		}
-		var status previewView
-		if err := json.Unmarshal([]byte(firstText(result)), &status); err != nil {
-			return result
+		status, err := e.branchStatusView(ctx, previewID)
+		if err != nil {
+			if !isRetryablePreviewWaitError(err) {
+				return mcp.ErrorResult(fmt.Sprintf("preview status failed: %s", err))
+			}
+			if result := e.waitForNextPreviewPoll(ctx, deadline.C, previewRetryDelay(err), fmt.Sprintf("timed out waiting for preview %s", previewID)); result != nil {
+				return result
+			}
+			continue
 		}
 		switch status.Status {
 		case "running", "ready", "partially_ready":
-			return result
+			return jsonResult(status)
 		case "failed", "stopped", "expired", "unavailable":
 			if status.Error != "" {
 				return mcp.ErrorResult(fmt.Sprintf("preview %s: %s", status.Status, status.Error))
 			}
 			return mcp.ErrorResult(fmt.Sprintf("preview %s", status.Status))
 		}
-		select {
-		case <-ctx.Done():
-			return mcp.ErrorResult(ctx.Err().Error())
-		case <-deadline.C:
-			return mcp.ErrorResult(fmt.Sprintf("timed out waiting for preview %s", previewID))
-		case <-ticker.C:
+		if result := e.waitForNextPreviewPoll(ctx, deadline.C, 0, fmt.Sprintf("timed out waiting for preview %s", previewID)); result != nil {
+			return result
 		}
 	}
 }
@@ -687,13 +741,21 @@ func (e *previewToolExecutor) status(ctx context.Context, args json.RawMessage) 
 	if params.SessionID != "" {
 		return e.sessionStatus(ctx, params.SessionID)
 	}
+	status, err := e.branchStatusView(ctx, params.PreviewID)
+	if err != nil {
+		return mcp.ErrorResult(fmt.Sprintf("preview status failed: %s", err))
+	}
+	return jsonResult(status)
+}
+
+func (e *previewToolExecutor) branchStatusView(ctx context.Context, previewID string) (previewView, error) {
 	var resp struct {
 		Data branchPreviewWire `json:"data"`
 	}
-	if err := e.client.Do(ctx, http.MethodGet, "/api/v1/previews/"+params.PreviewID, nil, &resp); err != nil {
-		return mcp.ErrorResult(fmt.Sprintf("preview status failed: %s", err))
+	if err := e.client.Do(ctx, http.MethodGet, "/api/v1/previews/"+previewID, nil, &resp); err != nil {
+		return previewView{}, err
 	}
-	return jsonResult(resp.Data.view())
+	return resp.Data.view(), nil
 }
 
 func (e *previewToolExecutor) list(ctx context.Context, args json.RawMessage) *mcp.ToolCallResult {

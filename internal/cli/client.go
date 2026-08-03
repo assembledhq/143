@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/assembledhq/143/internal/internalapi"
@@ -32,11 +33,22 @@ func NewClient(cfg Config) *Client {
 	}
 }
 
+// WithRequestTimeout returns an isolated client that shares the underlying
+// transport but uses an operation-specific end-to-end request timeout.
+func (c *Client) WithRequestTimeout(timeout time.Duration) *Client {
+	clone := *c
+	httpClient := *c.http
+	httpClient.Timeout = timeout
+	clone.http = &httpClient
+	return &clone
+}
+
 // APIError is a structured error response from the server.
 type APIError struct {
-	Status  int
-	Code    string
-	Message string
+	Status     int
+	Code       string
+	Message    string
+	RetryAfter time.Duration
 }
 
 func (e *APIError) Error() string {
@@ -87,7 +99,10 @@ func (c *Client) Do(ctx context.Context, method, path string, body, out any) err
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		apiErr := &APIError{Status: resp.StatusCode}
+		apiErr := &APIError{
+			Status:     resp.StatusCode,
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()),
+		}
 		var envelope struct {
 			Error struct {
 				Code    string `json:"code"`
@@ -107,4 +122,15 @@ func (c *Client) Do(ctx context.Context, method, path string, body, out any) err
 		}
 	}
 	return nil
+}
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	when, err := http.ParseTime(value)
+	if err != nil || !when.After(now) {
+		return 0
+	}
+	return when.Sub(now)
 }
