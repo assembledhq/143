@@ -265,9 +265,11 @@ func (s *JobStore) GetActiveByDedupeKey(ctx context.Context, orgID uuid.UUID, qu
 	return active, nil
 }
 
-// QueueChangesetPRCreation atomically reserves a changeset's PR slot and
-// inserts its open_pr job. A false queued result means another caller already
-// owns the slot or PR creation has completed; it is not an error.
+// QueueChangesetPRCreation atomically reserves a changeset's PR slot when
+// needed and ensures it has an active open_pr job. A queued or pushing slot
+// may outlive the job that started a pre-publication review, so those states
+// are eligible for a deduplicated requeue. A false queued result means an
+// active job already satisfies the request or PR creation has completed.
 func (s *JobStore) QueueChangesetPRCreation(
 	ctx context.Context,
 	orgID, sessionID, changesetID uuid.UUID,
@@ -295,7 +297,22 @@ func (s *JobStore) QueueChangesetPRCreation(
 		return uuid.Nil, false, fmt.Errorf("reserve changeset PR creation: %w", err)
 	}
 	if result.RowsAffected() == 0 {
-		return uuid.Nil, false, nil
+		var state models.PRCreationState
+		err = tx.QueryRow(ctx, `SELECT pr_creation_state
+			FROM session_changesets
+			WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id
+			FOR UPDATE`, pgx.NamedArgs{
+			"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+		}).Scan(&state)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, false, nil
+		}
+		if err != nil {
+			return uuid.Nil, false, fmt.Errorf("load reserved changeset PR creation: %w", err)
+		}
+		if state != models.PRCreationStateQueued && state != models.PRCreationStatePushing {
+			return uuid.Nil, false, nil
+		}
 	}
 
 	dedupeKey := OpenPRDedupeKey(changesetID)
@@ -308,8 +325,11 @@ func (s *JobStore) QueueChangesetPRCreation(
 	if err := tx.Commit(ctx); err != nil {
 		return uuid.Nil, false, fmt.Errorf("commit changeset PR enqueue: %w", err)
 	}
-	s.notify(ctx, jobID)
-	return jobID, true, nil
+	queued = jobID != uuid.Nil
+	if queued {
+		s.notify(ctx, jobID)
+	}
+	return jobID, queued, nil
 }
 
 // EnqueueWithTarget is the positional-args wrapper for callers (typically

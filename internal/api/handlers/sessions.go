@@ -218,16 +218,12 @@ func (h *SessionHandler) resolveSessionPublicationPolicy(
 	}
 	var personal *models.AutomaticPRFollowThroughSettings
 	if run.TriggeredByUserID != nil && h.userStore != nil {
-		initiator, initiatorErr := h.userStore.GetByIDGlobalWithSettings(ctx, *run.TriggeredByUserID)
+		initiator, initiatorErr := h.userStore.GetByIDWithSettings(ctx, orgID, *run.TriggeredByUserID)
 		switch {
 		case initiatorErr != nil:
 			h.logger.Warn().Err(initiatorErr).
 				Str("session_id", run.ID.String()).
 				Msg("falling back to organization publication policy; session initiator could not be loaded")
-		case initiator.OrgID != orgID:
-			h.logger.Warn().
-				Str("session_id", run.ID.String()).
-				Msg("falling back to organization publication policy; session initiator is outside organization scope")
 		default:
 			personal = initiator.Settings.AutomaticPRFollowThrough
 		}
@@ -1460,13 +1456,7 @@ func (h *SessionHandler) PublishChangesetStack(w http.ResponseWriter, r *http.Re
 				if errors.As(requestErr, &intentErr) {
 					code = string(intentErr.Code)
 				}
-				message := "This pull request could not be queued."
-				switch code {
-				case string(publicationintent.ErrorWorkspaceNotReady):
-					message = "This pull request is not ready to publish."
-				case string(publicationintent.ErrorSessionNotEligible):
-					message = "This session cannot publish this pull request."
-				}
+				message := publicationIntentRejectionMessage(code)
 				zerolog.Ctx(r.Context()).Error().Err(requestErr).
 					Str("changeset_id", changeset.ID.String()).
 					Str("publication_error_code", code).
@@ -1483,7 +1473,7 @@ func (h *SessionHandler) PublishChangesetStack(w http.ResponseWriter, r *http.Re
 			var intentErr *publicationintent.Error
 			if errors.As(requestErr, &intentErr) &&
 				(intentErr.Code == publicationintent.ErrorSessionNotEligible || intentErr.Code == publicationintent.ErrorWorkspaceNotReady) {
-				writeError(w, r, http.StatusConflict, string(intentErr.Code), "stack publication request was rejected", requestErr)
+				writeError(w, r, http.StatusConflict, string(intentErr.Code), publicationIntentRejectionMessage(string(intentErr.Code)), requestErr)
 				return
 			}
 			writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "failed to record stack publication intent", requestErr)
@@ -1566,17 +1556,33 @@ func (h *SessionHandler) ImportChangesetRemote(w http.ResponseWriter, r *http.Re
 		return
 	}
 	var req struct {
-		HeadSHA string `json:"head_sha"`
+		HeadSHA          string `json:"head_sha"`
+		LocalHeadSHA     string `json:"local_head_sha"`
+		RemoteIsAncestor bool   `json:"remote_is_ancestor"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(req.HeadSHA) {
+	headPattern := regexp.MustCompile(`^[0-9a-f]{40}$`)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !headPattern.MatchString(req.HeadSHA) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_HEAD_SHA", "a 40-character remote head SHA is required")
 		return
 	}
-	if err := h.changesetStore.ImportRemoteHead(r.Context(), orgID, sessionID, changesetID, req.HeadSHA); err != nil {
+	if req.LocalHeadSHA != "" && !headPattern.MatchString(req.LocalHeadSHA) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_LOCAL_HEAD_SHA", "local_head_sha must be a 40-character SHA when provided")
+		return
+	}
+	status, err := h.changesetStore.ImportRemoteHead(
+		r.Context(), orgID, sessionID, changesetID, req.HeadSHA, req.LocalHeadSHA, req.RemoteIsAncestor,
+	)
+	if err != nil {
 		writeError(w, r, http.StatusNotFound, "CHANGESET_NOT_FOUND", "pull request not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "imported"})
+	result := "imported"
+	if status == models.ChangesetStatusPublishedBranch {
+		result = "reconciled"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": result, "changeset_status": status,
+	})
 }
 
 func (h *SessionHandler) ConfirmChangesetRestack(w http.ResponseWriter, r *http.Request) {
@@ -3003,7 +3009,10 @@ func (h *SessionHandler) rejoinPublicationIntent(
 		memberDraftBypass := privilegedUserAction && requestedRole != string(models.RoleBuilder) &&
 			draft != nil && *draft &&
 			(publication.ReviewGateState == models.SessionPublicationReviewGateNeedsHuman || parked)
-		if !retryable && !memberDraftBypass && !(parked && privilegedUserAction) {
+		explicitReviewReplacement := privilegedUserAction && !publication.State.Terminal() &&
+			(publication.ReviewGateState == models.SessionPublicationReviewGatePending ||
+				publication.ReviewGateState == models.SessionPublicationReviewGateNeedsHuman)
+		if !retryable && !memberDraftBypass && !(parked && privilegedUserAction) && !explicitReviewReplacement {
 			return publicationintent.ExistingPublicationResult(publication), true, nil
 		}
 		return nil, false, nil
@@ -3040,6 +3049,17 @@ func writePublicationIntentAccepted(w http.ResponseWriter, result *publicationin
 		"pull_request_url": result.PullRequestURL,
 		"reason":           result.Reason,
 	})
+}
+
+func publicationIntentRejectionMessage(code string) string {
+	switch code {
+	case string(publicationintent.ErrorWorkspaceNotReady):
+		return "This workspace is not ready to publish a pull request. Review its status, then try again."
+	case string(publicationintent.ErrorSessionNotEligible):
+		return "This session cannot create a pull request in its current state."
+	default:
+		return "This pull request could not be queued. Try again."
+	}
 }
 
 func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
@@ -3248,7 +3268,7 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 			if errors.As(intentErr, &typedErr) {
 				switch typedErr.Code {
 				case publicationintent.ErrorSessionNotEligible, publicationintent.ErrorWorkspaceNotReady:
-					writeError(w, r, http.StatusConflict, string(typedErr.Code), "pull request publication request was rejected", intentErr)
+					writeErrorWithDetails(w, r, http.StatusConflict, string(typedErr.Code), publicationIntentRejectionMessage(string(typedErr.Code)), typedErr.Details, intentErr)
 				default:
 					writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "failed to record publication intent", intentErr)
 				}

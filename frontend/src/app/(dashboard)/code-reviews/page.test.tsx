@@ -1,7 +1,7 @@
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { act } from "react";
 import { delay, http, HttpResponse } from "msw";
-import { createTestQueryClient, fireEvent, renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
+import { createTestQueryClient, fireEvent, renderWithProviders as renderWithBaseProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import { queryKeys } from "@/lib/query-keys";
 
@@ -17,6 +17,13 @@ const sse = vi.hoisted(() => ({
 vi.mock("@/lib/notify", () => ({ notify: toast }));
 
 import CodeReviewsPage from "./page";
+
+function renderWithProviders(
+  ui: Parameters<typeof renderWithBaseProviders>[0],
+  options?: Parameters<typeof renderWithBaseProviders>[1],
+) {
+  return renderWithBaseProviders(ui, { nuqsHasMemory: true, ...options });
+}
 
 // jsdom has no EventSource; stub the SSE hook so the live-refresh subscription
 // is a no-op in tests (the list refreshes via React Query as usual). Mirrors
@@ -746,6 +753,59 @@ describe("CodeReviewsPage", () => {
 
     expect(await screen.findByRole("tab", { name: "Analytics" })).toHaveAttribute("data-state", "active");
     expect(await screen.findByText("Usage by PR author")).toBeInTheDocument();
+  });
+
+  it("writes tab navigation to the URL without dropping filters", async () => {
+    const user = userEvent.setup();
+    const onUrlUpdate = vi.fn();
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews/analytics", () =>
+        HttpResponse.json({ data: reviewAnalytics } satisfies SingleResponse<CodeReviewAnalytics>)),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, {
+      searchParams: {
+        repository: repo.id,
+        range: "7d",
+        outcome: "blocked",
+      },
+      nuqsHasMemory: true,
+      nuqsOnUrlUpdate: onUrlUpdate,
+    });
+
+    await user.click(await screen.findByRole("tab", { name: "Analytics" }));
+    await waitFor(() => {
+      const update = onUrlUpdate.mock.calls.at(-1)?.[0];
+      expect(update?.searchParams.get("tab")).toBe("analytics");
+      expect(update?.searchParams.get("repository")).toBe(repo.id);
+      expect(update?.searchParams.get("range")).toBe("7d");
+      expect(update?.searchParams.get("outcome")).toBe("blocked");
+      expect(update?.options.history).toBe("push");
+    });
+
+    const updatesBeforeDrilldown = onUrlUpdate.mock.calls.length;
+    const drilldown = await screen.findByRole("link", { name: "12 reviewed PRs by anya" });
+    drilldown.addEventListener("click", (event) => event.preventDefault(), { capture: true, once: true });
+    await user.click(drilldown);
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 25));
+    });
+    expect(
+      onUrlUpdate.mock.calls
+        .slice(updatesBeforeDrilldown)
+        .every(([update]) => update.searchParams.get("tab") === "analytics"),
+    ).toBe(true);
+
+    await user.click(screen.getByRole("tab", { name: "Policy" }));
+    await waitFor(() => {
+      const update = onUrlUpdate.mock.calls.at(-1)?.[0];
+      expect(update?.searchParams.get("tab")).toBe("policy");
+      expect(update?.searchParams.get("repository")).toBe(repo.id);
+      expect(update?.searchParams.get("range")).toBe("7d");
+      expect(update?.searchParams.get("outcome")).toBe("blocked");
+      expect(update?.options.history).toBe("push");
+    });
   });
 
   it("shows failed and stale attempts when no review completed", async () => {

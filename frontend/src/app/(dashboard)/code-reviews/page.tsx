@@ -488,19 +488,18 @@ export default function CodeReviewsPage() {
   const canManagePolicy = user?.role === "admin";
   const canFileDisputes = user?.role === "admin" || user?.role === "member";
   const canRetryReviews = canFileDisputes;
-  const [tabParam] = useQueryState(
+  const [tabParam, setTabParam] = useQueryState(
     "tab",
-    parseAsStringLiteral(CODE_REVIEW_TAB_VALUES).withDefault("reviews"),
+    parseAsStringLiteral(CODE_REVIEW_TAB_VALUES)
+      .withDefault("reviews")
+      .withOptions({ history: "push" }),
   );
-  const [activeTab, setActiveTabState] = useState<CodeReviewTab>(tabParam);
-  useEffect(() => {
-    setActiveTabState(tabParam === "disputes" && !canManagePolicy ? "reviews" : tabParam);
-  }, [canManagePolicy, tabParam]);
+  const activeTab: CodeReviewTab = tabParam === "disputes" && !canManagePolicy ? "reviews" : tabParam;
   const setActiveTab = useCallback(
     (value: string) => {
-      setActiveTabState(value as CodeReviewTab);
+      void setTabParam(value as CodeReviewTab);
     },
-    [],
+    [setTabParam],
   );
   const [repositoryFilter, setRepositoryFilter] = useQueryState("repository", parseAsString.withDefault(ALL_REPOSITORIES));
   const [outcomeFilter, setOutcomeParam] = useQueryState(
@@ -1458,7 +1457,6 @@ export default function CodeReviewsPage() {
                 repository: reviewRepositoryId,
                 range: timeRangeFilter,
               }}
-              onNavigateToReviews={() => setActiveTab("reviews")}
               filters={(
                 <CodeReviewFilters
                   id="code-review-analytics-filters"

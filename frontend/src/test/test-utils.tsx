@@ -1,7 +1,7 @@
 import React from 'react';
 import { render, type RenderOptions } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { NuqsTestingAdapter } from 'nuqs/adapters/testing';
+import { NuqsTestingAdapter, type OnUrlUpdateFunction } from 'nuqs/adapters/testing';
 import { OptimisticSessionsProvider } from '@/contexts/optimistic-sessions';
 
 function createTestQueryClient() {
@@ -32,6 +32,7 @@ interface RenderWithProvidersOptions extends Omit<RenderOptions, 'wrapper'> {
   searchParams?: Record<string, string>;
   queryClient?: QueryClient;
   nuqsHasMemory?: boolean;
+  nuqsOnUrlUpdate?: OnUrlUpdateFunction;
 }
 
 function renderWithProviders(
@@ -42,14 +43,19 @@ function renderWithProviders(
     searchParams,
     queryClient: providedQueryClient,
     nuqsHasMemory,
+    nuqsOnUrlUpdate,
     ...renderOptions
   } = options ?? {};
 
-  if (searchParams || providedQueryClient || nuqsHasMemory) {
+  if (searchParams || providedQueryClient || nuqsHasMemory || nuqsOnUrlUpdate) {
     const wrapper = ({ children }: { children: React.ReactNode }) => {
       const queryClient = providedQueryClient ?? createTestQueryClient();
       return (
-        <NuqsTestingAdapter searchParams={searchParams} hasMemory={nuqsHasMemory}>
+        <NuqsTestingAdapter
+          searchParams={searchParams}
+          hasMemory={nuqsHasMemory}
+          onUrlUpdate={nuqsOnUrlUpdate}
+        >
           <QueryClientProvider client={queryClient}>
             <OptimisticSessionsProvider>
               {children}

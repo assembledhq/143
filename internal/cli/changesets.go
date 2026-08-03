@@ -130,6 +130,12 @@ func runChangesets(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "error: --changeset is required")
 			return 1
 		}
+		localOutput, localErr := exec.CommandContext(ctx, "git", "rev-parse", "HEAD").Output()
+		localHeadSHA := strings.TrimSpace(string(localOutput))
+		if localErr != nil || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(localHeadSHA) {
+			fmt.Fprintln(stderr, "error: cannot determine the current local changeset head")
+			return 1
+		}
 		if headSHA == "" {
 			branchOutput, branchErr := exec.CommandContext(ctx, "git", "branch", "--show-current").Output()
 			if branchErr != nil || strings.TrimSpace(string(branchOutput)) == "" {
@@ -155,7 +161,13 @@ func runChangesets(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "error: remote changeset branch has no valid SHA")
 			return 1
 		}
-		method, path, body = http.MethodPost, prefix+"/sessions/"+sessionID+"/changesets/"+changesetID+"/import-remote", map[string]string{"head_sha": headSHA}
+		remoteIsAncestor := headSHA == localHeadSHA
+		if !remoteIsAncestor {
+			remoteIsAncestor = exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", headSHA, "HEAD").Run() == nil
+		}
+		method, path, body = http.MethodPost, prefix+"/sessions/"+sessionID+"/changesets/"+changesetID+"/import-remote", map[string]any{
+			"head_sha": headSHA, "local_head_sha": localHeadSHA, "remote_is_ancestor": remoteIsAncestor,
+		}
 	default:
 		fmt.Fprintf(stderr, "error: unknown changesets action %q\n", args[0])
 		return 1

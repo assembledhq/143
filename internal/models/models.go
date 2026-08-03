@@ -1108,6 +1108,7 @@ const (
 	JobTypeCollectPullRequestFeedback    = "collect_pull_request_feedback"
 	JobTypePublishPRFeedbackResponses    = "publish_pull_request_feedback_responses"
 	JobTypeReconcilePullRequestFeedback  = "reconcile_pull_request_feedback"
+	JobTypeReconcileSessionReviewLoop    = "reconcile_session_review_loop"
 )
 
 // Job represents an async work queue item.

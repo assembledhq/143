@@ -554,7 +554,7 @@ type UserLookup interface {
 }
 
 type UserSettingsLookup interface {
-	GetByIDGlobalWithSettings(ctx context.Context, userID uuid.UUID) (models.UserWithSettings, error)
+	GetByIDWithSettings(ctx context.Context, orgID, userID uuid.UUID) (models.UserWithSettings, error)
 }
 
 type PublicationIntentLookup interface {
@@ -2973,7 +2973,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		var personal *models.AutomaticPRFollowThroughSettings
 		if run.TriggeredByUserID != nil {
 			if settingsLookup, ok := o.users.(UserSettingsLookup); ok {
-				if user, userErr := settingsLookup.GetByIDGlobalWithSettings(ctx, *run.TriggeredByUserID); userErr == nil && user.OrgID == run.OrgID {
+				if user, userErr := settingsLookup.GetByIDWithSettings(ctx, run.OrgID, *run.TriggeredByUserID); userErr == nil {
 					personal = user.Settings.AutomaticPRFollowThrough
 				} else if userErr != nil {
 					log.Warn().Err(userErr).Msg("failed to resolve session initiator publication policy for prompt")

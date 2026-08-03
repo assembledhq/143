@@ -120,6 +120,11 @@ describe("session PR action state", () => {
         input: { ...base, hasSnapshot: false },
         reason: "A reusable sandbox snapshot is required before creating a PR",
       },
+      {
+        name: "remote branch differs from the checkpoint",
+        input: { ...base, changesetStatus: "external_update_detected" as const },
+        reason: "The remote pull request branch differs from the session checkpoint. Reconcile the remote branch with the session before creating the PR.",
+      },
     ];
 
     for (const tt of tests) {
