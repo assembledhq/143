@@ -168,7 +168,7 @@ describe('SessionDetailPage PR health and merge', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect(await screen.findByText('PR health')).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: 'Pull request #42' })).toBeInTheDocument();
     expect(MockEventSource.instances).toHaveLength(1);
     expect(MockEventSource.instances[0].url).toContain(`/api/v1/pull-requests/stream?org_id=${activeOrgId}`);
   });
@@ -176,7 +176,7 @@ describe('SessionDetailPage PR health and merge', () => {
   it('reconnects the PR health stream after an SSE error', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect(await screen.findByText('PR health')).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: 'Pull request #42' })).toBeInTheDocument();
     expect(MockEventSource.instances).toHaveLength(1);
 
     MockEventSource.instances[0].onerror?.(new Event('error'));
@@ -389,8 +389,8 @@ describe('SessionDetailPage PR health and merge', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect(await screen.findByText('PR health')).toBeInTheDocument();
-    expect(screen.getByText('PR #42 is blocked by conflicts and 2 failing test jobs.')).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: 'Pull request #42' })).toBeInTheDocument();
+    expect(screen.getByText('Blocked by conflicts and 2 failing test jobs.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Resolve conflicts' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Fix tests' })).toBeInTheDocument();
   });
@@ -426,7 +426,7 @@ describe('SessionDetailPage PR health and merge', () => {
     expect((await screen.findAllByText('PR #42 closed')).length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText('PR #42 was closed without merging.')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'View PR' })).toBeInTheDocument();
-    expect(screen.queryByText('PR health')).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Pull request #42' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Resolve conflicts' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Fix tests' })).not.toBeInTheDocument();
   });
@@ -517,8 +517,8 @@ describe('SessionDetailPage PR health and merge', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect(await screen.findByText('PR #42 is waiting for required checks to report passing.')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^Merge$/ })).toBeDisabled();
+    expect(await screen.findByText('Waiting for required checks to report passing.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Merge when ready' })).not.toBeDisabled();
 
     await waitFor(() => {
       expect(MockEventSource.instances.some((source) => source.url.includes('/api/v1/pull-requests/stream'))).toBe(true);
@@ -623,7 +623,7 @@ describe('SessionDetailPage PR health and merge', () => {
     expect(screen.getByLabelText('Merged PR status')).toHaveClass('text-success');
     expect(screen.queryAllByText('PR created')).toHaveLength(0);
     expect(within(screen.getByLabelText('Session detail actions')).queryByText('PR #42 merged')).not.toBeInTheDocument();
-    expect(screen.queryByText('PR health')).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Pull request #42' })).not.toBeInTheDocument();
   });
 
   it('shows a closed PR with a neutral status tone', async () => {
@@ -695,7 +695,7 @@ describe('SessionDetailPage PR health and merge', () => {
     expect(await screen.findAllByText('PR merged')).toHaveLength(2);
     expect(screen.getByText('PR #42 merged')).toBeInTheDocument();
     expect(screen.getByText('PR #42 was merged successfully.')).toBeInTheDocument();
-    expect(screen.queryByText('PR health')).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Pull request #42' })).not.toBeInTheDocument();
   });
 
   it('updates the header status when the PR stream reports a merge', async () => {
@@ -760,7 +760,7 @@ describe('SessionDetailPage PR health and merge', () => {
     expect(screen.queryAllByText('PR created')).toHaveLength(0);
   });
 
-  it('keeps the Merge button visible but disabled while CI is still in flight', async () => {
+  it('offers Merge when ready while CI is still in flight', async () => {
     server.use(
       http.get('/api/v1/pull-requests/:id/health', () => {
         return HttpResponse.json({
@@ -777,10 +777,10 @@ describe('SessionDetailPage PR health and merge', () => {
     );
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
-    await screen.findByText('PR health');
-    const mergeButton = screen.getByRole('button', { name: /^Merge$/ });
-    expect(mergeButton).toBeDisabled();
-    expect(mergeButton).toHaveAttribute('title', 'Checks are still running.');
+    await screen.findByRole('region', { name: 'Pull request #42' });
+    const mergeWhenReadyButton = screen.getByRole('button', { name: 'Merge when ready' });
+    expect(mergeWhenReadyButton).not.toBeDisabled();
+    expect(mergeWhenReadyButton).toHaveAttribute('data-variant', 'default');
   });
 
   it('shows a Merge button that opens GitHub auth when the org requires GitHub user auth and the user is disconnected', async () => {
@@ -809,7 +809,7 @@ describe('SessionDetailPage PR health and merge', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    await screen.findByText('PR health');
+    await screen.findByRole('region', { name: 'Pull request #42' });
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /^Merge$/ }));
 
@@ -872,7 +872,7 @@ describe('SessionDetailPage PR health and merge', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    await screen.findByText('PR health');
+    await screen.findByRole('region', { name: 'Pull request #42' });
     const mergeButton = screen.getByRole('button', { name: /^Merge$/ });
     expect(mergeButton).toBeDisabled();
     expect(mergeButton).toHaveAttribute('title', 'Waiting for GitHub to confirm required checks.');
@@ -962,9 +962,9 @@ describe('SessionDetailPage PR health and merge', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect(await screen.findByText('PR #42 is blocked by GitHub merge requirements.')).toBeInTheDocument();
+    expect(await screen.findByText('Blocked by GitHub merge requirements.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Resolve conflicts' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^Merge$/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Merge when ready' })).not.toBeDisabled();
   });
 
   it('stays on the original session after starting a PR repair action', async () => {
@@ -1395,7 +1395,7 @@ describe('SessionDetailPage PR health and merge', () => {
 
     await waitFor(() => {
       expect(screen.queryByText('Fix tests running')).not.toBeInTheDocument();
-      expect(screen.getByText('PR #42 is mergeable and all required test checks are passing.')).toBeInTheDocument();
+      expect(screen.getByText('Mergeable and all required test checks are passing.')).toBeInTheDocument();
     });
   });
 
@@ -1462,7 +1462,7 @@ describe('SessionDetailPage PR health and merge', () => {
 
     await waitFor(() => {
       expect(screen.queryByText('Fix tests running')).not.toBeInTheDocument();
-      expect(screen.getByText('PR #42 is mergeable and all required test checks are passing.')).toBeInTheDocument();
+      expect(screen.getByText('Mergeable and all required test checks are passing.')).toBeInTheDocument();
     });
   });
 

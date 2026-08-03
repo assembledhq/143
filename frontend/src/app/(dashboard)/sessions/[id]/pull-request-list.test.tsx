@@ -105,19 +105,20 @@ describe('ChangesetSplitPrompt', () => {
     render(
       <ChangesetSplitPrompt
         additions={CHANGESET_SPLIT_MIN_ADDITIONS}
+        filesChanged={1}
         onRequestSplit={onRequestSplit}
       />,
     );
 
-    await userEvent.click(await screen.findByRole('button', { name: 'Split PRs' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Split into PRs' }));
 
-    expect(screen.getByText('Need smaller pull requests?')).toBeInTheDocument();
-    expect(screen.getByText('Ask the coding agent to split the current diff into reviewable branches.')).toBeInTheDocument();
-    expect(document.querySelector('[data-slot="agent-action-card-icon"] .lucide-git-branch')).toBeInTheDocument();
+    expect(screen.getByText('Large change · 750 additions · 1 file')).toBeInTheDocument();
+    expect(screen.getByText('Split this diff into smaller, reviewable pull requests.')).toBeInTheDocument();
+    expect(document.querySelector('[data-slot="overview-suggestion-icon"] .lucide-git-branch')).toBeInTheDocument();
     expect(onRequestSplit).toHaveBeenCalledOnce();
   });
 
-  it('declares the layout container above the elements that query it', () => {
+  it('renders as a quiet suggestion row instead of another card', () => {
     render(
       <ChangesetSplitPrompt
         additions={CHANGESET_SPLIT_MIN_ADDITIONS}
@@ -125,18 +126,13 @@ describe('ChangesetSplitPrompt', () => {
       />,
     );
 
-    const card = screen.getByText('Need smaller pull requests?').closest('[data-slot="card"]');
-    const content = card?.querySelector('[data-slot="card-content"]');
-
-    // jsdom cannot evaluate container queries, so guard the placement instead:
-    // an element is never its own query container, so the row layout would be
-    // dead if the container were declared on the element that queries it.
-    expect(card?.className).toContain('@container/agent-action');
-    expect(content?.className).toContain('@min-[24rem]/agent-action:flex-row');
-    expect(content?.className).not.toContain('@container/agent-action');
+    const suggestion = screen.getByRole('region', { name: 'Pull request size suggestion' });
+    expect(suggestion).toHaveAttribute('data-slot', 'overview-suggestion');
+    expect(suggestion).toHaveClass('flex', 'items-center');
+    expect(suggestion.closest('[data-slot="card"]')).toBeNull();
   });
 
-  it('keeps the split action sized to its label on narrow cards', () => {
+  it('uses a compact ghost action that stays aligned on narrow panels', () => {
     render(
       <ChangesetSplitPrompt
         additions={CHANGESET_SPLIT_MIN_ADDITIONS}
@@ -144,11 +140,9 @@ describe('ChangesetSplitPrompt', () => {
       />,
     );
 
-    const button = screen.getByRole('button', { name: 'Split PRs' });
-    const action = button.closest('[data-slot="agent-action-card-action"]');
-    expect(action).toHaveClass('ml-11', 'w-fit', 'self-start');
-    expect(action).toHaveClass('@min-[24rem]/agent-action:ml-0');
-    expect(action).not.toHaveClass('w-full');
-    expect(button).not.toHaveClass('w-full');
+    const button = screen.getByRole('button', { name: 'Split into PRs' });
+    expect(button).toHaveAttribute('data-size', 'xs');
+    expect(button).toHaveAttribute('data-variant', 'ghost');
+    expect(button).toHaveClass('shrink-0');
   });
 });

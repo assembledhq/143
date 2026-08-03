@@ -722,6 +722,29 @@ function ThreadFailureDetailsCard({ thread }: { thread: SessionThread }) {
   );
 }
 
+function SessionResultCard({ summary }: { summary?: string }) {
+  if (!summary) return null;
+
+  return (
+    <Card className="border-border/60" data-testid="session-result-card">
+      <CardContent className="p-3.5">
+        <div className="flex items-start gap-2.5">
+          <div
+            aria-hidden="true"
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-success/10 text-success"
+          >
+            <CheckCircle2 className="h-4 w-4" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium text-foreground">Result</div>
+            <LazyMarkdownContent content={summary} className="mt-2 text-xs" />
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function OverviewTab({ session, activeThread, members, prStatus }: { session: Session; activeThread?: SessionThread | null; members: User[]; prStatus?: PullRequestStatus | null }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
@@ -767,21 +790,6 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
 
   return (
     <div className="space-y-4">
-      {/* Result card — most important for completed sessions, shown first */}
-      {session.result_summary && (
-        <Card className="border-l-2 border-l-success bg-success/5">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-xs flex items-center gap-2">
-              <CheckCircle2 className="h-3.5 w-3.5 text-success" />
-              Result
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <LazyMarkdownContent content={session.result_summary} className="text-xs" />
-          </CardContent>
-        </Card>
-      )}
-
       {isDeployRecovery && (
         <Card className="border-l-2 border-l-warning bg-warning/5">
           <CardHeader className="pb-2">
@@ -3482,26 +3490,54 @@ export function PullRequestList({
 
 export function ChangesetSplitPrompt({
   additions,
+  filesChanged,
   onRequestSplit,
   requestSplitPending = false,
 }: {
   additions?: number;
+  filesChanged?: number;
   onRequestSplit?: () => void;
   requestSplitPending?: boolean;
 }) {
   if (!shouldOfferChangesetSplit(additions)) return null;
 
+  const additionCount = additions ?? 0;
+  const fileLabel = filesChanged === undefined
+    ? ""
+    : ` · ${filesChanged.toLocaleString()} ${filesChanged === 1 ? "file" : "files"}`;
+
   return (
-    <AgentActionCard
-      icon={<GitBranch className="h-4 w-4" />}
-      title="Need smaller pull requests?"
-      description="Ask the coding agent to split the current diff into reviewable branches."
-      action={(
-        <Button size="sm" variant="outline" disabled={requestSplitPending || !onRequestSplit} onClick={onRequestSplit}>
-          Split PRs
-        </Button>
-      )}
-    />
+    <div
+      role="region"
+      aria-label="Pull request size suggestion"
+      data-slot="overview-suggestion"
+      className="flex items-center gap-2.5 px-1 py-1.5"
+    >
+      <div
+        data-slot="overview-suggestion-icon"
+        aria-hidden="true"
+        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"
+      >
+        <GitBranch className="h-4 w-4" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-xs font-medium text-foreground">
+          Large change · {additionCount.toLocaleString()} additions{fileLabel}
+        </p>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          Split this diff into smaller, reviewable pull requests.
+        </p>
+      </div>
+      <Button
+        size="xs"
+        variant="ghost"
+        className="shrink-0"
+        disabled={requestSplitPending || !onRequestSplit}
+        onClick={onRequestSplit}
+      >
+        Split into PRs
+      </Button>
+    </div>
   );
 }
 
@@ -6654,9 +6690,9 @@ export function SessionDetailContent({ id }: { id: string }) {
           )}
           {pullRequestId && prStatus === "closed" && (
             <Card className="border-border/60">
-              <CardContent className="p-4">
-                <div className="flex items-start gap-3">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-muted-foreground">
+              <CardContent className="p-3.5">
+                <div className="flex items-start gap-2.5">
+                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
                     <XCircle className="h-4 w-4" />
                   </div>
                   <div className="min-w-0 space-y-1">
@@ -6672,9 +6708,9 @@ export function SessionDetailContent({ id }: { id: string }) {
           )}
           {pullRequestId && prStatus === "merged" && (
             <Card className="border-border/60">
-              <CardContent className="p-4">
-                <div className="flex items-start gap-3">
-                  <div aria-label="Merged PR status" className={cn("flex h-8 w-8 items-center justify-center rounded-full", prMergedAccent.bg, prMergedAccent.text)}>
+              <CardContent className="p-3.5">
+                <div className="flex items-start gap-2.5">
+                  <div aria-label="Merged PR status" className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-md", prMergedAccent.bg, prMergedAccent.text)}>
                     <CheckCircle2 className="h-4 w-4" />
                   </div>
                   <div className="min-w-0 space-y-1">
@@ -6688,6 +6724,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </CardContent>
             </Card>
           )}
+          <SessionResultCard summary={session.result_summary} />
           <PullRequestList
             changesets={changesets}
             selectedID={selectedChangeset?.id ?? ""}
@@ -6757,6 +6794,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           ) : null}
           <ChangesetSplitPrompt
             additions={session.diff_stats?.added}
+            filesChanged={session.diff_stats?.files_changed}
             onRequestSplit={() => queueSend({
               overrideMessage: "Split the current diff into smaller, independently reviewable pull requests. Before making changes, run `143-tools changesets list`, `143-tools changesets current`, and `143-tools changesets status` so the platform changeset state is authoritative. Then use the changeset tools to create and materialize the split; do not create worktrees manually. Keep each pull request cohesive, account for every changed file, and verify the completed split with the changeset tools.",
             })}
