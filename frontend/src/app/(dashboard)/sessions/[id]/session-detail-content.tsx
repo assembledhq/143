@@ -31,6 +31,7 @@ import {
   Clock,
   MessageSquare,
   Pencil,
+  ScanSearch,
 } from "lucide-react";
 import { LinearIcon } from "@/components/linear-icon";
 import { looksLikeLinearRef } from "@/lib/linear-refs";
@@ -119,6 +120,7 @@ import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, flattenTra
 import { formatReviewMessage } from "@/lib/format-review-message";
 import {
   classifyPRSnapshotState,
+  formatPRCreationError,
   prErrorTitle,
   snapshotPRMessage,
 } from "@/lib/session-pr-snapshot";
@@ -140,7 +142,7 @@ import {
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
 import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
-import type { ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionPublication, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
+import type { ChangesetStatus, ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionPublication, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequest, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -168,7 +170,7 @@ import {
   type UseSessionKeyboardShortcutsOptions,
 } from "@/hooks/use-session-keyboard-shortcuts";
 import { prMergedAccent } from "@/lib/pr-status-styles";
-import { continueFromPRBranchMessage, deriveCreatePRActionState, derivePushChangesActionState, hasRepairableFailedChecks, prHealthBlocksPRActions } from "@/lib/session-pr-action-state";
+import { changesetPublicationBlocker, continueFromPRBranchMessage, deriveCreatePRActionState, derivePushChangesActionState, hasRepairableFailedChecks, prHealthBlocksPRActions } from "@/lib/session-pr-action-state";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { isProvisionalSessionDetail } from "@/lib/session-detail-cache";
 import { useReconcileOptimisticAction } from "./use-optimistic-pr-action";
@@ -251,11 +253,182 @@ function publicationHasReviewWarning(publication: SessionPublication) {
       publication.state !== "ready_to_publish");
 }
 
-function publicationIsVolatile(publication: SessionPublication) {
-  return publication.review_gate_state !== "needs_human" &&
+export function publicationExecutionIsPaused(
+  publication: SessionPublication,
+  policy?: SessionDetail["publication_policy"],
+) {
+  return ((publication.execution_source ?? publication.source) === "agent_tool" &&
+      policy?.agent_publication_execution_enabled === false) ||
+    (publication.review_gate_state === "pending" && policy?.review_execution_enabled === false);
+}
+
+export function publicationIsVolatile(
+  publication: SessionPublication,
+  policy?: SessionDetail["publication_policy"],
+) {
+  return !publicationExecutionIsPaused(publication, policy) &&
+    publication.review_gate_state !== "needs_human" &&
     publication.state !== "completed" &&
     publication.state !== "completed_noop" &&
     publication.state !== "terminal_failed";
+}
+
+// A durable publication owns the generic publish controls while it is live,
+// published, or stopped somewhere its workflow card can resolve. completed_noop
+// is the one settled outcome with neither a pull request nor a card action: the
+// workflow found nothing to publish, so a session that later produces changes
+// has to be able to reach the ordinary Create PR path again. The coordinator
+// already treats that state as retryable.
+function publicationOwnsPublishActions(publication: SessionPublication) {
+  return publication.state !== "completed_noop";
+}
+
+function publicationErrorDescription(publication: SessionPublication) {
+  switch (publication.last_error_code) {
+    case "no_diff_against_base":
+      return "There are no changes to publish against the target branch.";
+    case "remote_diverged":
+      return "The remote branch changed. Review the branch and retry publication.";
+    case "push_rejected":
+      return "The branch could not be pushed. Check repository access and retry publication.";
+    case "sandbox_auth_unavailable":
+      return "GitHub authorization is required before this pull request can be published.";
+    case "stack_parent_publication_failed":
+      return "Publish the parent pull request, then retry this one.";
+    default:
+      return "Publication stopped safely and needs a decision before it can continue.";
+  }
+}
+
+function PublicationWorkflowCard({
+  publication,
+  reviewLoop,
+  pullRequest,
+  canManage,
+  canBypassReview,
+  executionPaused,
+  reviewExecutionPaused,
+  actionPending,
+  onCreateDraft,
+  onOpenReview,
+  onContinue,
+  onRetry,
+}: {
+  publication: SessionPublication;
+  reviewLoop?: SessionReviewLoop | null;
+  pullRequest?: PullRequest | null;
+  canManage: boolean;
+  canBypassReview: boolean;
+  executionPaused: boolean;
+  reviewExecutionPaused: boolean;
+  actionPending: boolean;
+  onCreateDraft: () => void;
+  onOpenReview: () => void;
+  onContinue: () => void;
+  onRetry: () => void;
+}) {
+  const completedNoop = publication.state === "completed_noop";
+  const published = publication.state === "completed";
+  const executionActuallyPaused = executionPaused && !published && !completedNoop;
+  const needsAttention = executionActuallyPaused ||
+    publication.review_gate_state === "needs_human" ||
+    publication.review_gate_state === "failed" ||
+    publication.state === "terminal_failed";
+  // draft_first deliberately has a linked PR while review is still pending;
+  // only the durable completed checkpoint means the workflow is published.
+  const settled = published || completedNoop;
+  const reviewing = !published && !completedNoop && !needsAttention && publication.review_gate_state === "pending";
+  const reviewQueued = reviewing && !reviewLoop;
+  const reviewPassed = publication.review_gate_state === "passed";
+  const activePass = reviewLoop?.passes?.at(-1);
+  const passNumber = activePass?.pass_index ?? Math.min((reviewLoop?.completed_passes ?? 0) + 1, publication.review_max_passes ?? reviewLoop?.max_passes ?? 2);
+  const maxPasses = publication.review_max_passes ?? reviewLoop?.max_passes ?? 2;
+  const activity = activePass?.status === "fixing"
+    ? "Applying fixes"
+    : activePass?.status === "deciding"
+      ? "Evaluating findings"
+      : "Reviewing the current changes";
+  const title = completedNoop
+    ? "No publication needed"
+    : published
+      ? "Published"
+    : needsAttention
+      ? "Needs attention"
+      : reviewing
+        ? reviewQueued
+          ? "Review queued"
+          : "Reviewing"
+        : "Publishing";
+  const description = completedNoop
+    ? "The completed workflow found no changes to publish."
+    : published
+      ? (pullRequest?.title ?? "The pull request is ready for team review.")
+    : needsAttention
+      ? executionActuallyPaused
+        ? canManage
+          ? "Publication automation is temporarily paused. Continue with the agent for next steps."
+          : "Publication automation is temporarily paused. A member can continue the session with the agent."
+        : publicationErrorDescription(publication)
+      : reviewing
+        ? reviewQueued
+          ? "Waiting for publication review to start."
+          : `Pass ${passNumber} of ${maxPasses} · ${activity}`
+        // Only a gate that actually passed may be described as reviewed. This
+        // branch is also reached when review was not required or was bypassed,
+        // and claiming a review ran for those would misrepresent the PR.
+        : publication.handoff_mode === "draft_first" && publication.state === "recorded"
+          ? `${reviewPassed ? "Review passed. " : ""}Publishing the reviewed head and marking the draft ready.`
+          : `${reviewPassed ? "Review passed. " : ""}Pull request publication is queued.`;
+  const prURL = pullRequest?.github_pr_url ?? publication.github_pr_url;
+  const prNumber = pullRequest?.github_pr_number ?? publication.github_pr_number;
+
+  return (
+    <Card className={cn("border-border/60", needsAttention && "border-warning/50 bg-warning/5")} data-testid="publication-workflow-card">
+      <CardContent className="space-y-3 p-4">
+        <div className="flex items-start gap-3">
+          <div className={cn(
+            "flex h-8 w-8 shrink-0 items-center justify-center rounded-full",
+            settled ? "bg-success/10 text-success" : needsAttention ? "bg-warning/10 text-warning" : "bg-info/10 text-info",
+          )}>
+            {settled ? <CheckCircle2 className="h-4 w-4" /> : needsAttention ? <AlertTriangle className="h-4 w-4" /> : <Loader2 className="h-4 w-4 animate-spin" />}
+          </div>
+          <div className="min-w-0 flex-1 space-y-1">
+            <p className="text-sm font-medium text-foreground">{title}</p>
+            <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
+            {published && prNumber ? <p className="text-xs text-muted-foreground">Pull request #{prNumber}</p> : null}
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {published && prURL ? (
+            <Button asChild size="sm" variant="outline">
+              <a href={prURL} target="_blank" rel="noopener noreferrer">
+                <ExternalLink className="h-3.5 w-3.5" />
+                Open pull request
+              </a>
+            </Button>
+          ) : null}
+          {canBypassReview && needsAttention && (
+            publication.review_gate_state === "needs_human" ||
+            (executionActuallyPaused && reviewExecutionPaused && publication.review_gate_state === "pending")
+          ) ? (
+            <Button size="sm" disabled={actionPending} onClick={onCreateDraft}>
+              {actionPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GitPullRequest className="h-3.5 w-3.5" />}
+              Create draft PR
+            </Button>
+          ) : null}
+          {needsAttention && reviewLoop?.thread_id ? <Button size="sm" variant="outline" onClick={onOpenReview}>Open review</Button> : null}
+          {canManage && executionActuallyPaused && !reviewExecutionPaused ? (
+            <Button size="sm" variant="outline" disabled={actionPending} onClick={onRetry}>
+              {actionPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              Resume publication
+            </Button>
+          ) : null}
+          {canManage && needsAttention && publication.state === "terminal_failed" ? <Button size="sm" variant="outline" disabled={actionPending} onClick={onRetry}>Retry</Button> : null}
+          {canManage && needsAttention ? <Button size="sm" variant="ghost" onClick={onContinue}>Continue with agent</Button> : null}
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 // Defer the diff viewer until the user actually opens review mode. Saves
@@ -427,7 +600,33 @@ type PRAuthPromptState =
 type PRActionErrorState = {
   code?: string;
   message: string;
+  changesetID?: string;
+  changesetUpdatedAt?: string;
+  changesetStatus?: ChangesetStatus;
 };
+
+function publicationBlockerDetails(value: unknown): { reason?: string; changesetStatus?: ChangesetStatus } {
+  if (!value || typeof value !== "object") return {};
+  const details = value as { reason?: unknown; changeset_status?: unknown };
+  const candidateStatus = typeof details.changeset_status === "string"
+    ? details.changeset_status as ChangesetStatus
+    : undefined;
+  return {
+    reason: typeof details.reason === "string" ? details.reason : undefined,
+    changesetStatus: changesetPublicationBlocker(candidateStatus) ? candidateStatus : undefined,
+  };
+}
+
+function changesetAgentRecoveryMessage(changeset: ChangesetSummary, status = changeset.status): string | null {
+  switch (status) {
+    case "restack_conflict":
+      return "Resolve the restack conflict while preserving this pull request's intent. Explain any semantic changes and do not push; I will review and confirm the result.";
+    case "external_update_detected":
+      return "Run `143-tools changesets import-remote --changeset " + changeset.id + "` first. If it reports `reconciled`, stop and tell me Create PR is ready. Otherwise, fetch the remote branch and reconcile its commits with the local worktree without dropping either side's intended changes. Do not push. After the turn is checkpointed, run the import command again in a follow-up so the platform can verify that the checkpoint matches local HEAD and safely contains the remote HEAD.";
+    default:
+      return null;
+  }
+}
 
 const terminalSessionStatuses = new Set<SessionStatus>(["completed", "pr_created", "failed", "cancelled", "skipped"]);
 
@@ -3294,6 +3493,7 @@ export function ChangesetSplitPrompt({
 
   return (
     <AgentActionCard
+      icon={<GitBranch className="h-4 w-4" />}
       title="Need smaller pull requests?"
       description="Ask the coding agent to split the current diff into reviewable branches."
       action={(
@@ -3306,10 +3506,12 @@ export function ChangesetSplitPrompt({
 }
 
 function AgentActionCard({
+  icon,
   title,
   description,
   action,
 }: {
+  icon: ReactNode;
   title: string;
   description: string;
   action: ReactNode;
@@ -3319,11 +3521,23 @@ function AgentActionCard({
     // element is never its own query container.
     <Card className="@container/agent-action border-border/60">
       <CardContent className="flex flex-col gap-3 p-4 @min-[24rem]/agent-action:flex-row @min-[24rem]/agent-action:items-center @min-[24rem]/agent-action:justify-between">
-        <div className="min-w-0">
-          <p className="text-sm font-medium text-foreground">{title}</p>
-          <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
+        <div className="flex min-w-0 items-start gap-3">
+          <div
+            data-slot="agent-action-card-icon"
+            aria-hidden="true"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"
+          >
+            {icon}
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-foreground">{title}</p>
+            <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
+          </div>
         </div>
-        <div className="w-full shrink-0 [&>span]:w-full [&_[data-slot=button]]:w-full @min-[24rem]/agent-action:w-auto @min-[24rem]/agent-action:[&>span]:w-auto @min-[24rem]/agent-action:[&_[data-slot=button]]:w-auto">
+        <div
+          data-slot="agent-action-card-action"
+          className="ml-11 w-fit shrink-0 self-start @min-[24rem]/agent-action:ml-0 @min-[24rem]/agent-action:self-auto"
+        >
           {action}
         </div>
       </CardContent>
@@ -3590,7 +3804,8 @@ export function SessionDetailContent({ id }: { id: string }) {
       if (isProvisionalSessionDetail(s)) return false;
       const sessionVolatile = workingStatusesSet.has(s.status);
       const threadVolatile = (s.threads ?? []).some((thread) => workingStatusesSet.has(thread.status));
-      const publicationVolatile = (s.publications ?? []).some(publicationIsVolatile);
+      const publicationVolatile = (s.publications ?? []).some((publication) =>
+        publicationIsVolatile(publication, s.publication_policy));
       const serverInFlight = s.pr_creation_state === "queued" || s.pr_creation_state === "pushing";
       const waitingForServer = localPRState !== "idle" &&
         s.pr_creation_state !== "failed" &&
@@ -3667,9 +3882,22 @@ export function SessionDetailContent({ id }: { id: string }) {
   const primaryChangeset = changesets.find((changeset) => changeset.is_primary) ?? changesets[0];
   const [selectedChangesetID, setSelectedChangesetID] = useState<string | null>(changesetParam);
   const selectedChangeset = changesets.find((changeset) => changeset.id === selectedChangesetID) ?? primaryChangeset;
+  const selectedLocalPRActionError = localPRActionError &&
+    (!localPRActionError.changesetID || localPRActionError.changesetID === selectedChangeset?.id) &&
+    (!localPRActionError.changesetUpdatedAt ||
+      localPRActionError.changesetUpdatedAt === selectedChangeset?.updated_at ||
+      localPRActionError.changesetStatus === selectedChangeset?.status)
+    ? localPRActionError
+    : null;
+  useEffect(() => {
+    if (localPRActionError && !selectedLocalPRActionError) {
+      setLocalPRActionError(null);
+    }
+  }, [localPRActionError, selectedLocalPRActionError]);
   const selectedPublication = (session?.publications ?? []).find((publication) => publication.changeset_id === selectedChangeset?.id);
   const selectedPublicationPresentation = selectedPublication ? publicationPresentation(selectedPublication) : null;
   const selectedPublicationHasReviewWarning = selectedPublication ? publicationHasReviewWarning(selectedPublication) : false;
+  const selectedPublicationOwnsActions = selectedPublication ? publicationOwnsPublishActions(selectedPublication) : false;
   const stackTopChangeset = changesets.filter((changeset) => changeset.status !== "abandoned").at(-1);
   const hasMultipleChangesets = changesets.length > 1;
   const changesetLifecycleMutation = useMutation({
@@ -3677,6 +3905,47 @@ export function SessionDetailContent({ id }: { id: string }) {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["session", id] });
       toast.success("Pull request action queued");
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Pull request action failed"),
+  });
+  const publishChangesetMutation = useMutation({
+    mutationFn: (target: ChangesetSummary) => api.sessions.publishChangeset(id, target.id),
+    onMutate: () => {
+      setLocalPRActionError(null);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["session", id] });
+      toast.success("Pull request action queued");
+    },
+    onError: (error, target) => {
+      const blockerDetails = error instanceof ApiError ? publicationBlockerDetails(error.details) : {};
+      if (blockerDetails.changesetStatus) {
+        setLocalPRActionError({
+          code: error instanceof ApiError ? error.code : undefined,
+          message: blockerDetails.reason || (error instanceof Error ? error.message : "Pull request action failed"),
+          changesetID: target.id,
+          changesetUpdatedAt: target.updated_at,
+          changesetStatus: blockerDetails.changesetStatus,
+        });
+        void queryClient.invalidateQueries({ queryKey: ["session", id] });
+      }
+      toast.error(blockerDetails.reason || (error instanceof Error ? error.message : "Pull request action failed"));
+    },
+  });
+  // Stack publishing coordinates each changeset independently, so the request
+  // can succeed while individual entries are rejected. A generic success toast
+  // would hide that, leaving the user to discover the gap on their own.
+  const publishStackMutation = useMutation({
+    mutationFn: () => api.sessions.publishChangesetStack(id),
+    onSuccess: (response) => {
+      void queryClient.invalidateQueries({ queryKey: ["session", id] });
+      const rejected = (response.publications ?? []).filter((entry) => entry.status === "rejected");
+      if (rejected.length === 0) {
+        toast.success("Pull request action queued");
+        return;
+      }
+      const reason = rejected[0].reason ?? rejected[0].error_code ?? "no reason given";
+      toast.error(`${rejected.length} of ${response.publications.length} pull requests could not be queued: ${reason}`);
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Pull request action failed"),
   });
@@ -4596,6 +4865,9 @@ export function SessionDetailContent({ id }: { id: string }) {
     enabled: !!session,
   });
   const latestReviewLoop = reviewLoopsData?.data?.[0] ?? null;
+  const publicationReviewLoop = selectedPublication?.review_loop_id
+    ? (reviewLoopsData?.data ?? []).find((loop) => loop.id === selectedPublication.review_loop_id) ?? null
+    : null;
   // Mirror the server-side builder gate so the action is disabled with a reason
   // instead of failing with 409 REVIEW_REQUIRED_BEFORE_PR on click. The API
   // compares against the session snapshot key for the primary changeset, so
@@ -4641,6 +4913,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     onMutate: () => {
       setLocalPRActionError(null);
       setLocalPRState("submitting");
+      return {
+        changesetID: selectedChangeset?.id,
+        changesetUpdatedAt: selectedChangeset?.updated_at,
+      };
     },
     onSuccess: (data, options) => {
       setLocalPRActionError(null);
@@ -4652,7 +4928,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       queryClient.invalidateQueries({ queryKey: ["session", id] });
       queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
     },
-    onError: (err, options) => {
+    onError: (err, options, context) => {
       if (err instanceof ApiError &&
         (err.code === "GITHUB_PR_AUTHORSHIP_REQUIRED" || err.code === "GITHUB_PR_AUTHORSHIP_REAUTH_REQUIRED") &&
         isPRAuthInterceptDetails(err.details)) {
@@ -4663,11 +4939,18 @@ export function SessionDetailContent({ id }: { id: string }) {
         return;
       }
       setLocalPRState("idle");
-      const msg = err instanceof Error ? err.message : PR_ERROR_TOAST_MESSAGE;
+      const blockerDetails = err instanceof ApiError ? publicationBlockerDetails(err.details) : {};
+      const msg = blockerDetails.reason || (err instanceof Error ? err.message : PR_ERROR_TOAST_MESSAGE);
       setLocalPRActionError({
         code: err instanceof ApiError ? err.code : undefined,
         message: msg,
+        changesetID: context?.changesetID,
+        changesetUpdatedAt: context?.changesetUpdatedAt,
+        changesetStatus: blockerDetails.changesetStatus,
       });
+      if (blockerDetails.changesetStatus) {
+        void queryClient.invalidateQueries({ queryKey: ["session", id] });
+      }
       if (options?.resumeToken) {
         clearPRResumeParams();
       }
@@ -5942,17 +6225,35 @@ export function SessionDetailContent({ id }: { id: string }) {
     sessionSnapshotKey: session.snapshot_key,
     sessionSandboxState: session.sandbox_state,
     serverMessage: session.pr_creation_error,
-    localCode: localPRActionError?.code,
+    localCode: selectedLocalPRActionError?.code,
     allowImplicitMissingSnapshot: showExpiredPRAction,
   });
   const snapshotUnavailable = snapshotState !== null;
   const snapshotMessage = snapshotPRMessage(
     snapshotState,
-    localPRActionError?.code ? localPRActionError.message : session.pr_creation_error,
+    selectedLocalPRActionError?.code ? selectedLocalPRActionError.message : session.pr_creation_error,
   );
+  // The button tooltip repeats the notice copy, so it reads the same polished
+  // sentence the notice renders instead of the raw server detail.
+  const selectedLocalPRActionMessage = selectedLocalPRActionError?.message
+    ? formatPRCreationError(selectedLocalPRActionError.code, selectedLocalPRActionError.message)
+    : undefined;
+  const blockingChangesetStatus = selectedLocalPRActionError?.changesetStatus ?? selectedChangeset?.status;
+  const publicationBlocker = changesetPublicationBlocker(blockingChangesetStatus);
+  const selectedChangesetActionBlocker = publicationBlocker;
+  const selectedChangesetRecoveryMessage = selectedChangeset
+    ? changesetAgentRecoveryMessage(selectedChangeset, blockingChangesetStatus)
+    : null;
+  const requestSelectedChangesetRecovery = () => {
+    if (!selectedChangeset || !selectedChangesetRecoveryMessage) return;
+    setComposerChangesetID(selectedChangeset.id);
+    setComposerMessage(selectedChangesetRecoveryMessage);
+    focusComposerFromKeyboard();
+  };
   const prActionError = hasPR
     ? null
-    : (localPRActionError?.code && snapshotState ? snapshotMessage : localPRActionError?.message) ||
+    : publicationBlocker ||
+      (selectedLocalPRActionError?.code && snapshotState ? snapshotMessage : selectedLocalPRActionMessage) ||
       (snapshotUnavailable ? snapshotMessage : null) ||
       (prState === "failed" ? session.pr_creation_error || PR_ERROR_TOAST_MESSAGE : null);
   const createPRAction = deriveCreatePRActionState({
@@ -5970,11 +6271,15 @@ export function SessionDetailContent({ id }: { id: string }) {
     creatingPR,
     finalizingPR,
     prState,
+    changesetStatus: blockingChangesetStatus,
     prCreationError: session.pr_creation_error,
-    localError: snapshotUnavailable ? undefined : localPRActionError?.message,
+    localError: snapshotUnavailable ? undefined : selectedLocalPRActionMessage,
     hasRecoverableError: Boolean(prActionError),
   });
-  const showPRAction = createPRAction.visible;
+  // A durable publication owns the workflow until it settles. Its Overview
+  // card exposes the only valid next actions, so the generic header Create PR
+  // control must not invite a duplicate request while review/publication runs.
+  const showPRAction = createPRAction.visible && !selectedPublicationOwnsActions;
   const prActionLabel = createPRAction.label;
   const prActionSpinning = createPRAction.spinning;
   const prActionDisabled = createPRAction.disabled;
@@ -6058,9 +6363,16 @@ export function SessionDetailContent({ id }: { id: string }) {
   }
 
   const prErrorNotice = prActionError ? {
-    title: prErrorTitle(snapshotState, localPRActionError?.code),
-    description: prActionError,
-    action: prActionDisabled ? undefined : {
+    title: blockingChangesetStatus === "external_update_detected"
+      ? "Branch reconciliation required"
+      : publicationBlocker
+        ? "Publication blocked"
+        : prErrorTitle(snapshotState, selectedLocalPRActionError?.code),
+    description: publicationBlocker || formatPRCreationError(selectedLocalPRActionError?.code, prActionError),
+    action: selectedChangesetRecoveryMessage ? {
+      label: blockingChangesetStatus === "external_update_detected" ? "Reconcile with agent" : "Resolve with agent",
+      onClick: requestSelectedChangesetRecovery,
+    } : prActionDisabled ? undefined : {
       label: prActionLabel,
       onClick: () => submitCreatePR(undefined),
     },
@@ -6140,7 +6452,9 @@ export function SessionDetailContent({ id }: { id: string }) {
                 role="status"
                 aria-live="polite"
                 aria-atomic="true"
-                title={selectedPublication.last_error_message || selectedPublicationPresentation.label}
+                title={selectedPublication.last_error_code
+                  ? publicationErrorDescription(selectedPublication)
+                  : selectedPublicationPresentation.label}
               >
                 {selectedPublicationPresentation.label}
               </Badge>
@@ -6180,7 +6494,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                       title={prActionTitle ? `${prActionTitle} (p c)` : `${prActionLabel} (p c)`}
                       onClick={() => submitCreatePR(undefined)}
                     >
-                      {!prActionSpinning && (prState === "failed" || localPRActionError ? (
+                      {!prActionSpinning && (prState === "failed" || selectedLocalPRActionError ? (
                         <AlertTriangle className="h-3 w-3" />
                       ) : (
                         <GitPullRequest className="h-3 w-3" />
@@ -6246,7 +6560,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         </div>
         {prErrorNotice && (
           <ErrorNotice
-            className="mx-2 mt-2"
+            className="mx-4 mt-2"
             title={prErrorNotice.title}
             description={prErrorNotice.description}
             action={prErrorNotice.action}
@@ -6282,140 +6596,6 @@ export function SessionDetailContent({ id }: { id: string }) {
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <div className="space-y-4">
-          <PullRequestList
-            changesets={changesets}
-            selectedID={selectedChangeset?.id ?? ""}
-            onSelect={(changesetID) => {
-              setSelectedChangesetID(changesetID);
-              void setChangesetParam(changesetID);
-            }}
-          />
-          {hasMultipleChangesets && (
-            <Card className="border-border/60" data-testid="stack-health">
-              <CardContent className="flex items-center justify-between gap-3 p-4">
-                <div>
-                  <div className="text-sm font-medium">Stack health</div>
-                  <p className="text-xs text-muted-foreground">{(session.changeset_stack_state ?? "coherent").replaceAll("-", " ")}</p>
-                </div>
-                {selectedChangeset && changesets.some((item) => item.status === "needs_restack") && (
-                  <Button size="sm" variant="outline" disabled={changesetLifecycleMutation.isPending} onClick={() => changesetLifecycleMutation.mutate(() => api.sessions.restackChangesetDescendants(id, selectedChangeset.id))}>
-                    Restack descendants
-                  </Button>
-                )}
-              </CardContent>
-            </Card>
-          )}
-          {selectedIsPrimary && canManageSession && canUseNativeReviewLoop && !hasPR && hasSessionChanges ? (
-            reviewLoopRunning ? (
-              <Card className="border-border/60">
-                <CardContent className="p-4">
-                  <div className="flex min-w-0 items-start gap-2">
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    </div>
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium text-foreground">
-                        Fixing with {AGENTS_BY_KEY[latestReviewLoop?.agent_type ?? ""]?.label ?? "review agent"}
-                      </p>
-                      <p className="text-xs leading-relaxed text-muted-foreground">
-                        The review loop is checking the changes and applying fixes.
-                      </p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            ) : (
-              <AgentActionCard
-                title="Review before creating a PR?"
-                description="Ask a review agent to check the current diff and apply fixes."
-                action={(
-                  <DisabledTooltip disabled={reviewActionDisabled} content={reviewActionDisabledReason}>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={reviewActionDisabled}
-                      title={reviewActionDisabledReason}
-                      onClick={() => setReviewConfigOpen(true)}
-                    >
-                      Review &amp; fix
-                    </Button>
-                  </DisabledTooltip>
-                )}
-              />
-            )
-          ) : null}
-          <ChangesetSplitPrompt
-            additions={session.diff_stats?.added}
-            onRequestSplit={() => queueSend({
-              overrideMessage: "Split the current diff into smaller, independently reviewable pull requests. Before making changes, run `143-tools changesets list`, `143-tools changesets current`, and `143-tools changesets status` so the platform changeset state is authoritative. Then use the changeset tools to create and materialize the split; do not create worktrees manually. Keep each pull request cohesive, account for every changed file, and verify the completed split with the changeset tools.",
-            })}
-            requestSplitPending={sendMutation.isPending || !composerCanSendMessage}
-          />
-          {hasMultipleChangesets && selectedChangeset && (
-            <Card className="border-border/60" data-testid="selected-pull-request-panel">
-              <CardContent className="space-y-1 p-4">
-                <div className="text-sm font-medium">{selectedChangeset.title}</div>
-                {selectedChangeset.summary && <p className="text-xs text-muted-foreground">{selectedChangeset.summary}</p>}
-                <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 pt-1 text-xs">
-                  <dt className="text-muted-foreground">Base</dt><dd className="truncate">{selectedChangeset.base_branch}</dd>
-                  <dt className="text-muted-foreground">Head</dt><dd className="truncate">{selectedChangeset.working_branch ?? "Not materialized"}</dd>
-                  <dt className="text-muted-foreground">Target</dt><dd className="truncate">{selectedChangeset.target_branch}</dd>
-                  <dt className="text-muted-foreground">State</dt><dd>{selectedChangeset.pull_request?.status ?? selectedChangeset.status.replaceAll("_", " ")}</dd>
-                  {selectedChangeset.pull_request?.ci_status && <><dt className="text-muted-foreground">CI</dt><dd>{selectedChangeset.pull_request.ci_status}</dd></>}
-                  {selectedChangeset.pull_request?.review_status && <><dt className="text-muted-foreground">Review</dt><dd>{selectedChangeset.pull_request.review_status.replaceAll("_", " ")}</dd></>}
-                </dl>
-                {selectedChangeset.restack_delta_kind ? (
-                  <Card className="bg-muted/40">
-                    <CardContent className="p-3 text-xs">
-                    <p className="font-medium text-foreground">
-                      Restack delta: {selectedChangeset.restack_delta_kind.replaceAll("_", " ")}
-                    </p>
-                    {selectedChangeset.restack_delta_summary ? (
-                      <p className="mt-1 text-muted-foreground">{selectedChangeset.restack_delta_summary}</p>
-                    ) : null}
-                    {selectedChangeset.restack_confirmation_required ? (
-                      <Button className="mt-2" size="sm" variant="outline" disabled={changesetLifecycleMutation.isPending} onClick={() => changesetLifecycleMutation.mutate(() => api.sessions.confirmChangesetRestack(id, selectedChangeset.id))}>
-                        Confirm restack delta
-                      </Button>
-                    ) : null}
-                    </CardContent>
-                  </Card>
-                ) : null}
-                <div className="flex flex-wrap gap-2 pt-2">
-                {!selectedChangeset.pull_request && (
-                  <DisabledTooltip disabled={!!selectedChangeset.worktree_path} content="Create PR becomes available after branch materialization">
-                    <Button type="button" size="sm" disabled={!selectedChangeset.worktree_path || changesetLifecycleMutation.isPending} onClick={() => changesetLifecycleMutation.mutate(() => api.sessions.publishChangeset(id, selectedChangeset.id))}>
-                      <GitPullRequest className="h-3.5 w-3.5" />
-                      Create PR
-                    </Button>
-                  </DisabledTooltip>
-                )}
-                <Button type="button" size="sm" variant="outline" disabled={!selectedChangeset.worktree_path} onClick={() => {
-                  setComposerChangesetID(selectedChangeset.id);
-                  if (selectedChangeset.status === "restack_conflict") {
-                    setComposerMessage("Resolve the restack conflict while preserving this pull request's intent. Explain any semantic changes and do not push; I will review and confirm the result.");
-                  } else if (selectedChangeset.status === "external_update_detected") {
-                    setComposerMessage("Run `143-tools changesets import-remote --changeset " + selectedChangeset.id + "`, fetch this pull request's remote branch, and reconcile its remote commits with the local worktree without dropping either side's intended changes. Do not push; I will review and confirm the result.");
-                  }
-                  focusComposerFromKeyboard();
-                }}>
-                  {selectedChangeset.status === "restack_conflict"
-                    ? "Resolve with agent"
-                    : selectedChangeset.status === "external_update_detected"
-                      ? "Reconcile with agent"
-                      : "Ask agent"}
-                </Button>
-                {hasMultipleChangesets && <Button type="button" size="sm" variant="outline" disabled={changesetLifecycleMutation.isPending || changesets.some((item) => item.status !== "abandoned" && !item.worktree_path)} onClick={() => changesetLifecycleMutation.mutate(() => api.sessions.publishChangesetStack(id))}>Publish stack</Button>}
-                </div>
-                {!selectedChangeset.is_primary && !selectedChangeset.worktree_path && (
-                  <p className="pt-2 text-xs text-muted-foreground" data-testid="branch-actions-unavailable">
-                    Changes, preview, review, publishing, and agent editing become available after branch materialization.
-                  </p>
-                )}
-              </CardContent>
-            </Card>
-          )}
           {pullRequestId && prStatus === "open" && (
             prHealth ? (
               <PRHealthBanner
@@ -6508,6 +6688,183 @@ export function SessionDetailContent({ id }: { id: string }) {
               </CardContent>
             </Card>
           )}
+          <PullRequestList
+            changesets={changesets}
+            selectedID={selectedChangeset?.id ?? ""}
+            onSelect={(changesetID) => {
+              if (localPRActionError?.changesetID && localPRActionError.changesetID !== changesetID) {
+                setLocalPRActionError(null);
+              }
+              setSelectedChangesetID(changesetID);
+              void setChangesetParam(changesetID);
+            }}
+          />
+          {hasMultipleChangesets && (
+            <Card className="border-border/60" data-testid="stack-health">
+              <CardContent className="flex items-center justify-between gap-3 p-4">
+                <div>
+                  <div className="text-sm font-medium">Stack health</div>
+                  <p className="text-xs text-muted-foreground">{(session.changeset_stack_state ?? "coherent").replaceAll("-", " ")}</p>
+                </div>
+                {selectedChangeset && changesets.some((item) => item.status === "needs_restack") && (
+                  <Button size="sm" variant="outline" disabled={changesetLifecycleMutation.isPending} onClick={() => changesetLifecycleMutation.mutate(() => api.sessions.restackChangesetDescendants(id, selectedChangeset.id))}>
+                    Restack descendants
+                  </Button>
+                )}
+              </CardContent>
+            </Card>
+          )}
+          {selectedIsPrimary && canManageSession && canUseNativeReviewLoop && !hasPR && !selectedPublicationOwnsActions && hasSessionChanges ? (
+            reviewLoopRunning ? (
+              <Card className="border-border/60">
+                <CardContent className="p-4">
+                  <div className="flex min-w-0 items-start gap-2">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-foreground">
+                        Fixing with {AGENTS_BY_KEY[latestReviewLoop?.agent_type ?? ""]?.label ?? "review agent"}
+                      </p>
+                      <p className="text-xs leading-relaxed text-muted-foreground">
+                        The review loop is checking the changes and applying fixes.
+                      </p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            ) : (
+              <AgentActionCard
+                icon={<ScanSearch className="h-4 w-4" />}
+                title="Review before creating a PR?"
+                description="Ask a review agent to check the current diff and apply fixes."
+                action={(
+                  <DisabledTooltip disabled={reviewActionDisabled} content={reviewActionDisabledReason}>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={reviewActionDisabled}
+                      title={reviewActionDisabledReason}
+                      onClick={() => setReviewConfigOpen(true)}
+                    >
+                      Review &amp; fix
+                    </Button>
+                  </DisabledTooltip>
+                )}
+              />
+            )
+          ) : null}
+          <ChangesetSplitPrompt
+            additions={session.diff_stats?.added}
+            onRequestSplit={() => queueSend({
+              overrideMessage: "Split the current diff into smaller, independently reviewable pull requests. Before making changes, run `143-tools changesets list`, `143-tools changesets current`, and `143-tools changesets status` so the platform changeset state is authoritative. Then use the changeset tools to create and materialize the split; do not create worktrees manually. Keep each pull request cohesive, account for every changed file, and verify the completed split with the changeset tools.",
+            })}
+            requestSplitPending={sendMutation.isPending || !composerCanSendMessage}
+          />
+          {(hasMultipleChangesets || selectedChangesetRecoveryMessage) && selectedChangeset && (
+            <Card className="border-border/60" data-testid="selected-pull-request-panel">
+              <CardContent className="space-y-1 p-4">
+                <div className="text-sm font-medium">{selectedChangeset.title}</div>
+                {selectedChangeset.summary && <p className="text-xs text-muted-foreground">{selectedChangeset.summary}</p>}
+                <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 pt-1 text-xs">
+                  <dt className="text-muted-foreground">Base</dt><dd className="truncate">{selectedChangeset.base_branch}</dd>
+                  <dt className="text-muted-foreground">Head</dt><dd className="truncate">{selectedChangeset.working_branch ?? "Not materialized"}</dd>
+                  <dt className="text-muted-foreground">Target</dt><dd className="truncate">{selectedChangeset.target_branch}</dd>
+                  <dt className="text-muted-foreground">State</dt><dd>{selectedChangeset.pull_request?.status ?? selectedChangeset.status.replaceAll("_", " ")}</dd>
+                  {selectedChangeset.pull_request?.ci_status && <><dt className="text-muted-foreground">CI</dt><dd>{selectedChangeset.pull_request.ci_status}</dd></>}
+                  {selectedChangeset.pull_request?.review_status && <><dt className="text-muted-foreground">Review</dt><dd>{selectedChangeset.pull_request.review_status.replaceAll("_", " ")}</dd></>}
+                </dl>
+                {selectedChangeset.restack_delta_kind ? (
+                  <Card className="bg-muted/40">
+                    <CardContent className="p-3 text-xs">
+                    <p className="font-medium text-foreground">
+                      Restack delta: {selectedChangeset.restack_delta_kind.replaceAll("_", " ")}
+                    </p>
+                    {selectedChangeset.restack_delta_summary ? (
+                      <p className="mt-1 text-muted-foreground">{selectedChangeset.restack_delta_summary}</p>
+                    ) : null}
+                    {selectedChangeset.restack_confirmation_required ? (
+                      <Button className="mt-2" size="sm" variant="outline" disabled={changesetLifecycleMutation.isPending} onClick={() => changesetLifecycleMutation.mutate(() => api.sessions.confirmChangesetRestack(id, selectedChangeset.id))}>
+                        Confirm restack delta
+                      </Button>
+                    ) : null}
+                    </CardContent>
+                  </Card>
+                ) : null}
+                <div className="flex flex-wrap gap-2 pt-2">
+                {!selectedChangeset.pull_request && !selectedPublicationOwnsActions && (
+                  <DisabledTooltip
+                    disabled={!selectedChangeset.worktree_path || !!selectedChangesetActionBlocker || publishChangesetMutation.isPending}
+                    content={selectedChangesetActionBlocker || (!selectedChangeset.worktree_path ? "Create PR becomes available after branch materialization" : "Publishing pull request…")}
+                  >
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={!selectedChangeset.worktree_path || !!selectedChangesetActionBlocker || publishChangesetMutation.isPending}
+                      title={selectedChangesetActionBlocker || (!selectedChangeset.worktree_path ? "Create PR becomes available after branch materialization" : publishChangesetMutation.isPending ? "Publishing pull request…" : undefined)}
+                      onClick={() => publishChangesetMutation.mutate(selectedChangeset)}
+                    >
+                      <GitPullRequest className="h-3.5 w-3.5" />
+                      Create PR
+                    </Button>
+                  </DisabledTooltip>
+                )}
+                <Button type="button" size="sm" variant="outline" disabled={!selectedChangeset.worktree_path} onClick={() => {
+                  if (selectedChangesetRecoveryMessage) {
+                    requestSelectedChangesetRecovery();
+                  } else {
+                    setComposerChangesetID(selectedChangeset.id);
+                    focusComposerFromKeyboard();
+                  }
+                }}>
+                  {blockingChangesetStatus === "restack_conflict"
+                    ? "Resolve with agent"
+                    : blockingChangesetStatus === "external_update_detected"
+                      ? "Reconcile with agent"
+                      : "Ask agent"}
+                </Button>
+                {hasMultipleChangesets && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={changesetLifecycleMutation.isPending || publishStackMutation.isPending}
+                    onClick={() => publishStackMutation.mutate()}
+                  >
+                    Publish stack
+                  </Button>
+                )}
+                </div>
+                {!selectedChangeset.is_primary && !selectedChangeset.worktree_path && (
+                  <p className="pt-2 text-xs text-muted-foreground" data-testid="branch-actions-unavailable">
+                    Changes, preview, review, publishing, and agent editing become available after branch materialization.
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          )}
+          {selectedPublication ? (
+            <PublicationWorkflowCard
+              publication={selectedPublication}
+              reviewLoop={publicationReviewLoop}
+              pullRequest={selectedPR}
+              canManage={canManageSession}
+              canBypassReview={user?.role === "admin" || user?.role === "member"}
+              executionPaused={publicationExecutionIsPaused(selectedPublication, session.publication_policy)}
+              reviewExecutionPaused={
+                selectedPublication.review_gate_state === "pending" &&
+                session.publication_policy?.review_execution_enabled === false
+              }
+              actionPending={createPRMutation.isPending}
+              onCreateDraft={() => createPRMutation.mutate({ draft: true })}
+              onOpenReview={() => {
+                if (publicationReviewLoop?.thread_id) setActiveThreadId(publicationReviewLoop.thread_id);
+              }}
+              onContinue={focusComposerFromKeyboard}
+              onRetry={() => createPRMutation.mutate(undefined)}
+            />
+          ) : null}
           <OverviewTab session={session} activeThread={activeThread} members={members} prStatus={prStatus} />
         </div>
       </TabsContent>

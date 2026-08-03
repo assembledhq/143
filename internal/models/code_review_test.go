@@ -378,26 +378,6 @@ func TestResolveCodeReviewPolicyConfigNormalizesPromptFields(t *testing.T) {
 	}
 }
 
-func TestCodeReviewPolicyTemplates(t *testing.T) {
-	t.Parallel()
-
-	templates := CodeReviewPolicyTemplates()
-
-	require.Len(t, templates, 5, "starter templates should cover the product design templates")
-	for _, template := range templates {
-		t.Run(string(template.Key), func(t *testing.T) {
-			t.Parallel()
-
-			require.NotEmpty(t, template.Title, "template should have a display title")
-			require.Equal(t, CodeReviewApprovalModeApproveAcceptable, template.Config.ApprovalMode, "starter templates should be editable approval policies")
-			require.Contains(t, template.Config.AutomatedApprovalPolicy, "Unresolved human review threads must not count against approval.", "starter templates should require an independent decision")
-			require.NotContains(t, template.Config.RiskPolicy.BlockedPathPatterns, "**/*auth*", "starter templates should not block incidental auth substrings")
-			require.NotContains(t, template.Config.RiskPolicy.BlockedPathPatterns, "**/*billing*", "starter templates should not block incidental billing substrings")
-			require.NoError(t, template.Config.Validate(), "template config should be valid")
-		})
-	}
-}
-
 func TestEvaluateCodeReviewRisk(t *testing.T) {
 	t.Parallel()
 

@@ -1,7 +1,7 @@
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { act } from "react";
 import { delay, http, HttpResponse } from "msw";
-import { createTestQueryClient, fireEvent, renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
+import { createTestQueryClient, fireEvent, renderWithProviders as renderWithBaseProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import { queryKeys } from "@/lib/query-keys";
 
@@ -17,6 +17,13 @@ const sse = vi.hoisted(() => ({
 vi.mock("@/lib/notify", () => ({ notify: toast }));
 
 import CodeReviewsPage from "./page";
+
+function renderWithProviders(
+  ui: Parameters<typeof renderWithBaseProviders>[0],
+  options?: Parameters<typeof renderWithBaseProviders>[1],
+) {
+  return renderWithBaseProviders(ui, { nuqsHasMemory: true, ...options });
+}
 
 // jsdom has no EventSource; stub the SSE hook so the live-refresh subscription
 // is a no-op in tests (the list refreshes via React Query as usual). Mirrors
@@ -41,7 +48,6 @@ import type {
   CodeReviewPolicyRecord,
   CodeReviewResolvedPolicy,
   CodeReviewStats,
-  CodeReviewTemplateOption,
   CodeReviewPromptExamplesResponse,
   GitHubRepositoryClaimCandidate,
   AuditLog,
@@ -264,20 +270,6 @@ const reviewAnalytics: CodeReviewAnalytics = {
   ],
 };
 
-const template: CodeReviewTemplateOption = {
-  key: "small_backend_change",
-  title: "Small backend change",
-  description: "Small backend changes outside sensitive packages.",
-  config: {
-    ...policy.config,
-    approval_mode: "approve_acceptable",
-    risk_policy: {
-      ...policy.config.risk_policy,
-      max_files_changed: 4,
-    },
-  },
-};
-
 const githubTriggerReady: CodeReviewGitHubTriggerResponse = {
   status: "ready",
   repository_id: "repo-1",
@@ -370,12 +362,6 @@ function mockCodeReviewBaseHandlers(
         data: evidence,
       } satisfies SingleResponse<CodeReviewEvidence>),
     ),
-    http.get("/api/v1/code-reviews/templates", () =>
-      HttpResponse.json({
-        data: [template],
-        meta: {},
-      } satisfies ListResponse<CodeReviewTemplateOption>),
-    ),
     http.get("/api/v1/code-reviews/prompt-examples", () =>
       HttpResponse.json({ data: {
         review_instructions: [{ key: "balanced", title: "Balanced review", description: "Balanced", instructions: "Balanced instructions" }],
@@ -462,7 +448,6 @@ it("applies an approval example without changing safeguards and does not grant a
 describe("CodeReviewsPage", () => {
   beforeEach(() => {
     toast.success.mockReset();
-    toast.info.mockReset();
     toast.error.mockReset();
     sse.onEvent = undefined;
   });
@@ -662,18 +647,6 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByRole("combobox", { name: "Reviewer 2 reasoning level" })).toHaveTextContent("High");
     expect(screen.getByRole("combobox", { name: "Orchestrator reasoning level" })).toHaveTextContent("High");
 
-    // Autosave: applying a template persists without a Save button.
-    await user.click(screen.getByRole("combobox", { name: /Advanced policy preset/i }));
-    await user.click(await screen.findByRole("option", { name: "Small backend change" }));
-    await user.click(screen.getByRole("button", { name: /Apply preset/i }));
-    await waitFor(() => {
-      expect(toast.success).toHaveBeenCalledWith("Applied Small backend change");
-    });
-    await user.click(screen.getByRole("button", { name: /Approval criteria/i }));
-    expect((await screen.findAllByDisplayValue("4")).length).toBeGreaterThan(0);
-    expect(screen.getByLabelText("Timeout value")).toHaveValue(30);
-    expect(screen.getByRole("combobox", { name: "Timeout unit" })).toHaveTextContent("Minutes");
-
     await user.click(screen.getByRole("button", { name: /Add requirement/i }));
     expect(await screen.findByDisplayValue("Custom requirement")).toBeInTheDocument();
   }, 30_000);
@@ -785,6 +758,59 @@ describe("CodeReviewsPage", () => {
 
     expect(await screen.findByRole("tab", { name: "Analytics" })).toHaveAttribute("data-state", "active");
     expect(await screen.findByText("Usage by PR author")).toBeInTheDocument();
+  });
+
+  it("writes tab navigation to the URL without dropping filters", async () => {
+    const user = userEvent.setup();
+    const onUrlUpdate = vi.fn();
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews/analytics", () =>
+        HttpResponse.json({ data: reviewAnalytics } satisfies SingleResponse<CodeReviewAnalytics>)),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, {
+      searchParams: {
+        repository: repo.id,
+        range: "7d",
+        outcome: "blocked",
+      },
+      nuqsHasMemory: true,
+      nuqsOnUrlUpdate: onUrlUpdate,
+    });
+
+    await user.click(await screen.findByRole("tab", { name: "Analytics" }));
+    await waitFor(() => {
+      const update = onUrlUpdate.mock.calls.at(-1)?.[0];
+      expect(update?.searchParams.get("tab")).toBe("analytics");
+      expect(update?.searchParams.get("repository")).toBe(repo.id);
+      expect(update?.searchParams.get("range")).toBe("7d");
+      expect(update?.searchParams.get("outcome")).toBe("blocked");
+      expect(update?.options.history).toBe("push");
+    });
+
+    const updatesBeforeDrilldown = onUrlUpdate.mock.calls.length;
+    const drilldown = await screen.findByRole("link", { name: "12 reviewed PRs by anya" });
+    drilldown.addEventListener("click", (event) => event.preventDefault(), { capture: true, once: true });
+    await user.click(drilldown);
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 25));
+    });
+    expect(
+      onUrlUpdate.mock.calls
+        .slice(updatesBeforeDrilldown)
+        .every(([update]) => update.searchParams.get("tab") === "analytics"),
+    ).toBe(true);
+
+    await user.click(screen.getByRole("tab", { name: "Policy" }));
+    await waitFor(() => {
+      const update = onUrlUpdate.mock.calls.at(-1)?.[0];
+      expect(update?.searchParams.get("tab")).toBe("policy");
+      expect(update?.searchParams.get("repository")).toBe(repo.id);
+      expect(update?.searchParams.get("range")).toBe("7d");
+      expect(update?.searchParams.get("outcome")).toBe("blocked");
+      expect(update?.options.history).toBe("push");
+    });
   });
 
   it("shows failed and stale attempts when no review completed", async () => {
@@ -1832,13 +1858,12 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByRole("button", { name: "Disable reviewer" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Safeguards" }));
-    expect(screen.getByText(/Applying a preset replaces safety controls/i)).toBeVisible();
+    expect(screen.queryByRole("combobox", { name: /Advanced policy preset/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Apply preset/i })).not.toBeInTheDocument();
     for (const section of ["Approval criteria", "Paths, authors & checks", "Reviewers & agents"]) {
       await user.click(screen.getByRole("button", { name: new RegExp(section, "i") }));
     }
     for (const label of [
-      "Advanced policy preset",
-      "Apply advanced policy preset",
       "Files changed",
       "Lines changed",
       "Inline comments",
@@ -2455,36 +2480,6 @@ describe("CodeReviewsPage", () => {
     expect(within(requiredChecksEditor as HTMLElement).getByText("test")).toBeInTheDocument();
 
     expect(screen.getByRole("button", { name: "Add required check" })).toBeInTheDocument();
-  });
-
-  it("surfaces template apply save failures through the shared toast", async () => {
-    const user = userEvent.setup();
-    mockCodeReviewBaseHandlers();
-    server.use(
-      http.put("/api/v1/code-review-policies", () =>
-        HttpResponse.json(
-          {
-            error: {
-              code: "SAVE_FAILED",
-              message: "Policy could not be saved",
-            },
-          },
-          { status: 500 },
-        ),
-      ),
-    );
-
-    renderWithProviders(<CodeReviewsPage />);
-
-    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("button", { name: "Safeguards" }));
-    await user.click(screen.getByRole("combobox", { name: /Advanced policy preset/i }));
-    await user.click(await screen.findByRole("option", { name: "Small backend change" }));
-    await user.click(screen.getByRole("button", { name: /Apply preset/i }));
-
-    await waitFor(() => {
-      expect(toast.error).toHaveBeenCalledWith("Couldn't save. Your change was reverted.");
-    });
   });
 
   it("saves code review timeout in seconds from the selected unit", async () => {

@@ -1,6 +1,6 @@
 # Design: Prompt-First Code Review Policy
 
-> **Status:** Implemented | **Last reviewed:** 2026-07-28
+> **Status:** Implemented | **Last reviewed:** 2026-08-02
 >
 > **Depends on:** [../overall.md](../overall.md), [112-code-reviewer-bot-auto-approval.md](112-code-reviewer-bot-auto-approval.md), [../03-frontend.md](../03-frontend.md)
 
@@ -27,7 +27,7 @@ The central mental model is:
 
 ### Problem
 
-The current policy screen exposes GitHub setup, outcome, whole-policy templates, numeric thresholds, quality gates, path and author lists, agent selection, and PR-description requirements in one continuous card. Even though fine-tuning groups are collapsible, the page suggests that a user must understand the full policy model before starting.
+The original policy screen exposed GitHub setup, outcome, numeric thresholds, quality gates, path and author lists, agent selection, and PR-description requirements in one continuous card. Even though fine-tuning groups were collapsible, the page suggested that a user had to understand the full policy model before starting.
 
 The only editable prompt is currently attached to each structured PR-description requirement. It appears near the bottom of the page, behind a requirements table and side sheet, and is visually much smaller than the automation goal editor. Engineers who expect to express behavior in a prompt cannot find a clear, general-purpose place to do that.
 
@@ -36,7 +36,7 @@ This creates four usability problems:
 - **High perceived setup cost:** a safe first review appears to require many decisions.
 - **Weak primary action:** the most familiar control for engineers is visually subordinate.
 - **Mixed concepts:** probabilistic reviewer guidance and deterministic approval gates appear equivalent.
-- **Surprising templates:** a starter template can replace the full policy rather than only the text the user is trying to edit.
+- **Unsafe shortcuts:** whole-policy starter templates could replace unrelated safeguards and agent configuration while a user was trying to establish a starting point.
 
 ### Goals
 
@@ -112,7 +112,7 @@ The Code reviews page retains the existing **Reviews** and **Policy** tabs. The 
 7. **Current behavior summary**
    - Short badges for outcome, reviewer count, quorum, and active safety gates.
 8. **Advanced controls**
-   - One collapsed container holding Safety gates; Paths, authors, and required checks; Review agents; Limits and timeout; Structured PR-description checks; and Advanced policy presets.
+   - One collapsed container holding Safety gates; Paths, authors, and required checks; Review agents; Limits and timeout; and Structured PR-description checks.
 
 The automated approval policy remains prominent whenever approval is enabled. Optional review instructions are available on the main screen but visually secondary. Structured description checks remain advanced because they answer a different question: whether required evidence exists in the PR description.
 
@@ -226,7 +226,7 @@ Initial automated-approval examples:
 
 Applying an automated-approval example does not silently grant approval authority. If the policy is comment-only, the example preview explains that the user must separately choose **Leave comments and approve when acceptable**. Even then, the deterministic evaluator permits approval only when every hard gate passes.
 
-Whole-policy starter templates remain available as **Advanced policy presets**. Their copy must explicitly say that applying one changes safety controls, thresholds, and agent settings. They should not share the same selector as prompt examples.
+Whole-policy starter templates are not offered. They made a full policy replacement look like a normal configuration path and could overwrite unrelated safeguards, prompts, thresholds, and agent settings. Prompt examples remain intentionally scoped to one text field.
 
 ### Interaction details
 
@@ -263,7 +263,7 @@ Whole-policy starter templates remain available as **Advanced policy presets**. 
 
 #### Setting information tooltips
 
-Every editable policy setting must include an adjacent information tooltip. This applies to the two prompt composers, enablement and outcome controls, thresholds, switches, path/author/check lists, reviewer and model selection, quorum, timeout, inline-comment limit, structured PR-description checks, inheritance/reset actions, and advanced policy presets.
+Every editable policy setting must include an adjacent information tooltip. This applies to the two prompt composers, enablement and outcome controls, thresholds, switches, path/author/check lists, reviewer and model selection, quorum, timeout, inline-comment limit, structured PR-description checks, and inheritance/reset actions.
 
 Each tooltip should answer, in concise plain language:
 
@@ -338,7 +338,6 @@ The API currently exposes:
 
 - `GET /api/v1/code-review-policies?repository_id=<uuid>`;
 - `PUT /api/v1/code-review-policies` with the complete config;
-- `GET /api/v1/code-reviews/templates` for whole-policy templates;
 - GitHub trigger status/setup/delete routes.
 
 Reviewer and orchestrator system prompts live in `internal/prompts/templates/` and are rendered through `internal/prompts/prompts.go`. The editable instructions must be included as data inside those platform-owned templates; user text must never become the system prompt itself.
@@ -452,7 +451,7 @@ type CodeReviewAutomatedApprovalExampleOption struct {
 }
 ```
 
-`CodeReviewPromptExamples()` and `CodeReviewAutomatedApprovalExamples()` return deterministic built-in lists. Examples contain no organization data and require no database persistence. The existing `CodeReviewTemplateOption` and whole-policy templates remain supported but are relabeled as advanced presets in the UI.
+`CodeReviewPromptExamples()` and `CodeReviewAutomatedApprovalExamples()` return deterministic built-in lists. Examples contain no organization data and require no database persistence. Whole-policy templates and their API are not supported; examples can replace only their corresponding prompt field.
 
 ### API changes
 
@@ -543,8 +542,6 @@ Response:
 
 No mutation endpoint is needed. Applying an example is a normal policy update, ensuring versioning and audit behavior remain unchanged.
 The two explicitly named collections prevent clients from applying an example to the wrong field.
-
-Keep `GET /api/v1/code-reviews/templates` for compatibility. A future versioned API may rename it to `/policy-presets`, but this project should avoid a breaking route change solely for UI terminology.
 
 #### Authorization, rate limits, and tenancy
 
@@ -809,9 +806,9 @@ Implementation items:
 3. Move thresholds, quality gates, paths/authors/checks, agent roster, limits, and description requirements into one collapsed **Advanced controls** container.
 4. Rename `Description requirements` to `Structured PR-description checks` and `Reviewer instruction` to `Description check instruction`.
 5. Collapse a ready GitHub trigger into a status row with Manage disclosure; retain full actionable error states.
-6. Keep the current whole-policy template selector inside Advanced controls and relabel it **Advanced policy preset** with explicit replacement copy.
+6. Keep the whole-policy template selector inside Advanced controls and relabel it **Advanced policy preset** with explicit replacement copy. The selector and its `GET /api/v1/code-reviews/templates` API were later removed outright, so advanced controls are now the only path for changing safeguards, thresholds, and agent settings.
 7. Keep the effective-policy summary visible and update its wording for the new control hierarchy.
-8. Add the shared `SettingInfoTooltip` and require tooltip content for every existing policy input, including prompt, outcome, GitHub setup, advanced, inheritance, and preset controls.
+8. Add the shared `SettingInfoTooltip` and require tooltip content for every existing policy input, including prompt, outcome, GitHub setup, advanced, and inheritance controls.
 9. Add focused frontend tests for information order, enablement/outcome mapping, tooltip presence/accessibility, collapsed advanced state, GitHub statuses, and existing autosave behavior.
 10. Run targeted Vitest and lint for touched files, then verify desktop/mobile states and tooltip interactions using a session preview.
 
@@ -861,7 +858,7 @@ Implementation items:
 1. Add separate typed example collections for review instructions and automated approval policies, served by `GET /api/v1/code-reviews/prompt-examples`.
 2. Add frontend types, query keys, API client, prompt-example preview dialog, and replacement confirmation.
 3. Ensure applying an example replaces only its corresponding prompt field and produces a normal policy version.
-4. Distinguish **Prompt examples** from **Advanced policy presets** in labels, descriptions, and confirmation copy.
+4. Make labels, descriptions, and confirmation copy explicit that a prompt example replaces only its corresponding text field.
 5. Add `Use organization instructions` for repository scope and a customized-control count derived from override fields.
 6. If supported by product/backend semantics, add a full repository-policy reset endpoint that transactionally deactivates the active repository override; otherwise document and defer it.
 7. Add structured API field-error details and use them to open/focus the relevant advanced subsection.
@@ -884,7 +881,7 @@ Exit criteria:
 - Review instructions are optional and empty by default; native `/review` is the recommended baseline.
 - Automated approval policy is the more prominent prompt because it governs the evidence used for the higher-consequence approval decision.
 - Both fields are stored in dedicated versioned columns and inherit independently.
-- Prompt examples and whole-policy presets are separate product concepts.
+- Prompt examples are scoped helpers; whole-policy presets are intentionally not part of the product.
 - Both prompts are editable Markdown but have no template interpolation in this project.
 - The platform system prompt and deterministic evaluator remain authoritative.
 - `/review` remains the required first prefix for every reviewer-agent invocation and is never user-editable.

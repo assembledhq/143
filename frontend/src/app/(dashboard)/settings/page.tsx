@@ -35,6 +35,18 @@ const PR_AUTHORSHIP_OPTIONS = [
 ] as const;
 
 type RepairAutomationKey = "resolve_conflicts_when_idle" | "fix_tests_when_idle";
+type PublicationAutomationKey = "create_pr_when_agent_ready" | "review_before_pr";
+
+const PUBLICATION_AUTOMATION_COPY: Record<PublicationAutomationKey, { title: string; description: string }> = {
+  create_pr_when_agent_ready: {
+    title: "Create a PR when the coding agent is ready",
+    description: "Let eligible coding agents hand off verified changes for publication when their work is complete.",
+  },
+  review_before_pr: {
+    title: "Run a two-pass review/fix cycle before creating the PR",
+    description: "Review the current changes, apply fixes, and confirm the result before automatic publication. Clicking Create PR publishes directly.",
+  },
+};
 
 const REPAIR_AUTOMATION_COPY: Record<RepairAutomationKey, { title: string; description: string; confirm: string }> = {
   resolve_conflicts_when_idle: {
@@ -49,16 +61,10 @@ const REPAIR_AUTOMATION_COPY: Record<RepairAutomationKey, { title: string; descr
   },
 };
 
-function sessionAutomationPatch(
-  current: AutomaticFollowThroughOrgSettings,
-  patch: Partial<AutomaticFollowThroughOrgSettings>,
-): Partial<OrgSettings> {
+function sessionAutomationPatch(patch: Partial<AutomaticFollowThroughOrgSettings>): Partial<OrgSettings> {
   return {
     session_automation: {
-      automatic_follow_through: {
-        ...current,
-        ...patch,
-      },
+      automatic_follow_through: patch,
     },
   };
 }
@@ -97,7 +103,7 @@ function PRAuthorshipSettings() {
 
   const { save, status } = useOrgSettingsAutosave();
   const saveAutomaticFollowThrough = (patch: Partial<AutomaticFollowThroughOrgSettings>) => {
-    save({ settings: sessionAutomationPatch(automaticFollowThrough, patch) });
+    save({ settings: sessionAutomationPatch(patch) });
   };
   // Absent repair flags mean "on" for every org, so the effective value has to
   // come from the same default the switch renders; reading the raw field here
@@ -125,6 +131,31 @@ function PRAuthorshipSettings() {
       </div>
       <Card>
         <CardContent className="space-y-5">
+          <div className="space-y-4 pt-4">
+            <div className="space-y-1">
+              <h3 className="text-xs font-medium text-foreground">Agent PR handoff</h3>
+              <p className="text-xs text-muted-foreground">
+                Both policies are on for every organization unless an admin turns them off. Members can override them for their own sessions in Account Settings.
+              </p>
+            </div>
+            {(Object.keys(PUBLICATION_AUTOMATION_COPY) as PublicationAutomationKey[]).map((key) => {
+              const copy = PUBLICATION_AUTOMATION_COPY[key];
+              return (
+                <div key={key} className="flex items-start justify-between gap-4">
+                  <div className="space-y-1">
+                    <Label htmlFor={`session-automation-${key}`}>{copy.title}</Label>
+                    <p className="text-xs text-muted-foreground">{copy.description}</p>
+                  </div>
+                  <Switch
+                    id={`session-automation-${key}`}
+                    checked={automaticFollowThrough[key] ?? true}
+                    onCheckedChange={(checked) => saveAutomaticFollowThrough({ [key]: checked })}
+                    aria-label={copy.title}
+                  />
+                </div>
+              );
+            })}
+          </div>
           <div className="space-y-4 border-t border-border pt-4">
             <div className="space-y-1">
               <h3 className="text-xs font-medium text-foreground">Branch-writing repair</h3>

@@ -153,7 +153,7 @@ func TestSessionHandler_TriggerFix_RequiresRepository(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestSessionHandler_EndSession_AddsIssueSnapshotIDToJobPayload(t *testing.T) {
+func TestSessionHandler_EndSession_DoesNotReadPublicationSnapshot(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -164,7 +164,6 @@ func TestSessionHandler_EndSession_AddsIssueSnapshotIDToJobPayload(t *testing.T)
 	orgID := uuid.New()
 	sessionID := uuid.New()
 	issueID := uuid.New()
-	snapshotID := uuid.New()
 	handler := newSessionHandler(t, mock)
 	handler.SetIssueSnapshotStore(db.NewSessionTurnIssueSnapshotStore(mock))
 
@@ -214,24 +213,6 @@ func TestSessionHandler_EndSession_AddsIssueSnapshotIDToJobPayload(t *testing.T)
 				now,
 			),
 		)
-	mock.ExpectQuery("SELECT .+ FROM session_turn_issue_snapshots").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "org_id", "session_id", "turn_number", "linked_issues", "created_at"}).
-				AddRow(snapshotID, orgID, sessionID, 2, []byte(`[]`), now),
-		)
-	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO session_publish_state").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
-			snapshotKey:     "snapshots/test.tar",
-			prCreationState: "queued",
-		}))
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
-	mock.ExpectCommit()
-
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/end", nil)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", sessionID.String())
@@ -242,8 +223,8 @@ func TestSessionHandler_EndSession_AddsIssueSnapshotIDToJobPayload(t *testing.T)
 
 	handler.EndSession(w, req)
 
-	require.Equal(t, http.StatusOK, w.Code, "EndSession should succeed when snapshot lookup succeeds")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	require.Equal(t, http.StatusOK, w.Code, "EndSession should succeed without treating the latest issue snapshot as publication intent")
+	require.NoError(t, mock.ExpectationsWereMet(), "ending the session should not query issue snapshots or enqueue publication")
 }
 
 func TestSessionHandler_RetrySession_EnrichesLinks(t *testing.T) {

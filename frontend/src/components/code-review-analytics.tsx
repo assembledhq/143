@@ -119,7 +119,6 @@ function AuthorReviewCountLink({
   outcome,
   repository,
   range,
-  onNavigate,
 }: {
   author: string;
   count: number;
@@ -127,24 +126,12 @@ function AuthorReviewCountLink({
   outcome?: "automatically_approved" | "completed_not_approved";
   repository?: string;
   range: string;
-  onNavigate: () => void;
 }) {
   return (
     <Link
       href={authorReviewsHref({ author, outcome, repository, range })}
       className="font-medium text-primary underline-offset-4 hover:underline focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       aria-label={`${count.toLocaleString()} ${label} by ${author}`}
-      onClick={(event) => {
-        if (
-          event.button === 0
-          && !event.metaKey
-          && !event.ctrlKey
-          && !event.shiftKey
-          && !event.altKey
-        ) {
-          onNavigate();
-        }
-      }}
     >
       {count.toLocaleString()}
     </Link>
@@ -215,7 +202,6 @@ export function CodeReviewAnalyticsReport({
   authorSortOrder,
   onAuthorSort,
   reviewLinkFilters,
-  onNavigateToReviews,
   filters,
 }: {
   analytics?: CodeReviewAnalytics;
@@ -229,7 +215,6 @@ export function CodeReviewAnalyticsReport({
     repository?: string;
     range: string;
   };
-  onNavigateToReviews: () => void;
   filters: ReactNode;
 }) {
   if (!analytics && isLoading) {
@@ -301,22 +286,6 @@ export function CodeReviewAnalyticsReport({
       {filters}
 
       <SectionGroup
-        title="Approval by round"
-        description="Each PR appears once, based on the first distinct completed head that received a posted 143 approval."
-      >
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5" aria-label="Approval by round">
-          {analytics.approval_rounds.map((bucket) => (
-            <MetricCard
-              key={bucket.bucket}
-              label={APPROVAL_ROUND_LABELS[bucket.bucket]}
-              value={bucket.prs.toLocaleString()}
-              context={`${percentage(bucket.prs, summary.prs_reviewed)} of PRs reviewed`}
-            />
-          ))}
-        </div>
-      </SectionGroup>
-
-      <SectionGroup
         title="Usage by PR author"
         description="Unique PR outcomes grouped by the author captured from the first available assessment."
       >
@@ -365,7 +334,6 @@ export function CodeReviewAnalyticsReport({
                         label="reviewed PRs"
                         repository={reviewLinkFilters.repository}
                         range={reviewLinkFilters.range}
-                        onNavigate={onNavigateToReviews}
                       />
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
@@ -376,7 +344,6 @@ export function CodeReviewAnalyticsReport({
                         outcome="automatically_approved"
                         repository={reviewLinkFilters.repository}
                         range={reviewLinkFilters.range}
-                        onNavigate={onNavigateToReviews}
                       />
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
@@ -387,7 +354,6 @@ export function CodeReviewAnalyticsReport({
                         outcome="completed_not_approved"
                         repository={reviewLinkFilters.repository}
                         range={reviewLinkFilters.range}
-                        onNavigate={onNavigateToReviews}
                       />
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
@@ -457,6 +423,22 @@ export function CodeReviewAnalyticsReport({
           </p>
           </>
         )}
+      </SectionGroup>
+
+      <SectionGroup
+        title="Approval by round"
+        description="Each PR appears once, based on the first distinct completed head that received a posted 143 approval."
+      >
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5" aria-label="Approval by round">
+          {analytics.approval_rounds.map((bucket) => (
+            <MetricCard
+              key={bucket.bucket}
+              label={APPROVAL_ROUND_LABELS[bucket.bucket]}
+              value={bucket.prs.toLocaleString()}
+              context={`${percentage(bucket.prs, summary.prs_reviewed)} of PRs reviewed`}
+            />
+          ))}
+        </div>
       </SectionGroup>
 
       <div className="grid gap-6 xl:grid-cols-2">

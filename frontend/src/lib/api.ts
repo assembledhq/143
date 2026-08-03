@@ -341,7 +341,6 @@ export const api = {
       const qs = searchParams.toString();
       return get<import('./types').SingleResponse<import('./types').CodeReviewAnalytics>>(`/api/v1/code-reviews/analytics${qs ? `?${qs}` : ''}`);
     },
-    templates: () => get<import('./types').ListResponse<import('./types').CodeReviewTemplateOption>>('/api/v1/code-reviews/templates'),
     promptExamples: () => get<import('./types').SingleResponse<import('./types').CodeReviewPromptExamplesResponse>>('/api/v1/code-reviews/prompt-examples'),
     policyEvent: (body: import('./types').CodeReviewPolicyAnalyticsEvent) => post<void>('/api/v1/code-reviews/policy-events', body),
     evidence: (sessionId: string) =>
@@ -587,7 +586,16 @@ export const api = {
     publishChangeset: (sessionId: string, changesetId: string) =>
       post<{ status: string; job_id?: string }>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/publish`),
     publishChangesetStack: (sessionId: string) =>
-      post<{ status: string; job_id: string }>(`/api/v1/sessions/${sessionId}/changesets/publish-stack`),
+      post<{
+        status: string;
+        publications: Array<{
+          changeset_id: string;
+          status: string;
+          publication_id?: string | null;
+          error_code?: string;
+          reason?: string | null;
+        }>;
+      }>(`/api/v1/sessions/${sessionId}/changesets/publish-stack`),
     restackChangesetDescendants: (sessionId: string, changesetId: string) =>
       post<{ status: string; job_id: string }>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/restack-descendants`),
     confirmChangesetRestack: (sessionId: string, changesetId: string) =>

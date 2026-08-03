@@ -4562,6 +4562,54 @@ func TestPreviewStore_DeleteDependencyCacheIfBlobKeyGuardsOnBlobKey(t *testing.T
 	require.NoError(t, mock.ExpectationsWereMet(), "guarded delete must scope on blob_key so a stale restore cannot wipe a freshly published entry")
 }
 
+func TestPreviewStore_RecordDependencyCacheRestoreScopesByOrg(t *testing.T) {
+	t.Parallel()
+
+	orgID, cacheID := uuid.New(), uuid.New()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+	mock.ExpectExec("UPDATE preview_dependency_cache").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = NewPreviewStore(mock).RecordDependencyCacheRestore(context.Background(), orgID, cacheID, 1250*time.Millisecond, true)
+	require.NoError(t, err, "RecordDependencyCacheRestore should persist a successful attempt")
+	require.NoError(t, mock.ExpectationsWereMet(), "restore telemetry query should include all scoped arguments")
+}
+
+func TestPreviewStore_RecordDependencyCacheProducerBenefitScopesByOrg(t *testing.T) {
+	t.Parallel()
+
+	orgID, cacheID := uuid.New(), uuid.New()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+	mock.ExpectExec("UPDATE preview_dependency_cache").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = NewPreviewStore(mock).RecordDependencyCacheProducerBenefit(context.Background(), orgID, cacheID, 750*time.Millisecond)
+	require.NoError(t, err, "RecordDependencyCacheProducerBenefit should persist one org-scoped marginal-benefit sample")
+	require.NoError(t, mock.ExpectationsWereMet(), "producer benefit telemetry query should include the cache and org identifiers")
+}
+
+func TestPreviewStore_RecordDependencyCacheProducerBaselineScopesByOrg(t *testing.T) {
+	t.Parallel()
+
+	orgID, cacheID := uuid.New(), uuid.New()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+	mock.ExpectExec("UPDATE preview_dependency_cache").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = NewPreviewStore(mock).RecordDependencyCacheProducerBaseline(context.Background(), orgID, cacheID, 2*time.Second)
+	require.NoError(t, err, "RecordDependencyCacheProducerBaseline should fill an unknown cold baseline for the org-scoped cache")
+	require.NoError(t, mock.ExpectationsWereMet(), "producer baseline query should include the cache and org identifiers")
+}
+
 func TestPreviewStore_RepositoryPreviewReadyExcludesLatestBrokenAttempt(t *testing.T) {
 	t.Parallel()
 

@@ -1032,23 +1032,6 @@ type CodeReviewEvidence struct {
 	PromptArtifacts []CodeReviewPromptArtifact `json:"prompt_artifacts,omitempty"`
 }
 
-type CodeReviewTemplate string
-
-const (
-	CodeReviewTemplateDocsOnly      CodeReviewTemplate = "docs_and_comments_only"
-	CodeReviewTemplateTestsOnly     CodeReviewTemplate = "tests_only"
-	CodeReviewTemplateSmallFrontend CodeReviewTemplate = "small_frontend_change"
-	CodeReviewTemplateSmallBackend  CodeReviewTemplate = "small_backend_change"
-	CodeReviewTemplateSmallCombined CodeReviewTemplate = "small_combined_feature"
-)
-
-type CodeReviewTemplateOption struct {
-	Key         CodeReviewTemplate     `json:"key"`
-	Title       string                 `json:"title"`
-	Description string                 `json:"description"`
-	Config      CodeReviewPolicyConfig `json:"config"`
-}
-
 type CodeReviewPromptExample string
 
 const (
@@ -1098,89 +1081,6 @@ func CodeReviewAutomatedApprovalExamples() []CodeReviewAutomatedApprovalExampleO
 		{Key: CodeReviewAutomatedApprovalExampleDocumentation, Title: "Documentation-only approval", Description: "Approve clear documentation changes while escalating executable or generated changes.", Policy: "Automatically approve clear, accurate documentation-only changes when they match the implementation and contain no executable, configuration, generated, or security-sensitive changes.\n\nRequire human review whenever the change affects runtime behavior, configuration, generated files, permissions, secrets, or the intended documentation behavior is ambiguous." + codeReviewIndependentApprovalPolicy},
 		{Key: CodeReviewAutomatedApprovalExampleSmallRoutine, Title: "Small routine changes", Description: "Approve narrow changes that follow established patterns with proportionate tests.", Policy: "Automatically approve small, narrowly scoped changes that follow established repository patterns, have no blocking findings, and include test evidence proportionate to their risk.\n\nRequire human review for architectural changes, sensitive areas, unclear intent, reviewer disagreement, weak evidence, or any change whose impact cannot be evaluated confidently." + codeReviewIndependentApprovalPolicy},
 	}
-}
-
-func CodeReviewPolicyTemplates() []CodeReviewTemplateOption {
-	base := DefaultCodeReviewPolicyConfig()
-	return []CodeReviewTemplateOption{
-		{
-			Key:         CodeReviewTemplateDocsOnly,
-			Title:       "Docs and comments only",
-			Description: "Approve only documentation/comment-only changes with passing checks.",
-			Config: templatePolicy(base, templatePolicyOptions{
-				maxFiles: 8,
-				maxLines: 400,
-				allowedPaths: []string{
-					"docs/**", "**/*.md", "**/*.mdx", "**/*.txt", "**/*.rst", "**/*.adoc", "**/README*", "**/CHANGELOG*",
-				},
-				blockedPaths: []string{".github/**", "deploy/**", "infra/**", "**/.env*", "**/secrets/**"},
-			}),
-		},
-		{
-			Key:         CodeReviewTemplateTestsOnly,
-			Title:       "Tests only",
-			Description: "Approve isolated test and fixture changes with conservative churn limits.",
-			Config: templatePolicy(base, templatePolicyOptions{
-				maxFiles: 10,
-				maxLines: 500,
-				allowedPaths: []string{
-					"tests/**", "test/**", "**/__tests__/**", "**/*_test.go", "**/*.test.ts", "**/*.test.tsx",
-					"**/*.spec.ts", "**/*.spec.tsx", "fixtures/**", "**/fixtures/**", "testdata/**", "**/testdata/**",
-				},
-				blockedPaths: []string{"**/__snapshots__/**", "**/*.snap", "**/*.golden", "**/golden/**"},
-			}),
-		},
-		{
-			Key:         CodeReviewTemplateSmallFrontend,
-			Title:       "Small frontend change",
-			Description: "Approve small UI changes with screenshot or preview evidence.",
-			Config: templatePolicy(base, templatePolicyOptions{
-				maxFiles: 5,
-				maxLines: 250,
-				blockedPaths: []string{
-					"**/auth/**", "**/billing/**", "**/api/**", "**/queries/**",
-					"**/services/**", "**/data/**", "migrations/**",
-				},
-			}),
-		},
-		{
-			Key:         CodeReviewTemplateSmallBackend,
-			Title:       "Small backend change",
-			Description: "Approve small backend changes outside sensitive packages with test evidence.",
-			Config: templatePolicy(base, templatePolicyOptions{
-				maxFiles:     4,
-				maxLines:     200,
-				blockedPaths: []string{"migrations/**", "**/schema/**", "**/auth/**", "**/billing/**", ".github/**"},
-			}),
-		},
-		{
-			Key:         CodeReviewTemplateSmallCombined,
-			Title:       "Small combined feature",
-			Description: "Approve tightly scoped frontend/backend changes with evidence and passing checks.",
-			Config: templatePolicy(base, templatePolicyOptions{
-				maxFiles:     6,
-				maxLines:     250,
-				blockedPaths: []string{"migrations/**", "**/schema/**", "**/auth/**", "**/billing/**", ".github/**", "deploy/**"},
-			}),
-		},
-	}
-}
-
-type templatePolicyOptions struct {
-	maxFiles     int
-	maxLines     int
-	allowedPaths []string
-	blockedPaths []string
-}
-
-func templatePolicy(base CodeReviewPolicyConfig, opts templatePolicyOptions) CodeReviewPolicyConfig {
-	cfg := base
-	cfg.ApprovalMode = CodeReviewApprovalModeApproveAcceptable
-	cfg.RiskPolicy.MaxFilesChanged = opts.maxFiles
-	cfg.RiskPolicy.MaxLinesChanged = opts.maxLines
-	cfg.RiskPolicy.AllowedPathPatterns = opts.allowedPaths
-	cfg.RiskPolicy.BlockedPathPatterns = opts.blockedPaths
-	return cfg
 }
 
 type CodeReviewRiskInput struct {

@@ -9,7 +9,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/auth"
@@ -21,16 +20,15 @@ import (
 // InternalPullRequestHandler handles PR creation requests from sandbox agents
 // via internal API tokens.
 type InternalPullRequestHandler struct {
-	sessionStore       *db.SessionStore
-	pullRequestStore   *db.PullRequestStore
-	changesetStore     *db.SessionChangesetStore
-	jobStore           *db.JobStore
-	signingSecret      string
-	logger             zerolog.Logger
-	coordinator        publicationintent.PublicationIntentCoordinator
-	coordinatorEnabled bool
-	threadStore        *db.SessionThreadStore
-	audit              *db.AuditEmitter
+	sessionStore     *db.SessionStore
+	pullRequestStore *db.PullRequestStore
+	changesetStore   *db.SessionChangesetStore
+	jobStore         *db.JobStore
+	signingSecret    string
+	logger           zerolog.Logger
+	coordinator      publicationintent.PublicationIntentCoordinator
+	threadStore      *db.SessionThreadStore
+	audit            *db.AuditEmitter
 }
 
 func (h *InternalPullRequestHandler) SetAuditEmitter(audit *db.AuditEmitter) {
@@ -41,12 +39,13 @@ func (h *InternalPullRequestHandler) SetThreadStore(store *db.SessionThreadStore
 	h.threadStore = store
 }
 
+// SetPublicationIntentCoordinator takes no enable flag: the coordinator is the
+// permanent contract boundary for this handler, and execution kill switches are
+// resolved inside it.
 func (h *InternalPullRequestHandler) SetPublicationIntentCoordinator(
 	coordinator publicationintent.PublicationIntentCoordinator,
-	enabled bool,
 ) {
 	h.coordinator = coordinator
-	h.coordinatorEnabled = enabled
 }
 
 func (h *InternalPullRequestHandler) SetChangesetStore(store *db.SessionChangesetStore) {
@@ -178,90 +177,11 @@ func (h *InternalPullRequestHandler) Create(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, http.StatusForbidden, "REPO_MISMATCH", "token is not authorized for this session repository")
 		return
 	}
-	// The coordinator resolves the primary changeset, replay state, and review
-	// gating itself. Legacy PR creation state is not authoritative for it, so
-	// hand off before spending a query on state this path will not read.
-	if h.coordinatorEnabled {
-		h.createWithCoordinator(w, r, claims.OrgID, sessionID, req)
-		return
-	}
-
-	changesetID := sessionID
-	if h.changesetStore != nil {
-		primary, primaryErr := h.changesetStore.GetPrimary(r.Context(), claims.OrgID, sessionID)
-		if primaryErr != nil {
-			writeError(w, r, http.StatusInternalServerError, "PRIMARY_CHANGESET_FAILED", "failed to resolve the primary pull request target", primaryErr)
-			return
-		}
-		changesetID = primary.ID
-		session.PRCreationState = primary.PRCreationState
-		session.PRCreationError = primary.PRCreationError
-	}
-
-	switch session.PRCreationState {
-	case models.PRCreationStateQueued, models.PRCreationStatePushing:
-		writeError(w, r, http.StatusConflict, "PR_IN_FLIGHT", "PR creation already in progress")
-		return
-	case models.PRCreationStateSucceeded:
-		writeError(w, r, http.StatusConflict, "PR_ALREADY_CREATED", "PR creation already completed for this session")
-		return
-	}
-
-	// Catch cases where PRCreationState is stale but a PR record already exists
-	// (e.g. state-sync bug). The job-store dedupe key is the authoritative guard
-	// against duplicate jobs; this check produces a clearer 409 error for clients.
-	_, prErr := h.pullRequestStore.GetPrimaryBySessionID(r.Context(), claims.OrgID, sessionID)
-	if prErr == nil {
-		writeError(w, r, http.StatusConflict, "PR_EXISTS", "a pull request already exists for this session")
-		return
-	}
-	if !errors.Is(prErr, pgx.ErrNoRows) {
-		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to check for existing PR", prErr)
-		return
-	}
-	if h.changesetStore == nil {
-		err = h.sessionStore.UpdatePRCreationState(r.Context(), claims.OrgID, sessionID, models.PRCreationStateQueued, "")
-		if err != nil {
-			writeError(w, r, http.StatusInternalServerError, "PR_STATE_FAILED", "failed to reserve pull request creation", err)
-			return
-		}
-	}
-
-	payload := map[string]any{
-		"session_id":         sessionID.String(),
-		"changeset_id":       changesetID.String(),
-		"org_id":             claims.OrgID.String(),
-		"publication_source": string(models.SessionPublicationSourceAgentTool),
-		"publication_queue":  string(models.SessionPublicationJobQueueAgent),
-	}
-	if req.Draft != nil {
-		payload["draft"] = *req.Draft
-	}
-	if req.AuthorMode != "" && req.AuthorMode != "auto" {
-		payload["author_mode"] = req.AuthorMode
-	}
-	if h.changesetStore != nil {
-		_, queued, queueErr := h.jobStore.QueueChangesetPRCreation(r.Context(), claims.OrgID, sessionID, changesetID, "agent", payload, 5)
-		if queueErr != nil {
-			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation job", queueErr)
-			return
-		}
-		if !queued {
-			writeError(w, r, http.StatusConflict, "PR_IN_FLIGHT", "PR creation already in progress")
-			return
-		}
-	} else {
-		dedupeKey := db.OpenPRDedupeKey(changesetID)
-		if _, err := h.jobStore.Enqueue(r.Context(), claims.OrgID, "agent", "open_pr", payload, 5, &dedupeKey); err != nil {
-			if stateErr := h.sessionStore.UpdatePRCreationState(r.Context(), claims.OrgID, sessionID, models.PRCreationStateFailed, "Could not queue pull request creation."); stateErr != nil {
-				h.logger.Warn().Err(stateErr).Str("session_id", sessionID.String()).Msg("failed to restore PR creation state after enqueue failure")
-			}
-			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation job", err)
-			return
-		}
-	}
-
-	writeJSON(w, http.StatusAccepted, internalCreatePullRequestResponse{Status: "queued", SessionID: sessionID.String()})
+	// The coordinator is now the permanent contract boundary. Execution kill
+	// switches are handled inside it and return a typed 202 result; falling back
+	// to the legacy queue here would revive retired 409/500 responses and could
+	// publish during an emergency stop.
+	h.createWithCoordinator(w, r, claims.OrgID, sessionID, req)
 }
 
 func (h *InternalPullRequestHandler) createWithCoordinator(
@@ -291,17 +211,19 @@ func (h *InternalPullRequestHandler) createWithCoordinator(
 		if errors.As(err, &intentErr) {
 			switch intentErr.Code {
 			case publicationintent.ErrorSessionNotEligible:
-				writeError(w, r, http.StatusConflict, string(intentErr.Code), "session is not eligible for publication", err)
+				writeErrorWithDetails(w, r, http.StatusConflict, string(intentErr.Code), "session is not eligible for publication", intentErr.Details, err)
 			case publicationintent.ErrorWorkspaceNotReady:
-				writeError(w, r, http.StatusConflict, string(intentErr.Code), "workspace is not ready for publication", err)
-			case publicationintent.ErrorPRInFlight:
-				writeError(w, r, http.StatusConflict, "PR_IN_FLIGHT", "PR creation already in progress", err)
+				writeErrorWithDetails(w, r, http.StatusConflict, string(intentErr.Code), "workspace is not ready for publication", intentErr.Details, err)
 			default:
 				writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "failed to record publication intent", err)
 			}
 			return
 		}
 		writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "failed to record publication intent", err)
+		return
+	}
+	if result == nil {
+		writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "publication coordinator returned no result")
 		return
 	}
 	response := internalCreatePullRequestResponse{

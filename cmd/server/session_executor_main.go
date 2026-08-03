@@ -318,6 +318,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 	if services.LinearAgentDeps != nil {
 		services.LinearAgentDeps.Stores = stores
 	}
+	wirePublicationReviewEvidenceRefresher(services, stores)
 
 	oldShutdown := shutdown
 	shutdown = func() {
