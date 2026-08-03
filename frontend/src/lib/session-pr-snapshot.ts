@@ -75,6 +75,10 @@ export function prErrorTitle(snapshotState: PRSnapshotState | null, errorCode?: 
   return "Couldn't create the PR";
 }
 
+// The API now sends product copy for typed publication rejections, but a
+// server still running the previous build sends the raw coordinator string.
+// Translating that string here keeps the notice readable across a rollout;
+// anything more specific is already user-facing and passes through untouched.
 export function formatPRCreationError(errorCode?: string, message?: string | null): string {
   const trimmedMessage = message?.trim();
   const useCoordinatorFallback = !trimmedMessage ||
@@ -91,7 +95,7 @@ export function formatPRCreationError(errorCode?: string, message?: string | nul
     return "Something went wrong while creating the pull request. Try again.";
   }
 
-  const sentenceCasedMessage = `${trimmedMessage.charAt(0).toLocaleUpperCase()}${trimmedMessage.slice(1)}`;
+  const sentenceCasedMessage = `${trimmedMessage.charAt(0).toUpperCase()}${trimmedMessage.slice(1)}`;
   return /[.!?]$/.test(sentenceCasedMessage)
     ? sentenceCasedMessage
     : `${sentenceCasedMessage}.`;
