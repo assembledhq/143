@@ -69,7 +69,7 @@ describe("TimeRangePicker", () => {
     await user.click(startButton as HTMLElement);
     const applyButton = screen.getByRole("button", { name: "Apply range" });
     expect(applyButton).toBeDisabled();
-    await user.hover(applyButton.parentElement as HTMLElement);
+    await user.hover(applyButton.closest('[data-slot="tooltip-trigger"]') as HTMLElement);
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
       "Select a start and end date to apply the range.",
     );

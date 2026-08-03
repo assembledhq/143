@@ -73,6 +73,8 @@ export function TimeRangePicker({
     setOpen(false);
   };
 
+  const rangeComplete = Boolean(draft.from && draft.to);
+
   const applyCustomRange = () => {
     if (!draft.from || !draft.to) return;
     onValueChange(customTimeRange(draft.from, draft.to));
@@ -155,15 +157,10 @@ export function TimeRangePicker({
                     Cancel
                   </Button>
                   <DisabledTooltip
-                    disabled={!draft.from || !draft.to}
+                    disabled={!rangeComplete}
                     content="Select a start and end date to apply the range."
                   >
-                    <Button
-                      type="button"
-                      size="sm"
-                      disabled={!draft.from || !draft.to}
-                      onClick={applyCustomRange}
-                    >
+                    <Button type="button" size="sm" disabled={!rangeComplete} onClick={applyCustomRange}>
                       Apply range
                     </Button>
                   </DisabledTooltip>
