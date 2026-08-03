@@ -3,7 +3,9 @@ package ingestion
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -84,10 +86,12 @@ func (c *SentryAPIClient) fetchPage(ctx context.Context, url, authToken string) 
 		if err != nil {
 			return nil, "", fmt.Errorf("fetch sentry issues: %w", err)
 		}
-		defer resp.Body.Close()
 
 		if resp.StatusCode == http.StatusTooManyRequests {
 			retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
+			if err := closeSentryResponseBody(resp.Body, nil); err != nil {
+				return nil, "", err
+			}
 			c.logger.Warn().
 				Str("url", url).
 				Int("attempt", attempt).
@@ -103,12 +107,17 @@ func (c *SentryAPIClient) fetchPage(ctx context.Context, url, authToken string) 
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			return nil, "", fmt.Errorf("unexpected status %d from sentry API", resp.StatusCode)
+			responseErr := fmt.Errorf("unexpected status %d from sentry API", resp.StatusCode)
+			return nil, "", closeSentryResponseBody(resp.Body, responseErr)
 		}
 
 		var issues []SentryIssue
-		if err := json.NewDecoder(resp.Body).Decode(&issues); err != nil {
-			return nil, "", fmt.Errorf("decode sentry issues: %w", err)
+		decodeErr := json.NewDecoder(resp.Body).Decode(&issues)
+		if decodeErr != nil {
+			decodeErr = fmt.Errorf("decode sentry issues: %w", decodeErr)
+		}
+		if err := closeSentryResponseBody(resp.Body, decodeErr); err != nil {
+			return nil, "", err
 		}
 
 		nextURL := parseLinkHeader(resp.Header.Get("Link"))
@@ -116,6 +125,24 @@ func (c *SentryAPIClient) fetchPage(ctx context.Context, url, authToken string) 
 	}
 
 	return nil, "", fmt.Errorf("sentry API rate limited after %d retries", sentryMaxRetries)
+}
+
+// closeSentryResponseBody closes a response body and preserves any error that
+// was already being returned for the response. Keeping this out of a defer is
+// important in the retry loop: a rate-limited response must release its
+// connection before the client waits and starts the next attempt.
+func closeSentryResponseBody(body io.Closer, responseErr error) error {
+	closeErr := body.Close()
+	if closeErr == nil {
+		return responseErr
+	}
+
+	closeErr = fmt.Errorf("close sentry response body: %w", closeErr)
+	if responseErr == nil {
+		return closeErr
+	}
+
+	return errors.Join(responseErr, closeErr)
 }
 
 func (c *SentryAPIClient) normalizeIssue(integrationID uuid.UUID, issue SentryIssue) NormalizedIssue {
