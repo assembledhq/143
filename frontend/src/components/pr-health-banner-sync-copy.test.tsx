@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PullRequestHealthResponse } from "@/lib/types";
 import { renderWithProviders, screen } from "@/test/test-utils";
@@ -37,7 +37,16 @@ const health: PullRequestHealthResponse = {
 };
 
 describe("PRHealthBanner sync copy", () => {
-  it("renders sync status as plain text instead of a badge pill", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-29T12:00:00.000Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("renders the compact sync timestamp as plain text instead of a badge pill", () => {
     renderWithProviders(
       <PRHealthBanner
         health={health}
@@ -50,7 +59,8 @@ describe("PRHealthBanner sync copy", () => {
       />,
     );
 
-    expect(screen.getByText(/Synced/)).toBeInTheDocument();
-    expect(screen.queryByText(/Synced/, { selector: "[data-slot='badge']" })).toBeNull();
+    expect(screen.getByText("3m ago")).toBeInTheDocument();
+    expect(screen.queryByText("3m ago", { selector: "[data-slot='badge']" })).toBeNull();
+    expect(screen.queryByText(/Synced/)).toBeNull();
   });
 });
