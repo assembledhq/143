@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -52,6 +54,135 @@ func TestPreviewToolExecutor_WaitSessionReadyReportsPhaseChanges(t *testing.T) {
 	require.Contains(t, progress.String(), "build_cache_home_restore", "wait output should surface the first cache phase")
 	require.Contains(t, progress.String(), "service_build", "wait output should surface later phase changes")
 	require.Contains(t, progress.String(), "readiness", "wait output should surface the terminal readiness phase")
+}
+
+func TestPreviewToolExecutor_WaitSessionReadyRetriesTransientStatusErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		statusCode int
+	}{
+		{name: "rate limited", statusCode: http.StatusTooManyRequests},
+		{name: "bad gateway", statusCode: http.StatusBadGateway},
+		{name: "service unavailable", statusCode: http.StatusServiceUnavailable},
+		{name: "gateway timeout", statusCode: http.StatusGatewayTimeout},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var calls atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if calls.Add(1) == 1 {
+					w.WriteHeader(tt.statusCode)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, err := w.Write([]byte(`{"data":{"instance":{"id":"preview-1","session_id":"session-1","status":"ready","current_phase":"readiness"}}}`))
+				require.NoError(t, err, "ready status response should write")
+			}))
+			defer server.Close()
+
+			var progress bytes.Buffer
+			executor := &previewToolExecutor{
+				client:       NewClient(Config{ServerURL: server.URL, Token: "token"}),
+				progress:     &progress,
+				pollInterval: time.Millisecond,
+			}
+			result := executor.waitSessionReady(context.Background(), "session-1")
+
+			require.False(t, result.IsError, "wait should recover from a transient status response")
+			require.Equal(t, int64(2), calls.Load(), "wait should poll again after a transient response")
+			require.Contains(t, progress.String(), "temporarily unavailable", "wait should explain that transient status errors are being retried")
+		})
+	}
+}
+
+func TestPreviewToolExecutor_WaitSessionReadyFailsFastOnPermanentStatusError(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	executor := &previewToolExecutor{
+		client:       NewClient(Config{ServerURL: server.URL, Token: "token"}),
+		pollInterval: time.Millisecond,
+	}
+	result := executor.waitSessionReady(context.Background(), "session-1")
+
+	require.True(t, result.IsError, "wait should return permanent authentication failures")
+	require.Equal(t, int64(1), calls.Load(), "wait should not retry a permanent status failure")
+	require.Contains(t, firstText(result), "HTTP 401", "wait should preserve the permanent status error")
+}
+
+func TestIsRetryablePreviewWaitError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		err       error
+		cancelCtx bool
+		expected  bool
+	}{
+		{name: "transient API status", err: &APIError{Status: http.StatusServiceUnavailable}, expected: true},
+		{name: "unexpected EOF", err: io.ErrUnexpectedEOF, expected: true},
+		{name: "authentication failure", err: &APIError{Status: http.StatusUnauthorized}, expected: false},
+		{name: "permanent transport error", err: errors.New("malformed request"), expected: false},
+		// Every net-stack timeout reports itself as context.DeadlineExceeded, so
+		// the live-context cases below are what separate a per-request timeout
+		// (retry) from an exhausted wait budget (give up).
+		{name: "per-request timeout while wait budget remains", err: context.DeadlineExceeded, expected: true},
+		{name: "i/o timeout while wait budget remains", err: os.ErrDeadlineExceeded, expected: true},
+		{name: "caller context cancelled", err: &APIError{Status: http.StatusServiceUnavailable}, cancelCtx: true, expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := t.Context()
+			if tt.cancelCtx {
+				cancelled, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = cancelled
+			}
+
+			require.Equal(t, tt.expected, isRetryablePreviewWaitError(ctx, tt.err), "retry classification should match the error's recoverability")
+		})
+	}
+}
+
+// A stalled request is the transient failure the preview wait exists to survive:
+// the API server accepts the connection but goes quiet while the sandbox comes
+// up. It reaches the classifier as context.DeadlineExceeded, indistinguishable
+// by error value from an exhausted wait budget, so it only stays retryable while
+// the caller's context is still live.
+func TestIsRetryablePreviewWaitErrorRetriesRequestTimeout(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		server.Close()
+	})
+
+	client := NewClient(Config{ServerURL: server.URL}).WithRequestTimeout(50 * time.Millisecond)
+	err := client.Do(t.Context(), http.MethodGet, "/api/v1/previews/preview-1", nil, nil)
+	require.Error(t, err, "a stalled response should trip the per-request timeout")
+
+	require.True(t, isRetryablePreviewWaitError(t.Context(), err), "a per-request timeout should be retried while the wait budget remains")
 }
 
 func TestPreviewToolExecutor_SessionScreenshotOmitsInlineBase64(t *testing.T) {
@@ -505,6 +636,31 @@ func TestPreviewToolExecutor_BranchCreateWaitPollsUntilReady(t *testing.T) {
 	require.False(t, result.IsError, "branch create with wait should succeed")
 	require.EqualValues(t, 1, atomic.LoadInt32(&statusCalls), "branch create wait should poll status until live")
 	require.Contains(t, firstText(result), `"status": "running"`, "wait result should return the ready preview status")
+}
+
+func TestPreviewToolExecutor_WaitBranchReadyRetriesTransientStatusError(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"data":{"target_id":"target-1","preview_id":"preview-1","status":"running","preview_url":"https://preview.test"}}`))
+		require.NoError(t, err, "ready branch status response should write")
+	}))
+	defer server.Close()
+
+	executor := &previewToolExecutor{
+		client:       NewClient(Config{ServerURL: server.URL, Token: "token"}),
+		pollInterval: time.Millisecond,
+	}
+	result := executor.waitBranchReady(context.Background(), "preview-1")
+
+	require.False(t, result.IsError, "branch wait should recover from a transient status response")
+	require.Equal(t, int64(2), calls.Load(), "branch wait should poll again after a transient response")
 }
 
 func TestPreviewToolExecutor_UpdateWaitReturnsUpdateResponse(t *testing.T) {
