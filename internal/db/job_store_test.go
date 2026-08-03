@@ -128,15 +128,20 @@ func TestJobStoreQueueChangesetPRCreationIsAtomic(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		reserveRows int64
-		enqueueErr  error
-		wantQueued  bool
-		wantErr     bool
+		name            string
+		reserveRows     int64
+		existingState   *models.PRCreationState
+		enqueueConflict bool
+		enqueueErr      error
+		wantEnqueue     bool
+		wantQueued      bool
+		wantErr         bool
 	}{
-		{name: "commits reservation and job together", reserveRows: 1, wantQueued: true},
-		{name: "does not enqueue when reservation is held", reserveRows: 0},
-		{name: "rolls back reservation when enqueue fails", reserveRows: 1, enqueueErr: errors.New("insert failed"), wantErr: true},
+		{name: "commits reservation and job together", reserveRows: 1, wantEnqueue: true, wantQueued: true},
+		{name: "does not enqueue when publication already succeeded", existingState: ptrTo(models.PRCreationStateSucceeded)},
+		{name: "requeues work after review left the reservation queued", existingState: ptrTo(models.PRCreationStateQueued), wantEnqueue: true, wantQueued: true},
+		{name: "joins an active job that still owns the reservation", existingState: ptrTo(models.PRCreationStatePushing), wantEnqueue: true, enqueueConflict: true},
+		{name: "rolls back reservation when enqueue fails", reserveRows: 1, wantEnqueue: true, enqueueErr: errors.New("insert failed"), wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -150,11 +155,19 @@ func TestJobStoreQueueChangesetPRCreationIsAtomic(t *testing.T) {
 			mock.ExpectExec(`UPDATE session_changesets SET pr_creation_state = 'queued'.+WHERE org_id = .+ AND session_id = .+ AND id =`).
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 				WillReturnResult(pgxmock.NewResult("UPDATE", tt.reserveRows))
-			if tt.reserveRows == 1 {
+			if tt.reserveRows == 0 {
+				mock.ExpectQuery(`SELECT pr_creation_state FROM session_changesets`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"pr_creation_state"}).AddRow(*tt.existingState))
+			}
+			if tt.wantEnqueue {
 				query := mock.ExpectQuery("INSERT INTO jobs").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg())
 				if tt.enqueueErr != nil {
 					query.WillReturnError(tt.enqueueErr)
+				} else if tt.enqueueConflict {
+					query.WillReturnRows(pgxmock.NewRows([]string{"id"}))
+					mock.ExpectCommit()
 				} else {
 					query.WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
 					mock.ExpectCommit()
@@ -171,7 +184,7 @@ func TestJobStoreQueueChangesetPRCreationIsAtomic(t *testing.T) {
 			} else {
 				require.NoError(t, err, "atomic enqueue should complete without an error")
 			}
-			require.Equal(t, tt.wantQueued, queued, "result should identify whether this caller reserved the changeset")
+			require.Equal(t, tt.wantQueued, queued, "result should identify whether this caller created runnable publication work")
 			if tt.wantQueued {
 				require.Equal(t, jobID, gotJobID, "committed enqueue should return its durable job ID")
 			} else {
