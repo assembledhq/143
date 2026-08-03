@@ -143,7 +143,7 @@ func TestSessionReviewLoopStore_PublicationCleanTransitionIsAtomic(t *testing.T)
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("UPDATE session_review_loops").WithArgs(anyArgs(4)...).
 		WillReturnRows(pgxmock.NewRows([]string{"session_id", "source"}).AddRow(sessionID, models.ReviewLoopSourcePublication))
-	mock.ExpectQuery("UPDATE session_publications AS publication").WithArgs(anyArgs(5)...).
+	mock.ExpectQuery(`UPDATE session_publications AS publication[\s\S]+COALESCE\(publication\.completed_at, now\(\)\)[\s\S]+ELSE publication\.completed_at END`).WithArgs(anyArgs(5)...).
 		WillReturnRows(pgxmock.NewRows([]string{"request_payload", "job_queue", "changeset_id"}).AddRow(payload, models.SessionPublicationJobQueueAgent, changesetID))
 	mock.ExpectQuery("INSERT INTO jobs").WithArgs(anyArgs(6)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
@@ -156,6 +156,59 @@ func TestSessionReviewLoopStore_PublicationCleanTransitionIsAtomic(t *testing.T)
 	)
 	require.NoError(t, err, "clean publication review should advance the gate and enqueue in one transaction")
 	require.NoError(t, mock.ExpectationsWereMet(), "clean publication review should commit loop, gate, and original open_pr enqueue atomically")
+}
+
+func TestSessionReviewLoopStore_ListStrandedPublicationLoopsRequiresInactiveThreadWithoutLiveJob(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create a database mock")
+	t.Cleanup(mock.Close)
+	orgID, loopID, threadID := uuid.New(), uuid.New(), uuid.New()
+	inactiveBefore := time.Now().UTC()
+	mock.ExpectQuery(`SELECT loop\.id AS loop_id, loop\.thread_id[\s\S]+loop\.org_id = @org_id[\s\S]+loop\.source = 'publication'[\s\S]+thread\.status IN \('idle', 'completed', 'failed', 'cancelled'\)[\s\S]+jobs\.status IN \('pending', 'running'\)`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "inactive_before": inactiveBefore, "limit": 25}).
+		WillReturnRows(pgxmock.NewRows([]string{"loop_id", "thread_id"}).AddRow(loopID, threadID))
+
+	loops, err := NewSessionReviewLoopStore(mock).ListStrandedPublicationLoops(
+		context.Background(), orgID, inactiveBefore, 25,
+	)
+
+	require.NoError(t, err, "stranded publication review lookup should succeed")
+	require.Equal(t, []StrandedPublicationReviewLoop{{LoopID: loopID, ThreadID: threadID}}, loops, "lookup should return the inactive loop without live continuation work")
+	require.NoError(t, mock.ExpectationsWereMet(), "stranded lookup should enforce tenant, publication, thread, age, and live-job predicates")
+}
+
+func TestSessionReviewLoopStore_RestartStrandedPublicationLoopIsAtomic(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create a database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID, loopID, changesetID, jobID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	inactiveBefore := time.Now().UTC()
+	summary := "restart stranded review"
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `"}`)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`UPDATE session_review_loops AS loop[\s\S]+loop\.org_id = @org_id[\s\S]+thread\.status IN \('idle', 'completed', 'failed', 'cancelled'\)[\s\S]+jobs\.status IN \('pending', 'running'\)`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "loop_id": loopID, "inactive_before": inactiveBefore, "summary": summary}).
+		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
+	mock.ExpectQuery(`UPDATE session_publications[\s\S]+review_loop_id = NULL[\s\S]+org_id = @org_id AND session_id = @session_id`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "loop_id": loopID}).
+		WillReturnRows(pgxmock.NewRows([]string{"request_payload", "job_queue", "changeset_id"}).
+			AddRow(payload, models.SessionPublicationJobQueueAgent, changesetID))
+	mock.ExpectQuery("INSERT INTO jobs").WithArgs(anyArgs(6)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectCommit()
+
+	restarted, err := NewSessionReviewLoopStore(mock).RestartStrandedPublicationLoop(
+		context.Background(), orgID, loopID, inactiveBefore, summary,
+	)
+
+	require.NoError(t, err, "stranded publication review restart should succeed")
+	require.True(t, restarted, "eligible stranded review should be restarted")
+	require.NoError(t, mock.ExpectationsWereMet(), "restart should retire the loop, clear its evidence, and enqueue the original publication atomically")
 }
 
 func TestFinishPublicationReviewInvalidatesStaleCleanEvidence(t *testing.T) {
@@ -240,7 +293,7 @@ func TestFinishPublicationReviewMapsLoopOutcomeToOneGateMeaning(t *testing.T) {
 			t.Cleanup(mock.Close)
 			orgID, changesetID, loopID, jobID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 			payload := json.RawMessage(`{"changeset_id":"` + changesetID.String() + `"}`)
-			mock.ExpectQuery("UPDATE session_publications AS publication").
+			mock.ExpectQuery(`UPDATE session_publications AS publication[\s\S]+COALESCE\(publication\.completed_at, now\(\)\)[\s\S]+ELSE publication\.completed_at END`).
 				WithArgs(pgx.NamedArgs{
 					"org_id": orgID, "loop_id": loopID, "gate": tt.expectedGate,
 					"state": tt.expectedState, "status": tt.status,
