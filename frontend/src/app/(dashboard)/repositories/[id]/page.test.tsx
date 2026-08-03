@@ -92,6 +92,11 @@ describe("RepositoryDetailPage", () => {
     renderWithProviders(<RepositoryDetailContent id="repo-1" />);
 
     expect(await screen.findByText(/143 marks it ready only after review passes/i)).toBeInTheDocument();
+    expect(screen.getByText("Review before opening the PR").closest("label")).toHaveClass(
+      "border-primary/50",
+      "bg-accent/55",
+      "ring-1",
+    );
     await userEvent.click(screen.getByRole("radio", { name: /Create a draft first/i }));
 
     await waitFor(() => {
