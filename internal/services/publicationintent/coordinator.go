@@ -392,10 +392,16 @@ func (c *Coordinator) RequestPullRequest(
 	if req.TriggerKind == models.SessionPublicationTriggerExplicitAction {
 		automaticSource = models.PublicationPolicySourceExplicitAction
 	}
+	// The review-before-PR preference belongs to automatic handoff. An explicit
+	// authenticated-user Create PR action is already the user's publication
+	// decision and must queue the PR directly. Agent-ready requests keep the
+	// configured gate.
+	explicitUserAction := req.Source == models.SessionPublicationSourceUser &&
+		req.TriggerKind == models.SessionPublicationTriggerExplicitAction
 	// Execution switches must never rewrite effective review policy. If review
 	// is required while execution is stopped, persist a pending gate and park
 	// the intent; treating the switch as review=off would publish unreviewed.
-	reviewRequired := !automationRequest && !backendPolicyRequest && policy.ReviewBeforePR
+	reviewRequired := !automationRequest && !backendPolicyRequest && !explicitUserAction && policy.ReviewBeforePR
 	if manualTakeoverRequested && existingPublication.ReviewGateState == models.SessionPublicationReviewGatePending &&
 		existingPublication.ReviewMaxPasses != nil {
 		// A manual takeover changes execution authority, never the review
