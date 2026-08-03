@@ -834,7 +834,7 @@ func (e *previewToolExecutor) screenshot(ctx context.Context, args json.RawMessa
 			if !*params.InlineBase64 {
 				delete(screenshot, "png_base64")
 			}
-		} else if _, hasCapture := screenshot["capture"]; hasCapture || screenshot["artifact"] != nil {
+		} else if screenshot["capture"] != nil || screenshot["artifact"] != nil {
 			// Smart default: either supported stored-reference key is enough; drop
 			// the inline bytes while API generations overlap.
 			delete(screenshot, "png_base64")
