@@ -28,7 +28,7 @@ For each requirement, trace the actual runtime path rather than inferring behavi
 - asynchronous work, concurrency, idempotency, retry, cancellation, and recovery;
 - UI loading, empty, error, success, accessibility, and responsive states;
 - configuration, rollout, observability, operational support, and cleanup;
-- tests and generated artifacts required to ship the behavior.
+- tests and generated outputs required to ship the behavior.
 
 Use tests as evidence, not as proof that untested paths are correct. Check negative cases and partial failures as well as the happy path.
 

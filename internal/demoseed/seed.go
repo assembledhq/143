@@ -480,8 +480,8 @@ func AssertDemoSeedState(ctx context.Context, pool seedDB) error {
 			expected: 4,
 		},
 		{
-			name:     "demo code review prompt artifacts exist",
-			query:    `SELECT count(*) FROM code_review_prompt_artifacts WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000911'::uuid, '00000000-0000-4000-a000-000000000912'::uuid, '00000000-0000-4000-a000-000000000913'::uuid, '00000000-0000-4000-a000-000000000914'::uuid)`,
+			name:     "demo code review prompt records exist",
+			query:    `SELECT count(*) FROM code_review_prompt_records WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000911'::uuid, '00000000-0000-4000-a000-000000000912'::uuid, '00000000-0000-4000-a000-000000000913'::uuid, '00000000-0000-4000-a000-000000000914'::uuid)`,
 			expected: 4,
 		},
 		{

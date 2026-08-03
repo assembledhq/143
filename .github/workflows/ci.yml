@@ -172,7 +172,7 @@ jobs:
             echo "::warning::Backend coverage ${COVERAGE}% is below target ${BACKEND_COVERAGE_TARGET}%"
           fi
 
-      - name: Upload coverage artifact
+      - name: Upload coverage report
         if: github.event_name == 'push'
         uses: actions/upload-artifact@v7
         with:
@@ -286,7 +286,7 @@ jobs:
             echo "::warning::Frontend coverage ${COVERAGE}% is below target ${FRONTEND_COVERAGE_TARGET}%"
           fi
 
-      - name: Upload coverage artifact
+      - name: Upload coverage report
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v7
         with:

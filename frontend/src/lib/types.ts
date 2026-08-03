@@ -295,6 +295,8 @@ export interface CodeReviewListItem {
   stale: boolean;
   superseded_by_session_id?: string;
   review_output_key: string;
+  prompt_record_key?: string;
+  /** @deprecated Compatibility with API instances still draining during rollout. */
   prompt_artifact_key?: string;
   github_review_id?: number;
   github_review_url?: string;
@@ -416,11 +418,13 @@ export interface CodeReviewFinding {
   created_at: string;
 }
 
-export interface CodeReviewPromptArtifact {
+export interface CodeReviewPromptRecord {
   id: string;
   org_id: string;
   session_id: string;
-  artifact_key: string;
+  record_key?: string;
+  /** @deprecated Compatibility with API instances still draining during rollout. */
+  artifact_key?: string;
   role: "reviewer" | "orchestrator" | "description_policy" | string;
   agent_provider?: string;
   content: string;
@@ -431,7 +435,9 @@ export interface CodeReviewPromptArtifact {
 export interface CodeReviewEvidence {
   agent_results: CodeReviewAgentResult[];
   findings: CodeReviewFinding[];
-  prompt_artifacts?: CodeReviewPromptArtifact[];
+  prompt_records?: CodeReviewPromptRecord[];
+  /** @deprecated Compatibility with API instances still draining during rollout. */
+  prompt_artifacts?: CodeReviewPromptRecord[];
 }
 
 export type AgentCapabilityID =

@@ -19,9 +19,9 @@ type fakeVerificationRuns struct {
 }
 
 func (f *fakeVerificationRuns) Create(_ context.Context, orgID uuid.UUID, run models.PreviewVerificationRun) (models.PreviewVerificationRun, error) {
-	// The plan/steps/artifacts columns enforce a jsonb-array CHECK constraint, so a
+	// The plan/steps/captures columns enforce a jsonb-array CHECK constraint, so a
 	// nil slice marshaled to JSON null would fail the real INSERT. Mirror that here.
-	for name, raw := range map[string]json.RawMessage{"plan": run.Plan, "steps": run.Steps, "artifacts": run.Artifacts} {
+	for name, raw := range map[string]json.RawMessage{"plan": run.Plan, "steps": run.Steps, "captures": run.Captures} {
 		if len(raw) == 0 {
 			continue
 		}
@@ -40,8 +40,8 @@ func (f *fakeVerificationRuns) Create(_ context.Context, orgID uuid.UUID, run mo
 	return run, nil
 }
 
-func (f *fakeVerificationRuns) Complete(_ context.Context, _ uuid.UUID, runID uuid.UUID, status models.PreviewVerificationStatus, attempt int, steps, artifacts json.RawMessage, consoleErrors int, summary, failureReason string) (models.PreviewVerificationRun, error) {
-	f.completed = models.PreviewVerificationRun{ID: runID, Status: status, Attempt: attempt, Steps: steps, Artifacts: artifacts, ConsoleErrorCount: consoleErrors, Summary: summary, FailureReason: failureReason}
+func (f *fakeVerificationRuns) Complete(_ context.Context, _ uuid.UUID, runID uuid.UUID, status models.PreviewVerificationStatus, attempt int, steps, captures json.RawMessage, consoleErrors int, summary, failureReason string) (models.PreviewVerificationRun, error) {
+	f.completed = models.PreviewVerificationRun{ID: runID, Status: status, Attempt: attempt, Steps: steps, Captures: captures, ConsoleErrorCount: consoleErrors, Summary: summary, FailureReason: failureReason}
 	return f.completed, nil
 }
 
@@ -84,7 +84,7 @@ func TestVerificationCoordinatorRun(t *testing.T) {
 		expectedAttempt int
 		expectedSteps   int
 	}{
-		{name: "passes and records screenshot", auto: true, observations: []*models.PreviewObservation{{Ready: true, Screenshot: &models.ScreenshotResult{Artifact: &models.PreviewArtifact{ID: "shot-1"}}}}, maxAttempts: 1, expectedStatus: models.PreviewVerificationStatusPassed, expectedAttempt: 1, expectedSteps: 1},
+		{name: "passes and records screenshot", auto: true, observations: []*models.PreviewObservation{{Ready: true, Screenshot: &models.ScreenshotResult{Capture: &models.PreviewCapture{ID: "shot-1"}}}}, maxAttempts: 1, expectedStatus: models.PreviewVerificationStatusPassed, expectedAttempt: 1, expectedSteps: 1},
 		{name: "fixes console failure and retains both attempts", auto: true, observations: []*models.PreviewObservation{{Ready: true, Console: []models.ConsoleMessage{{Level: "error"}}}, {Ready: true}}, maxAttempts: 2, expectedStatus: models.PreviewVerificationStatusPassed, expectedFixes: 1, expectedAttempt: 2, expectedSteps: 2},
 		{name: "records disabled skip", auto: false, maxAttempts: 1, expectedStatus: models.PreviewVerificationStatusSkipped},
 		{name: "records orchestration skip", auto: true, skipReason: "session has no active configured preview", maxAttempts: 1, expectedStatus: models.PreviewVerificationStatusSkipped},

@@ -390,7 +390,7 @@ This stage runs only when needed:
 - when the user clicks `Fix tests`
 - when conflict detail needs refreshing for `Resolve conflicts`
 
-This is where the system fetches expensive artifacts such as:
+This is where the system fetches expensive outputs such as:
 
 - annotations
 - failing step names

@@ -399,7 +399,7 @@ type SandboxNetworkSettings struct {
 	StaticEgressEnabled bool `json:"static_egress_enabled,omitempty"`
 }
 
-// SandboxLifecycleSettings controls cleanup and retention defaults for runtime artifacts.
+// SandboxLifecycleSettings controls cleanup and retention defaults for runtime outputs.
 type SandboxLifecycleSettings struct {
 	CompletedSessionRetentionMinutes int   `json:"completed_session_retention_minutes,omitempty"`
 	IdlePreviewTTLMinutes            int   `json:"idle_preview_ttl_minutes,omitempty"`

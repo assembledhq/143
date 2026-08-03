@@ -92,7 +92,7 @@ Current limitations:
 ## Design Principles
 
 1. **Fast first paint**. The review surface should still open from cached diff data, not a live repo walk.
-2. **Diffs need provenance**. A patch without a recorded basis commit is not a durable review artifact.
+2. **Diffs need provenance**. A patch without a recorded basis commit is not a durable review bundle.
 3. **Directional context, not mode switching**. Reviewers should be able to move up and down from the current hunk without bouncing into the repo explorer.
 4. **One service owns diff semantics**. The codebase should define "the session diff" in one place.
 5. **Typed persistence beats JSON blobs**. Long-term review history should not keep growing inside `diff_history` JSONB.
@@ -259,7 +259,7 @@ This gives the existing UI a parseable patch while making the semantics explicit
 
 Implementation note:
 
-- Plain `git diff <base_commit_sha> -- .` does not capture untracked files by itself, so the collector must explicitly detect and append untracked-file additions to the authoritative diff artifact.
+- Plain `git diff <base_commit_sha> -- .` does not capture untracked files by itself, so the collector must explicitly detect and append untracked-file additions to the authoritative diff output.
 - The service should own that normalization logic so adapters and worker helpers cannot drift.
 
 ### 5. Extend the API response to include range metadata
@@ -349,7 +349,7 @@ What should change over time is the abstraction boundary:
 
 The current file-context endpoint requires a live Docker container, which means the moment a session finishes and its sandbox is torn down, directional context expansion stops working — even though the workspace state is already persisted as a snapshot tar in object storage and PR creation already reads from it. Reviewing a completed session is the most common reason to expand context, so this is the worst possible failure mode.
 
-GitHub does not run a sandbox to serve `Show more` clicks. It reads from a stored artifact (git objects). We should follow the same shape: read from the artifact we already have (`session.snapshot_key`), without rehydrating any container.
+GitHub does not run a sandbox to serve `Show more` clicks. It reads from a stored output (git objects). We should follow the same shape: read from the output we already have (`session.snapshot_key`), without rehydrating any container.
 
 Recommended shape:
 

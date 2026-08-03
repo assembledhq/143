@@ -12,7 +12,7 @@ environment.
 The product mental model is:
 
 - a **session** owns the sandbox, worktree, branch, preview, PR, and final
-  shipping artifact
+  shipping output
 - a **tab/thread** owns one independent agent conversation and one live runtime
   lane inside that sandbox
 - the user can send messages to any tab without waiting for another tab to
@@ -815,7 +815,7 @@ events is tracked under follow-up hardening.
 
 Developers should be able to reason about the system with a small vocabulary.
 
-- **Session**: the shared workspace and shipping artifact.
+- **Session**: the shared workspace and shipping output.
 - **Thread**: the durable tab/conversation.
 - **Inbox entry**: accepted input waiting to be delivered or already delivered.
 - **Runtime**: the live agent process for one thread.

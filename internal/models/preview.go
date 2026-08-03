@@ -625,7 +625,7 @@ type PreviewInstallConfig struct {
 	Cache          *PreviewInstallCacheConfig `json:"cache,omitempty"`
 }
 
-// PreviewInstallCacheConfig controls optional dependency artifact caching for
+// PreviewInstallCacheConfig controls optional dependency output caching for
 // preview.install. Enabled is a pointer so named config merge/defaulting can
 // distinguish omitted from explicitly false.
 type PreviewInstallCacheConfig struct {
@@ -642,9 +642,9 @@ type PreviewPackageManagerCacheConfig struct {
 	Paths   []string `json:"paths,omitempty"`
 }
 
-// PreviewBuildCacheConfig controls caching of incremental build artifacts
+// PreviewBuildCacheConfig controls caching of incremental build outputs
 // (e.g. Turborepo's local cache) that services populate while booting. Unlike
-// the install-artifact cache, build caches are saved after services report
+// the install-output cache, build caches are saved after services report
 // ready and use latest-wins keying: the build tool is trusted to content-hash
 // its own entries, so a stale blob degrades to partial hits rather than wrong
 // output.
@@ -660,9 +660,9 @@ type PreviewInstallPrewarmCacheConfig struct {
 type PreviewCacheKind string
 
 const (
-	PreviewCacheKindInstallArtifact PreviewCacheKind = "install_artifact"
-	PreviewCacheKindPackageManager  PreviewCacheKind = "package_manager"
-	PreviewCacheKindBuildArtifact   PreviewCacheKind = "build_artifact"
+	PreviewCacheKindInstallOutput  PreviewCacheKind = "install_output"
+	PreviewCacheKindPackageManager PreviewCacheKind = "package_manager"
+	PreviewCacheKindBuildOutput    PreviewCacheKind = "build_output"
 )
 
 type PreviewCacheRoot string
@@ -757,7 +757,7 @@ type SessionPreviewPrewarmRun struct {
 type ServiceConfig struct {
 	// Build, when set, runs once during a dedicated build phase after the
 	// install phase and after build caches are restored, but before any
-	// service starts. It is the place to compile artifacts (e.g. `go build`)
+	// service starts. It is the place to compile outputs (e.g. `go build`)
 	// so the start Command can exec a prebuilt binary instead of compiling on
 	// the readiness-probe hot path. Build commands run in dependency order
 	// (support services first, primary last), share the service Env, and
@@ -845,10 +845,10 @@ type ScreenshotOpts struct {
 	CurrentPage bool          `json:"-"`
 }
 
-// PreviewArtifact is a user-readable artifact produced by preview tooling.
-// Artifact URLs are served through the normal upload pipeline, so existing
+// PreviewCapture is a user-readable capture produced by preview tooling.
+// Capture URLs are served through the normal upload pipeline, so existing
 // membership authorization and object storage backends apply.
-type PreviewArtifact struct {
+type PreviewCapture struct {
 	ID          string    `json:"id"`
 	Kind        string    `json:"kind"`
 	ContentType string    `json:"content_type"`
@@ -876,8 +876,37 @@ type ScreenshotResult struct {
 	ConsoleErrors []ConsoleMessage `json:"console_errors,omitempty"`
 	URL           string           `json:"url"`
 	Viewport      ViewportSpec     `json:"viewport"`
-	Artifact      *PreviewArtifact `json:"artifact,omitempty"`
+	Capture       *PreviewCapture  `json:"capture,omitempty"`
 	CapturedAt    time.Time        `json:"captured_at"`
+}
+
+// MarshalJSON keeps the pre-capture response key available while older CLI
+// binaries and rolling worker generations are still supported.
+func (r ScreenshotResult) MarshalJSON() ([]byte, error) {
+	type screenshotResultAlias ScreenshotResult
+	return json.Marshal(struct {
+		screenshotResultAlias
+		LegacyCapture *PreviewCapture `json:"artifact,omitempty"`
+	}{
+		screenshotResultAlias: screenshotResultAlias(r),
+		LegacyCapture:         r.Capture,
+	})
+}
+
+// UnmarshalJSON accepts responses from either side of a rolling deployment.
+func (r *ScreenshotResult) UnmarshalJSON(data []byte) error {
+	type screenshotResultAlias ScreenshotResult
+	decoded := struct {
+		*screenshotResultAlias
+		LegacyCapture *PreviewCapture `json:"artifact,omitempty"`
+	}{screenshotResultAlias: (*screenshotResultAlias)(r)}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	if r.Capture == nil {
+		r.Capture = decoded.LegacyCapture
+	}
+	return nil
 }
 
 type BrowserTarget struct {

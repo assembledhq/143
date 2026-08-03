@@ -1099,7 +1099,7 @@ func ResolvePreviewInstallCachePaths(install *models.PreviewInstallConfig) ([]st
 	return paths, len(paths) > 0
 }
 
-// ResolvePreviewBuildCachePaths returns the effective build-artifact cache
+// ResolvePreviewBuildCachePaths returns the effective build-output cache
 // paths and whether build caching is enabled for this install config. Build
 // caching is default-on when dependency caching is on and a path can be
 // inferred: JS lockfiles imply Turborepo's local cache locations next to the
@@ -1147,7 +1147,7 @@ func ResolvePreviewBuildCachePaths(install *models.PreviewInstallConfig) ([]stri
 // ResolvePreviewBuildCacheHomePaths returns the effective HOME-rooted build
 // cache paths and whether home-rooted build caching is enabled. Unlike the
 // workdir build cache (which captures workspace-relative build-tool caches such
-// as Turborepo's), this captures compiled-artifact caches that live under $HOME
+// as Turborepo's), this captures compiled-output caches that live under $HOME
 // and are populated by a service's build step — most importantly Go's build
 // cache (.cache/go-build) and module cache (go/pkg/mod). These are home-rooted
 // because that is where Go places GOCACHE/GOMODCACHE by default in the sandbox,

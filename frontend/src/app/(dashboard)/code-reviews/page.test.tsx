@@ -192,12 +192,12 @@ const evidence: CodeReviewEvidence = {
       created_at: "2026-06-26T12:04:00Z",
     },
   ],
-  prompt_artifacts: [
+  prompt_records: [
     {
-      id: "artifact-1",
+      id: "record-1",
       org_id: "org-1",
       session_id: "session-1",
-      artifact_key: "code-review-prompts/session-1/head/reviewer-01-codex",
+      record_key: "code-review-prompts/session-1/head/reviewer-01-codex",
       role: "reviewer",
       agent_provider: "codex",
       content: "Review this PR.",

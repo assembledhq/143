@@ -98,7 +98,7 @@ func TestPreviewToolExecutor_InternalCreateRejectsBranchTarget(t *testing.T) {
 	require.NotContains(t, firstText(result), "not both", "should not surface the misleading not-both error")
 }
 
-func TestPreviewToolExecutor_SessionScreenshotInlinesWithoutArtifact(t *testing.T) {
+func TestPreviewToolExecutor_SessionScreenshotInlinesWithoutCapture(t *testing.T) {
 	t.Parallel()
 
 	var gotBody map[string]any
@@ -115,15 +115,15 @@ func TestPreviewToolExecutor_SessionScreenshotInlinesWithoutArtifact(t *testing.
 
 	require.False(t, result.IsError, "screenshot should succeed")
 	require.Equal(t, true, gotBody["inline_base64"], "session screenshot should request bytes by default so the image is not silently dropped")
-	require.Contains(t, firstText(result), "png_base64", "without artifact storage the image must still be inlined by default")
+	require.Contains(t, firstText(result), "png_base64", "without capture storage the image must still be inlined by default")
 }
 
-func TestPreviewToolExecutor_SessionScreenshotDropsInlineWhenArtifactPresent(t *testing.T) {
+func TestPreviewToolExecutor_SessionScreenshotDropsInlineWhenCapturePresent(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, err := w.Write([]byte(`{"data":{"screenshot":{"page_title":"Home","url":"https://preview.test/","png_base64":"abc","artifact":{"id":"art-1","url":"https://cdn.test/art-1.png"},"captured_at":"2026-06-27T00:00:00Z"}}}`))
+		_, err := w.Write([]byte(`{"data":{"screenshot":{"page_title":"Home","url":"https://preview.test/","png_base64":"abc","capture":{"id":"art-1","url":"https://cdn.test/art-1.png"},"captured_at":"2026-06-27T00:00:00Z"}}}`))
 		require.NoError(t, err, "test response should write")
 	}))
 	defer server.Close()
@@ -132,8 +132,26 @@ func TestPreviewToolExecutor_SessionScreenshotDropsInlineWhenArtifactPresent(t *
 	result := executor.screenshot(context.Background(), mustJSON(map[string]any{"session_id": "session-1"}))
 
 	require.False(t, result.IsError, "screenshot should succeed")
-	require.NotContains(t, firstText(result), "png_base64", "an artifact reference should replace inline bytes in the transcript")
-	require.Contains(t, firstText(result), "art-1", "artifact reference should be retained")
+	require.NotContains(t, firstText(result), "png_base64", "a capture reference should replace inline bytes in the transcript")
+	require.Contains(t, firstText(result), "art-1", "capture reference should be retained")
+}
+
+func TestPreviewToolExecutor_SessionScreenshotDropsInlineForLegacyStoredReference(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"data":{"screenshot":{"png_base64":"abc","artifact":{"id":"legacy-1"}}}}`))
+		require.NoError(t, err, "test response should write")
+	}))
+	defer server.Close()
+
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
+	result := executor.screenshot(context.Background(), mustJSON(map[string]any{"session_id": "session-1"}))
+
+	require.False(t, result.IsError, "screenshot should succeed against a draining API generation")
+	require.NotContains(t, firstText(result), "png_base64", "legacy stored reference should still replace inline bytes")
+	require.Contains(t, firstText(result), "legacy-1", "legacy stored reference should remain in the response")
 }
 
 func TestPreviewToolExecutor_InteractParsesJSONSteps(t *testing.T) {
@@ -205,7 +223,7 @@ func TestPreviewToolExecutor_ActUsesUnifiedEndpoint(t *testing.T) {
 		require.Equal(t, "/api/v1/sessions/session-1/preview/act", r.URL.Path, "act should use the unified endpoint")
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody), "act body should decode")
 		w.Header().Set("Content-Type", "application/json")
-		_, err := w.Write([]byte(`{"data":{"interaction":{"steps":[{"success":true}]},"observation":{"screenshot":{"png_base64":"iVBORw0KGgo=","artifact":{"id":"artifact-1"}},"ready":true}}}`))
+		_, err := w.Write([]byte(`{"data":{"interaction":{"steps":[{"success":true}]},"observation":{"screenshot":{"png_base64":"iVBORw0KGgo=","capture":{"id":"capture-1"}},"ready":true}}}`))
 		require.NoError(t, err, "act response should write")
 	}))
 	defer server.Close()
@@ -217,7 +235,7 @@ func TestPreviewToolExecutor_ActUsesUnifiedEndpoint(t *testing.T) {
 	require.Len(t, steps, 1, "act should send every requested step")
 	require.Len(t, result.Content, 2, "act should return its structured result and final native image")
 	require.Equal(t, "image", result.Content[1].Type, "act should extract the image from its nested observation")
-	require.Contains(t, firstText(result), "artifact-1", "act should retain durable screenshot artifact metadata")
+	require.Contains(t, firstText(result), "capture-1", "act should retain durable screenshot capture metadata")
 	require.NotContains(t, firstText(result), "png_base64", "act text should not duplicate native image bytes")
 }
 
@@ -409,7 +427,7 @@ func TestPreviewToolExecutor_ScreenshotTargetsPreviewID(t *testing.T) {
 		gotPath = r.URL.Path
 		require.Equal(t, http.MethodPost, r.Method, "screenshot should use POST")
 		w.Header().Set("Content-Type", "application/json")
-		_, err := w.Write([]byte(`{"data":{"artifact":{"url":"/api/v1/uploads/files/org/preview.png"},"captured_at":"2026-06-27T00:00:00Z"}}`))
+		_, err := w.Write([]byte(`{"data":{"capture":{"url":"/api/v1/uploads/files/org/preview.png"},"captured_at":"2026-06-27T00:00:00Z"}}`))
 		require.NoError(t, err, "test response should write")
 	}))
 	defer server.Close()
@@ -422,7 +440,7 @@ func TestPreviewToolExecutor_ScreenshotTargetsPreviewID(t *testing.T) {
 
 	require.False(t, result.IsError, "screenshot should succeed")
 	require.Equal(t, "/api/v1/previews/preview-1/screenshot", gotPath, "screenshot should target preview-id endpoint")
-	require.Contains(t, firstText(result), "preview.png", "screenshot should print artifact metadata")
+	require.Contains(t, firstText(result), "preview.png", "screenshot should print capture metadata")
 }
 
 func TestPreviewToolExecutor_ListSessionPreview(t *testing.T) {

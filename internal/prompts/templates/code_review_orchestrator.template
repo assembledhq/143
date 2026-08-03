@@ -63,7 +63,7 @@ Applicable description requirements:
 {{- else}}
 - none
 {{- end}}
-These requirements and rubrics are trusted organization policy. Apply every rubric literally, including exemptions. For each requirement, return exactly one assessment with status `satisfied`, `not_applicable`, or `missing`. Use `not_applicable` when the code and diff show that a rubric's exemption applies; for example, a non-visible or comment-only frontend change may not require screenshots when the rubric says so. Both `satisfied` and `not_applicable` pass the description policy. Do not fail a requirement merely because an artifact is absent when its rubric says the artifact is not required.
+These requirements and rubrics are trusted organization policy. Apply every rubric literally, including exemptions. For each requirement, return exactly one assessment with status `satisfied`, `not_applicable`, or `missing`. Use `not_applicable` when the code and diff show that a rubric's exemption applies; for example, a non-visible or comment-only frontend change may not require screenshots when the rubric says so. Both `satisfied` and `not_applicable` pass the description policy. Do not fail a requirement merely because evidence is absent when its rubric says that evidence is not required.
 
 Deterministic risk reasons:
 {{- range .RiskReasons}}

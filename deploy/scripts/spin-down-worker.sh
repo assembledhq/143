@@ -176,7 +176,7 @@ stop_compose_services() {
 }
 
 clear_machine() {
-  echo "Clearing worker-owned containers and unused Docker artifacts..."
+  echo "Clearing worker-owned containers and unused Docker resources..."
 
   mapfile -t executor_containers < <(list_session_executor_containers)
   if [ "${#executor_containers[@]}" -gt 0 ]; then

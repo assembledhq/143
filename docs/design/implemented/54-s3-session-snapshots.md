@@ -323,7 +323,7 @@ During cutover:
 
 This is acceptable because:
 
-- resumable sessions are transient, not long-term canonical artifacts
+- resumable sessions are transient, not long-term canonical outputs
 - bulk migration adds operational and correctness risk for low value
 
 If we later need migration tooling, it should be a one-off offline script, not part of the steady-state runtime.

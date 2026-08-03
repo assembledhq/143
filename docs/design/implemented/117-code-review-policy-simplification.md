@@ -323,7 +323,7 @@ Prompt text, diffs, and excerpts must not be included in analytics payloads or l
 - The new fields are additive. Old clients that omit either are accepted during a compatibility window and the corresponding stored/current value is retained where possible.
 - New clients treat missing review instructions as empty and a missing automated approval policy as its built-in default.
 - The frontend reorganization can ship before the prompts affect runtime, guarded by a product flag if a staged rollout is desired.
-- Prompt injection into the runtime ships only after prompt-rendering and end-to-end artifact tests are in place.
+- Prompt injection into the runtime ships only after prompt-rendering and end-to-end output tests are in place.
 
 ## Engineering Specification
 
@@ -609,7 +609,7 @@ applicable requirement using `satisfied`, `not_applicable`, or `missing`;
 standalone platform-LLM description-check calls are not part of the code-review
 approval path.
 
-Rendered prompt artifacts already recorded for evidence must include the exact effective prompts used by the captured policy version. Artifact access keeps existing authorization. Normal logs should record only policy ID/version and the rune length of each field, never text.
+Rendered prompt records already recorded for evidence must include the exact effective prompts used by the captured policy version. Record access keeps existing authorization. Normal logs should record only policy ID/version and the rune length of each field, never text.
 
 ### Frontend types and API client
 
@@ -698,7 +698,7 @@ Prompt example application is not called “reset.”
 - Continue recording policy version creation through existing audit behavior; add a field-change summary if policy mutations currently support one.
 - Log `org_id`, repository ID, policy ID/version, each prompt's rune count, and source (`manual`, `example`, `reset`) only where that source is explicitly provided by the client or analytics layer.
 - Never log either prompt's contents.
-- Existing prompt artifacts provide authorized run-level evidence of the rendered prompt.
+- Existing prompt records provide authorized run-level evidence of the rendered prompt.
 - Add frontend analytics only through the existing analytics facility; if no such facility exists, instrumentation is deferred rather than introducing a new vendor in this project.
 
 ### Testing strategy
@@ -742,7 +742,7 @@ Use table-driven parallel tests with `require` and exact values for:
 - comment-only orchestration does not use the automated approval policy to change the outcome;
 - template-like strings inside either prompt are not evaluated;
 - delimiter-like and prompt-injection text cannot remove platform safety text;
-- different policy versions produce different prompt artifacts;
+- different policy versions produce different prompt records;
 - running reviews use captured instructions, not the latest active policy.
 
 #### Frontend tests
@@ -826,7 +826,7 @@ Implementation items:
 8. Add the empty review-instructions default and built-in automated approval policy to new policies and safely backfill existing policy rows.
 9. Preserve `/review` as the first prefix of every configured and fallback reviewer-agent invocation, then inject captured review instructions as delimited data beneath immutable constraints.
 10. Inject both captured prompts into the orchestrator template as separately delimited data; use the automated approval policy only in approve mode.
-11. Ensure rendered prompt artifacts capture the effective prompts while normal logs do not.
+11. Ensure rendered prompt records capture the effective prompts while normal logs do not.
 12. Add model, store, handler, prompt-rendering, worker, and frontend tests described above, including exact `/review` prefix assertions for every reviewer path.
 13. Run focused Go tests/vet and frontend tests/lint; broaden verification because this phase crosses a shared API and runtime contract.
 
@@ -884,7 +884,7 @@ Exit criteria:
 2. Should repository-owned `.143/config.json` provide review instructions? Do not add a second source of truth in these phases; evaluate separately with an explicit precedence design.
 3. Should prompt examples be localized or organization-customizable? Built-in English examples are sufficient initially.
 4. **Resolved:** full repository-policy reset transactionally deactivates the active repository override while preserving version history captured by existing review sessions.
-5. Should the orchestrator receive instructions verbatim or a smaller derived subset? Start verbatim for consistency and evaluate prompt-token cost and behavior with artifacts/evals.
+5. Should the orchestrator receive instructions verbatim or a smaller derived subset? Start verbatim for consistency and evaluate prompt-token cost and behavior with prompt records and evals.
 
 ## Documentation impact
 

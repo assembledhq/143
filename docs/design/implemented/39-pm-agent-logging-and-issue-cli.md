@@ -12,7 +12,7 @@ The PM agent has two gaps compared to the session coding agent:
    call, and reasoning step into `session_logs`, giving operators full
    visibility. The PM agent discards all of this — its `logCh` channel is
    drained into a no-op goroutine (`service.go:303-307`). The only persisted
-   artifacts are the final `pm_decision_log` entries and the `analysis` text
+   outputs are the final `pm_decision_log` entries and the `analysis` text
    field on `pm_plans`. When something goes wrong (bad prioritization, missed
    issue, unexpected skip) there is no way to trace *why* the PM agent made
    that decision.

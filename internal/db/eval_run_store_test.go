@@ -259,7 +259,7 @@ func TestEvalRunStore_UpdateResult(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestEvalRunStore_UpdatePostSessionArtifacts(t *testing.T) {
+func TestEvalRunStore_UpdatePostSessionOutputs(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
@@ -277,8 +277,8 @@ func TestEvalRunStore_UpdatePostSessionArtifacts(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	store := NewEvalRunStore(mock)
-	err = store.UpdatePostSessionArtifacts(context.Background(), orgID, runID, &diff, trace, manifest)
-	require.NoError(t, err, "UpdatePostSessionArtifacts should move the run into grading with session artifacts")
+	err = store.UpdatePostSessionOutputs(context.Background(), orgID, runID, &diff, trace, manifest)
+	require.NoError(t, err, "UpdatePostSessionOutputs should move the run into grading with session outputs")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

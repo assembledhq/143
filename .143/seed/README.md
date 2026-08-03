@@ -11,7 +11,7 @@ Fragment map:
 - `20_sources_and_projects.sql` - integrations, repositories, PR templates, and projects.
 - `30_issues.sql` - issues plus priority and complexity sidecars.
 - `40_sessions_base.sql` - seeded session rows, session updates, issue links, and issue snapshots.
-- `41_session_artifacts.sql` - session threads, file events, diffs, reviews, questions, and validations.
+- `41_session_records.sql` - session threads, file events, diffs, reviews, questions, and validations.
 - `42_session_conversation.sql` - session diff body, messages, and logs.
 - `50_preview_targets.sql` - preview natural-key cleanup, groups, targets, and links.
 - `51_preview_runtime.sql` - preview instances, services, infrastructure, runtime, snapshots, and logs.
@@ -22,5 +22,5 @@ Fragment map:
 - `73_automation_runs.sql` - automations, triggers, runs, and capability policies.
 - `74_high_impact_sessions.sql` - high-impact sessions plus Slack and Linear surfaces linked to them.
 - `75_pm_projects.sql` - Legacy-named seed for reference-document pins, human-authored project details, automation improvements, and cleanup of obsolete PM demo rows.
-- `76_code_review.sql` - code review policy, sessions, reviewer output, findings, and prompt artifacts.
+- `76_code_review.sql` - code review policy, sessions, reviewer output, findings, and prompt records.
 - `77_usage_rollups.sql` - seeded usage rollups for dashboards.

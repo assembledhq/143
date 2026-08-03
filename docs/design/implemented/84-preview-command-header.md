@@ -18,7 +18,7 @@ Failed previews are the exception: `Retry Preview` can become the primary header
 
 ## Rationale
 
-Preview is a workspace surface that can accumulate many tools: external open, lifecycle controls, lifetime management, console errors, design mode, diagnostics, inspector tools, and future preview artifacts. Giving every control equal visual weight makes the main review action harder to find.
+Preview is a workspace surface that can accumulate many tools: external open, lifecycle controls, lifetime management, console errors, design mode, diagnostics, inspector tools, and future preview captures. Giving every control equal visual weight makes the main review action harder to find.
 
 The command-header pattern keeps a stable hierarchy:
 

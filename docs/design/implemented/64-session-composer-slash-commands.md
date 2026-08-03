@@ -62,7 +62,7 @@ We **reuse the existing mention picker UI** rather than ship a parallel componen
 ### Conductor
 
 - Conductor's composer also supports slash commands tied to its harness (e.g. `/loop`, `/schedule`).
-- Conductor's lesson is the one we already absorbed for `@`: keep the visible token but resolve to a real artifact (file on disk, structured intent) so multiple agents can consume it.
+- Conductor's lesson is the one we already absorbed for `@`: keep the visible token but resolve to a real output (file on disk, structured intent) so multiple agents can consume it.
 
 ## Implementation Principles
 

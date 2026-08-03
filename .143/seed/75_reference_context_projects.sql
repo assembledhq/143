@@ -407,7 +407,7 @@ SET execution_brief = EXCLUDED.execution_brief,
     project_task_id = EXCLUDED.project_task_id,
     updated_at = EXCLUDED.updated_at;
 
--- Remove legacy PM/Autopilot-only demo artifacts on both fresh and upgraded
+-- Remove legacy PM/Autopilot-only demo outputs on both fresh and upgraded
 -- demo databases. The manual reference document and its immutable pin remain
 -- because eval reproducibility still owns that data.
 DELETE FROM reference_context_set_pin_members

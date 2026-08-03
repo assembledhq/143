@@ -8,13 +8,13 @@ Phase 1 and the Phase 2 core now provide the durable session-owned browser
 foundation and native `ensure`/`observe`/`act` path: persisted browser identity and storage state,
 compatible-origin restoration, bounded accessibility/DOM and console-cursor
 observations, serialized structured actions, configured path enforcement,
-worker routing, explicit session-token preview capabilities, artifact-backed
+worker routing, explicit session-token preview capabilities, capture-backed
 screenshots, implicit session targeting, an audited human/agent control lease,
 and a preview panel that watches and controls the same worker-owned browser
 context used by the agent. Active-action fencing prevents human takeover and
 agent input from racing. MCP observations carry compact semantic context plus
 native PNG image content; CLI-only runtimes retain a private workspace-file
-fallback, and durable artifact references remain authoritative evidence.
+fallback, and durable capture references remain authoritative evidence.
 
 Adapter-by-adapter native-image compatibility still needs rollout validation;
 CLI-only runtimes can use the implemented workspace fallback. Verification
@@ -59,7 +59,7 @@ what was tested. The agent and user operate the same browser context, including
 the same URL, cookies, local storage, and authenticated application state.
 
 The default agent workflow should require no preview ID, worker address, port,
-credential exchange, or artifact plumbing:
+credential exchange, or capture plumbing:
 
 ```bash
 143-tools preview ensure --wait
@@ -119,7 +119,7 @@ session tool path.
 Add a high-signal `preview observe` operation. One response includes:
 
 - Screenshot as a native model image attachment.
-- Stored artifact reference and short-lived signed URL.
+- Stored capture reference and short-lived signed URL.
 - Current URL, title, viewport, and capture time.
 - Bounded accessibility tree or requested DOM excerpt.
 - New console errors since the previous observation.
@@ -147,7 +147,7 @@ available as lower-level and compatibility operations.
 
 The MCP transport now returns the bounded observation as text followed by a
 validated native `image/png` content block. It removes inline base64 from the
-text block, retains durable artifact metadata, rejects missing, malformed,
+text block, retains durable capture metadata, rejects missing, malformed,
 unsupported, or oversized image payloads, and preserves `--output` as a private
 workspace-file fallback. Confirming native image consumption in each supported
 coding-agent adapter remains rollout work.
@@ -187,7 +187,7 @@ preserves cookies, local storage, URL, and page state. This supports login, MFA,
 CAPTCHA, seed-data preparation, and ambiguous visual decisions without creating
 a second environment.
 
-Both the sandbox token and user session can access the browser and its artifacts
+Both the sandbox token and user session can access the browser and its captures
 through their respective authenticated platform paths. Neither needs direct
 network access to the worker. Same-session sandbox tokens cannot inspect or
 control another session's preview.
@@ -203,7 +203,7 @@ Each automatic or requested verification produces a compact run record:
 - Console-error summary.
 - Result: `passed`, `failed`, `skipped`, or `human_intervention_required`.
 
-The session transcript receives a concise summary and references; artifact bytes
+The session transcript receives a concise summary and references; capture bytes
 remain in object storage or a workspace-visible file. The preview panel and run
 detail can render the same evidence. Screenshot sequences and an action
 transcript are P0. GIF or video recording is a later presentation layer over
@@ -281,7 +281,7 @@ Coding agent runtime
   v
 143 API + session authorization
   |                         |
-  |                         +--> verification run + artifacts
+  |                         +--> verification run + captures
   v
 Worker preview controller
   | app services from .143/config.json
@@ -300,7 +300,7 @@ New responsibilities should remain separated:
 - A browser-session service owns persistent browser context and control leases.
 - `PreviewInspector` owns bounded observation and actions.
 - The preview tool transport turns screenshot bytes into native MCP image
-  content while preserving artifact references and the CLI workspace fallback;
+  content while preserving capture references and the CLI workspace fallback;
   coding-agent adapters consume the richest form they support.
 - A verification coordinator owns trigger policy, bounded retries, plans, and
   evidence records.
@@ -321,7 +321,7 @@ New responsibilities should remain separated:
   size limits.
 - Human takeover revokes the active agent action lease until explicitly
   returned or timed out.
-- Artifact URLs are short-lived and authorized independently from main-app
+- Capture URLs are short-lived and authorized independently from main-app
   browser cookies so sandbox agents can retrieve their own evidence.
 
 ## Delivery Plan
@@ -333,7 +333,7 @@ New responsibilities should remain separated:
 - **Complete:** Default preview tools to `CODING_SESSION_ID` and inject it in every coding-agent
   launch path.
 - **Complete:** Add explicit preview capability mappings and same-session authorization tests.
-- **Complete:** Verify sandbox-token access to preview endpoints and artifact downloads.
+- **Complete:** Verify sandbox-token access to preview endpoints and capture downloads.
 
 ### Phase 1: Persistent Session Browser
 
@@ -361,7 +361,7 @@ New responsibilities should remain separated:
 - **Complete:** Add deterministic diff-aware trigger policy, bounded coordinator retries,
   and route/viewport smoke plans.
 - **Complete:** Persist revision-keyed verification summaries, ordered action outcomes,
-  console counts, and artifact references.
+  console counts, and capture references.
 - **Complete:** Render the latest evidence and handoff result in the session preview UI.
 - **Complete:** Invoke one shared verification hook from successful initial and
   continuation turns, covering every supported adapter without branching.

@@ -427,7 +427,7 @@ config file, so the same binary works in both worlds.
    `checksums.txt`.
 2. **Server image** (`Dockerfile` for `143-server`): a build stage runs
    `make build-cli`; final stage copies `dist/cli/` to `/opt/143/cli/`. Adds
-   ~60 MB to the image — acceptable; revisit GHCR-hosted artifacts if it grows.
+   ~60 MB to the image — acceptable; revisit GHCR-hosted outputs if it grows.
    deploy.yml already builds/pushes the server image; the only other deploy
    change is the Caddyfile routing rules called out in the API contract section.
 3. **Server**: static handler serving `/opt/143/cli/` for the download routes;

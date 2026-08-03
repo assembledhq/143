@@ -654,12 +654,12 @@ func (h *CodeReviewHandler) Evidence(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_FINDINGS_LOAD_FAILED", "failed to load code review findings", err)
 		return
 	}
-	artifacts, err := h.store.ListPromptArtifacts(r.Context(), orgID, sessionID)
+	records, err := h.store.ListPromptRecords(r.Context(), orgID, sessionID)
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_PROMPTS_LOAD_FAILED", "failed to load code review prompt artifacts", err)
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_PROMPTS_LOAD_FAILED", "failed to load code review prompt records", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewEvidence]{Data: models.CodeReviewEvidence{AgentResults: results, Findings: findings, PromptArtifacts: artifacts}})
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewEvidence]{Data: models.CodeReviewEvidence{AgentResults: results, Findings: findings, PromptRecords: records}})
 }
 
 func (h *CodeReviewHandler) Retry(w http.ResponseWriter, r *http.Request) {
