@@ -479,6 +479,44 @@ func TestSharedDependencyCache_EvictLocalLRURemovesOldestBlobAndLocation(t *test
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+// A worker upgraded across the install_artifact -> install_output rename holds
+// the same blob under both directories: the legacy copy stops being touched
+// once a save writes the current one, so LRU reaches it first. Evicting that
+// orphan must not delete the placement hint the surviving copy still satisfies,
+// or cache-affinity routing silently stops sending work to a worker that has
+// the blob.
+func TestSharedDependencyCache_EvictLocalLRUKeepsLocationWhileAnotherCopySurvives(t *testing.T) {
+	t.Parallel()
+
+	localDir := t.TempDir()
+	cacheKey := strings.Repeat("a", 64)
+
+	cache, err := NewDependencyCache(DependencyCacheConfig{
+		Store:         db.NewPreviewStore(nil),
+		Executor:      &dependencyCacheExec{},
+		BlobStore:     newMemorySnapshotStore(),
+		Logger:        zerolog.Nop(),
+		WorkerNodeID:  "worker-1",
+		LocalDir:      localDir,
+		LocalMaxBytes: int64(len("current")),
+	})
+	require.NoError(t, err, "dependency cache should initialize")
+
+	legacyPath := cache.localBlobPathForDir("install_artifact", cacheKey)
+	currentPath := cache.localBlobPath(models.PreviewCacheKindInstallOutput, cacheKey)
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0o750), "legacy blob dir should be created")
+	require.NoError(t, os.MkdirAll(filepath.Dir(currentPath), 0o750), "current blob dir should be created")
+	require.NoError(t, os.WriteFile(legacyPath, []byte("stale"), 0o600), "orphaned legacy blob should be written")
+	require.NoError(t, os.WriteFile(currentPath, []byte("current"), 0o600), "current blob should be written")
+	require.NoError(t, os.Chtimes(legacyPath, time.Now().Add(-time.Hour), time.Now().Add(-time.Hour)), "legacy blob should be the LRU victim")
+
+	// db.NewPreviewStore(nil) panics on any query, so reaching the location
+	// delete would fail the test rather than silently pass.
+	require.NoError(t, cache.evictLocalLRU(context.Background()), "local LRU eviction should complete")
+	require.NoFileExists(t, legacyPath, "local LRU should evict the orphaned pre-rename copy")
+	require.FileExists(t, currentPath, "local LRU should keep the current copy within budget")
+}
+
 func TestSharedDependencyCache_RestoreDeletesMetadataWhenObjectMissing(t *testing.T) {
 	t.Parallel()
 

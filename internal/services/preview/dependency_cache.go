@@ -1035,6 +1035,24 @@ func (c *SharedDependencyCache) removeLocalBlob(ctx context.Context, kind models
 	}
 }
 
+// hasLocalBlobForKind reports whether this worker can still serve (kind,
+// cacheKey) from some local path. A worker upgraded across the cache-kind
+// rename can hold the same blob under both the legacy and the current
+// directory, and only the current one keeps getting touched — so LRU reaches
+// the orphaned legacy copy first. Evicting it must not delete the placement
+// hint that the surviving copy still satisfies.
+func (c *SharedDependencyCache) hasLocalBlobForKind(kind models.PreviewCacheKind, cacheKey string) bool {
+	if c.localDir == "" {
+		return false
+	}
+	for _, path := range c.localBlobPathCandidates(kind, cacheKey) {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *SharedDependencyCache) removeLocalBlobPath(path string) {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		c.logger.Warn().Err(err).Str("path", path).Msg("failed to remove dependency cache local blob")
@@ -1073,7 +1091,7 @@ func (c *SharedDependencyCache) evictLocalLRU(ctx context.Context) error {
 			c.logger.Warn().Err(err).Str("path", entry.path+".sha256").Msg("failed to evict dependency cache local checksum")
 		}
 		total -= entry.sizeBytes
-		if c.workerNodeID != "" {
+		if c.workerNodeID != "" && !c.hasLocalBlobForKind(entry.cacheKind, entry.cacheKey) {
 			if err := c.store.DeleteDependencyCacheLocationByWorkerCacheKey(ctx, c.workerNodeID, entry.cacheKind, entry.cacheKey); err != nil {
 				c.logger.Warn().Err(err).Str("cache_key", entry.cacheKey).Msg("failed to delete evicted dependency cache location")
 			}
