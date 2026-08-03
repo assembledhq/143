@@ -447,7 +447,7 @@ func (e *previewToolExecutor) waitSessionReady(ctx context.Context, sessionID st
 	for {
 		status, err := e.sessionStatusView(ctx, sessionID)
 		if err != nil {
-			if !isRetryablePreviewWaitError(err) {
+			if !isRetryablePreviewWaitError(ctx, err) {
 				return mcp.ErrorResult(fmt.Sprintf("preview status failed: %s", err))
 			}
 			if e.progress != nil && !transientReported {
@@ -509,8 +509,16 @@ func previewRetryDelay(err error) time.Duration {
 	return 0
 }
 
-func isRetryablePreviewWaitError(err error) bool {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+// isRetryablePreviewWaitError reports whether a failed status poll is worth
+// retrying inside the wait budget. ctx decides first: once the caller's context
+// is done the wait is over no matter what the request returned. That ordering
+// matters because every net-stack timeout — the per-request Client.Timeout, a
+// dial timeout, an i/o timeout — reports itself as context.DeadlineExceeded, so
+// matching on the error alone would misread a transient blip as a dead wait.
+// With ctx checked up front, a timeout that surfaces while ctx is still live can
+// only have come from the per-request budget, which is exactly what to retry.
+func isRetryablePreviewWaitError(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
 		return false
 	}
 	var apiErr *APIError
@@ -527,7 +535,7 @@ func isRetryablePreviewWaitError(err error) bool {
 		return true
 	}
 	var netErr net.Error
-	return errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary())
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func previewSessionAndWait(args json.RawMessage) (string, bool, error) {
@@ -704,7 +712,7 @@ func (e *previewToolExecutor) waitBranchReady(ctx context.Context, previewID str
 	for {
 		status, err := e.branchStatusView(ctx, previewID)
 		if err != nil {
-			if !isRetryablePreviewWaitError(err) {
+			if !isRetryablePreviewWaitError(ctx, err) {
 				return mcp.ErrorResult(fmt.Sprintf("preview status failed: %s", err))
 			}
 			if result := e.waitForNextPreviewPoll(ctx, deadline.C, previewRetryDelay(err), fmt.Sprintf("timed out waiting for preview %s", previewID)); result != nil {

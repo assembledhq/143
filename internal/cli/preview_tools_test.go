@@ -125,24 +125,64 @@ func TestIsRetryablePreviewWaitError(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		err      error
-		expected bool
+		name      string
+		err       error
+		cancelCtx bool
+		expected  bool
 	}{
 		{name: "transient API status", err: &APIError{Status: http.StatusServiceUnavailable}, expected: true},
 		{name: "unexpected EOF", err: io.ErrUnexpectedEOF, expected: true},
 		{name: "authentication failure", err: &APIError{Status: http.StatusUnauthorized}, expected: false},
-		{name: "context deadline", err: context.DeadlineExceeded, expected: false},
 		{name: "permanent transport error", err: errors.New("malformed request"), expected: false},
+		// Every net-stack timeout reports itself as context.DeadlineExceeded, so
+		// the live-context cases below are what separate a per-request timeout
+		// (retry) from an exhausted wait budget (give up).
+		{name: "per-request timeout while wait budget remains", err: context.DeadlineExceeded, expected: true},
+		{name: "i/o timeout while wait budget remains", err: os.ErrDeadlineExceeded, expected: true},
+		{name: "caller context cancelled", err: &APIError{Status: http.StatusServiceUnavailable}, cancelCtx: true, expected: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			require.Equal(t, tt.expected, isRetryablePreviewWaitError(tt.err), "retry classification should match the error's recoverability")
+			ctx := t.Context()
+			if tt.cancelCtx {
+				cancelled, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = cancelled
+			}
+
+			require.Equal(t, tt.expected, isRetryablePreviewWaitError(ctx, tt.err), "retry classification should match the error's recoverability")
 		})
 	}
+}
+
+// A stalled request is the transient failure the preview wait exists to survive:
+// the API server accepts the connection but goes quiet while the sandbox comes
+// up. It reaches the classifier as context.DeadlineExceeded, indistinguishable
+// by error value from an exhausted wait budget, so it only stays retryable while
+// the caller's context is still live.
+func TestIsRetryablePreviewWaitErrorRetriesRequestTimeout(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		server.Close()
+	})
+
+	client := NewClient(Config{ServerURL: server.URL}).WithRequestTimeout(50 * time.Millisecond)
+	err := client.Do(t.Context(), http.MethodGet, "/api/v1/previews/preview-1", nil, nil)
+	require.Error(t, err, "a stalled response should trip the per-request timeout")
+
+	require.True(t, isRetryablePreviewWaitError(t.Context(), err), "a per-request timeout should be retried while the wait budget remains")
 }
 
 func TestPreviewToolExecutor_SessionScreenshotOmitsInlineBase64(t *testing.T) {
