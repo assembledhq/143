@@ -220,6 +220,7 @@ export type CodeReviewGitHubTriggerStatus =
   | "ready"
   | "auth_required"
   | "permission_required"
+  | "disconnected"
   | "error";
 
 export interface CodeReviewGitHubTriggerSetting {
@@ -241,6 +242,7 @@ export interface CodeReviewGitHubTriggerResponse {
   status: CodeReviewGitHubTriggerStatus;
   repository_id: string;
   repository_full_name?: string;
+  repository_status: "active" | "paused" | "disconnected";
   github_org?: string;
   team_slug: string;
   team_name: string;

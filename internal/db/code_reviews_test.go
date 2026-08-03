@@ -253,6 +253,35 @@ func TestCodeReviewStore_GetActiveGitHubTriggerFiltersByOrgAndRepo(t *testing.T)
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestCodeReviewStore_ListActiveGitHubTriggersFiltersByOrg(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	triggerID := uuid.New()
+	userID := uuid.New()
+	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery("FROM code_review_github_trigger_settings").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(codeReviewGitHubTriggerColumns()).AddRow(
+			triggerID, orgID, repoID, int64(123), true, 2, "143-code-reviewer", "143 Code Reviewer", int64(143), "pull", &userID, now,
+		))
+
+	settings, err := NewCodeReviewStore(mock).ListActiveGitHubTriggers(context.Background(), orgID)
+
+	require.NoError(t, err, "ListActiveGitHubTriggers should load active settings for the organization")
+	require.Equal(t, []models.CodeReviewGitHubTriggerSetting{{
+		ID: triggerID, OrgID: orgID, RepositoryID: repoID, InstallationID: 123, Active: true, Version: 2,
+		TeamSlug: "143-code-reviewer", TeamName: "143 Code Reviewer", TeamID: 143,
+		RepoPermission: models.CodeReviewGitHubTriggerRepoPermissionPull, CreatedByUserID: &userID, CreatedAt: now,
+	}}, settings, "ListActiveGitHubTriggers should return the exact org-scoped settings")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestCodeReviewStore_SaveGitHubTriggerVersionsInsertOnly(t *testing.T) {
 	t.Parallel()
 

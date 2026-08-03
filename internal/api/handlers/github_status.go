@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,7 +16,9 @@ import (
 )
 
 const (
-	githubPRConnectStateCookie = "github_pr_connect_state"
+	githubPRConnectStateCookie      = "github_pr_connect_state"
+	githubConnectReturnCookiePrefix = "github_connect_return_"
+	githubConnectReturnTTL          = 10 * time.Minute
 )
 
 // githubStatusCredentialStore is the interface for checking GitHub credential status.
@@ -191,7 +194,11 @@ func (h *GitHubStatusHandler) StartConnect(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusServiceUnavailable, "GITHUB_APP_USER_AUTH_NOT_CONFIGURED", "github app user auth is not configured")
 		return
 	}
-	var resumeCookieName string
+	returnTo, hasReturnTo := githubConnectReturnPath(r.URL.Query().Get("return_to"))
+	if r.URL.Query().Has("return_to") && !hasReturnTo {
+		writeError(w, r, http.StatusBadRequest, "INVALID_RETURN_TO", "return_to must be a supported application path")
+		return
+	}
 	if resumeToken := r.URL.Query().Get("resume_token"); resumeToken != "" {
 		user := middleware.UserFromContext(r.Context())
 		orgID := middleware.OrgIDFromContext(r.Context())
@@ -222,12 +229,22 @@ func (h *GitHubStatusHandler) StartConnect(w http.ResponseWriter, r *http.Reques
 	}
 
 	if resumeToken := r.URL.Query().Get("resume_token"); resumeToken != "" {
-		resumeCookieName = githubPRResumeCookiePrefix + state
 		http.SetCookie(w, &http.Cookie{
-			Name:     resumeCookieName,
+			Name:     githubPRResumeCookiePrefix + state,
 			Value:    resumeToken,
 			Path:     "/",
 			MaxAge:   int(prAuthResumeTokenTTL.Seconds()),
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			Secure:   isSecureRequest(r),
+		})
+	}
+	if hasReturnTo {
+		http.SetCookie(w, &http.Cookie{
+			Name:     githubConnectReturnCookiePrefix + state,
+			Value:    url.QueryEscape(returnTo),
+			Path:     "/",
+			MaxAge:   int(githubConnectReturnTTL.Seconds()),
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
 			Secure:   isSecureRequest(r),
@@ -278,6 +295,20 @@ func (h *GitHubStatusHandler) HandleConnectCallback(w http.ResponseWriter, r *ht
 	// they began. The resume path below overrides this to return to the
 	// originating session instead.
 	redirectURL := h.frontendURL + "/settings/integrations?github_pr=connected"
+	returnCookieName := githubConnectReturnCookiePrefix + r.URL.Query().Get("state")
+	if returnCookie, cookieErr := r.Cookie(returnCookieName); cookieErr == nil {
+		if decoded, decodeErr := url.QueryUnescape(returnCookie.Value); decodeErr == nil {
+			if returnTo, ok := githubConnectReturnPath(decoded); ok {
+				parsedReturn, parseErr := url.Parse(returnTo)
+				if parseErr == nil {
+					query := parsedReturn.Query()
+					query.Set("github_pr", "connected")
+					parsedReturn.RawQuery = query.Encode()
+					redirectURL = h.frontendURL + parsedReturn.String()
+				}
+			}
+		}
+	}
 	resumeCookieName := githubPRResumeCookiePrefix + r.URL.Query().Get("state")
 	if resumeCookie, err := r.Cookie(resumeCookieName); err == nil && resumeCookie.Value != "" && len(h.signingKey) > 0 {
 		if claims, tokenErr := parsePRAuthResumeToken(h.signingKey, resumeCookie.Value, time.Now()); tokenErr == nil {
@@ -293,7 +324,22 @@ func (h *GitHubStatusHandler) HandleConnectCallback(w http.ResponseWriter, r *ht
 		}
 	}
 	clearCookie(w, r, resumeCookieName)
+	clearCookie(w, r, returnCookieName)
 	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
+}
+
+func githubConnectReturnPath(raw string) (string, bool) {
+	if raw == "" || len(raw) > 1024 {
+		return "", false
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" || !strings.HasPrefix(parsed.Path, "/") || strings.HasPrefix(parsed.Path, "//") {
+		return "", false
+	}
+	if parsed.Path != "/code-reviews" && parsed.Path != "/settings/integrations" {
+		return "", false
+	}
+	return parsed.RequestURI(), true
 }
 
 // Disconnect removes the user's stored GitHub App user credential.

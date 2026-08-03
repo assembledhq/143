@@ -1264,6 +1264,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/code-reviews/{id}/evidence", codeReviewHandler.Evidence)
 				r.Get("/api/v1/code-review-policies", codeReviewHandler.GetPolicy)
 				r.Get("/api/v1/code-review-github-trigger", codeReviewHandler.GetGitHubTrigger)
+				r.Get("/api/v1/code-review-github-triggers", codeReviewHandler.ListGitHubTriggers)
 
 				// GitHub connection status for PR authorship
 				r.Get("/api/v1/users/me/github-status", githubStatusHandler.GetStatus)

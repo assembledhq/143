@@ -56,9 +56,11 @@ func (s *RepositoryStore) Create(ctx context.Context, repo *models.Repository) e
 
 // RepositoryFilters controls optional predicates on ListByOrg. Default behavior
 // (zero value) returns only active repos, which is what every picker UI wants;
-// set IncludeDisconnected to surface historical repo rows for settings views.
+// set IncludeDisconnected to surface every historical row for settings views,
+// or IncludeRepositoryIDs to add specific inactive rows to the active result.
 type RepositoryFilters struct {
-	IncludeDisconnected bool
+	IncludeDisconnected  bool
+	IncludeRepositoryIDs []uuid.UUID
 }
 
 func (s *RepositoryStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters RepositoryFilters) ([]models.Repository, error) {
@@ -66,12 +68,18 @@ func (s *RepositoryStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filter
 		SELECT id, org_id, integration_id, github_id, full_name, default_branch, private, language, description, clone_url, installation_id, status, last_synced_at, context_quality, settings, created_at, updated_at
 		FROM repositories
 		WHERE org_id = @org_id`
-	if !filters.IncludeDisconnected {
+	args := pgx.NamedArgs{"org_id": orgID}
+	if filters.IncludeDisconnected {
+		// Return every historical row for settings views.
+	} else if len(filters.IncludeRepositoryIDs) > 0 {
+		query += ` AND (status = 'active' OR id = ANY(@include_repository_ids))`
+		args["include_repository_ids"] = filters.IncludeRepositoryIDs
+	} else {
 		query += ` AND status = 'active'`
 	}
 	query += ` ORDER BY full_name ASC`
 
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID})
+	rows, err := s.db.Query(ctx, query, args)
 	if err != nil {
 		return nil, fmt.Errorf("query repositories: %w", err)
 	}

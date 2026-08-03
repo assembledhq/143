@@ -85,6 +85,28 @@ func TestRepositoryStore_ListByOrg_DefaultFiltersDisconnected(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "default filter must emit the status = 'active' predicate")
 }
 
+func TestRepositoryStore_ListByOrgIncludesConfiguredInactiveRepositories(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	configuredRepoID := uuid.New()
+	mock.ExpectQuery(`status = 'active' OR id = ANY`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(repoColumns))
+
+	repos, err := NewRepositoryStore(mock).ListByOrg(context.Background(), orgID, RepositoryFilters{
+		IncludeRepositoryIDs: []uuid.UUID{configuredRepoID},
+	})
+
+	require.NoError(t, err, "ListByOrg should include configured repository IDs alongside active repositories")
+	require.Empty(t, repos, "mock query should return no repositories")
+	require.NoError(t, mock.ExpectationsWereMet(), "configured repository filter must be passed to the query")
+}
+
 func TestRepositoryStore_GetByID(t *testing.T) {
 	t.Parallel()
 

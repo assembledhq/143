@@ -43,6 +43,7 @@ import type {
   CodeReviewStats,
   CodeReviewTemplateOption,
   CodeReviewPromptExamplesResponse,
+  GitHubRepositoryClaimCandidate,
   AuditLog,
   ListResponse,
   OpenCodeModelInfo,
@@ -281,6 +282,7 @@ const githubTriggerReady: CodeReviewGitHubTriggerResponse = {
   status: "ready",
   repository_id: "repo-1",
   repository_full_name: "acme/api",
+  repository_status: "active",
   github_org: "acme",
   team_slug: "143-code-reviewer",
   team_name: "143 Code Reviewer",
@@ -322,6 +324,30 @@ function mockCodeReviewBaseHandlers(
         data: [repo],
         meta: {},
       } satisfies ListResponse<Repository>),
+    ),
+    http.get("/api/v1/integrations", () =>
+      HttpResponse.json({
+        data: [{
+          id: "int-1",
+          org_id: "org-1",
+          provider: "github",
+          status: "active",
+          github_app_installed: true,
+          github_installation_id: 123,
+          created_at: "2026-06-26T12:00:00Z",
+        }],
+        meta: {},
+      }),
+    ),
+    http.get("/api/v1/users/me/github-status", () =>
+      HttpResponse.json({
+        connected: true,
+        has_repo_scope: true,
+        pr_authorship_mode: "user_preferred",
+        pr_draft_default: false,
+        account_requirement: "recommended",
+        needs_reconnect: false,
+      }),
     ),
     http.get("/api/v1/code-reviews", () =>
       HttpResponse.json({
@@ -388,6 +414,9 @@ function mockCodeReviewBaseHandlers(
       HttpResponse.json({
         data: trigger,
       } satisfies SingleResponse<CodeReviewGitHubTriggerResponse>),
+    ),
+    http.get("/api/v1/code-review-github-triggers", () =>
+      HttpResponse.json({ data: [trigger], meta: {} } satisfies ListResponse<CodeReviewGitHubTriggerResponse>),
     ),
   );
   return {
@@ -1760,7 +1789,7 @@ describe("CodeReviewsPage", () => {
     // Every section title is a real heading, nested under the tab's own h2,
     // and all of them share one size.
     expect(screen.getByRole("heading", { level: 2, name: "Review policy" })).toBeInTheDocument();
-    for (const name of ["Review behavior", "Automated approval policy", "Additional review instructions (optional)", "GitHub setup"]) {
+    for (const name of ["Review behavior", "Automated approval policy", "Additional review instructions (optional)", "GitHub reviewer connections"]) {
       expect(screen.getByRole("heading", { level: 3, name })).toBeInTheDocument();
     }
     // Safeguards wraps its disclosure trigger, so the heading carries the
@@ -2553,6 +2582,7 @@ describe("CodeReviewsPage", () => {
       status: "auth_required",
       repository_id: "repo-1",
       repository_full_name: "acme/api",
+      repository_status: "active",
       github_org: "acme",
       team_slug: "143-code-reviewer",
       team_name: "143 Code Reviewer",
@@ -2581,19 +2611,15 @@ describe("CodeReviewsPage", () => {
       http.get("/api/v1/repositories", () =>
         HttpResponse.json({ data: [repo, secondRepo], meta: {} } satisfies ListResponse<Repository>),
       ),
-      http.get("/api/v1/code-review-github-trigger", ({ request }) => {
-        const repositoryID = new URL(request.url).searchParams.get("repository_id");
-        const trigger: CodeReviewGitHubTriggerResponse = repositoryID === secondRepo.id
-          ? {
-              ...githubTriggerReady,
-              status: "unconfigured",
-              repository_id: secondRepo.id,
-              repository_full_name: secondRepo.full_name,
-              trigger: undefined,
-            }
-          : githubTriggerReady;
-        return HttpResponse.json({ data: trigger } satisfies SingleResponse<CodeReviewGitHubTriggerResponse>);
-      }),
+      http.get("/api/v1/code-review-github-triggers", () =>
+        HttpResponse.json({ data: [githubTriggerReady, {
+          ...githubTriggerReady,
+          status: "unconfigured",
+          repository_id: secondRepo.id,
+          repository_full_name: secondRepo.full_name,
+          trigger: undefined,
+        }], meta: {} } satisfies ListResponse<CodeReviewGitHubTriggerResponse>),
+      ),
     );
 
     renderWithProviders(<CodeReviewsPage />);
@@ -2607,12 +2633,474 @@ describe("CodeReviewsPage", () => {
     expect(within(webRepository).getByRole("button", { name: "Set up GitHub reviewer" })).toBeEnabled();
   });
 
+  it("restores the open repository flow after GitHub App installation", async () => {
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/integrations/github/repositories", () =>
+        HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<GitHubRepositoryClaimCandidate>),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, {
+      searchParams: { tab: "policy", add_repository: "1", github: "connected" },
+      nuqsHasMemory: true,
+    });
+
+    expect(await screen.findByRole("dialog", { name: "Add GitHub reviewer" })).toBeInTheDocument();
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith(
+      "GitHub App connected",
+      expect.objectContaining({ description: expect.stringContaining("Choose a repository") }),
+    ));
+  });
+
+  it("explains the GitHub App prerequisite before listing repositories", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/integrations", () => HttpResponse.json({ data: [], meta: {} })),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: "Policy" }));
+    await user.click(await screen.findByRole("button", { name: "Add repository" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add GitHub reviewer" });
+
+    expect(within(sheet).getByText("Connect the GitHub App first")).toBeInTheDocument();
+    expect(within(sheet).getByRole("button", { name: "Connect GitHub App" })).toBeEnabled();
+    expect(within(sheet).queryByRole("textbox", { name: "Search GitHub repositories" })).not.toBeInTheDocument();
+  });
+
+  it("retries repository discovery without leaving the reviewer sheet", async () => {
+    const user = userEvent.setup();
+    let repositoryListCalls = 0;
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/integrations/github/repositories", () => {
+        repositoryListCalls += 1;
+        if (repositoryListCalls === 1) {
+          return HttpResponse.json({ error: { code: "LIST_REPOS_FAILED", message: "GitHub repositories are temporarily unavailable" } }, { status: 502 });
+        }
+        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<GitHubRepositoryClaimCandidate>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: "Policy" }));
+    await user.click(await screen.findByRole("button", { name: "Add repository" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add GitHub reviewer" });
+    expect(await within(sheet).findByText("GitHub repositories could not be loaded")).toBeInTheDocument();
+    await user.click(within(sheet).getByRole("button", { name: "Retry" }));
+
+    await waitFor(() => expect(repositoryListCalls).toBe(2));
+    expect(await within(sheet).findByText("No repositories are available")).toBeInTheDocument();
+  });
+
+  it("keeps cached repository rows visible when a background refresh fails", async () => {
+    const user = userEvent.setup();
+    const newRepo: Repository = {
+      ...repo,
+      id: "repo-refresh-failure",
+      github_id: 149,
+      full_name: "acme/offline-refresh",
+      clone_url: "https://github.com/acme/offline-refresh.git",
+    };
+    let candidateCalls = 0;
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({ data: [repo, newRepo], meta: {} } satisfies ListResponse<Repository>),
+      ),
+      http.get("/api/v1/integrations/github/repositories", () => {
+        candidateCalls += 1;
+        if (candidateCalls > 1) {
+          return HttpResponse.json({ error: {
+            code: "LIST_REPOS_FAILED",
+            message: "GitHub repository refresh failed",
+          } }, { status: 502 });
+        }
+        return HttpResponse.json({ data: [{
+          github_id: newRepo.github_id,
+          full_name: newRepo.full_name,
+          default_branch: newRepo.default_branch,
+          private: newRepo.private,
+          clone_url: newRepo.clone_url,
+          installation_id: newRepo.installation_id,
+          status: "unclaimed",
+          can_transfer: false,
+        }], meta: {} } satisfies ListResponse<GitHubRepositoryClaimCandidate>);
+      }),
+      http.post("/api/v1/integrations/github/repositories/claim", () =>
+        HttpResponse.json({ data: { claimed: 1 } }),
+      ),
+      http.post("/api/v1/code-review-github-trigger/setup", () =>
+        HttpResponse.json({ error: {
+          code: "GITHUB_TRIGGER_PERMISSION_REQUIRED",
+          message: "Reviewer setup still needs approval",
+        } }, { status: 403 }),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: "Policy" }));
+    await user.click(await screen.findByRole("button", { name: "Add repository" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add GitHub reviewer" });
+    await user.click(within(sheet).getByRole("button", { name: "Connect & set up" }));
+
+    expect(await within(sheet).findByText("GitHub repositories could not be refreshed")).toBeInTheDocument();
+    expect(within(sheet).getByText("acme/offline-refresh")).toBeInTheDocument();
+    expect(await within(sheet).findByText(/Repository connected, but reviewer setup failed/)).toHaveTextContent(
+      "Reviewer setup still needs approval",
+    );
+    expect(within(sheet).getByRole("button", { name: "Retry setup" })).toBeEnabled();
+  });
+
+  it("adds a connected repository reviewer without leaving the policy", async () => {
+    const user = userEvent.setup();
+    const secondRepo: Repository = {
+      ...repo,
+      id: "repo-2",
+      github_id: 144,
+      full_name: "acme/web",
+      clone_url: "https://github.com/acme/web.git",
+    };
+    let setupRepositoryID: string | undefined;
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({ data: [repo, secondRepo], meta: {} } satisfies ListResponse<Repository>),
+      ),
+      http.get("/api/v1/integrations/github/repositories", () =>
+        HttpResponse.json({ data: [{
+          github_id: secondRepo.github_id,
+          full_name: secondRepo.full_name,
+          default_branch: secondRepo.default_branch,
+          private: secondRepo.private,
+          clone_url: secondRepo.clone_url,
+          installation_id: secondRepo.installation_id,
+          status: "owned_by_current_org",
+          repository_id: secondRepo.id,
+          can_transfer: false,
+        }], meta: {} } satisfies ListResponse<GitHubRepositoryClaimCandidate>),
+      ),
+      http.post("/api/v1/code-review-github-trigger/setup", async ({ request }) => {
+        setupRepositoryID = ((await request.json()) as { repository_id: string }).repository_id;
+        return HttpResponse.json({ data: {
+          ...githubTriggerReady,
+          repository_id: secondRepo.id,
+          repository_full_name: secondRepo.full_name,
+        } } satisfies SingleResponse<CodeReviewGitHubTriggerResponse>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: "Policy" }));
+    await user.click(await screen.findByRole("button", { name: "Add repository" }));
+
+    const sheet = await screen.findByRole("dialog", { name: "Add GitHub reviewer" });
+    expect(within(sheet).getByText("acme/web")).toBeInTheDocument();
+    expect(within(sheet).getByText("Connected")).toBeInTheDocument();
+    await user.click(within(sheet).getByRole("button", { name: "Set up reviewer" }));
+
+    await waitFor(() => expect(setupRepositoryID).toBe(secondRepo.id));
+    expect(await within(sheet).findByText("Ready")).toBeInTheDocument();
+    expect(toast.success).toHaveBeenCalledWith(
+      "GitHub reviewer added to acme/web",
+      expect.objectContaining({ description: expect.stringContaining("@acme/143-code-reviewer") }),
+    );
+  });
+
+  it("keeps a connected repository recoverable when reviewer setup fails", async () => {
+    const user = userEvent.setup();
+    const newRepo: Repository = {
+      ...repo,
+      id: "repo-3",
+      github_id: 145,
+      full_name: "acme/mobile",
+      clone_url: "https://github.com/acme/mobile.git",
+    };
+    let claimCalls = 0;
+    let setupCalls = 0;
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({ data: claimCalls > 0 ? [repo, newRepo] : [repo], meta: {} } satisfies ListResponse<Repository>),
+      ),
+      http.get("/api/v1/integrations/github/repositories", () =>
+        HttpResponse.json({ data: [{
+          github_id: newRepo.github_id,
+          full_name: newRepo.full_name,
+          default_branch: newRepo.default_branch,
+          private: newRepo.private,
+          clone_url: newRepo.clone_url,
+          installation_id: newRepo.installation_id,
+          status: claimCalls > 0 ? "owned_by_current_org" : "unclaimed",
+          repository_id: claimCalls > 0 ? newRepo.id : undefined,
+          can_transfer: false,
+        }], meta: {} } satisfies ListResponse<GitHubRepositoryClaimCandidate>),
+      ),
+      http.get("/api/v1/code-review-github-triggers", () =>
+        HttpResponse.json({ data: claimCalls > 0 ? [githubTriggerReady, {
+          ...githubTriggerReady,
+          status: setupCalls > 1 ? "ready" : "unconfigured",
+          repository_id: newRepo.id,
+          repository_full_name: newRepo.full_name,
+          trigger: setupCalls > 1 ? { ...githubTriggerReady.trigger!, repository_id: newRepo.id } : undefined,
+        }] : [githubTriggerReady], meta: {} } satisfies ListResponse<CodeReviewGitHubTriggerResponse>),
+      ),
+      http.post("/api/v1/integrations/github/repositories/claim", () => {
+        claimCalls += 1;
+        return HttpResponse.json({ data: { claimed: 1 } });
+      }),
+      http.post("/api/v1/code-review-github-trigger/setup", () => {
+        setupCalls += 1;
+        if (setupCalls > 1) {
+          return HttpResponse.json({ data: {
+            ...githubTriggerReady,
+            repository_id: newRepo.id,
+            repository_full_name: newRepo.full_name,
+          } } satisfies SingleResponse<CodeReviewGitHubTriggerResponse>);
+        }
+        return HttpResponse.json({ error: {
+          code: "GITHUB_TRIGGER_PERMISSION_REQUIRED",
+          message: "GitHub App permissions need organization-owner approval",
+        } }, { status: 403 });
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: "Policy" }));
+    await user.click(await screen.findByRole("button", { name: "Add repository" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add GitHub reviewer" });
+    await user.click(within(sheet).getByRole("button", { name: "Connect & set up" }));
+
+    expect(await within(sheet).findByText(/Repository connected, but reviewer setup failed/)).toHaveTextContent(
+      "GitHub App permissions need organization-owner approval",
+    );
+    await user.click(within(sheet).getByRole("button", { name: "Done" }));
+    const connectedRepository = await screen.findByRole("region", { name: "acme/mobile GitHub reviewer" });
+    expect(within(connectedRepository).getByText("Not configured")).toBeInTheDocument();
+    await user.click(within(connectedRepository).getByRole("button", { name: "Set up GitHub reviewer" }));
+
+    expect(await within(connectedRepository).findByText("Ready")).toBeInTheDocument();
+    expect(claimCalls).toBe(1);
+    expect(setupCalls).toBe(2);
+  });
+
+  it("reclaims a disconnected repository before setting up its reviewer", async () => {
+    const user = userEvent.setup();
+    const disconnectedRepo: Repository = {
+      ...repo,
+      id: "repo-disconnected",
+      github_id: 146,
+      full_name: "acme/legacy",
+      clone_url: "https://github.com/acme/legacy.git",
+      status: "disconnected",
+    };
+    let claimed = false;
+    let setupRepositoryID: string | undefined;
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({ data: claimed ? [repo, { ...disconnectedRepo, status: "active" }] : [repo], meta: {} } satisfies ListResponse<Repository>),
+      ),
+      http.get("/api/v1/integrations/github/repositories", () =>
+        HttpResponse.json({ data: [{
+          github_id: disconnectedRepo.github_id,
+          full_name: disconnectedRepo.full_name,
+          default_branch: disconnectedRepo.default_branch,
+          private: disconnectedRepo.private,
+          clone_url: disconnectedRepo.clone_url,
+          installation_id: disconnectedRepo.installation_id,
+          status: claimed ? "owned_by_current_org" : "disconnected_in_current_org",
+          repository_id: disconnectedRepo.id,
+          can_transfer: false,
+        }], meta: {} } satisfies ListResponse<GitHubRepositoryClaimCandidate>),
+      ),
+      http.post("/api/v1/integrations/github/repositories/claim", () => {
+        claimed = true;
+        return HttpResponse.json({ data: { claimed: 1 } });
+      }),
+      http.post("/api/v1/code-review-github-trigger/setup", async ({ request }) => {
+        setupRepositoryID = ((await request.json()) as { repository_id: string }).repository_id;
+        return HttpResponse.json({ data: {
+          ...githubTriggerReady,
+          repository_id: disconnectedRepo.id,
+          repository_full_name: disconnectedRepo.full_name,
+        } } satisfies SingleResponse<CodeReviewGitHubTriggerResponse>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: "Policy" }));
+    await user.click(await screen.findByRole("button", { name: "Add repository" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add GitHub reviewer" });
+    await user.type(within(sheet).getByRole("textbox", { name: "Search GitHub repositories" }), "legacy");
+    expect(within(sheet).getByText("acme/legacy")).toBeInTheDocument();
+    await user.click(within(sheet).getByRole("button", { name: "Reconnect & set up" }));
+
+    await waitFor(() => expect(claimed).toBe(true));
+    await waitFor(() => expect(setupRepositoryID).toBe(disconnectedRepo.id));
+    expect(toast.success).toHaveBeenCalledWith(
+      "GitHub reviewer added to acme/legacy",
+      expect.objectContaining({ description: expect.stringContaining("@acme/143-code-reviewer") }),
+    );
+  });
+
+  it("returns to a retryable repository row when reviewer setup fails after transfer", async () => {
+    const user = userEvent.setup();
+    const transferredRepo: Repository = {
+      ...repo,
+      id: "repo-transferred",
+      github_id: 147,
+      full_name: "acme/transferred",
+      clone_url: "https://github.com/acme/transferred.git",
+    };
+    let transferred = false;
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({ data: transferred ? [repo, transferredRepo] : [repo], meta: {} } satisfies ListResponse<Repository>),
+      ),
+      http.get("/api/v1/integrations/github/repositories", () =>
+        HttpResponse.json({ data: [{
+          github_id: transferredRepo.github_id,
+          full_name: transferredRepo.full_name,
+          default_branch: transferredRepo.default_branch,
+          private: transferredRepo.private,
+          clone_url: transferredRepo.clone_url,
+          installation_id: transferredRepo.installation_id,
+          status: transferred ? "owned_by_current_org" : "owned_by_other_org",
+          repository_id: transferredRepo.id,
+          owner_org_name: "Previous workspace",
+          can_transfer: true,
+        }], meta: {} } satisfies ListResponse<GitHubRepositoryClaimCandidate>),
+      ),
+      http.post("/api/v1/integrations/github/repositories/claim", () => {
+        transferred = true;
+        return HttpResponse.json({ data: { claimed: 1 } });
+      }),
+      http.post("/api/v1/code-review-github-trigger/setup", () =>
+        HttpResponse.json({ error: {
+          code: "GITHUB_TRIGGER_PERMISSION_REQUIRED",
+          message: "Organization-owner approval is required",
+        } }, { status: 403 }),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: "Policy" }));
+    await user.click(await screen.findByRole("button", { name: "Add repository" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add GitHub reviewer" });
+    await user.click(within(sheet).getByRole("button", { name: "Transfer…" }));
+    const confirmation = await screen.findByRole("alertdialog", { name: "Transfer acme/transferred?" });
+    await user.click(within(confirmation).getByRole("button", { name: "Transfer and set up" }));
+
+    await waitFor(() => expect(screen.queryByRole("alertdialog", { name: "Transfer acme/transferred?" })).not.toBeInTheDocument());
+    expect(await within(sheet).findByText(/Repository connected, but reviewer setup failed/)).toHaveTextContent(
+      "Organization-owner approval is required",
+    );
+    expect(within(sheet).getByRole("button", { name: "Retry setup" })).toBeEnabled();
+  });
+
+  it("explains the GitHub account prerequisite inside the add repository flow", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers({ ...githubTriggerReady, status: "auth_required", trigger: undefined });
+    server.use(
+      http.get("/api/v1/users/me/github-status", () => HttpResponse.json({
+        connected: false,
+        has_repo_scope: false,
+        pr_authorship_mode: "user_preferred",
+        pr_draft_default: false,
+        account_requirement: "recommended",
+        needs_reconnect: false,
+      })),
+      http.get("/api/v1/integrations/github/repositories", () =>
+        HttpResponse.json({ data: [{
+          github_id: 144,
+          full_name: "acme/web",
+          default_branch: "main",
+          private: true,
+          clone_url: "https://github.com/acme/web.git",
+          installation_id: 123,
+          status: "unclaimed",
+          can_transfer: false,
+        }], meta: {} } satisfies ListResponse<GitHubRepositoryClaimCandidate>),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: "Policy" }));
+    await user.click(await screen.findByRole("button", { name: "Add repository" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add GitHub reviewer" });
+
+    expect(within(sheet).getByText("Connect your GitHub account")).toBeInTheDocument();
+    expect(within(sheet).getByRole("button", { name: "Connect account" })).toBeEnabled();
+    expect(within(sheet).getByRole("button", { name: "Connect & set up" })).toBeDisabled();
+  });
+
+  it("offers account reconnection when authorization expires during setup", async () => {
+    const user = userEvent.setup();
+    const connectedRepo: Repository = {
+      ...repo,
+      id: "repo-expired-auth",
+      github_id: 150,
+      full_name: "acme/expired-auth",
+      clone_url: "https://github.com/acme/expired-auth.git",
+    };
+    let accountStatusCalls = 0;
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/users/me/github-status", () => {
+        accountStatusCalls += 1;
+        return HttpResponse.json({
+          connected: accountStatusCalls === 1,
+          has_repo_scope: accountStatusCalls === 1,
+          pr_authorship_mode: "user_preferred",
+          pr_draft_default: false,
+          account_requirement: "recommended",
+          needs_reconnect: accountStatusCalls > 1,
+        });
+      }),
+      http.get("/api/v1/integrations/github/repositories", () =>
+        HttpResponse.json({ data: [{
+          github_id: connectedRepo.github_id,
+          full_name: connectedRepo.full_name,
+          default_branch: connectedRepo.default_branch,
+          private: connectedRepo.private,
+          clone_url: connectedRepo.clone_url,
+          installation_id: connectedRepo.installation_id,
+          status: "owned_by_current_org",
+          repository_id: connectedRepo.id,
+          can_transfer: false,
+        }], meta: {} } satisfies ListResponse<GitHubRepositoryClaimCandidate>),
+      ),
+      http.post("/api/v1/code-review-github-trigger/setup", () =>
+        HttpResponse.json({ error: {
+          code: "GITHUB_USER_AUTH_REQUIRED",
+          message: "Connect your GitHub account before creating the reviewer team",
+        } }, { status: 409 }),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: "Policy" }));
+    await user.click(await screen.findByRole("button", { name: "Add repository" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add GitHub reviewer" });
+    await user.click(within(sheet).getByRole("button", { name: "Set up reviewer" }));
+
+    expect(await within(sheet).findByText("Reconnect your GitHub account")).toBeInTheDocument();
+    expect(within(sheet).getByRole("button", { name: "Reconnect account" })).toBeEnabled();
+    expect(within(sheet).getByRole("button", { name: "Retry setup" })).toBeDisabled();
+    await waitFor(() => expect(accountStatusCalls).toBeGreaterThanOrEqual(2));
+  });
+
   it("explains why GitHub reviewer setup is disabled", async () => {
     const user = userEvent.setup();
     mockCodeReviewBaseHandlers({
       status: "auth_required",
       repository_id: "repo-1",
       repository_full_name: "acme/api",
+      repository_status: "active",
       github_org: "acme",
       team_slug: "143-code-reviewer",
       team_name: "143 Code Reviewer",
@@ -2645,6 +3133,7 @@ describe("CodeReviewsPage", () => {
       status: "unconfigured",
       repository_id: "repo-1",
       repository_full_name: "acme/api",
+      repository_status: "active",
       github_org: "acme",
       team_slug: "143-code-reviewer",
       team_name: "143 Code Reviewer",
@@ -2690,6 +3179,7 @@ describe("CodeReviewsPage", () => {
     expect(viewOnlyNotice.className).not.toMatch(/\bbg-/);
     expect(screen.getByRole("switch", { name: "Code reviews enabled" })).toBeDisabled();
     expect(screen.getByRole("textbox", { name: "Additional review instructions (optional)" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Add repository" })).toBeDisabled();
 
     expect(await screen.findByText("@acme/143-code-reviewer")).toBeInTheDocument();
     const manageButton = screen.getByRole("button", { name: "Manage" });
