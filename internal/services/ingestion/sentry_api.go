@@ -38,6 +38,11 @@ const (
 	// sentryMaxRetries is the maximum number of retry attempts for rate-limited
 	// Sentry API requests before giving up.
 	sentryMaxRetries = 3
+
+	// sentryMaxDrainBytes bounds how much of an unread response body is drained
+	// before closing it. The cap keeps a large or slow body from stalling
+	// cleanup; a body that exceeds it simply loses connection reuse.
+	sentryMaxDrainBytes = 64 << 10
 )
 
 // FetchIssues retrieves unresolved issues from a Sentry project since the given time.
@@ -127,11 +132,20 @@ func (c *SentryAPIClient) fetchPage(ctx context.Context, url, authToken string) 
 	return nil, "", fmt.Errorf("sentry API rate limited after %d retries", sentryMaxRetries)
 }
 
-// closeSentryResponseBody closes a response body and preserves any error that
-// was already being returned for the response. Keeping this out of a defer is
-// important in the retry loop: a rate-limited response must release its
-// connection before the client waits and starts the next attempt.
-func closeSentryResponseBody(body io.Closer, responseErr error) error {
+// closeSentryResponseBody drains and closes a response body, preserving any
+// error that was already being returned for the response. Keeping this out of a
+// defer is important in the retry loop: a rate-limited response must be
+// released before the client waits and starts the next attempt.
+//
+// The bounded drain is what lets the transport pool the connection for that
+// retry. Closing a body that was never read forces the transport to tear the
+// connection down, so every rate-limit retry would otherwise pay for a fresh
+// handshake against an API that is already shedding load.
+func closeSentryResponseBody(body io.ReadCloser, responseErr error) error {
+	// A drain failure is not worth reporting: it says nothing the response error
+	// does not already say, and the close below still runs either way.
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, sentryMaxDrainBytes))
+
 	closeErr := body.Close()
 	if closeErr == nil {
 		return responseErr

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,13 +24,25 @@ func (f sentryRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error
 	return f(req)
 }
 
+// trackedResponseBody records how a response body was consumed so tests can
+// assert that fetchPage drained it before closing it.
 type trackedResponseBody struct {
-	io.Reader
-	closed   atomic.Bool
-	closeErr error
+	payload       *strings.Reader
+	closed        atomic.Bool
+	unreadAtClose atomic.Int64
+	closeErr      error
+}
+
+func newTrackedResponseBody(payload string) *trackedResponseBody {
+	return &trackedResponseBody{payload: strings.NewReader(payload)}
+}
+
+func (b *trackedResponseBody) Read(p []byte) (int, error) {
+	return b.payload.Read(p)
 }
 
 func (b *trackedResponseBody) Close() error {
+	b.unreadAtClose.Store(int64(b.payload.Len()))
 	b.closed.Store(true)
 	return b.closeErr
 }
@@ -295,8 +306,8 @@ func TestSentryAPIClient_FetchIssues(t *testing.T) {
 func TestSentryAPIClient_FetchPageClosesRateLimitedResponseBeforeRetry(t *testing.T) {
 	t.Parallel()
 
-	rateLimitedBody := &trackedResponseBody{Reader: strings.NewReader(`{"detail":"rate limited"}`)}
-	successBody := &trackedResponseBody{Reader: strings.NewReader(`[{"id":"300"}]`)}
+	rateLimitedBody := newTrackedResponseBody(`{"detail":"rate limited"}`)
+	successBody := newTrackedResponseBody(`[{"id":"300"}]`)
 	requestCount := 0
 	httpClient := &http.Client{Transport: sentryRoundTripFunc(func(_ *http.Request) (*http.Response, error) {
 		requestCount++
@@ -325,16 +336,15 @@ func TestSentryAPIClient_FetchPageClosesRateLimitedResponseBeforeRetry(t *testin
 	require.Equal(t, 2, requestCount, "fetchPage should make exactly one retry")
 	require.True(t, rateLimitedBody.closed.Load(), "fetchPage should close the rate-limited response body")
 	require.True(t, successBody.closed.Load(), "fetchPage should close the successful response body")
+	require.Zero(t, rateLimitedBody.unreadAtClose.Load(), "fetchPage should drain the rate-limited response body so the retry can reuse the connection")
 }
 
 func TestSentryAPIClient_FetchPageReturnsResponseCloseError(t *testing.T) {
 	t.Parallel()
 
 	closeErr := errors.New("close failed")
-	body := &trackedResponseBody{
-		Reader:   strings.NewReader(`[]`),
-		closeErr: closeErr,
-	}
+	body := newTrackedResponseBody(`[]`)
+	body.closeErr = closeErr
 	httpClient := &http.Client{Transport: sentryRoundTripFunc(func(_ *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -357,10 +367,8 @@ func TestSentryAPIClient_FetchPagePreservesResponseAndCloseErrors(t *testing.T) 
 	t.Parallel()
 
 	closeErr := errors.New("close failed")
-	body := &trackedResponseBody{
-		Reader:   strings.NewReader(`{"detail":"internal error"}`),
-		closeErr: closeErr,
-	}
+	body := newTrackedResponseBody(`{"detail":"internal error"}`)
+	body.closeErr = closeErr
 	httpClient := &http.Client{Transport: sentryRoundTripFunc(func(_ *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusInternalServerError,
