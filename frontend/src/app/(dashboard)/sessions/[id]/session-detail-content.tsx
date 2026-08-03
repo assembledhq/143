@@ -6160,6 +6160,11 @@ export function SessionDetailContent({ id }: { id: string }) {
     snapshotState,
     localPRActionError?.code ? localPRActionError.message : session.pr_creation_error,
   );
+  // The button tooltip repeats the notice copy, so it reads the same polished
+  // sentence the notice renders instead of the raw server detail.
+  const localPRActionMessage = localPRActionError?.message
+    ? formatPRCreationError(localPRActionError.code, localPRActionError.message)
+    : undefined;
   const prActionError = hasPR
     ? null
     : (localPRActionError?.code && snapshotState ? snapshotMessage : localPRActionError?.message) ||
@@ -6181,7 +6186,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     finalizingPR,
     prState,
     prCreationError: session.pr_creation_error,
-    localError: snapshotUnavailable ? undefined : localPRActionError?.message,
+    localError: snapshotUnavailable ? undefined : localPRActionMessage,
     hasRecoverableError: Boolean(prActionError),
   });
   // A durable publication owns the workflow until it settles. Its Overview
