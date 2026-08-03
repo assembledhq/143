@@ -1352,7 +1352,6 @@ export default function CodeReviewsPage() {
                 repository: reviewRepositoryId,
                 range: timeRangeFilter,
               }}
-              onNavigateToReviews={() => setActiveTab("reviews")}
               filters={(
                 <CodeReviewFilters
                   id="code-review-analytics-filters"

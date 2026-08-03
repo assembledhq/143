@@ -760,6 +760,19 @@ describe("CodeReviewsPage", () => {
       expect(update?.options.history).toBe("push");
     });
 
+    const updatesBeforeDrilldown = onUrlUpdate.mock.calls.length;
+    const drilldown = await screen.findByRole("link", { name: "12 reviewed PRs by anya" });
+    drilldown.addEventListener("click", (event) => event.preventDefault(), { capture: true, once: true });
+    await user.click(drilldown);
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 25));
+    });
+    expect(
+      onUrlUpdate.mock.calls
+        .slice(updatesBeforeDrilldown)
+        .every(([update]) => update.searchParams.get("tab") === "analytics"),
+    ).toBe(true);
+
     await user.click(screen.getByRole("tab", { name: "Policy" }));
     await waitFor(() => {
       const update = onUrlUpdate.mock.calls.at(-1)?.[0];
