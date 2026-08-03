@@ -10981,12 +10981,9 @@ func effectivePublicationRequestedRole(
 	if stores == nil || stores.Users == nil {
 		return "", errors.New("user store is required to authorize agent-tool publication")
 	}
-	user, err := stores.Users.GetByIDGlobalWithSettings(ctx, *run.TriggeredByUserID)
+	user, err := stores.Users.GetByIDWithSettings(ctx, run.OrgID, *run.TriggeredByUserID)
 	if err != nil {
 		return "", fmt.Errorf("load agent publication initiator: %w", err)
-	}
-	if user.OrgID != run.OrgID {
-		return "", errors.New("agent publication initiator is outside organization scope")
 	}
 	return string(user.Role), nil
 }

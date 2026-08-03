@@ -77,8 +77,9 @@ const (
 )
 
 type Error struct {
-	Code ErrorCode
-	Err  error
+	Code    ErrorCode
+	Err     error
+	Details map[string]any
 }
 
 func (e *Error) Error() string {
@@ -109,7 +110,7 @@ type OrganizationStore interface {
 }
 
 type UserStore interface {
-	GetByIDGlobalWithSettings(ctx context.Context, userID uuid.UUID) (models.UserWithSettings, error)
+	GetByIDWithSettings(ctx context.Context, orgID, userID uuid.UUID) (models.UserWithSettings, error)
 }
 
 type PublicationStore interface {
@@ -695,9 +696,14 @@ func resolvePublicationTarget(
 	changeset models.SessionChangeset,
 ) (headBranch string, desiredHeadSHA *string, err error) {
 	if _, unpublishable := unpublishableChangesetStates[changeset.Status]; unpublishable {
+		reason := changesetPublicationBlocker(changeset.Status)
 		return "", nil, &Error{
 			Code: ErrorWorkspaceNotReady,
 			Err:  fmt.Errorf("primary changeset is %s", changeset.Status),
+			Details: map[string]any{
+				"changeset_status": changeset.Status,
+				"reason":           reason,
+			},
 		}
 	}
 	headBranch = trimmedPointer(changeset.WorkingBranch)
@@ -719,6 +725,21 @@ func resolvePublicationTarget(
 	return headBranch, desiredHeadSHA, nil
 }
 
+func changesetPublicationBlocker(status models.ChangesetStatus) string {
+	switch status {
+	case models.ChangesetStatusExternalUpdateDetected:
+		return "The remote pull request branch differs from the session checkpoint. Reconcile the remote branch with the session before creating the PR."
+	case models.ChangesetStatusNeedsRestack, models.ChangesetStatusRestacking, models.ChangesetStatusRestackConflict:
+		return "This pull request must finish restacking before it can be published."
+	case models.ChangesetStatusPROpen:
+		return "A pull request already exists for this changeset."
+	case models.ChangesetStatusMerged, models.ChangesetStatusAbandoned:
+		return "This changeset is already in a terminal state."
+	default:
+		return "This changeset is not ready to publish."
+	}
+}
+
 func trimmedPointer(value *string) string {
 	if value == nil {
 		return ""
@@ -738,12 +759,9 @@ func (c *Coordinator) resolvePolicy(ctx context.Context, orgID uuid.UUID, initia
 	var personal *models.AutomaticPRFollowThroughSettings
 	initiatorRole := ""
 	if initiatorID != nil {
-		user, userErr := c.users.GetByIDGlobalWithSettings(ctx, *initiatorID)
+		user, userErr := c.users.GetByIDWithSettings(ctx, orgID, *initiatorID)
 		if userErr != nil {
 			return EffectivePolicy{}, "", fmt.Errorf("load session initiator policy: %w", userErr)
-		}
-		if user.OrgID != orgID {
-			return EffectivePolicy{}, "", errors.New("session initiator is outside organization scope")
 		}
 		personal = user.Settings.AutomaticPRFollowThrough
 		initiatorRole = string(user.Role)

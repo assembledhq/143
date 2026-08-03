@@ -223,6 +223,53 @@ describe('SessionDetailPage PR creation', () => {
     expect(await screen.findByRole('menuitem', { name: /Create branch/ })).toHaveClass('text-xs');
   });
 
+  it('blocks a single diverged changeset with an actionable reconciliation path', async () => {
+    const changesetID = '11111111-1111-4111-8111-111111111111';
+    const session: SessionDetail = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-external-update',
+      threads: [],
+      changesets: [{
+        id: changesetID,
+        is_primary: true,
+        order_index: 0,
+        title: 'Primary pull request',
+        summary: '',
+        status: 'external_update_detected',
+        target_branch: 'main',
+        base_branch: 'main',
+        working_branch: '143/session-branch',
+        worktree_path: '/workspace/session',
+        created_at: '2026-07-15T12:00:00Z',
+        updated_at: '2026-07-15T12:00:00Z',
+      }],
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: session } satisfies SingleResponse<SessionDetail>)),
+      http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json(
+        { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+        { status: 404 },
+      )),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={session.id} />);
+
+    const notice = await screen.findByRole('alert');
+    expect(within(notice).getByText('Branch reconciliation required')).toBeInTheDocument();
+    expect(within(notice).getByText('The remote pull request branch differs from the session checkpoint. Reconcile the remote branch with the session before creating the PR.')).toBeInTheDocument();
+    const selectedPanel = screen.getByTestId('selected-pull-request-panel');
+    expect(within(selectedPanel).getByRole('button', { name: 'Create PR' })).toBeDisabled();
+
+    await user.click(within(notice).getByRole('button', { name: 'Reconcile with agent' }));
+    const composer = await screen.findByPlaceholderText('Send a follow-up message...');
+    expect((composer as HTMLTextAreaElement).value).toContain(`143-tools changesets import-remote --changeset ${changesetID}`);
+  });
+
   it('shows durable publication recovery state while GitHub reconciliation is active', async () => {
     const now = '2026-07-15T12:00:00Z';
     const detail: SessionDetail = {
@@ -1427,6 +1474,233 @@ describe('SessionDetailPage PR creation', () => {
     expect(alert).toHaveTextContent("Couldn't create the PR");
     expect(alert).toHaveTextContent('GitHub rejected the branch push.');
     expect(within(alert).getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  });
+
+  it('uses publication error details to replace generic retry with reconciliation', async () => {
+    const changesetID = '22222222-2222-4222-8222-222222222222';
+    const reason = 'The remote pull request branch differs from the session checkpoint. Reconcile the remote branch with the session before creating the PR.';
+    const session: SessionDetail = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'idle',
+      threads: [],
+      changesets: [{
+        id: changesetID,
+        is_primary: true,
+        order_index: 0,
+        title: 'Primary pull request',
+        summary: '',
+        status: 'ready',
+        target_branch: 'main',
+        base_branch: 'main',
+        working_branch: '143/session-branch',
+        worktree_path: '/workspace/session',
+        created_at: '2026-07-15T12:00:00Z',
+        updated_at: '2026-07-15T12:00:00Z',
+      }],
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: session } satisfies SingleResponse<SessionDetail>)),
+      http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json(
+        { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+        { status: 404 },
+      )),
+      http.post('/api/v1/sessions/:id/pr', () => HttpResponse.json({
+        error: {
+          code: 'WORKSPACE_NOT_READY',
+          message: 'pull request publication request was rejected',
+          details: { changeset_status: 'external_update_detected', reason },
+        },
+      }, { status: 409 })),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={session.id} />);
+    await user.click(await screen.findByRole('button', { name: 'Create PR' }));
+
+    const notice = await screen.findByRole('alert');
+    expect(notice).toHaveTextContent('Branch reconciliation required');
+    expect(notice).toHaveTextContent(reason);
+    expect(within(notice).queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+    expect(within(notice).getByRole('button', { name: 'Reconcile with agent' })).toBeInTheDocument();
+    expect(within(screen.getByTestId('selected-pull-request-panel')).getByRole('button', { name: 'Create PR' })).toBeDisabled();
+  });
+
+  it('does not carry a publication blocker to another selected changeset', async () => {
+    const primaryID = '22222222-2222-4222-8222-222222222222';
+    const childID = '33333333-3333-4333-8333-333333333333';
+    const reason = 'The primary branch must be reconciled before publication.';
+    const session: SessionDetail = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'idle',
+      threads: [],
+      changesets: [
+        {
+          id: primaryID, is_primary: true, order_index: 0, title: 'Primary pull request', summary: '',
+          status: 'ready', target_branch: 'main', base_branch: 'main', working_branch: '143/primary',
+          worktree_path: '/workspace/primary', created_at: '2026-07-15T12:00:00Z', updated_at: '2026-07-15T12:00:00Z',
+        },
+        {
+          id: childID, is_primary: false, order_index: 1, title: 'Secondary pull request', summary: '',
+          status: 'ready', target_branch: 'main', base_branch: '143/primary', working_branch: '143/secondary',
+          worktree_path: '/workspace/secondary', created_at: '2026-07-15T12:00:00Z', updated_at: '2026-07-15T12:00:00Z',
+        },
+      ],
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: session } satisfies SingleResponse<SessionDetail>)),
+      http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json(
+        { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+        { status: 404 },
+      )),
+      http.post('/api/v1/sessions/:id/pr', () => HttpResponse.json({
+        error: {
+          code: 'WORKSPACE_NOT_READY',
+          message: 'pull request publication request was rejected',
+          details: { changeset_status: 'external_update_detected', reason },
+        },
+      }, { status: 409 })),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={session.id} />);
+    const createButtons = await screen.findAllByRole('button', { name: 'Create PR' });
+    await user.click(createButtons[0]);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Branch reconciliation required');
+
+    await user.click(screen.getByRole('button', { name: /Secondary pull request/ }));
+
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+    const selectedPanel = screen.getByTestId('selected-pull-request-panel');
+    expect(within(selectedPanel).getByText('Secondary pull request')).toBeInTheDocument();
+    expect(within(selectedPanel).getByRole('button', { name: 'Create PR' })).not.toBeDisabled();
+  });
+
+  it('surfaces blocker details returned by selected changeset publication', async () => {
+    const primaryID = '55555555-5555-4555-8555-555555555555';
+    const childID = '66666666-6666-4666-8666-666666666666';
+    const reason = 'The remote pull request branch differs from the session checkpoint. Reconcile the remote branch with the session before creating the PR.';
+    const session: SessionDetail = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'idle',
+      threads: [],
+      changesets: [
+        {
+          id: primaryID, is_primary: true, order_index: 0, title: 'Primary pull request', summary: '',
+          status: 'ready', target_branch: 'main', base_branch: 'main', working_branch: '143/primary',
+          worktree_path: '/workspace/primary', created_at: '2026-07-15T12:00:00Z', updated_at: '2026-07-15T12:00:00Z',
+        },
+        {
+          id: childID, is_primary: false, order_index: 1, title: 'Secondary pull request', summary: '',
+          status: 'ready', target_branch: 'main', base_branch: '143/primary', working_branch: '143/secondary',
+          worktree_path: '/workspace/secondary', created_at: '2026-07-15T12:00:00Z', updated_at: '2026-07-15T12:00:00Z',
+        },
+      ],
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: session } satisfies SingleResponse<SessionDetail>)),
+      http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json(
+        { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+        { status: 404 },
+      )),
+      http.post('/api/v1/sessions/:id/changesets/:changesetId/publish', () => HttpResponse.json({
+        error: {
+          code: 'WORKSPACE_NOT_READY',
+          message: 'pull request publication request was rejected',
+          details: { changeset_status: 'external_update_detected', reason },
+        },
+      }, { status: 409 })),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={session.id} />);
+    await user.click(await screen.findByRole('button', { name: /Secondary pull request/ }));
+    const selectedPanel = screen.getByTestId('selected-pull-request-panel');
+    await user.click(within(selectedPanel).getByRole('button', { name: 'Create PR' }));
+
+    const notice = await screen.findByRole('alert');
+    expect(notice).toHaveTextContent('Branch reconciliation required');
+    expect(notice).toHaveTextContent(reason);
+    expect(within(notice).getByRole('button', { name: 'Reconcile with agent' })).toBeInTheDocument();
+    expect(within(selectedPanel).getByRole('button', { name: 'Create PR' })).toBeDisabled();
+  });
+
+  it('clears a local publication blocker after authoritative changeset recovery', async () => {
+    const changesetID = '44444444-4444-4444-8444-444444444444';
+    const reason = 'The remote pull request branch differs from the session checkpoint.';
+    let recovered = false;
+    const session: SessionDetail = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'idle',
+      threads: [],
+      changesets: [{
+        id: changesetID,
+        is_primary: true,
+        order_index: 0,
+        title: 'Primary pull request',
+        summary: '',
+        status: 'ready',
+        target_branch: 'main',
+        base_branch: 'main',
+        working_branch: '143/session-branch',
+        worktree_path: '/workspace/session',
+        created_at: '2026-07-15T12:00:00Z',
+        updated_at: '2026-07-15T12:00:00Z',
+      }],
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({
+        data: recovered ? {
+          ...session,
+          changesets: [{
+            ...session.changesets![0],
+            status: 'published_branch' as const,
+            updated_at: '2026-07-15T12:01:00Z',
+          }],
+        } : session,
+      } satisfies SingleResponse<SessionDetail>)),
+      http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json(
+        { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+        { status: 404 },
+      )),
+      http.post('/api/v1/sessions/:id/pr', () => {
+        recovered = true;
+        return HttpResponse.json({
+          error: {
+            code: 'WORKSPACE_NOT_READY',
+            message: 'pull request publication request was rejected',
+            details: { changeset_status: 'external_update_detected', reason },
+          },
+        }, { status: 409 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={session.id} />);
+    await user.click(await screen.findByRole('button', { name: 'Create PR' }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('PR creation failed', { duration: 10000 }));
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+    expect(await screen.findByRole('button', { name: 'Create PR' })).not.toBeDisabled();
   });
 
   it('lets the detail header grow when showing a PR error notice', async () => {

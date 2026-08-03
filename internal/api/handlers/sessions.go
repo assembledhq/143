@@ -218,16 +218,12 @@ func (h *SessionHandler) resolveSessionPublicationPolicy(
 	}
 	var personal *models.AutomaticPRFollowThroughSettings
 	if run.TriggeredByUserID != nil && h.userStore != nil {
-		initiator, initiatorErr := h.userStore.GetByIDGlobalWithSettings(ctx, *run.TriggeredByUserID)
+		initiator, initiatorErr := h.userStore.GetByIDWithSettings(ctx, orgID, *run.TriggeredByUserID)
 		switch {
 		case initiatorErr != nil:
 			h.logger.Warn().Err(initiatorErr).
 				Str("session_id", run.ID.String()).
 				Msg("falling back to organization publication policy; session initiator could not be loaded")
-		case initiator.OrgID != orgID:
-			h.logger.Warn().
-				Str("session_id", run.ID.String()).
-				Msg("falling back to organization publication policy; session initiator is outside organization scope")
 		default:
 			personal = initiator.Settings.AutomaticPRFollowThrough
 		}
@@ -1566,17 +1562,33 @@ func (h *SessionHandler) ImportChangesetRemote(w http.ResponseWriter, r *http.Re
 		return
 	}
 	var req struct {
-		HeadSHA string `json:"head_sha"`
+		HeadSHA          string `json:"head_sha"`
+		LocalHeadSHA     string `json:"local_head_sha"`
+		RemoteIsAncestor bool   `json:"remote_is_ancestor"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(req.HeadSHA) {
+	headPattern := regexp.MustCompile(`^[0-9a-f]{40}$`)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !headPattern.MatchString(req.HeadSHA) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_HEAD_SHA", "a 40-character remote head SHA is required")
 		return
 	}
-	if err := h.changesetStore.ImportRemoteHead(r.Context(), orgID, sessionID, changesetID, req.HeadSHA); err != nil {
+	if req.LocalHeadSHA != "" && !headPattern.MatchString(req.LocalHeadSHA) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_LOCAL_HEAD_SHA", "local_head_sha must be a 40-character SHA when provided")
+		return
+	}
+	status, err := h.changesetStore.ImportRemoteHead(
+		r.Context(), orgID, sessionID, changesetID, req.HeadSHA, req.LocalHeadSHA, req.RemoteIsAncestor,
+	)
+	if err != nil {
 		writeError(w, r, http.StatusNotFound, "CHANGESET_NOT_FOUND", "pull request not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "imported"})
+	result := "imported"
+	if status == models.ChangesetStatusPublishedBranch {
+		result = "reconciled"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": result, "changeset_status": status,
+	})
 }
 
 func (h *SessionHandler) ConfirmChangesetRestack(w http.ResponseWriter, r *http.Request) {
@@ -3248,7 +3260,7 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 			if errors.As(intentErr, &typedErr) {
 				switch typedErr.Code {
 				case publicationintent.ErrorSessionNotEligible, publicationintent.ErrorWorkspaceNotReady:
-					writeError(w, r, http.StatusConflict, string(typedErr.Code), "pull request publication request was rejected", intentErr)
+					writeErrorWithDetails(w, r, http.StatusConflict, string(typedErr.Code), "pull request publication request was rejected", typedErr.Details, intentErr)
 				default:
 					writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "failed to record publication intent", intentErr)
 				}

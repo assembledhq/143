@@ -1,4 +1,4 @@
-import type { PRCreationState, PRPushErrorCode, PRPushState, PullRequestHealthResponse } from "./types";
+import type { ChangesetStatus, PRCreationState, PRPushErrorCode, PRPushState, PullRequestHealthResponse } from "./types";
 
 type RepairableFailedChecksInput = Pick<PullRequestHealthResponse, "can_fix_tests" | "failing_test_count" | "checks" | "sync_status">;
 
@@ -56,10 +56,31 @@ export type CreatePRActionInput = {
   creatingPR: boolean;
   finalizingPR: boolean;
   prState?: PRCreationState;
+  changesetStatus?: ChangesetStatus;
   prCreationError?: string;
   localError?: string;
   hasRecoverableError: boolean;
 };
+
+export function changesetPublicationBlocker(status: ChangesetStatus | undefined): string | undefined {
+  switch (status) {
+    case "external_update_detected":
+      return "The remote pull request branch differs from the session checkpoint. Reconcile the remote branch with the session before creating the PR.";
+    case "needs_restack":
+    case "restacking":
+    case "restack_conflict":
+      return "This pull request must finish restacking before it can be published.";
+    case "materializing":
+      return "This pull request branch is still being materialized.";
+    case "pr_open":
+      return "A pull request already exists for this changeset.";
+    case "merged":
+    case "abandoned":
+      return "This changeset is already in a terminal state.";
+    default:
+      return undefined;
+  }
+}
 
 export function deriveCreatePRActionState(input: CreatePRActionInput): LabeledLifecycleActionState {
   const visible = input.canShipPR && !input.hasPR && (
@@ -104,6 +125,18 @@ export function deriveCreatePRActionState(input: CreatePRActionInput): LabeledLi
       disabledReason: "Finalizing the pull request",
       label: "Finalizing PR…",
       spinning: true,
+    };
+  }
+
+  const changesetBlocker = changesetPublicationBlocker(input.changesetStatus);
+  if (changesetBlocker) {
+    return {
+      visible: true,
+      disabled: true,
+      disabledReason: changesetBlocker,
+      label: "Create PR",
+      spinning: false,
+      showError: true,
     };
   }
 

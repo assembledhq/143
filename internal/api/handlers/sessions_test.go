@@ -237,6 +237,74 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 	return h
 }
 
+func TestSessionHandlerImportChangesetRemote(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		body               string
+		returnedStatus     models.ChangesetStatus
+		expectedStatusCode int
+		expectedCode       string
+		expectedResult     string
+	}{
+		{
+			name:               "matching local and remote heads report reconciliation",
+			body:               `{"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","local_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","remote_is_ancestor":true}`,
+			returnedStatus:     models.ChangesetStatusPublishedBranch,
+			expectedStatusCode: http.StatusOK,
+			expectedResult:     "reconciled",
+		},
+		{
+			name:               "invalid local head is rejected",
+			body:               `{"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","local_head_sha":"invalid"}`,
+			expectedStatusCode: http.StatusBadRequest,
+			expectedCode:       "INVALID_LOCAL_HEAD_SHA",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgx mock should initialize")
+			t.Cleanup(mock.Close)
+			orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+			if tt.expectedStatusCode == http.StatusOK {
+				mock.ExpectQuery(`UPDATE session_changesets SET`).
+					WithArgs(pgx.NamedArgs{
+						"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+						"remote_head_sha": strings.Repeat("a", 40), "local_head_sha": strings.Repeat("a", 40),
+						"remote_is_ancestor": true,
+					}).
+					WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow(tt.returnedStatus))
+			}
+
+			handler := newSessionHandler(t, mock)
+			handler.SetChangesetStore(db.NewSessionChangesetStore(mock))
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/changesets/"+changesetID.String()+"/import-remote", strings.NewReader(tt.body))
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("id", sessionID.String())
+			rctx.URLParams.Add("changeset_id", changesetID.String())
+			ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+			req = req.WithContext(middleware.WithOrgID(ctx, orgID))
+			w := httptest.NewRecorder()
+
+			handler.ImportChangesetRemote(w, req)
+
+			require.Equal(t, tt.expectedStatusCode, w.Code, "import-remote should return the expected HTTP status")
+			if tt.expectedCode != "" {
+				require.Contains(t, w.Body.String(), tt.expectedCode, "invalid input should return the expected error code")
+			} else {
+				require.Contains(t, w.Body.String(), `"status":"`+tt.expectedResult+`"`, "successful reconciliation should describe the durable result")
+				require.Contains(t, w.Body.String(), `"changeset_status":"published_branch"`, "successful reconciliation should return the publishable changeset state")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "import-remote should issue only the expected tenant-scoped query")
+		})
+	}
+}
+
 // sessionColumns is the standard column set for sessions queries.
 // Must match sessionSelectColumns in session_store.go. Update all inline
 // AddRow calls in this file when adding/removing/reordering columns.
