@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { format, subDays } from "date-fns";
+import { format } from "date-fns";
 import { CalendarRange, Check, ChevronDown } from "lucide-react";
 import type { DateRange } from "react-day-picker";
 
@@ -15,6 +15,7 @@ import { Separator } from "@/components/ui/separator";
 import {
   customTimeRange,
   customTimeRangeDates,
+  timeRangeDisplayDates,
   type PresetTimeRange,
   type TimeRangeFilter,
 } from "@/lib/time-range";
@@ -48,10 +49,7 @@ const PRESET_GROUPS: Array<{
 const PRESETS = PRESET_GROUPS.flatMap((group) => group.presets);
 
 function defaultDraft(value: TimeRangeFilter): DateRange {
-  const custom = customTimeRangeDates(value);
-  if (custom) return custom;
-  const today = new Date();
-  return { from: subDays(today, 30), to: today };
+  return timeRangeDisplayDates(value, new Date()) ?? { from: undefined, to: undefined };
 }
 
 export function timeRangeLabel(value: TimeRangeFilter): string {
@@ -87,6 +85,7 @@ export function TimeRangePicker({
   };
 
   const applyPreset = (preset: PresetTimeRange) => {
+    setDraft(defaultDraft(preset));
     onValueChange(preset);
     setOpen(false);
   };
