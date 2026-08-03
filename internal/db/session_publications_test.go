@@ -270,7 +270,7 @@ func TestSessionPublicationStoreApplyReviewBypassDetachesEvidence(t *testing.T) 
 	stored.ReviewWorkspaceRevision = nil
 	stored.ReviewDesiredHeadSHA = nil
 
-	mock.ExpectQuery(`UPDATE session_publications[\s\S]+review_loop_id = NULL[\s\S]+review_gate_state = 'not_required'[\s\S]+org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id`).
+	mock.ExpectQuery(`WITH publication_to_bypass AS[\s\S]+UPDATE session_review_loops AS loop[\s\S]+status = 'cancelled'[\s\S]+UPDATE session_publications[\s\S]+review_loop_id = NULL[\s\S]+review_gate_state = 'not_required'[\s\S]+org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id`).
 		WithArgs(pgx.NamedArgs{
 			"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
 			"source":                  models.SessionPublicationSourceUser,
@@ -281,7 +281,7 @@ func TestSessionPublicationStoreApplyReviewBypassDetachesEvidence(t *testing.T) 
 		WillReturnRows(pgxmock.NewRows(sessionPublicationTestColumns()).AddRow(sessionPublicationTestRow(stored)...))
 
 	err = NewSessionPublicationStore(mock).ApplyReviewBypass(context.Background(), orgID, &publication)
-	require.NoError(t, err, "authorized draft bypass should atomically detach stale review evidence")
+	require.NoError(t, err, "explicit Create PR should atomically retire review and detach stale evidence")
 	require.Equal(t, stored, publication, "bypassed publication should be ready with review no longer required")
 	require.NoError(t, mock.ExpectationsWereMet(), "review bypass should remain scoped to org, session, and changeset")
 }

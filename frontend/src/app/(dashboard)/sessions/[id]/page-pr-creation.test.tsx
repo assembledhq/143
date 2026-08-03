@@ -545,7 +545,7 @@ describe('SessionDetailPage PR creation', () => {
     const workflow = await screen.findByTestId('publication-workflow-card');
     expect(within(workflow).getByText('Needs attention')).toBeInTheDocument();
     expect(within(workflow).getByRole('button', { name: 'Resume publication' })).toBeInTheDocument();
-    expect(within(workflow).queryByRole('button', { name: 'Create draft PR' })).not.toBeInTheDocument();
+    expect(within(workflow).queryByRole('button', { name: 'Create PR' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Create PR' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
   });
@@ -594,7 +594,7 @@ describe('SessionDetailPage PR creation', () => {
     const workflow = await screen.findByTestId('publication-workflow-card');
     expect(within(workflow).getByText('Needs attention')).toBeInTheDocument();
     expect(within(workflow).getByText(/temporarily paused/)).toBeInTheDocument();
-    expect(within(workflow).getByRole('button', { name: 'Create draft PR' })).toBeInTheDocument();
+    expect(within(workflow).getByRole('button', { name: 'Create PR' })).toBeInTheDocument();
     expect(within(workflow).getByRole('button', { name: 'Continue with agent' })).toBeInTheDocument();
     expect(within(workflow).queryByText('Reviewing')).not.toBeInTheDocument();
   });
@@ -658,9 +658,9 @@ describe('SessionDetailPage PR creation', () => {
     expect(screen.getAllByTestId('publication-workflow-card')).toHaveLength(1);
   });
 
-  it('offers the audited draft bypass when publication review needs attention', async () => {
+  it('offers direct PR creation when an older publication review needs attention', async () => {
     const now = '2026-07-15T12:00:00Z';
-    let requestBody: unknown;
+    let requestBody = 'not-requested';
     const detail: SessionDetail = {
       ...mockSessions[0],
       status: 'completed',
@@ -687,7 +687,7 @@ describe('SessionDetailPage PR creation', () => {
       http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: detail } satisfies SingleResponse<SessionDetail>)),
       http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json({ error: { code: 'NOT_FOUND', message: 'pull request not found' } }, { status: 404 })),
       http.post('/api/v1/sessions/:id/pr', async ({ request }) => {
-        requestBody = await request.json();
+        requestBody = await request.text();
         return HttpResponse.json({ status: 'pr_queued', session_id: detail.id }, { status: 202 });
       }),
     );
@@ -696,10 +696,10 @@ describe('SessionDetailPage PR creation', () => {
 
     const workflow = await screen.findByTestId('publication-workflow-card');
     expect(within(workflow).getByText('Needs attention')).toBeInTheDocument();
-    await userEvent.click(within(workflow).getByRole('button', { name: 'Create draft PR' }));
+    await userEvent.click(within(workflow).getByRole('button', { name: 'Create PR' }));
 
     await waitFor(() => {
-      expect(requestBody).toMatchObject({ draft: true });
+      expect(requestBody).toBe('{}');
     });
   });
 
