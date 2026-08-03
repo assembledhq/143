@@ -245,7 +245,7 @@ func TestSessionHandlerPublishChangesetStackReportsPartialRejection(t *testing.T
 	require.Contains(t, body, `"status":"rejected"`, "the response should surface the rejected changeset")
 	require.Contains(t, body, secondID.String(), "the rejection should name the changeset it belongs to")
 	require.Contains(t, body, string(publicationintent.ErrorWorkspaceNotReady), "the rejection should retain the coordinator's typed error code")
-	require.Contains(t, body, "This pull request is not ready to publish.", "the rejection should return actionable safe copy")
+	require.Contains(t, body, "This workspace is not ready to publish a pull request. Review its status, then try again.", "the rejection should return actionable safe copy")
 	require.NotContains(t, body, "worktree is missing", "the response must not expose the coordinator's internal error detail")
 	require.Contains(t, body, firstID.String(), "the response should still report the changeset that was queued")
 	require.NoError(t, mock.ExpectationsWereMet(), "stack endpoint should consume the scoped session and changeset queries")

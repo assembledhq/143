@@ -120,6 +120,7 @@ import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, flattenTra
 import { formatReviewMessage } from "@/lib/format-review-message";
 import {
   classifyPRSnapshotState,
+  formatPRCreationError,
   prErrorTitle,
   snapshotPRMessage,
 } from "@/lib/session-pr-snapshot";
@@ -6232,6 +6233,11 @@ export function SessionDetailContent({ id }: { id: string }) {
     snapshotState,
     selectedLocalPRActionError?.code ? selectedLocalPRActionError.message : session.pr_creation_error,
   );
+  // The button tooltip repeats the notice copy, so it reads the same polished
+  // sentence the notice renders instead of the raw server detail.
+  const selectedLocalPRActionMessage = selectedLocalPRActionError?.message
+    ? formatPRCreationError(selectedLocalPRActionError.code, selectedLocalPRActionError.message)
+    : undefined;
   const blockingChangesetStatus = selectedLocalPRActionError?.changesetStatus ?? selectedChangeset?.status;
   const publicationBlocker = changesetPublicationBlocker(blockingChangesetStatus);
   const selectedChangesetActionBlocker = publicationBlocker;
@@ -6247,7 +6253,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const prActionError = hasPR
     ? null
     : publicationBlocker ||
-      (selectedLocalPRActionError?.code && snapshotState ? snapshotMessage : selectedLocalPRActionError?.message) ||
+      (selectedLocalPRActionError?.code && snapshotState ? snapshotMessage : selectedLocalPRActionMessage) ||
       (snapshotUnavailable ? snapshotMessage : null) ||
       (prState === "failed" ? session.pr_creation_error || PR_ERROR_TOAST_MESSAGE : null);
   const createPRAction = deriveCreatePRActionState({
@@ -6267,7 +6273,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     prState,
     changesetStatus: blockingChangesetStatus,
     prCreationError: session.pr_creation_error,
-    localError: snapshotUnavailable ? undefined : selectedLocalPRActionError?.message,
+    localError: snapshotUnavailable ? undefined : selectedLocalPRActionMessage,
     hasRecoverableError: Boolean(prActionError),
   });
   // A durable publication owns the workflow until it settles. Its Overview
@@ -6362,7 +6368,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       : publicationBlocker
         ? "Publication blocked"
         : prErrorTitle(snapshotState, selectedLocalPRActionError?.code),
-    description: prActionError,
+    description: publicationBlocker || formatPRCreationError(selectedLocalPRActionError?.code, prActionError),
     action: selectedChangesetRecoveryMessage ? {
       label: blockingChangesetStatus === "external_update_detected" ? "Reconcile with agent" : "Resolve with agent",
       onClick: requestSelectedChangesetRecovery,
@@ -6554,7 +6560,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         </div>
         {prErrorNotice && (
           <ErrorNotice
-            className="mx-2 mt-2"
+            className="mx-4 mt-2"
             title={prErrorNotice.title}
             description={prErrorNotice.description}
             action={prErrorNotice.action}

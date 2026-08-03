@@ -4,6 +4,7 @@ import {
   SNAPSHOT_NOT_CAPTURED_PR_MESSAGE,
   SNAPSHOT_UNAVAILABLE_PR_MESSAGE,
   classifyPRSnapshotState,
+  formatPRCreationError,
   prErrorTitle,
   snapshotPRMessage,
 } from "./session-pr-snapshot";
@@ -101,6 +102,49 @@ describe("session-pr-snapshot", () => {
 
     it("falls back to the generic PR creation title", () => {
       expect(prErrorTitle(null, "SOMETHING_ELSE")).toBe("Couldn't create the PR");
+    });
+  });
+
+  describe("formatPRCreationError", () => {
+    it.each([
+      {
+        name: "workspace rejection",
+        code: "WORKSPACE_NOT_READY",
+        message: "pull request publication request was rejected",
+        expected: "This workspace is not ready to publish a pull request. Review its status, then try again.",
+      },
+      {
+        name: "ineligible session",
+        code: "SESSION_NOT_PUBLICATION_ELIGIBLE",
+        message: "pull request publication request was rejected",
+        expected: "This session cannot create a pull request in its current state.",
+      },
+      {
+        name: "legacy lowercase detail",
+        code: undefined,
+        message: "pull request was rejected",
+        expected: "Pull request was rejected.",
+      },
+      {
+        name: "already polished detail",
+        code: undefined,
+        message: "GitHub rejected the branch push.",
+        expected: "GitHub rejected the branch push.",
+      },
+      {
+        name: "specific coordinator detail",
+        code: "WORKSPACE_NOT_READY",
+        message: "The working branch is no longer available.",
+        expected: "The working branch is no longer available.",
+      },
+      {
+        name: "missing detail",
+        code: undefined,
+        message: "  ",
+        expected: "Something went wrong while creating the pull request. Try again.",
+      },
+    ])("formats $name as polished product copy", ({ code, message, expected }) => {
+      expect(formatPRCreationError(code, message)).toBe(expected);
     });
   });
 });
