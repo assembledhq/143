@@ -61,6 +61,36 @@ create` from a session sandbox is intentionally unavailable because it would
 bypass review gates, repository templates, deduplication, audit state, and
 recovery.
 
+## Automatic PR handoff
+
+Eligible coding sessions can request publication after the agent has completed
+the change and appropriate verification. Organization admins control **Create
+a PR when the coding agent is ready** and **Run a two-pass review/fix cycle
+before creating the PR** under **Settings → Session automation**. Both default
+to on. Each user can choose **Use organization default (On/Off)**, **On**, or
+**Off** under **Account settings → Session automation**.
+
+Questions, planning, diagnosis, review-only work, sessions linked to an
+existing PR, incomplete work, and turns with no changes do not create a new
+PR. Completing an agent process is not a publication signal by itself. If an
+eligible turn leaves changes without requesting publication, the session stays
+available with its normal Create PR action.
+
+The session Overview shows one workflow card:
+
+- **Reviewing** shows the current pass and review/fix activity.
+- **Needs attention** offers the safe next actions, including an audited
+  **Create draft PR** bypass when the final review pass changed code.
+- **Publishing** means review passed and publication is queued; it does not
+  claim the PR exists yet.
+- **Published** links to the resulting pull request.
+
+Repositories default to **Review before opening the PR**. Repositories whose
+checks require an existing pull request can use **Create a draft first** on the
+repository page. In that mode 143 creates one draft, runs PR-dependent checks
+and review, publishes the reviewed head, and marks the draft ready only after
+the gate passes.
+
 ## Split a session into multiple pull requests
 
 For a large result, the Pull requests panel can divide the session diff into
