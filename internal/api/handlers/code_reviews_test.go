@@ -230,7 +230,7 @@ func TestCodeReviewHandler_SetupGitHubTriggerMapsMissingUserAuth(t *testing.T) {
 	handler := NewCodeReviewHandler(nil, nil)
 	handler.SetGitHubTriggerSetupService(codereviewsvc.NewGitHubTriggerSetupService(
 		&codeReviewTriggerHandlerStoreStub{},
-		&codeReviewTriggerHandlerRepoStub{repo: models.Repository{ID: repoID, OrgID: orgID, FullName: "acme/api"}},
+		&codeReviewTriggerHandlerRepoStub{repo: models.Repository{ID: repoID, OrgID: orgID, FullName: "acme/api", Status: models.RepositoryStatusActive}},
 		&codeReviewTriggerHandlerAuthStub{err: ghservice.ErrGitHubAppUserCredentialMissing},
 		zerolog.Nop(),
 	))
@@ -245,6 +245,40 @@ func TestCodeReviewHandler_SetupGitHubTriggerMapsMissingUserAuth(t *testing.T) {
 
 	require.Equal(t, http.StatusConflict, rr.Code, "missing GitHub user authorization should return a conflict")
 	require.Contains(t, rr.Body.String(), "GITHUB_USER_AUTH_REQUIRED", "response should expose the reconnect error code")
+}
+
+func TestCodeReviewHandler_ListGitHubTriggersReturnsRepositoryStatuses(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	repo := models.Repository{ID: repoID, OrgID: orgID, FullName: "acme/api", Status: models.RepositoryStatusActive}
+	handler := NewCodeReviewHandler(nil, nil)
+	handler.SetGitHubTriggerSetupService(codereviewsvc.NewGitHubTriggerSetupService(
+		&codeReviewTriggerHandlerStoreStub{},
+		&codeReviewTriggerHandlerRepoStub{repos: []models.Repository{repo}},
+		&codeReviewTriggerHandlerAuthStub{err: ghservice.ErrGitHubAppUserCredentialMissing},
+		zerolog.Nop(),
+	))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-review-github-triggers", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: models.RoleViewer})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.ListGitHubTriggers(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "all organization roles should be able to read GitHub reviewer connection statuses")
+	var response models.ListResponse[models.CodeReviewGitHubTriggerResponse]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response), "GitHub reviewer status response should be valid JSON")
+	require.Equal(t, []models.CodeReviewGitHubTriggerResponse{{
+		Status: models.CodeReviewGitHubTriggerStatusAuthRequired, RepositoryID: repoID,
+		RepositoryFullName: "acme/api", RepositoryStatus: models.RepositoryStatusActive, GitHubOrg: "acme",
+		TeamSlug: models.DefaultCodeReviewGitHubTriggerTeamSlug, TeamName: models.DefaultCodeReviewGitHubTriggerTeamName,
+		TeamReviewer: "@acme/143-code-reviewer", RepoPermission: models.DefaultCodeReviewGitHubTriggerRepoPerm,
+		Message: "Connect your GitHub account before creating the reviewer team.",
+	}}, response.Data, "handler should return the exact aggregate repository status")
 }
 
 func TestCodeReviewHandler_ListRejectsInvalidOutcome(t *testing.T) {
@@ -305,7 +339,7 @@ func TestCodeReviewHandler_ListReturnsPaginationMetadata(t *testing.T) {
 			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
 			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code",
 			"status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
-			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id",
+			"superseded_by_session_id", "review_output_key", "prompt_record_key", "github_review_id",
 			"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
 			"retry_eligible", "session_title", "repository_name", "github_repo", "github_pr_number",
 			"github_pr_url", "pull_request_title", "pull_request_author",
@@ -338,7 +372,7 @@ func TestCodeReviewHandler_ListAppliesTimeWindow(t *testing.T) {
 			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
 			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message",
 			"retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
-			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id",
+			"superseded_by_session_id", "review_output_key", "prompt_record_key", "github_review_id",
 			"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at", "retry_eligible",
 			"session_title", "repository_name", "github_repo", "github_pr_number", "github_pr_url",
 			"pull_request_title", "pull_request_author",
@@ -837,10 +871,16 @@ func (s *codeReviewRetryServiceStub) RetryReview(_ context.Context, input codere
 	return s.result, s.err
 }
 
-type codeReviewTriggerHandlerStoreStub struct{}
+type codeReviewTriggerHandlerStoreStub struct {
+	settings []models.CodeReviewGitHubTriggerSetting
+}
 
 func (s *codeReviewTriggerHandlerStoreStub) GetActiveGitHubTrigger(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewGitHubTriggerSetting, error) {
 	return models.CodeReviewGitHubTriggerSetting{}, pgx.ErrNoRows
+}
+
+func (s *codeReviewTriggerHandlerStoreStub) ListActiveGitHubTriggers(context.Context, uuid.UUID) ([]models.CodeReviewGitHubTriggerSetting, error) {
+	return s.settings, nil
 }
 
 func (s *codeReviewTriggerHandlerStoreStub) SaveGitHubTrigger(context.Context, uuid.UUID, db.SaveCodeReviewGitHubTriggerParams) (models.CodeReviewGitHubTriggerSetting, error) {
@@ -852,11 +892,19 @@ func (s *codeReviewTriggerHandlerStoreStub) DeactivateGitHubTrigger(context.Cont
 }
 
 type codeReviewTriggerHandlerRepoStub struct {
-	repo models.Repository
+	repo  models.Repository
+	repos []models.Repository
 }
 
 func (s *codeReviewTriggerHandlerRepoStub) GetByID(context.Context, uuid.UUID, uuid.UUID) (models.Repository, error) {
 	return s.repo, nil
+}
+
+func (s *codeReviewTriggerHandlerRepoStub) ListByOrg(context.Context, uuid.UUID, db.RepositoryFilters) ([]models.Repository, error) {
+	if s.repos != nil {
+		return s.repos, nil
+	}
+	return []models.Repository{s.repo}, nil
 }
 
 type codeReviewTriggerHandlerAuthStub struct {

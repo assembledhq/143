@@ -1,6 +1,6 @@
-// Package reviewartifact stores bounded head-side file text for fast diff
+// Package reviewbundle stores bounded head-side file text for fast diff
 // context expansion after a session workspace snapshot has gone cold.
-package reviewartifact
+package reviewbundle
 
 import (
 	"bytes"
@@ -64,7 +64,7 @@ type Metadata struct {
 	Truncated         bool
 }
 
-type Artifact struct {
+type Bundle struct {
 	Version   int             `json:"version"`
 	SessionID string          `json:"session_id,omitempty"`
 	Files     map[string]File `json:"files"`
@@ -92,30 +92,30 @@ type ChangedFile struct {
 
 func Capture(ctx context.Context, store storage.SnapshotStore, exec ExecFunc, orgID, sessionID uuid.UUID, diff string, opts Options) (Metadata, error) {
 	if store == nil {
-		return Metadata{}, errors.New("review artifact store is nil")
+		return Metadata{}, errors.New("review bundle store is nil")
 	}
 	if exec == nil {
-		return Metadata{}, errors.New("review artifact exec is nil")
+		return Metadata{}, errors.New("review bundle exec is nil")
 	}
 	if strings.TrimSpace(diff) == "" {
 		return Metadata{}, nil
 	}
 	opts = normalizeOptions(opts)
 	if opts.Key == "" {
-		opts.Key = fmt.Sprintf("review-artifacts/%s/%s/%s.json.gz", orgID, sessionID, uuid.NewString())
+		opts.Key = fmt.Sprintf("review-bundles/%s/%s/%s.json.gz", orgID, sessionID, uuid.NewString())
 	}
 
-	artifact := Artifact{
+	bundle := Bundle{
 		Version:   Version,
 		SessionID: sessionID.String(),
 		Files:     map[string]File{},
 	}
 	seen := map[string]struct{}{}
 	for _, changed := range ParseChangedFiles(diff) {
-		path, ok := cleanArtifactPath(changed.Path)
+		path, ok := cleanBundlePath(changed.Path)
 		if !ok {
-			artifact.Skipped = append(artifact.Skipped, SkippedFile{Path: changed.Path, Reason: SkipReasonInvalidPath})
-			artifact.Truncated = true
+			bundle.Skipped = append(bundle.Skipped, SkippedFile{Path: changed.Path, Reason: SkipReasonInvalidPath})
+			bundle.Truncated = true
 			continue
 		}
 		if _, exists := seen[path]; exists {
@@ -123,24 +123,24 @@ func Capture(ctx context.Context, store storage.SnapshotStore, exec ExecFunc, or
 		}
 		seen[path] = struct{}{}
 		if changed.Deleted {
-			artifact.Skipped = append(artifact.Skipped, SkippedFile{Path: path, Reason: SkipReasonDeleted})
+			bundle.Skipped = append(bundle.Skipped, SkippedFile{Path: path, Reason: SkipReasonDeleted})
 			continue
 		}
 		if changed.Binary {
-			artifact.Skipped = append(artifact.Skipped, SkippedFile{Path: path, Reason: SkipReasonBinary})
+			bundle.Skipped = append(bundle.Skipped, SkippedFile{Path: path, Reason: SkipReasonBinary})
 			continue
 		}
-		if len(artifact.Files) >= opts.MaxFiles {
-			artifact.Skipped = append(artifact.Skipped, SkippedFile{Path: path, Reason: SkipReasonMaxFiles})
-			artifact.Truncated = true
+		if len(bundle.Files) >= opts.MaxFiles {
+			bundle.Skipped = append(bundle.Skipped, SkippedFile{Path: path, Reason: SkipReasonMaxFiles})
+			bundle.Truncated = true
 			continue
 		}
 
 		content, reason := readChangedFile(ctx, exec, path, opts)
 		if reason != "" {
-			artifact.Skipped = append(artifact.Skipped, SkippedFile{Path: path, Reason: reason})
+			bundle.Skipped = append(bundle.Skipped, SkippedFile{Path: path, Reason: reason})
 			if reason == SkipReasonTooLarge {
-				artifact.Truncated = true
+				bundle.Truncated = true
 			}
 			continue
 		}
@@ -150,93 +150,93 @@ func Capture(ctx context.Context, store storage.SnapshotStore, exec ExecFunc, or
 			SizeBytes:  int64(len(content)),
 			TotalLines: countLogicalLines(content),
 		}
-		artifact.Files[path] = file
-		if uncompressedSize(artifact) > opts.MaxUncompressedBytes {
-			delete(artifact.Files, path)
-			artifact.Skipped = append(artifact.Skipped, SkippedFile{Path: path, Reason: SkipReasonTooLarge})
-			artifact.Truncated = true
+		bundle.Files[path] = file
+		if uncompressedSize(bundle) > opts.MaxUncompressedBytes {
+			delete(bundle.Files, path)
+			bundle.Skipped = append(bundle.Skipped, SkippedFile{Path: path, Reason: SkipReasonTooLarge})
+			bundle.Truncated = true
 		}
 	}
 
 	var buf bytes.Buffer
-	meta, err := Encode(&buf, artifact)
+	meta, err := Encode(&buf, bundle)
 	if err != nil {
 		return Metadata{}, err
 	}
 	meta.Key = opts.Key
 	if err := store.Save(ctx, opts.Key, bytes.NewReader(buf.Bytes())); err != nil {
-		return Metadata{}, fmt.Errorf("save review artifact: %w", err)
+		return Metadata{}, fmt.Errorf("save review bundle: %w", err)
 	}
 	return meta, nil
 }
 
-func Encode(w io.Writer, artifact Artifact) (Metadata, error) {
-	if artifact.Version == 0 {
-		artifact.Version = Version
+func Encode(w io.Writer, bundle Bundle) (Metadata, error) {
+	if bundle.Version == 0 {
+		bundle.Version = Version
 	}
-	if artifact.Files == nil {
-		artifact.Files = map[string]File{}
+	if bundle.Files == nil {
+		bundle.Files = map[string]File{}
 	}
-	raw, err := json.Marshal(artifact)
+	raw, err := json.Marshal(bundle)
 	if err != nil {
-		return Metadata{}, fmt.Errorf("marshal review artifact: %w", err)
+		return Metadata{}, fmt.Errorf("marshal review bundle: %w", err)
 	}
 	gz := gzip.NewWriter(w)
 	if _, err := gz.Write(raw); err != nil {
 		_ = gz.Close()
-		return Metadata{}, fmt.Errorf("gzip review artifact: %w", err)
+		return Metadata{}, fmt.Errorf("gzip review bundle: %w", err)
 	}
 	if err := gz.Close(); err != nil {
-		return Metadata{}, fmt.Errorf("close review artifact gzip: %w", err)
+		return Metadata{}, fmt.Errorf("close review bundle gzip: %w", err)
 	}
 	compressed := int64(-1)
 	if sizer, ok := w.(interface{ Len() int }); ok {
 		compressed = int64(sizer.Len())
 	}
 	return Metadata{
-		Version:           artifact.Version,
+		Version:           bundle.Version,
 		CompressedBytes:   compressed,
 		UncompressedBytes: int64(len(raw)),
-		FileCount:         len(artifact.Files),
-		SkippedCount:      len(artifact.Skipped),
-		Truncated:         artifact.Truncated,
+		FileCount:         len(bundle.Files),
+		SkippedCount:      len(bundle.Skipped),
+		Truncated:         bundle.Truncated,
 	}, nil
 }
 
-func Load(ctx context.Context, store storage.SnapshotStore, key string, maxUncompressedBytes int64) (*Artifact, error) {
+func Load(ctx context.Context, store storage.SnapshotStore, key string, maxUncompressedBytes int64) (*Bundle, error) {
 	if store == nil {
-		return nil, errors.New("review artifact store is nil")
+		return nil, errors.New("review bundle store is nil")
 	}
 	if key == "" {
-		return nil, errors.New("review artifact key is empty")
+		return nil, errors.New("review bundle key is empty")
 	}
 	if maxUncompressedBytes <= 0 {
 		maxUncompressedBytes = DefaultMaxUncompressedBytes
 	}
 	var compressed bytes.Buffer
 	if err := store.Load(ctx, key, &compressed); err != nil {
-		return nil, fmt.Errorf("load review artifact: %w", err)
+		return nil, fmt.Errorf("load review bundle: %w", err)
 	}
 	gz, err := gzip.NewReader(bytes.NewReader(compressed.Bytes()))
 	if err != nil {
-		return nil, fmt.Errorf("open review artifact gzip: %w", err)
+		return nil, fmt.Errorf("open review bundle gzip: %w", err)
 	}
 	defer gz.Close()
 	raw, err := io.ReadAll(io.LimitReader(gz, maxUncompressedBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read review artifact gzip: %w", err)
+		return nil, fmt.Errorf("read review bundle gzip: %w", err)
 	}
 	if int64(len(raw)) > maxUncompressedBytes {
-		return nil, fmt.Errorf("review artifact exceeds max decoded size")
+		return nil, fmt.Errorf("review bundle exceeds max decoded size")
 	}
-	var artifact Artifact
-	if err := json.Unmarshal(raw, &artifact); err != nil {
-		return nil, fmt.Errorf("decode review artifact: %w", err)
+	var bundle Bundle
+	if err := json.Unmarshal(raw, &bundle); err != nil {
+		return nil, fmt.Errorf("decode review bundle: %w", err)
 	}
-	if artifact.Files == nil {
-		artifact.Files = map[string]File{}
+	if bundle.Files == nil {
+		bundle.Files = map[string]File{}
 	}
-	return &artifact, nil
+	return &bundle, nil
 }
 
 func ParseChangedFiles(diff string) []ChangedFile {
@@ -276,18 +276,18 @@ func ParseChangedFiles(diff string) []ChangedFile {
 const readFileScript = `path=$1
 limit=$2
 if [ ! -f "$path" ]; then
-  echo "reviewartifact:missing" >&2
+  echo "reviewbundle:missing" >&2
   exit 2
 fi
 size=$(wc -c < "$path" | tr -d '[:space:]')
 case "$size" in
   ''|*[!0-9]*)
-    echo "reviewartifact:stat_failed" >&2
+    echo "reviewbundle:stat_failed" >&2
     exit 4
     ;;
 esac
 if [ "$size" -gt "$limit" ]; then
-  echo "reviewartifact:too_large:$size" >&2
+  echo "reviewbundle:too_large:$size" >&2
   exit 3
 fi
 cat -- "$path"`
@@ -296,7 +296,7 @@ func readChangedFile(ctx context.Context, exec ExecFunc, path string, opts Optio
 	readCtx, cancel := context.WithTimeout(ctx, opts.ReadTimeout)
 	defer cancel()
 
-	cmd := fmt.Sprintf("sh -c %s reviewartifact-read %s %d", shellQuote(readFileScript), shellQuote(path), opts.PerFileMaxBytes)
+	cmd := fmt.Sprintf("sh -c %s reviewbundle-read %s %d", shellQuote(readFileScript), shellQuote(path), opts.PerFileMaxBytes)
 	var stdout, stderr bytes.Buffer
 	exitCode, err := exec(readCtx, cmd, &stdout, &stderr)
 	if err != nil {
@@ -341,8 +341,8 @@ func normalizeOptions(opts Options) Options {
 	return opts
 }
 
-func uncompressedSize(artifact Artifact) int64 {
-	raw, err := json.Marshal(artifact)
+func uncompressedSize(bundle Bundle) int64 {
+	raw, err := json.Marshal(bundle)
 	if err != nil {
 		return 0
 	}
@@ -435,7 +435,7 @@ func stripDiffPathPrefix(raw, prefix string) string {
 	return raw
 }
 
-func cleanArtifactPath(raw string) (string, bool) {
+func cleanBundlePath(raw string) (string, bool) {
 	if raw == "" || strings.ContainsRune(raw, 0) {
 		return "", false
 	}
@@ -465,10 +465,10 @@ type CachedReader struct {
 }
 
 type cacheItem struct {
-	key      string
-	artifact *Artifact
-	size     int64
-	element  *list.Element
+	key     string
+	bundle  *Bundle
+	size    int64
+	element *list.Element
 }
 
 func NewCachedReader(store storage.SnapshotStore, maxBytes int64) *CachedReader {
@@ -487,43 +487,43 @@ func (r *CachedReader) ReadFileContext(ctx context.Context, key, filePath string
 	if r == nil || r.store == nil || key == "" {
 		return sandbox.FileContextResult{}, false, nil
 	}
-	artifact, err := r.load(ctx, key)
+	bundle, err := r.load(ctx, key)
 	if err != nil {
 		return sandbox.FileContextResult{}, false, err
 	}
-	cleanPath, ok := cleanArtifactPath(filePath)
+	cleanPath, ok := cleanBundlePath(filePath)
 	if !ok {
 		return sandbox.FileContextResult{}, false, nil
 	}
-	file, ok := artifact.Files[cleanPath]
+	file, ok := bundle.Files[cleanPath]
 	if !ok {
 		return sandbox.FileContextResult{}, false, nil
 	}
 	return contextFromFile(file, line, above, below), true, nil
 }
 
-func (r *CachedReader) load(ctx context.Context, key string) (*Artifact, error) {
+func (r *CachedReader) load(ctx context.Context, key string) (*Bundle, error) {
 	r.mu.Lock()
 	if item, ok := r.items[key]; ok {
 		r.order.MoveToFront(item.element)
-		artifact := item.artifact
+		bundle := item.bundle
 		r.mu.Unlock()
-		return artifact, nil
+		return bundle, nil
 	}
 	r.mu.Unlock()
 
-	artifact, err := Load(ctx, r.store, key, DefaultMaxUncompressedBytes)
+	bundle, err := Load(ctx, r.store, key, DefaultMaxUncompressedBytes)
 	if err != nil {
 		return nil, err
 	}
-	size := artifactCacheSize(artifact)
+	size := bundleCacheSize(bundle)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if existing, ok := r.items[key]; ok {
 		r.order.MoveToFront(existing.element)
-		return existing.artifact, nil
+		return existing.bundle, nil
 	}
-	item := &cacheItem{key: key, artifact: artifact, size: size}
+	item := &cacheItem{key: key, bundle: bundle, size: size}
 	item.element = r.order.PushFront(item)
 	r.items[key] = item
 	r.used += size
@@ -537,19 +537,19 @@ func (r *CachedReader) load(ctx context.Context, key string) (*Artifact, error) 
 		delete(r.items, victim.key)
 		r.used -= victim.size
 	}
-	return artifact, nil
+	return bundle, nil
 }
 
-func artifactCacheSize(artifact *Artifact) int64 {
-	if artifact == nil {
+func bundleCacheSize(bundle *Bundle) int64 {
+	if bundle == nil {
 		return 0
 	}
 	var size int64
-	for _, file := range artifact.Files {
+	for _, file := range bundle.Files {
 		size += int64(len(file.Content))
 	}
 	if size == 0 {
-		size = uncompressedSize(*artifact)
+		size = uncompressedSize(*bundle)
 	}
 	return size
 }

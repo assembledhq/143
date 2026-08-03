@@ -389,7 +389,7 @@ see plain language such as "API integration is being edited in Tab 2" or
 ### Worktree Resources
 
 `git worktree` shares the Git object store, but dependencies and build
-artifacts do not. Each materialized changeset that builds or previews needs
+outputs do not. Each materialized changeset that builds or previews needs
 usable dependency installs, and a four-changeset split must not
 quadruple sandbox disk or build time by accident.
 

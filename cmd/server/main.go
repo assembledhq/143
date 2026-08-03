@@ -55,6 +55,7 @@ import (
 	previewproviders "github.com/assembledhq/143/internal/services/preview/providers"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	projectservice "github.com/assembledhq/143/internal/services/projects"
+	"github.com/assembledhq/143/internal/services/publicationintent"
 	reviewloopservice "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
@@ -534,11 +535,27 @@ func main() {
 				projectStore, projectTaskStore, integrationStore,
 				sessionMessageStore, automationRunStore, evalBootstrapStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, sessionStreams, fileReader)
 			if services != nil {
-				if publicationReviewService, ok := services.ReviewLoops.(*reviewloopservice.Service); ok {
-					publicationReviewService.SetPublicationEvidenceRefresher(
-						worker.NewPublicationReviewEvidenceRefresher(stores, services.PR),
-					)
+				workerPublicationCoordinator := publicationintent.NewCoordinator(
+					stores.Sessions,
+					stores.SessionChangesets,
+					stores.PullRequests,
+					stores.Organizations,
+					stores.Users,
+					stores.SessionPublications,
+					stores.Jobs,
+					logger,
+				)
+				workerPublicationCoordinator.SetRepositoryStore(stores.Repositories)
+				workerPublicationCoordinator.SetPublicationEnabled(cfg.AgentPRPublicationEnabled)
+				workerPublicationCoordinator.SetReviewEnabled(cfg.PrePRReviewEnabled)
+				services.PublicationIntents = workerPublicationCoordinator
+				if prSvc, ok := services.PR.(*ghservice.PRService); ok {
+					prSvc.SetPublicationExecutionPolicy(workerPublicationCoordinator)
 				}
+				if concreteOrchestrator, ok := services.Orchestrator.(*agent.Orchestrator); ok {
+					concreteOrchestrator.SetPublicationIntentCoordinator(workerPublicationCoordinator)
+				}
+				wirePublicationReviewEvidenceRefresher(services, stores)
 				sandboxAuthShutdown = services.SandboxAuthShutdown
 				registerInternalSandboxAuthRoutes(router, services.SandboxAuthBroker, cfg, logger)
 				if previewManager != nil && pvProvider != nil {

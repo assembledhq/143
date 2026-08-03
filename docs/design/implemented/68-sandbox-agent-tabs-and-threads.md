@@ -118,7 +118,7 @@ Every session starts with one tab. The user can add another tab only after the
 sandbox exists. Creation flows should not force users to pre-plan a whole agent
 team.
 
-### 2. One sandbox means one final artifact
+### 2. One sandbox means one final output
 
 Multiple tabs in one sandbox produce one branch, one validation result, and one
 PR path. If the user wants separate PRs, the product should guide them to

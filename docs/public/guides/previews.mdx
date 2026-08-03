@@ -126,7 +126,7 @@ select **Return control** so the agent continues from the exact URL and storage
 state you left behind. Agent input is paused during human control, and abandoned
 leases expire automatically.
 
-Screenshot and multi-viewport responses include an `artifact.url` served through the normal upload pipeline. Use `--inline-base64 false` when agents do not need PNG bytes in stdout, or `preview observe --output path.png` to write an observation directly into the workspace.
+Screenshot and multi-viewport responses include a `capture.url` served through the normal upload pipeline. During the current rollout the same reference is also repeated under the former `artifact` key; new integrations should read `capture`. Use `--inline-base64 false` when agents do not need PNG bytes in stdout, or `preview observe --output path.png` to write an observation directly into the workspace.
 
 ## Add dependencies
 
@@ -154,7 +154,7 @@ Use `preview.install` when services need dependencies before they boot. Keep sou
 
 143 reruns `install.command` when declared lockfiles or config change, or when a declared `verify_paths` entry is missing. With `verify_paths`, a fresh workspace can skip install after restoring a matching dependency cache.
 
-Do not cache source directories, secret files, `.git`, or `.143/cache/preview-install`. Use pinned lockfiles when possible; mutable tags such as `latest` can leave stale dependency artifacts.
+Do not cache source directories, secret files, `.git`, or `.143/cache/preview-install`. Use pinned lockfiles when possible; mutable tags such as `latest` can leave stale dependency outputs.
 
 ## Secrets and config
 

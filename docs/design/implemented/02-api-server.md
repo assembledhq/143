@@ -293,7 +293,7 @@ Using `chi` for the HTTP router. All API routes are under `/api/v1/`.
 │   ├── GET    /stream              # org-scoped lifecycle event stream
 │   ├── GET    /templates           # starter policy templates
 │   ├── GET    /prompt-examples     # policy prompt examples
-│   ├── GET    /:id/evidence        # agent results, findings, and prompt artifacts
+│   ├── GET    /:id/evidence        # agent results, findings, and prompt records
 │   └── POST   /:id/retry           # retry an eligible failed assessment
 │
 ├── /experiments

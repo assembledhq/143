@@ -695,10 +695,10 @@ func (s *SessionStore) GetLatestDiffSnapshot(ctx context.Context, orgID, session
 		SELECT id, session_id, org_id, turn_number, sequence_number, source,
 		       base_commit_sha, head_commit_sha, workspace_dirty, working_branch,
 		       target_branch, diff, files_changed, lines_added, lines_removed, captured_at,
-		       review_artifact_key, review_artifact_version,
-		       review_artifact_compressed_bytes, review_artifact_uncompressed_bytes,
-		       review_artifact_file_count, review_artifact_skipped_count,
-		       review_artifact_truncated
+		       review_bundle_key, review_bundle_version,
+		       review_bundle_compressed_bytes, review_bundle_uncompressed_bytes,
+		       review_bundle_file_count, review_bundle_skipped_count,
+		       review_bundle_truncated
 		FROM session_diff_snapshots
 		WHERE org_id = @org_id AND session_id = @session_id
 		ORDER BY captured_at DESC, sequence_number DESC
@@ -733,13 +733,13 @@ func (s *SessionStore) HasSessionPublicationIntent(ctx context.Context, orgID, s
 	return exists, nil
 }
 
-func (s *SessionStore) GetLatestReviewArtifactRef(ctx context.Context, orgID, sessionID uuid.UUID) (models.SessionReviewArtifactRef, error) {
+func (s *SessionStore) GetLatestReviewBundleRef(ctx context.Context, orgID, sessionID uuid.UUID) (models.SessionReviewBundleRef, error) {
 	query := `
-		SELECT review_artifact_key, review_artifact_version
+		SELECT review_bundle_key, review_bundle_version
 		FROM session_diff_snapshots
 		WHERE org_id = @org_id
 		  AND session_id = @session_id
-		  AND review_artifact_key IS NOT NULL
+		  AND review_bundle_key IS NOT NULL
 		ORDER BY captured_at DESC, sequence_number DESC
 		LIMIT 1`
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
@@ -747,11 +747,11 @@ func (s *SessionStore) GetLatestReviewArtifactRef(ctx context.Context, orgID, se
 		"session_id": sessionID,
 	})
 	if err != nil {
-		return models.SessionReviewArtifactRef{}, fmt.Errorf("query latest review artifact ref: %w", err)
+		return models.SessionReviewBundleRef{}, fmt.Errorf("query latest review bundle ref: %w", err)
 	}
-	ref, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionReviewArtifactRef])
+	ref, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionReviewBundleRef])
 	if err != nil {
-		return models.SessionReviewArtifactRef{}, err
+		return models.SessionReviewBundleRef{}, err
 	}
 	return ref, nil
 }
@@ -2300,41 +2300,41 @@ func (s *SessionStore) writeDiffSnapshot(ctx context.Context, db DBTX, orgID, se
 			session_id, org_id, turn_number, sequence_number, source,
 			base_commit_sha, head_commit_sha, workspace_dirty, working_branch, target_branch, diff,
 			files_changed, lines_added, lines_removed, captured_at,
-			review_artifact_key, review_artifact_version, review_artifact_compressed_bytes,
-			review_artifact_uncompressed_bytes, review_artifact_file_count,
-			review_artifact_skipped_count, review_artifact_truncated
+			review_bundle_key, review_bundle_version, review_bundle_compressed_bytes,
+			review_bundle_uncompressed_bytes, review_bundle_file_count,
+			review_bundle_skipped_count, review_bundle_truncated
 		)
 		SELECT
 			@session_id, @org_id, @turn_number, 1, @source,
 			@base_commit_sha, @head_commit_sha, @workspace_dirty, working_branch, target_branch, @diff,
 			@files_changed, @lines_added, @lines_removed, @captured_at,
-			@review_artifact_key, @review_artifact_version, @review_artifact_compressed_bytes,
-			@review_artifact_uncompressed_bytes, @review_artifact_file_count,
-			@review_artifact_skipped_count, @review_artifact_truncated
+			@review_bundle_key, @review_bundle_version, @review_bundle_compressed_bytes,
+			@review_bundle_uncompressed_bytes, @review_bundle_file_count,
+			@review_bundle_skipped_count, @review_bundle_truncated
 		FROM sessions
 		WHERE id = @session_id AND org_id = @org_id
 		RETURNING id`
 
 	if err := db.QueryRow(ctx, insertQuery, pgx.NamedArgs{
-		"session_id":                         sessionID,
-		"org_id":                             orgID,
-		"turn_number":                        turn,
-		"source":                             source,
-		"base_commit_sha":                    *result.DiffBaseCommitSHA,
-		"head_commit_sha":                    result.DiffHeadCommitSHA,
-		"workspace_dirty":                    result.DiffWorkspaceDirty,
-		"diff":                               *result.Diff,
-		"files_changed":                      stats.FilesChanged,
-		"lines_added":                        stats.Added,
-		"lines_removed":                      stats.Removed,
-		"captured_at":                        capturedAt,
-		"review_artifact_key":                result.ReviewArtifactKey,
-		"review_artifact_version":            result.ReviewArtifactVersion,
-		"review_artifact_compressed_bytes":   result.ReviewArtifactCompressedBytes,
-		"review_artifact_uncompressed_bytes": result.ReviewArtifactUncompressedBytes,
-		"review_artifact_file_count":         result.ReviewArtifactFileCount,
-		"review_artifact_skipped_count":      result.ReviewArtifactSkippedCount,
-		"review_artifact_truncated":          result.ReviewArtifactTruncated,
+		"session_id":                       sessionID,
+		"org_id":                           orgID,
+		"turn_number":                      turn,
+		"source":                           source,
+		"base_commit_sha":                  *result.DiffBaseCommitSHA,
+		"head_commit_sha":                  result.DiffHeadCommitSHA,
+		"workspace_dirty":                  result.DiffWorkspaceDirty,
+		"diff":                             *result.Diff,
+		"files_changed":                    stats.FilesChanged,
+		"lines_added":                      stats.Added,
+		"lines_removed":                    stats.Removed,
+		"captured_at":                      capturedAt,
+		"review_bundle_key":                result.ReviewBundleKey,
+		"review_bundle_version":            result.ReviewBundleVersion,
+		"review_bundle_compressed_bytes":   result.ReviewBundleCompressedBytes,
+		"review_bundle_uncompressed_bytes": result.ReviewBundleUncompressedBytes,
+		"review_bundle_file_count":         result.ReviewBundleFileCount,
+		"review_bundle_skipped_count":      result.ReviewBundleSkippedCount,
+		"review_bundle_truncated":          result.ReviewBundleTruncated,
 	}).Scan(&snapshotID); err != nil {
 		return workspaceRevisionUpdate{}, fmt.Errorf("insert session diff snapshot: %w", err)
 	}

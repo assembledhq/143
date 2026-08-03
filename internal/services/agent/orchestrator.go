@@ -34,7 +34,7 @@ import (
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/mcp"
 	"github.com/assembledhq/143/internal/services/publicationintent"
-	"github.com/assembledhq/143/internal/services/reviewartifact"
+	"github.com/assembledhq/143/internal/services/reviewbundle"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
@@ -554,7 +554,7 @@ type UserLookup interface {
 }
 
 type UserSettingsLookup interface {
-	GetByIDGlobalWithSettings(ctx context.Context, userID uuid.UUID) (models.UserWithSettings, error)
+	GetByIDWithSettings(ctx context.Context, orgID, userID uuid.UUID) (models.UserWithSettings, error)
 }
 
 type PublicationIntentLookup interface {
@@ -855,6 +855,7 @@ type Orchestrator struct {
 	agentPRPromptEnabled       bool
 	agentPRPublicationEnabled  bool
 	prePRReviewEnabled         bool
+	publicationIntents         publicationintent.PublicationIntentCoordinator
 }
 
 type ChangesetMaterializationResult struct {
@@ -1373,6 +1374,7 @@ type OrchestratorConfig struct {
 	AgentPRPromptEnabled      bool
 	AgentPRPublicationEnabled bool
 	PrePRReviewEnabled        bool
+	PublicationIntents        publicationintent.PublicationIntentCoordinator
 	Logger                    zerolog.Logger
 	MaxConcurrent             int
 }
@@ -1456,7 +1458,14 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		agentPRPromptEnabled:       cfg.AgentPRPromptEnabled,
 		agentPRPublicationEnabled:  cfg.AgentPRPublicationEnabled,
 		prePRReviewEnabled:         cfg.PrePRReviewEnabled,
+		publicationIntents:         cfg.PublicationIntents,
 	}
+}
+
+// SetPublicationIntentCoordinator supports late binding in worker processes,
+// where the shared coordinator is assembled after the orchestrator.
+func (o *Orchestrator) SetPublicationIntentCoordinator(coordinator publicationintent.PublicationIntentCoordinator) {
+	o.publicationIntents = coordinator
 }
 
 // SetSuccessfulTurnVerifier supports late binding on worker processes, where
@@ -2964,7 +2973,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		var personal *models.AutomaticPRFollowThroughSettings
 		if run.TriggeredByUserID != nil {
 			if settingsLookup, ok := o.users.(UserSettingsLookup); ok {
-				if user, userErr := settingsLookup.GetByIDGlobalWithSettings(ctx, *run.TriggeredByUserID); userErr == nil && user.OrgID == run.OrgID {
+				if user, userErr := settingsLookup.GetByIDWithSettings(ctx, run.OrgID, *run.TriggeredByUserID); userErr == nil {
 					personal = user.Settings.AutomaticPRFollowThrough
 				} else if userErr != nil {
 					log.Warn().Err(userErr).Msg("failed to resolve session initiator publication policy for prompt")
@@ -3632,7 +3641,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			agentSessionID = *run.AgentSessionID
 		}
 		if err := o.sessions.UpdateTurnComplete(ctx, run.OrgID, run.ID, turnNumber, runResult, agentSessionID, snapshotKey); err != nil {
-			o.cleanupReviewArtifact(ctx, runResult, log)
+			o.cleanupReviewBundle(ctx, runResult, log)
 			return fmt.Errorf("update interactive turn result: %w", err)
 		}
 		if primaryThreadID != nil && o.sessionThreads != nil {
@@ -3653,7 +3662,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}
 
 	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, status, runResult); err != nil {
-		o.cleanupReviewArtifact(ctx, runResult, log)
+		o.cleanupReviewBundle(ctx, runResult, log)
 		return fmt.Errorf("update run result: %w", err)
 	}
 	// Completion hooks consume the in-memory session after UpdateResult.
@@ -3689,31 +3698,30 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	})
 
 	if o.shouldQueueAutomaticPR(ctx, run, runResult, log) {
-		payload := map[string]interface{}{
-			"session_id":        run.ID.String(),
-			"org_id":            run.OrgID.String(),
-			"publication_queue": string(models.SessionPublicationJobQueueDefault),
-		}
-		if run.AutomationRunID != nil {
-			payload["publication_source"] = string(models.SessionPublicationSourceAutomation)
+		if o.publicationIntents == nil {
+			log.Error().Msg("automatic publication coordinator is unavailable")
 		} else {
-			payload["publication_source"] = string(models.SessionPublicationSourceBackend)
-		}
-		if issueSnapshot != nil {
-			payload["issue_snapshot_id"] = issueSnapshot.ID.String()
-		}
-		changesetID, changesetErr := o.sessions.GetPrimaryChangesetID(ctx, run.OrgID, run.ID)
-		if changesetErr != nil {
-			o.logger.Error().Err(changesetErr).Str("session_id", run.ID.String()).Msg("failed to resolve primary changeset for automatic PR creation")
-		} else {
-			payload["changeset_id"] = changesetID.String()
-			if _, queued, queueErr := o.jobs.QueueChangesetPRCreation(ctx, run.OrgID, run.ID, changesetID, "default", payload, 0); queueErr != nil {
-				if stateErr := o.sessions.UpdatePRCreationState(ctx, run.OrgID, run.ID, models.PRCreationStateFailed, "Could not queue pull request creation."); stateErr != nil {
-					o.logger.Warn().Err(stateErr).Str("session_id", run.ID.String()).Msg("failed to restore automatic PR creation state after enqueue failure")
-				}
-				o.logger.Error().Err(queueErr).Str("changeset_id", changesetID.String()).Msg("failed to enqueue automatic PR creation")
-			} else if !queued {
-				o.logger.Info().Str("changeset_id", changesetID.String()).Msg("automatic PR creation already queued or complete")
+			source := models.SessionPublicationSourceAutomation
+			if run.AutomationRunID == nil && run.ProjectTaskID != nil {
+				// Project tasks retain their parent-controlled publication contract.
+				// They are not agent-readiness requests and must remain independent
+				// of the manual-session publication kill switch.
+				source = models.SessionPublicationSourceBackend
+			}
+			request := publicationintent.RequestPullRequest{
+				Source:      source,
+				TriggerKind: models.SessionPublicationTriggerPolicy,
+			}
+			if issueSnapshot != nil {
+				request.IssueSnapshotID = &issueSnapshot.ID
+			}
+			result, requestErr := o.publicationIntents.RequestPullRequest(ctx, run.OrgID, run.ID, request)
+			if requestErr != nil {
+				log.Error().Err(requestErr).Msg("failed to coordinate automatic PR publication")
+			} else if result == nil {
+				log.Error().Msg("automatic publication coordinator returned no result")
+			} else {
+				log.Info().Str("publication_status", string(result.Status)).Msg("automatic PR publication coordinated")
 			}
 		}
 	}
@@ -3750,14 +3758,20 @@ func (o *Orchestrator) shouldQueueAutomaticPR(ctx context.Context, run *models.S
 		o.enqueueLinearMilestone(ctx, run, string(linear.MilestoneEndedNoPR))
 		return false
 	}
+	if run.ProjectTaskID != nil && run.AutomationRunID == nil {
+		// Project tasks predate agent readiness and are explicitly retained by
+		// the rollout contract. Their parent project is the publication policy
+		// owner, so a successful non-empty task still requests a PR through the
+		// shared coordinator.
+		return true
+	}
 	if run.AutomationRunID == nil {
-		// Only retire the legacy completion trigger for turns that were
-		// actually told they could publish themselves. The prompt gate and
-		// this gate must agree: a turn that never saw the handoff instruction
-		// (prompt flag off, answer-only, code review, revision) would
-		// otherwise lose its PR with nothing to replace it.
+		// Ordinary sessions never publish merely because a process completed
+		// with a diff. The agent tool or an explicit user action is the durable
+		// readiness signal. When the feature is killed or a turn is ineligible,
+		// leave the verified changes visible for manual follow-up.
 		if !o.agentPRPublicationEnabled || !o.agentPRPromptEnabled || !agentPRHandoffEligible(run) {
-			return true
+			return false
 		}
 		if run.PRCreationState == models.PRCreationStateSucceeded {
 			// Already published. Standing down is the whole point of the
@@ -4077,7 +4091,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 	// Two distinct turn counters in one ContinueSession run:
 	//   sessionTurnNumber  — shared session counter, drives UpdateTurnComplete
-	//                        and any session-wide turn artifacts (issue
+	//                        and any session-wide turn outputs (issue
 	//                        snapshot, diff history append).
 	//   messageTurnNumber  — per-message thread-local turn used for transcript
 	//                        ordering, log streaming, retry helpers, and
@@ -5302,7 +5316,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	runResult := o.buildRunResult(ctx, session, sandbox, result)
 	if err := o.sessions.UpdateTurnComplete(ctx, session.OrgID, session.ID, sessionTurnNumber, runResult, agentSessionID, snapshotKey); err != nil {
-		o.cleanupReviewArtifact(ctx, runResult, log)
+		o.cleanupReviewBundle(ctx, runResult, log)
 		return fmt.Errorf("update turn complete: %w", err)
 	}
 	o.verifySuccessfulTurn(ctx, session, sandbox, result, log)
@@ -6761,7 +6775,7 @@ func (o *Orchestrator) buildRunResult(ctx context.Context, run *models.Session, 
 	headSHA := o.captureCurrentHeadSHA(ctx, sandbox)
 	workspaceDirty := o.captureWorkspaceDirty(ctx, sandbox)
 	diff := o.resultDiffOrWorkspaceFallback(ctx, run, sandbox, result.Diff)
-	artifactMeta := o.captureReviewArtifact(ctx, run, sandbox, diff)
+	bundleMeta := o.captureReviewBundle(ctx, run, sandbox, diff)
 
 	sessionResult := &models.SessionResult{
 		TokenUsage:         tokenUsage,
@@ -6775,50 +6789,50 @@ func (o *Orchestrator) buildRunResult(ctx context.Context, run *models.Session, 
 		DiffCollectedAt:    timePtr(time.Now().UTC()),
 		DiffSource:         "turn_complete",
 	}
-	if artifactMeta.Key != "" {
-		version := artifactMeta.Version
-		sessionResult.ReviewArtifactKey = &artifactMeta.Key
-		sessionResult.ReviewArtifactVersion = &version
-		sessionResult.ReviewArtifactCompressedBytes = artifactMeta.CompressedBytes
-		sessionResult.ReviewArtifactUncompressedBytes = artifactMeta.UncompressedBytes
-		sessionResult.ReviewArtifactFileCount = artifactMeta.FileCount
-		sessionResult.ReviewArtifactSkippedCount = artifactMeta.SkippedCount
-		sessionResult.ReviewArtifactTruncated = artifactMeta.Truncated
+	if bundleMeta.Key != "" {
+		version := bundleMeta.Version
+		sessionResult.ReviewBundleKey = &bundleMeta.Key
+		sessionResult.ReviewBundleVersion = &version
+		sessionResult.ReviewBundleCompressedBytes = bundleMeta.CompressedBytes
+		sessionResult.ReviewBundleUncompressedBytes = bundleMeta.UncompressedBytes
+		sessionResult.ReviewBundleFileCount = bundleMeta.FileCount
+		sessionResult.ReviewBundleSkippedCount = bundleMeta.SkippedCount
+		sessionResult.ReviewBundleTruncated = bundleMeta.Truncated
 	}
 	return sessionResult
 }
 
-func (o *Orchestrator) captureReviewArtifact(ctx context.Context, run *models.Session, sandbox *Sandbox, diff string) reviewartifact.Metadata {
+func (o *Orchestrator) captureReviewBundle(ctx context.Context, run *models.Session, sandbox *Sandbox, diff string) reviewbundle.Metadata {
 	if o == nil || o.snapshots == nil || o.provider == nil || run == nil || sandbox == nil || strings.TrimSpace(diff) == "" {
-		return reviewartifact.Metadata{}
+		return reviewbundle.Metadata{}
 	}
 	if run.BaseCommitSHA == nil || strings.TrimSpace(*run.BaseCommitSHA) == "" {
-		return reviewartifact.Metadata{}
+		return reviewbundle.Metadata{}
 	}
-	meta, err := reviewartifact.Capture(ctx, o.snapshots, func(execCtx context.Context, cmd string, stdout, stderr io.Writer) (int, error) {
+	meta, err := reviewbundle.Capture(ctx, o.snapshots, func(execCtx context.Context, cmd string, stdout, stderr io.Writer) (int, error) {
 		return o.provider.Exec(execCtx, sandbox, cmd, stdout, stderr)
-	}, run.OrgID, run.ID, diff, reviewartifact.Options{})
+	}, run.OrgID, run.ID, diff, reviewbundle.Options{})
 	if err != nil {
 		o.logger.Warn().
 			Err(err).
 			Str("session_id", run.ID.String()).
-			Msg("failed to capture review artifact")
-		return reviewartifact.Metadata{}
+			Msg("failed to capture review bundle")
+		return reviewbundle.Metadata{}
 	}
 	return meta
 }
 
-func (o *Orchestrator) cleanupReviewArtifact(ctx context.Context, result *models.SessionResult, log zerolog.Logger) {
-	if o == nil || o.snapshots == nil || result == nil || result.ReviewArtifactKey == nil || *result.ReviewArtifactKey == "" {
+func (o *Orchestrator) cleanupReviewBundle(ctx context.Context, result *models.SessionResult, log zerolog.Logger) {
+	if o == nil || o.snapshots == nil || result == nil || result.ReviewBundleKey == nil || *result.ReviewBundleKey == "" {
 		return
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	if err := o.snapshots.Delete(cleanupCtx, *result.ReviewArtifactKey); err != nil && !errors.Is(err, storage.ErrSnapshotNotFound) {
+	if err := o.snapshots.Delete(cleanupCtx, *result.ReviewBundleKey); err != nil && !errors.Is(err, storage.ErrSnapshotNotFound) {
 		log.Warn().
 			Err(err).
-			Str("review_artifact_key", *result.ReviewArtifactKey).
-			Msg("failed to delete orphaned review artifact after result persistence failure")
+			Str("review_bundle_key", *result.ReviewBundleKey).
+			Msg("failed to delete orphaned review bundle after result persistence failure")
 	}
 }
 

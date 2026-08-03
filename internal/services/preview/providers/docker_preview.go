@@ -140,7 +140,7 @@ type previewState struct {
 
 	deferredCacheSaves []func()
 
-	// Build-artifact cache slots for this launch. The fields are written once
+	// Build-output cache slots for this launch. The fields are written once
 	// during the install phase (before service goroutines start) and read by
 	// the save paths, so they need no locking. The *SaveOnce guards guarantee a
 	// single save per set regardless of which path (checkpoint, post-ready, or
@@ -148,7 +148,7 @@ type previewState struct {
 	//
 	// The workdir set holds workspace-relative build-tool caches (e.g. turbo),
 	// populated while services boot, saved after readiness. The home set holds
-	// $HOME-rooted compiled-artifact caches (Go's GOCACHE/GOMODCACHE), populated
+	// $HOME-rooted compiled-output caches (Go's GOCACHE/GOMODCACHE), populated
 	// by the build phase, saved synchronously at the build checkpoint so an
 	// expensive cold compile warms subsequent launches even if this one later
 	// fails its readiness probe.
@@ -228,7 +228,7 @@ const defaultServiceBuildTimeout = 30 * time.Minute
 
 // defaultServiceReadinessTimeout is how long a service has to pass its
 // readiness probe when the config does not set ready.timeout_seconds. With the
-// build phase compiling artifacts ahead of start, services should bind quickly;
+// build phase compiling outputs ahead of start, services should bind quickly;
 // the default still leaves generous headroom for first-request warmup while
 // failing a genuinely broken service reasonably fast. Configs with unusually
 // slow boots should set ready.timeout_seconds explicitly.
@@ -1587,7 +1587,7 @@ func (d *DockerPreviewProvider) runPreviewInstallWithSaveMode(ctx context.Contex
 	var packageManagerLockfiles []preview.PreviewInstallLockfileKey
 	var packageManagerPlacementKey string
 	forceInstallAfterDependencyRestoreFailure := false
-	// dependencyRestoredThisLaunch records that the install-artifact blob for
+	// dependencyRestoredThisLaunch records that the install-output blob for
 	// dependencyCacheKey was extracted into this sandbox during this launch,
 	// making a post-hit save byte-identical re-archival of the same key.
 	dependencyRestoredThisLaunch := false
@@ -1944,7 +1944,7 @@ func (d *DockerPreviewProvider) saveDependencyCache(ctx context.Context, state *
 		lockHashes[lockfile.Path] = lockfile.SHA256
 	}
 	metadata := preview.DependencyCacheMetadata{
-		Kind:               models.PreviewCacheKindInstallArtifact,
+		Kind:               models.PreviewCacheKindInstallOutput,
 		Root:               models.PreviewCacheRootWorkDir,
 		OrgID:              opts.OrgID,
 		RepoID:             opts.RepositoryID,
@@ -1957,7 +1957,7 @@ func (d *DockerPreviewProvider) saveDependencyCache(ctx context.Context, state *
 		ProducerDurationMS: producerDurationMS,
 	}
 	// Build caches (e.g. turbo's dir inside node_modules) belong to the
-	// build_artifact kind: keeping them out of install-artifact blobs avoids
+	// build_output kind: keeping them out of install-output blobs avoids
 	// archiving a concurrently-restored subtree and keeps the two kinds'
 	// invalidation independent.
 	excludePaths, _ := preview.ResolvePreviewBuildCachePaths(install)
@@ -1970,7 +1970,7 @@ func (d *DockerPreviewProvider) saveDependencyCache(ctx context.Context, state *
 		var err error
 		if hasPathCache {
 			result, err = pathCache.SavePathCache(saveCtx, state.sandbox, preview.PreviewPathCacheSaveSpec{
-				Kind:         models.PreviewCacheKindInstallArtifact,
+				Kind:         models.PreviewCacheKindInstallOutput,
 				Root:         models.PreviewCacheRootWorkDir,
 				CacheKey:     cacheKey,
 				Paths:        paths,
@@ -1997,7 +1997,7 @@ func (d *DockerPreviewProvider) saveDependencyCache(ctx context.Context, state *
 }
 
 // logBuildCacheKeyDiagnostics emits one structured record capturing every input
-// that feeds a build-artifact placement key, the resulting key, the exact bytes
+// that feeds a build-output placement key, the resulting key, the exact bytes
 // hashed, and the lookup outcome.
 //
 // TEMPORARY INSTRUMENTATION (diagnosing build-cache misses across launches whose
@@ -2103,7 +2103,7 @@ func previewHandle(state *previewState) string {
 	return state.handle
 }
 
-// restorePreviewBuildCache restores the latest build-artifact blob (e.g.
+// restorePreviewBuildCache restores the latest build-output blob (e.g.
 // Turborepo's local cache) into the sandbox workdir. It runs after the install
 // phase so install commands that wipe node_modules cannot delete the restored
 // tree, and before services start so boot-time builds get cache hits.
@@ -2142,7 +2142,7 @@ func (d *DockerPreviewProvider) restorePreviewBuildCache(ctx context.Context, st
 
 	lookupStarted := time.Now()
 	notifyPhaseStart(observer, "build_cache_lookup")
-	hit, findErr := pathCache.FindPathCache(ctx, opts.OrgID, opts.RepositoryID, models.PreviewCacheKindBuildArtifact, cacheKey)
+	hit, findErr := pathCache.FindPathCache(ctx, opts.OrgID, opts.RepositoryID, models.PreviewCacheKindBuildOutput, cacheKey)
 	notifyPhaseEnd(observer, "build_cache_lookup", findErr)
 	metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "build_cache_lookup", time.Since(lookupStarted))
 	{
@@ -2394,7 +2394,7 @@ func (d *DockerPreviewProvider) restorePreviewBuildCacheHome(ctx context.Context
 			defer wg.Done()
 			phasePrefix := "build_cache_home_" + set.name
 			lookupStarted := time.Now()
-			hit, findErr := pathCache.FindPathCache(ctx, opts.OrgID, opts.RepositoryID, models.PreviewCacheKindBuildArtifact, set.key)
+			hit, findErr := pathCache.FindPathCache(ctx, opts.OrgID, opts.RepositoryID, models.PreviewCacheKindBuildOutput, set.key)
 			metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), phasePrefix+"_lookup", time.Since(lookupStarted))
 			if findErr != nil {
 				set.restoreErr = findErr
@@ -2443,7 +2443,7 @@ func (d *DockerPreviewProvider) restorePreviewBuildCacheHome(ctx context.Context
 	metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "build_cache_home_restore", time.Since(phaseStarted))
 }
 
-// saveBuildCacheSet synchronously archives one build-artifact cache set (either
+// saveBuildCacheSet synchronously archives one build-output cache set (either
 // the workdir or home root) under a latest-wins key: each save overwrites the
 // same slot, and the build tool's own content hashing makes a stale blob
 // degrade to partial hits rather than wrong output. SkipIfChecksum avoids
@@ -2464,7 +2464,7 @@ func (d *DockerPreviewProvider) saveBuildCacheSetWithMode(ctx context.Context, s
 		return
 	}
 	metadata := preview.DependencyCacheMetadata{
-		Kind:           models.PreviewCacheKindBuildArtifact,
+		Kind:           models.PreviewCacheKindBuildOutput,
 		Root:           root,
 		OrgID:          opts.OrgID,
 		RepoID:         opts.RepositoryID,
@@ -2484,7 +2484,7 @@ func (d *DockerPreviewProvider) saveBuildCacheSetWithMode(ctx context.Context, s
 	defer cancel()
 	started := time.Now()
 	result, err := pathCache.SavePathCache(saveCtx, state.sandbox, preview.PreviewPathCacheSaveSpec{
-		Kind:           models.PreviewCacheKindBuildArtifact,
+		Kind:           models.PreviewCacheKindBuildOutput,
 		Root:           root,
 		CacheKey:       cacheKey,
 		Paths:          paths,
@@ -2509,7 +2509,7 @@ func (d *DockerPreviewProvider) saveBuildCacheSetWithMode(ctx context.Context, s
 	}
 }
 
-// savePreviewBuildCache archives the workdir build-artifact paths (turbo and
+// savePreviewBuildCache archives the workdir build-output paths (turbo and
 // friends) once services have reported ready — the point in a launch where
 // boot-time builds have populated their workspace-relative caches. The save
 // runs asynchronously so it does not delay reporting the ready preview.
@@ -2529,7 +2529,7 @@ func (d *DockerPreviewProvider) savePreviewBuildCache(ctx context.Context, state
 	})
 }
 
-// savePreviewBuildCacheHome archives the home-rooted build-artifact paths (Go's
+// savePreviewBuildCacheHome archives the home-rooted build-output paths (Go's
 // GOCACHE/GOMODCACHE) populated by the build phase, on the SUCCESS path once
 // services are ready. It runs asynchronously so a large GOCACHE upload never
 // blocks the launch hot path — the prebuilt binary has already started. Failure
@@ -3002,7 +3002,7 @@ func truncatedTail(outputTail []string, maxLines, maxRunes int) string {
 
 // previewServiceBuildOrder returns service names with the primary last, so
 // support services build before the primary (which may depend on their
-// artifacts), matching the start ordering. Support services are sorted for
+// outputs), matching the start ordering. Support services are sorted for
 // deterministic, reproducible build order.
 func previewServiceBuildOrder(cfg *models.PreviewConfig) []string {
 	names := make([]string, 0, len(cfg.Services))
@@ -3021,7 +3021,7 @@ func previewServiceBuildOrder(cfg *models.PreviewConfig) []string {
 
 // runServiceBuilds runs each service's optional Build command to completion,
 // in dependency order, before any service starts. It is the place to compile
-// artifacts (e.g. `go build`) so the start command can exec a prebuilt binary
+// outputs (e.g. `go build`) so the start command can exec a prebuilt binary
 // off the readiness-probe hot path. Build commands run with the service's own
 // Env plus the platform context env (ONEFORTYTHREE, ONEFORTYTHREE_ENV,
 // PREVIEW_ORIGIN) so build steps can detect the preview runtime and gate

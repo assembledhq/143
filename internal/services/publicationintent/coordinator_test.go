@@ -3,6 +3,7 @@ package publicationintent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -21,13 +22,29 @@ func (s coordinatorSessionStore) GetByID(context.Context, uuid.UUID, uuid.UUID) 
 	return s.session, nil
 }
 
-type coordinatorChangesetStore struct{ changeset models.SessionChangeset }
+type coordinatorChangesetStore struct {
+	changeset   models.SessionChangeset
+	requestedID *uuid.UUID
+}
 
-func (s coordinatorChangesetStore) GetPrimary(context.Context, uuid.UUID, uuid.UUID) (models.SessionChangeset, error) {
+func (s *coordinatorChangesetStore) GetPrimary(context.Context, uuid.UUID, uuid.UUID) (models.SessionChangeset, error) {
+	s.requestedID = nil
+	return s.changeset, nil
+}
+
+func (s *coordinatorChangesetStore) GetByID(_ context.Context, _, _, changesetID uuid.UUID) (models.SessionChangeset, error) {
+	s.requestedID = &changesetID
 	return s.changeset, nil
 }
 
 type coordinatorPullRequestStore struct{ pr *models.PullRequest }
+
+func (s coordinatorPullRequestStore) GetByChangesetID(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (models.PullRequest, error) {
+	if s.pr == nil {
+		return models.PullRequest{}, pgx.ErrNoRows
+	}
+	return *s.pr, nil
+}
 
 func (s coordinatorPullRequestStore) GetPrimaryBySessionID(context.Context, uuid.UUID, uuid.UUID) (models.PullRequest, error) {
 	if s.pr == nil {
@@ -42,9 +59,13 @@ func (s coordinatorOrganizationStore) GetByID(context.Context, uuid.UUID) (model
 	return s.organization, nil
 }
 
-type coordinatorUserStore struct{ user models.UserWithSettings }
+type coordinatorUserStore struct {
+	user     models.UserWithSettings
+	gotOrgID uuid.UUID
+}
 
-func (s coordinatorUserStore) GetByIDGlobalWithSettings(context.Context, uuid.UUID) (models.UserWithSettings, error) {
+func (s *coordinatorUserStore) GetByIDWithSettings(_ context.Context, orgID, _ uuid.UUID) (models.UserWithSettings, error) {
+	s.gotOrgID = orgID
 	return s.user, nil
 }
 
@@ -59,7 +80,8 @@ type coordinatorPublicationStore struct {
 	// ensureReturnsState models the row EnsureRequested actually wrote back.
 	// Setting it to a terminal state reproduces a generation-guarded reopen
 	// that did not fire.
-	ensureReturnsState models.SessionPublicationState
+	ensureReturnsState  models.SessionPublicationState
+	ensureReturnsSource models.SessionPublicationSource
 }
 
 func (s *coordinatorPublicationStore) EnsureRequested(_ context.Context, _ uuid.UUID, publication *models.SessionPublication) error {
@@ -67,17 +89,33 @@ func (s *coordinatorPublicationStore) EnsureRequested(_ context.Context, _ uuid.
 	if s.ensureReturnsState != "" {
 		publication.State = s.ensureReturnsState
 	}
+	if s.ensureReturnsSource != "" {
+		publication.Source = s.ensureReturnsSource
+	}
 	copy := *publication
 	s.captured = &copy
 	return nil
 }
 
 func (s *coordinatorPublicationStore) ApplyReviewBypass(_ context.Context, _ uuid.UUID, publication *models.SessionPublication) error {
+	publication.State = models.SessionPublicationStateReadyToPublish
 	publication.ReviewGateState = models.SessionPublicationReviewGateNotRequired
 	publication.ReviewMaxPasses = nil
 	publication.ReviewLoopID = nil
 	publication.ReviewWorkspaceRevision = nil
 	publication.ReviewDesiredHeadSHA = nil
+	copy := *publication
+	s.captured = &copy
+	return nil
+}
+
+func (s *coordinatorPublicationStore) ApplyManualTakeover(_ context.Context, _ uuid.UUID, publication *models.SessionPublication) error {
+	if publication.Source != models.SessionPublicationSourceUser {
+		return errors.New("manual takeover must retain the incoming user authority")
+	}
+	if s.ensureReturnsSource != "" {
+		publication.Source = s.ensureReturnsSource
+	}
 	copy := *publication
 	s.captured = &copy
 	return nil
@@ -91,14 +129,18 @@ func (s *coordinatorPublicationStore) GetByChangeset(_ context.Context, _, _, _ 
 }
 
 type coordinatorJobStore struct {
-	queued  bool
-	payload map[string]any
-	err     error
+	queued   bool
+	payload  map[string]any
+	err      error
+	queue    string
+	priority int
 }
 
-func (s *coordinatorJobStore) QueueChangesetPRCreation(_ context.Context, _, _, _ uuid.UUID, _ string, payload any, _ int) (uuid.UUID, bool, error) {
+func (s *coordinatorJobStore) QueueChangesetPRCreation(_ context.Context, _, _, _ uuid.UUID, queue string, payload any, priority int) (uuid.UUID, bool, error) {
 	encoded, _ := json.Marshal(payload)
 	_ = json.Unmarshal(encoded, &s.payload)
+	s.queue = queue
+	s.priority = priority
 	return uuid.New(), s.queued, s.err
 }
 
@@ -112,6 +154,8 @@ type coordinatorFixture struct {
 	changeset                                           models.SessionChangeset
 	publications                                        *coordinatorPublicationStore
 	jobs                                                *coordinatorJobStore
+	users                                               *coordinatorUserStore
+	changesets                                          *coordinatorChangesetStore
 	coordinator                                         *Coordinator
 }
 
@@ -137,7 +181,8 @@ func newCoordinatorFixture(
 	}
 	f.changeset = models.SessionChangeset{
 		ID: f.changesetID, OrgID: f.orgID, SessionID: f.sessionID,
-		Status: models.ChangesetStatusReady, BaseBranch: "main",
+		IsPrimary: true,
+		Status:    models.ChangesetStatusReady, BaseBranch: "main",
 		WorkingBranch: &branch, HeadSHA: &head,
 	}
 	if edit != nil {
@@ -150,19 +195,42 @@ func newCoordinatorFixture(
 
 	f.publications = &coordinatorPublicationStore{}
 	f.jobs = &coordinatorJobStore{queued: queued, err: queueErr}
+	f.users = &coordinatorUserStore{user: models.UserWithSettings{
+		ID: f.userID, OrgID: f.orgID, Role: models.RoleMember,
+		Settings: models.UserSettings{AutomaticPRFollowThrough: personal},
+	}}
+	f.changesets = &coordinatorChangesetStore{changeset: f.changeset}
 	f.coordinator = NewCoordinator(
 		coordinatorSessionStore{session: f.session},
-		coordinatorChangesetStore{changeset: f.changeset},
+		f.changesets,
 		coordinatorPullRequestStore{},
 		coordinatorOrganizationStore{organization: models.Organization{ID: f.orgID, Settings: orgSettings}},
-		coordinatorUserStore{user: models.UserWithSettings{
-			ID: f.userID, OrgID: f.orgID,
-			Settings: models.UserSettings{AutomaticPRFollowThrough: personal},
-		}},
+		f.users,
 		f.publications, f.jobs, zerolog.Nop(),
 	)
 	return f
 }
+
+func TestCoordinatorRequestPullRequestScopesInitiatorSettingsThroughMembership(t *testing.T) {
+	t.Parallel()
+
+	disabled := models.AutomaticFollowThroughPreferenceOff
+	f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{
+		CreatePRWhenAgentReady: coordinatorBoolPtr(true),
+	}, &models.AutomaticPRFollowThroughSettings{CreatePRWhenAgentReady: disabled}, nil, true, nil)
+	// Reproduce a multi-organization account whose legacy primary organization
+	// differs from the session organization. The scoped store has already
+	// validated membership, so this legacy field must not reject publication.
+	f.users.user.OrgID = uuid.New()
+
+	result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{})
+
+	require.NoError(t, err, "a secondary-organization member should resolve publication policy")
+	require.Equal(t, f.orgID, f.users.gotOrgID, "the coordinator should scope the settings lookup to the session organization")
+	require.Equal(t, ResultManualPublicationRequired, result.Status, "the member's personal opt-out should still apply in a secondary organization")
+}
+
+func coordinatorBoolPtr(value bool) *bool { return &value }
 
 func TestCoordinatorRequestPullRequest(t *testing.T) {
 	t.Parallel()
@@ -175,10 +243,12 @@ func TestCoordinatorRequestPullRequest(t *testing.T) {
 		personal    *models.AutomaticPRFollowThroughSettings
 		wantStatus  ResultStatus
 		wantErrCode ErrorCode
+		wantReason  string
 		wantQueued  bool
 		queueErr    error
 	}{
 		{name: "eligible agent intent starts durable review", wantStatus: ResultReviewInProgress, wantQueued: true},
+		{name: "concurrent queue joins durable review", wantStatus: ResultReviewInProgress, wantQueued: false},
 		{name: "queue failure preserves durable blocked intent", wantStatus: ResultBlocked, queueErr: assertiveError("queue unavailable")},
 		{
 			name: "code review session is ineligible",
@@ -210,6 +280,14 @@ func TestCoordinatorRequestPullRequest(t *testing.T) {
 			wantErrCode: ErrorWorkspaceNotReady,
 		},
 		{
+			name: "external branch update explains reconciliation",
+			edit: func(_ *models.Session, changeset *models.SessionChangeset) {
+				changeset.Status = models.ChangesetStatusExternalUpdateDetected
+			},
+			wantErrCode: ErrorWorkspaceNotReady,
+			wantReason:  "The remote pull request branch differs from the session checkpoint. Reconcile the remote branch with the session before creating the PR.",
+		},
+		{
 			name:       "personal opt-out requires manual publication",
 			orgPolicy:  models.AutomaticFollowThroughOrgSettings{CreatePRWhenAgentReady: &enabled},
 			personal:   &models.AutomaticPRFollowThroughSettings{CreatePRWhenAgentReady: models.AutomaticFollowThroughPreferenceOff},
@@ -234,6 +312,10 @@ func TestCoordinatorRequestPullRequest(t *testing.T) {
 				require.Error(t, err, "ineligible request should return a typed error")
 				require.ErrorAs(t, err, &intentErr, "ineligible request should preserve the coordinator error")
 				require.Equal(t, tt.wantErrCode, intentErr.Code, "coordinator should return the expected error code")
+				if tt.wantReason != "" {
+					require.Equal(t, models.ChangesetStatusExternalUpdateDetected, intentErr.Details["changeset_status"], "the coordinator should identify the blocking changeset lifecycle state")
+					require.Equal(t, tt.wantReason, intentErr.Details["reason"], "the coordinator should return actionable reconciliation guidance")
+				}
 				require.Nil(t, f.publications.captured, "rejected request should not persist publication state")
 				return
 			}
@@ -251,6 +333,287 @@ func TestCoordinatorRequestPullRequest(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCoordinatorRequestPullRequest_PublicationKillSwitchReturnsTypedManualState(t *testing.T) {
+	t.Parallel()
+
+	f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, nil, true, nil)
+	f.coordinator.SetPublicationEnabled(false)
+
+	result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{})
+
+	require.NoError(t, err, "execution kill switch should return a typed policy result")
+	require.Equal(t, ResultManualPublicationRequired, result.Status, "kill switch should fail safe without reviving legacy publication")
+	require.NotNil(t, result.Reason, "manual state should explain why publication did not run")
+	require.Nil(t, f.publications.captured, "kill switch should prevent publication side effects")
+	require.Nil(t, f.jobs.payload, "kill switch should prevent queue side effects")
+}
+
+func TestCoordinatorRequestPullRequest_ReviewKillSwitchParksRequiredGate(t *testing.T) {
+	t.Parallel()
+
+	f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, nil, true, nil)
+	f.coordinator.SetReviewEnabled(false)
+
+	result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{})
+
+	require.NoError(t, err, "review execution kill switch should return a typed policy result")
+	require.Equal(t, ResultManualPublicationRequired, result.Status, "required review should fail safe to manual attention while execution is stopped")
+	require.NotNil(t, result.PublicationID, "parked review should retain a durable publication intent")
+	require.NotNil(t, result.Reason, "parked review should explain why publication did not advance")
+	require.NotNil(t, f.publications.captured, "review kill switch should preserve the durable intent")
+	require.Equal(t, models.SessionPublicationReviewGatePending, f.publications.captured.ReviewGateState, "review kill switch must not weaken the effective review policy")
+	require.NotNil(t, f.publications.captured.ReviewMaxPasses, "parked review should retain its configured pass count")
+	require.Nil(t, f.jobs.payload, "review kill switch should not enqueue an unreviewed publication")
+}
+
+func TestCoordinatorRequestPullRequest_AutomationUsesDurablePolicyPath(t *testing.T) {
+	t.Parallel()
+
+	f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, func(session *models.Session, _ *models.SessionChangeset) {
+		automationRunID := uuid.New()
+		session.AutomationRunID = &automationRunID
+	}, true, nil)
+	f.coordinator.SetPublicationEnabled(false)
+
+	result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{
+		Source: models.SessionPublicationSourceAutomation, TriggerKind: models.SessionPublicationTriggerPolicy,
+	})
+
+	require.NoError(t, err, "configured automation publication should use the coordinator independently of the agent kill switch")
+	require.Equal(t, ResultPRQueued, result.Status, "automation policy should queue its durable publication")
+	require.NotNil(t, f.publications.captured, "automation publication should persist durable intent")
+	require.Equal(t, models.PublicationPolicySourceAutomation, f.publications.captured.AutomaticPolicySource, "automation should retain policy provenance")
+	require.Equal(t, models.PublicationPolicySourceAutomation, f.publications.captured.ReviewPolicySource, "automation review policy should remain authoritative")
+	require.Equal(t, models.SessionPublicationJobQueueDefault, f.publications.captured.JobQueue, "automation should retain the default worker queue")
+	require.Nil(t, f.publications.captured.ReviewMaxPasses, "worker should resolve the automation's configured review pass count")
+	require.Equal(t, "default", f.jobs.queue, "automation should use the default worker queue")
+	require.Equal(t, 0, f.jobs.priority, "automation should retain its existing queue priority")
+}
+
+func TestCoordinatorRequestPullRequest_ExecutionKillSwitchesPreserveExplicitUserPublication(t *testing.T) {
+	t.Parallel()
+
+	f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, nil, true, nil)
+	f.coordinator.SetPublicationEnabled(false)
+	f.coordinator.SetReviewEnabled(false)
+
+	result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{
+		Source: models.SessionPublicationSourceUser, TriggerKind: models.SessionPublicationTriggerExplicitAction,
+	})
+
+	require.NoError(t, err, "automatic publication and review switches should preserve explicit user publication")
+	require.Equal(t, ResultPRQueued, result.Status, "explicit user publication should queue the PR without starting automatic review")
+	require.NotNil(t, f.publications.captured, "explicit user publication should retain durable intent")
+	require.Equal(t, models.SessionPublicationReviewGateNotRequired, f.publications.captured.ReviewGateState, "explicit user publication should not persist an automatic review gate")
+	require.Nil(t, f.publications.captured.ReviewMaxPasses, "explicit user publication should not schedule review passes")
+	require.NotNil(t, f.jobs.payload, "explicit user publication should remain executable as the manual fallback")
+}
+
+func TestCoordinatorRequestPullRequest_TargetsRequestedChangeset(t *testing.T) {
+	t.Parallel()
+
+	f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, nil, true, nil)
+	targetID := f.changesetID
+
+	result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{
+		ChangesetID: &targetID,
+		Source:      models.SessionPublicationSourceUser,
+		TriggerKind: models.SessionPublicationTriggerExplicitAction,
+	})
+
+	require.NoError(t, err, "targeted publication should be coordinated")
+	require.Equal(t, ResultPRQueued, result.Status, "targeted explicit publication should queue without automatic review")
+	require.NotNil(t, f.changesets.requestedID, "coordinator should use the scoped changeset lookup")
+	require.Equal(t, targetID, *f.changesets.requestedID, "coordinator should publish the requested stack changeset")
+	require.Equal(t, targetID.String(), f.jobs.payload["changeset_id"], "queued publication should retain the requested changeset")
+}
+
+func TestCoordinatorRequestPullRequest_KillSwitchParksExistingLiveIntent(t *testing.T) {
+	t.Parallel()
+
+	f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, nil, true, nil)
+	f.publications.captured = &models.SessionPublication{
+		ID: f.changesetID, OrgID: f.orgID, SessionID: f.sessionID, ChangesetID: f.changesetID,
+		Source: models.SessionPublicationSourceAgentTool, State: models.SessionPublicationStateRequested,
+		ReviewGateState: models.SessionPublicationReviewGateNotRequired,
+	}
+	f.publications.ensureReturnsSource = models.SessionPublicationSourceAgentTool
+	f.coordinator.SetPublicationEnabled(false)
+
+	result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{})
+
+	require.NoError(t, err, "kill switch should return a typed non-error outcome for an existing intent")
+	require.Equal(t, ResultManualPublicationRequired, result.Status, "kill switch should park an existing live publication")
+	require.Nil(t, f.jobs.payload, "kill switch should not enqueue another execution job")
+}
+
+func TestCoordinatorRequestPullRequest_ExplicitUserReplacesReviewOnParkedAgentIntent(t *testing.T) {
+	t.Parallel()
+
+	f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, nil, true, nil)
+	maxPasses := 2
+	issueSnapshotID := uuid.New()
+	parkedPayload := json.RawMessage(`{"session_id":"` + f.sessionID.String() + `","changeset_id":"` + f.changesetID.String() + `","org_id":"` + f.orgID.String() + `","publication_source":"agent_tool","publication_queue":"agent","publication_handoff_mode":"draft_first","draft":true,"author_mode":"app","issue_snapshot_id":"` + issueSnapshotID.String() + `"}`)
+	f.publications.captured = &models.SessionPublication{
+		ID: uuid.New(), OrgID: f.orgID, SessionID: f.sessionID, ChangesetID: f.changesetID,
+		Source: models.SessionPublicationSourceAgentTool, State: models.SessionPublicationStateReviewPending,
+		HandoffMode: models.PRHandoffModeDraftFirst, RequestPayload: parkedPayload,
+		ReviewGateState: models.SessionPublicationReviewGatePending, ReviewMaxPasses: &maxPasses,
+	}
+	f.publications.ensureReturnsSource = models.SessionPublicationSourceAgentTool
+	// The repository changed after the automatic intent was recorded. The
+	// explicit Create PR action is a new publication decision, so it uses the
+	// current direct-publication options instead of replaying automatic review.
+	f.coordinator.SetRepositoryStore(coordinatorRepositoryStore{repository: models.Repository{
+		ID: f.repositoryID, OrgID: f.orgID, Settings: json.RawMessage(`{"pr_handoff_mode":"pre_publish"}`),
+	}})
+	f.coordinator.SetPublicationEnabled(false)
+	requesterID := uuid.New()
+
+	result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{
+		Source: models.SessionPublicationSourceUser, TriggerKind: models.SessionPublicationTriggerExplicitAction,
+		RequestedByUserID: &requesterID, RequestedRole: string(models.RoleMember),
+	})
+
+	require.NoError(t, err, "an authorized user should be able to replace parked automatic review")
+	require.Equal(t, ResultPRQueued, result.Status, "explicit Create PR should queue direct publication")
+	require.True(t, result.ReviewBypassed, "the result should report removal of the persisted automatic review gate")
+	require.Equal(t, models.SessionPublicationSourceUser, f.publications.captured.Source, "the durable intent should record explicit user provenance")
+	require.Equal(t, models.SessionPublicationReviewGateNotRequired, f.publications.captured.ReviewGateState, "explicit Create PR should remove recorded automatic review")
+	require.Equal(t, string(models.SessionPublicationSourceUser), f.jobs.payload["publication_source"], "queued work should use explicit user provenance")
+	require.Equal(t, string(models.PRHandoffModePrePublish), f.jobs.payload["publication_handoff_mode"], "explicit publication should use the current repository handoff shape")
+	require.NotContains(t, f.jobs.payload, "draft", "ordinary Create PR should not replay the automatic draft choice")
+	require.NotContains(t, f.jobs.payload, "author_mode", "ordinary Create PR should not replay automatic authorship")
+	require.NotContains(t, f.jobs.payload, "issue_snapshot_id", "ordinary Create PR should not replay the automatic issue snapshot request")
+	require.NotNil(t, f.jobs.payload, "explicit Create PR should queue the durable job")
+}
+
+func TestCoordinatorRequestPullRequest_NonPrimarySafetyGates(t *testing.T) {
+	t.Parallel()
+
+	disabled := false
+	tests := []struct {
+		name         string
+		materialized bool
+		orgPolicy    models.AutomaticFollowThroughOrgSettings
+		role         models.Role
+		wantErrCode  ErrorCode
+		wantQueued   bool
+		wantStatus   ResultStatus
+	}{
+		{
+			name: "unmaterialized changeset is rejected before intent creation",
+			role: models.RoleMember, wantErrCode: ErrorWorkspaceNotReady,
+		},
+		{
+			name:         "materialized changeset queues its pull request directly",
+			materialized: true, role: models.RoleMember, wantQueued: true, wantStatus: ResultPRQueued,
+		},
+		{
+			name:         "builder evidence cannot attest a separate worktree even with publication review off",
+			materialized: true,
+			orgPolicy:    models.AutomaticFollowThroughOrgSettings{ReviewBeforePR: &disabled},
+			role:         models.RoleBuilder, wantErrCode: ErrorSessionNotEligible,
+		},
+		{
+			name:         "member can publish a materialized changeset when review is explicitly off",
+			materialized: true,
+			orgPolicy:    models.AutomaticFollowThroughOrgSettings{ReviewBeforePR: &disabled},
+			role:         models.RoleMember, wantQueued: true, wantStatus: ResultPRQueued,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newCoordinatorFixture(t, tt.orgPolicy, nil, func(_ *models.Session, changeset *models.SessionChangeset) {
+				changeset.IsPrimary = false
+				if tt.materialized {
+					worktree := "/workspace/stack-child"
+					changeset.WorktreePath = &worktree
+				}
+			}, true, nil)
+			requesterID := uuid.New()
+
+			result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{
+				ChangesetID: &f.changesetID,
+				Source:      models.SessionPublicationSourceUser, TriggerKind: models.SessionPublicationTriggerExplicitAction,
+				RequestedByUserID: &requesterID, RequestedRole: string(tt.role),
+			})
+
+			if tt.wantErrCode != "" {
+				var intentErr *Error
+				require.ErrorAs(t, err, &intentErr, "unsupported non-primary publication should return a typed error")
+				require.Equal(t, tt.wantErrCode, intentErr.Code, "non-primary publication should fail at the expected safety gate")
+				require.Nil(t, f.jobs.payload, "rejected non-primary publication must not enqueue work")
+				return
+			}
+			require.NoError(t, err, "supported non-primary publication should be coordinated")
+			require.Equal(t, tt.wantStatus, result.Status, "non-primary publication should report its review-aware queue state")
+			require.Equal(t, tt.wantQueued, f.jobs.payload != nil, "supported non-primary publication should enqueue work")
+		})
+	}
+}
+
+func TestCoordinatorRequestPullRequest_DraftBypassesReviewExecutionPause(t *testing.T) {
+	t.Parallel()
+
+	f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, nil, true, nil)
+	maxPasses, draft := 2, true
+	f.publications.captured = &models.SessionPublication{
+		ID: uuid.New(), OrgID: f.orgID, SessionID: f.sessionID, ChangesetID: f.changesetID,
+		Source: models.SessionPublicationSourceAgentTool, State: models.SessionPublicationStateReviewPending,
+		ReviewGateState: models.SessionPublicationReviewGatePending, ReviewMaxPasses: &maxPasses,
+	}
+	f.coordinator.SetReviewEnabled(false)
+	requesterID := uuid.New()
+
+	result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{
+		Source: models.SessionPublicationSourceUser, TriggerKind: models.SessionPublicationTriggerExplicitAction,
+		Draft: &draft, RequestedByUserID: &requesterID, RequestedRole: string(models.RoleMember),
+	})
+
+	require.NoError(t, err, "an authorized draft action should provide a manual fallback while review execution is paused")
+	require.Equal(t, ResultPRQueued, result.Status, "the audited draft bypass should queue publication")
+	require.True(t, result.ReviewBypassed, "the result should expose the explicit review bypass")
+	require.Equal(t, models.PublicationPolicySourceExplicitBypass, f.publications.captured.ReviewPolicySource, "the durable intent should audit the bypass source")
+}
+
+func TestCoordinatorRequestPullRequest_DerivesAgentInitiatorRole(t *testing.T) {
+	t.Parallel()
+
+	f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, nil, true, nil)
+	f.coordinator.users = &coordinatorUserStore{user: models.UserWithSettings{
+		ID: f.userID, OrgID: f.orgID, Role: models.RoleBuilder,
+	}}
+
+	_, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{
+		Source: models.SessionPublicationSourceAgentTool, TriggerKind: models.SessionPublicationTriggerExplicitAction,
+		RequestedRole: string(models.RoleMember),
+	})
+
+	require.NoError(t, err, "agent publication should resolve authority from the initiating user")
+	require.Equal(t, string(models.RoleBuilder), f.jobs.payload["requested_role"], "sandbox input must not be able to downgrade the initiator's builder role")
+}
+
+func TestCoordinatorExecutionGatesPreserveAutomationIndependence(t *testing.T) {
+	t.Parallel()
+
+	f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, nil, true, nil)
+	f.coordinator.SetPublicationEnabled(false)
+	f.coordinator.SetReviewEnabled(true)
+
+	require.False(t, f.coordinator.PublicationExecutionEnabled(models.SessionPublicationSourceAgentTool), "agent publication switch should stop agent-tool publication execution")
+	require.True(t, f.coordinator.PublicationExecutionEnabled(models.SessionPublicationSourceUser), "agent publication switch should preserve explicit user publication")
+	require.True(t, f.coordinator.PublicationExecutionEnabled(models.SessionPublicationSourceAutomation), "agent publication switch should not stop configured automation")
+	require.False(t, f.coordinator.ReviewExecutionEnabled(models.SessionPublicationSourceAgentTool), "agent publication switch should park agent-tool review execution")
+	require.True(t, f.coordinator.ReviewExecutionEnabled(models.SessionPublicationSourceUser), "agent publication switch should preserve explicit user review execution")
+	require.True(t, f.coordinator.ReviewExecutionEnabled(models.SessionPublicationSourceAutomation), "automation review should remain enabled while its global review switch is on")
+
+	f.coordinator.SetReviewEnabled(false)
+	require.False(t, f.coordinator.ReviewExecutionEnabled(models.SessionPublicationSourceAutomation), "global review switch should park automation review execution")
 }
 
 // The agent calls create_pr from inside the sandbox while its turn is still
@@ -394,7 +757,27 @@ func TestCoordinatorRequestPullRequestExplicitActionBypassesDisabledPolicy(t *te
 		Source: models.SessionPublicationSourceUser, TriggerKind: models.SessionPublicationTriggerExplicitAction,
 	})
 	require.NoError(t, err, "an explicit user request should be accepted")
-	require.Equal(t, ResultReviewInProgress, explicitResult.Status, "explicit user action should override handoff policy while retaining review")
+	require.Equal(t, ResultPRQueued, explicitResult.Status, "explicit user action should override automatic handoff and review policy")
+}
+
+func TestCoordinatorRequestPullRequestRoutesProjectPolicyToDefaultQueue(t *testing.T) {
+	t.Parallel()
+
+	f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, func(session *models.Session, _ *models.SessionChangeset) {
+		projectTaskID := uuid.New()
+		session.ProjectTaskID = &projectTaskID
+	}, true, nil)
+	result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{
+		Source:      models.SessionPublicationSourceBackend,
+		TriggerKind: models.SessionPublicationTriggerPolicy,
+	})
+
+	require.NoError(t, err, "project policy publication should be coordinated")
+	require.Equal(t, ResultPRQueued, result.Status, "project policy should remain parent-controlled instead of inheriting agent review")
+	require.Equal(t, models.SessionPublicationSourceBackend, f.publications.captured.Source, "project publication should retain backend ownership")
+	require.Equal(t, "default", f.jobs.queue, "project publication should retain default-worker routing")
+	require.Equal(t, 0, f.jobs.priority, "project publication should retain policy-job priority")
+	require.Nil(t, f.publications.captured.ReviewMaxPasses, "project publication should not create a second pre-publication review loop")
 }
 
 func TestCoordinatorRequestPullRequestRepositoryHandoffAndDraftBypass(t *testing.T) {
@@ -421,9 +804,9 @@ func TestCoordinatorRequestPullRequestRepositoryHandoffAndDraftBypass(t *testing
 			expectedReviewSource: models.PublicationPolicySourceProductDefault,
 		},
 		{
-			name:           "a first draft request is not a review bypass",
+			name:           "a first explicit draft request queues without automatic review",
 			req:            explicitDraftRequest,
-			expectedStatus: ResultReviewInProgress, expectedGate: models.SessionPublicationReviewGatePending,
+			expectedStatus: ResultPRQueued, expectedGate: models.SessionPublicationReviewGateNotRequired,
 			expectedReviewSource: models.PublicationPolicySourceProductDefault,
 		},
 		{
@@ -466,6 +849,7 @@ func TestCoordinatorRequestPullRequestRejoinsOrReopensExistingIntent(t *testing.
 	tests := []struct {
 		name             string
 		existing         models.SessionPublication
+		changesetStatus  models.ChangesetStatus
 		ensureKeepsState models.SessionPublicationState
 		wantStatus       ResultStatus
 		wantReopened     bool
@@ -479,20 +863,21 @@ func TestCoordinatorRequestPullRequestRejoinsOrReopensExistingIntent(t *testing.
 			wantStatus: ResultReviewInProgress,
 		},
 		{
-			name:       "a completed publication stays published",
-			existing:   models.SessionPublication{State: models.SessionPublicationStateCompleted},
-			wantStatus: ResultAlreadyPublished,
+			name:            "a completed publication stays published",
+			existing:        models.SessionPublication{State: models.SessionPublicationStateCompleted},
+			changesetStatus: models.ChangesetStatusPROpen,
+			wantStatus:      ResultAlreadyPublished,
 		},
 		{
 			name:         "a no-op publication can be retried once there is something to publish",
 			existing:     models.SessionPublication{State: models.SessionPublicationStateCompletedNoop},
-			wantStatus:   ResultReviewInProgress,
+			wantStatus:   ResultPRQueued,
 			wantReopened: true,
 		},
 		{
 			name:         "a terminally failed publication can be retried",
 			existing:     models.SessionPublication{State: models.SessionPublicationStateTerminalFailed},
-			wantStatus:   ResultReviewInProgress,
+			wantStatus:   ResultPRQueued,
 			wantReopened: true,
 		},
 		{
@@ -511,6 +896,10 @@ func TestCoordinatorRequestPullRequestRejoinsOrReopensExistingIntent(t *testing.
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, nil, true, nil)
+			if tt.changesetStatus != "" {
+				f.changeset.Status = tt.changesetStatus
+				f.changesets.changeset = f.changeset
+			}
 			existing := tt.existing
 			existing.ID = uuid.New()
 			existing.SessionID = f.sessionID
@@ -538,6 +927,39 @@ func TestCoordinatorRequestPullRequestRejoinsOrReopensExistingIntent(t *testing.
 	}
 }
 
+func TestCoordinatorRequestPullRequestExplicitActionReplacesExistingReview(t *testing.T) {
+	t.Parallel()
+
+	f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, nil, true, nil)
+	reviewLoopID := uuid.New()
+	maxPasses := 2
+	existing := models.SessionPublication{
+		ID: f.changesetID, OrgID: f.orgID, SessionID: f.sessionID, ChangesetID: f.changesetID,
+		RepositoryID: f.repositoryID, State: models.SessionPublicationStateReviewPending,
+		Source: models.SessionPublicationSourceUser, TriggerKind: models.SessionPublicationTriggerExplicitAction,
+		HandoffMode: models.PRHandoffModePrePublish, AutomaticPolicySource: models.PublicationPolicySourceExplicitAction,
+		ReviewPolicySource: models.PublicationPolicySourceProductDefault, ReviewMaxPasses: &maxPasses,
+		ReviewLoopID: &reviewLoopID, ReviewGateState: models.SessionPublicationReviewGatePending,
+		JobQueue: models.SessionPublicationJobQueueAgent, RequestPayload: json.RawMessage(`{"session_id":"old"}`),
+		BaseBranch: "main", HeadBranch: "143/change",
+	}
+	f.publications.captured = &existing
+
+	result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{
+		Source: models.SessionPublicationSourceUser, TriggerKind: models.SessionPublicationTriggerExplicitAction,
+		RequestedByUserID: &f.userID, RequestedRole: string(models.RoleMember),
+	})
+
+	require.NoError(t, err, "an explicit Create PR action should replace an older automatic review intent")
+	require.Equal(t, ResultPRQueued, result.Status, "the explicit action should queue pull request creation directly")
+	require.True(t, result.ReviewBypassed, "the result should report that the older persisted review gate was removed")
+	require.Equal(t, models.SessionPublicationStateReadyToPublish, f.publications.captured.State, "the durable intent should advance past review")
+	require.Equal(t, models.SessionPublicationReviewGateNotRequired, f.publications.captured.ReviewGateState, "the durable intent should no longer require review")
+	require.Nil(t, f.publications.captured.ReviewLoopID, "the durable intent should detach the superseded review loop")
+	require.NotNil(t, f.jobs.payload, "the explicit action should queue publication work")
+	require.NotContains(t, f.jobs.payload, "draft", "the ordinary Create PR action should not force a draft")
+}
+
 func TestCoordinatorRequestPullRequestReopensTerminalDraftWithExistingPR(t *testing.T) {
 	t.Parallel()
 
@@ -558,11 +980,51 @@ func TestCoordinatorRequestPullRequestReopensTerminalDraftWithExistingPR(t *test
 	})
 
 	require.NoError(t, err, "a terminal draft-first publication should reopen around its existing draft")
-	require.Equal(t, ResultReviewInProgress, result.Status, "the existing draft should resume review instead of reporting an already-published PR")
+	require.Equal(t, ResultPRQueued, result.Status, "the explicit retry should resume the existing draft without starting automatic review")
 	require.NotNil(t, f.jobs.payload, "the reopened draft publication should enqueue its durable worker")
 	require.NotNil(t, f.publications.captured, "the reopened draft publication should be persisted")
 	require.Equal(t, models.PRHandoffModeDraftFirst, f.publications.captured.HandoffMode, "the reopened publication should retain the existing draft handoff")
 	require.Equal(t, true, f.jobs.payload["draft"], "the resumed worker should reuse the existing draft lifecycle")
+}
+
+func TestCoordinatorRequestPullRequestAdoptsExistingPROpenBeforeTargetValidation(t *testing.T) {
+	t.Parallel()
+
+	f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, nil, true, nil)
+	f.changeset.Status = models.ChangesetStatusPROpen
+	f.changesets.changeset = f.changeset
+	f.coordinator.pullRequests = coordinatorPullRequestStore{pr: &models.PullRequest{
+		ID: uuid.New(), OrgID: f.orgID, SessionID: &f.sessionID, ChangesetID: &f.changesetID,
+	}}
+
+	result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{
+		Source: models.SessionPublicationSourceUser, TriggerKind: models.SessionPublicationTriggerExplicitAction,
+	})
+
+	require.NoError(t, err, "a repeated request should adopt the existing pull request")
+	require.Equal(t, ResultAlreadyPublished, result.Status, "an existing pull request is the authoritative idempotent result")
+	require.Nil(t, f.publications.captured, "adopting an existing pull request should not create another publication intent")
+	require.Nil(t, f.jobs.payload, "adopting an existing pull request should not enqueue duplicate work")
+}
+
+func TestCoordinatorRequestPullRequestAdoptsLegacyPrimaryPR(t *testing.T) {
+	t.Parallel()
+
+	f := newCoordinatorFixture(t, models.AutomaticFollowThroughOrgSettings{}, nil, nil, true, nil)
+	f.changeset.Status = models.ChangesetStatusPROpen
+	f.changesets.changeset = f.changeset
+	f.coordinator.pullRequests = coordinatorPullRequestStore{pr: &models.PullRequest{
+		ID: uuid.New(), OrgID: f.orgID, SessionID: &f.sessionID, ChangesetID: nil,
+	}}
+
+	result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{
+		Source: models.SessionPublicationSourceUser, TriggerKind: models.SessionPublicationTriggerExplicitAction,
+	})
+
+	require.NoError(t, err, "a retry should adopt a rolling-upgrade primary PR without a changeset ID")
+	require.Equal(t, ResultAlreadyPublished, result.Status, "the legacy primary PR should remain the authoritative idempotent result")
+	require.Nil(t, f.publications.captured, "legacy PR adoption should not create a duplicate publication intent")
+	require.Nil(t, f.jobs.payload, "legacy PR adoption should not enqueue duplicate publication work")
 }
 
 func TestExistingPublicationResult(t *testing.T) {
@@ -629,7 +1091,7 @@ func TestExistingPublicationResult(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := existingPublicationResult(tt.publication)
+			result := ExistingPublicationResult(tt.publication)
 			require.Equal(t, tt.wantStatus, result.Status, "existing durable intent should return its current asynchronous state")
 			require.Equal(t, tt.wantReason, result.Reason != nil, "blocked existing intent should explain why it cannot advance")
 			require.Equal(t, tt.publication.ReviewLoopID, result.ReviewLoopID, "existing intent should preserve its review loop link")

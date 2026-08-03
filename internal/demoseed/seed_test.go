@@ -204,7 +204,7 @@ func TestCurrentSeedCoversRepresentativeProductTables(t *testing.T) {
 		"INSERT INTO code_review_session_metadata",
 		"INSERT INTO code_review_agent_results",
 		"INSERT INTO code_review_findings",
-		"INSERT INTO code_review_prompt_artifacts",
+		"INSERT INTO code_review_prompt_records",
 		"INSERT INTO usage_hourly",
 		"INSERT INTO usage_hourly_execution",
 		"INSERT INTO slack_installations",

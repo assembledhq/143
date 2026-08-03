@@ -586,7 +586,7 @@ func TestPreviewHandler_RemoteInspectorEndpoints_PropagateStructuredWorkerErrors
 	}
 }
 
-// screenshotPNGInspector returns a fixed PNG payload (and no artifact, mimicking
+// screenshotPNGInspector returns a fixed PNG payload (and no capture, mimicking
 // an unconfigured upload store) so the inline-base64 default/override behaviour
 // of CaptureScreenshot can be exercised.
 type screenshotPNGInspector struct {
@@ -605,7 +605,7 @@ func TestPreviewHandler_CaptureScreenshot_InlineBase64Default(t *testing.T) {
 		body           string
 		wantPNGPresent bool
 	}{
-		{"defaults to inline when no artifact", `{}`, true},
+		{"defaults to inline when no capture", `{}`, true},
 		{"explicit inline true", `{"inline_base64":true}`, true},
 		{"explicit inline false omits png", `{"inline_base64":false}`, false},
 	}
@@ -654,6 +654,48 @@ func TestPreviewHandler_CaptureScreenshot_InlineBase64Default(t *testing.T) {
 	}
 }
 
+func TestPreviewHandler_CaptureScreenshot_EmitsBothStoredReferenceKeys(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now().UTC()
+	store := &captureUploadStore{}
+	h := newPreviewHandlerWithMock(mock)
+	h.manager.SetInspector(screenshotPNGInspector{})
+	h.SetUploadStore(store)
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols).AddRow(newActivePreviewRow(previewID, sessionID, orgID, userID, now)...))
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(`{}`))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	rr := httptest.NewRecorder()
+	h.CaptureScreenshot(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "screenshot capture should succeed")
+	var body struct {
+		Data struct {
+			Capture       *models.PreviewCapture `json:"capture"`
+			LegacyCapture *models.PreviewCapture `json:"artifact"`
+			PNGBase64     string                 `json:"png_base64"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body), "response should decode")
+	require.NotNil(t, body.Data.Capture, "response should include the current capture key")
+	require.Equal(t, body.Data.Capture, body.Data.LegacyCapture, "response should include the same reference under the compatibility key")
+	require.Empty(t, body.Data.PNGBase64, "stored screenshots should not duplicate base64 by default")
+	require.Contains(t, store.key, "/preview-captures/", "new screenshot storage should use the reserved capture namespace")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 type interactScreenshotInspector struct {
 	internalPreviewTestInspector
 }
@@ -673,7 +715,7 @@ func (interactScreenshotInspector) ExecuteInteraction(context.Context, string, [
 // ScreenshotResult.PNG serializes as png_base64 (for worker transport), so
 // handlers that don't persist-and-strip would leak full base64 images into the
 // agent transcript. The interact handler must strip step screenshots' bytes
-// after attaching artifacts.
+// after attaching captures.
 func TestPreviewHandler_Interact_StripsInlineScreenshotBytes(t *testing.T) {
 	t.Parallel()
 
@@ -724,7 +766,7 @@ func (multiViewportScreenshotInspector) CaptureMultiViewport(context.Context, st
 }
 
 // The multi-viewport handler embeds a ScreenshotResult per capture; like the
-// interact handler it must strip the inline PNG bytes after attaching artifacts
+// interact handler it must strip the inline PNG bytes after attaching captures
 // so large base64 images do not leak into the agent transcript.
 func TestPreviewHandler_MultiViewport_StripsInlineScreenshotBytes(t *testing.T) {
 	t.Parallel()

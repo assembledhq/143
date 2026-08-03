@@ -46,7 +46,7 @@ import (
 	pagerdutysvc "github.com/assembledhq/143/internal/services/pagerduty"
 	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/publicationintent"
-	"github.com/assembledhq/143/internal/services/reviewartifact"
+	"github.com/assembledhq/143/internal/services/reviewbundle"
 	reviewloopservice "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
@@ -390,7 +390,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		logger,
 	)
 	publicationIntentCoordinator.SetRepositoryStore(repoStore)
-	publicationIntentCoordinator.SetReviewEnabled(cfg.PrePRReviewEnabled && cfg.AgentPRPublicationEnabled)
+	publicationIntentCoordinator.SetPublicationEnabled(cfg.AgentPRPublicationEnabled)
+	publicationIntentCoordinator.SetReviewEnabled(cfg.PrePRReviewEnabled)
 	sessionHandler := handlers.NewSessionHandler(
 		sessionStore,
 		sessionLogStore,
@@ -416,9 +417,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetHumanInputRequestStore(sessionHumanInputStore)
 	sessionHandler.SetCapabilityService(agentCapabilitySvc)
 	sessionHandler.SetUserStore(userStore)
-	sessionHandler.SetPublicationPolicyEnabled(cfg.AgentPRPublicationEnabled)
-	sessionHandler.SetPrePRReviewEnabled(cfg.PrePRReviewEnabled && cfg.AgentPRPublicationEnabled)
-	sessionHandler.SetPublicationIntentCoordinator(publicationIntentCoordinator, cfg.AgentPRPublicationEnabled)
+	// Policy remains visible while execution is killed; kill switches stop
+	// side effects and never rewrite or hide customer settings.
+	sessionHandler.SetPublicationPolicyEnabled(true)
+	sessionHandler.SetPrePRReviewEnabled(true)
+	sessionHandler.SetPublicationIntentCoordinator(publicationIntentCoordinator, true)
 	sessionHandler.SetThreadInboxStore(threadInboxStore)
 	sessionHandler.SetSessionSandboxHolderStore(sessionSandboxHolderStore)
 	sessionHandler.SetTxStarter(pool)
@@ -777,12 +780,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			sessionFilesSnapshotCache = sc
 		}
 	}
-	var reviewArtifactReader *reviewartifact.CachedReader
+	var reviewBundleReader *reviewbundle.CachedReader
 	if snapshotStore != nil {
-		reviewArtifactReader = reviewartifact.NewCachedReader(snapshotStore, reviewartifact.DefaultCacheBytes)
+		reviewBundleReader = reviewbundle.NewCachedReader(snapshotStore, reviewbundle.DefaultCacheBytes)
 	}
 	sessionComposerHandler := handlers.NewSessionComposerHandlerWithWorkspace(repoStore, sessionStore, prService, fileReader, sessionFilesSnapshotCache, redisClient, logger)
-	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, repoStore, fileReader, sessionFilesSnapshotCache, reviewArtifactReader, logger)
+	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, repoStore, fileReader, sessionFilesSnapshotCache, reviewBundleReader, logger)
 
 	// Preview system: inspector, snapshot cache, HMR watcher, manager, recycler, gateway.
 	var previewInspector preview.PreviewInspector
@@ -1042,10 +1045,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		internalPullRequestHandler.SetChangesetStore(sessionChangesetStore)
 		internalPullRequestHandler.SetThreadStore(sessionThreadStore)
 		internalPullRequestHandler.SetAuditEmitter(auditEmitter)
-		internalPullRequestHandler.SetPublicationIntentCoordinator(
-			publicationIntentCoordinator,
-			cfg.AgentPRPublicationEnabled,
-		)
+		internalPullRequestHandler.SetPublicationIntentCoordinator(publicationIntentCoordinator)
 		internalSessionTabsHandler := handlers.NewInternalSessionTabsHandler(threadSvc, sessionStore, orgStore, cfg.SessionSecret, logger)
 		internalAutomationHandler := handlers.NewInternalAutomationHandler(automationHandler, sessionStore, automationStore, cfg.SessionSecret)
 		internalSlackMessageHandler := handlers.NewInternalSlackMessageHandler(sessionStore, slackInstallationStore, credentialStore, db.NewSlackOutboundMessageStore(pool), cfg.SessionSecret, logger)
@@ -1263,6 +1263,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/code-reviews/{id}/evidence", codeReviewHandler.Evidence)
 				r.Get("/api/v1/code-review-policies", codeReviewHandler.GetPolicy)
 				r.Get("/api/v1/code-review-github-trigger", codeReviewHandler.GetGitHubTrigger)
+				r.Get("/api/v1/code-review-github-triggers", codeReviewHandler.ListGitHubTriggers)
 
 				// GitHub connection status for PR authorship
 				r.Get("/api/v1/users/me/github-status", githubStatusHandler.GetStatus)

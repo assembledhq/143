@@ -239,6 +239,7 @@ const (
 	CodeReviewGitHubTriggerStatusReady              CodeReviewGitHubTriggerStatus = "ready"
 	CodeReviewGitHubTriggerStatusAuthRequired       CodeReviewGitHubTriggerStatus = "auth_required"
 	CodeReviewGitHubTriggerStatusPermissionRequired CodeReviewGitHubTriggerStatus = "permission_required"
+	CodeReviewGitHubTriggerStatusDisconnected       CodeReviewGitHubTriggerStatus = "disconnected"
 	CodeReviewGitHubTriggerStatusError              CodeReviewGitHubTriggerStatus = "error"
 )
 
@@ -246,7 +247,7 @@ func (s CodeReviewGitHubTriggerStatus) Validate() error {
 	switch s {
 	case CodeReviewGitHubTriggerStatusUnconfigured, CodeReviewGitHubTriggerStatusReady,
 		CodeReviewGitHubTriggerStatusAuthRequired, CodeReviewGitHubTriggerStatusPermissionRequired,
-		CodeReviewGitHubTriggerStatusError:
+		CodeReviewGitHubTriggerStatusDisconnected, CodeReviewGitHubTriggerStatusError:
 		return nil
 	default:
 		return fmt.Errorf("invalid CodeReviewGitHubTriggerStatus: %q", s)
@@ -272,6 +273,7 @@ type CodeReviewGitHubTriggerResponse struct {
 	Status             CodeReviewGitHubTriggerStatus         `json:"status"`
 	RepositoryID       uuid.UUID                             `json:"repository_id"`
 	RepositoryFullName string                                `json:"repository_full_name,omitempty"`
+	RepositoryStatus   RepositoryStatus                      `json:"repository_status"`
 	GitHubOrg          string                                `json:"github_org,omitempty"`
 	TeamSlug           string                                `json:"team_slug"`
 	TeamName           string                                `json:"team_name"`
@@ -878,7 +880,7 @@ type CodeReviewSessionMetadata struct {
 	Stale                 bool                    `db:"stale" json:"stale"`
 	SupersededBySessionID *uuid.UUID              `db:"superseded_by_session_id" json:"superseded_by_session_id,omitempty"`
 	ReviewOutputKey       string                  `db:"review_output_key" json:"review_output_key"`
-	PromptArtifactKey     *string                 `db:"prompt_artifact_key" json:"prompt_artifact_key,omitempty"`
+	PromptRecordKey       *string                 `db:"prompt_record_key" json:"prompt_record_key,omitempty"`
 	GitHubReviewID        *int64                  `db:"github_review_id" json:"github_review_id,omitempty"`
 	GitHubReviewURL       *string                 `db:"github_review_url" json:"github_review_url,omitempty"`
 	FinalReviewBody       *string                 `db:"final_review_body" json:"final_review_body,omitempty"`
@@ -900,16 +902,29 @@ type CodeReviewAgentResult struct {
 	CreatedAt        time.Time                   `db:"created_at" json:"created_at"`
 }
 
-type CodeReviewPromptArtifact struct {
+type CodeReviewPromptRecord struct {
 	ID            uuid.UUID       `db:"id" json:"id"`
 	OrgID         uuid.UUID       `db:"org_id" json:"org_id"`
 	SessionID     uuid.UUID       `db:"session_id" json:"session_id"`
-	ArtifactKey   string          `db:"artifact_key" json:"artifact_key"`
+	RecordKey     string          `db:"record_key" json:"record_key"`
 	Role          string          `db:"role" json:"role"`
 	AgentProvider string          `db:"agent_provider" json:"agent_provider,omitempty"`
 	Content       string          `db:"content" json:"content"`
 	Metadata      json.RawMessage `db:"metadata" json:"metadata,omitempty"`
 	CreatedAt     time.Time       `db:"created_at" json:"created_at"`
+}
+
+// MarshalJSON retains the former identity key for separately deployed API
+// clients during the compatibility window.
+func (r CodeReviewPromptRecord) MarshalJSON() ([]byte, error) {
+	type codeReviewPromptRecordAlias CodeReviewPromptRecord
+	return json.Marshal(struct {
+		codeReviewPromptRecordAlias
+		LegacyRecordKey string `json:"artifact_key"`
+	}{
+		codeReviewPromptRecordAlias: codeReviewPromptRecordAlias(r),
+		LegacyRecordKey:             r.RecordKey,
+	})
 }
 
 type CodeReviewFinding struct {
@@ -940,6 +955,18 @@ type CodeReviewListItem struct {
 	GitHubPRURL       string  `db:"github_pr_url" json:"github_pr_url"`
 	PullRequestTitle  string  `db:"pull_request_title" json:"pull_request_title"`
 	PullRequestAuthor string  `db:"pull_request_author" json:"pull_request_author"`
+}
+
+// MarshalJSON keeps the former prompt reference alongside the renamed field.
+func (i CodeReviewListItem) MarshalJSON() ([]byte, error) {
+	type codeReviewListItemAlias CodeReviewListItem
+	return json.Marshal(struct {
+		codeReviewListItemAlias
+		LegacyPromptRecordKey *string `json:"prompt_artifact_key,omitempty"`
+	}{
+		codeReviewListItemAlias: codeReviewListItemAlias(i),
+		LegacyPromptRecordKey:   i.PromptRecordKey,
+	})
 }
 
 type CodeReviewStats struct {
@@ -1025,9 +1052,22 @@ type CodeReviewAnalytics struct {
 }
 
 type CodeReviewEvidence struct {
-	AgentResults    []CodeReviewAgentResult    `json:"agent_results"`
-	Findings        []CodeReviewFinding        `json:"findings"`
-	PromptArtifacts []CodeReviewPromptArtifact `json:"prompt_artifacts,omitempty"`
+	AgentResults  []CodeReviewAgentResult  `json:"agent_results"`
+	Findings      []CodeReviewFinding      `json:"findings"`
+	PromptRecords []CodeReviewPromptRecord `json:"prompt_records,omitempty"`
+}
+
+// MarshalJSON emits both collection names until old API clients are outside
+// the supported version window.
+func (e CodeReviewEvidence) MarshalJSON() ([]byte, error) {
+	type codeReviewEvidenceAlias CodeReviewEvidence
+	return json.Marshal(struct {
+		codeReviewEvidenceAlias
+		LegacyPromptRecords []CodeReviewPromptRecord `json:"prompt_artifacts,omitempty"`
+	}{
+		codeReviewEvidenceAlias: codeReviewEvidenceAlias(e),
+		LegacyPromptRecords:     e.PromptRecords,
+	})
 }
 
 type CodeReviewPromptExample string

@@ -924,7 +924,54 @@ func TestCodeReviewPromptInjectionLikelyIncludesRequestContext(t *testing.T) {
 	}
 }
 
-func TestCodeReviewCapturedPolicyVersionsRenderDistinctPromptArtifacts(t *testing.T) {
+// Harvest decodes a persisted structured result, mutates it, and writes it
+// back. During a rolling deploy a row can be created by one worker generation
+// and harvested by the other, so both prompt/raw key spellings must survive the
+// round trip or the prompt and raw-output references are silently dropped.
+func TestCodeReviewStructuredResultsRoundTripBothStoredKeySpellings(t *testing.T) {
+	t.Parallel()
+
+	t.Run("reviewer", func(t *testing.T) {
+		t.Parallel()
+
+		legacy, ok := parseCodeReviewReviewerStructuredResult(json.RawMessage(
+			`{"reviewer_key":"r1","thread_id":"t1","prompt_artifact_key":"prompts/reviewer","raw_artifact_key":"prompts/reviewer-output"}`,
+		))
+		require.True(t, ok, "a structured result written by the previous generation should parse")
+		require.Equal(t, "prompts/reviewer", legacy.PromptRecordKey, "the previous prompt key spelling should populate the current field")
+		require.Equal(t, "prompts/reviewer-output", legacy.RawRecordKey, "the previous raw output key spelling should populate the current field")
+
+		encoded := marshalCodeReviewReviewerStructuredResult(legacy)
+		require.Contains(t, string(encoded), `"prompt_record_key":"prompts/reviewer"`, "re-marshal should emit the current prompt key")
+		require.Contains(t, string(encoded), `"prompt_artifact_key":"prompts/reviewer"`, "re-marshal should preserve the compatibility prompt key for a draining generation")
+		require.Contains(t, string(encoded), `"raw_artifact_key":"prompts/reviewer-output"`, "re-marshal should preserve the compatibility raw output key")
+
+		current, ok := parseCodeReviewReviewerStructuredResult(encoded)
+		require.True(t, ok, "the re-marshaled result should parse")
+		require.Equal(t, legacy, current, "the harvest round trip should not drop stored references")
+	})
+
+	t.Run("orchestrator", func(t *testing.T) {
+		t.Parallel()
+
+		legacy, ok := parseCodeReviewOrchestratorStructuredResult(json.RawMessage(
+			`{"thread_id":"t1","prompt_artifact_key":"prompts/orchestrator","raw_artifact_key":"prompts/orchestrator-output"}`,
+		))
+		require.True(t, ok, "a structured result written by the previous generation should parse")
+		require.Equal(t, "prompts/orchestrator", legacy.PromptRecordKey, "the previous prompt key spelling should populate the current field")
+		require.Equal(t, "prompts/orchestrator-output", legacy.RawRecordKey, "the previous raw output key spelling should populate the current field")
+
+		encoded := marshalCodeReviewOrchestratorStructuredResult(legacy)
+		require.Contains(t, string(encoded), `"prompt_record_key":"prompts/orchestrator"`, "re-marshal should emit the current prompt key")
+		require.Contains(t, string(encoded), `"prompt_artifact_key":"prompts/orchestrator"`, "re-marshal should preserve the compatibility prompt key for a draining generation")
+
+		current, ok := parseCodeReviewOrchestratorStructuredResult(encoded)
+		require.True(t, ok, "the re-marshaled result should parse")
+		require.Equal(t, legacy, current, "the harvest round trip should not drop stored references")
+	})
+}
+
+func TestCodeReviewCapturedPolicyVersionsRenderDistinctPromptRecords(t *testing.T) {
 	t.Parallel()
 	first := models.DefaultCodeReviewPolicyConfig()
 	first.ApprovalMode = models.CodeReviewApprovalModeApproveAcceptable
@@ -938,21 +985,21 @@ func TestCodeReviewCapturedPolicyVersionsRenderDistinctPromptArtifacts(t *testin
 	secondRecord := codeReviewPolicyRecordForTest(second)
 	secondRecord.Version = 2
 
-	firstReviewerArtifact := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, firstRecord.Config(), firstRecord.Version, "", nil)
-	secondReviewerArtifact := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, secondRecord.Config(), secondRecord.Version, "", nil)
-	require.Contains(t, firstReviewerArtifact, first.ReviewInstructions, "captured reviewer artifact should use its historic policy record")
-	require.NotContains(t, firstReviewerArtifact, second.ReviewInstructions, "captured reviewer artifact should not use the latest active policy")
-	require.NotEqual(t, firstReviewerArtifact, secondReviewerArtifact, "different captured policy versions should render different reviewer artifacts")
+	firstReviewerRecord := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, firstRecord.Config(), firstRecord.Version, "", nil)
+	secondReviewerRecord := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, secondRecord.Config(), secondRecord.Version, "", nil)
+	require.Contains(t, firstReviewerRecord, first.ReviewInstructions, "captured reviewer record should use its historic policy record")
+	require.NotContains(t, firstReviewerRecord, second.ReviewInstructions, "captured reviewer record should not use the latest active policy")
+	require.NotEqual(t, firstReviewerRecord, secondReviewerRecord, "different captured policy versions should render different reviewer records")
 
-	firstOrchestratorArtifact := prompts.CodeReviewOrchestratorPrompt(prompts.CodeReviewOrchestratorPromptData{
+	firstOrchestratorRecord := prompts.CodeReviewOrchestratorPrompt(prompts.CodeReviewOrchestratorPromptData{
 		PolicyVersion: firstRecord.Version, ReviewInstructions: first.ReviewInstructions, AutomatedApprovalPolicy: first.AutomatedApprovalPolicy, UseAutomatedApprovalPolicy: true,
 	})
-	secondOrchestratorArtifact := prompts.CodeReviewOrchestratorPrompt(prompts.CodeReviewOrchestratorPromptData{
+	secondOrchestratorRecord := prompts.CodeReviewOrchestratorPrompt(prompts.CodeReviewOrchestratorPromptData{
 		PolicyVersion: secondRecord.Version, ReviewInstructions: second.ReviewInstructions, AutomatedApprovalPolicy: second.AutomatedApprovalPolicy, UseAutomatedApprovalPolicy: true,
 	})
-	require.Contains(t, firstOrchestratorArtifact, first.AutomatedApprovalPolicy, "captured orchestrator artifact should use its historic approval policy")
-	require.NotContains(t, firstOrchestratorArtifact, second.AutomatedApprovalPolicy, "captured orchestrator artifact should not use the latest active policy")
-	require.NotEqual(t, firstOrchestratorArtifact, secondOrchestratorArtifact, "different captured policy versions should render different orchestrator artifacts")
+	require.Contains(t, firstOrchestratorRecord, first.AutomatedApprovalPolicy, "captured orchestrator record should use its historic approval policy")
+	require.NotContains(t, firstOrchestratorRecord, second.AutomatedApprovalPolicy, "captured orchestrator record should not use the latest active policy")
+	require.NotEqual(t, firstOrchestratorRecord, secondOrchestratorRecord, "different captured policy versions should render different orchestrator records")
 }
 
 func TestHarvestCodeReviewReviewerResultsPreservesCompletedOutputAfterDeadline(t *testing.T) {
@@ -1358,7 +1405,7 @@ func TestRunCodeReviewHandlerFastWaitSkipsGitHubRefresh(t *testing.T) {
 			threadID := uuid.New()
 			now := time.Now().UTC()
 			headSHA := "reviewed-head"
-			promptArtifactKey := "code-review-prompts/" + sessionID.String() + "/" + headSHA
+			promptRecordKey := "code-review-prompts/" + sessionID.String() + "/" + headSHA
 			policy := models.DefaultCodeReviewPolicyConfig()
 			policy.AgentRoster.Reviewers = []models.AgentType{models.AgentTypeCodex}
 			policy.AgentRoster.ReviewerModels = []string{models.DefaultCodexModel}
@@ -1370,7 +1417,7 @@ func TestRunCodeReviewHandlerFastWaitSkipsGitHubRefresh(t *testing.T) {
 					AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
 						"base", headSHA, false, models.CodeReviewTriggerSourceTeamReviewer,
 						models.CodeReviewSessionStatusRunning, nil, nil, nil, nil, nil, false, nil, nil, false, nil,
-						"output-key", &promptArtifactKey, nil, nil, nil, nil, nil, now))
+						"output-key", &promptRecordKey, nil, nil, nil, nil, nil, now))
 			mock.ExpectQuery("(?s)FROM code_review_policies.*WHERE org_id = @org_id.*AND id = @id").
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "id": policyID}).
 				WillReturnRows(codeReviewPolicyRowsForTest(t, orgID, policyID, policy, now))
@@ -1406,7 +1453,7 @@ func TestRunCodeReviewHandlerFastWaitSkipsGitHubRefresh(t *testing.T) {
 					AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
 						"base", headSHA, false, models.CodeReviewTriggerSourceTeamReviewer,
 						models.CodeReviewSessionStatusRunning, &operationalPhase, nil, nil, nil, nil, false, nil, nil, false, nil,
-						"output-key", &promptArtifactKey, nil, nil, nil, nil, nil, now))
+						"output-key", &promptRecordKey, nil, nil, nil, nil, nil, now))
 
 			syncCalls := 0
 			submitter := &capturingCodeReviewSubmitter{}
@@ -1934,7 +1981,7 @@ func TestRequestCodeReviewOrchestratorSynthesisRepairRedispatchesPendingRepair(t
 	require.NoError(t, mock.ExpectationsWereMet(), "the retry should retain the pending repair without consuming the repair count")
 }
 
-func TestRequestCodeReviewOrchestratorSynthesisRepairPersistsOversizedFindingsBeforeArtifactSubstitution(t *testing.T) {
+func TestRequestCodeReviewOrchestratorSynthesisRepairPersistsOversizedFindingsBeforeRecordSubstitution(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -1946,14 +1993,14 @@ func TestRequestCodeReviewOrchestratorSynthesisRepairPersistsOversizedFindingsBe
 	threadID := uuid.New()
 	resultID := uuid.New()
 	findingID := uuid.New()
-	artifactID := uuid.New()
+	recordID := uuid.New()
 	now := time.Now().UTC()
 	rawReview := `::code-comment{title="[P2] Preserve this finding" body="The finding must survive synthesis repair." file="internal/worker/code_review_handler.go" start=42 priority=2}
 
 ` + strings.Repeat("x", codeReviewRawOutputInlineLimit) + `
 ` + "```json\n{\"summary\":\"The change is focused.\"}\n```"
-	artifactKey := fmt.Sprintf("code-review-prompts/%s/orchestrator-output-%s", sessionID, resultID)
-	storedSummary := fmt.Sprintf("Raw output stored in prompt artifact %s (%d bytes).", artifactKey, len(rawReview))
+	recordKey := fmt.Sprintf("code-review-prompts/%s/orchestrator-output-%s", sessionID, resultID)
+	storedSummary := fmt.Sprintf("Raw output stored in prompt record %s (%d bytes).", recordKey, len(rawReview))
 	state := codeReviewOrchestratorStructuredResult{
 		ThreadID:             threadID.String(),
 		DescriptionInputHash: "description-hash",
@@ -1970,11 +2017,11 @@ func TestRequestCodeReviewOrchestratorSynthesisRepairPersistsOversizedFindingsBe
 				models.CodeReviewFindingSeverityMedium, models.CodeReviewFindingConfidenceHigh,
 				stringPtr("internal/worker/code_review_handler.go"), intPtr(42), intPtr(42), "Preserve this finding",
 				"The finding must survive synthesis repair.", false, nil, now))
-	mock.ExpectQuery("INSERT INTO code_review_prompt_artifacts").
-		WithArgs(orgID, sessionID, artifactKey, "orchestrator_output", "codex", rawReview, pgxmock.AnyArg()).
+	mock.ExpectQuery("INSERT INTO code_review_prompt_records").
+		WithArgs(orgID, sessionID, recordKey, "orchestrator_output", "codex", rawReview, pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "session_id", "artifact_key", "role", "agent_provider", "content", "metadata", "created_at",
-		}).AddRow(artifactID, orgID, sessionID, artifactKey, "orchestrator_output", "codex", rawReview, json.RawMessage(`{}`), now))
+			"id", "org_id", "session_id", "record_key", "role", "agent_provider", "content", "metadata", "created_at",
+		}).AddRow(recordID, orgID, sessionID, recordKey, "orchestrator_output", "codex", rawReview, json.RawMessage(`{}`), now))
 	mock.ExpectQuery("UPDATE code_review_agent_results").
 		WithArgs(models.CodeReviewAgentResultStatusRunning, &storedSummary, repairingOrchestratorResultArg{baseTurn: 1, findingCount: 1}, orgID, resultID).
 		WillReturnRows(newCodeReviewAgentResultRows().
@@ -2007,7 +2054,7 @@ func TestRequestCodeReviewOrchestratorSynthesisRepairPersistsOversizedFindingsBe
 	require.True(t, handled, "oversized malformed output should be handled by synthesis repair")
 	require.True(t, started, "oversized malformed output should start the correction turn")
 	require.Len(t, sender.inputs, 1, "oversized malformed output should dispatch exactly one correction message")
-	require.NoError(t, mock.ExpectationsWereMet(), "finding persistence should precede replacement of oversized raw output with an artifact summary")
+	require.NoError(t, mock.ExpectationsWereMet(), "finding persistence should precede replacement of oversized raw output with an record summary")
 }
 
 func TestCodeReviewOrchestratorObserveRepairCompletion(t *testing.T) {
@@ -3996,7 +4043,7 @@ func newCodeReviewMetadataRows() *pgxmock.Rows {
 		"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
 		"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message",
 		"retry_at", "last_error_at", "retryable_failure", "decision", "acceptable",
-		"stale", "superseded_by_session_id", "review_output_key", "prompt_artifact_key",
+		"stale", "superseded_by_session_id", "review_output_key", "prompt_record_key",
 		"github_review_id", "github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
 	})
 }

@@ -14,7 +14,7 @@ Production workers run untrusted, write-heavy coding sandboxes on the same Docke
 
 ## Deploy Pruning
 
-`deploy/scripts/deploy.sh` prunes unused Docker artifacts only after a successful app or worker rollout and health check. The default window is `DOCKER_PRUNE_UNTIL=24h`, so the newly pulled image remains protected by the running service container while old unused images, stopped containers, and builder cache are reclaimed. Operators can disable this with `DEPLOY_DOCKER_PRUNE=0`.
+`deploy/scripts/deploy.sh` prunes unused Docker resources only after a successful app or worker rollout and health check. The default window is `DOCKER_PRUNE_UNTIL=24h`, so the newly pulled image remains protected by the running service container while old unused images, stopped containers, and builder cache are reclaimed. Operators can disable this with `DEPLOY_DOCKER_PRUNE=0`.
 
 Worker deploys can run detached during drain-and-rollover. In that path, the prune helper is embedded into the detached rollover script and runs after the replacement worker is healthy. The parent deploy process skips pruning for detached worker deploys so it cannot remove an image before the detached script has started the replacement container.
 

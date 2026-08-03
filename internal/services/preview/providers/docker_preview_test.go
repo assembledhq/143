@@ -873,13 +873,13 @@ type fakeDependencyCache struct {
 	producerBaselines   []time.Duration
 	producerBaselineIDs []uuid.UUID
 	saveStarted         chan models.PreviewCacheKind
-	// buildSaveBlock, when set, makes build-artifact saves block until the channel
+	// buildSaveBlock, when set, makes build-output saves block until the channel
 	// is closed — used to prove StopPreview awaits the save.
 	buildSaveBlock chan struct{}
 }
 
 func (f *fakeDependencyCache) Find(context.Context, uuid.UUID, uuid.UUID, string) (*preview.DependencyCacheHit, error) {
-	return f.FindPathCache(context.Background(), uuid.Nil, uuid.Nil, models.PreviewCacheKindInstallArtifact, "")
+	return f.FindPathCache(context.Background(), uuid.Nil, uuid.Nil, models.PreviewCacheKindInstallOutput, "")
 }
 
 func (f *fakeDependencyCache) Restore(context.Context, *agent.Sandbox, *preview.DependencyCacheHit) error {
@@ -888,7 +888,7 @@ func (f *fakeDependencyCache) Restore(context.Context, *agent.Sandbox, *preview.
 
 func (f *fakeDependencyCache) Save(ctx context.Context, sb *agent.Sandbox, cacheKey string, paths []string, metadata preview.DependencyCacheMetadata) (preview.DependencyCacheSaveResult, error) {
 	return f.SavePathCache(ctx, sb, preview.PreviewPathCacheSaveSpec{
-		Kind:     models.PreviewCacheKindInstallArtifact,
+		Kind:     models.PreviewCacheKindInstallOutput,
 		Root:     models.PreviewCacheRootWorkDir,
 		CacheKey: cacheKey,
 		Paths:    paths,
@@ -906,7 +906,7 @@ func (f *fakeDependencyCache) FindPathCache(_ context.Context, _ uuid.UUID, _ uu
 	switch kind {
 	case models.PreviewCacheKindPackageManager:
 		return f.pmFindHit, f.pmFindErr
-	case models.PreviewCacheKindBuildArtifact:
+	case models.PreviewCacheKindBuildOutput:
 		return f.buildFindHit, f.buildFindErr
 	default:
 		f.finds++
@@ -917,7 +917,7 @@ func (f *fakeDependencyCache) FindPathCache(_ context.Context, _ uuid.UUID, _ uu
 func (f *fakeDependencyCache) RestorePathCache(_ context.Context, _ *agent.Sandbox, hit *preview.DependencyCacheHit, root models.PreviewCacheRoot) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	kind := models.PreviewCacheKindInstallArtifact
+	kind := models.PreviewCacheKindInstallOutput
 	if root == models.PreviewCacheRootHomeDir {
 		kind = models.PreviewCacheKindPackageManager
 	}
@@ -932,7 +932,7 @@ func (f *fakeDependencyCache) RestorePathCache(_ context.Context, _ *agent.Sandb
 	switch kind {
 	case models.PreviewCacheKindPackageManager:
 		return f.pmRestoreErr
-	case models.PreviewCacheKindBuildArtifact:
+	case models.PreviewCacheKindBuildOutput:
 		return f.buildRestoreErr
 	default:
 		f.restores++
@@ -947,7 +947,7 @@ func (f *fakeDependencyCache) SavePathCache(ctx context.Context, _ *agent.Sandbo
 		default:
 		}
 	}
-	if f.buildSaveBlock != nil && spec.Kind == models.PreviewCacheKindBuildArtifact {
+	if f.buildSaveBlock != nil && spec.Kind == models.PreviewCacheKindBuildOutput {
 		select {
 		case <-f.buildSaveBlock:
 		case <-ctx.Done():
@@ -964,7 +964,7 @@ func (f *fakeDependencyCache) SavePathCache(ctx context.Context, _ *agent.Sandbo
 	switch spec.Kind {
 	case models.PreviewCacheKindPackageManager:
 		return preview.DependencyCacheSaveResult{SizeBytes: 456}, f.pmSaveErr
-	case models.PreviewCacheKindBuildArtifact:
+	case models.PreviewCacheKindBuildOutput:
 		return preview.DependencyCacheSaveResult{SizeBytes: 789}, f.buildSaveErr
 	default:
 		f.saves++
@@ -2309,7 +2309,7 @@ func TestStartPreview_PackageManagerCacheRestoresWhenInstallMarkerMissing(t *tes
 	obs := &recordingObserver{}
 
 	// VerifyPaths nil keeps this focused on package-manager behavior: with
-	// declared verify_paths a missing marker now attempts the install-artifact
+	// declared verify_paths a missing marker now attempts the install-output
 	// restore too (covered by ColdStartRestoreSatisfiesVerifyPaths).
 	cfg := previewInstallTestConfig()
 	cfg.Install.VerifyPaths = nil
@@ -2325,7 +2325,7 @@ func TestStartPreview_PackageManagerCacheRestoresWhenInstallMarkerMissing(t *tes
 	require.Equal(t, 1, finds[models.PreviewCacheKindPackageManager], "package-manager cache should be looked up even when marker is absent")
 	require.Equal(t, 1, restores[models.PreviewCacheKindPackageManager], "package-manager cache should restore before install")
 	require.Contains(t, roots, models.PreviewCacheRootHomeDir, "package-manager cache should restore relative to HomeDir")
-	require.Equal(t, 0, finds[models.PreviewCacheKindInstallArtifact], "missing marker without verify_paths should still skip install artifact lookup")
+	require.Equal(t, 0, finds[models.PreviewCacheKindInstallOutput], "missing marker without verify_paths should still skip install output lookup")
 	restoresObserved := obs.packageManagerCacheRestores()
 	require.Len(t, restoresObserved, 1, "observer should receive one package-manager restore event")
 	require.Equal(t, "restored", restoresObserved[0].status, "observer should report package-manager restored")
@@ -2845,7 +2845,7 @@ func TestStartPreview_DefersCacheSavesUntilAfterReadiness(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		_, _, saves, _, _ := cache.pathCounts()
-		return saves[models.PreviewCacheKindInstallArtifact] == 1 &&
+		return saves[models.PreviewCacheKindInstallOutput] == 1 &&
 			saves[models.PreviewCacheKindPackageManager] == 1
 	}, 2*time.Second, 10*time.Millisecond, "cache saves should start after readiness")
 
@@ -2881,7 +2881,7 @@ func TestStartPreview_PackageManagerAndDependencyCacheSavesAreIndependent(t *tes
 			return nil, os.ErrNotExist
 		},
 	}
-	cache := &fakeDependencyCache{saveErr: fmt.Errorf("dependency artifact save failed")}
+	cache := &fakeDependencyCache{saveErr: fmt.Errorf("dependency output save failed")}
 	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer), WithDependencyCache(cache))
 	obs := &recordingObserver{}
 
@@ -2895,12 +2895,12 @@ func TestStartPreview_PackageManagerAndDependencyCacheSavesAreIndependent(t *tes
 
 	require.Eventually(t, func() bool {
 		_, _, saves, _, _ := cache.pathCounts()
-		return saves[models.PreviewCacheKindInstallArtifact] == 1 &&
+		return saves[models.PreviewCacheKindInstallOutput] == 1 &&
 			saves[models.PreviewCacheKindPackageManager] == 1
 	}, 2*time.Second, 10*time.Millisecond, "both cache kinds should attempt independent saves after install")
 
 	_, _, saves, _, specs := cache.pathCounts()
-	require.Equal(t, 1, saves[models.PreviewCacheKindInstallArtifact], "dependency artifact save should run once")
+	require.Equal(t, 1, saves[models.PreviewCacheKindInstallOutput], "dependency output save should run once")
 	require.Equal(t, 1, saves[models.PreviewCacheKindPackageManager], "package-manager cache save should run once")
 	var packageManagerSpec *preview.PreviewPathCacheSaveSpec
 	for i := range specs {
@@ -2914,7 +2914,7 @@ func TestStartPreview_PackageManagerAndDependencyCacheSavesAreIndependent(t *tes
 	require.Contains(t, packageManagerSpec.Paths, ".npm", "npm package-manager save should include the inferred npm cache path")
 	pmSaves := obs.packageManagerCacheSaves()
 	require.Len(t, pmSaves, 1, "observer should receive package-manager save result")
-	require.Equal(t, "saved", pmSaves[0].status, "package-manager save should succeed independently from artifact save")
+	require.Equal(t, "saved", pmSaves[0].status, "package-manager save should succeed independently from output save")
 
 	close(release)
 	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")
@@ -3397,7 +3397,7 @@ func TestStartPreview_BuildCacheRestoresAfterInstallAndSavesPostReady(t *testing
 		findHit: &preview.DependencyCacheHit{},
 		buildFindHit: &preview.DependencyCacheHit{
 			Entry: models.PreviewDependencyCache{
-				CacheKind: models.PreviewCacheKindBuildArtifact,
+				CacheKind: models.PreviewCacheKindBuildOutput,
 				SizeBytes: 999,
 				Metadata:  []byte(`{"checksum_sha256":"prior-checksum"}`),
 			},
@@ -3415,8 +3415,8 @@ func TestStartPreview_BuildCacheRestoresAfterInstallAndSavesPostReady(t *testing
 	require.NotNil(t, handle, "StartPreview should return a handle")
 
 	finds, restores, _, _, _ := cache.pathCounts()
-	require.Equal(t, 1, finds[models.PreviewCacheKindBuildArtifact], "build cache should be looked up once after install")
-	require.Equal(t, 1, restores[models.PreviewCacheKindBuildArtifact], "build cache hit should restore into the workdir")
+	require.Equal(t, 1, finds[models.PreviewCacheKindBuildOutput], "build cache should be looked up once after install")
+	require.Equal(t, 1, restores[models.PreviewCacheKindBuildOutput], "build cache hit should restore into the workdir")
 
 	restoreEvents := obs.buildCacheRestoreEvents()
 	require.Len(t, restoreEvents, 1, "observer should receive one build cache restore event")
@@ -3425,13 +3425,13 @@ func TestStartPreview_BuildCacheRestoresAfterInstallAndSavesPostReady(t *testing
 	// The post-ready save runs asynchronously once readiness completes.
 	require.Eventually(t, func() bool {
 		_, _, saves, _, _ := cache.pathCounts()
-		return saves[models.PreviewCacheKindBuildArtifact] == 1
+		return saves[models.PreviewCacheKindBuildOutput] == 1
 	}, 5*time.Second, 10*time.Millisecond, "build cache should be saved once services report ready")
 
 	_, _, _, _, specs := cache.pathCounts()
 	var buildSpec *preview.PreviewPathCacheSaveSpec
 	for i := range specs {
-		if specs[i].Kind == models.PreviewCacheKindBuildArtifact {
+		if specs[i].Kind == models.PreviewCacheKindBuildOutput {
 			buildSpec = &specs[i]
 		}
 	}
@@ -3479,7 +3479,7 @@ func TestStopPreview_AwaitsBuildCacheSave(t *testing.T) {
 		findHit: &preview.DependencyCacheHit{},
 		buildFindHit: &preview.DependencyCacheHit{
 			Entry: models.PreviewDependencyCache{
-				CacheKind: models.PreviewCacheKindBuildArtifact,
+				CacheKind: models.PreviewCacheKindBuildOutput,
 				SizeBytes: 999,
 				Metadata:  []byte(`{"checksum_sha256":"prior-checksum"}`),
 			},
@@ -3499,12 +3499,12 @@ func TestStopPreview_AwaitsBuildCacheSave(t *testing.T) {
 
 	// Wait until the workdir build-cache save goroutine has started and is
 	// blocked inside SavePathCache on buildSaveBlock.
-	waitForBuildArtifactSave := func() {
+	waitForBuildOutputSave := func() {
 		deadline := time.After(5 * time.Second)
 		for {
 			select {
 			case kind := <-saveStarted:
-				if kind == models.PreviewCacheKindBuildArtifact {
+				if kind == models.PreviewCacheKindBuildOutput {
 					return
 				}
 			case <-deadline:
@@ -3512,7 +3512,7 @@ func TestStopPreview_AwaitsBuildCacheSave(t *testing.T) {
 			}
 		}
 	}
-	waitForBuildArtifactSave()
+	waitForBuildOutputSave()
 
 	// StopPreview must not return while the save is still in flight.
 	stopErr := make(chan error, 1)
@@ -3532,7 +3532,7 @@ func TestStopPreview_AwaitsBuildCacheSave(t *testing.T) {
 		t.Fatal("StopPreview did not return after the build cache save was released")
 	}
 	_, _, saves, _, _ := cache.pathCounts()
-	require.Equal(t, 1, saves[models.PreviewCacheKindBuildArtifact], "the awaited build cache save should have completed before StopPreview returned")
+	require.Equal(t, 1, saves[models.PreviewCacheKindBuildOutput], "the awaited build cache save should have completed before StopPreview returned")
 }
 
 // TestStopPreview_BoundedByContextWhenSaveStalls proves the other half of the
@@ -3565,7 +3565,7 @@ func TestStopPreview_BoundedByContextWhenSaveStalls(t *testing.T) {
 		findHit: &preview.DependencyCacheHit{},
 		buildFindHit: &preview.DependencyCacheHit{
 			Entry: models.PreviewDependencyCache{
-				CacheKind: models.PreviewCacheKindBuildArtifact,
+				CacheKind: models.PreviewCacheKindBuildOutput,
 				SizeBytes: 999,
 				Metadata:  []byte(`{"checksum_sha256":"prior-checksum"}`),
 			},
@@ -3587,7 +3587,7 @@ func TestStopPreview_BoundedByContextWhenSaveStalls(t *testing.T) {
 	for sawBuild := false; !sawBuild; {
 		select {
 		case kind := <-saveStarted:
-			sawBuild = kind == models.PreviewCacheKindBuildArtifact
+			sawBuild = kind == models.PreviewCacheKindBuildOutput
 		case <-deadline:
 			t.Fatal("build cache save never started")
 		}
@@ -3605,7 +3605,7 @@ func TestStartPreview_DependencyCacheSaveExcludesBuildCachePaths(t *testing.T) {
 	t.Parallel()
 
 	// Cold start: no install marker, install runs, and the post-install
-	// dependency save must exclude turbo's dirs so the install-artifact blob
+	// dependency save must exclude turbo's dirs so the install-output blob
 	// never absorbs build cache content.
 	release := make(chan struct{})
 	exec := &fakeServiceExecutor{
@@ -3649,7 +3649,7 @@ func TestStartPreview_DependencyCacheSaveExcludesBuildCachePaths(t *testing.T) {
 	require.Eventually(t, func() bool {
 		_, _, _, _, specs := cache.pathCounts()
 		for _, spec := range specs {
-			if spec.Kind == models.PreviewCacheKindInstallArtifact {
+			if spec.Kind == models.PreviewCacheKindInstallOutput {
 				return true
 			}
 		}
@@ -3658,7 +3658,7 @@ func TestStartPreview_DependencyCacheSaveExcludesBuildCachePaths(t *testing.T) {
 
 	_, _, _, _, specs := cache.pathCounts()
 	for _, spec := range specs {
-		if spec.Kind != models.PreviewCacheKindInstallArtifact {
+		if spec.Kind != models.PreviewCacheKindInstallOutput {
 			continue
 		}
 		require.Contains(t, spec.ExcludePaths, "node_modules/.cache/turbo", "dependency save should exclude the turbo cache subtree")
@@ -3845,7 +3845,7 @@ func TestStartPreview_BuildPhaseRunsBeforeStartAndSavesHomeCache(t *testing.T) {
 		_, _, _, _, specs := cache.pathCounts()
 		var homePaths [][]string
 		for _, spec := range specs {
-			if spec.Kind == models.PreviewCacheKindBuildArtifact && spec.Root == models.PreviewCacheRootHomeDir {
+			if spec.Kind == models.PreviewCacheKindBuildOutput && spec.Root == models.PreviewCacheRootHomeDir {
 				homePaths = append(homePaths, spec.Paths)
 			}
 		}
@@ -3854,7 +3854,7 @@ func TestStartPreview_BuildPhaseRunsBeforeStartAndSavesHomeCache(t *testing.T) {
 	_, _, _, _, specs := cache.pathCounts()
 	var homePaths [][]string
 	for _, spec := range specs {
-		if spec.Kind == models.PreviewCacheKindBuildArtifact && spec.Root == models.PreviewCacheRootHomeDir {
+		if spec.Kind == models.PreviewCacheKindBuildOutput && spec.Root == models.PreviewCacheRootHomeDir {
 			homePaths = append(homePaths, spec.Paths)
 		}
 	}
@@ -3904,7 +3904,7 @@ func TestStartPreview_BuildFailureFlushesHomeCache(t *testing.T) {
 	_, _, _, _, specs := cache.pathCounts()
 	foundHomeSave := false
 	for _, spec := range specs {
-		if spec.Kind == models.PreviewCacheKindBuildArtifact && spec.Root == models.PreviewCacheRootHomeDir {
+		if spec.Kind == models.PreviewCacheKindBuildOutput && spec.Root == models.PreviewCacheRootHomeDir {
 			foundHomeSave = true
 		}
 	}

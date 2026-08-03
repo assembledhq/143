@@ -95,6 +95,14 @@ type sessionReviewLoopLister interface {
 	ListLoopsBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionReviewLoop, error)
 }
 
+// PublicationExecutionPolicy exposes runtime kill switches to both workers and
+// reconciliation. Keeping the interface here avoids coupling GitHub lifecycle
+// code to the publication-intent coordinator implementation.
+type PublicationExecutionPolicy interface {
+	PublicationExecutionEnabled(source models.SessionPublicationSource) bool
+	ReviewExecutionEnabled(source models.SessionPublicationSource) bool
+}
+
 // PRService handles GitHub PR creation and webhook-based tracking.
 type PRService struct {
 	tokenProvider   *Service
@@ -140,6 +148,7 @@ type PRService struct {
 	linearMilestones         LinearMilestoneEnqueuer // nil-safe: Linear writes disabled if nil
 	prPreviewSurfacesEnabled bool
 	prHealthSyncGroup        singleflight.Group
+	publicationPolicy        PublicationExecutionPolicy
 
 	// cachedResolverMu guards lazy construction of cachedResolver. The
 	// resolver is built from the currently-wired dependencies on first use
@@ -183,6 +192,10 @@ func (s *PRService) SetChangesetStore(store *db.SessionChangesetStore) {
 
 func (s *PRService) SetPublicationStore(store *db.SessionPublicationStore) {
 	s.publications = store
+}
+
+func (s *PRService) SetPublicationExecutionPolicy(policy PublicationExecutionPolicy) {
+	s.publicationPolicy = policy
 }
 
 func NewPRService(
@@ -3080,11 +3093,15 @@ func (s *PRService) reconcileChildPRBasesAfterParentMerge(ctx context.Context, p
 			Base struct {
 				Ref string `json:"ref"`
 			} `json:"base"`
+			Head struct {
+				SHA string `json:"sha"`
+			} `json:"head"`
 		}
 		if jsonErr := json.Unmarshal(body, &remote); jsonErr != nil {
 			continue
 		}
 		if remote.Base.Ref == child.BaseBranch {
+			s.restoreChildPROpenAfterBaseReconciliation(ctx, child, remote.Head.SHA)
 			continue
 		}
 		if remote.Base.Ref != *parentPR.HeadRef {
@@ -3095,7 +3112,22 @@ func (s *PRService) reconcileChildPRBasesAfterParentMerge(ctx context.Context, p
 		}
 		if _, patchErr := s.doGitHubRequest(ctx, resolution.Token, http.MethodPatch, path, map[string]any{"base": child.BaseBranch}); patchErr != nil {
 			s.logger.Warn().Err(patchErr).Str("changeset_id", child.ID.String()).Str("base_branch", child.BaseBranch).Msg("failed to retarget child PR after parent merge")
+			continue
 		}
+		s.restoreChildPROpenAfterBaseReconciliation(ctx, child, remote.Head.SHA)
+	}
+}
+
+func (s *PRService) restoreChildPROpenAfterBaseReconciliation(ctx context.Context, child models.SessionChangeset, remoteHeadSHA string) {
+	if child.Status != models.ChangesetStatusExternalUpdateDetected ||
+		s.changesets == nil ||
+		child.ExpectedRemoteHeadSHA == nil ||
+		strings.TrimSpace(*child.ExpectedRemoteHeadSHA) == "" ||
+		strings.TrimSpace(remoteHeadSHA) != strings.TrimSpace(*child.ExpectedRemoteHeadSHA) {
+		return
+	}
+	if err := s.changesets.RestorePROpenAfterExternalUpdate(ctx, child.OrgID, child.SessionID, child.ID); err != nil {
+		s.logger.Warn().Err(err).Str("changeset_id", child.ID.String()).Msg("failed to restore reconciled child PR state")
 	}
 }
 

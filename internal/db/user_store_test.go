@@ -434,6 +434,34 @@ func TestUserStore_GetByIDGlobalWithSettings(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestUserStore_GetByIDWithSettingsUsesOrganizationMembership(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+
+	store := NewUserStore(mock)
+	userID := uuid.New()
+	activeOrgID := uuid.New()
+	now := time.Now()
+	settings := []byte(`{"automatic_pr_follow_through":{"create_pr_when_agent_ready":"off"}}`)
+
+	mock.ExpectQuery(`SELECT u\.id, @org_id::uuid AS org_id.+JOIN organization_memberships m.+m\.org_id = @org_id.+WHERE u\.id = @user_id`).
+		WithArgs(pgx.NamedArgs{"org_id": activeOrgID, "user_id": userID}).
+		WillReturnRows(pgxmock.NewRows(userColumnsWithSettings).
+			AddRow(userID, activeOrgID, "u@example.com", "Name", "member", nil, nil, nil, nil, nil, now, settings))
+
+	user, err := store.GetByIDWithSettings(context.Background(), activeOrgID, userID)
+	require.NoError(t, err, "secondary-organization membership should authorize the settings lookup")
+	require.Equal(t, activeOrgID, user.OrgID, "the result should project the active organization")
+	require.Equal(t, models.RoleMember, user.Role, "the result should use the active membership role")
+	require.Equal(t, models.AutomaticFollowThroughPreferenceOff,
+		user.Settings.AutomaticPRFollowThrough.CreatePRWhenAgentReady,
+		"the lookup should decode the member's personal publication preference")
+	require.NoError(t, mock.ExpectationsWereMet(), "the settings lookup should be scoped through organization membership")
+}
+
 func TestUserStore_GetByIDGlobalWithSettings_InvalidSettings(t *testing.T) {
 	t.Parallel()
 

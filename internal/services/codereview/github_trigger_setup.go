@@ -26,16 +26,19 @@ const defaultGitHubAPIBaseURL = "https://api.github.com"
 var (
 	ErrGitHubTriggerAuthRequired       = errors.New("github user authorization required")
 	ErrGitHubTriggerPermissionRequired = errors.New("github permissions required for code review trigger setup")
+	ErrGitHubTriggerRepoDisconnected   = errors.New("repository must be connected before code review trigger setup")
 )
 
 type GitHubTriggerStore interface {
 	GetActiveGitHubTrigger(ctx context.Context, orgID, repositoryID uuid.UUID) (models.CodeReviewGitHubTriggerSetting, error)
+	ListActiveGitHubTriggers(ctx context.Context, orgID uuid.UUID) ([]models.CodeReviewGitHubTriggerSetting, error)
 	SaveGitHubTrigger(ctx context.Context, orgID uuid.UUID, params db.SaveCodeReviewGitHubTriggerParams) (models.CodeReviewGitHubTriggerSetting, error)
 	DeactivateGitHubTrigger(ctx context.Context, orgID, repositoryID uuid.UUID, createdByUserID *uuid.UUID) error
 }
 
 type GitHubTriggerRepositoryStore interface {
 	GetByID(ctx context.Context, orgID, repoID uuid.UUID) (models.Repository, error)
+	ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.RepositoryFilters) ([]models.Repository, error)
 }
 
 type GitHubTriggerAppUserAuth interface {
@@ -90,6 +93,11 @@ func (s *GitHubTriggerSetupService) Status(ctx context.Context, orgID, userID, r
 		return models.CodeReviewGitHubTriggerResponse{}, err
 	}
 	resp := defaultGitHubTriggerResponse(repo)
+	if !repo.IsActive() {
+		resp.Status = models.CodeReviewGitHubTriggerStatusDisconnected
+		resp.Message = "Reconnect this repository before setting up its GitHub reviewer."
+		return resp, nil
+	}
 	setting, err := s.triggers.GetActiveGitHubTrigger(ctx, orgID, repositoryID)
 	if err == nil {
 		resp.Status = models.CodeReviewGitHubTriggerStatusReady
@@ -114,6 +122,65 @@ func (s *GitHubTriggerSetupService) Status(ctx context.Context, orgID, userID, r
 	return resp, nil
 }
 
+func (s *GitHubTriggerSetupService) ListStatus(ctx context.Context, orgID, userID uuid.UUID) ([]models.CodeReviewGitHubTriggerResponse, error) {
+	settings, err := s.triggers.ListActiveGitHubTriggers(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	settingsByRepositoryID := make(map[uuid.UUID]models.CodeReviewGitHubTriggerSetting, len(settings))
+	configuredRepositoryIDs := make([]uuid.UUID, 0, len(settings))
+	for _, setting := range settings {
+		settingsByRepositoryID[setting.RepositoryID] = setting
+		configuredRepositoryIDs = append(configuredRepositoryIDs, setting.RepositoryID)
+	}
+	repos, err := s.repos.ListByOrg(ctx, orgID, db.RepositoryFilters{IncludeRepositoryIDs: configuredRepositoryIDs})
+	if err != nil {
+		return nil, fmt.Errorf("list repositories for GitHub reviewer status: %w", err)
+	}
+
+	authAvailable := true
+	needsAuthCheck := false
+	for _, repo := range repos {
+		_, configured := settingsByRepositoryID[repo.ID]
+		if repo.IsActive() && !configured {
+			needsAuthCheck = true
+			break
+		}
+	}
+	if needsAuthCheck {
+		if _, authErr := s.validUserCredential(ctx, orgID, userID); authErr != nil {
+			if !errors.Is(authErr, ErrGitHubTriggerAuthRequired) {
+				return nil, authErr
+			}
+			authAvailable = false
+		}
+	}
+
+	responses := make([]models.CodeReviewGitHubTriggerResponse, 0, len(repos))
+	for _, repo := range repos {
+		resp := defaultGitHubTriggerResponse(repo)
+		setting, configured := settingsByRepositoryID[repo.ID]
+		if !repo.IsActive() && !configured {
+			continue
+		}
+		switch {
+		case !repo.IsActive():
+			if configured {
+				resp = withGitHubTriggerSetting(resp, setting)
+			}
+			resp.Status = models.CodeReviewGitHubTriggerStatusDisconnected
+			resp.Message = "Reconnect this repository before setting up its GitHub reviewer."
+		case configured:
+			resp = withGitHubTriggerSetting(resp, setting)
+		case !authAvailable:
+			resp.Status = models.CodeReviewGitHubTriggerStatusAuthRequired
+			resp.Message = "Connect your GitHub account before creating the reviewer team."
+		}
+		responses = append(responses, resp)
+	}
+	return responses, nil
+}
+
 func (s *GitHubTriggerSetupService) Setup(ctx context.Context, input GitHubTriggerSetupInput) (models.CodeReviewGitHubTriggerResponse, error) {
 	if input.OrgID == uuid.Nil || input.UserID == uuid.Nil || input.RepositoryID == uuid.Nil {
 		return models.CodeReviewGitHubTriggerResponse{}, fmt.Errorf("org_id, user_id, and repository_id are required")
@@ -121,6 +188,9 @@ func (s *GitHubTriggerSetupService) Setup(ctx context.Context, input GitHubTrigg
 	repo, err := s.loadRepository(ctx, input.OrgID, input.RepositoryID)
 	if err != nil {
 		return models.CodeReviewGitHubTriggerResponse{}, err
+	}
+	if !repo.IsActive() {
+		return models.CodeReviewGitHubTriggerResponse{}, ErrGitHubTriggerRepoDisconnected
 	}
 	owner, name, err := splitGitHubFullName(repo.FullName)
 	if err != nil {
@@ -152,14 +222,7 @@ func (s *GitHubTriggerSetupService) Setup(ctx context.Context, input GitHubTrigg
 		return models.CodeReviewGitHubTriggerResponse{}, fmt.Errorf("save code review GitHub trigger: %w", err)
 	}
 
-	resp := defaultGitHubTriggerResponse(repo)
-	resp.Status = models.CodeReviewGitHubTriggerStatusReady
-	resp.Trigger = &setting
-	resp.TeamSlug = setting.TeamSlug
-	resp.TeamName = setting.TeamName
-	resp.RepoPermission = setting.RepoPermission
-	resp.TeamReviewer = "@" + owner + "/" + setting.TeamSlug
-	return resp, nil
+	return withGitHubTriggerSetting(defaultGitHubTriggerResponse(repo), setting), nil
 }
 
 func (s *GitHubTriggerSetupService) Deactivate(ctx context.Context, orgID, userID, repositoryID uuid.UUID) error {
@@ -297,6 +360,7 @@ func defaultGitHubTriggerResponse(repo models.Repository) models.CodeReviewGitHu
 		Status:             models.CodeReviewGitHubTriggerStatusUnconfigured,
 		RepositoryID:       repo.ID,
 		RepositoryFullName: repo.FullName,
+		RepositoryStatus:   repo.Status,
 		GitHubOrg:          owner,
 		TeamSlug:           models.DefaultCodeReviewGitHubTriggerTeamSlug,
 		TeamName:           models.DefaultCodeReviewGitHubTriggerTeamName,
@@ -304,6 +368,18 @@ func defaultGitHubTriggerResponse(repo models.Repository) models.CodeReviewGitHu
 	}
 	if owner != "" {
 		resp.TeamReviewer = "@" + owner + "/" + resp.TeamSlug
+	}
+	return resp
+}
+
+func withGitHubTriggerSetting(resp models.CodeReviewGitHubTriggerResponse, setting models.CodeReviewGitHubTriggerSetting) models.CodeReviewGitHubTriggerResponse {
+	resp.Status = models.CodeReviewGitHubTriggerStatusReady
+	resp.Trigger = &setting
+	resp.TeamSlug = setting.TeamSlug
+	resp.TeamName = setting.TeamName
+	resp.RepoPermission = setting.RepoPermission
+	if resp.GitHubOrg != "" {
+		resp.TeamReviewer = "@" + resp.GitHubOrg + "/" + setting.TeamSlug
 	}
 	return resp
 }

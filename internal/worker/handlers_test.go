@@ -28,6 +28,7 @@ import (
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	projectservice "github.com/assembledhq/143/internal/services/projects"
+	"github.com/assembledhq/143/internal/services/publicationintent"
 	reviewloopsvc "github.com/assembledhq/143/internal/services/reviewloop"
 	slackbotsvc "github.com/assembledhq/143/internal/services/slackbot"
 	"github.com/google/uuid"
@@ -973,6 +974,36 @@ func TestRenderSlackFinalBlocksRequiresConfirmationForCreatePR(t *testing.T) {
 
 	require.True(t, slackBlocksContainAction(blocks, "slack_create_pr"), "completed Slack sessions with a snapshot should offer PR creation")
 	require.True(t, slackBlocksActionHasConfirm(blocks, "slack_create_pr"), "Slack PR creation should require confirmation")
+}
+
+func TestSlackPublicationOutcomeMessage(t *testing.T) {
+	t.Parallel()
+
+	reason := "Publication is temporarily paused."
+	tests := []struct {
+		name      string
+		result    *publicationintent.PublicationIntentResult
+		want      string
+		wantError bool
+	}{
+		{name: "missing coordinator result fails closed", wantError: true},
+		{name: "queued request is acknowledged", result: &publicationintent.PublicationIntentResult{Status: publicationintent.ResultPRQueued}, want: "Pull request workflow requested for this session."},
+		{name: "review reports in-product progress", result: &publicationintent.PublicationIntentResult{Status: publicationintent.ResultReviewInProgress}, want: "Pre-PR review is in progress for this session."},
+		{name: "manual result preserves reason", result: &publicationintent.PublicationIntentResult{Status: publicationintent.ResultManualPublicationRequired, Reason: &reason}, want: reason},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := slackPublicationOutcomeMessage(tt.result)
+			if tt.wantError {
+				require.Error(t, err, "missing coordinator result should not be acknowledged as durable publication")
+				return
+			}
+			require.NoError(t, err, "typed coordinator result should produce Slack acknowledgement copy")
+			require.Equal(t, tt.want, got, "Slack acknowledgement should reflect the coordinator outcome")
+		})
+	}
 }
 
 func TestAddSlackCompletionReactionUsesOriginalRootMessage(t *testing.T) {
@@ -5687,6 +5718,66 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 	}
 }
 
+func TestEnqueueSessionReviewLoopReconciliationDefersDedicatedRecoveryJob(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	t.Cleanup(mock.Close)
+	orgID, threadID, jobID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Date(2026, 8, 3, 7, 0, 0, 0, time.UTC)
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(workerAnyArgs(7)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	err := enqueueSessionReviewLoopReconciliation(context.Background(), stores, orgID, threadID, now)
+
+	require.NoError(t, err, "review advancement failure should enqueue durable recovery")
+	require.NoError(t, mock.ExpectationsWereMet(), "recovery enqueue should include a deferred run time and thread-scoped dedupe key")
+}
+
+func TestReconcileSessionReviewLoopHandlerRestartsStrandedPublicationReviews(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	reviews := &stubWorkerReviewLoops{restarted: 3}
+	handler := newReconcileSessionReviewLoopHandler(&Services{ReviewLoops: reviews}, zerolog.Nop())
+	startedAt := time.Now().UTC()
+
+	err := handler(
+		context.Background(),
+		models.JobTypeReconcileSessionReviewLoop,
+		json.RawMessage(`{"org_id":"`+orgID.String()+`","limit":25}`),
+	)
+
+	require.NoError(t, err, "review loop recovery handler should restart eligible loops")
+	require.Len(t, reviews.reconciliations, 1, "recovery handler should run one bounded reconciliation pass")
+	require.Equal(t, orgID, reviews.reconciliations[0].orgID, "recovery should remain scoped to the job organization")
+	require.Equal(t, 25, reviews.reconciliations[0].limit, "recovery should preserve the requested batch size")
+	require.WithinDuration(t, startedAt.Add(-reviewLoopRecoveryInactiveFor), reviews.reconciliations[0].inactiveBefore, time.Second, "recovery should only restart threads idle past the safety window")
+}
+
+func TestPullRequestReconciliationAlsoRecoversStrandedPublicationReviews(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	reviews := &stubWorkerReviewLoops{restarted: 2}
+	services := &Services{PR: &stubPRService{}, ReviewLoops: reviews}
+	handler := newReconcilePullRequestStateHandler(services, zerolog.Nop())
+	startedAt := time.Now().UTC()
+
+	err := handler(
+		context.Background(),
+		"reconcile_pull_request_state",
+		json.RawMessage(`{"org_id":"`+orgID.String()+`","limit":10}`),
+	)
+
+	require.NoError(t, err, "periodic pull request reconciliation should include review recovery")
+	require.Len(t, reviews.reconciliations, 1, "periodic reconciliation should inspect stranded publication reviews")
+	require.Equal(t, orgID, reviews.reconciliations[0].orgID, "periodic recovery should remain tenant scoped")
+	require.Equal(t, 10, reviews.reconciliations[0].limit, "periodic recovery should share the bounded reconciliation batch")
+	require.WithinDuration(t, startedAt.Add(-periodicReviewLoopRecoveryInactiveFor), reviews.reconciliations[0].inactiveBefore, time.Second, "periodic recovery should use the conservative inactivity threshold")
+}
+
 func TestRebuildPullRequestHealthHandlerSkipsAutoRepairAfterNoOp(t *testing.T) {
 	t.Parallel()
 
@@ -5909,6 +6000,45 @@ func TestPublishChangesetStackHandlerStopsTerminalReplayBeforeCreatePR(t *testin
 	require.NoError(t, mock.ExpectationsWereMet(), "terminal stack replay should acquire and release only its local lease")
 }
 
+func TestPublishChangesetStackHandlerMigratesLegacyJobToCoordinator(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	t.Cleanup(mock.Close)
+	stores.SessionChangesets = db.NewSessionChangesetStore(mock)
+	orgID, sessionID, changesetID, repositoryID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	branch, worktree := "143/session/stack", "/workspace/stack"
+	sessionRow := newWorkerSessionRow(sessionID, orgID, now, nil)
+	setWorkerSessionColumn(sessionRow, "repository_id", &repositoryID)
+	mock.ExpectQuery("SELECT .* FROM sessions").WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	changeset := models.SessionChangeset{
+		ID: changesetID, OrgID: orgID, SessionID: sessionID, IsPrimary: true,
+		Status: models.ChangesetStatusReady, TargetBranch: "main", BaseBranch: "main",
+		WorkingBranch: &branch, WorktreePath: &worktree, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("SELECT .*FROM session_changesets").WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(workerChangesetTestColumns).AddRow(workerChangesetTestRow(changeset)...))
+	coordinator := &stubPublicationExecutionCoordinator{publicationEnabled: true, reviewEnabled: true}
+	services := &Services{
+		PublicationIntents: coordinator,
+		PR: &stubPRService{createPRFn: func(context.Context, *models.Session, ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+			t.Fatal("legacy stack job should migrate to coordinator before GitHub side effects")
+			return nil, nil
+		}},
+	}
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","author_mode":"auto"}`)
+
+	err := newPublishChangesetStackHandler(stores, services, zerolog.Nop())(context.Background(), models.JobTypePublishChangesetStack, payload)
+
+	require.NoError(t, err, "legacy stack job should migrate into the durable coordinator")
+	require.Len(t, coordinator.requests, 1, "legacy stack job should request one coordinated publication per active changeset")
+	require.NotNil(t, coordinator.requests[0].ChangesetID, "coordinated stack request should retain the target changeset")
+	require.Equal(t, changesetID, *coordinator.requests[0].ChangesetID, "coordinated stack request should target the original changeset")
+	require.NoError(t, mock.ExpectationsWereMet(), "legacy migration should only load session and stack state")
+}
+
 func TestPublicationRequestGenerationAtUsesOriginalJobEnqueueTime(t *testing.T) {
 	t.Parallel()
 
@@ -5945,10 +6075,128 @@ func TestCompleteOpenPRJobRetriesPostPublicationWork(t *testing.T) {
 		openPRJobInput{MergeWhenReady: true, RequestedByUserID: requestedByUserID.String()},
 		nil,
 		&models.PullRequest{ID: prID, OrgID: orgID, GitHubPRURL: prURL},
+		nil,
+		models.PRCreationStateIdle,
 	)
 	require.NoError(t, err, "a completed publication retry should finish auto-merge and success-state work")
 	require.Equal(t, 1, mergeCalls, "post-publication replay should queue auto-merge exactly once per handler attempt")
 	require.NoError(t, mock.ExpectationsWereMet(), "post-publication success should persist the session state")
+}
+
+// Slack's job dedupe index is partial on pending/running, so a completed replay
+// that reached the fanout would deliver a second "Pull request opened" message
+// and a second time-to-PR sample.
+func TestIsCompletedPublicationReplay(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		publication *models.SessionPublication
+		state       models.PRCreationState
+		expected    bool
+	}{
+		{name: "legacy job without a durable row is not a replay", expected: false},
+		{name: "publishing attempt is the one that opens the pull request", publication: &models.SessionPublication{State: models.SessionPublicationStateRequested}},
+		{name: "recorded draft-first attempt still owns its side effects", publication: &models.SessionPublication{State: models.SessionPublicationStateRecorded}},
+		{
+			name:        "completed publication with completed local effects is a replay",
+			publication: &models.SessionPublication{State: models.SessionPublicationStateCompleted},
+			state:       models.PRCreationStateSucceeded,
+			expected:    true,
+		},
+		{
+			name:        "completed publication with incomplete local effects retries them",
+			publication: &models.SessionPublication{State: models.SessionPublicationStateCompleted},
+			state:       models.PRCreationStatePushing,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, isCompletedPublicationReplay(tt.publication, tt.state), "one-shot publication side effects should retry until local completion is durably checkpointed")
+		})
+	}
+}
+
+func TestStackParentPublicationComplete(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		parent   models.SessionChangeset
+		expected bool
+	}{
+		{name: "published parent is complete", parent: models.SessionChangeset{PRCreationState: models.PRCreationStateSucceeded}, expected: true},
+		{name: "merged parent is complete", parent: models.SessionChangeset{Status: models.ChangesetStatusMerged}, expected: true},
+		{name: "abandoned parent is complete", parent: models.SessionChangeset{Status: models.ChangesetStatusAbandoned}, expected: true},
+		{name: "queued parent is not complete", parent: models.SessionChangeset{PRCreationState: models.PRCreationStateQueued}},
+		{name: "failed parent is not complete", parent: models.SessionChangeset{PRCreationState: models.PRCreationStateFailed}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, stackParentPublicationComplete(tt.parent), "child publication should wait for an active unpublished stack parent")
+		})
+	}
+}
+
+// Parking is only safe while the parent can still advance on its own. The
+// dominant failure mode terminalizes the parent's publication row without ever
+// writing the changeset's pr_creation_state, so that row has to be consulted or
+// the child parks behind a dead parent forever.
+func TestStackParentPublicationBlocked(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		parent            models.SessionChangeset
+		parentPublication *models.SessionPublication
+		expected          bool
+	}{
+		{
+			name:              "dead-lettered parent publication leaves the changeset state untouched",
+			parent:            models.SessionChangeset{PRCreationState: models.PRCreationStatePushing},
+			parentPublication: &models.SessionPublication{State: models.SessionPublicationStateTerminalFailed},
+			expected:          true,
+		},
+		{
+			name:              "no-op parent never publishes the branch this one stacks on",
+			parent:            models.SessionChangeset{PRCreationState: models.PRCreationStateIdle},
+			parentPublication: &models.SessionPublication{State: models.SessionPublicationStateCompletedNoop},
+			expected:          true,
+		},
+		{
+			name:     "failed parent changeset state is still honored without a durable row",
+			parent:   models.SessionChangeset{PRCreationState: models.PRCreationStateFailed},
+			expected: true,
+		},
+		{
+			name:              "completed parent publication is only briefly ahead of its changeset",
+			parent:            models.SessionChangeset{PRCreationState: models.PRCreationStatePushing},
+			parentPublication: &models.SessionPublication{State: models.SessionPublicationStateCompleted},
+		},
+		{
+			name:              "reviewing parent is still progressing",
+			parent:            models.SessionChangeset{PRCreationState: models.PRCreationStateQueued},
+			parentPublication: &models.SessionPublication{State: models.SessionPublicationStateReviewPending},
+		},
+		{name: "queued parent without a durable row is still progressing", parent: models.SessionChangeset{PRCreationState: models.PRCreationStateQueued}},
+		{name: "published parent is not blocked", parent: models.SessionChangeset{PRCreationState: models.PRCreationStateSucceeded}},
+		{
+			name:              "abandoned parent is resolved even after a terminal failure",
+			parent:            models.SessionChangeset{PRCreationState: models.PRCreationStateFailed, Status: models.ChangesetStatusAbandoned},
+			parentPublication: &models.SessionPublication{State: models.SessionPublicationStateTerminalFailed},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, stackParentPublicationBlocked(tt.parent, tt.parentPublication), "only an unresolvable parent should terminalize its stack children")
+		})
+	}
 }
 
 var workerChangesetTestColumns = []string{
@@ -5990,6 +6238,117 @@ func workerPublicationTestRow(publication models.SessionPublication) []any {
 		publication.PublishedHeadSHA, publication.GitHubPRNumber, publication.GitHubPRURL, publication.AttemptCount,
 		publication.LastErrorCode, publication.LastErrorMessage, publication.RequestedAt, publication.LastAttemptAt,
 		publication.BranchPublishedAt, publication.PRResolvedAt, publication.CompletedAt, publication.CreatedAt, publication.UpdatedAt,
+	}
+}
+
+type openPRChangesetLeaseStoreStub struct {
+	acquireCalls    int
+	acquiredOrgID   uuid.UUID
+	acquiredSession uuid.UUID
+	acquiredTarget  uuid.UUID
+	acquiredHolder  uuid.UUID
+	acquiredType    models.ChangesetLeaseType
+	acquiredLabel   string
+	acquiredTTL     time.Duration
+	takeoverExpired bool
+	acquireErr      error
+}
+
+func (s *openPRChangesetLeaseStoreStub) AcquireLease(
+	_ context.Context,
+	orgID, sessionID, changesetID, holderID uuid.UUID,
+	holderType models.ChangesetLeaseType,
+	holderLabel string,
+	ttl time.Duration,
+	takeoverExpired bool,
+) (models.SessionChangesetLease, error) {
+	s.acquireCalls++
+	s.acquiredOrgID = orgID
+	s.acquiredSession = sessionID
+	s.acquiredTarget = changesetID
+	s.acquiredHolder = holderID
+	s.acquiredType = holderType
+	s.acquiredLabel = holderLabel
+	s.acquiredTTL = ttl
+	s.takeoverExpired = takeoverExpired
+	return models.SessionChangesetLease{HolderID: holderID}, s.acquireErr
+}
+
+func (s *openPRChangesetLeaseStoreStub) ReleaseLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+
+func TestAcquireOpenPRChangesetLease(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		changeset   models.SessionChangeset
+		acquireErr  error
+		wantAcquire bool
+		wantErr     bool
+	}{
+		{
+			name: "primary workspace remains protected by session quiescence",
+			changeset: models.SessionChangeset{
+				ID: uuid.New(), OrgID: uuid.New(), SessionID: uuid.New(), IsPrimary: true,
+			},
+		},
+		{
+			name: "unmaterialized non-primary changeset does not acquire a lease",
+			changeset: models.SessionChangeset{
+				ID: uuid.New(), OrgID: uuid.New(), SessionID: uuid.New(), IsPrimary: false,
+			},
+		},
+		{
+			name: "materialized non-primary changeset acquires the publication lease",
+			changeset: func() models.SessionChangeset {
+				worktree := "/workspace/stack-child"
+				return models.SessionChangeset{
+					ID: uuid.New(), OrgID: uuid.New(), SessionID: uuid.New(), IsPrimary: false, WorktreePath: &worktree,
+				}
+			}(),
+			wantAcquire: true,
+		},
+		{
+			name: "lease contention prevents publication",
+			changeset: func() models.SessionChangeset {
+				worktree := "/workspace/stack-child"
+				return models.SessionChangeset{
+					ID: uuid.New(), OrgID: uuid.New(), SessionID: uuid.New(), IsPrimary: false, WorktreePath: &worktree,
+				}
+			}(),
+			acquireErr: errors.New("lease held by agent turn"), wantAcquire: true, wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &openPRChangesetLeaseStoreStub{acquireErr: tt.acquireErr}
+			holderID, err := acquireOpenPRChangesetLease(context.Background(), store, tt.changeset)
+
+			if tt.wantErr {
+				require.Error(t, err, "lease contention should be returned to the publication worker")
+				require.Nil(t, holderID, "failed lease acquisition should not return a holder ID")
+			} else {
+				require.NoError(t, err, "supported publication target should complete lease acquisition")
+			}
+			require.Equal(t, tt.wantAcquire, store.acquireCalls == 1, "only materialized non-primary worktrees should acquire a lease")
+			if !tt.wantAcquire || tt.wantErr {
+				return
+			}
+			require.NotNil(t, holderID, "successful lease acquisition should return its holder ID")
+			require.Equal(t, tt.changeset.OrgID, store.acquiredOrgID, "lease should use the changeset organization")
+			require.Equal(t, tt.changeset.SessionID, store.acquiredSession, "lease should use the changeset session")
+			require.Equal(t, tt.changeset.ID, store.acquiredTarget, "lease should protect the publication target")
+			require.Equal(t, *holderID, store.acquiredHolder, "lease holder should match the release token")
+			require.Equal(t, models.ChangesetLeaseTypePublish, store.acquiredType, "publication should use the publish lease type")
+			require.Equal(t, "publish pull request", store.acquiredLabel, "lease should identify direct pull request publication")
+			require.Equal(t, 5*time.Minute, store.acquiredTTL, "publication lease should cover a normal publish attempt")
+			require.True(t, store.takeoverExpired, "publication should recover leases whose owners have expired")
+		})
 	}
 }
 
@@ -6380,6 +6739,43 @@ func TestTurnWorkspaceChangedComparesWholeWorkspaceDiff(t *testing.T) {
 	}
 }
 
+func TestReviewWorkspaceDiffBeforeUsesExecutedWorkspace(t *testing.T) {
+	t.Parallel()
+
+	primaryDiff := "diff --git a/primary b/primary"
+	childDiff := "diff --git a/child b/child"
+	tests := []struct {
+		name     string
+		session  models.Session
+		target   *models.SessionChangeset
+		expected *string
+	}{
+		{
+			name:     "primary review uses session diff",
+			session:  models.Session{Diff: &primaryDiff},
+			expected: &primaryDiff,
+		},
+		{
+			name:     "stack child review uses materialized diff",
+			session:  models.Session{Diff: &primaryDiff},
+			target:   &models.SessionChangeset{MaterializedDiff: &childDiff},
+			expected: &childDiff,
+		},
+		{
+			name:    "new stack child worktree has an empty baseline",
+			session: models.Session{Diff: &primaryDiff},
+			target:  &models.SessionChangeset{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, reviewWorkspaceDiffBefore(tt.session, tt.target), "review mutation detection should use the diff from the executed workspace")
+		})
+	}
+}
+
 func TestOpenPRHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
 	t.Parallel()
 
@@ -6669,6 +7065,148 @@ func TestOpenPRHandler_StartsAutomationPrePRReviewBeforePushing(t *testing.T) {
 	require.NotNil(t, reviews.starts[0].req.AutomationRunID, "review loop should retain the automation run id")
 	require.Equal(t, automationRunID, *reviews.starts[0].req.AutomationRunID, "review loop should retain the automation run id")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestEnsurePublicationPrePRReview_ParksDurableAutomationBeforeGateEvaluation(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	t.Cleanup(mock.Close)
+	stores.AutomationRuns = db.NewAutomationRunStore(mock)
+	stores.SessionPublications = db.NewSessionPublicationStore(mock)
+
+	orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+	automationID, automationRunID := uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	configSnapshot := json.RawMessage(`{"pre_pr_review_loops":2}`)
+	mock.ExpectQuery(`SELECT .+ FROM automation_runs\s+WHERE id = @id AND org_id = @org_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
+			automationRunID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
+			nil, nil, nil, nil, nil, []byte("{}"), "goal", configSnapshot,
+			models.AutomationRunStatusCompleted, nil, nil, nil, now, now,
+		))
+	mock.ExpectExec("UPDATE session_publications").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "max_passes": 2,
+	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	publication := &models.SessionPublication{
+		OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID,
+		Source:          models.SessionPublicationSourceAutomation,
+		ReviewGateState: models.SessionPublicationReviewGateNotRequired,
+		HandoffMode:     models.PRHandoffModePrePublish,
+	}
+	services := &Services{PublicationIntents: &stubPublicationExecutionCoordinator{
+		publicationEnabled: true,
+		reviewEnabled:      false,
+	}}
+
+	ready, err := ensurePublicationPrePRReview(
+		context.Background(), stores, services, zerolog.Nop(),
+		models.Session{ID: sessionID, OrgID: orgID, AutomationRunID: &automationRunID},
+		&changesetID, publication,
+	)
+
+	require.NoError(t, err, "durable automation review policy should be resolved and parked")
+	require.False(t, ready, "automation publication should not pass an unresolved review gate")
+	require.Equal(t, models.SessionPublicationReviewGatePending, publication.ReviewGateState, "worker should mirror the persisted pending gate in memory")
+	require.NotNil(t, publication.ReviewMaxPasses, "worker should retain the automation's configured pass count")
+	require.Equal(t, 2, *publication.ReviewMaxPasses, "worker should retain the configured automation review passes")
+	require.NoError(t, mock.ExpectationsWereMet(), "automation review should stop before branch or PR side effects")
+}
+
+// A passed gate whose evidence went stale reverts to pending. If the kill
+// switch were only consulted on entry, that path would push a branch and start
+// a fresh review loop while review execution is stopped.
+func TestEnsurePublicationPrePRReview_ParksStaleEvidenceWhenReviewExecutionDisabled(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	t.Cleanup(mock.Close)
+	stores.SessionChangesets = db.NewSessionChangesetStore(mock)
+	stores.SessionPublications = db.NewSessionPublicationStore(mock)
+
+	orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	reviewedHead, currentHead := "reviewed-head", "moved-head"
+	changeset := models.SessionChangeset{
+		ID: changesetID, OrgID: orgID, SessionID: sessionID, IsPrimary: true,
+		Status: models.ChangesetStatusReady, TargetBranch: "main", BaseBranch: "main",
+		HeadSHA: &currentHead, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("SELECT .*FROM session_changesets").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+	}).WillReturnRows(pgxmock.NewRows(workerChangesetTestColumns).AddRow(workerChangesetTestRow(changeset)...))
+	mock.ExpectExec("UPDATE session_publications").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "desired_head_sha": currentHead,
+	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	staleRevision := int64(1)
+	passes := 2
+	publication := &models.SessionPublication{
+		OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID,
+		Source:          models.SessionPublicationSourceAgentTool,
+		ReviewGateState: models.SessionPublicationReviewGatePassed,
+		HandoffMode:     models.PRHandoffModePrePublish,
+		ReviewMaxPasses: &passes,
+		// Evidence bound to a head the workspace has since moved past.
+		ReviewWorkspaceRevision: &staleRevision,
+		ReviewDesiredHeadSHA:    &reviewedHead,
+	}
+	services := &Services{
+		PublicationIntents: &stubPublicationExecutionCoordinator{publicationEnabled: true, reviewEnabled: false},
+		PR: &stubPRService{createPRFn: func(context.Context, *models.Session, ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+			t.Fatal("review kill switch should stop before any publication side effect")
+			return nil, nil
+		}},
+	}
+
+	ready, err := ensurePublicationPrePRReview(
+		context.Background(), stores, services, zerolog.Nop(),
+		models.Session{ID: sessionID, OrgID: orgID, WorkspaceRevision: staleRevision},
+		&changesetID, publication,
+	)
+
+	require.NoError(t, err, "parking stale evidence should not be an error")
+	require.False(t, ready, "stale review evidence must not pass the gate while review execution is stopped")
+	require.Equal(t, models.SessionPublicationReviewGatePending, publication.ReviewGateState, "invalidated evidence should leave the gate pending")
+	require.NoError(t, mock.ExpectationsWereMet(), "the kill switch should stop right after invalidating stale evidence")
+}
+
+func TestOpenPRHandler_ParksAgentPublicationWhenExecutionDisabled(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	t.Cleanup(mock.Close)
+	stores.SessionChangesets = db.NewSessionChangesetStore(mock)
+
+	orgID, sessionID, changesetID, repositoryID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	sessionRow := newWorkerSessionRow(sessionID, orgID, now, nil)
+	setWorkerSessionColumn(sessionRow, "repository_id", &repositoryID)
+	mock.ExpectQuery("SELECT .* FROM sessions").WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	changeset := models.SessionChangeset{
+		ID: changesetID, OrgID: orgID, SessionID: sessionID, IsPrimary: true,
+		Status: models.ChangesetStatusReady, TargetBranch: "main", BaseBranch: "main",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("SELECT .*FROM session_changesets").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+	}).WillReturnRows(pgxmock.NewRows(workerChangesetTestColumns).AddRow(workerChangesetTestRow(changeset)...))
+	services := &Services{
+		PublicationIntents: &stubPublicationExecutionCoordinator{publicationEnabled: false, reviewEnabled: false},
+		PR: &stubPRService{createPRFn: func(context.Context, *models.Session, ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+			t.Fatal("publication kill switch should stop before GitHub side effects")
+			return nil, nil
+		}},
+	}
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","changeset_id":"` + changesetID.String() + `","publication_source":"agent_tool","publication_queue":"agent"}`)
+
+	err := newOpenPRHandler(stores, services, zerolog.Nop())(context.Background(), "open_pr", payload)
+
+	require.NoError(t, err, "kill switch should park the durable job without consuming retries")
+	require.NoError(t, mock.ExpectationsWereMet(), "kill switch should stop after resolving the scoped publication target")
 }
 
 func TestEnsureAutomationPrePRReviewRetriesExistingRunningLoop(t *testing.T) {
@@ -8284,8 +8822,35 @@ func workerReviewLoopColumns() []string {
 }
 
 type stubWorkerReviewLoops struct {
-	starts   []stubWorkerReviewLoopStart
-	failures []stubWorkerReviewLoopFailure
+	starts            []stubWorkerReviewLoopStart
+	failures          []stubWorkerReviewLoopFailure
+	reconciliations   []stubWorkerReviewLoopReconciliation
+	restarted         int
+	reconciliationErr error
+}
+
+type stubPublicationExecutionCoordinator struct {
+	publicationEnabled bool
+	reviewEnabled      bool
+	requests           []publicationintent.RequestPullRequest
+}
+
+func (s *stubPublicationExecutionCoordinator) RequestPullRequest(
+	_ context.Context,
+	_ uuid.UUID,
+	_ uuid.UUID,
+	req publicationintent.RequestPullRequest,
+) (*publicationintent.PublicationIntentResult, error) {
+	s.requests = append(s.requests, req)
+	return &publicationintent.PublicationIntentResult{Status: publicationintent.ResultPRQueued}, nil
+}
+
+func (s *stubPublicationExecutionCoordinator) PublicationExecutionEnabled(models.SessionPublicationSource) bool {
+	return s.publicationEnabled
+}
+
+func (s *stubPublicationExecutionCoordinator) ReviewExecutionEnabled(models.SessionPublicationSource) bool {
+	return s.reviewEnabled
 }
 
 type stubWorkerReviewLoopStart struct {
@@ -8300,6 +8865,12 @@ type stubWorkerReviewLoopFailure struct {
 	summary  string
 }
 
+type stubWorkerReviewLoopReconciliation struct {
+	orgID          uuid.UUID
+	inactiveBefore time.Time
+	limit          int
+}
+
 func (s *stubWorkerReviewLoops) OnThreadTurnComplete(context.Context, uuid.UUID, uuid.UUID, string) error {
 	return nil
 }
@@ -8307,6 +8878,18 @@ func (s *stubWorkerReviewLoops) OnThreadTurnComplete(context.Context, uuid.UUID,
 func (s *stubWorkerReviewLoops) OnThreadTurnFailed(_ context.Context, orgID, threadID uuid.UUID, summary string) error {
 	s.failures = append(s.failures, stubWorkerReviewLoopFailure{orgID: orgID, threadID: threadID, summary: summary})
 	return nil
+}
+
+func (s *stubWorkerReviewLoops) ReconcileStrandedPublicationLoops(
+	_ context.Context,
+	orgID uuid.UUID,
+	inactiveBefore time.Time,
+	limit int,
+) (int, error) {
+	s.reconciliations = append(s.reconciliations, stubWorkerReviewLoopReconciliation{
+		orgID: orgID, inactiveBefore: inactiveBefore, limit: limit,
+	})
+	return s.restarted, s.reconciliationErr
 }
 
 func (s *stubWorkerReviewLoops) Start(_ context.Context, orgID, sessionID uuid.UUID, req reviewloopsvc.StartReviewLoopRequest) (*models.SessionReviewLoop, error) {
@@ -9601,8 +10184,9 @@ func TestPersistedOpenPRJobInputRestoresCallerChoices(t *testing.T) {
 		SessionID: sessionID.String(), ChangesetID: changesetID.String(), OrgID: orgID.String(),
 		IssueSnapshotID: uuid.NewString(), Draft: &draft, AuthorMode: "user", MergeWhenReady: true,
 		RequestedByUserID: uuid.NewString(), RequestedRole: string(models.RoleBuilder),
-		PublicationSource: string(models.SessionPublicationSourceAutomation),
-		PublicationQueue:  string(models.SessionPublicationJobQueueAgent),
+		PublicationSource:          string(models.SessionPublicationSourceAutomation),
+		PublicationExecutionSource: string(models.SessionPublicationSourceUser),
+		PublicationQueue:           string(models.SessionPublicationJobQueueAgent),
 	}
 	payload, err := json.Marshal(expected)
 	require.NoError(t, err, "test should encode a complete durable open_pr intent")
@@ -9616,6 +10200,41 @@ func TestPersistedOpenPRJobInputRestoresCallerChoices(t *testing.T) {
 	require.NoError(t, err, "a scoped durable open_pr intent should be restorable")
 	require.True(t, restored, "a nonempty durable open_pr intent should replace a minimal continuation payload")
 	require.Equal(t, expected, actual, "restored intent should preserve draft, authorship, merge, role, actor, and issue snapshot choices")
+	executionSource, err := effectivePublicationExecutionSource(actual, publication.Source)
+	require.NoError(t, err, "restored manual execution authority should be valid")
+	require.Equal(t, models.SessionPublicationSourceUser, executionSource, "manual takeover should execute independently of immutable publication provenance")
+}
+
+func TestEffectivePublicationRequestedRoleOverridesLegacyAgentPayload(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+	orgID, userID := uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	mock.ExpectQuery(`SELECT u\.id, @org_id::uuid AS org_id.+JOIN organization_memberships m.+m\.org_id = @org_id.+WHERE u\.id = @user_id`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "user_id": userID}).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url",
+			"google_id", "email_verified_at", "created_at", "settings",
+		}).AddRow(
+			userID, orgID, "builder@example.com", "Builder", models.RoleBuilder,
+			nil, nil, nil, nil, &now, now, json.RawMessage(`{}`),
+		))
+	run := models.Session{OrgID: orgID, TriggeredByUserID: &userID}
+
+	role, err := effectivePublicationRequestedRole(
+		context.Background(),
+		&Stores{Users: db.NewUserStore(mock)},
+		run,
+		models.SessionPublicationSourceAgentTool,
+		string(models.RoleMember),
+	)
+
+	require.NoError(t, err, "secondary-organization agent work should resolve current initiator authority")
+	require.Equal(t, string(models.RoleBuilder), role, "persisted sandbox input must not downgrade the active membership role")
+	require.NoError(t, mock.ExpectationsWereMet(), "worker authorization should use the session organization membership")
 }
 
 func TestPersistedOpenPRJobInputRejectsScopeDrift(t *testing.T) {
@@ -12447,7 +13066,7 @@ func TestEvalRunStatusForSession_Skipped(t *testing.T) {
 	require.NotNil(t, errMsg, "Skipped session should produce a non-nil error message")
 }
 
-func TestGradeEvalRunArtifacts_CodeCheckRequiresSnapshot(t *testing.T) {
+func TestGradeEvalRunOutputs_CodeCheckRequiresSnapshot(t *testing.T) {
 	t.Parallel()
 
 	diff := "diff --git a/app.go b/app.go"
@@ -12464,9 +13083,9 @@ func TestGradeEvalRunArtifacts_CodeCheckRequiresSnapshot(t *testing.T) {
 		PassThreshold:   0.75,
 	}
 
-	result, err := gradeEvalRunArtifacts(context.Background(), run, task, evalGraderDeps{})
+	result, err := gradeEvalRunOutputs(context.Background(), run, task, evalGraderDeps{})
 
-	require.NoError(t, err, "gradeEvalRunArtifacts should record non-executable code checks as criterion failures")
+	require.NoError(t, err, "gradeEvalRunOutputs should record non-executable code checks as criterion failures")
 	require.Equal(t, models.EvalRunStatusCompleted, result.Status, "graded eval run should be completed")
 	require.NotNil(t, result.Passed, "graded eval run should persist pass/fail")
 	require.False(t, *result.Passed, "required code checks without a snapshot should fail the run")
@@ -12476,7 +13095,7 @@ func TestGradeEvalRunArtifacts_CodeCheckRequiresSnapshot(t *testing.T) {
 	require.Equal(t, run.InputManifest, result.InputManifest, "grader should preserve the pinned input manifest")
 }
 
-func TestGradeEvalRunArtifacts_CodeCheckExecutesCommand(t *testing.T) {
+func TestGradeEvalRunOutputs_CodeCheckExecutesCommand(t *testing.T) {
 	t.Parallel()
 
 	diff := "diff --git a/app.go b/app.go"
@@ -12489,7 +13108,7 @@ func TestGradeEvalRunArtifacts_CodeCheckExecutesCommand(t *testing.T) {
 	task := models.EvalTask{ScoringCriteria: criteria, PassThreshold: 1}
 	session := models.Session{ID: uuid.New(), OrgID: uuid.New(), SnapshotKey: &snapshotKey}
 
-	result, err := gradeEvalRunArtifacts(context.Background(), run, task, evalGraderDeps{
+	result, err := gradeEvalRunOutputs(context.Background(), run, task, evalGraderDeps{
 		session:  &session,
 		provider: provider,
 		snapshots: fakeSnapshotStore{
@@ -12501,7 +13120,7 @@ func TestGradeEvalRunArtifacts_CodeCheckExecutesCommand(t *testing.T) {
 		},
 	})
 
-	require.NoError(t, err, "gradeEvalRunArtifacts should run configured code checks")
+	require.NoError(t, err, "gradeEvalRunOutputs should run configured code checks")
 	require.Equal(t, []string{"make test"}, provider.commands, "grader should execute the configured deterministic command")
 	require.NotNil(t, result.Passed, "graded eval run should persist pass/fail")
 	require.True(t, *result.Passed, "successful required code check should pass")
@@ -12509,7 +13128,7 @@ func TestGradeEvalRunArtifacts_CodeCheckExecutesCommand(t *testing.T) {
 	require.Contains(t, string(result.CriterionResults), "ok", "criterion details should include command output")
 }
 
-func TestGradeEvalRunArtifacts_LLMJudgeParsesJSON(t *testing.T) {
+func TestGradeEvalRunOutputs_LLMJudgeParsesJSON(t *testing.T) {
 	t.Parallel()
 
 	diff := "diff --git a/app.go b/app.go"
@@ -12520,9 +13139,9 @@ func TestGradeEvalRunArtifacts_LLMJudgeParsesJSON(t *testing.T) {
 	run := models.EvalRun{AgentDiff: &diff}
 	task := models.EvalTask{ScoringCriteria: criteria, PassThreshold: 0.75, IssueDescription: "Fix the bug"}
 
-	result, err := gradeEvalRunArtifacts(context.Background(), run, task, evalGraderDeps{llm: llm})
+	result, err := gradeEvalRunOutputs(context.Background(), run, task, evalGraderDeps{llm: llm})
 
-	require.NoError(t, err, "gradeEvalRunArtifacts should run LLM judge criteria")
+	require.NoError(t, err, "gradeEvalRunOutputs should run LLM judge criteria")
 	require.NotEmpty(t, llm.userPrompt, "LLM judge should receive the eval prompt and diff")
 	require.NotNil(t, result.Passed, "graded eval run should persist pass/fail")
 	require.True(t, *result.Passed, "passing LLM judge should pass")

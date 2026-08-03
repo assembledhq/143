@@ -390,11 +390,11 @@ func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uui
 	return nil
 }
 
-// ApplyReviewBypass atomically detaches review evidence from a non-terminal
-// publication and advances it to draft publication. It is deliberately a
-// separate transition from EnsureRequested: replay protection normally keeps
-// terminal review decisions immutable, while this audited user action is the
-// one authorized exception.
+// ApplyReviewBypass atomically retires any linked review loop, detaches its
+// evidence from a non-terminal publication, and advances the publication. It
+// is deliberately separate from EnsureRequested: replay protection normally
+// keeps recorded review decisions immutable, while an explicit authenticated
+// Create PR action is the authorized exception.
 func (s *SessionPublicationStore) ApplyReviewBypass(ctx context.Context, orgID uuid.UUID, publication *models.SessionPublication) error {
 	if publication == nil {
 		return errors.New("session publication is required")
@@ -415,7 +415,23 @@ func (s *SessionPublicationStore) ApplyReviewBypass(ctx context.Context, orgID u
 	if requestPayload == "" {
 		return errors.New("publication review bypass payload is required")
 	}
-	rows, err := s.db.Query(ctx, `UPDATE session_publications
+	rows, err := s.db.Query(ctx, `WITH publication_to_bypass AS (
+		SELECT review_loop_id
+		FROM session_publications
+		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id
+		  AND state NOT IN ('completed', 'completed_noop', 'terminal_failed')
+		FOR UPDATE
+	), cancelled_review AS (
+		UPDATE session_review_loops AS loop
+		SET status = 'cancelled', review_required = false,
+			latest_summary = 'Review stopped because an explicit Create PR action superseded automatic review.',
+			bypass_reason = 'Explicit Create PR action',
+			completed_at = COALESCE(loop.completed_at, now())
+		FROM publication_to_bypass AS target
+		WHERE loop.org_id = @org_id AND loop.id = target.review_loop_id AND loop.status = 'running'
+		RETURNING loop.id
+	)
+	UPDATE session_publications
 		SET state = 'ready_to_publish', source = @source,
 			trigger_kind = 'explicit_action',
 			automatic_pr_policy_source = @automatic_policy_source,
@@ -428,6 +444,7 @@ func (s *SessionPublicationStore) ApplyReviewBypass(ctx context.Context, orgID u
 			last_error_code = NULL, last_error_message = NULL, updated_at = now()
 		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id
 		  AND state NOT IN ('completed', 'completed_noop', 'terminal_failed')
+		  AND (SELECT count(*) FROM cancelled_review) >= 0
 		RETURNING `+sessionPublicationSelectColumns, pgx.NamedArgs{
 		"org_id": orgID, "session_id": publication.SessionID, "changeset_id": publication.ChangesetID,
 		"source": publication.Source, "automatic_policy_source": publication.AutomaticPolicySource,
@@ -440,6 +457,48 @@ func (s *SessionPublicationStore) ApplyReviewBypass(ctx context.Context, orgID u
 	stored, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionPublication])
 	if err != nil {
 		return fmt.Errorf("collect bypassed session publication: %w", err)
+	}
+	*publication = stored
+	return nil
+}
+
+// ApplyManualTakeover transfers execution of a parked automated intent to an
+// authenticated explicit user request without changing its recorded review
+// gate or evidence. This is the manual fallback for execution kill switches.
+func (s *SessionPublicationStore) ApplyManualTakeover(ctx context.Context, orgID uuid.UUID, publication *models.SessionPublication) error {
+	if publication == nil {
+		return errors.New("session publication is required")
+	}
+	if publication.OrgID != uuid.Nil && publication.OrgID != orgID {
+		return errors.New("session publication org does not match orgID")
+	}
+	if publication.TriggerKind != models.SessionPublicationTriggerExplicitAction {
+		return errors.New("publication manual takeover must be an explicit action")
+	}
+	if publication.Source != models.SessionPublicationSourceUser {
+		return errors.New("publication manual takeover must originate from an authenticated user")
+	}
+	requestPayload := string(publication.RequestPayload)
+	if requestPayload == "" {
+		return errors.New("publication manual takeover payload is required")
+	}
+	rows, err := s.db.Query(ctx, `UPDATE session_publications
+		SET job_queue = @job_queue, request_payload = @request_payload::jsonb,
+			request_generation_at = GREATEST(request_generation_at, @request_generation_at),
+			last_error_code = NULL, last_error_message = NULL, updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id
+		  AND state NOT IN ('completed', 'completed_noop', 'terminal_failed')
+		RETURNING `+sessionPublicationSelectColumns, pgx.NamedArgs{
+		"org_id": orgID, "session_id": publication.SessionID, "changeset_id": publication.ChangesetID,
+		"job_queue": publication.JobQueue, "request_payload": requestPayload,
+		"request_generation_at": publication.RequestGenerationAt,
+	})
+	if err != nil {
+		return fmt.Errorf("apply session publication manual takeover: %w", err)
+	}
+	stored, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionPublication])
+	if err != nil {
+		return fmt.Errorf("collect transferred session publication: %w", err)
 	}
 	*publication = stored
 	return nil

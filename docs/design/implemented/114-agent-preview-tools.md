@@ -19,7 +19,7 @@ the web app. Agents should be able to run the full visual iteration loop:
 7. Repeat until the product behavior and visuals are correct.
 
 The tool surface should be session-preview-first. Branch and PR previews remain
-important publishing and review artifacts, but agent iteration should not require
+important publishing and review surfaces, but agent iteration should not require
 pushing a branch before every visual check.
 
 ### Problem
@@ -67,8 +67,8 @@ This causes three product problems:
    preview; the platform should choose browser reload, soft service restart, full
    recycle, or cold relaunch.
 4. **Screenshots are first-class evidence.** Tool responses should make
-   screenshot artifacts easy to reference from a session transcript without
-   forcing the model to carry large base64 blobs when a stored artifact is
+   screenshot captures easy to reference from a session transcript without
+   forcing the model to carry large base64 blobs when a stored capture is
    available.
 5. **The browser is shared infrastructure, not a secret channel.** Browser
    automation must be scoped to the user's org/session/preview permissions and
@@ -85,7 +85,7 @@ This causes three product problems:
 - Add a smart preview update operation that selects the cheapest safe lifecycle
   path.
 - Return structured JSON suitable for LLM callers.
-- Store large screenshots as artifacts where possible and return references plus
+- Store large screenshots as captures where possible and return references plus
   metadata, while allowing small inline responses for compatibility.
 - Audit preview tool invocations and enforce RBAC consistently with preview UI
   actions.
@@ -150,7 +150,7 @@ Recommended actions:
 | `inspect` | Inspect a DOM element by coordinates or selector. |
 | `interact` | Execute browser interactions. |
 | `multi_viewport` | Capture standard or caller-provided responsive screenshots. |
-| `visual_diff` | Compare two stored screenshot/snapshot artifacts. |
+| `visual_diff` | Compare two stored screenshot/snapshot captures. |
 | `assert` | Run visual/browser assertions. |
 
 The CLI should still support the human shorthand:
@@ -185,7 +185,7 @@ Tool outputs should be concise JSON. Screenshot tools should return:
 - Viewport.
 - Capture time.
 - Console errors observed during capture.
-- Stored artifact reference when available.
+- Stored capture reference when available.
 - Optional inline base64 only when requested.
 
 Agents should be able to cite screenshot references in their final turn or use
@@ -486,7 +486,7 @@ Response:
     "url": "https://...",
     "captured_at": "2026-06-27T00:00:00Z",
     "viewport": {"width": 1280, "height": 720},
-    "artifact": {
+    "capture": {
       "kind": "image/png",
       "ref": "session-preview-screenshot:...",
       "download_url": "/api/v1/uploads/files/..."
@@ -498,7 +498,7 @@ Response:
 ```
 
 The current endpoint returns `png_base64`; this design recommends adding
-artifact storage and making inline base64 optional for CLI friendliness.
+capture storage and making inline base64 optional for CLI friendliness.
 
 #### Console
 
@@ -585,7 +585,7 @@ Response:
         "action": "click",
         "success": true,
         "screenshot": {
-          "artifact": {"ref": "session-preview-screenshot:..."}
+          "capture": {"ref": "session-preview-screenshot:..."}
         }
       }
     ],
@@ -629,8 +629,8 @@ Request:
 
 ```json
 {
-  "before_snapshot_id": "artifact-or-snapshot-id",
-  "after_snapshot_id": "artifact-or-snapshot-id"
+  "before_snapshot_id": "capture-or-snapshot-id",
+  "after_snapshot_id": "capture-or-snapshot-id"
 }
 ```
 
@@ -666,30 +666,30 @@ status, runtime, logs, snapshots, freshness, and audit tables already exist.
 
 Recommended additions:
 
-1. Store screenshot artifacts instead of only base64 JSON payloads.
+1. Store screenshot captures instead of only base64 JSON payloads.
 2. Track preview update attempts separately from generic preview logs if product
    analytics need mode-level reporting.
 
-#### Option A: Use Existing Upload/Artifact Storage
+#### Option A: Use Existing Upload/Capture Storage
 
-Preferred for v1 if the existing upload/file artifact model can store generated
+Preferred for v1 if the existing upload/file capture model can store generated
 PNG files with org/session ownership.
 
 No preview-specific migration required. Screenshot responses return the upload
 reference.
 
-#### Option B: Add Preview Tool Artifacts
+#### Option B: Add Preview Tool Captures
 
-If generated preview artifacts need preview-native retention and indexing, add:
+If generated preview captures need preview-native retention and indexing, add:
 
 ```sql
-CREATE TABLE preview_tool_artifacts (
+CREATE TABLE preview_tool_captures (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     org_id uuid NOT NULL REFERENCES organizations(id),
     preview_instance_id uuid NOT NULL REFERENCES preview_instances(id) ON DELETE CASCADE,
     session_id uuid REFERENCES sessions(id) ON DELETE SET NULL,
     tool_name text NOT NULL,
-    artifact_kind text NOT NULL,
+    capture_kind text NOT NULL,
     storage_key text NOT NULL,
     content_type text NOT NULL,
     byte_size bigint NOT NULL,
@@ -698,11 +698,11 @@ CREATE TABLE preview_tool_artifacts (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_preview_tool_artifacts_preview_created
-    ON preview_tool_artifacts (org_id, preview_instance_id, created_at DESC);
+CREATE INDEX idx_preview_tool_captures_preview_created
+    ON preview_tool_captures (org_id, preview_instance_id, created_at DESC);
 
-CREATE INDEX idx_preview_tool_artifacts_session_created
-    ON preview_tool_artifacts (org_id, session_id, created_at DESC)
+CREATE INDEX idx_preview_tool_captures_session_created
+    ON preview_tool_captures (org_id, session_id, created_at DESC)
     WHERE session_id IS NOT NULL;
 ```
 
@@ -715,14 +715,14 @@ Tenancy:
 Model:
 
 ```go
-type PreviewToolArtifactKind string
+type PreviewToolCaptureKind string
 
 const (
-    PreviewToolArtifactScreenshot PreviewToolArtifactKind = "screenshot"
-    PreviewToolArtifactScreencast PreviewToolArtifactKind = "screencast"
+    PreviewToolCaptureScreenshot PreviewToolCaptureKind = "screenshot"
+    PreviewToolCaptureScreencast PreviewToolCaptureKind = "screencast"
 )
 
-func (k PreviewToolArtifactKind) Validate() error
+func (k PreviewToolCaptureKind) Validate() error
 ```
 
 Use the typed-string enum pattern and table-driven validation tests.
@@ -926,7 +926,7 @@ existing handle and the org/session/config context already carried by
 For Docker provider:
 
 - Stop the configured app service process group.
-- Preserve infrastructure containers, dependency caches, installed artifacts,
+- Preserve infrastructure containers, dependency caches, installed outputs,
   preview secret files, preview origin, and browser context where possible.
 - Re-run only service start commands and readiness checks.
 - Update runtime handle/port only if changed.
@@ -1025,7 +1025,7 @@ Backend:
 - Handler tests for `POST /sessions/{id}/preview/update`.
 - RBAC tests for read vs write preview actions.
 - Worker routing tests for remote screenshot/interact/update.
-- Store tests if artifact/update-attempt tables are added.
+- Store tests if capture/update-attempt tables are added.
 - Enum validation tests for `PreviewUpdateMode` and `PreviewUpdateAction`.
 - Restart/update classifier table tests covering config, lockfile, source-only,
   dead sandbox, and no-op cases.
@@ -1053,13 +1053,13 @@ Integration:
 3. Add `preview update` initially mapping to existing full recycle when needed.
 4. Add update-mode classifier response.
 5. Add soft service restart provider support.
-6. Add screenshot artifact storage and transcript references.
+6. Add screenshot capture storage and transcript references.
 7. Update public docs only after the CLI workflow is stable.
 
 ### Open Questions
 
-- Should screenshot artifacts use the existing upload system or a
-  preview-specific artifact table?
+- Should screenshot captures use the existing upload system or a
+  preview-specific capture table?
 - Should sandbox-injected API tokens be restricted to the current session preview
   by default, or can they inspect any org preview visible to the session user?
 - What is the minimum reliable signal for HMR support per preview service?

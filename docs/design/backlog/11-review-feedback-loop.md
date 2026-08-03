@@ -257,7 +257,7 @@ Configurable per org in `organizations.settings`:
 
 ## 3. Review Patterns Knowledge Base
 
-When a review comment passes the processing pipeline and is classified as `generalizable`, the extracted rule is stored in a per-repo knowledge base. The `review_patterns` table is the backend data store; the curated context document (Section 4) is the artifact the agent actually reads.
+When a review comment passes the processing pipeline and is classified as `generalizable`, the extracted rule is stored in a per-repo knowledge base. The `review_patterns` table is the backend data store; the curated context document (Section 4) is the output the agent actually reads.
 
 ### Data Model
 

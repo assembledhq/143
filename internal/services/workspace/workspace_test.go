@@ -539,7 +539,7 @@ func TestSnapshotCache_CompressedDownloadCap(t *testing.T) {
 
 	_, err = cache.Open(context.Background(), key, "workspace")
 	require.Error(t, err, "oversize staged snapshot should return an error")
-	require.ErrorIs(t, err, ErrSnapshotUnreadable, "oversize staged snapshots should be treated as unreadable artifacts")
+	require.ErrorIs(t, err, ErrSnapshotUnreadable, "oversize staged snapshots should be treated as unreadable outputs")
 	require.NotErrorIs(t, err, ErrSnapshotMissing, "oversize staged snapshots are distinct from missing snapshots")
 	require.LessOrEqual(t, store.bytesWritten.Load(), int64(8), "cache must stop writing once the compressed cap is reached")
 }

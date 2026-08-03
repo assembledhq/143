@@ -4,7 +4,7 @@
 
 ## Problem
 
-The current automation creation and detail views expose automations primarily as settings forms. That makes recurring agent work feel like configuration, even though the most important artifact is the goal: the instruction the agent will repeatedly execute.
+The current automation creation and detail views expose automations primarily as settings forms. That makes recurring agent work feel like configuration, even though the most important output is the goal: the instruction the agent will repeatedly execute.
 
 For an AI-native product, users should feel like they are defining a durable teammate or recurring job by writing its mission, then choosing a few execution defaults. The details page should make the goal readable, inspectable, and easy to improve. Metadata, schedule, model, and run history remain important, but they should support the goal rather than compete with it.
 

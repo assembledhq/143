@@ -438,20 +438,29 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(screen.getByText('Ask a review agent to check the current diff and apply fixes.')).toBeInTheDocument();
     expect(reviewButton).toHaveAttribute('title', 'A reusable sandbox snapshot is required before review');
     const reviewAction = reviewButton.closest('[data-slot="agent-action-card-action"]');
-    expect(reviewAction).toHaveClass('w-fit', 'self-start');
+    expect(reviewAction).toHaveClass('ml-11', 'w-fit', 'self-start');
+    expect(reviewAction).toHaveClass('@min-[24rem]/agent-action:ml-0');
     expect(reviewAction).not.toHaveClass('w-full');
     expect(reviewButton).not.toHaveClass('w-full');
     const reviewTitle = screen.getByText('Review before creating a PR?');
-    const splitTitle = screen.getByText('Need smaller pull requests?');
+    const splitTitle = screen.getByText('Large change · 750 additions · 1 file');
     const reviewCard = reviewTitle.closest('[data-slot="card"]');
-    const splitCard = splitTitle.closest('[data-slot="card"]');
+    const splitSuggestion = splitTitle.closest('[data-slot="overview-suggestion"]');
     expect(reviewCard?.querySelector('[data-slot="agent-action-card-icon"] .lucide-scan-search')).toBeInTheDocument();
-    expect(splitCard?.querySelector('[data-slot="agent-action-card-icon"] .lucide-git-branch')).toBeInTheDocument();
+    // jsdom cannot evaluate container queries, so guard the placement instead:
+    // an element is never its own query container, so the row layout would be
+    // dead if the container were declared on the element that queries it.
+    const reviewCardContent = reviewCard?.querySelector('[data-slot="card-content"]');
+    expect(reviewCard?.className).toContain('@container/agent-action');
+    expect(reviewCardContent?.className).toContain('@min-[24rem]/agent-action:flex-row');
+    expect(reviewCardContent?.className).not.toContain('@container/agent-action');
+    expect(splitSuggestion?.querySelector('[data-slot="overview-suggestion-icon"] .lucide-git-branch')).toBeInTheDocument();
+    expect(splitTitle.closest('[data-slot="card"]')).toBeNull();
     expect(reviewTitle.compareDocumentPosition(splitTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
   });
 
-  it('keeps PR details at the very top of the overview before the split suggestion', async () => {
+  it('orders PR details, Result, then the quiet split suggestion', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({
@@ -465,13 +474,13 @@ describe('SessionDetailPage overview and review loop', () => {
 
     renderWithProviders(<SessionDetailContent id={mockSessions[0].id} />);
 
-    const prDetailsTitle = await screen.findByText('PR health');
-    const splitTitle = screen.getByText('Need smaller pull requests?');
-    const prDetailsCard = prDetailsTitle.closest('[data-slot="card"]');
+    const prDetailsCard = await screen.findByRole('region', { name: 'Pull request #42' });
+    const resultCard = screen.getByTestId('session-result-card');
+    const splitSuggestion = screen.getByRole('region', { name: 'Pull request size suggestion' });
 
-    expect(prDetailsCard).not.toBeNull();
     expect(prDetailsCard?.parentElement?.firstElementChild).toBe(prDetailsCard);
-    expect(prDetailsTitle.compareDocumentPosition(splitTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(prDetailsCard.compareDocumentPosition(resultCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(resultCard.compareDocumentPosition(splitSuggestion) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('shows a compact status card while the Overview review loop is running', async () => {
@@ -540,7 +549,7 @@ describe('SessionDetailPage overview and review loop', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect(await screen.findByText('PR health')).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: 'Pull request #42' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Review' })).toBeInTheDocument();
     expect(screen.queryByText('Review work')).not.toBeInTheDocument();
     expect(screen.queryByText('Review this work')).not.toBeInTheDocument();

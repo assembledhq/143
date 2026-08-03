@@ -16,7 +16,7 @@ var ErrVerificationHumanIntervention = errors.New("preview verification requires
 
 type VerificationRunWriter interface {
 	Create(ctx context.Context, orgID uuid.UUID, run models.PreviewVerificationRun) (models.PreviewVerificationRun, error)
-	Complete(ctx context.Context, orgID, runID uuid.UUID, status models.PreviewVerificationStatus, attempt int, steps, artifacts json.RawMessage, consoleErrors int, summary, failureReason string) (models.PreviewVerificationRun, error)
+	Complete(ctx context.Context, orgID, runID uuid.UUID, status models.PreviewVerificationStatus, attempt int, steps, captures json.RawMessage, consoleErrors int, summary, failureReason string) (models.PreviewVerificationRun, error)
 }
 
 type VerificationObserver interface {
@@ -138,7 +138,7 @@ func executeVerificationPlan(ctx context.Context, observer VerificationObserver,
 			return steps, fmt.Sprintf("%s at %s", err, planned.Path), errors.Is(err, ErrVerificationHumanIntervention)
 		}
 		if observation.Screenshot != nil {
-			step.Artifact = observation.Screenshot.Artifact
+			step.Capture = observation.Screenshot.Capture
 		}
 		for _, message := range observation.Console {
 			if message.Level == "error" {
@@ -167,21 +167,21 @@ func (c *VerificationCoordinator) complete(ctx context.Context, orgID uuid.UUID,
 	if err != nil {
 		return models.PreviewVerificationRun{}, fmt.Errorf("marshal preview verification steps: %w", err)
 	}
-	artifacts := make([]models.PreviewArtifact, 0, len(steps))
+	captures := make([]models.PreviewCapture, 0, len(steps))
 	consoleErrors := 0
 	for _, step := range steps {
 		consoleErrors += step.ConsoleCount
-		if step.Artifact != nil {
-			artifacts = append(artifacts, *step.Artifact)
+		if step.Capture != nil {
+			captures = append(captures, *step.Capture)
 		}
 	}
-	artifactsJSON, err := json.Marshal(artifacts)
+	capturesJSON, err := json.Marshal(captures)
 	if err != nil {
-		return models.PreviewVerificationRun{}, fmt.Errorf("marshal preview verification artifacts: %w", err)
+		return models.PreviewVerificationRun{}, fmt.Errorf("marshal preview verification captures: %w", err)
 	}
 	summary := fmt.Sprintf("Verified %d preview checks", len(steps))
 	if status != models.PreviewVerificationStatusPassed {
 		summary = failure
 	}
-	return c.runs.Complete(ctx, orgID, run.ID, status, attempt, stepsJSON, artifactsJSON, consoleErrors, summary, failure)
+	return c.runs.Complete(ctx, orgID, run.ID, status, attempt, stepsJSON, capturesJSON, consoleErrors, summary, failure)
 }

@@ -93,7 +93,7 @@ echo "Reading fleet from FLEET_HOSTS..."
 echo "Deploying roles: $REQUESTED_ROLES"
 echo "Deploying up to $DEPLOY_JOBS node(s) concurrently. Set DEPLOY_JOBS=1 for serial deploys."
 # DEPLOY_FLEET_LOG_DIR pins per-host logs to a stable path so CI can upload
-# them as an artifact; ephemeral runners lose /tmp the moment the job ends.
+# them as a CI archive; ephemeral runners lose /tmp the moment the job ends.
 # A pinned dir can outlive a run (local use, non-ephemeral machines), so
 # clear generated state from prior runs: stale .failed markers would dump a
 # previous run's failures, and stale host-*.targets files are appended to,

@@ -8,7 +8,7 @@
 
 ## Summary
 
-Previews became a first-class branch artifact in [83-branch-and-pr-previews](../implemented/83-branch-and-pr-previews.md), but the product still treats them as leaf pages: `/previews/new`, `/previews/[id]`, and the durable PR route exist, while a parent `/previews` index does not. Once a user navigates away from a preview, there is no way to find it again except back through the session or PR that spawned it. There is also no way to express "I want a preview for every PR" — every preview is a manual act.
+Previews became a first-class branch output in [83-branch-and-pr-previews](../implemented/83-branch-and-pr-previews.md), but the product still treats them as leaf pages: `/previews/new`, `/previews/[id]`, and the durable PR route exist, while a parent `/previews` index does not. Once a user navigates away from a preview, there is no way to find it again except back through the session or PR that spawned it. There is also no way to express "I want a preview for every PR" — every preview is a manual act.
 
 This design adds three things:
 
@@ -18,7 +18,7 @@ This design adds three things:
 
 ## Why Now
 
-- Previews are the artifact our **nontechnical contributors** actually consume. They do not read diffs or session transcripts; they look at a running app and react to it. Today that segment has no home surface — they need an engineer to hand them a link.
+- Previews are the output our **nontechnical contributors** actually consume. They do not read diffs or session transcripts; they look at a running app and react to it. Today that segment has no home surface — they need an engineer to hand them a link.
 - The orphan-route IA is a real bug: three preview routes exist with no parent list. Engineers lose previews they started an hour ago.
 - The startup-acceleration machinery already exists ([93-session-preview-dependency-cache](../implemented/93-session-preview-dependency-cache.md), worker startup snapshots in `preview_startup_cache`). "Warm and ready" is mostly true at the infrastructure level; the product just never says it or lets users rely on it.
 - We are deciding whether previews become a pillar of the product. Nav placement is the cheapest honest test of that thesis: the index page is needed under any option, and promoting or demoting a nav item is a one-line change.

@@ -448,7 +448,7 @@ preview or session ID:
 143-tools preview update --wait
 ```
 
-`observe` returns screenshot artifact metadata, URL, title, viewport, capture
+`observe` returns screenshot reference metadata, URL, title, viewport, capture
 time, a bounded accessibility tree, optional bounded DOM, readiness and browser
 restoration status, and error-level console messages after the supplied cursor. Pass
 `--output path/to/image.png` to write the image into the workspace without
@@ -507,11 +507,11 @@ Use these after creating or updating a preview. Pass either `--session-id` or `-
 
 | Command | Required flags | Purpose |
 |---|---|---|
-| `preview screenshot` | target | Capture a screenshot. Optional flags: `--path`, `--viewport-w`, `--viewport-h`, `--full-page`, `--delay-ms`, `--inline-base64`. Responses include `artifact.url`. |
+| `preview screenshot` | target | Capture a screenshot. Optional flags: `--path`, `--viewport-w`, `--viewport-h`, `--full-page`, `--delay-ms`, `--inline-base64`. Responses include `capture.url`, repeated under the former `artifact` key during the current rollout. |
 | `preview console` | target | Read browser console messages. Optional `--level error` filters output. |
 | `preview inspect` | target plus `--selector` or `--x`/`--y` | Inspect DOM metadata for an element. |
 | `preview interact` | target, `--steps` | Execute browser actions from a JSON step array. Step timeouts accept `timeout_ms`. |
-| `preview multi_viewport` | target | Capture mobile, tablet, and desktop screenshots, or pass `--viewports` JSON. Each capture includes artifact metadata. |
+| `preview multi_viewport` | target | Capture mobile, tablet, and desktop screenshots, or pass `--viewports` JSON. Each capture includes stored-reference metadata. |
 | `preview visual_diff` | target, `--before-snapshot-id`, `--after-snapshot-id` | Compare two stored preview snapshots. |
 | `preview assert` | target, `--assertions` | Run browser assertions from a JSON assertion array. |
 
@@ -618,6 +618,12 @@ Common use: open a PR through the same workflow as the app after tests pass.
 This command queues the durable 143 publication workflow; it does not call the
 GitHub PR API from the sandbox. Sandbox GitHub API access is read-only for pull
 requests, while git push uses a separate repository-bound contents token.
+
+The command returns the workflow's actual asynchronous status:
+`review_in_progress`, `pr_queued`, `already_published`,
+`manual_publication_required`, or `blocked`. A running review or queued
+publication is not a created pull request; report the returned state and wait
+for the session Overview to converge.
 
 ### `eval add`
 

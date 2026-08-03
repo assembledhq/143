@@ -2559,7 +2559,8 @@ func TestIntegrationHandler_StartGitHubOAuth_RedirectsToGitHubAuthorize(t *testi
 		WithGitHubIntegrationOAuth("github-client-id", "github-client-secret"),
 	)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/github/login", nil)
+	returnTo := "/code-reviews?tab=policy&add_repository=1"
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/github/login?return_to="+url.QueryEscape(returnTo), nil)
 	w := httptest.NewRecorder()
 
 	handler.StartGitHubOAuth(w, req)
@@ -2582,6 +2583,16 @@ func TestIntegrationHandler_StartGitHubOAuth_RedirectsToGitHubAuthorize(t *testi
 
 	setCookie := w.Result().Header.Get("Set-Cookie")
 	require.Contains(t, setCookie, "github_integration_oauth_state=")
+	returnCookieName := githubIntegrationReturnCookiePrefix + parsed.Query().Get("state")
+	var returnCookie *http.Cookie
+	for _, cookie := range w.Result().Cookies() {
+		if cookie.Name == returnCookieName {
+			returnCookie = cookie
+			break
+		}
+	}
+	require.NotNil(t, returnCookie, "login should preserve the safe return target in a state-scoped cookie")
+	require.Equal(t, url.QueryEscape(returnTo), returnCookie.Value, "return cookie should preserve the requested workflow")
 }
 
 func TestIntegrationHandler_StartGitHubOAuth_NotConfigured(t *testing.T) {
@@ -2602,6 +2613,22 @@ func TestIntegrationHandler_StartGitHubOAuth_NotConfigured(t *testing.T) {
 	require.Contains(t, w.Body.String(), "GITHUB_OAUTH_NOT_CONFIGURED")
 }
 
+func TestIntegrationHandler_StartGitHubOAuth_RejectsExternalReturnTarget(t *testing.T) {
+	t.Parallel()
+
+	handler := NewIntegrationHandler(
+		nil, nil, "", "", "http://localhost:8080", "http://localhost:3000",
+		WithGitHubAppSlug("my-app"),
+	)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/github/login?return_to="+url.QueryEscape("https://attacker.example/steal"), nil)
+	w := httptest.NewRecorder()
+
+	handler.StartGitHubOAuth(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "login should reject an external return target")
+	require.Contains(t, w.Body.String(), "INVALID_RETURN_TO", "response should identify the unsafe return target")
+}
+
 func TestIntegrationHandler_StartGitHubOAuth_AppSlugSetsStateCookie(t *testing.T) {
 	t.Parallel()
 
@@ -2618,7 +2645,8 @@ func TestIntegrationHandler_StartGitHubOAuth_AppSlugSetsStateCookie(t *testing.T
 		WithGitHubAppSlug("my-app"),
 	)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/github/login", nil)
+	returnTo := "/code-reviews?tab=policy&add_repository=1"
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/github/login?return_to="+url.QueryEscape(returnTo), nil)
 	ctx := middleware.WithOrgID(req.Context(), orgID)
 	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: models.RoleAdmin})
 	req = req.WithContext(ctx)
@@ -2637,6 +2665,9 @@ func TestIntegrationHandler_StartGitHubOAuth_AppSlugSetsStateCookie(t *testing.T
 	require.Equal(t, "github.com", parsed.Host)
 	require.Equal(t, "/apps/my-app/installations/new", parsed.Path)
 	require.NotEmpty(t, parsed.Query().Get("state"), "state parameter must be set for CSRF validation on callback")
+	payload, verifyErr := handler.verifyGitHubSetupState(parsed.Query().Get("state"))
+	require.NoError(t, verifyErr, "signed setup state should be verifiable")
+	require.Equal(t, returnTo, payload.ReturnTo, "signed setup state should preserve the safe workflow return target")
 
 	setCookie := w.Result().Header.Get("Set-Cookie")
 	require.Contains(t, setCookie, "github_integration_oauth_state=", "state cookie must be set so the callback can validate it")
@@ -2737,15 +2768,17 @@ func TestIntegrationHandler_HandleGitHubOAuthCallback_SavesCredentialAndIntegrat
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
 
+	returnTo := "/code-reviews?tab=policy&add_repository=1"
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/github/callback?code=gh-auth-code&state=test-state", nil)
 	req.AddCookie(&http.Cookie{Name: "github_integration_oauth_state", Value: "test-state"})
+	req.AddCookie(&http.Cookie{Name: githubIntegrationReturnCookiePrefix + "test-state", Value: url.QueryEscape(returnTo)})
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
 	w := httptest.NewRecorder()
 
 	handler.HandleGitHubOAuthCallback(w, req)
 
 	require.Equal(t, http.StatusTemporaryRedirect, w.Code)
-	require.Equal(t, "http://localhost:3000/integrations?github=connected", w.Header().Get("Location"))
+	require.Equal(t, "http://localhost:3000/code-reviews?add_repository=1&github=connected&tab=policy", w.Header().Get("Location"))
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -2858,6 +2891,7 @@ func TestIntegrationHandler_HandleGitHubOAuthCallback_DelegatesToAppInstalled(t 
 		UserID:    userID,
 		OrgID:     orgID,
 		ExpiresAt: time.Now().UTC().Add(time.Minute),
+		ReturnTo:  "/code-reviews?tab=policy&add_repository=1",
 	})
 	require.NoError(t, err, "test should create a valid setup state")
 
@@ -2885,7 +2919,7 @@ func TestIntegrationHandler_HandleGitHubOAuthCallback_DelegatesToAppInstalled(t 
 	handler.HandleGitHubOAuthCallback(w, req)
 
 	require.Equal(t, http.StatusTemporaryRedirect, w.Code)
-	require.Equal(t, "http://localhost:3000/settings/integrations?github=connected&select_repos=1", w.Header().Get("Location"))
+	require.Equal(t, "http://localhost:3000/code-reviews?add_repository=1&github=connected&tab=policy", w.Header().Get("Location"))
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

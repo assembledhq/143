@@ -1944,7 +1944,7 @@ func compatibleCodingProviderConfig(provider models.ProviderName, cfg models.Pro
 			return nil, false
 		}
 		// Drop PKCE-only fields (State, CodeVerifier, AuthorizeURL) when
-		// constructing the runtime config. They are pre-completion artifacts;
+		// constructing the runtime config. They are pre-completion outputs;
 		// the Status='active' filter upstream already excludes pending rows,
 		// but re-asserting their absence here keeps the runtime config minimal
 		// in case that filter ever loosens.

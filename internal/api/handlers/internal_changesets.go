@@ -40,6 +40,10 @@ func (h *InternalChangesetHandler) wrap(handler http.HandlerFunc) http.HandlerFu
 		}
 		ctx := middleware.WithOrgID(r.Context(), claims.OrgID)
 		ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: claims.OrgID, Role: models.RoleMember})
+		ctx = withPublicationRequestProvenance(ctx,
+			models.SessionPublicationSourceAgentTool,
+			models.SessionPublicationTriggerExplicitAction,
+		)
 		handler(w, r.WithContext(ctx))
 	}
 }

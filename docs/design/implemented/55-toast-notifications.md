@@ -30,7 +30,7 @@ This likely was not an intentional "close button on the left" product decision. 
 3. The toaster was partially aligned to that newer language.
 4. The default Sonner close-button layout was left in place even though the surrounding composition was no longer default Sonner.
 
-So the current state reads more like an incremental integration artifact than a finished design decision.
+So the current state reads more like an incremental integration output than a finished design decision.
 
 ## Why it looks bad
 
@@ -225,4 +225,4 @@ Adopt a platform-owned toast composition with:
 - error toasts visually aligned with `ErrorNotice`
 - neutral-first card styling with restrained semantic accents
 
-The current left-biased close button should be treated as an integration artifact, not as a design pattern to preserve.
+The current left-biased close button should be treated as an integration output, not as a design pattern to preserve.
