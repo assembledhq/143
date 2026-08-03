@@ -41,7 +41,6 @@ import type {
   CodeReviewPolicyRecord,
   CodeReviewResolvedPolicy,
   CodeReviewStats,
-  CodeReviewTemplateOption,
   CodeReviewPromptExamplesResponse,
   AuditLog,
   ListResponse,
@@ -263,20 +262,6 @@ const reviewAnalytics: CodeReviewAnalytics = {
   ],
 };
 
-const template: CodeReviewTemplateOption = {
-  key: "small_backend_change",
-  title: "Small backend change",
-  description: "Small backend changes outside sensitive packages.",
-  config: {
-    ...policy.config,
-    approval_mode: "approve_acceptable",
-    risk_policy: {
-      ...policy.config.risk_policy,
-      max_files_changed: 4,
-    },
-  },
-};
-
 const githubTriggerReady: CodeReviewGitHubTriggerResponse = {
   status: "ready",
   repository_id: "repo-1",
@@ -343,12 +328,6 @@ function mockCodeReviewBaseHandlers(
       HttpResponse.json({
         data: evidence,
       } satisfies SingleResponse<CodeReviewEvidence>),
-    ),
-    http.get("/api/v1/code-reviews/templates", () =>
-      HttpResponse.json({
-        data: [template],
-        meta: {},
-      } satisfies ListResponse<CodeReviewTemplateOption>),
     ),
     http.get("/api/v1/code-reviews/prompt-examples", () =>
       HttpResponse.json({ data: {
@@ -433,7 +412,6 @@ it("applies an approval example without changing safeguards and does not grant a
 describe("CodeReviewsPage", () => {
   beforeEach(() => {
     toast.success.mockReset();
-    toast.info.mockReset();
     toast.error.mockReset();
     sse.onEvent = undefined;
   });
@@ -495,17 +473,30 @@ describe("CodeReviewsPage", () => {
     expect(within(stats).getByText("128")).toBeInTheDocument();
     expect(within(stats).getByText("Automatically approved")).toBeInTheDocument();
     expect(within(stats).getByText("92")).toBeInTheDocument();
-    expect(within(stats).getByText("72% of completed reviews")).toBeInTheDocument();
+    expect(within(stats).getByRole("button", { name: "About Automatically approved" })).toBeInTheDocument();
     expect(within(stats).getByText("Approval rate")).toBeInTheDocument();
     expect(within(stats).getByText("72%")).toBeInTheDocument();
-    expect(within(stats).getByText("21 need human review")).toBeInTheDocument();
+    expect(within(stats).getByRole("button", { name: "About Approval rate" })).toBeInTheDocument();
     expect(within(stats).getByText("Median turnaround")).toBeInTheDocument();
     expect(within(stats).getByText("8m")).toBeInTheDocument();
     const timeWindow = screen.getByRole("button", { name: "Time window" });
     expect(timeWindow).toHaveTextContent("Last 30 days");
     const filters = timeWindow.closest("#code-review-filters");
+    expect(filters).toHaveAttribute("data-slot", "card");
     expect(filters).toContainElement(screen.getByRole("combobox", { name: "Repository" }));
     expect(filters?.lastElementChild).toContainElement(timeWindow);
+    expect(screen.getByText("Repository", { selector: "label" })).toHaveAttribute(
+      "for",
+      screen.getByRole("combobox", { name: "Repository" }).id,
+    );
+    expect(screen.getByText("PR author", { selector: "label" })).toHaveAttribute(
+      "for",
+      screen.getByRole("textbox", { name: "PR author" }).id,
+    );
+    expect(screen.getByText("Search", { selector: "label" })).toHaveAttribute(
+      "for",
+      screen.getByRole("textbox", { name: "Search code reviews" }).id,
+    );
     expect(screen.getByRole("heading", { level: 2, name: "Review activity" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Status" })).toHaveTextContent("Current reviews");
     expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
@@ -620,18 +611,6 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByRole("combobox", { name: "Reviewer 2 reasoning level" })).toHaveTextContent("High");
     expect(screen.getByRole("combobox", { name: "Orchestrator reasoning level" })).toHaveTextContent("High");
 
-    // Autosave: applying a template persists without a Save button.
-    await user.click(screen.getByRole("combobox", { name: /Advanced policy preset/i }));
-    await user.click(await screen.findByRole("option", { name: "Small backend change" }));
-    await user.click(screen.getByRole("button", { name: /Apply preset/i }));
-    await waitFor(() => {
-      expect(toast.success).toHaveBeenCalledWith("Applied Small backend change");
-    });
-    await user.click(screen.getByRole("button", { name: /Approval criteria/i }));
-    expect((await screen.findAllByDisplayValue("4")).length).toBeGreaterThan(0);
-    expect(screen.getByLabelText("Timeout value")).toHaveValue(30);
-    expect(screen.getByRole("combobox", { name: "Timeout unit" })).toHaveTextContent("Minutes");
-
     await user.click(screen.getByRole("button", { name: /Add requirement/i }));
     expect(await screen.findByDisplayValue("Custom requirement")).toBeInTheDocument();
   }, 30_000);
@@ -659,7 +638,7 @@ describe("CodeReviewsPage", () => {
     expect(screen.queryByRole("region", { name: "Code review statistics" })).not.toBeInTheDocument();
     const approvalOutcomes = screen.getByLabelText("Approval outcomes");
     expect(within(approvalOutcomes).getByText("32")).toBeInTheDocument();
-    expect(within(approvalOutcomes).getByText("First sent to 143 in this period")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByRole("button", { name: "About PRs reviewed" })).toBeInTheDocument();
     expect(within(approvalOutcomes).getByText("17")).toBeInTheDocument();
     expect(within(approvalOutcomes).getByText("53%")).toBeInTheDocument();
     expect(within(approvalOutcomes).getByText("2.0")).toBeInTheDocument();
@@ -790,9 +769,33 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
     await user.click(await screen.findByRole("tab", { name: "Analytics" }));
 
-    expect(await screen.findByText("First sent to 143 in this period")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "About PRs reviewed" })).toBeInTheDocument();
     expect(screen.getByText(/4 PRs had a failed attempt/)).toBeInTheDocument();
     expect(screen.getByText("Not yet approved")).toBeInTheDocument();
+  });
+
+  it("uses the shared empty state when completed reviews have no author attribution", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews/analytics", () =>
+        HttpResponse.json({
+          data: {
+            ...reviewAnalytics,
+            authors: [],
+          },
+        } satisfies SingleResponse<CodeReviewAnalytics>),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
+    await user.click(await screen.findByRole("tab", { name: "Analytics" }));
+
+    expect(await screen.findByText("No author attribution available")).toBeInTheDocument();
+    expect(
+      screen.getByText("Completed reviews in this report could not be matched to a pull request author."),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("table", { name: "Code review analytics by PR author" })).not.toBeInTheDocument();
   });
 
   it("applies shared filters to rows and stats while status scopes review activity only", async () => {
@@ -980,14 +983,16 @@ describe("CodeReviewsPage", () => {
   });
 
   it("keeps rows and metrics visible while the rolling window refreshes", async () => {
-    const originalSetInterval = globalThis.setInterval.bind(globalThis);
+    const originalSetTimeout = globalThis.setTimeout.bind(globalThis);
     let refreshRollingWindow: (() => void) | undefined;
-    const intervalSpy = vi.spyOn(globalThis, "setInterval").mockImplementation((handler, timeout) => {
-      if (timeout === 60_000) {
-        refreshRollingWindow = () => handler();
-        return originalSetInterval(() => undefined, timeout);
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation((handler, timeout, ...args) => {
+      if (typeof timeout === "number" && timeout >= 59_000 && timeout <= 60_000) {
+        refreshRollingWindow = () => {
+          if (typeof handler === "function") handler(...args);
+        };
+        return originalSetTimeout(() => undefined, timeout);
       }
-      return originalSetInterval(handler, timeout);
+      return originalSetTimeout(handler, timeout, ...args);
     });
     const createdAfterValues: string[] = [];
     let blockListRefresh = false;
@@ -1053,7 +1058,7 @@ describe("CodeReviewsPage", () => {
     } finally {
       releaseListRefresh?.();
       releaseStatsRefresh?.();
-      intervalSpy.mockRestore();
+      timeoutSpy.mockRestore();
     }
   });
 
@@ -1764,13 +1769,12 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByRole("button", { name: "Disable reviewer" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Safeguards" }));
-    expect(screen.getByText(/Applying a preset replaces safety controls/i)).toBeVisible();
+    expect(screen.queryByRole("combobox", { name: /Advanced policy preset/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Apply preset/i })).not.toBeInTheDocument();
     for (const section of ["Approval criteria", "Paths, authors & checks", "Reviewers & agents"]) {
       await user.click(screen.getByRole("button", { name: new RegExp(section, "i") }));
     }
     for (const label of [
-      "Advanced policy preset",
-      "Apply advanced policy preset",
       "Files changed",
       "Lines changed",
       "Inline comments",
@@ -2387,36 +2391,6 @@ describe("CodeReviewsPage", () => {
     expect(within(requiredChecksEditor as HTMLElement).getByText("test")).toBeInTheDocument();
 
     expect(screen.getByRole("button", { name: "Add required check" })).toBeInTheDocument();
-  });
-
-  it("surfaces template apply save failures through the shared toast", async () => {
-    const user = userEvent.setup();
-    mockCodeReviewBaseHandlers();
-    server.use(
-      http.put("/api/v1/code-review-policies", () =>
-        HttpResponse.json(
-          {
-            error: {
-              code: "SAVE_FAILED",
-              message: "Policy could not be saved",
-            },
-          },
-          { status: 500 },
-        ),
-      ),
-    );
-
-    renderWithProviders(<CodeReviewsPage />);
-
-    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("button", { name: "Safeguards" }));
-    await user.click(screen.getByRole("combobox", { name: /Advanced policy preset/i }));
-    await user.click(await screen.findByRole("option", { name: "Small backend change" }));
-    await user.click(screen.getByRole("button", { name: /Apply preset/i }));
-
-    await waitFor(() => {
-      expect(toast.error).toHaveBeenCalledWith("Couldn't save. Your change was reverted.");
-    });
   });
 
   it("saves code review timeout in seconds from the selected unit", async () => {

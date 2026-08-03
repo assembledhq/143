@@ -233,7 +233,11 @@ type PersonalAuthType = "subscription" | "api_key";
 // to the merge-patch settings endpoint (null clears an agent's entry).
 type ReasoningDefaults = ReturnType<typeof getCodingAgentReasoningDefaultsFromSettings>;
 type ReasoningDefaultsPatch = NonNullable<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"]>;
-type PersonalAutomationKey = "resolve_conflicts_when_idle" | "fix_tests_when_idle";
+type PersonalAutomationKey =
+  | "create_pr_when_agent_ready"
+  | "review_before_pr"
+  | "resolve_conflicts_when_idle"
+  | "fix_tests_when_idle";
 
 const PERSONAL_AUTOMATION_OPTIONS: Array<{ value: AutomaticFollowThroughPreference; label: string }> = [
   { value: "inherit", label: "Use organization default" },
@@ -242,6 +246,14 @@ const PERSONAL_AUTOMATION_OPTIONS: Array<{ value: AutomaticFollowThroughPreferen
 ];
 
 const PERSONAL_AUTOMATION_COPY: Record<PersonalAutomationKey, { title: string; description: string }> = {
+  create_pr_when_agent_ready: {
+    title: "Create a PR when the coding agent is ready",
+    description: "Choose whether eligible coding agents hand off your verified changes automatically.",
+  },
+  review_before_pr: {
+    title: "Run a two-pass review/fix cycle before creating the PR",
+    description: "Choose whether your PR requests run the two-pass review/fix cycle before publication.",
+  },
   resolve_conflicts_when_idle: {
     title: "Resolve conflicts when idle",
     description: "Allow automatic conflict repair for your idle sessions, overriding the organization default when needed.",
@@ -252,8 +264,8 @@ const PERSONAL_AUTOMATION_COPY: Record<PersonalAutomationKey, { title: string; d
   },
 };
 
-function automationDefaultLabel(value: boolean | undefined) {
-  return value ? "Org default: on" : "Org default: off";
+function automationDefaultLabel(value: boolean) {
+  return `Organization default: ${value ? "On" : "Off"}`;
 }
 
 export default function AccountPage() {
@@ -595,9 +607,7 @@ export default function AccountPage() {
             {(Object.keys(PERSONAL_AUTOMATION_COPY) as PersonalAutomationKey[]).map((key) => {
               const copy = PERSONAL_AUTOMATION_COPY[key];
               const currentValue = personalAutomaticFollowThrough[key] ?? "inherit";
-			  const orgDefault = key === "resolve_conflicts_when_idle"
-				? (orgAutomaticFollowThrough.resolve_conflicts_when_idle ?? true)
-				: (orgAutomaticFollowThrough.fix_tests_when_idle ?? true);
+              const orgDefault = orgAutomaticFollowThrough[key] ?? true;
               return (
                 <div key={key} className="space-y-3 border-b border-border pb-5 last:border-b-0 last:pb-0">
                   <div className="space-y-1">
@@ -617,7 +627,7 @@ export default function AccountPage() {
                         className="flex cursor-pointer items-center gap-2 rounded-md border border-border px-3 py-2 text-xs font-normal"
                       >
                         <RadioGroupItem id={`personal-automation-${key}-${option.value}`} value={option.value} />
-                        {option.label}
+                        {option.value === "inherit" ? `${option.label} (${orgDefault ? "On" : "Off"})` : option.label}
                       </Label>
                     ))}
                   </RadioGroup>

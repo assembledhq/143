@@ -17,6 +17,59 @@ function emptyCodingCredentialsHandlers() {
 }
 
 describe("Account settings page", () => {
+  it("shows effective organization values and saves personal PR handoff overrides", async () => {
+    const requestBodies: Array<Record<string, unknown>> = [];
+    server.use(
+      ...emptyCodingCredentialsHandlers(),
+      http.get("/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Test Org",
+          settings: {
+            session_automation: {
+              automatic_follow_through: {
+                create_pr_when_agent_ready: true,
+                review_before_pr: false,
+              },
+            },
+          },
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      })),
+      http.patch("/api/v1/auth/me/settings", async ({ request }) => {
+        requestBodies.push(await request.json() as Record<string, unknown>);
+        return HttpResponse.json({
+          data: {
+            id: "user-1",
+            org_id: "org-1",
+            email: "alice@example.com",
+            name: "Alice Smith",
+            role: "admin",
+            settings: { automatic_pr_follow_through: { create_pr_when_agent_ready: "off" } },
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<AccountPage />);
+
+    const createTitle = await screen.findByText("Create a PR when the coding agent is ready");
+    const createRow = createTitle.parentElement?.parentElement;
+    expect(createRow).not.toBeNull();
+    expect(within(createRow!).getByText("Organization default: On")).toBeInTheDocument();
+    expect(await screen.findByText("Organization default: Off")).toBeInTheDocument();
+
+    await userEvent.click(within(createRow!).getByRole("radio", { name: "Off" }));
+
+    await waitFor(() => {
+      expect(requestBodies).toEqual([{
+        automatic_pr_follow_through: { create_pr_when_agent_ready: "off" },
+      }]);
+    });
+  });
+
   it("renders the personal stack alongside the org fallback", async () => {
     server.use(
       http.get("/api/v1/coding-credentials", ({ request }) => {

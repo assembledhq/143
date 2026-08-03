@@ -855,6 +855,7 @@ type Orchestrator struct {
 	agentPRPromptEnabled       bool
 	agentPRPublicationEnabled  bool
 	prePRReviewEnabled         bool
+	publicationIntents         publicationintent.PublicationIntentCoordinator
 }
 
 type ChangesetMaterializationResult struct {
@@ -1373,6 +1374,7 @@ type OrchestratorConfig struct {
 	AgentPRPromptEnabled      bool
 	AgentPRPublicationEnabled bool
 	PrePRReviewEnabled        bool
+	PublicationIntents        publicationintent.PublicationIntentCoordinator
 	Logger                    zerolog.Logger
 	MaxConcurrent             int
 }
@@ -1456,7 +1458,14 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		agentPRPromptEnabled:       cfg.AgentPRPromptEnabled,
 		agentPRPublicationEnabled:  cfg.AgentPRPublicationEnabled,
 		prePRReviewEnabled:         cfg.PrePRReviewEnabled,
+		publicationIntents:         cfg.PublicationIntents,
 	}
+}
+
+// SetPublicationIntentCoordinator supports late binding in worker processes,
+// where the shared coordinator is assembled after the orchestrator.
+func (o *Orchestrator) SetPublicationIntentCoordinator(coordinator publicationintent.PublicationIntentCoordinator) {
+	o.publicationIntents = coordinator
 }
 
 // SetSuccessfulTurnVerifier supports late binding on worker processes, where
@@ -3689,31 +3698,30 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	})
 
 	if o.shouldQueueAutomaticPR(ctx, run, runResult, log) {
-		payload := map[string]interface{}{
-			"session_id":        run.ID.String(),
-			"org_id":            run.OrgID.String(),
-			"publication_queue": string(models.SessionPublicationJobQueueDefault),
-		}
-		if run.AutomationRunID != nil {
-			payload["publication_source"] = string(models.SessionPublicationSourceAutomation)
+		if o.publicationIntents == nil {
+			log.Error().Msg("automatic publication coordinator is unavailable")
 		} else {
-			payload["publication_source"] = string(models.SessionPublicationSourceBackend)
-		}
-		if issueSnapshot != nil {
-			payload["issue_snapshot_id"] = issueSnapshot.ID.String()
-		}
-		changesetID, changesetErr := o.sessions.GetPrimaryChangesetID(ctx, run.OrgID, run.ID)
-		if changesetErr != nil {
-			o.logger.Error().Err(changesetErr).Str("session_id", run.ID.String()).Msg("failed to resolve primary changeset for automatic PR creation")
-		} else {
-			payload["changeset_id"] = changesetID.String()
-			if _, queued, queueErr := o.jobs.QueueChangesetPRCreation(ctx, run.OrgID, run.ID, changesetID, "default", payload, 0); queueErr != nil {
-				if stateErr := o.sessions.UpdatePRCreationState(ctx, run.OrgID, run.ID, models.PRCreationStateFailed, "Could not queue pull request creation."); stateErr != nil {
-					o.logger.Warn().Err(stateErr).Str("session_id", run.ID.String()).Msg("failed to restore automatic PR creation state after enqueue failure")
-				}
-				o.logger.Error().Err(queueErr).Str("changeset_id", changesetID.String()).Msg("failed to enqueue automatic PR creation")
-			} else if !queued {
-				o.logger.Info().Str("changeset_id", changesetID.String()).Msg("automatic PR creation already queued or complete")
+			source := models.SessionPublicationSourceAutomation
+			if run.AutomationRunID == nil && run.ProjectTaskID != nil {
+				// Project tasks retain their parent-controlled publication contract.
+				// They are not agent-readiness requests and must remain independent
+				// of the manual-session publication kill switch.
+				source = models.SessionPublicationSourceBackend
+			}
+			request := publicationintent.RequestPullRequest{
+				Source:      source,
+				TriggerKind: models.SessionPublicationTriggerPolicy,
+			}
+			if issueSnapshot != nil {
+				request.IssueSnapshotID = &issueSnapshot.ID
+			}
+			result, requestErr := o.publicationIntents.RequestPullRequest(ctx, run.OrgID, run.ID, request)
+			if requestErr != nil {
+				log.Error().Err(requestErr).Msg("failed to coordinate automatic PR publication")
+			} else if result == nil {
+				log.Error().Msg("automatic publication coordinator returned no result")
+			} else {
+				log.Info().Str("publication_status", string(result.Status)).Msg("automatic PR publication coordinated")
 			}
 		}
 	}
@@ -3750,14 +3758,20 @@ func (o *Orchestrator) shouldQueueAutomaticPR(ctx context.Context, run *models.S
 		o.enqueueLinearMilestone(ctx, run, string(linear.MilestoneEndedNoPR))
 		return false
 	}
+	if run.ProjectTaskID != nil && run.AutomationRunID == nil {
+		// Project tasks predate agent readiness and are explicitly retained by
+		// the rollout contract. Their parent project is the publication policy
+		// owner, so a successful non-empty task still requests a PR through the
+		// shared coordinator.
+		return true
+	}
 	if run.AutomationRunID == nil {
-		// Only retire the legacy completion trigger for turns that were
-		// actually told they could publish themselves. The prompt gate and
-		// this gate must agree: a turn that never saw the handoff instruction
-		// (prompt flag off, answer-only, code review, revision) would
-		// otherwise lose its PR with nothing to replace it.
+		// Ordinary sessions never publish merely because a process completed
+		// with a diff. The agent tool or an explicit user action is the durable
+		// readiness signal. When the feature is killed or a turn is ineligible,
+		// leave the verified changes visible for manual follow-up.
 		if !o.agentPRPublicationEnabled || !o.agentPRPromptEnabled || !agentPRHandoffEligible(run) {
-			return true
+			return false
 		}
 		if run.PRCreationState == models.PRCreationStateSucceeded {
 			// Already published. Standing down is the whole point of the

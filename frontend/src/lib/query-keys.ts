@@ -52,7 +52,6 @@ export const queryKeys = {
     analyticsReport: (params?: unknown) => ["code-reviews", "analytics", params ?? null] as const,
     policy: ["code-reviews", "policy"] as const,
     githubTrigger: (repositoryId?: string | null) => ["code-reviews", "github-trigger", repositoryId ?? null] as const,
-    templates: ["code-reviews", "templates"] as const,
     promptExamples: ["code-reviews", "prompt-examples"] as const,
     evidence: (sessionId: string) => ["code-reviews", "evidence", sessionId] as const,
   },

@@ -286,6 +286,46 @@ func TestSessionPublicationStoreApplyReviewBypassDetachesEvidence(t *testing.T) 
 	require.NoError(t, mock.ExpectationsWereMet(), "review bypass should remain scoped to org, session, and changeset")
 }
 
+func TestSessionPublicationStoreApplyManualTakeoverPreservesReviewEvidence(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID, changesetID, repositoryID, loopID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	maxPasses, revision, headSHA := 2, int64(4), "reviewed-head"
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","changeset_id":"` + changesetID.String() + `","publication_source":"agent_tool","publication_execution_source":"user"}`)
+	publication := models.SessionPublication{
+		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID, RepositoryID: repositoryID,
+		State: models.SessionPublicationStateReviewPending, Source: models.SessionPublicationSourceUser,
+		TriggerKind: models.SessionPublicationTriggerExplicitAction, HandoffMode: models.PRHandoffModePrePublish,
+		AutomaticPolicySource: models.PublicationPolicySourceExplicitAction,
+		ReviewPolicySource:    models.PublicationPolicySourceOrganization, ReviewMaxPasses: &maxPasses,
+		ReviewLoopID: &loopID, ReviewWorkspaceRevision: &revision, ReviewDesiredHeadSHA: &headSHA,
+		ReviewGateState: models.SessionPublicationReviewGatePending,
+		JobQueue:        models.SessionPublicationJobQueueAgent, RequestPayload: payload, RequestGenerationAt: now,
+		BaseBranch: "main", HeadBranch: "143/session", RequestedAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	stored := publication
+	stored.Source = models.SessionPublicationSourceAgentTool
+	stored.TriggerKind = models.SessionPublicationTriggerAgentReady
+	stored.AutomaticPolicySource = models.PublicationPolicySourceProductDefault
+
+	mock.ExpectQuery(`UPDATE session_publications[\s\S]+job_queue = @job_queue[\s\S]+request_payload = @request_payload::jsonb[\s\S]+org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id`).
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+			"job_queue": models.SessionPublicationJobQueueAgent, "request_payload": string(payload),
+			"request_generation_at": now,
+		}).
+		WillReturnRows(pgxmock.NewRows(sessionPublicationTestColumns()).AddRow(sessionPublicationTestRow(stored)...))
+
+	err = NewSessionPublicationStore(mock).ApplyManualTakeover(context.Background(), orgID, &publication)
+	require.NoError(t, err, "authorized manual takeover should transfer execution authority")
+	require.Equal(t, stored, publication, "manual takeover should preserve the complete recorded review evidence")
+	require.NoError(t, mock.ExpectationsWereMet(), "manual takeover should remain scoped to org, session, and changeset")
+}
+
 func TestSessionPublicationStoreStartAttempt(t *testing.T) {
 	t.Parallel()
 

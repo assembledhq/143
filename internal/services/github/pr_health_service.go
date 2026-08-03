@@ -1057,6 +1057,7 @@ func (s *PRService) reconcileSessionPublications(ctx context.Context, orgID uuid
 	for _, publication := range candidates {
 		if err := s.reconcileSessionPublication(ctx, publication); err != nil {
 			metrics.RecordSessionPublicationReconciliation(ctx, "error")
+			metrics.RecordPRPublicationFailure(ctx, false)
 			if markErr := s.publications.MarkFailed(
 				ctx,
 				publication.OrgID,
@@ -1082,7 +1083,19 @@ func (s *PRService) reconcileSessionPublications(ctx context.Context, orgID uuid
 }
 
 func (s *PRService) reconcileSessionPublication(ctx context.Context, publication models.SessionPublication) error {
+	executionSource, err := reconciliationPublicationExecutionSource(publication)
+	if err != nil {
+		return err
+	}
+	if s.publicationPolicy != nil && !s.publicationPolicy.PublicationExecutionEnabled(executionSource) {
+		metrics.RecordSessionPublicationReconciliation(ctx, "publication_paused")
+		return nil
+	}
 	if publication.ReviewGateState == models.SessionPublicationReviewGatePending {
+		if s.publicationPolicy != nil && !s.publicationPolicy.ReviewExecutionEnabled(executionSource) {
+			metrics.RecordSessionPublicationReconciliation(ctx, "review_paused")
+			return nil
+		}
 		if publication.ReviewLoopID == nil {
 			metrics.RecordSessionPublicationReconciliation(ctx, "review_resumed")
 			return s.resumeSessionPublicationCreation(ctx, publication)
@@ -1194,6 +1207,30 @@ func (s *PRService) reconcileSessionPublication(ctx context.Context, publication
 	return nil
 }
 
+func reconciliationPublicationExecutionSource(publication models.SessionPublication) (models.SessionPublicationSource, error) {
+	source := publication.Source
+	if source == "" {
+		// Legacy rows and lightweight internal callers predate the typed source;
+		// they represent explicit publication rather than agent-tool execution.
+		source = models.SessionPublicationSourceUser
+	}
+	if len(bytes.TrimSpace(publication.RequestPayload)) > 0 {
+		var payload struct {
+			PublicationExecutionSource string `json:"publication_execution_source"`
+		}
+		if err := json.Unmarshal(publication.RequestPayload, &payload); err != nil {
+			return "", fmt.Errorf("decode publication execution source: %w", err)
+		}
+		if payload.PublicationExecutionSource != "" {
+			source = models.SessionPublicationSource(payload.PublicationExecutionSource)
+		}
+	}
+	if err := source.Validate(); err != nil {
+		return "", fmt.Errorf("validate publication execution source: %w", err)
+	}
+	return source, nil
+}
+
 // completeReconciledSessionPublication applies every required local
 // checkpoint before making a durable publication terminal. Terminal GitHub
 // states must flow through the same lifecycle transition as webhooks and
@@ -1244,6 +1281,13 @@ func (s *PRService) completeReconciledSessionPublication(
 
 	if err := s.publications.MarkCompleted(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID); err != nil {
 		return err
+	}
+	if !publication.RequestedAt.IsZero() {
+		// The ordinary worker records this after its local completion work. A
+		// crash between the GitHub side effect and that checkpoint is completed
+		// here instead, so reconciliation must contribute the same time-to-PR
+		// signal or recovered publications disappear from rollout telemetry.
+		metrics.RecordPRPublicationLatency(ctx, time.Since(publication.RequestedAt))
 	}
 	return nil
 }

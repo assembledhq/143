@@ -354,8 +354,9 @@ func (s *SessionChangesetStore) ImportRemoteHead(ctx context.Context, orgID, ses
 	row := s.db.QueryRow(ctx, `UPDATE session_changesets SET
 		expected_remote_head_sha = @remote_head_sha,
 		status = CASE
-			WHEN status IN ('pr_open', 'merged', 'abandoned') THEN status
-			WHEN @local_head_sha <> ''
+			WHEN status IN ('materializing', 'needs_restack', 'restacking', 'restack_conflict', 'pr_open', 'merged', 'abandoned') THEN status
+			WHEN status IN ('external_update_detected', 'published_branch')
+			 AND @local_head_sha <> ''
 			 AND head_sha = @local_head_sha
 			 AND (@local_head_sha = @remote_head_sha OR @remote_is_ancestor)
 			THEN 'published_branch'

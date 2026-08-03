@@ -64,9 +64,9 @@ import { useOpenCodeAvailability, type OpenCodeModelAvailability } from "@/hooks
 import { useAuth } from "@/hooks/use-auth";
 import {
   DEFAULT_TIME_RANGE,
-  isRollingTimeRange,
   parseTimeRange,
   timeRangeBounds,
+  timeRangeRefreshDelayMs,
   type TimeRangeFilter,
 } from "@/lib/time-range";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
@@ -136,12 +136,12 @@ const TIME_RANGE_FILTER_PARSER = createParser<TimeRangeFilter>({
   parse: parseTimeRange,
   serialize: (value) => value,
 }).withDefault(DEFAULT_TIME_RANGE);
-const NO_TEMPLATE = "none";
 // Coalesce a burst of SSE lifecycle events into a single list refetch.
 const CODE_REVIEW_INVALIDATE_COALESCE_MS = 300;
 const CODE_REVIEW_PAGE_SIZE = 50;
 const CODE_REVIEW_SEARCH_DEBOUNCE_MS = 300;
 const CODE_REVIEW_TIME_WINDOW_REFRESH_MS = 60_000;
+const MAX_BROWSER_TIMEOUT_MS = 2_147_000_000;
 const MAX_REVIEWER_MODELS = 3;
 const CODE_REVIEW_REASONING_OPTIONS = [
   { value: "low", label: "Low" },
@@ -530,8 +530,6 @@ export default function CodeReviewsPage() {
     }, CODE_REVIEW_SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
   }, [search, setSearchParam]);
-  const [selectedTemplateKey, setSelectedTemplateKey] = useState(NO_TEMPLATE);
-  const [pendingTemplateApply, setPendingTemplateApply] = useState<{ key: string; title: string } | null>(null);
   const [selectedEvidenceSessionId, setSelectedEvidenceSessionId] = useState<string | null>(null);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [editingRequirementKey, setEditingRequirementKey] = useState<string | null>(null);
@@ -692,7 +690,7 @@ export default function CodeReviewsPage() {
     queryKey: queryKeys.repositories.all,
     queryFn: () => api.repositories.list(),
   });
-  const refreshRollingReviewWindow = useCallback(() => {
+  const refreshRelativeReviewWindow = useCallback(() => {
     timeRangeAnchorMsRef.current = Date.now();
     void queryClient.invalidateQueries({
       queryKey: queryKeys.codeReviews.lists(),
@@ -705,13 +703,38 @@ export default function CodeReviewsPage() {
     });
   }, [queryClient]);
   useEffect(() => {
-    if (!isRollingTimeRange(timeRangeFilter) || (isViewingReviewHistory && activeTab === "reviews")) return;
-    const timer = window.setInterval(
-      refreshRollingReviewWindow,
-      CODE_REVIEW_TIME_WINDOW_REFRESH_MS,
-    );
-    return () => window.clearInterval(timer);
-  }, [activeTab, isViewingReviewHistory, refreshRollingReviewWindow, timeRangeFilter]);
+    if (isViewingReviewHistory && activeTab === "reviews") return;
+
+    let timer: number | undefined;
+    const waitUntil = (refreshAtMs: number) => {
+      const remainingMs = refreshAtMs - Date.now();
+      if (remainingMs <= 0) {
+        refreshRelativeReviewWindow();
+        scheduleRefresh();
+        return;
+      }
+
+      timer = window.setTimeout(
+        () => waitUntil(refreshAtMs),
+        Math.min(remainingMs, MAX_BROWSER_TIMEOUT_MS),
+      );
+    };
+    const scheduleRefresh = () => {
+      const anchor = new Date(timeRangeAnchorMsRef.current);
+      const delay = timeRangeRefreshDelayMs(
+        timeRangeFilter,
+        anchor,
+        CODE_REVIEW_TIME_WINDOW_REFRESH_MS,
+      );
+      if (delay === null) return;
+      waitUntil(anchor.getTime() + delay);
+    };
+
+    scheduleRefresh();
+    return () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [activeTab, isViewingReviewHistory, refreshRelativeReviewWindow, timeRangeFilter]);
   // The reviews list refreshes live via the org-scoped SSE stream below; the
   // polling backstop only kicks in (faster) while the stream is unhealthy so a
   // Redis hiccup still surfaces new reviews. Replaces the old manual Refresh
@@ -737,9 +760,9 @@ export default function CodeReviewsPage() {
     if (invalidateTimerRef.current) return;
     invalidateTimerRef.current = setTimeout(() => {
       invalidateTimerRef.current = null;
-      refreshRollingReviewWindow();
+      refreshRelativeReviewWindow();
     }, pollMs(CODE_REVIEW_INVALIDATE_COALESCE_MS));
-  }, [activeTab, isViewingReviewHistory, refreshRollingReviewWindow]);
+  }, [activeTab, isViewingReviewHistory, refreshRelativeReviewWindow]);
   useEffect(
     () => () => {
       if (invalidateTimerRef.current) clearTimeout(invalidateTimerRef.current);
@@ -802,10 +825,6 @@ export default function CodeReviewsPage() {
       queryKey: queryKeys.codeReviews.githubTrigger(repository.id),
       queryFn: () => api.codeReviews.getGitHubTrigger(repository.id),
     })),
-  });
-  const templatesQuery = useQuery({
-    queryKey: queryKeys.codeReviews.templates,
-    queryFn: () => api.codeReviews.templates(),
   });
   const promptExamplesQuery = useQuery({
     queryKey: queryKeys.codeReviews.promptExamples,
@@ -971,8 +990,6 @@ export default function CodeReviewsPage() {
     () => reviews.find((review) => review.session_id === selectedEvidenceSessionId) ?? null,
     [reviews, selectedEvidenceSessionId],
   );
-  const templates = templatesQuery.data?.data ?? [];
-  const selectedTemplate = templates.find((template) => template.key === selectedTemplateKey);
   const orgSettings = (settingsQuery.data?.data?.settings ?? {}) as OrgSettings;
   const orgCodingCredentials = useMemo(() => orgCodingCredentialsQuery.data?.data ?? [], [orgCodingCredentialsQuery.data?.data]);
   const codeReviewResolvedCredentials = useMemo(
@@ -992,22 +1009,6 @@ export default function CodeReviewsPage() {
     [config, editingRequirementKey],
   );
   const editingRequirement = editingRequirementIndex >= 0 && config ? config.description_policy.requirements[editingRequirementIndex] : null;
-  const selectedTemplateAlreadyApplied = useMemo(() => {
-    if (!selectedTemplate || !config) return false;
-    return JSON.stringify(config) === JSON.stringify(selectedTemplate.config);
-  }, [config, selectedTemplate]);
-  useEffect(() => {
-    setPendingTemplateApply(null);
-  }, [selectedTemplateKey]);
-  useEffect(() => {
-    if (!pendingTemplateApply) return;
-    if (autosave.status === "saved") {
-      toast.success(`Applied ${pendingTemplateApply.title}`);
-      setPendingTemplateApply(null);
-    } else if (autosave.status === "error") {
-      setPendingTemplateApply(null);
-    }
-  }, [autosave.status, pendingTemplateApply]);
   // Build a fully-merged config from the freshest cache value. Returns null
   // only before the policy has loaded (controls are disabled until then).
   const draftFrom = (mutate: (next: CodeReviewPolicyConfig) => void): CodeReviewPolicyConfig | null => {
@@ -1426,14 +1427,7 @@ export default function CodeReviewsPage() {
                   invalidPolicyField={invalidPolicyField}
                 />
                 <AdvancedPolicySettings
-                  selectedTemplateKey={selectedTemplateKey}
-                  setSelectedTemplateKey={setSelectedTemplateKey}
-                  templates={templates}
-                  selectedTemplate={selectedTemplate}
-                  selectedTemplateAlreadyApplied={selectedTemplateAlreadyApplied}
                   config={config}
-                  readLatestConfig={readLatestConfig}
-                  setPendingTemplateApply={setPendingTemplateApply}
                   autosave={autosave}
                   buildConfig={buildConfig}
                   commitPolicy={commitPolicy}
@@ -1714,17 +1708,8 @@ function CodeReviewPromptExampleDialog({ selection, currentConfig, currentDraftV
   </DialogContent></Dialog>;
 }
 
-type CodeReviewPolicyTemplate = Awaited<ReturnType<typeof api.codeReviews.templates>>["data"][number];
-
 type AdvancedPolicySettingsProps = {
-  selectedTemplateKey: string;
-  setSelectedTemplateKey: (value: string) => void;
-  templates: CodeReviewPolicyTemplate[];
-  selectedTemplate?: CodeReviewPolicyTemplate;
-  selectedTemplateAlreadyApplied: boolean;
   config: CodeReviewPolicyConfig | null;
-  readLatestConfig: () => CodeReviewPolicyConfig | null;
-  setPendingTemplateApply: (value: { key: string; title: string }) => void;
   autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
   buildConfig: (mutate: (next: CodeReviewPolicyConfig) => void) => CodeReviewPolicyConfig;
   commitPolicy: (mutate: (next: CodeReviewPolicyConfig) => void) => void;
@@ -1736,14 +1721,7 @@ type AdvancedPolicySettingsProps = {
 };
 
 function AdvancedPolicySettings({
-  selectedTemplateKey,
-  setSelectedTemplateKey,
-  templates,
-  selectedTemplate,
-  selectedTemplateAlreadyApplied,
   config,
-  readLatestConfig,
-  setPendingTemplateApply,
   autosave,
   buildConfig,
   commitPolicy,
@@ -1756,55 +1734,6 @@ function AdvancedPolicySettings({
   return (
                 <AdvancedPolicyControls forceOpen={Boolean(invalidPolicyField && ["risk_policy", "inline_comment_limit", "agent_roster", "description_policy"].includes(invalidPolicyField))} onOpened={() => trackCodeReviewPolicyEvent({ event: "code_review_advanced_opened", scope: analyticsScope, subsection: "all", configured: true })}>
                   {invalidPolicyField ? <ErrorNotice title="Could not save this policy setting" description={`Correct the highlighted ${invalidPolicyField.replaceAll("_", " ")} setting and try again.`} /> : null}
-                  <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
-                    <FilterSelect
-                      label="Advanced policy preset"
-                      value={selectedTemplateKey}
-                      onValueChange={setSelectedTemplateKey}
-                      info="Selects a whole-policy replacement covering safety controls, thresholds, and agent settings. No selection makes no change; applying a selection autosaves a new policy version."
-                    >
-                      <SelectItem value={NO_TEMPLATE}>No template selected</SelectItem>
-                      {templates.map((template) => (
-                        <SelectItem key={template.key} value={template.key}>
-                          {template.title}
-                        </SelectItem>
-                      ))}
-                    </FilterSelect>
-                    <div className="flex items-center gap-1.5">
-                      <Button
-                        variant="outline"
-                        disabled={!selectedTemplate || !config}
-                        onClick={() => {
-                          if (!selectedTemplate) return;
-                          const latestConfig = readLatestConfig();
-                          const alreadyApplied =
-                            selectedTemplateAlreadyApplied ||
-                            (latestConfig
-                              ? JSON.stringify(latestConfig) === JSON.stringify(selectedTemplate.config)
-                              : false);
-                          if (alreadyApplied) {
-                            toast.info(`${selectedTemplate.title} is already applied`);
-                            return;
-                          }
-                          setPendingTemplateApply({
-                            key: selectedTemplate.key,
-                            title: selectedTemplate.title,
-                          });
-                          autosave.save(clonePolicy(selectedTemplate.config));
-                        }}
-                      >
-                        Apply preset
-                      </Button>
-                      <SettingInfoTooltip
-                        label="Apply advanced policy preset"
-                        description="Replaces the complete effective policy with the selected preset and autosaves a new policy version. This changes safety controls, thresholds, and agent settings—not just visible text."
-                      />
-                    </div>
-                    <p className="text-xs text-muted-foreground md:col-span-2">
-                      Applying a preset replaces safety controls, thresholds, and agent settings across the whole policy.
-                    </p>
-                  </div>
-
                 <div>
                   <div className="text-sm font-medium text-foreground">Fine-tuning</div>
                   <div className="mt-2 divide-y divide-border border-y border-border">
@@ -2012,7 +1941,7 @@ function AdvancedPolicyControls({ children, forceOpen, onOpened }: { children: R
           </h3>
           <SettingInfoTooltip
             label="Safeguards"
-            description="Contains deterministic approval safeguards, reviewer configuration, limits, structured PR-description checks, and whole-policy presets. Defaults remain enforced while this section is closed."
+            description="Contains deterministic approval safeguards, reviewer configuration, limits, and structured PR-description checks. Defaults remain enforced while this section is closed."
           />
         </div>
         <CollapsibleContent className="space-y-4 border-t border-border p-4 sm:p-5">{children}</CollapsibleContent>
@@ -2609,35 +2538,6 @@ function DescriptionRequirementSheet({
         ) : null}
       </SheetContent>
     </Sheet>
-  );
-}
-
-function FilterSelect({
-  label,
-  info,
-  value,
-  onValueChange,
-  children,
-}: {
-  label: string;
-  info?: string;
-  value: string;
-  onValueChange: (value: string) => void;
-  children: ReactNode;
-}) {
-  return (
-    <div className="flex min-w-0 flex-col gap-2">
-      <div className="flex items-center gap-1.5">
-      <Label className="text-xs text-muted-foreground">{label}</Label>
-        {info ? <SettingInfoTooltip label={label} description={info} /> : null}
-      </div>
-      <Select value={value} onValueChange={onValueChange}>
-        <SelectTrigger aria-label={label}>
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>{children}</SelectContent>
-      </Select>
-    </div>
   );
 }
 

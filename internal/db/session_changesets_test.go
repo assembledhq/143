@@ -444,7 +444,7 @@ func TestSessionChangesetStoreImportRemoteHeadRequiresSafeCheckpointToReconcile(
 			t.Cleanup(mock.Close)
 			orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
 			remoteHeadSHA := strings.Repeat("a", 40)
-			mock.ExpectQuery(`UPDATE session_changesets SET[\s\S]+WHEN @local_head_sha <> ''[\s\S]+head_sha = @local_head_sha[\s\S]+@local_head_sha = @remote_head_sha OR @remote_is_ancestor[\s\S]+THEN 'published_branch'[\s\S]+ELSE 'external_update_detected'[\s\S]+WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id`).
+			mock.ExpectQuery(`UPDATE session_changesets SET[\s\S]+WHEN status IN \('materializing', 'needs_restack', 'restacking', 'restack_conflict', 'pr_open', 'merged', 'abandoned'\) THEN status[\s\S]+WHEN status IN \('external_update_detected', 'published_branch'\)[\s\S]+AND @local_head_sha <> ''[\s\S]+head_sha = @local_head_sha[\s\S]+@local_head_sha = @remote_head_sha OR @remote_is_ancestor[\s\S]+THEN 'published_branch'[\s\S]+ELSE 'external_update_detected'[\s\S]+WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id`).
 				WithArgs(pgx.NamedArgs{
 					"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
 					"remote_head_sha": remoteHeadSHA, "local_head_sha": tt.localHeadSHA,

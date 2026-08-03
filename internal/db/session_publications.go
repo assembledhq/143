@@ -445,6 +445,48 @@ func (s *SessionPublicationStore) ApplyReviewBypass(ctx context.Context, orgID u
 	return nil
 }
 
+// ApplyManualTakeover transfers execution of a parked automated intent to an
+// authenticated explicit user request without changing its recorded review
+// gate or evidence. This is the manual fallback for execution kill switches.
+func (s *SessionPublicationStore) ApplyManualTakeover(ctx context.Context, orgID uuid.UUID, publication *models.SessionPublication) error {
+	if publication == nil {
+		return errors.New("session publication is required")
+	}
+	if publication.OrgID != uuid.Nil && publication.OrgID != orgID {
+		return errors.New("session publication org does not match orgID")
+	}
+	if publication.TriggerKind != models.SessionPublicationTriggerExplicitAction {
+		return errors.New("publication manual takeover must be an explicit action")
+	}
+	if publication.Source != models.SessionPublicationSourceUser {
+		return errors.New("publication manual takeover must originate from an authenticated user")
+	}
+	requestPayload := string(publication.RequestPayload)
+	if requestPayload == "" {
+		return errors.New("publication manual takeover payload is required")
+	}
+	rows, err := s.db.Query(ctx, `UPDATE session_publications
+		SET job_queue = @job_queue, request_payload = @request_payload::jsonb,
+			request_generation_at = GREATEST(request_generation_at, @request_generation_at),
+			last_error_code = NULL, last_error_message = NULL, updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id
+		  AND state NOT IN ('completed', 'completed_noop', 'terminal_failed')
+		RETURNING `+sessionPublicationSelectColumns, pgx.NamedArgs{
+		"org_id": orgID, "session_id": publication.SessionID, "changeset_id": publication.ChangesetID,
+		"job_queue": publication.JobQueue, "request_payload": requestPayload,
+		"request_generation_at": publication.RequestGenerationAt,
+	})
+	if err != nil {
+		return fmt.Errorf("apply session publication manual takeover: %w", err)
+	}
+	stored, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionPublication])
+	if err != nil {
+		return fmt.Errorf("collect transferred session publication: %w", err)
+	}
+	*publication = stored
+	return nil
+}
+
 func (s *SessionPublicationStore) GetByChangeset(ctx context.Context, orgID, sessionID, changesetID uuid.UUID) (models.SessionPublication, error) {
 	rows, err := s.db.Query(ctx, `SELECT `+sessionPublicationSelectColumns+`
 		FROM session_publications

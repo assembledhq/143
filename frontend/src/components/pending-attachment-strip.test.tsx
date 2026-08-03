@@ -53,7 +53,7 @@ describe("PendingAttachmentStrip", () => {
 
     const removeButton = screen.getByRole("button", { name: "Remove screenshot.png" });
     expect(removeButton).toHaveClass("top-0", "right-0");
-    expect(removeButton).toHaveClass("size-5");
+    expect(removeButton).toHaveClass("size-10", "sm:size-6");
 
     await user.click(removeButton);
 

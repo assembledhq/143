@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/assembledhq/143/internal/services/mcp"
@@ -32,9 +33,28 @@ func newPreviewAugmentedToolSource(base mcp.ToolSource, client *Client) mcp.Tool
 	return &previewAugmentedToolSource{base: base, preview: preview}
 }
 
-func newInternalPreviewAugmentedToolSource(base mcp.ToolSource, client *Client) mcp.ToolSource {
-	preview := &previewToolExecutor{client: client, internal: true}
-	return &previewAugmentedToolSource{base: base, preview: preview}
+// newInternalToolSource layers the internal meta tools, the platform preview
+// tools, and — outermost — the org capability filter on top of base. Every
+// in-sandbox entry point must build its source through here: the capability
+// filter is what enforces the org's tool policy, so a caller that assembles
+// previewAugmentedToolSource directly silently exempts itself from it.
+//
+// The preview executor is returned alongside the source so callers can
+// configure it (e.g. attaching --wait progress output) without reaching back
+// through the capability wrapper, which has to stay on the outside.
+func newInternalToolSource(ctx context.Context, base mcp.ToolSource, token, apiURL string, stderr io.Writer) (mcp.ToolSource, *previewToolExecutor) {
+	preview := &previewToolExecutor{client: NewClient(Config{ServerURL: apiURL, Token: token}), internal: true}
+	var source mcp.ToolSource = &previewAugmentedToolSource{
+		base:    mcp.NewInternalMetaToolSource(base, token, apiURL),
+		preview: preview,
+	}
+	snapshot, err := mcp.FetchCapabilitySnapshot(ctx, token, apiURL)
+	if err != nil {
+		fmt.Fprintf(stderr, "143-tools: capability snapshot unavailable, running without filter: %v\n", err)
+	} else if len(snapshot) > 0 {
+		source = mcp.NewCapabilityFilteredToolSource(source, mcp.ToolCapabilityPolicy{Capabilities: snapshot})
+	}
+	return source, preview
 }
 
 func (s *previewAugmentedToolSource) ListTools() []mcp.Tool {

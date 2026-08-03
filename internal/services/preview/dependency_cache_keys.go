@@ -24,7 +24,7 @@ const PreviewBuildCacheRuntimeVersion = "preview-build-cache-v1"
 // GOCACHE/GOMODCACHE). It is distinct from the workdir build cache version so
 // the two blobs occupy separate slots under the same build_artifact kind and
 // never overwrite each other.
-const PreviewBuildCacheHomeRuntimeVersion = "preview-build-cache-home-v1"
+const PreviewBuildCacheHomeRuntimeVersion = "preview-build-cache-home-v2-split"
 
 type PreviewInstallLockfileKey struct {
 	Path   string `json:"path"`

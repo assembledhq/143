@@ -5,7 +5,7 @@ import { QueryClient } from '@tanstack/react-query';
 import { act } from '@testing-library/react';
 import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers, mockPR, mockPRHealth } from '@/test/mocks/handlers';
-import { SessionDetailContent } from './session-detail-content';
+import { CHANGESET_SPLIT_MIN_ADDITIONS, SessionDetailContent } from './session-detail-content';
 import { queryKeys } from '@/lib/query-keys';
 import { markProvisionalSessionDetail } from '@/lib/session-detail-cache';
 import { SESSION_THREAD_STRIP_HEIGHT_CLASSNAME } from './session-detail-geometry';
@@ -404,12 +404,12 @@ describe('SessionDetailPage overview and review loop', () => {
 
     await screen.findByText('Could not reproduce the error in test environment');
     expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
-    expect(screen.queryByText('Review before PR')).not.toBeInTheDocument();
+    expect(screen.queryByText('Review before creating a PR?')).not.toBeInTheDocument();
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Code review' })).not.toBeInTheDocument();
   });
 
-  it('shows a disabled review action in Overview when changes exist but no snapshot is available', async () => {
+  it('shows a disabled review action before the split suggestion when no snapshot is available', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({
@@ -418,7 +418,7 @@ describe('SessionDetailPage overview and review loop', () => {
             snapshot_key: undefined,
             sandbox_state: 'none',
             diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
-            diff_stats: { added: 1, removed: 1, files_changed: 1 },
+            diff_stats: { added: CHANGESET_SPLIT_MIN_ADDITIONS, removed: 1, files_changed: 1 },
           },
         } satisfies SingleResponse<Session>);
       }),
@@ -432,13 +432,50 @@ describe('SessionDetailPage overview and review loop', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect(await screen.findByRole('button', { name: 'Review & fix' })).toBeDisabled();
-    expect(screen.getByText('Review before PR')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Review & fix' })).toHaveAttribute('title', 'A reusable sandbox snapshot is required before review');
+    const reviewButton = await screen.findByRole('button', { name: 'Review & fix' });
+    expect(reviewButton).toBeDisabled();
+    expect(screen.getByText('Review before creating a PR?')).toBeInTheDocument();
+    expect(screen.getByText('Ask a review agent to check the current diff and apply fixes.')).toBeInTheDocument();
+    expect(reviewButton).toHaveAttribute('title', 'A reusable sandbox snapshot is required before review');
+    const reviewAction = reviewButton.closest('[data-slot="agent-action-card-action"]');
+    expect(reviewAction).toHaveClass('ml-11', 'w-fit', 'self-start');
+    expect(reviewAction).toHaveClass('@min-[24rem]/agent-action:ml-0');
+    expect(reviewAction).not.toHaveClass('w-full');
+    expect(reviewButton).not.toHaveClass('w-full');
+    const reviewTitle = screen.getByText('Review before creating a PR?');
+    const splitTitle = screen.getByText('Need smaller pull requests?');
+    const reviewCard = reviewTitle.closest('[data-slot="card"]');
+    const splitCard = splitTitle.closest('[data-slot="card"]');
+    expect(reviewCard?.querySelector('[data-slot="agent-action-card-icon"] .lucide-scan-search')).toBeInTheDocument();
+    expect(splitCard?.querySelector('[data-slot="agent-action-card-icon"] .lucide-git-branch')).toBeInTheDocument();
+    expect(reviewTitle.compareDocumentPosition(splitTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
   });
 
-  it('keeps the Overview review card header stacked inside the constrained detail panel', async () => {
+  it('keeps PR details at the very top of the overview before the split suggestion', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            diff_stats: { added: CHANGESET_SPLIT_MIN_ADDITIONS, removed: 1, files_changed: 1 },
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={mockSessions[0].id} />);
+
+    const prDetailsTitle = await screen.findByText('PR health');
+    const splitTitle = screen.getByText('Need smaller pull requests?');
+    const prDetailsCard = prDetailsTitle.closest('[data-slot="card"]');
+
+    expect(prDetailsCard).not.toBeNull();
+    expect(prDetailsCard?.parentElement?.firstElementChild).toBe(prDetailsCard);
+    expect(prDetailsTitle.compareDocumentPosition(splitTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('shows a compact status card while the Overview review loop is running', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({
@@ -475,11 +512,11 @@ describe('SessionDetailPage overview and review loop', () => {
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
 
     const reviewStatus = await screen.findByText('Fixing with Claude Code');
-    const header = reviewStatus.closest('.flex.flex-col.gap-3');
+    const statusCard = reviewStatus.closest('[data-slot="card"]');
 
-    expect(header).not.toBeNull();
-    expect(header?.className).not.toContain('lg:flex-row');
-    expect(header?.className).not.toContain('lg:justify-between');
+    expect(statusCard).not.toBeNull();
+    expect(statusCard?.querySelector('.lucide-loader-circle')).toBeInTheDocument();
+    expect(within(statusCard as HTMLElement).getByText('The review loop is checking the changes and applying fixes.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
   });
 

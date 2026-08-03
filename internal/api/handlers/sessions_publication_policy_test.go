@@ -109,9 +109,9 @@ func TestSessionHandler_ResolveSessionPublicationPolicyDegradesOnInitiatorFailur
 	}
 }
 
-// The orchestrator suppresses the pre-PR review line when the cycle cannot
-// run; the API must describe the same policy the same way.
-func TestSessionHandler_ResolveSessionPublicationPolicyMirrorsPrePRReviewGate(t *testing.T) {
+// Runtime kill switches park work without changing the customer's saved
+// policy. The API exposes both facts so the workflow can explain the pause.
+func TestSessionHandler_ResolveSessionPublicationPolicySeparatesPolicyFromReviewExecution(t *testing.T) {
 	t.Parallel()
 
 	for _, reviewEnabled := range []bool{true, false} {
@@ -139,8 +139,11 @@ func TestSessionHandler_ResolveSessionPublicationPolicyMirrorsPrePRReviewGate(t 
 				&models.Session{ID: uuid.New(), OrgID: orgID})
 
 			require.NotNil(t, policy, "organization policy alone should still resolve")
-			require.Equal(t, reviewEnabled, policy.ReviewBeforePR,
-				"the API must not advertise a pre-PR review the agent was told is off")
+			require.True(t, policy.ReviewBeforePR, "the runtime switch must not rewrite the stored review policy")
+			require.Equal(t, reviewEnabled, policy.ReviewExecutionEnabled,
+				"the API should expose whether the configured review can currently execute")
+			require.True(t, policy.AgentPublicationExecutionEnabled,
+				"agent publication should default to enabled when no coordinator gate is installed")
 		})
 	}
 }
