@@ -108,7 +108,7 @@ Optional LLM routing vars:
 - [ ] Separate staging domain (example: `staging.<domain>`)
 - [ ] Separate staging database
 - [ ] Separate OAuth App + GitHub App
-- [ ] Same build artifacts as prod, different env vars/secrets
+- [ ] Same build outputs as prod, different env vars/secrets
 
 ## 8. Current Repo Reality Checks
 

@@ -57,12 +57,13 @@ const (
 	// OAuth state cookie names — each flow gets its own cookie so concurrent
 	// flows cannot collide. Integration cookies use the _integration_ infix to
 	// distinguish them from the user-auth cookies in auth.go.
-	githubOAuthStateCookie            = "github_oauth_state"
-	googleOAuthStateCookie            = "google_oauth_state"
-	linearIntegrationOAuthStateCookie = "linear_integration_oauth_state"
-	sentryIntegrationOAuthStateCookie = "sentry_integration_oauth_state"
-	githubIntegrationOAuthStateCookie = "github_integration_oauth_state"
-	slackIntegrationOAuthStateCookie  = "slack_integration_oauth_state"
+	githubOAuthStateCookie              = "github_oauth_state"
+	googleOAuthStateCookie              = "google_oauth_state"
+	linearIntegrationOAuthStateCookie   = "linear_integration_oauth_state"
+	sentryIntegrationOAuthStateCookie   = "sentry_integration_oauth_state"
+	githubIntegrationOAuthStateCookie   = "github_integration_oauth_state"
+	githubIntegrationReturnCookiePrefix = "github_integration_return_"
+	slackIntegrationOAuthStateCookie    = "slack_integration_oauth_state"
 )
 
 var requiredSlackBotScopes = []string{
@@ -1084,11 +1085,16 @@ func (h *IntegrationHandler) ConnectSentry(w http.ResponseWriter, r *http.Reques
 // ──────────────────────────────────────────────────────────────────────────────
 
 func (h *IntegrationHandler) StartGitHubOAuth(w http.ResponseWriter, r *http.Request) {
+	returnTo, hasReturnTo := githubConnectReturnPath(r.URL.Query().Get("return_to"))
+	if r.URL.Query().Has("return_to") && !hasReturnTo {
+		writeError(w, r, http.StatusBadRequest, "INVALID_RETURN_TO", "return_to must be a supported application path")
+		return
+	}
 	// If a GitHub App slug is configured, redirect to the App installation page
 	// instead of the OAuth flow. Repositories are claimed explicitly after setup;
 	// the signed state binds the callback to the intended user and org.
 	if h.githubAppSlug != "" {
-		state, err := h.setGitHubSetupState(w, r)
+		state, err := h.setGitHubSetupState(w, r, returnTo)
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate oauth state", err)
 			return
@@ -1108,6 +1114,9 @@ func (h *IntegrationHandler) StartGitHubOAuth(w http.ResponseWriter, r *http.Req
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate oauth state", err)
 		return
+	}
+	if hasReturnTo {
+		h.setGitHubIntegrationReturnCookie(w, r, state, returnTo)
 	}
 
 	params := url.Values{
@@ -1163,7 +1172,11 @@ func (h *IntegrationHandler) HandleGitHubOAuthCallback(w http.ResponseWriter, r 
 		return
 	}
 
-	http.Redirect(w, r, h.frontendURL+"/integrations?github=connected", http.StatusTemporaryRedirect)
+	redirectURL := h.frontendURL + "/integrations?github=connected"
+	if returnTo, ok := h.githubIntegrationReturnPath(w, r, r.URL.Query().Get("state")); ok {
+		redirectURL = h.frontendURL + addQueryParameter(returnTo, "github", "connected")
+	}
+	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 }
 
 // HandleGitHubAppInstalled is called after a user installs the GitHub App.
@@ -1172,11 +1185,13 @@ func (h *IntegrationHandler) HandleGitHubOAuthCallback(w http.ResponseWriter, r 
 // redirects to the frontend integrations page.
 func (h *IntegrationHandler) HandleGitHubAppInstalled(w http.ResponseWriter, r *http.Request) {
 	activeOrgID := middleware.OrgIDFromContext(r.Context())
-	orgID, userID, ok := h.validateGitHubSetupState(w, r)
+	setupState, ok := h.validateGitHubSetupState(w, r)
 	if !ok {
 		writeError(w, r, http.StatusBadRequest, "INVALID_GITHUB_SETUP_STATE", "github setup state is missing, expired, or invalid")
 		return
 	}
+	orgID := setupState.OrgID
+	userID := setupState.UserID
 	if !h.userIsAdminInOrg(r.Context(), userID, orgID) {
 		writeError(w, r, http.StatusForbidden, "FORBIDDEN", "admin access to the setup organization is required")
 		return
@@ -1248,14 +1263,36 @@ func (h *IntegrationHandler) HandleGitHubAppInstalled(w http.ResponseWriter, r *
 	})
 	if marshalErr != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(marshalErr).Msg("failed to marshal installation config")
-		http.Redirect(w, r, h.frontendURL+"/settings/integrations?github=connected", http.StatusTemporaryRedirect)
+		http.Redirect(w, r, h.githubIntegrationInstalledRedirect(setupState.ReturnTo, false), http.StatusTemporaryRedirect)
 		return
 	}
 	if err := h.integrationStore.UpdateConfig(ctx, orgID, integration.ID, configJSON); err != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to update integration config")
 	}
 
-	http.Redirect(w, r, h.frontendURL+"/settings/integrations?github=connected&select_repos=1", http.StatusTemporaryRedirect)
+	http.Redirect(w, r, h.githubIntegrationInstalledRedirect(setupState.ReturnTo, true), http.StatusTemporaryRedirect)
+}
+
+func (h *IntegrationHandler) githubIntegrationInstalledRedirect(returnTo string, selectRepos bool) string {
+	if safeReturnTo, ok := githubConnectReturnPath(returnTo); ok {
+		return h.frontendURL + addQueryParameter(safeReturnTo, "github", "connected")
+	}
+	redirectPath := "/settings/integrations?github=connected"
+	if selectRepos {
+		redirectPath += "&select_repos=1"
+	}
+	return h.frontendURL + redirectPath
+}
+
+func addQueryParameter(path, key, value string) string {
+	parsed, err := url.Parse(path)
+	if err != nil {
+		return path
+	}
+	query := parsed.Query()
+	query.Set(key, value)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 func isGitHubAppSetupAction(action string) bool {
@@ -3477,9 +3514,10 @@ type githubSetupStatePayload struct {
 	UserID    uuid.UUID `json:"user_id"`
 	OrgID     uuid.UUID `json:"org_id"`
 	ExpiresAt time.Time `json:"expires_at"`
+	ReturnTo  string    `json:"return_to,omitempty"`
 }
 
-func (h *IntegrationHandler) setGitHubSetupState(w http.ResponseWriter, r *http.Request) (string, error) {
+func (h *IntegrationHandler) setGitHubSetupState(w http.ResponseWriter, r *http.Request, returnTo string) (string, error) {
 	user := middleware.UserFromContext(r.Context())
 	if user == nil {
 		return "", errors.New("authenticated user required for github setup")
@@ -3497,6 +3535,7 @@ func (h *IntegrationHandler) setGitHubSetupState(w http.ResponseWriter, r *http.
 		UserID:    user.ID,
 		OrgID:     orgID,
 		ExpiresAt: time.Now().UTC().Add(10 * time.Minute),
+		ReturnTo:  returnTo,
 	}
 	encoded, err := h.signGitHubSetupState(payload)
 	if err != nil {
@@ -3509,15 +3548,16 @@ func (h *IntegrationHandler) setGitHubSetupState(w http.ResponseWriter, r *http.
 		MaxAge:   600,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		Secure:   isSecureRequest(r),
 	})
 	return encoded, nil
 }
 
-func (h *IntegrationHandler) validateGitHubSetupState(w http.ResponseWriter, r *http.Request) (uuid.UUID, uuid.UUID, bool) {
+func (h *IntegrationHandler) validateGitHubSetupState(w http.ResponseWriter, r *http.Request) (githubSetupStatePayload, bool) {
 	state := r.URL.Query().Get("state")
 	cookie, err := r.Cookie(githubIntegrationOAuthStateCookie)
 	if err != nil || cookie.Value == "" || state == "" || cookie.Value != state {
-		return uuid.Nil, uuid.Nil, false
+		return githubSetupStatePayload{}, false
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     githubIntegrationOAuthStateCookie,
@@ -3530,13 +3570,45 @@ func (h *IntegrationHandler) validateGitHubSetupState(w http.ResponseWriter, r *
 	payload, err := h.verifyGitHubSetupState(state)
 	if err != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("invalid github setup state")
-		return uuid.Nil, uuid.Nil, false
+		return githubSetupStatePayload{}, false
 	}
 	if time.Now().UTC().After(payload.ExpiresAt) {
 		zerolog.Ctx(r.Context()).Warn().Msg("expired github setup state")
-		return uuid.Nil, uuid.Nil, false
+		return githubSetupStatePayload{}, false
 	}
-	return payload.OrgID, payload.UserID, true
+	if payload.ReturnTo != "" {
+		if _, ok := githubConnectReturnPath(payload.ReturnTo); !ok {
+			zerolog.Ctx(r.Context()).Warn().Msg("invalid github setup return path")
+			return githubSetupStatePayload{}, false
+		}
+	}
+	return payload, true
+}
+
+func (h *IntegrationHandler) setGitHubIntegrationReturnCookie(w http.ResponseWriter, r *http.Request, state, returnTo string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     githubIntegrationReturnCookiePrefix + state,
+		Value:    url.QueryEscape(returnTo),
+		Path:     "/",
+		MaxAge:   600,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   isSecureRequest(r),
+	})
+}
+
+func (h *IntegrationHandler) githubIntegrationReturnPath(w http.ResponseWriter, r *http.Request, state string) (string, bool) {
+	cookieName := githubIntegrationReturnCookiePrefix + state
+	defer clearCookie(w, r, cookieName)
+	cookie, err := r.Cookie(cookieName)
+	if err != nil || cookie.Value == "" {
+		return "", false
+	}
+	decoded, err := url.QueryUnescape(cookie.Value)
+	if err != nil {
+		return "", false
+	}
+	return githubConnectReturnPath(decoded)
 }
 
 func (h *IntegrationHandler) signGitHubSetupState(payload githubSetupStatePayload) (string, error) {

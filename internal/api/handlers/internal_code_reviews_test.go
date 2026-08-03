@@ -91,7 +91,7 @@ func newInternalCodeReviewWriteFixture(t *testing.T) internalCodeReviewFixture {
 var internalCodeReviewListColumns = []string{
 	"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
 	"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
-	"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id",
+	"superseded_by_session_id", "review_output_key", "prompt_record_key", "github_review_id",
 	"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at", "retry_eligible", "session_title",
 	"repository_name", "github_repo", "github_pr_number", "github_pr_url", "pull_request_title", "pull_request_author",
 }
@@ -278,10 +278,10 @@ func TestInternalCodeReviewHandler_GetIncludeFlagsTruncateAndMarkEmptyPrompts(t 
 			agentResultID, fx.orgID, reviewSessionID, "claude_code", nil, models.CodeReviewAgentRoleReviewer,
 			models.CodeReviewAgentResultStatusCompleted, &rawOutput, nil, now,
 		))
-	fx.mock.ExpectQuery("FROM code_review_prompt_artifacts").
+	fx.mock.ExpectQuery("FROM code_review_prompt_records").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "session_id", "artifact_key", "role", "agent_provider", "content", "metadata", "created_at",
+			"id", "org_id", "session_id", "record_key", "role", "agent_provider", "content", "metadata", "created_at",
 		}))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/internal/code-reviews/"+reviewSessionID.String()+"?include_raw_output=true&include_prompts=true", nil)
@@ -297,7 +297,8 @@ func TestInternalCodeReviewHandler_GetIncludeFlagsTruncateAndMarkEmptyPrompts(t 
 				RawOutput      *string `json:"raw_output"`
 				RawOutputRunes int     `json:"raw_output_runes"`
 			} `json:"agent_results"`
-			PromptArtifacts *[]any `json:"prompt_artifacts"`
+			PromptRecords       *[]any `json:"prompt_records"`
+			LegacyPromptRecords *[]any `json:"prompt_artifacts"`
 		} `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), "get response should be JSON")
@@ -306,9 +307,11 @@ func TestInternalCodeReviewHandler_GetIncludeFlagsTruncateAndMarkEmptyPrompts(t 
 	require.True(t, strings.HasSuffix(*resp.Data.AgentResults[0].RawOutput, "...(truncated)"), "over-limit raw output should carry the truncation marker")
 	require.Equal(t, internalCodeReviewTextLimit+len("\n...(truncated)"), len(*resp.Data.AgentResults[0].RawOutput), "raw output should be cut at the rune limit")
 	require.Equal(t, len(rawOutput), resp.Data.AgentResults[0].RawOutputRunes, "rune count should report the original size so truncation is detectable")
-	require.NotNil(t, resp.Data.PromptArtifacts, "requested prompt artifacts should serialize as an empty list, not disappear")
-	require.Empty(t, *resp.Data.PromptArtifacts, "no stored artifacts should yield an empty list")
-	require.NoError(t, fx.mock.ExpectationsWereMet(), "get should load review, findings, agent results, and prompt artifacts")
+	require.NotNil(t, resp.Data.PromptRecords, "requested prompt records should serialize as an empty list, not disappear")
+	require.Empty(t, *resp.Data.PromptRecords, "no stored records should yield an empty list")
+	require.NotNil(t, resp.Data.LegacyPromptRecords, "requested prompt records should retain the compatibility collection key")
+	require.Empty(t, *resp.Data.LegacyPromptRecords, "compatibility collection should preserve an empty result")
+	require.NoError(t, fx.mock.ExpectationsWereMet(), "get should load review, findings, agent results, and prompt records")
 }
 
 func TestInternalCodeReviewHandler_GetHidesOtherRepositories(t *testing.T) {

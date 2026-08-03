@@ -2,7 +2,7 @@
 
 > **Status:** Partially Implemented | **Last reviewed:** 2026-06-30
 >
-> **Implementation notes:** Single-node and multi-node Docker Compose deployment artifacts exist, including `docker-compose.single-node.yml`, `docker-compose.app.yml`, `docker-compose.worker.yml`, `docker-compose.db.yml`, `docker-compose.redis.yml`, `docker-compose.logging.yml`, `deploy/Caddyfile`, `deploy/cloud-init/*`, `deploy/postgres/*`, and deployment/backup scripts under `deploy/scripts`. Later-phase items such as full autoscaling and higher-availability orchestration remain future work.
+> **Implementation notes:** Single-node and multi-node Docker Compose deployment files exist, including `docker-compose.single-node.yml`, `docker-compose.app.yml`, `docker-compose.worker.yml`, `docker-compose.db.yml`, `docker-compose.redis.yml`, `docker-compose.logging.yml`, `deploy/Caddyfile`, `deploy/cloud-init/*`, `deploy/postgres/*`, and deployment/backup scripts under `deploy/scripts`. Later-phase items such as full autoscaling and higher-availability orchestration remain future work.
 
 ## Context
 
@@ -36,9 +36,9 @@ Use this design doc for historical context, scaling rationale, and lower-level o
    (node provisioning), S3-compatible storage (backups). All open source, all
    work on every provider.
 
-### Current Repo Artifacts
+### Current Deployment Files
 
-| Artifact | Path | Notes |
+| File | Path | Notes |
 |---|---|---|
 | Server image | `Dockerfile` | Multi-stage Go build for the API/worker runtime. |
 | Frontend image | `Dockerfile.frontend` | Next.js standalone runtime image. |
@@ -497,7 +497,7 @@ First, create the config files that `docker-compose.prod.yml` references.
 
 ### Historical Phase 1 File Sketches
 
-The sketches below describe the original Phase 1 shape. The current repo artifacts are listed in [Current Repo Artifacts](#current-repo-artifacts); prefer those files and the public self-hosting docs when operating or changing the deployment.
+The sketches below describe the original Phase 1 shape. The current deployment files are listed in [Current Deployment Files](#current-deployment-files); prefer those files and the public self-hosting docs when operating or changing the deployment.
 
 #### 1. `docker-compose.prod.yml`
 

@@ -65,21 +65,21 @@ func TestSessionStore_UpdateResult_WithDiffSnapshot(t *testing.T) {
 	diff := "--- a/a.go\n+++ b/a.go\n"
 	headSHA := "head123"
 	baseSHA := "base123"
-	artifactVersion := 1
+	bundleVersion := 1
 	result := &models.SessionResult{
-		Diff:                            &diff,
-		DiffBaseCommitSHA:               &baseSHA,
-		DiffHeadCommitSHA:               &headSHA,
-		DiffWorkspaceDirty:              true,
-		DiffCollectedAt:                 &collectedAt,
-		DiffSource:                      "review",
-		ReviewArtifactKey:               strPtr("review-artifacts/org/session/artifact.json.gz"),
-		ReviewArtifactVersion:           &artifactVersion,
-		ReviewArtifactCompressedBytes:   128,
-		ReviewArtifactUncompressedBytes: 512,
-		ReviewArtifactFileCount:         2,
-		ReviewArtifactSkippedCount:      1,
-		ReviewArtifactTruncated:         true,
+		Diff:                          &diff,
+		DiffBaseCommitSHA:             &baseSHA,
+		DiffHeadCommitSHA:             &headSHA,
+		DiffWorkspaceDirty:            true,
+		DiffCollectedAt:               &collectedAt,
+		DiffSource:                    "review",
+		ReviewBundleKey:               strPtr("review-bundles/org/session/bundle.json.gz"),
+		ReviewBundleVersion:           &bundleVersion,
+		ReviewBundleCompressedBytes:   128,
+		ReviewBundleUncompressedBytes: 512,
+		ReviewBundleFileCount:         2,
+		ReviewBundleSkippedCount:      1,
+		ReviewBundleTruncated:         true,
 	}
 
 	mock.ExpectBegin()
@@ -93,7 +93,7 @@ func TestSessionStore_UpdateResult_WithDiffSnapshot(t *testing.T) {
 	mock.ExpectExec("UPDATE session_changesets.+SET head_sha = .+WHERE org_id = .+ AND session_id = .+ AND is_primary").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectQuery("INSERT INTO session_diff_snapshots[\\s\\S]+review_artifact_key[\\s\\S]+review_artifact_truncated").
+	mock.ExpectQuery("INSERT INTO session_diff_snapshots[\\s\\S]+review_bundle_key[\\s\\S]+review_bundle_truncated").
 		WithArgs(anyDBArgs(19)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(snapshotID))
 	mock.ExpectQuery("UPDATE sessions\\s+SET latest_diff_snapshot_id[\\s\\S]+workspace_revision = workspace_revision \\+ 1[\\s\\S]+workspace_revision_updated_at = @captured_at[\\s\\S]+RETURNING workspace_revision, workspace_revision_updated_at").
@@ -106,7 +106,7 @@ func TestSessionStore_UpdateResult_WithDiffSnapshot(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestSessionStore_GetLatestReviewArtifactRef(t *testing.T) {
+func TestSessionStore_GetLatestReviewBundleRef(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -116,17 +116,17 @@ func TestSessionStore_GetLatestReviewArtifactRef(t *testing.T) {
 	store := NewSessionStore(mock)
 	orgID := uuid.New()
 	sessionID := uuid.New()
-	key := "review-artifacts/org/session/artifact.json.gz"
+	key := "review-bundles/org/session/bundle.json.gz"
 	version := 1
 
-	mock.ExpectQuery("SELECT review_artifact_key, review_artifact_version").
+	mock.ExpectQuery("SELECT review_bundle_key, review_bundle_version").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"review_artifact_key", "review_artifact_version"}).AddRow(&key, &version))
+		WillReturnRows(pgxmock.NewRows([]string{"review_bundle_key", "review_bundle_version"}).AddRow(&key, &version))
 
-	got, err := store.GetLatestReviewArtifactRef(context.Background(), orgID, sessionID)
-	require.NoError(t, err, "GetLatestReviewArtifactRef should return artifact metadata")
-	require.Equal(t, &key, got.Key, "GetLatestReviewArtifactRef should return the artifact key")
-	require.Equal(t, &version, got.Version, "GetLatestReviewArtifactRef should return the artifact version")
+	got, err := store.GetLatestReviewBundleRef(context.Background(), orgID, sessionID)
+	require.NoError(t, err, "GetLatestReviewBundleRef should return bundle metadata")
+	require.Equal(t, &key, got.Key, "GetLatestReviewBundleRef should return the bundle key")
+	require.Equal(t, &version, got.Version, "GetLatestReviewBundleRef should return the bundle version")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

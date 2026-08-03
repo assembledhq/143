@@ -766,8 +766,8 @@ func TestWorkerSelector_SelectCachePlacementWorkerBatchesCapacityChecks(t *testi
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "worker_node_id", "size_bytes", "last_used_at", "created_at",
 		}).
-			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallArtifact, "cache-key", "placement", "worker-1", int64(10), now, now).
-			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallArtifact, "cache-key", "placement", "worker-2", int64(10), now, now))
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallOutput, "cache-key", "placement", "worker-1", int64(10), now, now).
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallOutput, "cache-key", "placement", "worker-2", int64(10), now, now))
 	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
 		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
 			AddRow("worker-1", "worker", "worker-1.internal", "active", metadata, now, now).
@@ -782,7 +782,7 @@ func TestWorkerSelector_SelectCachePlacementWorkerBatchesCapacityChecks(t *testi
 	// Keep this mocked database test independent of scheduler delays under
 	// coverage instrumentation in CI without changing the production timeout.
 	selector.cacheLookupTimeout = 5 * time.Second
-	worker, ok, err := selector.selectCachePlacementWorker(context.Background(), orgID, repoID, []WorkerCachePlacement{{Kind: models.PreviewCacheKindInstallArtifact, PlacementKey: "placement"}}, true, WorkerSelectionRequirements{})
+	worker, ok, err := selector.selectCachePlacementWorker(context.Background(), orgID, repoID, []WorkerCachePlacement{{Kind: models.PreviewCacheKindInstallOutput, PlacementKey: "placement"}}, true, WorkerSelectionRequirements{})
 	require.NoError(t, err, "cache placement worker lookup should not fail")
 	require.True(t, ok, "cache placement worker lookup should find a candidate")
 	require.Equal(t, "worker-2", worker.ID, "cache placement worker should skip full cache holders using one batched count")
@@ -811,8 +811,8 @@ func TestWorkerSelector_SelectCachePlacementWorkerChoosesLeastLoadedHolder(t *te
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "worker_node_id", "size_bytes", "last_used_at", "created_at",
 		}).
-			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallArtifact, "cache-key", "placement", "worker-busy", int64(10), now, now).
-			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallArtifact, "cache-key", "placement", "worker-idle", int64(10), now.Add(-time.Minute), now))
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallOutput, "cache-key", "placement", "worker-busy", int64(10), now, now).
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallOutput, "cache-key", "placement", "worker-idle", int64(10), now.Add(-time.Minute), now))
 	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
 		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
 			AddRow("worker-busy", "worker", "worker-busy.internal", "active", metadata, now, now).
@@ -824,7 +824,7 @@ func TestWorkerSelector_SelectCachePlacementWorkerChoosesLeastLoadedHolder(t *te
 			AddRow("worker-idle", 1))
 
 	selector := NewWorkerSelectorWithMaxPerWorker(db.NewNodeStore(mock), db.NewPreviewStore(mock), 10)
-	worker, ok, err := selector.selectCachePlacementWorker(context.Background(), orgID, repoID, []WorkerCachePlacement{{Kind: models.PreviewCacheKindInstallArtifact, PlacementKey: "placement"}}, true, WorkerSelectionRequirements{})
+	worker, ok, err := selector.selectCachePlacementWorker(context.Background(), orgID, repoID, []WorkerCachePlacement{{Kind: models.PreviewCacheKindInstallOutput, PlacementKey: "placement"}}, true, WorkerSelectionRequirements{})
 	require.NoError(t, err, "cache placement worker lookup should not fail")
 	require.True(t, ok, "cache placement worker lookup should find a candidate")
 	require.Equal(t, "worker-idle", worker.ID, "cache placement should prefer the least-loaded holder instead of the newest hint when both have the blob")
@@ -853,7 +853,7 @@ func TestWorkerSelector_SelectStartNodeWithCachePlacementsUsesPackageManagerHold
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(pgx.ErrNoRows)
 	mock.ExpectQuery("SELECT .+ FROM preview_dependency_cache_locations").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), models.PreviewCacheKindInstallArtifact, "install-placement", pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), models.PreviewCacheKindInstallOutput, "install-placement", pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "worker_node_id", "size_bytes", "last_used_at", "created_at",
 		}))
@@ -872,7 +872,7 @@ func TestWorkerSelector_SelectStartNodeWithCachePlacementsUsesPackageManagerHold
 
 	selector := NewWorkerSelectorWithMaxPerWorker(db.NewNodeStore(mock), db.NewPreviewStore(mock), 2)
 	worker, err := selector.SelectStartNodeWithCachePlacementsAndRequirements(context.Background(), orgID, &models.Session{ID: sessionID}, repoID, []WorkerCachePlacement{
-		{Kind: models.PreviewCacheKindInstallArtifact, PlacementKey: "install-placement"},
+		{Kind: models.PreviewCacheKindInstallOutput, PlacementKey: "install-placement"},
 		{Kind: models.PreviewCacheKindPackageManager, PlacementKey: "pm-placement"},
 	}, WorkerSelectionRequirements{})
 
@@ -952,7 +952,7 @@ func TestWorkerSelector_SelectStartNodeFallsBackToRecentRepoCacheHolder(t *testi
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
 	mock.ExpectQuery("SELECT .+ FROM preview_dependency_cache_locations").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), models.PreviewCacheKindInstallArtifact, "missing-placement", pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), models.PreviewCacheKindInstallOutput, "missing-placement", pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "worker_node_id", "size_bytes", "last_used_at", "created_at",
 		}))
@@ -960,7 +960,7 @@ func TestWorkerSelector_SelectStartNodeFallsBackToRecentRepoCacheHolder(t *testi
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "worker_node_id", "size_bytes", "last_used_at", "created_at",
-		}).AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallArtifact, "cache-key", "other-placement", "worker-warm", int64(10), now, now))
+		}).AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallOutput, "cache-key", "other-placement", "worker-warm", int64(10), now, now))
 	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
 		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
 			AddRow("worker-warm", "worker", "worker-warm.internal", "active", metadata, now, now))
@@ -971,7 +971,7 @@ func TestWorkerSelector_SelectStartNodeFallsBackToRecentRepoCacheHolder(t *testi
 
 	selector := NewWorkerSelectorWithMaxPerWorker(db.NewNodeStore(mock), db.NewPreviewStore(mock), 2)
 	worker, err := selector.SelectStartNodeWithCachePlacementsAndRequirements(context.Background(), orgID, &models.Session{ID: sessionID}, repoID, []WorkerCachePlacement{
-		{Kind: models.PreviewCacheKindInstallArtifact, PlacementKey: "missing-placement", Approximate: true},
+		{Kind: models.PreviewCacheKindInstallOutput, PlacementKey: "missing-placement", Approximate: true},
 	}, WorkerSelectionRequirements{})
 	require.NoError(t, err, "SelectStartNode should fall back to a recent repo cache holder")
 	require.Equal(t, "worker-warm", worker.ID, "recent repo cache holder should beat cold rendezvous when exact placement has no holder")
@@ -1012,7 +1012,7 @@ func TestWorkerSelector_SelectStartNodeWithPlacementPrefersRegionThenCrossRegion
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "worker_node_id", "size_bytes", "last_used_at", "created_at",
 		}).
-			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallArtifact, "cache-key", "placement", "west-worker", int64(10), now, now))
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallOutput, "cache-key", "placement", "west-worker", int64(10), now, now))
 	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
 		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
 			AddRow("east-worker", "worker", "east.internal", "active", eastMeta, now, now).
@@ -1038,7 +1038,7 @@ func TestWorkerSelector_SelectStartNodeWithPlacementPrefersRegionThenCrossRegion
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "worker_node_id", "size_bytes", "last_used_at", "created_at",
 		}).
-			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallArtifact, "cache-key", "placement", "west-worker", int64(10), now, now))
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallOutput, "cache-key", "placement", "west-worker", int64(10), now, now))
 	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
 		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
 			AddRow("east-worker", "worker", "east.internal", "active", eastMeta, now, now).

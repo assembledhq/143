@@ -8205,7 +8205,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		if err != nil {
 			return fmt.Errorf("fetch agent run: %w", err)
 		}
-		defer finalizeSessionBackedEvalArtifacts(ctx, stores, services, logger, orgID, runID)
+		defer finalizeSessionBackedEvalOutputs(ctx, stores, services, logger, orgID, runID)
 		if input.ThreadID != "" {
 			threadID, parseErr := uuid.Parse(input.ThreadID)
 			if parseErr != nil {
@@ -8672,7 +8672,7 @@ func markSessionBackedEvalRunning(ctx context.Context, stores *Stores, services 
 	}
 }
 
-func finalizeSessionBackedEvalArtifacts(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, sessionID uuid.UUID) {
+func finalizeSessionBackedEvalOutputs(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, sessionID uuid.UUID) {
 	if stores == nil || stores.Sessions == nil {
 		return
 	}
@@ -8762,8 +8762,8 @@ func finalizeSessionBackedEvalRun(ctx context.Context, stores *Stores, services 
 			}
 			return
 		}
-		if err := stores.EvalRuns.UpdatePostSessionArtifacts(ctx, session.OrgID, run.ID, diff.Diff, agentTrace, inputManifest); err != nil {
-			logger.Warn().Err(err).Str("eval_run_id", run.ID.String()).Msg("failed to persist session-backed eval run artifacts")
+		if err := stores.EvalRuns.UpdatePostSessionOutputs(ctx, session.OrgID, run.ID, diff.Diff, agentTrace, inputManifest); err != nil {
+			logger.Warn().Err(err).Str("eval_run_id", run.ID.String()).Msg("failed to persist session-backed eval run outputs")
 			return
 		}
 		if stores.Jobs != nil {
@@ -8833,14 +8833,14 @@ func newEvalGraderHandler(stores *Stores, services *Services, logger zerolog.Log
 			snapshots = services.Snapshots
 			llm = services.LLM
 		}
-		result, err := gradeEvalRunArtifacts(ctx, run, task, evalGraderDeps{
+		result, err := gradeEvalRunOutputs(ctx, run, task, evalGraderDeps{
 			session:   session,
 			provider:  provider,
 			snapshots: snapshots,
 			llm:       llm,
 		})
 		if err != nil {
-			return fmt.Errorf("grade eval run artifacts: %w", err)
+			return fmt.Errorf("grade eval run outputs: %w", err)
 		}
 		if err := stores.EvalRuns.UpdateResult(ctx, orgID, run.ID, result); err != nil {
 			return fmt.Errorf("update eval grader result: %w", err)
@@ -8857,7 +8857,7 @@ type evalGraderDeps struct {
 	llm       llmClient
 }
 
-func gradeEvalRunArtifacts(ctx context.Context, run models.EvalRun, task models.EvalTask, deps evalGraderDeps) (*models.EvalRunResult, error) {
+func gradeEvalRunOutputs(ctx context.Context, run models.EvalRun, task models.EvalTask, deps evalGraderDeps) (*models.EvalRunResult, error) {
 	var criteria []models.ScoringCriterion
 	if len(task.ScoringCriteria) > 0 {
 		if err := json.Unmarshal(task.ScoringCriteria, &criteria); err != nil {

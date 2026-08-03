@@ -243,7 +243,7 @@ func recordAutoRepairThreadRevertRegret(ctx context.Context, stores *Stores, log
 // revertDiffDisplayLimit caps how many bytes of a thread's diff we inline
 // into the revert-confirmation chat message. A larger diff gets truncated
 // with a pointer back to the full patch on the tab's diff view; this keeps
-// the chat column readable while preserving the full artifact elsewhere.
+// the chat column readable while preserving the full output elsewhere.
 const revertDiffDisplayLimit = 12_000
 
 func truncateDiffForDisplay(diff string) string {

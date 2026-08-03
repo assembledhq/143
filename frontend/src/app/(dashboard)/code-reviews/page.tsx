@@ -12,6 +12,7 @@ import {
   CircleHelp,
   ClipboardCheck,
   FileSearch,
+  Github,
   MessageSquareText,
   Plus,
   PowerOff,
@@ -73,6 +74,7 @@ import {
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { CodeReviewAnalyticsReport } from "@/components/code-review-analytics";
+import { GitHubReviewerConnectionSheet } from "@/components/code-review/github-reviewer-connection-sheet";
 import { SortableTableHeader } from "@/components/sortable-table-header";
 import {
   ALL_OUTCOMES,
@@ -495,6 +497,21 @@ export default function CodeReviewsPage() {
       .withOptions({ history: "push" }),
   );
   const activeTab: CodeReviewTab = tabParam === "disputes" && !canManagePolicy ? "reviews" : tabParam;
+  const [addRepositoryParam, setAddRepositoryParam] = useQueryState("add_repository", parseAsString);
+  const [githubConnectionResult, setGitHubConnectionResult] = useQueryState("github_pr", parseAsString);
+  const [githubAppConnectionResult, setGitHubAppConnectionResult] = useQueryState("github", parseAsString);
+  const [addRepositoryOpen, setAddRepositoryOpen] = useState(addRepositoryParam === "1");
+  useEffect(() => {
+    if (addRepositoryParam === "1") setAddRepositoryOpen(true);
+  }, [addRepositoryParam]);
+  const openAddRepository = useCallback(() => {
+    setAddRepositoryOpen(true);
+    void setAddRepositoryParam("1");
+  }, [setAddRepositoryParam]);
+  const changeAddRepositoryOpen = useCallback((open: boolean) => {
+    setAddRepositoryOpen(open);
+    void setAddRepositoryParam(open ? "1" : null);
+  }, [setAddRepositoryParam]);
   const setActiveTab = useCallback(
     (value: string) => {
       void setTabParam(value as CodeReviewTab);
@@ -710,6 +727,18 @@ export default function CodeReviewsPage() {
     queryKey: queryKeys.repositories.all,
     queryFn: () => api.repositories.list(),
   });
+  const integrationsQuery = useQuery({
+    queryKey: queryKeys.integrations.all,
+    queryFn: () => api.integrations.list(),
+  });
+  const githubAccountQuery = useQuery({
+    queryKey: ["github-status"],
+    queryFn: () => api.githubStatus.get(),
+  });
+  const githubTriggerStatusesQuery = useQuery({
+    queryKey: queryKeys.codeReviews.githubTriggers,
+    queryFn: () => api.codeReviews.listGitHubTriggers(),
+  });
   const refreshRelativeReviewWindow = useCallback(() => {
     timeRangeAnchorMsRef.current = Date.now();
     void queryClient.invalidateQueries({
@@ -840,12 +869,40 @@ export default function CodeReviewsPage() {
     queryFn: () => api.codexAuth.status(),
   });
   const repositories = repositoriesQuery.data?.data ?? [];
-  const githubTriggerQueries = useQueries({
-    queries: repositories.map((repository) => ({
-      queryKey: queryKeys.codeReviews.githubTrigger(repository.id),
-      queryFn: () => api.codeReviews.getGitHubTrigger(repository.id),
-    })),
-  });
+  const githubIntegration = integrationsQuery.data?.data.find(
+    (integration) => integration.provider === "github" && integration.status === "active",
+  );
+  const githubTriggerStatuses = githubTriggerStatusesQuery.data?.data ?? [];
+  const visibleGitHubTriggerStatuses = githubTriggerStatuses
+    .filter((trigger) => trigger.repository_status !== "disconnected" || !!trigger.trigger)
+    .slice()
+    .sort((left, right) => {
+      const priority = (status: CodeReviewGitHubTriggerResponse["status"]) => {
+        if (status === "disconnected" || status === "permission_required" || status === "error") return 0;
+        if (status === "ready") return 1;
+        return 2;
+      };
+      return priority(left.status) - priority(right.status) || (left.repository_full_name ?? "").localeCompare(right.repository_full_name ?? "");
+    });
+
+  useEffect(() => {
+    if (githubConnectionResult !== "connected") return;
+    toast.success("GitHub account connected", {
+      description: "Choose a repository to connect and set up its reviewer.",
+    });
+    void queryClient.invalidateQueries({ queryKey: ["github-status"] });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.githubTriggers });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.integrations.all });
+    void setGitHubConnectionResult(null);
+  }, [githubConnectionResult, queryClient, setGitHubConnectionResult]);
+  useEffect(() => {
+    if (githubAppConnectionResult !== "connected") return;
+    toast.success("GitHub App connected", {
+      description: "Choose a repository to connect and set up its reviewer.",
+    });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.integrations.all });
+    void setGitHubAppConnectionResult(null);
+  }, [githubAppConnectionResult, queryClient, setGitHubAppConnectionResult]);
   const promptExamplesQuery = useQuery({
     queryKey: queryKeys.codeReviews.promptExamples,
     queryFn: () => api.codeReviews.promptExamples(),
@@ -944,6 +1001,7 @@ export default function CodeReviewsPage() {
       void queryClient.invalidateQueries({
         queryKey: queryKeys.codeReviews.githubTrigger(targetRepositoryId),
       });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.githubTriggers });
       trackCodeReviewPolicyEvent({ event: "code_review_github_setup_completed", scope: "repository", configured: true });
     },
     onError: () => trackCodeReviewPolicyEvent({ event: "code_review_github_setup_failed", scope: "repository", configured: false }),
@@ -954,6 +1012,7 @@ export default function CodeReviewsPage() {
       void queryClient.invalidateQueries({
         queryKey: queryKeys.codeReviews.githubTrigger(targetRepositoryId),
       });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.githubTriggers });
     },
   });
   const [retryingReviewSessionIds, setRetryingReviewSessionIds] = useState<Set<string>>(() => new Set());
@@ -1541,38 +1600,73 @@ export default function CodeReviewsPage() {
                 />
               </fieldset>
               <SectionGroup
-                title="GitHub setup"
-                description="See which repositories can receive review requests from GitHub and manage each reviewer entry point."
+                title="GitHub reviewer connections"
+                description="Connect repositories and manage where teammates can request the 143 reviewer from GitHub."
                 variant="bordered"
                 headingLevel={3}
+                action={(
+                  <DisabledTooltip
+                    disabled={!canManagePolicy}
+                    content={!canManagePolicy ? "Only organization administrators can add GitHub reviewer connections." : undefined}
+                  >
+                    <Button
+                      size="sm"
+                      disabled={!canManagePolicy}
+                      onClick={openAddRepository}
+                    >
+                      <Plus className="h-4 w-4" />
+                      Add repository
+                    </Button>
+                  </DisabledTooltip>
+                )}
               >
                 <div className="space-y-3" aria-label="GitHub reviewer repositories">
-                  {repositoriesQuery.isLoading ? (
+                  {githubTriggerStatusesQuery.isLoading ? (
                     <div className="rounded-md border border-border p-4 text-sm text-muted-foreground">Loading repositories…</div>
-                  ) : repositories.length === 0 ? (
-                    <div className="rounded-md border border-border p-4 text-sm text-muted-foreground">
-                      No GitHub repositories are connected to this organization.
-                    </div>
-                  ) : repositories.map((repository, index) => {
-                    const triggerQuery = githubTriggerQueries[index];
-                    const setupPending = setupGitHubTrigger.isPending && setupGitHubTrigger.variables === repository.id;
-                    const deletePending = deleteGitHubTrigger.isPending && deleteGitHubTrigger.variables === repository.id;
+                  ) : githubTriggerStatusesQuery.isError ? (
+                    <ErrorNotice
+                      title="GitHub reviewer connections could not be loaded"
+                      description={apiErrorMessage(githubTriggerStatusesQuery.error) ?? "Try again in a moment."}
+                      action={{ label: "Retry", onClick: () => void githubTriggerStatusesQuery.refetch() }}
+                    />
+                  ) : visibleGitHubTriggerStatuses.length === 0 ? (
+                    <EmptyState
+                      variant="inline"
+                      icon={Github}
+                      title="No GitHub reviewer connections"
+                      description="Add a repository to make the 143 reviewer available from its pull requests."
+                      action={canManagePolicy ? { label: "Add your first repository", onClick: openAddRepository } : undefined}
+                    />
+                  ) : visibleGitHubTriggerStatuses.map((trigger) => {
+                    const setupPending = setupGitHubTrigger.isPending && setupGitHubTrigger.variables === trigger.repository_id;
+                    const deletePending = deleteGitHubTrigger.isPending && deleteGitHubTrigger.variables === trigger.repository_id;
                     return (
                       <GitHubTriggerPanel
-                        key={repository.id}
-                        repositoryName={repository.full_name}
-                        trigger={triggerQuery?.data?.data}
-                        isLoading={triggerQuery?.isLoading || triggerQuery?.isFetching}
-                        errorMessage={apiErrorMessage(triggerQuery?.error)}
-                        setupErrorMessage={setupGitHubTrigger.variables === repository.id ? apiErrorMessage(setupGitHubTrigger.error) : null}
+                        key={trigger.repository_id}
+                        repositoryName={trigger.repository_full_name ?? "Unknown repository"}
+                        trigger={trigger}
+                        isLoading={false}
+                        errorMessage={null}
+                        setupErrorMessage={setupGitHubTrigger.variables === trigger.repository_id ? apiErrorMessage(setupGitHubTrigger.error) : null}
                         setupPending={setupPending}
                         deletePending={deletePending}
                         canManage={canManagePolicy}
-                        onSetup={() => setupGitHubTrigger.mutate(repository.id)}
-                        onDelete={() => deleteGitHubTrigger.mutate(repository.id)}
+                        onSetup={() => setupGitHubTrigger.mutate(trigger.repository_id)}
+                        onReconnect={openAddRepository}
+                        onDelete={() => deleteGitHubTrigger.mutate(trigger.repository_id)}
                       />
                     );
                   })}
+                  {!githubTriggerStatusesQuery.isLoading && !githubTriggerStatusesQuery.isError && visibleGitHubTriggerStatuses.length > 0 ? (
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
+                      <p className="text-xs tabular-nums text-muted-foreground">
+                        {visibleGitHubTriggerStatuses.filter((trigger) => trigger.status === "ready").length} ready of {visibleGitHubTriggerStatuses.length} repositor{visibleGitHubTriggerStatuses.length === 1 ? "y" : "ies"}
+                      </p>
+                      <Button asChild variant="link" size="sm">
+                        <Link href="/settings/integrations">Manage all GitHub settings</Link>
+                      </Button>
+                    </div>
+                  ) : null}
                 </div>
               </SectionGroup>
               <AuditLogTrigger
@@ -1595,6 +1689,22 @@ export default function CodeReviewsPage() {
                 trackCodeReviewPolicyEvent({ event: "code_review_prompt_example_applied", scope: "organization", source: "example", example_key: promptExample.example.key, character_bucket: promptCharacterBucket(value), configured: true });
                 setPromptExample(null);
               }}
+            />
+            <GitHubReviewerConnectionSheet
+              open={addRepositoryOpen}
+              onOpenChange={changeAddRepositoryOpen}
+              canManage={canManagePolicy}
+              githubConnected={!!githubIntegration}
+              githubStatusLoading={integrationsQuery.isLoading}
+              githubStatusError={apiErrorMessage(integrationsQuery.error) ?? undefined}
+              onRetryGithubStatus={() => void integrationsQuery.refetch()}
+              installationId={githubIntegration?.github_installation_id}
+              accountConnected={githubAccountQuery.data?.connected ?? false}
+              accountNeedsReconnect={githubAccountQuery.data?.needs_reconnect ?? false}
+              accountStatusLoading={githubAccountQuery.isLoading}
+              accountStatusError={apiErrorMessage(githubAccountQuery.error) ?? undefined}
+              onRetryAccountStatus={() => void githubAccountQuery.refetch()}
+              triggerStatuses={githubTriggerStatuses}
             />
             <DescriptionRequirementSheet
               requirement={editingRequirement}
@@ -2197,6 +2307,7 @@ function GitHubTriggerPanel({
   deletePending,
   canManage,
   onSetup,
+  onReconnect,
   onDelete,
 }: {
   repositoryName: string;
@@ -2208,12 +2319,14 @@ function GitHubTriggerPanel({
   deletePending: boolean;
   canManage: boolean;
   onSetup: () => void;
+  onReconnect: () => void;
   onDelete: () => void;
 }) {
   const status = trigger?.status ?? "unconfigured";
   const ready = status === "ready";
   const authRequired = status === "auth_required";
   const permissionRequired = status === "permission_required";
+  const disconnected = status === "disconnected";
   const needsRepair = status === "error" || permissionRequired;
   const reviewer = trigger?.team_reviewer ?? "@org/143-code-reviewer";
   const setupDisabledReason = githubTriggerSetupDisabledReason({
@@ -2255,16 +2368,21 @@ function GitHubTriggerPanel({
         </div>
         <div className="flex shrink-0 flex-wrap gap-2">
           {authRequired ? (
-            <Button variant="outline" size="sm" disabled={!canManage} onClick={() => api.githubStatus.connect()}>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={!canManage}
+              onClick={() => api.githubStatus.connect(undefined, "/code-reviews?tab=policy&add_repository=1")}
+            >
               <Users className="h-4 w-4" />
               Connect GitHub
             </Button>
           ) : null}
           {!ready ? (
             <DisabledTooltip disabled={!!setupDisabledReason} content={setupDisabledReason}>
-              <Button variant="default" size="sm" disabled={!!setupDisabledReason} onClick={onSetup}>
+              <Button variant="default" size="sm" disabled={!!setupDisabledReason} onClick={disconnected ? onReconnect : onSetup}>
                 <Users className="h-4 w-4" />
-                {needsRepair ? "Repair GitHub reviewer" : "Set up GitHub reviewer"}
+                {disconnected ? "Reconnect repository" : needsRepair ? "Repair GitHub reviewer" : "Set up GitHub reviewer"}
               </Button>
             </DisabledTooltip>
           ) : null}
@@ -2347,6 +2465,8 @@ function githubTriggerStatusLabel(status: CodeReviewGitHubTriggerResponse["statu
       return "Needs GitHub account";
     case "permission_required":
       return "Needs app permissions";
+    case "disconnected":
+      return "Repository disconnected";
     case "error":
       return "Needs attention";
     default:
@@ -2356,7 +2476,7 @@ function githubTriggerStatusLabel(status: CodeReviewGitHubTriggerResponse["statu
 
 function githubTriggerStatusVariant(status: CodeReviewGitHubTriggerResponse["status"]): "success" | "secondary" | "destructive" | "outline" {
   if (status === "ready") return "success";
-  if (status === "permission_required" || status === "error") return "destructive";
+  if (status === "permission_required" || status === "disconnected" || status === "error") return "destructive";
   if (status === "auth_required") return "secondary";
   return "outline";
 }
@@ -3430,7 +3550,7 @@ function CodeReviewEvidenceSheet({
   const [selectedReasonCodes, setSelectedReasonCodes] = useState<string[]>([]);
   const agentResults = evidence?.agent_results ?? [];
   const findings = evidence?.findings ?? [];
-  const artifacts = evidence?.prompt_artifacts ?? [];
+  const records = evidence?.prompt_records ?? evidence?.prompt_artifacts ?? [];
   const reasonCodes = evidence?.risk_reason_codes ?? [];
   const disputesQuery = useInfiniteQuery({
     queryKey: queryKeys.codeReviews.disputes(review?.session_id ?? ""),
@@ -3521,7 +3641,7 @@ function CodeReviewEvidenceSheet({
               <div className="grid grid-cols-3 gap-3">
                 <EvidenceMetric label="Agents" value={agentResults.length} />
                 <EvidenceMetric label="Findings" value={findings.length} />
-                <EvidenceMetric label="Prompts" value={artifacts.length} />
+                <EvidenceMetric label="Prompts" value={records.length} />
               </div>
 
               {canFileDisputes && review?.status === "completed" && review.decision ? (
@@ -3650,21 +3770,23 @@ function CodeReviewEvidenceSheet({
               </section>
 
               <section className="space-y-3">
-                <EvidenceSectionHeader title="Prompt artifacts" empty={artifacts.length === 0} />
-                {artifacts.length === 0 ? (
-                  <div className="text-sm text-muted-foreground">No prompt artifacts recorded.</div>
+                <EvidenceSectionHeader title="Prompt records" empty={records.length === 0} />
+                {records.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">No prompt records recorded.</div>
                 ) : (
-                  artifacts.map((artifact) => (
-                    <div key={artifact.id} className="space-y-3 border-t border-border pt-3 first:border-t-0 first:pt-0">
+                  records.map((record) => (
+                    <div key={record.id} className="space-y-3 border-t border-border pt-3 first:border-t-0 first:pt-0">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0 space-y-1">
-                          <div className="truncate text-sm font-medium text-foreground">{artifact.artifact_key}</div>
-                          {artifact.agent_provider ? <div className="text-xs text-muted-foreground">{artifact.agent_provider}</div> : null}
+                          <div className="truncate text-sm font-medium text-foreground">
+                            {record.record_key ?? record.artifact_key}
+                          </div>
+                          {record.agent_provider ? <div className="text-xs text-muted-foreground">{record.agent_provider}</div> : null}
                         </div>
-                        <Badge variant="outline">{artifact.role}</Badge>
+                        <Badge variant="outline">{record.role}</Badge>
                       </div>
                       <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">
-                        {artifact.content}
+                        {record.content}
                       </pre>
                     </div>
                   ))

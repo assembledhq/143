@@ -2,7 +2,7 @@
 
 > **Status:** Implemented | **Last reviewed:** 2026-06-30
 
-Session detail PR actions use a stable lifecycle row. Actions stay visible when they belong to the current artifact state, and disabled states explain the temporary blocker with a tooltip/title. Actions are hidden only when they no longer make sense for the artifact.
+Session detail PR actions use a stable lifecycle row. Actions stay visible when they belong to the current output state, and disabled states explain the temporary blocker with a tooltip/title. Actions are hidden only when they no longer make sense for the output.
 
 ## Visibility policy
 

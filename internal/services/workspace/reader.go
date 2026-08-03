@@ -28,7 +28,7 @@ var ErrSnapshotMissing = errors.New("session has no live container and no snapsh
 var ErrSnapshotUnreadable = errors.New("snapshot exists but cannot be read")
 
 // ErrSnapshotUnavailable wraps object-store and staging failures when the
-// snapshot key exists conceptually but the server cannot load the artifact
+// snapshot key exists conceptually but the server cannot load the output
 // right now — e.g. S3 is unavailable, credentials are wrong, or the local
 // staging file cannot be written. The HTTP handler maps this to a 500-class
 // response so operational failures do not look like missing source files.

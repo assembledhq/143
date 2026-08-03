@@ -285,7 +285,7 @@ func TestSharedDependencyCache_SaveUploadsBlobChecksumAndReturnsSize(t *testing.
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "restore_attempt_count", "restore_success_count", "restore_total_duration_ms", "producer_duration_ms", "producer_benefit_count", "producer_benefit_total_ms", "last_restore_at", "last_used_at", "created_at",
 		}).
-			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallArtifact, cacheKey, "placement", "deps/"+cacheKey+".tar.gz", int64(len(payload)), []byte(`{}`), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), nil, now, now))
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallOutput, cacheKey, "placement", "deps/"+cacheKey+".tar.gz", int64(len(payload)), []byte(`{}`), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), nil, now, now))
 
 	blobStore := newMemorySnapshotStore()
 	cache, err := NewDependencyCache(DependencyCacheConfig{
@@ -308,10 +308,10 @@ func TestSharedDependencyCache_SaveUploadsBlobChecksumAndReturnsSize(t *testing.
 	require.Equal(t, int64(len(payload)), result.SizeBytes, "Save should report compressed archive size")
 	sum := sha256.Sum256(payload)
 	expectedChecksum := fmt.Sprintf("%x", sum[:])
-	expectedBlobKey := "deps/" + orgID.String() + "/" + repoID.String() + "/install_artifact/" + cacheKey + "/" + expectedChecksum + ".tar.gz"
+	expectedBlobKey := "deps/" + orgID.String() + "/" + repoID.String() + "/install_output/" + cacheKey + "/" + expectedChecksum + ".tar.gz"
 	require.Equal(t, payload, blobStore.blobs[expectedBlobKey], "Save should upload archive bytes to a checksum-addressed object key")
 	require.NotEmpty(t, bytes.TrimSpace(blobStore.blobs[expectedBlobKey+".sha256"]), "Save should upload checksum sidecar next to the checksum-addressed blob")
-	require.Empty(t, blobStore.blobs["deps/"+orgID.String()+"/"+repoID.String()+"/install_artifact/"+cacheKey+".tar.gz"], "Save should not overwrite a shared mutable blob key")
+	require.Empty(t, blobStore.blobs["deps/"+orgID.String()+"/"+repoID.String()+"/install_output/"+cacheKey+".tar.gz"], "Save should not overwrite a shared mutable blob key")
 	require.Contains(t, strings.Join(cache.executor.(*dependencyCacheExec).calls(), "\n"), "tar cf -", "Save should stream raw tar output (compression happens on the worker) instead of creating a sandbox temp archive")
 	require.NotContains(t, strings.Join(cache.executor.(*dependencyCacheExec).calls(), "\n"), "cat /tmp/preview-dependency-cache-", "Save should not read back a sandbox temp archive")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
@@ -366,7 +366,7 @@ func TestSharedDependencyCache_RestoreHonorsConfiguredTimeout(t *testing.T) {
 
 	started := time.Now()
 	err = cache.RestorePathCache(context.Background(), &agent.Sandbox{HomeDir: "/home/codex"}, &DependencyCacheHit{
-		Entry:   models.PreviewDependencyCache{ID: uuid.New(), OrgID: uuid.New(), CacheKind: models.PreviewCacheKindBuildArtifact, CacheKey: cacheKey, BlobKey: blobKey, SizeBytes: int64(len(payload)), Metadata: metadata, ProducerDurationMS: 1},
+		Entry:   models.PreviewDependencyCache{ID: uuid.New(), OrgID: uuid.New(), CacheKind: models.PreviewCacheKindBuildOutput, CacheKey: cacheKey, BlobKey: blobKey, SizeBytes: int64(len(payload)), Metadata: metadata, ProducerDurationMS: 1},
 		BlobKey: blobKey,
 	}, models.PreviewCacheRootHomeDir)
 	require.ErrorIs(t, err, context.DeadlineExceeded, "restore should return the configured deadline error")
@@ -459,7 +459,7 @@ func TestSharedDependencyCache_SaveBatchesEffectivePathExistenceProbe(t *testing
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "restore_attempt_count", "restore_success_count", "restore_total_duration_ms", "producer_duration_ms", "producer_benefit_count", "producer_benefit_total_ms", "last_restore_at", "last_used_at", "created_at",
 		}).
-			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallArtifact, cacheKey, "placement", "deps/"+cacheKey+".tar.gz", int64(len(payload)), []byte(`{}`), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), nil, now, now))
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallOutput, cacheKey, "placement", "deps/"+cacheKey+".tar.gz", int64(len(payload)), []byte(`{}`), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), nil, now, now))
 
 	exec := &dependencyCacheExec{payload: payload}
 	cache, err := NewDependencyCache(DependencyCacheConfig{
@@ -551,7 +551,7 @@ func TestSharedDependencyCache_SaveRejectsPreviewInstallMarkerParentPath(t *test
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "restore_attempt_count", "restore_success_count", "restore_total_duration_ms", "producer_duration_ms", "producer_benefit_count", "producer_benefit_total_ms", "last_restore_at", "last_used_at", "created_at",
 		}).
-			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallArtifact, cacheKey, "", "deps/blob.tar.gz", int64(len(payload)), []byte(`{}`), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), nil, now, now))
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallOutput, cacheKey, "", "deps/blob.tar.gz", int64(len(payload)), []byte(`{}`), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), nil, now, now))
 
 	cache, err := NewDependencyCache(DependencyCacheConfig{
 		Store:     db.NewPreviewStore(mock),
@@ -587,7 +587,7 @@ func TestSharedDependencyCache_EvictLocalLRURemovesOldestBlobAndLocation(t *test
 	require.NoError(t, err, "pgx mock should initialize")
 	defer mock.Close()
 	mock.ExpectExec("DELETE FROM preview_dependency_cache_locations").
-		WithArgs(pgxmock.AnyArg(), models.PreviewCacheKindInstallArtifact, pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), models.PreviewCacheKindInstallOutput, pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
 
 	cache, err := NewDependencyCache(DependencyCacheConfig{
@@ -605,6 +605,44 @@ func TestSharedDependencyCache_EvictLocalLRURemovesOldestBlobAndLocation(t *test
 	require.NoFileExists(t, oldPath, "local LRU should remove oldest blob first")
 	require.FileExists(t, newPath, "local LRU should keep newest blob within budget")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// A worker upgraded across the install_artifact -> install_output rename holds
+// the same blob under both directories: the legacy copy stops being touched
+// once a save writes the current one, so LRU reaches it first. Evicting that
+// orphan must not delete the placement hint the surviving copy still satisfies,
+// or cache-affinity routing silently stops sending work to a worker that has
+// the blob.
+func TestSharedDependencyCache_EvictLocalLRUKeepsLocationWhileAnotherCopySurvives(t *testing.T) {
+	t.Parallel()
+
+	localDir := t.TempDir()
+	cacheKey := strings.Repeat("a", 64)
+
+	cache, err := NewDependencyCache(DependencyCacheConfig{
+		Store:         db.NewPreviewStore(nil),
+		Executor:      &dependencyCacheExec{},
+		BlobStore:     newMemorySnapshotStore(),
+		Logger:        zerolog.Nop(),
+		WorkerNodeID:  "worker-1",
+		LocalDir:      localDir,
+		LocalMaxBytes: int64(len("current")),
+	})
+	require.NoError(t, err, "dependency cache should initialize")
+
+	legacyPath := cache.localBlobPathForDir("install_artifact", cacheKey)
+	currentPath := cache.localBlobPath(models.PreviewCacheKindInstallOutput, cacheKey)
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0o750), "legacy blob dir should be created")
+	require.NoError(t, os.MkdirAll(filepath.Dir(currentPath), 0o750), "current blob dir should be created")
+	require.NoError(t, os.WriteFile(legacyPath, []byte("stale"), 0o600), "orphaned legacy blob should be written")
+	require.NoError(t, os.WriteFile(currentPath, []byte("current"), 0o600), "current blob should be written")
+	require.NoError(t, os.Chtimes(legacyPath, time.Now().Add(-time.Hour), time.Now().Add(-time.Hour)), "legacy blob should be the LRU victim")
+
+	// db.NewPreviewStore(nil) panics on any query, so reaching the location
+	// delete would fail the test rather than silently pass.
+	require.NoError(t, cache.evictLocalLRU(context.Background()), "local LRU eviction should complete")
+	require.NoFileExists(t, legacyPath, "local LRU should evict the orphaned pre-rename copy")
+	require.FileExists(t, currentPath, "local LRU should keep the current copy within budget")
 }
 
 func TestSharedDependencyCache_RestoreDeletesMetadataWhenObjectMissing(t *testing.T) {
@@ -730,15 +768,15 @@ func TestSharedDependencyCache_RestoreFallsBackToObjectStoreWhenLocalBlobChecksu
 	require.NoError(t, err, "pgx mock should initialize")
 	defer mock.Close()
 	mock.ExpectExec("DELETE FROM preview_dependency_cache_locations").
-		WithArgs("worker-1", models.PreviewCacheKindBuildArtifact, cacheKey).
+		WithArgs("worker-1", models.PreviewCacheKindBuildOutput, cacheKey).
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
 	now := time.Now().UTC()
 	mock.ExpectQuery("INSERT INTO preview_dependency_cache_locations").
-		WithArgs(orgID, repoID, models.PreviewCacheKindBuildArtifact, cacheKey, "placement", "worker-1", int64(len(remotePayload))).
+		WithArgs(orgID, repoID, models.PreviewCacheKindBuildOutput, cacheKey, "placement", "worker-1", int64(len(remotePayload))).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key",
 			"worker_node_id", "size_bytes", "last_used_at", "created_at",
-		}).AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindBuildArtifact, cacheKey, "placement", "worker-1", int64(len(remotePayload)), now, now))
+		}).AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindBuildOutput, cacheKey, "placement", "worker-1", int64(len(remotePayload)), now, now))
 
 	cache, err := NewDependencyCache(DependencyCacheConfig{
 		Store:        db.NewPreviewStore(mock),
@@ -751,7 +789,7 @@ func TestSharedDependencyCache_RestoreFallsBackToObjectStoreWhenLocalBlobChecksu
 	})
 	require.NoError(t, err, "dependency cache should initialize")
 
-	localPath := cache.localBlobPath(models.PreviewCacheKindBuildArtifact, cacheKey)
+	localPath := cache.localBlobPath(models.PreviewCacheKindBuildOutput, cacheKey)
 	require.NoError(t, os.MkdirAll(filepath.Dir(localPath), 0o750), "local cache directory should be created")
 	localPayload := makeDependencyCacheTarGz(t, map[string]string{"node_modules/.cache/build": "stale"})
 	require.NoError(t, os.WriteFile(localPath, localPayload, 0o600), "stale local blob should be written")
@@ -761,7 +799,7 @@ func TestSharedDependencyCache_RestoreFallsBackToObjectStoreWhenLocalBlobChecksu
 			ID:                 entryID,
 			OrgID:              orgID,
 			RepoID:             repoID,
-			CacheKind:          models.PreviewCacheKindBuildArtifact,
+			CacheKind:          models.PreviewCacheKindBuildOutput,
 			CacheKey:           cacheKey,
 			PlacementKey:       "placement",
 			BlobKey:            "deps/blob.tar.gz",
@@ -778,6 +816,52 @@ func TestSharedDependencyCache_RestoreFallsBackToObjectStoreWhenLocalBlobChecksu
 	require.NoError(t, err, "fallback restore should rewrite the worker-local cache blob")
 	require.Equal(t, remotePayload, replacedPayload, "fallback restore should replace the stale local blob with the shared object blob")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// The local blob layout embeds the cache kind in the directory name, so the
+// install_artifact -> install_output rename would strand every blob a worker
+// already holds. Restores must still find them, and LRU eviction must report
+// the current kind so it deletes the matching location row instead of leaving a
+// placement hint pointing at a worker that no longer has the blob.
+func TestSharedDependencyCache_ReadsLocalBlobsWrittenUnderTheRenamedCacheKind(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	localDir := t.TempDir()
+	cacheKey := strings.Repeat("f", 64)
+	payload := makeDependencyCacheTarGz(t, map[string]string{"node_modules/.bin/next": "next"})
+	sum := sha256.Sum256(payload)
+	checksum := fmt.Sprintf("%x", sum[:])
+
+	cache, err := NewDependencyCache(DependencyCacheConfig{
+		Store:        db.NewPreviewStore(nil),
+		Executor:     &dependencyCacheExec{},
+		BlobStore:    newMemorySnapshotStore(),
+		Logger:       zerolog.Nop(),
+		Prefix:       "deps",
+		WorkerNodeID: "worker-1",
+		LocalDir:     localDir,
+	})
+	require.NoError(t, err, "dependency cache should initialize")
+
+	legacyPath := cache.localBlobPathForDir("install_artifact", cacheKey)
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0o750), "legacy local cache directory should be created")
+	require.NoError(t, os.WriteFile(legacyPath, payload, 0o600), "legacy local blob should be written")
+
+	blob, err := cache.stageBlob(ctx, &DependencyCacheHit{
+		Entry: models.PreviewDependencyCache{
+			CacheKind: models.PreviewCacheKindInstallOutput,
+			CacheKey:  cacheKey,
+		},
+	}, checksum)
+	require.NoError(t, err, "stageBlob should read a blob written under the pre-rename cache kind directory")
+	defer blob.cleanup()
+	require.Equal(t, checksum, blob.checksum, "the pre-rename local blob should satisfy the expected checksum")
+
+	entries, _, err := cache.localBlobEntries()
+	require.NoError(t, err, "local blob entries should enumerate")
+	require.Len(t, entries, 1, "the pre-rename blob should be enumerated for eviction")
+	require.Equal(t, models.PreviewCacheKindInstallOutput, entries[0].cacheKind, "eviction should report the current cache kind so it deletes the matching location row")
 }
 
 func TestSharedDependencyCache_RestoreRejectsPreviewInstallMarkerParentPath(t *testing.T) {
@@ -1078,7 +1162,7 @@ func TestSharedDependencyCache_SavePathCacheExcludesSubtrees(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "restore_attempt_count", "restore_success_count", "restore_total_duration_ms", "producer_duration_ms", "producer_benefit_count", "producer_benefit_total_ms", "last_restore_at", "last_used_at", "created_at",
 		}).
-			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallArtifact, cacheKey, "placement", "deps/"+cacheKey+".tar.gz", int64(len(payload)), []byte(`{}`), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), nil, now, now))
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallOutput, cacheKey, "placement", "deps/"+cacheKey+".tar.gz", int64(len(payload)), []byte(`{}`), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), nil, now, now))
 
 	exec := &dependencyCacheExec{payload: payload}
 	cache, err := NewDependencyCache(DependencyCacheConfig{
@@ -1091,7 +1175,7 @@ func TestSharedDependencyCache_SavePathCacheExcludesSubtrees(t *testing.T) {
 	require.NoError(t, err, "dependency cache should initialize")
 
 	_, err = cache.SavePathCache(ctx, &agent.Sandbox{WorkDir: "/workspace/repo"}, PreviewPathCacheSaveSpec{
-		Kind:         models.PreviewCacheKindInstallArtifact,
+		Kind:         models.PreviewCacheKindInstallOutput,
 		Root:         models.PreviewCacheRootWorkDir,
 		CacheKey:     cacheKey,
 		Paths:        []string{"node_modules"},
@@ -1119,7 +1203,7 @@ func TestSharedDependencyCache_SavePathCacheSeparatesExistenceProbes(t *testing.
 	cacheKey := strings.Repeat("d", 64)
 	payload := makeDependencyCacheTarGz(t, map[string]string{
 		"node_modules/.bin/next": "next",
-		".turbo/cache/hash":      "artifact",
+		".turbo/cache/hash":      "output",
 	})
 	now := time.Now().UTC()
 
@@ -1137,7 +1221,7 @@ func TestSharedDependencyCache_SavePathCacheSeparatesExistenceProbes(t *testing.
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "restore_attempt_count", "restore_success_count", "restore_total_duration_ms", "producer_duration_ms", "producer_benefit_count", "producer_benefit_total_ms", "last_restore_at", "last_used_at", "created_at",
 		}).
-			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindBuildArtifact, cacheKey, "placement", "deps/"+cacheKey+".tar.gz", int64(len(payload)), []byte(`{}`), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), nil, now, now))
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindBuildOutput, cacheKey, "placement", "deps/"+cacheKey+".tar.gz", int64(len(payload)), []byte(`{}`), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), nil, now, now))
 
 	exec := &dependencyCacheExec{payload: payload}
 	cache, err := NewDependencyCache(DependencyCacheConfig{
@@ -1150,7 +1234,7 @@ func TestSharedDependencyCache_SavePathCacheSeparatesExistenceProbes(t *testing.
 	require.NoError(t, err, "dependency cache should initialize")
 
 	_, err = cache.SavePathCache(ctx, &agent.Sandbox{WorkDir: "/workspace/repo"}, PreviewPathCacheSaveSpec{
-		Kind:     models.PreviewCacheKindBuildArtifact,
+		Kind:     models.PreviewCacheKindBuildOutput,
 		Root:     models.PreviewCacheRootWorkDir,
 		CacheKey: cacheKey,
 		Paths:    []string{"node_modules", ".turbo/cache"},
@@ -1195,7 +1279,7 @@ func TestSharedDependencyCache_SavePathCacheSkipsUploadWhenChecksumUnchanged(t *
 	require.NoError(t, err, "dependency cache should initialize")
 
 	result, err := cache.SavePathCache(ctx, &agent.Sandbox{WorkDir: "/workspace/repo"}, PreviewPathCacheSaveSpec{
-		Kind:           models.PreviewCacheKindBuildArtifact,
+		Kind:           models.PreviewCacheKindBuildOutput,
 		Root:           models.PreviewCacheRootWorkDir,
 		CacheKey:       cacheKey,
 		Paths:          []string{"node_modules/.cache/turbo"},
@@ -1220,7 +1304,7 @@ func TestSharedDependencyCache_SavePathCacheDeletesSupersededBlob(t *testing.T) 
 	cacheKey := strings.Repeat("d", 64)
 	payload := makeDependencyCacheTarGz(t, map[string]string{"node_modules/.cache/turbo/abc": "entry"})
 	now := time.Now().UTC()
-	oldBlobKey := "deps/" + orgID.String() + "/" + repoID.String() + "/build_artifact/" + cacheKey + "/oldchecksum.tar.gz"
+	oldBlobKey := "deps/" + orgID.String() + "/" + repoID.String() + "/build_output/" + cacheKey + "/oldchecksum.tar.gz"
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgx mock should initialize")
@@ -1231,13 +1315,13 @@ func TestSharedDependencyCache_SavePathCacheDeletesSupersededBlob(t *testing.T) 
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "restore_attempt_count", "restore_success_count", "restore_total_duration_ms", "producer_duration_ms", "producer_benefit_count", "producer_benefit_total_ms", "last_restore_at", "last_used_at", "created_at",
 		}).
-			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindBuildArtifact, cacheKey, "placement", oldBlobKey, int64(10), []byte(`{}`), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), nil, now, now))
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindBuildOutput, cacheKey, "placement", oldBlobKey, int64(10), []byte(`{}`), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), nil, now, now))
 	mock.ExpectQuery("INSERT INTO preview_dependency_cache").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "restore_attempt_count", "restore_success_count", "restore_total_duration_ms", "producer_duration_ms", "producer_benefit_count", "producer_benefit_total_ms", "last_restore_at", "last_used_at", "created_at",
 		}).
-			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindBuildArtifact, cacheKey, "placement", "deps/new.tar.gz", int64(len(payload)), []byte(`{}`), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), nil, now, now))
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindBuildOutput, cacheKey, "placement", "deps/new.tar.gz", int64(len(payload)), []byte(`{}`), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), nil, now, now))
 
 	blobStore := newMemorySnapshotStore()
 	require.NoError(t, blobStore.Save(ctx, oldBlobKey, bytes.NewReader([]byte("old"))), "old blob should exist before the save")
@@ -1253,7 +1337,7 @@ func TestSharedDependencyCache_SavePathCacheDeletesSupersededBlob(t *testing.T) 
 	require.NoError(t, err, "dependency cache should initialize")
 
 	_, err = cache.SavePathCache(ctx, &agent.Sandbox{WorkDir: "/workspace/repo"}, PreviewPathCacheSaveSpec{
-		Kind:     models.PreviewCacheKindBuildArtifact,
+		Kind:     models.PreviewCacheKindBuildOutput,
 		Root:     models.PreviewCacheRootWorkDir,
 		CacheKey: cacheKey,
 		Paths:    []string{"node_modules/.cache/turbo"},

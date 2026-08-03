@@ -4,20 +4,20 @@
 
 ## Summary
 
-Session previews should be able to reuse expensive dependency and build-cache artifacts across cold starts without reusing another session's source workspace.
+Session previews should be able to reuse expensive dependency and build-cache outputs across cold starts without reusing another session's source workspace.
 
 The platform already has two preview acceleration mechanisms:
 
 - Live session sandbox reuse: fastest path, but only works while the session container is still running.
 - Branch/PR preview startup snapshots: worker-local full-workspace snapshots keyed by commit, lockfiles, and preview config.
 
-Session previews cannot safely use full-workspace snapshots from another preview because they must reflect unpushed agent edits. This design adds a default-on dependency artifact cache for `preview.install`. By default, 143 caches repo-declared `clean_paths` and a small set of conservative paths inferred from known dependency files. Repos can opt out or add extra cache paths such as framework build caches.
+Session previews cannot safely use full-workspace snapshots from another preview because they must reflect unpushed agent edits. This design adds a default-on dependency output cache for `preview.install`. By default, 143 caches repo-declared `clean_paths` and a small set of conservative paths inferred from known dependency files. Repos can opt out or add extra cache paths such as framework build caches.
 
 ## 2026-06 Update: Package-Manager Caches And Prewarming
 
 The cache implementation now treats preview install caching as a generic path-cache with two durable `cache_kind` values:
 
-- `install_artifact`: WorkDir-relative dependency/build artifacts. These are the original dependency artifact caches and remain marker-gated on restore.
+- `install_output`: WorkDir-relative dependency/build outputs. These are the original dependency output caches and remain marker-gated on restore.
 - `package_manager`: HomeDir-relative package-manager global caches. These restore before `preview.install` even when the install marker is absent, because package-manager download caches are useful to first cold installs and are not removed by repo `clean_paths`.
 
 `preview.install.cache.package_manager` supports `enabled`, `include`, and additive HomeDir-relative `paths`. Omitted `include` infers managers from lockfiles and install command. Default paths are:
@@ -35,13 +35,13 @@ The cache implementation now treats preview install caching as a generic path-ca
 
 Package-manager paths reject absolute paths, `..`, globs, broad `.`, sensitive directories such as `.ssh`, `.gnupg`, `.codex`, `.claude`, `.config/gh`, `.143`, and parents/children of those sensitive paths.
 
-The DB tables `preview_dependency_cache` and `preview_dependency_cache_locations` now include `cache_kind`; uniqueness and placement indexes include `(org_id, repo_id, cache_kind, cache_key)`. Worker-local L1 blob paths are also kind-aware, with legacy install-artifact local paths still readable during rollout.
+The DB tables `preview_dependency_cache` and `preview_dependency_cache_locations` now include `cache_kind`; uniqueness and placement indexes include `(org_id, repo_id, cache_kind, cache_key)`. Worker-local L1 blob paths are also kind-aware, with legacy install-output local paths still readable during rollout.
 
-Preview dependency and package-manager cache keys use a stable sandbox cache ABI (`SANDBOX_CACHE_ABI`, persisted in sandbox metadata as `cache_abi`) instead of the deploy-specific sandbox image tag. Routine worker/server deploys therefore do not invalidate warm caches just because `IMAGE_TAG` changed. Operators must bump the ABI when the sandbox OS, libc, Node/Python/Go toolchains, package-manager behavior, or other baked runtime compatibility changes can make cached install artifacts unsafe to reuse. Older sandboxes without `cache_abi` fall back to their recorded image string for conservative compatibility.
+Preview dependency and package-manager cache keys use a stable sandbox cache ABI (`SANDBOX_CACHE_ABI`, persisted in sandbox metadata as `cache_abi`) instead of the deploy-specific sandbox image tag. Routine worker/server deploys therefore do not invalidate warm caches just because `IMAGE_TAG` changed. Operators must bump the ABI when the sandbox OS, libc, Node/Python/Go toolchains, package-manager behavior, or other baked runtime compatibility changes can make cached install outputs unsafe to reuse. Older sandboxes without `cache_abi` fall back to their recorded image string for conservative compatibility.
 
 Preview startup uses cache placement as a scheduling hint, not a correctness primitive. Exact config-derived placement keys prefer workers with known L1 blobs. When the API cannot know the exact config before worker selection, the repo-level fallback is marked approximate and the scheduler prefers recent repo cache holders before rendezvous hashing. The worker still recomputes exact cache keys inside the hydrated workspace before restore.
 
-Cache saves are kept out of the readiness-critical path. Normal preview launches compute cache keys during install, but defer package-manager and install-artifact archive/upload work until after the primary readiness path succeeds. Prewarm jobs still save synchronously because cache creation is their primary work.
+Cache saves are kept out of the readiness-critical path. Normal preview launches compute cache keys during install, but defer package-manager and install-output archive/upload work until after the primary readiness path succeeds. Prewarm jobs still save synchronously because cache creation is their primary work.
 
 The preview gateway keeps a short-lived access-session validation cache so asset-heavy preview page loads do not hit Postgres for every JS/CSS/image request. The cache is scoped to the decoded org, public host, and runtime preview ID, and is intentionally short TTL so revocation/expiry changes converge quickly while protecting hot page-load latency.
 
@@ -116,7 +116,7 @@ The new flow:
 
 This means cache restore is an accelerator, not the source of truth. The hydrated session snapshot remains authoritative for source files.
 
-**Restore and marker interaction:** The marker-existence check runs before dependency-cache lookup/restore. When the marker is absent and no `verify_paths` are declared (e.g. a new session for a repo without an install-output contract), restore is skipped with `skipped_marker_missing` and the normal install command runs. When the marker is absent but `verify_paths` are declared, restore runs and — when all verify paths exist afterwards — writes the marker and skips install (`restored_satisfied_install`); this is the cold-start fast path that production data showed was otherwise unreachable, because session snapshots either carry both the marker and the dependency tree or neither. When the session snapshot already contains the install marker, restore may run before full `verify_paths` validation so restored artifacts can satisfy `verify_paths` and skip install entirely. If dependency-cache restore fails for any reason, the marker is treated as untrusted for that launch and the normal `preview.install` command runs. This is conservative: some failures happen before sandbox mutation, but forcing install prevents a partially cleaned or partially extracted dependency tree from being accepted because an old marker still exists.
+**Restore and marker interaction:** The marker-existence check runs before dependency-cache lookup/restore. When the marker is absent and no `verify_paths` are declared (e.g. a new session for a repo without an install-output contract), restore is skipped with `skipped_marker_missing` and the normal install command runs. When the marker is absent but `verify_paths` are declared, restore runs and — when all verify paths exist afterwards — writes the marker and skips install (`restored_satisfied_install`); this is the cold-start fast path that production data showed was otherwise unreachable, because session snapshots either carry both the marker and the dependency tree or neither. When the session snapshot already contains the install marker, restore may run before full `verify_paths` validation so restored outputs can satisfy `verify_paths` and skip install entirely. If dependency-cache restore fails for any reason, the marker is treated as untrusted for that launch and the normal `preview.install` command runs. This is conservative: some failures happen before sandbox mutation, but forcing install prevents a partially cleaned or partially extracted dependency tree from being accepted because an old marker still exists.
 
 ### Cache-Key-Aware Scheduling
 
@@ -191,7 +191,7 @@ To opt out:
 | `preview.install.cache.enabled` | boolean | no | Defaults to `true`. Set to `false` to disable dependency cache restore/save for this preview config. |
 | `preview.install.cache.paths` | `string[]` | no | Additional repo-relative paths that 143 may restore before install and save after successful install. These are added to `clean_paths`. |
 
-There is no `mode` field. The cache always means: "143 may persist and restore install output artifacts from `clean_paths`, known safe inferred paths, plus any extra `cache.paths` between session preview cold starts."
+There is no `mode` field. The cache always means: "143 may persist and restore install outputs from `clean_paths`, known safe inferred paths, plus any extra `cache.paths` between session preview cold starts."
 
 ### Inferred Paths
 
@@ -247,7 +247,7 @@ Rules:
 - Empty paths and `.` are rejected because they are too broad.
 - Shell metacharacters should be rejected using the same conservative character policy as `clean_paths`, unless path handling is fully tar-list based and never shell-interpolated.
 
-> **Sandbox ABI warning:** The cache key includes the platform sandbox cache ABI, not the deploy image tag. If the sandbox image changes its baked OS/toolchain/runtime compatibility without bumping `SANDBOX_CACHE_ABI`, stale install artifacts can be reused. Bump the ABI for runtime compatibility changes; do not bump it for ordinary server/worker deploys.
+> **Sandbox ABI warning:** The cache key includes the platform sandbox cache ABI, not the deploy image tag. If the sandbox image changes its baked OS/toolchain/runtime compatibility without bumping `SANDBOX_CACHE_ABI`, stale install outputs can be reused. Bump the ABI for runtime compatibility changes; do not bump it for ordinary server/worker deploys.
 
 ### Named Config Merge Semantics
 
@@ -374,7 +374,7 @@ Add table-driven validation tests for:
 
 ### Dependency Cache Service
 
-Add a service in `internal/services/preview`, separate from `SnapshotCache` because the artifact shape and safety rules differ from full workspace snapshots.
+Add a service in `internal/services/preview`, separate from `SnapshotCache` because the output shape and safety rules differ from full workspace snapshots.
 
 ```go
 type DependencyCache interface {
@@ -445,7 +445,7 @@ Inputs:
 - sorted lockfile paths and SHA-256 contents,
 - sorted effective cache paths.
 
-Do not include raw `clean_paths` separately from `EffectivePaths`, and do not include `verify_paths` or `timeout_seconds` unless there is a concrete correctness reason. Those fields affect install execution policy, not the reusable dependency artifact identity.
+Do not include raw `clean_paths` separately from `EffectivePaths`, and do not include `verify_paths` or `timeout_seconds` unless there is a concrete correctness reason. Those fields affect install execution policy, not the reusable dependency output identity.
 
 ### Placement Key
 
@@ -785,7 +785,7 @@ Object storage lifecycle rules (e.g. S3 Object Lifecycle Policies) should expire
 ## Security and Secret Handling
 
 1. Runtime secret files are written after `preview.install` today. Keep that order so dependency cache save cannot include runtime secret files.
-2. Reject `.143/cache` and descendants in all dependency-cache paths so cache restore cannot persist platform-owned preview state or forge install success markers. Broad `clean_paths` may still be used for fresh installs, but unsafe paths are excluded from dependency artifact caching.
+2. Reject `.143/cache` and descendants in all dependency-cache paths so cache restore cannot persist platform-owned preview state or forge install success markers. Broad `clean_paths` may still be used for fresh installs, but unsafe paths are excluded from dependency output caching.
 3. Reject `.git` to avoid credential remnants and repository metadata corruption.
 4. Cache blobs are stored in shared object storage. Access must be restricted to the service's IAM role or equivalent; the bucket must not be public. If a worker-local L1 cache is used, those files should be `0600` and the directory `0750`.
 5. Cache metadata must not include secret values, env dumps, install output, or file contents.

@@ -20,7 +20,7 @@ import (
 )
 
 // internalCodeReviewTextLimit bounds large free-text fields (agent raw output,
-// prompt artifact content) in internal API responses. The sandbox tool client
+// prompt record content) in internal API responses. The sandbox tool client
 // caps responses at 2 MiB, and agents read these with a token budget — a
 // truncated tail is more useful than a failed call.
 const internalCodeReviewTextLimit = 16 * 1024
@@ -98,9 +98,10 @@ type internalCodeReviewFinding struct {
 	CreatedAt         time.Time                          `json:"created_at"`
 }
 
-type internalCodeReviewPromptArtifact struct {
+type internalCodeReviewPromptRecord struct {
 	ID            uuid.UUID `json:"id"`
-	ArtifactKey   string    `json:"artifact_key"`
+	RecordKey     string    `json:"record_key"`
+	LegacyKey     string    `json:"artifact_key"`
 	Role          string    `json:"role"`
 	AgentProvider string    `json:"agent_provider,omitempty"`
 	Content       string    `json:"content"`
@@ -117,10 +118,12 @@ type internalCodeReviewDetail struct {
 	FinalReviewBody       *string                         `json:"final_review_body,omitempty"`
 	Findings              []internalCodeReviewFinding     `json:"findings"`
 	AgentResults          []internalCodeReviewAgentResult `json:"agent_results"`
-	// Pointer so a requested-but-empty artifact list serializes as [] while an
+	// Pointer so a requested-but-empty record list serializes as [] while an
 	// unrequested one is omitted entirely — a plain slice with omitempty cannot
 	// distinguish the two.
-	PromptArtifacts *[]internalCodeReviewPromptArtifact `json:"prompt_artifacts,omitempty"`
+	PromptRecords *[]internalCodeReviewPromptRecord `json:"prompt_records,omitempty"`
+	// Keep the old collection key during the CLI compatibility window.
+	LegacyPromptRecords *[]internalCodeReviewPromptRecord `json:"prompt_artifacts,omitempty"`
 }
 
 const internalCodeReviewDefaultLimit = 20
@@ -320,24 +323,26 @@ func (h *InternalCodeReviewHandler) Get(w http.ResponseWriter, r *http.Request) 
 		detail.AgentResults = append(detail.AgentResults, item)
 	}
 	if includePrompts {
-		artifacts, err := h.store.ListPromptArtifacts(r.Context(), claims.OrgID, sessionID)
+		records, err := h.store.ListPromptRecords(r.Context(), claims.OrgID, sessionID)
 		if err != nil {
-			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_HISTORY_FAILED", "failed to list code review prompt artifacts", err)
+			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_HISTORY_FAILED", "failed to list code review prompt records", err)
 			return
 		}
-		items := make([]internalCodeReviewPromptArtifact, 0, len(artifacts))
-		for _, artifact := range artifacts {
-			items = append(items, internalCodeReviewPromptArtifact{
-				ID:            artifact.ID,
-				ArtifactKey:   artifact.ArtifactKey,
-				Role:          artifact.Role,
-				AgentProvider: artifact.AgentProvider,
-				Content:       truncateInternalCodeReviewText(artifact.Content),
-				ContentRunes:  utf8.RuneCountInString(artifact.Content),
-				CreatedAt:     artifact.CreatedAt,
+		items := make([]internalCodeReviewPromptRecord, 0, len(records))
+		for _, record := range records {
+			items = append(items, internalCodeReviewPromptRecord{
+				ID:            record.ID,
+				RecordKey:     record.RecordKey,
+				LegacyKey:     record.RecordKey,
+				Role:          record.Role,
+				AgentProvider: record.AgentProvider,
+				Content:       truncateInternalCodeReviewText(record.Content),
+				ContentRunes:  utf8.RuneCountInString(record.Content),
+				CreatedAt:     record.CreatedAt,
 			})
 		}
-		detail.PromptArtifacts = &items
+		detail.PromptRecords = &items
+		detail.LegacyPromptRecords = &items
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[internalCodeReviewDetail]{Data: detail})
 }

@@ -152,7 +152,7 @@ func TestGitHubTriggerSetupService_StatusAuthRequired(t *testing.T) {
 	repoID := uuid.New()
 	svc := NewGitHubTriggerSetupService(
 		&githubTriggerSetupStoreStub{getErr: pgx.ErrNoRows},
-		&githubTriggerRepoStoreStub{repo: models.Repository{ID: repoID, OrgID: orgID, FullName: "acme/api"}},
+		&githubTriggerRepoStoreStub{repo: models.Repository{ID: repoID, OrgID: orgID, FullName: "acme/api", Status: models.RepositoryStatusActive}},
 		&githubTriggerAuthStub{err: ghservice.ErrGitHubAppUserCredentialMissing},
 		testLogger(),
 	)
@@ -164,11 +164,92 @@ func TestGitHubTriggerSetupService_StatusAuthRequired(t *testing.T) {
 	require.Equal(t, "@acme/143-code-reviewer", resp.TeamReviewer, "Status should still expose the expected reviewer team")
 }
 
+func TestGitHubTriggerSetupService_ListStatus(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	readyRepoID := uuid.New()
+	availableRepoID := uuid.New()
+	disconnectedRepoID := uuid.New()
+	unconfiguredDisconnectedRepoID := uuid.New()
+	setting := models.CodeReviewGitHubTriggerSetting{
+		ID: uuid.New(), OrgID: orgID, RepositoryID: readyRepoID, Active: true,
+		TeamSlug: "143-code-reviewer", TeamName: "143 Code Reviewer",
+		RepoPermission: models.CodeReviewGitHubTriggerRepoPermissionPull,
+	}
+	disconnectedSetting := models.CodeReviewGitHubTriggerSetting{
+		ID: uuid.New(), OrgID: orgID, RepositoryID: disconnectedRepoID, Active: true,
+		TeamSlug: "143-code-reviewer", TeamName: "143 Code Reviewer",
+		RepoPermission: models.CodeReviewGitHubTriggerRepoPermissionPull,
+	}
+	auth := &githubTriggerAuthStub{err: ghservice.ErrGitHubAppUserCredentialMissing}
+	repoStore := &githubTriggerRepoStoreStub{repos: []models.Repository{
+		{ID: readyRepoID, OrgID: orgID, FullName: "acme/api", Status: models.RepositoryStatusActive},
+		{ID: availableRepoID, OrgID: orgID, FullName: "acme/web", Status: models.RepositoryStatusActive},
+		{ID: disconnectedRepoID, OrgID: orgID, FullName: "acme/legacy", Status: models.RepositoryStatusDisconnected},
+		{ID: unconfiguredDisconnectedRepoID, OrgID: orgID, FullName: "acme/old", Status: models.RepositoryStatusDisconnected},
+	}}
+	svc := NewGitHubTriggerSetupService(
+		&githubTriggerSetupStoreStub{settings: []models.CodeReviewGitHubTriggerSetting{setting, disconnectedSetting}},
+		repoStore,
+		auth,
+		testLogger(),
+	)
+
+	responses, err := svc.ListStatus(context.Background(), orgID, userID)
+
+	require.NoError(t, err, "ListStatus should return actionable states when GitHub user authorization is missing")
+	require.Equal(t, []models.CodeReviewGitHubTriggerResponse{
+		withGitHubTriggerSetting(defaultGitHubTriggerResponse(models.Repository{ID: readyRepoID, OrgID: orgID, FullName: "acme/api", Status: models.RepositoryStatusActive}), setting),
+		{
+			Status: models.CodeReviewGitHubTriggerStatusAuthRequired, RepositoryID: availableRepoID,
+			RepositoryFullName: "acme/web", RepositoryStatus: models.RepositoryStatusActive, GitHubOrg: "acme",
+			TeamSlug: models.DefaultCodeReviewGitHubTriggerTeamSlug, TeamName: models.DefaultCodeReviewGitHubTriggerTeamName,
+			TeamReviewer: "@acme/143-code-reviewer", RepoPermission: models.DefaultCodeReviewGitHubTriggerRepoPerm,
+			Message: "Connect your GitHub account before creating the reviewer team.",
+		},
+		{
+			Status: models.CodeReviewGitHubTriggerStatusDisconnected, RepositoryID: disconnectedRepoID,
+			RepositoryFullName: "acme/legacy", RepositoryStatus: models.RepositoryStatusDisconnected, GitHubOrg: "acme",
+			TeamSlug: models.DefaultCodeReviewGitHubTriggerTeamSlug, TeamName: models.DefaultCodeReviewGitHubTriggerTeamName,
+			TeamReviewer: "@acme/143-code-reviewer", RepoPermission: models.DefaultCodeReviewGitHubTriggerRepoPerm,
+			Trigger: &disconnectedSetting,
+			Message: "Reconnect this repository before setting up its GitHub reviewer.",
+		},
+	}, responses, "ListStatus should combine repository, trigger, connection, and auth state without per-repository lookups")
+	require.Equal(t, 1, auth.calls, "ListStatus should check the caller's GitHub authorization once for all repositories")
+	require.ElementsMatch(t, []uuid.UUID{readyRepoID, disconnectedRepoID}, repoStore.filters.IncludeRepositoryIDs, "ListStatus should request only configured inactive repositories in addition to active repositories")
+}
+
+func TestGitHubTriggerSetupService_SetupRejectsDisconnectedRepository(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	svc := NewGitHubTriggerSetupService(
+		&githubTriggerSetupStoreStub{},
+		&githubTriggerRepoStoreStub{repo: models.Repository{ID: repoID, OrgID: orgID, FullName: "acme/api", Status: models.RepositoryStatusDisconnected}},
+		&githubTriggerAuthStub{cfg: &models.GitHubAppUserConfig{AccessToken: "ghu_user"}},
+		testLogger(),
+	)
+
+	_, err := svc.Setup(context.Background(), GitHubTriggerSetupInput{OrgID: orgID, UserID: userID, RepositoryID: repoID})
+
+	require.ErrorIs(t, err, ErrGitHubTriggerRepoDisconnected, "Setup should require an active repository")
+}
+
 type githubTriggerSetupStoreStub struct {
 	setting     models.CodeReviewGitHubTriggerSetting
+	settings    []models.CodeReviewGitHubTriggerSetting
 	getErr      error
 	saved       bool
 	savedParams db.SaveCodeReviewGitHubTriggerParams
+}
+
+func (s *githubTriggerSetupStoreStub) ListActiveGitHubTriggers(context.Context, uuid.UUID) ([]models.CodeReviewGitHubTriggerSetting, error) {
+	return s.settings, s.getErr
 }
 
 func (s *githubTriggerSetupStoreStub) GetActiveGitHubTrigger(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewGitHubTriggerSetting, error) {
@@ -204,8 +285,18 @@ func (s *githubTriggerSetupStoreStub) DeactivateGitHubTrigger(context.Context, u
 }
 
 type githubTriggerRepoStoreStub struct {
-	repo models.Repository
-	err  error
+	repo    models.Repository
+	repos   []models.Repository
+	filters db.RepositoryFilters
+	err     error
+}
+
+func (s *githubTriggerRepoStoreStub) ListByOrg(_ context.Context, _ uuid.UUID, filters db.RepositoryFilters) ([]models.Repository, error) {
+	s.filters = filters
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.repos, nil
 }
 
 func (s *githubTriggerRepoStoreStub) GetByID(context.Context, uuid.UUID, uuid.UUID) (models.Repository, error) {
@@ -216,11 +307,13 @@ func (s *githubTriggerRepoStoreStub) GetByID(context.Context, uuid.UUID, uuid.UU
 }
 
 type githubTriggerAuthStub struct {
-	cfg *models.GitHubAppUserConfig
-	err error
+	cfg   *models.GitHubAppUserConfig
+	err   error
+	calls int
 }
 
 func (s *githubTriggerAuthStub) GetValidCredential(context.Context, uuid.UUID, uuid.UUID) (*models.GitHubAppUserConfig, error) {
+	s.calls++
 	if s.err != nil {
 		return nil, s.err
 	}

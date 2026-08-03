@@ -25,7 +25,7 @@ Implemented on 2026-06-09:
   `run_eval_bootstrap`; eval state is now bootstrapped from session terminal
   state.
 - Added session-terminal finalization that marks linked bootstrap runs and eval
-  runs failed when the session fails, stores completed session artifacts on eval
+  runs failed when the session fails, stores completed session outputs on eval
   runs, moves successful sessions into `grading`, enqueues `run_eval_grader`,
   updates batches, and publishes eval SSE wake events.
 - Added a dedicated post-session eval grader job boundary that reads the linked
@@ -66,7 +66,7 @@ Implemented on 2026-06-09:
   through the repository GitHub installation, proves the proposed solution diff
   matches the base-to-solution range in a sandbox, and dry-runs deterministic
   `code_check` commands before task creation.
-- Added persisted batch release-gate decision artifacts so completed batches
+- Added persisted batch release-gate decision outputs so completed batches
   record pass/fail/no-data decisions per active release gate and return them
   from batch detail APIs.
 - Added a first-class compare API that builds a normal eval batch from one
@@ -84,7 +84,7 @@ Still intentionally left for a later product iteration:
   directly.
 - Slice-level release-gate regression decisions across repository area, issue
   type, complexity, required tools, and risk tags. The current server-side gate
-  decision artifact evaluates aggregate completed-run metrics and optional
+  decision output evaluates aggregate completed-run metrics and optional
   dataset scoping.
 - Reviewer override workflow for accepting intentionally judgment-heavy
   candidates that fail deterministic-check requirements. The current hardening

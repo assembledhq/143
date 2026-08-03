@@ -111,7 +111,7 @@ func (h *PreviewHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 }
 
 // SetUploadStore injects the upload store used for user-visible preview tool
-// artifacts such as screenshots.
+// captures such as screenshots.
 func (h *PreviewHandler) SetUploadStore(store storage.UploadStore) {
 	h.uploads = store
 }
@@ -1045,7 +1045,7 @@ func (h *PreviewHandler) startPreviewFromRequest(ctx context.Context, orgID, use
 				if placementErr != nil {
 					h.logger.Warn().Err(placementErr).Str("session_id", sessionID.String()).Msg("failed to compute preview dependency cache placement key")
 				} else {
-					cachePlacements = append(cachePlacements, preview.WorkerCachePlacement{Kind: models.PreviewCacheKindInstallArtifact, PlacementKey: computedPlacementKey})
+					cachePlacements = append(cachePlacements, preview.WorkerCachePlacement{Kind: models.PreviewCacheKindInstallOutput, PlacementKey: computedPlacementKey})
 				}
 			}
 			if paths, _, enabled := preview.ResolvePreviewInstallPackageManagerCachePaths(body.Config.Install); enabled && len(paths) > 0 {
@@ -1061,7 +1061,7 @@ func (h *PreviewHandler) startPreviewFromRequest(ctx context.Context, orgID, use
 				if keyErr != nil {
 					h.logger.Warn().Err(keyErr).Str("session_id", sessionID.String()).Msg("failed to compute preview build cache placement key")
 				} else {
-					cachePlacements = append(cachePlacements, preview.WorkerCachePlacement{Kind: models.PreviewCacheKindBuildArtifact, PlacementKey: buildCacheKey})
+					cachePlacements = append(cachePlacements, preview.WorkerCachePlacement{Kind: models.PreviewCacheKindBuildOutput, PlacementKey: buildCacheKey})
 				}
 			}
 		}
@@ -1070,7 +1070,7 @@ func (h *PreviewHandler) startPreviewFromRequest(ctx context.Context, orgID, use
 			if placementErr != nil {
 				h.logger.Warn().Err(placementErr).Str("session_id", sessionID.String()).Msg("failed to compute preview dependency cache placement key")
 			} else {
-				cachePlacements = append(cachePlacements, preview.WorkerCachePlacement{Kind: models.PreviewCacheKindInstallArtifact, PlacementKey: computedPlacementKey, Approximate: true})
+				cachePlacements = append(cachePlacements, preview.WorkerCachePlacement{Kind: models.PreviewCacheKindInstallOutput, PlacementKey: computedPlacementKey, Approximate: true})
 			}
 		}
 	}
@@ -2567,7 +2567,8 @@ type captureScreenshotResponse struct {
 	ConsoleErrors []models.ConsoleMessage `json:"console_errors,omitempty"`
 	URL           string                  `json:"url"`
 	Viewport      models.ViewportSpec     `json:"viewport"`
-	Artifact      *models.PreviewArtifact `json:"artifact,omitempty"`
+	Capture       *models.PreviewCapture  `json:"capture,omitempty"`
+	LegacyCapture *models.PreviewCapture  `json:"artifact,omitempty"`
 	CapturedAt    time.Time               `json:"captured_at"`
 	PNGBase64     string                  `json:"png_base64,omitempty"`
 }
@@ -2644,7 +2645,7 @@ func (h *PreviewHandler) Observe(w http.ResponseWriter, r *http.Request) {
 
 // WatchBrowser returns a fixed, side-effect-free observation for the preview
 // panel. Viewers cannot supply navigation, viewport, persistence, cursor, or
-// artifact options through this endpoint.
+// capture options through this endpoint.
 func (h *PreviewHandler) WatchBrowser(w http.ResponseWriter, r *http.Request) {
 	middleware.OrgIDFromContext(r.Context())
 	h.observePreview(w, r, observePreviewRequest{InlineBase64: true, PreserveConsoleCursor: true, ReadOnly: true, Ephemeral: true, SkipSemantic: true})
@@ -2690,7 +2691,7 @@ func (h *PreviewHandler) observePreview(w http.ResponseWriter, r *http.Request, 
 	}
 	result.Ready = instance.Status == models.PreviewStatusReady || instance.Status == models.PreviewStatusPartiallyReady
 	if result.Screenshot != nil && !body.Ephemeral {
-		attachPreviewArtifacts(r.Context(), h, instance.OrgID, instance, result.Screenshot, "observation")
+		attachPreviewCaptures(r.Context(), h, instance.OrgID, instance, result.Screenshot, "observation")
 	}
 	if result.Screenshot != nil && !body.InlineBase64 {
 		result.Screenshot.PNG = nil
@@ -2757,7 +2758,7 @@ func (h *PreviewHandler) writeActResult(w http.ResponseWriter, r *http.Request, 
 		result.Observation.Ready = instance.Status == models.PreviewStatusReady || instance.Status == models.PreviewStatusPartiallyReady
 	}
 	if result.Observation != nil && result.Observation.Screenshot != nil && !ephemeral {
-		attachPreviewArtifacts(r.Context(), h, instance.OrgID, instance, result.Observation.Screenshot, "action_observation")
+		attachPreviewCaptures(r.Context(), h, instance.OrgID, instance, result.Observation.Screenshot, "action_observation")
 		if !inlineBase64 {
 			result.Observation.Screenshot.PNG = nil
 		}
@@ -2768,7 +2769,7 @@ func (h *PreviewHandler) writeActResult(w http.ResponseWriter, r *http.Request, 
 			if stepScreenshot == nil {
 				continue
 			}
-			attachPreviewArtifacts(r.Context(), h, instance.OrgID, instance, stepScreenshot, "action_step")
+			attachPreviewCaptures(r.Context(), h, instance.OrgID, instance, stepScreenshot, "action_step")
 			if !inlineBase64 {
 				stepScreenshot.PNG = nil
 			}
@@ -2925,23 +2926,23 @@ func (h *PreviewHandler) HumanAct(w http.ResponseWriter, r *http.Request) {
 	h.writeActResult(w, r, instance, result, body.InlineBase64, body.Ephemeral, "preview_human_act")
 }
 
-func (h *PreviewHandler) persistPreviewScreenshotArtifact(ctx context.Context, orgID, previewID uuid.UUID, kind string, result *models.ScreenshotResult) *models.PreviewArtifact {
+func (h *PreviewHandler) persistPreviewScreenshotCapture(ctx context.Context, orgID, previewID uuid.UUID, kind string, result *models.ScreenshotResult) *models.PreviewCapture {
 	if h.uploads == nil || result == nil || len(result.PNG) == 0 {
 		return nil
 	}
-	artifactID := uuid.NewString()
+	captureID := uuid.NewString()
 	now := time.Now()
-	key := fmt.Sprintf("%s/%s/preview-artifacts/%s/%s.png", orgID, now.Format("2006-01"), previewID, artifactID)
+	key := fmt.Sprintf("%s/%s/preview-captures/%s/%s.png", orgID, now.Format("2006-01"), previewID, captureID)
 	url, err := h.uploads.Save(ctx, key, bytes.NewReader(result.PNG), "image/png")
 	if err != nil {
 		h.logger.Warn().Err(err).
 			Str("preview_id", previewID.String()).
-			Str("artifact_kind", kind).
-			Msg("failed to persist preview screenshot artifact")
+			Str("capture_kind", kind).
+			Msg("failed to persist preview screenshot capture")
 		return nil
 	}
-	artifact := &models.PreviewArtifact{
-		ID:          artifactID,
+	capture := &models.PreviewCapture{
+		ID:          captureID,
 		Kind:        kind,
 		ContentType: "image/png",
 		URL:         url,
@@ -2949,15 +2950,15 @@ func (h *PreviewHandler) persistPreviewScreenshotArtifact(ctx context.Context, o
 		Bytes:       len(result.PNG),
 		CreatedAt:   now,
 	}
-	result.Artifact = artifact
-	return artifact
+	result.Capture = capture
+	return capture
 }
 
-func attachPreviewArtifacts(ctx context.Context, h *PreviewHandler, orgID uuid.UUID, instance *models.PreviewInstance, result *models.ScreenshotResult, kind string) {
+func attachPreviewCaptures(ctx context.Context, h *PreviewHandler, orgID uuid.UUID, instance *models.PreviewInstance, result *models.ScreenshotResult, kind string) {
 	if instance == nil || result == nil {
 		return
 	}
-	h.persistPreviewScreenshotArtifact(ctx, orgID, instance.ID, kind, result)
+	h.persistPreviewScreenshotCapture(ctx, orgID, instance.ID, kind, result)
 }
 
 func bindSessionBrowser(inspector preview.PreviewInspector, instance *models.PreviewInstance) {
@@ -3071,13 +3072,13 @@ func (h *PreviewHandler) CaptureScreenshot(w http.ResponseWriter, r *http.Reques
 	if result.Viewport.Width == 0 && result.Viewport.Height == 0 {
 		result.Viewport = models.ViewportSpec{Width: opts.ViewportW, Height: opts.ViewportH}
 	}
-	attachPreviewArtifacts(r.Context(), h, orgID, instance, result, "screenshot")
+	attachPreviewCaptures(r.Context(), h, orgID, instance, result, "screenshot")
 
-	// When an artifact was persisted, callers get a stable reference and don't
+	// When a capture was persisted, callers get a stable reference and don't
 	// need the full PNG inlined; defaulting it off keeps large base64 blobs out
-	// of agent context. Without an artifact (upload store unconfigured) we still
+	// of agent context. Without a capture (upload store unconfigured) we still
 	// inline for compatibility. An explicit inline_base64 always wins.
-	inlineBase64 := result.Artifact == nil
+	inlineBase64 := result.Capture == nil
 	if body.InlineBase64 != nil {
 		inlineBase64 = *body.InlineBase64
 	}
@@ -3087,16 +3088,17 @@ func (h *PreviewHandler) CaptureScreenshot(w http.ResponseWriter, r *http.Reques
 		ConsoleErrors: result.ConsoleErrors,
 		URL:           result.URL,
 		Viewport:      result.Viewport,
-		Artifact:      result.Artifact,
+		Capture:       result.Capture,
+		LegacyCapture: result.Capture,
 		CapturedAt:    result.CapturedAt,
 	}
 	if inlineBase64 {
 		resp.PNGBase64 = base64.StdEncoding.EncodeToString(result.PNG)
 	}
 	auditDetails := map[string]any{"tool": "preview_screenshot"}
-	if result.Artifact != nil {
-		auditDetails["artifact_id"] = result.Artifact.ID
-		auditDetails["artifact_url"] = result.Artifact.URL
+	if result.Capture != nil {
+		auditDetails["capture_id"] = result.Capture.ID
+		auditDetails["capture_url"] = result.Capture.URL
 	}
 	h.emitPreviewToolAudit(r, models.AuditActionPreviewScreenshotCaptured, instance, auditDetails)
 
@@ -3381,10 +3383,10 @@ func (h *PreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *http.Reque
 		}
 		for i := range actResult.Interaction.Steps {
 			if actResult.Interaction.Steps[i].Screenshot != nil {
-				attachPreviewArtifacts(r.Context(), h, orgID, instance, actResult.Interaction.Steps[i].Screenshot, "interaction_screenshot")
+				attachPreviewCaptures(r.Context(), h, orgID, instance, actResult.Interaction.Steps[i].Screenshot, "interaction_screenshot")
 				// Keep large base64 PNGs out of the tool response; callers use the
-				// persisted artifact reference. Screenshot bytes are still carried
-				// over the worker transport above so the artifact upload works.
+				// persisted capture reference. Screenshot bytes are still carried
+				// over the worker transport above so the capture upload works.
 				actResult.Interaction.Steps[i].Screenshot.PNG = nil
 			}
 		}
@@ -3431,9 +3433,9 @@ func (h *PreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *http.Reque
 	orgID := middleware.OrgIDFromContext(r.Context())
 	for i := range result.Steps {
 		if result.Steps[i].Screenshot != nil {
-			attachPreviewArtifacts(r.Context(), h, orgID, instance, result.Steps[i].Screenshot, "interaction_screenshot")
+			attachPreviewCaptures(r.Context(), h, orgID, instance, result.Steps[i].Screenshot, "interaction_screenshot")
 			// Keep large base64 PNGs out of the tool response; callers use the
-			// persisted artifact reference.
+			// persisted capture reference.
 			result.Steps[i].Screenshot.PNG = nil
 		}
 	}
@@ -3548,9 +3550,9 @@ func (h *PreviewHandler) CaptureMultiViewport(w http.ResponseWriter, r *http.Req
 	}
 	for i := range result.Captures {
 		result.Captures[i].Screenshot.Viewport = result.Captures[i].Viewport
-		attachPreviewArtifacts(r.Context(), h, orgID, instance, &result.Captures[i].Screenshot, "multi_viewport_screenshot")
+		attachPreviewCaptures(r.Context(), h, orgID, instance, &result.Captures[i].Screenshot, "multi_viewport_screenshot")
 		// Keep large base64 PNGs out of the tool response; callers use the
-		// persisted artifact reference.
+		// persisted capture reference.
 		result.Captures[i].Screenshot.PNG = nil
 	}
 	h.emitPreviewToolAudit(r, models.AuditActionPreviewToolInvoked, instance, map[string]any{

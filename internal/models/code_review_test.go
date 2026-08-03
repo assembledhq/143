@@ -326,6 +326,37 @@ func TestCodeReviewPolicyConfigValidate(t *testing.T) {
 	}
 }
 
+func TestCodeReviewGitHubTriggerStatusValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		status  CodeReviewGitHubTriggerStatus
+		wantErr bool
+	}{
+		{name: "unconfigured", status: CodeReviewGitHubTriggerStatusUnconfigured},
+		{name: "ready", status: CodeReviewGitHubTriggerStatusReady},
+		{name: "auth required", status: CodeReviewGitHubTriggerStatusAuthRequired},
+		{name: "permission required", status: CodeReviewGitHubTriggerStatusPermissionRequired},
+		{name: "disconnected", status: CodeReviewGitHubTriggerStatusDisconnected},
+		{name: "error", status: CodeReviewGitHubTriggerStatusError},
+		{name: "unknown", status: CodeReviewGitHubTriggerStatus("unknown"), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.status.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "unknown GitHub trigger status should be rejected")
+				return
+			}
+			require.NoError(t, err, "known GitHub trigger status should be accepted")
+		})
+	}
+}
+
 func TestResolveCodeReviewPolicyConfigNormalizesPromptFields(t *testing.T) {
 	t.Parallel()
 

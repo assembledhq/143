@@ -1,8 +1,8 @@
 ALTER TABLE preview_dependency_cache
-    ADD COLUMN cache_kind text NOT NULL DEFAULT 'install_artifact';
+    ADD COLUMN cache_kind text NOT NULL DEFAULT 'install_output';
 
 ALTER TABLE preview_dependency_cache_locations
-    ADD COLUMN cache_kind text NOT NULL DEFAULT 'install_artifact';
+    ADD COLUMN cache_kind text NOT NULL DEFAULT 'install_output';
 
 DROP INDEX IF EXISTS idx_preview_dependency_cache_lookup;
 DROP INDEX IF EXISTS idx_preview_dependency_cache_placement;

@@ -13,7 +13,7 @@ The feature builds on the implemented session-thread model:
 
 - product UI calls them **tabs**
 - backend/API objects call them **threads**
-- one session owns the sandbox, branch, preview, PR path, and final artifact
+- one session owns the sandbox, branch, preview, PR path, and final output
 - each tab/thread owns a transcript, runtime lane, status, model, delivery
   state, file attribution, and cost
 

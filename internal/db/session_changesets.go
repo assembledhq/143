@@ -703,7 +703,7 @@ func (s *SessionChangesetStore) InitializeSplit(ctx context.Context, orgID, sess
 		SELECT @org_id, @session_id, s.latest_diff_snapshot_id FROM sessions s
 		JOIN session_diff_snapshots d ON d.id = s.latest_diff_snapshot_id AND d.org_id = s.org_id AND d.session_id = s.id
 		WHERE s.org_id = @org_id AND s.id = @session_id AND s.deleted_at IS NULL
-		  AND s.latest_diff_snapshot_id IS NOT NULL AND NOT d.review_artifact_truncated
+		  AND s.latest_diff_snapshot_id IS NOT NULL AND NOT d.review_bundle_truncated
 		ON CONFLICT (org_id, session_id) DO NOTHING`, pgx.NamedArgs{"org_id": orgID, "session_id": sessionID})
 	if err != nil {
 		return fmt.Errorf("initialize changeset split: %w", err)

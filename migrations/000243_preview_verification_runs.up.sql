@@ -11,7 +11,7 @@ CREATE TABLE preview_verification_runs (
     max_attempts integer NOT NULL CHECK (max_attempts > 0),
     plan jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(plan) = 'array'),
     steps jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(steps) = 'array'),
-    artifacts jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(artifacts) = 'array'),
+    captures jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(captures) = 'array'),
     console_error_count integer NOT NULL DEFAULT 0 CHECK (console_error_count >= 0),
     summary text NOT NULL DEFAULT '',
     failure_reason text NOT NULL DEFAULT '',

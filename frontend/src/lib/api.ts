@@ -371,6 +371,10 @@ export const api = {
       get<import('./types').SingleResponse<import('./types').CodeReviewGitHubTriggerResponse>>(
         `/api/v1/code-review-github-trigger?repository_id=${encodeURIComponent(repositoryId)}`,
       ),
+    listGitHubTriggers: () =>
+      get<import('./types').ListResponse<import('./types').CodeReviewGitHubTriggerResponse>>(
+        '/api/v1/code-review-github-triggers',
+      ),
     setupGitHubTrigger: (repositoryId: string) =>
       post<import('./types').SingleResponse<import('./types').CodeReviewGitHubTriggerResponse>>(
         '/api/v1/code-review-github-trigger/setup',
@@ -909,8 +913,9 @@ export const api = {
     listMyExternalIdentities: () => get<import('./types').ListResponse<import('./types').ExternalUserLink>>('/api/v1/users/me/external-identities'),
     deleteMyExternalIdentity: (id: string) => del<void>(`/api/v1/users/me/external-identities/${encodeURIComponent(id)}`),
     claimExternalIdentity: (token: string) => post<import('./types').SingleResponse<import('./types').ExternalUserLink>>(`/api/v1/integrations/external-user-link-claims/${encodeURIComponent(token)}/claim`),
-    loginGitHub: () => {
-      window.location.href = `${API_BASE}/api/v1/integrations/github/login`;
+    loginGitHub: (returnTo?: string) => {
+      const query = returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : '';
+      window.location.href = `${API_BASE}/api/v1/integrations/github/login${query}`;
     },
     loginLinear: () => {
       window.location.href = `${API_BASE}/api/v1/integrations/linear/login`;
@@ -1106,9 +1111,10 @@ export const api = {
   },
   githubStatus: {
     get: () => get<{ connected: boolean; has_repo_scope: boolean; github_login?: string; pr_authorship_mode: string; pr_draft_default: boolean; account_requirement: 'required' | 'recommended' | 'optional'; needs_reconnect: boolean }>('/api/v1/users/me/github-status'),
-    connect: (resumeToken?: string) => {
+    connect: (resumeToken?: string, returnTo?: string) => {
       const searchParams = new URLSearchParams();
       if (resumeToken) searchParams.set('resume_token', resumeToken);
+      if (returnTo) searchParams.set('return_to', returnTo);
       const qs = searchParams.toString();
       window.location.href = `${API_BASE}/api/v1/users/me/github/connect${qs ? `?${qs}` : ''}`;
     },
