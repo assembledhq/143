@@ -685,6 +685,14 @@ ALTER TABLE pull_requests
         CHECK (code_review_dispute_cycles_in_epoch >= 0);
 ```
 
+The production rollout installs the final `pull_requests` check constraint as
+`NOT VALID` in migration `000281`, then validates it in migration `000282`.
+This keeps the `ACCESS EXCLUSIVE` portion metadata-only and performs the table
+scan under PostgreSQL's weaker validation lock. The first `000281` production
+attempt timed out waiting for the hot table and rolled its transaction back;
+deploys therefore allowlist exactly dirty version 281 for rewind-and-retry via
+`migrate repair-known-dirty`.
+
 Versioned org/repository policy settings gain `stop_after_deterministic_failure` and
 the semantic-dedupe cooldown. They gain **no reassessment quotas** — no per-PR
 budget, no per-user rate, no per-org ceiling. The operator-wide hard ceiling and kill

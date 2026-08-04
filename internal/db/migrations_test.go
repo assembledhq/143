@@ -37,13 +37,19 @@ func TestCodeReviewDisputesMigrationEnforcesTenantScopedParents(t *testing.T) {
 		require.Regexp(t, `CREATE UNIQUE INDEX IF NOT EXISTS \w+\n?\s+ON `+parent+` \(org_id, id\)`, sql,
 			"parent index builds should be idempotent so they can be pre-created CONCURRENTLY")
 	}
-	// golang-migrate runs this file as a single implicit transaction, so
-	// ADD CONSTRAINT ... NOT VALID plus VALIDATE would hold ACCESS EXCLUSIVE
-	// across both and buy nothing. Keep the honest single-statement form.
-	require.Contains(t, sql, "CHECK (code_review_dispute_cycles_in_epoch >= 0);",
-		"the loop-guard CHECK should be added and validated in one statement")
+	// Keep the ACCESS EXCLUSIVE portion metadata-only. Validation runs in the
+	// next migration under a weaker lock that does not block normal DML.
+	require.Contains(t, sql, "CHECK (code_review_dispute_cycles_in_epoch >= 0) NOT VALID;",
+		"the loop-guard CHECK should be installed without scanning the hot pull requests table")
 	require.NotContains(t, sql, "VALIDATE CONSTRAINT",
-		"a deferred CHECK validation cannot help inside a single-transaction migration")
+		"the expand migration should not validate while retaining its ACCESS EXCLUSIVE lock")
+
+	validationBody, err := os.ReadFile("../../migrations/000282_validate_code_review_dispute_cycles.up.sql")
+	require.NoError(t, err, "test should read the code review dispute cycle validation migration")
+	validationSQL := string(validationBody)
+	require.Contains(t, validationSQL,
+		"ALTER TABLE pull_requests\n    VALIDATE CONSTRAINT chk_pr_code_review_dispute_cycles;",
+		"the follow-up migration should validate the loop-guard CHECK under a weaker lock")
 
 	// The adjudication UI always filters to pending; a broader partial index
 	// would accumulate every resolved dispute in the hot path.

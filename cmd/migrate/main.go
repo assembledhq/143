@@ -15,7 +15,10 @@ import (
 // migrateLogger implements migrate.Logger to surface verbose migration output.
 type migrateLogger struct{ verbose bool }
 
-const prReadinessDirtyMigrationVersion = 267
+const (
+	prReadinessDirtyMigrationVersion        = 267
+	codeReviewDisputesDirtyMigrationVersion = 281
+)
 
 type dirtyMigrationRepairer interface {
 	Version() (uint, bool, error)
@@ -35,7 +38,7 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: migrate [up|down|repair-pr-readiness]")
+		fmt.Println("Usage: migrate [up|down|repair-known-dirty|repair-pr-readiness]")
 		os.Exit(1)
 	}
 
@@ -67,6 +70,17 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("Migrations rolled back successfully.")
+	case "repair-known-dirty":
+		version, repaired, err := repairKnownDirtyMigration(m)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to repair known dirty migration state: %v\n", err)
+			os.Exit(1)
+		}
+		if repaired {
+			fmt.Printf("Repaired dirty migration %d; migrations can resume from %d.\n", version, version-1)
+		} else {
+			fmt.Println("Known dirty migration repair not needed.")
+		}
 	case "repair-pr-readiness":
 		repaired, err := repairPRReadinessDirtyMigration(m)
 		if err != nil {
@@ -81,6 +95,47 @@ func main() {
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1]) // #nosec G705 -- writing to stderr, not HTTP response
 		os.Exit(1)
+	}
+}
+
+// repairKnownDirtyMigration clears only dirty markers whose production failure
+// was observed and whose migration transaction was verified to have rolled back
+// completely. This is deliberately an exact allowlist rather than a general
+// force command: an unknown dirty version may have out-of-transaction effects
+// or require a data repair before it is safe to retry.
+func repairKnownDirtyMigration(m dirtyMigrationRepairer) (uint, bool, error) {
+	version, dirty, err := m.Version()
+	if err != nil {
+		if errors.Is(err, migrate.ErrNilVersion) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("read migration version: %w", err)
+	}
+	if !dirty {
+		return 0, false, nil
+	}
+
+	previousVersion, known := knownDirtyMigrationPreviousVersion(version)
+	if !known {
+		return 0, false, fmt.Errorf(
+			"database is dirty at version %d; refusing repair because only versions %d and %d are allowlisted",
+			version,
+			prReadinessDirtyMigrationVersion,
+			codeReviewDisputesDirtyMigrationVersion,
+		)
+	}
+	if err := m.Force(previousVersion); err != nil {
+		return 0, false, fmt.Errorf("force migration version to %d: %w", previousVersion, err)
+	}
+	return version, true, nil
+}
+
+func knownDirtyMigrationPreviousVersion(version uint) (int, bool) {
+	switch version {
+	case prReadinessDirtyMigrationVersion, codeReviewDisputesDirtyMigrationVersion:
+		return int(version) - 1, true
+	default:
+		return 0, false
 	}
 }
 

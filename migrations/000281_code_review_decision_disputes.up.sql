@@ -8,9 +8,10 @@
 -- the composite foreign keys below will then fail with "no unique constraint
 -- matching given keys" -- drop the invalid index before rerunning.
 -- lock_timeout bounds how long each statement waits to ACQUIRE a lock. It does
--- not bound how long an acquired lock is held, so it makes this migration fail
--- fast against concurrent DDL rather than making the index builds cheap.
-SET LOCAL lock_timeout = '5s';
+-- not bound how long an acquired lock is held. Production traffic can keep a
+-- short-lived lock on pull_requests for more than five seconds, so allow a
+-- bounded rolling-deploy window instead of spuriously dirtying the migration.
+SET LOCAL lock_timeout = '30s';
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_org_id_id_for_code_review_disputes
     ON sessions (org_id, id);
@@ -238,15 +239,11 @@ ALTER TABLE code_review_session_metadata
         REFERENCES code_review_decision_disputes(org_id, id)
         ON DELETE SET NULL (triggering_dispute_id);
 
--- Adding the columns is metadata-only (non-volatile defaults), but validating
--- the CHECK scans every pull_requests row under ACCESS EXCLUSIVE.
--- ADD CONSTRAINT ... NOT VALID plus a separate VALIDATE would not help here:
--- golang-migrate's postgres driver executes this whole file as one statement,
--- so it runs in a single implicit transaction and the ACCESS EXCLUSIVE lock is
--- held until commit either way. Splitting the validation requires splitting the
--- migration, which is not worth it for a scan of a table this size.
+-- Keep the ACCESS EXCLUSIVE operation metadata-only. Migration 282 validates
+-- the CHECK in a separate transaction under PostgreSQL's weaker validation
+-- lock, which does not block ordinary reads and writes.
 ALTER TABLE pull_requests
     ADD COLUMN code_review_dispute_epoch bigint NOT NULL DEFAULT 0,
     ADD COLUMN code_review_dispute_cycles_in_epoch integer NOT NULL DEFAULT 0,
     ADD CONSTRAINT chk_pr_code_review_dispute_cycles
-        CHECK (code_review_dispute_cycles_in_epoch >= 0);
+        CHECK (code_review_dispute_cycles_in_epoch >= 0) NOT VALID;

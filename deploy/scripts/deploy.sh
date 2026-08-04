@@ -2444,7 +2444,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
   # that the old schema doesn't have yet.
   if [ "$ROLE" = "app" ]; then
     echo "Running database migrations..."
-    docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate repair-pr-readiness < /dev/null
+    docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate repair-known-dirty < /dev/null
     docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate up < /dev/null
   fi
 
