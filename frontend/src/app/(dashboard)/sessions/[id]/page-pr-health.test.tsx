@@ -425,6 +425,10 @@ describe('SessionDetailPage PR health and merge', () => {
 
     expect((await screen.findAllByText('PR #42 closed')).length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText('PR #42 was closed without merging.')).toBeInTheDocument();
+    const closedSection = screen.getByText('PR #42 was closed without merging.').closest('[data-slot="pr-closed-section"]');
+    expect(closedSection).toBeInTheDocument();
+    expect(closedSection?.closest('[data-slot="card"]')).toBeNull();
+    expect(screen.getByTestId('session-result-section')).toHaveClass('border-t', 'pt-4');
     expect(screen.getByRole('link', { name: 'View PR' })).toBeInTheDocument();
     expect(screen.queryByRole('region', { name: 'Pull request #42' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Resolve conflicts' })).not.toBeInTheDocument();
@@ -621,6 +625,10 @@ describe('SessionDetailPage PR health and merge', () => {
     expect(screen.getByText('This change has landed. Open a follow-up session if you need to make another revision.')).toHaveClass('text-xs');
     expect(screen.getByRole('link', { name: 'View PR' })).toBeInTheDocument();
     expect(screen.getByLabelText('Merged PR status')).toHaveClass('text-success');
+    const mergedSection = screen.getByLabelText('Merged PR status').closest('[data-slot="pr-merged-section"]');
+    expect(mergedSection).toBeInTheDocument();
+    expect(mergedSection?.closest('[data-slot="card"]')).toBeNull();
+    expect(screen.getByTestId('session-result-section')).toHaveClass('border-t', 'pt-4');
     expect(screen.queryAllByText('PR created')).toHaveLength(0);
     expect(within(screen.getByLabelText('Session detail actions')).queryByText('PR #42 merged')).not.toBeInTheDocument();
     expect(screen.queryByRole('region', { name: 'Pull request #42' })).not.toBeInTheDocument();

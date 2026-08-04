@@ -539,8 +539,6 @@ function buildReviewLoopThreadPreview(loop: SessionReviewLoop, session?: Session
 
 type SessionOriginDisplay = {
   badge: string;
-  title: string;
-  detail?: string;
 };
 
 function getSessionOriginDisplay(session: Session): SessionOriginDisplay | null {
@@ -548,26 +546,18 @@ function getSessionOriginDisplay(session: Session): SessionOriginDisplay | null 
     case "automation":
       return {
         badge: "Automation",
-        title: "Created by automation",
-        detail: session.automation_run_id ? "Automation run" : "Scheduled or manually triggered automation",
       };
     case "project":
       return {
         badge: "Project",
-        title: "Created from project work",
-        detail: "Started as part of a tracked project task",
       };
     case "issue_trigger":
       return {
         badge: "Issue",
-        title: "Created from issue intake",
-        detail: "Started automatically from issue workflow",
       };
     case "revision":
       return {
         badge: "Revision",
-        title: "Created from a prior session",
-        detail: "Follow-up run spun out from an earlier session",
       };
     default:
       return null;
@@ -732,26 +722,28 @@ function ThreadFailureDetailsCard({ thread }: { thread: SessionThread }) {
   );
 }
 
-function SessionResultCard({ summary }: { summary?: string }) {
+function SessionResultSection({ summary, divided }: { summary?: string; divided: boolean }) {
   if (!summary) return null;
 
   return (
-    <Card className="border-border/60" data-testid="session-result-card">
-      <CardContent className="p-3.5">
-        <div className="flex items-start gap-2.5">
-          <div
-            aria-hidden="true"
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-success/10 text-success"
-          >
-            <CheckCircle2 className="h-4 w-4" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium text-foreground">Result</div>
-            <LazyMarkdownContent content={summary} className="mt-2 text-xs" />
-          </div>
+    <section
+      aria-label="Session result"
+      className={cn(divided && "border-t border-border/60 pt-4")}
+      data-testid="session-result-section"
+    >
+      <div className="flex items-start gap-2.5">
+        <div
+          aria-hidden="true"
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-success/10 text-success"
+        >
+          <CheckCircle2 className="h-4 w-4" />
         </div>
-      </CardContent>
-    </Card>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium text-foreground">Result</div>
+          <LazyMarkdownContent content={summary} className="mt-2 text-xs" />
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -936,7 +928,7 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
       )}
 
       {/* Session vitals — identity row (status + agent + who triggered) */}
-      <div className="space-y-2">
+      <div className="space-y-1.5">
         <div className="flex items-center gap-x-3 gap-y-1 flex-wrap text-xs">
           <StatusLabel
             label={operationalStatus.label}
@@ -952,62 +944,56 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
           </span>
         </div>
 
-        {originDisplay && (
-          <div className="flex items-center gap-x-2 gap-y-1 flex-wrap text-xs text-muted-foreground">
+        <div
+          data-testid="session-overview-context"
+          className="flex min-w-0 items-center gap-x-2 gap-y-1 flex-wrap text-xs text-muted-foreground"
+        >
+          {originDisplay && (
             <Badge variant="outline" className="h-5 rounded-full px-2 text-xs font-medium">
               {originDisplay.badge}
             </Badge>
-            <span className="font-medium text-foreground">{originDisplay.title}</span>
-            {originDisplay.detail && (
-              <>
-                <span aria-hidden="true" className="text-muted-foreground/50">·</span>
-                <span>{originDisplay.detail}</span>
-              </>
-            )}
-          </div>
-        )}
-
-        {repoBranchLabel && (
-          <div
-            data-testid="session-overview-repo-branch"
-            className="text-xs text-muted-foreground break-words"
-          >
-            {repoBranchLabel}
-          </div>
-        )}
-
-        {/* Timestamps + audit — secondary reference data, kept separate from long repo/branch labels */}
-        <div
-          data-testid="session-overview-timing"
-          className="flex items-center gap-x-1.5 gap-y-1 flex-wrap text-xs text-muted-foreground"
-        >
-          {terminalSessionStatuses.has(session.status) &&
-            !((session.status === "failed" || session.status === "cancelled") &&
-              !hasMeaningfulDuration(session.started_at, session.completed_at)) && (
-            <span>
-              {formatDuration(session.started_at, session.completed_at)}
-              <span aria-hidden="true" className="ml-1.5 text-muted-foreground/50">·</span>
+          )}
+          {repoBranchLabel && (
+            <span
+              data-testid="session-overview-repo-branch"
+              className="min-w-0 flex-1 basis-40 truncate"
+              title={repoBranchLabel}
+            >
+              {repoBranchLabel}
             </span>
           )}
-          <span>
-            {!isActive && session.completed_at ? (
-              session.status === "failed"
-                ? <>Failed {formatTimeAgo(session.completed_at)}</>
-                : session.status === "cancelled"
-                  ? <>Cancelled {formatTimeAgo(session.completed_at)}</>
-                  : <>Completed {formatTimeAgo(session.completed_at)}</>
-            ) : session.started_at ? (
-              <>Started {formatTimeAgo(session.started_at)}</>
-            ) : (
-              <>Queued {formatTimeAgo(session.created_at)}</>
+          <div
+            data-testid="session-overview-timing"
+            className="inline-flex shrink-0 items-center gap-x-1.5 whitespace-nowrap"
+          >
+            {terminalSessionStatuses.has(session.status) &&
+              !((session.status === "failed" || session.status === "cancelled") &&
+                !hasMeaningfulDuration(session.started_at, session.completed_at)) && (
+              <span>
+                {formatDuration(session.started_at, session.completed_at)}
+                <span aria-hidden="true" className="ml-1.5 text-muted-foreground/50">·</span>
+              </span>
             )}
-          </span>
-          <AuditLogTrigger
-            filters={{ session_id: session.id }}
-            members={members}
-            title="Session activity"
-            variant="inline"
-          />
+            <span>
+              {!isActive && session.completed_at ? (
+                session.status === "failed"
+                  ? <>Failed {formatTimeAgo(session.completed_at)}</>
+                  : session.status === "cancelled"
+                    ? <>Cancelled {formatTimeAgo(session.completed_at)}</>
+                    : <>Completed {formatTimeAgo(session.completed_at)}</>
+              ) : session.started_at ? (
+                <>Started {formatTimeAgo(session.started_at)}</>
+              ) : (
+                <>Queued {formatTimeAgo(session.created_at)}</>
+              )}
+            </span>
+            <AuditLogTrigger
+              filters={{ session_id: session.id }}
+              members={members}
+              title="Session activity"
+              variant="inline"
+            />
+          </div>
         </div>
       </div>
 
@@ -6450,6 +6436,92 @@ export function SessionDetailContent({ id }: { id: string }) {
   };
   const detailActionSize = isMobileReviewViewport ? "xs" : "sm";
   const detailActionIconSize = isMobileReviewViewport ? "icon-xs" : "icon-sm";
+  // The PR summary that leads the Overview column. Built as a single value so
+  // the Result divider below is derived from whether this actually rendered
+  // instead of from a second copy of these conditions.
+  const prOverviewSection = !pullRequestId ? null : prStatus === "open" ? (
+    prHealth ? (
+      <PRHealthBanner
+        health={prHealth}
+        currentSessionId={id}
+        currentThreadId={activeThread?.id ?? null}
+        pendingAction={pendingPRAction}
+        repairError={repairActionError}
+        mergeAuthRequired={ghBlocked}
+        mergeWhenReadyPending={pendingMergeWhenReady}
+        onFixTests={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: true })}
+        onFixTestsWithoutPushing={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: false })}
+        onResolveConflicts={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: true })}
+        onResolveConflictsWithoutPushing={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: false })}
+        onMerge={handleMergeAction}
+        onQueueMergeWhenReady={handleQueueMergeWhenReady}
+        onCancelMergeWhenReady={handleCancelMergeWhenReady}
+        onOpenRepairSession={(sessionId, threadId) => {
+          if (sessionId === id && threadId) {
+            setActiveThreadId(threadId);
+            return;
+          }
+          router.push(`/sessions/${sessionId}`);
+        }}
+        onStopAutoRepair={(sessionId, threadId) => stopAutoRepairMutation.mutate({ sessionId, threadId })}
+        stopAutoRepairPending={stopAutoRepairMutation.isPending}
+        reviewAction={selectedIsPrimary && canManageSession && canUseNativeReviewLoop ? {
+          disabled: reviewActionDisabled,
+          spinning: startReviewLoopMutation.isPending || reviewLoopRunning,
+          title: reviewActionDisabledReason,
+          onClick: () => setReviewConfigOpen(true),
+        } : undefined}
+        pushChanges={showPushAction ? {
+          label: pushActionLabel,
+          disabled: pushActionDisabled,
+          spinning: pushActionSpinning || (pushActionRequiresBranchSync && continueFromPRBranchMutation.isPending),
+          showError: pushState === "failed" || !!localPushActionError,
+          title: pushActionTitle,
+          onClick: () => {
+            if (pushActionRequiresBranchSync) {
+              continueFromPRBranchMutation.mutate();
+              return;
+            }
+            pushChangesMutation.mutate(undefined);
+          },
+        } : undefined}
+      />
+    ) : isPRHealthLoading ? (
+      <section
+        className="flex items-center gap-2 text-sm text-muted-foreground"
+        data-slot="pr-health-loading-section"
+      >
+        <Loader2 className="h-4 w-4 animate-spin" />
+        <span>Loading PR health...</span>
+      </section>
+    ) : null
+  ) : prStatus === "closed" ? (
+    <section className="flex items-start gap-2.5" data-slot="pr-closed-section">
+      <div aria-hidden="true" className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+        <XCircle className="h-4 w-4" />
+      </div>
+      <div className="min-w-0 space-y-1">
+        <div className="text-sm font-medium text-foreground">{closedPRLabel}</div>
+        <p className="text-xs text-foreground">{closedPRSummary}</p>
+        <p className="text-xs text-muted-foreground">
+          This pull request is no longer active. Create a follow-up revision if you want to ship a new attempt.
+        </p>
+      </div>
+    </section>
+  ) : prStatus === "merged" ? (
+    <section className="flex items-start gap-2.5" data-slot="pr-merged-section">
+      <div aria-label="Merged PR status" className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-md", prMergedAccent.bg, prMergedAccent.text)}>
+        <CheckCircle2 className="h-4 w-4" />
+      </div>
+      <div className="min-w-0 space-y-1">
+        <div className="text-sm font-medium text-foreground">{mergedPRLabel}</div>
+        <p className="text-xs text-foreground">{mergedPRSummary}</p>
+        <p className="text-xs text-muted-foreground">
+          This change has landed. Open a follow-up session if you need to make another revision.
+        </p>
+      </div>
+    </section>
+  ) : null;
   // Right-panel content. Rendered inline on desktop and inside a bottom sheet
   // on mobile — the same JSX in both places so tab state stays consistent.
   const panelTabsEl = (
@@ -6642,99 +6714,8 @@ export function SessionDetailContent({ id }: { id: string }) {
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <div className="space-y-4">
-          {pullRequestId && prStatus === "open" && (
-            prHealth ? (
-              <PRHealthBanner
-                health={prHealth}
-                currentSessionId={id}
-                currentThreadId={activeThread?.id ?? null}
-                pendingAction={pendingPRAction}
-                repairError={repairActionError}
-                mergeAuthRequired={ghBlocked}
-                mergeWhenReadyPending={pendingMergeWhenReady}
-                onFixTests={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: true })}
-                onFixTestsWithoutPushing={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: false })}
-                onResolveConflicts={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: true })}
-                onResolveConflictsWithoutPushing={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: false })}
-                onMerge={handleMergeAction}
-                onQueueMergeWhenReady={handleQueueMergeWhenReady}
-                onCancelMergeWhenReady={handleCancelMergeWhenReady}
-                onOpenRepairSession={(sessionId, threadId) => {
-                  if (sessionId === id && threadId) {
-                    setActiveThreadId(threadId);
-                    return;
-                  }
-                  router.push(`/sessions/${sessionId}`);
-                }}
-                onStopAutoRepair={(sessionId, threadId) => stopAutoRepairMutation.mutate({ sessionId, threadId })}
-                stopAutoRepairPending={stopAutoRepairMutation.isPending}
-                reviewAction={selectedIsPrimary && canManageSession && canUseNativeReviewLoop ? {
-                  disabled: reviewActionDisabled,
-                  spinning: startReviewLoopMutation.isPending || reviewLoopRunning,
-                  title: reviewActionDisabledReason,
-                  onClick: () => setReviewConfigOpen(true),
-                } : undefined}
-                pushChanges={showPushAction ? {
-                  label: pushActionLabel,
-                  disabled: pushActionDisabled,
-                  spinning: pushActionSpinning || (pushActionRequiresBranchSync && continueFromPRBranchMutation.isPending),
-                  showError: pushState === "failed" || !!localPushActionError,
-                  title: pushActionTitle,
-                  onClick: () => {
-                    if (pushActionRequiresBranchSync) {
-                      continueFromPRBranchMutation.mutate();
-                      return;
-                    }
-                    pushChangesMutation.mutate(undefined);
-                  },
-                } : undefined}
-              />
-            ) : isPRHealthLoading ? (
-              <Card className="border-border/60">
-                <CardContent className="flex items-center gap-2 p-4 text-sm text-muted-foreground">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  <span>Loading PR health...</span>
-                </CardContent>
-              </Card>
-            ) : null
-          )}
-          {pullRequestId && prStatus === "closed" && (
-            <Card className="border-border/60">
-              <CardContent className="p-3.5">
-                <div className="flex items-start gap-2.5">
-                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-                    <XCircle className="h-4 w-4" />
-                  </div>
-                  <div className="min-w-0 space-y-1">
-                    <div className="text-sm font-medium text-foreground">{closedPRLabel}</div>
-                    <p className="text-xs text-foreground">{closedPRSummary}</p>
-                    <p className="text-xs text-muted-foreground">
-                      This pull request is no longer active. Create a follow-up revision if you want to ship a new attempt.
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          )}
-          {pullRequestId && prStatus === "merged" && (
-            <Card className="border-border/60">
-              <CardContent className="p-3.5">
-                <div className="flex items-start gap-2.5">
-                  <div aria-label="Merged PR status" className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-md", prMergedAccent.bg, prMergedAccent.text)}>
-                    <CheckCircle2 className="h-4 w-4" />
-                  </div>
-                  <div className="min-w-0 space-y-1">
-                    <div className="text-sm font-medium text-foreground">{mergedPRLabel}</div>
-                    <p className="text-xs text-foreground">{mergedPRSummary}</p>
-                    <p className="text-xs text-muted-foreground">
-                      This change has landed. Open a follow-up session if you need to make another revision.
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          )}
-          <SessionResultCard summary={session.result_summary} />
+          {prOverviewSection}
+          <SessionResultSection summary={session.result_summary} divided={prOverviewSection !== null} />
           <PullRequestList
             changesets={changesets}
             selectedID={selectedChangeset?.id ?? ""}

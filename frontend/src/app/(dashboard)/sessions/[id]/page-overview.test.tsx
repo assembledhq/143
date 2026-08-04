@@ -371,11 +371,35 @@ describe('SessionDetailPage overview and review loop', () => {
 
     const repoBranchRow = screen.getByTestId('session-overview-repo-branch');
     expect(repoBranchRow).toHaveTextContent('assembledhq/143 · 143/feature-session-details');
+    expect(repoBranchRow).toHaveAttribute('title', 'assembledhq/143 · 143/feature-session-details');
+    expect(repoBranchRow).toHaveClass('truncate');
     expect(repoBranchRow).not.toHaveTextContent(/feature-session-details\s*·/);
 
     const metadataRow = screen.getByTestId('session-overview-timing');
     expect(metadataRow).not.toHaveTextContent('assembledhq/143');
     expect(metadataRow).toHaveTextContent(/Completed/);
+  });
+
+  it('keeps issue-trigger provenance compact without redundant workflow copy', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            origin: 'issue_trigger',
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={mockSessions[0].id} />);
+
+    const context = await screen.findByTestId('session-overview-context');
+    expect(within(context).getByText('Issue')).toBeInTheDocument();
+    expect(context).toContainElement(screen.getByTestId('session-overview-repo-branch'));
+    expect(context).toContainElement(screen.getByTestId('session-overview-timing'));
+    expect(screen.queryByText('Created from issue intake')).not.toBeInTheDocument();
+    expect(screen.queryByText('Started automatically from issue workflow')).not.toBeInTheDocument();
   });
 
   it('renders the session Linear chip as an outbound link when only linear_identifier_hint is available', async () => {
@@ -460,7 +484,7 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
   });
 
-  it('orders PR details, Result, then the quiet split suggestion', async () => {
+  it('orders the card-free PR details and Result sections before the quiet split suggestion', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({
@@ -474,13 +498,48 @@ describe('SessionDetailPage overview and review loop', () => {
 
     renderWithProviders(<SessionDetailContent id={mockSessions[0].id} />);
 
-    const prDetailsCard = await screen.findByRole('region', { name: 'Pull request #42' });
-    const resultCard = screen.getByTestId('session-result-card');
+    const prDetailsSection = await screen.findByRole('region', { name: 'Pull request #42' });
+    const resultSection = screen.getByTestId('session-result-section');
     const splitSuggestion = screen.getByRole('region', { name: 'Pull request size suggestion' });
 
-    expect(prDetailsCard?.parentElement?.firstElementChild).toBe(prDetailsCard);
-    expect(prDetailsCard.compareDocumentPosition(resultCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(resultCard.compareDocumentPosition(splitSuggestion) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(prDetailsSection?.parentElement?.firstElementChild).toBe(prDetailsSection);
+    expect(prDetailsSection.closest('[data-slot="card"]')).toBeNull();
+    expect(resultSection.closest('[data-slot="card"]')).toBeNull();
+    expect(resultSection).toHaveClass('border-t', 'pt-4');
+    expect(prDetailsSection.compareDocumentPosition(resultSection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(resultSection.compareDocumentPosition(splitSuggestion) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('keeps the PR health placeholder card-free and still divides Result while health loads', async () => {
+    server.use(
+      http.get('/api/v1/pull-requests/:id/health', () => new Promise(() => {})),
+    );
+
+    renderWithProviders(<SessionDetailContent id={mockSessions[0].id} />);
+
+    const loadingSection = (await screen.findByText('Loading PR health...')).closest('[data-slot="pr-health-loading-section"]');
+    expect(loadingSection).toBeInTheDocument();
+    expect(loadingSection?.closest('[data-slot="card"]')).toBeNull();
+    expect(screen.getByTestId('session-result-section')).toHaveClass('border-t', 'pt-4');
+  });
+
+  it('renders Result without a leading divider when no pull request section precedes it', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json({ data: null });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={mockSessions[0].id} />);
+
+    const resultSection = await screen.findByTestId('session-result-section');
+
+    expect(screen.queryByRole('region', { name: /^Pull request #/ })).not.toBeInTheDocument();
+    expect(resultSection.closest('[data-slot="card"]')).toBeNull();
+    // Asserted separately: `.not.toHaveClass(a, b)` only requires one of the
+    // two classes to be absent, so a single call would pass on a half-divider.
+    expect(resultSection).not.toHaveClass('border-t');
+    expect(resultSection).not.toHaveClass('pt-4');
   });
 
   it('shows a compact status card while the Overview review loop is running', async () => {

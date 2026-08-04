@@ -50,7 +50,10 @@ describe("PRHealthBanner", () => {
       />,
     );
 
-    expect(screen.getByRole("region", { name: "Pull request #42" })).toBeInTheDocument();
+    const prHealthSection = screen.getByRole("region", { name: "Pull request #42" });
+    expect(prHealthSection).toBeInTheDocument();
+    expect(prHealthSection).toHaveAttribute("data-slot", "pr-health-section");
+    expect(prHealthSection.closest('[data-slot="card"]')).toBeNull();
     expect(screen.getByText("PR #42")).toHaveClass("text-sm");
     expect(screen.getByText("Ready")).toHaveAttribute("data-variant", "success");
     expect(screen.getByText("acme/widgets")).toHaveClass("text-xs");
