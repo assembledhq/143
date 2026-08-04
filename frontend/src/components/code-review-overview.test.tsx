@@ -148,6 +148,25 @@ describe("TimeRangePicker", () => {
     expect(timeRangeLabel("custom:2026-07-01:2026-07-31")).toBe("Jul 1, 2026 – Jul 31, 2026");
   });
 
+  it("explains why an incomplete custom range cannot be applied", async () => {
+    const user = userEvent.setup();
+    render(<TimeRangePicker label="Time window" value="30d" onValueChange={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "Time window" }));
+    const start = subDays(new Date(), 5);
+    const startButton = document.querySelector<HTMLElement>(`[data-day="${start.toLocaleDateString()}"]`);
+    expect(startButton).not.toBeNull();
+    await user.click(startButton as HTMLElement);
+    const applyButton = screen.getByRole("button", { name: "Apply range" });
+    expect(applyButton).toBeDisabled();
+
+    await user.hover(applyButton.parentElement as HTMLElement);
+
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Select an end date to apply this range.",
+    );
+  });
+
   it.each([
     { value: "this_week" as const, expected: "This week" },
     { value: "last_week" as const, expected: "Last week" },
