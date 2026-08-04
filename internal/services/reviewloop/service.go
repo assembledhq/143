@@ -185,7 +185,11 @@ func (s *Service) Start(ctx context.Context, orgID, sessionID uuid.UUID, req Sta
 	}
 	fixMode := req.FixMode
 	if fixMode == "" {
-		fixMode = models.ReviewLoopFixModeMinimal
+		if source == models.ReviewLoopSourceManual {
+			fixMode = models.ReviewLoopFixModeMinimal
+		} else {
+			fixMode = models.ReviewLoopFixModeExhaustive
+		}
 	}
 	if err := fixMode.Validate(); err != nil {
 		return nil, ErrInvalidFixMode

@@ -146,9 +146,10 @@ Design choices:
   pass without creating a separate session. The selector falls back to the main
   session agent when no supported alternative exists.
 - The setup dialog must clearly state that the loop runs in the current sandbox.
-- Minimal fixes is the default fix mode to preserve existing review-loop
-  behavior; Fix every finding is explicit because it can increase scope,
-  latency, and token cost.
+- Minimal fixes is the default for manually configured review loops; Fix every
+  finding is explicit there because it can increase scope, latency, and token
+  cost. Publication- and automation-created review loops always use Fix every
+  finding so an unattended PR workflow does not knowingly defer review issues.
 
 ### Manual session timeline
 

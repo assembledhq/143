@@ -103,6 +103,51 @@ func TestService_StartStoresRequestedFixMode(t *testing.T) {
 	require.Equal(t, models.ReviewLoopFixModeExhaustive, store.createdLoops[0].FixMode, "Start should persist the requested fix mode")
 }
 
+func TestService_StartDefaultsAutomaticFixModesToExhaustive(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		source models.ReviewLoopSource
+	}{
+		{name: "automation", source: models.ReviewLoopSourceAutomation},
+		{name: "publication", source: models.ReviewLoopSourcePublication},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			threadID := uuid.New()
+			changesetID := uuid.New()
+			workspaceRevision := int64(7)
+			desiredHeadSHA := "reviewed-head"
+			snapshotKey := "snapshots/automatic-review-loop.tar.zst"
+			store := &fakeReviewLoopStore{}
+			threads := &fakeThreadService{
+				session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Status: models.SessionStatusIdle, SandboxState: models.SandboxStateSnapshotted, SnapshotKey: &snapshotKey},
+				thread:  models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Label: "Codex Review"},
+				message: models.SessionMessage{ID: 77, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID},
+			}
+			req := StartReviewLoopRequest{MaxPasses: 2, Source: tt.source}
+			if tt.source == models.ReviewLoopSourcePublication {
+				req.ChangesetID = &changesetID
+				req.WorkspaceRevision = &workspaceRevision
+				req.DesiredHeadSHA = &desiredHeadSHA
+			}
+
+			loop, err := NewService(store, threads).Start(context.Background(), orgID, sessionID, req)
+
+			require.NoError(t, err, "Start should create an automatic review loop")
+			require.Equal(t, models.ReviewLoopFixModeExhaustive, loop.FixMode, "automatic review loops should default to fixing every finding")
+			require.Equal(t, models.ReviewLoopFixModeExhaustive, store.createdLoops[0].FixMode, "automatic review loops should persist exhaustive fix mode")
+			require.Contains(t, threads.sent[0].Message, "Report every issue you find", "automatic review loops should ask the reviewer to report every finding")
+		})
+	}
+}
+
 func TestService_StartRejectsExistingRunningLoop(t *testing.T) {
 	t.Parallel()
 
