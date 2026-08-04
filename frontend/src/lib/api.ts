@@ -347,8 +347,27 @@ export const api = {
     },
     promptExamples: () => get<import('./types').SingleResponse<import('./types').CodeReviewPromptExamplesResponse>>('/api/v1/code-reviews/prompt-examples'),
     policyEvent: (body: import('./types').CodeReviewPolicyAnalyticsEvent) => post<void>('/api/v1/code-reviews/policy-events', body),
+    get: (sessionId: string) =>
+      get<import('./types').SingleResponse<import('./types').CodeReviewListItem>>(`/api/v1/code-reviews/${sessionId}`),
     evidence: (sessionId: string) =>
       get<import('./types').SingleResponse<import('./types').CodeReviewEvidence>>(`/api/v1/code-reviews/${sessionId}/evidence`),
+    disputes: (sessionId: string, cursor?: string) =>
+      get<import('./types').ListResponse<import('./types').CodeReviewDispute>>(`/api/v1/code-reviews/${sessionId}/disputes${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`),
+    createDispute: (sessionId: string, body: { body: string; contested_reason_codes?: string[] }) =>
+      post<import('./types').SingleResponse<import('./types').CodeReviewDispute>>(`/api/v1/code-reviews/${sessionId}/disputes`, body),
+    escalateDispute: (disputeId: string, note?: string) =>
+      post<import('./types').SingleResponse<import('./types').CodeReviewDispute>>(`/api/v1/code-review-disputes/${disputeId}/escalate`, { note }),
+    disputeQueue: (params?: { adjudication_status?: import('./types').CodeReviewDisputeAdjudicationStatus; repository_id?: string; direction?: import('./types').CodeReviewDisputeDirection; cursor?: string }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.adjudication_status) searchParams.set('adjudication_status', params.adjudication_status);
+      if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
+      if (params?.direction) searchParams.set('direction', params.direction);
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').CodeReviewDispute>>(`/api/v1/code-review-disputes${qs ? `?${qs}` : ''}`);
+    },
+    adjudicateDispute: (disputeId: string, body: { expected_version: number; adjudication_status?: "upheld" | "rejected" | "needs_context"; adjudication_note?: string; trust_override?: boolean }) =>
+      patch<import('./types').SingleResponse<import('./types').CodeReviewDispute>>(`/api/v1/code-review-disputes/${disputeId}`, body),
     retry: (sessionId: string) =>
       post<import('./types').SingleResponse<import('./types').CodeReviewRetryResult>>(`/api/v1/code-reviews/${sessionId}/retry`),
     getPolicy: () => get<import('./types').SingleResponse<import('./types').CodeReviewResolvedPolicy>>('/api/v1/code-review-policies'),

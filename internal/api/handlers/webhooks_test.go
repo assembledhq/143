@@ -30,6 +30,24 @@ type webhookAutomationEventRecorder struct {
 	calls []automationevents.GitHubEventTriggerRequest
 }
 
+func TestCodeReviewCommentSourceVersion(t *testing.T) {
+	t.Parallel()
+
+	updatedAt := time.Date(2026, time.August, 2, 7, 30, 45, 123_000_000, time.UTC)
+	var original ghservice.IssueCommentEvent
+	original.Comment.UpdatedAt = &updatedAt
+	original.Comment.Body = "Please reconsider the authorization finding."
+	redelivery := original
+	edited := original
+	edited.Comment.Body = "Please reconsider the authorization and tenancy findings."
+
+	originalVersion := codeReviewCommentSourceVersion(original)
+
+	require.Positive(t, originalVersion, "source versions should be valid positive database values")
+	require.Equal(t, originalVersion, codeReviewCommentSourceVersion(redelivery), "an identical webhook redelivery should retain its source version")
+	require.NotEqual(t, originalVersion, codeReviewCommentSourceVersion(edited), "distinct bodies should retain separate immutable versions even when GitHub timestamps match")
+}
+
 func (r *webhookAutomationEventRecorder) TriggerGitHubEvent(_ context.Context, req automationevents.GitHubEventTriggerRequest) error {
 	r.calls = append(r.calls, req)
 	return nil
@@ -1123,11 +1141,12 @@ func TestWebhook_HandleCodeReviewMentionedStartsContextualReview(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", nil)
 	rr := httptest.NewRecorder()
 
-	ok := handler.handleCodeReviewMentioned(rr, req, event, db.GitHubRepoOwner{
+	ok, captured := handler.handleCodeReviewMentioned(rr, req, event, db.GitHubRepoOwner{
 		OrgID: orgID, RepositoryID: repoID, FullName: "assembledhq/assembled", Status: "active",
 	})
 
 	require.True(t, ok, "configured team mention should be processed: %s", rr.Body.String())
+	require.False(t, captured, "ordinary review request should not be captured as a dispute")
 	require.Equal(t, orgID, loader.orgID, "handler should scope the GitHub snapshot to the owning organization")
 	require.Equal(t, repoID, loader.repositoryID, "handler should load the configured repository")
 	require.Equal(t, 54903, loader.number, "handler should load the commented pull request")
@@ -1163,13 +1182,341 @@ func TestWebhook_HandleCodeReviewMentionedIgnoresUnconfiguredTeamBeforeGitHubLoa
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", nil)
 	rr := httptest.NewRecorder()
 
-	ok := handler.handleCodeReviewMentioned(rr, req, event, db.GitHubRepoOwner{
+	ok, captured := handler.handleCodeReviewMentioned(rr, req, event, db.GitHubRepoOwner{
 		OrgID: orgID, RepositoryID: repoID, FullName: "assembledhq/assembled", Status: "active",
 	})
 
 	require.True(t, ok, "unconfigured team mention should be ignored")
+	require.False(t, captured, "unconfigured team mention should not be captured as a dispute")
 	require.Equal(t, 0, loader.number, "unconfigured team mention should not spend a GitHub API request")
 	require.Empty(t, rr.Body.String(), "ignored team mention should not write an error response")
+}
+
+func TestWebhook_HandleCodeReviewMentionedDoesNotStartAReviewWhenDisputeCaptureFails(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	prID := uuid.New()
+	now := time.Now().UTC()
+	remote := ghservice.CodeReviewPullRequestSnapshot{
+		Number: 54903, State: "open", HTMLURL: "https://github.com/assembledhq/assembled/pull/54903",
+		Title: "Fix invoice rounding", Body: "body", HeadSHA: "head-sha", HeadRef: "feature", BaseSHA: "base-sha",
+	}
+	loader := &codeReviewPullRequestLoaderStub{snapshot: remote}
+	jobs := &codeReviewWebhookJobStore{jobID: uuid.New()}
+	// A fully wired review service: if the handler falls through, a review
+	// really does start, so the assertion below can tell the difference.
+	codeReviews := codereviewsvc.NewService(
+		&codeReviewWebhookPolicyStore{policyID: uuid.New(), config: models.DefaultCodeReviewPolicyConfig()},
+		&codeReviewWebhookMetadataStore{},
+		&codeReviewWebhookSessionStore{},
+		jobs,
+		zerolog.Nop(),
+		codereviewsvc.Config{TeamSlugs: []string{"143-code-reviewer"}},
+	)
+	// An unconfigured dispute service makes FileFromGitHub fail the way a
+	// transient outage would.
+	handler := &WebhookHandler{
+		codeReviews:        codeReviews,
+		codeReviewPRs:      loader,
+		pullRequests:       db.NewPullRequestStore(mock),
+		codeReviewDisputes: codereviewsvc.NewDisputeService(nil, nil, nil, nil, nil, "", zerolog.Nop()),
+	}
+
+	staleBody := "old body"
+	staleHead := "old-head"
+	staleRef := "old-ref"
+	staleBase := "old-base"
+	mock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*WHERE org_id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": "assembledhq/assembled", "github_pr_number": 54903}).
+		WillReturnRows(pgxmock.NewRows(codeReviewWebhookPullRequestColumns()).AddRow(
+			prID, nil, orgID, 54903, remote.HTMLURL, "assembledhq/assembled",
+			"Old title", &staleBody, "open", "pending", "user", "", &staleHead, &staleRef, &staleBase,
+			"unknown", false, 0, false, nil, int64(0),
+			models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil,
+			nil, now, now,
+		))
+	mock.ExpectExec("UPDATE pull_requests[\\s\\S]*github_pr_url = @github_pr_url").
+		WithArgs(pgx.NamedArgs{
+			"id":            prID,
+			"org_id":        orgID,
+			"github_pr_url": remote.HTMLURL,
+			"title":         remote.Title,
+			"body":          stringPointerArg{value: remote.Body},
+			"head_sha":      stringPointerArg{value: remote.HeadSHA},
+			"head_ref":      stringPointerArg{value: remote.HeadRef},
+			"base_sha":      stringPointerArg{value: remote.BaseSHA},
+			"merge_state":   models.PullRequestMergeStateUnknown,
+		}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	var event ghservice.IssueCommentEvent
+	event.Action = "created"
+	event.DeliveryID = "delivery-dispute-capture-failure"
+	event.Repository.FullName = "assembledhq/assembled"
+	event.Issue.Number = 54903
+	event.Issue.PullRequest = &struct{}{}
+	event.Comment.ID = 5124237399
+	event.Comment.Body = "@assembledhq/143-code-reviewer I disagree, this should have been approved"
+	event.Comment.User.Login = "assembled-matthew"
+	event.Comment.User.Type = "User"
+	event.Comment.AuthorAssociation = "MEMBER"
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", nil)
+	rr := httptest.NewRecorder()
+
+	ok, captured := handler.handleCodeReviewMentioned(rr, req, event, db.GitHubRepoOwner{
+		OrgID: orgID, RepositoryID: repoID, FullName: "assembledhq/assembled", Status: "active",
+	})
+
+	require.True(t, ok, "a dispute capture failure should not fail the webhook: %s", rr.Body.String())
+	require.False(t, captured, "an uncaptured comment should still be recorded as ordinary PR feedback")
+	// Falling through would answer a transient capture failure with a whole new
+	// agent fan-out, which is the opposite of what the commenter asked for.
+	require.Equal(t, uuid.Nil, jobs.payload.SessionID, "a failed dispute capture must not start a code review")
+	require.Empty(t, rr.Body.String(), "a non-fatal capture failure should not write an error response")
+}
+
+// A finding thread is also the main channel for PR feedback follow-through, and
+// capture marks the feedback item ignored with no way back. An actionable reply
+// that does not object must therefore stay with follow-through.
+func TestWebhook_HandleCodeReviewInlineDisputeLeavesActionableRepliesToFeedback(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	rootID := int64(778899)
+	tests := []struct {
+		name              string
+		body              string
+		expectIntakeEntry bool
+	}{
+		{name: "actionable reply stays with follow-through", body: "Good catch, please apply that rename."},
+		{name: "acknowledgement stays with follow-through", body: "Thanks, fixing now."},
+		{name: "objection enters intake", body: "I disagree, the helper already handles nil.", expectIntakeEntry: true},
+		{name: "question enters intake", body: "Why is this flagged as sensitive?", expectIntakeEntry: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should initialize")
+			defer mock.Close()
+			// The pull request lookup is the first thing past the gate. Expecting
+			// it unconditionally makes both directions assertable: consumed means
+			// the reply entered intake, unfulfilled means the gate held it back.
+			mock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*WHERE org_id").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": "assembledhq/assembled", "github_pr_number": 54903}).
+				WillReturnError(pgx.ErrNoRows)
+			handler := &WebhookHandler{
+				pullRequests:       db.NewPullRequestStore(mock),
+				codeReviewDisputes: codereviewsvc.NewDisputeService(nil, nil, nil, nil, nil, "", zerolog.Nop()),
+			}
+			var event ghservice.PullRequestReviewCommentEvent
+			event.Action = "created"
+			event.Repository.FullName = "assembledhq/assembled"
+			event.PullRequest.Number = 54903
+			event.Comment.ID = 991122
+			event.Comment.InReplyToID = &rootID
+			event.Comment.Body = tt.body
+			event.Comment.User.Login = "assembled-matthew"
+			event.Comment.User.Type = "User"
+			event.Comment.AuthorAssociation = "MEMBER"
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", nil)
+
+			captured := handler.handleCodeReviewInlineDispute(req, event, db.GitHubRepoOwner{
+				OrgID: orgID, RepositoryID: repoID, FullName: "assembledhq/assembled", Status: "active",
+			})
+
+			require.False(t, captured, "no dispute is stored in either case, so the feedback item stays actionable")
+			if tt.expectIntakeEntry {
+				require.NoError(t, mock.ExpectationsWereMet(), "an objection or question belongs to dispute intake")
+			} else {
+				require.Error(t, mock.ExpectationsWereMet(),
+					"an actionable reply must never be claimed away from feedback follow-through")
+			}
+		})
+	}
+}
+
+// A trusted author's new mention is a review request first. Because
+// IsLikelyDisputeMention treats any question mark as dispute-shaped, capture
+// would swallow "@team can you re-review?" -- and triage routes a non-author's
+// objection to policy_signal_only, so nothing would run at all.
+func TestWebhook_HandleCodeReviewMentionedStartsReviewForTrustedQuestionWithoutObjection(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	prID := uuid.New()
+	now := time.Now().UTC()
+	remote := ghservice.CodeReviewPullRequestSnapshot{
+		Number: 54903, State: "open", HTMLURL: "https://github.com/assembledhq/assembled/pull/54903",
+		Title: "Fix invoice rounding", Body: "body", HeadSHA: "head-sha", HeadRef: "feature", BaseSHA: "base-sha",
+	}
+	loader := &codeReviewPullRequestLoaderStub{snapshot: remote}
+	jobs := &codeReviewWebhookJobStore{jobID: uuid.New()}
+	codeReviews := codereviewsvc.NewService(
+		&codeReviewWebhookPolicyStore{policyID: uuid.New(), config: models.DefaultCodeReviewPolicyConfig()},
+		&codeReviewWebhookMetadataStore{},
+		&codeReviewWebhookSessionStore{},
+		jobs,
+		zerolog.Nop(),
+		codereviewsvc.Config{TeamSlugs: []string{"143-code-reviewer"}},
+	)
+	// An unconfigured dispute service: if the handler treated this as a dispute
+	// candidate it would fail capture and refuse to start the review, so the
+	// assertion below can tell the two routes apart.
+	handler := &WebhookHandler{
+		codeReviews:        codeReviews,
+		codeReviewPRs:      loader,
+		pullRequests:       db.NewPullRequestStore(mock),
+		codeReviewDisputes: codereviewsvc.NewDisputeService(nil, nil, nil, nil, nil, "", zerolog.Nop()),
+	}
+
+	staleBody := "old body"
+	staleHead := "old-head"
+	staleRef := "old-ref"
+	staleBase := "old-base"
+	mock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*WHERE org_id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": "assembledhq/assembled", "github_pr_number": 54903}).
+		WillReturnRows(pgxmock.NewRows(codeReviewWebhookPullRequestColumns()).AddRow(
+			prID, nil, orgID, 54903, remote.HTMLURL, "assembledhq/assembled",
+			"Old title", &staleBody, "open", "pending", "user", "", &staleHead, &staleRef, &staleBase,
+			"unknown", false, 0, false, nil, int64(0),
+			models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil,
+			nil, now, now,
+		))
+	mock.ExpectExec("UPDATE pull_requests[\\s\\S]*github_pr_url = @github_pr_url").
+		WithArgs(pgx.NamedArgs{
+			"id":            prID,
+			"org_id":        orgID,
+			"github_pr_url": remote.HTMLURL,
+			"title":         remote.Title,
+			"body":          stringPointerArg{value: remote.Body},
+			"head_sha":      stringPointerArg{value: remote.HeadSHA},
+			"head_ref":      stringPointerArg{value: remote.HeadRef},
+			"base_sha":      stringPointerArg{value: remote.BaseSHA},
+			"merge_state":   models.PullRequestMergeStateUnknown,
+		}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	var event ghservice.IssueCommentEvent
+	event.Action = "created"
+	event.DeliveryID = "delivery-trusted-question"
+	event.Repository.FullName = "assembledhq/assembled"
+	event.Issue.Number = 54903
+	event.Issue.PullRequest = &struct{}{}
+	event.Comment.ID = 5124237400
+	event.Comment.Body = "@assembledhq/143-code-reviewer can you re-review this?"
+	event.Comment.User.Login = "assembled-matthew"
+	event.Comment.User.Type = "User"
+	event.Comment.AuthorAssociation = "MEMBER"
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", nil)
+	rr := httptest.NewRecorder()
+
+	ok, captured := handler.handleCodeReviewMentioned(rr, req, event, db.GitHubRepoOwner{
+		OrgID: orgID, RepositoryID: repoID, FullName: "assembledhq/assembled", Status: "active",
+	})
+
+	require.True(t, ok, "a trusted review request should not fail the webhook: %s", rr.Body.String())
+	require.False(t, captured, "a review request without objection language is not a dispute")
+	require.NotEqual(t, uuid.Nil, jobs.payload.SessionID, "an explicit re-review request must still start a review")
+}
+
+// The objection gate deliberately ignores event.Action. Gating it on "created"
+// would make a typo fix on a trusted author's question file a dispute, spending
+// an LLM triage to answer an edit the created event already answered.
+func TestWebhook_HandleCodeReviewMentionedIgnoresEditedTrustedQuestion(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	loader := &codeReviewPullRequestLoaderStub{err: errors.New("GitHub should not be called")}
+	codeReviews := codereviewsvc.NewService(
+		&codeReviewWebhookPolicyStore{},
+		&codeReviewWebhookMetadataStore{},
+		&codeReviewWebhookSessionStore{},
+		&codeReviewWebhookJobStore{},
+		zerolog.Nop(),
+		codereviewsvc.Config{TeamSlugs: []string{"143-code-reviewer"}},
+	)
+	handler := &WebhookHandler{
+		codeReviews:        codeReviews,
+		codeReviewPRs:      loader,
+		codeReviewDisputes: codereviewsvc.NewDisputeService(nil, nil, nil, nil, nil, "", zerolog.Nop()),
+	}
+	var event ghservice.IssueCommentEvent
+	event.Action = "edited"
+	event.DeliveryID = "delivery-edited-question"
+	event.Repository.FullName = "assembledhq/assembled"
+	event.Issue.Number = 54903
+	event.Issue.PullRequest = &struct{}{}
+	event.Comment.ID = 5124237401
+	event.Comment.Body = "@assembledhq/143-code-reviewer can you re-review this?"
+	event.Comment.User.Login = "assembled-matthew"
+	event.Comment.User.Type = "User"
+	event.Comment.AuthorAssociation = "MEMBER"
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", nil)
+	rr := httptest.NewRecorder()
+
+	ok, captured := handler.handleCodeReviewMentioned(rr, req, event, db.GitHubRepoOwner{
+		OrgID: orgID, RepositoryID: repoID, FullName: "assembledhq/assembled", Status: "active",
+	})
+
+	require.True(t, ok, "an edited question should not fail the webhook")
+	require.False(t, captured, "a trusted author's question is a review request, not a dispute, however it arrives")
+	require.Equal(t, 0, loader.number, "an edited trusted question should not spend a GitHub request or an LLM triage")
+	require.Empty(t, rr.Body.String(), "an ignored edit should not write an error response")
+}
+
+func TestWebhook_HandleCodeReviewMentionedIgnoresEditedNonDisputeBeforeGitHubLoad(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	loader := &codeReviewPullRequestLoaderStub{err: errors.New("GitHub should not be called")}
+	codeReviews := codereviewsvc.NewService(
+		&codeReviewWebhookPolicyStore{},
+		&codeReviewWebhookMetadataStore{},
+		&codeReviewWebhookSessionStore{},
+		&codeReviewWebhookJobStore{},
+		zerolog.Nop(),
+		codereviewsvc.Config{TeamSlugs: []string{"143-code-reviewer"}},
+	)
+	handler := &WebhookHandler{codeReviews: codeReviews, codeReviewPRs: loader}
+	var event ghservice.IssueCommentEvent
+	event.Action = "edited"
+	event.DeliveryID = "delivery-edit-54903"
+	event.Repository.FullName = "assembledhq/assembled"
+	event.Issue.Number = 54903
+	event.Comment.Body = "@assembledhq/143-code-reviewer please take a look"
+	event.Comment.User.Login = "assembled-matthew"
+	event.Comment.User.Type = "User"
+	event.Comment.AuthorAssociation = "MEMBER"
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", nil)
+	rr := httptest.NewRecorder()
+
+	ok, captured := handler.handleCodeReviewMentioned(rr, req, event, db.GitHubRepoOwner{
+		OrgID: orgID, RepositoryID: repoID, FullName: "assembledhq/assembled", Status: "active",
+	})
+
+	require.True(t, ok, "an edited mention should not fail the webhook")
+	require.False(t, captured, "an ordinary edited mention is not a dispute")
+	// Every edit carries a fresh delivery ID, so reaching the mention path
+	// again would force a whole new agent fan-out for a typo fix.
+	require.Equal(t, 0, loader.number, "an edited non-dispute mention should not spend a GitHub API request or start a review")
+	require.Empty(t, rr.Body.String(), "an ignored edit should not write an error response")
 }
 
 func TestWebhook_HandleCodeReviewMentionedRejectsUntrustedAuthorsBeforeGitHubLoad(t *testing.T) {
@@ -1217,8 +1564,17 @@ func TestWebhook_HandleCodeReviewMentionedRejectsUntrustedAuthorsBeforeGitHubLoa
 				zerolog.Nop(),
 				codereviewsvc.Config{TeamSlugs: []string{"143-code-reviewer"}},
 			)
-			handler := &WebhookHandler{codeReviews: codeReviews, codeReviewPRs: loader}
+			// Dispute intake is wired and the action is "created", so the only
+			// thing that can stop this comment before the GitHub load is the
+			// untrusted-author gate itself. The body is a plain review request,
+			// not an objection, so it is not a dispute candidate either.
+			handler := &WebhookHandler{
+				codeReviews:        codeReviews,
+				codeReviewPRs:      loader,
+				codeReviewDisputes: codereviewsvc.NewDisputeService(nil, nil, nil, nil, nil, "", zerolog.Nop()),
+			}
 			var event ghservice.IssueCommentEvent
+			event.Action = "created"
 			event.Repository.FullName = "assembledhq/assembled"
 			event.Issue.Number = 54903
 			event.Comment.Body = "@assembledhq/143-code-reviewer review again"
@@ -1229,11 +1585,12 @@ func TestWebhook_HandleCodeReviewMentionedRejectsUntrustedAuthorsBeforeGitHubLoa
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", nil)
 			rr := httptest.NewRecorder()
 
-			ok := handler.handleCodeReviewMentioned(rr, req, event, db.GitHubRepoOwner{
+			ok, captured := handler.handleCodeReviewMentioned(rr, req, event, db.GitHubRepoOwner{
 				OrgID: orgID, RepositoryID: repoID, FullName: "assembledhq/assembled", Status: "active",
 			})
 
 			require.True(t, ok, "untrusted mention should be ignored without failing the webhook")
+			require.False(t, captured, "untrusted mention without dispute intake should not suppress ordinary feedback")
 			require.Equal(t, 0, loader.number, "untrusted mention should not spend a GitHub API request")
 			require.Empty(t, rr.Body.String(), "ignored mention should not write an error response")
 		})

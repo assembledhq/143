@@ -42,6 +42,7 @@ import type {
   CodingCredentialSummary,
   CodeReviewAnalytics,
   CodeReviewEvidence,
+  CodeReviewDispute,
   CodeReviewGitHubTriggerResponse,
   CodeReviewListItem,
   CodeReviewPolicyConfig,
@@ -107,6 +108,7 @@ const policy: CodeReviewResolvedPolicy = {
     risk_policy: {
       max_files_changed: 5,
       max_lines_changed: 300,
+      semantic_dedupe_cooldown_seconds: 900,
       require_passing_checks: true,
       exclude_sensitive_paths: true,
       sensitive_paths: ["*auth*"],
@@ -193,6 +195,7 @@ const evidence: CodeReviewEvidence = {
       created_at: "2026-06-26T12:04:00Z",
     },
   ],
+  risk_reason_codes: ["blocking_findings"],
   prompt_records: [
     {
       id: "record-1",
@@ -315,6 +318,7 @@ function mockCodeReviewBaseHandlers(
   // reflect the last saved config for optimistic values to stick across the
   // invalidation round-trip.
   let currentConfig: CodeReviewPolicyConfig = initialConfig;
+  let disputes: CodeReviewDispute[] = [];
   server.use(
     http.get("/api/v1/repositories", () =>
       HttpResponse.json({
@@ -367,6 +371,26 @@ function mockCodeReviewBaseHandlers(
         data: evidence,
       } satisfies SingleResponse<CodeReviewEvidence>),
     ),
+    http.get("/api/v1/code-reviews/session-1/disputes", () =>
+      HttpResponse.json({ data: disputes, meta: {} } satisfies ListResponse<CodeReviewDispute>),
+    ),
+    http.get("/api/v1/code-review-disputes", () =>
+      HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<CodeReviewDispute>),
+    ),
+    http.post("/api/v1/code-reviews/session-1/disputes", async ({ request }) => {
+      const body = await request.json() as { body: string; contested_reason_codes?: string[] };
+      const dispute: CodeReviewDispute = {
+        id: "dispute-1", org_id: "org-1", session_id: "session-1", pull_request_id: "pr-1",
+        repository_id: "repo-1", policy_id: "policy-1", reviewed_head_sha: review.head_sha,
+        decision: "approved", filed_by_login: "anya", author_association: "MEMBER",
+        author_is_pr_author: true, repository_visibility: "private", trusted: true, source: "app_ui",
+        body: body.body, contested_reason_codes: body.contested_reason_codes ?? [], intake_status: "pending",
+        reassessment_status: "not_requested", queue_signals: {}, queue_priority: 0,
+        reply_status: "not_applicable", version: 1, created_at: "2026-06-26T12:06:00Z", updated_at: "2026-06-26T12:06:00Z",
+      };
+      disputes = [dispute];
+      return HttpResponse.json({ data: dispute } satisfies SingleResponse<CodeReviewDispute>, { status: 201 });
+    }),
     http.get("/api/v1/code-reviews/prompt-examples", () =>
       HttpResponse.json({ data: {
         review_instructions: [{ key: "balanced", title: "Balanced review", description: "Balanced", instructions: "Balanced instructions" }],
@@ -1213,6 +1237,90 @@ describe("CodeReviewsPage", () => {
     expect(statsRequests).toBeGreaterThanOrEqual(3);
   });
 
+  // The dispute queue and every GitHub dispute reply deep-link to
+  // ?evidence=<session id>. The reviews list is windowed to 30 days and paged at
+  // 50, so the sheet has to be able to open a review the list never loaded.
+  it("opens the evidence sheet for a deep link to a review outside the loaded list", async () => {
+    mockCodeReviewBaseHandlers();
+    const archived: CodeReviewListItem = {
+      ...review,
+      id: "review-9",
+      session_id: "session-9",
+      github_pr_number: 311,
+      pull_request_title: "Archived rounding fix",
+    };
+    let detailRequests = 0;
+    server.use(
+      // The list only ever returns the recent review, exactly as a 30-day
+      // window would.
+      http.get("/api/v1/code-reviews", () =>
+        HttpResponse.json({ data: [review], meta: { total_count: 1 } } satisfies ListResponse<CodeReviewListItem>),
+      ),
+      http.get("/api/v1/code-reviews/session-9", () => {
+        detailRequests += 1;
+        return HttpResponse.json({ data: archived } satisfies SingleResponse<CodeReviewListItem>);
+      }),
+      http.get("/api/v1/code-reviews/session-9/evidence", () =>
+        HttpResponse.json({ data: evidence } satisfies SingleResponse<CodeReviewEvidence>),
+      ),
+      http.get("/api/v1/code-reviews/session-9/disputes", () =>
+        HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<CodeReviewDispute>),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, {
+      searchParams: { evidence: "session-9" },
+      nuqsHasMemory: true,
+    });
+
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #311/i });
+    expect(within(evidenceSheet).getByText("Archived rounding fix")).toBeInTheDocument();
+    expect(detailRequests).toBe(1);
+  });
+
+  it("explains an unresolvable evidence deep link instead of doing nothing", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews/session-9", () =>
+        HttpResponse.json({ error: { code: "CODE_REVIEW_NOT_FOUND", message: "code review not found" } }, { status: 404 }),
+      ),
+      // The evidence query keys off the same URL param, so it fires and 404s too.
+      http.get("/api/v1/code-reviews/session-9/evidence", () =>
+        HttpResponse.json({ error: { code: "CODE_REVIEW_NOT_FOUND", message: "code review not found" } }, { status: 404 }),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, {
+      searchParams: { evidence: "session-9" },
+      nuqsHasMemory: true,
+    });
+
+    const notice = await screen.findByRole("alert");
+    expect(notice).toHaveTextContent("That code review could not be opened");
+    // Clearing the link must return the page to its ordinary state.
+    await user.click(within(notice).getByRole("button", { name: "Clear the evidence link" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+  });
+
+  it("does not fetch a review detail when the deep link is already in the loaded list", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+    let detailRequests = 0;
+    server.use(
+      http.get("/api/v1/code-reviews/session-1", () => {
+        detailRequests += 1;
+        return HttpResponse.json({ data: review } satisfies SingleResponse<CodeReviewListItem>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
+
+    await user.click((await screen.findAllByRole("button", { name: /Evidence/i }))[0]);
+    expect(await screen.findByRole("dialog", { name: /Evidence for #428/i })).toBeInTheDocument();
+    expect(detailRequests).toBe(0);
+  });
+
   it("uses the standard error notice and retries evidence loading", async () => {
     const user = userEvent.setup();
     let evidenceRequests = 0;
@@ -1250,6 +1358,185 @@ describe("CodeReviewsPage", () => {
 
     expect(await within(evidenceSheet).findByText("No blocking issues found.")).toBeInTheDocument();
     expect(evidenceRequests).toBe(2);
+  });
+
+  it("records unsafe approval feedback and shows it in the review timeline", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
+    await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
+    await user.click(within(evidenceSheet).getByRole("button", { name: "Report an unsafe approval" }));
+
+    const feedbackDialog = await screen.findByRole("dialog", { name: "Report an unsafe approval" });
+    await user.type(within(feedbackDialog).getByLabelText("What should be reconsidered?"), "This approval missed an authorization bypass.");
+    await user.click(within(feedbackDialog).getByLabelText(/blocking findings/i));
+    await user.click(within(feedbackDialog).getByRole("button", { name: "Record feedback" }));
+
+    expect(await within(evidenceSheet).findByText("This approval missed an authorization bypass.")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("Pending")).toBeInTheDocument();
+  });
+
+  it("does not request or show decision feedback for viewer roles", async () => {
+    const user = userEvent.setup();
+    let disputeRequests = 0;
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/auth/me", () => HttpResponse.json({
+        data: {
+          id: "viewer-1",
+          org_id: "org-1",
+          email: "viewer@example.com",
+          name: "Viewer",
+          role: "viewer",
+          created_at: "2026-01-01T00:00:00Z",
+        } satisfies User,
+      })),
+      http.get("/api/v1/code-reviews/session-1/disputes", () => {
+        disputeRequests += 1;
+        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<CodeReviewDispute>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
+    await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
+
+    expect(within(evidenceSheet).queryByText("Decision feedback")).not.toBeInTheDocument();
+    expect(disputeRequests).toBe(0);
+  });
+
+  it("opens the linked evidence timeline from the dispute URL", async () => {
+    mockCodeReviewBaseHandlers();
+
+    renderWithProviders(<CodeReviewsPage />, { searchParams: { evidence: "session-1" } });
+
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
+    expect(within(evidenceSheet).getByText("Decision feedback")).toBeInTheDocument();
+  });
+
+  it("shows the flat admin dispute list and submits a CAS adjudication", async () => {
+    const user = userEvent.setup();
+    let updateBody: unknown;
+    const dispute: CodeReviewDispute = {
+      id: "dispute-queue-1", org_id: "org-1", session_id: "session-1", pull_request_id: "pr-1",
+      repository_id: "repo-1", policy_id: "policy-1", reviewed_head_sha: review.head_sha,
+      decision: "blocked", direction: "should_have_approved", filed_by_login: "anya",
+      author_association: "MEMBER", author_is_pr_author: true, repository_visibility: "private",
+      trusted: true, source: "app_ui", body: "The size exception was already approved.",
+      contested_reason_codes: ["lines_limit_exceeded"], intake_status: "triaged", routing: "policy_signal_only",
+      reassessment_status: "not_requested", adjudication_status: "pending", queue_signals: {
+        pull_request_title: "Fix invoice rounding", github_repository: "acme/api", github_pr_number: 428,
+        github_pr_url: "https://github.com/acme/api/pull/428",
+      }, queue_priority: 0,
+      reply_status: "not_applicable", version: 3, created_at: "2026-06-26T12:06:00Z", updated_at: "2026-06-26T12:06:00Z",
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-review-disputes", () => HttpResponse.json({ data: [dispute], meta: {} } satisfies ListResponse<CodeReviewDispute>)),
+      http.patch("/api/v1/code-review-disputes/dispute-queue-1", async ({ request }) => {
+        updateBody = await request.json();
+        return HttpResponse.json({ data: { ...dispute, adjudication_status: "upheld", version: 4 } } satisfies SingleResponse<CodeReviewDispute>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: "Disputes" }));
+    expect(await screen.findByText("The size exception was already approved.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "acme/api #428" })).toHaveAttribute("href", "https://github.com/acme/api/pull/428");
+    await user.type(screen.getByLabelText("Adjudication note for dispute dispute-queue-1"), "Confirmed exception in the policy record.");
+    await user.click(screen.getByRole("button", { name: "Uphold" }));
+
+    await waitFor(() => expect(updateBody).toEqual({
+      expected_version: 3,
+      adjudication_status: "upheld",
+      adjudication_note: "Confirmed exception in the policy record.",
+    }));
+  });
+
+  it("pages the dispute queue past the first cursor page", async () => {
+    const user = userEvent.setup();
+    const baseDispute: CodeReviewDispute = {
+      id: "dispute-page-1", org_id: "org-1", session_id: "session-1", pull_request_id: "pr-1",
+      repository_id: "repo-1", policy_id: "policy-1", reviewed_head_sha: review.head_sha,
+      decision: "blocked", direction: "should_have_approved", filed_by_login: "anya",
+      author_association: "MEMBER", author_is_pr_author: true, repository_visibility: "private",
+      trusted: true, source: "app_ui", body: "First page objection.",
+      contested_reason_codes: [], intake_status: "triaged", routing: "policy_signal_only",
+      reassessment_status: "not_requested", adjudication_status: "pending", queue_signals: {}, queue_priority: 0,
+      reply_status: "not_applicable", version: 3, created_at: "2026-06-26T12:06:00Z", updated_at: "2026-06-26T12:06:00Z",
+    };
+    const requestedCursors: (string | null)[] = [];
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-review-disputes", ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get("cursor");
+        requestedCursors.push(cursor);
+        if (cursor === "dispute-page-1") {
+          return HttpResponse.json({
+            data: [{ ...baseDispute, id: "dispute-page-2", body: "Second page objection." }],
+            meta: {},
+          } satisfies ListResponse<CodeReviewDispute>);
+        }
+        return HttpResponse.json({
+          data: [baseDispute],
+          meta: { next_cursor: "dispute-page-1" },
+        } satisfies ListResponse<CodeReviewDispute>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: "Disputes" }));
+    expect(await screen.findByText("First page objection.")).toBeInTheDocument();
+    // Without the cursor the badge would cap at the page size and the rest of
+    // the queue would be unreachable.
+    expect(await screen.findByText("1+")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Load more disputes" }));
+
+    expect(await screen.findByText("Second page objection.")).toBeInTheDocument();
+    expect(screen.getByText("First page objection.")).toBeInTheDocument();
+    expect(requestedCursors).toEqual([null, "dispute-page-1"]);
+    expect(screen.queryByRole("button", { name: "Load more disputes" })).not.toBeInTheDocument();
+  });
+
+  it("lets an admin promote an untrusted timeline dispute without adjudicating it", async () => {
+    const user = userEvent.setup();
+    let updateBody: unknown;
+    const dispute: CodeReviewDispute = {
+      id: "dispute-untrusted-1", org_id: "org-1", session_id: "session-1", pull_request_id: "pr-1",
+      repository_id: "repo-1", policy_id: "policy-1", reviewed_head_sha: review.head_sha,
+      decision: "approved", direction: "should_not_have_approved", filed_by_login: "external-contributor",
+      author_association: "CONTRIBUTOR", author_is_pr_author: true, repository_visibility: "public",
+      trusted: false, source: "github_comment", body: "This approval missed an authorization bypass.",
+      contested_reason_codes: [], intake_status: "triaged", routing: "policy_signal_only",
+      reassessment_status: "not_requested", queue_signals: {}, queue_priority: 0,
+      reply_status: "published", version: 2, created_at: "2026-06-26T12:06:00Z", updated_at: "2026-06-26T12:06:00Z",
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews/session-1/disputes", () => HttpResponse.json({ data: [dispute], meta: {} } satisfies ListResponse<CodeReviewDispute>)),
+      http.patch("/api/v1/code-review-disputes/dispute-untrusted-1", async ({ request }) => {
+        updateBody = await request.json();
+        return HttpResponse.json({ data: { ...dispute, trusted: true, trust_override: true, adjudication_status: "pending", version: 3 } } satisfies SingleResponse<CodeReviewDispute>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
+    await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
+    await user.click(await within(evidenceSheet).findByRole("button", { name: "Promote to policy queue" }));
+
+    await waitFor(() => expect(updateBody).toEqual({ expected_version: 2, trust_override: true }));
   });
 
   it("loads the next cursor page and updates the visible count", async () => {

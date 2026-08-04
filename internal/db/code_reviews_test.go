@@ -2223,6 +2223,30 @@ func TestCodeReviewStore_ReplaceFindingUpdatesConflictContent(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestCodeReviewStore_GetRiskReasonsBySessionPreservesValues(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	defer mock.Close()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	mock.ExpectQuery("SELECT risk_reason_details").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+		WillReturnRows(pgxmock.NewRows([]string{"risk_reason_details"}).AddRow([]byte(`[
+			{"code":"lines_limit_exceeded","actual":431,"limit":300},
+			{"code":"retired_reason","subject":"ignored"}
+		]`)))
+
+	reasons, err := NewCodeReviewStore(mock).GetRiskReasonsBySession(context.Background(), orgID, sessionID)
+
+	require.NoError(t, err, "risk reason details should decode")
+	require.Equal(t, []models.CodeReviewRiskReason{{
+		Code: models.CodeReviewRiskReasonLinesLimitExceeded, Actual: 431, Limit: 300,
+	}}, reasons, "known risk reasons should retain actual and limit values while unknown historical reasons are ignored")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func mustCodeReviewPolicyJSON(t *testing.T, config models.CodeReviewPolicyConfig) ([]byte, []byte, []byte) {
 	t.Helper()
 	descriptionPolicy, err := json.Marshal(config.DescriptionPolicy)

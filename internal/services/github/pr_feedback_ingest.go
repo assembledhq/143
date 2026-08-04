@@ -47,6 +47,7 @@ type normalizedPRFeedback struct {
 	Side              *string
 	DiffHunk          *string
 	CommitSHA         *string
+	RecordOnly        bool
 }
 
 func (s *PRService) ingestPRFeedback(ctx context.Context, input normalizedPRFeedback) error {
@@ -85,6 +86,11 @@ func (s *PRService) ingestPRFeedback(ctx context.Context, input normalizedPRFeed
 		Line: input.Line, Side: nonEmptyStringPointer(input.Side), DiffHunk: nonEmptyStringPointer(input.DiffHunk),
 		CommentCommitSHA: nonEmptyStringPointer(input.CommitSHA), Intent: models.PRFeedbackIntentUnknown,
 		Status: models.PRFeedbackItemStatusPending,
+	}
+	if input.RecordOnly {
+		reason := models.PRFeedbackIgnoreReasonCodeReviewDispute
+		item.Status = models.PRFeedbackItemStatusIgnored
+		item.IgnoreReason = &reason
 	}
 	if pr.HeadSHA != nil {
 		item.ObservedHeadSHA = *pr.HeadSHA

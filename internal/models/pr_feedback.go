@@ -169,6 +169,11 @@ func (v PRFeedbackItemStatus) Validate() error {
 	return fmt.Errorf("invalid PR feedback item status: %q", v)
 }
 
+// PRFeedbackIgnoreReasonCodeReviewDispute marks a comment that code-review
+// dispute intake claimed. It is the only ignore reason the ingest path treats
+// specially, so ordinary eligibility ignores keep their existing behavior.
+const PRFeedbackIgnoreReasonCodeReviewDispute = "handled_as_code_review_dispute"
+
 type PRFeedbackBatchStatus string
 
 const (

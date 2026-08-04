@@ -15,11 +15,11 @@ export function DisabledTooltip({ children, content, disabled = false }: Disable
   // becomes undefined. Removing the wrapper unmounts the child element, which
   // invalidates any external DOM reference held to it.
   const [everHadContent, setEverHadContent] = React.useState(() => !!content);
+  const [open, setOpen] = React.useState(false);
   React.useEffect(() => {
     if (content) setEverHadContent(true);
   }, [content]);
   const canOpen = disabled && !!content;
-  const [open, setOpen] = React.useState(false);
   React.useEffect(() => {
     if (!canOpen && open) setOpen(false);
   }, [canOpen, open]);

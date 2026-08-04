@@ -194,17 +194,18 @@ type CodeReviewUpdatedEvent struct {
 type CodeReviewTriggerSource string
 
 const (
-	CodeReviewTriggerSourceAppReviewer   CodeReviewTriggerSource = "app_reviewer"
-	CodeReviewTriggerSourceAliasReviewer CodeReviewTriggerSource = "alias_reviewer"
-	CodeReviewTriggerSourceTeamReviewer  CodeReviewTriggerSource = "team_reviewer"
-	CodeReviewTriggerSourceSlashCommand  CodeReviewTriggerSource = "slash_command"
-	CodeReviewTriggerSourceAutoPolicy    CodeReviewTriggerSource = "auto_policy"
+	CodeReviewTriggerSourceAppReviewer         CodeReviewTriggerSource = "app_reviewer"
+	CodeReviewTriggerSourceAliasReviewer       CodeReviewTriggerSource = "alias_reviewer"
+	CodeReviewTriggerSourceTeamReviewer        CodeReviewTriggerSource = "team_reviewer"
+	CodeReviewTriggerSourceSlashCommand        CodeReviewTriggerSource = "slash_command"
+	CodeReviewTriggerSourceAutoPolicy          CodeReviewTriggerSource = "auto_policy"
+	CodeReviewTriggerSourceDisputeReassessment CodeReviewTriggerSource = "dispute_reassessment"
 )
 
 func (s CodeReviewTriggerSource) Validate() error {
 	switch s {
 	case CodeReviewTriggerSourceAppReviewer, CodeReviewTriggerSourceAliasReviewer, CodeReviewTriggerSourceTeamReviewer,
-		CodeReviewTriggerSourceSlashCommand, CodeReviewTriggerSourceAutoPolicy:
+		CodeReviewTriggerSourceSlashCommand, CodeReviewTriggerSourceAutoPolicy, CodeReviewTriggerSourceDisputeReassessment:
 		return nil
 	default:
 		return fmt.Errorf("invalid CodeReviewTriggerSource: %q", s)
@@ -465,18 +466,25 @@ type CodeReviewDescriptionPolicy struct {
 }
 
 type CodeReviewRiskPolicy struct {
-	MaxFilesChanged       int      `json:"max_files_changed"`
-	MaxLinesChanged       int      `json:"max_lines_changed"`
-	RequirePassingChecks  bool     `json:"require_passing_checks"`
-	ExcludeSensitivePaths bool     `json:"exclude_sensitive_paths"`
-	SensitivePaths        []string `json:"sensitive_paths,omitempty"`
-	AllowedPathPatterns   []string `json:"allowed_path_patterns,omitempty"`
-	BlockedPathPatterns   []string `json:"blocked_path_patterns,omitempty"`
-	RequireUpToDate       bool     `json:"require_up_to_date"`
-	AllowForks            bool     `json:"allow_forks"`
-	EligibleAuthors       []string `json:"eligible_authors,omitempty"`
-	RequiredChecks        []string `json:"required_checks,omitempty"`
+	MaxFilesChanged               int      `json:"max_files_changed"`
+	MaxLinesChanged               int      `json:"max_lines_changed"`
+	SemanticDedupeCooldownSeconds int      `json:"semantic_dedupe_cooldown_seconds"`
+	RequirePassingChecks          bool     `json:"require_passing_checks"`
+	ExcludeSensitivePaths         bool     `json:"exclude_sensitive_paths"`
+	SensitivePaths                []string `json:"sensitive_paths,omitempty"`
+	AllowedPathPatterns           []string `json:"allowed_path_patterns,omitempty"`
+	BlockedPathPatterns           []string `json:"blocked_path_patterns,omitempty"`
+	RequireUpToDate               bool     `json:"require_up_to_date"`
+	AllowForks                    bool     `json:"allow_forks"`
+	EligibleAuthors               []string `json:"eligible_authors,omitempty"`
+	RequiredChecks                []string `json:"required_checks,omitempty"`
 }
+
+const (
+	DefaultCodeReviewSemanticDedupeCooldownSeconds = 15 * 60
+	MinCodeReviewSemanticDedupeCooldownSeconds     = 60
+	MaxCodeReviewSemanticDedupeCooldownSeconds     = 24 * 60 * 60
+)
 
 type CodeReviewAgentRoster struct {
 	Reviewers                []AgentType       `json:"reviewers"`
@@ -585,13 +593,14 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 			},
 		}},
 		RiskPolicy: CodeReviewRiskPolicy{
-			MaxFilesChanged:       5,
-			MaxLinesChanged:       300,
-			RequirePassingChecks:  false,
-			ExcludeSensitivePaths: false,
-			SensitivePaths:        []string{},
-			RequireUpToDate:       false,
-			AllowForks:            false,
+			MaxFilesChanged:               5,
+			MaxLinesChanged:               300,
+			SemanticDedupeCooldownSeconds: DefaultCodeReviewSemanticDedupeCooldownSeconds,
+			RequirePassingChecks:          false,
+			ExcludeSensitivePaths:         false,
+			SensitivePaths:                []string{},
+			RequireUpToDate:               false,
+			AllowForks:                    false,
 		},
 		AgentRoster: CodeReviewAgentRoster{
 			Reviewers:                []AgentType{AgentTypeCodex, AgentTypeClaudeCode},
@@ -633,6 +642,9 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 	}
 	if config.RiskPolicy.MaxLinesChanged != 0 {
 		defaults.RiskPolicy.MaxLinesChanged = config.RiskPolicy.MaxLinesChanged
+	}
+	if config.RiskPolicy.SemanticDedupeCooldownSeconds != 0 {
+		defaults.RiskPolicy.SemanticDedupeCooldownSeconds = config.RiskPolicy.SemanticDedupeCooldownSeconds
 	}
 	defaults.RiskPolicy.RequirePassingChecks = config.RiskPolicy.RequirePassingChecks
 	defaults.RiskPolicy.ExcludeSensitivePaths = config.RiskPolicy.ExcludeSensitivePaths
@@ -722,6 +734,10 @@ func (c CodeReviewPolicyConfig) Validate() error {
 	}
 	if c.RiskPolicy.MaxLinesChanged < 1 {
 		return codeReviewPolicyFieldError(CodeReviewPolicyFieldRiskPolicy, "max_lines_changed must be positive")
+	}
+	if c.RiskPolicy.SemanticDedupeCooldownSeconds < MinCodeReviewSemanticDedupeCooldownSeconds ||
+		c.RiskPolicy.SemanticDedupeCooldownSeconds > MaxCodeReviewSemanticDedupeCooldownSeconds {
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldRiskPolicy, "semantic_dedupe_cooldown_seconds must be between 60 and 86400")
 	}
 	for _, requirement := range c.DescriptionPolicy.Requirements {
 		if err := requirement.AppliesWhen.Validate(); err != nil {
@@ -868,6 +884,7 @@ type CodeReviewSessionMetadata struct {
 	HeadSHA               string                  `db:"head_sha" json:"head_sha"`
 	FromFork              bool                    `db:"from_fork" json:"from_fork"`
 	TriggerSource         CodeReviewTriggerSource `db:"trigger_source" json:"trigger_source"`
+	TriggeringDisputeID   *uuid.UUID              `db:"-" json:"triggering_dispute_id,omitempty"`
 	Status                CodeReviewSessionStatus `db:"status" json:"status"`
 	Phase                 *CodeReviewPhase        `db:"phase" json:"phase,omitempty"`
 	StatusCode            *CodeReviewStatusCode   `db:"status_code" json:"status_code,omitempty"`
@@ -1059,9 +1076,10 @@ type CodeReviewAnalytics struct {
 }
 
 type CodeReviewEvidence struct {
-	AgentResults  []CodeReviewAgentResult  `json:"agent_results"`
-	Findings      []CodeReviewFinding      `json:"findings"`
-	PromptRecords []CodeReviewPromptRecord `json:"prompt_records,omitempty"`
+	AgentResults    []CodeReviewAgentResult    `json:"agent_results"`
+	Findings        []CodeReviewFinding        `json:"findings"`
+	PromptRecords   []CodeReviewPromptRecord   `json:"prompt_records,omitempty"`
+	RiskReasonCodes []CodeReviewRiskReasonCode `json:"risk_reason_codes"`
 }
 
 // MarshalJSON emits both collection names until old API clients are outside

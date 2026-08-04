@@ -13,6 +13,60 @@ import (
 
 const prFeedbackHiddenMarker = "<!-- 143:pr-feedback:"
 
+// PRFeedbackHiddenMarker returns the stable marker used on machine-authored
+// PR feedback replies. Inbound provenance checks reject comments containing
+// this prefix so response publication cannot recursively trigger more work.
+func PRFeedbackHiddenMarker(id string) string {
+	return prFeedbackHiddenMarker + strings.TrimSpace(id) + " -->"
+}
+
+type PRFeedbackProvenanceInput struct {
+	AuthorLogin string
+	AuthorType  models.PRFeedbackAuthorType
+	Association string
+	OwnAppLogin string
+	Body        string
+	Deleted     bool
+}
+
+type PRFeedbackProvenance struct {
+	Recordable bool
+	// Trusted mirrors the long-standing association-only rule used by feedback
+	// follow-through. Repository visibility deliberately does not widen it:
+	// disputes apply their own private-repo relaxation in
+	// models.CodeReviewDispute.CurrentTrust, and folding that here would
+	// silently make every private-repo commenter eligible for automatic
+	// follow-through.
+	Trusted      bool
+	IgnoreReason string
+}
+
+// EvaluatePRFeedbackProvenance is the shared, product-neutral half of PR
+// feedback eligibility. It deliberately excludes follow-through mode and
+// mention settings so code-review disputes can record and answer external
+// contributors without inheriting an unrelated product switch.
+func EvaluatePRFeedbackProvenance(input PRFeedbackProvenanceInput) PRFeedbackProvenance {
+	input.AuthorLogin = strings.TrimSpace(input.AuthorLogin)
+	input.OwnAppLogin = strings.TrimSpace(input.OwnAppLogin)
+	input.Association = strings.ToUpper(strings.TrimSpace(input.Association))
+	input.Body = strings.TrimSpace(input.Body)
+	login := canonicalBotLogin(input.AuthorLogin)
+	if login == canonicalBotLogin(input.OwnAppLogin) && login != "" {
+		return PRFeedbackProvenance{IgnoreReason: "self_authored"}
+	}
+	if input.Deleted || strings.TrimSpace(input.Body) == "" {
+		return PRFeedbackProvenance{IgnoreReason: "empty_or_deleted"}
+	}
+	if strings.Contains(input.Body, prFeedbackHiddenMarker) {
+		return PRFeedbackProvenance{IgnoreReason: "hidden_response_marker"}
+	}
+	if input.AuthorType == models.PRFeedbackAuthorTypeBot {
+		return PRFeedbackProvenance{IgnoreReason: "bot_authored"}
+	}
+	trustedAssociation := input.Association == "OWNER" || input.Association == "MEMBER" || input.Association == "COLLABORATOR"
+	return PRFeedbackProvenance{Recordable: true, Trusted: trustedAssociation}
+}
+
 type prFeedbackEligibilityInput struct {
 	HumanMode    models.PRFeedbackHumanMode
 	BotMode      models.PRFeedbackBotMode
@@ -35,22 +89,19 @@ type prFeedbackEligibility struct {
 }
 
 func evaluatePRFeedbackEligibility(input prFeedbackEligibilityInput) prFeedbackEligibility {
+	provenance := EvaluatePRFeedbackProvenance(PRFeedbackProvenanceInput{
+		AuthorLogin: input.AuthorLogin, AuthorType: input.AuthorType,
+		Association: input.Association, OwnAppLogin: input.OwnAppLogin, Body: input.Body, Deleted: input.Deleted,
+	})
+	if !provenance.Recordable && (input.AuthorType != models.PRFeedbackAuthorTypeBot || provenance.IgnoreReason != "bot_authored") {
+		return prFeedbackEligibility{IgnoreReason: provenance.IgnoreReason}
+	}
 	login := canonicalBotLogin(input.AuthorLogin)
-	if login == canonicalBotLogin(input.OwnAppLogin) && login != "" {
-		return prFeedbackEligibility{IgnoreReason: "self_authored"}
-	}
-	if input.Deleted || strings.TrimSpace(input.Body) == "" {
-		return prFeedbackEligibility{IgnoreReason: "empty_or_deleted"}
-	}
-	if strings.Contains(input.Body, prFeedbackHiddenMarker) {
-		return prFeedbackEligibility{IgnoreReason: "hidden_response_marker"}
-	}
 	if input.AuthorType != models.PRFeedbackAuthorTypeBot {
 		if input.HumanMode == models.PRFeedbackHumanModeOff {
 			return prFeedbackEligibility{IgnoreReason: "human_mode_off"}
 		}
-		trusted := input.Association == "OWNER" || input.Association == "MEMBER" || input.Association == "COLLABORATOR"
-		if !trusted && !input.Mentioned {
+		if !provenance.Trusted && !input.Mentioned {
 			return prFeedbackEligibility{IgnoreReason: "untrusted_human_without_mention"}
 		}
 		if input.HumanMode == models.PRFeedbackHumanModeMentions && !input.Mentioned {

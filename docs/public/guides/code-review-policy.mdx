@@ -28,6 +28,14 @@ When a review starts, 143 asynchronously posts a best-effort PR conversation com
 
 Once 143 submits an approval, that approval is final for the PR: later changes and reviewer rerequests do not start another 143 assessment, so automation never reverses or contradicts the approval.
 
+## Challenge a review decision
+
+Organization admins and members can open a completed review's **Evidence** panel and select **Ask for reconsideration** for a non-approval or **Report an unsafe approval** for an approval. Explain what the review missed and, when available, select the policy reasons you are contesting. The original decision and evidence remain immutable while the panel shows the dispute's intake, reassessment, escalation, and adjudication timeline.
+
+On GitHub, a mention that questions or objects to a decision on a previously reviewed pull request, or a reply in one of 143's inline finding threads, enters the same dispute flow. A bare reviewer mention still requests a normal review. Human comments are acknowledged with one marker-protected reply so 143 cannot answer itself. In Phase 1A, a trusted pull request author can trigger a same-head reassessment when another run could help; other maintainers and outside contributors are still recorded and answered, but cannot spend organization compute automatically. Semantically unchanged requests within the policy's **Reassessment cooldown** are deduplicated with a clear response, and a pull request that moves to another commit must be reviewed at that newer head instead. Admins can tune that cooldown under the policy's advanced approval criteria.
+
+Unsafe-approval reports do not reverse an existing GitHub approval or automatically rerun the reviewer. They enter the policy-owner list for human judgment. Admins use the **Disputes** tab to uphold, reject, or request more context; only an upheld dispute is evidence that policy should change. An admin can also promote an untrusted captured report from the review's Evidence timeline when its provenance has been checked.
+
 ## Monitor and recover reviews
 
 The **Reviews** tab reports the current stage of each active attempt: syncing with GitHub, reviewing, synthesizing, or publishing. If GitHub rate-limits an operation, the attempt moves to **Waiting for GitHub** and shows when automatic processing will resume. You do not need to start another review while that countdown is active.

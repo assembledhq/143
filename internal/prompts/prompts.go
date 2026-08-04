@@ -95,6 +95,12 @@ func PRFeedbackTriagePrompt() string { return render("pr_feedback_triage.templat
 
 func PRFeedbackResponsePrompt() string { return render("pr_feedback_response.template", nil) }
 
+// CodeReviewDisputeTriagePrompt returns the system prompt for classifying a
+// natural-language challenge to a code-review decision.
+func CodeReviewDisputeTriagePrompt() string {
+	return render("code_review_dispute_triage.template", nil)
+}
+
 // ─── Agent ───────────────────────────────────────────────────────────────────
 
 // CodingTaskPreamble returns the preamble injected into coding-agent system prompts.

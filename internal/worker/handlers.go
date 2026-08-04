@@ -454,6 +454,10 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 			w.Register(models.JobTypeStartCodeReviewReassessment, newStartCodeReviewReassessmentHandler(stores, services, logger))
 		}
 	}
+	if stores != nil && stores.CodeReviewDisputes != nil && services != nil && services.CodeReviewDisputes != nil {
+		w.Register(models.JobTypeTriageCodeReviewDispute, newTriageCodeReviewDisputeHandler(services.CodeReviewDisputes))
+		w.Register(models.JobTypeReplyCodeReviewDispute, newReplyCodeReviewDisputeHandler(stores, services, logger))
+	}
 	if services != nil && services.ReviewLoops != nil {
 		w.Register(models.JobTypeReconcileSessionReviewLoop, newReconcileSessionReviewLoopHandler(services, logger))
 	}
@@ -630,6 +634,7 @@ type Stores struct {
 	AutomationRuns      *db.AutomationRunStore // nil-safe: automations feature disabled if nil
 	ReviewLoops         *db.SessionReviewLoopStore
 	CodeReviews         *db.CodeReviewStore
+	CodeReviewDisputes  *db.CodeReviewDisputeStore
 	SessionIssueLinks   *db.SessionIssueLinkStore // nil-safe: needed for Linear milestones
 	Previews            *db.PreviewStore
 	PullRequests        *db.PullRequestStore
@@ -754,6 +759,7 @@ type prCreator interface {
 	CreateBranch(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*ghservice.CreateBranchResult, error)
 	PushChangesToPR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
 	SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error
+	GetCodeReviewPullRequestSnapshot(ctx context.Context, orgID, repositoryID uuid.UUID, number int) (ghservice.CodeReviewPullRequestSnapshot, error)
 	RebuildPullRequestHealthFromCheckStates(ctx context.Context, orgID, pullRequestID uuid.UUID) (bool, error)
 	ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error
 	EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error
@@ -788,36 +794,49 @@ type codeReviewLifecycle interface {
 	HandleReviewChanged(ctx context.Context, input codereviewsvc.ReviewChangedInput) (codereviewsvc.ReviewRequestedResult, error)
 }
 
+type codeReviewDisputeService interface {
+	Triage(ctx context.Context, orgID, disputeID uuid.UUID) error
+	FailTriage(ctx context.Context, orgID, disputeID uuid.UUID, detail string) error
+	BuildReply(ctx context.Context, orgID, disputeID uuid.UUID) (models.CodeReviewDispute, string, error)
+	EnqueueReply(ctx context.Context, orgID, disputeID uuid.UUID, stage string) error
+}
+
+type codeReviewDisputePublisher interface {
+	PublishCodeReviewDisputeReply(ctx context.Context, req ghservice.CodeReviewDisputeReplyRequest) (int64, error)
+}
+
 type codingAgentAvailability interface {
 	IsAgentAvailable(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, agentType models.AgentType, model string) (bool, error)
 }
 
 // Services holds the service dependencies needed by job handlers.
 type Services struct {
-	Orchestrator        orchestratorService
-	PR                  prCreator
-	Failure             *agent.FailureService
-	SandboxProvider     agent.SandboxProvider
-	ProjectTasks        agent.ProjectTaskUpdater   // nil-safe: updates project tasks on terminal session fallback paths
-	AutomationRuns      agent.AutomationRunUpdater // nil-safe: updates automation runs on terminal session fallback paths
-	Prioritization      *prioritization.Service
-	Feedback            *feedback.Service
-	Memory              MemoryReinforcer                               // optional — enables memory reinforcement on PR approval
-	SlackSummarizer     *ingestion.SlackSummarizer                     // nil-safe: Slack summarization disabled if nil
-	LLM                 llmClient                                      // nil-safe: needed for eval LLM judge grading
-	GitHub              agent.GitHubTokenProvider                      // nil-safe: needed for eval repo cloning
-	GitHubOrgRoster     githubOrgRosterService                         // nil-safe: needed for GitHub org auto-join roster sync
-	Snapshots           storage.SnapshotStore                          // nil-safe: needed for eval code_check grading
-	TitleService        *services.SessionTitleService                  // nil-safe: session title regeneration
-	Linear              *linear.Service                                // nil-safe: Linear session-linking disabled if nil
-	PagerDuty           pagerDutyEventProcessor                        // nil-safe: PagerDuty incident ingestion disabled if nil
-	PagerDutySync       pagerDutySyncer                                // nil-safe: PagerDuty reconciliation disabled if nil
-	PagerDutyWrites     pagerDutyPRWritebacker                         // nil-safe: PagerDuty writeback disabled if nil
-	CodeReviews         codeReviewSubmitter                            // nil-safe: GitHub review submission disabled if nil
-	CodeReviewLifecycle codeReviewLifecycle                            // nil-safe: starts durable follow-up assessments after webhook changes
-	CodingAgents        codingAgentAvailability                        // nil-safe: code review falls back to the configured roster when nil
-	PublicationIntents  publicationintent.PublicationIntentCoordinator // nil-safe: Slack falls back to an actionable error when publication is unavailable
-	SlackbotMetrics     *metrics.SlackbotMetrics                       // nil-safe: Slackbot observability disabled if nil
+	Orchestrator               orchestratorService
+	PR                         prCreator
+	Failure                    *agent.FailureService
+	SandboxProvider            agent.SandboxProvider
+	ProjectTasks               agent.ProjectTaskUpdater   // nil-safe: updates project tasks on terminal session fallback paths
+	AutomationRuns             agent.AutomationRunUpdater // nil-safe: updates automation runs on terminal session fallback paths
+	Prioritization             *prioritization.Service
+	Feedback                   *feedback.Service
+	Memory                     MemoryReinforcer                               // optional — enables memory reinforcement on PR approval
+	SlackSummarizer            *ingestion.SlackSummarizer                     // nil-safe: Slack summarization disabled if nil
+	LLM                        llmClient                                      // nil-safe: needed for eval LLM judge grading
+	GitHub                     agent.GitHubTokenProvider                      // nil-safe: needed for eval repo cloning
+	GitHubOrgRoster            githubOrgRosterService                         // nil-safe: needed for GitHub org auto-join roster sync
+	Snapshots                  storage.SnapshotStore                          // nil-safe: needed for eval code_check grading
+	TitleService               *services.SessionTitleService                  // nil-safe: session title regeneration
+	Linear                     *linear.Service                                // nil-safe: Linear session-linking disabled if nil
+	PagerDuty                  pagerDutyEventProcessor                        // nil-safe: PagerDuty incident ingestion disabled if nil
+	PagerDutySync              pagerDutySyncer                                // nil-safe: PagerDuty reconciliation disabled if nil
+	PagerDutyWrites            pagerDutyPRWritebacker                         // nil-safe: PagerDuty writeback disabled if nil
+	CodeReviews                codeReviewSubmitter                            // nil-safe: GitHub review submission disabled if nil
+	CodeReviewLifecycle        codeReviewLifecycle                            // nil-safe: starts durable follow-up assessments after webhook changes
+	CodeReviewDisputes         codeReviewDisputeService                       // nil-safe: triages and replies to decision disputes
+	CodeReviewDisputePublisher codeReviewDisputePublisher                     // nil-safe: publishes idempotent GitHub replies
+	CodingAgents               codingAgentAvailability                        // nil-safe: code review falls back to the configured roster when nil
+	PublicationIntents         publicationintent.PublicationIntentCoordinator // nil-safe: Slack falls back to an actionable error when publication is unavailable
+	SlackbotMetrics            *metrics.SlackbotMetrics                       // nil-safe: Slackbot observability disabled if nil
 	// Redis is optional and used for non-authoritative shared caches such as
 	// Slack user display names. Losing it should only increase provider lookups.
 	Redis       *cache.Client

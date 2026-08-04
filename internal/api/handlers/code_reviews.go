@@ -41,6 +41,18 @@ type codeReviewRetryService interface {
 	RetryReview(ctx context.Context, input codereviewsvc.RetryReviewInput) (codereviewsvc.RetryReviewResult, error)
 }
 
+// codeReviewDisputeService is the handler's view of the dispute service. It is
+// an interface for the same reason codeReviewRetryService is: the endpoints
+// carry authorization, version-conflict, and error-classification logic that
+// has to be testable without a database.
+type codeReviewDisputeService interface {
+	FileInApp(ctx context.Context, input codereviewsvc.FileCodeReviewDisputeInput) (models.CodeReviewDispute, error)
+	ListBySession(ctx context.Context, orgID, sessionID uuid.UUID, cursor *uuid.UUID, limit int) (models.CodeReviewDisputePage, error)
+	ListQueue(ctx context.Context, orgID uuid.UUID, filters models.CodeReviewDisputeListFilters) (models.CodeReviewDisputePage, error)
+	Escalate(ctx context.Context, orgID, disputeID, userID uuid.UUID, note string) (models.CodeReviewDispute, error)
+	Adjudicate(ctx context.Context, orgID, disputeID, userID uuid.UUID, update models.CodeReviewDisputeAdjudicationUpdate) (models.CodeReviewDispute, error)
+}
+
 type codeReviewListCursor struct {
 	ID        uuid.UUID             `json:"id"`
 	CreatedAt time.Time             `json:"created_at"`
@@ -211,6 +223,7 @@ type CodeReviewHandler struct {
 	audit        *db.AuditEmitter
 	memberships  codeReviewMembershipStore
 	retryService codeReviewRetryService
+	disputes     codeReviewDisputeService
 }
 
 func (h *CodeReviewHandler) SetAuditEmitter(audit *db.AuditEmitter) { h.audit = audit }
@@ -233,6 +246,17 @@ func (h *CodeReviewHandler) SetMembershipStore(store codeReviewMembershipStore) 
 
 func (h *CodeReviewHandler) SetRetryService(service codeReviewRetryService) {
 	h.retryService = service
+}
+
+// SetDisputeService takes the concrete service so a nil pointer stays a nil
+// interface: the endpoints answer 503 on `h.disputes == nil`, and a typed-nil
+// would sail past that check into a nil-receiver call.
+func (h *CodeReviewHandler) SetDisputeService(service *codereviewsvc.DisputeService) {
+	if service == nil {
+		h.disputes = nil
+		return
+	}
+	h.disputes = service
 }
 
 // StreamUpdates is the org-scoped SSE endpoint backing the live code reviews
@@ -648,6 +672,29 @@ func oneOfOrEmpty(value string, allowed ...string) bool {
 	return false
 }
 
+// Get returns a single review by session ID. The list endpoint is windowed and
+// paginated, so deep links -- the dispute queue's "View evidence" action and the
+// link in every GitHub dispute reply -- cannot rely on the review still being in
+// the loaded page.
+func (h *CodeReviewHandler) Get(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	item, err := h.store.GetListItemBySessionID(r.Context(), orgID, sessionID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "CODE_REVIEW_NOT_FOUND", "code review not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_LOAD_FAILED", "failed to load code review", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewListItem]{Data: item})
+}
+
 func (h *CodeReviewHandler) Evidence(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -670,7 +717,14 @@ func (h *CodeReviewHandler) Evidence(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_PROMPTS_LOAD_FAILED", "failed to load code review prompt records", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewEvidence]{Data: models.CodeReviewEvidence{AgentResults: results, Findings: findings, PromptRecords: records}})
+	reasonCodes, err := h.store.GetRiskReasonCodesBySession(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REASONS_LOAD_FAILED", "failed to load code review reason codes", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewEvidence]{Data: models.CodeReviewEvidence{
+		AgentResults: results, Findings: findings, PromptRecords: records, RiskReasonCodes: reasonCodes,
+	}})
 }
 
 func (h *CodeReviewHandler) Retry(w http.ResponseWriter, r *http.Request) {

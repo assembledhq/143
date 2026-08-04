@@ -149,6 +149,7 @@ type ReviewChangedInput struct {
 	RequestContext         *ReviewRequestContext          `json:"request_context,omitempty"`
 	ExplicitRequest        bool                           `json:"explicit_request,omitempty"`
 	TriggerSource          models.CodeReviewTriggerSource `json:"trigger_source,omitempty"`
+	TriggeringDisputeID    *uuid.UUID                     `json:"triggering_dispute_id,omitempty"`
 }
 
 type ReviewRequestedResult struct {
@@ -215,13 +216,15 @@ type RunCodeReviewJobPayload struct {
 	PreviousReviewBody      *string                    `json:"previous_review_body,omitempty"`
 	ExistingGitHubReviewID  *int64                     `json:"existing_github_review_id,omitempty"`
 	ExistingGitHubReviewURL *string                    `json:"existing_github_review_url,omitempty"`
+	TriggeringDisputeID     *uuid.UUID                 `json:"triggering_dispute_id,omitempty"`
 }
 
 type SyncReviewStatusCommentJobPayload struct {
-	OrgID         uuid.UUID `json:"org_id"`
-	SessionID     uuid.UUID `json:"session_id"`
-	RepositoryID  uuid.UUID `json:"repository_id"`
-	PullRequestID uuid.UUID `json:"pull_request_id"`
+	OrgID               uuid.UUID  `json:"org_id"`
+	SessionID           uuid.UUID  `json:"session_id"`
+	RepositoryID        uuid.UUID  `json:"repository_id"`
+	PullRequestID       uuid.UUID  `json:"pull_request_id"`
+	TriggeringDisputeID *uuid.UUID `json:"triggering_dispute_id,omitempty"`
 }
 
 type reviewStartOptions struct {
@@ -235,6 +238,7 @@ type reviewStartOptions struct {
 	previousReviewBody      *string
 	existingGitHubReviewID  *int64
 	existingGitHubReviewURL *string
+	triggeringDisputeID     *uuid.UUID
 }
 
 func NewService(policies PolicyStore, metadata MetadataStore, sessions SessionStore, jobs JobStore, logger zerolog.Logger, cfg Config) *Service {
@@ -787,6 +791,7 @@ func (s *Service) HandleReviewChanged(ctx context.Context, input ReviewChangedIn
 		previousReviewBody:      submitted.FinalReviewBody,
 		existingGitHubReviewID:  submitted.GitHubReviewID,
 		existingGitHubReviewURL: submitted.GitHubReviewURL,
+		triggeringDisputeID:     input.TriggeringDisputeID,
 	})
 }
 
@@ -956,6 +961,7 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 		"change_key":               strings.TrimSpace(opts.changeKey),
 		"github_delivery_id":       strings.TrimSpace(input.DeliveryID),
 		"request_context":          normalizeReviewRequestContext(input.RequestContext),
+		"triggering_dispute_id":    opts.triggeringDisputeID,
 	})
 	if err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("marshal code review revision context: %w", err)
@@ -981,18 +987,19 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 	}
 
 	metadata := &models.CodeReviewSessionMetadata{
-		OrgID:           input.OrgID,
-		SessionID:       session.ID,
-		RepositoryID:    input.RepositoryID,
-		PullRequestID:   input.PullRequestID,
-		PolicyID:        policy.ID,
-		BaseSHA:         input.BaseSHA,
-		HeadSHA:         input.HeadSHA,
-		FromFork:        input.FromFork,
-		TriggerSource:   source,
-		Status:          models.CodeReviewSessionStatusQueued,
-		Phase:           codeReviewPhasePtr(models.CodeReviewPhaseSyncingGitHub),
-		ReviewOutputKey: outputKey,
+		OrgID:               input.OrgID,
+		SessionID:           session.ID,
+		RepositoryID:        input.RepositoryID,
+		PullRequestID:       input.PullRequestID,
+		PolicyID:            policy.ID,
+		BaseSHA:             input.BaseSHA,
+		HeadSHA:             input.HeadSHA,
+		FromFork:            input.FromFork,
+		TriggerSource:       source,
+		TriggeringDisputeID: opts.triggeringDisputeID,
+		Status:              models.CodeReviewSessionStatusQueued,
+		Phase:               codeReviewPhasePtr(models.CodeReviewPhaseSyncingGitHub),
+		ReviewOutputKey:     outputKey,
 	}
 	if err := s.metadata.CreateSessionMetadata(ctx, metadata); err != nil {
 		if errors.Is(err, db.ErrCodeReviewActiveHeadConflict) {
@@ -1041,6 +1048,7 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 		PreviousReviewBody:      opts.previousReviewBody,
 		ExistingGitHubReviewID:  opts.existingGitHubReviewID,
 		ExistingGitHubReviewURL: opts.existingGitHubReviewURL,
+		TriggeringDisputeID:     opts.triggeringDisputeID,
 	}
 	dedupeKey := "code_review:" + outputKey
 	jobID, err := s.jobs.EnqueueWithOpts(ctx, input.OrgID, db.EnqueueOpts{

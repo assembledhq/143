@@ -46,6 +46,7 @@ type runCodeReviewPayload struct {
 	PreviousReviewBody      *string                             `json:"previous_review_body,omitempty"`
 	ExistingGitHubReviewID  *int64                              `json:"existing_github_review_id,omitempty"`
 	ExistingGitHubReviewURL *string                             `json:"existing_github_review_url,omitempty"`
+	TriggeringDisputeID     *uuid.UUID                          `json:"triggering_dispute_id,omitempty"`
 }
 
 const codeReviewRawOutputInlineLimit = 32 * 1024

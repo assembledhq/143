@@ -48,6 +48,75 @@ func TestCodeReviewHandler_GetPolicyReturnsPromptFields(t *testing.T) {
 	require.Equal(t, config.AutomatedApprovalPolicy, response.Data.Config.AutomatedApprovalPolicy, "policy GET should return automated approval policy")
 }
 
+// Get backs the ?evidence=<session id> deep link used by the dispute queue and
+// by every GitHub dispute reply, so it has to answer for reviews the windowed
+// list endpoint would never return.
+func TestCodeReviewHandler_GetReportsMissingAndMalformedSessions(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	tests := []struct {
+		name string
+		// emptyResult exercises the "no such review" path with a genuinely empty
+		// result set, which is what CollectOneRow turns into pgx.ErrNoRows.
+		emptyResult  bool
+		malformedID  bool
+		storeErr     error
+		expectedCode int
+		expectedErr  string
+	}{
+		{name: "malformed session id", malformedID: true, expectedCode: http.StatusBadRequest, expectedErr: "INVALID_ID"},
+		{name: "unknown review", emptyResult: true, expectedCode: http.StatusNotFound, expectedErr: "CODE_REVIEW_NOT_FOUND"},
+		{
+			name: "store failure", storeErr: errors.New("connection refused"),
+			expectedCode: http.StatusInternalServerError, expectedErr: "CODE_REVIEW_LOAD_FAILED",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			sessionID := uuid.New()
+			routeID := sessionID.String()
+			if tt.malformedID {
+				routeID = "not-a-uuid"
+			}
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock should initialize")
+			defer mock.Close()
+			if !tt.malformedID {
+				expectation := mock.ExpectQuery("SELECT[\\s\\S]+FROM code_review_session_metadata").
+					WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID})
+				if tt.emptyResult {
+					expectation.WillReturnRows(pgxmock.NewRows([]string{"id"}))
+				} else {
+					expectation.WillReturnError(tt.storeErr)
+				}
+			}
+			handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/code-reviews/"+routeID, nil)
+			ctx := middleware.WithOrgID(req.Context(), orgID)
+			routeCtx := chi.NewRouteContext()
+			routeCtx.URLParams.Add("id", routeID)
+			req = req.WithContext(context.WithValue(ctx, chi.RouteCtxKey, routeCtx))
+			rr := httptest.NewRecorder()
+
+			handler.Get(rr, req)
+
+			require.Equal(t, tt.expectedCode, rr.Code, "body: %s", rr.Body.String())
+			var body struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body), "error body should be valid JSON")
+			require.Equal(t, tt.expectedErr, body.Error.Code)
+			require.NoError(t, mock.ExpectationsWereMet(), "a malformed id must not reach the database")
+		})
+	}
+}
+
 func TestCodeReviewHandler_PromptExamplesReturnsSeparateCollections(t *testing.T) {
 	t.Parallel()
 	handler := NewCodeReviewHandler(nil, nil)
