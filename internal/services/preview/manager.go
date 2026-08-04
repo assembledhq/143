@@ -1334,7 +1334,7 @@ func (o *managerServiceObserver) OnInstallFailed(errMsg string, tail []string) {
 
 func (o *managerServiceObserver) OnDependencyCacheRestore(status string, cacheKey string, sizeBytes int64, err error) {
 	switch status {
-	case "disabled", "miss", "restore_failed", "restore_timeout", "skipped_cost", "restored", "restored_satisfied_install", "skipped_marker_missing":
+	case "disabled", "miss", "restore_failed", "restore_timeout", "skipped_cost", "restored", "restored_satisfied_install", "skipped_marker_missing", "skipped_install_valid":
 	default:
 		return
 	}
@@ -1367,7 +1367,7 @@ func (o *managerServiceObserver) OnDependencyCacheSave(status string, cacheKey s
 
 func (o *managerServiceObserver) OnPackageManagerCacheRestore(status string, cacheKey string, sizeBytes int64, err error) {
 	switch status {
-	case "disabled", "miss", "restore_failed", "restore_timeout", "skipped_cost", "restored", "key_failed", "skipped_no_paths":
+	case "disabled", "miss", "restore_failed", "restore_timeout", "skipped_cost", "restored", "key_failed", "skipped_no_paths", "skipped_install_valid":
 	default:
 		return
 	}
@@ -2200,10 +2200,22 @@ func (m *Manager) SoftRestartPreviewWithRevision(ctx context.Context, orgID, pre
 	})
 }
 
+// ErrWarmResumeNotEligible reports that a preview cannot take the warm-resume
+// shortcut. Every eligibility guard in ResumeStoppedWarmPreview returns it, and
+// all of them are raced by ordinary user activity: an agent turn can bump the
+// workspace revision, or the startup cache can be evicted, between the caller's
+// own check and this one. Callers must treat it as "start normally", never as a
+// failure — the preview is untouched at that point, so a cold start is always
+// still available.
+var ErrWarmResumeNotEligible = errors.New("preview is not eligible for warm resume")
+
 // ResumeStoppedWarmPreview starts a session preview that was fully warmed and
 // then stopped by the session prewarm policy. It intentionally does not accept
 // arbitrary terminal previews: this path exists only to make a user click on a
 // current warm candidate cheaper than a cold start.
+//
+// Every guard below runs before the preview is claimed, so returning
+// ErrWarmResumeNotEligible leaves the instance exactly as it was found.
 func (m *Manager) ResumeStoppedWarmPreview(ctx context.Context, orgID, previewID uuid.UUID) error {
 	started := time.Now()
 	instance, err := m.store.GetPreviewInstance(ctx, orgID, previewID)
@@ -2215,13 +2227,47 @@ func (m *Manager) ResumeStoppedWarmPreview(ctx context.Context, orgID, previewID
 		return err
 	}
 	if !instance.Status.IsTerminal() || reason != models.PreviewStoppedReasonSessionPrewarmPolicy {
-		return fmt.Errorf("preview is not a stopped session prewarm candidate (status=%s, reason=%s)", instance.Status, reason)
+		return fmt.Errorf("%w: not a stopped session prewarm candidate (status=%s, reason=%s)", ErrWarmResumeNotEligible, instance.Status, reason)
 	}
 	if m.provider == nil {
 		return fmt.Errorf("preview provider is not configured")
 	}
+	if m.sessionStore == nil || instance.SessionID == uuid.Nil {
+		return fmt.Errorf("%w: session metadata is unavailable", ErrWarmResumeNotEligible)
+	}
+	session, err := m.sessionStore.GetByID(ctx, orgID, instance.SessionID)
+	if err != nil {
+		return fmt.Errorf("get warm preview session: %w", err)
+	}
+	if instance.SourceWorkspaceRevision == nil || *instance.SourceWorkspaceRevision != session.WorkspaceRevision {
+		return fmt.Errorf("%w: workspace revision is stale", ErrWarmResumeNotEligible)
+	}
+	if session.RepositoryID == nil || *session.RepositoryID == uuid.Nil || strings.TrimSpace(instance.WorkerNodeID) == "" {
+		return fmt.Errorf("%w: startup cache identity is incomplete", ErrWarmResumeNotEligible)
+	}
+	// SkipServiceBuild below is only safe on the worker that still holds the
+	// retained sandbox and its build outputs. HasSessionPreviewStartupCache
+	// answers "some active worker holds this", so pin it to this process too
+	// rather than trusting the caller to have routed correctly.
+	if m.workerNodeID != "" && instance.WorkerNodeID != m.workerNodeID {
+		return fmt.Errorf("%w: retained sandbox belongs to worker %q, not %q", ErrWarmResumeNotEligible, instance.WorkerNodeID, m.workerNodeID)
+	}
+	startupCacheAvailable, err := m.store.HasSessionPreviewStartupCache(
+		ctx,
+		orgID,
+		*session.RepositoryID,
+		instance.SessionID,
+		session.WorkspaceRevision,
+		instance.WorkerNodeID,
+	)
+	if err != nil {
+		return fmt.Errorf("verify warm preview startup cache: %w", err)
+	}
+	if !startupCacheAvailable {
+		return fmt.Errorf("%w: startup cache is unavailable", ErrWarmResumeNotEligible)
+	}
 
-	input, err := m.loadRecycleInput(ctx, instance)
+	input, err := m.loadRecycleInputForSession(ctx, instance, &session)
 	if err != nil {
 		return fmt.Errorf("load warm resume input: %w", err)
 	}
@@ -2266,6 +2312,11 @@ func (m *Manager) ResumeStoppedWarmPreview(ctx context.Context, orgID, previewID
 		SessionID:    input.SessionID,
 		ConfigDigest: computeConfigDigest(input.Config),
 		ExtraEnv:     m.platformEnv(previewID),
+		// The warm-build job ran these exact build commands in this retained
+		// sandbox, and the guards above proved the workspace revision, the
+		// owning worker, and the startup-cache marker all still match.
+		// Rebuilding here defeats the warm-resume contract.
+		SkipServiceBuild: true,
 	}, observer)
 	if err != nil {
 		if resumeRuntime != nil {
@@ -3030,9 +3081,16 @@ func uuidPointerValue(id *uuid.UUID) uuid.UUID {
 }
 
 func (m *Manager) loadRecycleInput(ctx context.Context, instance *models.PreviewInstance) (StartPreviewInput, error) {
+	return m.loadRecycleInputForSession(ctx, instance, nil)
+}
+
+// loadRecycleInputForSession is loadRecycleInput for callers that already hold
+// the instance's session. Passing it avoids re-reading the same row, which
+// matters on the warm-resume click path where latency is the whole point.
+func (m *Manager) loadRecycleInputForSession(ctx context.Context, instance *models.PreviewInstance, session *models.Session) (StartPreviewInput, error) {
 	input, err := loadRecycleInput(instance)
 	if err == nil {
-		input.RepositoryID = m.recycleRepositoryID(ctx, instance)
+		input.RepositoryID = m.recycleRepositoryID(ctx, instance, session)
 		return input, nil
 	}
 	if !errors.Is(err, errMissingRecycleInput) {
@@ -3049,13 +3107,19 @@ func (m *Manager) loadRecycleInput(ctx context.Context, instance *models.Preview
 	return rebuilt, nil
 }
 
-func (m *Manager) recycleRepositoryID(ctx context.Context, instance *models.PreviewInstance) uuid.UUID {
+// recycleRepositoryID resolves the repository a recycled preview belongs to.
+// session, when non-nil, is the instance's already-loaded session and is used
+// in place of a second read of the same row.
+func (m *Manager) recycleRepositoryID(ctx context.Context, instance *models.PreviewInstance, session *models.Session) uuid.UUID {
 	if instance.PreviewTargetID != nil && *instance.PreviewTargetID != uuid.Nil {
 		target, err := m.store.GetPreviewTarget(ctx, instance.OrgID, *instance.PreviewTargetID)
 		if err == nil {
 			return target.RepositoryID
 		}
 		m.logger.Warn().Err(err).Str("preview_id", instance.ID.String()).Msg("failed to load preview target repository for recycle")
+	}
+	if session != nil {
+		return uuidPointerValue(session.RepositoryID)
 	}
 	if instance.SessionID != uuid.Nil && m.sessionStore != nil {
 		session, err := m.sessionStore.GetByID(ctx, instance.OrgID, instance.SessionID)

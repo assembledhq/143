@@ -78,6 +78,11 @@ type StartPreviewOptions struct {
 	SessionID    uuid.UUID
 	ConfigDigest string
 	ExtraEnv     map[string]string
+	// SkipServiceBuild is reserved for an exact-revision warm resume whose
+	// retained sandbox already completed every configured service build. Normal
+	// starts and recycles must leave this false. Service start commands remain
+	// responsible for detecting unexpectedly missing artifacts.
+	SkipServiceBuild bool
 }
 
 // PreviewHandle is returned by StartPreview and contains the information

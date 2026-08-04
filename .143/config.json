@@ -11,7 +11,12 @@
       "verify_paths": ["frontend/node_modules/.bin/next"],
       "timeout_seconds": 600,
       "cache": {
-        "paths": ["frontend/.next/cache"]
+        "package_manager": {
+          "enabled": false
+        },
+        "build": {
+          "paths": ["frontend/.next/cache"]
+        }
       }
     },
     "services": {
