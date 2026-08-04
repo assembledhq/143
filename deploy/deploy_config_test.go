@@ -870,18 +870,18 @@ func TestRoutineWorkerDeployBuildsSandboxDNSOnlyWhenMissing(t *testing.T) {
 	}, "\n"), "routine worker deploy must not rebuild sandbox-dns unconditionally because that primes the next reconcile to recreate the sidecar")
 }
 
-func TestAppDeployRepairsKnownReadinessMigrationBeforeMigrating(t *testing.T) {
+func TestAppDeployRepairsKnownDirtyMigrationsBeforeMigrating(t *testing.T) {
 	t.Parallel()
 
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read deploy.sh")
 	deployText := string(deployScript)
-	repairCommand := `docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate repair-pr-readiness < /dev/null`
+	repairCommand := `docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate repair-known-dirty < /dev/null`
 	upCommand := `docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate up < /dev/null`
 	repairIndex := strings.Index(deployText, repairCommand)
 	upIndex := strings.Index(deployText, upCommand)
 
-	require.NotEqual(t, -1, repairIndex, "app deploy should run the narrowly scoped readiness migration repair")
+	require.NotEqual(t, -1, repairIndex, "app deploy should run the allowlisted dirty migration repair")
 	require.NotEqual(t, -1, upIndex, "app deploy should still run normal migrations")
 	require.Less(t, repairIndex, upIndex, "app deploy should repair the known dirty marker before normal migrations")
 }
