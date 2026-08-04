@@ -587,9 +587,15 @@ func (s *PRService) sessionURL(sessionID uuid.UUID) string {
 // API request (as opposed to org-level defaults). Fields use pointers to
 // distinguish "caller explicitly set this" from "use org default".
 type CreatePRParams struct {
-	Draft                     *bool                                `json:"draft,omitempty"`
-	AuthorMode                string                               `json:"author_mode,omitempty"`
-	ChangesetID               *uuid.UUID                           `json:"changeset_id,omitempty"`
+	Draft       *bool      `json:"draft,omitempty"`
+	AuthorMode  string     `json:"author_mode,omitempty"`
+	ChangesetID *uuid.UUID `json:"changeset_id,omitempty"`
+	// ExpectedRemoteHeadSHA is an internal revision-bound lease consumed only
+	// by the review evidence refresh paths (CreateBranch and PushChangesToPR).
+	// It permits replacing a non-ancestor branch head when the remote still
+	// equals the exact checkpoint that the review loop inspected. It is
+	// deliberately excluded from persisted/client payloads.
+	ExpectedRemoteHeadSHA     string                               `json:"-"`
 	PublicationSource         models.SessionPublicationSource      `json:"publication_source,omitempty"`
 	PublicationQueue          models.SessionPublicationJobQueue    `json:"-"`
 	PublicationRequestPayload json.RawMessage                      `json:"-"`
@@ -1178,9 +1184,9 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 
 	var pushed *pushResult
 	if materializedTarget {
-		pushed, err = s.pushChangesetBranch(ctx, run, &repo, orgSettings, *targetChangeset, commitMsg, authorName, authorEmail)
+		pushed, err = s.pushChangesetBranch(ctx, run, &repo, orgSettings, *targetChangeset, commitMsg, authorName, authorEmail, "")
 	} else {
-		pushed, err = s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, defaultBranch, commitMsg, authorName, authorEmail)
+		pushed, err = s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, defaultBranch, commitMsg, authorName, authorEmail, "")
 	}
 	if err != nil {
 		return nil, err
@@ -1381,6 +1387,7 @@ func (s *PRService) pushChangesetBranch(
 	orgSettings models.OrgSettings,
 	changeset models.SessionChangeset,
 	commitMsg, authorName, authorEmail string,
+	reviewExpectedRemoteHeadSHA string,
 ) (*pushResult, error) {
 	if s.sandboxAuth == nil {
 		return nil, fmt.Errorf("%w: sandbox auth socket not configured", ErrSandboxAuthUnavailable)
@@ -1408,6 +1415,10 @@ func (s *PRService) pushChangesetBranch(
 	if changeset.ExpectedRemoteHeadSHA != nil {
 		expected = strings.TrimSpace(*changeset.ExpectedRemoteHeadSHA)
 	}
+	reviewExpected := strings.TrimSpace(reviewExpectedRemoteHeadSHA)
+	if reviewExpected != "" {
+		expected = reviewExpected
+	}
 	if remoteHead != expected {
 		localHeadCmd := fmt.Sprintf("git -C %s rev-parse HEAD", shellQuote(*changeset.WorktreePath))
 		var localHeadOut, localHeadErr bytes.Buffer
@@ -1433,7 +1444,7 @@ func (s *PRService) pushChangesetBranch(
 	if changeset.BaseHeadSHA != nil {
 		baseHead = *changeset.BaseHeadSHA
 	}
-	script := buildPushScript(sandbox.WorkDir, commitMsgPath, authorName, authorEmail, *changeset.WorkingBranch, changeset.BaseBranch, baseHead, fmt.Sprintf("https://github.com/%s.git", repo.FullName))
+	script := buildPushScriptWithExpectedRemote(sandbox.WorkDir, commitMsgPath, authorName, authorEmail, *changeset.WorkingBranch, changeset.BaseBranch, baseHead, fmt.Sprintf("https://github.com/%s.git", repo.FullName), reviewExpected)
 	var stdout, stderr bytes.Buffer
 	exitCode, execErr = s.sandboxProvider.Exec(ctx, sandbox, script, &stdout, &stderr)
 	if execErr != nil {
@@ -1449,7 +1460,21 @@ func (s *PRService) pushChangesetBranch(
 	if err != nil {
 		return nil, fmt.Errorf("parse changeset push head: %w", err)
 	}
-	return &pushResult{HeadSHA: headSHA, Outcome: parsePushOutcome(stdout.String())}, nil
+	reconciledExpectedRemote := strings.Contains(stdout.String(), pushExpectedRemoteReconciledSentinel)
+	if reconciledExpectedRemote {
+		s.logger.Info().
+			Str("session_id", run.ID.String()).
+			Str("changeset_id", changeset.ID.String()).
+			Str("branch", *changeset.WorkingBranch).
+			Str("expected_remote_head_sha", reviewExpected).
+			Str("head_sha", headSHA).
+			Msg("reconciled review fixes against the expected remote checkpoint")
+	}
+	return &pushResult{
+		HeadSHA:                  headSHA,
+		Outcome:                  parsePushOutcome(stdout.String()),
+		ReconciledExpectedRemote: reconciledExpectedRemote,
+	}, nil
 }
 
 // CreateBranch pushes the session snapshot to the same remote branch that
@@ -1496,6 +1521,9 @@ func (s *PRService) CreateBranch(ctx context.Context, run *models.Session, param
 		if param.AuthorMode != "" {
 			opts.AuthorMode = param.AuthorMode
 		}
+		if strings.TrimSpace(param.ExpectedRemoteHeadSHA) != "" {
+			opts.ExpectedRemoteHeadSHA = strings.TrimSpace(param.ExpectedRemoteHeadSHA)
+		}
 	}
 	resolution, err := s.resolveToken(ctx, run, &repo, orgSettings, opts.AuthorMode)
 	if err != nil {
@@ -1514,7 +1542,7 @@ func (s *PRService) CreateBranch(ctx context.Context, run *models.Session, param
 	}
 
 	baseBranch := targetBranchForPR(run, &repo)
-	pushed, err := s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, baseBranch, commitMsg, authorName, authorEmail)
+	pushed, err := s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, baseBranch, commitMsg, authorName, authorEmail, opts.ExpectedRemoteHeadSHA)
 	if err != nil {
 		return nil, err
 	}
@@ -1597,6 +1625,9 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 		if param.ChangesetID != nil {
 			opts.ChangesetID = param.ChangesetID
 		}
+		if strings.TrimSpace(param.ExpectedRemoteHeadSHA) != "" {
+			opts.ExpectedRemoteHeadSHA = strings.TrimSpace(param.ExpectedRemoteHeadSHA)
+		}
 	}
 	var targetChangeset *models.SessionChangeset
 	if opts.ChangesetID != nil && s.changesets != nil {
@@ -1628,10 +1659,14 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 		return nil, ErrLegacyPRMissingHeadRef
 	}
 
-	if s.sandboxProvider == nil || (targetChangeset == nil && s.snapshots == nil) {
+	materializedTarget := targetChangeset != nil && targetChangeset.WorktreePath != nil && targetChangeset.WorkingBranch != nil
+	if targetChangeset != nil && !targetChangeset.IsPrimary && !materializedTarget {
+		return nil, errors.New("changeset must be materialized before PR push")
+	}
+	if s.sandboxProvider == nil || (!materializedTarget && s.snapshots == nil) {
 		return nil, fmt.Errorf("PRService: sandbox push dependencies not configured")
 	}
-	if targetChangeset == nil && (run.SnapshotKey == nil || *run.SnapshotKey == "") {
+	if !materializedTarget && (run.SnapshotKey == nil || *run.SnapshotKey == "") {
 		return nil, ErrSnapshotNotCaptured
 	}
 	if run.PendingSnapshotKey != nil && *run.PendingSnapshotKey != "" {
@@ -1690,10 +1725,10 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 	}
 
 	var pushed *pushResult
-	if targetChangeset != nil {
-		pushed, err = s.pushChangesetBranch(ctx, run, &repo, orgSettings, *targetChangeset, commitMsg, authorName, authorEmail)
+	if materializedTarget {
+		pushed, err = s.pushChangesetBranch(ctx, run, &repo, orgSettings, *targetChangeset, commitMsg, authorName, authorEmail, opts.ExpectedRemoteHeadSHA)
 	} else {
-		pushed, err = s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, "", commitMsg, authorName, authorEmail)
+		pushed, err = s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, "", commitMsg, authorName, authorEmail, opts.ExpectedRemoteHeadSHA)
 	}
 	if err != nil {
 		return nil, err
@@ -1724,7 +1759,7 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 			return nil, fmt.Errorf("record pushed changeset head: %w", recordErr)
 		}
 	}
-	if targetChangeset == nil {
+	if !materializedTarget {
 		if err := s.sessions.MarkLatestDiffSnapshotPushed(ctx, run.OrgID, run.ID, pushed.HeadSHA); err != nil {
 			s.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to mark latest diff snapshot as pushed after PR push")
 		}
@@ -1732,7 +1767,7 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 	pr.HeadSHA = &pushed.HeadSHA
 	s.enqueuePullRequestStateSync(ctx, pr, PullRequestSyncReasonHeadChanged)
 
-	if targetChangeset != nil {
+	if materializedTarget {
 		return &pr, nil
 	}
 	if pushed.CapturedSnapshotErr != nil {
@@ -1893,11 +1928,12 @@ func (s *PRService) SyncSessionTitle(ctx context.Context, session *models.Sessio
 // the caller can log it. The caller owns the temp file and MUST remove it
 // once it has finished streaming or has decided to abandon it.
 type pushResult struct {
-	HeadSHA              string
-	Outcome              branchPublishOutcome
-	CapturedSnapshotPath string
-	CapturedSnapshotSize int64
-	CapturedSnapshotErr  error
+	HeadSHA                  string
+	Outcome                  branchPublishOutcome
+	ReconciledExpectedRemote bool
+	CapturedSnapshotPath     string
+	CapturedSnapshotSize     int64
+	CapturedSnapshotErr      error
 }
 
 type branchPublishOutcome string
@@ -1914,6 +1950,7 @@ func (s *PRService) pushSessionBranch(
 	repo *models.Repository,
 	orgSettings models.OrgSettings,
 	snapshotKey, branchName, baseBranch, commitMsg, authorName, authorEmail string,
+	expectedRemoteHeadSHA string,
 ) (*pushResult, error) {
 	if s.sandboxAuth == nil {
 		return nil, fmt.Errorf("%w: sandbox auth socket not configured", ErrSandboxAuthUnavailable)
@@ -1976,7 +2013,8 @@ func (s *PRService) pushSessionBranch(
 	if run.BaseCommitSHA != nil {
 		baseCommitSHA = strings.TrimSpace(*run.BaseCommitSHA)
 	}
-	script := buildPushScript(sandbox.WorkDir, commitMsgPath, authorName, authorEmail, branchName, baseBranch, baseCommitSHA, pushURL)
+	expectedRemoteHeadSHA = strings.TrimSpace(expectedRemoteHeadSHA)
+	script := buildPushScriptWithExpectedRemote(sandbox.WorkDir, commitMsgPath, authorName, authorEmail, branchName, baseBranch, baseCommitSHA, pushURL, expectedRemoteHeadSHA)
 
 	var stdout, stderr bytes.Buffer
 	exitCode, execErr := s.sandboxProvider.Exec(ctx, sandbox, script, &stdout, &stderr)
@@ -2039,7 +2077,20 @@ func (s *PRService) pushSessionBranch(
 		return nil, fmt.Errorf("parse push head sha: %w", parseErr)
 	}
 
-	result := &pushResult{HeadSHA: headSHA, Outcome: parsePushOutcome(stdout.String())}
+	reconciledExpectedRemote := strings.Contains(stdout.String(), pushExpectedRemoteReconciledSentinel)
+	if reconciledExpectedRemote {
+		s.logger.Info().
+			Str("session_id", run.ID.String()).
+			Str("branch", branchName).
+			Str("expected_remote_head_sha", expectedRemoteHeadSHA).
+			Str("head_sha", headSHA).
+			Msg("reconciled review fixes against the expected remote checkpoint")
+	}
+	result := &pushResult{
+		HeadSHA:                  headSHA,
+		Outcome:                  parsePushOutcome(stdout.String()),
+		ReconciledExpectedRemote: reconciledExpectedRemote,
+	}
 	// Capture a snapshot of the post-push sandbox before the deferred Destroy
 	// runs. This is the state we want a "Fix tests" / continue resume to see:
 	// clean working tree, HEAD at the just-pushed commit, working branch
@@ -2180,6 +2231,11 @@ const pushHeadSHASentinel = "__143_HEAD_SHA="
 
 const pushOutcomeSentinel = "__143_PUSH_OUTCOME="
 
+// pushExpectedRemoteReconciledSentinel is emitted only when a revision-bound
+// review push replaces a non-ancestor remote head that still exactly matches
+// the checkpoint persisted on the review loop.
+const pushExpectedRemoteReconciledSentinel = "__143_EXPECTED_REMOTE_RECONCILED=1"
+
 const pushBranchDivergedMessage = "remote branch has changes that are not present in this session checkpoint; refusing to force push"
 
 const pushBaseUnrelatedMessage = "remote base branch could not be found or session changes could not be replayed onto the current base branch; refusing to push"
@@ -2224,6 +2280,7 @@ branch=%[7]s
 base_branch=%[8]s
 base_commit=%[9]s
 push_url=%[6]s
+expected_remote_head=%[16]s
 remote_ref="refs/heads/$branch"
 remote_guard_ref="refs/remotes/__143_push_guard/$branch"
 base_ref="refs/heads/$base_branch"
@@ -2274,18 +2331,31 @@ push_outcome=created_remote_branch
 if [ -n "$remote_sha" ]; then
     push_outcome=updated_remote_branch
     git fetch --no-tags --quiet "$push_url" "+${remote_ref}:${remote_guard_ref}"
-    if [ "$remote_sha" = "$(git rev-parse HEAD)" ]; then
+    local_head=$(git rev-parse HEAD)
+    if [ -n "$expected_remote_head" ] && [ "$remote_sha" != "$expected_remote_head" ] && [ "$remote_sha" != "$local_head" ]; then
+        echo "%[13]s" >&2
+        exit %[14]d
+    fi
+    if [ "$remote_sha" = "$local_head" ]; then
         push_outcome=already_at_desired_head
     fi
     if ! git merge-base --is-ancestor "$remote_guard_ref" HEAD; then
         if [ "$transplanted" = 1 ]; then
             if ! git diff --quiet "$original_head" "$remote_guard_ref"; then
+                if [ -n "$expected_remote_head" ] && [ "$remote_sha" = "$expected_remote_head" ]; then
+                    echo "%[17]s"
+                else
+                    echo "%[13]s" >&2
+                    exit %[14]d
+                fi
+            fi
+        elif ! git diff --quiet HEAD "$remote_guard_ref"; then
+            if [ -n "$expected_remote_head" ] && [ "$remote_sha" = "$expected_remote_head" ]; then
+                echo "%[17]s"
+            else
                 echo "%[13]s" >&2
                 exit %[14]d
             fi
-        elif ! git diff --quiet HEAD "$remote_guard_ref"; then
-            echo "%[13]s" >&2
-            exit %[14]d
         fi
     fi
 fi
@@ -2299,6 +2369,16 @@ echo "%[10]s$(git rev-parse HEAD)"
 // handles embedded single quotes (via the `'\”` trick) — so any UTF-8
 // string is safe to interpolate.
 func buildPushScript(workDir, commitMsgPath, authorName, authorEmail, branchName, baseBranch, baseCommitSHA, pushURL string) string {
+	return buildPushScriptWithExpectedRemote(workDir, commitMsgPath, authorName, authorEmail, branchName, baseBranch, baseCommitSHA, pushURL, "")
+}
+
+// buildPushScriptWithExpectedRemote extends the normal divergence guard with
+// one narrow exception for revision-bound review fixes. A non-ancestor remote
+// head may be replaced only when it still equals expectedRemoteHeadSHA; the
+// existing --force-with-lease then protects the final observation-to-push
+// race. Callers without durable review evidence use buildPushScript and retain
+// the original fail-closed behavior.
+func buildPushScriptWithExpectedRemote(workDir, commitMsgPath, authorName, authorEmail, branchName, baseBranch, baseCommitSHA, pushURL, expectedRemoteHeadSHA string) string {
 	return fmt.Sprintf(
 		pushScriptTemplate,
 		shellQuote(commitMsgPath),
@@ -2320,6 +2400,8 @@ func buildPushScript(workDir, commitMsgPath, authorName, authorEmail, branchName
 		pushBranchDivergedMessage,
 		pushExitBranchDiverged,
 		pushOutcomeSentinel,
+		shellQuote(strings.TrimSpace(expectedRemoteHeadSHA)),
+		pushExpectedRemoteReconciledSentinel,
 	)
 }
 

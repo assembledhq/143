@@ -43,8 +43,9 @@ func (r *publicationReviewEvidenceRefresher) RefreshPublicationEvidence(
 	}
 
 	var headSHA string
+	pushParams := publicationReviewPushParams(loop)
 	if publication.HandoffMode == models.PRHandoffModeDraftFirst {
-		pr, pushErr := r.pr.PushChangesToPR(ctx, &session, ghservice.CreatePRParams{ChangesetID: loop.ChangesetID})
+		pr, pushErr := r.pr.PushChangesToPR(ctx, &session, pushParams)
 		if errors.Is(pushErr, ghservice.ErrNoChanges) {
 			headSHA = stringValue(changeset.HeadSHA)
 			pushErr = nil
@@ -59,7 +60,7 @@ func (r *publicationReviewEvidenceRefresher) RefreshPublicationEvidence(
 			headSHA = *pr.HeadSHA
 		}
 	} else {
-		branch, branchErr := r.pr.CreateBranch(ctx, &session, ghservice.CreatePRParams{ChangesetID: loop.ChangesetID})
+		branch, branchErr := r.pr.CreateBranch(ctx, &session, pushParams)
 		if errors.Is(branchErr, ghservice.ErrNoChanges) {
 			headSHA = stringValue(changeset.HeadSHA)
 		} else if branchErr != nil {
@@ -82,4 +83,11 @@ func (r *publicationReviewEvidenceRefresher) RefreshPublicationEvidence(
 		session = fresh
 	}
 	return session.WorkspaceRevision, headSHA, nil
+}
+
+func publicationReviewPushParams(loop models.SessionReviewLoop) ghservice.CreatePRParams {
+	return ghservice.CreatePRParams{
+		ChangesetID:           loop.ChangesetID,
+		ExpectedRemoteHeadSHA: stringValue(loop.DesiredHeadSHA),
+	}
 }
