@@ -1013,6 +1013,11 @@ type CodeReviewNonApprovalReasonAnalytics struct {
 	PRs  int64                    `db:"prs" json:"prs"`
 }
 
+type CodeReviewCommentRequestUserAnalytics struct {
+	GitHubLogin string `db:"github_login" json:"github_login"`
+	Requests    int64  `db:"requests" json:"requests"`
+}
+
 type CodeReviewApprovalRoundBucket string
 
 const (
@@ -1045,10 +1050,12 @@ type CodeReviewApprovalRoundAnalytics struct {
 }
 
 type CodeReviewAnalytics struct {
-	Summary            CodeReviewAnalyticsSummary             `json:"summary"`
-	ApprovalRounds     []CodeReviewApprovalRoundAnalytics     `json:"approval_rounds"`
-	Authors            []CodeReviewAuthorAnalytics            `json:"authors"`
-	NonApprovalReasons []CodeReviewNonApprovalReasonAnalytics `json:"non_approval_reasons"`
+	Summary               CodeReviewAnalyticsSummary              `json:"summary"`
+	ApprovalRounds        []CodeReviewApprovalRoundAnalytics      `json:"approval_rounds"`
+	Authors               []CodeReviewAuthorAnalytics             `json:"authors"`
+	NonApprovalReasons    []CodeReviewNonApprovalReasonAnalytics  `json:"non_approval_reasons"`
+	CommentRequestsTotal  int64                                   `json:"comment_requests_total"`
+	CommentRequestsByUser []CodeReviewCommentRequestUserAnalytics `json:"comment_requests_by_user"`
 }
 
 type CodeReviewEvidence struct {

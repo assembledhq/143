@@ -410,6 +410,46 @@ export function CodeReviewAnalyticsReport({
       </SectionGroup>
 
       <SectionGroup
+        title="Direct review requests by user"
+        description="For the selected PR cohort, trusted comments that directly mentioned the configured 143 code reviewer. GitHub redeliveries count once."
+      >
+        {analytics.comment_requests_by_user.length === 0 ? (
+          <p className="py-6 text-center text-sm text-muted-foreground">
+            No direct comment requests were captured for this PR cohort.
+          </p>
+        ) : (
+          <Card className="overflow-x-auto">
+            <Table aria-label="Direct code review requests by GitHub user">
+              <TableHeader>
+                <TableRow>
+                  <TableHead>GitHub user</TableHead>
+                  <TableHead className="text-right">Direct comment requests</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {analytics.comment_requests_by_user.map((requester) => (
+                  <TableRow key={requester.github_login}>
+                    <TableCell className="font-medium">{requester.github_login}</TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {requester.requests.toLocaleString()}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+              <DataTableSummaryRow
+                description="Direct comment requests across all PRs first sent to 143 in the current repository and time filters."
+                cells={[{
+                  content: analytics.comment_requests_total.toLocaleString(),
+                  className: "text-right",
+                  ariaLabel: `${analytics.comment_requests_total.toLocaleString()} direct comment requests overall`,
+                }]}
+              />
+            </Table>
+          </Card>
+        )}
+      </SectionGroup>
+
+      <SectionGroup
         title="Approval by round"
         description="Each PR appears once, based on the first distinct completed head that received a posted 143 approval."
       >

@@ -44,6 +44,8 @@ function emptyAnalytics(prsReviewed = 0): CodeReviewAnalytics {
       median_deletions: null,
     }] : [],
     non_approval_reasons: [],
+    comment_requests_total: 0,
+    comment_requests_by_user: [],
   };
 }
 
@@ -143,5 +145,28 @@ describe("CodeReviewAnalyticsReport PR cohort states", () => {
 
     expect(screen.getByText(/1 of 4 PRs whose representative assessment captured a change/))
       .toBeInTheDocument();
+  });
+
+  it("shows direct comment request totals grouped by GitHub user", () => {
+    const analytics = emptyAnalytics(4);
+    analytics.comment_requests_total = 5;
+    analytics.comment_requests_by_user = [
+      { github_login: "anya", requests: 3 },
+      { github_login: "sam", requests: 2 },
+    ];
+    renderReport(analytics);
+
+    expect(screen.getByText("Direct review requests by user")).toBeInTheDocument();
+    expect(screen.getByText("Direct comment requests")).toBeInTheDocument();
+    const requestTable = screen.getByRole("table", { name: "Direct code review requests by GitHub user" });
+    expect(within(requestTable).getByText("anya")).toBeInTheDocument();
+    expect(within(requestTable).getByText("sam")).toBeInTheDocument();
+    expect(within(requestTable).getByLabelText("5 direct comment requests overall")).toHaveTextContent("5");
+  });
+
+  it("shows an inline empty state when the cohort has no direct comment requests", () => {
+    renderReport(emptyAnalytics(2));
+
+    expect(screen.getByText("No direct comment requests were captured for this PR cohort.")).toBeInTheDocument();
   });
 });

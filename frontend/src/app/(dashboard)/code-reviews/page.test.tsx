@@ -268,6 +268,11 @@ const reviewAnalytics: CodeReviewAnalytics = {
     { code: "lines_limit_exceeded", prs: 5 },
     { code: "blocking_findings", prs: 3 },
   ],
+  comment_requests_total: 7,
+  comment_requests_by_user: [
+    { github_login: "anya", requests: 5 },
+    { github_login: "sam", requests: 2 },
+  ],
 };
 
 const githubTriggerReady: CodeReviewGitHubTriggerResponse = {
@@ -853,6 +858,8 @@ describe("CodeReviewsPage", () => {
       ],
       authors: [],
       non_approval_reasons: [],
+      comment_requests_total: 0,
+      comment_requests_by_user: [],
     };
     mockCodeReviewBaseHandlers();
     server.use(

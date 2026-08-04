@@ -1789,6 +1789,33 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 		JOIN cohort c ON c.pull_request_id = m.pull_request_id
 		WHERE m.org_id = @org_id` + scanWhere + `
 	),
+	comment_request_candidates AS (
+		SELECT a.pull_request_id,
+			COALESCE(
+				NULLIF(LOWER(BTRIM(s.revision_context #>> '{request_context,author_login}')), ''),
+				'Unknown'
+			) AS github_login,
+			BTRIM(s.revision_context->>'github_delivery_id') AS request_key,
+			a.created_at, a.id
+		FROM attempts a
+		JOIN sessions s ON s.id = a.session_id AND s.org_id = @org_id
+		WHERE s.revision_context #>> '{request_context,source}' = 'issue_comment'
+		  AND NULLIF(BTRIM(s.revision_context->>'github_delivery_id'), '') IS NOT NULL
+	),
+	comment_requests AS MATERIALIZED (
+		-- A GitHub redelivery or internal retry must not turn one human comment
+		-- into several request observations. Comment-triggered reviews always
+		-- persist the delivery id, falling back to the globally unique comment id.
+		SELECT DISTINCT ON (pull_request_id, request_key)
+			pull_request_id, request_key, github_login
+		FROM comment_request_candidates
+		ORDER BY pull_request_id, request_key, created_at, id
+	),
+	comment_request_users AS (
+		SELECT github_login, COUNT(*)::bigint AS requests
+		FROM comment_requests
+		GROUP BY github_login
+	),
 	attempt_flags AS (
 		-- One grouped pass instead of a correlated EXISTS per cohort PR: an
 		-- EXISTS sublink in a target list cannot become a semi-join, so it
@@ -1915,12 +1942,17 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 	SELECT s.*,
 		(SELECT buckets FROM approval_rounds) AS approval_rounds,
 		COALESCE((SELECT jsonb_agg(to_jsonb(a) ORDER BY ` + authorOrder + `) FROM authors a), '[]') AS authors,
-		COALESCE((SELECT jsonb_agg(to_jsonb(r) ORDER BY r.prs DESC, r.code) FROM reasons r), '[]') AS reasons
+		COALESCE((SELECT jsonb_agg(to_jsonb(r) ORDER BY r.prs DESC, r.code) FROM reasons r), '[]') AS reasons,
+		(SELECT COUNT(*)::bigint FROM comment_requests) AS comment_requests_total,
+		COALESCE((
+			SELECT jsonb_agg(to_jsonb(requester) ORDER BY requester.requests DESC, requester.github_login)
+			FROM comment_request_users requester
+		), '[]') AS comment_requests_by_user
 	FROM summary s`
 
 	var analytics models.CodeReviewAnalytics
 	var medianRounds, medianAdditions, medianDeletions float64
-	var roundsJSON, authorsJSON, reasonsJSON []byte
+	var roundsJSON, authorsJSON, reasonsJSON, commentRequestUsersJSON []byte
 	err = s.db.QueryRow(ctx, query, args).Scan(
 		&analytics.Summary.PRsReviewed, &analytics.Summary.PRsWithCompletedRound,
 		&analytics.Summary.ApprovedBy143, &analytics.Summary.NotApproved,
@@ -1932,7 +1964,7 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 		&analytics.Summary.TotalFindings, &analytics.Summary.NeedsHumanReview,
 		&analytics.Summary.CommentOnly, &analytics.Summary.Blocked,
 		&analytics.Summary.ApprovalNotPosted, &roundsJSON, &authorsJSON,
-		&reasonsJSON,
+		&reasonsJSON, &analytics.CommentRequestsTotal, &commentRequestUsersJSON,
 	)
 	if err != nil {
 		return models.CodeReviewAnalytics{}, fmt.Errorf("query PR-centric code review analytics: %w", err)
@@ -1948,6 +1980,7 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 		{"approval rounds", roundsJSON, &analytics.ApprovalRounds},
 		{"authors", authorsJSON, &analytics.Authors},
 		{"non-approval reasons", reasonsJSON, &analytics.NonApprovalReasons},
+		{"comment requests by user", commentRequestUsersJSON, &analytics.CommentRequestsByUser},
 	} {
 		if err := json.Unmarshal(section.payload, section.target); err != nil {
 			return models.CodeReviewAnalytics{}, fmt.Errorf("decode PR-centric code review analytics %s: %w", section.name, err)
