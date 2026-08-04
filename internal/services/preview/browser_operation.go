@@ -20,21 +20,43 @@ const (
 	// and then a full observation of the resulting page, so the operation budget
 	// must cover both. Sizing them equally would leave the trailing observation
 	// no time whenever the steps ran long, discarding step results that already
-	// succeeded.
+	// succeeded. Both halves are enforced -- the step loop by
+	// maxInteractionTimeout, the observation by ChromeDPInspector.Observe -- so
+	// the sum is a real ceiling rather than an estimate. Browser-session
+	// lifecycle work is budgeted separately, by BrowserOperationSessionAct.
 	browserInteractionStepsTimeout     = 60 * time.Second
 	browserInteractionOperationTimeout = browserInteractionStepsTimeout + browserObserveOperationTimeout
+
+	// Session lifecycle calls include work outside a raw browser operation. The
+	// access phase covers the session row plus the worst successful recovery
+	// path: bootstrap, failed state restore, and a second bootstrap. Persistence
+	// covers both browser export and the state-store write. Control acquisition
+	// and release split a final default-operation allowance.
+	browserSessionAccessTimeout         = 4 * browserDefaultOperationTimeout
+	browserSessionInitializationTimeout = browserObserveOperationTimeout
+	browserSessionPersistTimeout        = 2 * browserDefaultOperationTimeout
+	browserSessionControlAcquireTimeout = browserDefaultOperationTimeout / 2
+	browserSessionControlReleaseTimeout = browserDefaultOperationTimeout / 2
+	browserSessionCoordinationTimeout   = browserSessionControlAcquireTimeout + browserSessionControlReleaseTimeout
+
+	browserSessionObserveOperationTimeout = browserSessionAccessTimeout +
+		browserObserveOperationTimeout + browserSessionPersistTimeout + browserSessionCoordinationTimeout
+	browserSessionInteractionOperationTimeout = browserSessionAccessTimeout + browserSessionInitializationTimeout +
+		browserInteractionOperationTimeout + browserSessionPersistTimeout + browserSessionCoordinationTimeout
 
 	browserMultiViewportOperationTimeout = 150 * time.Second
 )
 
 const (
-	BrowserOperationScreenshot    BrowserOperation = "screenshot"
-	BrowserOperationObserve       BrowserOperation = "observe"
-	BrowserOperationInteract      BrowserOperation = "interact"
-	BrowserOperationInspect       BrowserOperation = "inspect"
-	BrowserOperationMultiViewport BrowserOperation = "multi_viewport"
-	BrowserOperationVisualDiff    BrowserOperation = "visual_diff"
-	BrowserOperationAssertions    BrowserOperation = "assertions"
+	BrowserOperationScreenshot     BrowserOperation = "screenshot"
+	BrowserOperationObserve        BrowserOperation = "observe"
+	BrowserOperationSessionObserve BrowserOperation = "session_observe"
+	BrowserOperationInteract       BrowserOperation = "interact"
+	BrowserOperationSessionAct     BrowserOperation = "session_act"
+	BrowserOperationInspect        BrowserOperation = "inspect"
+	BrowserOperationMultiViewport  BrowserOperation = "multi_viewport"
+	BrowserOperationVisualDiff     BrowserOperation = "visual_diff"
+	BrowserOperationAssertions     BrowserOperation = "assertions"
 )
 
 // BrowserOperationBudget leaves bounded headroom at each network hop so the
@@ -56,8 +78,12 @@ func BrowserOperationBudgetFor(operation BrowserOperation) BrowserOperationBudge
 	switch operation {
 	case BrowserOperationObserve:
 		operationTimeout = browserObserveOperationTimeout
+	case BrowserOperationSessionObserve:
+		operationTimeout = browserSessionObserveOperationTimeout
 	case BrowserOperationInteract:
 		operationTimeout = browserInteractionOperationTimeout
+	case BrowserOperationSessionAct:
+		operationTimeout = browserSessionInteractionOperationTimeout
 	case BrowserOperationAssertions:
 		operationTimeout = browserAssertionsOperationTimeout
 	case BrowserOperationMultiViewport:
@@ -69,6 +95,15 @@ func BrowserOperationBudgetFor(operation BrowserOperation) BrowserOperationBudge
 		WorkerRequest:  operationTimeout + 10*time.Second,
 		APIResponse:    operationTimeout + 15*time.Second,
 	}
+}
+
+// CoordinatedBrowserOperationAPIResponseTimeoutFor adds the session identity
+// and control fencing that compatibility browser tools perform in the public
+// API before and after their raw inspector/worker operation. The worker itself
+// still executes the raw operation, so only the outer API response deadline
+// needs this additional allowance.
+func CoordinatedBrowserOperationAPIResponseTimeoutFor(operation BrowserOperation) time.Duration {
+	return BrowserOperationBudgetFor(operation).APIResponse + browserDefaultOperationTimeout + browserSessionCoordinationTimeout
 }
 
 // BrowserAccessStage identifies a safe, non-secret preview authentication
@@ -87,7 +122,12 @@ const (
 // tokens, cookies, and underlying implementation details out of API details.
 type BrowserAccessError struct {
 	Stage BrowserAccessStage
-	Err   error
+	// PrecedingStage records the stage that failed first and triggered a
+	// recovery attempt, when that recovery then failed at Stage. Only one stage
+	// survives errors.As on a joined error, so without this the failure that
+	// started the cascade never reaches logs or error details.
+	PrecedingStage BrowserAccessStage
+	Err            error
 }
 
 func (e *BrowserAccessError) Error() string {

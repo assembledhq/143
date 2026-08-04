@@ -521,7 +521,7 @@ func (c *WorkerPreviewClient) ExecuteInteraction(ctx context.Context, worker Wor
 }
 
 func (c *WorkerPreviewClient) Observe(ctx context.Context, worker WorkerNode, orgID, sessionID, previewID uuid.UUID, body RemoteObserveRequest) (*models.PreviewObservation, error) {
-	observeCtx, cancel := withBrowserWorkerRequestTimeout(ctx, BrowserOperationObserve)
+	observeCtx, cancel := withBrowserWorkerRequestTimeout(ctx, BrowserOperationSessionObserve)
 	defer cancel()
 	req, err := c.newRequest(observeCtx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/observe", worker.BaseURL, previewID), auth.PreviewTokenClaims{OrgID: orgID, TargetNodeID: worker.ID, PreviewID: &previewID, SessionID: &sessionID, Action: "observe", ExpiresAt: time.Now().Add(previewWorkerTokenTTL)}, body)
 	if err != nil {
@@ -535,7 +535,7 @@ func (c *WorkerPreviewClient) Observe(ctx context.Context, worker WorkerNode, or
 }
 
 func (c *WorkerPreviewClient) Act(ctx context.Context, worker WorkerNode, orgID, sessionID, previewID uuid.UUID, body RemoteActRequest) (*models.PreviewActResult, error) {
-	ctx, cancel := withBrowserWorkerRequestTimeout(ctx, BrowserOperationInteract)
+	ctx, cancel := withBrowserWorkerRequestTimeout(ctx, BrowserOperationSessionAct)
 	defer cancel()
 	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/act", worker.BaseURL, previewID), auth.PreviewTokenClaims{OrgID: orgID, TargetNodeID: worker.ID, PreviewID: &previewID, SessionID: &sessionID, Action: "act", ExpiresAt: time.Now().Add(previewWorkerTokenTTL)}, body)
 	if err != nil {
@@ -549,7 +549,7 @@ func (c *WorkerPreviewClient) Act(ctx context.Context, worker WorkerNode, orgID,
 }
 
 func (c *WorkerPreviewClient) ActAsHuman(ctx context.Context, worker WorkerNode, orgID, sessionID, previewID, userID uuid.UUID, body RemoteActRequest) (*models.PreviewActResult, error) {
-	ctx, cancel := withBrowserWorkerRequestTimeout(ctx, BrowserOperationInteract)
+	ctx, cancel := withBrowserWorkerRequestTimeout(ctx, BrowserOperationSessionAct)
 	defer cancel()
 	payload := RemoteHumanActRequest{RemoteActRequest: body, UserID: userID}
 	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/human-act", worker.BaseURL, previewID), auth.PreviewTokenClaims{OrgID: orgID, TargetNodeID: worker.ID, PreviewID: &previewID, SessionID: &sessionID, Action: "human_act", ExpiresAt: time.Now().Add(previewWorkerTokenTTL)}, payload)

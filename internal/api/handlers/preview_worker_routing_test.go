@@ -816,6 +816,24 @@ func TestWorkerClientHTTPError_PreservesSafeDetails(t *testing.T) {
 		{name: "matching browser stage is preserved", code: "PREVIEW_BROWSER_BOOTSTRAP_EXCHANGE_FAILED", details: map[string]any{"stage": "bootstrap_exchange"}, wantDetails: map[string]string{"stage": "bootstrap_exchange"}},
 		{name: "unrelated worker details are dropped", code: "PREVIEW_WORKER_FAILED", details: map[string]any{"token": "secret"}},
 		{name: "mismatched stage and code are dropped", code: "PREVIEW_BROWSER_TOKEN_MINT_FAILED", details: map[string]any{"stage": "bootstrap_exchange"}},
+		{
+			name:        "known preceding stage survives the worker hop",
+			code:        "PREVIEW_BROWSER_BOOTSTRAP_EXCHANGE_FAILED",
+			details:     map[string]any{"stage": "bootstrap_exchange", "preceding_stage": "state_restore"},
+			wantDetails: map[string]string{"stage": "bootstrap_exchange", "preceding_stage": "state_restore"},
+		},
+		{
+			name:        "unknown preceding stage is dropped without dropping the stage",
+			code:        "PREVIEW_BROWSER_BOOTSTRAP_EXCHANGE_FAILED",
+			details:     map[string]any{"stage": "bootstrap_exchange", "preceding_stage": "not-a-stage"},
+			wantDetails: map[string]string{"stage": "bootstrap_exchange"},
+		},
+		{
+			name:        "sibling detail keys are never forwarded",
+			code:        "PREVIEW_BROWSER_BOOTSTRAP_EXCHANGE_FAILED",
+			details:     map[string]any{"stage": "bootstrap_exchange", "token": "must-not-leak"},
+			wantDetails: map[string]string{"stage": "bootstrap_exchange"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -833,18 +851,126 @@ func TestBrowserHandlerTimeout(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name          string
-		workerRouting bool
-		want          time.Duration
+		name      string
+		remote    bool
+		operation previewsvc.BrowserOperation
+		want      time.Duration
 	}{
-		{name: "local operation uses inner budget", want: 105 * time.Second},
-		{name: "remote operation includes worker request headroom", workerRouting: true, want: 115 * time.Second},
+		{name: "routing configured and selected worker local uses operation budget", operation: previewsvc.BrowserOperationInteract, want: 105 * time.Second},
+		{name: "remote interaction includes worker request headroom", remote: true, operation: previewsvc.BrowserOperationInteract, want: 115 * time.Second},
+		{name: "local session observation includes lifecycle budget", operation: previewsvc.BrowserOperationSessionObserve, want: 255 * time.Second},
+		{name: "remote session observation includes lifecycle and worker headroom", remote: true, operation: previewsvc.BrowserOperationSessionObserve, want: 265 * time.Second},
+		{name: "local session action includes lifecycle budget", operation: previewsvc.BrowserOperationSessionAct, want: 360 * time.Second},
+		{name: "remote session action includes lifecycle and worker headroom", remote: true, operation: previewsvc.BrowserOperationSessionAct, want: 370 * time.Second},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tt.want, browserHandlerTimeout(tt.workerRouting, previewsvc.BrowserOperationInteract), "handler timeout should match its execution topology")
+			require.Equal(t, tt.want, browserHandlerTimeout(tt.remote, tt.operation), "handler timeout should match its execution topology")
+		})
+	}
+}
+
+func TestBrowserWorkerResolutionHasIndependentBound(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, 15*time.Second, browserWorkerResolutionTimeout, "worker resolution should be bounded without consuming browser operation headroom")
+}
+
+type browserDeadlineRecorder struct {
+	*httptest.ResponseRecorder
+	deadlines []time.Time
+}
+
+func (w *browserDeadlineRecorder) SetWriteDeadline(deadline time.Time) error {
+	w.deadlines = append(w.deadlines, deadline)
+	return nil
+}
+
+func TestPreviewHandler_PrepareBrowserExecutionRefreshesResponseDeadlineAfterPreflight(t *testing.T) {
+	t.Parallel()
+
+	h := &PreviewHandler{}
+	w := &browserDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	req := httptest.NewRequest(http.MethodPost, "/preview", nil)
+	req = withAPIBrowserOperation(w, req, previewsvc.BrowserOperationInspect)
+
+	_, remote, resolved := h.prepareBrowserExecution(w, req, "", true, previewsvc.BrowserOperationInspect)
+
+	require.True(t, resolved, "local execution without worker routing should not require topology lookup")
+	require.False(t, remote, "local execution without worker routing should stay in process")
+	require.Len(t, w.deadlines, 3, "browser execution preparation should re-arm before and after bounded worker resolution")
+	require.True(t, w.deadlines[1].After(w.deadlines[0]), "resolution deadline should start after target lookup and request parsing")
+	require.True(t, w.deadlines[2].After(w.deadlines[1]), "operation deadline should start after worker resolution")
+}
+
+func TestPreviewHandler_PrepareBrowserExecutionRetainsDeadlineForResolutionError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+	h := newPreviewHandlerWithMock(mock)
+	h.SetWorkerRuntime(previewsvc.NewWorkerSelector(db.NewNodeStore(mock), h.store), previewsvc.NewWorkerPreviewClient("test-secret"), "api-node")
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE id = @id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnError(context.DeadlineExceeded)
+
+	w := &browserDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	req := httptest.NewRequest(http.MethodPost, "/preview", nil)
+	req = withAPIBrowserOperation(w, req, previewsvc.BrowserOperationInspect)
+	_, _, resolved := h.prepareBrowserExecution(w, req, "worker-node", true, previewsvc.BrowserOperationInspect)
+
+	require.False(t, resolved, "worker resolution failure should stop browser execution")
+	require.Equal(t, http.StatusBadGateway, w.Code, "worker resolution failure should remain a structured gateway response")
+	require.Len(t, w.deadlines, 2, "resolution failure should receive a fresh response deadline after request preflight")
+	require.True(t, w.deadlines[1].After(w.deadlines[0]), "resolution error deadline should start after target lookup and request parsing")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewHandler_ResolveBrowserWorkerUsesSelectedTopology(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		localNodeID   string
+		canRunLocally bool
+		wantRemote    bool
+	}{
+		{name: "selected local worker executes in process", localNodeID: "selected-worker", canRunLocally: true},
+		{name: "selected remote worker uses worker client", localNodeID: "api-node", canRunLocally: true, wantRemote: true},
+		{name: "local worker without in-process executor uses worker client", localNodeID: "selected-worker", wantRemote: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should be created")
+			defer mock.Close()
+
+			h := newPreviewHandlerWithMock(mock)
+			nodeStore := db.NewNodeStore(mock)
+			h.SetWorkerRuntime(previewsvc.NewWorkerSelector(nodeStore, h.store), previewsvc.NewWorkerPreviewClient("test-secret"), tt.localNodeID)
+
+			metadata, err := json.Marshal(previewsvc.WorkerNodeMetadata{PreviewInternalBaseURL: "http://selected-worker.internal"})
+			require.NoError(t, err, "worker metadata should marshal")
+			now := time.Now().UTC()
+			mock.ExpectQuery("SELECT .+ FROM nodes WHERE id = @id").
+				WithArgs(pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(handlerNodeTestCols).
+					AddRow("selected-worker", "worker", "worker.internal", "active", metadata, now, now))
+
+			req := httptest.NewRequest(http.MethodPost, "/preview", nil)
+			rr := httptest.NewRecorder()
+			worker, remote, resolved := h.resolveBrowserWorker(rr, req, "selected-worker", tt.canRunLocally)
+
+			require.True(t, resolved, "known worker should resolve successfully")
+			require.Equal(t, previewsvc.WorkerNode{ID: "selected-worker", Mode: "worker", BaseURL: "http://selected-worker.internal"}, worker, "resolved worker should preserve routing metadata")
+			require.Equal(t, tt.wantRemote, remote, "selected topology should determine whether the operation leaves the process")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
 }

@@ -15,9 +15,11 @@ import (
 )
 
 type fakeBrowserSessionStore struct {
-	mu     sync.Mutex
-	record *models.PreviewBrowserSession
-	saves  int
+	mu                sync.Mutex
+	record            *models.PreviewBrowserSession
+	saves             int
+	endActionCalls    int
+	endActionDeadline time.Duration
 }
 
 func (s *fakeBrowserSessionStore) GetBySession(context.Context, uuid.UUID, uuid.UUID) (*models.PreviewBrowserSession, error) {
@@ -69,7 +71,14 @@ func (s *fakeBrowserSessionStore) BeginAgentAction(_ context.Context, _, _ uuid.
 	}
 	return false, nil
 }
-func (s *fakeBrowserSessionStore) EndAgentAction(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
+
+func (s *fakeBrowserSessionStore) EndAgentAction(ctx context.Context, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.endActionCalls++
+	if deadline, ok := ctx.Deadline(); ok {
+		s.endActionDeadline = time.Until(deadline)
+	}
 	return nil
 }
 func (s *fakeBrowserSessionStore) BeginHumanAction(_ context.Context, _, _, userID, _ uuid.UUID, _ time.Duration) (bool, error) {
@@ -197,6 +206,8 @@ type fakeSessionBrowserInspector struct {
 	maxActive            int
 	delay                time.Duration
 	observeUntilCanceled bool
+	observeDeadlines     []time.Duration
+	exportDeadline       time.Duration
 	storage              json.RawMessage
 	restoreErr           error
 	restoreClearsAccess  bool
@@ -232,6 +243,9 @@ func (i *fakeSessionBrowserInspector) Observe(ctx context.Context, target models
 	i.mu.Lock()
 	i.hasContext = true
 	waitForCancellation := i.observeUntilCanceled
+	if deadline, ok := ctx.Deadline(); ok {
+		i.observeDeadlines = append(i.observeDeadlines, time.Until(deadline))
+	}
 	i.mu.Unlock()
 	if waitForCancellation {
 		<-ctx.Done()
@@ -257,7 +271,12 @@ func (i *fakeSessionBrowserInspector) Act(ctx context.Context, target models.Bro
 	i.mu.Unlock()
 	return &models.PreviewActResult{Interaction: &models.InteractionResult{Steps: []models.StepResult{{StepIndex: 0, Action: steps[0].Action, Success: true}}}, Observation: observation}, err
 }
-func (i *fakeSessionBrowserInspector) ExportStorage(context.Context, models.BrowserTarget) (json.RawMessage, error) {
+func (i *fakeSessionBrowserInspector) ExportStorage(ctx context.Context, _ models.BrowserTarget) (json.RawMessage, error) {
+	i.mu.Lock()
+	if deadline, ok := ctx.Deadline(); ok {
+		i.exportDeadline = time.Until(deadline)
+	}
+	i.mu.Unlock()
 	if len(i.storage) == 0 {
 		return json.RawMessage(`{"cookies":[]}`), nil
 	}
@@ -383,7 +402,7 @@ func TestBrowserSessionService_FailsClosedWhenPreviewAccessCannotBeEstablished(t
 	}
 }
 
-func TestBrowserSessionService_ClassifiesRestoreFailureWhenAccessRecoveryFails(t *testing.T) {
+func TestBrowserSessionService_ClassifiesAccessRecoveryFailureAfterRestoreFailure(t *testing.T) {
 	t.Parallel()
 
 	orgID, sessionID, previewID := uuid.New(), uuid.New(), uuid.New()
@@ -405,7 +424,29 @@ func TestBrowserSessionService_ClassifiesRestoreFailureWhenAccessRecoveryFails(t
 	require.Error(t, err, "failed state restore and access recovery should fail the observation")
 	accessErr, ok := AsBrowserAccessError(err)
 	require.True(t, ok, "restore failure should retain structured stage information")
-	require.Equal(t, BrowserAccessStageStateRestore, accessErr.Stage, "restore failure should be the primary diagnostic stage")
+	require.Equal(t, BrowserAccessStageBootstrapExchange, accessErr.Stage, "the terminal access recovery failure should be the primary diagnostic stage")
+	require.Contains(t, err.Error(), string(BrowserAccessStageStateRestore), "the preceding restore failure should remain available as diagnostic context")
+	require.Equal(t, BrowserAccessStageStateRestore, accessErr.PrecedingStage,
+		"only one stage survives errors.As, so the failure that triggered recovery must be carried structurally rather than only in the error text")
+}
+
+func TestBrowserSessionService_LeavesPrecedingStageUnsetWithoutACascade(t *testing.T) {
+	t.Parallel()
+
+	orgID, sessionID, previewID := uuid.New(), uuid.New(), uuid.New()
+	store := &fakeBrowserSessionStore{}
+	inspector := &fakeSessionBrowserInspector{
+		bootstrapErrs: []error{&BrowserAccessError{Stage: BrowserAccessStageBootstrapExchange, Err: errors.New("exchange rejected")}},
+	}
+	service := NewBrowserSessionService(store, inspector, &fakeBrowserAccessTokenMinter{token: "browser-token"})
+
+	_, err := service.Observe(context.Background(), orgID, sessionID, previewID, BrowserSessionPolicy{}, models.PreviewObservationOpts{})
+
+	require.Error(t, err, "a failed bootstrap should fail the observation")
+	accessErr, ok := AsBrowserAccessError(err)
+	require.True(t, ok, "bootstrap failure should retain structured stage information")
+	require.Equal(t, BrowserAccessStageBootstrapExchange, accessErr.Stage, "bootstrap failure should report its own stage")
+	require.Empty(t, accessErr.PrecedingStage, "a first-attempt failure has no preceding stage to report")
 }
 
 func TestBrowserSessionService_BoundsObservationDuration(t *testing.T) {
@@ -424,6 +465,63 @@ func TestBrowserSessionService_BoundsObservationDuration(t *testing.T) {
 	)
 
 	require.ErrorIs(t, err, context.DeadlineExceeded, "browser observation should return at its service deadline")
+}
+
+func TestBrowserSessionService_BoundsActionLifecyclePhases(t *testing.T) {
+	t.Parallel()
+
+	inspector := &fakeSessionBrowserInspector{}
+	service := NewBrowserSessionService(&fakeBrowserSessionStore{}, inspector, nil)
+
+	_, err := service.Act(
+		context.Background(),
+		uuid.New(),
+		uuid.New(),
+		uuid.New(),
+		BrowserSessionPolicy{PersistSession: true},
+		[]models.InteractionStep{{Action: "click", Selector: "button"}},
+		models.PreviewObservationOpts{},
+	)
+
+	require.NoError(t, err, "fresh session action should complete")
+	inspector.mu.Lock()
+	observeDeadlines := append([]time.Duration(nil), inspector.observeDeadlines...)
+	exportDeadline := inspector.exportDeadline
+	inspector.mu.Unlock()
+	require.Len(t, observeDeadlines, 2, "fresh actions should separately bound reset-page initialization and the interaction's trailing observation")
+	require.Positive(t, observeDeadlines[0], "initialization deadline should leave time to reset the page")
+	require.LessOrEqual(t, observeDeadlines[0], browserSessionInitializationTimeout, "reset-page initialization should not exceed its phase allowance")
+	require.Positive(t, observeDeadlines[1], "interaction deadline should leave time for the trailing observation")
+	require.LessOrEqual(t, observeDeadlines[1], browserInteractionOperationTimeout, "interaction and its trailing observation should not exceed their shared allowance")
+	require.Positive(t, exportDeadline, "storage export should receive a persistence deadline")
+	require.LessOrEqual(t, exportDeadline, browserSessionPersistTimeout, "storage export should not exceed the persistence allowance")
+}
+
+func TestBrowserSessionService_BoundsObservationLifecyclePhases(t *testing.T) {
+	t.Parallel()
+
+	inspector := &fakeSessionBrowserInspector{}
+	service := NewBrowserSessionService(&fakeBrowserSessionStore{}, inspector, nil)
+
+	_, err := service.Observe(
+		context.Background(),
+		uuid.New(),
+		uuid.New(),
+		uuid.New(),
+		BrowserSessionPolicy{PersistSession: true},
+		models.PreviewObservationOpts{},
+	)
+
+	require.NoError(t, err, "fresh session observation should complete")
+	inspector.mu.Lock()
+	observeDeadlines := append([]time.Duration(nil), inspector.observeDeadlines...)
+	exportDeadline := inspector.exportDeadline
+	inspector.mu.Unlock()
+	require.Len(t, observeDeadlines, 1, "session observation should have one independently bounded browser phase")
+	require.Positive(t, observeDeadlines[0], "browser observation should receive a deadline")
+	require.LessOrEqual(t, observeDeadlines[0], browserObserveOperationTimeout, "browser observation should retain its full phase allowance after access setup")
+	require.Positive(t, exportDeadline, "session observation persistence should receive a deadline")
+	require.LessOrEqual(t, exportDeadline, browserSessionPersistTimeout, "session observation persistence should retain its full phase allowance")
 }
 
 func TestBrowserSessionService_ObserveLifecycle(t *testing.T) {
@@ -525,6 +623,41 @@ func TestBrowserSessionService_SerializesActions(t *testing.T) {
 	require.NoError(t, <-done, "second concurrent action should succeed")
 	require.Equal(t, 1, inspector.maxActive, "one session should execute only one browser action at a time")
 	require.Empty(t, service.locks, "completed actions should release their in-memory session lock")
+}
+
+func TestBrowserSessionService_SessionLockHonorsCancellation(t *testing.T) {
+	t.Parallel()
+
+	service := NewBrowserSessionService(&fakeBrowserSessionStore{}, &fakeSessionBrowserInspector{}, nil)
+	sessionID := uuid.New()
+	release, err := service.acquireSession(context.Background(), sessionID)
+	require.NoError(t, err, "first caller should acquire the session lock")
+
+	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	secondRelease, err := service.acquireSession(waitCtx, sessionID)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "waiting for a busy session lock should honor cancellation")
+	require.Nil(t, secondRelease, "a canceled waiter should not receive a release function")
+
+	release()
+	require.Empty(t, service.locks, "holder release should remove the lock after a canceled waiter exits")
+}
+
+func TestBrowserSessionService_BoundsAgentActionCleanup(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeBrowserSessionStore{}
+	service := NewBrowserSessionService(store, &fakeSessionBrowserInspector{}, nil)
+	err := service.RunAgentOperation(context.Background(), uuid.New(), uuid.New(), time.Minute, func() error { return nil })
+	require.NoError(t, err, "agent operation should complete when cleanup succeeds")
+
+	store.mu.Lock()
+	endActionCalls := store.endActionCalls
+	endActionDeadline := store.endActionDeadline
+	store.mu.Unlock()
+	require.Equal(t, 1, endActionCalls, "agent operation should release its control token exactly once")
+	require.Positive(t, endActionDeadline, "agent action cleanup should receive a deadline")
+	require.LessOrEqual(t, endActionDeadline, browserSessionControlReleaseTimeout, "agent action cleanup should not outlive its release allowance")
 }
 
 func TestBrowserSessionService_IsolatesSessionContextKeys(t *testing.T) {

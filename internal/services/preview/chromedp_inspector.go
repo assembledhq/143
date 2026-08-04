@@ -607,6 +607,12 @@ func (c *ChromeDPInspector) ReadConsole(ctx context.Context, previewID string) (
 }
 
 func (c *ChromeDPInspector) Observe(ctx context.Context, target models.BrowserTarget, opts models.PreviewObservationOpts) (*models.PreviewObservation, error) {
+	// The screenshot bounds itself, but the AX tree walk and DOM excerpt below
+	// do not. Bound the observation as a whole so it can never overrun the
+	// budget callers reserve for it -- notably Act, whose operation budget is
+	// sized as the step loop plus one observation.
+	ctx, cancel := context.WithTimeout(ctx, browserObserveOperationTimeout)
+	defer cancel()
 	if target.ContextKey == "" {
 		target.ContextKey = target.PreviewID
 	}
@@ -857,8 +863,10 @@ func (c *ChromeDPInspector) ExportStorage(ctx context.Context, target models.Bro
 	}
 	merged, cancel := mergeContexts(pc.ctx, ctx)
 	defer cancel()
+	timeoutCtx, timeoutCancel := context.WithTimeout(merged, defaultOpTimeout)
+	defer timeoutCancel()
 	var state browserStorageState
-	if err := chromedp.Run(merged, chromedp.Location(&state.URL), chromedp.Evaluate(`Object.fromEntries(Object.entries(localStorage))`, &state.LocalStorage), chromedp.ActionFunc(func(runCtx context.Context) error {
+	if err := chromedp.Run(timeoutCtx, chromedp.Location(&state.URL), chromedp.Evaluate(`Object.fromEntries(Object.entries(localStorage))`, &state.LocalStorage), chromedp.ActionFunc(func(runCtx context.Context) error {
 		cookies, cookieErr := network.GetCookies().Do(runCtx)
 		state.Cookies = persistableBrowserCookies(cookies)
 		return cookieErr
@@ -897,6 +905,8 @@ func (c *ChromeDPInspector) RestoreStorage(ctx context.Context, target models.Br
 	}
 	merged, cancel := mergeContexts(pc.ctx, ctx)
 	defer cancel()
+	timeoutCtx, timeoutCancel := context.WithTimeout(merged, defaultOpTimeout)
+	defer timeoutCancel()
 	storageJSON, err := json.Marshal(state.LocalStorage)
 	if err != nil {
 		return fmt.Errorf("marshal local storage: %w", err)
@@ -904,7 +914,7 @@ func (c *ChromeDPInspector) RestoreStorage(ctx context.Context, target models.Br
 	storageScript := fmt.Sprintf(`(values => { localStorage.clear(); for (const [key,value] of Object.entries(values)) localStorage.setItem(key,value) })(%s)`, storageJSON)
 	oldURL, _ := url.Parse(state.URL)
 	newURL, _ := url.Parse(destinationURL)
-	err = chromedp.Run(merged, chromedp.ActionFunc(func(runCtx context.Context) error {
+	err = chromedp.Run(timeoutCtx, chromedp.ActionFunc(func(runCtx context.Context) error {
 		for _, cookie := range state.Cookies {
 			if cookie == nil || isPreviewGatewaySessionCookie(cookie.Name) {
 				continue

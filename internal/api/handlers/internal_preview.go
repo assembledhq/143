@@ -420,7 +420,7 @@ func (h *InternalPreviewHandler) CaptureScreenshot(w http.ResponseWriter, r *htt
 }
 
 func (h *InternalPreviewHandler) Observe(w http.ResponseWriter, r *http.Request) {
-	r, cancel := withWorkerBrowserOperation(w, r, previewsvc.BrowserOperationObserve)
+	r, cancel := withWorkerBrowserOperation(w, r, previewsvc.BrowserOperationSessionObserve)
 	defer cancel()
 	previewID, claims, ok := h.authorizePreviewAction(w, r, "observe")
 	if !ok {
@@ -451,7 +451,7 @@ func (h *InternalPreviewHandler) Observe(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *InternalPreviewHandler) Act(w http.ResponseWriter, r *http.Request) {
-	r, cancel := withWorkerBrowserOperation(w, r, previewsvc.BrowserOperationInteract)
+	r, cancel := withWorkerBrowserOperation(w, r, previewsvc.BrowserOperationSessionAct)
 	defer cancel()
 	previewID, claims, ok := h.authorizePreviewAction(w, r, "act")
 	if !ok {
@@ -482,7 +482,7 @@ func (h *InternalPreviewHandler) Act(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *InternalPreviewHandler) HumanAct(w http.ResponseWriter, r *http.Request) {
-	r, cancel := withWorkerBrowserOperation(w, r, previewsvc.BrowserOperationInteract)
+	r, cancel := withWorkerBrowserOperation(w, r, previewsvc.BrowserOperationSessionAct)
 	defer cancel()
 	middleware.OrgIDFromContext(r.Context())
 	previewID, claims, ok := h.authorizePreviewAction(w, r, "human_act")
@@ -515,6 +515,9 @@ func (h *InternalPreviewHandler) HumanAct(w http.ResponseWriter, r *http.Request
 func writeBrowserSessionError(w http.ResponseWriter, r *http.Request, err error) {
 	if accessErr, ok := previewsvc.AsBrowserAccessError(err); ok {
 		logContext := zerolog.Ctx(r.Context()).With().Str("browser_stage", string(accessErr.Stage))
+		if accessErr.PrecedingStage != "" {
+			logContext = logContext.Str("browser_preceding_stage", string(accessErr.PrecedingStage))
+		}
 		if elapsed := browserOperationElapsed(r); elapsed > 0 {
 			logContext = logContext.Dur("browser_elapsed", elapsed)
 		}
@@ -528,7 +531,11 @@ func writeBrowserSessionError(w http.ResponseWriter, r *http.Request, err error)
 		}
 		logger := logContext.Logger()
 		r = r.WithContext(logger.WithContext(r.Context()))
-		writeErrorWithDetails(w, r, http.StatusInternalServerError, accessErr.Code(), "preview browser access failed", map[string]string{"stage": string(accessErr.Stage)}, err)
+		details := map[string]string{"stage": string(accessErr.Stage)}
+		if accessErr.PrecedingStage != "" {
+			details["preceding_stage"] = string(accessErr.PrecedingStage)
+		}
+		writeErrorWithDetails(w, r, http.StatusInternalServerError, accessErr.Code(), "preview browser access failed", details, err)
 		return
 	}
 	switch {
