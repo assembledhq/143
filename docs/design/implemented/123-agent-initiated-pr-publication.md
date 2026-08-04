@@ -1,6 +1,6 @@
 # Design: Agent-Initiated PR Publication with Automatic Review
 
-> **Status:** Implemented | **Last reviewed:** 2026-08-02
+> **Status:** Implemented | **Last reviewed:** 2026-08-03
 >
 > **Depends on:** [overall.md](../overall.md),
 > [review agent loops](../implemented/78-review-agent-loops.md),
@@ -16,7 +16,7 @@
 agent implements and verifies
   -> agent runs `143-tools pr create`
   -> 143 records durable publication intent
-  -> optional two-pass review/fix loop
+  -> optional three-pass review/fix loop
   -> clean review queues durable PR publication
   -> linked session remains available for CI, conflicts, and feedback
 ```
@@ -27,7 +27,7 @@ how** the external side effect occurs.
 Two organization settings govern the workflow:
 
 1. **Create a PR when the coding agent is ready**
-2. **Run a two-pass review/fix cycle before creating the PR**
+2. **Run a three-pass review/fix cycle before creating the PR**
 
 Both default on for existing and new organizations. Users may override either
 with `inherit`, `on`, or `off`.
@@ -274,7 +274,7 @@ create_pr
   -> persist publication intent and caller options
   -> pre_publish + review off: queue open_pr
   -> pre_publish + review on:
-       reuse fresh clean review, or start/join two-pass loop
+       reuse fresh clean review, or start/join three-pass loop
        clean -> atomically queue open_pr
        other terminal result -> block for in-product attention
   -> draft_first:
@@ -894,7 +894,7 @@ Session detail adds resolved policy:
     "review_execution_enabled": true,
     "agent_publication_execution_enabled": true,
     "review_source": "personal",
-    "review_max_passes": 2,
+    "review_max_passes": 3,
     "pr_handoff_mode": "pre_publish"
   }
 }
@@ -963,7 +963,7 @@ closure/revert, publication success, cost, and latency.
    roll forward. Response changes up to this point are additive only; the
    `409` retirement waits for this step to drain and lands in PR 3.
 3. Enable prompt/tool states internally.
-4. Enable two-pass review internally and inspect churn/block rates.
+4. Enable three-pass review internally and inspect churn/block rates.
 5. Enable for selected organizations with visible default-on settings.
 6. Enable generally.
 7. Remove the generic manual-session completion trigger after agent-tool
@@ -1099,7 +1099,7 @@ Scope:
   automation loop parks the intent as `review_in_progress` instead of
   stranding it, and resume when that loop terminates. Do not relax
   `idx_session_review_loops_one_running_per_session`.
-- Run the bounded two-pass review/fix cycle for agent- and user-initiated
+- Run the bounded three-pass review/fix cycle for agent- and user-initiated
   publication, honor an automation's `pre_pr_review_loops` when that is the
   trigger, prefer and persist an independent reviewer, and block when the final
   pass changes code.

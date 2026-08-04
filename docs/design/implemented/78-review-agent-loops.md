@@ -1,6 +1,6 @@
 # Design: Review Agent Loops
 
-> **Status:** Implemented | **Last reviewed:** 2026-05-15
+> **Status:** Implemented | **Last reviewed:** 2026-08-03
 >
 > **Depends on:** [implemented/48-automations-separation.md](../implemented/48-automations-separation.md), [backlog/11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md), [implemented/40-pr-creation-revamp.md](../implemented/40-pr-creation-revamp.md), [implemented/68-sandbox-agent-tabs-and-threads.md](../implemented/68-sandbox-agent-tabs-and-threads.md), [implemented/64-session-composer-slash-commands.md](../implemented/64-session-composer-slash-commands.md)
 
@@ -17,12 +17,12 @@ completion callback, the worker marks the running loop terminal `failed` while
 also releasing the thread. The session overview must therefore render the
 review as failed instead of continuing to show a stale loading/running state.
 
-Manual session detail now exposes a `Review` action that starts a two-pass loop
+Manual session detail now exposes a `Review` action that starts a three-pass loop
 in the current sandbox. Manual setup includes a fix-mode choice: the default
 `minimal` mode preserves the original behavior by fixing only the minimum
 needed to clear the review, while `exhaustive` instructs fix turns to address
 every finding from the previous review pass before the next pass. Automations persist `pre_pr_review_loops`; new
-automations default to one pass, existing rows backfill to zero, and the
+automations default to three passes, existing rows backfill to zero, and the
 `open_pr` worker gate starts or waits for the automation review loop before
 publication. Clean automation loops enqueue PR creation again; loops that hit
 the pass limit block PR creation for human decision.
@@ -590,7 +590,7 @@ Automation create/update/get payloads expose:
 
 ```json
 {
-  "pre_pr_review_loops": 1
+  "pre_pr_review_loops": 3
 }
 ```
 
@@ -600,7 +600,7 @@ Start request:
 {
   "agent_type": "claude_code",
   "model": "claude-sonnet-4-5",
-  "max_passes": 2
+  "max_passes": 3
 }
 ```
 
@@ -759,7 +759,7 @@ changes.
    after the session snapshot expires?
 2. What is the right cost preview for 3-5 pass loops on large diffs?
 3. Should manual review keep the full pass-count setup dialog, or add a
-   fast-start default of two passes?
+   fast-start path that uses the three-pass default?
 4. Should the review-loop tab be reusable for future review loops in the same
    session, or should each click create a fresh tab?
 

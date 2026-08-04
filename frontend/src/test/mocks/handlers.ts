@@ -1,5 +1,6 @@
 import { http, HttpResponse } from 'msw';
 import type { APIClient, APIToken, AuthProviders, CliToken, EvalReleaseGate, Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, Project, ProjectDetail, SessionTranscriptWindowResponse, AgentCapabilityDefinition, AgentCapabilityPolicyResponse, JoinToken, JoinTokenLink, OpenCodeModelInfo } from '@/lib/types';
+import { DEFAULT_REVIEW_MAX_PASSES } from '@/lib/review-loop-constants';
 
 export const mockIssues: Issue[] = [
   {
@@ -468,7 +469,7 @@ export const handlers = [
         status: 'running',
         source: 'manual',
         agent_type: body.agent_type || 'codex',
-        max_passes: body.max_passes ?? 2,
+        max_passes: body.max_passes ?? DEFAULT_REVIEW_MAX_PASSES,
         fix_mode: body.fix_mode ?? 'minimal',
         completed_passes: 0,
         review_required: false,

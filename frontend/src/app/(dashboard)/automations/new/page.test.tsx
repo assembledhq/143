@@ -362,7 +362,7 @@ describe("NewAutomationPage", () => {
               max_concurrent: 1,
               base_branch: "main",
               identity_scope: "org",
-              pre_pr_review_loops: 1,
+              pre_pr_review_loops: requestBody.pre_pr_review_loops as number,
               schedule_type: requestBody.schedule_type,
               github_event_triggers: [],
               timezone: "UTC",
@@ -397,6 +397,7 @@ describe("NewAutomationPage", () => {
     expect(requestBody).toMatchObject({
       schedule_type: "none",
       triggers: ["github.pr.feedback"],
+      pre_pr_review_loops: 3,
     });
     expect(requestBody).not.toHaveProperty("interval_value");
     expect(requestBody).not.toHaveProperty("interval_unit");
@@ -578,7 +579,7 @@ describe("NewAutomationPage", () => {
               max_concurrent: 1,
               base_branch: "main",
               identity_scope: "org",
-              pre_pr_review_loops: 1,
+              pre_pr_review_loops: requestBody.pre_pr_review_loops as number,
               schedule_type: requestBody.schedule_type,
               github_event_triggers: [],
               timezone: "UTC",
@@ -736,7 +737,7 @@ describe("NewAutomationPage", () => {
               max_concurrent: 1,
               base_branch: "main",
               identity_scope: "org",
-              pre_pr_review_loops: 1,
+              pre_pr_review_loops: requestBody.pre_pr_review_loops as number,
               schedule_type: requestBody.schedule_type,
               github_event_triggers: [],
               timezone: "UTC",
@@ -1036,7 +1037,7 @@ describe("NewAutomationPage", () => {
               max_concurrent: 1,
               base_branch: "main",
               identity_scope: "org",
-              pre_pr_review_loops: 1,
+              pre_pr_review_loops: requestBody.pre_pr_review_loops as number,
               schedule_type: "interval",
               github_event_triggers: [],
               timezone: "UTC",

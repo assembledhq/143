@@ -582,7 +582,7 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(dialog.querySelector('.lucide-clipboard-list')).not.toBeInTheDocument();
   });
 
-  it('starts a manual review loop with the selected pass count and default minimal fix mode', async () => {
+  it('starts a manual review loop with three passes and minimal fixes by default', async () => {
     const user = userEvent.setup();
     let postedBody: { max_passes: number; fix_mode?: ReviewLoopFixMode } | null = null;
 
@@ -629,7 +629,7 @@ describe('SessionDetailPage overview and review loop', () => {
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
 
     await user.click(await screen.findByRole('button', { name: 'Review & fix' }));
-    await user.click(await screen.findByRole('button', { name: 'Increase review passes' }));
+    expect(screen.getByRole('spinbutton', { name: 'Review passes' })).toHaveValue(3);
     await user.click(screen.getByRole('button', { name: 'Start review' }));
 
     await waitFor(() => {
@@ -749,7 +749,7 @@ describe('SessionDetailPage overview and review loop', () => {
     await user.click(screen.getByRole('button', { name: 'Start review' }));
 
     await waitFor(() => {
-      expect(postedBody).toEqual({ agent_type: 'claude_code', max_passes: 2, fix_mode: 'minimal' });
+      expect(postedBody).toEqual({ agent_type: 'claude_code', max_passes: 3, fix_mode: 'minimal' });
     });
   });
 
