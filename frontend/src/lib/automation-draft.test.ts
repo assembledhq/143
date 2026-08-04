@@ -123,7 +123,9 @@ describe("automation-draft storage", () => {
   });
 
   it("keeps the canonical form state keys explicit", () => {
-    expect(Object.keys(defaultAutomationFormState()).sort()).toEqual(FORM_STATE_KEYS);
+    const defaults = defaultAutomationFormState();
+    expect(Object.keys(defaults).sort()).toEqual(FORM_STATE_KEYS);
+    expect(defaults.prePRReviewLoops).toBe(3);
   });
 
   it("round-trips a populated draft", () => {

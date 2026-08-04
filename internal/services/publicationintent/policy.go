@@ -2,7 +2,7 @@ package publicationintent
 
 import "github.com/assembledhq/143/internal/models"
 
-const UserInitiatedReviewMaxPasses = 2
+const UserInitiatedReviewMaxPasses = models.DefaultReviewLoopMaxPasses
 
 type EffectivePolicy struct {
 	CreatePRWhenAgentReady bool

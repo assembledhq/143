@@ -237,7 +237,7 @@ describe('SettingsPage', () => {
     renderWithProviders(<SettingsPage />);
 
     const createSwitch = await screen.findByRole('switch', { name: 'Create a PR when the coding agent is ready' });
-    const reviewSwitch = screen.getByRole('switch', { name: 'Run a two-pass review/fix cycle before creating the PR' });
+    const reviewSwitch = screen.getByRole('switch', { name: 'Run a three-pass review/fix cycle before creating the PR' });
     expect(createSwitch).toBeChecked();
     expect(reviewSwitch).toBeChecked();
 
@@ -273,7 +273,7 @@ describe('SettingsPage', () => {
     });
     renderWithProviders(<SettingsPage />);
 
-    await userEvent.click(await screen.findByRole('switch', { name: 'Run a two-pass review/fix cycle before creating the PR' }));
+    await userEvent.click(await screen.findByRole('switch', { name: 'Run a three-pass review/fix cycle before creating the PR' }));
 
     await waitFor(() => {
       expect(settingsUpdateMock).toHaveBeenCalledWith({

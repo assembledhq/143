@@ -530,7 +530,7 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	prePRReviewLoops := 0
 	if models.AgentSupportsNativeReview(effectiveAgentType) {
-		prePRReviewLoops = 1
+		prePRReviewLoops = models.DefaultReviewLoopMaxPasses
 	}
 	if req.PrePRReviewLoops != nil {
 		if *req.PrePRReviewLoops < 0 || *req.PrePRReviewLoops > 5 {

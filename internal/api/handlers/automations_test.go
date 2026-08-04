@@ -731,6 +731,7 @@ func TestAutomationHandler_Create_OK(t *testing.T) {
 	require.Equal(t, models.ReasoningEffortXHigh, *resp.Data.ReasoningEffort)
 	require.Equal(t, models.AutomationIdentityScopeOrg, resp.Data.IdentityScope)
 	require.Equal(t, models.AutomationPublishPolicyPullRequest, resp.Data.PublishPolicy)
+	require.Equal(t, models.DefaultReviewLoopMaxPasses, resp.Data.PrePRReviewLoops, "supported agents should default automations to three review passes")
 	require.Equal(t, models.AutomationIconTypeEmoji, resp.Data.IconType)
 	require.Equal(t, "🧹", resp.Data.IconValue)
 	require.NoError(t, mock.ExpectationsWereMet())

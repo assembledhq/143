@@ -1,6 +1,7 @@
 import { toCodingAgentReasoningEffort, type CodingAgentReasoningEffort } from "@/lib/coding-agent-reasoning";
 import type { AutomationProductTrigger } from "@/lib/automation-triggers";
 import { isScheduleDraft, type ScheduleDraft } from "@/lib/automation-schedule";
+import { DEFAULT_REVIEW_MAX_PASSES } from "@/lib/review-loop-constants";
 import type {
   AgentCapabilityGrant,
   AutomationPublishPolicy,
@@ -149,7 +150,7 @@ export function defaultAutomationFormState(
     model: undefined,
     identityScope: "org",
     publishPolicy: "pull_request",
-    prePRReviewLoops: 1,
+    prePRReviewLoops: DEFAULT_REVIEW_MAX_PASSES,
     reasoningEffort: "",
     priority: 50,
     capabilityOverride: null,
@@ -217,7 +218,12 @@ export function automationFormStateFromDraft(
     model: typeof parsed.model === "string" ? parsed.model : undefined,
     identityScope: parsed.identityScope === "personal" ? "personal" : "org",
     publishPolicy: parsed.publishPolicy === "none" ? "none" : "pull_request",
-    prePRReviewLoops: clampInteger(parsed.prePRReviewLoops, 0, 5, 1),
+    prePRReviewLoops: clampInteger(
+      parsed.prePRReviewLoops,
+      0,
+      5,
+      DEFAULT_REVIEW_MAX_PASSES,
+    ),
     reasoningEffort: toCodingAgentReasoningEffort(
       typeof parsed.reasoningEffort === "string" ? parsed.reasoningEffort : "",
     ),
@@ -336,7 +342,7 @@ function isEmptyDraft(draft: AutomationDraft): boolean {
     && Object.keys(draft.baseBranchByRepoId).length === 0
     && draft.model === undefined
     && draft.identityScope === "org"
-    && draft.prePRReviewLoops === 1
+    && draft.prePRReviewLoops === DEFAULT_REVIEW_MAX_PASSES
     && draft.reasoningEffort === ""
     && draft.priority === 50
     && draft.capabilityOverride === null

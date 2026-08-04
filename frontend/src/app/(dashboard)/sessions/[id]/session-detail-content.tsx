@@ -106,6 +106,11 @@ import {
   syncReferencesWithMessage,
 } from "@/lib/session-composer-mentions";
 import { queryKeys } from "@/lib/query-keys";
+import {
+  DEFAULT_REVIEW_MAX_PASSES,
+  MAX_REVIEW_MAX_PASSES,
+  MIN_REVIEW_MAX_PASSES,
+} from "@/lib/review-loop-constants";
 import { api, ApiError } from "@/lib/api";
 import { AGENTS, AGENTS_BY_KEY } from "@/lib/agents";
 import { getActiveOrgId } from "@/lib/active-org";
@@ -341,8 +346,13 @@ function PublicationWorkflowCard({
   const reviewQueued = reviewing && !reviewLoop;
   const reviewPassed = publication.review_gate_state === "passed";
   const activePass = reviewLoop?.passes?.at(-1);
-  const passNumber = activePass?.pass_index ?? Math.min((reviewLoop?.completed_passes ?? 0) + 1, publication.review_max_passes ?? reviewLoop?.max_passes ?? 2);
-  const maxPasses = publication.review_max_passes ?? reviewLoop?.max_passes ?? 2;
+  const passNumber = activePass?.pass_index ?? Math.min(
+    (reviewLoop?.completed_passes ?? 0) + 1,
+    publication.review_max_passes ?? reviewLoop?.max_passes ?? DEFAULT_REVIEW_MAX_PASSES,
+  );
+  const maxPasses = publication.review_max_passes
+    ?? reviewLoop?.max_passes
+    ?? DEFAULT_REVIEW_MAX_PASSES;
   const activity = activePass?.status === "fixing"
     ? "Applying fixes"
     : activePass?.status === "deciding"
@@ -3616,7 +3626,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [mobileRenameOpen, setMobileRenameOpen] = useState(false);
   const [keyboardHelpOpen, setKeyboardHelpOpen] = useState(false);
   const [reviewConfigOpen, setReviewConfigOpen] = useState(false);
-  const [reviewPasses, setReviewPasses] = useState(2);
+  const [reviewPasses, setReviewPasses] = useState(DEFAULT_REVIEW_MAX_PASSES);
   const [reviewAgentType, setReviewAgentType] = useState<string>("codex");
   const [reviewFixMode, setReviewFixMode] = useState<ReviewLoopFixMode>("minimal");
   const [detailWidth, setDetailWidth] = useState(SESSION_DETAIL_PANEL_DEFAULT_WIDTH);
@@ -7373,8 +7383,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                   size="icon"
                   className="h-9 w-9 shrink-0"
                   aria-label="Decrease review passes"
-                  disabled={reviewPasses <= 1 || startReviewLoopMutation.isPending}
-                  onClick={() => setReviewPasses((current) => Math.max(1, current - 1))}
+                  disabled={reviewPasses <= MIN_REVIEW_MAX_PASSES || startReviewLoopMutation.isPending}
+                  onClick={() => setReviewPasses((current) => Math.max(MIN_REVIEW_MAX_PASSES, current - 1))}
                 >
                   <Minus className="h-3.5 w-3.5" />
                 </Button>
@@ -7382,19 +7392,22 @@ export function SessionDetailContent({ id }: { id: string }) {
                   id="review-pass-count"
                   aria-label="Review passes"
                   type="number"
-                  min={1}
-                  max={5}
+                  min={MIN_REVIEW_MAX_PASSES}
+                  max={MAX_REVIEW_MAX_PASSES}
                   value={reviewPasses}
                   disabled={startReviewLoopMutation.isPending}
                   onChange={(event) => {
                     const next = Number.parseInt(event.target.value, 10);
                     if (Number.isNaN(next)) {
-                      setReviewPasses(1);
+                      setReviewPasses(MIN_REVIEW_MAX_PASSES);
                       return;
                     }
-                    setReviewPasses(Math.min(5, Math.max(1, next)));
+                    setReviewPasses(Math.min(
+                      MAX_REVIEW_MAX_PASSES,
+                      Math.max(MIN_REVIEW_MAX_PASSES, next),
+                    ));
                   }}
-                      className="text-center"
+                  className="text-center"
                 />
                 <Button
                   type="button"
@@ -7402,8 +7415,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                   size="icon"
                   className="h-9 w-9 shrink-0"
                   aria-label="Increase review passes"
-                  disabled={reviewPasses >= 5 || startReviewLoopMutation.isPending}
-                  onClick={() => setReviewPasses((current) => Math.min(5, current + 1))}
+                  disabled={reviewPasses >= MAX_REVIEW_MAX_PASSES || startReviewLoopMutation.isPending}
+                  onClick={() => setReviewPasses((current) => Math.min(MAX_REVIEW_MAX_PASSES, current + 1))}
                 >
                   <Plus className="h-3.5 w-3.5" />
                 </Button>
