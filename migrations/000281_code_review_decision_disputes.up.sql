@@ -62,7 +62,7 @@ CREATE TABLE code_review_decision_disputes (
     reassessment_decision text CHECK (reassessment_decision IS NULL OR reassessment_decision IN ('approved', 'comment_only', 'needs_human_review', 'blocked')),
     reassessment_flipped boolean,
     reassessment_status text NOT NULL DEFAULT 'not_requested'
-        CHECK (reassessment_status IN ('not_requested', 'queued', 'running', 'completed', 'deduped', 'head_changed', 'failed')),
+        CHECK (reassessment_status IN ('not_requested', 'queued', 'running', 'completed', 'deduped', 'failed')),
     semantic_input_hash_at_filing text NOT NULL,
     semantic_input_hash_at_rerun text,
     adjudication_status text

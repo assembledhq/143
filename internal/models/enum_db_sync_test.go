@@ -249,8 +249,7 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 		"code_review_decision_disputes_reassessment_status": toStrings(
 			CodeReviewDisputeReassessmentNotRequested, CodeReviewDisputeReassessmentQueued,
 			CodeReviewDisputeReassessmentRunning, CodeReviewDisputeReassessmentCompleted,
-			CodeReviewDisputeReassessmentDeduped, CodeReviewDisputeReassessmentHeadChanged,
-			CodeReviewDisputeReassessmentFailed,
+			CodeReviewDisputeReassessmentDeduped, CodeReviewDisputeReassessmentFailed,
 		),
 		"code_review_decision_disputes_adjudication_status": toStrings(
 			CodeReviewDisputeAdjudicationPending, CodeReviewDisputeAdjudicationUpheld,

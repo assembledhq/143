@@ -200,7 +200,7 @@ func (s *CodeReviewDisputeStore) CreateAndEnqueueTriage(ctx context.Context, dis
 //
 // The retirement is recorded in superseded_by_dispute_id, not in reply_status.
 // reply_status is a lifecycle column that CompleteReassessment, FailTriage,
-// MarkHeadChanged, and MarkReassessmentFailed all reset to 'pending' -- and
+// and MarkReassessmentFailed all reset to 'pending' -- and
 // BuildReply calls CompleteReassessment itself, so a retirement stored there
 // would be undone by the very read that precedes the publish check.
 //
@@ -730,18 +730,6 @@ func (s *CodeReviewDisputeStore) CompleteReassessmentOnce(ctx context.Context, o
 		return false, fmt.Errorf("complete code review reassessment: %w", err)
 	}
 	return result.RowsAffected() == 1, nil
-}
-
-func (s *CodeReviewDisputeStore) MarkHeadChanged(ctx context.Context, orgID, disputeID uuid.UUID, detail string) error {
-	_, err := s.db.Exec(ctx, `UPDATE code_review_decision_disputes
-		SET reassessment_status = 'head_changed', status_detail = @detail,
-		    reply_status = CASE WHEN source = 'github_comment' OR direction = 'should_not_have_approved' THEN 'pending' ELSE 'not_applicable' END,
-		    updated_at = now(), version = version + 1
-		WHERE org_id = @org_id AND id = @id`, pgx.NamedArgs{"org_id": orgID, "id": disputeID, "detail": strings.TrimSpace(detail)})
-	if err != nil {
-		return fmt.Errorf("mark dispute head changed: %w", err)
-	}
-	return nil
 }
 
 func (s *CodeReviewDisputeStore) MarkReassessmentFailed(ctx context.Context, orgID, disputeID uuid.UUID, detail string) error {

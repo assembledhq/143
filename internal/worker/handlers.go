@@ -759,6 +759,7 @@ type prCreator interface {
 	CreateBranch(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*ghservice.CreateBranchResult, error)
 	PushChangesToPR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
 	SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error
+	GetCodeReviewPullRequestSnapshot(ctx context.Context, orgID, repositoryID uuid.UUID, number int) (ghservice.CodeReviewPullRequestSnapshot, error)
 	RebuildPullRequestHealthFromCheckStates(ctx context.Context, orgID, pullRequestID uuid.UUID) (bool, error)
 	ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error
 	EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error

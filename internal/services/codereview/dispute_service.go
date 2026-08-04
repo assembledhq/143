@@ -54,7 +54,6 @@ type DisputeStore interface {
 	RecordAuthorization(ctx context.Context, authorization models.CodeReviewDisputeAuthorization) error
 	AdmitAndEnqueueReassessment(ctx context.Context, dispute models.CodeReviewDispute, userID *uuid.UUID, semanticHash string, cooldown time.Duration, maxActive int, payload any) (bool, error)
 	CompleteReassessment(ctx context.Context, orgID, disputeID, sessionID uuid.UUID, status models.CodeReviewSessionStatus, decision *models.CodeReviewDecision, detail string) error
-	MarkHeadChanged(ctx context.Context, orgID, disputeID uuid.UUID, detail string) error
 	MarkReassessmentFailed(ctx context.Context, orgID, disputeID uuid.UUID, detail string) error
 	Escalate(ctx context.Context, orgID, disputeID, userID uuid.UUID, note string) (models.CodeReviewDispute, error)
 	Adjudicate(ctx context.Context, orgID, disputeID, userID uuid.UUID, update models.CodeReviewDisputeAdjudicationUpdate) (models.CodeReviewDispute, error)
@@ -77,6 +76,10 @@ type disputeRiskReasonStore interface {
 	GetRiskReasonsBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.CodeReviewRiskReason, error)
 }
 
+type disputePullRequestSnapshotter interface {
+	GetCodeReviewPullRequestSnapshot(ctx context.Context, orgID, repositoryID uuid.UUID, number int) (ghservice.CodeReviewPullRequestSnapshot, error)
+}
+
 type DisputeJobStore interface {
 	EnqueueWithOpts(ctx context.Context, orgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error)
 }
@@ -85,6 +88,7 @@ type DisputeService struct {
 	disputes     DisputeStore
 	reviews      DisputeReviewStore
 	pullRequests PullRequestStore
+	snapshots    disputePullRequestSnapshotter
 	jobs         DisputeJobStore
 	llm          llm.Client
 	logger       zerolog.Logger
@@ -96,6 +100,12 @@ type DisputeService struct {
 // SetAuditEmitter enables best-effort audit records for webhook-filed disputes.
 func (s *DisputeService) SetAuditEmitter(audit *db.AuditEmitter) {
 	s.audit = audit
+}
+
+// SetPullRequestSnapshotter makes reassessment admission use GitHub's current
+// pull request revision rather than the eventually-consistent local mirror.
+func (s *DisputeService) SetPullRequestSnapshotter(snapshotter disputePullRequestSnapshotter) {
+	s.snapshots = snapshotter
 }
 
 type DisputeConfig struct {
@@ -717,24 +727,28 @@ func (s *DisputeService) recordAuthorizationWithActor(ctx context.Context, dispu
 }
 
 func (s *DisputeService) queueReassessment(ctx context.Context, dispute models.CodeReviewDispute) error {
+	if s.snapshots == nil {
+		return fmt.Errorf("pull request snapshotter unavailable for code review reassessment")
+	}
 	pr, err := s.pullRequests.GetByID(ctx, dispute.OrgID, dispute.PullRequestID)
 	if err != nil {
 		return err
 	}
-	liveHead := strings.TrimSpace(stringPtr(pr.HeadSHA))
-	if liveHead == "" || liveHead != strings.TrimSpace(dispute.ReviewedHeadSHA) {
-		detail := fmt.Sprintf("The pull request changed after this objection was filed; the current review covers %s.", shortCodeReviewSHA(liveHead))
-		if err := s.disputes.MarkHeadChanged(ctx, dispute.OrgID, dispute.ID, detail); err != nil {
-			return err
-		}
-		return nil
+	snapshot, err := s.snapshots.GetCodeReviewPullRequestSnapshot(ctx, dispute.OrgID, dispute.RepositoryID, pr.GitHubPRNumber)
+	if err != nil {
+		return fmt.Errorf("load latest pull request for code review reassessment admission: %w", err)
 	}
-	semanticHash := codeReviewDisputeSemanticHash(liveHead, dispute.PolicyID, dispute.Body, pr.Title, stringPtr(pr.Body))
+	liveHead := strings.TrimSpace(snapshot.HeadSHA)
+	if liveHead == "" {
+		return fmt.Errorf("latest pull request head is missing for code review reassessment admission")
+	}
+	semanticHash := codeReviewDisputeSemanticHash(liveHead, dispute.PolicyID, dispute.Body, snapshot.Title, snapshot.Body)
 	changeKey := "dispute:" + dispute.ID.String()
 	payload := ReviewChangedInput{
 		OrgID: dispute.OrgID, RepositoryID: dispute.RepositoryID, PullRequestID: dispute.PullRequestID,
-		GitHubRepo: pr.GitHubRepo, GitHubPRNumber: pr.GitHubPRNumber, GitHubPRURL: pr.GitHubPRURL,
-		PullRequestTitle: pr.Title, BaseSHA: stringPtr(pr.BaseSHA), HeadSHA: liveHead,
+		GitHubRepo: pr.GitHubRepo, GitHubPRNumber: snapshot.Number, GitHubPRURL: snapshot.HTMLURL,
+		PullRequestTitle: snapshot.Title, PullRequestAuthor: snapshot.AuthorLogin,
+		BaseSHA: snapshot.BaseSHA, HeadSHA: liveHead, FromFork: snapshot.FromFork,
 		ChangeKey: changeKey, ChangeReason: "code_review_dispute.reassessment", ExplicitRequest: true,
 		TriggerSource: models.CodeReviewTriggerSourceDisputeReassessment, TriggeringDisputeID: &dispute.ID,
 		RequestContext: &ReviewRequestContext{Source: "code_review_dispute", AuthorLogin: dispute.FiledByLogin, Body: dispute.Body},
@@ -765,17 +779,6 @@ func stringPtr(value *string) string {
 		return ""
 	}
 	return *value
-}
-
-func shortCodeReviewSHA(value string) string {
-	value = strings.TrimSpace(value)
-	if len(value) > 7 {
-		return value[:7]
-	}
-	if value == "" {
-		return "the latest commit"
-	}
-	return value
 }
 
 func boundedGeneratedReply(value string) string {
@@ -842,13 +845,9 @@ func buildCodeReviewDisputeReply(dispute models.CodeReviewDispute, frontendURL s
 	message := strings.TrimSpace(stringPtr(dispute.StatusDetail))
 	switch dispute.ReassessmentStatus {
 	case models.CodeReviewDisputeReassessmentQueued, models.CodeReviewDisputeReassessmentRunning:
-		message = "I recorded the objection and started a reassessment of the same pull request head."
+		message = "I recorded the objection and started a reassessment of the latest pull request revision."
 	case models.CodeReviewDisputeReassessmentDeduped:
 		message = "I recorded the objection. An equivalent reassessment was already requested for this pull request."
-	case models.CodeReviewDisputeReassessmentHeadChanged:
-		if message == "" {
-			message = "I recorded the objection, but the pull request changed before reassessment could start."
-		}
 	case models.CodeReviewDisputeReassessmentCompleted:
 		if dispute.ReassessmentDecision != nil && dispute.ReassessmentFlipped != nil && *dispute.ReassessmentFlipped {
 			message = "The reassessment completed and the decision changed to " + strings.ReplaceAll(string(*dispute.ReassessmentDecision), "_", " ") + "."

@@ -384,6 +384,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		},
 	)
 	codeReviewDisputeSvc.SetAuditEmitter(auditEmitter)
+	if prService != nil {
+		codeReviewDisputeSvc.SetPullRequestSnapshotter(prService)
+	}
 	codeReviewTriggerSetupSvc := codereviewsvc.NewGitHubTriggerSetupService(codeReviewStore, repoStore, appUserAuthSvc, logger)
 	webhookHandler.SetCodeReviewService(codeReviewSvc, pullRequestStore)
 	webhookHandler.SetCodeReviewDisputeService(codeReviewDisputeSvc)

@@ -23,6 +23,9 @@ func newStartCodeReviewReassessmentHandler(stores *Stores, services *Services, l
 		if services == nil || services.CodeReviewLifecycle == nil {
 			return fmt.Errorf("code review lifecycle service unavailable")
 		}
+		if services.PR == nil {
+			return fmt.Errorf("pull request snapshot service unavailable for code review reassessment")
+		}
 		var input codereviewsvc.ReviewChangedInput
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("decode code review reassessment starter payload: %w", err)
@@ -44,26 +47,22 @@ func newStartCodeReviewReassessmentHandler(stores *Stores, services *Services, l
 		if err != nil {
 			return fmt.Errorf("load current pull request for code review reassessment: %w", err)
 		}
-		currentHead := strings.TrimSpace(stringPtrValue(pr.HeadSHA))
-		if input.TriggeringDisputeID != nil && strings.TrimSpace(input.HeadSHA) != currentHead {
-			if stores.CodeReviewDisputes == nil || services.CodeReviewDisputes == nil {
-				return fmt.Errorf("code review dispute dependencies unavailable for reassessment head guard")
-			}
-			detail := fmt.Sprintf("The pull request changed after this objection was filed; the current head is %s.", shortCodeReviewSHA(currentHead))
-			if err := stores.CodeReviewDisputes.MarkHeadChanged(ctx, input.OrgID, *input.TriggeringDisputeID, detail); err != nil {
-				return err
-			}
-			if err := services.CodeReviewDisputes.EnqueueReply(ctx, input.OrgID, *input.TriggeringDisputeID, "head_changed"); err != nil {
-				return err
-			}
-			return nil
+		snapshot, err := services.PR.GetCodeReviewPullRequestSnapshot(ctx, input.OrgID, input.RepositoryID, pr.GitHubPRNumber)
+		if err != nil {
+			wrapped := fmt.Errorf("load latest pull request for code review reassessment: %w", err)
+			return classifyGitHubJobError(wrapped, input.PullRequestID.String())
 		}
 		input.GitHubRepo = pr.GitHubRepo
-		input.GitHubPRNumber = pr.GitHubPRNumber
-		input.GitHubPRURL = pr.GitHubPRURL
-		input.PullRequestTitle = pr.Title
-		input.BaseSHA = strings.TrimSpace(stringPtrValue(pr.BaseSHA))
-		input.HeadSHA = currentHead
+		input.GitHubPRNumber = snapshot.Number
+		input.GitHubPRURL = snapshot.HTMLURL
+		input.PullRequestTitle = snapshot.Title
+		input.PullRequestAuthor = snapshot.AuthorLogin
+		input.BaseSHA = strings.TrimSpace(snapshot.BaseSHA)
+		input.HeadSHA = strings.TrimSpace(snapshot.HeadSHA)
+		input.FromFork = snapshot.FromFork
+		if input.HeadSHA == "" {
+			return fmt.Errorf("latest pull request head is missing for code review reassessment")
+		}
 
 		result, err := services.CodeReviewLifecycle.HandleReviewChanged(ctx, input)
 		if err != nil {
@@ -102,15 +101,4 @@ func newStartCodeReviewReassessmentHandler(stores *Stores, services *Services, l
 		}
 		return nil
 	}
-}
-
-func shortCodeReviewSHA(value string) string {
-	value = strings.TrimSpace(value)
-	if len(value) > 7 {
-		return value[:7]
-	}
-	if value == "" {
-		return "the latest commit"
-	}
-	return value
 }

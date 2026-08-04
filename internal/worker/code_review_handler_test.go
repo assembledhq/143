@@ -31,6 +31,7 @@ func TestStartCodeReviewReassessmentHandlerDefersBehindOlderAssessment(t *testin
 	prID := uuid.New()
 	repoID := uuid.New()
 	priorSessionID := uuid.New()
+	disputeID := uuid.New()
 	now := time.Now().UTC()
 	head := "current-head"
 	base := "current-base"
@@ -50,6 +51,17 @@ func TestStartCodeReviewReassessmentHandlerDefersBehindOlderAssessment(t *testin
 		WithArgs(pgx.NamedArgs{"id": prID, "org_id": orgID}).
 		WillReturnRows(pgxmock.NewRows(workerPullRequestColumns).AddRow(row...))
 	lifecycle := &codeReviewLifecycleStub{result: codereview.ReviewRequestedResult{Processed: true, Reused: true, Deferred: true}}
+	snapshotCalls := 0
+	prService := &stubPRService{getCodeReviewPRSnapshotFn: func(_ context.Context, actualOrgID, actualRepositoryID uuid.UUID, number int) (ghservice.CodeReviewPullRequestSnapshot, error) {
+		snapshotCalls++
+		require.Equal(t, orgID, actualOrgID, "starter should fetch the latest PR within the job organization")
+		require.Equal(t, repoID, actualRepositoryID, "starter should fetch the latest PR from the reassessment repository")
+		require.Equal(t, 42, number, "starter should fetch the mirrored GitHub pull request number")
+		return ghservice.CodeReviewPullRequestSnapshot{
+			Number: 42, HTMLURL: "https://github.com/acme/repo/pull/42", Title: "Latest PR title",
+			AuthorLogin: "octocat", HeadSHA: "latest-github-head", BaseSHA: "latest-github-base", FromFork: true,
+		}, nil
+	}}
 	requestContext := &codereview.ReviewRequestContext{
 		Source: "issue_comment", AuthorLogin: "anya", Body: "@acme/143-code-reviewer review again",
 	}
@@ -57,13 +69,13 @@ func TestStartCodeReviewReassessmentHandlerDefersBehindOlderAssessment(t *testin
 		OrgID: orgID, RepositoryID: repoID, PullRequestID: prID, PriorSessionID: priorSessionID,
 		HeadSHA: "event-head", ChangeKey: "review_requested:delivery-143", ChangeReason: "pull_request.review_requested",
 		GitHubDeliveryID: "delivery-143", RequestedTeamSlug: "143-code-reviewer", ExplicitRequest: true,
-		RequestContext: requestContext,
+		RequestContext: requestContext, TriggeringDisputeID: &disputeID,
 	})
 	require.NoError(t, err, "reassessment starter payload should marshal")
 
 	err = newStartCodeReviewReassessmentHandler(
 		&Stores{PullRequests: db.NewPullRequestStore(mock)},
-		&Services{CodeReviewLifecycle: lifecycle},
+		&Services{PR: prService, CodeReviewLifecycle: lifecycle},
 		zerolog.Nop(),
 	)(context.Background(), models.JobTypeStartCodeReviewReassessment, payload)
 
@@ -71,8 +83,14 @@ func TestStartCodeReviewReassessmentHandlerDefersBehindOlderAssessment(t *testin
 	require.ErrorAs(t, err, &retryable, "active older assessment should keep the starter job pending")
 	require.False(t, retryable.ConsumeAttempt, "waiting for an active review should not consume the job attempt budget")
 	require.True(t, retryable.BypassMaxRetryDuration, "durable follow-up should survive long-running reviewer agents")
-	require.Equal(t, "current-head", lifecycle.input.HeadSHA, "starter should reassess the current mirrored PR head")
+	require.Equal(t, 1, snapshotCalls, "starter should refresh GitHub before each reassessment attempt")
+	require.Equal(t, "latest-github-head", lifecycle.input.HeadSHA, "starter should reassess GitHub's latest PR head")
+	require.Equal(t, "latest-github-base", lifecycle.input.BaseSHA, "starter should use GitHub's latest base revision")
+	require.Equal(t, "Latest PR title", lifecycle.input.PullRequestTitle, "starter should use GitHub's latest PR title")
+	require.Equal(t, "octocat", lifecycle.input.PullRequestAuthor, "starter should use GitHub's current PR author")
+	require.True(t, lifecycle.input.FromFork, "starter should use GitHub's current fork state")
 	require.Equal(t, priorSessionID, lifecycle.input.PriorSessionID, "starter should preserve event ordering against the prior assessment")
+	require.Equal(t, &disputeID, lifecycle.input.TriggeringDisputeID, "starter should preserve the dispute link while replacing its stale head")
 	require.True(t, lifecycle.input.ExplicitRequest, "starter should preserve the explicit request contract")
 	require.Equal(t, "delivery-143", lifecycle.input.GitHubDeliveryID, "starter should preserve GitHub delivery identity")
 	require.Equal(t, "143-code-reviewer", lifecycle.input.RequestedTeamSlug, "starter should preserve reviewer cleanup context")

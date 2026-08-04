@@ -4077,9 +4077,8 @@ type PullRequestHead struct {
 	BaseBranch string
 }
 
-// CodeReviewPullRequestSnapshot is the current GitHub state needed to create
-// or refresh a pull request mirror before an issue-comment mention starts a
-// code review.
+// CodeReviewPullRequestSnapshot is the current GitHub state needed by code
+// review entry points that cannot safely rely on the asynchronous PR mirror.
 type CodeReviewPullRequestSnapshot struct {
 	Number      int
 	HTMLURL     string
@@ -4093,8 +4092,8 @@ type CodeReviewPullRequestSnapshot struct {
 	FromFork    bool
 }
 
-// GetCodeReviewPullRequestSnapshot loads the authoritative PR revision for an
-// issue_comment webhook, whose payload does not include head/base commit data.
+// GetCodeReviewPullRequestSnapshot loads the authoritative PR revision for
+// issue-comment mentions and dispute reassessments.
 func (s *PRService) GetCodeReviewPullRequestSnapshot(ctx context.Context, orgID, repositoryID uuid.UUID, number int) (CodeReviewPullRequestSnapshot, error) {
 	if s == nil || s.repos == nil {
 		return CodeReviewPullRequestSnapshot{}, fmt.Errorf("repository store is unavailable")

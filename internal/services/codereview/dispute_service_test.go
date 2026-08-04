@@ -21,6 +21,8 @@ type captureDisputeStore struct {
 	authorizations   []models.CodeReviewDisputeAuthorization
 	admitted         bool
 	admittedCooldown time.Duration
+	admittedHash     string
+	admittedPayload  ReviewChangedInput
 	guards           []db.CodeReviewDisputeIntakeGuard
 	createErr        error
 }
@@ -66,15 +68,14 @@ func (s *captureDisputeStore) RecordAuthorization(_ context.Context, authorizati
 	s.authorizations = append(s.authorizations, authorization)
 	return nil
 }
-func (s *captureDisputeStore) AdmitAndEnqueueReassessment(_ context.Context, _ models.CodeReviewDispute, _ *uuid.UUID, _ string, cooldown time.Duration, _ int, _ any) (bool, error) {
+func (s *captureDisputeStore) AdmitAndEnqueueReassessment(_ context.Context, _ models.CodeReviewDispute, _ *uuid.UUID, semanticHash string, cooldown time.Duration, _ int, payload any) (bool, error) {
 	s.admitted = true
 	s.admittedCooldown = cooldown
+	s.admittedHash = semanticHash
+	s.admittedPayload, _ = payload.(ReviewChangedInput)
 	return false, nil
 }
 func (s *captureDisputeStore) CompleteReassessment(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.CodeReviewSessionStatus, *models.CodeReviewDecision, string) error {
-	return nil
-}
-func (s *captureDisputeStore) MarkHeadChanged(context.Context, uuid.UUID, uuid.UUID, string) error {
 	return nil
 }
 func (s *captureDisputeStore) MarkReassessmentFailed(context.Context, uuid.UUID, uuid.UUID, string) error {
@@ -122,6 +123,15 @@ func (s disputeReviewStoreStub) GetRiskReasonsBySession(context.Context, uuid.UU
 
 type disputePullRequestStoreStub struct {
 	pullRequest models.PullRequest
+}
+
+type disputePullRequestSnapshotterStub struct {
+	snapshot ghservice.CodeReviewPullRequestSnapshot
+	err      error
+}
+
+func (s disputePullRequestSnapshotterStub) GetCodeReviewPullRequestSnapshot(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewPullRequestSnapshot, error) {
+	return s.snapshot, s.err
 }
 
 func (s disputePullRequestStoreStub) GetByID(context.Context, uuid.UUID, uuid.UUID) (models.PullRequest, error) {
@@ -372,7 +382,7 @@ func TestDisputeService_TriageSkipsWorkForASupersededDispute(t *testing.T) {
 		"the authorization snapshot is the audit trail of what we decided about this filer and is still recorded")
 }
 
-func TestDisputeService_QueueReassessmentUsesCapturedPolicyCooldown(t *testing.T) {
+func TestDisputeService_QueueReassessmentUsesLatestGitHubSnapshotAndCapturedPolicyCooldown(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -390,7 +400,9 @@ func TestDisputeService_QueueReassessmentUsesCapturedPolicyCooldown(t *testing.T
 			orgID := uuid.New()
 			policyID := uuid.New()
 			pullRequestID := uuid.New()
-			headSHA := "abc123"
+			reviewedHeadSHA := "reviewed-head"
+			staleMirrorHeadSHA := "stale-mirror-head"
+			latestHeadSHA := "latest-github-head"
 			store := &captureDisputeStore{}
 			reviews := disputeReviewStoreStub{policy: models.CodeReviewPolicyRecord{
 				ID: policyID,
@@ -399,18 +411,33 @@ func TestDisputeService_QueueReassessmentUsesCapturedPolicyCooldown(t *testing.T
 				},
 			}}
 			pullRequests := disputePullRequestStoreStub{pullRequest: models.PullRequest{
-				ID: pullRequestID, OrgID: orgID, Title: "Fix authorization", HeadSHA: &headSHA,
+				ID: pullRequestID, OrgID: orgID, GitHubRepo: "acme/payments", GitHubPRNumber: 42,
+				Title: "Stale title", HeadSHA: &staleMirrorHeadSHA,
 			}}
 			service := NewDisputeService(store, reviews, pullRequests, &disputeJobStoreStub{}, nil, "", zerolog.Nop())
+			service.SetPullRequestSnapshotter(disputePullRequestSnapshotterStub{snapshot: ghservice.CodeReviewPullRequestSnapshot{
+				Number: 42, HTMLURL: "https://github.com/acme/payments/pull/42",
+				Title: "Latest authorization fix", Body: "Latest pull request body", AuthorLogin: "octocat",
+				HeadSHA: latestHeadSHA, BaseSHA: "latest-base", FromFork: true,
+			}})
 
 			err := service.queueReassessment(context.Background(), models.CodeReviewDispute{
 				ID: uuid.New(), OrgID: orgID, PullRequestID: pullRequestID, PolicyID: policyID,
-				ReviewedHeadSHA: headSHA, Body: "The check missed the authorization guard.",
+				RepositoryID: uuid.New(), ReviewedHeadSHA: reviewedHeadSHA,
+				Body: "The check missed the authorization guard.",
 			})
 
-			require.NoError(t, err, "queueReassessment should admit a matching-head dispute")
+			require.NoError(t, err, "queueReassessment should admit a dispute against GitHub's latest revision")
 			require.True(t, store.admitted, "queueReassessment should reach admission")
 			require.Equal(t, tt.expected, store.admittedCooldown, "admission should use the captured policy cooldown")
+			require.Equal(t, codeReviewDisputeSemanticHash(
+				latestHeadSHA, policyID, "The check missed the authorization guard.",
+				"Latest authorization fix", "Latest pull request body",
+			), store.admittedHash, "admission identity should use the authoritative GitHub revision")
+			require.Equal(t, latestHeadSHA, store.admittedPayload.HeadSHA, "reassessment payload should target GitHub's latest head")
+			require.Equal(t, "Latest authorization fix", store.admittedPayload.PullRequestTitle, "reassessment payload should use GitHub's latest title")
+			require.Equal(t, "octocat", store.admittedPayload.PullRequestAuthor, "reassessment payload should use GitHub's current author")
+			require.True(t, store.admittedPayload.FromFork, "reassessment payload should use GitHub's current fork state")
 		})
 	}
 }

@@ -130,7 +130,6 @@ const (
 	CodeReviewDisputeReassessmentRunning      CodeReviewDisputeReassessmentStatus = "running"
 	CodeReviewDisputeReassessmentCompleted    CodeReviewDisputeReassessmentStatus = "completed"
 	CodeReviewDisputeReassessmentDeduped      CodeReviewDisputeReassessmentStatus = "deduped"
-	CodeReviewDisputeReassessmentHeadChanged  CodeReviewDisputeReassessmentStatus = "head_changed"
 	CodeReviewDisputeReassessmentFailed       CodeReviewDisputeReassessmentStatus = "failed"
 )
 
@@ -138,8 +137,7 @@ func (s CodeReviewDisputeReassessmentStatus) Validate() error {
 	switch s {
 	case CodeReviewDisputeReassessmentNotRequested, CodeReviewDisputeReassessmentQueued,
 		CodeReviewDisputeReassessmentRunning, CodeReviewDisputeReassessmentCompleted,
-		CodeReviewDisputeReassessmentDeduped, CodeReviewDisputeReassessmentHeadChanged,
-		CodeReviewDisputeReassessmentFailed:
+		CodeReviewDisputeReassessmentDeduped, CodeReviewDisputeReassessmentFailed:
 		return nil
 	default:
 		return fmt.Errorf("invalid CodeReviewDisputeReassessmentStatus: %q", s)

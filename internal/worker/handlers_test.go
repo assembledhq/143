@@ -4661,6 +4661,7 @@ type stubPRService struct {
 	pushChangesToPRFn              func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
 	markPullRequestReadyFn         func(context.Context, uuid.UUID, uuid.UUID, string) error
 	syncPullRequestStateFn         func(context.Context, uuid.UUID, uuid.UUID) error
+	getCodeReviewPRSnapshotFn      func(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewPullRequestSnapshot, error)
 	rebuildPullRequestHealthFn     func(context.Context, uuid.UUID, uuid.UUID) (bool, error)
 	reconcilePullRequestFn         func(context.Context, uuid.UUID, int) error
 	enrichPullRequestHealthFn      func(context.Context, uuid.UUID, uuid.UUID, int64) error
@@ -4719,6 +4720,13 @@ func (s *stubPRService) SyncPullRequestState(ctx context.Context, orgID, pullReq
 		return s.syncPullRequestStateFn(ctx, orgID, pullRequestID)
 	}
 	return nil
+}
+
+func (s *stubPRService) GetCodeReviewPullRequestSnapshot(ctx context.Context, orgID, repositoryID uuid.UUID, number int) (ghservice.CodeReviewPullRequestSnapshot, error) {
+	if s.getCodeReviewPRSnapshotFn != nil {
+		return s.getCodeReviewPRSnapshotFn(ctx, orgID, repositoryID, number)
+	}
+	return ghservice.CodeReviewPullRequestSnapshot{}, nil
 }
 
 func (s *stubPRService) RebuildPullRequestHealthFromCheckStates(ctx context.Context, orgID, pullRequestID uuid.UUID) (bool, error) {

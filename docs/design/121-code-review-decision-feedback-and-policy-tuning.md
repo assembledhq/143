@@ -1,12 +1,12 @@
 # Design: Code Review Decision Feedback And Policy Tuning
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-08-02
+> **Status:** Partially Implemented | **Last reviewed:** 2026-08-04
 >
 > **Depends on:** [implemented/112-code-reviewer-bot-auto-approval.md](implemented/112-code-reviewer-bot-auto-approval.md), [backlog/11-review-feedback-loop.md](backlog/11-review-feedback-loop.md), [future/116-automatic-pr-feedback-follow-through.md](future/116-automatic-pr-feedback-follow-through.md), [future/16-ai-agent-evals.md](future/16-ai-agent-evals.md)
 
 ## Implementation status
 
-The PR 3 Phase 1A runtime is implemented: in-app reconsideration, GitHub mention and inline-thread intake, evidence-grounded answers, durable acknowledgement/timeline states, authorization snapshots, versioned semantic cooldown dedupe, loop guards, guarded reassessment, admin promotion of untrusted evidence, the member escalation route, and the flat admin adjudication list. Reassessment workers use an operator kill switch and platform-wide active-work ceiling.
+The PR 3 Phase 1A runtime is implemented: in-app reconsideration, GitHub mention and inline-thread intake, evidence-grounded answers, durable acknowledgement/timeline states, authorization snapshots, versioned semantic cooldown dedupe, loop guards, latest-revision reassessment, admin promotion of untrusted evidence, the member escalation route, and the flat admin adjudication list. Reassessment workers use an operator kill switch and platform-wide active-work ceiling.
 
 Two cross-cutting contracts remain design gaps rather than Phase 1A implementation claims: the repository code-review-owner identity/delivery model needed for targeted notifications does not exist yet, and the retention section does not specify a retention duration, scanner behavior, or tombstone trigger. The current implementation bounds and isolates untrusted text, preserves immutable source versions, replies on GitHub, and surfaces escalation in the admin queue, but it does not invent notification recipients or destructive retention behavior without those decisions.
 
@@ -255,14 +255,15 @@ input would be the wrong trade.
 A `reassess` uses the normal review path with trigger `dispute_reassessment`, keyed
 by dispute id. Existing explicit-request idempotency and starter-job behavior apply.
 
-**A reassessment only runs against the head it was filed on.** If the live head no
-longer equals `reviewed_head_sha`, the rerun does not start. The dispute is answered
-with *"the PR changed after you filed this — the review for `def5678` covers it"* and
-remains queued for adjudication on its own merits. Doc 112 already validates the live
-PR head on `POST /retry`, and this is the same guard for the same reason: a
-reassessment that inherits an argument about an older diff can submit a monotonic,
-unrevokable approval on code nobody actually vouched for. This is the only path in
-the design where user-supplied text can end in an approval, so it fails closed.
+**A reassessment reviews the latest GitHub revision, not `reviewed_head_sha`.** The
+reviewed head remains immutable provenance for the decision being disputed, but it
+is never an admission guard or rerun target. Admission fetches an authoritative PR
+snapshot for semantic dedupe and the starter fetches it again on every attempt. If
+commits land while an older assessment keeps the starter deferred, the next attempt
+therefore follows them. The normal review worker still detects a head change during
+an in-flight review and refuses to publish a stale decision; the ordinary
+head-change event then requests a review of the newer revision. This keeps the
+approval safety invariant while making reconsideration answer the current code.
 
 The dispute text goes in as **untrusted evidence**, screened the same way PR
 descriptions and diffs already are. It's a claim to check against the code, not
@@ -277,14 +278,14 @@ from instead of inventing one now.
 
 What remains is **not** a cost control and stays:
 
-- **Semantic dedupe** over head, title/body, dispute evidence, and policy, with a
+- **Semantic dedupe** over the latest provider head, title/body, dispute evidence,
+  and policy, with a
   short cooldown for semantically unchanged input. This is idempotency, not
   rationing: without it, three "please reconsider" comments produce three identical
   reruns and three identical replies on the same PR. Apply the same dedupe to
   empty-commit reviews.
-- **The head guard above**, which now carries more weight — with no per-PR cap, it
-  and semantic dedupe are the only things standing between a disputed decision and
-  unbounded reruns.
+- **Provider refresh at admission and starter execution**, which prevents a stale
+  local PR mirror or a long queue delay from selecting an obsolete revision.
 - **The bot-loop cycle budget** below, which stops two machines arguing forever.
 - **An operator hard ceiling and kill switch**, platform-side and invisible in normal
   operation. This is not a product limit; it's the thing you reach for at 2am when an
@@ -508,7 +509,7 @@ listed.
 | Column | Type | Notes |
 | --- | --- | --- |
 | `session_id`, `pull_request_id`, `repository_id`, `policy_id` | uuid NOT NULL | FKs; deletion follows the explicit retention/tombstone policy below rather than blind cascade |
-| `reviewed_head_sha`, `decision` | text NOT NULL | What was being disputed |
+| `reviewed_head_sha`, `decision` | text NOT NULL | Immutable provenance for what was disputed; the SHA is not the reassessment target |
 | `direction` | text | Nullable until triage; then `should_have_approved` \| `should_not_have_approved` |
 | `filed_by_user_id`, `filed_by_login`, `author_association`, `author_is_pr_author` | uuid / text / bool | Filer identity and association observed at intake |
 | `repository_visibility`, `membership_evidence` | text / jsonb | Raw authorization inputs observed at intake |
@@ -792,8 +793,8 @@ minutes per resolution.
 - What audit retention duration, secret-scanner disposition (reject, redact, or quarantine), and source-deletion/tombstone trigger apply to dispute text?
 - After observing Phase 1 traffic, should trusted non-authors become
   `reassess`-eligible for additional judgment reason codes? They pass through the
-  same head guard and dedupe; the initial release keeps the narrower rule until
-  demand is measured.
+  same latest-revision refresh and dedupe; the initial release keeps the narrower
+  rule until demand is measured.
 - Does uncapped reassessment spend concentrate in a small number of orgs or PRs? If
   the tail is thin, it stays uncapped indefinitely. If one org is generating most of
   it, the answer is more likely a conversation with that org than a global quota.
