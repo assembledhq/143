@@ -7062,6 +7062,7 @@ func TestOpenPRHandler_StartsAutomationPrePRReviewBeforePushing(t *testing.T) {
 	require.Len(t, reviews.starts, 1, "open_pr should start exactly one automation review loop")
 	require.Equal(t, models.ReviewLoopSourceAutomation, reviews.starts[0].req.Source, "review loop should be marked automation-owned")
 	require.Equal(t, 1, reviews.starts[0].req.MaxPasses, "review loop should use the snapshotted automation pass count")
+	require.Equal(t, models.ReviewLoopFixModeExhaustive, reviews.starts[0].req.FixMode, "automation-created review loops should fix every finding")
 	require.NotNil(t, reviews.starts[0].req.AutomationRunID, "review loop should retain the automation run id")
 	require.Equal(t, automationRunID, *reviews.starts[0].req.AutomationRunID, "review loop should retain the automation run id")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")

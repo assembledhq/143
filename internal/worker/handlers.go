@@ -12225,7 +12225,8 @@ func ensurePublicationPrePRReview(
 	}
 	loop, err := services.ReviewLoops.Start(ctx, run.OrgID, run.ID, reviewloopsvc.StartReviewLoopRequest{
 		AgentType: reviewer, Model: model, MaxPasses: *publication.ReviewMaxPasses,
-		Source: models.ReviewLoopSourcePublication, AutomationRunID: run.AutomationRunID,
+		FixMode: models.ReviewLoopFixModeExhaustive,
+		Source:  models.ReviewLoopSourcePublication, AutomationRunID: run.AutomationRunID,
 		StartedByUserID: publication.InitiatedByUserID,
 		ReviewRequired:  true, ChangesetID: changesetID, WorkspaceRevision: &workspaceRevision,
 		DesiredHeadSHA: &desiredHeadSHA,
@@ -12380,6 +12381,7 @@ func ensureAutomationPrePRReview(ctx context.Context, stores *Stores, services *
 		AgentType:       run.AgentType,
 		Model:           stringValue(run.ModelOverride),
 		MaxPasses:       passCount,
+		FixMode:         models.ReviewLoopFixModeExhaustive,
 		Source:          models.ReviewLoopSourceAutomation,
 		AutomationRunID: run.AutomationRunID,
 		StartedByUserID: run.TriggeredByUserID,
