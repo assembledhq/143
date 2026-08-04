@@ -22,6 +22,11 @@ const buttonVariants = cva(
           "hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50",
         link: "text-primary underline-offset-4 hover:underline",
       },
+      // The `has-[>svg]` tighteners below outrank horizontal padding passed via
+      // `className`: `:has(>svg)` adds the specificity of its argument, so the rule
+      // wins over a plain `px-*`/`pl-*`/`p-*` no matter what `cn` merges. A call site
+      // that needs its own gutter must keep icons out of the button's direct children
+      // — wrap them in a `span`, as `DisclosureCard` does.
       size: {
         default: "h-10 px-2.5 py-1 sm:h-8 has-[>svg]:px-2",
         xs: "h-10 gap-1 rounded-md px-1.5 text-xs sm:h-6 has-[>svg]:px-1.5 [&_svg:not([class*='size-'])]:size-3",

@@ -2172,15 +2172,25 @@ function AdvancedPolicyControls({ children, forceOpen, onOpened }: { children: R
   return (
     <Collapsible open={open || forceOpen} onOpenChange={(next) => { setOpen(next); if (next) onOpened(); }}>
       <div className="rounded-xl border border-border bg-card">
-        <div className="flex items-center gap-1 pr-3">
+        {/* Padding is split rather than a plain `p-4 sm:p-5`: the trigger is not the
+            full card width, so only its left edge carries the card inset that
+            `CollapsibleContent` and sibling `SectionGroup`s use. The right inset comes
+            from this row's `pr`, which lands the help icon — not the chevron — on it. */}
+        <div className="flex items-center gap-1 pr-3 sm:pr-4">
           <h3 className="min-w-0 flex-1">
             <CollapsibleTrigger asChild>
-              <Button variant="ghost" className="group h-auto w-full min-w-0 justify-between whitespace-normal rounded-xl p-4 text-left sm:h-auto sm:p-5" aria-label="Safeguards">
+              <Button variant="ghost" className="group h-auto w-full min-w-0 justify-between whitespace-normal rounded-xl py-4 pr-2 pl-4 text-left sm:h-auto sm:py-5 sm:pl-5" aria-label="Safeguards">
                 <span className="min-w-0">
                   <span className="block font-display text-lg leading-6 font-semibold tracking-[-0.025em] text-foreground">Safeguards</span>
                   <span className="mt-0.5 block text-xs font-normal text-muted-foreground">These settings apply whether or not this section is open.</span>
                 </span>
-                <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+                {/* Wrapped so the chevron is not a direct child: `size="default"` carries
+                    `has-[>svg]:px-2`, whose `:has()` specificity silently outranks the plain
+                    padding utilities set above. `DisclosureCard` wraps its chevron too and is
+                    immune for the same reason. */}
+                <span className="flex shrink-0 items-center">
+                  <ChevronDown className="h-4 w-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+                </span>
               </Button>
             </CollapsibleTrigger>
           </h3>

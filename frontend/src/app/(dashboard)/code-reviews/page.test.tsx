@@ -2105,7 +2105,17 @@ describe("CodeReviewsPage", () => {
     const advancedTrigger = screen.getByRole("button", {
       name: "Safeguards",
     });
-    expect(advancedTrigger).toHaveClass("h-auto", "p-4", "sm:h-auto", "sm:p-5");
+    // The trigger owns the card's left inset; the right inset comes from the header
+    // row so the help icon, not the chevron, lands on the card edge.
+    expect(advancedTrigger).toHaveClass("h-auto", "py-4", "pr-2", "pl-4", "sm:h-auto", "sm:py-5", "sm:pl-5");
+    expect(advancedTrigger.closest("h3")?.parentElement).toHaveClass("pr-3", "sm:pr-4");
+    // The chevron must stay wrapped. As a direct child it matches the Button size
+    // variant's `has-[>svg]:px-2`, whose `:has()` specificity outranks the padding
+    // above and silently collapses the title back to an 8px inset. jsdom applies no
+    // CSS, so this structural check — not the class list above — is what catches it:
+    // the button also still carries an unmerged `px-2.5`, and these assertions would
+    // pass even if it started winning.
+    expect(advancedTrigger.querySelector(":scope > svg")).toBeNull();
     // Behavior, then both prompts together, then safeguards, then GitHub setup.
     expect(enablement.compareDocumentPosition(summaryHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(summaryHeading.compareDocumentPosition(approvalHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();

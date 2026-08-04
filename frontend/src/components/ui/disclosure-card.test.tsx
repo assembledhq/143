@@ -174,6 +174,11 @@ describe("DisclosureCard", () => {
       name: "Show Nested controls",
     });
     expect(trigger).toHaveClass("px-0");
+    // `px-0` alone does not settle the gutter: a chevron promoted to a direct
+    // child would match the Button size variant's `has-[>svg]:px-2`, whose
+    // `:has()` specificity outranks it and restores an 8px inset. jsdom applies
+    // no CSS, so the assertion above cannot see that — only this structural one.
+    expect(trigger.querySelector(":scope > svg")).toBeNull();
 
     const card = trigger.closest('[data-slot="card"]');
     expect(card).toHaveClass("rounded-none");
