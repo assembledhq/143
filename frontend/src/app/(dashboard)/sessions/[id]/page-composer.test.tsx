@@ -613,8 +613,9 @@ describe('SessionDetailPage composer and session metadata', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     await screen.findAllByText('Fixed TypeError by adding null check');
-    expect(screen.getByText('Created by automation')).toBeInTheDocument();
-    expect(screen.getByText('Automation run')).toBeInTheDocument();
+    expect(screen.getByText('Automation')).toBeInTheDocument();
+    expect(screen.queryByText('Created by automation')).not.toBeInTheDocument();
+    expect(screen.queryByText('Automation run')).not.toBeInTheDocument();
   });
 
   it('does not show automation provenance for manually created sessions', async () => {
@@ -634,6 +635,7 @@ describe('SessionDetailPage composer and session metadata', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     await screen.findAllByText('Fixed TypeError by adding null check');
+    expect(screen.queryByText('Automation')).not.toBeInTheDocument();
     expect(screen.queryByText('Created by automation')).not.toBeInTheDocument();
     expect(screen.queryByText('Automation run')).not.toBeInTheDocument();
   });

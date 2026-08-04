@@ -218,6 +218,23 @@ func TestCurrentSeedCoversRepresentativeProductTables(t *testing.T) {
 	}
 }
 
+func TestCurrentSeedIncludesSessionDetailShowcase(t *testing.T) {
+	t.Parallel()
+
+	seed := string(readCurrentSeed(t))
+	requiredContent := []string{
+		ShowcaseSessionID,
+		"Session detail UI showcase",
+		"Overview polish",
+		"Copy review",
+		"Rejected experiment",
+	}
+
+	for _, content := range requiredContent {
+		require.Contains(t, seed, content, "session detail showcase should seed representative detail content")
+	}
+}
+
 func TestCurrentSeedUsesConvergentConflictHandlers(t *testing.T) {
 	t.Parallel()
 

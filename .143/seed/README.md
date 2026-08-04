@@ -13,6 +13,7 @@ Fragment map:
 - `40_sessions_base.sql` - seeded session rows, session updates, issue links, and issue snapshots.
 - `41_session_records.sql` - session threads, file events, diffs, reviews, questions, and validations.
 - `42_session_conversation.sql` - session diff body, messages, and logs.
+- `43_session_detail_showcase.sql` - one rich multi-tab session for reviewing success, review, failure, diff, and metadata states.
 - `50_preview_targets.sql` - preview natural-key cleanup, groups, targets, and links.
 - `51_preview_runtime.sql` - preview instances, services, infrastructure, runtime, snapshots, and logs.
 - `60_pull_requests.sql` - pull requests, PR health, and PR preview state.
