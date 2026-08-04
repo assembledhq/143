@@ -93,6 +93,14 @@ var prTestPullRequestColumns = []string{
 	"merge_when_ready_updated_at", "merged_at", "created_at", "updated_at",
 }
 
+var prTestChangesetColumns = []string{
+	"id", "org_id", "session_id", "is_primary", "order_index", "title", "summary",
+	"status", "target_branch", "base_branch", "working_branch", "stacked_on_changeset_id", "head_sha",
+	"expected_remote_head_sha", "base_head_sha", "worktree_path", "materialization_error", "materialized_diff",
+	"restack_delta_kind", "restack_delta_summary", "restack_confirmation_required",
+	"pr_creation_state", "pr_creation_error", "created_at", "updated_at",
+}
+
 var prTestPreviewTargetColumns = []string{
 	"id", "org_id", "repository_id", "branch", "commit_sha",
 	"preview_config_name", "resolved_config_digest", "source_type", "source_id", "source_url",
@@ -152,6 +160,28 @@ func newPRTestRowWithTitle(prID uuid.UUID, sessionID *uuid.UUID, orgID uuid.UUID
 		now,
 		now,
 	}
+}
+
+func newPRTestChangesetRow(changesetID, sessionID, orgID uuid.UUID, isPrimary bool, headSHA *string, now time.Time) []any {
+	return []any{
+		changesetID, orgID, sessionID, isPrimary, 0, "Primary", "", models.ChangesetStatusPROpen,
+		"main", "main", nil, nil, headSHA, headSHA, nil, nil, nil, nil,
+		nil, nil, false, models.PRCreationStateSucceeded, nil, now, now,
+	}
+}
+
+func TestCreatePRParamsKeepsExpectedRemoteHeadInternal(t *testing.T) {
+	t.Parallel()
+
+	params := CreatePRParams{ExpectedRemoteHeadSHA: "abc1234567890abcdef1234567890abcdef12345"}
+	encoded, err := json.Marshal(params)
+	require.NoError(t, err, "CreatePRParams should remain serializable")
+	require.NotContains(t, string(encoded), "expected_remote_head", "the review-only replacement lease must not enter persisted or client payloads")
+
+	var decoded CreatePRParams
+	err = json.Unmarshal([]byte(`{"expected_remote_head_sha":"attacker-controlled"}`), &decoded)
+	require.NoError(t, err, "unknown client fields should not break CreatePRParams decoding")
+	require.Empty(t, decoded.ExpectedRemoteHeadSHA, "clients must not be able to grant the review-only replacement lease")
 }
 
 type prTestSnapshotStore struct {
@@ -4619,6 +4649,145 @@ func TestPushChangesToPR_EnqueuesHealthSyncAfterSuccessfulPush(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPushChangesToPR_UsesSessionSnapshotForUnmaterializedPrimaryChangeset(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	t.Cleanup(mock.Close)
+
+	now := time.Now().UTC()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	changesetID := uuid.New()
+	prID := uuid.New()
+	repoID := uuid.New()
+	integrationID := uuid.New()
+	body := "body"
+	snapshotKey := "snapshots/session.tar"
+	headRef := "143/session/changes"
+	reviewedHeadSHA := "0123456789abcdef0123456789abcdef01234567"
+	pushedHeadSHA := "abcdef0123456789abcdef0123456789abcdef01"
+
+	mock.ExpectQuery("SELECT .+ FROM session_changesets").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID}).
+		WillReturnRows(pgxmock.NewRows(prTestChangesetColumns).AddRow(
+			newPRTestChangesetRow(changesetID, sessionID, orgID, true, &reviewedHeadSHA, now)...,
+		))
+
+	prRow := newPRTestRow(prID, &sessionID, orgID, "owner/repo", now, &body)
+	prRow[13] = &headRef
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID}).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(prRow...))
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
+			repoID, orgID, integrationID, int64(12345), "owner/repo", "main",
+			false, nil, nil, "https://github.com/owner/repo.git", int64(99),
+			"active", nil, nil, json.RawMessage(`{}`), now, now,
+		))
+	mock.ExpectQuery("SELECT .+ FROM organizations").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestOrganizationColumns).AddRow(
+			orgID, "Test Org", json.RawMessage(`{"pr_authorship":"app_only"}`), now, now,
+		))
+	mock.ExpectExec("UPDATE pull_requests SET head_sha").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_changesets").
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "head_sha": pushedHeadSHA,
+		}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_diff_snapshots").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgx.NamedArgs{
+			"org_id":     orgID,
+			"queue":      "default",
+			"job_type":   "sync_pull_request_state",
+			"payload":    pgxmock.AnyArg(),
+			"priority":   6,
+			"dedupe_key": pgxmock.AnyArg(),
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	provider := &prTestSandboxProvider{
+		execStdout:  pushHeadSHASentinel + pushedHeadSHA + "\n",
+		snapshotErr: errors.New("test: skip post-push snapshot"),
+	}
+	svc := &PRService{
+		tokenProvider: &Service{cache: map[int64]*cachedToken{
+			99: {Token: "app-token", ExpiresAt: time.Now().Add(time.Hour)},
+		}},
+		pullRequests:    db.NewPullRequestStore(mock),
+		changesets:      db.NewSessionChangesetStore(mock),
+		sessions:        db.NewSessionStore(mock),
+		repos:           db.NewRepositoryStore(mock),
+		orgs:            db.NewOrganizationStore(mock),
+		jobs:            db.NewJobStore(mock),
+		sandboxProvider: provider,
+		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		sandboxAuth:     &fakeSandboxAuth{socketPath: "/tmp/fake.sock"},
+		logger:          zerolog.Nop(),
+	}
+
+	pr, err := svc.PushChangesToPR(context.Background(), &models.Session{
+		ID: sessionID, OrgID: orgID, RepositoryID: &repoID, SnapshotKey: &snapshotKey,
+	}, CreatePRParams{
+		ChangesetID: &changesetID, ExpectedRemoteHeadSHA: reviewedHeadSHA,
+	})
+	require.NoError(t, err, "PushChangesToPR should hydrate the session snapshot for an unmaterialized primary changeset")
+	require.Equal(t, pushedHeadSHA, *pr.HeadSHA, "PushChangesToPR should return the head pushed from the session snapshot")
+	require.Contains(t, provider.lastExecCmd, "branch='"+headRef+"'", "snapshot-backed review fixes should target the persisted pull request branch")
+	require.Contains(t, provider.lastExecCmd, "expected_remote_head='"+reviewedHeadSHA+"'", "snapshot-backed review fixes should retain the reviewed checkpoint lease")
+	require.Equal(t, 1, provider.destroyed, "snapshot-backed review fixes should clean up the hydrated sandbox")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPushChangesToPR_RejectsUnmaterializedNonPrimaryChangeset(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	t.Cleanup(mock.Close)
+
+	now := time.Now().UTC()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	changesetID := uuid.New()
+	prID := uuid.New()
+	body := "body"
+	headRef := "143/session/child"
+	headSHA := "0123456789abcdef0123456789abcdef01234567"
+	snapshotKey := "snapshots/session.tar"
+
+	mock.ExpectQuery("SELECT .+ FROM session_changesets").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID}).
+		WillReturnRows(pgxmock.NewRows(prTestChangesetColumns).AddRow(
+			newPRTestChangesetRow(changesetID, sessionID, orgID, false, &headSHA, now)...,
+		))
+	prRow := newPRTestRow(prID, &sessionID, orgID, "owner/repo", now, &body)
+	prRow[13] = &headRef
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID}).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(prRow...))
+
+	svc := &PRService{
+		pullRequests: db.NewPullRequestStore(mock),
+		changesets:   db.NewSessionChangesetStore(mock),
+		logger:       zerolog.Nop(),
+	}
+	_, err = svc.PushChangesToPR(context.Background(), &models.Session{
+		ID: sessionID, OrgID: orgID, SnapshotKey: &snapshotKey,
+	}, CreatePRParams{ChangesetID: &changesetID, ExpectedRemoteHeadSHA: headSHA})
+
+	require.ErrorContains(t, err, "changeset must be materialized before PR push", "a child changeset must never fall back to the primary session snapshot")
+	require.NoError(t, mock.ExpectationsWereMet(), "the rejected child push should stop before sandbox or repository access")
+}
+
 // PRs created before migration 107 don't have head_ref persisted. The push
 // code refuses to recompute via formatBranchName because the result is
 // sensitive to the session's title and Linear identifier — both of which can
@@ -4960,6 +5129,133 @@ func TestBuildPushScript_AlreadyPublishedBranchIsSuccessful(t *testing.T) {
 	require.Contains(t, string(output), pushHeadSHASentinel+runPRTestGit(t, repo, "rev-parse", "HEAD"), "push should report the existing remote head")
 }
 
+func TestBuildPushScript_ExpectedRemoteCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git is required for this test: %v", err)
+	}
+
+	tests := []struct {
+		name                        string
+		bindExpectedRemote          bool
+		advanceRemote               bool
+		baseLocalOnUnexpectedRemote bool
+		wantSuccess                 bool
+		wantRemoteContent           string
+	}{
+		{
+			name:               "reconciles review fixes when remote still matches checkpoint",
+			bindExpectedRemote: true,
+			wantSuccess:        true,
+			wantRemoteContent:  "reviewed fix",
+		},
+		{
+			name:              "rejects sibling history without revision evidence",
+			wantRemoteContent: "initial change",
+		},
+		{
+			name:               "rejects review fixes when remote moved past checkpoint",
+			bindExpectedRemote: true,
+			advanceRemote:      true,
+			wantRemoteContent:  "initial change",
+		},
+		{
+			name:                        "rejects an unreviewed remote ancestor",
+			bindExpectedRemote:          true,
+			advanceRemote:               true,
+			baseLocalOnUnexpectedRemote: true,
+			wantRemoteContent:           "initial change",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			root := t.TempDir()
+			remote := filepath.Join(root, "remote.git")
+			repo := filepath.Join(root, "repo")
+			runPRTestGit(t, root, "init", "--bare", remote)
+			runPRTestGit(t, root, "init", repo)
+			configurePRTestGitIdentity(t, repo)
+			runPRTestGit(t, repo, "checkout", "-b", "main")
+			require.NoError(t, os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o644), "base file should be written")
+			runPRTestGit(t, repo, "add", "README.md")
+			runPRTestGit(t, repo, "commit", "-m", "base")
+			runPRTestGit(t, repo, "remote", "add", "origin", remote)
+			runPRTestGit(t, repo, "push", "-u", "origin", "main")
+
+			branch := "143/session/review-fixes"
+			runPRTestGit(t, repo, "checkout", "-b", branch)
+			require.NoError(t, os.WriteFile(filepath.Join(repo, "feature.txt"), []byte("initial change\n"), 0o644), "initial feature should be written")
+			runPRTestGit(t, repo, "add", "feature.txt")
+			runPRTestGit(t, repo, "commit", "-m", "initial change")
+			runPRTestGit(t, repo, "push", "-u", "origin", branch)
+			expectedRemoteHead := runPRTestGit(t, repo, "rev-parse", "HEAD")
+
+			remoteHeadBefore := expectedRemoteHead
+			if tt.advanceRemote {
+				require.NoError(t, os.WriteFile(filepath.Join(repo, "remote-only.txt"), []byte("unexpected remote work\n"), 0o644), "unexpected remote file should be written")
+				runPRTestGit(t, repo, "add", "remote-only.txt")
+				runPRTestGit(t, repo, "commit", "-m", "unexpected remote work")
+				runPRTestGit(t, repo, "push", "origin", branch)
+				remoteHeadBefore = runPRTestGit(t, repo, "rev-parse", "HEAD")
+			}
+
+			// Simulate a preview-held sandbox that still has the pre-push history:
+			// its tree contains the reviewed change, but its commit is a sibling of
+			// the exact checkpoint already present on the remote branch.
+			if !tt.baseLocalOnUnexpectedRemote {
+				runPRTestGit(t, repo, "checkout", "-B", branch, "main")
+			}
+			require.NoError(t, os.WriteFile(filepath.Join(repo, "feature.txt"), []byte("reviewed fix\n"), 0o644), "reviewed feature should be written")
+			runPRTestGit(t, repo, "add", "feature.txt")
+			runPRTestGit(t, repo, "commit", "-m", "reviewed fix from stale sandbox")
+
+			commitMsgPath := filepath.Join(root, "commit-message")
+			require.NoError(t, os.WriteFile(commitMsgPath, []byte("checkpoint review fixes\n"), 0o644), "commit message should be written")
+			script := buildPushScript(repo, commitMsgPath, "143 Agent", "noreply@143.dev", branch, "main", "", remote)
+			if tt.bindExpectedRemote {
+				script = buildPushScriptWithExpectedRemote(
+					repo,
+					commitMsgPath,
+					"143 Agent",
+					"noreply@143.dev",
+					branch,
+					"main",
+					"",
+					remote,
+					expectedRemoteHead,
+				)
+			}
+			cmd := exec.Command("sh", "-c", script) // #nosec G204 -- generated script uses fixed test data and temporary repositories.
+			cmd.Dir = repo
+			output, err := cmd.CombinedOutput()
+
+			if tt.wantSuccess {
+				require.NoError(t, err, "expected review checkpoint should permit the guarded push: %s", string(output))
+				require.Contains(t, string(output), pushExpectedRemoteReconciledSentinel, "push should report expected-head reconciliation")
+			} else {
+				require.Error(t, err, "unexpected remote movement should reject the guarded push")
+				var exitErr *exec.ExitError
+				require.ErrorAs(t, err, &exitErr, "rejected guarded push should return a process exit error")
+				require.Equal(t, pushExitBranchDiverged, exitErr.ExitCode(), "unexpected remote movement should use the branch-diverged sentinel")
+				require.Contains(t, string(output), pushBranchDivergedMessage, "rejected guarded push should explain the remote divergence")
+			}
+
+			remoteHeadAfter := strings.Fields(runPRTestGit(t, repo, "ls-remote", remote, "refs/heads/"+branch))[0]
+			if tt.wantSuccess {
+				runPRTestGit(t, repo, "fetch", remote, "+refs/heads/"+branch+":refs/remotes/check/review-fixes")
+				require.Equal(t, tt.wantRemoteContent, runPRTestGit(t, repo, "show", "refs/remotes/check/review-fixes:feature.txt"), "guarded push should publish the reviewed workspace")
+				require.Equal(t, runPRTestGit(t, repo, "rev-parse", "HEAD"), remoteHeadAfter, "guarded push should publish the current reviewed head")
+			} else {
+				require.Equal(t, remoteHeadBefore, remoteHeadAfter, "rejected guarded push must preserve the unexpected remote head")
+			}
+		})
+	}
+}
+
 func configurePRTestGitIdentity(t *testing.T, dir string) {
 	t.Helper()
 	runPRTestGit(t, dir, "config", "user.name", "143 Test")
@@ -5202,6 +5498,8 @@ func TestPushSessionBranch(t *testing.T) {
 		wantHeadSHA          string
 		wantSnapshotCaptured bool
 		wantSnapshotErr      bool
+		expectedRemoteHead   string
+		wantReconciled       bool
 	}{
 		{
 			name:           "missing snapshot object maps to unavailable",
@@ -5282,6 +5580,16 @@ func TestPushSessionBranch(t *testing.T) {
 			wantSnapshotCaptured: true,
 		},
 		{
+			name:                 "revision-bound success records expected remote reconciliation",
+			snapshots:            &prTestSnapshotStore{payload: []byte("snapshot")},
+			provider:             &prTestSandboxProvider{execStdout: pushExpectedRemoteReconciledSentinel + "\n" + successStdout},
+			wantDestroyCnt:       1,
+			wantHeadSHA:          fakeHeadSHA,
+			wantSnapshotCaptured: true,
+			expectedRemoteHead:   "def4567890abcdef1234567890abcdef12345678",
+			wantReconciled:       true,
+		},
+		{
 			name:            "snapshot capture failure does not fail the push",
 			snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
 			provider:        &prTestSandboxProvider{execStdout: successStdout, snapshotErr: errors.New("snapshot exec died")},
@@ -5316,6 +5624,7 @@ func TestPushSessionBranch(t *testing.T) {
 				"commit message",
 				"Test User",
 				"test@example.com",
+				tt.expectedRemoteHead,
 			)
 			t.Cleanup(func() {
 				if result != nil && result.CapturedSnapshotPath != "" {
@@ -5335,6 +5644,10 @@ func TestPushSessionBranch(t *testing.T) {
 				require.NotContains(t, tt.provider.lastExecCmd, "GIT_ASKPASS", "pushSessionBranch should auth via the credential socket, not askpass")
 				require.NotContains(t, tt.provider.lastExecCmd, "x-access-token", "pushSessionBranch should not embed credentials in the push URL")
 				require.Equal(t, tt.wantHeadSHA, result.HeadSHA, "pushSessionBranch should return the parsed HEAD SHA")
+				require.Equal(t, tt.wantReconciled, result.ReconciledExpectedRemote, "pushSessionBranch should report whether it used the revision-bound reconciliation path")
+				if tt.expectedRemoteHead != "" {
+					require.Contains(t, tt.provider.lastExecCmd, "expected_remote_head='"+tt.expectedRemoteHead+"'", "pushSessionBranch should bind the persisted review checkpoint into the push guard")
+				}
 				if tt.wantSnapshotCaptured {
 					require.NotEmpty(t, result.CapturedSnapshotPath, "pushSessionBranch should spool the post-push snapshot to a temp file")
 					require.NoError(t, result.CapturedSnapshotErr, "snapshot capture should succeed when provider.Snapshot returns no error")
@@ -5400,7 +5713,7 @@ func TestPushChangesetBranchAcceptsOwnPreviouslyPublishedHead(t *testing.T) {
 
 	result, err := service.pushChangesetBranch(
 		context.Background(), run, &models.Repository{FullName: "owner/repo"}, models.OrgSettings{},
-		changeset, "commit message", "Bot", "bot@example.com",
+		changeset, "commit message", "Bot", "bot@example.com", "",
 	)
 	require.NoError(t, err, "a retry after the branch push checkpoint gap should accept a remote already at local HEAD")
 	require.Equal(t, headSHA, result.HeadSHA, "the recovered push should preserve the already-published head SHA")
@@ -5408,6 +5721,63 @@ func TestPushChangesetBranchAcceptsOwnPreviouslyPublishedHead(t *testing.T) {
 	require.Equal(t, 3, provider.execCallCount, "recovery should inspect the remote, verify local HEAD, and run the idempotent push script")
 	require.Equal(t, 1, auth.listenCount, "changeset publication should open one sandbox auth listener")
 	require.Equal(t, 1, auth.closeCount, "changeset publication should close its sandbox auth listener")
+}
+
+func TestPushChangesetBranchRevisionLeaseIsExplicit(t *testing.T) {
+	t.Parallel()
+
+	const headSHA = "abc1234567890abcdef1234567890abcdef12345"
+	tests := []struct {
+		name                string
+		reviewExpected      string
+		wantScriptExpected  string
+		wantScriptUnbounded bool
+	}{
+		{
+			name:                "ordinary changeset push keeps divergence guard closed",
+			wantScriptUnbounded: true,
+		},
+		{
+			name:               "review refresh binds its explicit checkpoint",
+			reviewExpected:     headSHA,
+			wantScriptExpected: headSHA,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			provider := &prTestSandboxProvider{execSequence: []prTestExecResponse{
+				{exit: 0, stdout: headSHA + "\trefs/heads/143/session/changes\n"},
+				{exit: 0, stdout: pushHeadSHASentinel + headSHA + "\n"},
+			}}
+			auth := &fakeSandboxAuth{socketPath: "/tmp/fake.sock"}
+			service := &PRService{sandboxProvider: provider, sandboxAuth: auth, logger: zerolog.Nop()}
+			containerID, worktree, branch := "sandbox-1", "/workspace/repo", "143/session/changes"
+			run := &models.Session{ID: uuid.New(), OrgID: uuid.New(), ContainerID: &containerID}
+			changeset := models.SessionChangeset{
+				ID: uuid.New(), SessionID: run.ID, OrgID: run.OrgID,
+				WorktreePath: &worktree, WorkingBranch: &branch, BaseBranch: "main",
+				ExpectedRemoteHeadSHA: strPtr(headSHA),
+			}
+
+			result, err := service.pushChangesetBranch(
+				context.Background(), run, &models.Repository{FullName: "owner/repo"}, models.OrgSettings{},
+				changeset, "commit message", "Bot", "bot@example.com", tt.reviewExpected,
+			)
+
+			require.NoError(t, err, "changeset push should succeed with a matching ordinary remote checkpoint")
+			require.Equal(t, headSHA, result.HeadSHA, "changeset push should return the published head")
+			if tt.wantScriptUnbounded {
+				require.Contains(t, provider.lastExecCmd, "expected_remote_head=''", "ordinary changeset pushes must not inherit the review-only replacement lease")
+			} else {
+				require.Contains(t, provider.lastExecCmd, "expected_remote_head='"+tt.wantScriptExpected+"'", "review refresh should bind its explicit replacement lease")
+			}
+			require.Equal(t, 1, auth.listenCount, "changeset push should open one sandbox auth listener")
+			require.Equal(t, 1, auth.closeCount, "changeset push should close its sandbox auth listener")
+		})
+	}
 }
 
 // TestPushSessionBranch_RetryOnRejection_Succeeds locks in the self-healing
@@ -5446,6 +5816,7 @@ func TestPushSessionBranch_RetryOnRejection_Succeeds(t *testing.T) {
 		"commit message",
 		"Bot",
 		"bot@example.com",
+		"",
 	)
 	t.Cleanup(func() {
 		if result != nil && result.CapturedSnapshotPath != "" {
@@ -5489,6 +5860,7 @@ func TestPushSessionBranch_RetryOnRejection_PersistentRejection(t *testing.T) {
 		"commit message",
 		"Bot",
 		"bot@example.com",
+		"",
 	)
 	require.ErrorIs(t, err, ErrPushRejected, "persistent rejection must still surface ErrPushRejected")
 	require.Equal(t, 2, provider.execCallCount, "retry budget is one — at most two total attempts")
@@ -5519,6 +5891,7 @@ func TestPushSessionBranch_NoRetryOnNonRejection(t *testing.T) {
 		"commit message",
 		"Bot",
 		"bot@example.com",
+		"",
 	)
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrPushRejected)
@@ -5554,6 +5927,7 @@ func TestPushSessionBranch_AuthSocketWired(t *testing.T) {
 		"commit message",
 		"Bot",
 		"bot@example.com",
+		"",
 	)
 	t.Cleanup(func() {
 		if result != nil && result.CapturedSnapshotPath != "" {
@@ -5603,6 +5977,7 @@ func TestPushSessionBranch_AuthSocketListenFailureWrapsSentinel(t *testing.T) {
 		"commit message",
 		"Bot",
 		"bot@example.com",
+		"",
 	)
 
 	require.ErrorIs(t, err, ErrSandboxAuthUnavailable, "pushSessionBranch should classify auth socket listener failures")
@@ -5625,7 +6000,7 @@ func TestPushSessionBranch_RequiresSandboxAuth(t *testing.T) {
 		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
 		&models.Repository{FullName: "o/r"},
 		models.OrgSettings{},
-		"k", "b", "main", "m", "n", "e@x",
+		"k", "b", "main", "m", "n", "e@x", "",
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrSandboxAuthUnavailable, "pushSessionBranch should preserve the sandbox auth sentinel")
