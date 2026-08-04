@@ -3410,7 +3410,9 @@ func (h *PreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *http.Reque
 	}
 	normalizeInteractionStepTimeouts(body.Steps)
 
-	// Enforce the max total duration per the design doc (60 seconds).
+	// Enforce the max total duration per the design doc (60 seconds), plus
+	// worker-hop headroom when the interaction is routed to another node so the
+	// worker's own 60s budget expires first and returns a structured error.
 	ctx, cancel := context.WithTimeout(r.Context(), browserHandlerTimeout(h.workerRoutingEnabled(), preview.BrowserOperationInteract))
 	defer cancel()
 	if instance.SessionID != uuid.Nil && h.browserSessions != nil {
