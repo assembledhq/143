@@ -5,7 +5,7 @@ import { act } from '@testing-library/react';
 import { server } from '@/test/mocks/server';
 import { mockSessions } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
-import type { Session, SessionMessage, SessionThread, SingleResponse } from '@/lib/types';
+import type { Session, SessionLog, SessionMessage, SessionThread, SessionTranscriptWindowResponse, SingleResponse } from '@/lib/types';
 import { installSessionDetailPageTestHooks, MockEventSource, changeFieldValue, makeTranscriptWindow } from './session-detail-test-kit';
 
 const { toast } = vi.hoisted(() => ({
@@ -58,6 +58,117 @@ vi.mock('next/image', () => ({
 installSessionDetailPageTestHooks({ toast, routerPush });
 
 describe('SessionDetailPage agent tabs and threads', () => {
+  it('reconciles duplicated, out-of-order, and missed activity lifecycle events from the durable transcript', async () => {
+    const sessionId = 'session-activity-lifecycle';
+    const thread: SessionThread = {
+      id: 'thread-activity', session_id: sessionId, org_id: 'org-1', agent_type: 'codex',
+      label: 'Codex', status: 'running', current_turn: 1, created_at: '2026-08-03T00:00:00Z',
+      cost_cents: 0, pending_message_count: 0,
+    };
+    const phaseOneID = '10000000-0000-0000-0000-000000000001';
+    const phaseTwoID = '10000000-0000-0000-0000-000000000002';
+    let transcriptState: 'running' | 'completed' | 'recovered' = 'running';
+    const transcriptWindow = (): SessionTranscriptWindowResponse => {
+      const phaseID = transcriptState === 'recovered' ? phaseTwoID : phaseOneID;
+      const log: SessionLog = {
+        id: transcriptState === 'recovered' ? 2 : 1,
+        session_id: sessionId,
+        thread_id: thread.id,
+        level: 'tool_use',
+        message: transcriptState === 'recovered' ? 'Resume checks' : 'Run checks',
+        metadata: { type: 'tool_use', tool: 'shell', input: { command: 'npm test' } },
+        turn_number: 1,
+        created_at: transcriptState === 'recovered' ? '2026-08-03T00:00:08Z' : '2026-08-03T00:00:01Z',
+        message_bytes: 10,
+        message_chars: 10,
+        message_truncated: false,
+        activity_phase_id: phaseID,
+      };
+      const messages: SessionMessage[] = transcriptState === 'running' ? [] : [{
+        id: 10,
+        session_id: sessionId,
+        org_id: 'org-1',
+        thread_id: thread.id,
+        turn_number: 1,
+        role: 'assistant',
+        content: 'Durable final response.',
+        created_at: '2026-08-03T00:00:06Z',
+        activity_phase_id: phaseOneID,
+      }];
+      const window = makeTranscriptWindow(messages, [log], { thread_status: 'running' });
+      window.data[0].phases = transcriptState === 'running' ? [{
+        id: phaseOneID,
+        anchor_id: `aph_${phaseOneID}`,
+        phase_number: 1,
+        status: 'running',
+        trigger_kind: 'initial',
+        started_at: '2026-08-03T00:00:00Z',
+        tool_call_count: 1,
+      }] : transcriptState === 'completed' ? [{
+        id: phaseOneID,
+        anchor_id: `aph_${phaseOneID}`,
+        phase_number: 1,
+        status: 'completed',
+        boundary_reason: 'final_response',
+        trigger_kind: 'initial',
+        started_at: '2026-08-03T00:00:00Z',
+        completed_at: '2026-08-03T00:00:06Z',
+        tool_call_count: 1,
+      }] : [{
+        id: phaseOneID,
+        anchor_id: `aph_${phaseOneID}`,
+        phase_number: 1,
+        status: 'interrupted',
+        boundary_reason: 'runtime_lost',
+        trigger_kind: 'initial',
+        started_at: '2026-08-03T00:00:00Z',
+        completed_at: '2026-08-03T00:00:06Z',
+        tool_call_count: 1,
+      }, {
+        id: phaseTwoID,
+        anchor_id: `aph_${phaseTwoID}`,
+        phase_number: 2,
+        status: 'running',
+        trigger_kind: 'recovery',
+        started_at: '2026-08-03T00:00:08Z',
+        tool_call_count: 1,
+      }];
+      return window;
+    };
+
+    server.use(
+      http.get('/api/v1/application-config', () => HttpResponse.json({
+        data: { session_activity_capsules_enabled: true, revision: 'test', updated_at: '2026-08-03T00:00:00Z' },
+      })),
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({
+        data: { ...mockSessions[0], id: sessionId, status: 'running', sandbox_state: 'running', threads: [thread] },
+      } satisfies SingleResponse<Session & { threads: SessionThread[] }>)),
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(transcriptWindow());
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+    expect(await screen.findByRole('button', { name: /Working for.*1 tool call/ })).toBeVisible();
+    const sessionStream = MockEventSource.instances.find((source) => source.url.includes(`/api/v1/sessions/${sessionId}/logs/stream`));
+    expect(sessionStream).toBeDefined();
+
+    transcriptState = 'completed';
+    act(() => {
+      sessionStream?.emit('session_activity_phase.terminal', { id: 'terminal-2', thread_id: thread.id });
+      sessionStream?.emit('session_activity_phase.terminal', { id: 'terminal-2', thread_id: thread.id });
+    });
+    expect(await screen.findByText('Durable final response.')).toBeVisible();
+
+    act(() => {
+      sessionStream?.emit('session_activity_phase.started', { id: 'started-1', thread_id: thread.id });
+    });
+
+    transcriptState = 'recovered';
+    act(() => sessionStream?.onerror?.(new Event('error')));
+    expect(await screen.findByText('Runtime recovered and execution resumed.')).toBeVisible();
+  });
+
   it('switches between sandbox agent tabs and sends through the active thread', async () => {
     const sessionId = 'session-abcdef12-3456-7890';
     const threads: SessionThread[] = [

@@ -237,6 +237,16 @@ export const mockAPITokens: APIToken[] = [
 ];
 
 export const handlers = [
+  http.post('/api/v1/session-activity-events', () => new HttpResponse(null, { status: 204 })),
+  http.get('/api/v1/application-config', () => {
+    return HttpResponse.json({
+      data: {
+        session_activity_capsules_enabled: false,
+        revision: 'test-session-activity-disabled',
+        updated_at: '2026-08-03T00:00:00Z',
+      },
+    });
+  }),
   http.post('/api/v1/automations/schedule-preview', () => {
     return HttpResponse.json({
       data: { next_run_at: '2026-08-03T16:00:00Z' },

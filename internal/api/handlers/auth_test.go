@@ -987,6 +987,7 @@ func TestAuthHandler_Me(t *testing.T) {
 					CodingAgentReasoningDefaults: map[models.AgentType]models.ReasoningEffort{
 						models.AgentTypeCodex: models.ReasoningEffortXHigh,
 					},
+					SessionActivityDetail: models.SessionActivityDetailCompact,
 				}, resp.Data.Settings, "/auth/me should return typed persisted user settings")
 			},
 		},
@@ -1029,12 +1030,12 @@ func TestAuthHandler_UpdateSettings(t *testing.T) {
 	userID := uuid.New()
 	orgID := uuid.New()
 	now := time.Now()
-	settings := []byte(`{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`)
+	settings := []byte(`{"coding_agent_reasoning_defaults":{"claude_code":"max"},"session_activity_detail":"detailed"}`)
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT settings FROM users WHERE id = @id FOR UPDATE").
 		WithArgs(userID).
-		WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow(json.RawMessage(`{}`)))
+		WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow(json.RawMessage(`{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`)))
 	mock.ExpectExec("UPDATE users SET settings = @settings").
 		WithArgs(pgxmock.AnyArg(), userID).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -1045,7 +1046,7 @@ func TestAuthHandler_UpdateSettings(t *testing.T) {
 			"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "google_id", "email_verified_at", "created_at", "settings",
 		}).AddRow(userID, orgID, "me@example.com", "Me", "admin", nil, nil, nil, nil, nil, now, settings))
 
-	req := httptest.NewRequest(http.MethodPatch, "/api/v1/auth/me/settings", bytes.NewBufferString(`{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`))
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/auth/me/settings", bytes.NewBufferString(`{"session_activity_detail":"detailed"}`))
 	req = req.WithContext(middleware.WithUser(req.Context(), &models.User{
 		ID:    userID,
 		OrgID: orgID,
@@ -1064,6 +1065,7 @@ func TestAuthHandler_UpdateSettings(t *testing.T) {
 		CodingAgentReasoningDefaults: map[models.AgentType]models.ReasoningEffort{
 			models.AgentTypeClaudeCode: models.ReasoningEffortMax,
 		},
+		SessionActivityDetail: models.SessionActivityDetailDetailed,
 	}, resp.Data.Settings, "updated user response should include typed persisted settings")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -88,6 +88,7 @@ import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
+import { SessionActivityTimeline } from "@/components/session-activity-timeline";
 import { ContextHeader } from "@/components/context-header";
 import { StatusLabel } from "@/components/status-label";
 import { StatusIndicator } from "@/components/status-indicator";
@@ -95,6 +96,9 @@ import { SessionComposerAttachmentMenu } from "@/components/session-composer-att
 import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
 import { useSessionComposerSlashCommands } from "@/hooks/use-session-composer-slash-commands";
 import { useFileDropzone } from "@/hooks/use-file-dropzone";
+import { useSessionActivityDetail } from "@/hooks/use-session-activity-detail";
+import { useSessionActivityCapsulesEnabled } from "@/hooks/use-session-activity-capsules-enabled";
+import { useTranscriptPrependCompensation } from "@/hooks/use-transcript-prepend-compensation";
 import {
   COMPOSER_TRIGGER_SPECS,
   findActiveTrigger,
@@ -169,6 +173,7 @@ import {
   type UseSessionKeyboardShortcutsOptions,
 } from "@/hooks/use-session-keyboard-shortcuts";
 import { prMergedAccent } from "@/lib/pr-status-styles";
+import { recordSessionActivityEvent } from "@/lib/session-activity-events";
 import { continueFromPRBranchMessage, deriveCreatePRActionState, derivePushChangesActionState, hasRepairableFailedChecks, prHealthBlocksPRActions } from "@/lib/session-pr-action-state";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { isProvisionalSessionDetail } from "@/lib/session-detail-cache";
@@ -207,6 +212,7 @@ import {
   mergeSessionDetailStatusUpdate,
   mergeSessionLogListResponse,
   statusConfig,
+  shouldInvalidateForActivityLifecycleEvent,
   trackInFlightAgentUpdate,
   type PendingThreadPreview,
 } from "./session-detail-state";
@@ -2296,6 +2302,8 @@ function ChatPanel({
   onRegisterKeyboardControls,
 }: ChatPanelProps) {
   const queryClient = useQueryClient();
+  const { detail: activityDetail, setDetail: setActivityDetail, mutation: activityDetailMutation } = useSessionActivityDetail();
+  const { enabled: activityCapsulesEnabled } = useSessionActivityCapsulesEnabled();
   const [dismissedHumanInputIds, setDismissedHumanInputIds] = useState<Set<string>>(() => new Set());
   const [newerThreadMessagePages, setNewerThreadMessagePages] = useState<SessionTranscriptWindowResponse[]>([]);
   const [isFetchingNewerThreadMessages, setIsFetchingNewerThreadMessages] = useState(false);
@@ -2303,12 +2311,15 @@ function ChatPanel({
   const isNearBottomRef = useRef(false);
   const initialAnchorAppliedRef = useRef(false);
   const initialAnchorCancelledRef = useRef(false);
-  const olderMessagesPrependSnapshotRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  const anchorFailureReportedRef = useRef(false);
   const saveScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttempts = useRef(0);
+  const lifecycleEventIDsRef = useRef<Set<string>>(new Set());
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [userScrollEpoch, setUserScrollEpoch] = useState(0);
+  const userScrollIntentRef = useRef(false);
   const isDocumentVisible = useDocumentVisible();
 
   const activeThreadId = activeThread?.id;
@@ -2800,16 +2811,17 @@ function ChatPanel({
     }
   }, []);
 
+  const captureOlderMessagesPosition = useTranscriptPrependCompensation({
+    scrollContainerRef: scrollRef,
+    isFetching: threadTranscriptQuery.isFetchingNextPage,
+    contentVersion: threadMessages.length,
+    detail: activityDetail,
+  });
+
   const loadOlderThreadMessages = useCallback(() => {
-    const el = scrollRef.current;
-    if (el) {
-      olderMessagesPrependSnapshotRef.current = {
-        scrollHeight: el.scrollHeight,
-        scrollTop: el.scrollTop,
-      };
-    }
+    captureOlderMessagesPosition();
     void threadTranscriptQuery.fetchNextPage();
-  }, [threadTranscriptQuery]);
+  }, [captureOlderMessagesPosition, threadTranscriptQuery]);
 
   const loadNewerThreadMessages = useCallback(() => {
     if (!activeThreadId || !nextNewerThreadCursor || isFetchingNewerThreadMessages) return;
@@ -2824,16 +2836,6 @@ function ChatPanel({
       setIsFetchingNewerThreadMessages(false);
     });
   }, [activeThreadId, isFetchingNewerThreadMessages, nextNewerThreadCursor, sessionId]);
-
-  useLayoutEffect(() => {
-    const snapshot = olderMessagesPrependSnapshotRef.current;
-    const el = scrollRef.current;
-    if (!snapshot || !el || threadTranscriptQuery.isFetchingNextPage) {
-      return;
-    }
-    olderMessagesPrependSnapshotRef.current = null;
-    el.scrollTop = snapshot.scrollTop + (el.scrollHeight - snapshot.scrollHeight);
-  }, [threadMessages.length, threadTranscriptQuery.isFetchingNextPage]);
 
   const getEntryContainerProps = useCallback(
     (_entry: TimelineEntry, index: number) =>
@@ -3017,6 +3019,17 @@ function ChatPanel({
       addSSEListener(eventSource, SSE_EVENT.THREAD_RUNTIME_UPDATED, mergeThreadRuntimeUpdate);
       addSSEListener(eventSource, SSE_EVENT.SESSION_WORKSPACE_GENERATION_CHANGED, mergeWorkspaceGenerationUpdate);
 
+      const reconcileActivityLifecycle = (event: { id: string; thread_id: string }) => {
+        if (shouldInvalidateForActivityLifecycleEvent(lifecycleEventIDsRef.current, event, activeThreadId)) {
+          invalidateActiveThreadTranscript();
+        }
+      };
+      addSSEListener(eventSource, SSE_EVENT.ACTIVITY_PHASE_STARTED, reconcileActivityLifecycle);
+      addSSEListener(eventSource, SSE_EVENT.ACTIVITY_PHASE_TERMINAL, reconcileActivityLifecycle);
+      addSSEListener(eventSource, SSE_EVENT.INBOX_DELIVERY_ACKNOWLEDGED, reconcileActivityLifecycle);
+      addSSEListener(eventSource, SSE_EVENT.INBOX_DELIVERY_STARTED, reconcileActivityLifecycle);
+      addSSEListener(eventSource, SSE_EVENT.INBOX_DELIVERY_ABANDONED, reconcileActivityLifecycle);
+
       addSSEListener(eventSource, SSE_EVENT.DONE, (updated) => {
         mergeSessionStatusUpdate(updated);
         eventSource?.close();
@@ -3065,6 +3078,10 @@ function ChatPanel({
       cancelPendingInitialAnchorRestore();
     }
     syncScrollState(el);
+    if (userScrollIntentRef.current && !isNearBottom(el)) {
+      setUserScrollEpoch((current) => current + 1);
+    }
+    userScrollIntentRef.current = false;
     if (activeThreadId && isNearBottom(el) && hasNewerThreadMessages && !isFetchingNewerThreadMessages) {
       loadNewerThreadMessages();
     }
@@ -3074,6 +3091,7 @@ function ChatPanel({
   useEffect(() => {
     initialAnchorAppliedRef.current = false;
     initialAnchorCancelledRef.current = false;
+    anchorFailureReportedRef.current = false;
   }, [activeThreadId, sessionId]);
 
   useEffect(() => {
@@ -3114,6 +3132,15 @@ function ChatPanel({
         syncScrollState(el);
         initialAnchorAppliedRef.current = true;
         return;
+      }
+      if (!anchorFailureReportedRef.current) {
+        anchorFailureReportedRef.current = true;
+        recordSessionActivityEvent({
+          event: "scroll_restore_failed",
+          detail: activityDetail,
+          trigger: "anchor",
+          viewport_class: typeof window !== "undefined" && window.innerWidth < 768 ? "mobile" : "desktop",
+        });
       }
     }
 
@@ -3162,7 +3189,7 @@ function ChatPanel({
 
     scrollToLiveEdgePosition();
     initialAnchorAppliedRef.current = true;
-  }, [activeThreadId, hasLoadedTimelineInputs, initialThreadAnchorPosition, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, threadTranscriptQuery, timelineEntries, tryApplyDefaultEntryAnchor, viewerScope]);
+  }, [activeThreadId, activityDetail, hasLoadedTimelineInputs, initialThreadAnchorPosition, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, threadTranscriptQuery, timelineEntries, tryApplyDefaultEntryAnchor, viewerScope]);
 
   // Only auto-scroll to bottom when new entries arrive if the user is already near the bottom.
   useEffect(() => {
@@ -3170,6 +3197,33 @@ function ChatPanel({
       scrollToLiveEdgePosition();
     }
   }, [scrollToLiveEdgePosition, timelineEntries.length]);
+
+  const chatTimelineProps = {
+    entries: timelineEntries,
+    isRunning,
+    recoveryActive,
+    stoppingLabel: isStopRequested ? "Stopping agent..." : undefined,
+    stoppedLabel: session.status === "cancelled" || activeThread?.status === "cancelled"
+      ? "Session stopped"
+      : stopOutcome === "checkpointed"
+        ? "Stopped. You can send a follow-up when ready."
+        : undefined,
+    diffStats: session.diff_stats,
+    onDiffClick,
+    onApprovePlan: canSendMessage ? onApprovePlan : undefined,
+    onAdjustPlan: canSendMessage ? onAdjustPlan : undefined,
+    humanInputSubmittingId: answerHumanInputMutation.isPending
+      ? answerHumanInputMutation.variables?.request.id ?? null
+      : cancelHumanInputMutation.isPending
+        ? cancelHumanInputMutation.variables?.id ?? null
+        : null,
+    autoOpenHumanInputId,
+    humanInputAnswerable: canAnswerHumanInput,
+    onAnswerHumanInput: handleAnswerHumanInput,
+    onCancelHumanInput: handleCancelHumanInput,
+    onDismissHumanInputAutoOpen: handleDismissHumanInputAutoOpen,
+    getEntryContainerProps,
+  } satisfies ComponentProps<typeof ChatTimeline>;
 
   return (
     <div className="relative flex flex-col h-full">
@@ -3190,6 +3244,13 @@ function ChatPanel({
       <div
         ref={scrollRef}
         onScroll={handleScroll}
+        onWheelCapture={() => { userScrollIntentRef.current = true; }}
+        onTouchMoveCapture={() => { userScrollIntentRef.current = true; }}
+        onKeyDownCapture={(event) => {
+          if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) {
+            userScrollIntentRef.current = true;
+          }
+        }}
         tabIndex={0}
         aria-label="Session conversation"
         data-session-transcript-scroll="true"
@@ -3217,37 +3278,37 @@ function ChatPanel({
                 </Button>
               </div>
             ) : null}
+            {activityCapsulesEnabled && activeThreadId ? (
+              <div className="flex justify-end pb-2">
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button type="button" variant="ghost" size="sm" disabled={activityDetailMutation.isPending}>
+                      Activity detail: {activityDetail === "detailed" ? "Detailed" : "Compact"}
+                      <ChevronDown className="h-3.5 w-3.5" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onSelect={() => setActivityDetail("compact")}>Compact</DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => setActivityDetail("detailed")}>Detailed</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            ) : null}
             {showFreshThreadShell ? <FreshThreadShell /> : null}
-            <ChatTimeline
-              entries={timelineEntries}
-              isRunning={isRunning}
-              recoveryActive={recoveryActive}
-              stoppingLabel={isStopRequested ? "Stopping agent..." : undefined}
-              stoppedLabel={
-                session.status === "cancelled" || activeThread?.status === "cancelled"
-                  ? "Session stopped"
-                  : stopOutcome === "checkpointed"
-                    ? "Stopped. You can send a follow-up when ready."
-                    : undefined
-              }
-              diffStats={session.diff_stats}
-              onDiffClick={onDiffClick}
-              onApprovePlan={canSendMessage ? onApprovePlan : undefined}
-              onAdjustPlan={canSendMessage ? onAdjustPlan : undefined}
-              humanInputSubmittingId={
-                answerHumanInputMutation.isPending
-                  ? answerHumanInputMutation.variables?.request.id ?? null
-                  : cancelHumanInputMutation.isPending
-                    ? cancelHumanInputMutation.variables?.id ?? null
-                    : null
-              }
-              autoOpenHumanInputId={autoOpenHumanInputId}
-              humanInputAnswerable={canAnswerHumanInput}
-              onAnswerHumanInput={handleAnswerHumanInput}
-              onCancelHumanInput={handleCancelHumanInput}
-              onDismissHumanInputAutoOpen={handleDismissHumanInputAutoOpen}
-              getEntryContainerProps={getEntryContainerProps}
-            />
+            {activityCapsulesEnabled && activeThreadId ? (
+              <SessionActivityTimeline
+                {...chatTimelineProps}
+                turns={threadTranscriptTurns}
+                detailPreference={activityDetail}
+                anchorEntryId={initialThreadAnchorPosition?.anchor.kind === "entry" ? initialThreadAnchorPosition.anchor.id : newestThreadWindow?.meta.anchor_entry_id}
+                threadID={activeThreadId}
+                scrollContainerRef={scrollRef}
+                userScrollEpoch={userScrollEpoch}
+                atLiveEdge={!showJumpToLatest}
+              />
+            ) : (
+              <ChatTimeline {...chatTimelineProps} />
+            )}
             {activeThreadId && hasNewerThreadMessages ? (
               <div className="flex justify-center pt-2">
                 <Button

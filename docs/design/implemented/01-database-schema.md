@@ -1,6 +1,6 @@
 # Design: Database Schema
 
-> **Status:** Implemented | **Last reviewed:** 2026-07-30
+> **Status:** Implemented | **Last reviewed:** 2026-08-03
 
 This document defines the PostgreSQL schema for 143.dev. All entities flow through the pipeline: ingestion -> prioritization -> agent run -> validation -> PR -> deploy -> observation.
 
@@ -446,8 +446,57 @@ Per-thread state for multi-agent sessions. Each thread runs a separate agent pro
 - `(org_id, status)` — operational queries
 
 **Notes:**
-- `agent_run_logs` and `session_messages` both have a nullable `thread_id` (FK -> session_threads) column added to scope logs/messages to a specific thread. NULL means session-level.
+- `session_logs`, `session_messages`, and `session_human_input_requests` have nullable `thread_id` and `activity_phase_id` associations. `thread_id = NULL` means session-level; `activity_phase_id = NULL` preserves historical compatibility. Phase ownership is validated on every associated write.
 - Maximum 4 threads per session, enforced in application layer.
+
+### `thread_inbox_delivery_batches`
+
+Durable identity for one contiguous instruction range acknowledged together by
+a live thread runtime. A batch moves once from `acknowledged` to `started`, or
+to `abandoned` when execution cannot resume.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | uuid | PK |
+| org_id | uuid | FK -> organizations |
+| session_id | uuid | FK -> sessions ON DELETE CASCADE |
+| thread_id | uuid | FK -> session_threads ON DELETE CASCADE |
+| runtime_id | uuid | FK -> thread_runtimes ON DELETE CASCADE |
+| sequence_start / sequence_end | bigint | Inclusive contiguous inbox range |
+| status | text | `acknowledged`, `started`, `abandoned` |
+| acknowledged_at | timestamptz | Durable provider acknowledgment boundary |
+| started_at / abandoned_at | timestamptz | Mutually exclusive terminal lifecycle timestamps |
+| created_at / updated_at | timestamptz | |
+
+The org/thread/range tuple is unique and lifecycle checks require timestamps to
+match the typed status.
+
+### `session_activity_phases`
+
+One row per uninterrupted interval of actual coding-agent execution. Queueing,
+environment preparation, recovery waits, and post-response cleanup are outside
+these timestamps.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | uuid | PK |
+| org_id | uuid | FK -> organizations |
+| session_id | uuid | FK -> sessions ON DELETE CASCADE |
+| thread_id | uuid | FK -> session_threads ON DELETE CASCADE |
+| turn_number / phase_number | int | Phase number increases within a turn |
+| status | text | `running`, `completed`, `failed`, `cancelled`, `interrupted` |
+| boundary_reason | text | Typed terminal reason; null only while running |
+| started_at / completed_at | timestamptz | Authoritative execution interval |
+| runtime_id | uuid | Nullable FK -> thread_runtimes ON DELETE SET NULL |
+| trigger_kind | text | `initial`, `inbox_batch`, `recovery` |
+| trigger_batch_id | uuid | Nullable FK -> thread_inbox_delivery_batches |
+| trigger_sequence_start / trigger_sequence_end | bigint | Exact acknowledged range for inbox-triggered phases |
+| created_at / updated_at | timestamptz | |
+
+Unique indexes permit at most one running phase per org/thread, one phase per
+delivery batch, and one phase number per org/thread/turn. Transcript reads use
+the org/thread/turn/phase index; runtime reconciliation uses the partial running
+runtime index.
 
 ### `agent_run_questions`
 

@@ -836,8 +836,10 @@ type Orchestrator struct {
 	staticEgress               StaticEgressRuntimeConfig
 	threadRuntimes             ThreadRuntimeStore // can be nil — disables live thread-runtime routing
 	threadInbox                ThreadInboxStore   // can be nil — disables live inbox delivery
+	activityPhases             *ActivityPhaseService
 	sandboxHolders             SessionSandboxHolderStore
 	threadDeliveryLocks        sync.Map
+	activeActivityPhases       sync.Map
 	env                        *AgentEnv          // owns env resolution, auth pre-flight, Codex auth injection
 	identityResolver           *identity.Resolver // can be nil — falls back to legacy GITHUB_TOKEN env injection
 	sandboxAuth                SandboxAuthServer  // can be nil — paired with identityResolver
@@ -1341,8 +1343,9 @@ type OrchestratorConfig struct {
 	UsageTracker               UsageRecorder        // optional — enables billing observability
 	SandboxCapacity            *SandboxCapacityGate // optional — gates new local sandbox creation
 	StaticEgress               StaticEgressRuntimeConfig
-	ThreadRuntimes             ThreadRuntimeStore // optional — records per-thread live runtime ownership
-	ThreadInbox                ThreadInboxStore   // optional — durable per-thread input delivery log
+	ThreadRuntimes             ThreadRuntimeStore    // optional — records per-thread live runtime ownership
+	ThreadInbox                ThreadInboxStore      // optional — durable per-thread input delivery log
+	ActivityPhases             *ActivityPhaseService // optional — records authoritative execution phases
 	SandboxHolders             SessionSandboxHolderStore
 	Cancels                    *CancelRegistry       // optional — enables session cancellation from API
 	ThreadCancels              *ThreadCancelRegistry // optional — enables per-tab cancellation from API
@@ -1440,6 +1443,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		staticEgress:               cfg.StaticEgress,
 		threadRuntimes:             cfg.ThreadRuntimes,
 		threadInbox:                cfg.ThreadInbox,
+		activityPhases:             cfg.ActivityPhases,
 		sandboxHolders:             cfg.SandboxHolders,
 		env:                        env,
 		identityResolver:           cfg.IdentityResolver,
@@ -3425,13 +3429,35 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	// 10. Execute agent with log streaming.
 	o.honorPendingCancelRequest(ctx, run.OrgID, run.ID, log)
-	writeCtx := TranscriptWriteContext{ThreadID: primaryThreadID, TurnNumber: turnNumber}
+	var activityExecution *activityPhaseExecution
+	if primaryThreadID != nil {
+		var runtimeID, leaseToken *uuid.UUID
+		if threadRuntimeCtl != nil {
+			runtimeID = &threadRuntimeCtl.runtime.ID
+			leaseToken = &threadRuntimeCtl.runtime.LeaseToken
+		}
+		activityExecution, err = newActivityPhaseExecution(
+			ctx, o.activityPhases, log, run.OrgID, run.ID, *primaryThreadID,
+			turnNumber, runtimeID, leaseToken,
+			models.ActivityPhaseTrigger{Kind: models.ActivityPhaseTriggerInitial},
+		)
+		if err != nil {
+			o.failRun(ctx, run, fmt.Sprintf("start activity phase: %s", err))
+			return fmt.Errorf("start activity phase: %w", err)
+		}
+		if activityExecution != nil {
+			o.activeActivityPhases.Store(*primaryThreadID, activityExecution)
+			defer o.activeActivityPhases.Delete(*primaryThreadID)
+		}
+	}
+	writeCtx := TranscriptWriteContext{ThreadID: primaryThreadID, TurnNumber: turnNumber, ActivityPhase: activityExecution}
 	logCh := make(chan LogEntry, 100)
 	var logWg sync.WaitGroup
+	logErrCh := make(chan error, 1)
 	logWg.Add(1)
 	go func() {
 		defer logWg.Done()
-		o.streamLogs(ctx, run.ID, run.OrgID, run.AgentType, writeCtx, logCh, runtimeTracker)
+		logErrCh <- o.streamLogs(ctx, run.ID, run.OrgID, run.AgentType, writeCtx, logCh, runtimeTracker)
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
@@ -3456,6 +3482,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	result, err := adapter.Execute(execCtx, sandbox, prompt, logCh)
 	close(logCh)
 	logWg.Wait()
+	streamErr := <-logErrCh
 
 	// 10b. Retry once on token expiration for Codex agents.
 	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, run.ID, writeCtx, sandbox, adapter, execCtx, prompt, result, err, log)
@@ -3465,6 +3492,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// No-ops cleanly for agent types whose auth flows do not pass through
 	// the unified resolver (e.g. Codex subscription via codexauth.Service).
 	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, run, writeCtx, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, false, log)
+	err = errors.Join(err, streamErr)
 	if _, harvestErr := o.harvestClaudeCodeCredentials(ctx, run, sandbox, authBillingMode, log); harvestErr != nil {
 		log.Warn().
 			Err(harvestErr).
@@ -3509,7 +3537,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if wasCancelled {
 			log.Info().Msg("session cancelled by user")
 			deregisterSessionCancel()
-			o.handleCancelledSession(ctx, run, sandbox, result, run.CurrentTurn+1, log)
+			o.handleCancelledSession(ctx, run, sandbox, result, run.CurrentTurn+1, activityExecution, log)
 			logAgentRunFinished(log, run, "cancelled", runStartedAt, func(event *zerolog.Event) {
 				event.Str("stop_reason", string(models.RuntimeStopReasonUserCancel))
 			})
@@ -3518,7 +3546,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if systemStopReason == StopReasonWorkerDrain {
 			log.Info().Str("stop_reason", string(systemStopReason)).Msg("session interrupted by system stop")
 			deregisterSessionCancel()
-			o.handleSystemInterruptedSession(ctx, run, sandbox, result, fallbackStatus, systemStopReason, log)
+			o.handleSystemInterruptedSession(ctx, run, sandbox, result, fallbackStatus, systemStopReason, activityExecution, log)
 			logAgentRunFinished(log, run, "system_interrupted", runStartedAt, func(event *zerolog.Event) {
 				event.Str("stop_reason", string(stopReasonToRuntime(systemStopReason)))
 			})
@@ -3527,7 +3555,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if stopReason != StopReasonNone {
 			log.Info().Str("stop_reason", string(stopReason)).Msg("session stopped by runtime policy")
 			deregisterSessionCancel()
-			o.handlePolicyStoppedSession(ctx, run, sandbox, result, run.CurrentTurn+1, stopReason, log)
+			o.handlePolicyStoppedSession(ctx, run, sandbox, result, run.CurrentTurn+1, stopReason, activityExecution, log)
 			logAgentRunFinished(log, run, "runtime_policy_stopped", runStartedAt, func(event *zerolog.Event) {
 				event.Str("stop_reason", string(stopReason))
 			})
@@ -3535,12 +3563,14 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			elapsed := time.Since(runStartedAt).Round(time.Second)
-			o.failTimedOutSession(run, elapsed, 0, err, log)
+			o.failTimedOutSession(run, elapsed, 0, err, log, activityExecution)
 			return fmt.Errorf("%w after %s: %w", ErrSessionTimedOut, elapsed, err)
 		}
 		failureAlreadyRecorded := isRunFailureRecorded(err)
 		if !failureAlreadyRecorded {
-			o.failRun(ctx, run, err.Error())
+			o.failRunWithResultAndActivityPhase(ctx, run, &models.SessionResult{Error: strPtr(err.Error())}, err.Error(), activityExecution)
+		} else {
+			completeActivityPhaseDetached(activityExecution, models.ActivityPhaseStatusFailed, models.ActivityPhaseBoundaryError, log)
 		}
 		logAgentRunFailed(log, run, err, "failed", runStartedAt, nil)
 		if !failureAlreadyRecorded {
@@ -3558,7 +3588,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if wasCancelled {
 		log.Info().Msg("agent exited after cancel, snapshotting and returning to idle")
 		deregisterSessionCancel()
-		o.handleCancelledSession(ctx, run, sandbox, result, run.CurrentTurn+1, log)
+		o.handleCancelledSession(ctx, run, sandbox, result, run.CurrentTurn+1, activityExecution, log)
 		logAgentRunFinished(log, run, "cancelled", runStartedAt, func(event *zerolog.Event) {
 			event.Str("stop_reason", string(models.RuntimeStopReasonUserCancel))
 		})
@@ -3567,7 +3597,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if systemStopReason == StopReasonWorkerDrain {
 		log.Info().Str("stop_reason", string(systemStopReason)).Msg("agent exited after system stop")
 		deregisterSessionCancel()
-		o.handleSystemInterruptedSession(ctx, run, sandbox, result, fallbackStatus, systemStopReason, log)
+		o.handleSystemInterruptedSession(ctx, run, sandbox, result, fallbackStatus, systemStopReason, activityExecution, log)
 		logAgentRunFinished(log, run, "system_interrupted", runStartedAt, func(event *zerolog.Event) {
 			event.Str("stop_reason", string(stopReasonToRuntime(systemStopReason)))
 		})
@@ -3576,7 +3606,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if stopReason != StopReasonNone {
 		log.Info().Str("stop_reason", string(stopReason)).Msg("agent exited after runtime policy stop")
 		deregisterSessionCancel()
-		o.handlePolicyStoppedSession(ctx, run, sandbox, result, run.CurrentTurn+1, stopReason, log)
+		o.handlePolicyStoppedSession(ctx, run, sandbox, result, run.CurrentTurn+1, stopReason, activityExecution, log)
 		logAgentRunFinished(log, run, "runtime_policy_stopped", runStartedAt, func(event *zerolog.Event) {
 			event.Str("stop_reason", string(stopReason))
 		})
@@ -3590,6 +3620,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			})
 			return err
 		}
+		completeActivityPhaseDetached(activityExecution, models.ActivityPhaseStatusCompleted, models.ActivityPhaseBoundaryHumanInput, log)
 		logAgentRunFinished(log, run, "awaiting_input", runStartedAt, func(event *zerolog.Event) {
 			event.Str("status", string(models.SessionStatusAwaitingInput))
 		})
@@ -3599,13 +3630,23 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		agentErr := errors.New(strings.TrimSpace(result.Error))
 		err = agentErr
 		runResult := o.buildRunResult(ctx, run, sandbox, result)
-		o.failRunWithResult(ctx, run, runResult, agentErr.Error())
+		o.failRunWithResultAndActivityPhase(ctx, run, runResult, agentErr.Error(), activityExecution)
 		logAgentRunFailed(log, run, agentErr, "failed", runStartedAt, nil)
 		o.enqueueJob(ctx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
 			"session_id": run.ID.String(),
 			"org_id":     run.OrgID.String(),
 		})
 		return fmt.Errorf("execute agent: %w", agentErr)
+	}
+	if result != nil {
+		if err := o.createAssistantMessage(ctx, run.ID, run.OrgID, writeCtx.withTurn(run.CurrentTurn+1), result); err != nil {
+			if activityExecution != nil {
+				err = fmt.Errorf("persist final assistant response: %w", err)
+				o.failRunWithResultAndActivityPhase(ctx, run, &models.SessionResult{Error: strPtr(err.Error())}, err.Error(), activityExecution)
+				return err
+			}
+			log.Warn().Err(err).Msg("failed to persist assistant message for interactive turn")
+		}
 	}
 
 	// 11b. Snapshot workspace for multi-turn support (does not change session status).
@@ -3632,10 +3673,6 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	if isInteractive {
 		turnNumber := run.CurrentTurn + 1
-		if err := o.createAssistantMessage(ctx, run.ID, run.OrgID, writeCtx.withTurn(turnNumber), result); err != nil {
-			log.Warn().Err(err).Msg("failed to persist assistant message for interactive turn")
-		}
-
 		agentSessionID := result.AgentSessionID
 		if agentSessionID == "" && run.AgentSessionID != nil {
 			agentSessionID = *run.AgentSessionID
@@ -5090,13 +5127,60 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 
 	// 6. Execute agent with log streaming.
-	writeCtx := TranscriptWriteContext{ThreadID: threadID, TurnNumber: messageTurnNumber}
+	var activityExecution *activityPhaseExecution
+	if threadID != nil {
+		var runtimeID, leaseToken *uuid.UUID
+		trigger := models.ActivityPhaseTrigger{Kind: models.ActivityPhaseTriggerRecovery}
+		if threadRuntimeCtl != nil {
+			runtimeID = &threadRuntimeCtl.runtime.ID
+			leaseToken = &threadRuntimeCtl.runtime.LeaseToken
+			if o.activityPhases != nil && o.threadInbox != nil && len(threadRuntimeCtl.seedMessageIDs) > 0 {
+				sequenceEnd, deliveryErr := o.threadInbox.MarkDeliveredForSeedMessages(
+					ctx, session.OrgID, *threadID, threadRuntimeCtl.runtime.ID, threadRuntimeCtl.seedMessageIDs,
+				)
+				if deliveryErr != nil {
+					return fmt.Errorf("mark resumed seed inbox batch delivered: %w", deliveryErr)
+				}
+				if sequenceEnd > 0 {
+					batch, ackErr := o.activityPhases.AcknowledgeInboxBatch(
+						ctx, session.OrgID, session.ID, *threadID,
+						threadRuntimeCtl.runtime.ID, threadRuntimeCtl.runtime.LeaseToken,
+						nil, sequenceEnd,
+					)
+					if ackErr != nil {
+						return fmt.Errorf("acknowledge resumed seed inbox batch: %w", ackErr)
+					}
+					trigger = models.ActivityPhaseTrigger{Kind: models.ActivityPhaseTriggerInboxBatch, BatchID: &batch.ID}
+					threadRuntimeCtl.seedMessageIDs = nil
+				}
+			}
+		}
+		activityExecution, err = newActivityPhaseExecution(
+			ctx, o.activityPhases, log, session.OrgID, session.ID, *threadID,
+			messageTurnNumber, runtimeID, leaseToken,
+			trigger,
+		)
+		if err != nil {
+			o.failRun(ctx, session, fmt.Sprintf("start activity phase for resume: %s", err))
+			return fmt.Errorf("start activity phase for resume: %w", err)
+		}
+		if activityExecution != nil {
+			o.activeActivityPhases.Store(*threadID, activityExecution)
+			defer o.activeActivityPhases.Delete(*threadID)
+		}
+	}
+	finalBoundaryReason := models.ActivityPhaseBoundaryFinalResponse
+	if planMode {
+		finalBoundaryReason = models.ActivityPhaseBoundaryPlanApproval
+	}
+	writeCtx := TranscriptWriteContext{ThreadID: threadID, TurnNumber: messageTurnNumber, ActivityPhase: activityExecution, FinalBoundaryReason: finalBoundaryReason}
 	logCh := make(chan LogEntry, 100)
 	var logWg sync.WaitGroup
+	logErrCh := make(chan error, 1)
 	logWg.Add(1)
 	go func() {
 		defer logWg.Done()
-		o.streamLogs(ctx, session.ID, session.OrgID, session.AgentType, writeCtx, logCh, runtimeTracker)
+		logErrCh <- o.streamLogs(ctx, session.ID, session.OrgID, session.AgentType, writeCtx, logCh, runtimeTracker)
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
@@ -5150,6 +5234,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	close(logCh)
 	logWg.Wait()
+	streamErr := <-logErrCh
 
 	// 6b. Retry once on token expiration for Codex agents.
 	result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, writeCtx, sandbox, adapter, execCtx, prompt, result, err, log)
@@ -5158,6 +5243,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// rate-limit or auth-rejected signals. Same semantics as the entry-turn
 	// path above; see shedOnRunResult.
 	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, session, writeCtx, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, true, log)
+	err = errors.Join(err, streamErr)
 	if _, harvestErr := o.harvestClaudeCodeCredentials(ctx, session, sandbox, authBillingMode, log); harvestErr != nil {
 		log.Warn().
 			Err(harvestErr).
@@ -5181,29 +5267,31 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if wasCancelled {
 			log.Info().Msg("session cancelled by user during continue")
 			deregisterSessionCancel()
-			o.handleCancelledSession(ctx, session, sandbox, result, messageTurnNumber, log)
+			o.handleCancelledSession(ctx, session, sandbox, result, messageTurnNumber, activityExecution, log)
 			drainAfterRelease = true
 			return fmt.Errorf("%w: %w", ErrSessionCancelled, ctx.Err())
 		}
 		if systemStopReason == StopReasonWorkerDrain {
 			log.Info().Str("stop_reason", string(systemStopReason)).Msg("session interrupted by system stop during continue")
 			deregisterSessionCancel()
-			o.handleSystemInterruptedSession(ctx, session, sandbox, result, fallbackStatus, systemStopReason, log)
+			o.handleSystemInterruptedSession(ctx, session, sandbox, result, fallbackStatus, systemStopReason, activityExecution, log)
 			return fmt.Errorf("%w: %w", ErrSessionInterrupted, err)
 		}
 		if stopReason != StopReasonNone {
 			log.Info().Str("stop_reason", string(stopReason)).Msg("session stopped by runtime policy during continue")
 			deregisterSessionCancel()
-			o.handlePolicyStoppedSession(ctx, session, sandbox, result, messageTurnNumber, stopReason, log)
+			o.handlePolicyStoppedSession(ctx, session, sandbox, result, messageTurnNumber, stopReason, activityExecution, log)
 			return nil
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			elapsed := time.Since(turnStartedAt).Round(time.Second)
-			o.failTimedOutSession(session, elapsed, messageTurnNumber, err, log)
+			o.failTimedOutSession(session, elapsed, messageTurnNumber, err, log, activityExecution)
 			return fmt.Errorf("%w on turn %d after %s: %w", ErrSessionTimedOut, messageTurnNumber, elapsed, err)
 		}
 		if !isRunFailureRecorded(err) {
-			o.failRun(ctx, session, err.Error())
+			o.failRunWithResultAndActivityPhase(ctx, session, &models.SessionResult{Error: strPtr(err.Error())}, err.Error(), activityExecution)
+		} else {
+			completeActivityPhaseDetached(activityExecution, models.ActivityPhaseStatusFailed, models.ActivityPhaseBoundaryError, log)
 		}
 		return fmt.Errorf("execute agent on continue: %w", err)
 	}
@@ -5212,20 +5300,20 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if wasCancelled {
 		log.Info().Msg("agent exited after cancel during continue, returning to idle")
 		deregisterSessionCancel()
-		o.handleCancelledSession(ctx, session, sandbox, result, messageTurnNumber, log)
+		o.handleCancelledSession(ctx, session, sandbox, result, messageTurnNumber, activityExecution, log)
 		drainAfterRelease = true
 		return nil
 	}
 	if systemStopReason == StopReasonWorkerDrain {
 		log.Info().Str("stop_reason", string(systemStopReason)).Msg("agent exited after system stop during continue")
 		deregisterSessionCancel()
-		o.handleSystemInterruptedSession(ctx, session, sandbox, result, fallbackStatus, systemStopReason, log)
+		o.handleSystemInterruptedSession(ctx, session, sandbox, result, fallbackStatus, systemStopReason, activityExecution, log)
 		return ErrSessionInterrupted
 	}
 	if stopReason != StopReasonNone {
 		log.Info().Str("stop_reason", string(stopReason)).Msg("agent exited after runtime policy stop during continue")
 		deregisterSessionCancel()
-		o.handlePolicyStoppedSession(ctx, session, sandbox, result, messageTurnNumber, stopReason, log)
+		o.handlePolicyStoppedSession(ctx, session, sandbox, result, messageTurnNumber, stopReason, activityExecution, log)
 		return nil
 	}
 	if result != nil && result.RequiresHumanInput {
@@ -5233,6 +5321,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if err := o.handleHumanInputPause(ctx, session, sandbox, result, messageTurnNumber, threadID, log); err != nil {
 			return err
 		}
+		completeActivityPhaseDetached(activityExecution, models.ActivityPhaseStatusCompleted, models.ActivityPhaseBoundaryHumanInput, log)
 		return nil
 	}
 	if readOnlyReviewThread != nil {
@@ -5248,13 +5337,18 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		agentErr := errors.New(strings.TrimSpace(result.Error))
 		err = agentErr
 		runResult := o.buildRunResult(ctx, session, sandbox, result)
-		o.failRunWithResult(ctx, session, runResult, agentErr.Error())
+		o.failRunWithResultAndActivityPhase(ctx, session, runResult, agentErr.Error(), activityExecution)
 		o.failNonPrimaryThreadWithResult(ctx, session, threadID, runResult, log)
 		return fmt.Errorf("execute agent on continue: %w", agentErr)
 	}
 
 	// 7. Create assistant message with result summary.
 	if err := o.createAssistantMessage(ctx, session.ID, session.OrgID, writeCtx, result); err != nil {
+		if activityExecution != nil {
+			err = fmt.Errorf("persist final assistant response: %w", err)
+			o.failRunWithResultAndActivityPhase(ctx, session, &models.SessionResult{Error: strPtr(err.Error())}, err.Error(), activityExecution)
+			return err
+		}
 		log.Warn().Err(err).Msg("failed to create assistant message")
 	}
 	if opts != nil && opts.ResultAgentSessionID != nil {
@@ -6060,9 +6154,11 @@ func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID uuid.UUID, ex
 // TranscriptWriteContext carries the durable execution identity shared by all
 // transcript writers for one provider invocation.
 type TranscriptWriteContext struct {
-	ThreadID        *uuid.UUID
-	TurnNumber      int
-	ActivityPhaseID *uuid.UUID
+	ThreadID            *uuid.UUID
+	TurnNumber          int
+	ActivityPhaseID     *uuid.UUID
+	ActivityPhase       *activityPhaseExecution
+	FinalBoundaryReason models.ActivityPhaseBoundaryReason
 }
 
 // withTurn rescopes the context to a different turn. A phase belongs to exactly
@@ -6072,6 +6168,7 @@ type TranscriptWriteContext struct {
 func (c TranscriptWriteContext) withTurn(turnNumber int) TranscriptWriteContext {
 	if turnNumber != c.TurnNumber {
 		c.ActivityPhaseID = nil
+		c.ActivityPhase = nil
 	}
 	c.TurnNumber = turnNumber
 	return c
@@ -6085,6 +6182,9 @@ func (c TranscriptWriteContext) phaseAssociation() *uuid.UUID {
 	if c.ThreadID == nil {
 		return nil
 	}
+	if c.ActivityPhase != nil {
+		return c.ActivityPhase.phaseID()
+	}
 	return c.ActivityPhaseID
 }
 
@@ -6096,6 +6196,7 @@ func (c TranscriptWriteContext) phaseAssociation() *uuid.UUID {
 func (c TranscriptWriteContext) forThread(threadID *uuid.UUID) TranscriptWriteContext {
 	if threadID == nil || c.ThreadID == nil || *threadID != *c.ThreadID {
 		c.ActivityPhaseID = nil
+		c.ActivityPhase = nil
 	}
 	c.ThreadID = threadID
 	return c
@@ -6103,7 +6204,8 @@ func (c TranscriptWriteContext) forThread(threadID *uuid.UUID) TranscriptWriteCo
 
 // streamLogs reads LogEntry values from the channel and persists them to the DB.
 // It also normalizes structured or legacy human-input prompts into durable pause records.
-func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, agentType models.AgentType, writeCtx TranscriptWriteContext, logCh <-chan LogEntry, tracker *runtimeProgressTracker) {
+func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, agentType models.AgentType, writeCtx TranscriptWriteContext, logCh <-chan LogEntry, tracker *runtimeProgressTracker) error {
+	var firstErr error
 	for entry := range logCh {
 		if tracker != nil {
 			if progressType, strength, toolID, ok := runtimeProgressFromLog(entry); ok {
@@ -6118,13 +6220,21 @@ func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, a
 
 		var humanInputRecord *models.HumanInputRequest
 		if entry.HumanInput != nil {
-			humanInputRecord = o.handleHumanInputRequest(ctx, runID, orgID, agentType, entryCtx, entry.HumanInput)
+			var err error
+			humanInputRecord, err = o.handleHumanInputRequest(ctx, runID, orgID, agentType, entryCtx, entry.HumanInput)
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
 		} else if entry.Level == "question" {
 			req := humanInputRequestFromQuestionLog(entry)
 			entry.HumanInput = &req
 			entry.Level = "human_input"
 			entry.Message = req.Body
-			humanInputRecord = o.handleHumanInputRequest(ctx, runID, orgID, agentType, entryCtx, &req)
+			var err error
+			humanInputRecord, err = o.handleHumanInputRequest(ctx, runID, orgID, agentType, entryCtx, &req)
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
 		if humanInputRecord != nil {
 			annotateHumanInputLogMetadata(&entry, humanInputRecord)
@@ -6140,6 +6250,13 @@ func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, a
 			}
 		}
 
+		// A human-input boundary closes the phase as it persists the request, so
+		// the prompt's own log must stay attached to the phase it ended rather
+		// than falling through to the now-cleared association.
+		activityPhaseID := entryCtx.phaseAssociation()
+		if humanInputRecord != nil && humanInputRecord.ActivityPhaseID != nil {
+			activityPhaseID = humanInputRecord.ActivityPhaseID
+		}
 		log := &models.SessionLog{
 			SessionID:       runID,
 			OrgID:           orgID,
@@ -6148,12 +6265,13 @@ func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, a
 			Message:         entry.Message,
 			Metadata:        metadata,
 			TurnNumber:      entryCtx.TurnNumber,
-			ActivityPhaseID: entryCtx.phaseAssociation(),
+			ActivityPhaseID: activityPhaseID,
 		}
 		if err := o.agentRunLogs.Create(ctx, log); err != nil {
 			o.logger.Error().Err(err).Str("run_id", runID.String()).Msg("failed to persist log entry")
 		}
 	}
+	return firstErr
 }
 
 func (o *Orchestrator) handleHumanInputRequest(
@@ -6162,9 +6280,9 @@ func (o *Orchestrator) handleHumanInputRequest(
 	agentType models.AgentType,
 	writeCtx TranscriptWriteContext,
 	req *HumanInputRequest,
-) *models.HumanInputRequest {
+) (*models.HumanInputRequest, error) {
 	if req == nil {
-		return nil
+		return nil, nil
 	}
 	title := strings.TrimSpace(req.Title)
 	if title == "" {
@@ -6175,8 +6293,12 @@ func (o *Orchestrator) handleHumanInputRequest(
 		body = "The agent is waiting for human input."
 	}
 
+	if o.humanInputRequests == nil {
+		return nil, errors.New("persist human input request: store is unavailable")
+	}
+
 	var created *models.HumanInputRequest
-	if o.humanInputRequests != nil {
+	{
 		var providerRequestID *string
 		if strings.TrimSpace(req.ProviderRequestID) != "" {
 			value := strings.TrimSpace(req.ProviderRequestID)
@@ -6203,8 +6325,19 @@ func (o *Orchestrator) handleHumanInputRequest(
 		if record.Kind == "" {
 			record.Kind = models.HumanInputRequestKindFreeText
 		}
-		if err := o.humanInputRequests.Create(ctx, record); err != nil {
+		reason := models.ActivityPhaseBoundaryHumanInput
+		if record.Kind == models.HumanInputRequestKindToolApproval {
+			reason = models.ActivityPhaseBoundaryApproval
+		}
+		var err error
+		if record.ActivityPhaseID != nil && writeCtx.ActivityPhase != nil {
+			err = writeCtx.ActivityPhase.persistHumanInputAndComplete(ctx, record, reason)
+		} else {
+			err = o.humanInputRequests.Create(ctx, record)
+		}
+		if err != nil {
 			o.logger.Error().Err(err).Str("session_id", sessionID.String()).Msg("failed to create human input request")
+			return nil, fmt.Errorf("persist human input request: %w", err)
 		} else {
 			created = record
 		}
@@ -6229,7 +6362,7 @@ func (o *Orchestrator) handleHumanInputRequest(
 		}
 	}
 
-	return created
+	return created, nil
 }
 
 func humanInputRequestFromQuestionLog(entry LogEntry) HumanInputRequest {
@@ -6424,6 +6557,14 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 }
 
 func (o *Orchestrator) failRunWithResult(ctx context.Context, run *models.Session, result *models.SessionResult, errMsg string) {
+	o.failRunWithResultAndActivityPhase(ctx, run, result, errMsg, nil)
+}
+
+func (o *Orchestrator) failRunWithResultAndActivityPhase(ctx context.Context, run *models.Session, result *models.SessionResult, errMsg string, activityExecution *activityPhaseExecution) {
+	o.failRunWithResultAndPhaseTerminal(ctx, run, result, errMsg, activityExecution, models.ActivityPhaseStatusFailed, models.ActivityPhaseBoundaryError)
+}
+
+func (o *Orchestrator) failRunWithResultAndPhaseTerminal(ctx context.Context, run *models.Session, result *models.SessionResult, errMsg string, activityExecution *activityPhaseExecution, phaseStatus models.ActivityPhaseStatus, reason models.ActivityPhaseBoundaryReason) {
 	if result == nil {
 		result = &models.SessionResult{}
 	}
@@ -6439,8 +6580,15 @@ func (o *Orchestrator) failRunWithResult(ctx context.Context, run *models.Sessio
 	// until the reaper sweeps it (~2.5h later). updatePrimaryThreadTerminal also
 	// publishes a thread-runtime SSE event so any open page flips immediately.
 	o.updatePrimaryThreadTerminal(ctx, run, models.ThreadStatusFailed, result, o.logger)
-	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, models.SessionStatusFailed, result); err != nil {
+	var err error
+	if activityExecution != nil {
+		err = activityExecution.persistSessionResultAndComplete(ctx, o.sessions, models.SessionStatusFailed, result, phaseStatus, reason)
+	} else {
+		err = o.sessions.UpdateResult(ctx, run.OrgID, run.ID, models.SessionStatusFailed, result)
+	}
+	if err != nil {
 		o.logger.Error().Err(err).Str("run_id", run.ID.String()).Msg("failed to update run to failed")
+		return
 	}
 	if run.ProjectTaskID != nil && o.projectTasks != nil {
 		if err := o.projectTasks.OnSessionComplete(ctx, run, "failed"); err != nil {
@@ -6528,6 +6676,10 @@ func (o *Orchestrator) failRunWithCategory(ctx context.Context, run *models.Sess
 // tabs are non-primary threads, so session-level failure bookkeeping alone does
 // not give their per-tab UI enough information to explain the failure.
 func (o *Orchestrator) failRunWithCategoryForThread(ctx context.Context, run *models.Session, threadID *uuid.UUID, errMsg, category, explanation string, nextSteps []string) {
+	o.failRunWithCategoryForThreadAndActivityPhase(ctx, run, threadID, errMsg, category, explanation, nextSteps, nil)
+}
+
+func (o *Orchestrator) failRunWithCategoryForThreadAndActivityPhase(ctx context.Context, run *models.Session, threadID *uuid.UUID, errMsg, category, explanation string, nextSteps []string, activityExecution *activityPhaseExecution) {
 	result := &models.SessionResult{
 		Error:               strPtr(errMsg),
 		FailureExplanation:  strPtr(explanation),
@@ -6539,7 +6691,7 @@ func (o *Orchestrator) failRunWithCategoryForThread(ctx context.Context, run *mo
 	// the primary thread before atomically writing and publishing the fully
 	// structured terminal session result.
 	o.failNonPrimaryThreadWithResult(ctx, run, threadID, result, o.logger)
-	o.failRunWithResult(ctx, run, result, errMsg)
+	o.failRunWithResultAndActivityPhase(ctx, run, result, errMsg, activityExecution)
 }
 
 // failTimedOutSession handles the common bookkeeping for a session that hit
@@ -6556,7 +6708,7 @@ func (o *Orchestrator) failRunWithCategoryForThread(ctx context.Context, run *mo
 // retryAdvised is hard-coded true inside failRunWithCategory; the default
 // fits the "transient slowness" case and we accept the small false-positive
 // rate where a session is structurally too large to ever fit.
-func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Duration, turnNumber int, underlyingErr error, log zerolog.Logger) {
+func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Duration, turnNumber int, underlyingErr error, log zerolog.Logger, activityExecution *activityPhaseExecution) {
 	// Single canonical log per timeout: includes the canonical message that
 	// SessionTimeoutBurst alerts key off, plus the platform-health fields
 	// (agent_type, outcome, duration_ms) that the platform-health dashboard
@@ -6595,7 +6747,7 @@ func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Dur
 		errMsg = fmt.Sprintf("Session timed out %s. Raise max_session_duration_seconds in org settings or split the task into smaller sub-tasks.", elapsedDesc)
 		explanation = "The session hit its configured wall-clock limit before the agent could finish. Any work committed inside the sandbox during this run was discarded — no snapshot was taken."
 	}
-	o.failRunWithCategory(cleanupCtx, run,
+	o.failRunWithCategoryForThreadAndActivityPhase(cleanupCtx, run, nil,
 		errMsg,
 		FailureCategoryTimeout,
 		explanation,
@@ -6604,6 +6756,7 @@ func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Dur
 			"Split the task into smaller sub-tasks so each fits inside the limit",
 			"Retry the session — transient slowness (LLM latency, git clone) may have pushed the run over the edge",
 		},
+		activityExecution,
 	)
 	// failRun (via failRunWithCategory) terminalizes the primary thread.
 }
@@ -7659,7 +7812,7 @@ func (o *Orchestrator) BuildIntegrationSkills(ctx context.Context, orgID uuid.UU
 // both RunAgent and ContinueSession to avoid duplication.
 //
 // result may be nil (e.g. when the agent was force-killed and returned an error).
-func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, turnNumber int, log zerolog.Logger) {
+func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, turnNumber int, activityExecution *activityPhaseExecution, log zerolog.Logger) {
 	bgCtx := context.Background()
 	lockToken, _ := jobctx.LockTokenFromContext(ctx)
 
@@ -7686,9 +7839,23 @@ func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *mode
 			log.Warn().Err(err).Msg("failed to publish cancelled-session checkpoint metadata")
 		}
 		o.warmMentionIndexFromSandboxAsync(bgCtx, session, sandbox, snapshotKey, log)
-		if err := o.sessions.UpdateTurnComplete(bgCtx, session.OrgID, session.ID, turnNumber, nil, agentSessionID, snapshotKey); err != nil {
+		var updateErr error
+		if activityExecution != nil {
+			updateErr = activityExecution.persistTurnCompleteAndComplete(bgCtx, o.sessions, turnNumber, nil, agentSessionID, snapshotKey, models.ActivityPhaseStatusCancelled, models.ActivityPhaseBoundaryCancelled)
+		} else {
+			updateErr = o.sessions.UpdateTurnComplete(bgCtx, session.OrgID, session.ID, turnNumber, nil, agentSessionID, snapshotKey)
+		}
+		if updateErr != nil {
+			err := updateErr
 			log.Warn().Err(err).Msg("failed to return cancelled session to idle")
-			_ = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, models.SessionStatusCancelled)
+			if activityExecution != nil {
+				err = activityExecution.persistSessionStatusAndComplete(bgCtx, o.sessions, models.SessionStatusCancelled, models.ActivityPhaseStatusCancelled, models.ActivityPhaseBoundaryCancelled)
+			} else {
+				err = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, models.SessionStatusCancelled)
+			}
+			if err != nil {
+				log.Error().Err(err).Msg("failed to terminalize cancelled session after idle transition failure")
+			}
 			o.updatePrimaryThreadTerminal(bgCtx, session, models.ThreadStatusCancelled, nil, log)
 		} else {
 			log.Info().Int("turn", turnNumber).Msg("cancelled session returned to idle")
@@ -7699,7 +7866,15 @@ func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *mode
 			}
 		}
 	} else {
-		_ = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, models.SessionStatusCancelled)
+		var err error
+		if activityExecution != nil {
+			err = activityExecution.persistSessionStatusAndComplete(bgCtx, o.sessions, models.SessionStatusCancelled, models.ActivityPhaseStatusCancelled, models.ActivityPhaseBoundaryCancelled)
+		} else {
+			err = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, models.SessionStatusCancelled)
+		}
+		if err != nil {
+			log.Error().Err(err).Msg("failed to terminalize cancelled session")
+		}
 		o.updatePrimaryThreadTerminal(bgCtx, session, models.ThreadStatusCancelled, nil, log)
 	}
 }
@@ -7708,7 +7883,7 @@ func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *mode
 // restores the pre-turn status without advancing current_turn. Unlike user
 // cancellation, this path is recoverable: the worker returns a retryable error
 // so the same accepted turn can run again.
-func (o *Orchestrator) handleSystemInterruptedSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, fallbackStatus models.SessionStatus, reason StopReason, log zerolog.Logger) {
+func (o *Orchestrator) handleSystemInterruptedSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, fallbackStatus models.SessionStatus, reason StopReason, activityExecution *activityPhaseExecution, log zerolog.Logger) {
 	bgCtx := context.Background()
 	lockToken, _ := jobctx.LockTokenFromContext(ctx)
 	runtimeReason := stopReasonToRuntime(reason)
@@ -7747,7 +7922,14 @@ func (o *Orchestrator) handleSystemInterruptedSession(ctx context.Context, sessi
 		o.warmMentionIndexFromSandboxAsync(bgCtx, session, sandbox, snapshotKey, log)
 	}
 
-	if err := o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, fallbackStatus); err != nil {
+	var statusErr error
+	if activityExecution != nil {
+		statusErr = activityExecution.persistSessionStatusAndComplete(bgCtx, o.sessions, fallbackStatus, models.ActivityPhaseStatusInterrupted, models.ActivityPhaseBoundaryMaintenance)
+	} else {
+		statusErr = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, fallbackStatus)
+	}
+	if statusErr != nil {
+		err := statusErr
 		log.Warn().Err(err).Str("status", string(fallbackStatus)).Msg("failed to restore session status after system interruption")
 	}
 	// Surface the interruption at the session level so the UI's recovery banner
@@ -8033,7 +8215,7 @@ func truncateForLog(s string, max int) string {
 	return s[:cut] + "…"
 }
 
-func (o *Orchestrator) handlePolicyStoppedSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, turnNumber int, reason StopReason, log zerolog.Logger) {
+func (o *Orchestrator) handlePolicyStoppedSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, turnNumber int, reason StopReason, activityExecution *activityPhaseExecution, log zerolog.Logger) {
 	checkpointCtx, checkpointCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer checkpointCancel()
 
@@ -8061,7 +8243,14 @@ func (o *Orchestrator) handlePolicyStoppedSession(ctx context.Context, session *
 	errMsg, explanation, nextSteps := gracefulStopFailure(reason, snapshotKey != "", session.SnapshotKey != nil && *session.SnapshotKey != "")
 	terminalCtx, terminalCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer terminalCancel()
-	o.failRunWithCategory(terminalCtx, session, errMsg, FailureCategoryTimeout, explanation, nextSteps)
+	terminalResult := &models.SessionResult{
+		Error:               strPtr(errMsg),
+		FailureExplanation:  strPtr(explanation),
+		FailureCategory:     strPtr(FailureCategoryTimeout),
+		FailureNextSteps:    append([]string(nil), nextSteps...),
+		FailureRetryAdvised: true,
+	}
+	o.failRunWithResultAndPhaseTerminal(terminalCtx, session, terminalResult, errMsg, activityExecution, models.ActivityPhaseStatusCancelled, models.ActivityPhaseBoundaryStopped)
 	// failRun (via failRunWithCategory) terminalizes the primary thread.
 
 	if snapshotKey != "" {
@@ -8122,8 +8311,18 @@ func (o *Orchestrator) createAssistantMessage(ctx context.Context, sessionID, or
 		}
 		assistantMsg.TokenUsage = tokenJSON
 	}
-	if err := o.sessionMessages.Create(ctx, assistantMsg); err != nil {
-		return err
+	if assistantMsg.ActivityPhaseID != nil && writeCtx.ActivityPhase != nil {
+		reason := writeCtx.FinalBoundaryReason
+		if reason == "" {
+			reason = models.ActivityPhaseBoundaryFinalResponse
+		}
+		if err := writeCtx.ActivityPhase.persistAssistantAndComplete(ctx, assistantMsg, reason); err != nil {
+			return err
+		}
+	} else {
+		if err := o.sessionMessages.Create(ctx, assistantMsg); err != nil {
+			return err
+		}
 	}
 	if marker, ok := o.agentRunLogs.(interface {
 		MarkAssistantTranscriptDuplicate(ctx context.Context, orgID, sessionID uuid.UUID, threadID *uuid.UUID, turnNumber int, message string) error
@@ -8457,15 +8656,17 @@ func (o *Orchestrator) retryOnTokenExpired(
 
 	retryLogCh := make(chan LogEntry, 100)
 	var retryLogWg sync.WaitGroup
+	retryLogErrCh := make(chan error, 1)
 	retryLogWg.Add(1)
 	go func() {
 		defer retryLogWg.Done()
-		o.streamLogs(ctx, sessionID, orgID, agentType, writeCtx, retryLogCh, nil)
+		retryLogErrCh <- o.streamLogs(ctx, sessionID, orgID, agentType, writeCtx, retryLogCh, nil)
 	}()
 
 	result, err = adapter.Execute(execCtx, sandbox, prompt, retryLogCh)
 	close(retryLogCh)
 	retryLogWg.Wait()
+	err = errors.Join(err, <-retryLogErrCh)
 
 	log.Info().Msg("codex CLI retry after token refresh completed")
 	return result, err
@@ -8514,14 +8715,16 @@ func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 
 	retryLogCh := make(chan LogEntry, 100)
 	var retryLogWg sync.WaitGroup
+	retryLogErrCh := make(chan error, 1)
 	retryLogWg.Add(1)
 	go func() {
 		defer retryLogWg.Done()
-		o.streamLogs(ctx, session.ID, session.OrgID, session.AgentType, writeCtx, retryLogCh, nil)
+		retryLogErrCh <- o.streamLogs(ctx, session.ID, session.OrgID, session.AgentType, writeCtx, retryLogCh, nil)
 	}()
 	retryResult, retryErr := adapter.Execute(execCtx, sandbox, prompt, retryLogCh)
 	close(retryLogCh)
 	retryLogWg.Wait()
+	retryErr = errors.Join(retryErr, <-retryLogErrCh)
 
 	retryResult, retryErr = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, writeCtx, sandbox, adapter, execCtx, prompt, retryResult, retryErr, log)
 	if parseCredentialFailureSignal(retryResult, time.Now()).RateLimited {

@@ -313,7 +313,59 @@ func TestOrchestrator_DeliverThreadInboxDeadLettersInvalidPayloadAndContinues(t 
 	require.Equal(t, []deadLetterCall{{threadID: threadID, entryID: badEntryID}}, inbox.deadLetterCalls, "invalid payload should be marked dead-letter for explicit recovery")
 	require.Equal(t, []byte("second\n"), handle.StdinBuffer(), "valid entries after a dead-letter should still reach the live handle")
 	require.Equal(t, []markDeliveredEntryCall{{threadID: threadID, runtimeID: runtimeID, entryID: inbox.deliverable[1].ID, sequenceNo: 2}}, inbox.deliveredEntries, "valid entries should be marked delivered before commit")
-	require.Equal(t, []commitDeliveryCall{{runtimeID: runtimeID, leaseToken: leaseToken, threadID: threadID, delivered: 2, acked: 2}}, runtimes.commitCalls, "DeliverThreadInbox should atomically ack through successfully accepted later entries")
+	require.Equal(t, []commitDeliveryCall{
+		{runtimeID: runtimeID, leaseToken: leaseToken, threadID: threadID, delivered: 1, acked: 1},
+		{runtimeID: runtimeID, leaseToken: leaseToken, threadID: threadID, delivered: 2, acked: 2},
+	}, runtimes.commitCalls, "DeliverThreadInbox should advance past the failed entry separately before acknowledging later accepted input")
+}
+
+func TestOrchestrator_DeliverThreadInboxSplitsAcknowledgmentBatchesAtDeadLetters(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	runtimeID := uuid.New()
+	leaseToken := uuid.New()
+	firstPayload, err := json.Marshal(map[string]any{"content": "first"})
+	require.NoError(t, err, "first test payload should marshal")
+	thirdPayload, err := json.Marshal(map[string]any{"content": "third"})
+	require.NoError(t, err, "third test payload should marshal")
+
+	handle := newThreadCancelTestHandle()
+	registry := NewThreadCancelRegistry(zerolog.Nop())
+	registry.Register(threadID, func() {})
+	registry.AttachHandle(threadID, handle)
+	runtimes := &fakeThreadRuntimeStore{active: models.ThreadRuntime{
+		ID: runtimeID, OrgID: orgID, SessionID: sessionID, ThreadID: threadID,
+		AgentType: models.AgentTypeClaudeCode, Status: models.ThreadRuntimeStatusLive,
+		OwnerNodeID: "worker-a", LeaseToken: leaseToken,
+	}}
+	badEntryID := uuid.New()
+	inbox := &fakeThreadInboxStore{deliverable: []models.ThreadInboxEntry{
+		{ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ThreadID: threadID, SequenceNo: 1, MessageID: 40, EntryType: models.ThreadInboxEntryTypeUserMessage, Payload: firstPayload, DeliveryState: models.ThreadInboxDeliveryStatePending},
+		{ID: badEntryID, OrgID: orgID, SessionID: sessionID, ThreadID: threadID, SequenceNo: 2, MessageID: 41, EntryType: models.ThreadInboxEntryTypeUserMessage, Payload: json.RawMessage(`{"content":`), DeliveryState: models.ThreadInboxDeliveryStatePending},
+		{ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ThreadID: threadID, SequenceNo: 3, MessageID: 42, EntryType: models.ThreadInboxEntryTypeUserMessage, Payload: thirdPayload, DeliveryState: models.ThreadInboxDeliveryStatePending},
+	}}
+	orch := NewOrchestrator(OrchestratorConfig{
+		Adapters:       map[models.AgentType]AgentAdapter{models.AgentTypeClaudeCode: fakeThreadRuntimeInputAdapter{}},
+		ThreadCancels:  registry,
+		ThreadRuntimes: runtimes,
+		ThreadInbox:    inbox,
+		NodeID:         "worker-a",
+		Logger:         zerolog.Nop(),
+	})
+
+	err = orch.DeliverThreadInbox(context.Background(), orgID, sessionID, threadID)
+
+	require.NoError(t, err, "DeliverThreadInbox should preserve valid instructions on both sides of a dead-letter")
+	require.Equal(t, []byte("first\nthird\n"), handle.StdinBuffer(), "both valid contiguous segments should reach the provider")
+	require.Equal(t, []deadLetterCall{{threadID: threadID, entryID: badEntryID}}, inbox.deadLetterCalls, "the invalid middle entry should remain visibly dead-lettered")
+	require.Equal(t, []commitDeliveryCall{
+		{runtimeID: runtimeID, leaseToken: leaseToken, threadID: threadID, delivered: 1, acked: 1},
+		{runtimeID: runtimeID, leaseToken: leaseToken, threadID: threadID, delivered: 2, acked: 2},
+		{runtimeID: runtimeID, leaseToken: leaseToken, threadID: threadID, delivered: 3, acked: 3},
+	}, runtimes.commitCalls, "valid batches and the failed sequence should advance through distinct contiguous watermark transitions")
 }
 
 func TestOrchestrator_DeliverThreadInboxMarksWriteFailureForRetry(t *testing.T) {
@@ -816,6 +868,14 @@ func (s *fakeThreadInboxStore) MarkAckedForSeedMessages(_ context.Context, _ uui
 	copy(copied, messageIDs)
 	s.ackForMessagesCalls = append(s.ackForMessagesCalls, ackForMessagesCall{runtimeID: runtimeID, messageIDs: copied})
 	return int64(len(messageIDs)), nil
+}
+
+func (s *fakeThreadInboxStore) MarkDeliveredForSeedMessages(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID, messageIDs []int64) (int64, error) {
+	return int64(len(messageIDs)), nil
+}
+
+func (s *fakeThreadInboxStore) LastAcknowledgedSequence(context.Context, uuid.UUID, uuid.UUID) (int64, error) {
+	return 0, nil
 }
 
 func (s *fakeThreadInboxStore) MarkDeliveringForMessages(_ context.Context, _ uuid.UUID, _ uuid.UUID, runtimeID uuid.UUID, ownerNodeID string, messageIDs []int64) (int64, error) {

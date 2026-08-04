@@ -1526,6 +1526,15 @@ func (s *SessionStore) UpdateRecoveryState(ctx context.Context, orgID, sessionID
 }
 
 func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus) error {
+	session, err := s.updateStatusRow(ctx, s.db, orgID, runID, status)
+	if err != nil {
+		return err
+	}
+	s.publishStatus(ctx, &session)
+	return nil
+}
+
+func (s *SessionStore) updateStatusRow(ctx context.Context, database DBTX, orgID, runID uuid.UUID, status models.SessionStatus) (models.Session, error) {
 	query := `UPDATE sessions SET status = @status, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	if status == models.SessionStatusRunning {
 		// Clear completed_at so a resumed session doesn't display as "completed"
@@ -1537,21 +1546,20 @@ func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID,
 	} else if status == models.SessionStatusFailed || status == models.SessionStatusCancelled {
 		query = `UPDATE sessions SET status = @status, completed_at = now(), last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	}
-	rows, err := s.db.Query(ctx, query+` RETURNING `+sessionSelectColumns, pgx.NamedArgs{
+	rows, err := database.Query(ctx, query+` RETURNING `+sessionSelectColumns, pgx.NamedArgs{
 		"id":     runID,
 		"org_id": orgID,
 		"status": string(status),
 	})
 	if err != nil {
-		return err
+		return models.Session{}, err
 	}
 	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
 	if err != nil {
-		return err
+		return models.Session{}, err
 	}
 	hydrateSessionPolicy(&session)
-	s.publishStatus(ctx, &session)
-	return nil
+	return session, nil
 }
 
 func (s *SessionStore) SetRepositoryContext(ctx context.Context, orgID, sessionID, repositoryID uuid.UUID, targetBranch *string) (models.Session, error) {
@@ -1610,10 +1618,18 @@ func (s *SessionStore) UpdateInputManifest(ctx context.Context, orgID, sessionID
 // sweeper code paths — use a status-only update instead, otherwise dormant
 // sessions will resurface at the top of the MRU-ordered list.
 func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult) error {
+	if result == nil {
+		result = &models.SessionResult{}
+	}
 	diffStats := computeDiffStatsForResult(result)
 	persistDiffSnapshot := shouldPersistDiffSnapshot(result)
 	if !persistDiffSnapshot && !shouldPersistChangesetHead(result) {
-		return s.updateResultRow(ctx, s.db, orgID, runID, status, result, diffStats)
+		session, err := s.updateResultRow(ctx, s.db, orgID, runID, status, result, diffStats)
+		if err != nil {
+			return err
+		}
+		s.publishStatus(ctx, &session)
+		return nil
 	}
 
 	tx, err := s.Begin(ctx)
@@ -1622,7 +1638,8 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if err := s.updateResultRow(ctx, tx, orgID, runID, status, result, diffStats); err != nil {
+	session, err := s.updateResultRow(ctx, tx, orgID, runID, status, result, diffStats)
+	if err != nil {
 		return err
 	}
 	var updated workspaceRevisionUpdate
@@ -1635,13 +1652,100 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
+	s.publishStatus(ctx, &session)
 	if persistDiffSnapshot {
 		s.publishWorkspaceGenerationChanged(ctx, orgID, runID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
 	}
 	return nil
 }
 
-func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult, diffStats json.RawMessage) error {
+// UpdateResultAndCompleteActivityPhase atomically persists a platform-owned
+// terminal session result and closes the phase that produced it. Stream events
+// are emitted only after commit, so readers never observe half the boundary.
+func (s *SessionStore) UpdateResultAndCompleteActivityPhase(
+	ctx context.Context,
+	orgID, runID, phaseID uuid.UUID,
+	status models.SessionStatus,
+	result *models.SessionResult,
+	phaseStatus models.ActivityPhaseStatus,
+	reason models.ActivityPhaseBoundaryReason,
+	completedAt time.Time,
+) (models.SessionActivityPhase, models.Session, error) {
+	if result == nil {
+		result = &models.SessionResult{}
+	}
+	diffStats := computeDiffStatsForResult(result)
+	persistDiffSnapshot := shouldPersistDiffSnapshot(result)
+	tx, err := s.Begin(ctx)
+	if err != nil {
+		return models.SessionActivityPhase{}, models.Session{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	session, err := s.updateResultRow(ctx, tx, orgID, runID, status, result, diffStats)
+	if err != nil {
+		return models.SessionActivityPhase{}, models.Session{}, err
+	}
+	var updated workspaceRevisionUpdate
+	if persistDiffSnapshot {
+		updated, err = s.writeDiffSnapshot(ctx, tx, orgID, runID, 0, result, diffStats)
+		if err != nil {
+			return models.SessionActivityPhase{}, models.Session{}, err
+		}
+	}
+	phase, err := completeActivityPhaseInTransaction(ctx, tx, orgID, phaseID, phaseStatus, reason, completedAt)
+	if err != nil {
+		return models.SessionActivityPhase{}, models.Session{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return models.SessionActivityPhase{}, models.Session{}, err
+	}
+	if persistDiffSnapshot {
+		s.publishWorkspaceGenerationChanged(ctx, orgID, runID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
+	}
+	return phase, session, nil
+}
+
+// UpdateStatusAndCompleteActivityPhase is the status-only companion used by
+// cancellation and interruption paths after checkpoint decisions are durable.
+func (s *SessionStore) UpdateStatusAndCompleteActivityPhase(
+	ctx context.Context,
+	orgID, runID, phaseID uuid.UUID,
+	status models.SessionStatus,
+	phaseStatus models.ActivityPhaseStatus,
+	reason models.ActivityPhaseBoundaryReason,
+	completedAt time.Time,
+) (models.SessionActivityPhase, models.Session, error) {
+	tx, err := s.Begin(ctx)
+	if err != nil {
+		return models.SessionActivityPhase{}, models.Session{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	session, err := s.updateStatusRow(ctx, tx, orgID, runID, status)
+	if err != nil {
+		return models.SessionActivityPhase{}, models.Session{}, err
+	}
+	phase, err := completeActivityPhaseInTransaction(ctx, tx, orgID, phaseID, phaseStatus, reason, completedAt)
+	if err != nil {
+		return models.SessionActivityPhase{}, models.Session{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return models.SessionActivityPhase{}, models.Session{}, err
+	}
+	return phase, session, nil
+}
+
+// PublishCommittedSessionStatus emits the session side of an activity
+// boundary after the phase terminal event has been published.
+func (s *SessionStore) PublishCommittedSessionStatus(ctx context.Context, orgID uuid.UUID, session models.Session) {
+	if session.OrgID != orgID {
+		s.logger.Error().Str("org_id", orgID.String()).Str("session_org_id", session.OrgID.String()).Msg("refusing to publish activity boundary session for another organization")
+		return
+	}
+	s.publishStatus(ctx, &session)
+}
+
+func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult, diffStats json.RawMessage) (models.Session, error) {
 
 	// COALESCE on diff / diff_stats / diff_collected_at preserves the
 	// previously persisted authoritative diff when the current turn did not
@@ -1692,18 +1796,17 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 		"diff_stats":            diffStats,
 	})
 	if err != nil {
-		return err
+		return models.Session{}, err
 	}
 	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
 	if err != nil {
-		return err
+		return models.Session{}, err
 	}
 	hydrateSessionPolicy(&session)
 	if err := s.recordPrimaryChangesetHead(ctx, db, orgID, runID, result.DiffHeadCommitSHA); err != nil {
-		return err
+		return models.Session{}, err
 	}
-	s.publishStatus(ctx, &session)
-	return nil
+	return session, nil
 }
 
 func (s *SessionStore) publishStatus(ctx context.Context, session *models.Session) {
@@ -2150,6 +2253,9 @@ func (s *SessionStore) ListByIDs(ctx context.Context, orgID uuid.UUID, ids []uui
 // and updates multi-turn metadata. It also computes diff_stats and appends
 // a snapshot to diff_history for diff-between-passes review.
 func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string) error {
+	if result == nil {
+		result = &models.SessionResult{}
+	}
 	diffStats := computeDiffStatsForResult(result)
 	persistDiffSnapshot := shouldPersistDiffSnapshot(result)
 	if !persistDiffSnapshot && !shouldPersistChangesetHead(result) {
@@ -2179,6 +2285,52 @@ func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID 
 		s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
 	}
 	return nil
+}
+
+// UpdateTurnCompleteAndCompleteActivityPhase atomically returns a resumable
+// cancelled turn to idle and closes its execution phase. Checkpoint metadata is
+// persisted before this boundary; the session state and phase remain coherent.
+func (s *SessionStore) UpdateTurnCompleteAndCompleteActivityPhase(
+	ctx context.Context,
+	orgID, sessionID, phaseID uuid.UUID,
+	turn int,
+	result *models.SessionResult,
+	agentSessionID, snapshotKey string,
+	phaseStatus models.ActivityPhaseStatus,
+	reason models.ActivityPhaseBoundaryReason,
+	completedAt time.Time,
+) (models.SessionActivityPhase, error) {
+	if result == nil {
+		result = &models.SessionResult{}
+	}
+	diffStats := computeDiffStatsForResult(result)
+	persistDiffSnapshot := shouldPersistDiffSnapshot(result)
+	tx, err := s.Begin(ctx)
+	if err != nil {
+		return models.SessionActivityPhase{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := s.updateTurnCompleteRow(ctx, tx, orgID, sessionID, turn, result, agentSessionID, snapshotKey, diffStats); err != nil {
+		return models.SessionActivityPhase{}, err
+	}
+	var updated workspaceRevisionUpdate
+	if persistDiffSnapshot {
+		updated, err = s.writeDiffSnapshot(ctx, tx, orgID, sessionID, turn, result, diffStats)
+		if err != nil {
+			return models.SessionActivityPhase{}, err
+		}
+	}
+	phase, err := completeActivityPhaseInTransaction(ctx, tx, orgID, phaseID, phaseStatus, reason, completedAt)
+	if err != nil {
+		return models.SessionActivityPhase{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return models.SessionActivityPhase{}, err
+	}
+	if persistDiffSnapshot {
+		s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
+	}
+	return phase, nil
 }
 
 func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string, diffStats json.RawMessage) error {

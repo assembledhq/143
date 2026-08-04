@@ -152,7 +152,7 @@ function TimestampLabel({
   );
 }
 
-function DaySeparator({ dateStr }: { dateStr: string }) {
+export function DaySeparator({ dateStr }: { dateStr: string }) {
   const label = formatDaySeparatorLabel(dateStr);
   if (!label) return null;
   return (
@@ -166,16 +166,22 @@ function DaySeparator({ dateStr }: { dateStr: string }) {
   );
 }
 
-const ToolGroupEntry = memo(function ToolGroupEntry({ toolUse, toolResult }: { toolUse: SessionLog; toolResult?: SessionLog }) {
+const ToolGroupEntry = memo(function ToolGroupEntry({ toolUse, toolResult, onInspect }: { toolUse: SessionLog; toolResult?: SessionLog; onInspect?: () => void }) {
   const [open, setOpen] = useState(false);
   const { label } = deriveToolDisplay(toolUse);
   const inputDetail = formatToolInput(toolUse);
 
   return (
     <div className="mx-2 min-w-0">
-      <button
-        onClick={() => setOpen(!open)}
-        className="flex items-center gap-2 w-full text-left py-1.5 px-2 rounded-md hover:bg-muted/50 transition-colors text-xs group"
+      <Button
+        variant="ghost"
+        type="button"
+        onClick={() => {
+          const nextOpen = !open;
+          setOpen(nextOpen);
+          if (nextOpen) onInspect?.();
+        }}
+        className="h-auto w-full justify-start gap-2 px-2 py-1.5 text-left text-xs"
       >
         <ChevronRight className={`h-3 w-3 text-muted-foreground shrink-0 transition-transform duration-150 ${open ? "rotate-90" : ""}`} />
         <span className="text-foreground truncate min-w-0">{label}</span>
@@ -184,7 +190,7 @@ const ToolGroupEntry = memo(function ToolGroupEntry({ toolUse, toolResult }: { t
           formatter={formatTimestamp}
           className="ml-auto text-muted-foreground/60 text-xs tabular-nums shrink-0"
         />
-      </button>
+      </Button>
       {open && (
         <div className="ml-7 mt-1 mb-2 space-y-1.5 min-w-0">
           {inputDetail && (
@@ -293,16 +299,22 @@ const HiddenLogEntry = memo(function HiddenLogEntry({ log }: { log: SessionLog }
   );
 });
 
-function HiddenLogsGroup({ logs }: { logs: SessionLog[] }) {
+function HiddenLogsGroup({ logs, onInspect }: { logs: SessionLog[]; onInspect?: () => void }) {
   const [open, setOpen] = useState(false);
 
   if (logs.length === 0) return null;
 
   return (
     <div className="mx-2 min-w-0">
-      <button
-        onClick={() => setOpen(!open)}
-        className="flex items-center gap-2 w-full text-left py-1.5 px-2 rounded-md hover:bg-muted/50 transition-colors text-xs group"
+      <Button
+        type="button"
+        variant="ghost"
+        onClick={() => {
+          const nextOpen = !open;
+          setOpen(nextOpen);
+          if (nextOpen) onInspect?.();
+        }}
+        className="h-auto w-full justify-start gap-2 px-2 py-1.5 text-left text-xs"
       >
         <ChevronRight className={`h-3 w-3 text-muted-foreground shrink-0 transition-transform duration-150 ${open ? "rotate-90" : ""}`} />
         <span className="text-muted-foreground">
@@ -313,7 +325,7 @@ function HiddenLogsGroup({ logs }: { logs: SessionLog[] }) {
           formatter={formatTimestamp}
           className="ml-auto text-muted-foreground/60 text-xs tabular-nums shrink-0"
         />
-      </button>
+      </Button>
       {open && (
         <div className="ml-7 mt-1 mb-2 min-w-0 max-w-full rounded-lg bg-surface-recessed py-1 max-h-[300px] overflow-y-auto">
           {logs.map((log) => (
@@ -624,7 +636,7 @@ const CodeDiffSummary = memo(function CodeDiffSummary({
   );
 });
 
-interface ChatTimelineProps {
+export interface ChatTimelineProps {
   entries: TimelineEntry[];
   isRunning: boolean;
   // When the runtime was interrupted (worker drain / deploy) and is waiting to
@@ -643,18 +655,20 @@ interface ChatTimelineProps {
   onAnswerHumanInput?: (request: HumanInputRequest, body: HumanInputAnswerBody) => Promise<void> | void;
   onCancelHumanInput?: (request: HumanInputRequest) => Promise<void> | void;
   onDismissHumanInputAutoOpen?: (request: HumanInputRequest) => void;
+  onActivityInspect?: () => void;
+  initialDay?: string | null;
   getEntryContainerProps?: (
     entry: TimelineEntry,
     index: number,
   ) => React.HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string | number | undefined>;
 }
 
-function ChatTimelineImpl({ entries, isRunning, recoveryActive = false, stoppingLabel, stoppedLabel, diffStats, onDiffClick, onApprovePlan, onAdjustPlan, humanInputSubmittingId, autoOpenHumanInputId, humanInputAnswerable = true, onAnswerHumanInput, onCancelHumanInput, onDismissHumanInputAutoOpen, getEntryContainerProps }: ChatTimelineProps) {
+function ChatTimelineImpl({ entries, isRunning, recoveryActive = false, stoppingLabel, stoppedLabel, diffStats, onDiffClick, onApprovePlan, onAdjustPlan, humanInputSubmittingId, autoOpenHumanInputId, humanInputAnswerable = true, onAnswerHumanInput, onCancelHumanInput, onDismissHumanInputAutoOpen, onActivityInspect, initialDay = null, getEntryContainerProps }: ChatTimelineProps) {
   // Separate visible entries (messages, tool groups, errors) from hidden logs.
   // Group consecutive hidden logs together so they share a single "Show more" toggle.
   const rendered: React.ReactNode[] = [];
   let hiddenBatch: Array<{ entry: Extract<TimelineEntry, { kind: "log" }>; index: number }> = [];
-  let lastDay: string | null = null;
+  let lastDay: string | null = initialDay;
 
   function wrapEntry(node: React.ReactNode, entry: TimelineEntry, index: number, key: string) {
     const props = getEntryContainerProps?.(entry, index);
@@ -677,6 +691,7 @@ function ChatTimelineImpl({ entries, isRunning, recoveryActive = false, stopping
           <HiddenLogsGroup
             key={`hidden-${first.entry.data.id}`}
             logs={hiddenBatch.map((item) => item.entry.data)}
+            onInspect={onActivityInspect}
           />,
           first.entry,
           first.index,
@@ -777,6 +792,7 @@ function ChatTimelineImpl({ entries, isRunning, recoveryActive = false, stopping
               key={`tool-${entry.toolUse.id}`}
               toolUse={entry.toolUse}
               toolResult={entry.toolResult}
+              onInspect={onActivityInspect}
             />,
             entry,
             index,
@@ -913,6 +929,8 @@ export const ChatTimeline = memo(ChatTimelineImpl, (prev, next) => {
     prev.onAnswerHumanInput === next.onAnswerHumanInput &&
     prev.onCancelHumanInput === next.onCancelHumanInput &&
     prev.onDismissHumanInputAutoOpen === next.onDismissHumanInputAutoOpen &&
+    prev.onActivityInspect === next.onActivityInspect &&
+    prev.initialDay === next.initialDay &&
     prev.getEntryContainerProps === next.getEntryContainerProps &&
     diffStatsEqual(prev.diffStats, next.diffStats)
   );

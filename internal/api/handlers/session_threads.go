@@ -17,6 +17,7 @@ import (
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/thread"
@@ -998,8 +999,70 @@ func (h *SessionThreadHandler) GetThreadTranscript(w http.ResponseWriter, r *htt
 		return
 	}
 
+	recordMissingTranscriptPhaseAssociations(r.Context(), result)
 	resp := buildTranscriptWindowResponse(result, orgID, threadID)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func recordMissingTranscriptPhaseAssociations(ctx context.Context, result thread.TranscriptWindowResult) {
+	for kind, count := range missingTranscriptPhaseAssociations(result) {
+		metrics.RecordMissingActivityPhaseAssociations(ctx, string(kind), count)
+		zerolog.Ctx(ctx).Warn().
+			Str("entry_kind", string(kind)).
+			Int64("missing_entry_count", count).
+			Msg("session transcript entry missing expected activity phase association")
+	}
+}
+
+func missingTranscriptPhaseAssociations(result thread.TranscriptWindowResult) map[models.TranscriptEntryKind]int64 {
+	missing := make(map[models.TranscriptEntryKind]int64)
+	for _, row := range result.Window.Rows {
+		phases := result.Window.Phases[row.TurnNumber]
+		if len(phases) == 0 || rowActivityPhaseID(row) != nil || !entryTimeWithinActivityPhase(row.EntryTime, phases) {
+			continue
+		}
+		var expectedKind models.TranscriptEntryKind
+		switch {
+		case row.HumanInput != nil:
+			expectedKind = models.TranscriptEntryKindHumanInput
+		case row.Message != nil && row.Message.Role == models.MessageRoleAssistant:
+			expectedKind = models.TranscriptEntryKindMessage
+		case row.Log != nil && (row.EntryKindHint == models.TranscriptEntryKindToolUse || row.EntryKindHint == models.TranscriptEntryKindToolResult):
+			expectedKind = row.EntryKindHint
+		default:
+			continue
+		}
+		missing[expectedKind]++
+	}
+	return missing
+}
+
+func entryTimeWithinActivityPhase(entryTime time.Time, phases []models.SessionTranscriptPhase) bool {
+	if entryTime.IsZero() {
+		return false
+	}
+	for _, phase := range phases {
+		if entryTime.Before(phase.StartedAt) {
+			continue
+		}
+		if phase.CompletedAt == nil || !entryTime.After(*phase.CompletedAt) {
+			return true
+		}
+	}
+	return false
+}
+
+func rowActivityPhaseID(row db.SessionTranscriptRawRow) *uuid.UUID {
+	switch {
+	case row.Message != nil:
+		return row.Message.ActivityPhaseID
+	case row.Log != nil:
+		return row.Log.ActivityPhaseID
+	case row.HumanInput != nil:
+		return row.HumanInput.ActivityPhaseID
+	default:
+		return nil
+	}
 }
 
 // buildTranscriptEntry converts a raw store row to a SessionTranscriptEntry.
@@ -1030,6 +1093,15 @@ func buildTranscriptEntry(row db.SessionTranscriptRawRow) models.SessionTranscri
 		entry.ContentBytes = fullContentBytes
 		entry.ContentChars = utf8RuneCount(fullContent)
 		entry.Message = msg
+		entry.ActivityPhaseID = msg.ActivityPhaseID
+		if row.Inbox != nil {
+			sequence := row.Inbox.SequenceNo
+			entry.InboxSequence = &sequence
+			entry.DeliveryState = row.Inbox.DeliveryState
+			entry.AcceptedAt = &row.Inbox.AcceptedAt
+			entry.AcknowledgedAt = row.Inbox.AckedAt
+			entry.AppliedAt = row.Inbox.AppliedAt
+		}
 
 	case row.Log != nil:
 		log := row.Log
@@ -1072,6 +1144,7 @@ func buildTranscriptEntry(row db.SessionTranscriptRawRow) models.SessionTranscri
 		}
 		entry.LogID = &logID
 		entry.Log = &logResp
+		entry.ActivityPhaseID = log.ActivityPhaseID
 
 	case row.HumanInput != nil:
 		hir := row.HumanInput
@@ -1079,6 +1152,7 @@ func buildTranscriptEntry(row db.SessionTranscriptRawRow) models.SessionTranscri
 		entry.ID = "hiq_" + reqID.String()
 		entry.RequestID = &reqID
 		entry.HumanInput = hir
+		entry.ActivityPhaseID = hir.ActivityPhaseID
 	}
 
 	return entry
@@ -1095,13 +1169,23 @@ func buildTranscriptWindowResponse(result thread.TranscriptWindowResult, orgID, 
 		endedAt    time.Time
 	}
 
-	var turnOrder []int
+	turnSet := make(map[int]struct{})
 	turnMap := make(map[int]*turnAccum)
+	for turnNumber, phases := range result.Window.Phases {
+		if len(phases) == 0 {
+			continue
+		}
+		turnSet[turnNumber] = struct{}{}
+		turnMap[turnNumber] = &turnAccum{
+			turnNumber: turnNumber,
+			startedAt:  phases[0].StartedAt,
+			endedAt:    phases[0].StartedAt,
+		}
+	}
 
 	for _, row := range result.Window.Rows {
 		t, ok := turnMap[row.TurnNumber]
 		if !ok {
-			turnOrder = append(turnOrder, row.TurnNumber)
 			t = &turnAccum{
 				turnNumber: row.TurnNumber,
 				startedAt:  row.EntryTime,
@@ -1109,14 +1193,25 @@ func buildTranscriptWindowResponse(result thread.TranscriptWindowResult, orgID, 
 			}
 			turnMap[row.TurnNumber] = t
 		}
-		if row.EntryTime.Before(t.startedAt) {
+		turnSet[row.TurnNumber] = struct{}{}
+		if len(t.entries) == 0 {
 			t.startedAt = row.EntryTime
-		}
-		if row.EntryTime.After(t.endedAt) {
 			t.endedAt = row.EntryTime
+		} else {
+			if row.EntryTime.Before(t.startedAt) {
+				t.startedAt = row.EntryTime
+			}
+			if row.EntryTime.After(t.endedAt) {
+				t.endedAt = row.EntryTime
+			}
 		}
 		t.entries = append(t.entries, buildTranscriptEntry(row))
 	}
+	turnOrder := make([]int, 0, len(turnSet))
+	for turnNumber := range turnSet {
+		turnOrder = append(turnOrder, turnNumber)
+	}
+	sort.Ints(turnOrder)
 
 	turns := make([]models.SessionTranscriptTurn, 0, len(turnOrder))
 	for _, tn := range turnOrder {
@@ -1124,7 +1219,11 @@ func buildTranscriptWindowResponse(result thread.TranscriptWindowResult, orgID, 
 		turn := models.SessionTranscriptTurn{
 			TurnNumber: accum.turnNumber,
 			StartedAt:  accum.startedAt,
+			Phases:     result.Window.Phases[tn],
 			Entries:    accum.entries,
+		}
+		if turn.Entries == nil {
+			turn.Entries = []models.SessionTranscriptEntry{}
 		}
 		if !accum.endedAt.IsZero() && accum.endedAt != accum.startedAt {
 			endedAt := accum.endedAt

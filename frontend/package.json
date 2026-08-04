@@ -13,7 +13,8 @@
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
     "test": "vitest",
-    "test:ci": "vitest run --reporter=dot"
+    "test:ci": "vitest run --reporter=dot",
+    "test:session-transcript-e2e": "playwright test"
   },
   "dependencies": {
     "@fontsource-variable/instrument-sans": "^5.2.8",
@@ -46,6 +47,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "^4",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",

@@ -1337,6 +1337,68 @@ func TestSessionStore_UpdateResult(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestSessionStore_UpdateResultAndCompleteActivityPhase(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		phaseFail bool
+		expectErr bool
+	}{
+		{name: "commits terminal result and phase together"},
+		{name: "rolls back terminal result when phase conflicts", phaseFail: true, expectErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create an isolated database mock")
+			t.Cleanup(mock.Close)
+			store := NewSessionStore(mock)
+			orgID, sessionID, phaseID := uuid.New(), uuid.New(), uuid.New()
+			now := time.Date(2026, 8, 3, 12, 0, 0, 123456000, time.UTC)
+			result := &models.SessionResult{Error: stringPtr("provider failed")}
+
+			mock.ExpectBegin()
+			mock.ExpectQuery("UPDATE sessions").
+				WithArgs(anyDBArgs(15)...).
+				WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(
+					newAgentSessionRow(sessionID, uuid.New(), orgID, now)...,
+				))
+			phaseQuery := mock.ExpectQuery("UPDATE session_activity_phases").
+				WithArgs(orgID, phaseID, models.ActivityPhaseStatusFailed, models.ActivityPhaseBoundaryError, now)
+			if tt.phaseFail {
+				phaseQuery.WillReturnError(errors.New("phase write failed"))
+				mock.ExpectRollback()
+			} else {
+				phaseQuery.WillReturnRows(pgxmock.NewRows(activityPhaseTestColumns).AddRow(
+					phaseID, orgID, sessionID, uuid.New(), 1, 1,
+					models.ActivityPhaseStatusFailed, models.ActivityPhaseBoundaryError,
+					now.Add(-time.Minute), &now, nil, models.ActivityPhaseTriggerInitial,
+					nil, nil, nil, now.Add(-time.Minute), now,
+				))
+				mock.ExpectCommit()
+			}
+
+			phase, session, err := store.UpdateResultAndCompleteActivityPhase(
+				context.Background(), orgID, sessionID, phaseID,
+				models.SessionStatusFailed, result,
+				models.ActivityPhaseStatusFailed, models.ActivityPhaseBoundaryError, now,
+			)
+			if tt.expectErr {
+				require.Error(t, err, "transaction should report a phase boundary failure")
+				require.Equal(t, models.SessionActivityPhase{}, phase, "failed transaction should not return a durable phase")
+				require.Equal(t, models.Session{}, session, "failed transaction should not return a durable session")
+			} else {
+				require.NoError(t, err, "transaction should persist both terminal records")
+				require.Equal(t, phaseID, phase.ID, "transaction should return the committed terminal phase")
+				require.Equal(t, sessionID, session.ID, "transaction should return the committed terminal session")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all transaction boundaries should be observed")
+		})
+	}
+}
+
 func TestSessionStore_UpdateResult_PersistsModelUsed(t *testing.T) {
 	t.Parallel()
 

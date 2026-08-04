@@ -1,6 +1,23 @@
 # Design: Collapsible Session Work Activity
 
-> **Status:** Proposed | **Last reviewed:** 2026-07-26
+> **Status:** Partially Implemented | **Last reviewed:** 2026-08-04
+
+Implementation is complete in the working session changeset. The durable schema, typed
+lifecycle stores, ownership validation, reconciliation, orchestrator phase
+recording, transcript-window/SSE contracts, user preference, rendering kill
+switch, phase-preserving frontend model, activity capsule UI, public guide, and
+deterministic browser CI fixture are implemented. Final responses,
+human-input/approval requests, plans, steering acknowledgements, and terminal
+failure/cancel/stop state use the required transactional boundaries, with live
+notifications emitted only after commit. The final reconciliation pass also
+closed viewport timer rearming, durable interruption/recovery visibility,
+missing-association and primary success-measure telemetry, and duplicate,
+missed, and out-of-order lifecycle reconciliation coverage. Remaining
+launch-gate work is operational verification: materialize and review the PR
+stack, exercise an authenticated preview, run the available-provider smoke
+matrix, complete the coverage gate on a CI-class runner, and run the
+Chromium/WebKit pre-launch browser matrix in an environment with browser system
+dependencies.
 
 ## Product Specification
 
@@ -1798,19 +1815,23 @@ settings merge validator correctly rejects unknown fields on old API nodes.
   pre-launch coverage.
 - Telemetry contains no transcript or activity-label content.
 
-### Open Implementation Questions
+### Implementation Resolutions
 
-These do not change the product contract and should be resolved during detailed
-implementation:
-
-1. Final table and field names for activity phases.
-2. Whether partitioned transcript tables can safely carry database FKs to the
-   phase table or require the reviewed hot-table no-FK exception.
-3. The exact existing transcript overflow menu component that should host the
-   inline preference.
-4. The existing analytics/feature-flag provider used for the kill switch and
-   privacy-safe events.
-5. The minimal deterministic API/SSE fixture architecture for Playwright.
+1. Durable records use `session_activity_phases` and
+   `thread_inbox_delivery_batches`; transcript sources use
+   `activity_phase_id`.
+2. Durable session messages and human-input requests use ownership-validated
+   phase foreign keys. Partitioned session logs carry the nullable association
+   without a phase FK and validate ownership in their write path.
+3. Compact/Detailed lives in the existing transcript toolbar overflow menu and
+   persists through database-backed user settings.
+4. The emergency switch is server-controlled application config, refreshed on
+   initial load, focus, and a 30-second interval. Privacy-safe UI events use the
+   existing authenticated API and OpenTelemetry metrics path without transcript
+   or label content.
+5. Playwright uses a dedicated session activity fixture page with deterministic
+   API/state controls; required PR coverage runs Chromium desktop and mobile,
+   with WebKit reserved for scheduled and pre-launch verification.
 
 ### Decision Log
 

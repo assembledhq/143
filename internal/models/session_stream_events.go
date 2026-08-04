@@ -14,6 +14,11 @@ const (
 	SessionStreamEventThreadInboxCleared         SessionStreamEventType = "thread.inbox.cleared"
 	SessionStreamEventThreadRuntimeUpdated       SessionStreamEventType = "thread.runtime.updated"
 	SessionStreamEventWorkspaceGenerationChanged SessionStreamEventType = "session.workspace.generation_changed"
+	SessionStreamEventActivityPhaseStarted       SessionStreamEventType = "session_activity_phase.started"
+	SessionStreamEventActivityPhaseTerminal      SessionStreamEventType = "session_activity_phase.terminal"
+	SessionStreamEventInboxDeliveryAcknowledged  SessionStreamEventType = "thread_inbox_delivery.acknowledged"
+	SessionStreamEventInboxDeliveryStarted       SessionStreamEventType = "thread_inbox_delivery.started"
+	SessionStreamEventInboxDeliveryAbandoned     SessionStreamEventType = "thread_inbox_delivery.abandoned"
 )
 
 func (t SessionStreamEventType) Validate() error {
@@ -21,7 +26,12 @@ func (t SessionStreamEventType) Validate() error {
 	case SessionStreamEventThreadInboxQueued,
 		SessionStreamEventThreadInboxCleared,
 		SessionStreamEventThreadRuntimeUpdated,
-		SessionStreamEventWorkspaceGenerationChanged:
+		SessionStreamEventWorkspaceGenerationChanged,
+		SessionStreamEventActivityPhaseStarted,
+		SessionStreamEventActivityPhaseTerminal,
+		SessionStreamEventInboxDeliveryAcknowledged,
+		SessionStreamEventInboxDeliveryStarted,
+		SessionStreamEventInboxDeliveryAbandoned:
 		return nil
 	default:
 		return fmt.Errorf("invalid SessionStreamEventType: %q", t)
@@ -29,10 +39,21 @@ func (t SessionStreamEventType) Validate() error {
 }
 
 type SessionStreamEvent struct {
+	ID        uuid.UUID              `json:"id"`
 	Type      SessionStreamEventType `json:"type"`
 	SessionID uuid.UUID              `json:"session_id"`
 	OrgID     uuid.UUID              `json:"org_id"`
+	ThreadID  uuid.UUID              `json:"thread_id,omitempty"`
+	EmittedAt time.Time              `json:"emitted_at"`
 	Data      any                    `json:"data"`
+}
+
+type ActivityPhaseEvent struct {
+	Phase SessionActivityPhase `json:"phase"`
+}
+
+type ThreadInboxDeliveryBatchEvent struct {
+	Batch ThreadInboxDeliveryBatch `json:"batch"`
 }
 
 type ThreadInboxEvent struct {

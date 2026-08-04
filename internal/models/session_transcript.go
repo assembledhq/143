@@ -107,9 +107,15 @@ type SessionTranscriptEntry struct {
 	Kind      TranscriptEntryKind `json:"kind"`
 	CreatedAt time.Time           `json:"created_at"`
 
-	MessageID *int64     `json:"message_id,omitempty"`
-	LogID     *int64     `json:"log_id,omitempty"`
-	RequestID *uuid.UUID `json:"request_id,omitempty"`
+	MessageID       *int64                   `json:"message_id,omitempty"`
+	LogID           *int64                   `json:"log_id,omitempty"`
+	RequestID       *uuid.UUID               `json:"request_id,omitempty"`
+	ActivityPhaseID *uuid.UUID               `json:"activity_phase_id,omitempty"`
+	InboxSequence   *int64                   `json:"inbox_sequence,omitempty"`
+	DeliveryState   ThreadInboxDeliveryState `json:"delivery_state,omitempty"`
+	AcceptedAt      *time.Time               `json:"accepted_at,omitempty"`
+	AcknowledgedAt  *time.Time               `json:"acknowledged_at,omitempty"`
+	AppliedAt       *time.Time               `json:"applied_at,omitempty"`
 
 	Role  MessageRole     `json:"role,omitempty"`
 	Level SessionLogLevel `json:"level,omitempty"`
@@ -128,11 +134,26 @@ type SessionTranscriptEntry struct {
 	HumanInput *HumanInputRequest  `json:"human_input,omitempty"`
 }
 
+// SessionTranscriptPhase is the authoritative execution lifecycle metadata
+// needed to render one activity capsule within a transcript turn.
+type SessionTranscriptPhase struct {
+	ID             uuid.UUID                   `json:"id"`
+	AnchorID       string                      `json:"anchor_id"`
+	PhaseNumber    int                         `json:"phase_number"`
+	Status         ActivityPhaseStatus         `json:"status"`
+	BoundaryReason ActivityPhaseBoundaryReason `json:"boundary_reason,omitempty"`
+	TriggerKind    ActivityPhaseTriggerKind    `json:"trigger_kind"`
+	StartedAt      time.Time                   `json:"started_at"`
+	CompletedAt    *time.Time                  `json:"completed_at,omitempty"`
+	ToolCallCount  int                         `json:"tool_call_count"`
+}
+
 // SessionTranscriptTurn groups all entries belonging to one agent turn.
 type SessionTranscriptTurn struct {
 	TurnNumber int                      `json:"turn_number"`
 	StartedAt  time.Time                `json:"started_at"`
 	EndedAt    *time.Time               `json:"ended_at,omitempty"`
+	Phases     []SessionTranscriptPhase `json:"phases,omitempty"`
 	Entries    []SessionTranscriptEntry `json:"entries"`
 }
 

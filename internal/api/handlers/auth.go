@@ -192,6 +192,7 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "USER_LOOKUP_FAILED", "failed to load user settings", err)
 		return
 	}
+	loadedUser.Settings.SessionActivityDetail = loadedUser.Settings.SessionActivityDetail.Effective()
 	writeJSON(w, http.StatusOK, map[string]any{"data": models.UserWithSettings{
 		ID:            user.ID,
 		OrgID:         user.OrgID,
@@ -252,6 +253,7 @@ func (h *AuthHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "USER_LOOKUP_FAILED", "failed to load updated user settings", err)
 		return
 	}
+	updatedUser.Settings.SessionActivityDetail = updatedUser.Settings.SessionActivityDetail.Effective()
 	writeJSON(w, http.StatusOK, map[string]any{"data": models.UserWithSettings{
 		ID:          user.ID,
 		OrgID:       user.OrgID,

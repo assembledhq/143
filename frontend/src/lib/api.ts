@@ -173,6 +173,12 @@ async function uploadFile(file: File): Promise<{ url: string; file_name: string;
 }
 
 export const api = {
+  applicationConfig: {
+    get: () => get<import('./types').SingleResponse<import('./types').ApplicationConfig>>('/api/v1/application-config'),
+  },
+  sessionActivity: {
+    recordEvent: (body: import('./session-activity-events').SessionActivityUIEvent) => post<void>('/api/v1/session-activity-events', body),
+  },
   uploads: {
     upload: uploadFile,
   },

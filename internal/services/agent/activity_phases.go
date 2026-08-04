@@ -15,23 +15,41 @@ import (
 
 type ActivityPhaseStore interface {
 	StartPhase(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int, *uuid.UUID, *uuid.UUID, models.ActivityPhaseTrigger, time.Time) (models.SessionActivityPhase, error)
+	GetInboxDeliveryBatch(context.Context, uuid.UUID, uuid.UUID) (models.ThreadInboxDeliveryBatch, error)
 	CompletePhaseWithTransition(context.Context, uuid.UUID, uuid.UUID, models.ActivityPhaseStatus, models.ActivityPhaseBoundaryReason, time.Time) (models.SessionActivityPhase, bool, error)
+	CreateAssistantMessageAndCompletePhase(context.Context, uuid.UUID, uuid.UUID, *models.SessionMessage, models.ActivityPhaseBoundaryReason, time.Time) (models.SessionActivityPhase, error)
+	CreateHumanInputRequestAndCompletePhase(context.Context, uuid.UUID, uuid.UUID, *models.HumanInputRequest, models.ActivityPhaseBoundaryReason, time.Time) (models.SessionActivityPhase, error)
 	ListStrandedRunning(context.Context, uuid.UUID, time.Time, int) ([]models.SessionActivityPhase, error)
 	ListStrandedRunningAcrossOrgs(context.Context, time.Time, int) ([]models.SessionActivityPhase, error)
 	ReconcileStrandedPhase(context.Context, uuid.UUID, uuid.UUID, time.Time, time.Time) (bool, error)
 	ReconcileAbandonedInboxBatchesAcrossOrgs(context.Context, time.Time, time.Time, int) ([]models.ThreadInboxDeliveryBatch, error)
-	AcknowledgeInboxBatchWithTransition(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, *uuid.UUID, int64, time.Time) (models.ThreadInboxDeliveryBatch, bool, error)
+	AcknowledgeInboxBatchWithTransition(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, *uuid.UUID, int64, time.Time) (models.ThreadInboxDeliveryBatch, *models.SessionActivityPhase, error)
 	AbandonInboxBatch(context.Context, uuid.UUID, uuid.UUID, time.Time) (models.ThreadInboxDeliveryBatch, error)
 }
 
 type ActivityPhaseService struct {
-	store  ActivityPhaseStore
-	logger zerolog.Logger
-	now    func() time.Time
+	store     ActivityPhaseStore
+	logger    zerolog.Logger
+	now       func() time.Time
+	publisher ActivityPhaseEventPublisher
 }
 
-func NewActivityPhaseService(store ActivityPhaseStore, logger zerolog.Logger) *ActivityPhaseService {
-	return &ActivityPhaseService{store: store, logger: logger, now: time.Now}
+type ActivityPhaseEventPublisher interface {
+	PublishEvent(context.Context, models.SessionStreamEvent) error
+}
+
+type ActivityPhaseServiceOption func(*ActivityPhaseService)
+
+func WithActivityPhaseEventPublisher(publisher ActivityPhaseEventPublisher) ActivityPhaseServiceOption {
+	return func(service *ActivityPhaseService) { service.publisher = publisher }
+}
+
+func NewActivityPhaseService(store ActivityPhaseStore, logger zerolog.Logger, options ...ActivityPhaseServiceOption) *ActivityPhaseService {
+	service := &ActivityPhaseService{store: store, logger: logger, now: time.Now}
+	for _, option := range options {
+		option(service)
+	}
+	return service
 }
 
 func (s *ActivityPhaseService) StartPhase(ctx context.Context, orgID, sessionID, threadID uuid.UUID, turnNumber int, runtimeID, runtimeLeaseToken *uuid.UUID, trigger models.ActivityPhaseTrigger) (models.SessionActivityPhase, error) {
@@ -40,6 +58,17 @@ func (s *ActivityPhaseService) StartPhase(ctx context.Context, orgID, sessionID,
 		return models.SessionActivityPhase{}, fmt.Errorf("start activity phase: %w", err)
 	}
 	metrics.RecordActivityPhaseStarted(ctx, string(phase.TriggerKind))
+	s.publishPhase(ctx, models.SessionStreamEventActivityPhaseStarted, phase)
+	if trigger.Kind == models.ActivityPhaseTriggerInboxBatch && trigger.BatchID != nil {
+		batch, batchErr := s.store.GetInboxDeliveryBatch(ctx, orgID, *trigger.BatchID)
+		if batchErr != nil {
+			s.logger.Warn().Err(batchErr).
+				Str("thread_inbox_delivery_batch_id", trigger.BatchID.String()).
+				Msg("failed to load started inbox batch for lifecycle event")
+		} else {
+			s.publishBatch(ctx, models.SessionStreamEventInboxDeliveryStarted, batch)
+		}
+	}
 	return phase, nil
 }
 
@@ -77,6 +106,9 @@ func (s *ActivityPhaseService) ReconcileAbandonedInboxBatches(ctx context.Contex
 			Time("lease_expired_before", leaseExpiredBefore).
 			Msg("activity phase reconciliation abandoned acknowledged batches whose runtimes cannot resume")
 		metrics.RecordInboxDeliveryBatchReconciliation(ctx, "abandoned", int64(len(batches)))
+		for _, batch := range batches {
+			s.publishBatch(ctx, models.SessionStreamEventInboxDeliveryAbandoned, batch)
+		}
 	} else {
 		metrics.RecordInboxDeliveryBatchReconciliation(ctx, "completed", 0)
 	}
@@ -90,18 +122,48 @@ func (s *ActivityPhaseService) CompletePhase(ctx context.Context, orgID, phaseID
 	}
 	if transitioned {
 		metrics.RecordActivityPhaseTerminal(ctx, string(phase.Status), string(phase.BoundaryReason))
+		s.publishPhase(ctx, models.SessionStreamEventActivityPhaseTerminal, phase)
 	}
 	return phase, nil
 }
 
+// recordPersistedTerminal publishes a phase already closed by a larger
+// platform-owned database transaction.
+func (s *ActivityPhaseService) recordPersistedTerminal(ctx context.Context, phase models.SessionActivityPhase) {
+	metrics.RecordActivityPhaseTerminal(ctx, string(phase.Status), string(phase.BoundaryReason))
+	s.publishPhase(ctx, models.SessionStreamEventActivityPhaseTerminal, phase)
+}
+
+func (s *ActivityPhaseService) CreateAssistantMessageAndCompletePhase(ctx context.Context, orgID, phaseID uuid.UUID, message *models.SessionMessage, reason models.ActivityPhaseBoundaryReason) (models.SessionActivityPhase, error) {
+	phase, err := s.store.CreateAssistantMessageAndCompletePhase(ctx, orgID, phaseID, message, reason, s.now())
+	if err != nil {
+		return models.SessionActivityPhase{}, fmt.Errorf("persist assistant boundary and complete activity phase: %w", err)
+	}
+	metrics.RecordActivityPhaseTerminal(ctx, string(phase.Status), string(phase.BoundaryReason))
+	s.publishPhase(ctx, models.SessionStreamEventActivityPhaseTerminal, phase)
+	return phase, nil
+}
+
+func (s *ActivityPhaseService) CreateHumanInputRequestAndCompletePhase(ctx context.Context, orgID, phaseID uuid.UUID, request *models.HumanInputRequest, reason models.ActivityPhaseBoundaryReason) (models.SessionActivityPhase, error) {
+	phase, err := s.store.CreateHumanInputRequestAndCompletePhase(ctx, orgID, phaseID, request, reason, s.now())
+	if err != nil {
+		return models.SessionActivityPhase{}, fmt.Errorf("persist human input boundary and complete activity phase: %w", err)
+	}
+	metrics.RecordActivityPhaseTerminal(ctx, string(phase.Status), string(phase.BoundaryReason))
+	s.publishPhase(ctx, models.SessionStreamEventActivityPhaseTerminal, phase)
+	return phase, nil
+}
+
 func (s *ActivityPhaseService) AcknowledgeInboxBatch(ctx context.Context, orgID, sessionID, threadID, runtimeID, leaseToken uuid.UUID, activePhaseID *uuid.UUID, sequenceEnd int64) (models.ThreadInboxDeliveryBatch, error) {
-	batch, phaseTransitioned, err := s.store.AcknowledgeInboxBatchWithTransition(ctx, orgID, sessionID, threadID, runtimeID, leaseToken, activePhaseID, sequenceEnd, s.now())
+	batch, completedPhase, err := s.store.AcknowledgeInboxBatchWithTransition(ctx, orgID, sessionID, threadID, runtimeID, leaseToken, activePhaseID, sequenceEnd, s.now())
 	if err != nil {
 		return models.ThreadInboxDeliveryBatch{}, fmt.Errorf("acknowledge inbox delivery batch: %w", err)
 	}
-	if phaseTransitioned {
-		metrics.RecordActivityPhaseTerminal(ctx, string(models.ActivityPhaseStatusCompleted), string(models.ActivityPhaseBoundarySteered))
+	if completedPhase != nil {
+		metrics.RecordActivityPhaseTerminal(ctx, string(completedPhase.Status), string(completedPhase.BoundaryReason))
+		s.publishPhase(ctx, models.SessionStreamEventActivityPhaseTerminal, *completedPhase)
 	}
+	s.publishBatch(ctx, models.SessionStreamEventInboxDeliveryAcknowledged, batch)
 	return batch, nil
 }
 
@@ -110,7 +172,36 @@ func (s *ActivityPhaseService) AbandonInboxBatch(ctx context.Context, orgID, bat
 	if err != nil {
 		return models.ThreadInboxDeliveryBatch{}, fmt.Errorf("abandon inbox delivery batch: %w", err)
 	}
+	s.publishBatch(ctx, models.SessionStreamEventInboxDeliveryAbandoned, batch)
 	return batch, nil
+}
+
+func (s *ActivityPhaseService) publishPhase(ctx context.Context, eventType models.SessionStreamEventType, phase models.SessionActivityPhase) {
+	if s.publisher == nil {
+		return
+	}
+	event := models.SessionStreamEvent{
+		ID:   uuid.NewSHA1(uuid.NameSpaceOID, []byte(string(eventType)+":"+phase.ID.String()+":"+string(phase.Status))),
+		Type: eventType, SessionID: phase.SessionID, OrgID: phase.OrgID, ThreadID: phase.ThreadID,
+		EmittedAt: s.now().UTC(), Data: models.ActivityPhaseEvent{Phase: phase},
+	}
+	if err := s.publisher.PublishEvent(ctx, event); err != nil {
+		s.logger.Warn().Err(err).Str("activity_phase_id", phase.ID.String()).Str("event_type", string(eventType)).Msg("failed to publish activity phase event")
+	}
+}
+
+func (s *ActivityPhaseService) publishBatch(ctx context.Context, eventType models.SessionStreamEventType, batch models.ThreadInboxDeliveryBatch) {
+	if s.publisher == nil {
+		return
+	}
+	event := models.SessionStreamEvent{
+		ID:   uuid.NewSHA1(uuid.NameSpaceOID, []byte(string(eventType)+":"+batch.ID.String()+":"+string(batch.Status))),
+		Type: eventType, SessionID: batch.SessionID, OrgID: batch.OrgID, ThreadID: batch.ThreadID,
+		EmittedAt: s.now().UTC(), Data: models.ThreadInboxDeliveryBatchEvent{Batch: batch},
+	}
+	if err := s.publisher.PublishEvent(ctx, event); err != nil {
+		s.logger.Warn().Err(err).Str("thread_inbox_delivery_batch_id", batch.ID.String()).Str("event_type", string(eventType)).Msg("failed to publish inbox delivery batch event")
+	}
 }
 
 // ReconcileStrandedPhases closes a bounded page of running phases whose
@@ -128,7 +219,8 @@ func (s *ActivityPhaseService) reconcilePhases(ctx context.Context, phases []mod
 	reconciled := 0
 	var transitionErrors []error
 	for _, phase := range phases {
-		transitioned, err := s.store.ReconcileStrandedPhase(ctx, phase.OrgID, phase.ID, leaseExpiredBefore, s.now())
+		completedAt := s.now()
+		transitioned, err := s.store.ReconcileStrandedPhase(ctx, phase.OrgID, phase.ID, leaseExpiredBefore, completedAt)
 		if err != nil {
 			s.logger.Error().Err(err).
 				Str("org_id", phase.OrgID.String()).
@@ -142,6 +234,10 @@ func (s *ActivityPhaseService) reconcilePhases(ctx context.Context, phases []mod
 		if transitioned {
 			reconciled++
 			metrics.RecordActivityPhaseTerminal(ctx, string(models.ActivityPhaseStatusInterrupted), string(models.ActivityPhaseBoundaryRuntimeLost))
+			phase.Status = models.ActivityPhaseStatusInterrupted
+			phase.BoundaryReason = models.ActivityPhaseBoundaryRuntimeLost
+			phase.CompletedAt = &completedAt
+			s.publishPhase(ctx, models.SessionStreamEventActivityPhaseTerminal, phase)
 		}
 	}
 	return reconciled, errors.Join(transitionErrors...)

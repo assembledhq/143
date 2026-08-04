@@ -786,7 +786,7 @@ func main() {
 			agent.WithMaxRunningAge(cfg.SessionMaxRunningAge),
 			agent.WithRuntimeJobTerminalizer(jobStore),
 			agent.WithThreadRuntimeLeaseReclaimer(db.NewThreadRuntimeStore(pool)),
-			agent.WithActivityPhaseReconciler(agent.NewActivityPhaseService(db.NewSessionActivityPhaseStore(pool), logger)),
+			agent.WithActivityPhaseReconciler(agent.NewActivityPhaseService(db.NewSessionActivityPhaseStore(pool), logger, agent.WithActivityPhaseEventPublisher(sessionStreams))),
 			// Phase 0.5b safety net: fails session_threads stuck in 'running'
 			// past maxRunningAge. Catches orphans the orchestrator/handler
 			// thread.status reset paths couldn't unwind themselves.
@@ -1568,6 +1568,7 @@ func buildServices(
 		StaticEgress:               agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP),
 		ThreadRuntimes:             threadRuntimeStore,
 		ThreadInbox:                threadInboxStore,
+		ActivityPhases:             agent.NewActivityPhaseService(db.NewSessionActivityPhaseStore(pool), logger, agent.WithActivityPhaseEventPublisher(sessionStreams)),
 		SandboxHolders:             sessionSandboxHolderStore,
 		Cancels:                    cancelRegistry,
 		ThreadCancels:              threadCancelRegistry,

@@ -210,6 +210,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		healthHandler.SetRedisHealthCheck(redisClient.Healthy)
 	}
 	authHandler := handlers.NewAuthHandler(cfg, pool, userStore, authSessionStore, invitationStore, membershipStore)
+	applicationConfigHandler := handlers.NewApplicationConfigHandler(cfg.SessionActivityCapsulesEnabled)
+	applicationConfig := applicationConfigHandler.Config()
+	logger.Info().
+		Bool("session_activity_capsules_enabled", applicationConfig.SessionActivityCapsulesEnabled).
+		Str("revision", applicationConfig.Revision).
+		Time("updated_at", applicationConfig.UpdatedAt).
+		Str("actor", cfg.SessionActivityCapsulesActor).
+		Str("reason", cfg.SessionActivityCapsulesReason).
+		Msg("session activity capsule rendering configuration activated")
 	authHandler.SetGitHubHTTPClient(githubtelemetry.NewHTTPClient(10*time.Second, logger))
 	// CLI login flow stores (browser-based `143-tools login`, join-token JIT).
 	cliAuthCodeStore := db.NewCLIAuthCodeStore(pool)
@@ -1182,6 +1191,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			// OrgContext (which 403s on uuid.Nil) or RequireRole (which 403s on
 			// empty active role).
 			r.Get("/api/v1/auth/me", authHandler.Me)
+			r.Get("/api/v1/application-config", applicationConfigHandler.Get)
+			r.Post("/api/v1/session-activity-events", applicationConfigHandler.RecordSessionActivityEvent)
 			r.Patch("/api/v1/auth/me/settings", authHandler.UpdateSettings)
 			// Memberships is zero-membership-safe for the same reason /auth/me
 			// is: a user whose only org was just revoked still needs to see the

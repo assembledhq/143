@@ -2867,6 +2867,16 @@ func writeSessionStreamSSEEvent(sw *sse.Writer, event models.SessionStreamEvent)
 		return sw.WriteEvent(sse.EventThreadRuntimeUpdated, event.Data)
 	case models.SessionStreamEventWorkspaceGenerationChanged:
 		return sw.WriteEvent(sse.EventSessionWorkspaceGenerationChanged, event.Data)
+	case models.SessionStreamEventActivityPhaseStarted:
+		return sw.WriteEvent(sse.EventActivityPhaseStarted, event)
+	case models.SessionStreamEventActivityPhaseTerminal:
+		return sw.WriteEvent(sse.EventActivityPhaseTerminal, event)
+	case models.SessionStreamEventInboxDeliveryAcknowledged:
+		return sw.WriteEvent(sse.EventInboxDeliveryAcknowledged, event)
+	case models.SessionStreamEventInboxDeliveryStarted:
+		return sw.WriteEvent(sse.EventInboxDeliveryStarted, event)
+	case models.SessionStreamEventInboxDeliveryAbandoned:
+		return sw.WriteEvent(sse.EventInboxDeliveryAbandoned, event)
 	default:
 		return fmt.Errorf("unsupported session stream event type: %s", event.Type)
 	}

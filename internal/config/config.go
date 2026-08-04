@@ -154,6 +154,14 @@ type Config struct {
 	AgentPRPromptEnabled bool `env:"AGENT_PR_PROMPT_ENABLED" envDefault:"true"`
 	// PrePRReviewEnabled gates execution of the pre-publication review cycle.
 	PrePRReviewEnabled bool `env:"PRE_PR_REVIEW_ENABLED" envDefault:"true"`
+	// SessionActivityCapsulesEnabled is the rendering-only emergency rollback
+	// switch. Phase recording remains enabled when this is false.
+	SessionActivityCapsulesEnabled bool `env:"SESSION_ACTIVITY_CAPSULES_ENABLED" envDefault:"true"`
+	// SessionActivityCapsulesActor and Reason make emergency flag changes
+	// attributable in the structured operational audit log without carrying
+	// transcript content.
+	SessionActivityCapsulesActor  string `env:"SESSION_ACTIVITY_CAPSULES_ACTOR" envDefault:"deployment"`
+	SessionActivityCapsulesReason string `env:"SESSION_ACTIVITY_CAPSULES_REASON" envDefault:"process configuration"`
 
 	// Sentry OAuth
 	SentryOAuthClientID     string `env:"SENTRY_OAUTH_CLIENT_ID"`

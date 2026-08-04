@@ -86,11 +86,13 @@ type SessionTranscriptRawRow struct {
 	Message    *models.SessionMessage
 	Log        *models.SessionLog
 	HumanInput *models.HumanInputRequest
+	Inbox      *models.ThreadInboxEntry
 }
 
 // SessionTranscriptWindow is the result returned by ListThreadWindow.
 type SessionTranscriptWindow struct {
 	Rows                     []SessionTranscriptRawRow
+	Phases                   map[int][]models.SessionTranscriptPhase
 	Position                 models.TranscriptWindowPosition
 	HasOlder                 bool
 	HasNewer                 bool
@@ -180,6 +182,46 @@ func (s *SessionTranscriptStore) listDistinctTurns(
 	return turns, nil
 }
 
+func (s *SessionTranscriptStore) fetchPhasesForTurns(ctx context.Context, orgID, threadID uuid.UUID, turns []int) (map[int][]models.SessionTranscriptPhase, error) {
+	result := make(map[int][]models.SessionTranscriptPhase, len(turns))
+	if len(turns) == 0 {
+		return result, nil
+	}
+	turnInts, err := int32TurnNumbers(turns)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT p.id, p.turn_number, p.phase_number, p.status, p.boundary_reason, p.trigger_kind,
+		       p.started_at, p.completed_at, COUNT(l.id)::int AS tool_call_count
+		FROM session_activity_phases p
+		LEFT JOIN session_logs l
+		  ON l.org_id = p.org_id AND l.activity_phase_id = p.id AND l.level = 'tool_use'
+		WHERE p.org_id = @org_id AND p.thread_id = @thread_id
+		  AND p.turn_number = ANY(@turns)
+		GROUP BY p.id
+		ORDER BY p.turn_number, p.phase_number`, pgx.NamedArgs{
+		"org_id": orgID, "thread_id": threadID, "turns": turnInts,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query transcript activity phases: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var phase models.SessionTranscriptPhase
+		var turnNumber int
+		if err := rows.Scan(&phase.ID, &turnNumber, &phase.PhaseNumber, &phase.Status, &phase.BoundaryReason, &phase.TriggerKind, &phase.StartedAt, &phase.CompletedAt, &phase.ToolCallCount); err != nil {
+			return nil, fmt.Errorf("scan transcript activity phase: %w", err)
+		}
+		phase.AnchorID = "aph_" + phase.ID.String()
+		result[turnNumber] = append(result[turnNumber], phase)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate transcript activity phases: %w", err)
+	}
+	return result, nil
+}
+
 // fetchEntriesForTurns fetches session_messages, session_logs, and
 // session_human_input_requests for the given turn numbers and merges them.
 func (s *SessionTranscriptStore) fetchEntriesForTurns(
@@ -220,7 +262,36 @@ func (s *SessionTranscriptStore) fetchEntriesForTurns(
 		if err != nil {
 			return nil, fmt.Errorf("collect transcript messages: %w", err)
 		}
+		inboxByMessageID := make(map[int64]models.ThreadInboxEntry)
+		if len(messages) > 0 {
+			inboxRows, queryErr := s.db.Query(ctx, `
+				SELECT `+threadInboxEntryColumnsE+`
+				FROM thread_inbox_entries e
+				JOIN session_messages m ON m.org_id = e.org_id AND m.id = e.message_id
+				WHERE e.org_id = @org_id AND e.thread_id = @thread_id
+				  AND m.turn_number = ANY(@turns)
+				ORDER BY e.sequence_no`, pgx.NamedArgs{
+				"org_id": orgID, "thread_id": threadID, "turns": turnInts,
+			})
+			if queryErr != nil {
+				return nil, fmt.Errorf("query transcript inbox deliveries: %w", queryErr)
+			}
+			inboxEntries, queryErr := pgx.CollectRows(inboxRows, scanThreadInboxEntryRow)
+			if queryErr != nil {
+				return nil, fmt.Errorf("collect transcript inbox deliveries: %w", queryErr)
+			}
+			for _, entry := range inboxEntries {
+				if entry.MessageID != 0 {
+					inboxByMessageID[entry.MessageID] = entry
+				}
+			}
+		}
 		for i := range messages {
+			var inbox *models.ThreadInboxEntry
+			if entry, ok := inboxByMessageID[messages[i].ID]; ok {
+				entryCopy := entry
+				inbox = &entryCopy
+			}
 			rows = append(rows, SessionTranscriptRawRow{
 				EntryKindHint: models.TranscriptEntryKindMessage,
 				TurnNumber:    messages[i].TurnNumber,
@@ -228,6 +299,7 @@ func (s *SessionTranscriptStore) fetchEntriesForTurns(
 				SourceRank:    1,
 				SourceID:      messages[i].ID,
 				Message:       &messages[i],
+				Inbox:         inbox,
 			})
 		}
 	}
@@ -325,6 +397,18 @@ func (s *SessionTranscriptStore) fetchEntriesForTurns(
 	return rows, nil
 }
 
+func (s *SessionTranscriptStore) fetchWindowData(ctx context.Context, orgID, threadID uuid.UUID, include TranscriptInclude, turns []int) ([]SessionTranscriptRawRow, map[int][]models.SessionTranscriptPhase, error) {
+	rows, err := s.fetchEntriesForTurns(ctx, orgID, threadID, include, turns)
+	if err != nil {
+		return nil, nil, err
+	}
+	phases, err := s.fetchPhasesForTurns(ctx, orgID, threadID, turns)
+	if err != nil {
+		return nil, nil, err
+	}
+	return rows, phases, nil
+}
+
 // ListThreadWindow implements turn-based cursor pagination for the transcript.
 func (s *SessionTranscriptStore) ListThreadWindow(
 	ctx context.Context,
@@ -375,13 +459,14 @@ func (s *SessionTranscriptStore) listLatestOrOlderWindow(
 	// Reverse to ASC for fetching and presentation.
 	turns := reversedInts(descTurns)
 
-	rows, err := s.fetchEntriesForTurns(ctx, orgID, threadID, opts.Include, turns)
+	rows, phases, err := s.fetchWindowData(ctx, orgID, threadID, opts.Include, turns)
 	if err != nil {
 		return SessionTranscriptWindow{}, err
 	}
 
 	window := SessionTranscriptWindow{
 		Rows:     rows,
+		Phases:   phases,
 		Position: positionForLatestOrOlder(opts),
 		HasOlder: hasOlder,
 	}
@@ -391,7 +476,7 @@ func (s *SessionTranscriptStore) listLatestOrOlderWindow(
 			OrgID:      orgID,
 			ThreadID:   threadID,
 			TurnNumber: turns[0], // oldest turn in window
-			EntryID:    firstTranscriptEntryIDForTurn(rows, turns[0]),
+			EntryID:    firstTranscriptAnchorIDForTurn(rows, phases, turns[0]),
 		}
 		encoded, err := cursor.Encode()
 		if err != nil {
@@ -433,13 +518,14 @@ func (s *SessionTranscriptStore) listNewerWindow(
 		return SessionTranscriptWindow{}, nil
 	}
 
-	rows, err := s.fetchEntriesForTurns(ctx, orgID, threadID, opts.Include, ascTurns)
+	rows, phases, err := s.fetchWindowData(ctx, orgID, threadID, opts.Include, ascTurns)
 	if err != nil {
 		return SessionTranscriptWindow{}, err
 	}
 
 	window := SessionTranscriptWindow{
 		Rows:     rows,
+		Phases:   phases,
 		Position: models.TranscriptWindowPositionNewer,
 		HasNewer: hasNewer,
 	}
@@ -449,7 +535,7 @@ func (s *SessionTranscriptStore) listNewerWindow(
 			OrgID:      orgID,
 			ThreadID:   threadID,
 			TurnNumber: ascTurns[len(ascTurns)-1], // newest turn in window
-			EntryID:    lastTranscriptEntryIDForTurn(rows, ascTurns[len(ascTurns)-1]),
+			EntryID:    lastTranscriptAnchorIDForTurn(rows, phases, ascTurns[len(ascTurns)-1]),
 		}
 		encoded, err := cursor.Encode()
 		if err != nil {
@@ -523,13 +609,14 @@ func (s *SessionTranscriptStore) listAroundWindow(
 	allTurns = append(allTurns, anchorTurn)
 	allTurns = append(allTurns, newerTurnsAsc...)
 
-	rows, err := s.fetchEntriesForTurns(ctx, orgID, threadID, opts.Include, allTurns)
+	rows, phases, err := s.fetchWindowData(ctx, orgID, threadID, opts.Include, allTurns)
 	if err != nil {
 		return SessionTranscriptWindow{}, err
 	}
 
 	window := SessionTranscriptWindow{
 		Rows:          rows,
+		Phases:        phases,
 		Position:      models.TranscriptWindowPositionAround,
 		HasOlder:      hasOlder,
 		HasNewer:      hasNewer,
@@ -537,7 +624,7 @@ func (s *SessionTranscriptStore) listAroundWindow(
 		AnchorFound:   true,
 	}
 	if window.AnchorEntryID == "" {
-		window.AnchorEntryID = firstTranscriptEntryIDForTurn(rows, anchorTurn)
+		window.AnchorEntryID = firstTranscriptAnchorIDForTurn(rows, phases, anchorTurn)
 	}
 	if hasOlder && len(olderTurns) > 0 {
 		cursor := models.TranscriptCursor{
@@ -545,7 +632,7 @@ func (s *SessionTranscriptStore) listAroundWindow(
 			OrgID:      orgID,
 			ThreadID:   threadID,
 			TurnNumber: olderTurns[0],
-			EntryID:    firstTranscriptEntryIDForTurn(rows, olderTurns[0]),
+			EntryID:    firstTranscriptAnchorIDForTurn(rows, phases, olderTurns[0]),
 		}
 		encoded, err := cursor.Encode()
 		if err != nil {
@@ -559,7 +646,7 @@ func (s *SessionTranscriptStore) listAroundWindow(
 			OrgID:      orgID,
 			ThreadID:   threadID,
 			TurnNumber: newerTurnsAsc[len(newerTurnsAsc)-1],
-			EntryID:    lastTranscriptEntryIDForTurn(rows, newerTurnsAsc[len(newerTurnsAsc)-1]),
+			EntryID:    lastTranscriptAnchorIDForTurn(rows, phases, newerTurnsAsc[len(newerTurnsAsc)-1]),
 		}
 		encoded, err := cursor.Encode()
 		if err != nil {
@@ -603,6 +690,23 @@ func (s *SessionTranscriptStore) resolveAnchorEntryID(
 	entryID string,
 ) (int, bool, error) {
 	switch {
+	case strings.HasPrefix(entryID, "aph_"):
+		id, err := uuid.Parse(strings.TrimPrefix(entryID, "aph_"))
+		if err != nil {
+			return 0, false, nil
+		}
+		var turnNumber int
+		if err := s.db.QueryRow(ctx,
+			`SELECT turn_number FROM session_activity_phases WHERE org_id = @org_id AND thread_id = @thread_id AND id = @id`,
+			pgx.NamedArgs{"org_id": orgID, "thread_id": threadID, "id": id},
+		).Scan(&turnNumber); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return 0, false, nil
+			}
+			return 0, false, fmt.Errorf("resolve activity phase anchor %q: %w", entryID, err)
+		}
+		return turnNumber, true, nil
+
 	case strings.HasPrefix(entryID, "msg_"):
 		rawID := strings.TrimPrefix(entryID, "msg_")
 		id, err := strconv.ParseInt(rawID, 10, 64)
@@ -818,6 +922,26 @@ func lastTranscriptEntryIDForTurn(rows []SessionTranscriptRawRow, turn int) stri
 	return ""
 }
 
+func firstTranscriptAnchorIDForTurn(rows []SessionTranscriptRawRow, phases map[int][]models.SessionTranscriptPhase, turn int) string {
+	if entryID := firstTranscriptEntryIDForTurn(rows, turn); entryID != "" {
+		return entryID
+	}
+	if turnPhases := phases[turn]; len(turnPhases) > 0 {
+		return turnPhases[0].AnchorID
+	}
+	return ""
+}
+
+func lastTranscriptAnchorIDForTurn(rows []SessionTranscriptRawRow, phases map[int][]models.SessionTranscriptPhase, turn int) string {
+	if entryID := lastTranscriptEntryIDForTurn(rows, turn); entryID != "" {
+		return entryID
+	}
+	if turnPhases := phases[turn]; len(turnPhases) > 0 {
+		return turnPhases[len(turnPhases)-1].AnchorID
+	}
+	return ""
+}
+
 func transcriptRawRowEntryID(row SessionTranscriptRawRow) string {
 	if row.Message != nil {
 		return transcriptEntryID(models.TranscriptEntryKindMessage, row.Message.ID)
@@ -887,7 +1011,9 @@ func normalizeTranscriptInclude(include TranscriptInclude) TranscriptInclude {
 }
 
 func transcriptTurnSelectBranches(include TranscriptInclude) []string {
-	var branches []string
+	branches := []string{`
+		SELECT turn_number FROM session_activity_phases
+			WHERE org_id = @org_id AND thread_id = @thread_id`}
 	if include.Messages {
 		branches = append(branches, `
 			SELECT turn_number FROM session_messages
