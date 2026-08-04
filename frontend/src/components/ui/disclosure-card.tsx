@@ -98,9 +98,10 @@ function DisclosureCard({
                   ) : null}
                 </span>
               </span>
-              {/* The chevron must stay inside this wrapper. As a direct child of the
-                  button it would match the size variant's `has-[>svg]:px-2`, whose
-                  `:has()` specificity outranks the `px-0` set above. */}
+              {/* This wrapper groups the Hide/Show label with the chevron, and the
+                  chevron has to stay inside it: as a direct child of the button it
+                  would match the size variant's `has-[>svg]:px-2`, whose `:has()`
+                  specificity outranks the `px-0` set above and restores a gutter. */}
               <span
                 data-testid={actionTestId}
                 className="flex shrink-0 items-center gap-2 pt-0.5 text-xs font-medium text-muted-foreground sm:pt-0"
