@@ -31,12 +31,13 @@ The cache implementation now treats preview install caching as a generic path-ca
 | pip | `.cache/pip` |
 | uv | `.cache/uv` |
 | poetry | `.cache/pypoetry` |
-| go | `go/pkg/mod`, `.cache/go-build`, before the ownership split below |
+| go | `go/pkg/mod`, `.cache/go-build` |
 
 Package-manager paths reject absolute paths, `..`, globs, broad `.`, sensitive directories such as `.ssh`, `.gnupg`, `.codex`, `.claude`, `.config/gh`, `.143`, and parents/children of those sensitive paths.
 
-Each effective HomeDir path has one cache owner, and ownership follows restore
-*timing* rather than which phase happens to write the directory. The
+Those are the paths each manager infers before ownership is resolved. Each
+effective HomeDir path then gets exactly one cache owner, and ownership follows
+restore *timing* rather than which phase happens to write the directory. The
 package-manager cache restores before `preview.install`; the home build cache
 only afterwards, immediately before service builds. So the build cache owns
 `.cache/go-build` — nothing but a build populates it — while `go/pkg/mod` stays

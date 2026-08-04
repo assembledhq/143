@@ -32,6 +32,7 @@ type mockProvider struct {
 	startHandle   *PreviewHandle
 	startErr      error
 	startConfig   *models.PreviewConfig
+	startOptions  StartPreviewOptions
 	startObserver ServiceObserver
 	stopErr       error
 	dialErr       error
@@ -40,8 +41,9 @@ type mockProvider struct {
 	statusErr     error
 }
 
-func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig, _ StartPreviewOptions, observer ServiceObserver) (*PreviewHandle, error) {
+func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig, opts StartPreviewOptions, observer ServiceObserver) (*PreviewHandle, error) {
 	m.startConfig = cfg
+	m.startOptions = opts
 	m.startObserver = observer
 	if m.startErr != nil {
 		return nil, m.startErr
@@ -1505,6 +1507,7 @@ func TestRecyclePreview_PreservesPartiallyReadyStatus(t *testing.T) {
 
 	err = mgr.RecyclePreview(context.Background(), orgID, previewID)
 	require.NoError(t, err, "RecyclePreview should succeed for a partially ready restart")
+	require.True(t, mgr.provider.(*mockProvider).startOptions.RetainedSandbox, "recycle should tell the provider that WorkDir and HomeDir were retained")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -4425,6 +4428,72 @@ func TestResumeStoppedWarmPreviewRejectsStaleWorkspaceRevision(t *testing.T) {
 	require.ErrorIs(t, err, ErrWarmResumeNotEligible, "a stale revision should be reported as ineligibility, not failure")
 	require.Nil(t, provider.startConfig, "provider must not start a stale warm preview")
 	require.NoError(t, mock.ExpectationsWereMet(), "stale revision guard should use the expected org-scoped queries")
+}
+
+// TestResumeStoppedWarmPreviewClaimRejectsConcurrentRevisionChange covers the
+// race between the manager's eligibility reads and its state transition. The
+// store's claim rechecks the expected session revision atomically; losing that
+// race is ordinary ineligibility, so the caller can fall through to a normal
+// start instead of serving stale prebuilt output.
+func TestResumeStoppedWarmPreviewClaimRejectsConcurrentRevisionChange(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	repositoryID := uuid.New()
+	now := time.Now()
+	revision := int64(7)
+	previewRow := newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusStopped, "", now)
+	setPreviewInstanceRowColumn(previewRow, "source_workspace_revision", &revision)
+	setPreviewInstanceRowColumn(previewRow, "worker_node_id", "worker-1")
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols).AddRow(previewRow...))
+	mock.ExpectQuery("SELECT COALESCE\\(stopped_reason").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"stopped_reason"}).AddRow(string(models.PreviewStoppedReasonSessionPrewarmPolicy)))
+	sessionRow := newSessionRow(sessionID, orgID, nil, now)
+	for i, column := range sessionTestCols {
+		switch column {
+		case "repository_id":
+			sessionRow[i] = &repositoryID
+		case "workspace_revision":
+			sessionRow[i] = revision
+		case "workspace_revision_updated_at":
+			sessionRow[i] = now
+		}
+	}
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(sessionTestCols).AddRow(sessionRow...))
+	mock.ExpectQuery("SELECT EXISTS").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+	// Simulate the session revision advancing after the reads above. The
+	// revision-aware claim sees that change and affects no preview row.
+	mock.ExpectExec("UPDATE preview_instances(?s:.*)source_workspace_revision = @workspace_revision(?s:.*)EXISTS").
+		WithArgs(previewAnyArgs(7)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	provider := &mockProvider{startHandle: &PreviewHandle{Handle: "must-not-start"}}
+	mgr := NewManager(ManagerConfig{
+		Store:        db.NewPreviewStore(mock),
+		SessionStore: db.NewSessionStore(mock),
+		Provider:     provider,
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "worker-1",
+	})
+	err = mgr.ResumeStoppedWarmPreview(context.Background(), orgID, previewID)
+	require.Error(t, err, "warm resume should decline when the atomic claim loses a revision race")
+	require.ErrorIs(t, err, ErrWarmResumeNotEligible, "a concurrent revision change should fall back to a normal start")
+	require.Nil(t, provider.startConfig, "provider must not start stale prebuilt output after a lost claim")
+	require.NoError(t, mock.ExpectationsWereMet(), "warm resume should include the expected revision in its atomic claim")
 }
 
 // TestResumeStoppedWarmPreviewRejectsForeignWorkerSandbox covers the guard that

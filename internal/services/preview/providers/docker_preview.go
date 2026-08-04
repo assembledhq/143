@@ -229,13 +229,24 @@ func (s *previewState) runDeferredCacheSaves() {
 }
 
 // runDeferredCacheSavesAndWait drains the deferred saves and blocks until they
-// finish. Callers that own the sandbox and destroy it on return — the
-// build-snapshot prewarm — need this: a fire-and-forget drain there would be
-// killed by teardown, which is the failure mode the whole job exists to avoid.
-func (s *previewState) runDeferredCacheSavesAndWait() {
+// finish or budget expires. Callers that own the sandbox and destroy it on
+// return — the build-snapshot prewarm — need the wait: a fire-and-forget drain
+// there would be killed by teardown, which is the failure mode the whole job
+// exists to avoid.
+//
+// The wait deliberately ignores ctx cancellation, for the same reason the saves
+// themselves detach via WithoutCancel: honouring an expired job deadline here
+// would abandon the upload mid-flight and destroy the sandbox out from under it.
+// budget is therefore the only ceiling, and it is what keeps a stuck blob store
+// from running the job far past its own deadline.
+//
+// Unlike runDeferredCacheSaves this uses a local WaitGroup rather than state.wg:
+// the caller is blocking on the result here and there is no StopPreview to
+// coordinate with.
+func (s *previewState) runDeferredCacheSavesAndWait(ctx context.Context, budget time.Duration) error {
 	saves := s.takeDeferredCacheSaves()
 	if len(saves) == 0 {
-		return
+		return nil
 	}
 	var wg sync.WaitGroup
 	for _, save := range saves {
@@ -245,9 +256,11 @@ func (s *previewState) runDeferredCacheSavesAndWait() {
 			fn()
 		}(save)
 	}
-	wg.Wait()
+	return waitForGroupBounded(context.WithoutCancel(ctx), &wg, budget)
 }
 
+// takeDeferredCacheSaves removes and returns the queued saves. Both drain
+// helpers go through it so a save can never be started twice.
 func (s *previewState) takeDeferredCacheSaves() []func() {
 	if s == nil || len(s.deferredCacheSaves) == 0 {
 		return nil
@@ -688,7 +701,7 @@ func (d *DockerPreviewProvider) PrewarmPreviewBuildSnapshot(ctx context.Context,
 	if err := d.runServiceBuilds(ctx, state, cfg, opts, observer); err != nil {
 		// The install itself succeeded, so its caches are still worth keeping:
 		// the next attempt should not repeat a download that already worked.
-		state.runDeferredCacheSavesAndWait()
+		d.drainPrewarmCacheSaves(ctx, state)
 		d.flushBuildCachesBeforeCleanup(ctx, state, cfg.Install, opts, observer)
 		return fmt.Errorf("%w: %v", preview.ErrServiceBuildFailed, err)
 	}
@@ -699,9 +712,20 @@ func (d *DockerPreviewProvider) PrewarmPreviewBuildSnapshot(ctx context.Context,
 	if state.serviceBuildDuration > 0 {
 		d.recordBuildCacheProducerBenefits(ctx, state, state.serviceBuildDuration, true)
 	}
-	state.runDeferredCacheSavesAndWait()
+	d.drainPrewarmCacheSaves(ctx, state)
 	d.flushBuildCachesBeforeCleanup(ctx, state, cfg.Install, opts, observer)
 	return nil
+}
+
+// drainPrewarmCacheSaves persists the install-phase archives the build-snapshot
+// prewarm held back until after its build phase. Giving up is not an error for
+// the job — the snapshot it produces is its primary output — but it does mean
+// the next launch pays for whatever did not land, so say so.
+func (d *DockerPreviewProvider) drainPrewarmCacheSaves(ctx context.Context, state *previewState) {
+	if err := state.runDeferredCacheSavesAndWait(ctx, previewPrewarmCacheDrainTimeout); err != nil {
+		d.logger.Warn().Err(err).
+			Msg("preview build prewarm: giving up on install cache archives; sandbox teardown may truncate them")
+	}
 }
 
 // SoftRestartPreview restarts application service processes in-place while
@@ -1001,6 +1025,16 @@ const previewFailureCacheFlushTimeout = 30 * time.Second
 // for cancelled saves to unwind after the budget expires. Returning while a
 // save is still driving the sandbox would let cleanup and teardown race it.
 const previewFailureCacheFlushGrace = 5 * time.Second
+
+// previewPrewarmCacheDrainTimeout bounds how long the build-snapshot prewarm
+// blocks draining its install-phase archives after the build phase. Those saves
+// detach from the job context so a deadline cannot truncate them mid-upload,
+// which leaves this ceiling as the only thing stopping a wedged blob store from
+// running the job far past PREVIEW_CACHE_PREWARM_TIMEOUT while it holds a
+// sandbox and a prewarm capacity slot. It matches previewStopBackgroundWaitCap,
+// the existing budget for machine-driven paths that are willing to wait on a
+// cache upload.
+const previewPrewarmCacheDrainTimeout = previewStopBackgroundWaitCap
 
 // waitForGroupBounded blocks until wg is done, ctx is cancelled, or maxWait
 // elapses — whichever first — returning a non-nil error only when it gives up
@@ -1698,19 +1732,17 @@ func (d *DockerPreviewProvider) runPreviewInstallWithMode(ctx context.Context, s
 	// round-trip is latency off the critical path. Matching that helper, an
 	// empty verify_paths list is satisfied by the marker alone.
 	//
-	// Note this is a workdir-only signal that also suppresses the HomeDir
-	// package-manager restore below. That is sound because the only way the
-	// workdir can satisfy the contract before any restore is sandbox retention
-	// or a whole-container snapshot, both of which carry HOME along with the
-	// workdir. A repo cannot widen the check either: platform-owned cache paths
-	// are stripped from verify_paths (CacheRestorablePreviewInstallVerifyPaths),
-	// so no HomeDir path is declarable here.
+	// This is intentionally a WorkDir-only signal. A startup snapshot can make
+	// it true in a fresh sandbox while HomeDir is still cold because preview
+	// snapshots archive WorkDir only. Only an explicitly retained sandbox may
+	// use it to suppress the HomeDir package-manager restore below.
 	installValidBeforeRestore := markerExists &&
 		(len(cacheRestorableVerifyPaths) == 0 ||
 			d.previewInstallVerifyPathsSatisfied(ctx, state.sandbox, cacheRestorableVerifyPaths))
 	notifyPhaseEnd(observer, "install_marker_check", nil)
 	metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "install_marker_check", time.Since(markerCheckStarted))
-	if installValidBeforeRestore && mode.skipWhenAlreadyValid {
+	validInstallFastPath := installValidBeforeRestore && mode.skipWhenAlreadyValid
+	if validInstallFastPath && opts.RetainedSandbox {
 		// The retained sandbox already satisfies the exact install key and its
 		// declared output contract. Restoring either remote cache cannot improve
 		// correctness and only adds archive download/extraction latency.
@@ -1725,7 +1757,7 @@ func (d *DockerPreviewProvider) runPreviewInstallWithMode(ctx context.Context, s
 			metrics.RecordSessionPackageManagerCacheRestore(ctx, opts.OrgID.String(), "skipped_install_valid", 0)
 			metrics.RecordSessionDependencyCacheRestore(ctx, opts.OrgID.String(), "skipped_install_valid", 0)
 		}
-		d.logger.Info().Str("marker", markerPath).Msg("preview install cache hit; remote restores skipped")
+		d.logger.Info().Str("marker", markerPath).Msg("preview install cache hit in retained sandbox; remote restores skipped")
 		d.deferMissingInstallOutputCacheSave(ctx, state, install, opts, observer, dependencyPaths, dependencyCacheEnabled, cacheKey)
 		return nil
 	}
@@ -1807,6 +1839,24 @@ func (d *DockerPreviewProvider) runPreviewInstallWithMode(ctx context.Context, s
 		if opts.OrgID != uuid.Nil {
 			metrics.RecordSessionPackageManagerCacheRestore(ctx, opts.OrgID.String(), "disabled", 0)
 		}
+	}
+
+	if validInstallFastPath {
+		// A WorkDir startup snapshot already supplied the install outputs, so the
+		// dependency-output archive cannot improve this launch. HomeDir is not in
+		// that snapshot, however, and the package-manager lifecycle above must be
+		// allowed to restore it before service builds run.
+		notifyDependencyCacheRestore(observer, "skipped_install_valid", "", 0, nil)
+		if opts.OrgID != uuid.Nil {
+			metrics.RecordSessionDependencyCacheRestore(ctx, opts.OrgID.String(), "skipped_install_valid", 0)
+		}
+		// The valid WorkDir, not the HomeDir restore, caused preview.install to
+		// skip. Record a zero-benefit observation so cost-aware admission does not
+		// incorrectly credit the restore with the full cold-install baseline.
+		d.recordCacheProducerBenefits(ctx, pathCache, nil, []*preview.DependencyCacheHit{packageManagerRestoredHit}, 0, true)
+		d.logger.Info().Str("marker", markerPath).Msg("preview install cache hit; dependency restore skipped after HomeDir cache lifecycle")
+		d.deferMissingInstallOutputCacheSave(ctx, state, install, opts, observer, dependencyPaths, dependencyCacheEnabled, cacheKey)
+		return nil
 	}
 
 	if d.dependencyCache != nil && dependencyCacheEnabled && opts.OrgID != uuid.Nil && opts.RepositoryID != uuid.Nil {
@@ -1917,12 +1967,24 @@ func (d *DockerPreviewProvider) runPreviewInstallWithMode(ctx context.Context, s
 	// files before the install command can use them. With a marker present,
 	// restore can satisfy verify_paths and skip preview.install entirely.
 	if !forceInstallAfterDependencyRestoreFailure && d.previewInstallCacheValid(ctx, state.sandbox, markerPath, cacheRestorableVerifyPaths) {
-		// Only the workdir install-output restore can create verify_paths or the
-		// install marker. The home-directory package-manager cache may make a
-		// subsequently executed install faster, but it cannot cause this skip.
-		d.recordCacheProducerBenefits(ctx, pathCache,
-			[]*preview.DependencyCacheHit{dependencyRestoredHit},
-			[]*preview.DependencyCacheHit{packageManagerRestoredHit}, 0, true)
+		if installValidBeforeRestore {
+			// The sandbox already satisfied the contract before either restore
+			// ran, so neither one caused this skip and neither may claim its
+			// cold baseline as benefit. Only prewarm reaches this with an
+			// already-valid install — the launch path short-circuits above —
+			// and over-crediting here would corrupt the very signal cost-aware
+			// admission uses to decide whether restoring is worth it.
+			d.recordCacheProducerBenefits(ctx, pathCache, nil,
+				[]*preview.DependencyCacheHit{dependencyRestoredHit, packageManagerRestoredHit}, 0, true)
+		} else {
+			// Only the workdir install-output restore can create verify_paths or
+			// the install marker. The home-directory package-manager cache may
+			// make a subsequently executed install faster, but it cannot cause
+			// this skip.
+			d.recordCacheProducerBenefits(ctx, pathCache,
+				[]*preview.DependencyCacheHit{dependencyRestoredHit},
+				[]*preview.DependencyCacheHit{packageManagerRestoredHit}, 0, true)
+		}
 		d.logger.Info().Str("marker", markerPath).Msg("preview install cache hit")
 		if dependencyRestoredThisLaunch {
 			// The blob for this exact key was just extracted into the
@@ -3443,23 +3505,42 @@ func (d *DockerPreviewProvider) runServiceBuilds(ctx context.Context, state *pre
 		// cannot leak — results is buffered for every build — and the sandbox is
 		// torn down on this path anyway.
 		var drainGrace <-chan time.Time
+		collect := func(result serviceBuildResult) {
+			if result.err == nil {
+				return
+			}
+			failures[result.name] = result
+			cancelParallel()
+			if drainGrace == nil {
+				drainGrace = time.After(d.parallelBuildDrainGrace())
+			}
+		}
+	drain:
 		for collected := 0; collected < buildCount; {
 			select {
 			case result := <-results:
 				collected++
-				if result.err != nil {
-					failures[result.name] = result
-					cancelParallel()
-					if drainGrace == nil {
-						drainGrace = time.After(d.parallelBuildDrainGrace())
+				collect(result)
+			case <-drainGrace:
+				// Take whatever already landed before giving up. select picks
+				// uniformly among ready cases, so a result sitting in the buffer
+				// can lose the race to this timer — and it could be the causal
+				// failure, which would then be dropped from the report.
+				for {
+					select {
+					case result := <-results:
+						collected++
+						collect(result)
+					default:
+						if collected < buildCount {
+							d.logger.Warn().
+								Int("collected", collected).
+								Int("build_count", buildCount).
+								Msg("preview service builds: giving up waiting for cancelled sibling builds")
+						}
+						break drain
 					}
 				}
-			case <-drainGrace:
-				d.logger.Warn().
-					Int("collected", collected).
-					Int("build_count", buildCount).
-					Msg("preview service builds: giving up waiting for cancelled sibling builds")
-				collected = buildCount
 			}
 		}
 		// Preserve deterministic support-first/primary-last error selection even

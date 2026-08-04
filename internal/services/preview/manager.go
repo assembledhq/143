@@ -2274,12 +2274,12 @@ func (m *Manager) ResumeStoppedWarmPreview(ctx context.Context, orgID, previewID
 
 	m.logger.Info().Str("preview_id", previewID.String()).Msg("resuming stopped warm preview")
 
-	updated, err := m.store.BeginStoppedWarmPreviewResume(ctx, orgID, previewID)
+	updated, err := m.store.BeginStoppedWarmPreviewResume(ctx, orgID, previewID, instance.SessionID, session.WorkspaceRevision)
 	if err != nil {
 		return fmt.Errorf("claim warm preview resume: %w", err)
 	}
 	if !updated {
-		return fmt.Errorf("warm preview was claimed or stopped for another reason before resume could begin")
+		return fmt.Errorf("%w: preview was claimed, stopped for another reason, or superseded before resume could begin", ErrWarmResumeNotEligible)
 	}
 
 	if err := m.store.RevokeAllForPreview(ctx, orgID, previewID); err != nil {
@@ -2307,11 +2307,12 @@ func (m *Manager) ResumeStoppedWarmPreview(ctx context.Context, orgID, previewID
 	}
 
 	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, StartPreviewOptions{
-		OrgID:        input.OrgID,
-		RepositoryID: input.RepositoryID,
-		SessionID:    input.SessionID,
-		ConfigDigest: computeConfigDigest(input.Config),
-		ExtraEnv:     m.platformEnv(previewID),
+		OrgID:           input.OrgID,
+		RepositoryID:    input.RepositoryID,
+		SessionID:       input.SessionID,
+		ConfigDigest:    computeConfigDigest(input.Config),
+		ExtraEnv:        m.platformEnv(previewID),
+		RetainedSandbox: true,
 		// The warm-build job ran these exact build commands in this retained
 		// sandbox, and the guards above proved the workspace revision, the
 		// owning worker, and the startup-cache marker all still match.
@@ -2689,11 +2690,12 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 		}
 	}
 	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, StartPreviewOptions{
-		OrgID:        input.OrgID,
-		RepositoryID: input.RepositoryID,
-		SessionID:    input.SessionID,
-		ConfigDigest: computeConfigDigest(input.Config),
-		ExtraEnv:     m.platformEnv(previewID),
+		OrgID:           input.OrgID,
+		RepositoryID:    input.RepositoryID,
+		SessionID:       input.SessionID,
+		ConfigDigest:    computeConfigDigest(input.Config),
+		ExtraEnv:        m.platformEnv(previewID),
+		RetainedSandbox: true,
 	}, observer)
 	if err != nil {
 		if recycleRuntime != nil {

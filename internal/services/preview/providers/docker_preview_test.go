@@ -2097,9 +2097,10 @@ func TestStartPreview_ValidRetainedInstallSkipsRemoteCacheRestore(t *testing.T) 
 	obs := &recordingObserver{}
 
 	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo"}, previewInstallTestConfig(), preview.StartPreviewOptions{
-		OrgID:        uuid.New(),
-		RepositoryID: uuid.New(),
-		SessionID:    uuid.New(),
+		OrgID:           uuid.New(),
+		RepositoryID:    uuid.New(),
+		SessionID:       uuid.New(),
+		RetainedSandbox: true,
 	}, obs)
 	require.NoError(t, err, "StartPreview should reuse an already valid retained install")
 	require.NotNil(t, handle, "StartPreview should return a handle")
@@ -2129,6 +2130,57 @@ func TestStartPreview_ValidRetainedInstallSkipsRemoteCacheRestore(t *testing.T) 
 
 	close(release)
 	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")
+}
+
+// TestStartPreview_WorkdirSnapshotStillRestoresHomeCache guards the boundary
+// between startup snapshots and retained sandboxes. A startup snapshot carries
+// the install marker and dependency outputs from WorkDir, but it does not carry
+// HomeDir. The valid marker may skip preview.install and the dependency-output
+// restore, but it must not suppress a package-manager cache restore needed by a
+// subsequent service build.
+func TestStartPreview_WorkdirSnapshotStillRestoresHomeCache(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	exec := previewInstallValidMarkerExecutor(nil)
+	exec.execStreamFn = func(ctx context.Context, _ string, _ func([]byte)) (int, error) {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return 0, nil
+	}
+	packageManagerID := uuid.New()
+	cache := &fakeDependencyCache{pmFindHit: &preview.DependencyCacheHit{Entry: models.PreviewDependencyCache{
+		ID: packageManagerID, CacheKind: models.PreviewCacheKindPackageManager,
+	}}}
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer), WithDependencyCache(cache))
+	obs := &recordingObserver{}
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "snapshot", WorkDir: "/workspace/repo", HomeDir: "/home/codex"}, previewInstallTestConfig(), preview.StartPreviewOptions{
+		OrgID:        uuid.New(),
+		RepositoryID: uuid.New(),
+		SessionID:    uuid.New(),
+	}, obs)
+	require.NoError(t, err, "snapshot-backed preview should start from valid WorkDir install outputs")
+	require.NotNil(t, handle, "snapshot-backed preview should return a handle")
+
+	finds, restores, _, roots, _ := cache.pathCounts()
+	require.Equal(t, 1, finds[models.PreviewCacheKindPackageManager], "fresh snapshot sandbox should look up the HomeDir package-manager cache")
+	require.Equal(t, 1, restores[models.PreviewCacheKindPackageManager], "fresh snapshot sandbox should restore the HomeDir package-manager cache")
+	require.Contains(t, roots, models.PreviewCacheRootHomeDir, "package-manager archive should extract into HomeDir")
+	require.Zero(t, finds[models.PreviewCacheKindInstallOutput], "valid WorkDir snapshot should not synchronously look up the dependency-output cache")
+	dependencyRestores := obs.dependencyCacheRestores()
+	require.Len(t, dependencyRestores, 1, "dependency restore lifecycle should report one result")
+	require.Equal(t, "skipped_install_valid", dependencyRestores[0].status, "valid snapshot outputs should explain why dependency extraction was skipped")
+	packageManagerRestores := obs.packageManagerCacheRestores()
+	require.Len(t, packageManagerRestores, 1, "HomeDir restore lifecycle should report one result")
+	require.Equal(t, "restored", packageManagerRestores[0].status, "HomeDir package-manager cache should be restored")
+
+	releaseOnce.Do(func() { close(release) })
+	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "snapshot-backed preview should stop cleanly")
 }
 
 func TestStartPreview_DependencyCacheRestoreSkippedWhenInstallMarkerMissing(t *testing.T) {
@@ -3049,6 +3101,130 @@ func TestPrewarmPreviewInstallCaches_SavesEvenWhenSandboxInstallIsValid(t *testi
 	require.NotEmpty(t, restoresObserved, "prewarm should still run the normal restore lifecycle")
 	for _, restore := range restoresObserved {
 		require.NotEqual(t, "skipped_install_valid", restore.status, "prewarm must never take the launch path's skip")
+	}
+}
+
+// TestStopPreview_WaitsForDeferredInstallCacheSave pins the reason the deferred
+// saves are registered on state.wg. They are started after readiness, so a stop
+// arriving moments later — a prewarm stops the instant the preview is ready —
+// would otherwise destroy the sandbox out from under an archive that is still
+// reading from it, and the cache the run existed to produce would be lost.
+func TestStopPreview_WaitsForDeferredInstallCacheSave(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, cmd string, _ func([]byte)) (int, error) {
+			if strings.Contains(cmd, "'npm' 'ci'") {
+				return 0, nil
+			}
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, _ string) (int, error) { return 0, nil },
+		readFileFn: func(_ context.Context, path string) ([]byte, error) {
+			if strings.Contains(path, ".143/cache/preview-install/") {
+				// Cold: install runs, so its archive is deferred past readiness.
+				return nil, os.ErrNotExist
+			}
+			if path == "package-lock.json" {
+				return []byte(`{"lockfileVersion":3}`), nil
+			}
+			return []byte("ok"), nil
+		},
+	}
+	saveRunning := make(chan struct{})
+	var saveRunningOnce sync.Once
+	releaseSave := make(chan struct{})
+	var releaseSaveOnce sync.Once
+	t.Cleanup(func() { releaseSaveOnce.Do(func() { close(releaseSave) }) })
+	cache := &fakeDependencyCache{}
+	cache.saveHook = func(kind models.PreviewCacheKind) {
+		if kind != models.PreviewCacheKindInstallOutput {
+			return
+		}
+		saveRunningOnce.Do(func() { close(saveRunning) })
+		<-releaseSave
+	}
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer), WithDependencyCache(cache))
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo"}, previewInstallTestConfig(), preview.StartPreviewOptions{
+		OrgID:        uuid.New(),
+		RepositoryID: uuid.New(),
+		SessionID:    uuid.New(),
+	}, nil)
+	require.NoError(t, err, "StartPreview should succeed")
+	require.NotNil(t, handle, "StartPreview should return a handle")
+
+	select {
+	case <-saveRunning:
+	case <-time.After(10 * time.Second):
+		require.Fail(t, "the install-output archive should start once readiness releases the deferred saves")
+	}
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- d.StopPreview(context.Background(), handle.Handle) }()
+	select {
+	case <-stopDone:
+		require.Fail(t, "StopPreview must not return while a deferred install-output archive is still reading the sandbox")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	releaseSaveOnce.Do(func() { close(releaseSave) })
+	select {
+	case stopErr := <-stopDone:
+		require.NoError(t, stopErr, "StopPreview should succeed once the archive finishes")
+	case <-time.After(10 * time.Second):
+		require.Fail(t, "StopPreview should return once the deferred archive completes")
+	}
+	_, _, saves, _ := cache.counts()
+	require.Equal(t, 1, saves, "the deferred install-output archive should have completed before teardown")
+}
+
+// TestPrewarmPreviewInstallCaches_AlreadyValidInstallRecordsNoRestoreBenefit
+// guards the benefit attribution on the one path that still reaches the
+// "install cache hit" branch with the contract already satisfied before any
+// restore ran. Prewarm does not take the launch path's early return, so a
+// restore can succeed there without having caused anything: the sandbox was
+// already valid. Crediting it with its cold baseline would inflate the marginal
+// benefit that cost-aware admission compares against restore cost, which is the
+// signal deciding whether this cache gets restored at all.
+func TestPrewarmPreviewInstallCaches_AlreadyValidInstallRecordsNoRestoreBenefit(t *testing.T) {
+	t.Parallel()
+
+	dependencyID := uuid.New()
+	packageManagerID := uuid.New()
+	exec := previewInstallValidMarkerExecutor(nil)
+	cache := &fakeDependencyCache{
+		findHit: &preview.DependencyCacheHit{Entry: models.PreviewDependencyCache{
+			ID: dependencyID, SizeBytes: 123, ProducerDurationMS: 90_000,
+		}},
+		pmFindHit: &preview.DependencyCacheHit{Entry: models.PreviewDependencyCache{
+			ID: packageManagerID, CacheKind: models.PreviewCacheKindPackageManager, ProducerDurationMS: 90_000,
+		}},
+	}
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer), WithDependencyCache(cache))
+
+	err := d.PrewarmPreviewInstallCaches(context.Background(), &agent.Sandbox{ID: "prewarm", WorkDir: "/workspace/repo"}, previewInstallTestConfig(), preview.StartPreviewOptions{
+		OrgID:        uuid.New(),
+		RepositoryID: uuid.New(),
+		SessionID:    uuid.New(),
+	}, nil)
+	require.NoError(t, err, "prewarm should succeed against an already-installed workspace")
+
+	cache.mu.Lock()
+	benefits := append([]time.Duration(nil), cache.producerBenefits...)
+	benefitIDs := append([]uuid.UUID(nil), cache.producerBenefitIDs...)
+	cache.mu.Unlock()
+	require.ElementsMatch(t, []uuid.UUID{dependencyID, packageManagerID}, benefitIDs,
+		"both restores should record an observation so their cost history stays honest")
+	for i, benefit := range benefits {
+		require.Zero(t, benefit, "restore %d cannot claim benefit for a skip it did not cause", i)
 	}
 }
 

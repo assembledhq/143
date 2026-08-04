@@ -2215,8 +2215,8 @@ func TestPreviewStore_BeginStoppedWarmPreviewResume(t *testing.T) {
 
 			store := NewPreviewStore(mock)
 
-			mock.ExpectExec("UPDATE preview_instances").
-				WithArgs(previewAnyArgs(5)...).
+			mock.ExpectExec("UPDATE preview_instances(?s:.*)source_workspace_revision = @workspace_revision(?s:.*)EXISTS").
+				WithArgs(previewAnyArgs(7)...).
 				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows)).
 				WillReturnError(tt.execErr)
 			if tt.rows > 0 && tt.execErr == nil {
@@ -2226,7 +2226,7 @@ func TestPreviewStore_BeginStoppedWarmPreviewResume(t *testing.T) {
 					WillReturnError(tt.syncErr)
 			}
 
-			updated, err := store.BeginStoppedWarmPreviewResume(context.Background(), uuid.New(), uuid.New())
+			updated, err := store.BeginStoppedWarmPreviewResume(context.Background(), uuid.New(), uuid.New(), uuid.New(), 12)
 			if tt.expectErr {
 				require.Error(t, err, "warm resume transition should return database errors")
 				require.False(t, updated, "warm resume transition should not report success on error")
