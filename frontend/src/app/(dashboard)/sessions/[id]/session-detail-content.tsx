@@ -722,26 +722,28 @@ function ThreadFailureDetailsCard({ thread }: { thread: SessionThread }) {
   );
 }
 
-function SessionResultCard({ summary }: { summary?: string }) {
+function SessionResultSection({ summary, divided }: { summary?: string; divided: boolean }) {
   if (!summary) return null;
 
   return (
-    <Card className="border-border/60" data-testid="session-result-card">
-      <CardContent className="p-3.5">
-        <div className="flex items-start gap-2.5">
-          <div
-            aria-hidden="true"
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-success/10 text-success"
-          >
-            <CheckCircle2 className="h-4 w-4" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium text-foreground">Result</div>
-            <LazyMarkdownContent content={summary} className="mt-2 text-xs" />
-          </div>
+    <section
+      aria-label="Session result"
+      className={cn(divided && "border-t border-border/60 pt-4")}
+      data-testid="session-result-section"
+    >
+      <div className="flex items-start gap-2.5">
+        <div
+          aria-hidden="true"
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-success/10 text-success"
+        >
+          <CheckCircle2 className="h-4 w-4" />
         </div>
-      </CardContent>
-    </Card>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium text-foreground">Result</div>
+          <LazyMarkdownContent content={summary} className="mt-2 text-xs" />
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -6440,6 +6442,13 @@ export function SessionDetailContent({ id }: { id: string }) {
   };
   const detailActionSize = isMobileReviewViewport ? "xs" : "sm";
   const detailActionIconSize = isMobileReviewViewport ? "icon-xs" : "icon-sm";
+  const showResultDivider = Boolean(
+    pullRequestId && (
+      prStatus === "closed" ||
+      prStatus === "merged" ||
+      (prStatus === "open" && (prHealth || isPRHealthLoading))
+    ),
+  );
   // Right-panel content. Rendered inline on desktop and inside a bottom sheet
   // on mobile — the same JSX in both places so tab state stays consistent.
   const panelTabsEl = (
@@ -6724,7 +6733,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </CardContent>
             </Card>
           )}
-          <SessionResultCard summary={session.result_summary} />
+          <SessionResultSection summary={session.result_summary} divided={showResultDivider} />
           <PullRequestList
             changesets={changesets}
             selectedID={selectedChangeset?.id ?? ""}

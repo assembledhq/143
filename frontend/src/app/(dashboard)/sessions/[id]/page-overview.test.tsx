@@ -460,7 +460,7 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
   });
 
-  it('orders PR details, Result, then the quiet split suggestion', async () => {
+  it('orders the card-free PR details and Result sections before the quiet split suggestion', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({
@@ -474,13 +474,31 @@ describe('SessionDetailPage overview and review loop', () => {
 
     renderWithProviders(<SessionDetailContent id={mockSessions[0].id} />);
 
-    const prDetailsCard = await screen.findByRole('region', { name: 'Pull request #42' });
-    const resultCard = screen.getByTestId('session-result-card');
+    const prDetailsSection = await screen.findByRole('region', { name: 'Pull request #42' });
+    const resultSection = screen.getByTestId('session-result-section');
     const splitSuggestion = screen.getByRole('region', { name: 'Pull request size suggestion' });
 
-    expect(prDetailsCard?.parentElement?.firstElementChild).toBe(prDetailsCard);
-    expect(prDetailsCard.compareDocumentPosition(resultCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(resultCard.compareDocumentPosition(splitSuggestion) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(prDetailsSection?.parentElement?.firstElementChild).toBe(prDetailsSection);
+    expect(prDetailsSection.closest('[data-slot="card"]')).toBeNull();
+    expect(resultSection.closest('[data-slot="card"]')).toBeNull();
+    expect(resultSection).toHaveClass('border-t', 'pt-4');
+    expect(prDetailsSection.compareDocumentPosition(resultSection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(resultSection.compareDocumentPosition(splitSuggestion) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('renders Result without a leading divider when no pull request section precedes it', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json({ data: null });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={mockSessions[0].id} />);
+
+    const resultSection = await screen.findByTestId('session-result-section');
+
+    expect(resultSection.closest('[data-slot="card"]')).toBeNull();
+    expect(resultSection).not.toHaveClass('border-t', 'pt-4');
   });
 
   it('shows a compact status card while the Overview review loop is running', async () => {

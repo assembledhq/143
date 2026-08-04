@@ -8,7 +8,6 @@ import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
-import { Card, CardContent } from "@/components/ui/card";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
@@ -149,12 +148,12 @@ export function PRHealthBanner({
   const compactSummary = compactPRHealthSummary(health.summary, health.pull_request_number);
 
   return (
-    <Card
+    <section
       role="region"
       aria-label={`Pull request #${health.pull_request_number}`}
-      className="border-border/60"
+      data-slot="pr-health-section"
     >
-      <CardContent className="p-3.5">
+      <div>
         <div className="space-y-2.5">
           <div className="flex items-start gap-2.5">
             <div className="flex min-w-0 flex-1 items-start gap-2.5">
@@ -547,8 +546,8 @@ export function PRHealthBanner({
             )}
           </div>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </section>
   );
 }
 
