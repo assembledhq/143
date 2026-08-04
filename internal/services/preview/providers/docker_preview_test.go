@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -879,6 +880,9 @@ type fakeDependencyCache struct {
 	producerBaselines   []time.Duration
 	producerBaselineIDs []uuid.UUID
 	saveStarted         chan models.PreviewCacheKind
+	// saveHook, when set, runs at the start of every SavePathCache. Tests use it
+	// to observe save ordering relative to other launch phases.
+	saveHook func(models.PreviewCacheKind)
 	// buildSaveBlock, when set, makes build-output saves block until the channel
 	// is closed — used to prove StopPreview awaits the save.
 	buildSaveBlock chan struct{}
@@ -947,6 +951,9 @@ func (f *fakeDependencyCache) RestorePathCache(_ context.Context, _ *agent.Sandb
 }
 
 func (f *fakeDependencyCache) SavePathCache(ctx context.Context, _ *agent.Sandbox, spec preview.PreviewPathCacheSaveSpec) (preview.DependencyCacheSaveResult, error) {
+	if f.saveHook != nil {
+		f.saveHook(spec.Kind)
+	}
 	if f.saveStarted != nil {
 		select {
 		case f.saveStarted <- spec.Kind:
@@ -3983,6 +3990,95 @@ func TestDockerPreviewProvider_ParallelBuildReportsCauseNotCancellationVictim(t 
 	require.Contains(t, strings.Join(failures[0].tail, "\n"), "undefined symbol", "the observer should carry the causal build's output tail")
 }
 
+// TestDockerPreviewProvider_ParallelBuildFailureDoesNotWaitOutStuckSibling
+// covers the drain bound. Sequential builds surfaced a failure the moment it
+// happened; a parallel phase has to collect its siblings first, and a build
+// command that outlives its cancelled stream must not be able to hold the error
+// back for the full 30-minute build timeout.
+func TestDockerPreviewProvider_ParallelBuildFailureDoesNotWaitOutStuckSibling(t *testing.T) {
+	t.Parallel()
+
+	stuck := make(chan struct{})
+	t.Cleanup(func() { close(stuck) })
+	exec := &fakeServiceExecutor{execStreamFn: func(_ context.Context, cmd string, _ func([]byte)) (int, error) {
+		if strings.Contains(cmd, "build-web") {
+			return 1, nil
+		}
+		// Deliberately ignores ctx: models a build process that survives the
+		// cancelled exec stream.
+		<-stuck
+		return 0, nil
+	}}
+	provider := &DockerPreviewProvider{
+		executor:                    exec,
+		logger:                      zerolog.Nop(),
+		testParallelBuildDrainGrace: 50 * time.Millisecond,
+	}
+	cfg := &models.PreviewConfig{
+		Primary:        "web",
+		ParallelBuilds: true,
+		Services: map[string]models.ServiceConfig{
+			"api": {Build: []string{"build-api"}},
+			"web": {Build: []string{"build-web"}},
+		},
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- provider.runServiceBuilds(context.Background(), &previewState{sandbox: &agent.Sandbox{}}, cfg, preview.StartPreviewOptions{OrgID: uuid.New()}, nil)
+	}()
+	select {
+	case err := <-done:
+		require.Error(t, err, "the build phase should fail")
+		require.Contains(t, err.Error(), `service "web" build`, "the failure should name the build that actually failed")
+	case <-time.After(10 * time.Second):
+		require.Fail(t, "a failed parallel build must not wait out a sibling that ignores cancellation")
+	}
+}
+
+func TestSelectCausalBuildFailure(t *testing.T) {
+	t.Parallel()
+
+	buildOrder := []string{"api", "worker", "web"}
+
+	t.Run("prefers a genuine failure over cancellation fallout", func(t *testing.T) {
+		t.Parallel()
+		selected, ok := selectCausalBuildFailure(buildOrder, map[string]serviceBuildResult{
+			"api": {name: "api", err: errors.New(`service "api" build: exited with code 137`), canceled: true},
+			"web": {name: "web", err: errors.New(`service "web" build: exited with code 1`)},
+		})
+		require.True(t, ok, "a failure should be selected")
+		require.Equal(t, "web", selected.name, "the cancellation victim must not be reported as the cause")
+	})
+
+	t.Run("reports every genuine failure", func(t *testing.T) {
+		t.Parallel()
+		selected, ok := selectCausalBuildFailure(buildOrder, map[string]serviceBuildResult{
+			"api": {name: "api", err: errors.New(`service "api" build: missing header`)},
+			"web": {name: "web", err: errors.New(`service "web" build: undefined symbol`)},
+		})
+		require.True(t, ok, "a failure should be selected")
+		require.Equal(t, "api", selected.name, "selection should follow support-first build order")
+		require.Contains(t, selected.err.Error(), "missing header", "the selected failure should be reported")
+		require.Contains(t, selected.err.Error(), "undefined symbol", "a second genuine failure must not be dropped silently")
+	})
+
+	t.Run("falls back to cancellation fallout when that is all there is", func(t *testing.T) {
+		t.Parallel()
+		selected, ok := selectCausalBuildFailure(buildOrder, map[string]serviceBuildResult{
+			"web": {name: "web", err: errors.New(`service "web" build: context canceled`), canceled: true},
+		})
+		require.True(t, ok, "an all-cancelled phase still has to report something")
+		require.Equal(t, "web", selected.name, "the only failure should be reported")
+	})
+
+	t.Run("reports nothing when every build succeeded", func(t *testing.T) {
+		t.Parallel()
+		_, ok := selectCausalBuildFailure(buildOrder, map[string]serviceBuildResult{})
+		require.False(t, ok, "a phase with no failures must not synthesize one")
+	})
+}
+
 func TestStartPreview_ExactWarmResumeSkipsServiceBuilds(t *testing.T) {
 	t.Parallel()
 
@@ -4054,12 +4150,11 @@ func TestStartPreview_ExactWarmResumeSkipsServiceBuilds(t *testing.T) {
 
 // goBuildPreviewConfig is a Go service with a build step and a go.mod lockfile,
 // so the build phase runs and the home build cache (GOCACHE/GOMODCACHE) is
-// active. The package-manager cache is disabled, which is what makes the home
-// set own go/pkg/mod as well as .cache/go-build: with that lifecycle active it
-// keeps the module cache, because only it restores before install. Install is a
-// no-op cache hit in these tests.
+// active. The install command is JS-only, so the modules the build downloads are
+// the interesting case: the package-manager cache owns go/pkg/mod here and must
+// not archive it until after the build phase. Install is a no-op cache hit in
+// these tests.
 func goBuildPreviewConfig() *models.PreviewConfig {
-	packageManagerDisabled := false
 	return &models.PreviewConfig{
 		Name:    "test-app",
 		Primary: "web",
@@ -4067,9 +4162,6 @@ func goBuildPreviewConfig() *models.PreviewConfig {
 			Command:     []string{"npm", "ci"},
 			Lockfiles:   []string{"package-lock.json", "go.mod"},
 			VerifyPaths: []string{"node_modules/.bin/next"},
-			Cache: &models.PreviewInstallCacheConfig{
-				PackageManager: &models.PreviewPackageManagerCacheConfig{Enabled: &packageManagerDisabled},
-			},
 		},
 		Services: map[string]models.ServiceConfig{
 			"web": {
@@ -4080,6 +4172,81 @@ func goBuildPreviewConfig() *models.PreviewConfig {
 			},
 		},
 	}
+}
+
+// TestPrewarmPreviewBuildSnapshot_ArchivesModuleCacheAfterBuild pins the save
+// ordering the package-manager cache depends on. That cache owns go/pkg/mod
+// (only it restores before install), but a JS install command does not fill the
+// module cache — the build phase's `go build` does. Archiving at the end of
+// install would therefore capture the module cache as it stood before the
+// compile and permanently miss every module the build downloaded. The launch
+// path gets this ordering from its deferred saves; this job must ask for it.
+func TestPrewarmPreviewBuildSnapshot_ArchivesModuleCacheAfterBuild(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var order []string
+	record := func(event string) {
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, event)
+	}
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(_ context.Context, cmd string, _ func([]byte)) (int, error) {
+			switch {
+			case strings.Contains(cmd, "cmd/web"):
+				record("build")
+			case strings.Contains(cmd, "'npm' 'ci'"):
+				record("install")
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, _ string) (int, error) { return 0, nil },
+		readFileFn: func(_ context.Context, path string) ([]byte, error) {
+			if strings.Contains(path, ".143/cache/preview-install/") {
+				// No marker: install must actually run, which is what makes the
+				// package-manager cache save reachable.
+				return nil, os.ErrNotExist
+			}
+			if path == "package-lock.json" {
+				return []byte(`{"lockfileVersion":3}`), nil
+			}
+			return []byte("ok"), nil
+		},
+	}
+	cache := &fakeDependencyCache{}
+	cache.saveHook = func(kind models.PreviewCacheKind) { record("save:" + string(kind)) }
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer), WithDependencyCache(cache))
+
+	err := d.PrewarmPreviewBuildSnapshot(context.Background(), &agent.Sandbox{ID: "prewarm", WorkDir: "/workspace/repo", HomeDir: "/home/codex"}, goBuildPreviewConfig(), preview.StartPreviewOptions{
+		OrgID:        uuid.New(),
+		RepositoryID: uuid.New(),
+		SessionID:    uuid.New(),
+	}, nil)
+	require.NoError(t, err, "build-snapshot prewarm should succeed")
+
+	mu.Lock()
+	observed := append([]string(nil), order...)
+	mu.Unlock()
+	buildIdx := slices.Index(observed, "build")
+	saveIdx := slices.Index(observed, "save:"+string(models.PreviewCacheKindPackageManager))
+	require.GreaterOrEqual(t, buildIdx, 0, "the service build should run: %v", observed)
+	require.GreaterOrEqual(t, saveIdx, 0, "the package-manager cache should be archived: %v", observed)
+	require.Greater(t, saveIdx, buildIdx, "the module cache must be archived after the build that fills it: %v", observed)
+}
+
+// goBuildPreviewConfigWithoutPackageManagerCache is goBuildPreviewConfig with
+// the package-manager lifecycle switched off, which is what makes the home build
+// cache own go/pkg/mod in addition to .cache/go-build. Use it for assertions
+// about the home set's contents; use goBuildPreviewConfig for the default
+// ownership split.
+func goBuildPreviewConfigWithoutPackageManagerCache() *models.PreviewConfig {
+	cfg := goBuildPreviewConfig()
+	packageManagerDisabled := false
+	cfg.Install.Cache = &models.PreviewInstallCacheConfig{
+		PackageManager: &models.PreviewPackageManagerCacheConfig{Enabled: &packageManagerDisabled},
+	}
+	return cfg
 }
 
 // TestStartPreview_BuildPhaseInjectsPlatformEnv verifies the platform context
@@ -4186,7 +4353,7 @@ func TestStartPreview_BuildPhaseRunsBeforeStartAndSavesHomeCache(t *testing.T) {
 	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer), WithDependencyCache(cache))
 	obs := &recordingObserver{}
 
-	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo", HomeDir: "/home/codex"}, goBuildPreviewConfig(), preview.StartPreviewOptions{
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo", HomeDir: "/home/codex"}, goBuildPreviewConfigWithoutPackageManagerCache(), preview.StartPreviewOptions{
 		OrgID:        uuid.New(),
 		RepositoryID: uuid.New(),
 		SessionID:    uuid.New(),

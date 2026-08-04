@@ -31,7 +31,7 @@ The cache implementation now treats preview install caching as a generic path-ca
 | pip | `.cache/pip` |
 | uv | `.cache/uv` |
 | poetry | `.cache/pypoetry` |
-| go | `go/pkg/mod`, `.cache/go-build` (before build-cache ownership de-duplication) |
+| go | `go/pkg/mod`, `.cache/go-build`, before the ownership split below |
 
 Package-manager paths reject absolute paths, `..`, globs, broad `.`, sensitive directories such as `.ssh`, `.gnupg`, `.codex`, `.claude`, `.config/gh`, `.143`, and parents/children of those sensitive paths.
 
@@ -47,6 +47,15 @@ wrapper script, which the platform cannot inspect. The build cache adopts
 `go/pkg/mod` only when the package-manager cache is disabled, so the directory
 is never left uncached. De-duplicating this way avoids both duplicate archive
 upload and serialized extraction of the same data.
+
+Owning `go/pkg/mod` constrains when the package-manager cache may be archived: a
+JS install command does not fill the module cache, the build phase's `go build`
+does, so the save has to happen after service builds rather than at the end of
+install. Normal launches get that for free because their install-phase saves are
+deferred past readiness. The build-snapshot prewarm job has no readiness path, so
+it defers explicitly and drains synchronously after its build phase — it destroys
+its own sandbox on return, so a fire-and-forget drain there would be killed by
+teardown.
 
 The DB tables `preview_dependency_cache` and `preview_dependency_cache_locations` now include `cache_kind`; uniqueness and placement indexes include `(org_id, repo_id, cache_kind, cache_key)`. Worker-local L1 blob paths are also kind-aware, with legacy install-output local paths still readable during rollout.
 
