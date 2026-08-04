@@ -17,8 +17,7 @@ import (
 )
 
 const (
-	maxBrowserStorageStateBytes      = 1024 * 1024
-	previewBrowserObservationTimeout = 45 * time.Second
+	maxBrowserStorageStateBytes = 1024 * 1024
 )
 
 var (
@@ -125,8 +124,8 @@ type BrowserAccessTokenMinter interface {
 }
 
 type browserSessionLock struct {
-	mu   sync.Mutex
-	refs int
+	ready chan struct{}
+	refs  int
 }
 
 func NewBrowserSessionService(store BrowserSessionStore, inspector SessionBrowserInspector, accessTokenMinter BrowserAccessTokenMinter) *BrowserSessionService {
@@ -134,7 +133,7 @@ func NewBrowserSessionService(store BrowserSessionStore, inspector SessionBrowse
 		store:              store,
 		inspector:          inspector,
 		accessTokenMinter:  accessTokenMinter,
-		observationTimeout: previewBrowserObservationTimeout,
+		observationTimeout: BrowserOperationBudgetFor(BrowserOperationSessionObserve).Operation,
 		locks:              make(map[uuid.UUID]*browserSessionLock),
 	}
 }
@@ -143,33 +142,46 @@ func (s *BrowserSessionService) EnsureIdentity(ctx context.Context, orgID, sessi
 	if s == nil || s.store == nil {
 		return nil, ErrBrowserUnavailable
 	}
+	identityCtx, cancel := context.WithTimeout(ctx, browserDefaultOperationTimeout)
+	defer cancel()
 	policy = normalizeBrowserPolicy(policy)
 	contextKey := "session:" + sessionID.String()
-	if _, err := s.store.Ensure(ctx, orgID, sessionID, previewID, contextKey, policy.DefaultViewport); err != nil {
+	if _, err := s.store.Ensure(identityCtx, orgID, sessionID, previewID, contextKey, policy.DefaultViewport); err != nil {
 		return nil, fmt.Errorf("ensure browser identity: %w", err)
 	}
 	reused := s.inspector != nil && s.inspector.HasContext(models.BrowserTarget{PreviewID: previewID.String(), SessionID: sessionID.String(), ContextKey: contextKey})
 	return &models.PreviewBrowserContextStatus{ContextKey: contextKey, Reused: reused, Persisted: policy.PersistSession, Restoration: models.PreviewBrowserRestorationUnavailable, StatusDetail: "browser identity is ready; live context starts on first observation"}, nil
 }
 
-func (s *BrowserSessionService) acquireSession(sessionID uuid.UUID) func() {
+func (s *BrowserSessionService) acquireSession(ctx context.Context, sessionID uuid.UUID) (func(), error) {
 	s.locksMu.Lock()
 	entry := s.locks[sessionID]
 	if entry == nil {
-		entry = &browserSessionLock{}
+		entry = &browserSessionLock{ready: make(chan struct{}, 1)}
+		entry.ready <- struct{}{}
 		s.locks[sessionID] = entry
 	}
 	entry.refs++
 	s.locksMu.Unlock()
-	entry.mu.Lock()
-	return func() {
-		entry.mu.Unlock()
+	select {
+	case <-ctx.Done():
 		s.locksMu.Lock()
 		entry.refs--
 		if entry.refs == 0 {
 			delete(s.locks, sessionID)
 		}
 		s.locksMu.Unlock()
+		return nil, ctx.Err()
+	case <-entry.ready:
+		return func() {
+			entry.ready <- struct{}{}
+			s.locksMu.Lock()
+			entry.refs--
+			if entry.refs == 0 {
+				delete(s.locks, sessionID)
+			}
+			s.locksMu.Unlock()
+		}, nil
 	}
 }
 
@@ -208,7 +220,23 @@ func (s *BrowserSessionService) prepare(ctx context.Context, orgID, sessionID, p
 	}
 	if err := s.inspector.RestoreStorage(ctx, target, record.StorageState); err != nil {
 		if accessErr := s.ensurePreviewAccess(ctx, orgID, sessionID, previewID, target); accessErr != nil {
-			return target, record, models.PreviewBrowserRestorationUnavailable, "preview browser access could not be re-established after restore failure", errors.Join(err, accessErr)
+			restoreErr := &BrowserAccessError{Stage: BrowserAccessStageStateRestore, Err: err}
+			// The recovery failure is the terminal and actionable stage. Keep the
+			// preceding restore failure in the chain without allowing it to mask
+			// the bootstrap stage selected by AsBrowserAccessError, and record it
+			// on the recovery error so it stays queryable rather than surviving
+			// only in the joined error text.
+			if recoveryErr, staged := AsBrowserAccessError(accessErr); staged {
+				// Do not mutate an error owned by the inspector: implementations may
+				// reuse error values across calls. A new outer staged error keeps the
+				// terminal stage authoritative and retains the original chain.
+				accessErr = &BrowserAccessError{
+					Stage:          recoveryErr.Stage,
+					PrecedingStage: BrowserAccessStageStateRestore,
+					Err:            accessErr,
+				}
+			}
+			return target, record, models.PreviewBrowserRestorationUnavailable, "preview browser access could not be re-established after restore failure", errors.Join(accessErr, restoreErr)
 		}
 		return target, record, models.PreviewBrowserRestorationReset, "stored browser state was incompatible or could not be restored", nil
 	}
@@ -228,13 +256,16 @@ func (s *BrowserSessionService) ensurePreviewAccess(ctx context.Context, orgID, 
 	}
 	token, err := s.accessTokenMinter.MintBrowserAccessToken(ctx, orgID, sessionID, previewID)
 	if err != nil {
-		return fmt.Errorf("mint preview browser access: %w", err)
+		return &BrowserAccessError{Stage: BrowserAccessStageTokenMint, Err: fmt.Errorf("mint preview browser access: %w", err)}
 	}
 	if strings.TrimSpace(token) == "" {
-		return fmt.Errorf("mint preview browser access: empty token")
+		return &BrowserAccessError{Stage: BrowserAccessStageTokenMint, Err: errors.New("mint preview browser access: empty token")}
 	}
 	if err := accessInspector.BootstrapPreviewAccess(ctx, target, token); err != nil {
-		return fmt.Errorf("bootstrap preview browser access: %w", err)
+		if _, staged := AsBrowserAccessError(err); staged {
+			return err
+		}
+		return &BrowserAccessError{Stage: BrowserAccessStageBootstrapNavigation, Err: fmt.Errorf("bootstrap preview browser access: %w", err)}
 	}
 	return nil
 }
@@ -242,7 +273,7 @@ func (s *BrowserSessionService) ensurePreviewAccess(ctx context.Context, orgID, 
 func (s *BrowserSessionService) Observe(ctx context.Context, orgID, sessionID, previewID uuid.UUID, policy BrowserSessionPolicy, opts models.PreviewObservationOpts) (*models.PreviewObservation, error) {
 	timeout := s.observationTimeout
 	if timeout <= 0 {
-		timeout = previewBrowserObservationTimeout
+		timeout = BrowserOperationBudgetFor(BrowserOperationSessionObserve).Operation
 	}
 	observeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -265,19 +296,25 @@ func (s *BrowserSessionService) RunAgentOperation(ctx context.Context, orgID, se
 		return ErrBrowserUnavailable
 	}
 	token := uuid.New()
-	started, err := s.store.BeginAgentAction(ctx, orgID, sessionID, token, duration)
+	acquireCtx, acquireCancel := context.WithTimeout(ctx, browserSessionControlAcquireTimeout)
+	started, err := s.store.BeginAgentAction(acquireCtx, orgID, sessionID, token, duration)
 	if err != nil {
+		acquireCancel()
 		return fmt.Errorf("acquire agent browser operation: %w", err)
 	}
 	if !started {
-		control, controlErr := s.GetControl(ctx, orgID, sessionID)
+		control, controlErr := s.GetControl(acquireCtx, orgID, sessionID)
+		acquireCancel()
 		if controlErr == nil && control.State == models.PreviewBrowserControlAgent {
 			return ErrBrowserControlBusy
 		}
 		return ErrBrowserControlHeld
 	}
+	acquireCancel()
 	operationErr := operation()
-	endErr := s.store.EndAgentAction(context.WithoutCancel(ctx), orgID, sessionID, token)
+	releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), browserSessionControlReleaseTimeout)
+	endErr := s.store.EndAgentAction(releaseCtx, orgID, sessionID, token)
+	releaseCancel()
 	if endErr != nil {
 		endErr = fmt.Errorf("release agent browser operation: %w", endErr)
 	}
@@ -286,9 +323,14 @@ func (s *BrowserSessionService) RunAgentOperation(ctx context.Context, orgID, se
 
 func (s *BrowserSessionService) observe(ctx context.Context, orgID, sessionID, previewID uuid.UUID, policy BrowserSessionPolicy, opts models.PreviewObservationOpts) (*models.PreviewObservation, error) {
 	policy = normalizeBrowserPolicy(policy)
-	release := s.acquireSession(sessionID)
+	release, err := s.acquireSession(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
 	defer release()
-	target, record, restoration, restorationDetail, err := s.prepare(ctx, orgID, sessionID, previewID, policy)
+	accessCtx, accessCancel := context.WithTimeout(ctx, browserSessionAccessTimeout)
+	target, record, restoration, restorationDetail, err := s.prepare(accessCtx, orgID, sessionID, previewID, policy)
+	accessCancel()
 	if err != nil {
 		return nil, err
 	}
@@ -307,7 +349,9 @@ func (s *BrowserSessionService) observe(ctx context.Context, orgID, sessionID, p
 	if opts.Path != "" && !pathAllowed(opts.Path, policy.AllowedPaths) {
 		return nil, ErrNavigationNotAllowed
 	}
-	observation, err := s.inspector.Observe(ctx, target, opts)
+	observationCtx, observationCancel := context.WithTimeout(ctx, browserObserveOperationTimeout)
+	observation, err := s.inspector.Observe(observationCtx, target, opts)
+	observationCancel()
 	if err != nil {
 		return nil, err
 	}
@@ -322,34 +366,45 @@ func (s *BrowserSessionService) observe(ctx context.Context, orgID, sessionID, p
 		if opts.PreserveConsoleCursor {
 			persistedCursor = record.ConsoleCursor
 		}
-		if err := s.persist(ctx, orgID, sessionID, target, policy, observation, persistedCursor); err != nil {
-			return nil, err
+		persistCtx, persistCancel := context.WithTimeout(ctx, browserSessionPersistTimeout)
+		persistErr := s.persist(persistCtx, orgID, sessionID, target, policy, observation, persistedCursor)
+		persistCancel()
+		if persistErr != nil {
+			return nil, persistErr
 		}
 	}
 	return observation, nil
 }
 
 func (s *BrowserSessionService) Act(ctx context.Context, orgID, sessionID, previewID uuid.UUID, policy BrowserSessionPolicy, steps []models.InteractionStep, opts models.PreviewObservationOpts) (*models.PreviewActResult, error) {
+	actCtx, cancel := context.WithTimeout(ctx, BrowserOperationBudgetFor(BrowserOperationSessionAct).Operation)
+	defer cancel()
 	var result *models.PreviewActResult
-	err := s.RunAgentOperation(ctx, orgID, sessionID, 5*time.Minute, func() error {
+	err := s.RunAgentOperation(actCtx, orgID, sessionID, 5*time.Minute, func() error {
 		var actErr error
-		result, actErr = s.act(ctx, orgID, sessionID, previewID, policy, steps, opts)
+		result, actErr = s.act(actCtx, orgID, sessionID, previewID, policy, steps, opts)
 		return actErr
 	})
 	return result, err
 }
 
 func (s *BrowserSessionService) ActAsHuman(ctx context.Context, orgID, sessionID, previewID, userID uuid.UUID, policy BrowserSessionPolicy, steps []models.InteractionStep, opts models.PreviewObservationOpts) (*models.PreviewActResult, error) {
+	actCtx, cancel := context.WithTimeout(ctx, BrowserOperationBudgetFor(BrowserOperationSessionAct).Operation)
+	defer cancel()
 	token := uuid.New()
-	allowed, err := s.store.BeginHumanAction(ctx, orgID, sessionID, userID, token, 5*time.Minute)
+	acquireCtx, acquireCancel := context.WithTimeout(actCtx, browserSessionControlAcquireTimeout)
+	allowed, err := s.store.BeginHumanAction(acquireCtx, orgID, sessionID, userID, token, 5*time.Minute)
+	acquireCancel()
 	if err != nil {
 		return nil, fmt.Errorf("acquire human browser action: %w", err)
 	}
 	if !allowed {
 		return nil, ErrBrowserControlHeld
 	}
-	result, actErr := s.act(ctx, orgID, sessionID, previewID, policy, steps, opts)
-	endErr := s.store.EndAgentAction(context.WithoutCancel(ctx), orgID, sessionID, token)
+	result, actErr := s.act(actCtx, orgID, sessionID, previewID, policy, steps, opts)
+	releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(actCtx), browserSessionControlReleaseTimeout)
+	endErr := s.store.EndAgentAction(releaseCtx, orgID, sessionID, token)
+	releaseCancel()
 	if endErr != nil {
 		endErr = fmt.Errorf("release human browser action: %w", endErr)
 	}
@@ -358,14 +413,19 @@ func (s *BrowserSessionService) ActAsHuman(ctx context.Context, orgID, sessionID
 
 func (s *BrowserSessionService) act(ctx context.Context, orgID, sessionID, previewID uuid.UUID, policy BrowserSessionPolicy, steps []models.InteractionStep, opts models.PreviewObservationOpts) (*models.PreviewActResult, error) {
 	policy = normalizeBrowserPolicy(policy)
-	release := s.acquireSession(sessionID)
+	release, err := s.acquireSession(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
 	defer release()
 	for _, step := range steps {
 		if step.Action == "navigate" && !pathAllowed(step.Value, policy.AllowedPaths) {
 			return nil, ErrNavigationNotAllowed
 		}
 	}
-	target, record, restoration, restorationDetail, err := s.prepare(ctx, orgID, sessionID, previewID, policy)
+	accessCtx, accessCancel := context.WithTimeout(ctx, browserSessionAccessTimeout)
+	target, record, restoration, restorationDetail, err := s.prepare(accessCtx, orgID, sessionID, previewID, policy)
+	accessCancel()
 	if err != nil {
 		return nil, err
 	}
@@ -389,11 +449,16 @@ func (s *BrowserSessionService) act(ctx context.Context, orgID, sessionID, previ
 	if restoration == models.PreviewBrowserRestorationReset {
 		initialOpts := opts
 		initialOpts.Path = initialBrowserPath(record.CurrentURL, policy.AllowedPaths)
-		if _, initErr := s.inspector.Observe(ctx, target, initialOpts); initErr != nil {
+		initializationCtx, initializationCancel := context.WithTimeout(ctx, browserSessionInitializationTimeout)
+		_, initErr := s.inspector.Observe(initializationCtx, target, initialOpts)
+		initializationCancel()
+		if initErr != nil {
 			return nil, fmt.Errorf("initialize browser page: %w", initErr)
 		}
 	}
-	result, err := s.inspector.Act(ctx, target, steps, opts)
+	interactionCtx, interactionCancel := context.WithTimeout(ctx, browserInteractionOperationTimeout)
+	result, err := s.inspector.Act(interactionCtx, target, steps, opts)
+	interactionCancel()
 	if err != nil {
 		return nil, err
 	}
@@ -404,8 +469,11 @@ func (s *BrowserSessionService) act(ctx context.Context, orgID, sessionID, previ
 		if !urlPathAllowed(result.Observation.URL, policy.AllowedPaths) {
 			return nil, ErrNavigationNotAllowed
 		}
-		if err := s.persist(ctx, orgID, sessionID, target, policy, result.Observation, result.Observation.ConsoleCursor); err != nil {
-			return nil, err
+		persistCtx, persistCancel := context.WithTimeout(ctx, browserSessionPersistTimeout)
+		persistErr := s.persist(persistCtx, orgID, sessionID, target, policy, result.Observation, result.Observation.ConsoleCursor)
+		persistCancel()
+		if persistErr != nil {
+			return nil, persistErr
 		}
 	}
 	return result, nil

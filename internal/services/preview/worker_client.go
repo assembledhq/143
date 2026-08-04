@@ -11,9 +11,11 @@ import (
 	"strings"
 	"time"
 
+	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 
 	"github.com/assembledhq/143/internal/auth"
+	"github.com/assembledhq/143/internal/internalapi"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -24,15 +26,17 @@ const previewWorkerTokenTTL = 30 * time.Second
 // probes, each defaulting to 90s) or the API gives up before the worker
 // finishes, surfacing as "context canceled" on a readiness probe.
 const previewWorkerHTTPTimeout = 10 * time.Minute
-const previewWorkerObservationTimeout = 50 * time.Second
-
 const PreviewSoftRestartUnsupportedCode = "PREVIEW_SOFT_RESTART_UNSUPPORTED"
+
+type workerNodeContextKey struct{}
 
 // WorkerRequestError preserves structured worker error responses.
 type WorkerRequestError struct {
-	StatusCode int
-	Code       string
-	Message    string
+	StatusCode   int
+	Code         string
+	Message      string
+	Details      any
+	WorkerNodeID string
 }
 
 func (e *WorkerRequestError) Error() string {
@@ -253,6 +257,7 @@ func (c *WorkerPreviewClient) newRequest(
 		}
 		reader = bytes.NewReader(payload)
 	}
+	ctx = context.WithValue(ctx, workerNodeContextKey{}, claims.TargetNodeID)
 	req, err := http.NewRequestWithContext(ctx, method, url, reader)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
@@ -265,6 +270,9 @@ func (c *WorkerPreviewClient) newRequest(
 		return nil, fmt.Errorf("sign preview token: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	if parentRequestID := internalapi.NormalizeParentRequestID(chiMiddleware.GetReqID(ctx)); parentRequestID != "" {
+		req.Header.Set(internalapi.ParentRequestIDHeader, parentRequestID)
+	}
 	return req, nil
 }
 
@@ -275,14 +283,17 @@ func decodeWorkerResponse[T any](resp *http.Response) (*T, error) {
 		var payload models.ErrorResponse
 		if err := json.Unmarshal(body, &payload); err == nil && payload.Error.Code != "" {
 			return nil, &WorkerRequestError{
-				StatusCode: resp.StatusCode,
-				Code:       payload.Error.Code,
-				Message:    payload.Error.Message,
+				StatusCode:   resp.StatusCode,
+				Code:         payload.Error.Code,
+				Message:      payload.Error.Message,
+				Details:      payload.Error.Details,
+				WorkerNodeID: responseWorkerNodeID(resp),
 			}
 		}
 		return nil, &WorkerRequestError{
-			StatusCode: resp.StatusCode,
-			Message:    strings.TrimSpace(string(body)),
+			StatusCode:   resp.StatusCode,
+			Message:      strings.TrimSpace(string(body)),
+			WorkerNodeID: responseWorkerNodeID(resp),
 		}
 	}
 	var payload models.SingleResponse[T]
@@ -299,14 +310,17 @@ func decodeWorkerListResponse[T any](resp *http.Response) ([]T, error) {
 		var payload models.ErrorResponse
 		if err := json.Unmarshal(body, &payload); err == nil && payload.Error.Code != "" {
 			return nil, &WorkerRequestError{
-				StatusCode: resp.StatusCode,
-				Code:       payload.Error.Code,
-				Message:    payload.Error.Message,
+				StatusCode:   resp.StatusCode,
+				Code:         payload.Error.Code,
+				Message:      payload.Error.Message,
+				Details:      payload.Error.Details,
+				WorkerNodeID: responseWorkerNodeID(resp),
 			}
 		}
 		return nil, &WorkerRequestError{
-			StatusCode: resp.StatusCode,
-			Message:    strings.TrimSpace(string(body)),
+			StatusCode:   resp.StatusCode,
+			Message:      strings.TrimSpace(string(body)),
+			WorkerNodeID: responseWorkerNodeID(resp),
 		}
 	}
 	var payload models.ListResponse[T]
@@ -316,6 +330,14 @@ func decodeWorkerListResponse[T any](resp *http.Response) ([]T, error) {
 	return payload.Data, nil
 }
 
+func responseWorkerNodeID(resp *http.Response) string {
+	if resp == nil || resp.Request == nil {
+		return ""
+	}
+	workerNodeID, _ := resp.Request.Context().Value(workerNodeContextKey{}).(string)
+	return workerNodeID
+}
+
 // AsWorkerRequestError unwraps a worker client error.
 func AsWorkerRequestError(err error) (*WorkerRequestError, bool) {
 	var target *WorkerRequestError
@@ -323,6 +345,10 @@ func AsWorkerRequestError(err error) (*WorkerRequestError, bool) {
 		return target, true
 	}
 	return nil, false
+}
+
+func withBrowserWorkerRequestTimeout(ctx context.Context, operation BrowserOperation) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, BrowserOperationBudgetFor(operation).WorkerRequest)
 }
 
 func (c *WorkerPreviewClient) StartPreview(ctx context.Context, worker WorkerNode, reqBody RemoteStartPreviewRequest) (*models.PreviewInstance, error) {
@@ -409,6 +435,8 @@ func (c *WorkerPreviewClient) recyclePreview(ctx context.Context, worker WorkerN
 }
 
 func (c *WorkerPreviewClient) CaptureScreenshot(ctx context.Context, worker WorkerNode, orgID, previewID uuid.UUID, opts models.ScreenshotOpts) (*models.ScreenshotResult, error) {
+	ctx, cancel := withBrowserWorkerRequestTimeout(ctx, BrowserOperationScreenshot)
+	defer cancel()
 	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/screenshot", worker.BaseURL, previewID), auth.PreviewTokenClaims{
 		OrgID:        orgID,
 		TargetNodeID: worker.ID,
@@ -435,6 +463,8 @@ func (c *WorkerPreviewClient) InspectElementBySelector(ctx context.Context, work
 }
 
 func (c *WorkerPreviewClient) inspectElement(ctx context.Context, worker WorkerNode, orgID, previewID uuid.UUID, body RemoteInspectElementRequest) (*models.ElementInfo, error) {
+	ctx, cancel := withBrowserWorkerRequestTimeout(ctx, BrowserOperationInspect)
+	defer cancel()
 	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/inspect", worker.BaseURL, previewID), auth.PreviewTokenClaims{
 		OrgID:        orgID,
 		TargetNodeID: worker.ID,
@@ -471,6 +501,8 @@ func (c *WorkerPreviewClient) ReadConsole(ctx context.Context, worker WorkerNode
 }
 
 func (c *WorkerPreviewClient) ExecuteInteraction(ctx context.Context, worker WorkerNode, orgID, previewID uuid.UUID, steps []models.InteractionStep) (*models.InteractionResult, error) {
+	ctx, cancel := withBrowserWorkerRequestTimeout(ctx, BrowserOperationInteract)
+	defer cancel()
 	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/interact", worker.BaseURL, previewID), auth.PreviewTokenClaims{
 		OrgID:        orgID,
 		TargetNodeID: worker.ID,
@@ -489,7 +521,7 @@ func (c *WorkerPreviewClient) ExecuteInteraction(ctx context.Context, worker Wor
 }
 
 func (c *WorkerPreviewClient) Observe(ctx context.Context, worker WorkerNode, orgID, sessionID, previewID uuid.UUID, body RemoteObserveRequest) (*models.PreviewObservation, error) {
-	observeCtx, cancel := context.WithTimeout(ctx, previewWorkerObservationTimeout)
+	observeCtx, cancel := withBrowserWorkerRequestTimeout(ctx, BrowserOperationSessionObserve)
 	defer cancel()
 	req, err := c.newRequest(observeCtx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/observe", worker.BaseURL, previewID), auth.PreviewTokenClaims{OrgID: orgID, TargetNodeID: worker.ID, PreviewID: &previewID, SessionID: &sessionID, Action: "observe", ExpiresAt: time.Now().Add(previewWorkerTokenTTL)}, body)
 	if err != nil {
@@ -503,6 +535,8 @@ func (c *WorkerPreviewClient) Observe(ctx context.Context, worker WorkerNode, or
 }
 
 func (c *WorkerPreviewClient) Act(ctx context.Context, worker WorkerNode, orgID, sessionID, previewID uuid.UUID, body RemoteActRequest) (*models.PreviewActResult, error) {
+	ctx, cancel := withBrowserWorkerRequestTimeout(ctx, BrowserOperationSessionAct)
+	defer cancel()
 	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/act", worker.BaseURL, previewID), auth.PreviewTokenClaims{OrgID: orgID, TargetNodeID: worker.ID, PreviewID: &previewID, SessionID: &sessionID, Action: "act", ExpiresAt: time.Now().Add(previewWorkerTokenTTL)}, body)
 	if err != nil {
 		return nil, err
@@ -515,6 +549,8 @@ func (c *WorkerPreviewClient) Act(ctx context.Context, worker WorkerNode, orgID,
 }
 
 func (c *WorkerPreviewClient) ActAsHuman(ctx context.Context, worker WorkerNode, orgID, sessionID, previewID, userID uuid.UUID, body RemoteActRequest) (*models.PreviewActResult, error) {
+	ctx, cancel := withBrowserWorkerRequestTimeout(ctx, BrowserOperationSessionAct)
+	defer cancel()
 	payload := RemoteHumanActRequest{RemoteActRequest: body, UserID: userID}
 	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/human-act", worker.BaseURL, previewID), auth.PreviewTokenClaims{OrgID: orgID, TargetNodeID: worker.ID, PreviewID: &previewID, SessionID: &sessionID, Action: "human_act", ExpiresAt: time.Now().Add(previewWorkerTokenTTL)}, payload)
 	if err != nil {
@@ -528,6 +564,8 @@ func (c *WorkerPreviewClient) ActAsHuman(ctx context.Context, worker WorkerNode,
 }
 
 func (c *WorkerPreviewClient) CaptureMultiViewport(ctx context.Context, worker WorkerNode, orgID, previewID uuid.UUID, opts models.MultiViewportOpts) (*models.MultiViewportResult, error) {
+	ctx, cancel := withBrowserWorkerRequestTimeout(ctx, BrowserOperationMultiViewport)
+	defer cancel()
 	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/multi-viewport", worker.BaseURL, previewID), auth.PreviewTokenClaims{
 		OrgID:        orgID,
 		TargetNodeID: worker.ID,
@@ -546,6 +584,8 @@ func (c *WorkerPreviewClient) CaptureMultiViewport(ctx context.Context, worker W
 }
 
 func (c *WorkerPreviewClient) ComputeVisualDiff(ctx context.Context, worker WorkerNode, orgID, previewID uuid.UUID, beforeSnapshotID, afterSnapshotID string) (*models.VisualDiff, error) {
+	ctx, cancel := withBrowserWorkerRequestTimeout(ctx, BrowserOperationVisualDiff)
+	defer cancel()
 	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/visual-diff", worker.BaseURL, previewID), auth.PreviewTokenClaims{
 		OrgID:        orgID,
 		TargetNodeID: worker.ID,
@@ -564,6 +604,8 @@ func (c *WorkerPreviewClient) ComputeVisualDiff(ctx context.Context, worker Work
 }
 
 func (c *WorkerPreviewClient) RunAssertions(ctx context.Context, worker WorkerNode, orgID, previewID uuid.UUID, assertions []Assertion) (*AssertionResult, error) {
+	ctx, cancel := withBrowserWorkerRequestTimeout(ctx, BrowserOperationAssertions)
+	defer cancel()
 	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/assert", worker.BaseURL, previewID), auth.PreviewTokenClaims{
 		OrgID:        orgID,
 		TargetNodeID: worker.ID,

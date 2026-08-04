@@ -852,6 +852,50 @@ func TestInternalPreviewHandler_BrowserSessionMismatch(t *testing.T) {
 	}
 }
 
+func TestWriteBrowserSessionError_ReturnsSafeBootstrapStage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		error       *previewsvc.BrowserAccessError
+		wantDetails map[string]any
+	}{
+		{
+			name:        "single bootstrap failure",
+			error:       &previewsvc.BrowserAccessError{Stage: previewsvc.BrowserAccessStageBootstrapExchange, Err: errors.New("exchange rejected token=must-not-leak")},
+			wantDetails: map[string]any{"stage": "bootstrap_exchange"},
+		},
+		{
+			name: "bootstrap recovery failure after state restore",
+			error: &previewsvc.BrowserAccessError{
+				Stage:          previewsvc.BrowserAccessStageBootstrapExchange,
+				PrecedingStage: previewsvc.BrowserAccessStageStateRestore,
+				Err:            errors.New("exchange rejected cookie=must-not-leak"),
+			},
+			wantDetails: map[string]any{"stage": "bootstrap_exchange", "preceding_stage": "state_restore"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequest(http.MethodPost, "/internal/preview/preview-id/observe", nil)
+			req = withPreviewRouteParam(req, "preview-id")
+			rr := httptest.NewRecorder()
+
+			writeBrowserSessionError(rr, req, tt.error)
+
+			require.Equal(t, http.StatusInternalServerError, rr.Code, "bootstrap stage failure should return a server error")
+			var resp models.ErrorResponse
+			require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp), "bootstrap stage failure should return JSON")
+			require.Equal(t, "PREVIEW_BROWSER_BOOTSTRAP_EXCHANGE_FAILED", resp.Error.Code, "bootstrap stage should have a stable public code")
+			require.Equal(t, tt.wantDetails, resp.Error.Details, "bootstrap response should expose only safe structured stages")
+			require.NotContains(t, rr.Body.String(), "must-not-leak", "bootstrap response should never include the underlying token or cookie error")
+		})
+	}
+}
+
 func TestInternalPreviewHandler_InspectorEndpoints_RejectInvalidBodiesAndSurfaceFailures(t *testing.T) {
 	t.Parallel()
 

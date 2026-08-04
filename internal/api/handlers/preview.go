@@ -138,6 +138,7 @@ type previewHTTPError struct {
 	status  int
 	code    string
 	message string
+	details any
 	err     error
 }
 
@@ -188,15 +189,109 @@ func newPreviewHTTPError(status int, code, message string, err error) *previewHT
 	return &previewHTTPError{status: status, code: code, message: message, err: err}
 }
 
+func newPreviewHTTPErrorWithDetails(status int, code, message string, details any, err error) *previewHTTPError {
+	return &previewHTTPError{status: status, code: code, message: message, details: details, err: err}
+}
+
 func writePreviewHTTPError(w http.ResponseWriter, r *http.Request, err *previewHTTPError) {
 	if err == nil {
 		return
 	}
+	if stage := browserDetailString(err.details, "stage"); stage != "" {
+		logContext := zerolog.Ctx(r.Context()).With().Str("browser_stage", stage)
+		if preceding := browserDetailString(err.details, "preceding_stage"); preceding != "" {
+			logContext = logContext.Str("browser_preceding_stage", preceding)
+		}
+		if previewID := chi.URLParam(r, "preview_id"); previewID != "" {
+			logContext = logContext.Str("preview_id", previewID)
+		}
+		if sessionID := chi.URLParam(r, "id"); sessionID != "" {
+			logContext = logContext.Str("session_id", sessionID)
+		}
+		if elapsed := browserOperationElapsed(r); elapsed > 0 {
+			logContext = logContext.Dur("browser_elapsed", elapsed)
+		}
+		logger := logContext.Logger()
+		r = r.WithContext(logger.WithContext(r.Context()))
+	}
 	if err.err != nil {
-		writeError(w, r, err.status, err.code, err.message, err.err)
+		writeErrorWithDetails(w, r, err.status, err.code, err.message, err.details, err.err)
 		return
 	}
-	writeError(w, r, err.status, err.code, err.message)
+	writeErrorWithDetails(w, r, err.status, err.code, err.message, err.details)
+}
+
+func withAPIBrowserOperation(w http.ResponseWriter, r *http.Request, operation preview.BrowserOperation) *http.Request {
+	setAPIBrowserResponseDeadline(w, r, operation)
+	return withBrowserOperationStart(r)
+}
+
+func setAPIBrowserResponseDeadline(w http.ResponseWriter, r *http.Request, operation preview.BrowserOperation) {
+	setResponseWriteDeadline(w, r, preview.BrowserOperationBudgetFor(operation).APIResponse)
+}
+
+func setAPICoordinatedBrowserResponseDeadline(w http.ResponseWriter, r *http.Request, operation preview.BrowserOperation) {
+	setResponseWriteDeadline(w, r, preview.CoordinatedBrowserOperationAPIResponseTimeoutFor(operation))
+}
+
+// browserHandlerTimeout bounds a browser handler. Only a call that actually
+// leaves this process earns the worker-hop headroom; work executed in-process
+// keeps the plain operation budget so the documented ceiling stays honest.
+func browserHandlerTimeout(remote bool, operation preview.BrowserOperation) time.Duration {
+	budget := preview.BrowserOperationBudgetFor(operation)
+	if remote {
+		return budget.WorkerRequest
+	}
+	return budget.Operation
+}
+
+const browserWorkerResolutionTimeout = 15 * time.Second
+
+// resolveBrowserWorker resolves where a browser operation will execute, so the
+// handler can size its timeout to the real topology rather than to whether
+// worker routing happens to be enabled process-wide. The returned bool reports
+// whether the operation leaves this process. canRunLocally lets a caller say it
+// has no in-process executor, in which case even a local worker is reached over
+// loopback HTTP and does deserve the hop headroom.
+func (h *PreviewHandler) resolveBrowserWorker(w http.ResponseWriter, r *http.Request, workerNodeID string, canRunLocally bool) (preview.WorkerNode, bool, bool) {
+	if !h.workerRoutingEnabled() {
+		return preview.WorkerNode{}, false, true
+	}
+	resolveCtx, cancel := context.WithTimeout(r.Context(), browserWorkerResolutionTimeout)
+	defer cancel()
+	worker, err := h.resolvePreviewWorker(resolveCtx, workerNodeID)
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", err)
+		return preview.WorkerNode{}, false, false
+	}
+	return worker, !canRunLocally || !h.isLocalWorker(worker), true
+}
+
+func (h *PreviewHandler) prepareBrowserExecution(w http.ResponseWriter, r *http.Request, workerNodeID string, canRunLocally bool, operation preview.BrowserOperation) (preview.WorkerNode, bool, bool) {
+	// Re-arm after target lookup and request parsing so a bounded resolution
+	// failure still has time to return a structured error response.
+	setAPIBrowserResponseDeadline(w, r, operation)
+	worker, remote, resolved := h.resolveBrowserWorker(w, r, workerNodeID, canRunLocally)
+	if !resolved {
+		return preview.WorkerNode{}, false, false
+	}
+	// Refresh again after bounded worker resolution so none of that preflight
+	// consumes the response headroom reserved for the actual local operation or
+	// worker request.
+	setAPIBrowserResponseDeadline(w, r, operation)
+	return worker, remote, true
+}
+
+func browserDetailString(details any, key string) string {
+	switch value := details.(type) {
+	case map[string]any:
+		field, _ := value[key].(string)
+		return field
+	case map[string]string:
+		return value[key]
+	default:
+		return ""
+	}
 }
 
 func (h *PreviewHandler) workerRoutingEnabled() bool {
@@ -208,14 +303,40 @@ func (h *PreviewHandler) isLocalWorker(worker preview.WorkerNode) bool {
 }
 
 func (h *PreviewHandler) writeWorkerClientError(w http.ResponseWriter, r *http.Request, err error) {
+	if reqErr, ok := preview.AsWorkerRequestError(err); ok && reqErr.WorkerNodeID != "" {
+		logger := zerolog.Ctx(r.Context()).With().Str("worker_node_id", reqErr.WorkerNodeID).Logger()
+		r = r.WithContext(logger.WithContext(r.Context()))
+	}
 	writePreviewHTTPError(w, r, workerClientHTTPError(err))
 }
 
 func workerClientHTTPError(err error) *previewHTTPError {
 	if reqErr, ok := preview.AsWorkerRequestError(err); ok {
-		return newPreviewHTTPError(reqErr.StatusCode, reqErr.Code, reqErr.Message, nil)
+		return newPreviewHTTPErrorWithDetails(reqErr.StatusCode, reqErr.Code, reqErr.Message, safeWorkerBrowserDetails(reqErr.Code, reqErr.Details), nil)
 	}
 	return newPreviewHTTPError(http.StatusBadGateway, "PREVIEW_WORKER_REQUEST_FAILED", "preview worker request failed", err)
+}
+
+func safeWorkerBrowserDetails(code string, details any) any {
+	stage := browserDetailString(details, "stage")
+	if stage == "" {
+		return nil
+	}
+	accessErr := &preview.BrowserAccessError{Stage: preview.BrowserAccessStage(stage)}
+	if accessErr.Code() != code || accessErr.Code() == "PREVIEW_BROWSER_ACCESS_FAILED" {
+		return nil
+	}
+	safe := map[string]string{"stage": stage}
+	// The preceding stage is diagnostic metadata from the same closed set, so
+	// it is safe to forward -- but only after the worker's value is confirmed
+	// to be a stage this build knows, never as an opaque passthrough.
+	if preceding := browserDetailString(details, "preceding_stage"); preceding != "" {
+		precedingErr := &preview.BrowserAccessError{Stage: preview.BrowserAccessStage(preceding)}
+		if precedingErr.Code() != "PREVIEW_BROWSER_ACCESS_FAILED" {
+			safe["preceding_stage"] = preceding
+		}
+	}
+	return safe
 }
 
 // =============================================================================
@@ -2652,6 +2773,7 @@ func (h *PreviewHandler) WatchBrowser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *PreviewHandler) observePreview(w http.ResponseWriter, r *http.Request, body observePreviewRequest) {
+	r = withAPIBrowserOperation(w, r, preview.BrowserOperationSessionObserve)
 	orgID := middleware.OrgIDFromContext(r.Context())
 	instance, ok := h.getPreviewTarget(w, r)
 	if !ok {
@@ -2663,22 +2785,20 @@ func (h *PreviewHandler) observePreview(w http.ResponseWriter, r *http.Request, 
 	}
 	opts := models.PreviewObservationOpts{ScreenshotOpts: models.ScreenshotOpts{Path: body.Path, ViewportW: body.ViewportW, ViewportH: body.ViewportH, FullPage: body.FullPage, Delay: time.Duration(body.DelayMS) * time.Millisecond}, Selector: body.Selector, IncludeDOM: body.IncludeDOM, MaxSemanticBytes: body.MaxSemanticBytes, ConsoleCursor: body.ConsoleCursor, PreserveConsoleCursor: body.PreserveConsoleCursor, ReadOnly: body.ReadOnly, SkipSemantic: body.SkipSemantic}
 	policy := browserPolicyForInstance(instance)
+	worker, remote, resolved := h.prepareBrowserExecution(w, r, instance.WorkerNodeID, h.browserSessions != nil, preview.BrowserOperationSessionObserve)
+	if !resolved {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), browserHandlerTimeout(remote, preview.BrowserOperationSessionObserve))
+	defer cancel()
 	var result *models.PreviewObservation
 	var err error
-	if h.workerRoutingEnabled() {
-		worker, resolveErr := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
-		if resolveErr != nil {
-			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
-			return
-		}
-		if h.isLocalWorker(worker) && h.browserSessions != nil {
-			result, err = h.browserSessions.Observe(r.Context(), orgID, instance.SessionID, instance.ID, policy, opts)
-		} else {
-			result, err = h.workerClient.Observe(r.Context(), worker, orgID, instance.SessionID, instance.ID, preview.RemoteObserveRequest{SessionID: instance.SessionID, Policy: policy, Options: opts})
-		}
-	} else if h.browserSessions != nil {
-		result, err = h.browserSessions.Observe(r.Context(), orgID, instance.SessionID, instance.ID, policy, opts)
-	} else {
+	switch {
+	case remote:
+		result, err = h.workerClient.Observe(ctx, worker, orgID, instance.SessionID, instance.ID, preview.RemoteObserveRequest{SessionID: instance.SessionID, Policy: policy, Options: opts})
+	case h.browserSessions != nil:
+		result, err = h.browserSessions.Observe(ctx, orgID, instance.SessionID, instance.ID, policy, opts)
+	default:
 		err = preview.ErrBrowserUnavailable
 	}
 	if err != nil {
@@ -2701,6 +2821,7 @@ func (h *PreviewHandler) observePreview(w http.ResponseWriter, r *http.Request, 
 }
 
 func (h *PreviewHandler) Act(w http.ResponseWriter, r *http.Request) {
+	r = withAPIBrowserOperation(w, r, preview.BrowserOperationSessionAct)
 	orgID := middleware.OrgIDFromContext(r.Context())
 	instance, ok := h.getPreviewTarget(w, r)
 	if !ok {
@@ -2722,24 +2843,20 @@ func (h *PreviewHandler) Act(w http.ResponseWriter, r *http.Request) {
 	normalizeInteractionStepTimeouts(body.Steps)
 	opts := models.PreviewObservationOpts{ScreenshotOpts: models.ScreenshotOpts{ViewportW: body.ViewportW, ViewportH: body.ViewportH}, Selector: body.Selector, IncludeDOM: body.IncludeDOM, MaxSemanticBytes: body.MaxSemanticBytes, ConsoleCursor: body.ConsoleCursor}
 	policy := browserPolicyForInstance(instance)
-	ctx, cancel := context.WithTimeout(r.Context(), maxInteractionDuration)
+	worker, remote, resolved := h.prepareBrowserExecution(w, r, instance.WorkerNodeID, h.browserSessions != nil, preview.BrowserOperationSessionAct)
+	if !resolved {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), browserHandlerTimeout(remote, preview.BrowserOperationSessionAct))
 	defer cancel()
 	var result *models.PreviewActResult
 	var err error
-	if h.workerRoutingEnabled() {
-		worker, resolveErr := h.resolvePreviewWorker(ctx, instance.WorkerNodeID)
-		if resolveErr != nil {
-			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
-			return
-		}
-		if h.isLocalWorker(worker) && h.browserSessions != nil {
-			result, err = h.browserSessions.Act(ctx, orgID, instance.SessionID, instance.ID, policy, body.Steps, opts)
-		} else {
-			result, err = h.workerClient.Act(ctx, worker, orgID, instance.SessionID, instance.ID, preview.RemoteActRequest{SessionID: instance.SessionID, Policy: policy, Steps: body.Steps, Options: opts})
-		}
-	} else if h.browserSessions != nil {
+	switch {
+	case remote:
+		result, err = h.workerClient.Act(ctx, worker, orgID, instance.SessionID, instance.ID, preview.RemoteActRequest{SessionID: instance.SessionID, Policy: policy, Steps: body.Steps, Options: opts})
+	case h.browserSessions != nil:
 		result, err = h.browserSessions.Act(ctx, orgID, instance.SessionID, instance.ID, policy, body.Steps, opts)
-	} else {
+	default:
 		err = preview.ErrBrowserUnavailable
 	}
 	if err != nil {
@@ -2873,6 +2990,7 @@ func (h *PreviewHandler) changeBrowserControl(w http.ResponseWriter, r *http.Req
 }
 
 func (h *PreviewHandler) HumanAct(w http.ResponseWriter, r *http.Request) {
+	r = withAPIBrowserOperation(w, r, preview.BrowserOperationSessionAct)
 	orgID := middleware.OrgIDFromContext(r.Context())
 	instance, ok := h.getPreviewTarget(w, r)
 	if !ok {
@@ -2895,24 +3013,20 @@ func (h *PreviewHandler) HumanAct(w http.ResponseWriter, r *http.Request) {
 	normalizeInteractionStepTimeouts(body.Steps)
 	opts := models.PreviewObservationOpts{ScreenshotOpts: models.ScreenshotOpts{ViewportW: body.ViewportW, ViewportH: body.ViewportH}, Selector: body.Selector, IncludeDOM: body.IncludeDOM, MaxSemanticBytes: body.MaxSemanticBytes, ConsoleCursor: body.ConsoleCursor}
 	policy := browserPolicyForInstance(instance)
-	ctx, cancel := context.WithTimeout(r.Context(), maxInteractionDuration)
+	worker, remote, resolved := h.prepareBrowserExecution(w, r, instance.WorkerNodeID, h.browserSessions != nil, preview.BrowserOperationSessionAct)
+	if !resolved {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), browserHandlerTimeout(remote, preview.BrowserOperationSessionAct))
 	defer cancel()
 	var result *models.PreviewActResult
 	var err error
-	if h.workerRoutingEnabled() {
-		worker, resolveErr := h.resolvePreviewWorker(ctx, instance.WorkerNodeID)
-		if resolveErr != nil {
-			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
-			return
-		}
-		if h.isLocalWorker(worker) && h.browserSessions != nil {
-			result, err = h.browserSessions.ActAsHuman(ctx, orgID, instance.SessionID, instance.ID, user.ID, policy, body.Steps, opts)
-		} else {
-			result, err = h.workerClient.ActAsHuman(ctx, worker, orgID, instance.SessionID, instance.ID, user.ID, preview.RemoteActRequest{SessionID: instance.SessionID, Policy: policy, Steps: body.Steps, Options: opts})
-		}
-	} else if h.browserSessions != nil {
+	switch {
+	case remote:
+		result, err = h.workerClient.ActAsHuman(ctx, worker, orgID, instance.SessionID, instance.ID, user.ID, preview.RemoteActRequest{SessionID: instance.SessionID, Policy: policy, Steps: body.Steps, Options: opts})
+	case h.browserSessions != nil:
 		result, err = h.browserSessions.ActAsHuman(ctx, orgID, instance.SessionID, instance.ID, user.ID, policy, body.Steps, opts)
-	} else {
+	default:
 		err = preview.ErrBrowserUnavailable
 	}
 	if err != nil {
@@ -2991,6 +3105,7 @@ func (h *PreviewHandler) emitPreviewToolAudit(r *http.Request, action models.Aud
 }
 
 func (h *PreviewHandler) CaptureScreenshot(w http.ResponseWriter, r *http.Request) {
+	r = withAPIBrowserOperation(w, r, preview.BrowserOperationScreenshot)
 	if !h.workerRoutingEnabled() {
 		if _, ok := h.requireInspector(w, r); !ok {
 			return
@@ -3025,27 +3140,20 @@ func (h *PreviewHandler) CaptureScreenshot(w http.ResponseWriter, r *http.Reques
 	if body.DelayMS > 0 {
 		opts.Delay = time.Duration(body.DelayMS) * time.Millisecond
 	}
+	worker, remote, resolved := h.prepareBrowserExecution(w, r, instance.WorkerNodeID, true, preview.BrowserOperationScreenshot)
+	if !resolved {
+		return
+	}
+	if instance.SessionID != uuid.Nil && h.browserSessions != nil {
+		setAPICoordinatedBrowserResponseDeadline(w, r, preview.BrowserOperationScreenshot)
+	}
 
 	var result *models.ScreenshotResult
 	orgID := middleware.OrgIDFromContext(r.Context())
 	err := h.runAgentBrowserOperation(r.Context(), orgID, instance, func() error {
 		var operationErr error
-		if h.workerRoutingEnabled() {
-			worker, resolveErr := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
-			if resolveErr != nil {
-				writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
-				return errPreviewResponseWritten
-			}
-			if h.isLocalWorker(worker) {
-				inspector, inspectorOK := h.requireInspector(w, r)
-				if !inspectorOK {
-					return errPreviewResponseWritten
-				}
-				bindSessionBrowser(inspector, instance)
-				result, operationErr = inspector.CaptureScreenshot(r.Context(), instance.ID.String(), opts)
-			} else {
-				result, operationErr = h.workerClient.CaptureScreenshot(r.Context(), worker, orgID, instance.ID, opts)
-			}
+		if remote {
+			result, operationErr = h.workerClient.CaptureScreenshot(r.Context(), worker, orgID, instance.ID, opts)
 		} else {
 			inspector, inspectorOK := h.requireInspector(w, r)
 			if !inspectorOK {
@@ -3116,6 +3224,7 @@ type inspectElementRequest struct {
 }
 
 func (h *PreviewHandler) InspectElement(w http.ResponseWriter, r *http.Request) {
+	r = withAPIBrowserOperation(w, r, preview.BrowserOperationInspect)
 	if !h.workerRoutingEnabled() {
 		if _, ok := h.requireInspector(w, r); !ok {
 			return
@@ -3141,32 +3250,18 @@ func (h *PreviewHandler) InspectElement(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
+	worker, remote, resolved := h.prepareBrowserExecution(w, r, instance.WorkerNodeID, true, preview.BrowserOperationInspect)
+	if !resolved {
+		return
+	}
 
 	var element *models.ElementInfo
 	var err error
-	if h.workerRoutingEnabled() {
-		var worker preview.WorkerNode
-		worker, err = h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
-		if err != nil {
-			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", err)
-			return
-		}
-		if h.isLocalWorker(worker) {
-			inspector, inspectorOK := h.requireInspector(w, r)
-			if !inspectorOK {
-				return
-			}
-			if body.Selector != "" {
-				element, err = inspector.InspectElementBySelector(r.Context(), instance.ID.String(), body.Selector)
-			} else {
-				element, err = inspector.InspectElement(r.Context(), instance.ID.String(), body.X, body.Y)
-			}
+	if remote {
+		if body.Selector != "" {
+			element, err = h.workerClient.InspectElementBySelector(r.Context(), worker, middleware.OrgIDFromContext(r.Context()), instance.ID, body.Selector)
 		} else {
-			if body.Selector != "" {
-				element, err = h.workerClient.InspectElementBySelector(r.Context(), worker, middleware.OrgIDFromContext(r.Context()), instance.ID, body.Selector)
-			} else {
-				element, err = h.workerClient.InspectElement(r.Context(), worker, middleware.OrgIDFromContext(r.Context()), instance.ID, body.X, body.Y)
-			}
+			element, err = h.workerClient.InspectElement(r.Context(), worker, middleware.OrgIDFromContext(r.Context()), instance.ID, body.X, body.Y)
 		}
 	} else {
 		inspector, inspectorOK := h.requireInspector(w, r)
@@ -3308,9 +3403,8 @@ func (h *PreviewHandler) SubmitDesignFeedback(w http.ResponseWriter, r *http.Req
 // =============================================================================
 
 const (
-	maxInteractionSteps    = 20
-	maxInteractionDuration = 60 * time.Second
-	maxAssertions          = 50
+	maxInteractionSteps = 20
+	maxAssertions       = 50
 )
 
 type executeInteractionRequest struct {
@@ -3318,6 +3412,10 @@ type executeInteractionRequest struct {
 }
 
 func (h *PreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *http.Request) {
+	// This compatibility endpoint can execute either a raw interaction or a
+	// full browser-session action. Reserve the larger response deadline up
+	// front; the operation context below still uses the exact selected path.
+	r = withAPIBrowserOperation(w, r, preview.BrowserOperationSessionAct)
 	if !h.workerRoutingEnabled() {
 		if _, ok := h.requireInspector(w, r); !ok {
 			return
@@ -3345,29 +3443,31 @@ func (h *PreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *http.Reque
 	}
 	normalizeInteractionStepTimeouts(body.Steps)
 
-	// Enforce the max total duration per the design doc (60 seconds).
-	ctx, cancel := context.WithTimeout(r.Context(), maxInteractionDuration)
+	// Bound the whole interaction: the design doc's 60s cap applies to the step
+	// loop, and the budget adds room for the observation Act performs after the
+	// steps. An interaction that leaves this process gets worker-hop headroom on
+	// top so the worker's own budget expires first and returns a structured
+	// error.
+	sessionAction := instance.SessionID != uuid.Nil && h.browserSessions != nil
+	operation := preview.BrowserOperationInteract
+	if sessionAction {
+		operation = preview.BrowserOperationSessionAct
+	}
+	worker, remote, resolved := h.prepareBrowserExecution(w, r, instance.WorkerNodeID, true, operation)
+	if !resolved {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), browserHandlerTimeout(remote, operation))
 	defer cancel()
-	if instance.SessionID != uuid.Nil && h.browserSessions != nil {
+	if sessionAction {
 		orgID := middleware.OrgIDFromContext(r.Context())
 		policy := browserPolicyForInstance(instance)
 		var actResult *models.PreviewActResult
 		var actErr error
-		if h.workerRoutingEnabled() {
-			worker, resolveErr := h.resolvePreviewWorker(ctx, instance.WorkerNodeID)
-			if resolveErr != nil {
-				writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
-				return
-			}
-			if h.isLocalWorker(worker) && h.browserSessions != nil {
-				actResult, actErr = h.browserSessions.Act(ctx, orgID, instance.SessionID, instance.ID, policy, body.Steps, models.PreviewObservationOpts{})
-			} else {
-				actResult, actErr = h.workerClient.Act(ctx, worker, orgID, instance.SessionID, instance.ID, preview.RemoteActRequest{SessionID: instance.SessionID, Policy: policy, Steps: body.Steps})
-			}
-		} else if h.browserSessions != nil {
-			actResult, actErr = h.browserSessions.Act(ctx, orgID, instance.SessionID, instance.ID, policy, body.Steps, models.PreviewObservationOpts{})
+		if remote {
+			actResult, actErr = h.workerClient.Act(ctx, worker, orgID, instance.SessionID, instance.ID, preview.RemoteActRequest{SessionID: instance.SessionID, Policy: policy, Steps: body.Steps})
 		} else {
-			actErr = preview.ErrBrowserUnavailable
+			actResult, actErr = h.browserSessions.Act(ctx, orgID, instance.SessionID, instance.ID, policy, body.Steps, models.PreviewObservationOpts{})
 		}
 		if actErr != nil {
 			if _, ok := preview.AsWorkerRequestError(actErr); ok {
@@ -3397,23 +3497,8 @@ func (h *PreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *http.Reque
 
 	var result *models.InteractionResult
 	var err error
-	if h.workerRoutingEnabled() {
-		var worker preview.WorkerNode
-		worker, err = h.resolvePreviewWorker(ctx, instance.WorkerNodeID)
-		if err != nil {
-			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", err)
-			return
-		}
-		if h.isLocalWorker(worker) {
-			inspector, inspectorOK := h.requireInspector(w, r)
-			if !inspectorOK {
-				return
-			}
-			bindSessionBrowser(inspector, instance)
-			result, err = inspector.ExecuteInteraction(ctx, instance.ID.String(), body.Steps)
-		} else {
-			result, err = h.workerClient.ExecuteInteraction(ctx, worker, middleware.OrgIDFromContext(r.Context()), instance.ID, body.Steps)
-		}
+	if remote {
+		result, err = h.workerClient.ExecuteInteraction(ctx, worker, middleware.OrgIDFromContext(r.Context()), instance.ID, body.Steps)
 	} else {
 		inspector, inspectorOK := h.requireInspector(w, r)
 		if !inspectorOK {
@@ -3468,6 +3553,7 @@ type captureMultiViewportRequest struct {
 }
 
 func (h *PreviewHandler) CaptureMultiViewport(w http.ResponseWriter, r *http.Request) {
+	r = withAPIBrowserOperation(w, r, preview.BrowserOperationMultiViewport)
 	if !h.workerRoutingEnabled() {
 		if _, ok := h.requireInspector(w, r); !ok {
 			return
@@ -3504,6 +3590,13 @@ func (h *PreviewHandler) CaptureMultiViewport(w http.ResponseWriter, r *http.Req
 	if body.DelayMS > 0 {
 		opts.Delay = time.Duration(body.DelayMS) * time.Millisecond
 	}
+	worker, remote, resolved := h.prepareBrowserExecution(w, r, instance.WorkerNodeID, true, preview.BrowserOperationMultiViewport)
+	if !resolved {
+		return
+	}
+	if instance.SessionID != uuid.Nil && h.browserSessions != nil {
+		setAPICoordinatedBrowserResponseDeadline(w, r, preview.BrowserOperationMultiViewport)
+	}
 
 	var (
 		result *models.MultiViewportResult
@@ -3511,22 +3604,8 @@ func (h *PreviewHandler) CaptureMultiViewport(w http.ResponseWriter, r *http.Req
 	orgID := middleware.OrgIDFromContext(r.Context())
 	err := h.runAgentBrowserOperation(r.Context(), orgID, instance, func() error {
 		var operationErr error
-		if h.workerRoutingEnabled() {
-			worker, resolveErr := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
-			if resolveErr != nil {
-				writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
-				return errPreviewResponseWritten
-			}
-			if h.isLocalWorker(worker) {
-				inspector, inspectorOK := h.requireInspector(w, r)
-				if !inspectorOK {
-					return errPreviewResponseWritten
-				}
-				bindSessionBrowser(inspector, instance)
-				result, operationErr = inspector.CaptureMultiViewport(r.Context(), instance.ID.String(), opts)
-			} else {
-				result, operationErr = h.workerClient.CaptureMultiViewport(r.Context(), worker, orgID, instance.ID, opts)
-			}
+		if remote {
+			result, operationErr = h.workerClient.CaptureMultiViewport(r.Context(), worker, orgID, instance.ID, opts)
 		} else {
 			inspector, inspectorOK := h.requireInspector(w, r)
 			if !inspectorOK {
@@ -3573,6 +3652,7 @@ type computeVisualDiffRequest struct {
 }
 
 func (h *PreviewHandler) ComputeVisualDiff(w http.ResponseWriter, r *http.Request) {
+	r = withAPIBrowserOperation(w, r, preview.BrowserOperationVisualDiff)
 	if !h.workerRoutingEnabled() {
 		if _, ok := h.requireInspector(w, r); !ok {
 			return
@@ -3593,26 +3673,17 @@ func (h *PreviewHandler) ComputeVisualDiff(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusBadRequest, "MISSING_SNAPSHOT_IDS", "before_snapshot_id and after_snapshot_id are required")
 		return
 	}
+	worker, remote, resolved := h.prepareBrowserExecution(w, r, instance.WorkerNodeID, true, preview.BrowserOperationVisualDiff)
+	if !resolved {
+		return
+	}
 
 	var (
 		diff *models.VisualDiff
 		err  error
 	)
-	if h.workerRoutingEnabled() {
-		worker, resolveErr := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
-		if resolveErr != nil {
-			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
-			return
-		}
-		if h.isLocalWorker(worker) {
-			inspector, inspectorOK := h.requireInspector(w, r)
-			if !inspectorOK {
-				return
-			}
-			diff, err = inspector.ComputeVisualDiff(r.Context(), instance.ID.String(), body.BeforeSnapshotID, body.AfterSnapshotID)
-		} else {
-			diff, err = h.workerClient.ComputeVisualDiff(r.Context(), worker, middleware.OrgIDFromContext(r.Context()), instance.ID, body.BeforeSnapshotID, body.AfterSnapshotID)
-		}
+	if remote {
+		diff, err = h.workerClient.ComputeVisualDiff(r.Context(), worker, middleware.OrgIDFromContext(r.Context()), instance.ID, body.BeforeSnapshotID, body.AfterSnapshotID)
 	} else {
 		inspector, inspectorOK := h.requireInspector(w, r)
 		if !inspectorOK {
@@ -3645,6 +3716,7 @@ type runAssertionsRequest struct {
 }
 
 func (h *PreviewHandler) RunAssertions(w http.ResponseWriter, r *http.Request) {
+	r = withAPIBrowserOperation(w, r, preview.BrowserOperationAssertions)
 	if !h.workerRoutingEnabled() {
 		if _, ok := h.requireInspector(w, r); !ok {
 			return
@@ -3670,6 +3742,13 @@ func (h *PreviewHandler) RunAssertions(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("at most %d assertions allowed per call", maxAssertions))
 		return
 	}
+	worker, remote, resolved := h.prepareBrowserExecution(w, r, instance.WorkerNodeID, true, preview.BrowserOperationAssertions)
+	if !resolved {
+		return
+	}
+	if instance.SessionID != uuid.Nil && h.browserSessions != nil {
+		setAPICoordinatedBrowserResponseDeadline(w, r, preview.BrowserOperationAssertions)
+	}
 
 	var (
 		result *preview.AssertionResult
@@ -3677,22 +3756,8 @@ func (h *PreviewHandler) RunAssertions(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	err := h.runAgentBrowserOperation(r.Context(), orgID, instance, func() error {
 		var operationErr error
-		if h.workerRoutingEnabled() {
-			worker, resolveErr := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
-			if resolveErr != nil {
-				writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
-				return errPreviewResponseWritten
-			}
-			if h.isLocalWorker(worker) {
-				inspector, inspectorOK := h.requireInspector(w, r)
-				if !inspectorOK {
-					return errPreviewResponseWritten
-				}
-				bindSessionBrowser(inspector, instance)
-				result, operationErr = inspector.RunAssertions(r.Context(), instance.ID.String(), body.Assertions)
-			} else {
-				result, operationErr = h.workerClient.RunAssertions(r.Context(), worker, orgID, instance.ID, body.Assertions)
-			}
+		if remote {
+			result, operationErr = h.workerClient.RunAssertions(r.Context(), worker, orgID, instance.ID, body.Assertions)
 		} else {
 			inspector, inspectorOK := h.requireInspector(w, r)
 			if !inspectorOK {

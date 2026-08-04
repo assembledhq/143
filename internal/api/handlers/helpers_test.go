@@ -7,10 +7,32 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSetResponseWriteDeadline_ExtendsShortServerDeadline(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setResponseWriteDeadline(w, r, 500*time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	}))
+	server.Config.WriteTimeout = 5 * time.Millisecond
+	server.Start()
+	defer server.Close()
+
+	resp, err := server.Client().Get(server.URL)
+	require.NoError(t, err, "operation-specific response deadline should prevent an EOF from the shorter server timeout")
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode, "delayed handler should complete within its operation-specific budget")
+	var body map[string]string
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body), "delayed handler should return a complete JSON response")
+	require.Equal(t, map[string]string{"status": "ready"}, body, "delayed handler should preserve its response body")
+}
 
 func TestQueryInt(t *testing.T) {
 	t.Parallel()
