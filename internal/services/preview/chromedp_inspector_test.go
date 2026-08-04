@@ -7,9 +7,20 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/cdproto/runtime"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+func TestAwaitPromiseEvaluation(t *testing.T) {
+	t.Parallel()
+
+	params := runtime.Evaluate("Promise.resolve(200)")
+	require.False(t, params.AwaitPromise, "runtime evaluation should not await promises by default")
+
+	actual := awaitPromiseEvaluation(params)
+	require.True(t, actual.AwaitPromise, "async browser evaluations should await the resolved promise value")
+}
 
 func TestChromeDPInspector_BindsSessionContextIdentity(t *testing.T) {
 	t.Parallel()
