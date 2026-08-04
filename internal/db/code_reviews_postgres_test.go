@@ -616,3 +616,106 @@ func TestCodeReviewSortRankMatchesPostgresForEveryRow(t *testing.T) {
 		})
 	}
 }
+
+// The reason filter is the only list predicate that reaches into JSONB, and
+// pgxmock never parses SQL: a malformed jsonb_array_elements block, a reason
+// code PostgreSQL cannot compare, or an attempt whose reason array is empty
+// would all satisfy the mocked expectations and only fail in production. Run
+// the generated predicate against PostgreSQL so the stored shape stays covered.
+//
+//nolint:paralleltest // reason subtests share one PostgreSQL connection and isolated schema, so they must run serially
+func TestCodeReviewListWhereReasonFilterMatchesPostgres(t *testing.T) {
+	t.Parallel()
+
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set TEST_DATABASE_URL to run the PostgreSQL reason filter test")
+	}
+
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, databaseURL)
+	require.NoError(t, err, "test should connect to TEST_DATABASE_URL")
+	defer func() {
+		require.NoError(t, conn.Close(context.Background()), "test should close the PostgreSQL connection")
+	}()
+
+	schema := "test_code_review_reason_filter_" + strings.ReplaceAll(uuid.NewString(), "-", "_")
+	_, err = conn.Exec(ctx, `CREATE SCHEMA `+schema)
+	require.NoError(t, err, "test should create an isolated reason filter schema")
+	defer func() {
+		_, cleanupErr := conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS `+schema+` CASCADE`)
+		require.NoError(t, cleanupErr, "test should remove the isolated reason filter schema")
+	}()
+	_, err = conn.Exec(ctx, `SET search_path TO `+schema+`, public`)
+	require.NoError(t, err, "test should isolate reason filter objects")
+
+	_, err = conn.Exec(ctx, `
+		CREATE TABLE code_review_session_metadata (
+			id uuid PRIMARY KEY,
+			org_id uuid NOT NULL,
+			risk_reason_details jsonb NOT NULL DEFAULT '[]'::jsonb
+		)`)
+	require.NoError(t, err, "test should create the columns the reason predicate reads")
+
+	orgID, otherOrgID := uuid.New(), uuid.New()
+	seeded := []struct {
+		name    string
+		orgID   uuid.UUID
+		details string
+	}{
+		{name: "blocking only", orgID: orgID, details: `[{"code": "blocking_findings", "detail": "reviewer flagged a regression"}]`},
+		{name: "blocking and lines", orgID: orgID, details: `[{"code": "lines_limit_exceeded"}, {"code": "blocking_findings"}]`},
+		{name: "no reasons", orgID: orgID, details: `[]`},
+		{name: "other org blocking", orgID: otherOrgID, details: `[{"code": "blocking_findings"}]`},
+	}
+	ids := map[string]uuid.UUID{}
+	for _, row := range seeded {
+		ids[row.name] = uuid.New()
+		_, insertErr := conn.Exec(ctx, `
+			INSERT INTO code_review_session_metadata (id, org_id, risk_reason_details)
+			VALUES ($1, $2, $3::jsonb)`, ids[row.name], row.orgID, row.details)
+		require.NoError(t, insertErr, "test should insert a reason combination")
+	}
+
+	tests := []struct {
+		name     string
+		reason   models.CodeReviewRiskReasonCode
+		expected []uuid.UUID
+	}{
+		{
+			name:     "matches every attempt carrying the reason",
+			reason:   models.CodeReviewRiskReasonBlockingFindings,
+			expected: []uuid.UUID{ids["blocking only"], ids["blocking and lines"]},
+		},
+		{
+			name:     "matches a reason recorded alongside others",
+			reason:   models.CodeReviewRiskReasonLinesLimitExceeded,
+			expected: []uuid.UUID{ids["blocking and lines"]},
+		},
+		{
+			name:     "matches nothing when no attempt recorded the reason",
+			reason:   models.CodeReviewRiskReasonHeadChanged,
+			expected: []uuid.UUID{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason := tt.reason
+			where, args, whereErr := codeReviewListWhere(orgID, CodeReviewListFilters{Reason: &reason}, false)
+			require.NoError(t, whereErr, "the reason predicate should build")
+
+			rows, queryErr := conn.Query(ctx, `SELECT m.id FROM code_review_session_metadata m`+where+` ORDER BY m.id`, args)
+			require.NoError(t, queryErr, "the reason predicate should execute against PostgreSQL")
+			defer rows.Close()
+
+			matched := []uuid.UUID{}
+			for rows.Next() {
+				var id uuid.UUID
+				require.NoError(t, rows.Scan(&id), "the reason query should return attempt IDs")
+				matched = append(matched, id)
+			}
+			require.NoError(t, rows.Err(), "the reason query should complete")
+			require.ElementsMatch(t, tt.expected, matched, "only same-org attempts recording the reason should match")
+		})
+	}
+}

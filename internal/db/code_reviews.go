@@ -1159,6 +1159,7 @@ type CodeReviewListFilters struct {
 	ActivityStatus  *models.CodeReviewActivityStatus
 	Status          *models.CodeReviewSessionStatus
 	Acceptable      *bool
+	Reason          *models.CodeReviewRiskReasonCode
 	Author          string
 	Search          string
 	Limit           int
@@ -1254,6 +1255,17 @@ func codeReviewListWhere(orgID uuid.UUID, filters CodeReviewListFilters, include
 	if filters.Acceptable != nil {
 		query += ` AND m.acceptable = @acceptable`
 		args["acceptable"] = *filters.Acceptable
+	}
+	if filters.Reason != nil {
+		if err := filters.Reason.Validate(); err != nil {
+			return "", nil, err
+		}
+		query += ` AND EXISTS (
+			SELECT 1
+			FROM jsonb_array_elements(m.risk_reason_details) AS risk_reason
+			WHERE risk_reason->>'code' = @reason
+		)`
+		args["reason"] = *filters.Reason
 	}
 	if author := strings.TrimSpace(filters.Author); author != "" {
 		query += ` AND LOWER(COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), 'Unknown')) = LOWER(@author)`
@@ -1528,6 +1540,7 @@ type CodeReviewStatsFilters struct {
 	ActivityStatus *models.CodeReviewActivityStatus
 	Status         *models.CodeReviewSessionStatus
 	Acceptable     *bool
+	Reason         *models.CodeReviewRiskReasonCode
 	Author         string
 	Search         string
 	CreatedAfter   *time.Time
@@ -1651,6 +1664,18 @@ func (s *CodeReviewStore) GetReviewStats(ctx context.Context, orgID uuid.UUID, f
 		query += `
 		  AND m.acceptable = @acceptable`
 		args["acceptable"] = *filters.Acceptable
+	}
+	if filters.Reason != nil {
+		if err := filters.Reason.Validate(); err != nil {
+			return models.CodeReviewStats{}, err
+		}
+		query += `
+		  AND EXISTS (
+			SELECT 1
+			FROM jsonb_array_elements(m.risk_reason_details) AS risk_reason
+			WHERE risk_reason->>'code' = @reason
+		  )`
+		args["reason"] = *filters.Reason
 	}
 	if author := strings.TrimSpace(filters.Author); author != "" {
 		query += `

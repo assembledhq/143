@@ -272,6 +272,7 @@ export const api = {
       activity_status?: import('./types').CodeReviewActivityStatus;
       status?: import('./types').CodeReviewSessionStatus;
       risk?: "acceptable" | "needs_review";
+      reason?: import('./code-review-reasons').CodeReviewReasonCode;
       author?: string;
       search?: string;
       created_after?: string;
@@ -288,6 +289,7 @@ export const api = {
       if (params?.activity_status) searchParams.set('activity_status', params.activity_status);
       if (params?.status) searchParams.set('status', params.status);
       if (params?.risk) searchParams.set('risk', params.risk);
+      if (params?.reason) searchParams.set('reason', params.reason);
       if (params?.author) searchParams.set('author', params.author);
       if (params?.search) searchParams.set('search', params.search);
       if (params?.created_after) searchParams.set('created_after', params.created_after);
@@ -306,6 +308,7 @@ export const api = {
       activity_status?: import('./types').CodeReviewActivityStatus;
       status?: import('./types').CodeReviewSessionStatus;
       risk?: "acceptable" | "needs_review";
+      reason?: import('./code-review-reasons').CodeReviewReasonCode;
       author?: string;
       search?: string;
       created_after?: string;
@@ -318,6 +321,7 @@ export const api = {
       if (params?.activity_status) searchParams.set('activity_status', params.activity_status);
       if (params?.status) searchParams.set('status', params.status);
       if (params?.risk) searchParams.set('risk', params.risk);
+      if (params?.reason) searchParams.set('reason', params.reason);
       if (params?.author) searchParams.set('author', params.author);
       if (params?.search) searchParams.set('search', params.search);
       if (params?.created_after) searchParams.set('created_after', params.created_after);

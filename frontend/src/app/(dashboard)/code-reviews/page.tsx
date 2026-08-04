@@ -54,6 +54,11 @@ import { ApiError, api } from "@/lib/api";
 import { notify as toast } from "@/lib/notify";
 import { queryKeys } from "@/lib/query-keys";
 import { getActiveOrgId } from "@/lib/active-org";
+import {
+  ALL_CODE_REVIEW_REASONS,
+  CODE_REVIEW_REASON_CODES,
+  type CodeReviewReasonCode,
+} from "@/lib/code-review-reasons";
 import { buildCodeReviewStreamURL, SSE_EVENT } from "@/lib/sse";
 import { useResourceSSE } from "@/lib/use-resource-sse";
 import { pollMs } from "@/lib/poll-intervals";
@@ -525,6 +530,11 @@ export default function CodeReviewsPage() {
   );
   const timeRangeAnchorMsRef = useRef(Date.now());
   const [riskFilter, setRiskFilter] = useQueryState("risk", parseAsStringLiteral(RISK_FILTER_VALUES).withDefault(ALL_RISKS));
+  const [reasonFilter, setReasonFilter] = useQueryState(
+    "reason",
+    parseAsStringLiteral([ALL_CODE_REVIEW_REASONS, ...CODE_REVIEW_REASON_CODES] as const)
+      .withDefault(ALL_CODE_REVIEW_REASONS),
+  );
   const [statusFilter, setStatusFilter] = useQueryState(
     "status",
     STATUS_FILTER_PARSER,
@@ -579,10 +589,11 @@ export default function CodeReviewsPage() {
           : undefined,
       outcome: outcomeFilter === AUTOMATICALLY_APPROVED || outcomeFilter === COMPLETED_NOT_APPROVED ? (outcomeFilter as CodeReviewListOutcome) : undefined,
       risk: riskFilter === ALL_RISKS ? undefined : (riskFilter as "acceptable" | "needs_review"),
+      reason: reasonFilter === ALL_CODE_REVIEW_REASONS ? undefined : reasonFilter as CodeReviewReasonCode,
       author: authorFilter.trim() || undefined,
       search: searchParam.trim() || undefined,
     }),
-    [authorFilter, outcomeFilter, reviewRepositoryId, riskFilter, searchParam],
+    [authorFilter, outcomeFilter, reasonFilter, reviewRepositoryId, riskFilter, searchParam],
   );
   // Which review attempts are in scope for the Reviews tab. Analytics selects
   // PR cohorts only by repository and first-request time.
@@ -673,6 +684,7 @@ export default function CodeReviewsPage() {
     reviewRepositoryId
     || outcomeFilter !== ALL_OUTCOMES
     || riskFilter !== ALL_RISKS
+    || reasonFilter !== ALL_CODE_REVIEW_REASONS
     || statusFilter !== DEFAULT_STATUS_FILTER
     || authorFilter.trim()
     || searchParam.trim()
@@ -682,12 +694,13 @@ export default function CodeReviewsPage() {
     void setRepositoryFilter(null);
     void setOutcomeParam(null);
     void setRiskFilter(null);
+    void setReasonFilter(null);
     void setStatusFilter(null);
     void setAuthorFilter(null);
     setSearch("");
     void setSearchParam(null);
     setTimeRangeFilter("all");
-  }, [setAuthorFilter, setOutcomeParam, setRepositoryFilter, setRiskFilter, setSearchParam, setStatusFilter, setTimeRangeFilter]);
+  }, [setAuthorFilter, setOutcomeParam, setReasonFilter, setRepositoryFilter, setRiskFilter, setSearchParam, setStatusFilter, setTimeRangeFilter]);
   const reviewScopeKey = JSON.stringify(reviewFiltersQueryKey);
   const [extraReviewPages, setExtraReviewPages] = useState<CodeReviewListItem[][]>([]);
   const [loadMoreCursor, setLoadMoreCursor] = useState<string | undefined>();
@@ -1194,6 +1207,7 @@ export default function CodeReviewsPage() {
     repository: repositoryFilter,
     outcome: outcomeFilter,
     risk: riskFilter,
+    reason: reasonFilter,
     status: statusFilter,
     author: authorFilter,
     search,
@@ -1209,6 +1223,9 @@ export default function CodeReviewsPage() {
         break;
       case "risk":
         void setRiskFilter(value === ALL_RISKS ? null : value as (typeof RISK_FILTER_VALUES)[number]);
+        break;
+      case "reason":
+        void setReasonFilter(value === ALL_CODE_REVIEW_REASONS ? null : value as CodeReviewReasonCode);
         break;
       case "status":
         void setStatusFilter(value === DEFAULT_STATUS_FILTER ? null : value as StatusFilter);

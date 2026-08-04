@@ -10,6 +10,11 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { TimeRangePicker } from "@/components/time-range-picker";
 import { MetricInfoTooltip } from "@/components/metric-info-tooltip";
+import {
+  ALL_CODE_REVIEW_REASONS,
+  CODE_REVIEW_REASON_CODES,
+  CODE_REVIEW_REASON_LABELS,
+} from "@/lib/code-review-reasons";
 import type { CodeReviewListOutcome, CodeReviewStats, Repository } from "@/lib/types";
 import type { TimeRangeFilter } from "@/lib/time-range";
 
@@ -134,6 +139,7 @@ export interface CodeReviewFilterValues {
   repository: string;
   outcome: string;
   risk: string;
+  reason: string;
   status: string;
   author: string;
   search: string;
@@ -170,7 +176,7 @@ export function CodeReviewFilters({
         <span className="flex items-center gap-2"><SlidersHorizontal className="h-4 w-4" />{mobileLabel}</span>
         <ChevronDown className={`h-4 w-4 transition-transform ${mobileOpen ? "rotate-180" : ""}`} />
       </Button>
-      <Card id={id} className={`${mobileOpen ? "grid" : "hidden"} gap-3 p-3 shadow-sm md:grid md:grid-cols-2 md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none ${analyticsMode ? "lg:grid-cols-2 xl:grid-cols-[minmax(12rem,18rem)_minmax(12rem,18rem)]" : "lg:grid-cols-3 xl:grid-cols-[minmax(12rem,18rem)_repeat(3,minmax(9rem,11rem))_minmax(12rem,1fr)_minmax(9rem,11rem)]"}`}>
+      <Card id={id} className={`${mobileOpen ? "grid" : "hidden"} gap-3 p-3 shadow-sm md:grid md:grid-cols-2 md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none ${analyticsMode ? "lg:grid-cols-2 xl:grid-cols-[minmax(12rem,18rem)_minmax(12rem,18rem)]" : "lg:grid-cols-4"}`}>
         <FilterSelect label="Repository" value={values.repository} onValueChange={(value) => onChange("repository", value)}>
           <SelectItem value={ALL_REPOSITORIES}>All repositories</SelectItem>
           {repositories.map((repo) => <SelectItem key={repo.id} value={repo.id}>{repo.full_name}</SelectItem>)}
@@ -190,6 +196,12 @@ export function CodeReviewFilters({
               <SelectItem value={ALL_RISKS}>All risk</SelectItem>
               <SelectItem value="acceptable">Acceptable</SelectItem>
               <SelectItem value="needs_review">Needs review</SelectItem>
+            </FilterSelect>
+            <FilterSelect label="Reason" value={values.reason} onValueChange={(value) => onChange("reason", value)}>
+              <SelectItem value={ALL_CODE_REVIEW_REASONS}>All reasons</SelectItem>
+              {CODE_REVIEW_REASON_CODES.map((reason) => (
+                <SelectItem key={reason} value={reason}>{CODE_REVIEW_REASON_LABELS[reason]}</SelectItem>
+              ))}
             </FilterSelect>
             <FilterSelect label="Status" value={values.status} onValueChange={(value) => onChange("status", value)}>
               <SelectItem value="current">Current reviews</SelectItem>
@@ -218,8 +230,8 @@ export function CodeReviewFilters({
       </Card>
       {analyticsMode ? (
         <p className="text-xs text-muted-foreground">
-          Analytics covers every PR in the selected repository and window. Outcome, risk, status, author,
-          and search filters apply to the Reviews tab only.
+          Analytics covers every PR in the selected repository and window. Outcome, risk, reason, status,
+          author, and search filters apply to the Reviews tab only.
         </p>
       ) : null}
     </>

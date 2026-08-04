@@ -12,38 +12,9 @@ import { SortableTableHeader, sortDirectionAriaValue } from "@/components/sortab
 import { Card, CardContent } from "@/components/ui/card";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { codeReviewReasonLabel } from "@/lib/code-review-reasons";
 import type { CodeReviewAnalytics } from "@/lib/types";
 type AuthorSort = "author" | "reviews" | "approved" | "not_approved" | "approval_rate" | "first_round" | "median_rounds" | "median_additions" | "median_deletions";
-
-const NON_APPROVAL_REASON_LABELS: Record<string, string> = {
-  reviewer_disabled: "Automatic approval was disabled",
-  context_unavailable: "PR context was unavailable",
-  head_changed: "PR changed during review",
-  files_limit_exceeded: "File-count limit exceeded",
-  lines_limit_exceeded: "Line-count limit exceeded",
-  checks_failing: "Required checks were not passing",
-  required_check_failing: "A named required check was not passing",
-  description_failed: "PR description requirements were not met",
-  branch_out_of_date: "Branch was out of date",
-  fork_ineligible: "Fork PRs were not eligible",
-  author_ineligible: "Author was not eligible",
-  blocking_findings: "Reviewers found a blocking issue",
-  reviewer_disagreement: "Reviewer agents disagreed",
-  scope_mismatch: "Change scope did not match the PR",
-  unresolved_uncertainty: "Important uncertainty remained",
-  prompt_injection: "Prompt-injection risk was detected",
-  sensitive_path: "Sensitive paths changed",
-  path_outside_scope: "Paths were outside the allowed scope",
-  blocked_path: "Blocked paths changed",
-  reviewer_quorum: "Reviewer quorum was not met",
-  orchestrator_synthesis_invalid: "Final synthesis was unavailable",
-  orchestrator_context_stale: "Final synthesis used stale PR context",
-  architecture: "Architecture needed human judgment",
-  ownership: "Ownership needed human judgment",
-  operational_risk: "Operational risk needed human judgment",
-  sensitive_change: "Sensitive change needed human judgment",
-  policy_requirement: "An approval-policy requirement needed human judgment",
-};
 
 const APPROVAL_ROUND_LABELS: Record<CodeReviewAnalytics["approval_rounds"][number]["bucket"], string> = {
   round_1: "Approved in round 1",
@@ -81,13 +52,6 @@ function medianAriaLabel(value: number | null, sign: "+" | "-", noun: string): s
   return formatted === "—" ? `No ${noun} data overall` : `${formatted} ${noun} overall`;
 }
 
-function reasonLabel(code: string): string {
-  const known = NON_APPROVAL_REASON_LABELS[code];
-  if (known) return known;
-  const readable = code.replaceAll("_", " ");
-  return readable.charAt(0).toUpperCase() + readable.slice(1);
-}
-
 function authorReviewsHref({
   author,
   outcome,
@@ -108,6 +72,26 @@ function authorReviewsHref({
     params.set("status", "completed");
     params.set("outcome", outcome);
   }
+  if (repository) params.set("repository", repository);
+  return `/code-reviews?${params.toString()}`;
+}
+
+function reasonReviewsHref({
+  reason,
+  repository,
+  range,
+}: {
+  reason: string;
+  repository?: string;
+  range: string;
+}): string {
+  const params = new URLSearchParams({
+    tab: "reviews",
+    outcome: "completed_not_approved",
+    reason,
+    status: "all",
+    range,
+  });
   if (repository) params.set("repository", repository);
   return `/code-reviews?${params.toString()}`;
 }
@@ -454,10 +438,21 @@ export function CodeReviewAnalyticsReport({
             <Card>
               <CardContent className="divide-y divide-border p-0">
                 {analytics.non_approval_reasons.map((reason) => (
-                  <div key={reason.code} className="flex items-center justify-between gap-4 px-4 py-3">
-                    <span className="text-sm text-foreground">{reasonLabel(reason.code)}</span>
+                  <Link
+                    key={reason.code}
+                    href={reasonReviewsHref({
+                      reason: reason.code,
+                      repository: reviewLinkFilters.repository,
+                      range: reviewLinkFilters.range,
+                    })}
+                    className="group flex items-center justify-between gap-4 px-4 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring hover:bg-muted/50"
+                    aria-label={`View ${reason.prs.toLocaleString()} PRs where ${codeReviewReasonLabel(reason.code).toLowerCase()}`}
+                  >
+                    <span className="text-sm text-foreground underline-offset-4 group-hover:underline">
+                      {codeReviewReasonLabel(reason.code)}
+                    </span>
                     <Badge variant="secondary">{reason.prs.toLocaleString()} PRs</Badge>
-                  </div>
+                  </Link>
                 ))}
               </CardContent>
             </Card>
