@@ -1,17 +1,38 @@
 package middleware
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/assembledhq/143/internal/internalapi"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+func TestLogContext_CorrelatesParentRequestID(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	req := httptest.NewRequest(http.MethodPost, "/internal/preview/preview-id/observe", nil)
+	req.Header.Set(internalapi.ParentRequestIDHeader, "public-request-123")
+	rr := httptest.NewRecorder()
+
+	LogContext(zerolog.New(&logs))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		zerolog.Ctx(r.Context()).Info().Msg("worker browser request")
+		w.WriteHeader(http.StatusNoContent)
+	})).ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusNoContent, rr.Code, "correlated worker request should reach the handler")
+	var entry map[string]any
+	require.NoError(t, json.Unmarshal(logs.Bytes(), &entry), "request-scoped log should be valid JSON")
+	require.Equal(t, "public-request-123", entry["parent_request_id"], "worker log should include the originating public request id")
+}
 
 func TestLogContext_AllowsAPIIdentityWithoutUser(t *testing.T) {
 	t.Parallel()

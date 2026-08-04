@@ -54,10 +54,10 @@ func mergeContexts(primary, caller context.Context) (context.Context, context.Ca
 
 const (
 	browserIdleTimeout    = 5 * time.Minute
-	defaultOpTimeout      = 30 * time.Second
+	defaultOpTimeout      = browserDefaultOperationTimeout
 	browserResetTimeout   = 5 * time.Second
 	maxInteractionSteps   = 20
-	maxInteractionTimeout = 60 * time.Second
+	maxInteractionTimeout = browserInteractionOperationTimeout
 	maxViewports          = 5
 	maxScreencastDuration = 30 * time.Second
 	maxScreencastFPS      = 4
@@ -756,22 +756,22 @@ func awaitPromiseEvaluation(params *runtime.EvaluateParams) *runtime.EvaluatePar
 
 func (c *ChromeDPInspector) BootstrapPreviewAccess(ctx context.Context, target models.BrowserTarget, token string) error {
 	if strings.TrimSpace(token) == "" {
-		return fmt.Errorf("preview bootstrap token is required")
+		return &BrowserAccessError{Stage: BrowserAccessStageTokenMint, Err: errors.New("preview bootstrap token is required")}
 	}
 	if target.SessionID != "" {
 		c.BindSessionBrowser(target.PreviewID, target.SessionID)
 	}
 	bootstrapURL, err := c.previewURL(target.PreviewID, "/bootstrap")
 	if err != nil {
-		return fmt.Errorf("resolve preview bootstrap URL: %w", err)
+		return &BrowserAccessError{Stage: BrowserAccessStageBootstrapNavigation, Err: fmt.Errorf("resolve preview bootstrap URL: %w", err)}
 	}
 	previewURL, err := c.previewURL(target.PreviewID, "/")
 	if err != nil {
-		return fmt.Errorf("resolve preview URL: %w", err)
+		return &BrowserAccessError{Stage: BrowserAccessStageAuthenticatedOpen, Err: fmt.Errorf("resolve preview URL: %w", err)}
 	}
 	pc, err := c.getOrCreatePreviewCtx(target.PreviewID)
 	if err != nil {
-		return err
+		return &BrowserAccessError{Stage: BrowserAccessStageBootstrapNavigation, Err: err}
 	}
 	merged, mergeCancel := mergeContexts(pc.ctx, ctx)
 	defer mergeCancel()
@@ -792,14 +792,17 @@ func (c *ChromeDPInspector) BootstrapPreviewAccess(ctx context.Context, target m
 		timeoutCtx,
 		chromedp.Navigate(bootstrapURL),
 		chromedp.WaitReady("body", chromedp.ByQuery),
-		chromedp.Evaluate(exchangeScript, &exchangeStatus, awaitPromiseEvaluation),
 	); err != nil {
 		c.dropBrowserContext(target)
-		return fmt.Errorf("exchange preview browser access: %w", err)
+		return &BrowserAccessError{Stage: BrowserAccessStageBootstrapNavigation, Err: fmt.Errorf("open preview bootstrap page: %w", err)}
+	}
+	if err := chromedp.Run(timeoutCtx, chromedp.Evaluate(exchangeScript, &exchangeStatus, awaitPromiseEvaluation)); err != nil {
+		c.dropBrowserContext(target)
+		return &BrowserAccessError{Stage: BrowserAccessStageBootstrapExchange, Err: fmt.Errorf("exchange preview browser access: %w", err)}
 	}
 	if exchangeStatus < http.StatusOK || exchangeStatus >= http.StatusMultipleChoices {
 		c.dropBrowserContext(target)
-		return fmt.Errorf("exchange preview browser access returned status %d", exchangeStatus)
+		return &BrowserAccessError{Stage: BrowserAccessStageBootstrapExchange, Err: fmt.Errorf("exchange preview browser access returned status %d", exchangeStatus)}
 	}
 	var currentURL string
 	if err := chromedp.Run(
@@ -809,11 +812,11 @@ func (c *ChromeDPInspector) BootstrapPreviewAccess(ctx context.Context, target m
 		chromedp.Location(&currentURL),
 	); err != nil {
 		c.dropBrowserContext(target)
-		return fmt.Errorf("open authenticated preview: %w", err)
+		return &BrowserAccessError{Stage: BrowserAccessStageAuthenticatedOpen, Err: fmt.Errorf("open authenticated preview: %w", err)}
 	}
 	if err := validateObservationOrigin(currentURL, previewURL); err != nil {
 		c.dropBrowserContext(target)
-		return fmt.Errorf("authenticated preview left its authorized origin: %w", err)
+		return &BrowserAccessError{Stage: BrowserAccessStageAuthenticatedOpen, Err: fmt.Errorf("authenticated preview left its authorized origin: %w", err)}
 	}
 	key := browserTargetContextKey(target)
 	c.mu.Lock()
@@ -2110,10 +2113,14 @@ func (c *ChromeDPInspector) RunAssertions(ctx context.Context, previewID string,
 	result := &AssertionResult{
 		Total: len(assertions),
 	}
+	merged, mergeCancel := mergeContexts(pc.ctx, ctx)
+	defer mergeCancel()
+	assertionCtx, cancel := context.WithTimeout(merged, BrowserOperationBudgetFor(BrowserOperationAssertions).Operation)
+	defer cancel()
 
 	for _, a := range assertions {
 		// Bail out if the caller context has been cancelled.
-		if err := ctx.Err(); err != nil {
+		if err := assertionCtx.Err(); err != nil {
 			check := AssertionCheck{Assertion: a, Message: fmt.Sprintf("cancelled: %v", err)}
 			result.Failed++
 			result.Results = append(result.Results, check)
@@ -2124,17 +2131,17 @@ func (c *ChromeDPInspector) RunAssertions(ctx context.Context, previewID string,
 
 		switch a.Type {
 		case "element_exists":
-			check = c.assertElementExists(pc, a)
+			check = c.assertElementExists(assertionCtx, a)
 		case "element_text":
-			check = c.assertElementText(pc, a)
+			check = c.assertElementText(assertionCtx, a)
 		case "element_style":
-			check = c.assertElementStyle(pc, a)
+			check = c.assertElementStyle(assertionCtx, a)
 		case "element_count":
-			check = c.assertElementCount(pc, a)
+			check = c.assertElementCount(assertionCtx, a)
 		case "no_console_errors":
 			check = c.assertNoConsoleErrors(pc, a)
 		case "page_title":
-			check = c.assertPageTitle(pc, a)
+			check = c.assertPageTitle(assertionCtx, a)
 		case "viewport_screenshot_match":
 			check = c.assertViewportScreenshotMatch(pc, a)
 		default:
@@ -2152,7 +2159,7 @@ func (c *ChromeDPInspector) RunAssertions(ctx context.Context, previewID string,
 	return result, nil
 }
 
-func (c *ChromeDPInspector) assertElementExists(pc *previewContext, a Assertion) AssertionCheck {
+func (c *ChromeDPInspector) assertElementExists(ctx context.Context, a Assertion) AssertionCheck {
 	check := AssertionCheck{Assertion: a}
 
 	selectorJSON, err := json.Marshal(a.Selector)
@@ -2173,7 +2180,7 @@ func (c *ChromeDPInspector) assertElementExists(pc *previewContext, a Assertion)
 	})()`, string(selectorJSON), a.Visible != nil && *a.Visible)
 
 	var result string
-	if err := chromedp.Run(pc.ctx, chromedp.Evaluate(js, &result)); err != nil {
+	if err := chromedp.Run(ctx, chromedp.Evaluate(js, &result)); err != nil {
 		check.Message = fmt.Sprintf("error: %v", err)
 		return check
 	}
@@ -2193,11 +2200,11 @@ func (c *ChromeDPInspector) assertElementExists(pc *previewContext, a Assertion)
 	return check
 }
 
-func (c *ChromeDPInspector) assertElementText(pc *previewContext, a Assertion) AssertionCheck {
+func (c *ChromeDPInspector) assertElementText(ctx context.Context, a Assertion) AssertionCheck {
 	check := AssertionCheck{Assertion: a}
 
 	var text string
-	if err := chromedp.Run(pc.ctx, chromedp.Text(a.Selector, &text, chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(ctx, chromedp.Text(a.Selector, &text, chromedp.ByQuery)); err != nil {
 		check.Message = fmt.Sprintf("error: %v", err)
 		return check
 	}
@@ -2218,7 +2225,7 @@ func (c *ChromeDPInspector) assertElementText(pc *previewContext, a Assertion) A
 	return check
 }
 
-func (c *ChromeDPInspector) assertElementStyle(pc *previewContext, a Assertion) AssertionCheck {
+func (c *ChromeDPInspector) assertElementStyle(ctx context.Context, a Assertion) AssertionCheck {
 	check := AssertionCheck{Assertion: a}
 
 	selectorJSON, err := json.Marshal(a.Selector)
@@ -2238,7 +2245,7 @@ func (c *ChromeDPInspector) assertElementStyle(pc *previewContext, a Assertion) 
 	})()`, string(selectorJSON), string(propertyJSON))
 
 	var actual string
-	if err := chromedp.Run(pc.ctx, chromedp.Evaluate(js, &actual)); err != nil {
+	if err := chromedp.Run(ctx, chromedp.Evaluate(js, &actual)); err != nil {
 		check.Message = fmt.Sprintf("error: %v", err)
 		return check
 	}
@@ -2259,7 +2266,7 @@ func (c *ChromeDPInspector) assertElementStyle(pc *previewContext, a Assertion) 
 	return check
 }
 
-func (c *ChromeDPInspector) assertElementCount(pc *previewContext, a Assertion) AssertionCheck {
+func (c *ChromeDPInspector) assertElementCount(ctx context.Context, a Assertion) AssertionCheck {
 	check := AssertionCheck{Assertion: a}
 
 	selectorJSON, err := json.Marshal(a.Selector)
@@ -2269,7 +2276,7 @@ func (c *ChromeDPInspector) assertElementCount(pc *previewContext, a Assertion) 
 	}
 	js := fmt.Sprintf(`document.querySelectorAll(%s).length`, string(selectorJSON))
 	var count int
-	if err := chromedp.Run(pc.ctx, chromedp.Evaluate(js, &count)); err != nil {
+	if err := chromedp.Run(ctx, chromedp.Evaluate(js, &count)); err != nil {
 		check.Message = fmt.Sprintf("error: %v", err)
 		return check
 	}
@@ -2313,11 +2320,11 @@ func (c *ChromeDPInspector) assertNoConsoleErrors(pc *previewContext, a Assertio
 	return check
 }
 
-func (c *ChromeDPInspector) assertPageTitle(pc *previewContext, a Assertion) AssertionCheck {
+func (c *ChromeDPInspector) assertPageTitle(ctx context.Context, a Assertion) AssertionCheck {
 	check := AssertionCheck{Assertion: a}
 
 	var title string
-	if err := chromedp.Run(pc.ctx, chromedp.Title(&title)); err != nil {
+	if err := chromedp.Run(ctx, chromedp.Title(&title)); err != nil {
 		check.Message = fmt.Sprintf("error: %v", err)
 		return check
 	}

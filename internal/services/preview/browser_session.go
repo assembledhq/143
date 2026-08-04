@@ -17,8 +17,7 @@ import (
 )
 
 const (
-	maxBrowserStorageStateBytes      = 1024 * 1024
-	previewBrowserObservationTimeout = 45 * time.Second
+	maxBrowserStorageStateBytes = 1024 * 1024
 )
 
 var (
@@ -134,7 +133,7 @@ func NewBrowserSessionService(store BrowserSessionStore, inspector SessionBrowse
 		store:              store,
 		inspector:          inspector,
 		accessTokenMinter:  accessTokenMinter,
-		observationTimeout: previewBrowserObservationTimeout,
+		observationTimeout: BrowserOperationBudgetFor(BrowserOperationObserve).Operation,
 		locks:              make(map[uuid.UUID]*browserSessionLock),
 	}
 }
@@ -208,7 +207,8 @@ func (s *BrowserSessionService) prepare(ctx context.Context, orgID, sessionID, p
 	}
 	if err := s.inspector.RestoreStorage(ctx, target, record.StorageState); err != nil {
 		if accessErr := s.ensurePreviewAccess(ctx, orgID, sessionID, previewID, target); accessErr != nil {
-			return target, record, models.PreviewBrowserRestorationUnavailable, "preview browser access could not be re-established after restore failure", errors.Join(err, accessErr)
+			restoreErr := &BrowserAccessError{Stage: BrowserAccessStageStateRestore, Err: err}
+			return target, record, models.PreviewBrowserRestorationUnavailable, "preview browser access could not be re-established after restore failure", errors.Join(restoreErr, accessErr)
 		}
 		return target, record, models.PreviewBrowserRestorationReset, "stored browser state was incompatible or could not be restored", nil
 	}
@@ -228,13 +228,16 @@ func (s *BrowserSessionService) ensurePreviewAccess(ctx context.Context, orgID, 
 	}
 	token, err := s.accessTokenMinter.MintBrowserAccessToken(ctx, orgID, sessionID, previewID)
 	if err != nil {
-		return fmt.Errorf("mint preview browser access: %w", err)
+		return &BrowserAccessError{Stage: BrowserAccessStageTokenMint, Err: fmt.Errorf("mint preview browser access: %w", err)}
 	}
 	if strings.TrimSpace(token) == "" {
-		return fmt.Errorf("mint preview browser access: empty token")
+		return &BrowserAccessError{Stage: BrowserAccessStageTokenMint, Err: errors.New("mint preview browser access: empty token")}
 	}
 	if err := accessInspector.BootstrapPreviewAccess(ctx, target, token); err != nil {
-		return fmt.Errorf("bootstrap preview browser access: %w", err)
+		if _, staged := AsBrowserAccessError(err); staged {
+			return err
+		}
+		return &BrowserAccessError{Stage: BrowserAccessStageBootstrapNavigation, Err: fmt.Errorf("bootstrap preview browser access: %w", err)}
 	}
 	return nil
 }
@@ -242,7 +245,7 @@ func (s *BrowserSessionService) ensurePreviewAccess(ctx context.Context, orgID, 
 func (s *BrowserSessionService) Observe(ctx context.Context, orgID, sessionID, previewID uuid.UUID, policy BrowserSessionPolicy, opts models.PreviewObservationOpts) (*models.PreviewObservation, error) {
 	timeout := s.observationTimeout
 	if timeout <= 0 {
-		timeout = previewBrowserObservationTimeout
+		timeout = BrowserOperationBudgetFor(BrowserOperationObserve).Operation
 	}
 	observeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

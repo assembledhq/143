@@ -5,6 +5,8 @@ import (
 
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/rs/zerolog"
+
+	"github.com/assembledhq/143/internal/internalapi"
 )
 
 // LogContext returns middleware that injects a zerolog.Logger into the request
@@ -35,6 +37,9 @@ func LogContext(logger zerolog.Logger) func(http.Handler) http.Handler {
 			}
 			if apiVersion != "" {
 				logCtx = logCtx.Str("api_version", apiVersion)
+			}
+			if parentRequestID := internalapi.NormalizeParentRequestID(r.Header.Get(internalapi.ParentRequestIDHeader)); parentRequestID != "" {
+				logCtx = logCtx.Str("parent_request_id", parentRequestID)
 			}
 			l := logCtx.Logger()
 			ctx = l.WithContext(ctx)

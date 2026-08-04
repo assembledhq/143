@@ -138,6 +138,7 @@ type previewHTTPError struct {
 	status  int
 	code    string
 	message string
+	details any
 	err     error
 }
 
@@ -188,15 +189,58 @@ func newPreviewHTTPError(status int, code, message string, err error) *previewHT
 	return &previewHTTPError{status: status, code: code, message: message, err: err}
 }
 
+func newPreviewHTTPErrorWithDetails(status int, code, message string, details any, err error) *previewHTTPError {
+	return &previewHTTPError{status: status, code: code, message: message, details: details, err: err}
+}
+
 func writePreviewHTTPError(w http.ResponseWriter, r *http.Request, err *previewHTTPError) {
 	if err == nil {
 		return
 	}
+	if stage := browserStageFromDetails(err.details); stage != "" {
+		logContext := zerolog.Ctx(r.Context()).With().Str("browser_stage", stage)
+		if previewID := chi.URLParam(r, "preview_id"); previewID != "" {
+			logContext = logContext.Str("preview_id", previewID)
+		}
+		if sessionID := chi.URLParam(r, "id"); sessionID != "" {
+			logContext = logContext.Str("session_id", sessionID)
+		}
+		if elapsed := browserOperationElapsed(r); elapsed > 0 {
+			logContext = logContext.Dur("browser_elapsed", elapsed)
+		}
+		logger := logContext.Logger()
+		r = r.WithContext(logger.WithContext(r.Context()))
+	}
 	if err.err != nil {
-		writeError(w, r, err.status, err.code, err.message, err.err)
+		writeErrorWithDetails(w, r, err.status, err.code, err.message, err.details, err.err)
 		return
 	}
-	writeError(w, r, err.status, err.code, err.message)
+	writeErrorWithDetails(w, r, err.status, err.code, err.message, err.details)
+}
+
+func withAPIBrowserOperation(w http.ResponseWriter, r *http.Request, operation preview.BrowserOperation) *http.Request {
+	setResponseWriteDeadline(w, r, preview.BrowserOperationBudgetFor(operation).APIResponse)
+	return withBrowserOperationStart(r)
+}
+
+func browserHandlerTimeout(workerRouting bool, operation preview.BrowserOperation) time.Duration {
+	budget := preview.BrowserOperationBudgetFor(operation)
+	if workerRouting {
+		return budget.WorkerRequest
+	}
+	return budget.Operation
+}
+
+func browserStageFromDetails(details any) string {
+	switch value := details.(type) {
+	case map[string]any:
+		stage, _ := value["stage"].(string)
+		return stage
+	case map[string]string:
+		return value["stage"]
+	default:
+		return ""
+	}
 }
 
 func (h *PreviewHandler) workerRoutingEnabled() bool {
@@ -208,14 +252,30 @@ func (h *PreviewHandler) isLocalWorker(worker preview.WorkerNode) bool {
 }
 
 func (h *PreviewHandler) writeWorkerClientError(w http.ResponseWriter, r *http.Request, err error) {
+	if reqErr, ok := preview.AsWorkerRequestError(err); ok && reqErr.WorkerNodeID != "" {
+		logger := zerolog.Ctx(r.Context()).With().Str("worker_node_id", reqErr.WorkerNodeID).Logger()
+		r = r.WithContext(logger.WithContext(r.Context()))
+	}
 	writePreviewHTTPError(w, r, workerClientHTTPError(err))
 }
 
 func workerClientHTTPError(err error) *previewHTTPError {
 	if reqErr, ok := preview.AsWorkerRequestError(err); ok {
-		return newPreviewHTTPError(reqErr.StatusCode, reqErr.Code, reqErr.Message, nil)
+		return newPreviewHTTPErrorWithDetails(reqErr.StatusCode, reqErr.Code, reqErr.Message, safeWorkerBrowserDetails(reqErr.Code, reqErr.Details), nil)
 	}
 	return newPreviewHTTPError(http.StatusBadGateway, "PREVIEW_WORKER_REQUEST_FAILED", "preview worker request failed", err)
+}
+
+func safeWorkerBrowserDetails(code string, details any) any {
+	stage := browserStageFromDetails(details)
+	if stage == "" {
+		return nil
+	}
+	accessErr := &preview.BrowserAccessError{Stage: preview.BrowserAccessStage(stage)}
+	if accessErr.Code() != code || accessErr.Code() == "PREVIEW_BROWSER_ACCESS_FAILED" {
+		return nil
+	}
+	return map[string]string{"stage": stage}
 }
 
 // =============================================================================
@@ -2652,6 +2712,7 @@ func (h *PreviewHandler) WatchBrowser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *PreviewHandler) observePreview(w http.ResponseWriter, r *http.Request, body observePreviewRequest) {
+	r = withAPIBrowserOperation(w, r, preview.BrowserOperationObserve)
 	orgID := middleware.OrgIDFromContext(r.Context())
 	instance, ok := h.getPreviewTarget(w, r)
 	if !ok {
@@ -2701,6 +2762,7 @@ func (h *PreviewHandler) observePreview(w http.ResponseWriter, r *http.Request, 
 }
 
 func (h *PreviewHandler) Act(w http.ResponseWriter, r *http.Request) {
+	r = withAPIBrowserOperation(w, r, preview.BrowserOperationInteract)
 	orgID := middleware.OrgIDFromContext(r.Context())
 	instance, ok := h.getPreviewTarget(w, r)
 	if !ok {
@@ -2722,7 +2784,7 @@ func (h *PreviewHandler) Act(w http.ResponseWriter, r *http.Request) {
 	normalizeInteractionStepTimeouts(body.Steps)
 	opts := models.PreviewObservationOpts{ScreenshotOpts: models.ScreenshotOpts{ViewportW: body.ViewportW, ViewportH: body.ViewportH}, Selector: body.Selector, IncludeDOM: body.IncludeDOM, MaxSemanticBytes: body.MaxSemanticBytes, ConsoleCursor: body.ConsoleCursor}
 	policy := browserPolicyForInstance(instance)
-	ctx, cancel := context.WithTimeout(r.Context(), maxInteractionDuration)
+	ctx, cancel := context.WithTimeout(r.Context(), browserHandlerTimeout(h.workerRoutingEnabled(), preview.BrowserOperationInteract))
 	defer cancel()
 	var result *models.PreviewActResult
 	var err error
@@ -2873,6 +2935,7 @@ func (h *PreviewHandler) changeBrowserControl(w http.ResponseWriter, r *http.Req
 }
 
 func (h *PreviewHandler) HumanAct(w http.ResponseWriter, r *http.Request) {
+	r = withAPIBrowserOperation(w, r, preview.BrowserOperationInteract)
 	orgID := middleware.OrgIDFromContext(r.Context())
 	instance, ok := h.getPreviewTarget(w, r)
 	if !ok {
@@ -2895,7 +2958,7 @@ func (h *PreviewHandler) HumanAct(w http.ResponseWriter, r *http.Request) {
 	normalizeInteractionStepTimeouts(body.Steps)
 	opts := models.PreviewObservationOpts{ScreenshotOpts: models.ScreenshotOpts{ViewportW: body.ViewportW, ViewportH: body.ViewportH}, Selector: body.Selector, IncludeDOM: body.IncludeDOM, MaxSemanticBytes: body.MaxSemanticBytes, ConsoleCursor: body.ConsoleCursor}
 	policy := browserPolicyForInstance(instance)
-	ctx, cancel := context.WithTimeout(r.Context(), maxInteractionDuration)
+	ctx, cancel := context.WithTimeout(r.Context(), browserHandlerTimeout(h.workerRoutingEnabled(), preview.BrowserOperationInteract))
 	defer cancel()
 	var result *models.PreviewActResult
 	var err error
@@ -2991,6 +3054,7 @@ func (h *PreviewHandler) emitPreviewToolAudit(r *http.Request, action models.Aud
 }
 
 func (h *PreviewHandler) CaptureScreenshot(w http.ResponseWriter, r *http.Request) {
+	r = withAPIBrowserOperation(w, r, preview.BrowserOperationScreenshot)
 	if !h.workerRoutingEnabled() {
 		if _, ok := h.requireInspector(w, r); !ok {
 			return
@@ -3116,6 +3180,7 @@ type inspectElementRequest struct {
 }
 
 func (h *PreviewHandler) InspectElement(w http.ResponseWriter, r *http.Request) {
+	r = withAPIBrowserOperation(w, r, preview.BrowserOperationInspect)
 	if !h.workerRoutingEnabled() {
 		if _, ok := h.requireInspector(w, r); !ok {
 			return
@@ -3308,9 +3373,8 @@ func (h *PreviewHandler) SubmitDesignFeedback(w http.ResponseWriter, r *http.Req
 // =============================================================================
 
 const (
-	maxInteractionSteps    = 20
-	maxInteractionDuration = 60 * time.Second
-	maxAssertions          = 50
+	maxInteractionSteps = 20
+	maxAssertions       = 50
 )
 
 type executeInteractionRequest struct {
@@ -3318,6 +3382,7 @@ type executeInteractionRequest struct {
 }
 
 func (h *PreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *http.Request) {
+	r = withAPIBrowserOperation(w, r, preview.BrowserOperationInteract)
 	if !h.workerRoutingEnabled() {
 		if _, ok := h.requireInspector(w, r); !ok {
 			return
@@ -3346,7 +3411,7 @@ func (h *PreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *http.Reque
 	normalizeInteractionStepTimeouts(body.Steps)
 
 	// Enforce the max total duration per the design doc (60 seconds).
-	ctx, cancel := context.WithTimeout(r.Context(), maxInteractionDuration)
+	ctx, cancel := context.WithTimeout(r.Context(), browserHandlerTimeout(h.workerRoutingEnabled(), preview.BrowserOperationInteract))
 	defer cancel()
 	if instance.SessionID != uuid.Nil && h.browserSessions != nil {
 		orgID := middleware.OrgIDFromContext(r.Context())
@@ -3468,6 +3533,7 @@ type captureMultiViewportRequest struct {
 }
 
 func (h *PreviewHandler) CaptureMultiViewport(w http.ResponseWriter, r *http.Request) {
+	r = withAPIBrowserOperation(w, r, preview.BrowserOperationMultiViewport)
 	if !h.workerRoutingEnabled() {
 		if _, ok := h.requireInspector(w, r); !ok {
 			return
@@ -3573,6 +3639,7 @@ type computeVisualDiffRequest struct {
 }
 
 func (h *PreviewHandler) ComputeVisualDiff(w http.ResponseWriter, r *http.Request) {
+	r = withAPIBrowserOperation(w, r, preview.BrowserOperationVisualDiff)
 	if !h.workerRoutingEnabled() {
 		if _, ok := h.requireInspector(w, r); !ok {
 			return
@@ -3645,6 +3712,7 @@ type runAssertionsRequest struct {
 }
 
 func (h *PreviewHandler) RunAssertions(w http.ResponseWriter, r *http.Request) {
+	r = withAPIBrowserOperation(w, r, preview.BrowserOperationAssertions)
 	if !h.workerRoutingEnabled() {
 		if _, ok := h.requireInspector(w, r); !ok {
 			return

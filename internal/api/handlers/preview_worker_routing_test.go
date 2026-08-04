@@ -803,3 +803,48 @@ func TestPreviewHandler_MultiViewport_StripsInlineScreenshotBytes(t *testing.T) 
 	require.Contains(t, body, "\"page_title\":\"Desktop\"", "capture screenshot metadata should still be present")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
+
+func TestWorkerClientHTTPError_PreservesSafeDetails(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		code        string
+		details     any
+		wantDetails any
+	}{
+		{name: "matching browser stage is preserved", code: "PREVIEW_BROWSER_BOOTSTRAP_EXCHANGE_FAILED", details: map[string]any{"stage": "bootstrap_exchange"}, wantDetails: map[string]string{"stage": "bootstrap_exchange"}},
+		{name: "unrelated worker details are dropped", code: "PREVIEW_WORKER_FAILED", details: map[string]any{"token": "secret"}},
+		{name: "mismatched stage and code are dropped", code: "PREVIEW_BROWSER_TOKEN_MINT_FAILED", details: map[string]any{"stage": "bootstrap_exchange"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			httpErr := workerClientHTTPError(&previewsvc.WorkerRequestError{StatusCode: http.StatusInternalServerError, Code: tt.code, Message: "worker failed", Details: tt.details})
+			require.Equal(t, http.StatusInternalServerError, httpErr.status, "worker status should be preserved")
+			require.Equal(t, tt.code, httpErr.code, "worker error code should be preserved")
+			require.Equal(t, tt.wantDetails, httpErr.details, "only allowlisted browser stage details should reach the public API")
+		})
+	}
+}
+
+func TestBrowserHandlerTimeout(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		workerRouting bool
+		want          time.Duration
+	}{
+		{name: "local operation uses inner budget", want: 60 * time.Second},
+		{name: "remote operation includes worker request headroom", workerRouting: true, want: 70 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, browserHandlerTimeout(tt.workerRouting, previewsvc.BrowserOperationInteract), "handler timeout should match its execution topology")
+		})
+	}
+}

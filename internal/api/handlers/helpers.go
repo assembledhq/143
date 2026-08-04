@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 )
+
+type browserOperationStartContextKey struct{}
 
 // encodeCursor produces an opaque, base64-encoded cursor from a created_at
 // timestamp and a string-encoded ID. Format: "RFC3339Nano,id" → base64.
@@ -175,6 +178,33 @@ func clearWriteDeadline(w http.ResponseWriter, r *http.Request) {
 	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil {
 		zerolog.Ctx(r.Context()).Debug().Err(err).Msg("could not clear write deadline; continuing with server default")
 	}
+}
+
+// setResponseWriteDeadline replaces the server-wide write deadline with a
+// bounded operation-specific deadline. This preserves a useful JSON error when
+// a long browser operation reaches its own timeout instead of surfacing EOF.
+func setResponseWriteDeadline(w http.ResponseWriter, r *http.Request, timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		zerolog.Ctx(r.Context()).Debug().Err(err).Dur("response_timeout", timeout).Msg("response writer does not support an operation-specific write deadline")
+	}
+}
+
+func withBrowserOperationStart(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), browserOperationStartContextKey{}, time.Now()))
+}
+
+func browserOperationElapsed(r *http.Request) time.Duration {
+	if r == nil {
+		return 0
+	}
+	startedAt, _ := r.Context().Value(browserOperationStartContextKey{}).(time.Time)
+	if startedAt.IsZero() {
+		return 0
+	}
+	return time.Since(startedAt)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

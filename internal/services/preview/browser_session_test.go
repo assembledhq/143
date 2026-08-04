@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -189,6 +190,7 @@ type fakeSessionBrowserInspector struct {
 	authorizedPreviewID  string
 	bootstrapTokens      []string
 	bootstrapErr         error
+	bootstrapErrs        []error
 	restores             int
 	acts                 int
 	active               int
@@ -197,6 +199,7 @@ type fakeSessionBrowserInspector struct {
 	observeUntilCanceled bool
 	storage              json.RawMessage
 	restoreErr           error
+	restoreClearsAccess  bool
 }
 
 func (i *fakeSessionBrowserInspector) HasContext(models.BrowserTarget) bool {
@@ -213,6 +216,11 @@ func (i *fakeSessionBrowserInspector) BootstrapPreviewAccess(_ context.Context, 
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.bootstrapTokens = append(i.bootstrapTokens, token)
+	if len(i.bootstrapErrs) >= len(i.bootstrapTokens) {
+		if err := i.bootstrapErrs[len(i.bootstrapTokens)-1]; err != nil {
+			return err
+		}
+	}
 	if i.bootstrapErr != nil {
 		return i.bootstrapErr
 	}
@@ -260,6 +268,9 @@ func (i *fakeSessionBrowserInspector) RestoreStorage(context.Context, models.Bro
 	defer i.mu.Unlock()
 	i.restores++
 	i.hasContext = true
+	if i.restoreClearsAccess {
+		i.authorizedPreviewID = ""
+	}
 	return i.restoreErr
 }
 
@@ -342,9 +353,10 @@ func TestBrowserSessionService_FailsClosedWhenPreviewAccessCannotBeEstablished(t
 		minterErr     error
 		bootstrapErr  error
 		expectedError string
+		expectedStage BrowserAccessStage
 	}{
-		{name: "token mint fails", minterErr: context.DeadlineExceeded, expectedError: "mint preview browser access"},
-		{name: "token exchange fails", bootstrapErr: context.DeadlineExceeded, expectedError: "bootstrap preview browser access"},
+		{name: "token mint fails", minterErr: context.DeadlineExceeded, expectedError: "mint preview browser access", expectedStage: BrowserAccessStageTokenMint},
+		{name: "bootstrap fails", bootstrapErr: &BrowserAccessError{Stage: BrowserAccessStageBootstrapExchange, Err: context.DeadlineExceeded}, expectedError: "bootstrap_exchange", expectedStage: BrowserAccessStageBootstrapExchange},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -364,8 +376,36 @@ func TestBrowserSessionService_FailsClosedWhenPreviewAccessCannotBeEstablished(t
 
 			require.Error(t, err, "observation should fail without an authorized preview context")
 			require.Contains(t, err.Error(), tt.expectedError, "access setup failure should identify the failed stage")
+			accessErr, ok := AsBrowserAccessError(err)
+			require.True(t, ok, "access setup failure should preserve structured stage information")
+			require.Equal(t, tt.expectedStage, accessErr.Stage, "access setup failure should report the exact failed stage")
 		})
 	}
+}
+
+func TestBrowserSessionService_ClassifiesRestoreFailureWhenAccessRecoveryFails(t *testing.T) {
+	t.Parallel()
+
+	orgID, sessionID, previewID := uuid.New(), uuid.New(), uuid.New()
+	viewport, err := json.Marshal(models.ViewportSpec{Width: 1440, Height: 900})
+	require.NoError(t, err, "test viewport should encode")
+	store := &fakeBrowserSessionStore{record: &models.PreviewBrowserSession{
+		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, PreviewInstanceID: &previewID,
+		ContextKey: "session:" + sessionID.String(), Viewport: viewport, StorageState: json.RawMessage(`{"cookies":[]}`),
+	}}
+	inspector := &fakeSessionBrowserInspector{
+		restoreErr:          errors.New("cookie restore rejected"),
+		restoreClearsAccess: true,
+		bootstrapErrs:       []error{nil, &BrowserAccessError{Stage: BrowserAccessStageBootstrapExchange, Err: errors.New("exchange rejected")}},
+	}
+	service := NewBrowserSessionService(store, inspector, &fakeBrowserAccessTokenMinter{token: "browser-token"})
+
+	_, err = service.Observe(context.Background(), orgID, sessionID, previewID, BrowserSessionPolicy{PersistSession: true}, models.PreviewObservationOpts{})
+
+	require.Error(t, err, "failed state restore and access recovery should fail the observation")
+	accessErr, ok := AsBrowserAccessError(err)
+	require.True(t, ok, "restore failure should retain structured stage information")
+	require.Equal(t, BrowserAccessStageStateRestore, accessErr.Stage, "restore failure should be the primary diagnostic stage")
 }
 
 func TestBrowserSessionService_BoundsObservationDuration(t *testing.T) {

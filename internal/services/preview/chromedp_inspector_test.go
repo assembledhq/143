@@ -32,6 +32,18 @@ func TestChromeDPInspector_BindsSessionContextIdentity(t *testing.T) {
 	require.False(t, inspector.HasContext(models.BrowserTarget{PreviewID: "preview-new", SessionID: "session-1", ContextKey: "session:session-1"}), "binding should not eagerly launch a browser")
 }
 
+func TestChromeDPInspector_BootstrapRejectsEmptyTokenWithStage(t *testing.T) {
+	t.Parallel()
+
+	inspector := NewChromeDPInspector(ChromeDPInspectorConfig{}, zerolog.Nop())
+	err := inspector.BootstrapPreviewAccess(context.Background(), models.BrowserTarget{PreviewID: "preview-1"}, " ")
+
+	require.Error(t, err, "bootstrap should reject an empty access token")
+	accessErr, ok := AsBrowserAccessError(err)
+	require.True(t, ok, "bootstrap token validation should return a staged error")
+	require.Equal(t, BrowserAccessStageTokenMint, accessErr.Stage, "empty bootstrap token should be classified at token mint stage")
+}
+
 func TestChromeDPInspector_BindAdoptsRawContext(t *testing.T) {
 	t.Parallel()
 	inspector := NewChromeDPInspector(ChromeDPInspectorConfig{}, zerolog.Nop())

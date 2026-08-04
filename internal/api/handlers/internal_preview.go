@@ -16,6 +16,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/internalapi"
 	"github.com/assembledhq/143/internal/models"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/go-chi/chi/v5"
@@ -152,6 +153,26 @@ func (h *InternalPreviewHandler) requireInspector(w http.ResponseWriter, r *http
 		return nil, false
 	}
 	return h.manager.Inspector(), true
+}
+
+func withWorkerBrowserOperation(w http.ResponseWriter, r *http.Request, operation previewsvc.BrowserOperation) (*http.Request, context.CancelFunc) {
+	budget := previewsvc.BrowserOperationBudgetFor(operation)
+	setResponseWriteDeadline(w, r, budget.WorkerResponse)
+	r = withBrowserOperationStart(r)
+	ctx, cancel := context.WithTimeout(r.Context(), budget.Operation)
+	return r.WithContext(ctx), cancel
+}
+
+type browserDiagnosticContextKey struct{}
+
+func withBrowserDiagnosticContext(r *http.Request, workerNodeID string, previewID, sessionID uuid.UUID) *http.Request {
+	logger := zerolog.Ctx(r.Context()).With().
+		Str("preview_id", previewID.String()).
+		Str("session_id", sessionID.String()).
+		Str("worker_node_id", workerNodeID).
+		Logger()
+	ctx := context.WithValue(logger.WithContext(r.Context()), browserDiagnosticContextKey{}, true)
+	return r.WithContext(ctx)
 }
 
 func (h *InternalPreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
@@ -372,6 +393,8 @@ func (h *InternalPreviewHandler) CancelSession(w http.ResponseWriter, r *http.Re
 }
 
 func (h *InternalPreviewHandler) CaptureScreenshot(w http.ResponseWriter, r *http.Request) {
+	r, cancel := withWorkerBrowserOperation(w, r, previewsvc.BrowserOperationScreenshot)
+	defer cancel()
 	previewID, claims, ok := h.authorizePreviewAction(w, r, "screenshot")
 	if !ok {
 		return
@@ -397,6 +420,8 @@ func (h *InternalPreviewHandler) CaptureScreenshot(w http.ResponseWriter, r *htt
 }
 
 func (h *InternalPreviewHandler) Observe(w http.ResponseWriter, r *http.Request) {
+	r, cancel := withWorkerBrowserOperation(w, r, previewsvc.BrowserOperationObserve)
+	defer cancel()
 	previewID, claims, ok := h.authorizePreviewAction(w, r, "observe")
 	if !ok {
 		return
@@ -416,6 +441,7 @@ func (h *InternalPreviewHandler) Observe(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, http.StatusServiceUnavailable, "BROWSER_UNAVAILABLE", "preview browser is unavailable")
 		return
 	}
+	r = withBrowserDiagnosticContext(r, h.nodeID, previewID, body.SessionID)
 	result, err := h.preview.browserSessions.Observe(r.Context(), orgID, body.SessionID, previewID, body.Policy, body.Options)
 	if err != nil {
 		writeBrowserSessionError(w, r, err)
@@ -425,6 +451,8 @@ func (h *InternalPreviewHandler) Observe(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *InternalPreviewHandler) Act(w http.ResponseWriter, r *http.Request) {
+	r, cancel := withWorkerBrowserOperation(w, r, previewsvc.BrowserOperationInteract)
+	defer cancel()
 	previewID, claims, ok := h.authorizePreviewAction(w, r, "act")
 	if !ok {
 		return
@@ -444,6 +472,7 @@ func (h *InternalPreviewHandler) Act(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusServiceUnavailable, "BROWSER_UNAVAILABLE", "preview browser is unavailable")
 		return
 	}
+	r = withBrowserDiagnosticContext(r, h.nodeID, previewID, body.SessionID)
 	result, err := h.preview.browserSessions.Act(r.Context(), orgID, body.SessionID, previewID, body.Policy, body.Steps, body.Options)
 	if err != nil {
 		writeBrowserSessionError(w, r, err)
@@ -453,6 +482,8 @@ func (h *InternalPreviewHandler) Act(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *InternalPreviewHandler) HumanAct(w http.ResponseWriter, r *http.Request) {
+	r, cancel := withWorkerBrowserOperation(w, r, previewsvc.BrowserOperationInteract)
+	defer cancel()
 	middleware.OrgIDFromContext(r.Context())
 	previewID, claims, ok := h.authorizePreviewAction(w, r, "human_act")
 	if !ok {
@@ -472,6 +503,7 @@ func (h *InternalPreviewHandler) HumanAct(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusServiceUnavailable, "BROWSER_UNAVAILABLE", "preview browser is unavailable")
 		return
 	}
+	r = withBrowserDiagnosticContext(r, h.nodeID, previewID, body.SessionID)
 	result, err := h.preview.browserSessions.ActAsHuman(r.Context(), claims.OrgID, body.SessionID, previewID, body.UserID, body.Policy, body.Steps, body.Options)
 	if err != nil {
 		writeBrowserSessionError(w, r, err)
@@ -481,6 +513,24 @@ func (h *InternalPreviewHandler) HumanAct(w http.ResponseWriter, r *http.Request
 }
 
 func writeBrowserSessionError(w http.ResponseWriter, r *http.Request, err error) {
+	if accessErr, ok := previewsvc.AsBrowserAccessError(err); ok {
+		logContext := zerolog.Ctx(r.Context()).With().Str("browser_stage", string(accessErr.Stage))
+		if elapsed := browserOperationElapsed(r); elapsed > 0 {
+			logContext = logContext.Dur("browser_elapsed", elapsed)
+		}
+		if diagnosticContext, _ := r.Context().Value(browserDiagnosticContextKey{}).(bool); !diagnosticContext {
+			if previewID := firstNonEmptyString(chi.URLParam(r, "previewID"), chi.URLParam(r, "preview_id")); previewID != "" {
+				logContext = logContext.Str("preview_id", previewID)
+			}
+			if sessionID := chi.URLParam(r, "id"); sessionID != "" {
+				logContext = logContext.Str("session_id", sessionID)
+			}
+		}
+		logger := logContext.Logger()
+		r = r.WithContext(logger.WithContext(r.Context()))
+		writeErrorWithDetails(w, r, http.StatusInternalServerError, accessErr.Code(), "preview browser access failed", map[string]string{"stage": string(accessErr.Stage)}, err)
+		return
+	}
 	switch {
 	case errors.Is(err, previewsvc.ErrBrowserUnavailable):
 		writeError(w, r, http.StatusServiceUnavailable, "BROWSER_UNAVAILABLE", "preview browser is unavailable", err)
@@ -494,6 +544,8 @@ func writeBrowserSessionError(w http.ResponseWriter, r *http.Request, err error)
 }
 
 func (h *InternalPreviewHandler) InspectElement(w http.ResponseWriter, r *http.Request) {
+	r, cancel := withWorkerBrowserOperation(w, r, previewsvc.BrowserOperationInspect)
+	defer cancel()
 	previewID, claims, ok := h.authorizePreviewAction(w, r, "inspect")
 	if !ok {
 		return
@@ -543,6 +595,8 @@ func (h *InternalPreviewHandler) ReadConsole(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *InternalPreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *http.Request) {
+	r, cancel := withWorkerBrowserOperation(w, r, previewsvc.BrowserOperationInteract)
+	defer cancel()
 	previewID, claims, ok := h.authorizePreviewAction(w, r, "interact")
 	if !ok {
 		return
@@ -577,6 +631,8 @@ func bindClaimedSessionBrowser(inspector previewsvc.PreviewInspector, previewID 
 }
 
 func (h *InternalPreviewHandler) CaptureMultiViewport(w http.ResponseWriter, r *http.Request) {
+	r, cancel := withWorkerBrowserOperation(w, r, previewsvc.BrowserOperationMultiViewport)
+	defer cancel()
 	previewID, claims, ok := h.authorizePreviewAction(w, r, "multi_viewport")
 	if !ok {
 		return
@@ -601,6 +657,8 @@ func (h *InternalPreviewHandler) CaptureMultiViewport(w http.ResponseWriter, r *
 }
 
 func (h *InternalPreviewHandler) ComputeVisualDiff(w http.ResponseWriter, r *http.Request) {
+	r, cancel := withWorkerBrowserOperation(w, r, previewsvc.BrowserOperationVisualDiff)
+	defer cancel()
 	previewID, claims, ok := h.authorizePreviewAction(w, r, "visual_diff")
 	if !ok {
 		return
@@ -625,6 +683,8 @@ func (h *InternalPreviewHandler) ComputeVisualDiff(w http.ResponseWriter, r *htt
 }
 
 func (h *InternalPreviewHandler) RunAssertions(w http.ResponseWriter, r *http.Request) {
+	r, cancel := withWorkerBrowserOperation(w, r, previewsvc.BrowserOperationAssertions)
+	defer cancel()
 	previewID, claims, ok := h.authorizePreviewAction(w, r, "assert")
 	if !ok {
 		return
@@ -776,6 +836,7 @@ func addInternalPreviewRequestLogFields(event *zerolog.Event, r *http.Request) *
 	requestHost := ""
 	requestPath := ""
 	queryPresent := false
+	parentRequestID := ""
 	if r != nil {
 		requestMethod = r.Method
 		requestHost = r.Host
@@ -783,12 +844,17 @@ func addInternalPreviewRequestLogFields(event *zerolog.Event, r *http.Request) *
 			requestPath = r.URL.Path
 			queryPresent = r.URL.RawQuery != ""
 		}
+		parentRequestID = internalapi.NormalizeParentRequestID(r.Header.Get(internalapi.ParentRequestIDHeader))
 	}
-	return event.
+	event = event.
 		Str("request_method", requestMethod).
 		Str("request_host", requestHost).
 		Str("request_path", requestPath).
 		Bool("query_present", queryPresent)
+	if parentRequestID != "" {
+		event = event.Str("parent_request_id", parentRequestID)
+	}
+	return event
 }
 
 func addPreviewTokenClaimLogFields(event *zerolog.Event, claims *auth.PreviewTokenClaims) *zerolog.Event {

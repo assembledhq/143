@@ -852,6 +852,24 @@ func TestInternalPreviewHandler_BrowserSessionMismatch(t *testing.T) {
 	}
 }
 
+func TestWriteBrowserSessionError_ReturnsSafeBootstrapStage(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/preview/preview-id/observe", nil)
+	req = withPreviewRouteParam(req, "preview-id")
+	rr := httptest.NewRecorder()
+	secretCause := errors.New("exchange rejected token=must-not-leak")
+
+	writeBrowserSessionError(rr, req, &previewsvc.BrowserAccessError{Stage: previewsvc.BrowserAccessStageBootstrapExchange, Err: secretCause})
+
+	require.Equal(t, http.StatusInternalServerError, rr.Code, "bootstrap stage failure should return a server error")
+	var resp models.ErrorResponse
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp), "bootstrap stage failure should return JSON")
+	require.Equal(t, "PREVIEW_BROWSER_BOOTSTRAP_EXCHANGE_FAILED", resp.Error.Code, "bootstrap stage should have a stable public code")
+	require.Equal(t, map[string]any{"stage": "bootstrap_exchange"}, resp.Error.Details, "bootstrap response should expose only the safe stage")
+	require.NotContains(t, rr.Body.String(), "must-not-leak", "bootstrap response should never include the underlying token or cookie error")
+}
+
 func TestInternalPreviewHandler_InspectorEndpoints_RejectInvalidBodiesAndSurfaceFailures(t *testing.T) {
 	t.Parallel()
 
