@@ -10,6 +10,11 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { ErrorNotice } from "@/components/ui/error-notice";
 
+const CONTROL_POLL_INTERVAL_MS = 2000;
+const OBSERVATION_POLL_INTERVAL_MS = 1500;
+const FAILED_POLL_INTERVAL_MS = 5000;
+const INITIAL_FAILURE_THRESHOLD = 2;
+
 export function mapSharedBrowserPoint(rect: Pick<DOMRect, "left" | "top" | "width" | "height">, viewport: { width: number; height: number }, clientX: number, clientY: number) {
   const scale = Math.min(rect.width / viewport.width, rect.height / viewport.height);
   const renderedWidth = viewport.width * scale;
@@ -18,6 +23,15 @@ export function mapSharedBrowserPoint(rect: Pick<DOMRect, "left" | "top" | "widt
   const top = rect.top + (rect.height - renderedHeight) / 2;
   if (clientX < left || clientX > left + renderedWidth || clientY < top || clientY > top + renderedHeight) return null;
   return { x: Math.round((clientX - left) / scale), y: Math.round((clientY - top) / scale) };
+}
+
+export function sharedBrowserErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) return error.message;
+  if (typeof error === "object" && error !== null && "message" in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message;
+  }
+  return String(error);
 }
 
 export function SharedBrowserSurface({ sessionId }: { sessionId: string }) {
@@ -29,12 +43,18 @@ export function SharedBrowserSurface({ sessionId }: { sessionId: string }) {
   const control = useQuery({
     queryKey: ["preview-browser-control", sessionId],
     queryFn: () => api.sessions.preview.browserControl(sessionId),
-    refetchInterval: 2000,
+    retry: false,
+    refetchInterval: (query) => query.state.errorUpdatedAt > query.state.dataUpdatedAt
+      ? FAILED_POLL_INTERVAL_MS
+      : CONTROL_POLL_INTERVAL_MS,
   });
   const observation = useQuery({
     queryKey: ["preview-browser-observation", sessionId],
     queryFn: ({ signal }) => api.sessions.preview.observeBrowser(sessionId, { signal }),
-    refetchInterval: 1500,
+    retry: false,
+    refetchInterval: (query) => query.state.errorUpdatedAt > query.state.dataUpdatedAt
+      ? FAILED_POLL_INTERVAL_MS
+      : OBSERVATION_POLL_INTERVAL_MS,
   });
   const refresh = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["preview-browser-observation", sessionId] });
@@ -60,6 +80,20 @@ export function SharedBrowserSurface({ sessionId }: { sessionId: string }) {
   const isLeaseOwner = isHuman && control.data?.is_lease_owner;
   const label = control.data?.state?.replaceAll("_", " ") ?? "connecting";
   const imageSrc = useMemo(() => image ? `data:image/png;base64,${image}` : undefined, [image]);
+  // React Query resets a no-data query to pending during each interval fetch.
+  // Use the cumulative error count plus update timestamps so a repeated outage
+  // becomes one stable notice instead of blinking off on every retry. Once a
+  // frame has loaded, keep showing that last good frame through refetch errors.
+  const passiveBrowserUnavailable = [control, observation].some((query) =>
+    query.data === undefined &&
+    query.errorUpdateCount >= INITIAL_FAILURE_THRESHOLD &&
+    query.errorUpdatedAt > query.dataUpdatedAt);
+  const actionError = acquire.error || release.error || inputError;
+  const errorDescription = actionError
+    ? sharedBrowserErrorMessage(actionError)
+    : passiveBrowserUnavailable
+      ? "The session browser is not responding. Retrying automatically."
+      : undefined;
 
   const navigate = () => {
     const value = path.trim();
@@ -87,8 +121,8 @@ export function SharedBrowserSurface({ sessionId }: { sessionId: string }) {
           <Button variant="outline" onClick={navigate} disabled={pendingInputCount > 0}>Go</Button>
         </div>
       )}
-      {Boolean(control.error || observation.error || acquire.error || release.error || inputError) && (
-        <ErrorNotice title="Shared browser unavailable" description={String(control.error || observation.error || acquire.error || release.error || inputError)} />
+      {errorDescription && (
+        <ErrorNotice title="Shared browser unavailable" description={errorDescription} />
       )}
       <div className="relative mx-auto aspect-[16/10] max-h-[70vh] bg-background">
         {imageSrc ? (

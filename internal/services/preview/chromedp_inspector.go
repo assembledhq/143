@@ -747,6 +747,13 @@ func (c *ChromeDPInspector) HasPreviewAccess(target models.BrowserTarget) bool {
 	return hasContext && c.previewAccess[key] == target.PreviewID
 }
 
+// awaitPromiseEvaluation must be used for scripts that return a JavaScript
+// Promise. Runtime.evaluate otherwise returns the Promise object itself, which
+// cannot be decoded into the resolved Go result.
+func awaitPromiseEvaluation(params *runtime.EvaluateParams) *runtime.EvaluateParams {
+	return params.WithAwaitPromise(true)
+}
+
 func (c *ChromeDPInspector) BootstrapPreviewAccess(ctx context.Context, target models.BrowserTarget, token string) error {
 	if strings.TrimSpace(token) == "" {
 		return fmt.Errorf("preview bootstrap token is required")
@@ -785,7 +792,7 @@ func (c *ChromeDPInspector) BootstrapPreviewAccess(ctx context.Context, target m
 		timeoutCtx,
 		chromedp.Navigate(bootstrapURL),
 		chromedp.WaitReady("body", chromedp.ByQuery),
-		chromedp.Evaluate(exchangeScript, &exchangeStatus),
+		chromedp.Evaluate(exchangeScript, &exchangeStatus, awaitPromiseEvaluation),
 	); err != nil {
 		c.dropBrowserContext(target)
 		return fmt.Errorf("exchange preview browser access: %w", err)
