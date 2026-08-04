@@ -363,6 +363,11 @@ export interface CodeReviewAnalytics {
   }>;
   authors: CodeReviewAuthorAnalytics[];
   non_approval_reasons: CodeReviewNonApprovalReasonAnalytics[];
+  comment_requests_total: number;
+  comment_requests_by_user: Array<{
+    github_login: string;
+    requests: number;
+  }>;
 }
 
 export type CodeReviewPhase =

@@ -1,6 +1,6 @@
 # Design: PR-Centric Code Review Analytics
 
-> **Status:** Implemented | **Last reviewed:** 2026-07-31
+> **Status:** Implemented | **Last reviewed:** 2026-08-03
 >
 > **Depends on:** [112-code-reviewer-bot-auto-approval.md](112-code-reviewer-bot-auto-approval.md), [../overall.md](../overall.md)
 
@@ -10,12 +10,14 @@ Change the Code reviews Analytics tab from review-attempt reporting to
 pull-request reporting while preserving the useful metrics and sections already
 on the page.
 
-The page should answer four questions:
+The page should answer five questions:
 
 1. How many PRs did 143 review?
 2. How many of those PRs received an approval from 143?
 3. What percentage of reviewed PRs did 143 approve?
 4. How many rounds did approval usually take?
+5. Which trusted GitHub users directly requested reviews through PR comments,
+   and how often?
 
 Individual review sessions remain available as evidence, but they are not the
 primary analytics unit. This prevents a PR reviewed several times from having
@@ -24,6 +26,11 @@ several times the influence of a PR approved immediately.
 The existing author, finding, non-approval, and operational metrics remain.
 Their labels and calculations change from reviews to unique PRs. First-round
 approval and rounds to approval are added alongside them.
+
+The report also counts trusted PR conversation comments that directly mention
+the configured 143 code reviewer. These comment-request counts are grouped by
+the captured GitHub login and deduplicated by the durable GitHub delivery or
+comment identity. Comment contents are not returned in analytics.
 
 Global PR-size, file-count, size-bucket, and policy-limit analytics are
 intentionally excluded. The author table retains median additions and deletions
@@ -62,8 +69,8 @@ first-round approval rate.
 - Attribute merge speed or engineering productivity to 143.
 - Compare 143 approval with human approval.
 - Add policy tuning, automatic recommendations, or dispute handling.
-- Add new analytics dimensions beyond the existing report and review-round
-  metrics defined here.
+- Add analytics dimensions beyond the existing report, review-round metrics,
+  and direct-comment request counts defined here.
 - Create a new analytics warehouse, event stream, or persisted rollup table.
 - Redesign the Reviews or Policy tabs.
 
@@ -235,6 +242,21 @@ overlap other outcomes: a PR can have a stale attempt and later be approved. The
 copy must make this clear rather than presenting them as mutually exclusive final
 outcomes.
 
+### 6. Direct review requests by user
+
+Show a compact table of trusted GitHub users whose newly created PR conversation
+comments directly mentioned the configured 143 code reviewer:
+
+| Column | Definition |
+| --- | --- |
+| GitHub user | Lowercased captured login from the triggering comment |
+| Direct comment requests | Distinct GitHub delivery/comment identities for PRs in the selected cohort |
+
+Show the total in the table summary. A GitHub webhook redelivery counts once.
+Automatic head reassessments, reviewer assignments, and manual retries do not
+count. Later comment requests for a PR in the selected cohort remain included,
+matching the report's existing full-PR-journey semantics.
+
 ## Suggested layout
 
 ```text
@@ -248,6 +270,9 @@ Approval by round
 
 Usage by PR author
 Author       PRs   Approved   Not approved   First-round approval   Median rounds
+
+Direct review requests by user
+GitHub user                                  Direct comment requests
 
 Why PRs were not approved right away
 Reason                                      PRs
@@ -313,6 +338,11 @@ filters. Change the response contract to PR-oriented fields:
     ],
     "non_approval_reasons": [
       {"code": "blocking_findings", "prs": 12}
+    ],
+    "comment_requests_total": 7,
+    "comment_requests_by_user": [
+      {"github_login": "anya", "requests": 5},
+      {"github_login": "sam", "requests": 2}
     ]
   }
 }
@@ -327,7 +357,14 @@ The implementation should derive this in one org-scoped PostgreSQL query:
 4. order distinct completed heads by completion time to assign round numbers;
 5. select one representative assessment per PR;
 6. aggregate PR outcomes, rounds, authors, representative change-distribution
-   and finding metrics, and distinct per-PR reason codes.
+   and finding metrics, distinct per-PR reason codes, and direct comment-request
+   counts grouped by GitHub login.
+
+Direct comment requests are derived from the existing session
+`revision_context`: `request_context.source = 'issue_comment'` identifies the
+trusted comment trigger, while the non-empty `github_delivery_id` provides the
+dedupe identity. The comment body is neither selected nor returned. No database
+schema change is required.
 
 Continue filtering every source by `org_id`. No migration is expected unless
 focused query testing shows an additional index is required.
@@ -367,6 +404,10 @@ Add focused store tests covering:
 - representative author change-distribution, decision, and finding metrics;
 - unique PR counts for failed and stale attempts;
 - author aggregation and missing authors.
+- direct comment request totals and per-user grouping;
+- case-insensitive GitHub login grouping;
+- GitHub webhook redelivery deduplication;
+- exclusion of automatic reassessments, manual retries, and other organizations.
 
 Update handler contract tests and frontend component tests for:
 
@@ -376,6 +417,7 @@ Update handler contract tests and frontend component tests for:
 - non-approval reasons;
 - finding and outcome sections with PR-based copy;
 - PR-author rows and navigation filters.
+- direct-comment requester rows, totals, and the empty state.
 
 ## Rollout
 
@@ -396,3 +438,5 @@ the report is derived from current durable review and PR records.
   insights remain available with PR-based denominators.
 - No PR contributes more than once to an author row, outcome count,
   or individual non-approval reason.
+- Each trusted direct-comment request contributes once to its captured GitHub
+  user even when GitHub redelivers the webhook.

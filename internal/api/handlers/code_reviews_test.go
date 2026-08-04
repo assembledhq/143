@@ -430,13 +430,14 @@ func TestCodeReviewHandler_AnalyticsReturnsReport(t *testing.T) {
 			"prs_with_change_breakdown", "median_additions", "median_deletions", "prs_with_findings",
 			"prs_with_blocking_findings", "total_findings", "needs_human_review",
 			"comment_only", "blocked", "approval_not_posted", "approval_rounds", "authors",
-			"non_approval_reasons",
+			"non_approval_reasons", "comment_requests_total", "comment_requests_by_user",
 		}).AddRow(
 			6, 5, 3, 2, 2, 1.0, 1, 0,
 			0, -1, -1, 1,
 			1, 2, 2, 0, 0, 0,
 			[]byte(`[{"bucket":"round_1","prs":2},{"bucket":"round_2","prs":1},{"bucket":"round_3","prs":0},{"bucket":"round_4_plus","prs":0},{"bucket":"not_yet_approved","prs":3}]`),
-			[]byte(`[]`), []byte(`[]`),
+			[]byte(`[]`), []byte(`[]`), 4,
+			[]byte(`[{"github_login":"anya","requests":3},{"github_login":"sam","requests":1}]`),
 		))
 	handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-reviews/analytics?repository_id="+repositoryID.String(), nil)
@@ -476,7 +477,12 @@ func TestCodeReviewHandler_AnalyticsReturnsReport(t *testing.T) {
 				{"bucket":"not_yet_approved","prs":3}
 			],
 			"authors": [],
-			"non_approval_reasons": []
+			"non_approval_reasons": [],
+			"comment_requests_total": 4,
+			"comment_requests_by_user": [
+				{"github_login":"anya","requests":3},
+				{"github_login":"sam","requests":1}
+			]
 		}
 	}`, rr.Body.String(), "analytics should return exact nullable metrics and empty breakdowns")
 	require.NoError(t, mock.ExpectationsWereMet(), "analytics handler should apply the repository scope to every query")

@@ -1368,7 +1368,7 @@ func TestCodeReviewStore_GetReviewAnalyticsReturnsDecisionReport(t *testing.T) {
 			"prs_with_change_breakdown", "median_additions", "median_deletions", "prs_with_findings",
 			"prs_with_blocking_findings", "total_findings", "needs_human_review",
 			"comment_only", "blocked", "approval_not_posted", "approval_rounds", "authors",
-			"non_approval_reasons",
+			"non_approval_reasons", "comment_requests_total", "comment_requests_by_user",
 		}).AddRow(
 			32, 28, 17, 11, 10, 2.0, 2, 2,
 			20, medianAdditions, medianDeletions,
@@ -1387,6 +1387,9 @@ func TestCodeReviewStore_GetReviewAnalyticsReturnsDecisionReport(t *testing.T) {
 			[]byte(`[
 				{"code":"lines_limit_exceeded","prs":5},
 				{"code":"blocking_findings","prs":3}
+			]`), 5, []byte(`[
+				{"github_login":"anya","requests":3},
+				{"github_login":"sam","requests":2}
 			]`),
 		))
 
@@ -1439,6 +1442,11 @@ func TestCodeReviewStore_GetReviewAnalyticsReturnsDecisionReport(t *testing.T) {
 			{Code: models.CodeReviewRiskReasonLinesLimitExceeded, PRs: 5},
 			{Code: models.CodeReviewRiskReasonBlockingFindings, PRs: 3},
 		},
+		CommentRequestsTotal: 5,
+		CommentRequestsByUser: []models.CodeReviewCommentRequestUserAnalytics{
+			{GitHubLogin: "anya", Requests: 3},
+			{GitHubLogin: "sam", Requests: 2},
+		},
 	}, analytics, "GetReviewAnalytics should return exact summary, author, and reason metrics")
 	require.NoError(t, mock.ExpectationsWereMet(), "the single analytics query should remain org and filter scoped")
 }
@@ -1487,10 +1495,10 @@ func TestCodeReviewStore_GetReviewAnalyticsRejectsIncompleteApprovalRounds(t *te
 					"prs_with_change_breakdown", "median_additions", "median_deletions", "prs_with_findings",
 					"prs_with_blocking_findings", "total_findings", "needs_human_review",
 					"comment_only", "blocked", "approval_not_posted", "approval_rounds", "authors",
-					"non_approval_reasons",
+					"non_approval_reasons", "comment_requests_total", "comment_requests_by_user",
 				}).AddRow(
 					1, 1, 1, 0, 1, 1.0, 0, 0, 0, -1.0, -1.0, 0, 0, 0, 0, 0, 0, 0,
-					[]byte(tt.rounds), []byte(`[]`), []byte(`[]`),
+					[]byte(tt.rounds), []byte(`[]`), []byte(`[]`), 0, []byte(`[]`),
 				))
 
 			_, err = NewCodeReviewStore(mock).GetReviewAnalytics(context.Background(), uuid.New(), CodeReviewAnalyticsFilters{})
