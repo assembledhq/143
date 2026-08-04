@@ -38,7 +38,7 @@ func LogContext(logger zerolog.Logger) func(http.Handler) http.Handler {
 			if apiVersion != "" {
 				logCtx = logCtx.Str("api_version", apiVersion)
 			}
-			if parentRequestID := internalapi.NormalizeParentRequestID(r.Header.Get(internalapi.ParentRequestIDHeader)); parentRequestID != "" {
+			if parentRequestID := internalapi.TrustedParentRequestID(r); parentRequestID != "" {
 				logCtx = logCtx.Str("parent_request_id", parentRequestID)
 			}
 			l := logCtx.Logger()

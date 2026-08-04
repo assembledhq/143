@@ -57,7 +57,7 @@ const (
 	defaultOpTimeout      = browserDefaultOperationTimeout
 	browserResetTimeout   = 5 * time.Second
 	maxInteractionSteps   = 20
-	maxInteractionTimeout = browserInteractionOperationTimeout
+	maxInteractionTimeout = browserInteractionStepsTimeout
 	maxViewports          = 5
 	maxScreencastDuration = 30 * time.Second
 	maxScreencastFPS      = 4

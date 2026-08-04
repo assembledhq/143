@@ -11,9 +11,19 @@ import (
 type BrowserOperation string
 
 const (
-	browserDefaultOperationTimeout       = 30 * time.Second
-	browserObserveOperationTimeout       = 45 * time.Second
-	browserInteractionOperationTimeout   = 60 * time.Second
+	browserDefaultOperationTimeout    = 30 * time.Second
+	browserObserveOperationTimeout    = 45 * time.Second
+	browserAssertionsOperationTimeout = 60 * time.Second
+
+	// browserInteractionStepsTimeout is the design doc's cap on the interaction
+	// step loop itself. An interaction is not just that loop: Act runs the steps
+	// and then a full observation of the resulting page, so the operation budget
+	// must cover both. Sizing them equally would leave the trailing observation
+	// no time whenever the steps ran long, discarding step results that already
+	// succeeded.
+	browserInteractionStepsTimeout     = 60 * time.Second
+	browserInteractionOperationTimeout = browserInteractionStepsTimeout + browserObserveOperationTimeout
+
 	browserMultiViewportOperationTimeout = 150 * time.Second
 )
 
@@ -38,14 +48,18 @@ type BrowserOperationBudget struct {
 }
 
 // BrowserOperationBudgetFor returns the canonical timeout stack for an
-// operation. Multi-viewport captures may perform five sequential screenshots.
+// operation. Each operation's budget covers everything that runs inside it:
+// multi-viewport captures may perform five sequential screenshots, and an
+// interaction is a step loop followed by an observation.
 func BrowserOperationBudgetFor(operation BrowserOperation) BrowserOperationBudget {
 	operationTimeout := browserDefaultOperationTimeout
 	switch operation {
 	case BrowserOperationObserve:
 		operationTimeout = browserObserveOperationTimeout
-	case BrowserOperationInteract, BrowserOperationAssertions:
+	case BrowserOperationInteract:
 		operationTimeout = browserInteractionOperationTimeout
+	case BrowserOperationAssertions:
+		operationTimeout = browserAssertionsOperationTimeout
 	case BrowserOperationMultiViewport:
 		operationTimeout = browserMultiViewportOperationTimeout
 	}

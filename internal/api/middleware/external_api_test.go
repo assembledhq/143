@@ -34,6 +34,25 @@ func TestLogContext_CorrelatesParentRequestID(t *testing.T) {
 	require.Equal(t, "public-request-123", entry["parent_request_id"], "worker log should include the originating public request id")
 }
 
+func TestLogContext_IgnoresParentRequestIDFromPublicClients(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/previews/preview-id/observe", nil)
+	req.Header.Set(internalapi.ParentRequestIDHeader, "forged-request-123")
+	rr := httptest.NewRecorder()
+
+	LogContext(zerolog.New(&logs))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		zerolog.Ctx(r.Context()).Info().Msg("public browser request")
+		w.WriteHeader(http.StatusNoContent)
+	})).ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusNoContent, rr.Code, "public request should still reach the handler")
+	var entry map[string]any
+	require.NoError(t, json.Unmarshal(logs.Bytes(), &entry), "request-scoped log should be valid JSON")
+	require.NotContains(t, entry, "parent_request_id", "a public caller should not be able to forge a correlation id in structured logs")
+}
+
 func TestLogContext_AllowsAPIIdentityWithoutUser(t *testing.T) {
 	t.Parallel()
 

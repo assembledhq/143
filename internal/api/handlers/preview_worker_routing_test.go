@@ -837,8 +837,8 @@ func TestBrowserHandlerTimeout(t *testing.T) {
 		workerRouting bool
 		want          time.Duration
 	}{
-		{name: "local operation uses inner budget", want: 60 * time.Second},
-		{name: "remote operation includes worker request headroom", workerRouting: true, want: 70 * time.Second},
+		{name: "local operation uses inner budget", want: 105 * time.Second},
+		{name: "remote operation includes worker request headroom", workerRouting: true, want: 115 * time.Second},
 	}
 
 	for _, tt := range tests {

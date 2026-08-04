@@ -18,7 +18,7 @@ func TestBrowserOperationBudgetFor(t *testing.T) {
 	}{
 		{name: "screenshot", operation: BrowserOperationScreenshot, want: BrowserOperationBudget{Operation: 30 * time.Second, WorkerResponse: 35 * time.Second, WorkerRequest: 40 * time.Second, APIResponse: 45 * time.Second}},
 		{name: "observe", operation: BrowserOperationObserve, want: BrowserOperationBudget{Operation: 45 * time.Second, WorkerResponse: 50 * time.Second, WorkerRequest: 55 * time.Second, APIResponse: 60 * time.Second}},
-		{name: "interaction", operation: BrowserOperationInteract, want: BrowserOperationBudget{Operation: 60 * time.Second, WorkerResponse: 65 * time.Second, WorkerRequest: 70 * time.Second, APIResponse: 75 * time.Second}},
+		{name: "interaction", operation: BrowserOperationInteract, want: BrowserOperationBudget{Operation: 105 * time.Second, WorkerResponse: 110 * time.Second, WorkerRequest: 115 * time.Second, APIResponse: 120 * time.Second}},
 		{name: "inspect", operation: BrowserOperationInspect, want: BrowserOperationBudget{Operation: 30 * time.Second, WorkerResponse: 35 * time.Second, WorkerRequest: 40 * time.Second, APIResponse: 45 * time.Second}},
 		{name: "multi viewport", operation: BrowserOperationMultiViewport, want: BrowserOperationBudget{Operation: 150 * time.Second, WorkerResponse: 155 * time.Second, WorkerRequest: 160 * time.Second, APIResponse: 165 * time.Second}},
 		{name: "visual diff", operation: BrowserOperationVisualDiff, want: BrowserOperationBudget{Operation: 30 * time.Second, WorkerResponse: 35 * time.Second, WorkerRequest: 40 * time.Second, APIResponse: 45 * time.Second}},
@@ -31,6 +31,17 @@ func TestBrowserOperationBudgetFor(t *testing.T) {
 			require.Equal(t, tt.want, BrowserOperationBudgetFor(tt.operation), "timeout stack should preserve bounded headroom at every hop")
 		})
 	}
+}
+
+func TestBrowserInteractionBudgetCoversStepsAndTrailingObservation(t *testing.T) {
+	t.Parallel()
+
+	interact := BrowserOperationBudgetFor(BrowserOperationInteract).Operation
+	observe := BrowserOperationBudgetFor(BrowserOperationObserve).Operation
+
+	require.Equal(t, maxInteractionTimeout, browserInteractionStepsTimeout, "the inspector step loop should be capped by the documented step budget")
+	require.GreaterOrEqual(t, interact, browserInteractionStepsTimeout+observe,
+		"Act runs the step loop and then a full observation, so a step loop that uses its whole budget must still leave room to observe the resulting page")
 }
 
 func TestBrowserAccessErrorCode(t *testing.T) {

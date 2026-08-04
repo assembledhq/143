@@ -844,7 +844,7 @@ func addInternalPreviewRequestLogFields(event *zerolog.Event, r *http.Request) *
 			requestPath = r.URL.Path
 			queryPresent = r.URL.RawQuery != ""
 		}
-		parentRequestID = internalapi.NormalizeParentRequestID(r.Header.Get(internalapi.ParentRequestIDHeader))
+		parentRequestID = internalapi.TrustedParentRequestID(r)
 	}
 	event = event.
 		Str("request_method", requestMethod).
