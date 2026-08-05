@@ -203,6 +203,8 @@ func cliPathForTool(name string) (CLINamespace, CLIAction, bool) {
 	switch {
 	case name == "create_pr":
 		return NamespacePR, ActionCreate, true
+	case name == "update_pr":
+		return NamespacePR, ActionUpdate, true
 	case name == "issue_create":
 		return NamespaceIssue, ActionCreate, true
 	case name == "automation_create":

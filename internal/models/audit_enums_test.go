@@ -47,6 +47,7 @@ func TestAuditAction_Validate(t *testing.T) {
 		{name: "session.created is valid", value: AuditActionSessionCreated},
 		{name: "session.branch_requested is valid", value: AuditActionSessionBranchRequested},
 		{name: "session.preview_lifetime_set is valid", value: AuditActionSessionPreviewLifetimeSet},
+		{name: "pull_request.updated is valid", value: AuditActionPullRequestUpdated},
 		{name: "pull_request.auto_repair_started is valid", value: AuditActionPullRequestAutoRepairStarted},
 		{name: "project.started is valid", value: AuditActionProjectStarted},
 		{name: "automation goal improvement requested is valid", value: AuditActionAutomationGoalImprovementRequested},

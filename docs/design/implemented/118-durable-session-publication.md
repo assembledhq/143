@@ -1,6 +1,6 @@
 # Durable Session Publication
 
-> **Status:** Implemented | **Last reviewed:** 2026-07-30
+> **Status:** Implemented | **Last reviewed:** 2026-08-04
 
 ## Problem
 
@@ -55,6 +55,60 @@ kept out of the sandbox. When a human triggered the session, their user record
 is still attached to the resolution so commit author/co-author attribution is
 preserved. Token issuance fails closed if repository identity or the scoped
 issuer is unavailable.
+
+Existing PR title/body updates follow the same ownership boundary. Agents use
+`143-tools pr update`, which calls a token-scoped internal API and updates the
+current session's primary PR with a server-held installation token. The
+sandbox never receives `pull_requests: write`; the handler verifies tenant,
+repository, session, and writable-thread identity, preserves the durable
+publication marker and 143 preview footer in replacement descriptions, refreshes the local GitHub
+snapshot, and emits an agent audit event. Substantial descriptions can be read
+from a sandbox file with `--body-file`, avoiding shell-quoting limits without
+making arbitrary host files visible to the API server.
+
+### Existing PR metadata update contract
+
+This capability requires no schema or migration change. It reuses the
+tenant-scoped `sessions`, `session_threads`, `repositories`, `pull_requests`,
+and `audit_logs` records. The successful GitHub response refreshes the existing
+`pull_requests` title, body, URL, head, and base snapshot fields; it does not
+create a second PR or publication ledger row.
+
+The internal API exposes both token-scoped and compatibility routes:
+
+- `PATCH /api/v1/internal/session/pr`
+- `PATCH /api/v1/internal/sessions/{sessionID}/pr`
+
+Both require the short-lived internal bearer token issued to a session. The
+path or optional request `session_id`, when present, must equal the signed
+claim. Read-only filesystem threads, review execution threads, repository
+mismatches, repo-only tokens, and automation-goal-improvement sessions fail
+closed. The JSON request accepts optional `title` and `body` string fields and
+requires at least one; `title` cannot be blank and is capped by the existing PR
+title limit. `body_file` is a CLI-only flag: `143-tools` reads it inside the
+sandbox and sends the resulting `body` string.
+
+A successful synchronous update returns HTTP 200:
+
+```json
+{
+  "status": "updated",
+  "session_id": "<uuid>",
+  "pull_request_id": "<uuid>",
+  "pull_request_number": 2068,
+  "pull_request_url": "https://github.com/owner/repo/pull/2068",
+  "title": "Updated title"
+}
+```
+
+Stable errors include `UNAUTHORIZED`, `SESSION_MISMATCH`, `REPO_MISMATCH`,
+`TOOL_NOT_AVAILABLE`, `INVALID_BODY`, `INVALID_TITLE`,
+`PULL_REQUEST_NOT_FOUND`, `GITHUB_APP_NOT_CONFIGURED`,
+`GITHUB_PERMISSION_MISSING`, and `PULL_REQUEST_UPDATE_FAILED`. A GitHub 403
+with `Resource not accessible by integration` maps to
+`GITHUB_PERMISSION_MISSING` and tells operators to grant **Pull requests: Read
+& Write** and have an organization owner approve the installation permission
+change.
 
 ### Idempotent branch semantics
 

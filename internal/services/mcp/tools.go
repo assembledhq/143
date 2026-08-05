@@ -410,6 +410,19 @@ func (tr *ToolRegistry) ListTools() []Tool {
 					},
 				},
 			},
+			Tool{
+				Name:        "update_pr",
+				Description: "Update the title and/or body of the current session's existing primary Pull Request through the server-owned GitHub integration. Prefer body_file for substantial markdown descriptions.",
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"session_id": {Type: "string", Description: "Session UUID. Omit inside a session sandbox; the server derives it from the signed internal token."},
+						"title":      {Type: "string", Description: "Replacement Pull Request title."},
+						"body":       {Type: "string", Description: "Replacement Pull Request description in Markdown."},
+						"body_file":  {Type: "string", Description: "Path inside the sandbox containing the replacement Markdown description. Mutually exclusive with body."},
+					},
+				},
+			},
 		)
 	}
 
@@ -563,12 +576,12 @@ func (tr *ToolRegistry) ListTools() []Tool {
 
 // CallTool dispatches a tool call to the appropriate integration method.
 func (tr *ToolRegistry) CallTool(ctx context.Context, name string, args json.RawMessage) *ToolCallResult {
-	if name == "create_pr" {
+	if name == "create_pr" || name == "update_pr" {
 		creators := tr.integrations.PullRequestCreators()
 		if len(creators) == 0 {
 			return ErrorResult("pull request creator not registered")
 		}
-		return tr.callPullRequestCreator(ctx, creators[0], "create_pr", args)
+		return tr.callPullRequestCreator(ctx, creators[0], name, args)
 	}
 
 	switch name {
@@ -1357,6 +1370,37 @@ func (tr *ToolRegistry) callPullRequestCreator(ctx context.Context, pc integrati
 		})
 		if err != nil {
 			return ErrorResult(fmt.Sprintf("create pull request failed: %s", err))
+		}
+		return jsonResult(result)
+
+	case "update_pr":
+		var p struct {
+			SessionID string  `json:"session_id"`
+			Title     *string `json:"title"`
+			Body      *string `json:"body"`
+			BodyFile  string  `json:"body_file"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil && len(args) > 0 {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		p.BodyFile = strings.TrimSpace(p.BodyFile)
+		if p.Title == nil && p.Body == nil && p.BodyFile == "" {
+			return ErrorResult("title, body, or body_file is required")
+		}
+		if p.Title != nil && strings.TrimSpace(*p.Title) == "" {
+			return ErrorResult("title must not be empty")
+		}
+		if p.Body != nil && p.BodyFile != "" {
+			return ErrorResult("body and body_file are mutually exclusive")
+		}
+		result, err := pc.UpdatePullRequest(ctx, integration.UpdatePullRequestParams{
+			SessionID: p.SessionID,
+			Title:     p.Title,
+			Body:      p.Body,
+			BodyFile:  p.BodyFile,
+		})
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("update pull request failed: %s", err))
 		}
 		return jsonResult(result)
 

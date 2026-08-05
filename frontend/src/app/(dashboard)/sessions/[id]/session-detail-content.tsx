@@ -305,6 +305,32 @@ function publicationErrorDescription(publication: SessionPublication) {
   }
 }
 
+// Every status block in the overview leads with a 16px icon and a title on one
+// row, then full-width body copy underneath. Sharing the row keeps the icon gap
+// and title type from drifting apart across the places that render it.
+function SectionHeading({
+  icon,
+  iconClassName,
+  iconSlot,
+  title,
+}: {
+  icon: ReactNode;
+  iconClassName?: string;
+  iconSlot?: string;
+  title: ReactNode;
+}) {
+  return (
+    <div className="flex items-center gap-1.5" data-slot="section-heading">
+      {/* Pin the glyph size here so a caller-supplied icon cannot reintroduce
+          the size drift this component exists to prevent. */}
+      <span aria-hidden="true" data-slot={iconSlot} className={cn("shrink-0 [&_svg]:size-4", iconClassName)}>
+        {icon}
+      </span>
+      <p className="text-sm font-medium text-foreground">{title}</p>
+    </div>
+  );
+}
+
 function PublicationWorkflowCard({
   publication,
   reviewLoop,
@@ -395,18 +421,14 @@ function PublicationWorkflowCard({
   return (
     <Card className={cn("border-border/60", needsAttention && "border-warning/50 bg-warning/5")} data-testid="publication-workflow-card">
       <CardContent className="space-y-3 p-4">
-        <div className="flex items-start gap-3">
-          <div className={cn(
-            "flex h-8 w-8 shrink-0 items-center justify-center rounded-full",
-            settled ? "bg-success/10 text-success" : needsAttention ? "bg-warning/10 text-warning" : "bg-info/10 text-info",
-          )}>
-            {settled ? <CheckCircle2 className="h-4 w-4" /> : needsAttention ? <AlertTriangle className="h-4 w-4" /> : <Loader2 className="h-4 w-4 animate-spin" />}
-          </div>
-          <div className="min-w-0 flex-1 space-y-1">
-            <p className="text-sm font-medium text-foreground">{title}</p>
-            <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
-            {published && prNumber ? <p className="text-xs text-muted-foreground">Pull request #{prNumber}</p> : null}
-          </div>
+        <div className="space-y-1.5">
+          <SectionHeading
+            icon={settled ? <CheckCircle2 className="h-4 w-4" /> : needsAttention ? <AlertTriangle className="h-4 w-4" /> : <Loader2 className="h-4 w-4 animate-spin" />}
+            iconClassName={settled ? "text-success" : needsAttention ? "text-warning" : "text-info"}
+            title={title}
+          />
+          <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
+          {published && prNumber ? <p className="text-xs text-muted-foreground">Pull request #{prNumber}</p> : null}
         </div>
         <div className="flex flex-wrap gap-2">
           {published && prURL ? (
@@ -726,22 +748,16 @@ function SessionResultSection({ summary, divided }: { summary?: string; divided:
   if (!summary) return null;
 
   return (
+    // Looser than the other status blocks on purpose: the body here is a
+    // markdown block rather than a one-line caption.
     <section
       aria-label="Session result"
-      className={cn(divided && "border-t border-border/60 pt-4")}
+      className={cn("space-y-2", divided && "border-t border-border/60 pt-4")}
       data-testid="session-result-section"
     >
-      <div className="flex items-start gap-2.5">
-        <div
-          aria-hidden="true"
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-success/10 text-success"
-        >
-          <CheckCircle2 className="h-4 w-4" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium text-foreground">Result</div>
-          <LazyMarkdownContent content={summary} className="mt-2 text-xs" />
-        </div>
+      <SectionHeading icon={<CheckCircle2 className="h-4 w-4" />} iconClassName="text-success" title="Result" />
+      <div data-slot="session-result-body">
+        <LazyMarkdownContent content={summary} className="text-xs" />
       </div>
     </section>
   );
@@ -3325,22 +3341,18 @@ function PendingCapacityNotice({ maxConcurrentRuns }: { maxConcurrentRuns?: numb
   return (
     <div className="flex justify-center py-8">
       <Card className="w-full max-w-[34rem] border-amber-200/70 bg-amber-50/70 shadow-none dark:border-amber-900/60 dark:bg-amber-950/20">
-        <CardContent className="flex gap-3 p-4">
-          <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-amber-200 bg-background text-amber-700 dark:border-amber-900/70 dark:text-amber-300">
-            <Clock className="h-4 w-4" aria-hidden />
+        <CardContent className="space-y-1.5 p-4" data-testid="pending-capacity-body">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Clock className="h-4 w-4 shrink-0 text-amber-700 dark:text-amber-300" aria-hidden />
+            <p className="text-sm font-semibold text-foreground">Waiting for capacity</p>
+            <Badge variant="outline" className="border-amber-300/80 bg-background/70 text-amber-800 dark:border-amber-800 dark:text-amber-300">
+              Max concurrency reached
+            </Badge>
           </div>
-          <div className="min-w-0 space-y-1.5">
-            <div className="flex flex-wrap items-center gap-2">
-              <p className="text-sm font-semibold text-foreground">Waiting for capacity</p>
-              <Badge variant="outline" className="border-amber-300/80 bg-background/70 text-amber-800 dark:border-amber-800 dark:text-amber-300">
-                Max concurrency reached
-              </Badge>
-            </div>
-            <p className="text-sm text-muted-foreground">{limitText}</p>
-            <p className="text-sm text-muted-foreground">
-              This session will start automatically when another session finishes or the limit is raised.
-            </p>
-          </div>
+          <p className="text-sm text-muted-foreground">{limitText}</p>
+          <p className="text-sm text-muted-foreground">
+            This session will start automatically when another session finishes or the limit is raised.
+          </p>
         </CardContent>
       </Card>
     </div>
@@ -3509,21 +3521,19 @@ function OverviewRow({
     <section
       {...regionProps}
       data-slot={slot}
-      className="flex items-center gap-2.5 px-1 py-1.5"
+      className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-1.5 gap-y-1.5 px-1 py-1.5"
     >
       <div
         data-slot={`${slot}-icon`}
         aria-hidden="true"
-        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"
+        className="shrink-0 text-muted-foreground [&_svg]:size-4"
       >
         {icon}
       </div>
-      <div className="min-w-0 flex-1">
-        <p className="text-xs font-medium text-foreground">{title}</p>
-        <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
-      </div>
+      <p className="col-start-2 row-start-1 text-xs font-medium text-foreground">{title}</p>
+      <p className="col-span-3 row-start-2 text-xs leading-relaxed text-muted-foreground">{description}</p>
       {action != null ? (
-        <div data-slot={`${slot}-control`} className="shrink-0">
+        <div data-slot={`${slot}-control`} className="col-start-3 row-start-1 shrink-0">
           {action}
         </div>
       ) : null}
@@ -6489,30 +6499,30 @@ export function SessionDetailContent({ id }: { id: string }) {
       </section>
     ) : null
   ) : prStatus === "closed" ? (
-    <section className="flex items-start gap-2.5" data-slot="pr-closed-section">
-      <div aria-hidden="true" className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-        <XCircle className="h-4 w-4" />
-      </div>
-      <div className="min-w-0 space-y-1">
-        <div className="text-sm font-medium text-foreground">{closedPRLabel}</div>
-        <p className="text-xs text-foreground">{closedPRSummary}</p>
-        <p className="text-xs text-muted-foreground">
-          This pull request is no longer active. Create a follow-up revision if you want to ship a new attempt.
-        </p>
-      </div>
+    <section className="space-y-1.5" data-slot="pr-closed-section">
+      <SectionHeading
+        iconSlot="pr-closed-icon"
+        icon={<XCircle className="h-4 w-4" />}
+        iconClassName="text-muted-foreground"
+        title={closedPRLabel}
+      />
+      <p className="text-xs text-foreground">{closedPRSummary}</p>
+      <p className="text-xs text-muted-foreground">
+        This pull request is no longer active. Create a follow-up revision if you want to ship a new attempt.
+      </p>
     </section>
   ) : prStatus === "merged" ? (
-    <section className="flex items-start gap-2.5" data-slot="pr-merged-section">
-      <div aria-label="Merged PR status" className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-md", prMergedAccent.bg, prMergedAccent.text)}>
-        <CheckCircle2 className="h-4 w-4" />
-      </div>
-      <div className="min-w-0 space-y-1">
-        <div className="text-sm font-medium text-foreground">{mergedPRLabel}</div>
-        <p className="text-xs text-foreground">{mergedPRSummary}</p>
-        <p className="text-xs text-muted-foreground">
-          This change has landed. Open a follow-up session if you need to make another revision.
-        </p>
-      </div>
+    <section className="space-y-1.5" data-slot="pr-merged-section">
+      <SectionHeading
+        iconSlot="pr-merged-icon"
+        icon={<CheckCircle2 className="h-4 w-4" />}
+        iconClassName={prMergedAccent.text}
+        title={mergedPRLabel}
+      />
+      <p className="text-xs text-foreground">{mergedPRSummary}</p>
+      <p className="text-xs text-muted-foreground">
+        This change has landed. Open a follow-up session if you need to make another revision.
+      </p>
     </section>
   ) : null;
   const showOverviewReviewSection = selectedIsPrimary &&

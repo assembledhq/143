@@ -356,9 +356,18 @@ describe('SessionDetailPage PR creation', () => {
     renderWithProviders(<SessionDetailContent id={detail.id} />);
 
     const workflow = await screen.findByTestId('publication-workflow-card');
-    expect(within(workflow).getByText('No publication needed')).toBeInTheDocument();
-    expect(within(workflow).getByText('The completed workflow found no changes to publish.')).toBeInTheDocument();
+    const title = within(workflow).getByText('No publication needed');
+    const description = within(workflow).getByText('The completed workflow found no changes to publish.');
+    expect(title).toBeInTheDocument();
+    expect(description).toBeInTheDocument();
     expect(within(workflow).queryByText('Needs attention')).not.toBeInTheDocument();
+
+    // Flat block: the status icon leads the title row and the description is a
+    // sibling of that row, not a column indented past an icon tile.
+    const heading = title.parentElement;
+    expect(heading).toHaveClass('gap-1.5');
+    expect(heading?.querySelector('.lucide-circle-check')).toBeInTheDocument();
+    expect(description.parentElement).toBe(heading?.parentElement);
   });
 
   // A no-op publication is the one settled outcome with neither a pull request

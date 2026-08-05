@@ -462,8 +462,10 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(screen.getByText('Check the current diff and apply any fixes before publishing.')).toBeInTheDocument();
     expect(reviewButton).toHaveAttribute('title', 'A reusable sandbox snapshot is required before review');
     const reviewAction = reviewButton.closest<HTMLElement>('[data-slot="overview-action-control"]');
+    expect(reviewAction).toHaveClass('col-start-3', 'row-start-1');
     expect(reviewButton).not.toHaveClass('w-full');
     const reviewTitle = screen.getByText('Review before creating a PR');
+    const reviewDescription = screen.getByText('Check the current diff and apply any fixes before publishing.');
     const splitTitle = screen.getByText('Large change · 750 additions · 1 file');
     const resultSection = screen.getByTestId('session-result-section');
     const reviewSuggestion = reviewTitle.closest('[data-slot="overview-action"]');
@@ -472,10 +474,15 @@ describe('SessionDetailPage overview and review loop', () => {
     // of its own, so keep the structure asserted instead of the spacing utilities.
     expect(reviewSuggestion).toContainElement(reviewAction);
     expect(reviewSuggestion?.closest('[data-slot="card"]')).toBeNull();
+    expect(reviewDescription.parentElement).toBe(reviewSuggestion);
+    expect(reviewDescription).toHaveClass('col-span-3', 'row-start-2');
     // The row carries no accessible name of its own, so it stays a plain group
     // rather than adding a landmark that just repeats the visible title.
     expect(screen.queryByRole('region', { name: 'Review before creating a PR' })).not.toBeInTheDocument();
-    expect(reviewSuggestion?.querySelector('[data-slot="overview-action-icon"] .lucide-scan-search')).toBeInTheDocument();
+    const reviewIcon = reviewSuggestion?.querySelector('[data-slot="overview-action-icon"]');
+    expect(reviewIcon?.querySelector('.lucide-scan-search')).toBeInTheDocument();
+    expect(reviewIcon).toHaveAttribute('aria-hidden', 'true');
+    expect(reviewIcon?.className).not.toContain('bg-muted');
     expect(splitSuggestion?.querySelector('[data-slot="overview-suggestion-icon"] .lucide-git-branch')).toBeInTheDocument();
     expect(splitTitle.closest('[data-slot="card"]')).toBeNull();
     expect(reviewTitle.compareDocumentPosition(splitTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -506,6 +513,11 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(prDetailsSection.closest('[data-slot="card"]')).toBeNull();
     expect(resultSection.closest('[data-slot="card"]')).toBeNull();
     expect(resultSection).toHaveClass('border-t', 'pt-4');
+    expect(resultSection.querySelector('[data-slot="section-heading"]')?.parentElement).toBe(resultSection);
+    const resultBody = resultSection.querySelector('[data-slot="session-result-body"]');
+    expect(resultBody?.parentElement).toBe(resultSection);
+    expect(resultBody?.className).not.toContain('pl-');
+    expect(resultBody?.className).not.toContain('ml-');
     expect(prDetailsSection.compareDocumentPosition(splitSuggestion) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(splitSuggestion.compareDocumentPosition(resultSection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
@@ -588,8 +600,12 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(statusRow).toHaveAttribute('aria-atomic', 'true');
     expect(statusRow?.closest('[data-slot="card"]')).toBeNull();
     expect(statusRow?.querySelector('[data-slot="overview-review-status-control"]')).toBeNull();
-    expect(statusRow?.querySelector('[data-slot="overview-review-status-icon"] .lucide-loader-circle')).toBeInTheDocument();
-    expect(within(statusRow as HTMLElement).getByText('The review loop is checking the changes and applying fixes.')).toBeInTheDocument();
+    const statusIcon = statusRow?.querySelector('[data-slot="overview-review-status-icon"]');
+    expect(statusIcon?.querySelector('.lucide-loader-circle')).toBeInTheDocument();
+    expect(statusIcon?.className).not.toContain('bg-muted');
+    const runningDescription = within(statusRow as HTMLElement).getByText('The review loop is checking the changes and applying fixes.');
+    expect(runningDescription.parentElement).toBe(statusRow);
+    expect(runningDescription).toHaveClass('col-span-3', 'row-start-2');
     expect(reviewStatus.compareDocumentPosition(screen.getByTestId('session-result-section')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
   });

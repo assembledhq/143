@@ -101,6 +101,7 @@ func skillsExamples(commands []CLICommand) []string {
 		{"slack", "send", "143-tools slack send --channel-id C123 --text \"Automation completed successfully.\""},
 		{NamespaceAutomation, ActionCreate, "143-tools automation create --payload '{\"name\":\"Weekly cleanup\",\"goal\":\"Clean stale state\",\"repository_id\":\"<repo-uuid>\",\"schedule_type\":\"cron\",\"cron_expression\":\"0 9 * * 1\"}'"},
 		{NamespacePR, ActionCreate, "143-tools pr create --draft false"},
+		{NamespacePR, ActionUpdate, "143-tools pr update --body-file /tmp/pr-description.md"},
 		{NamespaceTabs, ActionList, "143-tools session-tabs list"},
 		{NamespaceTabs, ActionSend, "143-tools session-tabs send --tab-id <uuid> --message \"Run focused tests and summarize failures.\""},
 		{NamespaceCodeReviewHistory, ActionList, "143-tools code-review-history list --decision blocked --limit 20"},
