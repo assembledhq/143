@@ -32,6 +32,7 @@ type mockProvider struct {
 	startHandle   *PreviewHandle
 	startErr      error
 	startConfig   *models.PreviewConfig
+	startOptions  StartPreviewOptions
 	startObserver ServiceObserver
 	stopErr       error
 	dialErr       error
@@ -40,8 +41,9 @@ type mockProvider struct {
 	statusErr     error
 }
 
-func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig, _ StartPreviewOptions, observer ServiceObserver) (*PreviewHandle, error) {
+func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig, opts StartPreviewOptions, observer ServiceObserver) (*PreviewHandle, error) {
 	m.startConfig = cfg
+	m.startOptions = opts
 	m.startObserver = observer
 	if m.startErr != nil {
 		return nil, m.startErr
@@ -1505,6 +1507,7 @@ func TestRecyclePreview_PreservesPartiallyReadyStatus(t *testing.T) {
 
 	err = mgr.RecyclePreview(context.Background(), orgID, previewID)
 	require.NoError(t, err, "RecyclePreview should succeed for a partially ready restart")
+	require.True(t, mgr.provider.(*mockProvider).startOptions.RetainedSandbox, "recycle should tell the provider that WorkDir and HomeDir were retained")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -3909,6 +3912,10 @@ func TestManagerServiceObserver_OnDependencyCacheRestore_PersistsNonFailureStatu
 			status:   "skipped_marker_missing",
 			cacheKey: strings.Repeat("b", 64),
 		},
+		{
+			name:   "skipped retained install valid",
+			status: "skipped_install_valid",
+		},
 	}
 
 	for _, tt := range tests {
@@ -3935,6 +3942,29 @@ func TestManagerServiceObserver_OnDependencyCacheRestore_PersistsNonFailureStatu
 			require.NoError(t, mock.ExpectationsWereMet(), "cache restore observer should persist non-failure restore statuses")
 		})
 	}
+}
+
+func TestManagerServiceObserver_OnPackageManagerCacheRestore_PersistsValidInstallSkip(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	orgID := uuid.New()
+	previewID := uuid.New()
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
+	logID := uuid.New()
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+		}).AddRow(logID, previewID, orgID, "info", "install", "msg", json.RawMessage(`{}`), time.Now()))
+
+	obs.OnPackageManagerCacheRestore("skipped_install_valid", "", 0, nil)
+	obs.Close()
+	require.NoError(t, mock.ExpectationsWereMet(), "package-manager observer should persist retained-install skips")
 }
 
 func TestManagerServiceObserver_OnCacheRestore_EmitsPreviewHealthCacheEvent(t *testing.T) {
@@ -4342,6 +4372,188 @@ type stopWaitRecorder struct {
 	PreviewCapableProvider
 	gotWait time.Duration
 	called  bool
+}
+
+func TestResumeStoppedWarmPreviewRejectsStaleWorkspaceRevision(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	repositoryID := uuid.New()
+	now := time.Now()
+	previewRow := newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusStopped, "", now)
+	previewRevision := int64(4)
+	setPreviewInstanceRowColumn(previewRow, "source_workspace_revision", &previewRevision)
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols).AddRow(previewRow...))
+	mock.ExpectQuery("SELECT COALESCE\\(stopped_reason").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"stopped_reason"}).AddRow(string(models.PreviewStoppedReasonSessionPrewarmPolicy)))
+	sessionRow := newSessionRow(sessionID, orgID, nil, now)
+	for i, column := range sessionTestCols {
+		switch column {
+		case "repository_id":
+			sessionRow[i] = &repositoryID
+		case "workspace_revision":
+			sessionRow[i] = int64(5)
+		case "workspace_revision_updated_at":
+			sessionRow[i] = now
+		}
+	}
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestCols).AddRow(sessionRow...))
+
+	provider := &mockProvider{startHandle: &PreviewHandle{Handle: "must-not-start"}}
+	mgr := NewManager(ManagerConfig{
+		Store:        db.NewPreviewStore(mock),
+		SessionStore: db.NewSessionStore(mock),
+		Provider:     provider,
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "worker-1",
+	})
+	err = mgr.ResumeStoppedWarmPreview(context.Background(), orgID, previewID)
+	require.Error(t, err, "warm resume should reject stale prebuilt output")
+	require.Contains(t, err.Error(), "workspace revision is stale", "warm resume should explain the exact-revision guard")
+	// A revision bump between the caller's check and this one is an ordinary
+	// race with agent activity, not a failure: the preview was never claimed,
+	// so callers must be able to fall back to a normal start.
+	require.ErrorIs(t, err, ErrWarmResumeNotEligible, "a stale revision should be reported as ineligibility, not failure")
+	require.Nil(t, provider.startConfig, "provider must not start a stale warm preview")
+	require.NoError(t, mock.ExpectationsWereMet(), "stale revision guard should use the expected org-scoped queries")
+}
+
+// TestResumeStoppedWarmPreviewClaimRejectsConcurrentRevisionChange covers the
+// race between the manager's eligibility reads and its state transition. The
+// store's claim rechecks the expected session revision atomically; losing that
+// race is ordinary ineligibility, so the caller can fall through to a normal
+// start instead of serving stale prebuilt output.
+func TestResumeStoppedWarmPreviewClaimRejectsConcurrentRevisionChange(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	repositoryID := uuid.New()
+	now := time.Now()
+	revision := int64(7)
+	previewRow := newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusStopped, "", now)
+	setPreviewInstanceRowColumn(previewRow, "source_workspace_revision", &revision)
+	setPreviewInstanceRowColumn(previewRow, "worker_node_id", "worker-1")
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols).AddRow(previewRow...))
+	mock.ExpectQuery("SELECT COALESCE\\(stopped_reason").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"stopped_reason"}).AddRow(string(models.PreviewStoppedReasonSessionPrewarmPolicy)))
+	sessionRow := newSessionRow(sessionID, orgID, nil, now)
+	for i, column := range sessionTestCols {
+		switch column {
+		case "repository_id":
+			sessionRow[i] = &repositoryID
+		case "workspace_revision":
+			sessionRow[i] = revision
+		case "workspace_revision_updated_at":
+			sessionRow[i] = now
+		}
+	}
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(sessionTestCols).AddRow(sessionRow...))
+	mock.ExpectQuery("SELECT EXISTS").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+	// Simulate the session revision advancing after the reads above. The
+	// revision-aware claim sees that change and affects no preview row.
+	mock.ExpectExec("UPDATE preview_instances(?s:.*)source_workspace_revision = @workspace_revision(?s:.*)EXISTS").
+		WithArgs(previewAnyArgs(7)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	provider := &mockProvider{startHandle: &PreviewHandle{Handle: "must-not-start"}}
+	mgr := NewManager(ManagerConfig{
+		Store:        db.NewPreviewStore(mock),
+		SessionStore: db.NewSessionStore(mock),
+		Provider:     provider,
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "worker-1",
+	})
+	err = mgr.ResumeStoppedWarmPreview(context.Background(), orgID, previewID)
+	require.Error(t, err, "warm resume should decline when the atomic claim loses a revision race")
+	require.ErrorIs(t, err, ErrWarmResumeNotEligible, "a concurrent revision change should fall back to a normal start")
+	require.Nil(t, provider.startConfig, "provider must not start stale prebuilt output after a lost claim")
+	require.NoError(t, mock.ExpectationsWereMet(), "warm resume should include the expected revision in its atomic claim")
+}
+
+// TestResumeStoppedWarmPreviewRejectsForeignWorkerSandbox covers the guard that
+// makes SkipServiceBuild safe. The startup-cache row proves some active worker
+// holds the retained sandbox and its build outputs; only this check proves it is
+// this process. Resuming elsewhere would start services against artifacts that
+// were never built there.
+func TestResumeStoppedWarmPreviewRejectsForeignWorkerSandbox(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	repositoryID := uuid.New()
+	now := time.Now()
+	previewRow := newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusStopped, "", now)
+	previewRevision := int64(7)
+	setPreviewInstanceRowColumn(previewRow, "source_workspace_revision", &previewRevision)
+	setPreviewInstanceRowColumn(previewRow, "worker_node_id", "worker-2")
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols).AddRow(previewRow...))
+	mock.ExpectQuery("SELECT COALESCE\\(stopped_reason").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"stopped_reason"}).AddRow(string(models.PreviewStoppedReasonSessionPrewarmPolicy)))
+	sessionRow := newSessionRow(sessionID, orgID, nil, now)
+	for i, column := range sessionTestCols {
+		switch column {
+		case "repository_id":
+			sessionRow[i] = &repositoryID
+		case "workspace_revision":
+			sessionRow[i] = previewRevision
+		case "workspace_revision_updated_at":
+			sessionRow[i] = now
+		}
+	}
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestCols).AddRow(sessionRow...))
+
+	provider := &mockProvider{startHandle: &PreviewHandle{Handle: "must-not-start"}}
+	mgr := NewManager(ManagerConfig{
+		Store:        db.NewPreviewStore(mock),
+		SessionStore: db.NewSessionStore(mock),
+		Provider:     provider,
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "worker-1",
+	})
+	err = mgr.ResumeStoppedWarmPreview(context.Background(), orgID, previewID)
+	require.Error(t, err, "warm resume should refuse a sandbox retained on another worker")
+	require.ErrorIs(t, err, ErrWarmResumeNotEligible, "a foreign retained sandbox should fall back to a normal start")
+	require.Nil(t, provider.startConfig, "provider must not start a preview whose build outputs live elsewhere")
+	// The startup-cache lookup is never reached: ExpectationsWereMet fails if a
+	// query ran that was not expected above.
+	require.NoError(t, mock.ExpectationsWereMet(), "the worker guard should short-circuit before the startup cache lookup")
 }
 
 func (s *stopWaitRecorder) StopPreviewWithBackgroundWait(_ context.Context, _ string, backgroundWait time.Duration) error {

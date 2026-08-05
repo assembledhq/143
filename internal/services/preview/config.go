@@ -152,6 +152,7 @@ type rawPreviewConfig struct {
 	Credentials    models.CredentialConfig                `json:"credentials"`
 	Network        models.NetworkConfig                   `json:"network"`
 	Progressive    bool                                   `json:"progressive,omitempty"`
+	ParallelBuilds bool                                   `json:"parallel_builds,omitempty"`
 	Browser        *rawPreviewBrowserConfig               `json:"browser,omitempty"`
 	Verification   *rawPreviewVerificationConfig          `json:"verification,omitempty"`
 
@@ -251,6 +252,7 @@ func ParseNamedConfig(data []byte, name string) (*models.PreviewConfig, error) {
 		Credentials:    raw.Credentials,
 		Network:        raw.Network,
 		Progressive:    raw.Progressive,
+		ParallelBuilds: raw.ParallelBuilds,
 	}
 	secrets, err := parsePreviewSecrets(raw.Secrets)
 	if err != nil {
@@ -1159,13 +1161,16 @@ func ResolvePreviewBuildCachePaths(install *models.PreviewInstallConfig) ([]stri
 // preview.install.lockfiles, the same signal the package-manager cache uses to
 // enable Go caching. Build caching must also not be explicitly disabled.
 //
-// To avoid double-caching the module cache, go/pkg/mod is dropped from the home
-// set when the install *command* already runs go (e.g. `go mod download`): in
-// that case the package-manager cache captures the modules post-install, so the
-// home set only needs the compiled-object cache (.cache/go-build) that the build
-// phase uniquely warms. When install does not run go (the common case: a JS
-// install that happens to sit beside a go.mod), the build phase is the only
-// thing that downloads modules, so the home set owns go/pkg/mod too.
+// To avoid double-caching the module cache, go/pkg/mod is left to the
+// package-manager cache whenever that lifecycle is active. Ownership is decided
+// by restore *timing*, not by which phase happens to populate the directory: the
+// package-manager cache restores before preview.install, the home build cache
+// only afterwards (immediately before service builds). An install that fetches
+// modules — directly via `go mod download` or indirectly via a wrapper script
+// that this package cannot see inside — is therefore only warm if the module
+// cache is restored by the earlier lifecycle. The home set falls back to owning
+// go/pkg/mod when the package-manager cache is disabled, so the directory is
+// never orphaned.
 func ResolvePreviewBuildCacheHomePaths(install *models.PreviewInstallConfig) ([]string, bool) {
 	if install == nil || len(install.Lockfiles) == 0 {
 		return nil, false
@@ -1190,19 +1195,31 @@ func ResolvePreviewBuildCacheHomePaths(install *models.PreviewInstallConfig) ([]
 	// cold-compile cost — and is only populated by an actual build, so the home
 	// build cache always owns it.
 	paths := []string{".cache/go-build"}
-	installRunsGo := false
-	for _, part := range install.Command {
-		if manager, ok := inferPreviewPackageManagerFromCommandPart(part); ok && manager == "go" {
-			installRunsGo = true
-			break
-		}
-	}
-	if !installRunsGo {
-		// Nothing else populates the module cache, so capture it here too.
+	if !previewPackageManagerCacheActive(install) {
+		// No earlier lifecycle will restore the module cache, so capture it
+		// here rather than leaving it uncached entirely.
 		paths = append(paths, "go/pkg/mod")
 	}
 	sort.Strings(paths)
 	return paths, true
+}
+
+// previewPackageManagerCacheActive reports whether the package-manager cache
+// lifecycle runs for this install config, before any build-cache ownership
+// subtraction. It is the ownership input for ResolvePreviewBuildCacheHomePaths,
+// so it deliberately does not call back into
+// ResolvePreviewInstallPackageManagerCachePaths (which would recurse).
+func previewPackageManagerCacheActive(install *models.PreviewInstallConfig) bool {
+	if install == nil || len(install.Lockfiles) == 0 {
+		return false
+	}
+	if install.Cache != nil && install.Cache.Enabled != nil && !*install.Cache.Enabled {
+		return false
+	}
+	if install.Cache != nil && install.Cache.PackageManager != nil && install.Cache.PackageManager.Enabled != nil && !*install.Cache.PackageManager.Enabled {
+		return false
+	}
+	return true
 }
 
 // CacheRestorablePreviewInstallVerifyPaths returns the verify paths that can
@@ -1252,13 +1269,7 @@ func inferPreviewBuildCachePaths(lockfile string) []string {
 }
 
 func ResolvePreviewInstallPackageManagerCachePaths(install *models.PreviewInstallConfig) ([]string, []string, bool) {
-	if install == nil || len(install.Lockfiles) == 0 {
-		return nil, nil, false
-	}
-	if install.Cache != nil && install.Cache.Enabled != nil && !*install.Cache.Enabled {
-		return nil, nil, false
-	}
-	if install.Cache != nil && install.Cache.PackageManager != nil && install.Cache.PackageManager.Enabled != nil && !*install.Cache.PackageManager.Enabled {
+	if !previewPackageManagerCacheActive(install) {
 		return nil, nil, false
 	}
 	managersSeen := make(map[string]struct{})
@@ -1312,6 +1323,27 @@ func ResolvePreviewInstallPackageManagerCachePaths(install *models.PreviewInstal
 			pathsSeen[clean] = struct{}{}
 			paths = append(paths, clean)
 		}
+	}
+	// Home-rooted build caches have a dedicated lifecycle: they are restored
+	// immediately before service builds and saved after those builds complete.
+	// Do not also put the same paths in the package-manager archive. Apart from
+	// doubling storage, a duplicate restore serializes gigabytes of extraction
+	// on the preview startup path. ResolvePreviewBuildCacheHomePaths only claims
+	// .cache/go-build while this lifecycle is active, so go/pkg/mod survives the
+	// subtraction and stays restorable before preview.install runs.
+	if buildPaths, buildEnabled := ResolvePreviewBuildCacheHomePaths(install); buildEnabled {
+		ownedByBuild := make(map[string]struct{}, len(buildPaths))
+		for _, p := range buildPaths {
+			ownedByBuild[p] = struct{}{}
+		}
+		filtered := paths[:0]
+		for _, p := range paths {
+			if _, duplicate := ownedByBuild[p]; duplicate {
+				continue
+			}
+			filtered = append(filtered, p)
+		}
+		paths = filtered
 	}
 	sort.Strings(managers)
 	sort.Strings(paths)
@@ -1577,6 +1609,13 @@ func ResolveConfig(baseCfg, diffCfg *models.PreviewConfig) (*models.PreviewConfi
 		Version:     baseCfg.Version,
 		Name:        baseCfg.Name,
 		Progressive: baseCfg.Progressive,
+		// Concurrent builds add their peak memory inside one cgroup, so whether
+		// a repo's builds fit is a property of the repo, not of a branch. Keep
+		// it a base-branch decision. Note this is an operational choice, not a
+		// security boundary: a non-connected diff already controls Resources and
+		// every service command, so it can create the same pressure by other
+		// means.
+		ParallelBuilds: baseCfg.ParallelBuilds,
 
 		// Security-sensitive: always from base.
 		Primary:     baseCfg.Primary,
@@ -1615,14 +1654,15 @@ func ResolveConfig(baseCfg, diffCfg *models.PreviewConfig) (*models.PreviewConfi
 			resolved.Services[name] = baseSvc
 		} else {
 			// Non-connected: runtime fields from diff, existence from base.
+			//
+			// Take the diff's service wholesale and subtract, rather than
+			// listing the fields to keep: an allowlist silently drops every
+			// field added to ServiceConfig later, which is exactly how `build`
+			// and `hmr` went missing from non-connected previews. There is
+			// nothing to subtract today — the service name itself is the only
+			// base-pinned part, and it is the map key.
 			if diffSvc, ok := diffCfg.Services[name]; ok {
-				resolved.Services[name] = models.ServiceConfig{
-					Command: diffSvc.Command,
-					Cwd:     diffSvc.Cwd,
-					Port:    diffSvc.Port,
-					Env:     diffSvc.Env,
-					Ready:   diffSvc.Ready,
-				}
+				resolved.Services[name] = diffSvc
 			} else {
 				// Service exists in base but not in diff — use base.
 				resolved.Services[name] = baseSvc
