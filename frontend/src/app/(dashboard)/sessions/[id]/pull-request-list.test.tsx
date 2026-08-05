@@ -118,7 +118,7 @@ describe('ChangesetSplitPrompt', () => {
     expect(onRequestSplit).toHaveBeenCalledOnce();
   });
 
-  it('renders as a quiet suggestion row instead of another card', () => {
+  it('renders as a quiet full-width suggestion instead of another card', () => {
     render(
       <ChangesetSplitPrompt
         additions={CHANGESET_SPLIT_MIN_ADDITIONS}
@@ -128,7 +128,8 @@ describe('ChangesetSplitPrompt', () => {
 
     const suggestion = screen.getByRole('region', { name: 'Pull request size suggestion' });
     expect(suggestion).toHaveAttribute('data-slot', 'overview-suggestion');
-    expect(suggestion).toHaveClass('flex', 'items-center');
+    expect(suggestion).toHaveClass('space-y-1.5');
+    expect(screen.getByText('Split this diff into smaller, reviewable pull requests.').parentElement).toBe(suggestion);
     expect(suggestion.closest('[data-slot="card"]')).toBeNull();
   });
 

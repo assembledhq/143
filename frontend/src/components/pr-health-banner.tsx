@@ -154,23 +154,18 @@ export function PRHealthBanner({
       className="space-y-2.5"
       data-slot="pr-health-section"
     >
-      <div className="flex items-start gap-2.5">
-        <div className="flex min-w-0 flex-1 items-start gap-2.5">
-          <div className={cn(
-            "flex h-7 w-7 shrink-0 items-center justify-center rounded-md",
-            prHealthStatusIconClassName(statusPresentation.variant),
-          )}>
-            {statusPresentation.variant === "success" ? <CheckCircle2 className="h-4 w-4" /> : isRepositoryDisconnected ? <AlertTriangle className="h-4 w-4" /> : <GitPullRequest className="h-4 w-4" />}
-          </div>
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <div className="text-sm font-medium text-foreground">PR #{health.pull_request_number}</div>
-              <Badge variant={statusPresentation.variant} className="h-5 px-1.5 py-0 text-xs">
-                {statusPresentation.label}
-              </Badge>
+      <div className="flex items-start justify-between gap-2.5">
+        <div className="min-w-0 flex-1 space-y-1">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <div aria-hidden="true" className={cn("shrink-0", prHealthStatusIconClassName(statusPresentation.variant))}>
+              {statusPresentation.variant === "success" ? <CheckCircle2 className="h-4 w-4" /> : isRepositoryDisconnected ? <AlertTriangle className="h-4 w-4" /> : <GitPullRequest className="h-4 w-4" />}
             </div>
-            <div className="truncate text-xs text-muted-foreground">{health.repository}</div>
+            <div className="text-sm font-medium text-foreground">PR #{health.pull_request_number}</div>
+            <Badge variant={statusPresentation.variant} className="h-5 px-1.5 py-0 text-xs">
+              {statusPresentation.label}
+            </Badge>
           </div>
+          <div className="truncate text-xs text-muted-foreground">{health.repository}</div>
         </div>
         {isRepositoryDisconnected ? (
           <span className="shrink-0 whitespace-nowrap text-xs font-medium text-warning">Sync blocked</span>
@@ -182,9 +177,7 @@ export function PRHealthBanner({
         )}
       </div>
 
-      {/* Indent matches the header's icon tile (h-7) plus its gap-2.5 so the
-          body copy lines up with "PR #<n>" instead of the icon. */}
-      <div className="space-y-2 pl-[2.375rem]">
+      <div className="space-y-2" data-slot="pr-health-body">
         <p className="text-xs text-foreground">{compactSummary}</p>
 
         {hasStatusBadges && (
@@ -582,15 +575,15 @@ function derivePRHealthStatusPresentation({
 function prHealthStatusIconClassName(variant: PRHealthStatusPresentation["variant"]): string {
   switch (variant) {
     case "success":
-      return "bg-success/10 text-success";
+      return "text-success";
     case "destructive":
-      return "bg-destructive/10 text-destructive";
+      return "text-destructive";
     case "warning":
-      return "bg-warning/10 text-warning";
+      return "text-warning";
     case "info":
-      return "bg-info/10 text-info";
+      return "text-info";
     case "secondary":
-      return "bg-muted text-muted-foreground";
+      return "text-muted-foreground";
   }
 }
 

@@ -58,6 +58,9 @@ describe("PRHealthBanner", () => {
     expect(screen.getByText("Ready")).toHaveAttribute("data-variant", "success");
     expect(screen.getByText("acme/widgets")).toHaveClass("text-xs");
     expect(screen.getByText("Healthy.")).toHaveClass("text-xs");
+    const body = prHealthSection.querySelector('[data-slot="pr-health-body"]');
+    expect(body?.parentElement).toBe(prHealthSection);
+    expect(body?.className).not.toContain("pl-");
   });
 
   it.each([

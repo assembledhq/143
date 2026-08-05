@@ -462,8 +462,8 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(screen.getByText('Ask a review agent to check the current diff and apply fixes.')).toBeInTheDocument();
     expect(reviewButton).toHaveAttribute('title', 'A reusable sandbox snapshot is required before review');
     const reviewAction = reviewButton.closest('[data-slot="agent-action-card-action"]');
-    expect(reviewAction).toHaveClass('ml-11', 'w-fit', 'self-start');
-    expect(reviewAction).toHaveClass('@min-[24rem]/agent-action:ml-0');
+    expect(reviewAction).toHaveClass('w-fit', 'self-start');
+    expect(reviewAction).not.toHaveClass('ml-11');
     expect(reviewAction).not.toHaveClass('w-full');
     expect(reviewButton).not.toHaveClass('w-full');
     const reviewTitle = screen.getByText('Review before creating a PR?');
@@ -478,6 +478,10 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(reviewCard?.className).toContain('@container/agent-action');
     expect(reviewCardContent?.className).toContain('@min-[24rem]/agent-action:flex-row');
     expect(reviewCardContent?.className).not.toContain('@container/agent-action');
+    const reviewIcon = reviewCard?.querySelector('[data-slot="agent-action-card-icon"]');
+    expect(reviewIcon?.className).not.toContain('h-8');
+    expect(reviewIcon?.className).not.toContain('w-8');
+    expect(reviewIcon?.className).not.toContain('bg-muted');
     expect(splitSuggestion?.querySelector('[data-slot="overview-suggestion-icon"] .lucide-git-branch')).toBeInTheDocument();
     expect(splitTitle.closest('[data-slot="card"]')).toBeNull();
     expect(reviewTitle.compareDocumentPosition(splitTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -506,6 +510,11 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(prDetailsSection.closest('[data-slot="card"]')).toBeNull();
     expect(resultSection.closest('[data-slot="card"]')).toBeNull();
     expect(resultSection).toHaveClass('border-t', 'pt-4');
+    expect(resultSection.querySelector('[data-slot="session-result-heading"]')?.parentElement).toBe(resultSection);
+    const resultBody = resultSection.querySelector('[data-slot="session-result-body"]');
+    expect(resultBody?.parentElement).toBe(resultSection);
+    expect(resultBody?.className).not.toContain('pl-');
+    expect(resultBody?.className).not.toContain('ml-');
     expect(prDetailsSection.compareDocumentPosition(resultSection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(resultSection.compareDocumentPosition(splitSuggestion) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });

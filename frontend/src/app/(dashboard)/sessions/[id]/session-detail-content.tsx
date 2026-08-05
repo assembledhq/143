@@ -395,18 +395,18 @@ function PublicationWorkflowCard({
   return (
     <Card className={cn("border-border/60", needsAttention && "border-warning/50 bg-warning/5")} data-testid="publication-workflow-card">
       <CardContent className="space-y-3 p-4">
-        <div className="flex items-start gap-3">
-          <div className={cn(
-            "flex h-8 w-8 shrink-0 items-center justify-center rounded-full",
-            settled ? "bg-success/10 text-success" : needsAttention ? "bg-warning/10 text-warning" : "bg-info/10 text-info",
-          )}>
-            {settled ? <CheckCircle2 className="h-4 w-4" /> : needsAttention ? <AlertTriangle className="h-4 w-4" /> : <Loader2 className="h-4 w-4 animate-spin" />}
-          </div>
-          <div className="min-w-0 flex-1 space-y-1">
+        <div className="space-y-1">
+          <div className="flex items-center gap-1.5">
+            <div className={cn(
+              "shrink-0",
+              settled ? "text-success" : needsAttention ? "text-warning" : "text-info",
+            )} aria-hidden="true">
+              {settled ? <CheckCircle2 className="h-4 w-4" /> : needsAttention ? <AlertTriangle className="h-4 w-4" /> : <Loader2 className="h-4 w-4 animate-spin" />}
+            </div>
             <p className="text-sm font-medium text-foreground">{title}</p>
-            <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
-            {published && prNumber ? <p className="text-xs text-muted-foreground">Pull request #{prNumber}</p> : null}
           </div>
+          <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
+          {published && prNumber ? <p className="text-xs text-muted-foreground">Pull request #{prNumber}</p> : null}
         </div>
         <div className="flex flex-wrap gap-2">
           {published && prURL ? (
@@ -731,17 +731,12 @@ function SessionResultSection({ summary, divided }: { summary?: string; divided:
       className={cn(divided && "border-t border-border/60 pt-4")}
       data-testid="session-result-section"
     >
-      <div className="flex items-start gap-2.5">
-        <div
-          aria-hidden="true"
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-success/10 text-success"
-        >
-          <CheckCircle2 className="h-4 w-4" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium text-foreground">Result</div>
-          <LazyMarkdownContent content={summary} className="mt-2 text-xs" />
-        </div>
+      <div className="flex items-center gap-1.5" data-slot="session-result-heading">
+        <CheckCircle2 aria-hidden="true" className="h-4 w-4 shrink-0 text-success" />
+        <div className="text-sm font-medium text-foreground">Result</div>
+      </div>
+      <div className="mt-2 min-w-0" data-slot="session-result-body">
+        <LazyMarkdownContent content={summary} className="text-xs" />
       </div>
     </section>
   );
@@ -3325,22 +3320,18 @@ function PendingCapacityNotice({ maxConcurrentRuns }: { maxConcurrentRuns?: numb
   return (
     <div className="flex justify-center py-8">
       <Card className="w-full max-w-[34rem] border-amber-200/70 bg-amber-50/70 shadow-none dark:border-amber-900/60 dark:bg-amber-950/20">
-        <CardContent className="flex gap-3 p-4">
-          <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-amber-200 bg-background text-amber-700 dark:border-amber-900/70 dark:text-amber-300">
-            <Clock className="h-4 w-4" aria-hidden />
+        <CardContent className="min-w-0 space-y-1.5 p-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <Clock className="h-4 w-4 shrink-0 text-amber-700 dark:text-amber-300" aria-hidden />
+            <p className="text-sm font-semibold text-foreground">Waiting for capacity</p>
+            <Badge variant="outline" className="border-amber-300/80 bg-background/70 text-amber-800 dark:border-amber-800 dark:text-amber-300">
+              Max concurrency reached
+            </Badge>
           </div>
-          <div className="min-w-0 space-y-1.5">
-            <div className="flex flex-wrap items-center gap-2">
-              <p className="text-sm font-semibold text-foreground">Waiting for capacity</p>
-              <Badge variant="outline" className="border-amber-300/80 bg-background/70 text-amber-800 dark:border-amber-800 dark:text-amber-300">
-                Max concurrency reached
-              </Badge>
-            </div>
-            <p className="text-sm text-muted-foreground">{limitText}</p>
-            <p className="text-sm text-muted-foreground">
-              This session will start automatically when another session finishes or the limit is raised.
-            </p>
-          </div>
+          <p className="text-sm text-muted-foreground">{limitText}</p>
+          <p className="text-sm text-muted-foreground">
+            This session will start automatically when another session finishes or the limit is raised.
+          </p>
         </CardContent>
       </Card>
     </div>
@@ -3507,32 +3498,28 @@ export function ChangesetSplitPrompt({
       role="region"
       aria-label="Pull request size suggestion"
       data-slot="overview-suggestion"
-      className="flex items-center gap-2.5 px-1 py-1.5"
+      className="space-y-1.5 px-1 py-1.5"
     >
-      <div
-        data-slot="overview-suggestion-icon"
-        aria-hidden="true"
-        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"
-      >
-        <GitBranch className="h-4 w-4" />
-      </div>
-      <div className="min-w-0 flex-1">
-        <p className="text-xs font-medium text-foreground">
+      <div className="flex items-center gap-1.5">
+        <div data-slot="overview-suggestion-icon" aria-hidden="true" className="shrink-0 text-muted-foreground">
+          <GitBranch className="h-4 w-4" />
+        </div>
+        <p className="min-w-0 flex-1 text-xs font-medium text-foreground">
           Large change · {additionCount.toLocaleString()} additions{fileLabel}
         </p>
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          Split this diff into smaller, reviewable pull requests.
-        </p>
+        <Button
+          size="xs"
+          variant="ghost"
+          className="shrink-0"
+          disabled={requestSplitPending || !onRequestSplit}
+          onClick={onRequestSplit}
+        >
+          Split into PRs
+        </Button>
       </div>
-      <Button
-        size="xs"
-        variant="ghost"
-        className="shrink-0"
-        disabled={requestSplitPending || !onRequestSplit}
-        onClick={onRequestSplit}
-      >
-        Split into PRs
-      </Button>
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        Split this diff into smaller, reviewable pull requests.
+      </p>
     </div>
   );
 }
@@ -3553,22 +3540,22 @@ function AgentActionCard({
     // element is never its own query container.
     <Card className="@container/agent-action border-border/60">
       <CardContent className="flex flex-col gap-3 p-4 @min-[24rem]/agent-action:flex-row @min-[24rem]/agent-action:items-center @min-[24rem]/agent-action:justify-between">
-        <div className="flex min-w-0 items-start gap-3">
-          <div
-            data-slot="agent-action-card-icon"
-            aria-hidden="true"
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"
-          >
-            {icon}
-          </div>
-          <div className="min-w-0">
+        <div className="min-w-0 flex-1 space-y-1.5">
+          <div className="flex items-center gap-1.5">
+            <div
+              data-slot="agent-action-card-icon"
+              aria-hidden="true"
+              className="shrink-0 text-muted-foreground"
+            >
+              {icon}
+            </div>
             <p className="text-sm font-medium text-foreground">{title}</p>
-            <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
           </div>
+          <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
         </div>
         <div
           data-slot="agent-action-card-action"
-          className="ml-11 w-fit shrink-0 self-start @min-[24rem]/agent-action:ml-0 @min-[24rem]/agent-action:self-auto"
+          className="w-fit shrink-0 self-start @min-[24rem]/agent-action:self-auto"
         >
           {action}
         </div>
@@ -6496,30 +6483,26 @@ export function SessionDetailContent({ id }: { id: string }) {
       </section>
     ) : null
   ) : prStatus === "closed" ? (
-    <section className="flex items-start gap-2.5" data-slot="pr-closed-section">
-      <div aria-hidden="true" className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-        <XCircle className="h-4 w-4" />
-      </div>
-      <div className="min-w-0 space-y-1">
+    <section className="space-y-1" data-slot="pr-closed-section">
+      <div className="flex items-center gap-1.5">
+        <XCircle aria-hidden="true" className="h-4 w-4 shrink-0 text-muted-foreground" />
         <div className="text-sm font-medium text-foreground">{closedPRLabel}</div>
-        <p className="text-xs text-foreground">{closedPRSummary}</p>
-        <p className="text-xs text-muted-foreground">
-          This pull request is no longer active. Create a follow-up revision if you want to ship a new attempt.
-        </p>
       </div>
+      <p className="text-xs text-foreground">{closedPRSummary}</p>
+      <p className="text-xs text-muted-foreground">
+        This pull request is no longer active. Create a follow-up revision if you want to ship a new attempt.
+      </p>
     </section>
   ) : prStatus === "merged" ? (
-    <section className="flex items-start gap-2.5" data-slot="pr-merged-section">
-      <div aria-label="Merged PR status" className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-md", prMergedAccent.bg, prMergedAccent.text)}>
-        <CheckCircle2 className="h-4 w-4" />
-      </div>
-      <div className="min-w-0 space-y-1">
+    <section className="space-y-1" data-slot="pr-merged-section">
+      <div className="flex items-center gap-1.5">
+        <CheckCircle2 aria-label="Merged PR status" className={cn("h-4 w-4 shrink-0", prMergedAccent.text)} />
         <div className="text-sm font-medium text-foreground">{mergedPRLabel}</div>
-        <p className="text-xs text-foreground">{mergedPRSummary}</p>
-        <p className="text-xs text-muted-foreground">
-          This change has landed. Open a follow-up session if you need to make another revision.
-        </p>
       </div>
+      <p className="text-xs text-foreground">{mergedPRSummary}</p>
+      <p className="text-xs text-muted-foreground">
+        This change has landed. Open a follow-up session if you need to make another revision.
+      </p>
     </section>
   ) : null;
   // Right-panel content. Rendered inline on desktop and inside a bottom sheet
@@ -6745,20 +6728,16 @@ export function SessionDetailContent({ id }: { id: string }) {
           {selectedIsPrimary && canManageSession && canUseNativeReviewLoop && !hasPR && !selectedPublicationOwnsActions && hasSessionChanges ? (
             reviewLoopRunning ? (
               <Card className="border-border/60">
-                <CardContent className="p-4">
-                  <div className="flex min-w-0 items-start gap-2">
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    </div>
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium text-foreground">
-                        Fixing with {AGENTS_BY_KEY[latestReviewLoop?.agent_type ?? ""]?.label ?? "review agent"}
-                      </p>
-                      <p className="text-xs leading-relaxed text-muted-foreground">
-                        The review loop is checking the changes and applying fixes.
-                      </p>
-                    </div>
+                <CardContent className="min-w-0 space-y-1.5 p-4">
+                  <div className="flex items-center gap-1.5">
+                    <Loader2 aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
+                    <p className="text-sm font-medium text-foreground">
+                      Fixing with {AGENTS_BY_KEY[latestReviewLoop?.agent_type ?? ""]?.label ?? "review agent"}
+                    </p>
                   </div>
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    The review loop is checking the changes and applying fixes.
+                  </p>
                 </CardContent>
               </Card>
             ) : (
