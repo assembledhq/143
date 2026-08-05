@@ -779,6 +779,26 @@ describe('api client', () => {
       await api.auth.logout();
       expect(logoutCalled).toBe(true);
     });
+
+    it('merge-patches the typed session activity preference', async () => {
+      let capturedBody: unknown;
+      server.use(
+        http.patch('/api/v1/auth/me/settings', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({
+            data: {
+              id: 'user-1',
+              settings: { session_activity_detail: 'detailed' },
+            },
+          });
+        }),
+      );
+
+      const result = await api.auth.updateSettings({ session_activity_detail: 'detailed' });
+
+      expect(capturedBody).toEqual({ session_activity_detail: 'detailed' });
+      expect(result.data.settings?.session_activity_detail).toBe('detailed');
+    });
   });
 
   describe('priority', () => {

@@ -19,30 +19,21 @@ import { AGENTS_BY_KEY } from "@/lib/agents";
 import { deriveSessionStatusPresentation } from "@/lib/session-display-status";
 import type { SessionThread, SessionThreadFileEvent } from "@/lib/types";
 import { SESSION_THREAD_STRIP_HEIGHT_CLASSNAME } from "./session-detail-geometry";
+import {
+  canArchiveThread,
+  isActiveThreadStatus,
+  isThreadLabelProminent,
+  isThreadUnread,
+  threadIndicatorTone,
+  threadNeedsAttention,
+  threadStateSuffix,
+} from "./session-thread-presentation";
 
-// Status helpers — kept in one place so the tab strip and detail panel agree.
+// Status label formatting stays local: the strip resolves labels through the
+// statusConfig prop, while the shared rules live in session-thread-presentation.
 
 function threadStatusLabel(status: string, statusConfig: Record<string, { label: string }>): string {
   return statusConfig[status]?.label ?? status.replace(/_/g, " ");
-}
-
-function isActiveStatus(status: string): boolean {
-  return status === "pending" || status === "running" || status === "awaiting_input";
-}
-
-function threadNeedsAttention(thread: SessionThread): boolean {
-  if (thread.status === "awaiting_input" || thread.status === "failed") {
-    return true;
-  }
-  return !isActiveStatus(thread.status) && !!(thread.failure_explanation || thread.failure_category);
-}
-
-function shouldShowUnreadDot(thread: SessionThread, viewedThreadIds: ReadonlySet<string>): boolean {
-  return !viewedThreadIds.has(thread.id);
-}
-
-function canArchiveThread(thread: SessionThread, threadCount: number): boolean {
-  return threadCount > 1 && !isActiveStatus(thread.status);
 }
 
 function addTabButtonClassName(): string {
@@ -101,7 +92,7 @@ export function computeThreadOverlap(
   if (!events || events.length === 0) {
     return result;
   }
-  const activeThreadIds = new Set(threads.filter((t) => isActiveStatus(t.status)).map((t) => t.id));
+  const activeThreadIds = new Set(threads.filter((t) => isActiveThreadStatus(t.status)).map((t) => t.id));
   // path -> set of thread ids that touched it
   const ownersByPath = new Map<string, Set<string>>();
   for (const e of events) {
@@ -174,8 +165,11 @@ function ThreadStripPlaceholder({ message }: { message?: string }) {
 // Design notes:
 // - Single tab degrades into the original "quiet header" look so a session
 //   with one agent does not feel project-board-y.
-// - The tab dot animates when running so a glance at the strip tells the
-//   user which lane is mid-turn.
+// - Exactly one dot per tab, and it owns operational state (including a
+//   settled failure): the tab dot animates when running so a glance at the
+//   strip tells the user which lane is mid-turn. Unread is carried by label
+//   emphasis plus screen-reader text — the same split the session sidebar
+//   uses — so nothing needs a second dot after the label.
 // - Overlap is rendered with an AlertTriangle so the user notices conflict
 //   before reviewing the diff.
 export function AgentTabStrip({
@@ -214,13 +208,16 @@ export function AgentTabStrip({
     const statusLabel = threadStatusLabel(activeThread.status, statusConfig);
     const overlap = overlapsByThreadId.get(activeThread.id) ?? [];
     const isCancelling =
-      activeThread.cancel_requested_at != null && isActiveStatus(activeThread.status);
+      activeThread.cancel_requested_at != null && isActiveThreadStatus(activeThread.status);
     const queued = activeThread.pending_message_count ?? 0;
     const deliverySummary = formatDeliverySummary(activeThread);
     const provenance = formatThreadProvenance(activeThread);
     const needsAttention = threadNeedsAttention(activeThread);
-    const showUnreadDot = shouldShowUnreadDot(activeThread, viewedThreadIds);
+    // The lone tab is the one being viewed, so it is marked read almost
+    // immediately; the state only needs to reach assistive tech.
+    const isUnread = isThreadUnread(activeThread, viewedThreadIds);
     const operationalStatus = deriveSessionStatusPresentation(activeThread.status);
+    const indicatorTone = threadIndicatorTone(operationalStatus, needsAttention);
 
     return (
       <TooltipProvider delayDuration={150}>
@@ -232,18 +229,17 @@ export function AgentTabStrip({
                   <div
                     tabIndex={0}
                     role="group"
-                    aria-label={`${agentLabel} ${statusLabel}`}
+                    aria-label={`${agentLabel} ${statusLabel}${threadStateSuffix(needsAttention, isUnread)}`}
                     className="inline-flex max-w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
                   >
                     <StatusIndicator
-                      tone={operationalStatus.tone}
+                      tone={indicatorTone}
                       activity={isCancelling ? "none" : operationalStatus.activity}
                       stateKey={activeThread.status}
                     />
-                    <span className="truncate text-xs font-medium text-foreground">{activeThread.label}</span>
-                    {showUnreadDot ? (
-                      <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" title="Unread activity" />
-                    ) : null}
+                    <span className="truncate text-xs font-medium text-foreground">
+                      {activeThread.label}
+                    </span>
                     {isCancelling && (
                       <Loader2
                         className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground"
@@ -254,12 +250,6 @@ export function AgentTabStrip({
                       <Badge variant="secondary" className="h-4 px-1 text-xs leading-none">
                         {queued}
                       </Badge>
-                    )}
-                    {needsAttention && (
-                      <span
-                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning"
-                        aria-label="Needs attention"
-                      />
                     )}
                     {overlap.length > 0 && (
                       <AlertTriangle
@@ -347,12 +337,19 @@ export function AgentTabStrip({
                   const statusLabel = threadStatusLabel(thread.status, statusConfig);
                   const needsAttention = threadNeedsAttention(thread);
                   const overlap = overlapsByThreadId.get(thread.id) ?? [];
-                  const isCancelling = thread.cancel_requested_at != null && isActiveStatus(thread.status);
+                  const isCancelling = thread.cancel_requested_at != null && isActiveThreadStatus(thread.status);
                   const queued = thread.pending_message_count ?? 0;
                   const deliverySummary = formatDeliverySummary(thread);
                   const provenance = formatThreadProvenance(thread);
-                  const showUnreadDot = shouldShowUnreadDot(thread, viewedThreadIds);
+                  const isUnread = isThreadUnread(thread, viewedThreadIds);
+                  const isActiveTab = thread.id === activeThreadId;
                   const operationalStatus = deriveSessionStatusPresentation(thread.status);
+                  const indicatorTone = threadIndicatorTone(operationalStatus, needsAttention);
+                  const stateSuffix = threadStateSuffix(needsAttention, isUnread);
+                  const isLabelProminent = isThreadLabelProminent(thread, {
+                    isUnread,
+                    isActive: isActiveTab,
+                  });
                   const showArchiveButton = canArchiveThread(thread, tabs.length);
                   const isNonInteractive = nonInteractiveThreadIds?.has(thread.id) ?? false;
                   const closeLabel = `Close ${thread.label}${thread.label.toLowerCase().endsWith(" tab") ? "" : " tab"}`;
@@ -373,14 +370,23 @@ export function AgentTabStrip({
                               )}
                             >
                               <StatusIndicator
-                                tone={operationalStatus.tone}
+                                tone={indicatorTone}
                                 activity={isCancelling ? "none" : operationalStatus.activity}
                                 stateKey={thread.status}
                               />
-                              <span className="truncate">{thread.label}</span>
-                              {showUnreadDot ? (
-                                <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" title="Unread activity" />
-                              ) : null}
+                              {/* Prominence brightens the label rather than
+                                  bolding it: a weight change would resize the
+                                  tab and shift the strip the moment it is read.
+                                  The active tab already has its own colour. */}
+                              <span
+                                className={cn(
+                                  "truncate",
+                                  isLabelProminent && !isActiveTab && "text-foreground",
+                                )}
+                              >
+                                {thread.label}
+                                {stateSuffix ? <span className="sr-only">{stateSuffix}</span> : null}
+                              </span>
                               {isCancelling && (
                                 <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" aria-label="Cancelling" />
                               )}
@@ -388,9 +394,6 @@ export function AgentTabStrip({
                                 <Badge variant="secondary" className="h-4 px-1 text-xs leading-none">
                                   {queued}
                                 </Badge>
-                              )}
-                              {needsAttention && (
-                                <span className="h-1.5 w-1.5 rounded-full bg-warning" aria-label="Needs attention" />
                               )}
                               {overlap.length > 0 && (
                                 <AlertTriangle

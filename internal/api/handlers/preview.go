@@ -1569,30 +1569,49 @@ func (h *PreviewHandler) sessionPreviewStartMetricPath(ctx context.Context, orgI
 	return "cold_start"
 }
 
-func (h *PreviewHandler) resumeWarmSessionPreview(ctx context.Context, orgID uuid.UUID, instance *models.PreviewInstance) *previewHTTPError {
+// previewWarmResumeNotEligibleCode marks a warm resume the worker declined
+// because the preview stopped qualifying for the shortcut. It travels over the
+// internal worker API so the coordinator can tell it apart from a real failure.
+const previewWarmResumeNotEligibleCode = "PREVIEW_WARM_RESUME_NOT_ELIGIBLE"
+
+// resumeWarmSessionPreview attempts the warm-resume shortcut. It reports
+// resumed=false with no error when the preview turned out not to qualify —
+// every eligibility guard races ordinary user activity (an agent turn bumping
+// the workspace revision, a startup cache being evicted), and the preview is
+// left untouched in that case. Callers must fall through to a normal start
+// rather than surfacing an error the user cannot act on.
+func (h *PreviewHandler) resumeWarmSessionPreview(ctx context.Context, orgID uuid.UUID, instance *models.PreviewInstance) (bool, *previewHTTPError) {
 	if instance == nil {
-		return nil
+		return false, nil
+	}
+	resumeLocal := func() (bool, *previewHTTPError) {
+		if err := h.manager.ResumeStoppedWarmPreview(ctx, orgID, instance.ID); err != nil {
+			if errors.Is(err, preview.ErrWarmResumeNotEligible) {
+				h.logger.Info().Err(err).Str("preview_id", instance.ID.String()).Msg("warm preview resume declined; starting normally")
+				return false, nil
+			}
+			return false, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_WARM_RESUME_FAILED", "failed to resume warm preview", err)
+		}
+		return true, nil
 	}
 	if h.workerRoutingEnabled() {
 		worker, err := h.resolvePreviewWorker(ctx, instance.WorkerNodeID)
 		if err != nil {
-			return newPreviewHTTPError(http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", err)
+			return false, newPreviewHTTPError(http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", err)
 		}
 		if h.isLocalWorker(worker) {
-			if err := h.manager.ResumeStoppedWarmPreview(ctx, orgID, instance.ID); err != nil {
-				return newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_WARM_RESUME_FAILED", "failed to resume warm preview", err)
-			}
-			return nil
+			return resumeLocal()
 		}
 		if err := h.workerClient.ResumeWarmPreview(ctx, worker, orgID, instance.ID); err != nil {
-			return workerClientHTTPError(err)
+			if reqErr, ok := preview.AsWorkerRequestError(err); ok && reqErr.Code == previewWarmResumeNotEligibleCode {
+				h.logger.Info().Err(err).Str("preview_id", instance.ID.String()).Msg("warm preview resume declined by worker; starting normally")
+				return false, nil
+			}
+			return false, workerClientHTTPError(err)
 		}
-		return nil
+		return true, nil
 	}
-	if err := h.manager.ResumeStoppedWarmPreview(ctx, orgID, instance.ID); err != nil {
-		return newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_WARM_RESUME_FAILED", "failed to resume warm preview", err)
-	}
-	return nil
+	return resumeLocal()
 }
 
 func (h *PreviewHandler) previewFreshness(ctx context.Context, orgID, sessionID uuid.UUID, instance *models.PreviewInstance) *models.PreviewFreshness {
@@ -1923,20 +1942,25 @@ func (h *PreviewHandler) ensurePreview(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if warmInstance != nil {
-			if resumeErr := h.resumeWarmSessionPreview(r.Context(), orgID, warmInstance); resumeErr != nil {
+			resumed, resumeErr := h.resumeWarmSessionPreview(r.Context(), orgID, warmInstance)
+			if resumeErr != nil {
 				writePreviewHTTPError(w, r, resumeErr)
 				return
 			}
-			metrics.RecordSessionPrewarmOpenAfterPrewarm(r.Context(), orgID.String(), "warm_candidate")
-			metrics.RecordSessionPrewarmClickToReady(r.Context(), orgID.String(), "warm_resume", time.Since(clickStarted))
-			refreshed, err := h.store.GetPreviewInstance(r.Context(), orgID, warmInstance.ID)
-			if err != nil {
-				refreshed = warmInstance
+			// resumed=false means the shortcut was declined, not that anything
+			// failed; fall through to the normal start below.
+			if resumed {
+				metrics.RecordSessionPrewarmOpenAfterPrewarm(r.Context(), orgID.String(), "warm_candidate")
+				metrics.RecordSessionPrewarmClickToReady(r.Context(), orgID.String(), "warm_resume", time.Since(clickStarted))
+				refreshed, err := h.store.GetPreviewInstance(r.Context(), orgID, warmInstance.ID)
+				if err != nil {
+					refreshed = warmInstance
+				}
+				writeJSON(w, http.StatusOK, models.SingleResponse[ensurePreviewResponse]{
+					Data: h.ensurePreviewResponse(r.Context(), orgID, "resumed", refreshed),
+				})
+				return
 			}
-			writeJSON(w, http.StatusOK, models.SingleResponse[ensurePreviewResponse]{
-				Data: h.ensurePreviewResponse(r.Context(), orgID, "resumed", refreshed),
-			})
-			return
 		}
 		started, _, startErr := h.startPreviewFromRequest(r.Context(), orgID, user.ID, sessionID, body)
 		if startErr != nil {

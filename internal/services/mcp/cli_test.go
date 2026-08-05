@@ -54,7 +54,7 @@ func TestRunCLI_NamespaceHelp(t *testing.T) {
 		{
 			name:      "pull request namespace",
 			args:      []string{"pr", "--help"},
-			contains:  []string{"143-tools pr <action>", "create"},
+			contains:  []string{"143-tools pr <action>", "create", "update"},
 			notString: "create_pr",
 		},
 		{
@@ -148,6 +148,11 @@ func TestRunCLI_DispatchesHierarchicalCommands(t *testing.T) {
 			expected: "queued",
 		},
 		{
+			name:     "pull request updater",
+			args:     []string{"pr", "update", "--body", "Expanded description"},
+			expected: "updated",
+		},
+		{
 			name:     "issue creator",
 			args:     []string{"issue", "create", "--title", "Follow-up", "--description", "Investigate more"},
 			expected: "Follow-up",
@@ -225,6 +230,11 @@ func TestRunCLI_RejectsFlatCommandsWithMigrationHelp(t *testing.T) {
 			name:              "pull request command",
 			args:              []string{"create_pr", "--help"},
 			expectedMigration: "143-tools pr create",
+		},
+		{
+			name:              "pull request update command",
+			args:              []string{"update_pr", "--help"},
+			expectedMigration: "143-tools pr update",
 		},
 		{
 			name:              "session tabs command",
@@ -489,6 +499,7 @@ func TestDetectOldFlatCommand(t *testing.T) {
 		{name: "provider-prefixed", input: "sentry_list_errors", expected: "143-tools sentry list_errors"},
 		{name: "logs", input: "log_query", expected: "143-tools logs query"},
 		{name: "pull request", input: "create_pr", expected: "143-tools pr create"},
+		{name: "pull request update", input: "update_pr", expected: "143-tools pr update"},
 		{name: "session tabs", input: "session_tabs_send", expected: "143-tools session-tabs send"},
 		{name: "automation", input: "automation_create", expected: "143-tools automation create"},
 		{name: "not flat", input: "sentry", expected: ""},

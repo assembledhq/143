@@ -176,12 +176,12 @@ func TestCreatePRParamsKeepsExpectedRemoteHeadInternal(t *testing.T) {
 	params := CreatePRParams{ExpectedRemoteHeadSHA: "abc1234567890abcdef1234567890abcdef12345"}
 	encoded, err := json.Marshal(params)
 	require.NoError(t, err, "CreatePRParams should remain serializable")
-	require.NotContains(t, string(encoded), "expected_remote_head", "the review-only replacement lease must not enter persisted or client payloads")
+	require.NotContains(t, string(encoded), "expected_remote_head", "the publication-owned replacement lease must not enter persisted or client payloads")
 
 	var decoded CreatePRParams
 	err = json.Unmarshal([]byte(`{"expected_remote_head_sha":"attacker-controlled"}`), &decoded)
 	require.NoError(t, err, "unknown client fields should not break CreatePRParams decoding")
-	require.Empty(t, decoded.ExpectedRemoteHeadSHA, "clients must not be able to grant the review-only replacement lease")
+	require.Empty(t, decoded.ExpectedRemoteHeadSHA, "clients must not be able to grant the publication-owned replacement lease")
 }
 
 type prTestSnapshotStore struct {
@@ -5770,7 +5770,7 @@ func TestPushChangesetBranchRevisionLeaseIsExplicit(t *testing.T) {
 			require.NoError(t, err, "changeset push should succeed with a matching ordinary remote checkpoint")
 			require.Equal(t, headSHA, result.HeadSHA, "changeset push should return the published head")
 			if tt.wantScriptUnbounded {
-				require.Contains(t, provider.lastExecCmd, "expected_remote_head=''", "ordinary changeset pushes must not inherit the review-only replacement lease")
+				require.Contains(t, provider.lastExecCmd, "expected_remote_head=''", "ordinary changeset pushes must not inherit the mutable changeset checkpoint as a publication lease")
 			} else {
 				require.Contains(t, provider.lastExecCmd, "expected_remote_head='"+tt.wantScriptExpected+"'", "review refresh should bind its explicit replacement lease")
 			}
@@ -6344,6 +6344,7 @@ func TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR(t *testing.T) {
 	userID := uuid.New()
 	integrationID := uuid.New()
 	snapshotKey := "snapshots/session.tar"
+	expectedRemoteHeadSHA := "0123456789abcdef0123456789abcdef01234567"
 	body := ""
 
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
@@ -6456,7 +6457,7 @@ func TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR(t *testing.T) {
 		ResultSummary:     func() *string { s := "Implemented the fix"; return &s }(),
 	}
 
-	pr, err := svc.CreatePR(context.Background(), run)
+	pr, err := svc.CreatePR(context.Background(), run, CreatePRParams{ExpectedRemoteHeadSHA: expectedRemoteHeadSHA})
 	require.NoError(t, err, "CreatePR should succeed for a snapshot-backed session")
 	require.Equal(t, 42, pr.GitHubPRNumber, "CreatePR should store the returned PR number")
 	require.Equal(t, "https://github.com/owner/repo/pull/42", pr.GitHubPRURL, "CreatePR should store the returned PR URL")
@@ -6464,6 +6465,7 @@ func TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR(t *testing.T) {
 	require.Equal(t, 1, labelCalls, "CreatePR should add labels to the created PR")
 	require.Equal(t, true, createPRPayload["draft"], "CreatePR should honor the org default draft setting")
 	require.Contains(t, string(provider.writes[pushCommitMsgPath(agent.DefaultSandboxConfig().HomeDir)]), "Co-authored-by: Alice <alice@example.com>", "CreatePR should include a co-author trailer when using the app token for a user-triggered run")
+	require.Contains(t, provider.lastExecCmd, "expected_remote_head='"+expectedRemoteHeadSHA+"'", "CreatePR should bind the push to the durable publication-owned remote checkpoint")
 	require.Contains(t, provider.lastExecCmd, `git push --force-with-lease="${remote_ref}:${remote_sha}" "$push_url" "HEAD:${remote_ref}"`, "CreatePR should push the restored branch before opening the PR")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	_ = body
@@ -6797,14 +6799,24 @@ func TestPreparePublicationAttemptPersistsExactBranchAndGatesTerminalReplay(t *t
 	t.Parallel()
 
 	tests := []struct {
-		name          string
-		state         models.SessionPublicationState
-		workingBranch *string
-		updatedRows   int64
-		wantStarted   bool
+		name                  string
+		state                 models.SessionPublicationState
+		workingBranch         *string
+		publishedHeadSHA      *string
+		updatedRows           int64
+		wantStarted           bool
+		wantExpectedRemoteSHA string
 	}{
 		{name: "derives branch for snapshot-backed session", state: models.SessionPublicationStateRequested, updatedRows: 1, wantStarted: true},
-		{name: "uses materialized changeset branch", state: models.SessionPublicationStateRequested, workingBranch: strPtr("143/custom/stack"), updatedRows: 1, wantStarted: true},
+		{
+			name:                  "uses durable published head for the same materialized branch",
+			state:                 models.SessionPublicationStateRequested,
+			workingBranch:         strPtr("143/custom/stack"),
+			publishedHeadSHA:      strPtr("0123456789abcdef0123456789abcdef01234567"),
+			updatedRows:           1,
+			wantStarted:           true,
+			wantExpectedRemoteSHA: "0123456789abcdef0123456789abcdef01234567",
+		},
 		{name: "blocks terminal replay before side effects", state: models.SessionPublicationStateTerminalFailed, updatedRows: 0, wantStarted: false},
 	}
 
@@ -6834,7 +6846,7 @@ func TestPreparePublicationAttemptPersistsExactBranchAndGatesTerminalReplay(t *t
 				State: tt.state, Source: models.SessionPublicationSourceUser,
 				ReviewGateState: models.SessionPublicationReviewGateNotRequired,
 				JobQueue:        models.SessionPublicationJobQueueAgent, RequestPayload: payload, RequestGenerationAt: now,
-				BaseBranch: "main", HeadBranch: headBranch,
+				BaseBranch: "main", HeadBranch: headBranch, PublishedHeadSHA: tt.publishedHeadSHA,
 				RequestedAt: now, CreatedAt: now, UpdatedAt: now,
 			}
 			mock.ExpectQuery("INSERT INTO session_publications").WithArgs(pgx.NamedArgs{
@@ -6873,6 +6885,7 @@ func TestPreparePublicationAttemptPersistsExactBranchAndGatesTerminalReplay(t *t
 			require.Equal(t, tt.wantStarted, attempt.Started, "publication preparation should report whether side effects may start")
 			require.Equal(t, stored, attempt.Publication, "publication preparation should return the persisted state")
 			require.Equal(t, headBranch, attempt.Params.PublicationHeadBranch, "CreatePR should receive the exact durably recorded branch")
+			require.Equal(t, tt.wantExpectedRemoteSHA, attempt.Params.ExpectedRemoteHeadSHA, "CreatePR should receive only the durable publication-owned remote checkpoint")
 			require.Equal(t, changesetID, *attempt.Params.ChangesetID, "prepared parameters should retain the changeset target")
 			require.NoError(t, mock.ExpectationsWereMet(), "publication preparation should perform only the expected tenant-scoped writes")
 		})
@@ -7152,7 +7165,7 @@ func TestCheckpointExistingPullRequestPublicationPreservesMergedLifecycle(t *tes
 	mock.ExpectQuery("UPDATE sessions SET status").WithArgs(githubAnyArgs(3)...).
 		WillReturnRows(pgxmock.NewRows(prHealthSessionColumns).AddRow(newPRHealthSessionRow(sessionID, orgID, now, models.SessionStatusPRCreated)...))
 	mock.ExpectExec("UPDATE pull_requests SET status").WithArgs(pgx.NamedArgs{
-		"id": pullRequestID, "org_id": orgID, "status": models.PullRequestStatusMerged,
+		"id": pullRequestID, "org_id": orgID, "status": models.PullRequestStatusMerged, "merged_at": pgxmock.AnyArg(),
 	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE session_publications[\\s\\S]*SET state").
 		WithArgs(githubAnyArgs(7)...).

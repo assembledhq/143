@@ -19,6 +19,7 @@ import {
   messageReconciliationKey,
   statusConfig,
   trackInFlightAgentUpdate,
+  shouldInvalidateForActivityLifecycleEvent,
   buildChromeThreads,
   getPullRequestHealthRefetchInterval,
   deriveSessionDetailLoadState,
@@ -97,6 +98,24 @@ describe("deriveSessionDetailLoadState", () => {
 
     expect(failed.kind).toBe("error");
     expect(isProvisionalSessionDetail(failed.session ?? undefined)).toBe(true);
+  });
+});
+
+describe("shouldInvalidateForActivityLifecycleEvent", () => {
+  it("deduplicates repeated events while accepting unique out-of-order lifecycle notifications", () => {
+    const seen = new Set<string>();
+
+    expect(shouldInvalidateForActivityLifecycleEvent(seen, { id: "terminal-2", thread_id: "thread-1" }, "thread-1")).toBe(true);
+    expect(shouldInvalidateForActivityLifecycleEvent(seen, { id: "started-1", thread_id: "thread-1" }, "thread-1")).toBe(true);
+    expect(shouldInvalidateForActivityLifecycleEvent(seen, { id: "terminal-2", thread_id: "thread-1" }, "thread-1")).toBe(false);
+    expect(shouldInvalidateForActivityLifecycleEvent(seen, { id: "other-thread", thread_id: "thread-2" }, "thread-1")).toBe(false);
+  });
+
+  it("keeps the deduplication set bounded without losing current events", () => {
+    const seen = new Set(["old-1", "old-2"]);
+
+    expect(shouldInvalidateForActivityLifecycleEvent(seen, { id: "new-3", thread_id: "thread-1" }, "thread-1", 2)).toBe(true);
+    expect(seen).toEqual(new Set(["old-2", "new-3"]));
   });
 });
 

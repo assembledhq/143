@@ -37,6 +37,8 @@ type ThreadInboxStore interface {
 	ClaimDeliverableAfter(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, ownerNodeID string, afterSequence int64, limit int) ([]models.ThreadInboxEntry, error)
 	MarkDeliveredForEntry(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, ownerNodeID string, entryID uuid.UUID, sequenceNo int64) (int64, error)
 	MarkAckedForSeedMessages(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, messageIDs []int64) (int64, error)
+	MarkDeliveredForSeedMessages(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, messageIDs []int64) (int64, error)
+	LastAcknowledgedSequence(ctx context.Context, orgID, threadID uuid.UUID) (int64, error)
 	MarkDeliveringForMessages(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, ownerNodeID string, messageIDs []int64) (int64, error)
 	MarkDeadLetter(ctx context.Context, orgID, threadID, entryID uuid.UUID, reason string) (models.ThreadInboxEntry, error)
 	MarkDeliveryFailed(ctx context.Context, orgID, threadID, runtimeID, entryID uuid.UUID, reason string, maxAttempts int) (models.ThreadInboxEntry, error)
@@ -104,6 +106,14 @@ func (o *Orchestrator) startThreadRuntimeControl(ctx context.Context, session *m
 	if session.ModelOverride != nil {
 		model = *session.ModelOverride
 	}
+	var lastAcknowledgedSequence int64
+	if o.threadInbox != nil {
+		sequence, watermarkErr := o.threadInbox.LastAcknowledgedSequence(ctx, session.OrgID, threadID)
+		if watermarkErr != nil {
+			return nil, fmt.Errorf("get thread inbox acknowledgment watermark: %w", watermarkErr)
+		}
+		lastAcknowledgedSequence = sequence
+	}
 	runtime, err := o.threadRuntimes.CreateStarting(ctx, session.OrgID, db.CreateThreadRuntimeParams{
 		SessionID:                  session.ID,
 		ThreadID:                   threadID,
@@ -113,8 +123,8 @@ func (o *Orchestrator) startThreadRuntimeControl(ctx context.Context, session *m
 		Model:                      model,
 		OwnerNodeID:                o.nodeID,
 		LeaseToken:                 leaseToken,
-		LastDeliveredSequence:      0,
-		LastAckedSequence:          0,
+		LastDeliveredSequence:      lastAcknowledgedSequence,
+		LastAckedSequence:          lastAcknowledgedSequence,
 		BaseWorkspaceGeneration:    session.WorkspaceGeneration,
 		CurrentWorkspaceGeneration: session.WorkspaceGeneration,
 		LeaseDuration:              threadRuntimeLeaseDuration,
@@ -510,6 +520,22 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 		}
 	}
 
+	// A process may have stopped after persisting a dead-letter state but
+	// before advancing the runtime watermark. Recover that contiguous terminal
+	// prefix before claiming later input so a durable delivery batch can never
+	// span a failed entry.
+	terminalSequence, err := o.threadInbox.LastAcknowledgedSequence(ctx, orgID, threadID)
+	if err != nil {
+		return fmt.Errorf("get contiguous terminal thread inbox sequence: %w", err)
+	}
+	if terminalSequence > runtime.LastAckedSequence {
+		if err := o.commitThreadInboxWatermark(ctx, runtime, threadID, terminalSequence); err != nil {
+			return fmt.Errorf("recover thread inbox terminal watermark: %w", err)
+		}
+		runtime.LastDeliveredSequence = max(runtime.LastDeliveredSequence, terminalSequence)
+		runtime.LastAckedSequence = terminalSequence
+	}
+
 	formatter := o.threadRuntimeInputFormatter(runtime.AgentType)
 
 	entries, err := o.threadInbox.ClaimDeliverableAfter(ctx, orgID, threadID, runtime.ID, runtime.OwnerNodeID, runtime.LastDeliveredSequence, threadInboxDeliveryBatchSize)
@@ -520,11 +546,41 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 		return nil
 	}
 
+	var deliveredSequenceEnd int64
+	flushDelivered := func() error {
+		if deliveredSequenceEnd == 0 {
+			return nil
+		}
+		if err := o.acknowledgeDeliveredThreadInboxSegment(ctx, runtime, threadID, deliveredSequenceEnd); err != nil {
+			return err
+		}
+		runtime.LastDeliveredSequence = max(runtime.LastDeliveredSequence, deliveredSequenceEnd)
+		runtime.LastAckedSequence = deliveredSequenceEnd
+		deliveredSequenceEnd = 0
+		return nil
+	}
+	advanceDeadLetter := func(sequenceNo int64) error {
+		if sequenceNo != runtime.LastAckedSequence+1 {
+			return fmt.Errorf("dead-letter sequence %d is discontinuous after watermark %d", sequenceNo, runtime.LastAckedSequence)
+		}
+		if err := o.commitThreadInboxWatermark(ctx, runtime, threadID, sequenceNo); err != nil {
+			return err
+		}
+		runtime.LastDeliveredSequence = max(runtime.LastDeliveredSequence, sequenceNo)
+		runtime.LastAckedSequence = sequenceNo
+		return nil
+	}
 	for _, entry := range entries {
 		input, err := formatter.FormatThreadRuntimeInput(entry)
 		if errors.Is(err, ErrThreadRuntimeLiveInputUnsupported) {
+			if flushErr := flushDelivered(); flushErr != nil {
+				return fmt.Errorf("acknowledge delivered inbox segment before unsupported entry %d: %w", entry.SequenceNo, flushErr)
+			}
 			if _, markErr := o.threadInbox.MarkDeadLetter(ctx, orgID, threadID, entry.ID, err.Error()); markErr != nil {
 				return fmt.Errorf("mark unsupported thread inbox entry %d dead-letter: %w", entry.SequenceNo, markErr)
+			}
+			if advanceErr := advanceDeadLetter(entry.SequenceNo); advanceErr != nil {
+				return fmt.Errorf("advance unsupported thread inbox entry %d: %w", entry.SequenceNo, advanceErr)
 			}
 			o.logger.Warn().
 				Err(err).
@@ -536,9 +592,15 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 			continue
 		}
 		if err != nil {
+			if flushErr := flushDelivered(); flushErr != nil {
+				return fmt.Errorf("acknowledge delivered inbox segment before invalid entry %d: %w", entry.SequenceNo, flushErr)
+			}
 			reason := err.Error()
 			if _, markErr := o.threadInbox.MarkDeadLetter(ctx, orgID, threadID, entry.ID, reason); markErr != nil {
 				return fmt.Errorf("mark thread inbox entry %d dead-letter after format failure: %w", entry.SequenceNo, markErr)
+			}
+			if advanceErr := advanceDeadLetter(entry.SequenceNo); advanceErr != nil {
+				return fmt.Errorf("advance invalid thread inbox entry %d: %w", entry.SequenceNo, advanceErr)
 			}
 			o.logger.Warn().
 				Err(err).
@@ -552,6 +614,9 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 		err = o.threadCancels.DeliverInput(writeCtx, threadID, input)
 		cancel()
 		if errors.Is(err, ErrThreadHandleUnavailable) || errors.Is(err, ErrInputNotOpen) {
+			if flushErr := flushDelivered(); flushErr != nil {
+				return fmt.Errorf("acknowledge delivered inbox segment before unavailable entry %d: %w", entry.SequenceNo, flushErr)
+			}
 			o.logger.Info().
 				Err(err).
 				Str("runtime_id", runtime.ID.String()).
@@ -561,8 +626,17 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 			return nil
 		}
 		if err != nil {
-			if _, markErr := o.threadInbox.MarkDeliveryFailed(ctx, orgID, threadID, runtime.ID, entry.ID, err.Error(), db.DefaultThreadInboxMaxDeliveryAttempts); markErr != nil {
+			if flushErr := flushDelivered(); flushErr != nil {
+				return fmt.Errorf("acknowledge delivered inbox segment before failed entry %d: %w", entry.SequenceNo, flushErr)
+			}
+			failedEntry, markErr := o.threadInbox.MarkDeliveryFailed(ctx, orgID, threadID, runtime.ID, entry.ID, err.Error(), db.DefaultThreadInboxMaxDeliveryAttempts)
+			if markErr != nil {
 				return fmt.Errorf("mark thread inbox entry %d failed after handle write failure: %w", entry.SequenceNo, markErr)
+			}
+			if failedEntry.DeliveryState == models.ThreadInboxDeliveryStateDeadLetter {
+				if advanceErr := advanceDeadLetter(entry.SequenceNo); advanceErr != nil {
+					return fmt.Errorf("advance failed thread inbox entry %d: %w", entry.SequenceNo, advanceErr)
+				}
 			}
 			return fmt.Errorf("deliver thread inbox entry %d to runtime handle: %w", entry.SequenceNo, err)
 		}
@@ -573,13 +647,39 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 		if deliveredRows != 1 {
 			return fmt.Errorf("mark thread inbox entry %d delivered: expected 1 row, updated %d", entry.SequenceNo, deliveredRows)
 		}
-		ok, err := o.threadRuntimes.CommitInboxDeliveryWithLease(ctx, orgID, runtime.ID, runtime.LeaseToken, threadID, runtime.OwnerNodeID, entry.SequenceNo, entry.SequenceNo)
-		if err != nil {
+		deliveredSequenceEnd = entry.SequenceNo
+	}
+	return flushDelivered()
+}
+
+// acknowledgeDeliveredThreadInboxSegment creates one boundary for a
+// contiguous set of provider-accepted instructions. Segments are split at
+// failed/dead-lettered entries so every durable batch range contains only the
+// messages actually applied to the provider.
+func (o *Orchestrator) acknowledgeDeliveredThreadInboxSegment(ctx context.Context, runtime models.ThreadRuntime, threadID uuid.UUID, deliveredSequenceEnd int64) error {
+	if executionValue, ok := o.activeActivityPhases.Load(threadID); ok && o.activityPhases != nil {
+		execution, valid := executionValue.(*activityPhaseExecution)
+		if !valid || execution == nil {
+			return fmt.Errorf("active activity phase registry contained invalid value for thread %s", threadID)
+		}
+		if err := execution.acknowledgeAndResume(ctx, deliveredSequenceEnd); err != nil {
+			return fmt.Errorf("acknowledge and resume steered activity phase at sequence %d: %w", deliveredSequenceEnd, err)
+		}
+	} else {
+		if err := o.commitThreadInboxWatermark(ctx, runtime, threadID, deliveredSequenceEnd); err != nil {
 			return fmt.Errorf("commit thread runtime inbox delivery cursor: %w", err)
 		}
-		if !ok {
-			return fmt.Errorf("%w: %s", ErrThreadRuntimeLeaseLost, runtime.ID)
-		}
+	}
+	return nil
+}
+
+func (o *Orchestrator) commitThreadInboxWatermark(ctx context.Context, runtime models.ThreadRuntime, threadID uuid.UUID, sequence int64) error {
+	ok, err := o.threadRuntimes.CommitInboxDeliveryWithLease(ctx, runtime.OrgID, runtime.ID, runtime.LeaseToken, threadID, runtime.OwnerNodeID, sequence, sequence)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrThreadRuntimeLeaseLost, runtime.ID)
 	}
 	return nil
 }

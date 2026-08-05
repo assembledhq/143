@@ -15,6 +15,7 @@ import (
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -973,4 +974,51 @@ func TestPreviewHandler_ResolveBrowserWorkerUsesSelectedTopology(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+// TestPreviewHandler_ResumeWarmSessionPreviewFallsBackWhenIneligible pins the
+// contract that keeps a benign race off the user's screen. Every warm-resume
+// eligibility guard can flip between the handler's own pre-check and the
+// manager's — an agent turn bumps the workspace revision, a startup cache row is
+// evicted — and the preview is left untouched when it does. That must read as
+// "start it normally", never as a 500 on a preview the user just clicked.
+func TestPreviewHandler_ResumeWarmSessionPreviewFallsBackWhenIneligible(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	row := newActivePreviewRow(previewID, sessionID, orgID, userID, now)
+	for i, column := range previewInstanceTestCols {
+		if column == "status" {
+			row[i] = string(models.PreviewStatusStopped)
+		}
+	}
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols).AddRow(row...))
+	// Stopped for an unrelated reason: no longer a warm-resume candidate.
+	mock.ExpectQuery("SELECT COALESCE\\(stopped_reason").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"stopped_reason"}).AddRow(string(models.PreviewStoppedReasonExpired)))
+
+	store := db.NewPreviewStore(mock)
+	manager := previewsvc.NewManager(previewsvc.ManagerConfig{
+		Store:        store,
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "worker-1",
+	})
+	h := &PreviewHandler{manager: manager, store: store, logger: zerolog.Nop()}
+
+	resumed, resumeErr := h.resumeWarmSessionPreview(context.Background(), orgID, &models.PreviewInstance{ID: previewID, OrgID: orgID, SessionID: sessionID})
+	require.Nil(t, resumeErr, "an ineligible warm candidate must not surface an error to the user")
+	require.False(t, resumed, "an ineligible warm candidate must report that it did not resume, so the caller starts normally")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

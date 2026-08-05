@@ -14,6 +14,7 @@ type CodeReviewFinalReviewInput struct {
 	ChangeSummary             string
 	OperationalSummary        string
 	SessionURL                string
+	PolicySettingsURL         string
 	DescriptionPassed         *bool
 	DescriptionIssues         []string
 	AgentSummaries            []string
@@ -33,6 +34,21 @@ func BuildCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) string {
 	return buildDefaultCodeReviewFinalReviewBody(input)
 }
 
+const CodeReviewProvisionalReviewHeading = "⚠️ **143 Code Reviewer found stable policy blockers**"
+
+func BuildCodeReviewProvisionalBody(input CodeReviewFinalReviewInput) string {
+	paragraphs := []string{CodeReviewProvisionalReviewHeading}
+	paragraphs = append(paragraphs, codeReviewBlockerSections(input)...)
+	paragraphs = append(paragraphs, "These blockers are stable for this commit. The substantive code review is still running and may identify additional findings.")
+	if assessment := codeReviewAssessmentSummary(input.HeadSHA, input.AssessedAt); assessment != "" {
+		paragraphs = append(paragraphs, assessment)
+	}
+	if input.SessionURL != "" {
+		paragraphs = append(paragraphs, "[Follow the review session]("+input.SessionURL+")")
+	}
+	return strings.Join(paragraphs, "\n\n")
+}
+
 func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) string {
 	paragraphs := make([]string, 0, 9)
 	if input.Decision == CodeReviewDecisionApproved {
@@ -45,12 +61,23 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 
 	generatedSummary := codeReviewGeneratedSummary(input.GeneratedSummary)
 	operationalSummary := codeReviewGeneratedSummary(input.OperationalSummary)
+	var blockerSections []string
+	if !input.Acceptable {
+		blockerSections = codeReviewBlockerSections(input)
+	}
 	explanation := operationalSummary
 	if explanation == "" {
 		explanation = generatedSummary
 	}
 	if explanation == "" {
-		explanation = codeReviewDecisionExplanation(input)
+		// Without a model-written summary the derived explanation is the same
+		// reason list the grouped sections spell out below, so lead into them
+		// instead of repeating every blocker verbatim.
+		if len(blockerSections) > 0 {
+			explanation = "This PR did not meet the configured approval policy; the blockers are grouped below."
+		} else {
+			explanation = codeReviewDecisionExplanation(input)
+		}
 	}
 	paragraphs = append(paragraphs, "**Why:** "+explanation)
 
@@ -58,18 +85,10 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 		paragraphs = append(paragraphs, "**Change:** "+changeSummary)
 	}
 
-	if (generatedSummary != "" || operationalSummary != "") && !input.Acceptable {
-		riskReasons := input.RiskReasons
-		if operationalSummary != "" {
-			riskReasons = codeReviewRiskReasonsWithout(riskReasons, CodeReviewRiskReasonOrchestratorSynthesisInvalid)
-		}
-		if blockers := codeReviewRiskReasonExplanations(riskReasons, input.DescriptionIssues); len(blockers) > 0 {
-			var policyBlockers strings.Builder
-			policyBlockers.WriteString("**Policy blockers:**\n")
-			for _, blocker := range blockers {
-				policyBlockers.WriteString("- " + blocker + "\n")
-			}
-			paragraphs = append(paragraphs, strings.TrimSpace(policyBlockers.String()))
+	if !input.Acceptable {
+		paragraphs = append(paragraphs, blockerSections...)
+		if issues := codeReviewReviewIssueSection(input.RiskReasons, input.DescriptionIssues); issues != "" {
+			paragraphs = append(paragraphs, issues)
 		}
 	}
 
@@ -95,16 +114,17 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 		paragraphs = append(paragraphs, strings.TrimSpace(findings.String()))
 	}
 	if len(advisoryFindings) > 0 {
-		paragraphs = append(paragraphs, fmt.Sprintf(
-			"**Advisory notes:** %d non-blocking %s available in the full review. P2 and P3 observations do not affect the approval decision.",
-			len(advisoryFindings),
-			pluralizeCodeReviewWord(len(advisoryFindings), "observation is", "observations are"),
-		))
+		paragraphs = append(paragraphs, codeReviewAdvisoryFindingsSection(advisoryFindings))
 	}
 	if reviewers := nonEmptyStrings(input.RecommendedHumanReviewers); len(reviewers) > 0 {
 		paragraphs = append(paragraphs, "**Suggested human reviewers:** "+strings.Join(reviewers, ", "))
 	}
 	if !input.Acceptable {
+		if codeReviewBlockerCount(input.RiskReasons, blockingFindings) == 1 {
+			if revision := codeReviewShortSHA(input.HeadSHA); revision != "" {
+				paragraphs = append(paragraphs, "This is the only blocker as of `"+revision+"`.")
+			}
+		}
 		if operationalSummary != "" {
 			paragraphs = append(paragraphs, "**Next steps:** Retry the automated review to regenerate the final synthesis, or ask a human reviewer to review the available evidence directly.")
 		} else {
@@ -120,30 +140,24 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 	return strings.Join(paragraphs, "\n\n")
 }
 
-func codeReviewRiskReasonsWithout(reasons []CodeReviewRiskReason, excluded CodeReviewRiskReasonCode) []CodeReviewRiskReason {
-	filtered := make([]CodeReviewRiskReason, 0, len(reasons))
-	for _, reason := range reasons {
-		if reason.Code != excluded {
-			filtered = append(filtered, reason)
-		}
-	}
-	return filtered
-}
-
 func codeReviewAssessmentSummary(headSHA string, assessedAt time.Time) string {
-	headSHA = strings.TrimSpace(headSHA)
-	if headSHA == "" {
+	shortSHA := codeReviewShortSHA(headSHA)
+	if shortSHA == "" {
 		return ""
-	}
-	shortSHA := headSHA
-	if len(shortSHA) > 7 {
-		shortSHA = shortSHA[:7]
 	}
 	summary := "**Latest assessment:** `" + shortSHA + "`"
 	if !assessedAt.IsZero() {
 		summary += " at " + assessedAt.UTC().Format(time.RFC3339)
 	}
 	return summary
+}
+
+func codeReviewShortSHA(headSHA string) string {
+	headSHA = strings.TrimSpace(headSHA)
+	if len(headSHA) > 7 {
+		return headSHA[:7]
+	}
+	return headSHA
 }
 
 func codeReviewGeneratedSummary(value string) string {
@@ -208,11 +222,203 @@ func codeReviewDecisionExplanation(input CodeReviewFinalReviewInput) string {
 		return result
 	}
 
-	reasons := codeReviewRiskReasonExplanations(input.RiskReasons, input.DescriptionIssues)
+	reasons := codeReviewRiskReasonExplanations(codeReviewActionableRiskReasons(input.RiskReasons), input.DescriptionIssues)
 	if len(reasons) == 0 {
+		if codeReviewHasReviewIssue(input.RiskReasons) {
+			return "143 could not complete the automated review."
+		}
 		return "The available review evidence did not meet the configured approval policy."
 	}
 	return strings.Join(reasons, " ")
+}
+
+type codeReviewBlockerGroup string
+
+const (
+	codeReviewBlockerGroupPolicy   codeReviewBlockerGroup = "Policy thresholds"
+	codeReviewBlockerGroupFinding  codeReviewBlockerGroup = "Review findings"
+	codeReviewBlockerGroupJudgment codeReviewBlockerGroup = "Human judgment needed"
+)
+
+var codeReviewBlockerGroupOrder = []codeReviewBlockerGroup{
+	codeReviewBlockerGroupPolicy,
+	codeReviewBlockerGroupFinding,
+	codeReviewBlockerGroupJudgment,
+}
+
+const maxCodeReviewReasonsPerGroup = 4
+
+func codeReviewBlockerSections(input CodeReviewFinalReviewInput) []string {
+	grouped := make(map[codeReviewBlockerGroup][]string, len(codeReviewBlockerGroupOrder))
+	for _, reason := range input.RiskReasons {
+		if codeReviewRiskReasonIsReviewIssue(reason.Code) {
+			continue
+		}
+		explanation := humanizeCodeReviewRiskReason(reason, input.DescriptionIssues)
+		if explanation == "" {
+			continue
+		}
+		group := codeReviewRiskReasonBlockerGroup(reason.Code)
+		if group == codeReviewBlockerGroupPolicy {
+			explanation = codeReviewExplanationWithSettingsLink(explanation, input.PolicySettingsURL, reason.Code)
+		}
+		grouped[group] = append(grouped[group], explanation)
+	}
+
+	sections := make([]string, 0, len(grouped))
+	for _, group := range codeReviewBlockerGroupOrder {
+		explanations := grouped[group]
+		if len(explanations) == 0 {
+			continue
+		}
+		var section strings.Builder
+		section.WriteString("**" + string(group) + ":**\n")
+		displayed := explanations
+		if len(displayed) > maxCodeReviewReasonsPerGroup {
+			displayed = displayed[:maxCodeReviewReasonsPerGroup]
+		}
+		for _, explanation := range displayed {
+			section.WriteString("- " + explanation + "\n")
+		}
+		if hidden := len(explanations) - len(displayed); hidden > 0 {
+			section.WriteString(fmt.Sprintf("- %d more %s listed in the full review.\n", hidden, pluralizeCodeReviewWord(hidden, "blocker is", "blockers are")))
+		}
+		sections = append(sections, strings.TrimSpace(section.String()))
+	}
+	return sections
+}
+
+func codeReviewRiskReasonBlockerGroup(code CodeReviewRiskReasonCode) codeReviewBlockerGroup {
+	switch code {
+	case CodeReviewRiskReasonReviewerDisabled,
+		CodeReviewRiskReasonFilesLimitExceeded,
+		CodeReviewRiskReasonLinesLimitExceeded,
+		CodeReviewRiskReasonChecksFailing,
+		CodeReviewRiskReasonRequiredCheckFailing,
+		CodeReviewRiskReasonDescriptionFailed,
+		CodeReviewRiskReasonBranchOutOfDate,
+		CodeReviewRiskReasonForkIneligible,
+		CodeReviewRiskReasonAuthorIneligible,
+		CodeReviewRiskReasonSensitivePath,
+		CodeReviewRiskReasonPathOutsideScope,
+		CodeReviewRiskReasonBlockedPath,
+		CodeReviewRiskReasonPolicyPathChanged,
+		CodeReviewRiskReasonExcludedCategory:
+		return codeReviewBlockerGroupPolicy
+	case CodeReviewRiskReasonBlockingFindings,
+		CodeReviewRiskReasonReviewerDisagreement,
+		CodeReviewRiskReasonScopeMismatch,
+		CodeReviewRiskReasonUnresolvedUncertainty,
+		CodeReviewRiskReasonPromptInjection,
+		CodeReviewRiskReasonHeadChanged,
+		CodeReviewRiskReasonOrchestratorContextStale:
+		return codeReviewBlockerGroupFinding
+	case CodeReviewRiskReasonUnresolvedHumanReview,
+		CodeReviewRiskReasonReviewerQuorum,
+		CodeReviewRiskReasonOrchestratorEscalation,
+		CodeReviewRiskReasonArchitecture,
+		CodeReviewRiskReasonOwnership,
+		CodeReviewRiskReasonOperationalRisk,
+		CodeReviewRiskReasonSensitiveChange,
+		CodeReviewRiskReasonPolicyRequirement:
+		return codeReviewBlockerGroupJudgment
+	default:
+		// Unknown future reasons fail closed into human judgment instead of
+		// disappearing from a non-approval explanation.
+		return codeReviewBlockerGroupJudgment
+	}
+}
+
+func codeReviewRiskReasonIsReviewIssue(code CodeReviewRiskReasonCode) bool {
+	return code == CodeReviewRiskReasonContextUnavailable || code == CodeReviewRiskReasonOrchestratorSynthesisInvalid
+}
+
+func codeReviewActionableRiskReasons(reasons []CodeReviewRiskReason) []CodeReviewRiskReason {
+	actionable := make([]CodeReviewRiskReason, 0, len(reasons))
+	for _, reason := range reasons {
+		if !codeReviewRiskReasonIsReviewIssue(reason.Code) {
+			actionable = append(actionable, reason)
+		}
+	}
+	return actionable
+}
+
+func codeReviewHasReviewIssue(reasons []CodeReviewRiskReason) bool {
+	for _, reason := range reasons {
+		if codeReviewRiskReasonIsReviewIssue(reason.Code) {
+			return true
+		}
+	}
+	return false
+}
+
+func codeReviewReviewIssueSection(reasons []CodeReviewRiskReason, descriptionIssues []string) string {
+	var section strings.Builder
+	for _, reason := range reasons {
+		if !codeReviewRiskReasonIsReviewIssue(reason.Code) {
+			continue
+		}
+		explanation := humanizeCodeReviewRiskReason(reason, descriptionIssues)
+		if explanation == "" {
+			continue
+		}
+		if section.Len() == 0 {
+			section.WriteString("**143 review issues:**\n")
+		}
+		section.WriteString("- " + explanation + "\n")
+	}
+	return strings.TrimSpace(section.String())
+}
+
+func codeReviewExplanationWithSettingsLink(explanation, settingsURL string, code CodeReviewRiskReasonCode) string {
+	settingsURL = strings.TrimSpace(settingsURL)
+	if settingsURL == "" {
+		return explanation
+	}
+	if fragment := codeReviewPolicySettingFragment(code); fragment != "" {
+		settingsURL = strings.SplitN(settingsURL, "#", 2)[0] + "#" + fragment
+	}
+	return explanation + " [View policy setting](" + settingsURL + ")"
+}
+
+func codeReviewPolicySettingFragment(code CodeReviewRiskReasonCode) string {
+	switch code {
+	case CodeReviewRiskReasonFilesLimitExceeded:
+		return "policy-max-files-changed"
+	case CodeReviewRiskReasonLinesLimitExceeded:
+		return "policy-max-lines-changed"
+	default:
+		return ""
+	}
+}
+
+func codeReviewBlockerCount(reasons []CodeReviewRiskReason, blockingFindings []CodeReviewFinding) int {
+	count := 0
+	for _, reason := range reasons {
+		if codeReviewRiskReasonIsReviewIssue(reason.Code) {
+			continue
+		}
+		if reason.Code == CodeReviewRiskReasonBlockingFindings && len(blockingFindings) > 0 {
+			count += len(blockingFindings)
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+func codeReviewAdvisoryFindingsSection(findings []CodeReviewFinding) string {
+	var section strings.Builder
+	section.WriteString("<details>\n")
+	section.WriteString(fmt.Sprintf("<summary><strong>Advisory findings</strong> (%d non-blocking)</summary>\n\n", len(findings)))
+	// groupedCodeReviewFindings bounds the inlined bullets and reports the
+	// remainder, so the disclosure cannot grow past the GitHub body limit.
+	for _, finding := range groupedCodeReviewFindings(findings) {
+		section.WriteString("- " + finding + "\n")
+	}
+	section.WriteString("\nP2 and P3 observations do not affect the approval decision.\n")
+	section.WriteString("</details>")
+	return section.String()
 }
 
 func codeReviewRiskReasonExplanations(reasons []CodeReviewRiskReason, descriptionIssues []string) []string {
@@ -222,11 +428,10 @@ func codeReviewRiskReasonExplanations(reasons []CodeReviewRiskReason, descriptio
 			explanations = append(explanations, explanation)
 		}
 	}
-	const maxReasonsInReviewBody = 4
-	if len(explanations) > maxReasonsInReviewBody {
-		additional := len(explanations) - maxReasonsInReviewBody
+	if len(explanations) > maxCodeReviewReasonsPerGroup {
+		additional := len(explanations) - maxCodeReviewReasonsPerGroup
 		explanations = append(
-			explanations[:maxReasonsInReviewBody],
+			explanations[:maxCodeReviewReasonsPerGroup],
 			fmt.Sprintf("%d more %s listed in the full review.", additional, pluralizeCodeReviewWord(additional, "blocker is", "blockers are")),
 		)
 	}
@@ -305,8 +510,11 @@ func humanizeCodeReviewRiskReason(reason CodeReviewRiskReason, descriptionIssues
 	return codeReviewSentence(reason.Message())
 }
 
+// codeReviewExplicitHumanReviewExplanation renders an orchestrator-authored
+// human-review reason. The detail is model output derived from PR content, so
+// it is escaped exactly like finding text before reaching a GitHub comment.
 func codeReviewExplicitHumanReviewExplanation(kind, detail string) string {
-	detail = strings.TrimSpace(detail)
+	detail = codeReviewUntrustedMarkdownInline(detail)
 	if detail == "" {
 		return "Human review is required for " + kind + "."
 	}
@@ -377,13 +585,13 @@ func groupedCodeReviewFindings(findings []CodeReviewFinding) []string {
 	}
 	out := make([]string, 0, len(sorted))
 	for _, finding := range sorted {
-		summary := strings.TrimSpace(finding.Summary)
+		summary := codeReviewUntrustedMarkdownInline(finding.Summary)
 		if summary == "" {
 			continue
 		}
 		prefix := string(finding.Severity)
 		if finding.Path != nil && strings.TrimSpace(*finding.Path) != "" {
-			coordinate := strings.TrimSpace(*finding.Path)
+			coordinate := codeReviewUntrustedMarkdownInline(*finding.Path)
 			if finding.StartLine != nil && *finding.StartLine > 0 {
 				coordinate = fmt.Sprintf("%s:%d", coordinate, *finding.StartLine)
 			}
@@ -396,6 +604,21 @@ func groupedCodeReviewFindings(findings []CodeReviewFinding) []string {
 		out = append(out, fmt.Sprintf("%d additional findings are available in the review session", len(findings)-len(sorted)))
 	}
 	return out
+}
+
+func codeReviewUntrustedMarkdownInline(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	return strings.NewReplacer(
+		"\\", "\\\\",
+		"`", "\\`",
+		"*", "\\*",
+		"_", "\\_",
+		"~", "\\~",
+		"[", "\\[",
+		"]", "\\]",
+		"<", "&lt;",
+		">", "&gt;",
+	).Replace(value)
 }
 
 func SelectCodeReviewInlineFindings(findings []CodeReviewFinding, limit int) []CodeReviewFinding {

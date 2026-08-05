@@ -29,6 +29,7 @@ func TestGenerateSkillsDoc_WithIntegrations(t *testing.T) {
 	require.NotContains(t, doc, "linear_create_task", "skills doc should not mention old flat command names")
 	require.NotContains(t, doc, "143-tools <tool_name>", "skills doc should not teach old flat command shape")
 	require.Contains(t, doc, "Run `143-tools <namespace> --help`", "skills doc should guide agents toward lazy discovery")
+	require.Contains(t, doc, "`pr`: 143 pull requests (`create`, `update`)", "skills doc should advertise first-class Pull Request updates")
 }
 
 func TestGenerateSkillsDoc_Empty(t *testing.T) {

@@ -922,7 +922,7 @@ func TestWebhook_CodeReviewReassessmentUsesSameKeyForEquivalentDeliveries(t *tes
 	now := time.Now().UTC()
 	metadata := &codeReviewWebhookMetadataStore{latest: models.CodeReviewSessionMetadata{
 		ID: uuid.New(), SessionID: priorSessionID, RepositoryID: repoID, PullRequestID: prID, PolicyID: policyID,
-		HeadSHA: "head-sha", TriggerSource: models.CodeReviewTriggerSourceTeamReviewer,
+		HeadSHA: "previous-head-sha", TriggerSource: models.CodeReviewTriggerSourceTeamReviewer,
 		Status: models.CodeReviewSessionStatusCompleted, ReviewOutputKey: "prior-output",
 	}}
 	jobs := &codeReviewWebhookJobStore{jobID: uuid.New()}

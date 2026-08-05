@@ -78,6 +78,17 @@ type StartPreviewOptions struct {
 	SessionID    uuid.UUID
 	ConfigDigest string
 	ExtraEnv     map[string]string
+	// RetainedSandbox asserts that this start is reusing the same sandbox
+	// filesystem as its previous run, including both WorkDir and HomeDir. It
+	// lets install caching skip remote HomeDir restores that cannot add data.
+	// Snapshot-backed starts must leave this false because startup snapshots
+	// contain WorkDir only.
+	RetainedSandbox bool
+	// SkipServiceBuild is reserved for an exact-revision warm resume whose
+	// retained sandbox already completed every configured service build. Normal
+	// starts and recycles must leave this false. Service start commands remain
+	// responsible for detecting unexpectedly missing artifacts.
+	SkipServiceBuild bool
 }
 
 // PreviewHandle is returned by StartPreview and contains the information

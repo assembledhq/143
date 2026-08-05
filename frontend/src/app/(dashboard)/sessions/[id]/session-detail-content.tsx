@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -88,6 +88,7 @@ import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
+import { SessionActivityTimeline } from "@/components/session-activity-timeline";
 import { ContextHeader } from "@/components/context-header";
 import { StatusLabel } from "@/components/status-label";
 import { StatusIndicator } from "@/components/status-indicator";
@@ -95,6 +96,9 @@ import { SessionComposerAttachmentMenu } from "@/components/session-composer-att
 import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
 import { useSessionComposerSlashCommands } from "@/hooks/use-session-composer-slash-commands";
 import { useFileDropzone } from "@/hooks/use-file-dropzone";
+import { useSessionActivityDetail } from "@/hooks/use-session-activity-detail";
+import { useSessionActivityCapsulesEnabled } from "@/hooks/use-session-activity-capsules-enabled";
+import { useTranscriptPrependCompensation } from "@/hooks/use-transcript-prepend-compensation";
 import {
   COMPOSER_TRIGGER_SPECS,
   findActiveTrigger,
@@ -175,6 +179,7 @@ import {
   type UseSessionKeyboardShortcutsOptions,
 } from "@/hooks/use-session-keyboard-shortcuts";
 import { prMergedAccent } from "@/lib/pr-status-styles";
+import { recordSessionActivityEvent } from "@/lib/session-activity-events";
 import { changesetPublicationBlocker, continueFromPRBranchMessage, deriveCreatePRActionState, derivePushChangesActionState, hasRepairableFailedChecks, prHealthBlocksPRActions } from "@/lib/session-pr-action-state";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { isProvisionalSessionDetail } from "@/lib/session-detail-cache";
@@ -213,6 +218,7 @@ import {
   mergeSessionDetailStatusUpdate,
   mergeSessionLogListResponse,
   statusConfig,
+  shouldInvalidateForActivityLifecycleEvent,
   trackInFlightAgentUpdate,
   type PendingThreadPreview,
 } from "./session-detail-state";
@@ -305,6 +311,32 @@ function publicationErrorDescription(publication: SessionPublication) {
   }
 }
 
+// Every status block in the overview leads with a 16px icon and a title on one
+// row, then full-width body copy underneath. Sharing the row keeps the icon gap
+// and title type from drifting apart across the places that render it.
+function SectionHeading({
+  icon,
+  iconClassName,
+  iconSlot,
+  title,
+}: {
+  icon: ReactNode;
+  iconClassName?: string;
+  iconSlot?: string;
+  title: ReactNode;
+}) {
+  return (
+    <div className="flex items-center gap-1.5" data-slot="section-heading">
+      {/* Pin the glyph size here so a caller-supplied icon cannot reintroduce
+          the size drift this component exists to prevent. */}
+      <span aria-hidden="true" data-slot={iconSlot} className={cn("shrink-0 [&_svg]:size-4", iconClassName)}>
+        {icon}
+      </span>
+      <p className="text-sm font-medium text-foreground">{title}</p>
+    </div>
+  );
+}
+
 function PublicationWorkflowCard({
   publication,
   reviewLoop,
@@ -395,18 +427,14 @@ function PublicationWorkflowCard({
   return (
     <Card className={cn("border-border/60", needsAttention && "border-warning/50 bg-warning/5")} data-testid="publication-workflow-card">
       <CardContent className="space-y-3 p-4">
-        <div className="flex items-start gap-3">
-          <div className={cn(
-            "flex h-8 w-8 shrink-0 items-center justify-center rounded-full",
-            settled ? "bg-success/10 text-success" : needsAttention ? "bg-warning/10 text-warning" : "bg-info/10 text-info",
-          )}>
-            {settled ? <CheckCircle2 className="h-4 w-4" /> : needsAttention ? <AlertTriangle className="h-4 w-4" /> : <Loader2 className="h-4 w-4 animate-spin" />}
-          </div>
-          <div className="min-w-0 flex-1 space-y-1">
-            <p className="text-sm font-medium text-foreground">{title}</p>
-            <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
-            {published && prNumber ? <p className="text-xs text-muted-foreground">Pull request #{prNumber}</p> : null}
-          </div>
+        <div className="space-y-1.5">
+          <SectionHeading
+            icon={settled ? <CheckCircle2 className="h-4 w-4" /> : needsAttention ? <AlertTriangle className="h-4 w-4" /> : <Loader2 className="h-4 w-4 animate-spin" />}
+            iconClassName={settled ? "text-success" : needsAttention ? "text-warning" : "text-info"}
+            title={title}
+          />
+          <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
+          {published && prNumber ? <p className="text-xs text-muted-foreground">Pull request #{prNumber}</p> : null}
         </div>
         <div className="flex flex-wrap gap-2">
           {published && prURL ? (
@@ -722,26 +750,27 @@ function ThreadFailureDetailsCard({ thread }: { thread: SessionThread }) {
   );
 }
 
+// Rule drawn above a stacked Overview block. Every block above any given one is
+// conditional (no PR, no result summary, a single changeset, …), so
+// `first:border-t-0` keeps the rule from drawing across the top of the panel
+// with nothing above it. Call sites pair this with their own `first:pt-*`: the
+// padding the rule collapses back to is whatever that block already had.
+const OVERVIEW_DIVIDER_CLASSNAME = "border-t border-border/60 pt-4 first:border-t-0";
+
 function SessionResultSection({ summary, divided }: { summary?: string; divided: boolean }) {
   if (!summary) return null;
 
   return (
+    // Looser than the other status blocks on purpose: the body here is a
+    // markdown block rather than a one-line caption.
     <section
       aria-label="Session result"
-      className={cn(divided && "border-t border-border/60 pt-4")}
+      className={cn("space-y-2", divided && OVERVIEW_DIVIDER_CLASSNAME, divided && "first:pt-0")}
       data-testid="session-result-section"
     >
-      <div className="flex items-start gap-2.5">
-        <div
-          aria-hidden="true"
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-success/10 text-success"
-        >
-          <CheckCircle2 className="h-4 w-4" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium text-foreground">Result</div>
-          <LazyMarkdownContent content={summary} className="mt-2 text-xs" />
-        </div>
+      <SectionHeading icon={<CheckCircle2 className="h-4 w-4" />} iconClassName="text-success" title="Result" />
+      <div data-slot="session-result-body">
+        <LazyMarkdownContent content={summary} className="text-xs" />
       </div>
     </section>
   );
@@ -791,7 +820,11 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
       : "System";
 
   return (
-    <div className="space-y-4">
+    // Fragment rather than a wrapper: the parent panel is already `space-y-4`,
+    // so flattening keeps the same spacing while letting the divider below
+    // resolve `first:` against the whole Overview panel instead of against a
+    // nested div where the vitals block is always the first child.
+    <>
       {isDeployRecovery && (
         <Card className="border-l-2 border-l-warning bg-warning/5">
           <CardHeader className="pb-2">
@@ -928,7 +961,10 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
       )}
 
       {/* Session vitals — identity row (status + agent + who triggered) */}
-      <div className="space-y-1.5">
+      <div
+        data-testid="session-overview-vitals"
+        className={cn("space-y-1.5", OVERVIEW_DIVIDER_CLASSNAME, "first:pt-0")}
+      >
         <div className="flex items-center gap-x-3 gap-y-1 flex-wrap text-xs">
           <StatusLabel
             label={operationalStatus.label}
@@ -987,12 +1023,20 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
                 <>Queued {formatTimeAgo(session.created_at)}</>
               )}
             </span>
-            <AuditLogTrigger
-              filters={{ session_id: session.id }}
-              members={members}
-              title="Session activity"
-              variant="inline"
-            />
+            {/*
+              Suppressed on the two success terminals only: their last audit
+              entry restates the "Completed …" caption immediately to its left.
+              Failed/cancelled/skipped sessions keep the trigger because their
+              activity trail is what explains how they got there.
+            */}
+            {session.status !== "completed" && session.status !== "pr_created" && (
+              <AuditLogTrigger
+                filters={{ session_id: session.id }}
+                members={members}
+                title="Session activity"
+                variant="inline"
+              />
+            )}
           </div>
         </div>
       </div>
@@ -1021,7 +1065,7 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
           </Card>
         )}
 
-    </div>
+    </>
   );
 }
 
@@ -2327,6 +2371,8 @@ function ChatPanel({
   onRegisterKeyboardControls,
 }: ChatPanelProps) {
   const queryClient = useQueryClient();
+  const { detail: activityDetail, setDetail: setActivityDetail, mutation: activityDetailMutation } = useSessionActivityDetail();
+  const { enabled: activityCapsulesEnabled } = useSessionActivityCapsulesEnabled();
   const [dismissedHumanInputIds, setDismissedHumanInputIds] = useState<Set<string>>(() => new Set());
   const [newerThreadMessagePages, setNewerThreadMessagePages] = useState<SessionTranscriptWindowResponse[]>([]);
   const [isFetchingNewerThreadMessages, setIsFetchingNewerThreadMessages] = useState(false);
@@ -2334,12 +2380,15 @@ function ChatPanel({
   const isNearBottomRef = useRef(false);
   const initialAnchorAppliedRef = useRef(false);
   const initialAnchorCancelledRef = useRef(false);
-  const olderMessagesPrependSnapshotRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  const anchorFailureReportedRef = useRef(false);
   const saveScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttempts = useRef(0);
+  const lifecycleEventIDsRef = useRef<Set<string>>(new Set());
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [userScrollEpoch, setUserScrollEpoch] = useState(0);
+  const userScrollIntentRef = useRef(false);
   const isDocumentVisible = useDocumentVisible();
 
   const activeThreadId = activeThread?.id;
@@ -2831,16 +2880,17 @@ function ChatPanel({
     }
   }, []);
 
+  const captureOlderMessagesPosition = useTranscriptPrependCompensation({
+    scrollContainerRef: scrollRef,
+    isFetching: threadTranscriptQuery.isFetchingNextPage,
+    contentVersion: threadMessages.length,
+    detail: activityDetail,
+  });
+
   const loadOlderThreadMessages = useCallback(() => {
-    const el = scrollRef.current;
-    if (el) {
-      olderMessagesPrependSnapshotRef.current = {
-        scrollHeight: el.scrollHeight,
-        scrollTop: el.scrollTop,
-      };
-    }
+    captureOlderMessagesPosition();
     void threadTranscriptQuery.fetchNextPage();
-  }, [threadTranscriptQuery]);
+  }, [captureOlderMessagesPosition, threadTranscriptQuery]);
 
   const loadNewerThreadMessages = useCallback(() => {
     if (!activeThreadId || !nextNewerThreadCursor || isFetchingNewerThreadMessages) return;
@@ -2855,16 +2905,6 @@ function ChatPanel({
       setIsFetchingNewerThreadMessages(false);
     });
   }, [activeThreadId, isFetchingNewerThreadMessages, nextNewerThreadCursor, sessionId]);
-
-  useLayoutEffect(() => {
-    const snapshot = olderMessagesPrependSnapshotRef.current;
-    const el = scrollRef.current;
-    if (!snapshot || !el || threadTranscriptQuery.isFetchingNextPage) {
-      return;
-    }
-    olderMessagesPrependSnapshotRef.current = null;
-    el.scrollTop = snapshot.scrollTop + (el.scrollHeight - snapshot.scrollHeight);
-  }, [threadMessages.length, threadTranscriptQuery.isFetchingNextPage]);
 
   const getEntryContainerProps = useCallback(
     (_entry: TimelineEntry, index: number) =>
@@ -3048,6 +3088,17 @@ function ChatPanel({
       addSSEListener(eventSource, SSE_EVENT.THREAD_RUNTIME_UPDATED, mergeThreadRuntimeUpdate);
       addSSEListener(eventSource, SSE_EVENT.SESSION_WORKSPACE_GENERATION_CHANGED, mergeWorkspaceGenerationUpdate);
 
+      const reconcileActivityLifecycle = (event: { id: string; thread_id: string }) => {
+        if (shouldInvalidateForActivityLifecycleEvent(lifecycleEventIDsRef.current, event, activeThreadId)) {
+          invalidateActiveThreadTranscript();
+        }
+      };
+      addSSEListener(eventSource, SSE_EVENT.ACTIVITY_PHASE_STARTED, reconcileActivityLifecycle);
+      addSSEListener(eventSource, SSE_EVENT.ACTIVITY_PHASE_TERMINAL, reconcileActivityLifecycle);
+      addSSEListener(eventSource, SSE_EVENT.INBOX_DELIVERY_ACKNOWLEDGED, reconcileActivityLifecycle);
+      addSSEListener(eventSource, SSE_EVENT.INBOX_DELIVERY_STARTED, reconcileActivityLifecycle);
+      addSSEListener(eventSource, SSE_EVENT.INBOX_DELIVERY_ABANDONED, reconcileActivityLifecycle);
+
       addSSEListener(eventSource, SSE_EVENT.DONE, (updated) => {
         mergeSessionStatusUpdate(updated);
         eventSource?.close();
@@ -3096,6 +3147,10 @@ function ChatPanel({
       cancelPendingInitialAnchorRestore();
     }
     syncScrollState(el);
+    if (userScrollIntentRef.current && !isNearBottom(el)) {
+      setUserScrollEpoch((current) => current + 1);
+    }
+    userScrollIntentRef.current = false;
     if (activeThreadId && isNearBottom(el) && hasNewerThreadMessages && !isFetchingNewerThreadMessages) {
       loadNewerThreadMessages();
     }
@@ -3105,6 +3160,7 @@ function ChatPanel({
   useEffect(() => {
     initialAnchorAppliedRef.current = false;
     initialAnchorCancelledRef.current = false;
+    anchorFailureReportedRef.current = false;
   }, [activeThreadId, sessionId]);
 
   useEffect(() => {
@@ -3145,6 +3201,15 @@ function ChatPanel({
         syncScrollState(el);
         initialAnchorAppliedRef.current = true;
         return;
+      }
+      if (!anchorFailureReportedRef.current) {
+        anchorFailureReportedRef.current = true;
+        recordSessionActivityEvent({
+          event: "scroll_restore_failed",
+          detail: activityDetail,
+          trigger: "anchor",
+          viewport_class: typeof window !== "undefined" && window.innerWidth < 768 ? "mobile" : "desktop",
+        });
       }
     }
 
@@ -3193,7 +3258,7 @@ function ChatPanel({
 
     scrollToLiveEdgePosition();
     initialAnchorAppliedRef.current = true;
-  }, [activeThreadId, hasLoadedTimelineInputs, initialThreadAnchorPosition, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, threadTranscriptQuery, timelineEntries, tryApplyDefaultEntryAnchor, viewerScope]);
+  }, [activeThreadId, activityDetail, hasLoadedTimelineInputs, initialThreadAnchorPosition, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, threadTranscriptQuery, timelineEntries, tryApplyDefaultEntryAnchor, viewerScope]);
 
   // Only auto-scroll to bottom when new entries arrive if the user is already near the bottom.
   useEffect(() => {
@@ -3201,6 +3266,33 @@ function ChatPanel({
       scrollToLiveEdgePosition();
     }
   }, [scrollToLiveEdgePosition, timelineEntries.length]);
+
+  const chatTimelineProps = {
+    entries: timelineEntries,
+    isRunning,
+    recoveryActive,
+    stoppingLabel: isStopRequested ? "Stopping agent..." : undefined,
+    stoppedLabel: session.status === "cancelled" || activeThread?.status === "cancelled"
+      ? "Session stopped"
+      : stopOutcome === "checkpointed"
+        ? "Stopped. You can send a follow-up when ready."
+        : undefined,
+    diffStats: session.diff_stats,
+    onDiffClick,
+    onApprovePlan: canSendMessage ? onApprovePlan : undefined,
+    onAdjustPlan: canSendMessage ? onAdjustPlan : undefined,
+    humanInputSubmittingId: answerHumanInputMutation.isPending
+      ? answerHumanInputMutation.variables?.request.id ?? null
+      : cancelHumanInputMutation.isPending
+        ? cancelHumanInputMutation.variables?.id ?? null
+        : null,
+    autoOpenHumanInputId,
+    humanInputAnswerable: canAnswerHumanInput,
+    onAnswerHumanInput: handleAnswerHumanInput,
+    onCancelHumanInput: handleCancelHumanInput,
+    onDismissHumanInputAutoOpen: handleDismissHumanInputAutoOpen,
+    getEntryContainerProps,
+  } satisfies ComponentProps<typeof ChatTimeline>;
 
   return (
     <div className="relative flex flex-col h-full">
@@ -3221,6 +3313,13 @@ function ChatPanel({
       <div
         ref={scrollRef}
         onScroll={handleScroll}
+        onWheelCapture={() => { userScrollIntentRef.current = true; }}
+        onTouchMoveCapture={() => { userScrollIntentRef.current = true; }}
+        onKeyDownCapture={(event) => {
+          if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) {
+            userScrollIntentRef.current = true;
+          }
+        }}
         tabIndex={0}
         aria-label="Session conversation"
         data-session-transcript-scroll="true"
@@ -3248,37 +3347,37 @@ function ChatPanel({
                 </Button>
               </div>
             ) : null}
+            {activityCapsulesEnabled && activeThreadId ? (
+              <div className="flex justify-end pb-2">
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button type="button" variant="ghost" size="sm" disabled={activityDetailMutation.isPending}>
+                      Activity detail: {activityDetail === "detailed" ? "Detailed" : "Compact"}
+                      <ChevronDown className="h-3.5 w-3.5" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onSelect={() => setActivityDetail("compact")}>Compact</DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => setActivityDetail("detailed")}>Detailed</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            ) : null}
             {showFreshThreadShell ? <FreshThreadShell /> : null}
-            <ChatTimeline
-              entries={timelineEntries}
-              isRunning={isRunning}
-              recoveryActive={recoveryActive}
-              stoppingLabel={isStopRequested ? "Stopping agent..." : undefined}
-              stoppedLabel={
-                session.status === "cancelled" || activeThread?.status === "cancelled"
-                  ? "Session stopped"
-                  : stopOutcome === "checkpointed"
-                    ? "Stopped. You can send a follow-up when ready."
-                    : undefined
-              }
-              diffStats={session.diff_stats}
-              onDiffClick={onDiffClick}
-              onApprovePlan={canSendMessage ? onApprovePlan : undefined}
-              onAdjustPlan={canSendMessage ? onAdjustPlan : undefined}
-              humanInputSubmittingId={
-                answerHumanInputMutation.isPending
-                  ? answerHumanInputMutation.variables?.request.id ?? null
-                  : cancelHumanInputMutation.isPending
-                    ? cancelHumanInputMutation.variables?.id ?? null
-                    : null
-              }
-              autoOpenHumanInputId={autoOpenHumanInputId}
-              humanInputAnswerable={canAnswerHumanInput}
-              onAnswerHumanInput={handleAnswerHumanInput}
-              onCancelHumanInput={handleCancelHumanInput}
-              onDismissHumanInputAutoOpen={handleDismissHumanInputAutoOpen}
-              getEntryContainerProps={getEntryContainerProps}
-            />
+            {activityCapsulesEnabled && activeThreadId ? (
+              <SessionActivityTimeline
+                {...chatTimelineProps}
+                turns={threadTranscriptTurns}
+                detailPreference={activityDetail}
+                anchorEntryId={initialThreadAnchorPosition?.anchor.kind === "entry" ? initialThreadAnchorPosition.anchor.id : newestThreadWindow?.meta.anchor_entry_id}
+                threadID={activeThreadId}
+                scrollContainerRef={scrollRef}
+                userScrollEpoch={userScrollEpoch}
+                atLiveEdge={!showJumpToLatest}
+              />
+            ) : (
+              <ChatTimeline {...chatTimelineProps} />
+            )}
             {activeThreadId && hasNewerThreadMessages ? (
               <div className="flex justify-center pt-2">
                 <Button
@@ -3325,22 +3424,18 @@ function PendingCapacityNotice({ maxConcurrentRuns }: { maxConcurrentRuns?: numb
   return (
     <div className="flex justify-center py-8">
       <Card className="w-full max-w-[34rem] border-amber-200/70 bg-amber-50/70 shadow-none dark:border-amber-900/60 dark:bg-amber-950/20">
-        <CardContent className="flex gap-3 p-4">
-          <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-amber-200 bg-background text-amber-700 dark:border-amber-900/70 dark:text-amber-300">
-            <Clock className="h-4 w-4" aria-hidden />
+        <CardContent className="space-y-1.5 p-4" data-testid="pending-capacity-body">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Clock className="h-4 w-4 shrink-0 text-amber-700 dark:text-amber-300" aria-hidden />
+            <p className="text-sm font-semibold text-foreground">Waiting for capacity</p>
+            <Badge variant="outline" className="border-amber-300/80 bg-background/70 text-amber-800 dark:border-amber-800 dark:text-amber-300">
+              Max concurrency reached
+            </Badge>
           </div>
-          <div className="min-w-0 space-y-1.5">
-            <div className="flex flex-wrap items-center gap-2">
-              <p className="text-sm font-semibold text-foreground">Waiting for capacity</p>
-              <Badge variant="outline" className="border-amber-300/80 bg-background/70 text-amber-800 dark:border-amber-800 dark:text-amber-300">
-                Max concurrency reached
-              </Badge>
-            </div>
-            <p className="text-sm text-muted-foreground">{limitText}</p>
-            <p className="text-sm text-muted-foreground">
-              This session will start automatically when another session finishes or the limit is raised.
-            </p>
-          </div>
+          <p className="text-sm text-muted-foreground">{limitText}</p>
+          <p className="text-sm text-muted-foreground">
+            This session will start automatically when another session finishes or the limit is raised.
+          </p>
         </CardContent>
       </Card>
     </div>
@@ -3484,6 +3579,59 @@ export function PullRequestList({
   );
 }
 
+type OverviewRowSlot = "overview-suggestion" | "overview-action" | "overview-review-status";
+
+// Shared chrome for the quiet, card-free Overview rows, so a suggestion, an
+// action and a status row cannot drift apart on spacing or typography. `slot`
+// names the row and its derived `-icon`/`-control` query hooks; it is applied
+// after the forwarded props, along with `className`, so callers can pass role
+// and aria attributes but cannot rename or restyle the row.
+function OverviewRow({
+  icon,
+  title,
+  description,
+  action,
+  divided = false,
+  slot,
+  ...regionProps
+}: {
+  icon: ReactNode;
+  title: string;
+  description: string;
+  action?: ReactNode;
+  divided?: boolean;
+  slot: OverviewRowSlot;
+} & Omit<ComponentProps<"section">, "title" | "children" | "className">) {
+  return (
+    <section
+      {...regionProps}
+      data-slot={slot}
+      className={cn(
+        "grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-1.5 gap-y-1.5 px-1 py-1.5",
+        divided && OVERVIEW_DIVIDER_CLASSNAME,
+        // Collapses back to the `py-1.5` above, not to zero, so a first-child
+        // divided row lines up with the undivided ones.
+        divided && "first:pt-1.5",
+      )}
+    >
+      <div
+        data-slot={`${slot}-icon`}
+        aria-hidden="true"
+        className="shrink-0 text-muted-foreground [&_svg]:size-4"
+      >
+        {icon}
+      </div>
+      <p className="col-start-2 row-start-1 text-xs font-medium text-foreground">{title}</p>
+      <p className="col-span-3 row-start-2 text-xs leading-relaxed text-muted-foreground">{description}</p>
+      {action != null ? (
+        <div data-slot={`${slot}-control`} className="col-start-3 row-start-1 shrink-0">
+          {action}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 export function ChangesetSplitPrompt({
   additions,
   filesChanged,
@@ -3503,77 +3651,25 @@ export function ChangesetSplitPrompt({
     : ` · ${filesChanged.toLocaleString()} ${filesChanged === 1 ? "file" : "files"}`;
 
   return (
-    <div
+    <OverviewRow
+      slot="overview-suggestion"
       role="region"
       aria-label="Pull request size suggestion"
-      data-slot="overview-suggestion"
-      className="flex items-center gap-2.5 px-1 py-1.5"
-    >
-      <div
-        data-slot="overview-suggestion-icon"
-        aria-hidden="true"
-        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"
-      >
-        <GitBranch className="h-4 w-4" />
-      </div>
-      <div className="min-w-0 flex-1">
-        <p className="text-xs font-medium text-foreground">
-          Large change · {additionCount.toLocaleString()} additions{fileLabel}
-        </p>
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          Split this diff into smaller, reviewable pull requests.
-        </p>
-      </div>
-      <Button
-        size="xs"
-        variant="ghost"
-        className="shrink-0"
-        disabled={requestSplitPending || !onRequestSplit}
-        onClick={onRequestSplit}
-      >
-        Split into PRs
-      </Button>
-    </div>
-  );
-}
-
-function AgentActionCard({
-  icon,
-  title,
-  description,
-  action,
-}: {
-  icon: ReactNode;
-  title: string;
-  description: string;
-  action: ReactNode;
-}) {
-  return (
-    // The container must live on an ancestor of the elements querying it: an
-    // element is never its own query container.
-    <Card className="@container/agent-action border-border/60">
-      <CardContent className="flex flex-col gap-3 p-4 @min-[24rem]/agent-action:flex-row @min-[24rem]/agent-action:items-center @min-[24rem]/agent-action:justify-between">
-        <div className="flex min-w-0 items-start gap-3">
-          <div
-            data-slot="agent-action-card-icon"
-            aria-hidden="true"
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"
-          >
-            {icon}
-          </div>
-          <div className="min-w-0">
-            <p className="text-sm font-medium text-foreground">{title}</p>
-            <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
-          </div>
-        </div>
-        <div
-          data-slot="agent-action-card-action"
-          className="ml-11 w-fit shrink-0 self-start @min-[24rem]/agent-action:ml-0 @min-[24rem]/agent-action:self-auto"
+      icon={<GitBranch className="h-4 w-4" />}
+      title={`Large change · ${additionCount.toLocaleString()} additions${fileLabel}`}
+      description="Split this diff into smaller, reviewable pull requests."
+      divided
+      action={(
+        <Button
+          size="xs"
+          variant="ghost"
+          disabled={requestSplitPending || !onRequestSplit}
+          onClick={onRequestSplit}
         >
-          {action}
-        </div>
-      </CardContent>
-    </Card>
+          Split into PRs
+        </Button>
+      )}
+    />
   );
 }
 
@@ -6436,9 +6532,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   };
   const detailActionSize = isMobileReviewViewport ? "xs" : "sm";
   const detailActionIconSize = isMobileReviewViewport ? "icon-xs" : "icon-sm";
-  // The PR summary that leads the Overview column. Built as a single value so
-  // the Result divider below is derived from whether this actually rendered
-  // instead of from a second copy of these conditions.
+  // The PR summary leads the Overview column so actionable publication state
+  // stays ahead of the agent's result summary.
   const prOverviewSection = !pullRequestId ? null : prStatus === "open" ? (
     prHealth ? (
       <PRHealthBanner
@@ -6496,32 +6591,47 @@ export function SessionDetailContent({ id }: { id: string }) {
       </section>
     ) : null
   ) : prStatus === "closed" ? (
-    <section className="flex items-start gap-2.5" data-slot="pr-closed-section">
-      <div aria-hidden="true" className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-        <XCircle className="h-4 w-4" />
-      </div>
-      <div className="min-w-0 space-y-1">
-        <div className="text-sm font-medium text-foreground">{closedPRLabel}</div>
-        <p className="text-xs text-foreground">{closedPRSummary}</p>
-        <p className="text-xs text-muted-foreground">
-          This pull request is no longer active. Create a follow-up revision if you want to ship a new attempt.
-        </p>
-      </div>
+    <section className="space-y-1.5" data-slot="pr-closed-section">
+      <SectionHeading
+        iconSlot="pr-closed-icon"
+        icon={<XCircle className="h-4 w-4" />}
+        iconClassName="text-muted-foreground"
+        title={closedPRLabel}
+      />
+      <p className="text-xs text-foreground">{closedPRSummary}</p>
+      <p className="text-xs text-muted-foreground">
+        This pull request is no longer active. Create a follow-up revision if you want to ship a new attempt.
+      </p>
     </section>
   ) : prStatus === "merged" ? (
-    <section className="flex items-start gap-2.5" data-slot="pr-merged-section">
-      <div aria-label="Merged PR status" className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-md", prMergedAccent.bg, prMergedAccent.text)}>
-        <CheckCircle2 className="h-4 w-4" />
-      </div>
-      <div className="min-w-0 space-y-1">
-        <div className="text-sm font-medium text-foreground">{mergedPRLabel}</div>
-        <p className="text-xs text-foreground">{mergedPRSummary}</p>
-        <p className="text-xs text-muted-foreground">
-          This change has landed. Open a follow-up session if you need to make another revision.
-        </p>
-      </div>
+    <section className="space-y-1.5" data-slot="pr-merged-section">
+      <SectionHeading
+        iconSlot="pr-merged-icon"
+        icon={<CheckCircle2 className="h-4 w-4" />}
+        iconClassName={prMergedAccent.text}
+        title={mergedPRLabel}
+      />
+      <p className="text-xs text-foreground">{mergedPRSummary}</p>
+      <p className="text-xs text-muted-foreground">
+        This change has landed. Open a follow-up session if you need to make another revision.
+      </p>
     </section>
   ) : null;
+  const showOverviewReviewSection = selectedIsPrimary &&
+    canManageSession &&
+    canUseNativeReviewLoop &&
+    !hasPR &&
+    !selectedPublicationOwnsActions &&
+    hasSessionChanges;
+  const showSelectedPullRequestPanel = Boolean(
+    (hasMultipleChangesets || selectedChangesetRecoveryMessage) && selectedChangeset,
+  );
+  const hasOverviewWorkflowBeforeResult = prOverviewSection !== null ||
+    hasMultipleChangesets ||
+    showOverviewReviewSection ||
+    shouldOfferChangesetSplit(session.diff_stats?.added) ||
+    showSelectedPullRequestPanel ||
+    Boolean(selectedPublication);
   // Right-panel content. Rendered inline on desktop and inside a bottom sheet
   // on mobile — the same JSX in both places so tab state stays consistent.
   const panelTabsEl = (
@@ -6715,7 +6825,6 @@ export function SessionDetailContent({ id }: { id: string }) {
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <div className="space-y-4">
           {prOverviewSection}
-          <SessionResultSection summary={session.result_summary} divided={prOverviewSection !== null} />
           <PullRequestList
             changesets={changesets}
             selectedID={selectedChangeset?.id ?? ""}
@@ -6742,36 +6851,30 @@ export function SessionDetailContent({ id }: { id: string }) {
               </CardContent>
             </Card>
           )}
-          {selectedIsPrimary && canManageSession && canUseNativeReviewLoop && !hasPR && !selectedPublicationOwnsActions && hasSessionChanges ? (
+          {showOverviewReviewSection ? (
             reviewLoopRunning ? (
-              <Card className="border-border/60">
-                <CardContent className="p-4">
-                  <div className="flex min-w-0 items-start gap-2">
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    </div>
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium text-foreground">
-                        Fixing with {AGENTS_BY_KEY[latestReviewLoop?.agent_type ?? ""]?.label ?? "review agent"}
-                      </p>
-                      <p className="text-xs leading-relaxed text-muted-foreground">
-                        The review loop is checking the changes and applying fixes.
-                      </p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
+              <OverviewRow
+                slot="overview-review-status"
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
+                aria-label="Review in progress"
+                icon={<Loader2 className="h-4 w-4 animate-spin" />}
+                title={`Fixing with ${AGENTS_BY_KEY[latestReviewLoop?.agent_type ?? ""]?.label ?? "review agent"}`}
+                description="The review loop is checking the changes and applying fixes."
+              />
             ) : (
-              <AgentActionCard
+              <OverviewRow
+                slot="overview-action"
                 icon={<ScanSearch className="h-4 w-4" />}
-                title="Review before creating a PR?"
-                description="Ask a review agent to check the current diff and apply fixes."
+                title="Review before creating a PR"
+                description="Check the current diff and apply any fixes before publishing."
                 action={(
                   <DisabledTooltip disabled={reviewActionDisabled} content={reviewActionDisabledReason}>
                     <Button
                       type="button"
-                      variant="outline"
-                      size="sm"
+                      variant="ghost"
+                      size="xs"
                       disabled={reviewActionDisabled}
                       title={reviewActionDisabledReason}
                       onClick={() => setReviewConfigOpen(true)}
@@ -6894,6 +6997,10 @@ export function SessionDetailContent({ id }: { id: string }) {
               onRetry={() => createPRMutation.mutate(undefined)}
             />
           ) : null}
+          <SessionResultSection
+            summary={session.result_summary}
+            divided={hasOverviewWorkflowBeforeResult}
+          />
           <OverviewTab session={session} activeThread={activeThread} members={members} prStatus={prStatus} />
         </div>
       </TabsContent>

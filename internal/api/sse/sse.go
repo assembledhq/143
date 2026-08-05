@@ -30,6 +30,11 @@ const (
 	EventThreadRuntimeUpdated EventType = "thread.runtime.updated"
 	// EventSessionWorkspaceGenerationChanged is sent when a session workspace generation advances.
 	EventSessionWorkspaceGenerationChanged EventType = "session.workspace.generation_changed"
+	EventActivityPhaseStarted              EventType = "session_activity_phase.started"
+	EventActivityPhaseTerminal             EventType = "session_activity_phase.terminal"
+	EventInboxDeliveryAcknowledged         EventType = "thread_inbox_delivery.acknowledged"
+	EventInboxDeliveryStarted              EventType = "thread_inbox_delivery.started"
+	EventInboxDeliveryAbandoned            EventType = "thread_inbox_delivery.abandoned"
 )
 
 // Writer wraps an http.ResponseWriter that supports SSE streaming.

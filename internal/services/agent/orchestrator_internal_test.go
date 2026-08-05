@@ -1733,34 +1733,39 @@ func (s *internalReviewBundleStore) Delete(_ context.Context, key string) error 
 func TestStreamLogs_CarriesThreadID(t *testing.T) {
 	t.Parallel()
 
-	orgID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
-	sessionID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
-	threadID := uuid.MustParse("33333333-3333-3333-3333-333333333333")
-	phaseID := uuid.MustParse("44444444-4444-4444-4444-444444444444")
-
-	logs := &testInternalSessionLogStore{}
-	orch := &Orchestrator{
-		agentRunLogs: logs,
-		logger:       zerolog.Nop(),
+	tests := []struct {
+		name      string
+		agentType models.AgentType
+	}{
+		{name: "Codex", agentType: models.AgentTypeCodex},
+		{name: "Claude Code", agentType: models.AgentTypeClaudeCode},
+		{name: "OpenCode", agentType: models.AgentTypeOpenCode},
+		{name: "Amp", agentType: models.AgentTypeAmp},
+		{name: "Pi", agentType: models.AgentTypePi},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	logCh := make(chan LogEntry, 1)
-	logCh <- LogEntry{
-		Timestamp: time.Now(),
-		Level:     "output",
-		Message:   "streamed message",
+			orgID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+			sessionID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+			threadID := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+			phaseID := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+			logs := &testInternalSessionLogStore{}
+			orch := &Orchestrator{agentRunLogs: logs, logger: zerolog.Nop()}
+			logCh := make(chan LogEntry, 1)
+			logCh <- LogEntry{Timestamp: time.Now(), Level: "output", Message: "streamed message"}
+			close(logCh)
+
+			orch.streamLogs(context.Background(), sessionID, orgID, tt.agentType, TranscriptWriteContext{ThreadID: &threadID, TurnNumber: 2, ActivityPhaseID: &phaseID}, logCh, nil)
+
+			require.Equal(t, []models.SessionLog{{
+				SessionID: sessionID, OrgID: orgID, ThreadID: &threadID,
+				Level: models.SessionLogLevelOutput, Message: "streamed message",
+				TurnNumber: 2, ActivityPhaseID: &phaseID,
+			}}, logs.logs, "every configured provider should persist the shared transcript phase identity")
+		})
 	}
-	close(logCh)
-
-	orch.streamLogs(context.Background(), sessionID, orgID, models.AgentTypeClaudeCode, TranscriptWriteContext{ThreadID: &threadID, TurnNumber: 2, ActivityPhaseID: &phaseID}, logCh, nil)
-
-	require.Len(t, logs.logs, 1, "streamLogs should persist the log entry")
-	require.NotNil(t, logs.logs[0].ThreadID, "persisted log should preserve the thread id")
-	require.Equal(t, threadID, *logs.logs[0].ThreadID, "persisted log should use the provided thread id")
-	require.Equal(t, 2, logs.logs[0].TurnNumber, "persisted log should keep the turn number")
-	require.Equal(t, &phaseID, logs.logs[0].ActivityPhaseID, "persisted log should preserve the active phase id")
-	require.Equal(t, "streamed message", logs.logs[0].Message, "persisted log should keep the message content")
-	require.Nil(t, logs.logs[0].Metadata, "persisted log should leave absent metadata as SQL null")
 }
 
 func TestHandleHumanInputRequest_CarriesActivityPhaseID(t *testing.T) {
@@ -1773,7 +1778,7 @@ func TestHandleHumanInputRequest_CarriesActivityPhaseID(t *testing.T) {
 	store := &testInternalHumanInputStore{}
 	orch := &Orchestrator{humanInputRequests: store, logger: zerolog.Nop()}
 
-	created := orch.handleHumanInputRequest(
+	created, err := orch.handleHumanInputRequest(
 		context.Background(),
 		sessionID,
 		orgID,
@@ -1782,10 +1787,44 @@ func TestHandleHumanInputRequest_CarriesActivityPhaseID(t *testing.T) {
 		&HumanInputRequest{Kind: models.HumanInputRequestKindFreeText, Title: "Need input", Body: "Choose"},
 	)
 
+	require.NoError(t, err, "human input request should persist without error")
 	require.NotNil(t, created, "human input request should be persisted")
 	require.Equal(t, &phaseID, created.ActivityPhaseID, "human input request should preserve the active phase id")
 	require.Equal(t, &threadID, created.ThreadID, "human input request should preserve the active thread id")
 	require.Equal(t, 2, created.TurnNumber, "human input request should preserve the active turn number")
+}
+
+func TestStreamLogsReturnsAtomicHumanInputPersistenceFailure(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	sessionID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	threadID := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	persistErr := errors.New("transaction rolled back")
+	phaseStore := &activityPhaseStoreFake{completeErr: persistErr}
+	service := NewActivityPhaseService(phaseStore, zerolog.Nop())
+	execution, err := newActivityPhaseExecution(
+		context.Background(), service, zerolog.Nop(), orgID, sessionID, threadID, 2, nil, nil,
+		models.ActivityPhaseTrigger{Kind: models.ActivityPhaseTriggerInitial},
+	)
+	require.NoError(t, err, "activity phase should start for the log stream")
+	logs := &testInternalSessionLogStore{}
+	orch := &Orchestrator{
+		humanInputRequests: &testInternalHumanInputStore{},
+		agentRunLogs:       logs,
+		logger:             zerolog.Nop(),
+	}
+	logCh := make(chan LogEntry, 1)
+	logCh <- LogEntry{Level: "human_input", Message: "Choose", HumanInput: &HumanInputRequest{Body: "Choose"}}
+	close(logCh)
+
+	err = orch.streamLogs(context.Background(), sessionID, orgID, models.AgentTypeCodex, TranscriptWriteContext{
+		ThreadID: &threadID, TurnNumber: 2, ActivityPhase: execution,
+	}, logCh, nil)
+
+	require.ErrorIs(t, err, persistErr, "log streaming should return the failed atomic boundary write")
+	require.NotNil(t, execution.phaseID(), "a rolled-back boundary should leave the active phase available for terminal failure handling")
+	require.Equal(t, []uuid.UUID(nil), phaseStore.completed, "a rolled-back boundary must not terminally complete the phase")
 }
 
 func TestStreamLogs_DropsPhaseAssociationForEntriesFromAnotherThread(t *testing.T) {
@@ -1882,12 +1921,13 @@ func TestHandleHumanInputRequest_DropsPhaseForUnthreadedContext(t *testing.T) {
 	store := &testInternalHumanInputStore{}
 	orch := &Orchestrator{humanInputRequests: store, logger: zerolog.Nop()}
 
-	created := orch.handleHumanInputRequest(
+	created, err := orch.handleHumanInputRequest(
 		context.Background(), sessionID, orgID, models.AgentTypeCodex,
 		TranscriptWriteContext{TurnNumber: 2, ActivityPhaseID: &phaseID},
 		&HumanInputRequest{Kind: models.HumanInputRequestKindFreeText, Title: "Need input", Body: "Choose"},
 	)
 
+	require.NoError(t, err, "unthreaded human input request should persist without error")
 	require.NotNil(t, created, "human input request should be persisted")
 	require.Nil(t, created.ActivityPhaseID, "an unthreaded human input request should not carry a phase")
 }

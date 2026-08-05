@@ -2021,10 +2021,10 @@ func TestPRServiceSyncPullRequestStateSelfHealsMergedDrift(t *testing.T) {
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
 	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
-	// Self-heal must run UpdateStatus("merged"). The merged-status branch sets
-	// merged_at = now() in the same statement (see PullRequestStore.UpdateStatus).
-	mock.ExpectExec("UPDATE pull_requests SET status = .+ merged_at = now").
-		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID, "status": models.PullRequestStatusMerged}).
+	// The provider timestamp is absent in this fixture, so self-healing uses a
+	// processing-time fallback while keeping the explicit merged_at write path.
+	mock.ExpectExec("UPDATE pull_requests SET status = .+ merged_at = @merged_at").
+		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID, "status": models.PullRequestStatusMerged, "merged_at": pgxmock.AnyArg()}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	// Service is wired with nil sessions/issues/deploys/jobs/orgs/previews so
@@ -2780,8 +2780,9 @@ func TestPRServiceApplyClosedPRTransitionPublishesTerminalState(t *testing.T) {
 	}
 	pr := models.PullRequest{ID: pullRequestID, OrgID: orgID, GitHubRepo: "assembledhq/143", GitHubPRNumber: 42}
 
-	require.NoError(t, service.applyClosedPRTransition(context.Background(), pr, false, "", "head-closed"),
-		"closing a pull request should succeed")
+	applied, err := service.applyClosedPRTransition(context.Background(), pr, false, nil, nil, "", "head-closed")
+	require.NoError(t, err, "closing a pull request should succeed")
+	require.True(t, applied, "a current close transition should be applied")
 	require.Eventually(t, func() bool {
 		select {
 		case event := <-sub.C:

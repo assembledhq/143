@@ -32,12 +32,14 @@ const sessionPublicationSelectColumns = `id, org_id, session_id, changeset_id, r
 
 // EnsureRequested upserts durable publication intent. Every mutable column is
 // guarded so a later replay cannot undo a decision an earlier writer already
-// made. review_gate_state is the strictest of those: once a coordinator has
-// recorded that review applies (a 'pending' gate with review_max_passes set),
-// no later request may downgrade it to 'not_required'. The open_pr worker
-// re-runs this upsert before it knows anything about review, so without that
-// guard the worker's default gate would silently skip the review it is about
-// to be asked to run.
+// made. The published head is branch-scoped ownership evidence: retries retain
+// it, branch/repository changes clear it, and legacy review publications can
+// recover it from the latest server-written review checkpoint. review_gate_state
+// is the strictest policy field: once a coordinator has recorded that review
+// applies (a 'pending' gate with review_max_passes set), no later request may
+// downgrade it to 'not_required'. The open_pr worker re-runs this upsert before
+// it knows anything about review, so without that guard the worker's default
+// gate would silently skip the review it is about to be asked to run.
 func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uuid.UUID, publication *models.SessionPublication) error {
 	if publication == nil {
 		return errors.New("session publication is required")
@@ -301,9 +303,25 @@ func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uui
 			ELSE session_publications.request_payload
 		END,
 		published_head_sha = CASE
-			WHEN session_publications.state IN ('completed_noop', 'terminal_failed')
-			 AND EXCLUDED.request_generation_at > session_publications.request_generation_at
-			THEN NULL ELSE session_publications.published_head_sha
+			WHEN session_publications.state = 'completed'
+			  OR EXCLUDED.request_generation_at < session_publications.request_generation_at
+			  OR (session_publications.state IN ('completed_noop', 'terminal_failed')
+			      AND EXCLUDED.request_generation_at <= session_publications.request_generation_at)
+			THEN session_publications.published_head_sha
+			WHEN EXCLUDED.repository_id IS DISTINCT FROM session_publications.repository_id
+			  OR EXCLUDED.head_branch IS DISTINCT FROM session_publications.head_branch
+			THEN NULL
+			ELSE COALESCE(session_publications.published_head_sha, (
+				SELECT loop.desired_head_sha
+				FROM session_review_loops AS loop
+				WHERE loop.org_id = session_publications.org_id
+				  AND loop.session_id = session_publications.session_id
+				  AND loop.changeset_id = session_publications.changeset_id
+				  AND loop.source = 'publication'
+				  AND loop.desired_head_sha IS NOT NULL
+				ORDER BY loop.started_at DESC, loop.id DESC
+				LIMIT 1
+			))
 		END,
 		github_pr_number = CASE
 			WHEN session_publications.state IN ('completed_noop', 'terminal_failed')
@@ -436,6 +454,7 @@ func (s *SessionPublicationStore) ApplyReviewBypass(ctx context.Context, orgID u
 			trigger_kind = 'explicit_action',
 			automatic_pr_policy_source = @automatic_policy_source,
 			review_policy_source = 'explicit_bypass',
+			published_head_sha = COALESCE(review_desired_head_sha, published_head_sha),
 			review_max_passes = NULL, review_loop_id = NULL,
 			review_workspace_revision = NULL, review_desired_head_sha = NULL,
 			review_gate_state = 'not_required', job_queue = @job_queue,
@@ -712,7 +731,8 @@ func (s *SessionPublicationStore) RecordReviewTarget(ctx context.Context, orgID,
 		return errors.New("review target head SHA is required")
 	}
 	result, err := s.db.Exec(ctx, `UPDATE session_publications
-		SET desired_head_sha = @desired_head_sha, updated_at = now()
+		SET desired_head_sha = @desired_head_sha,
+			published_head_sha = @desired_head_sha, updated_at = now()
 		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id
 		  AND state NOT IN ('completed', 'completed_noop', 'terminal_failed')`, pgx.NamedArgs{
 		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,

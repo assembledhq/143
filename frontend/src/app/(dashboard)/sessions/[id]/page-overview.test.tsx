@@ -380,6 +380,137 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(metadataRow).toHaveTextContent(/Completed/);
   });
 
+  it('separates the session vitals from the blocks stacked above it', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const vitals = await screen.findByTestId('session-overview-vitals');
+    expect(vitals).toHaveClass('border-t', 'border-border/60', 'pt-4');
+    expect(within(vitals).getByText('Completed')).toBeInTheDocument();
+    // Load-bearing: re-adding a wrapper around OverviewTab would make the
+    // vitals that wrapper's first child, silently collapsing the rule while
+    // real content still sits above them in the panel.
+    expect(vitals.parentElement!.firstElementChild).not.toBe(vitals);
+  });
+
+  it('keeps the vitals divider below a failure card raised by the same tab', async () => {
+    // The block above comes from inside OverviewTab rather than from the panel;
+    // the rule only draws if the two are flat siblings after the flattening.
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            status: 'failed',
+            failure_explanation: 'Could not reproduce the error in test environment',
+            threads: [],
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const vitals = await screen.findByTestId('session-overview-vitals');
+    expect(vitals).toHaveClass('border-t', 'first:pt-0');
+    expect(vitals.previousElementSibling).toHaveTextContent('Failure details');
+    // Not the first child, so `first:pt-0` stays inert and the rule draws.
+    expect(vitals.parentElement!.firstElementChild).not.toBe(vitals);
+  });
+
+  it('collapses the vitals divider when nothing renders above it', async () => {
+    // A bare session — no pull request, no result summary, a single changeset —
+    // renders nothing above the vitals, so the rule has to collapse instead of
+    // drawing across the top of the Overview panel separating nothing.
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            status: 'pending',
+            started_at: undefined,
+            completed_at: undefined,
+            result_summary: undefined,
+            threads: [],
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json({ data: null })),
+      http.get('/api/v1/sessions/:id/changesets', () => HttpResponse.json({ data: [], meta: {} })),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const vitals = await screen.findByTestId('session-overview-vitals');
+    expect(vitals).toHaveClass('first:border-t-0', 'first:pt-0');
+    // `first:border-t-0` resolves against the vitals' own parent, so the reset
+    // is only reachable while the overview blocks stay flat siblings. Re-adding
+    // a wrapper around OverviewTab would make the vitals a first child of that
+    // wrapper while real content still sits above them in the panel.
+    const panel = vitals.closest('[role="tabpanel"]')!;
+    expect(vitals.parentElement).toBe(panel.firstElementChild);
+    expect(vitals.parentElement!.firstElementChild).toBe(vitals);
+  });
+
+  // The audit trigger only mounts once /auth/me confirms an admin and the
+  // latest-entry query resolves. Both are seeded into the cache so the trigger
+  // renders in the same commit as the vitals block — a `queryByRole` on the
+  // unsettled DOM passes whether or not the status gate exists.
+  function renderWithSeededAuditTrail(sessionId: string) {
+    const latestEntry = {
+      id: 'audit-1',
+      actor_type: 'system',
+      action: 'session.completed',
+      created_at: new Date(Date.now() - 12 * 60000).toISOString(),
+    };
+    // The seed is what makes the assertions synchronous; the handler has to
+    // agree with it so the refetch on mount doesn't wipe the entry back out.
+    server.use(
+      http.get('/api/v1/audit-logs', () => HttpResponse.json({ data: [latestEntry], meta: {} })),
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(['auth', 'me'], { data: mockMembers[0] });
+    queryClient.setQueryData(['audit-logs', 'latest', { session_id: sessionId }], {
+      data: [latestEntry],
+      meta: {},
+    });
+    return renderSessionDetailWithQueryClient(sessionId, queryClient);
+  }
+
+  it('keeps the session activity trigger inline while a session is still running', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: { ...mockSessions[0], status: 'running', completed_at: undefined },
+        } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithSeededAuditTrail('session-abcdef12-3456-7890');
+
+    const vitals = await screen.findByTestId('session-overview-vitals');
+    expect(await within(vitals).findByRole('button', { name: /Updated.*ago by/i })).toBeInTheDocument();
+  });
+
+  // Both success terminals are gated, so both need covering — dropping either
+  // clause otherwise leaves the suite green.
+  it.each(['completed', 'pr_created'] as const)(
+    'omits low-value audit update metadata once a session is %s',
+    async (status) => {
+      server.use(
+        http.get('/api/v1/sessions/:id', () => {
+          return HttpResponse.json({
+            data: { ...mockSessions[0], status },
+          } satisfies SingleResponse<Session>);
+        }),
+      );
+
+      renderWithSeededAuditTrail('session-abcdef12-3456-7890');
+
+      const vitals = await screen.findByTestId('session-overview-vitals');
+      expect(within(vitals).queryByRole('button', { name: /Updated.*ago by/i })).not.toBeInTheDocument();
+    },
+  );
+
   it('keeps issue-trigger provenance compact without redundant workflow copy', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
@@ -428,12 +559,12 @@ describe('SessionDetailPage overview and review loop', () => {
 
     await screen.findByText('Could not reproduce the error in test environment');
     expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
-    expect(screen.queryByText('Review before creating a PR?')).not.toBeInTheDocument();
+    expect(screen.queryByText('Review before creating a PR')).not.toBeInTheDocument();
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Code review' })).not.toBeInTheDocument();
   });
 
-  it('shows a disabled review action before the split suggestion when no snapshot is available', async () => {
+  it('leads the Overview with review and split actions before Result when no snapshot is available', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({
@@ -458,33 +589,40 @@ describe('SessionDetailPage overview and review loop', () => {
 
     const reviewButton = await screen.findByRole('button', { name: 'Review & fix' });
     expect(reviewButton).toBeDisabled();
-    expect(screen.getByText('Review before creating a PR?')).toBeInTheDocument();
-    expect(screen.getByText('Ask a review agent to check the current diff and apply fixes.')).toBeInTheDocument();
+    expect(screen.getByText('Review before creating a PR')).toBeInTheDocument();
+    expect(screen.getByText('Check the current diff and apply any fixes before publishing.')).toBeInTheDocument();
     expect(reviewButton).toHaveAttribute('title', 'A reusable sandbox snapshot is required before review');
-    const reviewAction = reviewButton.closest('[data-slot="agent-action-card-action"]');
-    expect(reviewAction).toHaveClass('ml-11', 'w-fit', 'self-start');
-    expect(reviewAction).toHaveClass('@min-[24rem]/agent-action:ml-0');
-    expect(reviewAction).not.toHaveClass('w-full');
+    const reviewAction = reviewButton.closest<HTMLElement>('[data-slot="overview-action-control"]');
+    expect(reviewAction).toHaveClass('col-start-3', 'row-start-1');
     expect(reviewButton).not.toHaveClass('w-full');
-    const reviewTitle = screen.getByText('Review before creating a PR?');
+    const reviewTitle = screen.getByText('Review before creating a PR');
+    const reviewDescription = screen.getByText('Check the current diff and apply any fixes before publishing.');
     const splitTitle = screen.getByText('Large change · 750 additions · 1 file');
-    const reviewCard = reviewTitle.closest('[data-slot="card"]');
+    const resultSection = screen.getByTestId('session-result-section');
+    const reviewSuggestion = reviewTitle.closest('[data-slot="overview-action"]');
     const splitSuggestion = splitTitle.closest('[data-slot="overview-suggestion"]');
-    expect(reviewCard?.querySelector('[data-slot="agent-action-card-icon"] .lucide-scan-search')).toBeInTheDocument();
-    // jsdom cannot evaluate container queries, so guard the placement instead:
-    // an element is never its own query container, so the row layout would be
-    // dead if the container were declared on the element that queries it.
-    const reviewCardContent = reviewCard?.querySelector('[data-slot="card-content"]');
-    expect(reviewCard?.className).toContain('@container/agent-action');
-    expect(reviewCardContent?.className).toContain('@min-[24rem]/agent-action:flex-row');
-    expect(reviewCardContent?.className).not.toContain('@container/agent-action');
+    // The action sits in the same quiet row as the copy rather than in a card
+    // of its own, so keep the structure asserted instead of the spacing utilities.
+    expect(reviewSuggestion).toContainElement(reviewAction);
+    expect(reviewSuggestion?.closest('[data-slot="card"]')).toBeNull();
+    expect(reviewDescription.parentElement).toBe(reviewSuggestion);
+    expect(reviewDescription).toHaveClass('col-span-3', 'row-start-2');
+    // The row carries no accessible name of its own, so it stays a plain group
+    // rather than adding a landmark that just repeats the visible title.
+    expect(screen.queryByRole('region', { name: 'Review before creating a PR' })).not.toBeInTheDocument();
+    const reviewIcon = reviewSuggestion?.querySelector('[data-slot="overview-action-icon"]');
+    expect(reviewIcon?.querySelector('.lucide-scan-search')).toBeInTheDocument();
+    expect(reviewIcon).toHaveAttribute('aria-hidden', 'true');
+    expect(reviewIcon?.className).not.toContain('bg-muted');
     expect(splitSuggestion?.querySelector('[data-slot="overview-suggestion-icon"] .lucide-git-branch')).toBeInTheDocument();
     expect(splitTitle.closest('[data-slot="card"]')).toBeNull();
     expect(reviewTitle.compareDocumentPosition(splitTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(splitTitle.compareDocumentPosition(resultSection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(resultSection).toHaveClass('border-t', 'pt-4');
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
   });
 
-  it('orders the card-free PR details and Result sections before the quiet split suggestion', async () => {
+  it('orders card-free PR details and the quiet split suggestion before Result', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({
@@ -506,8 +644,13 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(prDetailsSection.closest('[data-slot="card"]')).toBeNull();
     expect(resultSection.closest('[data-slot="card"]')).toBeNull();
     expect(resultSection).toHaveClass('border-t', 'pt-4');
-    expect(prDetailsSection.compareDocumentPosition(resultSection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(resultSection.compareDocumentPosition(splitSuggestion) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(resultSection.querySelector('[data-slot="section-heading"]')?.parentElement).toBe(resultSection);
+    const resultBody = resultSection.querySelector('[data-slot="session-result-body"]');
+    expect(resultBody?.parentElement).toBe(resultSection);
+    expect(resultBody?.className).not.toContain('pl-');
+    expect(resultBody?.className).not.toContain('ml-');
+    expect(prDetailsSection.compareDocumentPosition(splitSuggestion) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(splitSuggestion.compareDocumentPosition(resultSection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('keeps the PR health placeholder card-free and still divides Result while health loads', async () => {
@@ -542,13 +685,14 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(resultSection).not.toHaveClass('pt-4');
   });
 
-  it('shows a compact status card while the Overview review loop is running', async () => {
+  it('shows a quiet inline status while the Overview review loop is running', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({
           data: {
             ...mockSessions[1],
             status: 'completed',
+            result_summary: 'Review-ready result',
             snapshot_key: 'snapshot-running-review',
             sandbox_state: 'snapshotted',
             diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
@@ -579,11 +723,21 @@ describe('SessionDetailPage overview and review loop', () => {
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
 
     const reviewStatus = await screen.findByText('Fixing with Claude Code');
-    const statusCard = reviewStatus.closest('[data-slot="card"]');
+    const statusRow = reviewStatus.closest('[data-slot="overview-review-status"]');
 
-    expect(statusCard).not.toBeNull();
-    expect(statusCard?.querySelector('.lucide-loader-circle')).toBeInTheDocument();
-    expect(within(statusCard as HTMLElement).getByText('The review loop is checking the changes and applying fixes.')).toBeInTheDocument();
+    expect(statusRow).not.toBeNull();
+    expect(statusRow).toHaveAttribute('role', 'status');
+    expect(statusRow).toHaveAttribute('aria-live', 'polite');
+    expect(statusRow).toHaveAttribute('aria-atomic', 'true');
+    expect(statusRow?.closest('[data-slot="card"]')).toBeNull();
+    expect(statusRow?.querySelector('[data-slot="overview-review-status-control"]')).toBeNull();
+    const statusIcon = statusRow?.querySelector('[data-slot="overview-review-status-icon"]');
+    expect(statusIcon?.querySelector('.lucide-loader-circle')).toBeInTheDocument();
+    expect(statusIcon?.className).not.toContain('bg-muted');
+    const runningDescription = within(statusRow as HTMLElement).getByText('The review loop is checking the changes and applying fixes.');
+    expect(runningDescription.parentElement).toBe(statusRow);
+    expect(runningDescription).toHaveClass('col-span-3', 'row-start-2');
+    expect(reviewStatus.compareDocumentPosition(screen.getByTestId('session-result-section')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
   });
 
@@ -1234,7 +1388,9 @@ describe('SessionDetailPage overview and review loop', () => {
 
     const user = userEvent.setup();
     renderWithProviders(<SessionDetailContent id={multiPRSession.id} />);
-    expect(await screen.findByTestId('pull-request-list')).toBeInTheDocument();
+    const pullRequestList = await screen.findByTestId('pull-request-list');
+    expect(pullRequestList).toBeInTheDocument();
+    expect(pullRequestList.compareDocumentPosition(screen.getByTestId('session-result-section')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     await user.click(screen.getByRole('button', { name: /API integration/ }));
 
     await waitFor(() => {

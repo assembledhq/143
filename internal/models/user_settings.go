@@ -16,6 +16,30 @@ type UserSettings struct {
 	DiffViewerFullScreen         bool                              `json:"diff_viewer_full_screen,omitempty"`
 	ManualSessionPlanesHidden    bool                              `json:"manual_session_planes_hidden,omitempty"`
 	AutomaticPRFollowThrough     *AutomaticPRFollowThroughSettings `json:"automatic_pr_follow_through,omitempty"`
+	SessionActivityDetail        SessionActivityDetail             `json:"session_activity_detail,omitempty"`
+}
+
+type SessionActivityDetail string
+
+const (
+	SessionActivityDetailCompact  SessionActivityDetail = "compact"
+	SessionActivityDetailDetailed SessionActivityDetail = "detailed"
+)
+
+func (d SessionActivityDetail) Validate() error {
+	switch d {
+	case "", SessionActivityDetailCompact, SessionActivityDetailDetailed:
+		return nil
+	default:
+		return fmt.Errorf("invalid session activity detail: %q", d)
+	}
+}
+
+func (d SessionActivityDetail) Effective() SessionActivityDetail {
+	if d == "" {
+		return SessionActivityDetailCompact
+	}
+	return d
 }
 
 // AutomaticFollowThroughPreference is a per-user override for automatic
@@ -170,6 +194,9 @@ func mergeJSONObjects(target, patch map[string]any) map[string]any {
 
 // Validate returns an error if any user setting is invalid.
 func (s UserSettings) Validate() error {
+	if err := s.SessionActivityDetail.Validate(); err != nil {
+		return err
+	}
 	if s.CodingAgentModelDefault != "" {
 		agentType := AgentTypeForModel(s.CodingAgentModelDefault)
 		if agentType == "" {

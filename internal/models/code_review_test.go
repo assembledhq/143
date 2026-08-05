@@ -200,6 +200,17 @@ func TestCodeReviewPolicyRecordConfigDefaultsLegacyRosterReasoning(t *testing.T)
 	require.Equal(t, []ReasoningEffort{ReasoningEffortHigh, ReasoningEffortHigh}, resolved.AgentRoster.ReviewerReasoningEfforts, "stored legacy reviewers should inherit high reasoning")
 }
 
+func TestResolveCodeReviewPolicyConfigPreservesDeterministicEarlyStop(t *testing.T) {
+	t.Parallel()
+
+	config := DefaultCodeReviewPolicyConfig()
+	config.RiskPolicy.StopAfterDeterministicFailure = true
+
+	resolved := ResolveCodeReviewPolicyConfig(&config)
+
+	require.True(t, resolved.RiskPolicy.StopAfterDeterministicFailure, "resolved policy should preserve the explicit deterministic early-stop setting")
+}
+
 func TestResolveCodeReviewPolicyConfigDoesNotMutateInput(t *testing.T) {
 	t.Parallel()
 

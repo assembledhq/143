@@ -487,6 +487,73 @@ func TestCodeReviewStore_SetWaitingForGitHubPersistsOperationalState(t *testing.
 	require.NoError(t, mock.ExpectationsWereMet(), "wait update should stay org and session scoped")
 }
 
+func TestCodeReviewStore_SetProvisionalReviewBody(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Date(2026, 8, 5, 18, 0, 0, 0, time.UTC)
+	body := "Stable policy blockers were found."
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery("(?s)UPDATE code_review_session_metadata.*final_review_body = @body.*status IN \\('queued', 'running'\\)").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "body": body}).
+		WillReturnRows(codeReviewMetadataRowsForTest().AddRow(
+			uuid.New(), orgID, sessionID, uuid.New(), uuid.New(), uuid.New(),
+			"base", "head", false, models.CodeReviewTriggerSourceAppReviewer,
+			models.CodeReviewSessionStatusRunning, nil, nil, nil, nil, nil, false,
+			nil, nil, false, nil, "output", nil, nil, nil, &body, nil, nil, now,
+		))
+
+	metadata, err := NewCodeReviewStore(mock).SetProvisionalReviewBody(context.Background(), orgID, sessionID, "  "+body+"  ")
+
+	require.NoError(t, err, "running review should persist a provisional rolling-comment body")
+	require.Equal(t, &body, metadata.FinalReviewBody, "provisional body should be durable until the terminal body replaces it")
+	require.NoError(t, mock.ExpectationsWereMet(), "provisional update should remain org and session scoped")
+}
+
+func TestCodeReviewStore_SetProvisionalReviewBodyReportsNoRunningReview(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery("(?s)UPDATE code_review_session_metadata.*final_review_body = @body").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "body": "blockers"}).
+		WillReturnRows(codeReviewMetadataRowsForTest())
+
+	_, err = NewCodeReviewStore(mock).SetProvisionalReviewBody(context.Background(), orgID, sessionID, "blockers")
+
+	require.ErrorIs(t, err, pgx.ErrNoRows, "a session that left queued or running should be reported so callers can skip best-effort publication")
+	require.NoError(t, mock.ExpectationsWereMet(), "provisional update should remain org and session scoped")
+}
+
+func TestCodeReviewStore_HasPriorDeterministicEarlyStop(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+	sessionID := uuid.New()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery("(?s)SELECT EXISTS.*prior.org_id = @org_id.*prior.pull_request_id = @pull_request_id.*prior.session_id <> @session_id.*prior.head_sha = @head_sha.*code_review_agent_results").
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "pull_request_id": pullRequestID, "session_id": sessionID, "head_sha": "head",
+			"stable_reason_codes": models.CodeReviewStableDeterministicRiskReasonStrings(),
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+
+	exists, err := NewCodeReviewStore(mock).HasPriorDeterministicEarlyStop(context.Background(), orgID, pullRequestID, sessionID, " head ")
+
+	require.NoError(t, err, "prior early-stop lookup should succeed")
+	require.True(t, exists, "prior same-head early stop should let an explicit rerequest run the full review")
+	require.NoError(t, mock.ExpectationsWereMet(), "early-stop lookup should remain org, pull request, session, and head scoped")
+}
+
 func TestCodeReviewStore_MarkSupersededByUsesRetryableFailureCAS(t *testing.T) {
 	t.Parallel()
 
@@ -1172,9 +1239,14 @@ func TestCodeReviewStore_SavePolicyExpectingVersionIncrementsFromCurrent(t *test
 			"review_instructions", "automated_approval_policy",
 			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at",
 		}).AddRow(policyID, orgID, nil, true, 4, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, nil, now))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(orgID, "feedback", models.JobTypeRankCodeReviewDispute, pgxmock.AnyArg(), 2, pgxmock.AnyArg(), 6).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectCommit()
 
-	record, err := NewCodeReviewStore(mock).SavePolicyExpectingVersion(context.Background(), orgID, config, 3, nil)
+	store := NewCodeReviewStore(mock)
+	store.SetJobStore(NewJobStore(mock))
+	record, err := store.SavePolicyExpectingVersion(context.Background(), orgID, config, 3, nil)
 
 	require.NoError(t, err, "matching expected version should save the next version")
 	require.Equal(t, 4, record.Version, "the new version should be current+1")

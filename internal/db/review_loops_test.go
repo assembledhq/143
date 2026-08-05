@@ -130,6 +130,33 @@ func TestSessionReviewLoopStore_GetFreshCleanPublicationLoopUsesExactEvidence(t 
 	require.NoError(t, mock.ExpectationsWereMet(), "fresh review lookup should filter by tenant, session, changeset, revision, and head")
 }
 
+func TestSessionReviewLoopStore_RefreshPublicationEvidenceAdvancesPublishedCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create a database mock")
+	t.Cleanup(mock.Close)
+	orgID, loopID := uuid.New(), uuid.New()
+	revision := int64(15)
+	headSHA := "0123456789abcdef0123456789abcdef01234567"
+	args := pgx.NamedArgs{
+		"org_id": orgID, "loop_id": loopID, "workspace_revision": revision,
+		"desired_head_sha": headSHA,
+	}
+	mock.ExpectBegin()
+	mock.ExpectExec(`UPDATE session_review_loops[\s\S]+workspace_revision = @workspace_revision[\s\S]+desired_head_sha = @desired_head_sha`).
+		WithArgs(args).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec(`UPDATE session_publications[\s\S]+review_workspace_revision = @workspace_revision[\s\S]+review_desired_head_sha = @desired_head_sha[\s\S]+desired_head_sha = @desired_head_sha[\s\S]+published_head_sha = @desired_head_sha`).
+		WithArgs(args).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+
+	err = NewSessionReviewLoopStore(mock).RefreshPublicationEvidence(context.Background(), orgID, loopID, revision, headSHA)
+	require.NoError(t, err, "refreshing pushed review fixes should atomically advance review and publication-owned checkpoints")
+	require.NoError(t, mock.ExpectationsWereMet(), "review evidence refresh should commit both checkpoint updates")
+}
+
 func TestSessionReviewLoopStore_PublicationCleanTransitionIsAtomic(t *testing.T) {
 	t.Parallel()
 

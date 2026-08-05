@@ -1819,8 +1819,9 @@ func (s *PreviewStore) updatePreviewStatusIfActive(ctx context.Context, orgID, i
 
 // BeginStoppedWarmPreviewResume atomically claims a stopped session prewarm
 // preview for user-visible resume. Only previews stopped by the session prewarm
-// policy can be resumed through this path.
-func (s *PreviewStore) BeginStoppedWarmPreviewResume(ctx context.Context, orgID, id uuid.UUID) (bool, error) {
+// policy whose source revision is still the session's current revision can be
+// resumed through this path.
+func (s *PreviewStore) BeginStoppedWarmPreviewResume(ctx context.Context, orgID, id, sessionID uuid.UUID, workspaceRevision int64) (bool, error) {
 	status := models.PreviewStatusStarting
 	phase := previewPhaseForStatus(status)
 	tag, err := s.db.Exec(ctx, `
@@ -1833,14 +1834,25 @@ func (s *PreviewStore) BeginStoppedWarmPreviewResume(ctx context.Context, orgID,
 		    updated_at = now()
 		WHERE id = @id
 		  AND org_id = @org_id
+		  AND session_id = @session_id
+		  AND source_workspace_revision = @workspace_revision
 		  AND status IN ('stopped', 'expired')
-		  AND stopped_reason = @stopped_reason`,
+		  AND stopped_reason = @stopped_reason
+		  AND EXISTS (
+			SELECT 1
+			FROM sessions s
+			WHERE s.id = @session_id
+			  AND s.org_id = @org_id
+			  AND s.workspace_revision = @workspace_revision
+		  )`,
 		pgx.NamedArgs{
-			"id":             id,
-			"org_id":         orgID,
-			"status":         status,
-			"phase":          phase,
-			"stopped_reason": models.PreviewStoppedReasonSessionPrewarmPolicy,
+			"id":                 id,
+			"org_id":             orgID,
+			"session_id":         sessionID,
+			"workspace_revision": workspaceRevision,
+			"status":             status,
+			"phase":              phase,
+			"stopped_reason":     models.PreviewStoppedReasonSessionPrewarmPolicy,
 		},
 	)
 	if err != nil {

@@ -43,6 +43,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrig
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ThemeSelect } from "@/components/theme-select";
 import { useAuth } from "@/hooks/use-auth";
+import { useSessionActivityDetail } from "@/hooks/use-session-activity-detail";
 import { AGENTS } from "@/lib/agents";
 import {
   CODING_AGENT_REASONING_OPTIONS_BY_AGENT,
@@ -271,6 +272,7 @@ function automationDefaultLabel(value: boolean) {
 export default function AccountPage() {
   const { user } = useAuth();
   const queryClient = useQueryClient();
+  const { detail: activityDetail, setDetail: setActivityDetail, mutation: activityDetailMutation } = useSessionActivityDetail();
   const [addOpen, setAddOpen] = useState(false);
   const [provider, setProvider] = useState<PersonalProvider>("openai");
   const [authType, setAuthType] = useState<PersonalAuthType>("subscription");
@@ -715,7 +717,26 @@ export default function AccountPage() {
             <CardTitle>Appearance</CardTitle>
           </CardHeader>
           <CardContent className="pb-6">
-            <ThemeSelect />
+            <div className="space-y-6">
+              <ThemeSelect />
+              <div className="space-y-2">
+                <Label htmlFor="session-activity-detail">Activity detail</Label>
+                <Select
+                  value={activityDetail}
+                  onValueChange={(value) => setActivityDetail(value as typeof activityDetail)}
+                  disabled={activityDetailMutation.isPending}
+                >
+                  <SelectTrigger id="session-activity-detail" className="w-full sm:w-[220px]" aria-label="Activity detail">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="compact">Compact</SelectItem>
+                    <SelectItem value="detailed">Detailed</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">Compact collapses completed work into expandable summaries. Detailed keeps every activity phase open.</p>
+              </div>
+            </div>
           </CardContent>
         </Card>
 

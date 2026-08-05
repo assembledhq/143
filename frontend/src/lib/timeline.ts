@@ -114,7 +114,7 @@ export function buildTimeline(
   // Tag and merge into a single sortable list.
   const items: TaggedTimelineItem[] = [
     ...messages.map(
-      (m) => ({ source: "message" as const, ts: m.created_at, data: m })
+      (m) => ({ source: "message" as const, ts: m.applied_at ?? m.created_at, data: m })
     ),
     ...logs
       .filter((l) => !suppressedLogIds.has(l.id))
@@ -340,7 +340,14 @@ export function flattenTranscriptWindows(turns: SessionTranscriptTurn[] | undefi
     for (const entry of turn.entries) {
       if (entry.message && !seenMessageIds.has(entry.message.id)) {
         seenMessageIds.add(entry.message.id);
-        messages.push(entry.message);
+        messages.push({
+          ...entry.message,
+          inbox_sequence: entry.inbox_sequence,
+          delivery_state: entry.delivery_state,
+          accepted_at: entry.accepted_at,
+          acknowledged_at: entry.acknowledged_at,
+          applied_at: entry.applied_at,
+        });
         messageEntryIds.set(entry.message.id, entry.id);
       }
       if (entry.log && !seenLogIds.has(entry.log.id)) {

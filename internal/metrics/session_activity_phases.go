@@ -21,6 +21,7 @@ type ActivityPhaseMetrics struct {
 	ReconciledPhases             otelmetric.Int64Counter
 	InboxBatchReconciliationRuns otelmetric.Int64Counter
 	InboxBatchesReconciled       otelmetric.Int64Counter
+	MissingPhaseAssociations     otelmetric.Int64Counter
 }
 
 func getActivityPhaseMetrics() *ActivityPhaseMetrics {
@@ -89,6 +90,15 @@ func getActivityPhaseMetrics() *ActivityPhaseMetrics {
 			otel.Handle(err)
 			return
 		}
+		missingAssociations, err := meter.Int64Counter(
+			"session_activity_phase.missing_associations",
+			otelmetric.WithDescription("Transcript entries missing an expected durable activity phase association"),
+			otelmetric.WithUnit("{entry}"),
+		)
+		if err != nil {
+			otel.Handle(err)
+			return
+		}
 		activityPhaseMetrics = &ActivityPhaseMetrics{
 			StartsTotal:                  starts,
 			TerminalTransitionsTotal:     terminals,
@@ -97,9 +107,23 @@ func getActivityPhaseMetrics() *ActivityPhaseMetrics {
 			ReconciledPhases:             reconciled,
 			InboxBatchReconciliationRuns: batchRuns,
 			InboxBatchesReconciled:       batches,
+			MissingPhaseAssociations:     missingAssociations,
 		}
 	})
 	return activityPhaseMetrics
+}
+
+func RecordMissingActivityPhaseAssociations(ctx context.Context, entryKind string, count int64) {
+	metrics := getActivityPhaseMetrics()
+	if metrics != nil {
+		metrics.recordMissingActivityPhaseAssociations(ctx, entryKind, count)
+	}
+}
+
+func (metrics *ActivityPhaseMetrics) recordMissingActivityPhaseAssociations(ctx context.Context, entryKind string, count int64) {
+	if metrics.MissingPhaseAssociations != nil && count > 0 {
+		metrics.MissingPhaseAssociations.Add(ctx, count, otelmetric.WithAttributes(attrString("entry_kind", entryKind)))
+	}
 }
 
 func RecordActivityPhaseStarted(ctx context.Context, triggerKind string) {

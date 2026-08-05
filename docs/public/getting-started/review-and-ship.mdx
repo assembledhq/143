@@ -61,6 +61,11 @@ create` from a session sandbox is intentionally unavailable because it would
 bypass review gates, repository templates, deduplication, audit state, and
 recovery.
 
+After publication, agents can update the current session's primary PR title or
+description with `143-tools pr update --title ...`, `--body ...`, or
+`--body-file ...`. This write also goes through 143's session-scoped backend;
+direct `gh pr edit` remains unavailable to sandbox credentials.
+
 ## Automatic PR handoff
 
 Eligible coding sessions can request publication after the agent has completed

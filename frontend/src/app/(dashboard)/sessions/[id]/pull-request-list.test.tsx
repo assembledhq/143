@@ -118,7 +118,7 @@ describe('ChangesetSplitPrompt', () => {
     expect(onRequestSplit).toHaveBeenCalledOnce();
   });
 
-  it('renders as a quiet suggestion row instead of another card', () => {
+  it('renders as a quiet full-width suggestion instead of another card', () => {
     render(
       <ChangesetSplitPrompt
         additions={CHANGESET_SPLIT_MIN_ADDITIONS}
@@ -128,8 +128,34 @@ describe('ChangesetSplitPrompt', () => {
 
     const suggestion = screen.getByRole('region', { name: 'Pull request size suggestion' });
     expect(suggestion).toHaveAttribute('data-slot', 'overview-suggestion');
-    expect(suggestion).toHaveClass('flex', 'items-center');
+    expect(suggestion).toHaveClass('border-t', 'border-border/60', 'pt-4');
+    // As a first child the rule collapses, but this row carries its own top
+    // padding, so it has to fall back to that rather than to zero. Asserted as
+    // a pair: changing the base padding without the reset fails here.
+    expect(suggestion).toHaveClass('py-1.5', 'first:border-t-0', 'first:pt-1.5');
+    expect(suggestion).not.toHaveClass('first:pt-0');
+    const description = screen.getByText('Split this diff into smaller, reviewable pull requests.');
+    expect(description.parentElement).toBe(suggestion);
+    expect(description).toHaveClass('col-span-3');
     expect(suggestion.closest('[data-slot="card"]')).toBeNull();
+  });
+
+  // The button sits on the title row visually, but a reader should still meet
+  // the sentence explaining the action before the action itself.
+  it('reads the split description before the split action', () => {
+    render(
+      <ChangesetSplitPrompt
+        additions={CHANGESET_SPLIT_MIN_ADDITIONS}
+        onRequestSplit={vi.fn()}
+      />,
+    );
+
+    const description = screen.getByText('Split this diff into smaller, reviewable pull requests.');
+    const action = screen.getByRole('button', { name: 'Split into PRs' });
+    const control = action.closest('[data-slot="overview-suggestion-control"]');
+
+    expect(description.compareDocumentPosition(action) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(control).toHaveClass('row-start-1');
   });
 
   it('uses a compact ghost action that stays aligned on narrow panels', () => {
@@ -143,6 +169,8 @@ describe('ChangesetSplitPrompt', () => {
     const button = screen.getByRole('button', { name: 'Split into PRs' });
     expect(button).toHaveAttribute('data-size', 'xs');
     expect(button).toHaveAttribute('data-variant', 'ghost');
-    expect(button).toHaveClass('shrink-0');
+    // Pinned to the trailing auto-sized column, so the title column absorbs the
+    // slack instead of squeezing the action.
+    expect(button.closest('[data-slot="overview-suggestion-control"]')).toHaveClass('col-start-3');
   });
 });

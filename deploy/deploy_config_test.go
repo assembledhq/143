@@ -2250,6 +2250,30 @@ func TestActivityPhaseReconciliationAlertCoversEveryFailurePath(t *testing.T) {
 	require.Contains(t, alertConfig, `_msg:"reaper: failed to reconcile acknowledged inbox delivery batches"`, "activity phase alert should match acknowledged-batch reconciliation failures")
 }
 
+func TestSessionActivityAnchorFailuresHaveAProductionAlert(t *testing.T) {
+	t.Parallel()
+
+	alerts, err := os.ReadFile("../deploy/vmalert/rules/production-alerts.yml")
+	require.NoError(t, err, "test should read production vmalert rules")
+
+	alertConfig := string(alerts)
+	require.Contains(t, alertConfig, "SessionActivityAnchorRestorationFailures", "production alerts should identify elevated activity-capsule anchor failures")
+	require.Contains(t, alertConfig, `session_activity_event:"scroll_restore_failed"`, "anchor alert should use the bounded privacy-safe event field")
+	require.Contains(t, alertConfig, `_msg:"session activity transcript viewport integrity event"`, "anchor alert should use the canonical API warning message")
+}
+
+func TestSessionActivityMissingAssociationsHaveAProductionAlert(t *testing.T) {
+	t.Parallel()
+
+	alerts, err := os.ReadFile("../deploy/vmalert/rules/production-alerts.yml")
+	require.NoError(t, err, "test should read production vmalert rules")
+
+	alertConfig := string(alerts)
+	require.Contains(t, alertConfig, "SessionActivityPhaseAssociationsMissing", "production alerts should identify missing durable phase associations")
+	require.Contains(t, alertConfig, `_msg:"session transcript entry missing expected activity phase association"`, "association alert should use the canonical privacy-safe API warning")
+	require.Contains(t, alertConfig, "missing_entry_count", "association alert should aggregate the bounded missing-entry count")
+}
+
 func TestLoggingDesignDocsTrackProvisionedDashboardsAndAlerts(t *testing.T) {
 	t.Parallel()
 

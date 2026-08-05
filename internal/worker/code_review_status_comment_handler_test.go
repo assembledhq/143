@@ -26,9 +26,13 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 		lockedStatus              models.CodeReviewSessionStatus
 		lockedFinalBody           *string
 		lockedReviewID            *int64
+		previousFinalBody         *string
+		previousHeadSHA           string
 		storedCommentID           any
 		expectedExistingCommentID *int64
 		expectedBody              string
+		expectedAdditionalBody    string
+		expectReassessmentHistory bool
 		expectedCalls             []string
 		hideErr                   error
 		expectErr                 bool
@@ -39,6 +43,45 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			lockedStatus:  models.CodeReviewSessionStatusRunning,
 			expectedBody:  "143 Code Reviewer has started reviewing this pull request.",
 			expectedCalls: []string{"upsert"},
+		},
+		{
+			name:            "publishes durable provisional blockers while review continues",
+			initialStatus:   models.CodeReviewSessionStatusRunning,
+			lockedStatus:    models.CodeReviewSessionStatusRunning,
+			lockedFinalBody: statusCommentStringPtr(models.CodeReviewProvisionalReviewHeading + "\n\nSubstantive review is still running."),
+			expectedBody:    models.CodeReviewProvisionalReviewHeading + "\n\nSubstantive review is still running.",
+			expectedCalls:   []string{"upsert"},
+		},
+		{
+			name:            "does not expose a terminal body before the decision commits",
+			initialStatus:   models.CodeReviewSessionStatusRunning,
+			lockedStatus:    models.CodeReviewSessionStatusRunning,
+			lockedFinalBody: statusCommentStringPtr("❌ 143 Code Reviewer needs human review."),
+			expectedBody:    "143 Code Reviewer has started reviewing this pull request.",
+			expectedCalls:   []string{"upsert"},
+		},
+		{
+			name:                      "keeps the previous verdict visible during reassessment",
+			initialStatus:             models.CodeReviewSessionStatusRunning,
+			lockedStatus:              models.CodeReviewSessionStatusRunning,
+			previousFinalBody:         statusCommentStringPtr("❌ **143 Code Reviewer needs human review**\n\n**Why:** Sensitive workflow changes require a human decision."),
+			previousHeadSHA:           "previous-head-sha",
+			expectedBody:              "❌ **143 Code Reviewer needs human review**\n\n**Why:** Sensitive workflow changes require a human decision.",
+			expectedAdditionalBody:    "History of 143 code reviews:",
+			expectReassessmentHistory: true,
+			expectedCalls:             []string{"upsert"},
+		},
+		{
+			name:                      "adds provisional blockers without hiding the previous verdict",
+			initialStatus:             models.CodeReviewSessionStatusRunning,
+			lockedStatus:              models.CodeReviewSessionStatusRunning,
+			lockedFinalBody:           statusCommentStringPtr(models.CodeReviewProvisionalReviewHeading + "\n\nSubstantive review is still running."),
+			previousFinalBody:         statusCommentStringPtr("❌ **143 Code Reviewer needs human review**\n\n**Why:** Sensitive workflow changes require a human decision."),
+			previousHeadSHA:           "previous-head-sha",
+			expectedBody:              models.CodeReviewProvisionalReviewHeading + "\n\nSubstantive review is still running.",
+			expectedAdditionalBody:    "❌ **143 Code Reviewer needs human review**",
+			expectReassessmentHistory: true,
+			expectedCalls:             []string{"upsert"},
 		},
 		{
 			name:                      "refreshes state under lock before publishing completed result",
@@ -128,6 +171,21 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			mock.ExpectQuery("(?s)FROM code_review_session_metadata.*pull_request_id = @pull_request_id").
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 				WillReturnRows(metadataRows(tt.lockedStatus, tt.lockedFinalBody, tt.lockedReviewID))
+			if !codeReviewMetadataTerminal(tt.lockedStatus) {
+				previousRows := newCodeReviewMetadataRows()
+				if tt.previousFinalBody != nil {
+					previousDecision := models.CodeReviewDecisionNeedsHumanReview
+					previousRows.AddRow(
+						uuid.New(), orgID, uuid.New(), repositoryID, pullRequestID, policyID,
+						"base", tt.previousHeadSHA, false, models.CodeReviewTriggerSourceTeamReviewer,
+						models.CodeReviewSessionStatusCompleted, nil, nil, nil, nil, nil, false, &previousDecision, nil, false, nil,
+						"previous-output-key", nil, nil, nil, tt.previousFinalBody, nil, &now, now.Add(-time.Minute),
+					)
+				}
+				mock.ExpectQuery("(?s)FROM code_review_session_metadata.*status = 'completed'.*decision IS NOT NULL").
+					WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+					WillReturnRows(previousRows)
+			}
 			mock.ExpectQuery("SELECT code_review_status_comment_id").
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "id": pullRequestID}).
 				WillReturnRows(pgxmock.NewRows([]string{"code_review_status_comment_id"}).AddRow(tt.storedCommentID))
@@ -165,6 +223,15 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			require.Equal(t, 42, submitter.request.PullNumber, "status comment should target the pull request number")
 			require.Equal(t, tt.expectedExistingCommentID, submitter.request.ExistingCommentID, "status comment should use the durable GitHub comment id when available")
 			require.Contains(t, submitter.request.Body, tt.expectedBody, "status comment should render the current durable outcome")
+			if tt.expectedAdditionalBody != "" {
+				require.Contains(t, submitter.request.Body, tt.expectedAdditionalBody, "status comment should retain the complete previous verdict during reassessment")
+			}
+			if tt.expectReassessmentHistory {
+				expectedEntry := "- `" + now.Format(time.RFC3339) + "` — **Reassessment started** for `head` — [Follow the review session](https://143.test/sessions/" + sessionID.String() + ")"
+				require.Contains(t, submitter.request.Body, expectedEntry, "reassessment history should identify when the active assessment started and link to its session")
+				require.NotContains(t, submitter.request.Body, "143 Code Reviewer is reassessing this pull request", "reassessment status should appear in history instead of a standalone paragraph")
+				require.NotContains(t, submitter.request.Body, "remains visible until the new review finishes", "reassessment history should replace the redundant visibility explanation")
+			}
 			require.Contains(t, submitter.request.Body, "https://143.test/sessions/"+sessionID.String(), "status comment should link to the review session")
 			require.Equal(t, tt.expectedCalls, submitter.calls, "fallback summary should only be hidden after the rolling comment is published")
 			if tt.lockedReviewID != nil {

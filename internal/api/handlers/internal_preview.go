@@ -307,6 +307,13 @@ func (h *InternalPreviewHandler) RecyclePreview(w http.ResponseWriter, r *http.R
 			return
 		}
 		if err := h.manager.ResumeStoppedWarmPreview(r.Context(), orgID, previewID); err != nil {
+			// Ineligibility is an expected race, not a failure: the preview was
+			// never claimed, so the coordinator can still start it cold. Keep it
+			// distinguishable from a genuine resume failure.
+			if errors.Is(err, previewsvc.ErrWarmResumeNotEligible) {
+				writeError(w, r, http.StatusConflict, previewWarmResumeNotEligibleCode, "preview is no longer eligible for warm resume", err)
+				return
+			}
 			writeError(w, r, http.StatusInternalServerError, "PREVIEW_WARM_RESUME_FAILED", "failed to resume warm preview", err)
 			return
 		}

@@ -50,6 +50,7 @@ export const queryKeys = {
     stat: (params?: unknown) => ["code-reviews", "stats", params ?? null] as const,
     analytics: () => ["code-reviews", "analytics"] as const,
     analyticsReport: (params?: unknown) => ["code-reviews", "analytics", params ?? null] as const,
+    insights: (params?: unknown) => ["code-reviews", "insights", params ?? null] as const,
     policy: ["code-reviews", "policy"] as const,
     githubTrigger: (repositoryId?: string | null) => ["code-reviews", "github-trigger", repositoryId ?? null] as const,
     githubTriggers: ["code-reviews", "github-triggers"] as const,

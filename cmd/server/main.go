@@ -432,6 +432,7 @@ func main() {
 		issueStore := db.NewIssueStore(pool)
 		sessionStore := db.NewSessionStore(pool)
 		jobStore = db.NewJobStore(pool)
+		codeReviewStore.SetJobStore(jobStore)
 		orgStore := db.NewOrganizationStore(pool)
 		repoStore := db.NewRepositoryStore(pool)
 		integrationStore := db.NewIntegrationStore(pool)
@@ -473,6 +474,7 @@ func main() {
 		workerPullRequestFeedbackStore.SetJobStore(jobStore)
 		workerCodeReviewDisputeStore := db.NewCodeReviewDisputeStore(pool)
 		workerCodeReviewDisputeStore.SetJobStore(jobStore)
+		workerCodeReviewInsightStore := db.NewCodeReviewInsightStore(pool)
 		stores := &worker.Stores{
 			Issues:              issueStore,
 			Users:               db.NewUserStore(pool),
@@ -508,6 +510,7 @@ func main() {
 			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
 			CodeReviews:         codeReviewStore,
 			CodeReviewDisputes:  workerCodeReviewDisputeStore,
+			CodeReviewInsights:  workerCodeReviewInsightStore,
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 			Previews:            previewStore,
 			PullRequests:        pullRequestStore,
@@ -785,7 +788,7 @@ func main() {
 			agent.WithMaxRunningAge(cfg.SessionMaxRunningAge),
 			agent.WithRuntimeJobTerminalizer(jobStore),
 			agent.WithThreadRuntimeLeaseReclaimer(db.NewThreadRuntimeStore(pool)),
-			agent.WithActivityPhaseReconciler(agent.NewActivityPhaseService(db.NewSessionActivityPhaseStore(pool), logger)),
+			agent.WithActivityPhaseReconciler(agent.NewActivityPhaseService(db.NewSessionActivityPhaseStore(pool), logger, agent.WithActivityPhaseEventPublisher(sessionStreams))),
 			// Phase 0.5b safety net: fails session_threads stuck in 'running'
 			// past maxRunningAge. Catches orphans the orchestrator/handler
 			// thread.status reset paths couldn't unwind themselves.
@@ -1567,6 +1570,7 @@ func buildServices(
 		StaticEgress:               agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP),
 		ThreadRuntimes:             threadRuntimeStore,
 		ThreadInbox:                threadInboxStore,
+		ActivityPhases:             agent.NewActivityPhaseService(db.NewSessionActivityPhaseStore(pool), logger, agent.WithActivityPhaseEventPublisher(sessionStreams)),
 		SandboxHolders:             sessionSandboxHolderStore,
 		Cancels:                    cancelRegistry,
 		ThreadCancels:              threadCancelRegistry,
@@ -1595,6 +1599,7 @@ func buildServices(
 	prService.SetPullRequestFeedbackStore(workerFeedbackStore)
 	prService.SetChangesetStore(db.NewSessionChangesetStore(pool))
 	prService.SetPublicationStore(db.NewSessionPublicationStore(pool))
+	prService.SetCodeReviewInsightStore(db.NewCodeReviewInsightStore(pool))
 	prService.SetPRPreviewSurfacesEnabled(cfg.PRPreviewSurfacesEnabled)
 	wireWorkerPRService(
 		prService,
@@ -1761,6 +1766,7 @@ func buildServices(
 	}
 
 	codeReviewLifecycleStore := db.NewCodeReviewStore(pool)
+	codeReviewLifecycleStore.SetJobStore(jobStore)
 	codeReviewLifecycleStore.SetStreams(cache.NewCodeReviewStreams(redisClient, logger))
 	codeReviewLifecycleStore.SetLogger(logger)
 	codeReviewLifecycle := codereviewsvc.NewService(
@@ -1796,8 +1802,10 @@ func buildServices(
 	codeReviewDisputes.SetAuditEmitter(auditEmitter)
 	codeReviewDisputes.SetReviewRequestQueuer(codeReviewLifecycle)
 	codeReviewDisputes.SetFeedbackReleaser(workerFeedbackStore)
+	codeReviewInsights := codereviewsvc.NewInsightService(db.NewCodeReviewInsightStore(pool), logger)
 	if prService != nil {
 		codeReviewDisputes.SetPullRequestSnapshotter(prService)
+		codeReviewInsights.SetOutcomeProvider(prService)
 	}
 	svc := &worker.Services{
 		Orchestrator:    orchestrator,
@@ -1816,6 +1824,7 @@ func buildServices(
 		),
 		CodeReviewLifecycle:        codeReviewLifecycle,
 		CodeReviewDisputes:         codeReviewDisputes,
+		CodeReviewInsights:         codeReviewInsights,
 		CodeReviewDisputePublisher: prService,
 		CodingAgents:               agentEnv,
 		GitHubOrgRoster:            ghSvc,

@@ -98,13 +98,75 @@ func TestStartCodeReviewReassessmentHandlerDefersBehindOlderAssessment(t *testin
 	require.NoError(t, mock.ExpectationsWereMet(), "starter should load the current pull request with org isolation")
 }
 
+func TestStartCodeReviewReassessmentHandlerCoalescesStaleAutomaticHead(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+	repositoryID := uuid.New()
+	priorSessionID := uuid.New()
+	now := time.Now().UTC()
+	row := workerPullRequestRow(pullRequestID, uuid.New(), orgID, "acme/repo", "feature/reassess", now)
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery("(?s)FROM pull_requests.*WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(workerPullRequestColumns).AddRow(row...))
+
+	queuedJobID := uuid.New()
+	lifecycle := &codeReviewLifecycleStub{result: codereview.ReviewRequestedResult{Processed: true, JobID: queuedJobID}}
+	prService := &stubPRService{getCodeReviewPRSnapshotFn: func(_ context.Context, actualOrgID, actualRepositoryID uuid.UUID, number int) (ghservice.CodeReviewPullRequestSnapshot, error) {
+		require.Equal(t, orgID, actualOrgID, "starter should refresh the PR within the job organization")
+		require.Equal(t, repositoryID, actualRepositoryID, "starter should refresh the queued repository")
+		require.Equal(t, 42, number, "starter should refresh the mirrored pull request number")
+		return ghservice.CodeReviewPullRequestSnapshot{
+			Number: 42, HTMLURL: "https://github.com/acme/repo/pull/42", Title: "Newest PR title",
+			AuthorLogin: "octocat", HeadSHA: "newest-head", BaseSHA: "newest-base",
+		}, nil
+	}}
+	payload, err := json.Marshal(codereview.ReviewChangedInput{
+		OrgID: orgID, RepositoryID: repositoryID, PullRequestID: pullRequestID, PriorSessionID: priorSessionID,
+		HeadSHA: "superseded-head", ChangeKey: "material:old", ChangeReason: "pull_request.synchronize",
+	})
+	require.NoError(t, err, "automatic reassessment payload should marshal")
+
+	err = newStartCodeReviewReassessmentHandler(
+		&Stores{PullRequests: db.NewPullRequestStore(mock)},
+		&Services{PR: prService, CodeReviewLifecycle: lifecycle},
+		zerolog.Nop(),
+	)(context.Background(), models.JobTypeStartCodeReviewReassessment, payload)
+
+	require.NoError(t, err, "stale automatic starter should coalesce into a fresh delayed job")
+	require.Equal(t, 1, lifecycle.queueCalls, "stale automatic starter should enqueue the latest head once")
+	require.Equal(t, 0, lifecycle.handleCalls, "stale automatic starter should not launch an obsolete assessment")
+	require.Equal(t, "newest-head", lifecycle.queuedInput.HeadSHA, "replacement job should target GitHub's latest head")
+	require.Equal(t, "newest-base", lifecycle.queuedInput.BaseSHA, "replacement job should preserve the latest base revision")
+	require.Equal(t, "Newest PR title", lifecycle.queuedInput.PullRequestTitle, "replacement job should preserve the latest pull request context")
+	require.Equal(t, priorSessionID, lifecycle.queuedInput.PriorSessionID, "replacement job should retain ordering against the previous assessment")
+	expectedChangeKey, err := codereview.MaterialChangeKey("newest-head")
+	require.NoError(t, err, "latest material change key should be deterministic")
+	require.Equal(t, expectedChangeKey, lifecycle.queuedInput.ChangeKey, "replacement job should deduplicate by the latest head")
+	require.NoError(t, mock.ExpectationsWereMet(), "starter should load the pull request with org isolation")
+}
+
 type codeReviewLifecycleStub struct {
-	input  codereview.ReviewChangedInput
-	result codereview.ReviewRequestedResult
-	err    error
+	input       codereview.ReviewChangedInput
+	queuedInput codereview.ReviewChangedInput
+	result      codereview.ReviewRequestedResult
+	err         error
+	queueCalls  int
+	handleCalls int
+}
+
+func (s *codeReviewLifecycleStub) QueueReviewChanged(_ context.Context, input codereview.ReviewChangedInput) (codereview.ReviewRequestedResult, error) {
+	s.queueCalls++
+	s.queuedInput = input
+	return s.result, s.err
 }
 
 func (s *codeReviewLifecycleStub) HandleReviewChanged(_ context.Context, input codereview.ReviewChangedInput) (codereview.ReviewRequestedResult, error) {
+	s.handleCalls++
 	s.input = input
 	return s.result, s.err
 }
@@ -3220,6 +3282,136 @@ func TestCodeReviewSessionURL(t *testing.T) {
 	}
 }
 
+func TestCodeReviewPolicySettingsURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		frontendURL string
+		expected    string
+	}{
+		{name: "empty frontend URL omits link", expected: ""},
+		{name: "trims trailing slash", frontendURL: "https://143.dev/", expected: "https://143.dev/code-reviews?tab=policy"},
+		{name: "uses base URL", frontendURL: "https://app.143.dev", expected: "https://app.143.dev/code-reviews?tab=policy"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := codeReviewPolicySettingsURL(tt.frontendURL)
+
+			require.Equal(t, tt.expected, actual, "codeReviewPolicySettingsURL should build stable policy links")
+		})
+	}
+}
+
+func TestCodeReviewStableDeterministicRisk(t *testing.T) {
+	t.Parallel()
+
+	policy := models.DefaultCodeReviewPolicyConfig()
+	policy.RiskPolicy.MaxFilesChanged = 1
+	policy.RiskPolicy.MaxLinesChanged = 5
+	policy.RiskPolicy.BlockedPathPatterns = []string{"migrations/**"}
+	policy.RiskPolicy.RequirePassingChecks = true
+	policy.RiskPolicy.RequiredChecks = []string{"tests"}
+	policy.RiskPolicy.RequireUpToDate = true
+	tests := []struct {
+		name                  string
+		available             bool
+		files                 []codereview.PullRequestFile
+		expectedReasonDetails []models.CodeReviewRiskReason
+	}{
+		{
+			name:      "keeps only stable head-bound failures",
+			available: true,
+			files: []codereview.PullRequestFile{
+				{Filename: "migrations/001.sql", Additions: 4, Deletions: 0},
+				{Filename: "internal/api.go", Additions: 2, Deletions: 0},
+			},
+			expectedReasonDetails: []models.CodeReviewRiskReason{
+				{Code: models.CodeReviewRiskReasonFilesLimitExceeded, Actual: 2, Limit: 1},
+				{Code: models.CodeReviewRiskReasonLinesLimitExceeded, Actual: 6, Limit: 5},
+				{Code: models.CodeReviewRiskReasonBlockedPath, Subject: "migrations/001.sql"},
+			},
+		},
+		{name: "does not publish when changed files are unavailable", available: false, files: []codereview.PullRequestFile{{Filename: "migrations/001.sql", Additions: 10}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := codeReviewStableDeterministicRisk(policy, runCodeReviewPayload{}, models.PullRequest{AuthoredBy: models.GitIdentitySourceUser}, tt.files, tt.available)
+
+			require.Equal(t, tt.expectedReasonDetails, actual.ReasonDetails, "early evaluation should publish only stable deterministic failures")
+			require.Equal(t, len(tt.expectedReasonDetails) == 0, actual.Acceptable, "early evaluation acceptability should reflect stable failures")
+		})
+	}
+}
+
+func TestCodeReviewStableDeterministicRiskIncludesSensitivePaths(t *testing.T) {
+	t.Parallel()
+
+	policy := models.DefaultCodeReviewPolicyConfig()
+	policy.RiskPolicy.ExcludeSensitivePaths = true
+	policy.RiskPolicy.SensitivePaths = []string{"internal/auth/**"}
+
+	actual := codeReviewStableDeterministicRisk(
+		policy,
+		runCodeReviewPayload{},
+		models.PullRequest{AuthoredBy: models.GitIdentitySourceUser},
+		[]codereview.PullRequestFile{{Filename: "internal/auth/session.go", Additions: 2}},
+		true,
+	)
+
+	require.Equal(t,
+		[]models.CodeReviewRiskReason{{Code: models.CodeReviewRiskReasonSensitivePath, Subject: "internal/auth/session.go"}},
+		actual.ReasonDetails,
+		"sensitive-path matches are decided by the assessed commit, so they publish with the other stable path rules")
+}
+
+func TestCodeReviewCanStopBeforeAgentFanout(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		results  []models.CodeReviewAgentResult
+		expected bool
+	}{
+		{name: "allows an untouched session", expected: true},
+		{
+			name: "preserves completed reviewer evidence",
+			results: []models.CodeReviewAgentResult{{
+				Role:   models.CodeReviewAgentRoleReviewer,
+				Status: models.CodeReviewAgentResultStatusCompleted,
+			}},
+		},
+		{
+			name: "preserves in-flight reviewer work",
+			results: []models.CodeReviewAgentResult{{
+				Role:   models.CodeReviewAgentRoleReviewer,
+				Status: models.CodeReviewAgentResultStatusRunning,
+			}},
+		},
+		{
+			name: "preserves failed agent evidence",
+			results: []models.CodeReviewAgentResult{{
+				Role:   models.CodeReviewAgentRoleOrchestrator,
+				Status: models.CodeReviewAgentResultStatusFailed,
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, codeReviewCanStopBeforeAgentFanout(tt.results), "early stopping should only be possible before durable agent work exists")
+		})
+	}
+}
+
 func TestCodeReviewThreadCompletedByDeadline(t *testing.T) {
 	t.Parallel()
 
@@ -3550,7 +3742,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			bodyContains: "Understandable description (The coding agent found the required evidence missing.)",
 		},
 		{
-			name: "approves a P2-only review despite an opaque negative orchestrator recommendation",
+			name: "approves a P2-only review and exposes its structured advisory evidence",
 			input: liveCodeReviewOutcomeInput{
 				Policy: policy,
 				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
@@ -3587,8 +3779,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			},
 			expected:        models.CodeReviewDecisionApproved,
 			riskNotContains: "coding-agent orchestrator recommends human review",
-			bodyContains:    "**Advisory notes:** 1 non-blocking observation is available in the full review. P2 and P3 observations do not affect the approval decision.",
-			bodyNotContains: "Add direct parser coverage",
+			bodyContains:    "<summary><strong>Advisory findings</strong> (1 non-blocking)</summary>",
 		},
 		{
 			name: "keeps generated P2 details out of an approved GitHub summary",
@@ -3630,7 +3821,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 				setCodingAgentDecision(input, true, nil)
 			},
 			expected:        models.CodeReviewDecisionApproved,
-			bodyContains:    "**Advisory notes:** 1 non-blocking observation is available in the full review. P2 and P3 observations do not affect the approval decision.",
+			bodyContains:    "<summary><strong>Advisory findings</strong> (1 non-blocking)</summary>",
 			bodyNotContains: "direct parser coverage remains an advisory follow-up",
 		},
 		{

@@ -458,6 +458,10 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register(models.JobTypeTriageCodeReviewDispute, newTriageCodeReviewDisputeHandler(services.CodeReviewDisputes))
 		w.Register(models.JobTypeReplyCodeReviewDispute, newReplyCodeReviewDisputeHandler(stores, services, logger))
 	}
+	if stores != nil && stores.CodeReviewInsights != nil && services != nil && services.CodeReviewInsights != nil {
+		w.Register(models.JobTypeRankCodeReviewDispute, newRankCodeReviewDisputeHandler(services.CodeReviewInsights))
+		w.Register(models.JobTypeReconcileCodeReviewOutcomes, newReconcileCodeReviewOutcomesHandler(services.CodeReviewInsights))
+	}
 	if services != nil && services.ReviewLoops != nil {
 		w.Register(models.JobTypeReconcileSessionReviewLoop, newReconcileSessionReviewLoopHandler(services, logger))
 	}
@@ -635,6 +639,7 @@ type Stores struct {
 	ReviewLoops         *db.SessionReviewLoopStore
 	CodeReviews         *db.CodeReviewStore
 	CodeReviewDisputes  *db.CodeReviewDisputeStore
+	CodeReviewInsights  *db.CodeReviewInsightStore
 	SessionIssueLinks   *db.SessionIssueLinkStore // nil-safe: needed for Linear milestones
 	Previews            *db.PreviewStore
 	PullRequests        *db.PullRequestStore
@@ -791,6 +796,7 @@ type codeReviewStatusCommentUpdater interface {
 }
 
 type codeReviewLifecycle interface {
+	QueueReviewChanged(ctx context.Context, input codereviewsvc.ReviewChangedInput) (codereviewsvc.ReviewRequestedResult, error)
 	HandleReviewChanged(ctx context.Context, input codereviewsvc.ReviewChangedInput) (codereviewsvc.ReviewRequestedResult, error)
 }
 
@@ -799,6 +805,12 @@ type codeReviewDisputeService interface {
 	FailTriage(ctx context.Context, orgID, disputeID uuid.UUID, detail string) error
 	BuildReply(ctx context.Context, orgID, disputeID uuid.UUID) (models.CodeReviewDispute, string, error)
 	EnqueueReply(ctx context.Context, orgID, disputeID uuid.UUID, stage string) error
+}
+
+type codeReviewInsightService interface {
+	ProjectDecision(ctx context.Context, orgID, sessionID uuid.UUID) error
+	ReconcileAndRank(ctx context.Context, orgID uuid.UUID) error
+	RankPendingBatches(ctx context.Context, orgID uuid.UUID, limit, maxBatches int) (int, bool, error)
 }
 
 type codeReviewDisputePublisher interface {
@@ -833,6 +845,7 @@ type Services struct {
 	CodeReviews                codeReviewSubmitter                            // nil-safe: GitHub review submission disabled if nil
 	CodeReviewLifecycle        codeReviewLifecycle                            // nil-safe: starts durable follow-up assessments after webhook changes
 	CodeReviewDisputes         codeReviewDisputeService                       // nil-safe: triages and replies to decision disputes
+	CodeReviewInsights         codeReviewInsightService                       // nil-safe: projects outcomes and ranks the policy-owner queue
 	CodeReviewDisputePublisher codeReviewDisputePublisher                     // nil-safe: publishes idempotent GitHub replies
 	CodingAgents               codingAgentAvailability                        // nil-safe: code review falls back to the configured roster when nil
 	PublicationIntents         publicationintent.PublicationIntentCoordinator // nil-safe: Slack falls back to an actionable error when publication is unavailable
@@ -13069,6 +13082,26 @@ func newDataRetentionCleanupHandler(stores *Stores, retentionCfg DataRetentionCo
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var totalDeleted int64
 		var errs []error
+		if stores.CodeReviewDisputes != nil {
+			var input struct {
+				OrgID string `json:"org_id"`
+			}
+			if err := json.Unmarshal(payload, &input); err != nil {
+				return fmt.Errorf("unmarshal data_retention_cleanup payload: %w", err)
+			}
+			orgID, err := parseOrgID(input.OrgID, ctx)
+			if err != nil {
+				return fmt.Errorf("parse data retention org ID: %w", err)
+			}
+			deleted, err := stores.CodeReviewDisputes.DeleteExpiredQueueSnapshots(ctx, orgID)
+			if err != nil {
+				logger.Error().Err(err).Str("org_id", orgID.String()).Msg("failed to delete expired code review dispute queue snapshots")
+				errs = append(errs, err)
+			} else {
+				totalDeleted += deleted
+				logger.Info().Int64("deleted", deleted).Str("org_id", orgID.String()).Msg("code review dispute queue snapshot cleanup complete")
+			}
+		}
 
 		if stores.Webhooks != nil && retentionCfg.WebhookDays > 0 {
 			deleted, err := stores.Webhooks.DeleteExpired(ctx, retentionCfg.WebhookDays)

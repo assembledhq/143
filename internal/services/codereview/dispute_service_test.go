@@ -94,7 +94,7 @@ func (s *captureDisputeStore) Escalate(context.Context, uuid.UUID, uuid.UUID, uu
 	return models.CodeReviewDispute{}, nil
 }
 func (s *captureDisputeStore) Adjudicate(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.CodeReviewDisputeAdjudicationUpdate) (models.CodeReviewDispute, error) {
-	return models.CodeReviewDispute{}, nil
+	return s.current, nil
 }
 
 type disputeReviewStoreStub struct {
@@ -370,6 +370,33 @@ func TestDisputeService_TriageDoesNotLetTrustedNonAuthorStartReassessment(t *tes
 	require.Equal(t, []models.CodeReviewDisputeAuthorizationAction{models.CodeReviewDisputeAuthorizationQueueInfluence}, actions, "queue influence should have one exact durable authorization snapshot")
 }
 
+func TestDisputeService_AdjudicateTrustOverrideEnqueuesRankRefresh(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	disputeID := uuid.New()
+	userID := uuid.New()
+	trustOverride := true
+	store := &captureDisputeStore{current: models.CodeReviewDispute{
+		ID: disputeID, OrgID: orgID, Version: 4, TrustOverride: &trustOverride,
+	}}
+	jobs := &disputeJobStoreStub{}
+	service := NewDisputeService(store, disputeReviewStoreStub{}, disputePullRequestStoreStub{}, jobs, nil, "", zerolog.Nop())
+
+	result, err := service.Adjudicate(context.Background(), orgID, disputeID, userID, models.CodeReviewDisputeAdjudicationUpdate{
+		ExpectedVersion: 3, TrustOverride: &trustOverride, TrustOverridePresent: true,
+	})
+
+	require.NoError(t, err, "adjudicating a trust override should succeed")
+	require.True(t, result.Trusted, "the adjudication response should expose the updated trust decision")
+	require.Len(t, jobs.enqueued, 2, "a trust override should enqueue both the reply and ranking refresh")
+	require.Equal(t, models.JobTypeReplyCodeReviewDispute, jobs.enqueued[0].JobType, "the first follow-up should refresh the durable reply")
+	require.Equal(t, models.JobTypeRankCodeReviewDispute, jobs.enqueued[1].JobType, "the second follow-up should refresh queue eligibility and priority")
+	require.Equal(t, models.CodeReviewInsightPayload{OrgID: orgID}, jobs.enqueued[1].Payload, "the ranking job should target the adjudicated tenant")
+	require.NotNil(t, jobs.enqueued[1].DedupeKey, "the ranking refresh should have a stable dedupe key")
+	require.Contains(t, *jobs.enqueued[1].DedupeKey, disputeID.String()+":trust_override:4", "the ranking refresh should be unique to the accepted dispute version")
+}
+
 // A triage job is enqueued at insert, so it still runs after a later edit of
 // the same GitHub comment replaced the objection. The reply belongs to the live
 // dispute and a reassessment would spend a whole agent run on a body nobody
@@ -605,7 +632,8 @@ func TestDisputeService_ReviewRequestQueuesNormalReviewWithoutDisputeArtifacts(t
 	require.Equal(t, models.CodeReviewDisputeRoutingReviewRequest, store.triage.Routing, "the review_request classification should be retained for audit")
 	require.Nil(t, store.current.AdjudicationStatus, "an ordinary review request must not enter the disputes queue")
 	require.Empty(t, store.authorizations, "an ordinary review request must not record dispute influence authorization")
-	require.Empty(t, jobs.enqueued, "the dispute reply path should not publish a second status comment")
+	require.Len(t, jobs.enqueued, 1, "the normal review route should only enqueue the ranking refresh")
+	require.Equal(t, models.JobTypeRankCodeReviewDispute, jobs.enqueued[0].JobType, "the normal review route must not enqueue a duplicate GitHub reply")
 	require.Len(t, queue.inputs, 1, "the normal review lifecycle should receive exactly one idempotent request")
 	queued := queue.inputs[0]
 	require.Equal(t, models.CodeReviewTriggerSourceTeamReviewer, queued.TriggerSource, "the ordinary review should retain the team-reviewer trigger")
@@ -636,7 +664,9 @@ func TestDisputeService_ApprovedDecisionQuestionRemainsAnswerOnly(t *testing.T) 
 	require.NoError(t, err, "approval monotonicity should not turn a question into a policy dispute")
 	require.Equal(t, models.CodeReviewDisputeRoutingAnswerOnly, store.triage.Routing, "only reassessment routes should be closed after an approval")
 	require.Nil(t, store.current.AdjudicationStatus, "an explanation question should not enter policy-owner adjudication")
-	require.Len(t, jobs.enqueued, 1, "the evidence-grounded answer should be published once")
+	require.Len(t, jobs.enqueued, 2, "the evidence-grounded answer and ranking refresh should each be enqueued once")
+	require.Equal(t, models.JobTypeReplyCodeReviewDispute, jobs.enqueued[0].JobType, "the evidence-grounded answer should be published once")
+	require.Equal(t, models.JobTypeRankCodeReviewDispute, jobs.enqueued[1].JobType, "triage should refresh dispute ranking after publishing the answer")
 }
 
 func TestDisputeService_ReviewRequestSafetyChecksRunAfterClassification(t *testing.T) {
@@ -664,7 +694,9 @@ func TestDisputeService_ReviewRequestSafetyChecksRunAfterClassification(t *testi
 	require.Equal(t, models.CodeReviewDisputeRoutingNotADispute, store.triage.Routing, "the event provenance guard should override the expensive route after LLM classification")
 	require.Equal(t, "An edited comment can't start another code review. Post a new reviewer mention to request one.", store.triage.Reply, "the commenter should receive the exact safety explanation")
 	require.Empty(t, queue.inputs, "editing an existing comment must not start another agent fan-out")
-	require.Len(t, jobs.enqueued, 1, "the safety explanation should use one marker-protected dispute reply")
+	require.Len(t, jobs.enqueued, 2, "the safety explanation and ranking refresh should each be enqueued once")
+	require.Equal(t, models.JobTypeReplyCodeReviewDispute, jobs.enqueued[0].JobType, "the safety explanation should use one marker-protected dispute reply")
+	require.Equal(t, models.JobTypeRankCodeReviewDispute, jobs.enqueued[1].JobType, "triage should refresh dispute ranking after publishing the safety explanation")
 }
 
 func TestDisputeService_FailedTriageFallsBackForTrustedPullRequestAuthor(t *testing.T) {

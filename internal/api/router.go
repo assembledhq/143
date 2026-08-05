@@ -210,6 +210,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		healthHandler.SetRedisHealthCheck(redisClient.Healthy)
 	}
 	authHandler := handlers.NewAuthHandler(cfg, pool, userStore, authSessionStore, invitationStore, membershipStore)
+	applicationConfigHandler := handlers.NewApplicationConfigHandler(cfg.SessionActivityCapsulesEnabled)
+	applicationConfig := applicationConfigHandler.Config()
+	logger.Info().
+		Bool("session_activity_capsules_enabled", applicationConfig.SessionActivityCapsulesEnabled).
+		Str("revision", applicationConfig.Revision).
+		Time("updated_at", applicationConfig.UpdatedAt).
+		Str("actor", cfg.SessionActivityCapsulesActor).
+		Str("reason", cfg.SessionActivityCapsulesReason).
+		Msg("session activity capsule rendering configuration activated")
 	authHandler.SetGitHubHTTPClient(githubtelemetry.NewHTTPClient(10*time.Second, logger))
 	// CLI login flow stores (browser-based `143-tools login`, join-token JIT).
 	cliAuthCodeStore := db.NewCLIAuthCodeStore(pool)
@@ -353,6 +362,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionSandboxHolderStore := db.NewSessionSandboxHolderStore(pool)
 	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
 	codeReviewStore := db.NewCodeReviewStore(pool)
+	codeReviewStore.SetJobStore(jobStore)
 	codeReviewStreams := cache.NewCodeReviewStreams(redisClient, logger)
 	codeReviewStore.SetStreams(codeReviewStreams)
 	codeReviewStore.SetLogger(logger)
@@ -390,6 +400,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		codeReviewDisputeSvc.SetPullRequestSnapshotter(prService)
 	}
 	codeReviewTriggerSetupSvc := codereviewsvc.NewGitHubTriggerSetupService(codeReviewStore, repoStore, appUserAuthSvc, logger)
+	codeReviewInsightStore := db.NewCodeReviewInsightStore(pool)
+	codeReviewInsightSvc := codereviewsvc.NewInsightService(codeReviewInsightStore, logger)
+	if prService != nil {
+		prService.SetCodeReviewInsightStore(codeReviewInsightStore)
+	}
 	webhookHandler.SetCodeReviewService(codeReviewSvc, pullRequestStore)
 	webhookHandler.SetCodeReviewDisputeService(codeReviewDisputeSvc)
 	sessionThreadFileEventStore := db.NewSessionThreadFileEventStore(pool)
@@ -403,6 +418,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	codeReviewHandler.SetAuditEmitter(auditEmitter)
 	codeReviewHandler.SetGitHubTriggerSetupService(codeReviewTriggerSetupSvc)
 	codeReviewHandler.SetDisputeService(codeReviewDisputeSvc)
+	codeReviewHandler.SetInsightService(codeReviewInsightSvc)
 	prHealthStreams := cache.NewPullRequestStreams(redisClient, logger)
 	publicationIntentCoordinator := publicationintent.NewCoordinator(
 		sessionStore,
@@ -1071,6 +1087,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		internalPullRequestHandler.SetThreadStore(sessionThreadStore)
 		internalPullRequestHandler.SetAuditEmitter(auditEmitter)
 		internalPullRequestHandler.SetPublicationIntentCoordinator(publicationIntentCoordinator)
+		if prService != nil {
+			internalPullRequestHandler.SetPullRequestUpdater(prService)
+		}
 		internalSessionTabsHandler := handlers.NewInternalSessionTabsHandler(threadSvc, sessionStore, orgStore, cfg.SessionSecret, logger)
 		internalAutomationHandler := handlers.NewInternalAutomationHandler(automationHandler, sessionStore, automationStore, cfg.SessionSecret)
 		internalSlackMessageHandler := handlers.NewInternalSlackMessageHandler(sessionStore, slackInstallationStore, credentialStore, db.NewSlackOutboundMessageStore(pool), cfg.SessionSecret, logger)
@@ -1102,7 +1121,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Post("/sessions/{id}/preview/assert", internalAgentPreviewHandler.Assert)
 			r.Post("/issues", internalIssueHandler.Create)
 			r.Post("/session/pr", internalPullRequestHandler.Create)
+			r.Patch("/session/pr", internalPullRequestHandler.Update)
 			r.Post("/sessions/{sessionID}/pr", internalPullRequestHandler.Create)
+			r.Patch("/sessions/{sessionID}/pr", internalPullRequestHandler.Update)
 			r.Get("/sessions/{id}/changesets", internalChangesetHandler.List)
 			r.Get("/sessions/{id}/changesets/split-status", internalChangesetHandler.Status)
 			r.Post("/sessions/{id}/changesets", internalChangesetHandler.Create)
@@ -1207,6 +1228,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			// OrgContext (which 403s on uuid.Nil) or RequireRole (which 403s on
 			// empty active role).
 			r.Get("/api/v1/auth/me", authHandler.Me)
+			r.Get("/api/v1/application-config", applicationConfigHandler.Get)
+			r.Post("/api/v1/session-activity-events", applicationConfigHandler.RecordSessionActivityEvent)
 			r.Patch("/api/v1/auth/me/settings", authHandler.UpdateSettings)
 			// Memberships is zero-membership-safe for the same reason /auth/me
 			// is: a user whose only org was just revoked still needs to see the
@@ -1677,6 +1700,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/code-reviews/{id}/agent-results", codeReviewHandler.CreateAgentResult)
 				r.Post("/api/v1/code-reviews/{id}/findings", codeReviewHandler.CreateFinding)
 				r.Get("/api/v1/code-review-disputes", codeReviewHandler.ListDisputeQueue)
+				r.Get("/api/v1/code-review-insights", codeReviewHandler.Insights)
 				r.Patch("/api/v1/code-review-disputes/{id}", codeReviewHandler.UpdateDispute)
 				r.Put("/api/v1/repositories/{repository_id}/preview-policy", branchPreviewHandler.UpdatePolicy)
 				r.Post("/api/v1/repositories/{repository_id}/preview-policy/test-preview", branchPreviewHandler.TestPolicyPreview)

@@ -278,6 +278,7 @@ func TestSessionTranscriptStore_ListThreadWindowIncludesTurnZeroInitialMessage(t
 	turns := []int32{0, 1}
 	now := time.Now().UTC()
 	turnOneTime := now.Add(time.Second)
+	turnOneCompletedAt := turnOneTime.Add(time.Second)
 
 	mock.ExpectQuery(`SELECT DISTINCT turn_number FROM \(.+session_messages.+session_logs.+\) t\s+WHERE turn_number >= 0`).
 		WithArgs(pgx.NamedArgs{
@@ -299,6 +300,18 @@ func TestSessionTranscriptStore_ListThreadWindowIncludesTurnZeroInitialMessage(t
 			AddRow(int64(10), sessionID, orgID, &threadID, nil, 0, models.MessageRoleUser, "initial prompt", nil, nil, nil, nil, "", now).
 			AddRow(int64(11), sessionID, orgID, &threadID, nil, 1, models.MessageRoleAssistant, "assistant response", nil, nil, nil, nil, "", turnOneTime))
 
+	mock.ExpectQuery(`SELECT e.id, e.org_id, e.session_id, e.thread_id, e.sequence_no`).
+		WithArgs(pgx.NamedArgs{
+			"org_id":    orgID,
+			"thread_id": threadID,
+			"turns":     turns,
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "thread_id", "sequence_no", "message_id", "client_message_id",
+			"entry_type", "payload", "delivery_state", "delivery_attempts", "last_error", "owner_node_id", "runtime_id",
+			"accepted_at", "delivered_at", "acked_at", "applied_at", "created_at", "updated_at",
+		}))
+
 	mock.ExpectQuery(`SELECT .+ FROM session_logs.+turn_number = ANY\(@turns\).+turn_number > 0`).
 		WithArgs(pgx.NamedArgs{
 			"org_id":    orgID,
@@ -307,6 +320,15 @@ func TestSessionTranscriptStore_ListThreadWindowIncludesTurnZeroInitialMessage(t
 		}).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
 			AddRow(int64(101), sessionID, orgID, &threadID, turnOneTime.Add(time.Millisecond), models.SessionLogLevelInfo, "turn one log", json.RawMessage(`{}`), 1))
+
+	mock.ExpectQuery(`SELECT p.id, p.turn_number, p.phase_number`).
+		WithArgs(pgx.NamedArgs{
+			"org_id":    orgID,
+			"thread_id": threadID,
+			"turns":     turns,
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "turn_number", "phase_number", "status", "boundary_reason", "trigger_kind", "started_at", "completed_at", "tool_call_count"}).
+			AddRow(uuid.New(), 1, 1, models.ActivityPhaseStatusCompleted, models.ActivityPhaseBoundaryFinalResponse, models.ActivityPhaseTriggerRecovery, turnOneTime, &turnOneCompletedAt, 0))
 
 	mock.ExpectQuery(`SELECT id\s+FROM session_messages\s+WHERE org_id = @org_id AND thread_id = @thread_id AND role = 'assistant'`).
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID}).
@@ -323,6 +345,7 @@ func TestSessionTranscriptStore_ListThreadWindowIncludesTurnZeroInitialMessage(t
 	require.NoError(t, err, "ListThreadWindow should include the initial prompt without error")
 	require.False(t, window.HasOlder, "turn zero and turn one should fit in the default latest window")
 	require.Equal(t, int64(11), window.LatestAssistantMessageID, "latest assistant metadata should still point at the assistant response")
+	require.Equal(t, models.ActivityPhaseTriggerRecovery, window.Phases[1][0].TriggerKind, "transcript phase metadata should preserve the durable recovery trigger")
 	require.Equal(t, "log_101", window.LiveEdgeEntryID, "live edge metadata should ignore turn-zero history and use the latest positive-turn entry")
 
 	gotKinds := make([]models.TranscriptEntryKind, 0, len(window.Rows))

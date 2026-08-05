@@ -63,6 +63,19 @@ Verification:
 
 Sessions are interactive. After a turn completes or pauses, send follow-up instructions instead of starting over. Follow-ups reuse the session context and can continue from the same sandbox when a checkpoint is available.
 
+## Inspect completed work
+
+143 keeps active agent work expanded so you can follow commands, tool calls, and progress as they happen. After an uninterrupted period of work finishes, the transcript compacts that activity into a summary such as **Worked for 2m 41s · 8 tool calls**. Requests, answers, approvals, failures, and the agent's final response remain visible outside the summary.
+
+Select an activity summary to expand the complete execution trace inline. Individual tool calls retain their own detail controls.
+
+Use **Activity detail** in a session transcript to choose:
+
+- **Compact** — collapse completed activity while keeping active work open.
+- **Detailed** — keep every activity phase expanded, including older history loaded later.
+
+The choice is saved to your account and follows you across sessions, browsers, and devices. You can also change it from **Account settings → Appearance**. Expanding or collapsing one summary is temporary and does not change the saved preference.
+
 <AgentNote>
 When automating against sessions, treat the session as the durable work object. Issues provide context, but the session owns execution state.
 </AgentNote>

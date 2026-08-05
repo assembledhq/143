@@ -103,25 +103,34 @@ type PublicationExecutionPolicy interface {
 	ReviewExecutionEnabled(source models.SessionPublicationSource) bool
 }
 
+type codeReviewInsightProjector interface {
+	RecordHumanReview(ctx context.Context, orgID, pullRequestID uuid.UUID, reviewID int64, login, reviewerType, authorAssociation, pullRequestAuthor, state string, observedAt time.Time) error
+	DismissHumanReview(ctx context.Context, orgID, pullRequestID uuid.UUID, reviewID int64, login, reviewerType, authorAssociation, pullRequestAuthor string, observedAt time.Time) error
+	RefreshHumanReviewCommentCount(ctx context.Context, orgID, pullRequestID uuid.UUID, observedAt time.Time) error
+	RecordPullRequestTerminal(ctx context.Context, orgID, pullRequestID uuid.UUID, merged bool, mergedAt *time.Time, observedAt time.Time) (bool, error)
+	RecordPullRequestOpen(ctx context.Context, orgID, pullRequestID uuid.UUID, observedAt time.Time) (bool, error)
+}
+
 // PRService handles GitHub PR creation and webhook-based tracking.
 type PRService struct {
-	tokenProvider   *Service
-	pullRequests    *db.PullRequestStore
-	changesets      *db.SessionChangesetStore
-	publications    *db.SessionPublicationStore
-	sessions        *db.SessionStore
-	issues          *db.IssueStore
-	deploys         *db.DeployStore
-	repos           *db.RepositoryStore
-	jobs            *db.JobStore
-	reviewComments  *db.ReviewCommentStore
-	feedback        *db.PullRequestFeedbackStore
-	integrations    *db.IntegrationStore
-	userCredentials *db.UserCredentialStore
-	sessionMessages *db.SessionMessageStore
-	sessionThreads  sessionThreadLister
-	reviewLoops     sessionReviewLoopLister
-	appUserAuth     interface {
+	tokenProvider      *Service
+	pullRequests       *db.PullRequestStore
+	changesets         *db.SessionChangesetStore
+	publications       *db.SessionPublicationStore
+	sessions           *db.SessionStore
+	issues             *db.IssueStore
+	deploys            *db.DeployStore
+	repos              *db.RepositoryStore
+	jobs               *db.JobStore
+	reviewComments     *db.ReviewCommentStore
+	codeReviewInsights codeReviewInsightProjector
+	feedback           *db.PullRequestFeedbackStore
+	integrations       *db.IntegrationStore
+	userCredentials    *db.UserCredentialStore
+	sessionMessages    *db.SessionMessageStore
+	sessionThreads     sessionThreadLister
+	reviewLoops        sessionReviewLoopLister
+	appUserAuth        interface {
 		GetValidCredential(ctx context.Context, orgID, userID uuid.UUID) (*models.GitHubAppUserConfig, error)
 	}
 	users                    *db.UserStore
@@ -196,6 +205,10 @@ func (s *PRService) SetPublicationStore(store *db.SessionPublicationStore) {
 
 func (s *PRService) SetPublicationExecutionPolicy(policy PublicationExecutionPolicy) {
 	s.publicationPolicy = policy
+}
+
+func (s *PRService) SetCodeReviewInsightStore(store codeReviewInsightProjector) {
+	s.codeReviewInsights = store
 }
 
 func NewPRService(
@@ -590,11 +603,11 @@ type CreatePRParams struct {
 	Draft       *bool      `json:"draft,omitempty"`
 	AuthorMode  string     `json:"author_mode,omitempty"`
 	ChangesetID *uuid.UUID `json:"changeset_id,omitempty"`
-	// ExpectedRemoteHeadSHA is an internal revision-bound lease consumed only
-	// by the review evidence refresh paths (CreateBranch and PushChangesToPR).
-	// It permits replacing a non-ancestor branch head when the remote still
-	// equals the exact checkpoint that the review loop inspected. It is
-	// deliberately excluded from persisted/client payloads.
+	// ExpectedRemoteHeadSHA is an internal branch lease derived from a durable
+	// publication or review checkpoint. It permits replacing a non-ancestor
+	// branch head only while the remote still equals the exact head previously
+	// published by this operation. It is deliberately excluded from persisted
+	// and client-controlled payloads.
 	ExpectedRemoteHeadSHA     string                               `json:"-"`
 	PublicationSource         models.SessionPublicationSource      `json:"publication_source,omitempty"`
 	PublicationQueue          models.SessionPublicationJobQueue    `json:"-"`
@@ -843,6 +856,7 @@ func (s *PRService) PreparePublicationAttempt(
 	params.PublicationRequestPayload = append(json.RawMessage(nil), publication.RequestPayload...)
 	params.PublicationGenerationAt = publication.RequestGenerationAt
 	params.PublicationHeadBranch = publication.HeadBranch
+	params.ExpectedRemoteHeadSHA = strings.TrimSpace(stringValue(publication.PublishedHeadSHA))
 
 	started, err := s.publications.StartAttempt(ctx, run.OrgID, run.ID, changeset.ID)
 	if err != nil {
@@ -949,7 +963,7 @@ func (s *PRService) checkpointExistingPullRequestPublication(
 		holdDraftForReview = publication.HandoffMode == models.PRHandoffModeDraftFirst &&
 			publication.ReviewPolicySource != models.PublicationPolicySourceExplicitBypass
 		if existing.Status == models.PullRequestStatusMerged || existing.Status == models.PullRequestStatusClosed {
-			return s.completeReconciledSessionPublication(ctx, *publication, *existing, "")
+			return s.completeReconciledSessionPublication(ctx, *publication, *existing, existing.MergedAt, &existing.UpdatedAt, "")
 		}
 		if existing.Status != models.PullRequestStatusOpen {
 			return fmt.Errorf("recovered pull request has unsupported status %q", existing.Status)
@@ -996,6 +1010,9 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 		if param.ChangesetID != nil {
 			opts.ChangesetID = param.ChangesetID
+		}
+		if strings.TrimSpace(param.ExpectedRemoteHeadSHA) != "" {
+			opts.ExpectedRemoteHeadSHA = strings.TrimSpace(param.ExpectedRemoteHeadSHA)
 		}
 		if param.PublicationSource != "" {
 			opts.PublicationSource = param.PublicationSource
@@ -1166,6 +1183,10 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		if publicationErr := s.publications.EnsureRequested(ctx, run.OrgID, publication); publicationErr != nil {
 			return nil, fmt.Errorf("ensure publication operation: %w", publicationErr)
 		}
+		// The durable publication row is authoritative for branch ownership.
+		// Callers cannot grant this lease through request JSON, and reloading it
+		// here keeps direct and replayed CreatePR paths on the same safety model.
+		opts.ExpectedRemoteHeadSHA = strings.TrimSpace(stringValue(publication.PublishedHeadSHA))
 		if gateErr := validatePublicationReviewGateForCreate(run, publication.ReviewGateState); gateErr != nil {
 			return nil, gateErr
 		}
@@ -1184,9 +1205,9 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 
 	var pushed *pushResult
 	if materializedTarget {
-		pushed, err = s.pushChangesetBranch(ctx, run, &repo, orgSettings, *targetChangeset, commitMsg, authorName, authorEmail, "")
+		pushed, err = s.pushChangesetBranch(ctx, run, &repo, orgSettings, *targetChangeset, commitMsg, authorName, authorEmail, opts.ExpectedRemoteHeadSHA)
 	} else {
-		pushed, err = s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, defaultBranch, commitMsg, authorName, authorEmail, "")
+		pushed, err = s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, defaultBranch, commitMsg, authorName, authorEmail, opts.ExpectedRemoteHeadSHA)
 	}
 	if err != nil {
 		return nil, err
@@ -1387,7 +1408,7 @@ func (s *PRService) pushChangesetBranch(
 	orgSettings models.OrgSettings,
 	changeset models.SessionChangeset,
 	commitMsg, authorName, authorEmail string,
-	reviewExpectedRemoteHeadSHA string,
+	expectedRemoteHeadSHA string,
 ) (*pushResult, error) {
 	if s.sandboxAuth == nil {
 		return nil, fmt.Errorf("%w: sandbox auth socket not configured", ErrSandboxAuthUnavailable)
@@ -1415,9 +1436,9 @@ func (s *PRService) pushChangesetBranch(
 	if changeset.ExpectedRemoteHeadSHA != nil {
 		expected = strings.TrimSpace(*changeset.ExpectedRemoteHeadSHA)
 	}
-	reviewExpected := strings.TrimSpace(reviewExpectedRemoteHeadSHA)
-	if reviewExpected != "" {
-		expected = reviewExpected
+	publicationExpected := strings.TrimSpace(expectedRemoteHeadSHA)
+	if publicationExpected != "" {
+		expected = publicationExpected
 	}
 	if remoteHead != expected {
 		localHeadCmd := fmt.Sprintf("git -C %s rev-parse HEAD", shellQuote(*changeset.WorktreePath))
@@ -1444,7 +1465,7 @@ func (s *PRService) pushChangesetBranch(
 	if changeset.BaseHeadSHA != nil {
 		baseHead = *changeset.BaseHeadSHA
 	}
-	script := buildPushScriptWithExpectedRemote(sandbox.WorkDir, commitMsgPath, authorName, authorEmail, *changeset.WorkingBranch, changeset.BaseBranch, baseHead, fmt.Sprintf("https://github.com/%s.git", repo.FullName), reviewExpected)
+	script := buildPushScriptWithExpectedRemote(sandbox.WorkDir, commitMsgPath, authorName, authorEmail, *changeset.WorkingBranch, changeset.BaseBranch, baseHead, fmt.Sprintf("https://github.com/%s.git", repo.FullName), publicationExpected)
 	var stdout, stderr bytes.Buffer
 	exitCode, execErr = s.sandboxProvider.Exec(ctx, sandbox, script, &stdout, &stderr)
 	if execErr != nil {
@@ -1466,9 +1487,9 @@ func (s *PRService) pushChangesetBranch(
 			Str("session_id", run.ID.String()).
 			Str("changeset_id", changeset.ID.String()).
 			Str("branch", *changeset.WorkingBranch).
-			Str("expected_remote_head_sha", reviewExpected).
+			Str("expected_remote_head_sha", publicationExpected).
 			Str("head_sha", headSHA).
-			Msg("reconciled review fixes against the expected remote checkpoint")
+			Msg("reconciled publication against the expected remote checkpoint")
 	}
 	return &pushResult{
 		HeadSHA:                  headSHA,
@@ -2084,7 +2105,7 @@ func (s *PRService) pushSessionBranch(
 			Str("branch", branchName).
 			Str("expected_remote_head_sha", expectedRemoteHeadSHA).
 			Str("head_sha", headSHA).
-			Msg("reconciled review fixes against the expected remote checkpoint")
+			Msg("reconciled publication against the expected remote checkpoint")
 	}
 	result := &pushResult{
 		HeadSHA:                  headSHA,
@@ -2231,9 +2252,9 @@ const pushHeadSHASentinel = "__143_HEAD_SHA="
 
 const pushOutcomeSentinel = "__143_PUSH_OUTCOME="
 
-// pushExpectedRemoteReconciledSentinel is emitted only when a revision-bound
-// review push replaces a non-ancestor remote head that still exactly matches
-// the checkpoint persisted on the review loop.
+// pushExpectedRemoteReconciledSentinel is emitted only when a server-owned
+// publication replaces a non-ancestor remote head that still exactly matches
+// its durable publication or review checkpoint.
 const pushExpectedRemoteReconciledSentinel = "__143_EXPECTED_REMOTE_RECONCILED=1"
 
 const pushBranchDivergedMessage = "remote branch has changes that are not present in this session checkpoint; refusing to force push"
@@ -2373,11 +2394,11 @@ func buildPushScript(workDir, commitMsgPath, authorName, authorEmail, branchName
 }
 
 // buildPushScriptWithExpectedRemote extends the normal divergence guard with
-// one narrow exception for revision-bound review fixes. A non-ancestor remote
-// head may be replaced only when it still equals expectedRemoteHeadSHA; the
-// existing --force-with-lease then protects the final observation-to-push
-// race. Callers without durable review evidence use buildPushScript and retain
-// the original fail-closed behavior.
+// one narrow exception for a server-owned publication checkpoint. A
+// non-ancestor remote head may be replaced only when it still equals
+// expectedRemoteHeadSHA; the existing --force-with-lease then protects the
+// final observation-to-push race. Callers without durable ownership evidence
+// use buildPushScript and retain the original fail-closed behavior.
 func buildPushScriptWithExpectedRemote(workDir, commitMsgPath, authorName, authorEmail, branchName, baseBranch, baseCommitSHA, pushURL, expectedRemoteHeadSHA string) string {
 	return fmt.Sprintf(
 		pushScriptTemplate,
@@ -2447,13 +2468,14 @@ type PullRequestEvent struct {
 		Type  string `json:"type"`
 	} `json:"sender"`
 	PR struct {
-		Merged         bool   `json:"merged"`
-		Draft          bool   `json:"draft"`
-		HTMLURL        string `json:"html_url"`
-		Title          string `json:"title"`
-		Body           string `json:"body"`
-		MergedAt       string `json:"merged_at"`
-		MergeCommitSHA string `json:"merge_commit_sha"`
+		Merged         bool       `json:"merged"`
+		Draft          bool       `json:"draft"`
+		HTMLURL        string     `json:"html_url"`
+		Title          string     `json:"title"`
+		Body           string     `json:"body"`
+		MergedAt       *time.Time `json:"merged_at"`
+		UpdatedAt      *time.Time `json:"updated_at"`
+		MergeCommitSHA string     `json:"merge_commit_sha"`
 		Head           struct {
 			SHA  string `json:"sha"`
 			Ref  string `json:"ref"`
@@ -2546,6 +2568,19 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 		}
 		return nil
 	case "opened", "reopened":
+		if event.Action == "reopened" {
+			if s.codeReviewInsights != nil {
+				accepted, err := s.codeReviewInsights.RecordPullRequestOpen(ctx, pr.OrgID, pr.ID, codeReviewLifecycleObservedAt(event.PR.UpdatedAt))
+				if err != nil {
+					return fmt.Errorf("project reopened code review outcomes: %w", err)
+				}
+				if !accepted {
+					return nil
+				}
+			} else if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, models.PullRequestStatusOpen); err != nil {
+				return fmt.Errorf("update PR status to open: %w", err)
+			}
+		}
 		reason := PullRequestSyncReasonInitial
 		if pullRequestHasHealthBaseline(pr) && *pr.HeadSHA != event.PR.Head.SHA {
 			reason = PullRequestSyncReasonHeadChanged
@@ -2576,8 +2611,12 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 		return nil
 	}
 
-	if err := s.applyClosedPRTransition(ctx, pr, event.PR.Merged, event.PR.MergeCommitSHA, event.PR.Head.SHA); err != nil {
+	applied, err := s.applyClosedPRTransition(ctx, pr, event.PR.Merged, event.PR.MergedAt, event.PR.UpdatedAt, event.PR.MergeCommitSHA, event.PR.Head.SHA)
+	if err != nil {
 		return err
+	}
+	if !applied {
+		return nil
 	}
 
 	return s.handleAutoPreviewEvent(ctx, event)
@@ -2994,10 +3033,27 @@ func (s *PRService) teardownAutoPreview(ctx context.Context, event PullRequestEv
 // SHA so the deploy row reflects the commit that landed on the base branch
 // (squash/rebase merges produce a new SHA distinct from the head); falls back
 // to head SHA when GitHub omits merge_commit_sha.
-func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullRequest, merged bool, mergeCommitSHA, headSHA string) error {
+func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullRequest, merged bool, mergedAt, lifecycleUpdatedAt *time.Time, mergeCommitSHA, headSHA string) (bool, error) {
+	observedAt := codeReviewLifecycleObservedAt(lifecycleUpdatedAt)
 	if merged {
-		if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, models.PullRequestStatusMerged); err != nil {
-			return fmt.Errorf("update PR status to merged: %w", err)
+		observedMergedAt := mergedAt
+		if observedMergedAt == nil {
+			fallback := time.Now().UTC()
+			observedMergedAt = &fallback
+		}
+		if s.codeReviewInsights != nil {
+			accepted, err := s.codeReviewInsights.RecordPullRequestTerminal(ctx, pr.OrgID, pr.ID, true, observedMergedAt, observedAt)
+			if err != nil {
+				return false, fmt.Errorf("project merged code review outcomes: %w", err)
+			}
+			if !accepted {
+				return false, nil
+			}
+			if err := s.enqueueCodeReviewDisputeRanking(ctx, pr.OrgID, "merged:"+pr.ID.String()); err != nil {
+				return false, err
+			}
+		} else if err := s.pullRequests.UpdateMergedStatus(ctx, pr.OrgID, pr.ID, *observedMergedAt); err != nil {
+			return false, fmt.Errorf("update PR status to merged: %w", err)
 		}
 		if pr.SessionID != nil {
 			s.enqueueSlackSessionReaction(ctx, pr.OrgID, *pr.SessionID, models.SlackReactionPRMerged)
@@ -3008,11 +3064,22 @@ func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullR
 		}
 		s.runMergedPullRequestFollowUps(ctx, pr, commitSHA)
 		s.publishPullRequestTerminalState(ctx, pr)
-		return nil
+		return true, nil
 	}
 
-	if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, models.PullRequestStatusClosed); err != nil {
-		return fmt.Errorf("update PR status to closed: %w", err)
+	if s.codeReviewInsights != nil {
+		accepted, err := s.codeReviewInsights.RecordPullRequestTerminal(ctx, pr.OrgID, pr.ID, false, nil, observedAt)
+		if err != nil {
+			return false, fmt.Errorf("project closed code review outcomes: %w", err)
+		}
+		if !accepted {
+			return false, nil
+		}
+		if err := s.enqueueCodeReviewDisputeRanking(ctx, pr.OrgID, "closed:"+pr.ID.String()); err != nil {
+			return false, err
+		}
+	} else if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, models.PullRequestStatusClosed); err != nil {
+		return false, fmt.Errorf("update PR status to closed: %w", err)
 	}
 	if pr.SessionID != nil {
 		s.enqueueSlackSessionReaction(ctx, pr.OrgID, *pr.SessionID, models.SlackReactionPRClosed)
@@ -3029,6 +3096,29 @@ func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullR
 	s.teardownPRPreview(ctx, pr, false)
 	s.maybeAutoArchiveSessionOnPRClose(ctx, pr, nil, false)
 	s.publishPullRequestTerminalState(ctx, pr)
+	return true, nil
+}
+
+func codeReviewLifecycleObservedAt(providerUpdatedAt *time.Time) time.Time {
+	if providerUpdatedAt != nil && !providerUpdatedAt.IsZero() {
+		return providerUpdatedAt.UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (s *PRService) enqueueCodeReviewDisputeRanking(ctx context.Context, orgID uuid.UUID, key string) error {
+	if s.jobs == nil {
+		return nil
+	}
+	dedupeKey := "rank_code_review_disputes:" + orgID.String() + ":" + strings.TrimSpace(key)
+	_, err := s.jobs.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue: "feedback", JobType: models.JobTypeRankCodeReviewDispute,
+		Payload: models.CodeReviewInsightPayload{OrgID: orgID}, Priority: 2,
+		DedupeKey: &dedupeKey, MaxAttempts: 6,
+	})
+	if err != nil {
+		return fmt.Errorf("enqueue code review dispute ranking: %w", err)
+	}
 	return nil
 }
 
@@ -3371,10 +3461,11 @@ type PullRequestReviewEvent struct {
 		Type  string `json:"type"`
 	} `json:"sender"`
 	Review struct {
-		ID    int64  `json:"id"`
-		State string `json:"state"`
-		Body  string `json:"body"`
-		User  struct {
+		ID          int64     `json:"id"`
+		State       string    `json:"state"`
+		Body        string    `json:"body"`
+		SubmittedAt time.Time `json:"submitted_at"`
+		User        struct {
 			Login string `json:"login"`
 			Type  string `json:"type"`
 		} `json:"user"`
@@ -3385,7 +3476,10 @@ type PullRequestReviewEvent struct {
 		Number  int    `json:"number"`
 		HTMLURL string `json:"html_url"`
 		Title   string `json:"title"`
-		Head    struct {
+		User    struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		Head struct {
 			SHA string `json:"sha"`
 		} `json:"head"`
 		Base struct {
@@ -3409,6 +3503,26 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 		if err := s.ingestPRFeedback(ctx, normalizedPRFeedback{Metadata: event.FeedbackMetadata, OwnerOrgID: event.OwnerOrgID, RepositoryID: event.Repository.ID, Repository: event.Repository.FullName, PullRequestNumber: event.PullRequest.Number, Surface: models.PRFeedbackSurfaceReviewBody, ProviderObjectID: event.Review.ID, GitHubReviewID: &event.Review.ID, AuthorLogin: event.Review.User.Login, AuthorType: event.Review.User.Type, AuthorAssociation: event.Review.AuthorAssociation, GitHubAppID: appID, GitHubAppSlug: appSlug, Body: body}); err != nil {
 			return err
 		}
+	}
+	if event.Action == "dismissed" {
+		pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.PullRequest.Number)
+		if err != nil {
+			// Not a 143-generated PR — ignore.
+			return nil
+		}
+		if s.codeReviewInsights != nil {
+			if err := s.codeReviewInsights.DismissHumanReview(
+				ctx, pr.OrgID, pr.ID, event.Review.ID,
+				event.Review.User.Login, event.Review.User.Type, event.Review.AuthorAssociation,
+				event.PullRequest.User.Login, time.Now().UTC(),
+			); err != nil {
+				return fmt.Errorf("dismiss independent human review outcome: %w", err)
+			}
+			if err := s.enqueueCodeReviewDisputeRanking(ctx, pr.OrgID, fmt.Sprintf("dismissed_review:%d", event.Review.ID)); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	if event.Action != "submitted" {
 		return nil
@@ -3435,7 +3549,6 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 		// Not a 143-generated PR — ignore.
 		return nil
 	}
-
 	var reviewStatus models.PullRequestReviewStatus
 	switch event.Review.State {
 	case "approved":
@@ -3448,6 +3561,14 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 
 	if err := s.pullRequests.UpdateReviewStatus(ctx, pr.OrgID, pr.ID, reviewStatus); err != nil {
 		return fmt.Errorf("update review status: %w", err)
+	}
+	if s.codeReviewInsights != nil {
+		if err := s.codeReviewInsights.RecordHumanReview(ctx, pr.OrgID, pr.ID, event.Review.ID, event.Review.User.Login, event.Review.User.Type, event.Review.AuthorAssociation, event.PullRequest.User.Login, event.Review.State, event.Review.SubmittedAt); err != nil {
+			return fmt.Errorf("project independent human review outcome: %w", err)
+		}
+		if err := s.enqueueCodeReviewDisputeRanking(ctx, pr.OrgID, fmt.Sprintf("human_review:%d", event.Review.ID)); err != nil {
+			return err
+		}
 	}
 
 	// If the PR was approved, reinforce memories that were active for this repo.
@@ -3467,12 +3588,18 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 				OrgID:           pr.OrgID,
 				GitHubCommentID: event.Review.ID,
 				Reviewer:        event.Review.User.Login,
+				ReviewerType:    event.Review.User.Type,
 				Body:            event.Review.Body,
 				FilterStatus:    "pending",
 			}
 			if err := s.reviewComments.Create(ctx, comment); err != nil {
 				s.logger.Warn().Err(err).Str("pr_id", pr.ID.String()).Msg("failed to create review comment record")
 			} else {
+				if s.codeReviewInsights != nil {
+					if err := s.codeReviewInsights.RefreshHumanReviewCommentCount(ctx, pr.OrgID, pr.ID, event.Review.SubmittedAt); err != nil {
+						return fmt.Errorf("refresh human review comment outcome: %w", err)
+					}
+				}
 				s.enqueueProcessReviewComment(ctx, pr.OrgID, comment.ID, pr.GitHubRepo)
 			}
 		}
@@ -3583,6 +3710,7 @@ func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, eve
 		OrgID:           pr.OrgID,
 		GitHubCommentID: event.Comment.ID,
 		Reviewer:        event.Comment.User.Login,
+		ReviewerType:    event.Comment.User.Type,
 		Body:            event.Comment.Body,
 		FilterStatus:    "pending",
 	}
@@ -3596,6 +3724,15 @@ func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, eve
 	if err := s.reviewComments.Create(ctx, comment); err != nil {
 		s.logger.Warn().Err(err).Str("pr_id", pr.ID.String()).Msg("failed to create review comment record")
 		return nil
+	}
+	if s.codeReviewInsights != nil {
+		observedAt := time.Now().UTC()
+		if event.Comment.UpdatedAt != nil {
+			observedAt = *event.Comment.UpdatedAt
+		}
+		if err := s.codeReviewInsights.RefreshHumanReviewCommentCount(ctx, pr.OrgID, pr.ID, observedAt); err != nil {
+			return fmt.Errorf("refresh human review comment outcome: %w", err)
+		}
 	}
 
 	s.enqueueProcessReviewComment(ctx, pr.OrgID, comment.ID, pr.GitHubRepo)
@@ -4216,6 +4353,81 @@ func (s *PRService) GetCodeReviewPullRequestSnapshot(ctx context.Context, orgID,
 		BaseSHA:     details.Base.SHA,
 		FromFork:    details.Head.Repo.Fork,
 	}, nil
+}
+
+// GetCodeReviewOutcomeSnapshot reads the provider as the repair authority for
+// independent review and terminal PR facts. The scheduled insight reconciler
+// uses this after missed or reordered webhooks.
+func (s *PRService) GetCodeReviewOutcomeSnapshot(ctx context.Context, orgID, repositoryID uuid.UUID, number int) (models.CodeReviewOutcomeSnapshot, error) {
+	if s == nil || s.repos == nil {
+		return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("repository store is unavailable")
+	}
+	if orgID == uuid.Nil || repositoryID == uuid.Nil || number <= 0 {
+		return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("org_id, repository_id, and positive pull request number are required")
+	}
+	repository, err := s.repos.GetByID(ctx, orgID, repositoryID)
+	if err != nil {
+		return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("load repository for code review outcome: %w", err)
+	}
+	token, err := s.getInstallationTokenForRepo(ctx, orgID, &repository)
+	if err != nil {
+		return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("load installation token for code review outcome: %w", err)
+	}
+	owner, repo := splitRepo(repository.FullName)
+	// This is a read fence, not a completion timestamp. Reconciliation must
+	// yield to webhook projections that land after the provider read begins.
+	observedAt := time.Now().UTC()
+	detailsPath := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number)
+	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, detailsPath, nil)
+	if err != nil {
+		return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("load pull request for code review outcome: %w", err)
+	}
+	var details gitHubPullRequestDetails
+	if err := json.Unmarshal(body, &details); err != nil {
+		return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("decode pull request for code review outcome: %w", err)
+	}
+	snapshot := models.CodeReviewOutcomeSnapshot{
+		AuthorLogin: details.User.Login, State: details.State, Merged: details.Merged,
+		MergedAt: details.MergedAt, ObservedAt: observedAt,
+		Reviews: make([]models.CodeReviewHumanReviewObservation, 0),
+	}
+	for page := 1; ; page++ {
+		reviewsPath := fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews?per_page=100&page=%d", owner, repo, number, page)
+		reviewsBody, requestErr := s.doGitHubRequest(ctx, token, http.MethodGet, reviewsPath, nil)
+		if requestErr != nil {
+			return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("list pull request reviews for code review outcome: %w", requestErr)
+		}
+		var reviews []struct {
+			ID                int64     `json:"id"`
+			State             string    `json:"state"`
+			SubmittedAt       time.Time `json:"submitted_at"`
+			AuthorAssociation string    `json:"author_association"`
+			User              struct {
+				Login string `json:"login"`
+				Type  string `json:"type"`
+			} `json:"user"`
+		}
+		if err := json.Unmarshal(reviewsBody, &reviews); err != nil {
+			return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("decode pull request reviews for code review outcome: %w", err)
+		}
+		for _, review := range reviews {
+			state := strings.ToLower(strings.TrimSpace(review.State))
+			if review.ID <= 0 || strings.TrimSpace(review.User.Login) == "" {
+				continue
+			}
+			if state != "approved" && state != "changes_requested" && state != "dismissed" {
+				continue
+			}
+			snapshot.Reviews = append(snapshot.Reviews, models.CodeReviewHumanReviewObservation{
+				GitHubReviewID: review.ID, ReviewerLogin: review.User.Login, ReviewerType: review.User.Type,
+				AuthorAssociation: review.AuthorAssociation, State: state, SubmittedAt: review.SubmittedAt,
+			})
+		}
+		if len(reviews) < 100 {
+			break
+		}
+	}
+	return snapshot, nil
 }
 
 // GetPullRequestHead returns the current head branch/SHA for a pull request.

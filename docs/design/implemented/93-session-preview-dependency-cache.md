@@ -35,6 +35,29 @@ The cache implementation now treats preview install caching as a generic path-ca
 
 Package-manager paths reject absolute paths, `..`, globs, broad `.`, sensitive directories such as `.ssh`, `.gnupg`, `.codex`, `.claude`, `.config/gh`, `.143`, and parents/children of those sensitive paths.
 
+Those are the paths each manager infers before ownership is resolved. Each
+effective HomeDir path then gets exactly one cache owner, and ownership follows
+restore *timing* rather than which phase happens to write the directory. The
+package-manager cache restores before `preview.install`; the home build cache
+only afterwards, immediately before service builds. So the build cache owns
+`.cache/go-build` — nothing but a build populates it — while `go/pkg/mod` stays
+with the package-manager cache whenever that lifecycle is enabled, because an
+install that fetches modules is only warm if they are already on disk when it
+runs. That holds whether the install command is `go mod download` or an opaque
+wrapper script, which the platform cannot inspect. The build cache adopts
+`go/pkg/mod` only when the package-manager cache is disabled, so the directory
+is never left uncached. De-duplicating this way avoids both duplicate archive
+upload and serialized extraction of the same data.
+
+Owning `go/pkg/mod` constrains when the package-manager cache may be archived: a
+JS install command does not fill the module cache, the build phase's `go build`
+does, so the save has to happen after service builds rather than at the end of
+install. Normal launches get that for free because their install-phase saves are
+deferred past readiness. The build-snapshot prewarm job has no readiness path, so
+it defers explicitly and drains synchronously after its build phase — it destroys
+its own sandbox on return, so a fire-and-forget drain there would be killed by
+teardown.
+
 The DB tables `preview_dependency_cache` and `preview_dependency_cache_locations` now include `cache_kind`; uniqueness and placement indexes include `(org_id, repo_id, cache_kind, cache_key)`. Worker-local L1 blob paths are also kind-aware, with legacy install-output local paths still readable during rollout.
 
 Preview dependency and package-manager cache keys use a stable sandbox cache ABI (`SANDBOX_CACHE_ABI`, persisted in sandbox metadata as `cache_abi`) instead of the deploy-specific sandbox image tag. Routine worker/server deploys therefore do not invalidate warm caches just because `IMAGE_TAG` changed. Operators must bump the ABI when the sandbox OS, libc, Node/Python/Go toolchains, package-manager behavior, or other baked runtime compatibility changes can make cached install outputs unsafe to reuse. Older sandboxes without `cache_abi` fall back to their recorded image string for conservative compatibility.
@@ -42,6 +65,20 @@ Preview dependency and package-manager cache keys use a stable sandbox cache ABI
 Preview startup uses cache placement as a scheduling hint, not a correctness primitive. Exact config-derived placement keys prefer workers with known L1 blobs. When the API cannot know the exact config before worker selection, the repo-level fallback is marked approximate and the scheduler prefers recent repo cache holders before rendezvous hashing. The worker still recomputes exact cache keys inside the hydrated workspace before restore.
 
 Cache saves are kept out of the readiness-critical path. Normal preview launches compute cache keys during install, but defer package-manager and install-output archive/upload work until after the primary readiness path succeeds. Prewarm jobs still save synchronously because cache creation is their primary work.
+
+Retained sandboxes validate the exact install marker and declared `verify_paths`
+before any remote cache lookup. When both already hold, startup reports
+`skipped_install_valid` and avoids package-manager and install-output archive
+download/extraction entirely. The shortcut is a launch-path optimization only:
+prewarm jobs never take it, because their sandbox is cloned or hydrated from a
+workspace that may already have installed, and skipping there would report
+success while producing no cache. Because a launch that takes the shortcut runs
+neither a restore nor an install, it is also the only thing that would notice
+the remote entry backing its marker has been evicted, so it queues one existence
+probe behind readiness and re-archives when nothing backs the key. If a remote
+install-output restore is what makes the contract valid, only that workdir cache
+receives saved-producer benefit; the HomeDir package-manager restore records zero
+benefit unless an install command actually runs.
 
 The preview gateway keeps a short-lived access-session validation cache so asset-heavy preview page loads do not hit Postgres for every JS/CSS/image request. The cache is scoped to the decoded org, public host, and runtime preview ID, and is intentionally short TTL so revocation/expiry changes converge quickly while protecting hot page-load latency.
 
@@ -55,7 +92,11 @@ Failure-path build-cache persistence is best effort. Independent workdir, `GOCAC
 
 Cache admission is cost-aware. `preview_dependency_cache` records compressed bytes, a cold producer baseline, marginal-benefit observations, restore attempts, successful restores, total restore duration, and last restore time. Unknown legacy baselines force one cold sample. After three attempts, restore is skipped when its historical average is at least the measured average marginal benefit; complementary caches share one end-to-end benefit budget rather than each claiming the full cold duration. Failed and timed-out attempts count toward restore cost. A launch whose install or build itself failed records no benefit observation at all — it never measured one, and a zero sample there would let a few broken builds switch off the branch's own warm start. Replacing a blob resets the whole cost history for that key, baseline included. A skipped entry is re-probed after 24 hours so worker, network, or archive-shape improvements can recover automatically. The terminal observer statuses are `skipped_cost` and `restore_timeout`; both are accelerator fallbacks and never fail preview startup.
 
-Prewarming is implemented as a low-priority `preview_cache_prewarm` worker job with branch and session payload sources. The automatic triggers are branch/PR preview target creation or commit update, plus successful snapshot-producing `run_agent` and `continue_session` turns. The runner creates an ephemeral sandbox with purpose `preview_cache_prewarm`, checks out, hydrates, or live-clones the workspace when the session sandbox is still owned by the same worker, reads the selected preview config, and skips only when both install caches and the exact branch startup snapshot are already warm. Session-source jobs still prewarm install/package-manager caches only. Branch-source jobs use providers that support build-snapshot prewarm to run install, restore build caches, run service build commands without starting runtime services, save build caches synchronously, create the exact startup snapshot, and then destroy the sandbox. Capacity exhaustion returns `skipped_capacity` and does not retry or dead-letter. Runtime rollout is controlled by `PREVIEW_CACHE_PREWARM_ENABLED=false` by default, `PREVIEW_CACHE_PREWARM_TIMEOUT=15m`, and `PREVIEW_CACHE_PREWARM_PRIORITY=-50`.
+Prewarming is implemented as low-priority worker jobs. Branch and cache-only session payloads use `preview_cache_prewarm`: the runner creates an ephemeral sandbox with purpose `preview_cache_prewarm`, checks out, hydrates, or live-clones the workspace when the session sandbox is still owned by the same worker, reads the selected preview config, and warms install/package-manager caches. Branch-source jobs additionally use providers that support build-snapshot prewarm to restore build caches, run service build commands without starting runtime services, save build caches synchronously, create the exact startup snapshot, and then destroy the sandbox.
+
+The smart session warm-candidate path uses `session_preview_warm_build`. It launches the exact session workspace revision, completes install, service builds, and readiness, records a worker-local startup-cache marker keyed by session and workspace revision, then stops services while retaining the sandbox and its build artifacts. A click revalidates the session revision, worker placement, stop reason, and startup-cache marker before resuming that retained sandbox. The resume runs service commands and readiness probes but skips remote build-cache restore/save and the already-completed service build phase. Ordinary starts and recycles never receive that exemption.
+
+Capacity exhaustion returns `skipped_capacity` and does not retry or dead-letter. Runtime rollout is controlled by `PREVIEW_CACHE_PREWARM_ENABLED=false` by default, `PREVIEW_CACHE_PREWARM_TIMEOUT=15m`, and `PREVIEW_CACHE_PREWARM_PRIORITY=-50`.
 
 ## Goals
 
