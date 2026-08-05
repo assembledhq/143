@@ -381,7 +381,7 @@ func (s *CodeReviewDisputeStore) ListQueue(ctx context.Context, orgID uuid.UUID,
 		limit = 50
 	}
 
-	snapshotID := uuid.Nil
+	var snapshotID uuid.UUID
 	position := int64(0)
 	queryDB := DBTX(s.db)
 	var tx pgx.Tx
