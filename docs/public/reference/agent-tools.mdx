@@ -625,6 +625,31 @@ The command returns the workflow's actual asynchronous status:
 publication is not a created pull request; report the returned state and wait
 for the session Overview to converge.
 
+### `pr update`
+
+Update the title and/or Markdown description of the current session's existing
+primary Pull Request.
+
+| Flag | Type | Required | Description |
+|---|---|---:|---|
+| `--session-id` | string | No | Compatibility override. Normally omit it; if supplied, it must match the signed current-session token. |
+| `--title` | string | No | Replacement Pull Request title. |
+| `--body` | string | No | Replacement Markdown description. Mutually exclusive with `--body-file`. |
+| `--body-file` | path | No | Read the replacement Markdown description from a file inside the sandbox. Mutually exclusive with `--body`. |
+
+At least one of `--title`, `--body`, or `--body-file` is required. Prefer a
+file for substantial descriptions:
+
+```bash
+143-tools pr update --body-file /tmp/pr-description.md
+```
+
+The server verifies that the Pull Request belongs to the token-scoped session
+and repository, updates GitHub with the server-held App installation, preserves
+143's hidden publication marker and preview footer, refreshes the local PR mirror, and records an
+agent audit event. The sandbox's raw GitHub token remains read-only for Pull
+Requests, so `gh pr edit` is intentionally not a substitute for this command.
+
 ### `eval add`
 
 Add a candidate eval task from a session launched by the eval settings bootstrap flow. This namespace is not exposed to ordinary coding sessions.

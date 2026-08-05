@@ -192,6 +192,21 @@ func (m *mockPullRequestCreator) CreatePullRequest(_ context.Context, params int
 	}, nil
 }
 
+func (m *mockPullRequestCreator) UpdatePullRequest(_ context.Context, params integration.UpdatePullRequestParams) (*integration.UpdatePullRequestResult, error) {
+	title := "Existing title"
+	if params.Title != nil {
+		title = *params.Title
+	}
+	return &integration.UpdatePullRequestResult{
+		Status:            "updated",
+		SessionID:         params.SessionID,
+		PullRequestID:     "pr-123",
+		PullRequestNumber: 42,
+		PullRequestURL:    "https://github.com/acme/repo/pull/42",
+		Title:             title,
+	}, nil
+}
+
 type mockSessionTabManager struct {
 	name string
 }
@@ -750,12 +765,12 @@ func TestListToolsAllIntegrations(t *testing.T) {
 	tools := tr.ListTools()
 
 	// PM project proposal tooling is intentionally absent.
-	if len(tools) != 41 {
+	if len(tools) != 42 {
 		names := make([]string, len(tools))
 		for i, tool := range tools {
 			names[i] = tool.Name
 		}
-		t.Fatalf("expected 41 tools, got %d: %v", len(tools), names)
+		t.Fatalf("expected 42 tools, got %d: %v", len(tools), names)
 	}
 
 	expected := map[string]bool{
@@ -777,6 +792,7 @@ func TestListToolsAllIntegrations(t *testing.T) {
 		"slack_send":                           false,
 		"issue_create":                         false,
 		"create_pr":                            false,
+		"update_pr":                            false,
 		"session_tabs_list":                    false,
 		"session_tabs_get":                     false,
 		"session_tabs_create":                  false,
@@ -948,6 +964,48 @@ func TestCallToolPullRequestCreatorCreate_InvalidDraft(t *testing.T) {
 	}
 	if !strings.Contains(result.Content[0].Text, "draft must be true or false") {
 		t.Errorf("unexpected error: %s", result.Content[0].Text)
+	}
+}
+
+func TestCallToolPullRequestCreatorUpdate(t *testing.T) {
+	t.Parallel()
+
+	title := "Expanded performance summary"
+	result := NewToolRegistry(buildFullTestRegistry()).CallTool(
+		context.Background(),
+		"update_pr",
+		json.RawMessage(`{"session_id":"session-123","title":"Expanded performance summary","body":"New description"}`),
+	)
+
+	require.False(t, result.IsError, "valid PR metadata should update through the registered manager")
+	var response integration.UpdatePullRequestResult
+	require.NoError(t, json.Unmarshal([]byte(result.Content[0].Text), &response), "tool response should be valid update JSON")
+	require.Equal(t, "updated", response.Status, "tool should report a completed update")
+	require.Equal(t, title, response.Title, "tool should preserve the requested title")
+	require.Equal(t, 42, response.PullRequestNumber, "tool should identify the updated Pull Request")
+}
+
+func TestCallToolPullRequestCreatorUpdateValidatesMetadata(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		args    string
+		message string
+	}{
+		{name: "missing metadata", args: `{}`, message: "title, body, or body_file is required"},
+		{name: "empty title", args: `{"title":"   "}`, message: "title must not be empty"},
+		{name: "body and file", args: `{"body":"description","body_file":"/tmp/pr.md"}`, message: "mutually exclusive"},
+		{name: "bad JSON", args: `{bad`, message: "invalid arguments"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := NewToolRegistry(buildFullTestRegistry()).CallTool(context.Background(), "update_pr", json.RawMessage(tt.args))
+			require.True(t, result.IsError, "invalid PR metadata should be rejected")
+			require.Contains(t, result.Content[0].Text, tt.message, "validation should explain how to correct the update request")
+		})
 	}
 }
 

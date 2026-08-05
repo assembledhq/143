@@ -1069,6 +1069,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		internalPullRequestHandler.SetThreadStore(sessionThreadStore)
 		internalPullRequestHandler.SetAuditEmitter(auditEmitter)
 		internalPullRequestHandler.SetPublicationIntentCoordinator(publicationIntentCoordinator)
+		if prService != nil {
+			internalPullRequestHandler.SetPullRequestUpdater(prService)
+		}
 		internalSessionTabsHandler := handlers.NewInternalSessionTabsHandler(threadSvc, sessionStore, orgStore, cfg.SessionSecret, logger)
 		internalAutomationHandler := handlers.NewInternalAutomationHandler(automationHandler, sessionStore, automationStore, cfg.SessionSecret)
 		internalSlackMessageHandler := handlers.NewInternalSlackMessageHandler(sessionStore, slackInstallationStore, credentialStore, db.NewSlackOutboundMessageStore(pool), cfg.SessionSecret, logger)
@@ -1100,7 +1103,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Post("/sessions/{id}/preview/assert", internalAgentPreviewHandler.Assert)
 			r.Post("/issues", internalIssueHandler.Create)
 			r.Post("/session/pr", internalPullRequestHandler.Create)
+			r.Patch("/session/pr", internalPullRequestHandler.Update)
 			r.Post("/sessions/{sessionID}/pr", internalPullRequestHandler.Create)
+			r.Patch("/sessions/{sessionID}/pr", internalPullRequestHandler.Update)
 			r.Get("/sessions/{id}/changesets", internalChangesetHandler.List)
 			r.Get("/sessions/{id}/changesets/split-status", internalChangesetHandler.Status)
 			r.Post("/sessions/{id}/changesets", internalChangesetHandler.Create)

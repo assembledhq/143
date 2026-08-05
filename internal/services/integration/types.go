@@ -520,17 +520,22 @@ type CreateIssueResult struct {
 }
 
 // --------------------------------------------------------------------------
-// PullRequestCreator — internal 143 PR creation
+// PullRequestCreator — internal 143 PR creation and updates
 // --------------------------------------------------------------------------
 
 // PullRequestCreator allows sandbox agents to request first-class 143 PR
-// creation for their current session instead of calling GitHub directly.
+// creation and metadata updates for their current session instead of calling
+// GitHub directly.
 type PullRequestCreator interface {
 	// Name returns the provider identifier (e.g. "session").
 	Name() string
 
 	// CreatePullRequest queues PR creation through the 143 session workflow.
 	CreatePullRequest(ctx context.Context, params CreatePullRequestParams) (*CreatePullRequestResult, error)
+
+	// UpdatePullRequest updates the title and/or body of the current session's
+	// existing primary PR through the 143 server-owned GitHub integration.
+	UpdatePullRequest(ctx context.Context, params UpdatePullRequestParams) (*UpdatePullRequestResult, error)
 }
 
 // CreatePullRequestParams describes a session PR creation request.
@@ -549,6 +554,26 @@ type CreatePullRequestResult struct {
 	ReviewLoopID   *string `json:"review_loop_id,omitempty"`
 	PullRequestURL *string `json:"pull_request_url,omitempty"`
 	Reason         *string `json:"reason,omitempty"`
+}
+
+// UpdatePullRequestParams describes a current-session PR metadata update.
+// BodyFile is resolved locally by 143-tools and is never sent to the server.
+type UpdatePullRequestParams struct {
+	SessionID string  `json:"session_id,omitempty"`
+	Title     *string `json:"title,omitempty"`
+	Body      *string `json:"body,omitempty"`
+	BodyFile  string  `json:"-"`
+}
+
+// UpdatePullRequestResult is returned after GitHub and the local PR mirror
+// have accepted the metadata update.
+type UpdatePullRequestResult struct {
+	Status            string `json:"status"`
+	SessionID         string `json:"session_id"`
+	PullRequestID     string `json:"pull_request_id"`
+	PullRequestNumber int    `json:"pull_request_number"`
+	PullRequestURL    string `json:"pull_request_url"`
+	Title             string `json:"title"`
 }
 
 // --------------------------------------------------------------------------
@@ -624,6 +649,9 @@ type StubPullRequestCreator struct {
 func (s *StubPullRequestCreator) Name() string { return s.ProviderName }
 func (s *StubPullRequestCreator) CreatePullRequest(_ context.Context, _ CreatePullRequestParams) (*CreatePullRequestResult, error) {
 	return nil, fmt.Errorf("stub: use sandbox CLI tools (143-tools pr create) instead of direct API calls")
+}
+func (s *StubPullRequestCreator) UpdatePullRequest(_ context.Context, _ UpdatePullRequestParams) (*UpdatePullRequestResult, error) {
+	return nil, fmt.Errorf("stub: use sandbox CLI tools (143-tools pr update) instead of direct API calls")
 }
 
 // --------------------------------------------------------------------------

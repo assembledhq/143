@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -19,6 +20,7 @@ import (
 	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/publicationintent"
 )
 
@@ -58,6 +60,25 @@ type internalPRCoordinatorStub struct {
 	// publish that partially succeeds is reproduced.
 	failOnCall int
 	failWith   error
+}
+
+type internalPRUpdaterStub struct {
+	result  *ghservice.UpdateSessionPullRequestResult
+	err     error
+	orgID   uuid.UUID
+	runID   uuid.UUID
+	request ghservice.UpdateSessionPullRequestParams
+}
+
+func (s *internalPRUpdaterStub) UpdateSessionPullRequest(
+	_ context.Context,
+	orgID, sessionID uuid.UUID,
+	request ghservice.UpdateSessionPullRequestParams,
+) (*ghservice.UpdateSessionPullRequestResult, error) {
+	s.orgID = orgID
+	s.runID = sessionID
+	s.request = request
+	return s.result, s.err
 }
 
 func (s *internalPRCoordinatorStub) RequestPullRequest(
@@ -340,4 +361,88 @@ func TestAgentPublicationAuditDetailsPreservesRequestedTrigger(t *testing.T) {
 			require.Equal(t, string(publicationintent.ResultPRQueued), details.Status, "audit trail should record the coordinator outcome")
 		})
 	}
+}
+
+func TestInternalPullRequestHandlerUpdate(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "mock pool should initialize")
+	t.Cleanup(mock.Close)
+	orgID, repoID, sessionID, pullRequestID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now()
+	sessionRow := sessionHandlerDetailRow(sessionID, orgID, now)
+	for index, column := range sessionColumns {
+		if column == "repository_id" {
+			sessionRow[index] = &repoID
+		}
+	}
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(sessionRow...))
+
+	title, body := "Profile startup paths", "Expanded performance description"
+	updater := &internalPRUpdaterStub{result: &ghservice.UpdateSessionPullRequestResult{
+		PullRequestID:     pullRequestID,
+		PullRequestNumber: 2068,
+		PullRequestURL:    "https://github.com/acme/repo/pull/2068",
+		Title:             title,
+	}}
+	handler := newPRHandler(mock)
+	handler.SetPullRequestUpdater(updater)
+	token, err := auth.GenerateSessionToken(prHandlerSecret, orgID, repoID, sessionID, 5*time.Minute)
+	require.NoError(t, err, "session-scoped token should be generated")
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/internal/session/pr", bytes.NewBufferString(`{"title":"Profile startup paths","body":"Expanded performance description"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+
+	handler.Update(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "authorized current-session update should succeed")
+	var response internalUpdatePullRequestResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response), "update response should be valid JSON")
+	require.Equal(t, "updated", response.Status, "update response should report completion")
+	require.Equal(t, 2068, response.PullRequestNumber, "update response should identify the changed Pull Request")
+	require.Equal(t, orgID, updater.orgID, "handler should preserve token-scoped tenant identity")
+	require.Equal(t, sessionID, updater.runID, "handler should preserve token-scoped session identity")
+	require.Equal(t, &title, updater.request.Title, "handler should forward the replacement title")
+	require.Equal(t, &body, updater.request.Body, "handler should forward the replacement description")
+	require.NoError(t, mock.ExpectationsWereMet(), "handler should perform only the tenant-scoped session lookup")
+}
+
+func TestInternalPullRequestHandlerUpdateRejectsMissingMetadataBeforeDatabaseAccess(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "mock pool should initialize")
+	t.Cleanup(mock.Close)
+	orgID, repoID, sessionID := uuid.New(), uuid.New(), uuid.New()
+	token, err := auth.GenerateSessionToken(prHandlerSecret, orgID, repoID, sessionID, 5*time.Minute)
+	require.NoError(t, err, "session-scoped token should be generated")
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/internal/session/pr", bytes.NewBufferString(`{}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+
+	newPRHandler(mock).Update(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "metadata-free update should be rejected")
+	require.Contains(t, rr.Body.String(), "INVALID_BODY", "response should explain the missing metadata")
+	require.NoError(t, mock.ExpectationsWereMet(), "invalid metadata should not access the database")
+}
+
+func TestInternalPullRequestHandlerUpdateExplainsMissingGitHubPermission(t *testing.T) {
+	t.Parallel()
+
+	handler := &InternalPullRequestHandler{
+		updater: &internalPRUpdaterStub{err: fmt.Errorf("update failed: %w", ghservice.ErrPullRequestWritePermissionRequired)},
+		logger:  zerolog.Nop(),
+	}
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/internal/session/pr", nil)
+	rr := httptest.NewRecorder()
+
+	handler.updateWithService(rr, req, uuid.New(), uuid.New(), internalUpdatePullRequestRequest{Body: ptr("description")})
+
+	require.Equal(t, http.StatusForbidden, rr.Code, "missing GitHub App permission should be reported as an authorization failure")
+	require.Contains(t, rr.Body.String(), "GITHUB_PERMISSION_MISSING", "response should identify the missing GitHub App permission")
+	require.Contains(t, rr.Body.String(), "organization owner must approve", "response should explain the installation approval step")
 }
