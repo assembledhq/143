@@ -433,7 +433,7 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(screen.queryByRole('button', { name: 'Code review' })).not.toBeInTheDocument();
   });
 
-  it('shows a disabled review action before the split suggestion when no snapshot is available', async () => {
+  it('leads the Overview with review and split actions before Result when no snapshot is available', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({
@@ -468,6 +468,7 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(reviewButton).not.toHaveClass('w-full');
     const reviewTitle = screen.getByText('Review before creating a PR?');
     const splitTitle = screen.getByText('Large change · 750 additions · 1 file');
+    const resultSection = screen.getByTestId('session-result-section');
     const reviewCard = reviewTitle.closest('[data-slot="card"]');
     const splitSuggestion = splitTitle.closest('[data-slot="overview-suggestion"]');
     expect(reviewCard?.querySelector('[data-slot="agent-action-card-icon"] .lucide-scan-search')).toBeInTheDocument();
@@ -481,10 +482,12 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(splitSuggestion?.querySelector('[data-slot="overview-suggestion-icon"] .lucide-git-branch')).toBeInTheDocument();
     expect(splitTitle.closest('[data-slot="card"]')).toBeNull();
     expect(reviewTitle.compareDocumentPosition(splitTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(splitTitle.compareDocumentPosition(resultSection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(resultSection).toHaveClass('border-t', 'pt-4');
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
   });
 
-  it('orders the card-free PR details and Result sections before the quiet split suggestion', async () => {
+  it('orders card-free PR details and the quiet split suggestion before Result', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({
@@ -506,8 +509,8 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(prDetailsSection.closest('[data-slot="card"]')).toBeNull();
     expect(resultSection.closest('[data-slot="card"]')).toBeNull();
     expect(resultSection).toHaveClass('border-t', 'pt-4');
-    expect(prDetailsSection.compareDocumentPosition(resultSection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(resultSection.compareDocumentPosition(splitSuggestion) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(prDetailsSection.compareDocumentPosition(splitSuggestion) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(splitSuggestion.compareDocumentPosition(resultSection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('keeps the PR health placeholder card-free and still divides Result while health loads', async () => {
@@ -549,6 +552,7 @@ describe('SessionDetailPage overview and review loop', () => {
           data: {
             ...mockSessions[1],
             status: 'completed',
+            result_summary: 'Review-ready result',
             snapshot_key: 'snapshot-running-review',
             sandbox_state: 'snapshotted',
             diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
@@ -584,6 +588,7 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(statusCard).not.toBeNull();
     expect(statusCard?.querySelector('.lucide-loader-circle')).toBeInTheDocument();
     expect(within(statusCard as HTMLElement).getByText('The review loop is checking the changes and applying fixes.')).toBeInTheDocument();
+    expect(reviewStatus.compareDocumentPosition(screen.getByTestId('session-result-section')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
   });
 
@@ -1234,7 +1239,9 @@ describe('SessionDetailPage overview and review loop', () => {
 
     const user = userEvent.setup();
     renderWithProviders(<SessionDetailContent id={multiPRSession.id} />);
-    expect(await screen.findByTestId('pull-request-list')).toBeInTheDocument();
+    const pullRequestList = await screen.findByTestId('pull-request-list');
+    expect(pullRequestList).toBeInTheDocument();
+    expect(pullRequestList.compareDocumentPosition(screen.getByTestId('session-result-section')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     await user.click(screen.getByRole('button', { name: /API integration/ }));
 
     await waitFor(() => {

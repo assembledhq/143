@@ -6436,9 +6436,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   };
   const detailActionSize = isMobileReviewViewport ? "xs" : "sm";
   const detailActionIconSize = isMobileReviewViewport ? "icon-xs" : "icon-sm";
-  // The PR summary that leads the Overview column. Built as a single value so
-  // the Result divider below is derived from whether this actually rendered
-  // instead of from a second copy of these conditions.
+  // The PR summary leads the Overview column so actionable publication state
+  // stays ahead of the agent's result summary.
   const prOverviewSection = !pullRequestId ? null : prStatus === "open" ? (
     prHealth ? (
       <PRHealthBanner
@@ -6522,6 +6521,21 @@ export function SessionDetailContent({ id }: { id: string }) {
       </div>
     </section>
   ) : null;
+  const showOverviewReviewSection = selectedIsPrimary &&
+    canManageSession &&
+    canUseNativeReviewLoop &&
+    !hasPR &&
+    !selectedPublicationOwnsActions &&
+    hasSessionChanges;
+  const showSelectedPullRequestPanel = Boolean(
+    (hasMultipleChangesets || selectedChangesetRecoveryMessage) && selectedChangeset,
+  );
+  const hasOverviewWorkflowBeforeResult = prOverviewSection !== null ||
+    hasMultipleChangesets ||
+    showOverviewReviewSection ||
+    shouldOfferChangesetSplit(session.diff_stats?.added) ||
+    showSelectedPullRequestPanel ||
+    Boolean(selectedPublication);
   // Right-panel content. Rendered inline on desktop and inside a bottom sheet
   // on mobile — the same JSX in both places so tab state stays consistent.
   const panelTabsEl = (
@@ -6715,7 +6729,6 @@ export function SessionDetailContent({ id }: { id: string }) {
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <div className="space-y-4">
           {prOverviewSection}
-          <SessionResultSection summary={session.result_summary} divided={prOverviewSection !== null} />
           <PullRequestList
             changesets={changesets}
             selectedID={selectedChangeset?.id ?? ""}
@@ -6742,7 +6755,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </CardContent>
             </Card>
           )}
-          {selectedIsPrimary && canManageSession && canUseNativeReviewLoop && !hasPR && !selectedPublicationOwnsActions && hasSessionChanges ? (
+          {showOverviewReviewSection ? (
             reviewLoopRunning ? (
               <Card className="border-border/60">
                 <CardContent className="p-4">
@@ -6894,6 +6907,10 @@ export function SessionDetailContent({ id }: { id: string }) {
               onRetry={() => createPRMutation.mutate(undefined)}
             />
           ) : null}
+          <SessionResultSection
+            summary={session.result_summary}
+            divided={hasOverviewWorkflowBeforeResult}
+          />
           <OverviewTab session={session} activeThread={activeThread} members={members} prStatus={prStatus} />
         </div>
       </TabsContent>
