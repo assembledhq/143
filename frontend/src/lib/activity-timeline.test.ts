@@ -61,6 +61,53 @@ describe("buildActivityTimelineNodes", () => {
     expect(buildActivityTimelineNodes([appliedEntry], [])).toEqual([{ kind: "visible", entry: appliedEntry }]);
   });
 
+  it.each([
+    ["pending" as const],
+    ["delivering" as const],
+    ["delivered" as const],
+    ["acked" as const],
+    ["unknown_delivery" as const],
+    ["dead_letter" as const],
+  ])("omits steering still in delivery state %s", (deliveryState) => {
+    const entry: TimelineEntry = {
+      kind: "message",
+      data: {
+        id: 7, session_id: "session-1", org_id: "org-1", thread_id: "thread-1", turn_number: 2,
+        role: "user" as const, content: "also update the tests", created_at: "2026-08-03T00:00:07Z",
+        inbox_sequence: 4, delivery_state: deliveryState,
+      },
+    };
+    expect(buildActivityTimelineNodes([entry], [])).toEqual([]);
+  });
+
+  // applied_at is only written when an inbox batch actually starts, so it
+  // cannot be the sole signal: an entry that never reaches a phase would be
+  // hidden from the transcript forever. Anything outside the known unapplied
+  // states must fail open rather than drop user-authored content.
+  it("keeps a user message whose delivery state is not a known unapplied state", () => {
+    const entry: TimelineEntry = {
+      kind: "message",
+      data: {
+        id: 7, session_id: "session-1", org_id: "org-1", thread_id: "thread-1", turn_number: 2,
+        role: "user" as const, content: "also update the tests", created_at: "2026-08-03T00:00:07Z",
+        inbox_sequence: 4, delivery_state: "some_future_state" as never,
+      },
+    };
+    expect(buildActivityTimelineNodes([entry], [])).toEqual([{ kind: "visible", entry }]);
+  });
+
+  it("keeps an assistant message that carries a delivery state", () => {
+    const entry: TimelineEntry = {
+      kind: "message",
+      data: {
+        id: 8, session_id: "session-1", org_id: "org-1", thread_id: "thread-1", turn_number: 2,
+        role: "assistant" as const, content: "done", created_at: "2026-08-03T00:00:09Z",
+        delivery_state: "pending" as const,
+      },
+    };
+    expect(buildActivityTimelineNodes([entry], [])).toEqual([{ kind: "visible", entry }]);
+  });
+
   it("does not split historical activity around omitted steering", () => {
     const before = { kind: "log", data: log(1, "info") } satisfies TimelineEntry;
     const queued = {

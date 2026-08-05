@@ -1,5 +1,31 @@
 import type { TimelineEntry } from "./timeline";
-import type { SessionTranscriptPhase, SessionTranscriptTurn } from "./types";
+import type { SessionTranscriptPhase, SessionTranscriptTurn, ThreadInboxDeliveryState } from "./types";
+
+// Delivery states in which a steering message has not yet been applied to a
+// running phase. Such a message is kept out of the transcript so its content
+// is never attributed to work that has not happened yet; the failure states
+// stay actionable through the recoverable-inbox notice instead.
+//
+// Enumerated rather than derived from a missing applied_at: applied_at is only
+// written when an inbox batch actually starts, so treating "no applied_at" as
+// "not applied" also hides entries that will never reach a phase at all. An
+// unrecognised state must fail open and keep the message visible - dropping
+// user-authored content from every surface is the worse failure.
+const UNAPPLIED_DELIVERY_STATES = new Set<ThreadInboxDeliveryState>([
+  "pending",
+  "delivering",
+  "delivered",
+  "acked",
+  "unknown_delivery",
+  "dead_letter",
+]);
+
+function isUnappliedSteering(entry: TimelineEntry): boolean {
+  if (entry.kind !== "message" || entry.data.role !== "user") return false;
+  const state = entry.data.delivery_state;
+  if (!state || entry.data.applied_at) return false;
+  return UNAPPLIED_DELIVERY_STATES.has(state);
+}
 
 export interface TimelineActivityPhase extends SessionTranscriptPhase {
   turnNumber: number;
@@ -129,7 +155,7 @@ export function buildActivityTimelineNodes(entries: TimelineEntry[], turns: Sess
   };
 
   for (const entry of entries) {
-    if (entry.kind === "message" && entry.data.role === "user" && entry.data.delivery_state && !entry.data.applied_at) {
+    if (isUnappliedSteering(entry)) {
       continue;
     }
     const phaseID = phaseIDForEntry(entry);

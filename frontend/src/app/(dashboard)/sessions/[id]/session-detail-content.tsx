@@ -151,7 +151,7 @@ import {
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
 import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
-import type { ChangesetStatus, ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionPublication, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequest, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
+import type { ChangesetStatus, ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionPublication, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequest, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry, ThreadInboxEntry, ThreadInboxDeliveryState } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -2160,11 +2160,18 @@ function flattenTranscriptPages(
 // appendMessageToTranscriptCache injects a freshly-sent message into the first
 // (newest) cached transcript page so the optimistic message can be dropped from
 // local state without a flicker before the next /transcript refetch lands.
-function appendMessageToTranscriptCache(
+//
+// The inbox metadata has to be carried over verbatim: the activity timeline
+// hides a steering message until the runtime applies it, so an entry patched
+// in without its delivery state renders once and then vanishes as soon as the
+// refetch supplies the real state. Same state in, same visibility out.
+export function appendMessageToTranscriptCache(
   previous: TranscriptWindowInfiniteData | undefined,
   message: SessionMessage,
   fallbackStatus: ThreadStatus,
+  delivery?: { deliveryState?: ThreadInboxDeliveryState; inboxEntry?: ThreadInboxEntry },
 ): TranscriptWindowInfiniteData {
+  const deliveryState = delivery?.deliveryState || undefined;
   const entry: SessionTranscriptEntry = {
     id: `msg_${message.id}`,
     kind: "message",
@@ -2173,6 +2180,10 @@ function appendMessageToTranscriptCache(
     role: message.role,
     content: message.content,
     message,
+    delivery_state: deliveryState,
+    inbox_sequence: delivery?.inboxEntry?.sequence_no,
+    accepted_at: delivery?.inboxEntry?.accepted_at,
+    acknowledged_at: delivery?.inboxEntry?.acked_at,
   };
   const pages = previous?.pages ?? [];
   if (pages.length === 0) {
@@ -5615,6 +5626,10 @@ export function SessionDetailContent({ id }: { id: string }) {
           response: {
             ...response,
             data: response.data.message,
+            // Preserved so the transcript-cache patch can reproduce the
+            // visibility the next refetch will produce for this message.
+            deliveryState: response.data.delivery_state,
+            inboxEntry: response.data.inbox_entry,
           },
           resolvedIDs: vars.resolvedIDs,
         };
@@ -5625,7 +5640,16 @@ export function SessionDetailContent({ id }: { id: string }) {
         model: vars.model,
         resolveReviewCommentIDs: vars.resolvedIDs.length > 0 ? vars.resolvedIDs : undefined,
       });
-      return { response, resolvedIDs: vars.resolvedIDs };
+      // The session-level endpoint carries no inbox metadata; only the thread
+      // path patches the transcript cache, so these stay undefined here.
+      return {
+        response: {
+          ...response,
+          deliveryState: undefined as ThreadInboxDeliveryState | undefined,
+          inboxEntry: undefined as ThreadInboxEntry | undefined,
+        },
+        resolvedIDs: vars.resolvedIDs,
+      };
     },
     onMutate: (vars) => {
       setComposerUploadError(null);
@@ -5656,7 +5680,10 @@ export function SessionDetailContent({ id }: { id: string }) {
         // refetch (triggered by SSE/invalidations) supersedes this patch.
         queryClient.setQueriesData<TranscriptWindowInfiniteData>(
           { queryKey: queryKeys.sessions.threadTranscript(id, vars.activeThreadId) },
-          (previous) => appendMessageToTranscriptCache(previous, response.data, activeThread?.status ?? "idle"),
+          (previous) => appendMessageToTranscriptCache(previous, response.data, activeThread?.status ?? "idle", {
+            deliveryState: response.deliveryState,
+            inboxEntry: response.inboxEntry,
+          }),
         );
       } else {
         queryClient.setQueryData<ListResponse<SessionTimelineEntry>>(

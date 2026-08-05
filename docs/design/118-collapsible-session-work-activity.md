@@ -965,6 +965,20 @@ On failed or cancelled delivery:
 - retain visible failure/cancellation state;
 - preserve the old phase until its actual execution state changes.
 
+Hiding an unapplied message is only safe while every unapplied message is
+reachable from some other surface, so no delivery state may be both unapplied
+and terminal. Acknowledgment moves entries to `acked`, but only a started batch
+stamps `applied_at`; abandoning a batch therefore moves its still-unapplied
+entries to `unknown_delivery`, which is accurate — the runtime confirmed
+receipt but was lost before execution — and is the state the recoverable-inbox
+notice offers a replay action for. Entries predating the delivery-batch
+machinery have no batch at all and are backfilled as applied.
+
+For the same reason the frontend enumerates the unapplied delivery states
+rather than treating a missing `applied_at` as proof of non-application: an
+unrecognized state must leave the message visible, because dropping
+user-authored content from every surface is worse than showing it early.
+
 Explicit interruption follows confirmation from runtime control rather than
 submission time.
 
@@ -1554,6 +1568,9 @@ Use table-driven Vitest cases for:
 - transient override precedence;
 - queued steering omission before acknowledgment and applied-boundary ordering
   after execution resumes;
+- omission across every unapplied delivery state, and visibility for an
+  unrecognized one;
+- optimistic send and refetch agreeing on steering visibility;
 - malformed legacy fallback.
 
 Compare complete expected structures rather than partial lengths where

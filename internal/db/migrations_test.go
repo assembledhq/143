@@ -1602,6 +1602,27 @@ func TestActivityPhaseTranscriptAssociationMigration(t *testing.T) {
 	}
 }
 
+func TestInboxAppliedAtBackfillMigrationOnlyRepairsUnreachableEntries(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000284_backfill_inbox_applied_at.up.sql")
+	require.NoError(t, err, "test should read the inbox applied_at backfill migration")
+	sql := string(body)
+
+	require.Contains(t, sql, "delivery_state = 'unknown_delivery'", "migration should reopen entries stranded by an abandoned batch")
+	require.Contains(t, sql, "b.status = 'abandoned'", "stranded-entry repair should only touch batches that were abandoned")
+	require.Contains(t, sql, "COALESCE(e.acked_at, e.delivered_at, e.updated_at)", "backfill should date applied_at from the entry's own acknowledgment history")
+
+	// The backfill treats "acked with no covering batch" as proof that an
+	// entry predates the batch machinery. Without the NOT EXISTS guard it
+	// would also stamp applied_at on entries of a live acknowledged batch,
+	// promoting steering into the transcript before the runtime applies it.
+	require.Contains(t, sql, "NOT EXISTS", "backfill must exclude entries owned by the current delivery-batch machinery")
+	require.Contains(t, sql, "e.sequence_no BETWEEN b.sequence_start AND b.sequence_end", "backfill exclusion should match entries to batches by sequence range")
+	require.Equal(t, 2, strings.Count(sql, "applied_at IS NULL"), "both repairs should be idempotent by skipping already-applied entries")
+	require.NotContains(t, sql, "DROP", "a data repair should not change schema")
+}
+
 func TestRenameLegacyOutputTermsMigrationPinsNamespaceContracts(t *testing.T) {
 	t.Parallel()
 

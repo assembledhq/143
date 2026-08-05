@@ -205,6 +205,12 @@ test("manual inspection protects a terminal phase and disclosure is keyboard ope
 });
 
 test("keeps queued steering out of the transcript until it is applied", async ({ page }) => {
+  // Anchor on content the fixture does render before asserting absence:
+  // toHaveCount(0) resolves immediately against a page that has not painted
+  // yet, so unanchored absence checks would pass even if nothing loaded.
+  await expect(page.getByText("Fix transcript scrolling")).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Working for/ })).toBeVisible();
+
   await expect(page.getByText("Queued")).toHaveCount(0);
   await expect(page.getByText("Also preserve anchors")).toHaveCount(0);
   await expect(page.getByText("Keep day separators stable")).toHaveCount(0);
