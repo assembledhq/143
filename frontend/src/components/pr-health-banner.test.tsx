@@ -61,6 +61,12 @@ describe("PRHealthBanner", () => {
     const body = prHealthSection.querySelector('[data-slot="pr-health-body"]');
     expect(body?.parentElement).toBe(prHealthSection);
     expect(body?.className).not.toContain("pl-");
+    // The icon carries the status tone as a bare color and repeats the adjacent
+    // badge, so it stays out of the accessibility tree.
+    const icon = prHealthSection.querySelector('[data-slot="pr-health-status-icon"]');
+    expect(icon).toHaveClass("text-success");
+    expect(icon).toHaveAttribute("aria-hidden", "true");
+    expect(icon?.className).not.toContain("bg-");
   });
 
   it.each([
@@ -100,6 +106,7 @@ describe("PRHealthBanner", () => {
     {
       label: "Repairing",
       variant: "info",
+      iconColor: "text-info",
       health: {
         checks_confirmed: true,
         has_conflicts: true,
@@ -114,6 +121,7 @@ describe("PRHealthBanner", () => {
     {
       label: "Conflicts",
       variant: "warning",
+      iconColor: "text-warning",
       health: {
         checks_confirmed: true,
         has_conflicts: true,
@@ -123,6 +131,7 @@ describe("PRHealthBanner", () => {
     {
       label: "Checks failing",
       variant: "destructive",
+      iconColor: "text-destructive",
       health: {
         checks_confirmed: true,
         checks: [{ name: "unit", category: "test", status: "failed" }],
@@ -131,19 +140,22 @@ describe("PRHealthBanner", () => {
     {
       label: "Behind",
       variant: "warning",
+      iconColor: "text-warning",
       health: { checks_confirmed: true, merge_state: "behind" },
     },
     {
       label: "Blocked",
       variant: "warning",
+      iconColor: "text-warning",
       health: { checks_confirmed: true, merge_state: "blocked" },
     },
     {
       label: "Open",
       variant: "secondary",
+      iconColor: "text-muted-foreground",
       health: { checks_confirmed: true, merge_state: "clean" },
     },
-  ])("labels the pull request $label", ({ label, variant, health }) => {
+  ])("labels the pull request $label", ({ label, variant, iconColor, health }) => {
     renderWithProviders(
       <PRHealthBanner
         health={{ ...baseHealth, ...health } as PullRequestHealthResponse}
@@ -157,6 +169,12 @@ describe("PRHealthBanner", () => {
     );
 
     expect(screen.getByText(label, { selector: "[data-slot='badge']" })).toHaveAttribute("data-variant", variant);
+    // The status icon carries the same tone as the badge, as a bare text color.
+    const icon = screen.getByRole("region", { name: "Pull request #42" })
+      .querySelector('[data-slot="pr-health-status-icon"]');
+    expect(icon).toHaveClass(iconColor);
+    expect(icon).toHaveAttribute("aria-hidden", "true");
+    expect(icon?.className).not.toContain("bg-");
   });
 
   it("keeps the Merge button visible but disabled when can_merge is false", async () => {

@@ -321,7 +321,9 @@ function SectionHeading({
 }) {
   return (
     <div className="flex items-center gap-1.5" data-slot="section-heading">
-      <span aria-hidden="true" data-slot={iconSlot} className={cn("shrink-0", iconClassName)}>
+      {/* Pin the glyph size here so a caller-supplied icon cannot reintroduce
+          the size drift this component exists to prevent. */}
+      <span aria-hidden="true" data-slot={iconSlot} className={cn("shrink-0 [&_svg]:size-4", iconClassName)}>
         {icon}
       </span>
       <p className="text-sm font-medium text-foreground">{title}</p>
