@@ -32,6 +32,13 @@ const nodeTestFiles = [
   'src/app/(dashboard)/sessions/[id]/session-detail-content.test.ts',
 ];
 
+// These tests intentionally block one request while asserting that another
+// starts in parallel. A fresh module graph keeps their real-time polling from
+// inheriting cached mocks or fake timers from the reused jsdom worker.
+const isolatedJSDOMTestFiles = [
+  'src/app/(dashboard)/sessions/[id]/page-warm-start.test.tsx',
+];
+
 export default defineConfig({
   plugins: [react()],
   resolve: {
@@ -71,7 +78,17 @@ export default defineConfig({
           environment: 'jsdom',
           setupFiles: ['./src/test/setup.ts'],
           include: ['src/**/*.test.{ts,tsx}'],
-          exclude: nodeTestFiles,
+          exclude: [...nodeTestFiles, ...isolatedJSDOMTestFiles],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'jsdom-isolated-warm-start',
+          environment: 'jsdom',
+          setupFiles: ['./src/test/setup.ts'],
+          isolate: true,
+          include: isolatedJSDOMTestFiles,
         },
       },
     ],
