@@ -1257,10 +1257,25 @@ func withCodeReviewHistory(body, previousBody string, decision SubmitReviewDecis
 	if entry := codeReviewHistoryEntry(decision, decidedAt); entry != "" && !containsString(entries, entry) {
 		entries = append(entries, entry)
 	}
+	return withCodeReviewHistoryEntries(body, entries)
+}
+
+// WithCodeReviewReassessmentHistory adds the active reassessment to the same
+// marker-backed history that records completed review decisions.
+func WithCodeReviewReassessmentHistory(body, headSHA string, startedAt time.Time, sessionURL string) string {
+	entries := codeReviewHistoryEntries(body)
+	if entry := codeReviewReassessmentHistoryEntry(headSHA, startedAt, sessionURL); entry != "" && !containsString(entries, entry) {
+		entries = append(entries, entry)
+	}
+	return withCodeReviewHistoryEntries(body, entries)
+}
+
+func withCodeReviewHistoryEntries(body string, entries []string) string {
+	body = stripCodeReviewHistory(body)
 	if len(entries) == 0 {
 		return body
 	}
-	history := codeReviewHistoryStartMarker + "\nPrevious 143 code reviews:\n" + strings.Join(entries, "\n") + "\n" + codeReviewHistoryEndMarker
+	history := codeReviewHistoryStartMarker + "\nHistory of 143 code reviews:\n" + strings.Join(entries, "\n") + "\n" + codeReviewHistoryEndMarker
 	if body == "" {
 		return history
 	}
@@ -1314,6 +1329,21 @@ func codeReviewHistoryEntry(decision SubmitReviewDecision, decidedAt time.Time) 
 		return ""
 	}
 	return fmt.Sprintf("- `%s` — **%s**", decidedAt.UTC().Format(time.RFC3339), codeReviewDecisionLabel(decision))
+}
+
+func codeReviewReassessmentHistoryEntry(headSHA string, startedAt time.Time, sessionURL string) string {
+	headSHA = strings.TrimSpace(headSHA)
+	if headSHA == "" || startedAt.IsZero() {
+		return ""
+	}
+	if len(headSHA) > 7 {
+		headSHA = headSHA[:7]
+	}
+	entry := fmt.Sprintf("- `%s` — **Reassessment started** for `%s`", startedAt.UTC().Format(time.RFC3339), headSHA)
+	if sessionURL != "" {
+		entry += " — [Follow the review session](" + sessionURL + ")"
+	}
+	return entry
 }
 
 func codeReviewDecisionLabel(decision SubmitReviewDecision) string {

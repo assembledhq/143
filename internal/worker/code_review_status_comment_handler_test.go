@@ -32,6 +32,7 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 		expectedExistingCommentID *int64
 		expectedBody              string
 		expectedAdditionalBody    string
+		expectReassessmentHistory bool
 		expectedCalls             []string
 		hideErr                   error
 		expectErr                 bool
@@ -44,15 +45,15 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			expectedCalls: []string{"upsert"},
 		},
 		{
-			name:              "keeps the previous verdict visible during reassessment",
-			initialStatus:     models.CodeReviewSessionStatusRunning,
-			lockedStatus:      models.CodeReviewSessionStatusRunning,
-			previousFinalBody: statusCommentStringPtr("❌ **143 Code Reviewer needs human review**\n\n**Why:** Sensitive workflow changes require a human decision."),
-			previousHeadSHA:   "previous-head-sha",
-			expectedBody:      "143 Code Reviewer is reassessing this pull request at `head`.",
-			expectedAdditionalBody: "The previous completed assessment for `previou` remains visible until the new review finishes.\n\n" +
-				"❌ **143 Code Reviewer needs human review**\n\n**Why:** Sensitive workflow changes require a human decision.",
-			expectedCalls: []string{"upsert"},
+			name:                      "keeps the previous verdict visible during reassessment",
+			initialStatus:             models.CodeReviewSessionStatusRunning,
+			lockedStatus:              models.CodeReviewSessionStatusRunning,
+			previousFinalBody:         statusCommentStringPtr("❌ **143 Code Reviewer needs human review**\n\n**Why:** Sensitive workflow changes require a human decision."),
+			previousHeadSHA:           "previous-head-sha",
+			expectedBody:              "❌ **143 Code Reviewer needs human review**\n\n**Why:** Sensitive workflow changes require a human decision.",
+			expectedAdditionalBody:    "History of 143 code reviews:",
+			expectReassessmentHistory: true,
+			expectedCalls:             []string{"upsert"},
 		},
 		{
 			name:                      "refreshes state under lock before publishing completed result",
@@ -196,6 +197,12 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			require.Contains(t, submitter.request.Body, tt.expectedBody, "status comment should render the current durable outcome")
 			if tt.expectedAdditionalBody != "" {
 				require.Contains(t, submitter.request.Body, tt.expectedAdditionalBody, "status comment should retain the complete previous verdict during reassessment")
+			}
+			if tt.expectReassessmentHistory {
+				expectedEntry := "- `" + now.Format(time.RFC3339) + "` — **Reassessment started** for `head` — [Follow the review session](https://143.test/sessions/" + sessionID.String() + ")"
+				require.Contains(t, submitter.request.Body, expectedEntry, "reassessment history should identify when the active assessment started and link to its session")
+				require.NotContains(t, submitter.request.Body, "143 Code Reviewer is reassessing this pull request", "reassessment status should appear in history instead of a standalone paragraph")
+				require.NotContains(t, submitter.request.Body, "remains visible until the new review finishes", "reassessment history should replace the redundant visibility explanation")
 			}
 			require.Contains(t, submitter.request.Body, "https://143.test/sessions/"+sessionID.String(), "status comment should link to the review session")
 			require.Equal(t, tt.expectedCalls, submitter.calls, "fallback summary should only be hidden after the rolling comment is published")
