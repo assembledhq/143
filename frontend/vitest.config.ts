@@ -46,11 +46,11 @@ export default defineConfig({
     // Vitest 4 defaults to the forks pool; threads runs this suite ~20%
     // faster end-to-end with identical results.
     pool: 'threads',
-    // Reuse workers across test files instead of rebuilding a jsdom
-    // environment and module graph per file. src/test/setup.ts and
-    // setup-node.ts restore the per-file invariants (module registry,
-    // overridden globals) that isolation otherwise provides.
-    isolate: false,
+    // Give each test file a fresh module graph and environment. Several
+    // interaction libraries capture timer functions during module evaluation,
+    // so cleanup hooks cannot reliably repair a graph evaluated while another
+    // file had fake timers installed.
+    isolate: true,
     testTimeout: 15_000,
     hookTimeout: 10_000,
     reporters: process.env.CI ? ['dot'] : ['default'],
