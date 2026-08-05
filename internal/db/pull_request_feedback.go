@@ -166,6 +166,61 @@ func (s *PullRequestFeedbackStore) Ingest(ctx context.Context, delivery *models.
 	return true, nil
 }
 
+// ReleaseCodeReviewDisputeItem returns an inline comment to ordinary PR
+// feedback processing after asynchronous LLM triage determined that it was
+// not about the prior code-review decision. The update and collector enqueue
+// are atomic so a released comment cannot be left pending without work.
+func (s *PullRequestFeedbackStore) ReleaseCodeReviewDisputeItem(ctx context.Context, orgID, pullRequestID uuid.UUID, surface models.PRFeedbackSurface, providerObjectID int64) error {
+	if err := surface.Validate(); err != nil {
+		return err
+	}
+	if s.jobs == nil {
+		return fmt.Errorf("PR feedback job store is not configured")
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin release of code review dispute feedback: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := tx.Exec(ctx, `UPDATE pull_request_feedback_items
+		SET status = 'pending', ignore_reason = NULL, batch_id = NULL,
+		    automatic_attempt_count = 0, updated_at = now()
+		WHERE org_id = @org_id AND pull_request_id = @pull_request_id
+		  AND surface = @surface AND provider_object_id = @provider_object_id
+		  AND status = 'ignored' AND ignore_reason = @ignore_reason`, pgx.NamedArgs{
+		"org_id": orgID, "pull_request_id": pullRequestID, "surface": surface,
+		"provider_object_id": providerObjectID, "ignore_reason": models.PRFeedbackIgnoreReasonCodeReviewDispute,
+	})
+	if err != nil {
+		return fmt.Errorf("release code review dispute feedback item: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit unchanged code review dispute feedback release: %w", err)
+		}
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `UPDATE pull_request_feedback_batches
+		SET debounce_until = LEAST(max_collect_until, now() + interval '5 seconds'), updated_at = now()
+		WHERE org_id = @org_id AND pull_request_id = @pull_request_id AND status = 'collecting'`, pgx.NamedArgs{
+		"org_id": orgID, "pull_request_id": pullRequestID,
+	}); err != nil {
+		return fmt.Errorf("extend PR feedback collection after dispute release: %w", err)
+	}
+	dedupeKey := "collect_pr_feedback:" + pullRequestID.String()
+	jobID, err := s.jobs.EnqueueInTx(ctx, tx, orgID, "default", models.JobTypeCollectPullRequestFeedback, map[string]string{
+		"org_id": orgID.String(), "pull_request_id": pullRequestID.String(),
+	}, 5, &dedupeKey)
+	if err != nil {
+		return fmt.Errorf("enqueue released PR feedback collection: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit code review dispute feedback release: %w", err)
+	}
+	s.jobs.Notify(ctx, jobID)
+	return nil
+}
+
 func (s *PullRequestFeedbackStore) EnsureCollectingBatch(ctx context.Context, orgID, pullRequestID uuid.UUID, now time.Time) (*models.PullRequestFeedbackBatch, bool, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {

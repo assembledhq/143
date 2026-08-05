@@ -450,7 +450,7 @@ export interface CodeReviewEvidence {
 }
 
 export type CodeReviewDisputeDirection = "should_have_approved" | "should_not_have_approved";
-export type CodeReviewDisputeRouting = "reassess" | "policy_signal_only" | "answer_only" | "not_a_dispute";
+export type CodeReviewDisputeRouting = "reassess" | "policy_signal_only" | "answer_only" | "not_a_dispute" | "review_request";
 export type CodeReviewDisputeIntakeStatus = "pending" | "triaged" | "discarded" | "failed";
 export type CodeReviewDisputeReassessmentStatus = "not_requested" | "queued" | "running" | "completed" | "deduped" | "failed";
 export type CodeReviewDisputeAdjudicationStatus = "pending" | "upheld" | "rejected" | "expired" | "needs_context";

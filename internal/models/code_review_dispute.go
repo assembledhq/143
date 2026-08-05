@@ -70,12 +70,14 @@ const (
 	CodeReviewDisputeRoutingPolicySignalOnly CodeReviewDisputeRouting = "policy_signal_only"
 	CodeReviewDisputeRoutingAnswerOnly       CodeReviewDisputeRouting = "answer_only"
 	CodeReviewDisputeRoutingNotADispute      CodeReviewDisputeRouting = "not_a_dispute"
+	CodeReviewDisputeRoutingReviewRequest    CodeReviewDisputeRouting = "review_request"
 )
 
 func (r CodeReviewDisputeRouting) Validate() error {
 	switch r {
 	case CodeReviewDisputeRoutingReassess, CodeReviewDisputeRoutingPolicySignalOnly,
-		CodeReviewDisputeRoutingAnswerOnly, CodeReviewDisputeRoutingNotADispute:
+		CodeReviewDisputeRoutingAnswerOnly, CodeReviewDisputeRoutingNotADispute,
+		CodeReviewDisputeRoutingReviewRequest:
 		return nil
 	default:
 		return fmt.Errorf("invalid CodeReviewDisputeRouting: %q", r)

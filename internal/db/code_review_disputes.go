@@ -471,7 +471,7 @@ func (s *CodeReviewDisputeStore) SetTriage(ctx context.Context, orgID, disputeID
 		status = models.CodeReviewDisputeAdjudicationPending
 	}
 	intakeStatus := models.CodeReviewDisputeIntakeTriaged
-	if result.Routing == models.CodeReviewDisputeRoutingNotADispute {
+	if result.Routing == models.CodeReviewDisputeRoutingNotADispute || result.Routing == models.CodeReviewDisputeRoutingReviewRequest {
 		intakeStatus = models.CodeReviewDisputeIntakeDiscarded
 	}
 	rows, err := s.db.Query(ctx, `UPDATE code_review_decision_disputes
@@ -479,6 +479,7 @@ func (s *CodeReviewDisputeStore) SetTriage(ctx context.Context, orgID, disputeID
 		    asserts_new_information = @asserts_new_information, routing = @routing,
 		    intake_status = @intake_status, intake_confidence = @confidence,
 		    adjudication_status = @adjudication_status, status_detail = NULLIF(@status_detail, ''),
+		    reply_status = CASE WHEN @routing = 'review_request' THEN 'not_applicable' ELSE reply_status END,
 		    updated_at = now(), version = version + 1
 		WHERE org_id = @org_id AND id = @id AND intake_status = 'pending'
 		RETURNING `+codeReviewDisputeColumns, pgx.NamedArgs{
@@ -506,11 +507,12 @@ func normalizeCodeReviewDisputeKind(value string) any {
 	return value
 }
 
-func (s *CodeReviewDisputeStore) FailTriage(ctx context.Context, orgID, disputeID uuid.UUID, detail string) error {
+func (s *CodeReviewDisputeStore) FailTriage(ctx context.Context, orgID, disputeID uuid.UUID, detail string, replyApplicable bool) error {
 	_, err := s.db.Exec(ctx, `UPDATE code_review_decision_disputes
-		SET intake_status = 'failed', reply_status = CASE WHEN source = 'github_comment' OR direction = 'should_not_have_approved' THEN 'pending' ELSE 'not_applicable' END,
+		SET intake_status = 'failed', reply_status = CASE WHEN @reply_applicable AND (source = 'github_comment' OR direction = 'should_not_have_approved') THEN 'pending' ELSE 'not_applicable' END,
 		    status_detail = @detail, updated_at = now(), version = version + 1
-		WHERE org_id = @org_id AND id = @id AND intake_status = 'pending'`, pgx.NamedArgs{"org_id": orgID, "id": disputeID, "detail": strings.TrimSpace(detail)})
+		WHERE org_id = @org_id AND id = @id
+		  AND (intake_status = 'pending' OR (intake_status = 'discarded' AND routing = 'review_request'))`, pgx.NamedArgs{"org_id": orgID, "id": disputeID, "detail": strings.TrimSpace(detail), "reply_applicable": replyApplicable})
 	if err != nil {
 		return fmt.Errorf("fail code review dispute triage: %w", err)
 	}

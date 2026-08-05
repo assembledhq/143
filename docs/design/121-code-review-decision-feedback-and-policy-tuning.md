@@ -1,6 +1,6 @@
 # Design: Code Review Decision Feedback And Policy Tuning
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-08-04
+> **Status:** Partially Implemented | **Last reviewed:** 2026-08-05
 >
 > **Depends on:** [implemented/112-code-reviewer-bot-auto-approval.md](implemented/112-code-reviewer-bot-auto-approval.md), [backlog/11-review-feedback-loop.md](backlog/11-review-feedback-loop.md), [future/116-automatic-pr-feedback-follow-through.md](future/116-automatic-pr-feedback-follow-through.md), [future/16-ai-agent-evals.md](future/16-ai-agent-evals.md)
 
@@ -206,9 +206,12 @@ triage's job, not the webhook handler's.
 
 ### Triage
 
-`triage_code_review_dispute` runs `deterministicPRFeedbackTriage`, then one LLM pass
-over the comment, decision, reason codes, diff summary, and surrounding context. It
-classifies direction, contested reasons, new information, and route.
+`triage_code_review_dispute` runs one LLM pass over the comment, decision, reason
+codes, diff summary, and surrounding context. It classifies direction, contested
+reasons, new information, and route. Webhooks do not classify meaning from keywords,
+punctuation, acknowledgements, or other phrasing. Deterministic provenance, trust,
+approval monotonicity, policy blockers, confidence, dedupe, and operator controls run
+after classification as safety checks.
 
 | Route | When | What happens |
 | --- | --- | --- |
@@ -216,9 +219,18 @@ classifies direction, contested reasons, new information, and route.
 | `policy_signal_only` | Argues with a threshold or path rule, or triage wasn't confident enough to rerun | A rerun would change nothing — the threshold evaluates the same way every time. Say so, name the setting and its value, link to it, record the dispute, and offer **Send this to a policy owner** |
 | `answer_only` | It's a question, not a disagreement | Answer from the session evidence. Keep the captured source/version row for reply reconciliation and audit, but exclude it from policy influence and the adjudication queue |
 | `not_a_dispute` | Chatter | Recorded as discarded, with a one-line acknowledgement carrying the override link. No influence |
+| `review_request` | A bare request to review or re-review, without challenging the prior decision | Recorded as discarded, excluded from Disputes, and handed to the normal team-reviewer workflow with the comment as untrusted orchestrator context. The rolling review comment provides status, so no dispute reply is published |
 
 `not_a_dispute` always receives a one-line acknowledgement with a link to file
 explicitly in-app. That explicit action bypasses classification.
+
+For GitHub comments, classification is asynchronous and durable. Every human mention
+of the configured reviewer after a completed decision enters intake; if no completed
+decision exists, a trusted new mention follows the normal first-review path. Comment
+edits may be classified but cannot start another ordinary review. Inline finding
+replies classified `not_a_dispute` are released back to the PR-feedback
+follow-through pipeline so broad intake does not consume actionable code-change
+requests.
 
 **Route to `reassess` only above a confidence floor.** One LLM pass decides whether
 to spend agent compute and, on a blocked PR, whether an approval becomes reachable.
@@ -521,7 +533,7 @@ listed.
 | `contested_reason_codes` | text[] | Inferred by triage |
 | `dispute_kind` | text | **Free text from triage, no constraint.** See below |
 | `asserts_new_information` | boolean | Nullable until triage; drives the `reassess` route |
-| `routing` | text | `reassess` \| `policy_signal_only` \| `answer_only` \| `not_a_dispute` |
+| `routing` | text | `reassess` \| `policy_signal_only` \| `answer_only` \| `not_a_dispute` \| `review_request` |
 | `intake_status`, `intake_confidence` | text | `pending` \| `triaged` \| `discarded` \| `failed`; confidence is nullable until triage |
 | `reassessment_session_id`, `reassessment_decision`, `reassessment_flipped` | uuid / text / bool | Rerun linkage |
 | `semantic_input_hash_at_filing`, `semantic_input_hash_at_rerun` | text | Both hashes, so a reader can tell a flip caused by changed input from an unstable judge. Makes the "exclude flips as evidence" rule auditable rather than asserted |
@@ -545,7 +557,7 @@ hundred near-duplicates and the promotion step never gets a signal to act on.
 
 State-dependent checks require classified fields after `triaged`, require routing
 and direction for an adjudication-eligible dispute, and require adjudicator/time for
-terminal adjudication. `answer_only`, `not_a_dispute`, failed intake, and untrusted
+terminal adjudication. `answer_only`, `not_a_dispute`, `review_request`, failed intake, and untrusted
 items not explicitly promoted have NULL adjudication status and cannot enter the
 queue.
 
@@ -704,7 +716,7 @@ platform-side they never surface to a user as a quota.
 | Job | Queue | Fires when |
 | --- | --- | --- |
 | `triage_code_review_dispute` | `feedback` | A comment is captured, or a dispute is filed in-app |
-| `start_code_review_reassessment` | `agent` | Triage routed `reassess`; creates a linked session and dispatches the existing review path |
+| `start_code_review_reassessment` | `agent` | Triage routed `reassess`, or classified a bare `review_request`; creates the appropriate linked dispute reassessment or ordinary team-reviewer session through the existing review path |
 | `reply_code_review_dispute` | `feedback` | Triage routed `policy_signal_only` / `answer_only` / `not_a_dispute`, or a rerun finished |
 | `rank_code_review_dispute` | `feedback` | Rerun settles, PR closes, the window expires, or the dispute's base policy is superseded. Recomputes `queue_signals` and `queue_priority` |
 | `generate_code_review_policy_proposal` | `agent` | An admin upholds a dispute |
@@ -751,10 +763,12 @@ smaller dispute-body limit.
 
 Existing comment handlers capture flat-comment mentions and inline-thread replies.
 The durable ingress ledger handles delivery/source-version dedupe before triage;
-handlers do not classify meaning or parse syntax. Once a comment is captured as a
-code-review dispute, its normalized PR-feedback item is retained as `ignored` with
-the dispute-specific reason and does not enter the separate automatic PR-feedback
-follow-through worker; ordinary GitHub automation triggers still observe the event.
+handlers do not classify meaning or parse syntax. While classification is pending,
+the normalized PR-feedback item is retained as `ignored` with the dispute-specific
+reason and does not enter the separate automatic PR-feedback follow-through worker.
+An inline item classified `not_a_dispute` is atomically returned to pending feedback
+and its collector is enqueued; other routes remain claimed by code review. Ordinary
+GitHub automation triggers still observe the event.
 
 Activation atomically locks/CASes the proposal and replayed revision, validates the
 active base policy and exact delta, deactivates the old policy, inserts the new

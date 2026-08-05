@@ -50,7 +50,7 @@ type DisputeStore interface {
 	ListQueue(ctx context.Context, orgID uuid.UUID, filters models.CodeReviewDisputeListFilters) (models.CodeReviewDisputePage, error)
 	ListRecentKinds(ctx context.Context, orgID uuid.UUID, limit int) ([]string, error)
 	SetTriage(ctx context.Context, orgID, disputeID uuid.UUID, result models.CodeReviewDisputeTriageResult, adjudicationEligible bool, detail string) (models.CodeReviewDispute, error)
-	FailTriage(ctx context.Context, orgID, disputeID uuid.UUID, detail string) error
+	FailTriage(ctx context.Context, orgID, disputeID uuid.UUID, detail string, replyApplicable bool) error
 	RecordAuthorization(ctx context.Context, authorization models.CodeReviewDisputeAuthorization) error
 	AdmitAndEnqueueReassessment(ctx context.Context, dispute models.CodeReviewDispute, userID *uuid.UUID, semanticHash string, cooldown time.Duration, maxActive int, payload any) (bool, error)
 	CompleteReassessment(ctx context.Context, orgID, disputeID, sessionID uuid.UUID, status models.CodeReviewSessionStatus, decision *models.CodeReviewDecision, detail string) error
@@ -80,6 +80,14 @@ type disputePullRequestSnapshotter interface {
 	GetCodeReviewPullRequestSnapshot(ctx context.Context, orgID, repositoryID uuid.UUID, number int) (ghservice.CodeReviewPullRequestSnapshot, error)
 }
 
+type disputeReviewRequestQueuer interface {
+	QueueReviewChanged(ctx context.Context, input ReviewChangedInput) (ReviewRequestedResult, error)
+}
+
+type disputeFeedbackReleaser interface {
+	ReleaseCodeReviewDisputeItem(ctx context.Context, orgID, pullRequestID uuid.UUID, surface models.PRFeedbackSurface, providerObjectID int64) error
+}
+
 type DisputeJobStore interface {
 	EnqueueWithOpts(ctx context.Context, orgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error)
 }
@@ -89,6 +97,8 @@ type DisputeService struct {
 	reviews      DisputeReviewStore
 	pullRequests PullRequestStore
 	snapshots    disputePullRequestSnapshotter
+	reviewQueue  disputeReviewRequestQueuer
+	feedback     disputeFeedbackReleaser
 	jobs         DisputeJobStore
 	llm          llm.Client
 	logger       zerolog.Logger
@@ -106,6 +116,18 @@ func (s *DisputeService) SetAuditEmitter(audit *db.AuditEmitter) {
 // pull request revision rather than the eventually-consistent local mirror.
 func (s *DisputeService) SetPullRequestSnapshotter(snapshotter disputePullRequestSnapshotter) {
 	s.snapshots = snapshotter
+}
+
+// SetReviewRequestQueuer routes comments that the LLM classifies as bare
+// review requests back through the normal durable code-review lifecycle.
+func (s *DisputeService) SetReviewRequestQueuer(queuer disputeReviewRequestQueuer) {
+	s.reviewQueue = queuer
+}
+
+// SetFeedbackReleaser lets an inline comment classified as unrelated to the
+// review decision return to the ordinary PR feedback follow-through pipeline.
+func (s *DisputeService) SetFeedbackReleaser(releaser disputeFeedbackReleaser) {
+	s.feedback = releaser
 }
 
 type DisputeConfig struct {
@@ -150,23 +172,27 @@ type FileCodeReviewDisputeInput struct {
 	Source               models.CodeReviewDisputeSource
 	GitHubCommentID      *int64
 	GitHubThreadRootID   *int64
+	GitHubCommentURL     string
+	ReviewRequestAllowed bool
 	SourceVersion        int64
 	SourceUpdatedAt      *time.Time
 }
 
 type FileGitHubCodeReviewDisputeInput struct {
-	OrgID              uuid.UUID
-	PullRequestID      uuid.UUID
-	InlineThreadRootID *int64
-	AuthorLogin        string
-	AuthorType         models.PRFeedbackAuthorType
-	AuthorAssociation  string
-	RepositoryPrivate  bool
-	OwnAppLogin        string
-	Body               string
-	GitHubCommentID    int64
-	SourceVersion      int64
-	SourceUpdatedAt    *time.Time
+	OrgID                uuid.UUID
+	PullRequestID        uuid.UUID
+	InlineThreadRootID   *int64
+	AuthorLogin          string
+	AuthorType           models.PRFeedbackAuthorType
+	AuthorAssociation    string
+	RepositoryPrivate    bool
+	OwnAppLogin          string
+	Body                 string
+	GitHubCommentID      int64
+	GitHubCommentURL     string
+	ReviewRequestAllowed bool
+	SourceVersion        int64
+	SourceUpdatedAt      *time.Time
 }
 
 func (s *DisputeService) FileInApp(ctx context.Context, input FileCodeReviewDisputeInput) (models.CodeReviewDispute, error) {
@@ -216,6 +242,7 @@ func (s *DisputeService) FileFromGitHub(ctx context.Context, input FileGitHubCod
 		AuthorAssociation: input.AuthorAssociation, RepositoryVisibility: visibility,
 		Body: input.Body, Source: models.CodeReviewDisputeSourceGitHubComment,
 		GitHubCommentID: &commentID, GitHubThreadRootID: input.InlineThreadRootID,
+		GitHubCommentURL: input.GitHubCommentURL, ReviewRequestAllowed: input.ReviewRequestAllowed,
 		SourceVersion: input.SourceVersion, SourceUpdatedAt: input.SourceUpdatedAt,
 	})
 	if errors.Is(err, db.ErrCodeReviewDisputeIntakeCapped) {
@@ -224,7 +251,7 @@ func (s *DisputeService) FileFromGitHub(ctx context.Context, input FileGitHubCod
 			Str("pull_request_id", input.PullRequestID.String()).
 			Str("filed_by_login", strings.TrimSpace(input.AuthorLogin)).
 			Msg("declined code review dispute intake at the rolling cap")
-		return models.CodeReviewDispute{}, false, nil
+		return models.CodeReviewDispute{}, false, db.ErrCodeReviewDisputeIntakeCapped
 	}
 	if err != nil {
 		return models.CodeReviewDispute{}, false, err
@@ -318,15 +345,17 @@ func (s *DisputeService) fileAgainstSessionResult(ctx context.Context, input Fil
 	}
 	trustedAtFiling, _ := dispute.CurrentTrust()
 	queueSignals, err := json.Marshal(map[string]any{
-		"trusted_at_filing":   trustedAtFiling,
-		"filer_is_pr_author":  dispute.AuthorIsPRAuthor,
-		"pull_request_author": strings.TrimSpace(item.PullRequestAuthor),
-		"pull_request_title":  strings.TrimSpace(item.PullRequestTitle),
-		"github_pr_number":    item.GitHubPRNumber,
-		"github_pr_url":       strings.TrimSpace(item.GitHubPRURL),
-		"github_repository":   strings.TrimSpace(item.GitHubRepo),
-		"source":              dispute.Source,
-		"reason_codes":        dispute.ContestedReasonCodes,
+		"trusted_at_filing":      trustedAtFiling,
+		"filer_is_pr_author":     dispute.AuthorIsPRAuthor,
+		"pull_request_author":    strings.TrimSpace(item.PullRequestAuthor),
+		"pull_request_title":     strings.TrimSpace(item.PullRequestTitle),
+		"github_pr_number":       item.GitHubPRNumber,
+		"github_pr_url":          strings.TrimSpace(item.GitHubPRURL),
+		"github_repository":      strings.TrimSpace(item.GitHubRepo),
+		"github_comment_url":     strings.TrimSpace(input.GitHubCommentURL),
+		"review_request_allowed": input.ReviewRequestAllowed,
+		"source":                 dispute.Source,
+		"reason_codes":           dispute.ContestedReasonCodes,
 	})
 	if err != nil {
 		return models.CodeReviewDispute{}, false, fmt.Errorf("marshal code review dispute queue signals: %w", err)
@@ -426,8 +455,18 @@ func (s *DisputeService) Triage(ctx context.Context, orgID, disputeID uuid.UUID)
 		result.ContestedReasonCodes = append([]models.CodeReviewRiskReasonCode(nil), dispute.ContestedReasonCodes...)
 	}
 	trusted, trustReason := dispute.CurrentTrust()
-	if result.Direction == models.CodeReviewDisputeDirectionShouldNotHaveApproved {
+	if result.Direction == models.CodeReviewDisputeDirectionShouldNotHaveApproved && result.Routing == models.CodeReviewDisputeRoutingReassess {
 		result.Routing = models.CodeReviewDisputeRoutingPolicySignalOnly
+	}
+	if result.Routing == models.CodeReviewDisputeRoutingReviewRequest {
+		switch {
+		case !trusted:
+			result.Routing = models.CodeReviewDisputeRoutingNotADispute
+			result.Reply = "External contributors can't trigger a code review. Ask a maintainer to request one."
+		case !codeReviewDisputeReviewRequestAllowed(dispute):
+			result.Routing = models.CodeReviewDisputeRoutingNotADispute
+			result.Reply = "An edited comment can't start another code review. Post a new reviewer mention to request one."
+		}
 	}
 	if result.Confidence < codeReviewDisputeConfidenceFloor && result.Routing == models.CodeReviewDisputeRoutingReassess {
 		result.Routing = models.CodeReviewDisputeRoutingPolicySignalOnly
@@ -445,7 +484,10 @@ func (s *DisputeService) Triage(ctx context.Context, orgID, disputeID uuid.UUID)
 		result.Routing = models.CodeReviewDisputeRoutingPolicySignalOnly
 		result.Reply = "The objection was recorded, but automatic reassessment is temporarily unavailable."
 	}
-	if result.Routing != models.CodeReviewDisputeRoutingAnswerOnly && result.Routing != models.CodeReviewDisputeRoutingNotADispute && onlyDeterministicReasons(result.ContestedReasonCodes) {
+	if result.Routing != models.CodeReviewDisputeRoutingAnswerOnly &&
+		result.Routing != models.CodeReviewDisputeRoutingNotADispute &&
+		result.Routing != models.CodeReviewDisputeRoutingReviewRequest &&
+		onlyDeterministicReasons(result.ContestedReasonCodes) {
 		result.Routing = models.CodeReviewDisputeRoutingPolicySignalOnly
 		var details []models.CodeReviewRiskReason
 		if riskReasons, ok := s.reviews.(disputeRiskReasonStore); ok {
@@ -456,7 +498,7 @@ func (s *DisputeService) Triage(ctx context.Context, orgID, disputeID uuid.UUID)
 		}
 		result.Reply = deterministicPolicySignalReply(result.ContestedReasonCodes, details)
 	}
-	adjudicationEligible := trusted && result.Routing != models.CodeReviewDisputeRoutingAnswerOnly && result.Routing != models.CodeReviewDisputeRoutingNotADispute
+	adjudicationEligible := trusted && (result.Routing == models.CodeReviewDisputeRoutingReassess || result.Routing == models.CodeReviewDisputeRoutingPolicySignalOnly)
 	detail := boundedGeneratedReply(result.Reply)
 	updated, err := s.disputes.SetTriage(ctx, orgID, disputeID, result, adjudicationEligible, detail)
 	if err != nil {
@@ -483,7 +525,15 @@ func (s *DisputeService) completeTriagedWorkflowWithTrust(ctx context.Context, d
 		}
 		return s.recordAuthorization(ctx, dispute, models.CodeReviewDisputeAuthorizationQueueInfluence, trusted, trustReason)
 	}
+	if dispute.Routing != nil && *dispute.Routing == models.CodeReviewDisputeRoutingReviewRequest {
+		return s.queueReviewRequest(ctx, dispute)
+	}
 	if dispute.IntakeStatus == models.CodeReviewDisputeIntakeDiscarded {
+		if dispute.Routing != nil && *dispute.Routing == models.CodeReviewDisputeRoutingNotADispute {
+			if err := s.releaseInlineFeedback(ctx, dispute); err != nil {
+				return err
+			}
+		}
 		return s.EnqueueReply(ctx, dispute.OrgID, dispute.ID, "triaged")
 	}
 	if dispute.IntakeStatus != models.CodeReviewDisputeIntakeTriaged || dispute.Routing == nil {
@@ -515,7 +565,22 @@ func (s *DisputeService) FailTriage(ctx context.Context, orgID, disputeID uuid.U
 	}
 	detail = boundedGeneratedReply(detail)
 	if dispute.IntakeStatus == models.CodeReviewDisputeIntakePending {
-		err = s.disputes.FailTriage(ctx, orgID, disputeID, detail)
+		trusted, _ := dispute.CurrentTrust()
+		if dispute.Source == models.CodeReviewDisputeSourceGitHubComment && trusted && dispute.AuthorIsPRAuthor && codeReviewDisputeReviewRequestAllowed(dispute) {
+			if queueErr := s.queueReviewRequest(ctx, dispute); queueErr == nil {
+				detail = "We could not classify this comment automatically, so we started a normal code review instead."
+				return s.disputes.FailTriage(ctx, orgID, disputeID, detail, false)
+			} else {
+				s.logger.Warn().Err(queueErr).
+					Str("org_id", orgID.String()).
+					Str("dispute_id", disputeID.String()).
+					Msg("failed to queue trusted-author fallback after dispute triage failure")
+			}
+		}
+		err = s.disputes.FailTriage(ctx, orgID, disputeID, detail, true)
+	} else if dispute.IntakeStatus == models.CodeReviewDisputeIntakeDiscarded && dispute.Routing != nil && *dispute.Routing == models.CodeReviewDisputeRoutingReviewRequest {
+		detail = "We classified this as a code review request but could not start the review. Post a new reviewer mention to try again."
+		err = s.disputes.FailTriage(ctx, orgID, disputeID, detail, true)
 	} else if dispute.IntakeStatus == models.CodeReviewDisputeIntakeTriaged && dispute.Routing != nil && *dispute.Routing == models.CodeReviewDisputeRoutingReassess {
 		err = s.disputes.MarkReassessmentFailed(ctx, orgID, disputeID, detail)
 	}
@@ -534,18 +599,6 @@ func (s *DisputeService) triageResult(ctx context.Context, dispute models.CodeRe
 		}
 		return models.CodeReviewDisputeTriageResult{Direction: direction, ContestedReasonCodes: dispute.ContestedReasonCodes, DisputeKind: "explicit_reconsideration", AssertsNewInformation: true, Routing: routing, Confidence: 1}, nil
 	}
-	normalized := strings.ToLower(strings.Join(strings.Fields(dispute.Body), " "))
-	trimmed := strings.Trim(normalized, " .,!?:;")
-	if trimmed == "thanks" || trimmed == "thank you" || trimmed == "lgtm" || trimmed == "looks good" || trimmed == "noted" {
-		return models.CodeReviewDisputeTriageResult{Direction: direction, DisputeKind: "acknowledgement", Routing: models.CodeReviewDisputeRoutingNotADispute, Confidence: 1, Reply: "Noted. If you meant to challenge this decision, use the reconsideration action in 143."}, nil
-	}
-	deterministicRouteHint := ""
-	if strings.Contains(dispute.Body, "?") && !containsDisagreementLanguage(normalized) {
-		deterministicRouteHint = string(models.CodeReviewDisputeRoutingAnswerOnly)
-	}
-	if deterministicRouteHint == string(models.CodeReviewDisputeRoutingAnswerOnly) && s.llm == nil {
-		return models.CodeReviewDisputeTriageResult{Direction: direction, DisputeKind: "explanation_question", Routing: models.CodeReviewDisputeRoutingAnswerOnly, Confidence: 0.95, Reply: "The review evidence and policy blockers are linked from the latest 143 review comment."}, nil
-	}
 	if s.llm == nil {
 		return models.CodeReviewDisputeTriageResult{}, fmt.Errorf("LLM is unavailable for code review dispute triage")
 	}
@@ -559,7 +612,6 @@ func (s *DisputeService) triageResult(ctx context.Context, dispute models.CodeRe
 		"review_summary":             stringPtr(review.FinalReviewBody),
 		"review_findings":            findingContext,
 		"existing_dispute_kinds":     existingKinds,
-		"deterministic_route_hint":   deterministicRouteHint,
 		"untrusted_dispute_evidence": map[string]any{"body": dispute.Body, "filed_by_login": dispute.FiledByLogin},
 	})
 	if err != nil {
@@ -613,31 +665,6 @@ func extractJSONObject(value string) string {
 		return value[start : end+1]
 	}
 	return strings.TrimSpace(value)
-}
-
-func containsDisagreementLanguage(value string) bool {
-	for _, phrase := range []string{"disagree", "should have", "shouldn't", "should not", "wrong", "unsafe", "reconsider", "mistake", "incorrect"} {
-		if strings.Contains(value, phrase) {
-			return true
-		}
-	}
-	return false
-}
-
-// IsLikelyDisputeMention separates plain-language objections and questions
-// from bare team mentions that are requesting a normal code review.
-func IsLikelyDisputeMention(body string) bool {
-	normalized := strings.ToLower(strings.Join(strings.Fields(body), " "))
-	return strings.Contains(body, "?") || containsDisagreementLanguage(normalized)
-}
-
-// ContainsDisputeObjection is the narrower half of IsLikelyDisputeMention: text
-// that disagrees with the decision rather than merely asking about it. Callers
-// that must not divert an explicit review request use this instead, because a
-// question mark alone does not distinguish "why was this blocked?" from
-// "@team can you re-review?".
-func ContainsDisputeObjection(body string) bool {
-	return containsDisagreementLanguage(strings.ToLower(strings.Join(strings.Fields(body), " ")))
 }
 
 func directionForDecision(decision models.CodeReviewDecision) models.CodeReviewDisputeDirection {
@@ -763,6 +790,98 @@ func (s *DisputeService) queueReassessment(ctx context.Context, dispute models.C
 	}
 	_, err = s.disputes.AdmitAndEnqueueReassessment(ctx, dispute, dispute.FiledByUserID, semanticHash, cooldown, s.config.MaxActiveReassessments, payload)
 	return err
+}
+
+func codeReviewDisputeReviewRequestAllowed(dispute models.CodeReviewDispute) bool {
+	var signals struct {
+		ReviewRequestAllowed bool `json:"review_request_allowed"`
+	}
+	return json.Unmarshal(dispute.QueueSignals, &signals) == nil && signals.ReviewRequestAllowed
+}
+
+func (s *DisputeService) queueReviewRequest(ctx context.Context, dispute models.CodeReviewDispute) error {
+	if s.reviewQueue == nil {
+		return fmt.Errorf("code review request queue is unavailable")
+	}
+	if s.snapshots == nil {
+		return fmt.Errorf("pull request snapshotter unavailable for code review request")
+	}
+	if dispute.GitHubCommentID == nil {
+		return fmt.Errorf("GitHub comment id is required for a code review request")
+	}
+	pr, err := s.pullRequests.GetByID(ctx, dispute.OrgID, dispute.PullRequestID)
+	if err != nil {
+		return err
+	}
+	snapshot, err := s.snapshots.GetCodeReviewPullRequestSnapshot(ctx, dispute.OrgID, dispute.RepositoryID, pr.GitHubPRNumber)
+	if err != nil {
+		return fmt.Errorf("load latest pull request for code review request: %w", err)
+	}
+	if strings.TrimSpace(snapshot.HeadSHA) == "" {
+		return fmt.Errorf("latest pull request head is missing for code review request")
+	}
+	var signals struct {
+		GitHubCommentURL  string `json:"github_comment_url"`
+		PullRequestAuthor string `json:"pull_request_author"`
+	}
+	if err := json.Unmarshal(dispute.QueueSignals, &signals); err != nil {
+		return fmt.Errorf("decode code review request context: %w", err)
+	}
+	source := "issue_comment"
+	if dispute.GitHubThreadRootCommentID != nil {
+		source = "review_comment_reply"
+	}
+	githubPRNumber := snapshot.Number
+	if githubPRNumber <= 0 {
+		githubPRNumber = pr.GitHubPRNumber
+	}
+	githubPRURL := strings.TrimSpace(snapshot.HTMLURL)
+	if githubPRURL == "" {
+		githubPRURL = strings.TrimSpace(pr.GitHubPRURL)
+	}
+	title := strings.TrimSpace(snapshot.Title)
+	if title == "" {
+		title = strings.TrimSpace(pr.Title)
+	}
+	author := strings.TrimSpace(snapshot.AuthorLogin)
+	if author == "" {
+		author = strings.TrimSpace(signals.PullRequestAuthor)
+	}
+	result, err := s.reviewQueue.QueueReviewChanged(ctx, ReviewChangedInput{
+		OrgID: dispute.OrgID, RepositoryID: dispute.RepositoryID, PullRequestID: dispute.PullRequestID,
+		GitHubRepo: pr.GitHubRepo, GitHubPRNumber: githubPRNumber, GitHubPRURL: githubPRURL,
+		PullRequestTitle: title, PullRequestAuthor: author,
+		BaseSHA: snapshot.BaseSHA, HeadSHA: snapshot.HeadSHA, FromFork: snapshot.FromFork,
+		ChangeKey: "review_request:" + dispute.ID.String(), ChangeReason: "code_review_dispute.review_request",
+		ExplicitRequest: true, TriggerSource: models.CodeReviewTriggerSourceTeamReviewer,
+		RequestContext: &ReviewRequestContext{
+			Source: source, AuthorLogin: dispute.FiledByLogin, Body: dispute.Body, URL: strings.TrimSpace(signals.GitHubCommentURL),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("queue classified code review request: %w", err)
+	}
+	if !result.Processed {
+		return fmt.Errorf("classified code review request was not queued: %s", strings.TrimSpace(result.IgnoredReason))
+	}
+	return nil
+}
+
+func (s *DisputeService) releaseInlineFeedback(ctx context.Context, dispute models.CodeReviewDispute) error {
+	if s.feedback == nil || dispute.Source != models.CodeReviewDisputeSourceGitHubComment ||
+		dispute.GitHubThreadRootCommentID == nil || dispute.GitHubCommentID == nil {
+		return nil
+	}
+	if err := s.feedback.ReleaseCodeReviewDisputeItem(
+		ctx,
+		dispute.OrgID,
+		dispute.PullRequestID,
+		models.PRFeedbackSurfaceReviewComment,
+		*dispute.GitHubCommentID,
+	); err != nil {
+		return fmt.Errorf("release non-dispute inline comment to PR feedback: %w", err)
+	}
+	return nil
 }
 
 func codeReviewDisputeSemanticHash(head string, policyID uuid.UUID, evidence, title, body string) string {

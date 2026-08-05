@@ -1380,6 +1380,35 @@ describe("CodeReviewsPage", () => {
     expect(within(evidenceSheet).getByText("Pending")).toBeInTheDocument();
   });
 
+  it("labels a classified bare mention as an ordinary review request", async () => {
+    const user = userEvent.setup();
+    const reviewRequest: CodeReviewDispute = {
+      id: "review-request-1", org_id: "org-1", session_id: "session-1", pull_request_id: "pr-1",
+      repository_id: "repo-1", policy_id: "policy-1", reviewed_head_sha: review.head_sha,
+      decision: "approved", direction: "should_not_have_approved", filed_by_login: "anya",
+      author_association: "MEMBER", author_is_pr_author: true, repository_visibility: "private",
+      trusted: true, source: "github_comment", body: "@acme/reviewers please review again",
+      contested_reason_codes: [], intake_status: "discarded", routing: "review_request",
+      reassessment_status: "not_requested", queue_signals: {}, queue_priority: 0,
+      reply_status: "not_applicable", version: 2, created_at: "2026-06-26T12:06:00Z", updated_at: "2026-06-26T12:06:00Z",
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews/session-1/disputes", () =>
+        HttpResponse.json({ data: [reviewRequest], meta: {} } satisfies ListResponse<CodeReviewDispute>),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
+    await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
+    expect(within(evidenceSheet).getByText("Review requested")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("Ordinary review request")).toBeInTheDocument();
+    expect(within(evidenceSheet).queryByText("Discarded")).not.toBeInTheDocument();
+  });
+
   it("does not request or show decision feedback for viewer roles", async () => {
     const user = userEvent.setup();
     let disputeRequests = 0;

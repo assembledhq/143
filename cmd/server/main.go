@@ -1794,6 +1794,11 @@ func buildServices(
 		},
 	)
 	codeReviewDisputes.SetAuditEmitter(auditEmitter)
+	codeReviewDisputes.SetReviewRequestQueuer(codeReviewLifecycle)
+	codeReviewDisputes.SetFeedbackReleaser(workerFeedbackStore)
+	if prService != nil {
+		codeReviewDisputes.SetPullRequestSnapshotter(prService)
+	}
 	svc := &worker.Services{
 		Orchestrator:    orchestrator,
 		PR:              prService,
