@@ -24,6 +24,9 @@ describe("ActivityCapsule", () => {
 
     const trigger = screen.getByRole("button", { name: "Worked for 42s · 1 tool call" });
     expect(trigger).toHaveAttribute("aria-expanded", "false");
+    const capsule = trigger.closest("[data-activity-capsule='true']");
+    expect(capsule).toHaveClass("mx-2", "min-w-0");
+    expect(capsule).not.toHaveClass("rounded-lg", "border", "bg-card");
     expect(screen.queryByText("original activity")).not.toBeInTheDocument();
     await user.click(trigger);
     expect(onExpandedChange).toHaveBeenCalledWith(true);
@@ -43,6 +46,8 @@ describe("ActivityCapsule", () => {
       </ActivityCapsule>,
     );
     expect(screen.getByText("original activity")).toBeInTheDocument();
+    const body = document.querySelector("[data-activity-phase-body='true']");
+    expect(body).not.toHaveClass("border-t", "border-border");
   });
 
   it("reports a non-empty text selection inside expanded activity", () => {
