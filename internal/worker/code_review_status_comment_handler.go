@@ -195,15 +195,12 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, prev
 			paragraphs = append(paragraphs, "143 Code Reviewer has started reviewing this pull request.")
 			break
 		}
-		paragraphs = append(paragraphs, fmt.Sprintf(
-			"143 Code Reviewer is reassessing this pull request at `%s`.",
-			codeReviewStatusShortSHA(metadata.HeadSHA),
+		paragraphs = append(paragraphs, codereviewsvc.WithCodeReviewReassessmentHistory(
+			previousBody,
+			metadata.HeadSHA,
+			metadata.CreatedAt,
+			sessionURL,
 		))
-		paragraphs = append(paragraphs, fmt.Sprintf(
-			"The previous completed assessment for `%s` remains visible until the new review finishes.",
-			codeReviewStatusShortSHA(previousCompleted.HeadSHA),
-		))
-		paragraphs = append(paragraphs, previousBody)
 	}
 	if sessionURL != "" && !strings.Contains(strings.Join(paragraphs, "\n\n"), sessionURL) {
 		label := "Follow the review session"
@@ -213,14 +210,6 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, prev
 		paragraphs = append(paragraphs, fmt.Sprintf("[%s](%s)", label, sessionURL))
 	}
 	return strings.Join(paragraphs, "\n\n")
-}
-
-func codeReviewStatusShortSHA(value string) string {
-	value = strings.TrimSpace(value)
-	if len(value) > 7 {
-		return value[:7]
-	}
-	return value
 }
 
 func enqueueCodeReviewStatusCommentSync(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, stage string) {
