@@ -383,6 +383,7 @@ func (s *SessionReviewLoopStore) RefreshPublicationEvidence(ctx context.Context,
 		SET review_workspace_revision = @workspace_revision,
 			review_desired_head_sha = @desired_head_sha,
 			desired_head_sha = @desired_head_sha,
+			published_head_sha = @desired_head_sha,
 			updated_at = now()
 		WHERE org_id = @org_id AND review_loop_id = @loop_id
 		  AND state NOT IN ('completed', 'completed_noop', 'terminal_failed')`, pgx.NamedArgs{
