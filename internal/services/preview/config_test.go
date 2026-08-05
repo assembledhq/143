@@ -63,6 +63,7 @@ func TestParseConfig_MultiService(t *testing.T) {
 		"version": "3",
 		"name": "Full Stack",
 		"primary": "frontend",
+		"parallel_builds": true,
 		"services": {
 			"frontend": {
 				"command": ["npm", "run", "dev"],
@@ -91,6 +92,7 @@ func TestParseConfig_MultiService(t *testing.T) {
 	if len(cfg.Services) != 2 {
 		t.Errorf("len(Services) = %d, want 2", len(cfg.Services))
 	}
+	require.True(t, cfg.ParallelBuilds, "parallel_builds should survive config parsing")
 }
 
 func TestParseConfig_BrowserVerificationPolicy(t *testing.T) {
@@ -1257,9 +1259,10 @@ func TestResolveConfig_NonConnected(t *testing.T) {
 	t.Parallel()
 
 	baseCfg := &models.PreviewConfig{
-		Version: "3",
-		Name:    "Test",
-		Primary: "frontend",
+		Version:        "3",
+		Name:           "Test",
+		Primary:        "frontend",
+		ParallelBuilds: true,
 		Install: &models.PreviewInstallConfig{
 			Command:    []string{"npm", "ci"},
 			Lockfiles:  []string{"package-lock.json"},
@@ -1287,7 +1290,7 @@ func TestResolveConfig_NonConnected(t *testing.T) {
 			VerifyPaths: []string{"node_modules/.bin/next"},
 		},
 		Services: map[string]models.ServiceConfig{
-			"frontend": {Command: []string{"npm", "run", "dev"}, Port: 3000, Cwd: "frontend", Ready: models.ReadinessProbe{HTTPPath: "/", TimeoutSeconds: 120}},
+			"frontend": {Build: []string{"npm", "run", "build"}, Command: []string{"npm", "run", "dev"}, Port: 3000, Cwd: "frontend", Ready: models.ReadinessProbe{HTTPPath: "/", TimeoutSeconds: 120}, HMR: true},
 			"backend":  {Command: []string{"python", "app.py", "--debug"}, Port: 4000, Ready: models.ReadinessProbe{HTTPPath: "/health"}},
 		},
 		Infrastructure: map[string]models.InfrastructureConfig{
@@ -1319,6 +1322,8 @@ func TestResolveConfig_NonConnected(t *testing.T) {
 	if fe.Command[0] != "npm" || fe.Command[1] != "run" {
 		t.Errorf("frontend.Command = %v, want [npm run dev]", fe.Command)
 	}
+	require.Equal(t, []string{"npm", "run", "build"}, fe.Build, "non-connected preview should use the diff build command")
+	require.True(t, fe.HMR, "non-connected preview should use the diff HMR declaration")
 
 	be := resolved.Services["backend"]
 	if len(be.Command) != 3 || be.Command[2] != "--debug" {
@@ -1341,6 +1346,7 @@ func TestResolveConfig_NonConnected(t *testing.T) {
 	require.Equal(t, []string{"pnpm", "install", "--frozen-lockfile"}, resolved.Install.Command, "non-connected preview should use install command from diff")
 	require.Equal(t, []string{"apps/*/node_modules"}, resolved.Install.CleanPaths[1:], "non-connected preview should use install cleanup paths from diff")
 	require.Equal(t, diffCfg.Resources, resolved.Resources, "non-connected preview should use resource requirements from diff")
+	require.True(t, resolved.ParallelBuilds, "build concurrency should remain pinned to the trusted base config")
 }
 
 func TestResolveConfig_Connected_PinsEverythingToBase(t *testing.T) {
@@ -1553,13 +1559,27 @@ func TestResolvePreviewInstallPackageManagerCachePaths(t *testing.T) {
 			enabled: true,
 		},
 		{
-			name: "infers go module and build caches",
+			name: "go install keeps module cache while build cache owns compiled objects",
 			install: &models.PreviewInstallConfig{
 				Command:   []string{"go", "mod", "download"},
 				Lockfiles: []string{"go.mod"},
 			},
 			wantPMs: []string{"go"},
-			want:    []string{".cache/go-build", "go/pkg/mod"},
+			want:    []string{"go/pkg/mod"},
+			enabled: true,
+		},
+		{
+			// A wrapper script may run `go mod download` where this package
+			// cannot see it, and only the package-manager cache restores before
+			// install runs. Handing the module cache to the build cache here
+			// would leave every install fetching modules cold.
+			name: "wrapper install keeps the module cache restorable before install",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"sh", ".143/preview-install.sh"},
+				Lockfiles: []string{"go.mod"},
+			},
+			wantPMs: []string{"go"},
+			want:    []string{"go/pkg/mod"},
 			enabled: true,
 		},
 		{
@@ -2423,19 +2443,19 @@ func TestResolvePreviewBuildCacheHomePaths(t *testing.T) {
 			enabled: false,
 		},
 		{
-			name: "go.mod lockfile enables go build/module caches",
+			name: "go.mod lockfile leaves modules to the package-manager cache",
 			install: &models.PreviewInstallConfig{
 				Lockfiles: []string{"go.mod"},
 			},
-			want:    []string{".cache/go-build", "go/pkg/mod"},
+			want:    []string{".cache/go-build"},
 			enabled: true,
 		},
 		{
-			name: "go.sum alongside javascript lockfile still enables go caches",
+			name: "go.sum alongside javascript lockfile still enables the compiled-object cache",
 			install: &models.PreviewInstallConfig{
 				Lockfiles: []string{"package-lock.json", "go.sum"},
 			},
-			want:    []string{".cache/go-build", "go/pkg/mod"},
+			want:    []string{".cache/go-build"},
 			enabled: true,
 		},
 		{
@@ -2445,6 +2465,33 @@ func TestResolvePreviewBuildCacheHomePaths(t *testing.T) {
 				Lockfiles: []string{"go.mod"},
 			},
 			want:    []string{".cache/go-build"},
+			enabled: true,
+		},
+		{
+			// A wrapper install command is opaque, so it may well run
+			// `go mod download` inside. Ownership must not depend on guessing:
+			// while the package-manager cache is active it keeps the module
+			// directory, because only that lifecycle restores before install.
+			name: "wrapper install command still leaves modules to the package-manager cache",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"sh", ".143/preview-install.sh"},
+				Lockfiles: []string{"go.mod"},
+			},
+			want:    []string{".cache/go-build"},
+			enabled: true,
+		},
+		{
+			// Nothing restores the module cache before install now, so the
+			// build cache adopts it rather than leaving it uncached.
+			name: "package-manager cache disabled hands the module cache to the build cache",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"sh", ".143/preview-install.sh"},
+				Lockfiles: []string{"go.mod"},
+				Cache: &models.PreviewInstallCacheConfig{
+					PackageManager: &models.PreviewPackageManagerCacheConfig{Enabled: &disabled},
+				},
+			},
+			want:    []string{".cache/go-build", "go/pkg/mod"},
 			enabled: true,
 		},
 		{

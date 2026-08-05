@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { endOfMonth, format, startOfMonth, subDays, subMonths } from "date-fns";
@@ -7,20 +7,40 @@ import { CodeReviewSummaryCards, formatReviewTurnaround } from "./code-review-ov
 import { TimeRangePicker, timeRangeLabel } from "./time-range-picker";
 import { customTimeRange, type TimeRangeFilter } from "@/lib/time-range";
 
+// `matches` is a live getter and listeners are real, so `changeViewport` can
+// move a mounted component across the breakpoint the way a rotation does.
+let desktopMatches = true;
+const queryListeners = new Set<() => void>();
+
 function setDesktopMatch(matches: boolean) {
+  desktopMatches = matches;
+  queryListeners.clear();
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
     writable: true,
-    value: vi.fn().mockImplementation((query: string) => ({
-      matches: query === "(min-width: 768px)" ? matches : false,
-      media: query,
-      onchange: null,
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-      addListener: vi.fn(),
-      removeListener: vi.fn(),
-      dispatchEvent: vi.fn(),
-    })),
+    value: vi.fn().mockImplementation((query: string) => {
+      const listeners = new Set<() => void>();
+      queryListeners.add(() => listeners.forEach((listener) => listener()));
+      return {
+        get matches() {
+          return { "(min-width: 768px)": desktopMatches, "(max-width: 767px)": !desktopMatches }[query] ?? false;
+        },
+        media: query,
+        onchange: null,
+        addEventListener: (_: string, listener: () => void) => listeners.add(listener),
+        removeEventListener: (_: string, listener: () => void) => listeners.delete(listener),
+        addListener: (listener: () => void) => listeners.add(listener),
+        removeListener: (listener: () => void) => listeners.delete(listener),
+        dispatchEvent: vi.fn(),
+      };
+    }),
+  });
+}
+
+async function changeViewport(matches: boolean) {
+  desktopMatches = matches;
+  await act(async () => {
+    queryListeners.forEach((notify) => notify());
   });
 }
 
@@ -86,6 +106,125 @@ describe("TimeRangePicker", () => {
     expect(document.querySelectorAll(".rdp-month")).toHaveLength(expectedMonths);
   });
 
+  it("uses the full mobile screen instead of an anchored popover", async () => {
+    setDesktopMatch(false);
+    const user = userEvent.setup();
+    render(<TimeRangePicker label="Time window" value="30d" onValueChange={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "Time window" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Choose time range" });
+    expect(dialog).toHaveAttribute("data-slot", "sheet-content");
+    expect(dialog).toHaveClass("inset-0", "h-dvh", "max-h-dvh", "max-w-none", "rounded-none");
+    expect(document.querySelector('[data-slot="popover-content"]')).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Last 30 days" })).toBeInTheDocument();
+  });
+
+  it("pins the mobile range actions outside the scrolling body", async () => {
+    setDesktopMatch(false);
+    const user = userEvent.setup();
+    render(<TimeRangePicker label="Time window" value="30d" onValueChange={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "Time window" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Choose time range" });
+    const body = dialog.querySelector('[data-slot="time-range-picker-body"]');
+    const month = document.querySelector<HTMLElement>(".rdp-month");
+    expect(body).not.toBeNull();
+    expect(month).not.toBeNull();
+    // The calendar scrolls; Cancel/Apply must stay reachable without scrolling.
+    expect(body).toContainElement(month);
+    for (const name of ["Cancel", "Apply range"]) {
+      const action = within(dialog).getByRole("button", { name });
+      expect(body).not.toContainElement(action);
+    }
+  });
+
+  it("leaves the value untouched when the mobile sheet is dismissed", async () => {
+    setDesktopMatch(false);
+    const user = userEvent.setup();
+    const onValueChange = vi.fn();
+    const start = subDays(new Date(), 12);
+    render(<TimeRangePicker label="Time window" value="30d" onValueChange={onValueChange} />);
+
+    await user.click(screen.getByRole("button", { name: "Time window" }));
+    const day = document.querySelector<HTMLElement>(`[data-day="${start.toLocaleDateString()}"]`);
+    expect(day).not.toBeNull();
+    await user.click(day as HTMLElement);
+    await user.click(screen.getByRole("button", { name: "Close" }));
+
+    expect(screen.queryByRole("dialog", { name: "Choose time range" })).not.toBeInTheDocument();
+    expect(onValueChange).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { desktop: false, surface: "mobile sheet" },
+    { desktop: true, surface: "desktop popover" },
+  ])("discards a half-selected range when Cancel is clicked in the $surface", async ({ desktop }) => {
+    setDesktopMatch(desktop);
+    const user = userEvent.setup();
+    const onValueChange = vi.fn();
+    const start = subDays(new Date(), 12);
+    render(<TimeRangePicker label="Time window" value="30d" onValueChange={onValueChange} />);
+
+    await user.click(screen.getByRole("button", { name: "Time window" }));
+    const day = document.querySelector<HTMLElement>(`[data-day="${start.toLocaleDateString()}"]`);
+    expect(day).not.toBeNull();
+    await user.click(day as HTMLElement);
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(screen.queryByRole("dialog", { name: "Choose time range" })).not.toBeInTheDocument();
+    expect(onValueChange).not.toHaveBeenCalled();
+
+    // Reopening starts from the applied value again, not the abandoned draft:
+    // the summary shows a complete range instead of a dangling start date.
+    await user.click(screen.getByRole("button", { name: "Time window" }));
+    expect(screen.queryByText(/Select an end date$/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Select a start date")).not.toBeInTheDocument();
+  });
+
+  it("keeps the picker open and the draft intact when the viewport crosses the breakpoint", async () => {
+    setDesktopMatch(false);
+    const user = userEvent.setup();
+    const start = subDays(new Date(), 12);
+    render(<TimeRangePicker label="Time window" value="30d" onValueChange={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "Time window" }));
+    const day = document.querySelector<HTMLElement>(`[data-day="${start.toLocaleDateString()}"]`);
+    expect(day).not.toBeNull();
+    await user.click(day as HTMLElement);
+    expect(screen.getByRole("dialog", { name: "Choose time range" }))
+      .toHaveAttribute("data-slot", "sheet-content");
+
+    // e.g. rotating a phone to landscape crosses 768px mid-selection.
+    await changeViewport(true);
+
+    const dialog = screen.getByRole("dialog", { name: "Choose time range" });
+    expect(dialog).toHaveAttribute("data-slot", "popover-content");
+    expect(within(dialog).getByText(`${format(start, "MMM d, yyyy")} – Select an end date`))
+      .toBeInTheDocument();
+  });
+
+  it("applies a custom range from the mobile sheet", async () => {
+    setDesktopMatch(false);
+    const user = userEvent.setup();
+    const onValueChange = vi.fn();
+    const start = subDays(new Date(), 12);
+    const end = subDays(new Date(), 6);
+    render(<TimeRangePicker label="Time window" value="30d" onValueChange={onValueChange} />);
+
+    await user.click(screen.getByRole("button", { name: "Time window" }));
+    for (const date of [start, end]) {
+      const day = document.querySelector<HTMLElement>(`[data-day="${date.toLocaleDateString()}"]`);
+      expect(day).not.toBeNull();
+      await user.click(day as HTMLElement);
+    }
+    await user.click(screen.getByRole("button", { name: "Apply range" }));
+
+    expect(onValueChange).toHaveBeenCalledWith(customTimeRange(start, end));
+    expect(screen.queryByRole("dialog", { name: "Choose time range" })).not.toBeInTheDocument();
+  });
+
   it("shows presets and applies one immediately", async () => {
     const user = userEvent.setup();
     const onValueChange = vi.fn();
@@ -93,6 +232,8 @@ describe("TimeRangePicker", () => {
 
     await user.click(screen.getByRole("button", { name: "Time window" }));
     const dialog = screen.getByRole("dialog", { name: "Choose time range" });
+    expect(dialog).toHaveAttribute("data-slot", "popover-content");
+    expect(document.querySelector('[data-slot="sheet-content"]')).not.toBeInTheDocument();
     expect(within(dialog).getByText("Custom range")).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: /Last 30 days/ })).toHaveAttribute("data-variant", "secondary");
     for (const label of ["This week", "Last week", "Last 2 weeks", "This month", "Last month"]) {

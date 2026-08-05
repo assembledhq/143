@@ -146,9 +146,10 @@ describe('ChangesetSplitPrompt', () => {
 
     const description = screen.getByText('Split this diff into smaller, reviewable pull requests.');
     const action = screen.getByRole('button', { name: 'Split into PRs' });
+    const control = action.closest('[data-slot="overview-suggestion-control"]');
 
     expect(description.compareDocumentPosition(action) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(action).toHaveClass('row-start-1');
+    expect(control).toHaveClass('row-start-1');
   });
 
   it('uses a compact ghost action that stays aligned on narrow panels', () => {
@@ -164,6 +165,6 @@ describe('ChangesetSplitPrompt', () => {
     expect(button).toHaveAttribute('data-variant', 'ghost');
     // Pinned to the trailing auto-sized column, so the title column absorbs the
     // slack instead of squeezing the action.
-    expect(button).toHaveClass('col-start-3');
+    expect(button.closest('[data-slot="overview-suggestion-control"]')).toHaveClass('col-start-3');
   });
 });

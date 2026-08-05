@@ -561,8 +561,11 @@ type PreviewConfig struct {
 	Credentials    CredentialConfig                `json:"credentials"`
 	Network        NetworkConfig                   `json:"network"`
 	Progressive    bool                            `json:"progressive,omitempty"`
-	Browser        PreviewBrowserConfig            `json:"browser,omitempty"`
-	Verification   PreviewVerificationConfig       `json:"verification,omitempty"`
+	// ParallelBuilds opts into concurrent service Build commands. Repositories
+	// should enable it only when those commands write independent outputs.
+	ParallelBuilds bool                      `json:"parallel_builds,omitempty"`
+	Browser        PreviewBrowserConfig      `json:"browser,omitempty"`
+	Verification   PreviewVerificationConfig `json:"verification,omitempty"`
 
 	RuntimeSecretEnv   map[string]map[string]string `json:"-"`
 	RuntimeSecretFiles []PreviewRuntimeSecretFile   `json:"-"`
@@ -759,9 +762,10 @@ type ServiceConfig struct {
 	// install phase and after build caches are restored, but before any
 	// service starts. It is the place to compile outputs (e.g. `go build`)
 	// so the start Command can exec a prebuilt binary instead of compiling on
-	// the readiness-probe hot path. Build commands run in dependency order
-	// (support services first, primary last), share the service Env, and
-	// populate build caches that the post-build checkpoint persists.
+	// the readiness-probe hot path. Build commands run support-first and
+	// primary-last unless the preview explicitly opts into concurrent independent
+	// builds. They share the service Env and populate build caches that the
+	// post-build checkpoint persists.
 	Build   []string          `json:"build,omitempty"`
 	Command []string          `json:"command"`
 	Cwd     string            `json:"cwd,omitempty"`

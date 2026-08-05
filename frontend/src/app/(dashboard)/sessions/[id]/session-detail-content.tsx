@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -3496,6 +3496,51 @@ export function PullRequestList({
   );
 }
 
+type OverviewRowSlot = "overview-suggestion" | "overview-action" | "overview-review-status";
+
+// Shared chrome for the quiet, card-free Overview rows, so a suggestion, an
+// action and a status row cannot drift apart on spacing or typography. `slot`
+// names the row and its derived `-icon`/`-control` query hooks; it is applied
+// after the forwarded props, along with `className`, so callers can pass role
+// and aria attributes but cannot rename or restyle the row.
+function OverviewRow({
+  icon,
+  title,
+  description,
+  action,
+  slot,
+  ...regionProps
+}: {
+  icon: ReactNode;
+  title: string;
+  description: string;
+  action?: ReactNode;
+  slot: OverviewRowSlot;
+} & Omit<ComponentProps<"section">, "title" | "children" | "className">) {
+  return (
+    <section
+      {...regionProps}
+      data-slot={slot}
+      className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-1.5 gap-y-1.5 px-1 py-1.5"
+    >
+      <div
+        data-slot={`${slot}-icon`}
+        aria-hidden="true"
+        className="shrink-0 text-muted-foreground [&_svg]:size-4"
+      >
+        {icon}
+      </div>
+      <p className="col-start-2 row-start-1 text-xs font-medium text-foreground">{title}</p>
+      <p className="col-span-3 row-start-2 text-xs leading-relaxed text-muted-foreground">{description}</p>
+      {action != null ? (
+        <div data-slot={`${slot}-control`} className="col-start-3 row-start-1 shrink-0">
+          {action}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 export function ChangesetSplitPrompt({
   additions,
   filesChanged,
@@ -3515,64 +3560,24 @@ export function ChangesetSplitPrompt({
     : ` · ${filesChanged.toLocaleString()} ${filesChanged === 1 ? "file" : "files"}`;
 
   return (
-    // A grid rather than stacked flex rows: the button renders on the title row
-    // but still follows its own description in reading order.
-    <div
+    <OverviewRow
+      slot="overview-suggestion"
       role="region"
       aria-label="Pull request size suggestion"
-      data-slot="overview-suggestion"
-      className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-1.5 gap-y-1.5 px-1 py-1.5"
-    >
-      <div data-slot="overview-suggestion-icon" aria-hidden="true" className="text-muted-foreground">
-        <GitBranch className="h-4 w-4" />
-      </div>
-      <p className="text-xs font-medium text-foreground">
-        Large change · {additionCount.toLocaleString()} additions{fileLabel}
-      </p>
-      <p className="col-span-3 row-start-2 text-xs leading-relaxed text-muted-foreground">
-        Split this diff into smaller, reviewable pull requests.
-      </p>
-      <Button
-        size="xs"
-        variant="ghost"
-        className="col-start-3 row-start-1"
-        disabled={requestSplitPending || !onRequestSplit}
-        onClick={onRequestSplit}
-      >
-        Split into PRs
-      </Button>
-    </div>
-  );
-}
-
-function AgentActionCard({
-  icon,
-  title,
-  description,
-  action,
-}: {
-  icon: ReactNode;
-  title: string;
-  description: string;
-  action: ReactNode;
-}) {
-  return (
-    // The container must live on an ancestor of the elements querying it: an
-    // element is never its own query container.
-    <Card className="@container/agent-action border-border/60">
-      <CardContent className="flex flex-col gap-3 p-4 @min-[24rem]/agent-action:flex-row @min-[24rem]/agent-action:items-center @min-[24rem]/agent-action:justify-between">
-        <div className="min-w-0 flex-1 space-y-1.5">
-          <SectionHeading iconSlot="agent-action-card-icon" iconClassName="text-muted-foreground" icon={icon} title={title} />
-          <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
-        </div>
-        <div
-          data-slot="agent-action-card-action"
-          className="w-fit shrink-0 self-start @min-[24rem]/agent-action:self-auto"
+      icon={<GitBranch className="h-4 w-4" />}
+      title={`Large change · ${additionCount.toLocaleString()} additions${fileLabel}`}
+      description="Split this diff into smaller, reviewable pull requests."
+      action={(
+        <Button
+          size="xs"
+          variant="ghost"
+          disabled={requestSplitPending || !onRequestSplit}
+          onClick={onRequestSplit}
         >
-          {action}
-        </div>
-      </CardContent>
-    </Card>
+          Split into PRs
+        </Button>
+      )}
+    />
   );
 }
 
@@ -6743,29 +6748,28 @@ export function SessionDetailContent({ id }: { id: string }) {
           )}
           {selectedIsPrimary && canManageSession && canUseNativeReviewLoop && !hasPR && !selectedPublicationOwnsActions && hasSessionChanges ? (
             reviewLoopRunning ? (
-              <Card className="border-border/60">
-                <CardContent className="space-y-1.5 p-4" data-testid="review-loop-running-body">
-                  <SectionHeading
-                    icon={<Loader2 className="h-4 w-4 animate-spin" />}
-                    iconClassName="text-muted-foreground"
-                    title={`Fixing with ${AGENTS_BY_KEY[latestReviewLoop?.agent_type ?? ""]?.label ?? "review agent"}`}
-                  />
-                  <p className="text-xs leading-relaxed text-muted-foreground">
-                    The review loop is checking the changes and applying fixes.
-                  </p>
-                </CardContent>
-              </Card>
+              <OverviewRow
+                slot="overview-review-status"
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
+                aria-label="Review in progress"
+                icon={<Loader2 className="h-4 w-4 animate-spin" />}
+                title={`Fixing with ${AGENTS_BY_KEY[latestReviewLoop?.agent_type ?? ""]?.label ?? "review agent"}`}
+                description="The review loop is checking the changes and applying fixes."
+              />
             ) : (
-              <AgentActionCard
+              <OverviewRow
+                slot="overview-action"
                 icon={<ScanSearch className="h-4 w-4" />}
-                title="Review before creating a PR?"
-                description="Ask a review agent to check the current diff and apply fixes."
+                title="Review before creating a PR"
+                description="Check the current diff and apply any fixes before publishing."
                 action={(
                   <DisabledTooltip disabled={reviewActionDisabled} content={reviewActionDisabledReason}>
                     <Button
                       type="button"
-                      variant="outline"
-                      size="sm"
+                      variant="ghost"
+                      size="xs"
                       disabled={reviewActionDisabled}
                       title={reviewActionDisabledReason}
                       onClick={() => setReviewConfigOpen(true)}

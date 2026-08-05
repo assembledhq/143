@@ -33,6 +33,21 @@ function makeThread(overrides: Partial<SessionThread>): SessionThread {
   };
 }
 
+// Pills (the queued-message Badge) are round too, so match on dot dimensions
+// rather than on rounded-full alone.
+const DOT_SIZED = /(^|\s)(size|h)-(1\.5|2)(\s|$)/;
+
+/**
+ * Every dot inside a tab must belong to the single StatusIndicator — this is
+ * the guard against a tab growing a second dot after its label.
+ */
+function dotsOutsideIndicator(tab: Element): Element[] {
+  return Array.from(tab.querySelectorAll(".rounded-full")).filter(
+    (element) =>
+      !element.closest('[data-slot="status-indicator"]') && DOT_SIZED.test(element.className),
+  );
+}
+
 describe("AgentTabStrip", () => {
   // The strip's height is part of the session workspace's stable geometry: a
   // bare null here collapses the row and shifts the transcript and composer
@@ -221,7 +236,12 @@ describe("AgentTabStrip", () => {
       />,
     );
 
-    expect(screen.getByLabelText("Needs attention")).toBeInTheDocument();
+    // The quiet header names the state instead of drawing a second dot.
+    const header = screen.getByRole("group", { name: "Claude Code Idle (needs attention)" });
+    expect(header.querySelectorAll('[data-slot="status-indicator"]')).toHaveLength(1);
+    expect(dotsOutsideIndicator(header)).toHaveLength(0);
+    expect(header.querySelector('[data-slot="status-indicator-core"]')).toHaveClass("bg-warning");
+
     await user.hover(screen.getByText("Main tab"));
     expect(await screen.findByRole("tooltip")).not.toHaveTextContent("reconnect required");
   });
@@ -490,11 +510,11 @@ describe("AgentTabStrip", () => {
     expect(onArchiveThread).toHaveBeenCalledWith("thread-2");
   });
 
-  it("keeps a blue dot on unseen tabs until they are selected", async () => {
+  it("keeps operational state on the single tab dot and carries unread in the accessible name", async () => {
     const user = userEvent.setup();
     const threads = [
-      makeThread({ id: "thread-1", label: "Main tab" }),
-      makeThread({ id: "thread-2", label: "Review" }),
+      makeThread({ id: "thread-1", label: "Main tab", status: "running" }),
+      makeThread({ id: "thread-2", label: "Review", status: "completed" }),
     ];
 
     function Harness() {
@@ -523,10 +543,118 @@ describe("AgentTabStrip", () => {
 
     const { container } = renderWithProviders(<Harness />);
 
-    expect(container.querySelectorAll(".bg-primary").length).toBe(1);
+    const indicators = container.querySelectorAll('[data-slot="status-indicator"]');
+    expect(indicators).toHaveLength(2);
 
-    await user.click(screen.getByRole("tab", { name: /Review/ }));
+    // The dot tracks status, not unread: the viewed-but-running tab is the
+    // primary/breathing one, while the unread completed tab reads as success.
+    expect(indicators[0].querySelector('[data-slot="status-indicator-core"]')).toHaveClass("bg-primary");
+    expect(indicators[0]).toHaveAttribute("data-activity", "breathing");
+    expect(indicators[1].querySelector('[data-slot="status-indicator-core"]')).toHaveClass("bg-success");
 
-    expect(container.querySelector(".bg-primary")).toBeNull();
+    for (const tab of screen.getAllByRole("tab")) {
+      expect(tab.querySelectorAll('[data-slot="status-indicator"]')).toHaveLength(1);
+      expect(tab.firstElementChild).toHaveAttribute("data-slot", "status-indicator");
+      expect(dotsOutsideIndicator(tab)).toHaveLength(0);
+    }
+
+    // Unread is announced, and drawn as a brighter label rather than a dot.
+    expect(screen.getByRole("tab", { name: /Review\s*\(unread\)/ })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /Main tab\s*\(unread\)/ })).not.toBeInTheDocument();
+
+    const [activeTab, unreadTab] = screen.getAllByRole("tab");
+    expect(unreadTab.querySelector("span.truncate")).toHaveClass("text-foreground");
+    // The active tab carries its own colour, so it is never brightened here.
+    expect(activeTab.querySelector("span.truncate")).not.toHaveClass("text-foreground");
+
+    await user.click(screen.getByRole("tab", { name: /Review\s*\(unread\)/ }));
+
+    expect(screen.queryByRole("tab", { name: /\(unread\)/ })).not.toBeInTheDocument();
+    const afterSelection = container.querySelectorAll('[data-slot="status-indicator"]');
+    expect(afterSelection).toHaveLength(2);
+    expect(afterSelection[1].querySelector('[data-slot="status-indicator-core"]')).toHaveClass("bg-success");
+
+    const [nowInactiveRunningTab, nowActiveTab] = screen.getAllByRole("tab");
+    // Still working, so it stays prominent even though it has been read.
+    expect(nowInactiveRunningTab.querySelector("span.truncate")).toHaveClass("text-foreground");
+    expect(nowActiveTab.querySelector("span.truncate")).not.toHaveClass("text-foreground");
+    // Reading the tab must not change the label's weight — that would resize
+    // the tab and shift the strip.
+    expect(nowActiveTab.querySelector("span.truncate")).not.toHaveClass("font-semibold");
+  });
+
+  // Being active is itself a prominence condition, so the label must defer to
+  // the tab's own active colour — otherwise text-foreground would override
+  // data-[state=active]:text-primary on every selected tab.
+  it("never brightens the active tab's label, even while it is still unread", () => {
+    const threads = [
+      makeThread({ id: "thread-1", label: "Main tab", status: "completed" }),
+      makeThread({ id: "thread-2", label: "Review", status: "completed" }),
+    ];
+
+    renderWithProviders(
+      <AgentTabStrip
+        threads={threads}
+        activeThreadId={threads[0].id}
+        // Nothing viewed yet: the active tab is unread too, which is the state
+        // that exists between selecting a tab and it being marked read.
+        viewedThreadIds={new Set<string>()}
+        overlapsByThreadId={new Map()}
+        statusConfig={statusConfig}
+        onActiveThreadChange={vi.fn()}
+        onAddTab={vi.fn()}
+        onRevertThread={vi.fn()}
+        onArchiveThread={vi.fn()}
+        archivePendingThreadId={null}
+      />,
+    );
+
+    const [activeTab, inactiveTab] = screen.getAllByRole("tab");
+
+    expect(activeTab).toHaveAttribute("data-state", "active");
+    expect(activeTab).toHaveClass("data-[state=active]:text-primary");
+    expect(activeTab.querySelector("span.truncate")).not.toHaveClass("text-foreground");
+    // Unread is still announced on both tabs, including the active one.
+    expect(activeTab).toHaveAccessibleName(/Main tab\s*\(unread\)/);
+    expect(inactiveTab.querySelector("span.truncate")).toHaveClass("text-foreground");
+  });
+
+  it("folds a needs-attention thread into the tab's own dot instead of trailing a second one", () => {
+    const threads = [
+      // The queued-message badge is round as well; it must not read as a dot.
+      makeThread({ id: "thread-1", label: "Main tab", status: "awaiting_input", pending_message_count: 2 }),
+      makeThread({
+        id: "thread-2",
+        label: "Review",
+        status: "completed",
+        failure_category: "claude_code_auth_expired",
+        failure_explanation: "claude subscription is marked invalid; reconnect required",
+      }),
+    ];
+
+    renderWithProviders(
+      <AgentTabStrip
+        threads={threads}
+        activeThreadId={threads[0].id}
+        viewedThreadIds={new Set(threads.map((thread) => thread.id))}
+        overlapsByThreadId={new Map()}
+        statusConfig={statusConfig}
+        onActiveThreadChange={vi.fn()}
+        onAddTab={vi.fn()}
+        onRevertThread={vi.fn()}
+        onArchiveThread={vi.fn()}
+        archivePendingThreadId={null}
+      />,
+    );
+
+    const [awaitingTab, settledFailureTab] = screen.getAllByRole("tab");
+
+    for (const tab of [awaitingTab, settledFailureTab]) {
+      expect(tab.querySelectorAll('[data-slot="status-indicator"]')).toHaveLength(1);
+      expect(dotsOutsideIndicator(tab)).toHaveLength(0);
+      expect(tab.querySelector('[data-slot="status-indicator-core"]')).toHaveClass("bg-warning");
+    }
+
+    expect(screen.getByRole("tab", { name: /Review\s*\(needs attention\)/ })).toBeInTheDocument();
   });
 });
