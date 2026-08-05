@@ -240,21 +240,15 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 				HeadSHA:           job.HeadSHA,
 				AssessedAt:        time.Now().UTC(),
 			})
-			// A concurrent supersede, stale mark, or cancellation can move the
-			// session out of queued/running while these blockers are being
-			// published. Provisional publication is best effort, so a terminal
-			// session skips it instead of failing the job.
+			// A concurrent supersede, stale mark, or cancellation moves the session
+			// out of queued/running and makes this update match no rows. Returning
+			// the error hands the run back to MarkRunning on retry, which owns the
+			// terminal-state reconciliation, rather than letting a session that no
+			// longer owns this pull request keep publishing.
 			if _, err := stores.CodeReviews.SetProvisionalReviewBody(ctx, job.OrgID, job.SessionID, provisionalBody); err != nil {
-				if !errors.Is(err, pgx.ErrNoRows) {
-					return fmt.Errorf("persist provisional deterministic blockers: %w", err)
-				}
-				logger.Info().
-					Str("org_id", job.OrgID.String()).
-					Str("session_id", job.SessionID.String()).
-					Msg("skipped provisional deterministic blockers for a code review that is no longer running")
-			} else {
-				enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "deterministic")
+				return fmt.Errorf("persist provisional deterministic blockers: %w", err)
 			}
+			enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "deterministic")
 		}
 		stopAfterDeterministicFailure := policy.Config().RiskPolicy.StopAfterDeterministicFailure && codeReviewCanStopBeforeAgentFanout(agentResults)
 		if !stableRisk.Acceptable && stopAfterDeterministicFailure && metadata.TriggerSource != models.CodeReviewTriggerSourceAutoPolicy {
