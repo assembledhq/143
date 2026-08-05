@@ -219,7 +219,7 @@ after classification as safety checks.
 | `policy_signal_only` | Argues with a threshold or path rule, or triage wasn't confident enough to rerun | A rerun would change nothing — the threshold evaluates the same way every time. Say so, name the setting and its value, link to it, record the dispute, and offer **Send this to a policy owner** |
 | `answer_only` | It's a question, not a disagreement | Answer from the session evidence. Keep the captured source/version row for reply reconciliation and audit, but exclude it from policy influence and the adjudication queue |
 | `not_a_dispute` | Chatter | Recorded as discarded, with a one-line acknowledgement carrying the override link. No influence |
-| `review_request` | A bare request to review or re-review, without challenging the prior decision | Recorded as discarded, excluded from Disputes, and handed to the normal team-reviewer workflow with the comment as untrusted orchestrator context. The rolling review comment provides status, so no dispute reply is published |
+| `review_request` | A bare request to review or re-review, without challenging the prior decision | Recorded as discarded, excluded from Disputes, and handed to the normal team-reviewer workflow with the comment as untrusted orchestrator context. A failure-only correlation terminalizes the intake if the starter never creates a review; after a session exists, the rolling review comment provides status, so no dispute reply is published |
 
 `not_a_dispute` always receives a one-line acknowledgement with a link to file
 explicitly in-app. That explicit action bypasses classification.
@@ -767,8 +767,10 @@ handlers do not classify meaning or parse syntax. While classification is pendin
 the normalized PR-feedback item is retained as `ignored` with the dispute-specific
 reason and does not enter the separate automatic PR-feedback follow-through worker.
 An inline item classified `not_a_dispute` is atomically returned to pending feedback
-and its collector is enqueued; other routes remain claimed by code review. Ordinary
-GitHub automation triggers still observe the event.
+and its collector is enqueued. If triage runs before webhook ingestion creates that
+feedback row, the release remains retryable rather than accepting a false no-op;
+other routes remain claimed by code review. Ordinary GitHub automation triggers
+still observe the event.
 
 Activation atomically locks/CASes the proposal and replayed revision, validates the
 active base policy and exact delta, deactivates the old policy, inserts the new

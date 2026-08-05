@@ -610,6 +610,7 @@ func TestDisputeService_ReviewRequestQueuesNormalReviewWithoutDisputeArtifacts(t
 	queued := queue.inputs[0]
 	require.Equal(t, models.CodeReviewTriggerSourceTeamReviewer, queued.TriggerSource, "the ordinary review should retain the team-reviewer trigger")
 	require.Nil(t, queued.TriggeringDisputeID, "an ordinary review request must not be linked as a dispute reassessment")
+	require.Equal(t, &disputeID, queued.ReviewRequestDisputeID, "the starter should retain failure-only correlation to the classified request")
 	require.Equal(t, "latest-head", queued.HeadSHA, "the review should target the authoritative current head")
 	require.NotNil(t, queued.RequestContext, "the classified review request should retain its human-authored context")
 	require.Equal(t, "@acme/reviewers please review again", queued.RequestContext.Body, "the comment should still reach orchestrator synthesis")

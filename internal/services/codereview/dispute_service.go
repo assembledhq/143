@@ -854,6 +854,7 @@ func (s *DisputeService) queueReviewRequest(ctx context.Context, dispute models.
 		BaseSHA: snapshot.BaseSHA, HeadSHA: snapshot.HeadSHA, FromFork: snapshot.FromFork,
 		ChangeKey: "review_request:" + dispute.ID.String(), ChangeReason: "code_review_dispute.review_request",
 		ExplicitRequest: true, TriggerSource: models.CodeReviewTriggerSourceTeamReviewer,
+		ReviewRequestDisputeID: &dispute.ID,
 		RequestContext: &ReviewRequestContext{
 			Source: source, AuthorLogin: dispute.FiledByLogin, Body: dispute.Body, URL: strings.TrimSpace(signals.GitHubCommentURL),
 		},

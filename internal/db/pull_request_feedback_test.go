@@ -130,12 +130,17 @@ func TestPullRequestFeedbackStore_ReleaseCodeReviewDisputeItem(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		rowsAffected int64
-		expectJob    bool
+		name           string
+		rowsAffected   int64
+		existingItem   bool
+		existingStatus models.PRFeedbackItemStatus
+		existingIgnore *string
+		expectJob      bool
+		expectErr      bool
 	}{
 		{name: "released inline comment schedules collection", rowsAffected: 1, expectJob: true},
-		{name: "missing or already released comment is idempotent"},
+		{name: "already released comment is idempotent", existingItem: true, existingStatus: models.PRFeedbackItemStatusPending},
+		{name: "comment not yet ingested asks triage to retry", expectErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -157,6 +162,20 @@ func TestPullRequestFeedbackStore_ReleaseCodeReviewDisputeItem(t *testing.T) {
 					"ignore_reason":      models.PRFeedbackIgnoreReasonCodeReviewDispute,
 				}).
 				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
+			if tt.rowsAffected == 0 {
+				expected := mock.ExpectQuery("SELECT status, ignore_reason[\\s\\S]+provider_object_id = @provider_object_id").
+					WithArgs(pgx.NamedArgs{
+						"org_id": orgID, "pull_request_id": pullRequestID,
+						"surface":            models.PRFeedbackSurfaceReviewComment,
+						"provider_object_id": providerObjectID,
+					})
+				if tt.existingItem {
+					expected.WillReturnRows(pgxmock.NewRows([]string{"status", "ignore_reason"}).
+						AddRow(tt.existingStatus, tt.existingIgnore))
+				} else {
+					expected.WillReturnError(pgx.ErrNoRows)
+				}
+			}
 			if tt.expectJob {
 				mock.ExpectExec("UPDATE pull_request_feedback_batches").
 					WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
@@ -168,7 +187,11 @@ func TestPullRequestFeedbackStore_ReleaseCodeReviewDisputeItem(t *testing.T) {
 					).
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 			}
-			mock.ExpectCommit()
+			if tt.expectErr {
+				mock.ExpectRollback()
+			} else {
+				mock.ExpectCommit()
+			}
 
 			store := NewPullRequestFeedbackStore(mock)
 			store.SetJobStore(NewJobStore(mock))
@@ -177,7 +200,11 @@ func TestPullRequestFeedbackStore_ReleaseCodeReviewDisputeItem(t *testing.T) {
 				models.PRFeedbackSurfaceReviewComment, providerObjectID,
 			)
 
-			require.NoError(t, err, "releasing a non-dispute comment should be idempotent")
+			if tt.expectErr {
+				require.ErrorIs(t, err, pgx.ErrNoRows, "a release that races ahead of feedback ingestion should be retried")
+			} else {
+				require.NoError(t, err, "releasing a non-dispute comment should be idempotent")
+			}
 			require.NoError(t, mock.ExpectationsWereMet(), "release and collector scheduling should share one transaction")
 		})
 	}

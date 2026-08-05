@@ -195,6 +195,25 @@ func (s *PullRequestFeedbackStore) ReleaseCodeReviewDisputeItem(ctx context.Cont
 		return fmt.Errorf("release code review dispute feedback item: %w", err)
 	}
 	if result.RowsAffected() == 0 {
+		var status models.PRFeedbackItemStatus
+		var ignoreReason *string
+		err := tx.QueryRow(ctx, `SELECT status, ignore_reason
+			FROM pull_request_feedback_items
+			WHERE org_id = @org_id AND pull_request_id = @pull_request_id
+			  AND surface = @surface AND provider_object_id = @provider_object_id`, pgx.NamedArgs{
+			"org_id": orgID, "pull_request_id": pullRequestID, "surface": surface,
+			"provider_object_id": providerObjectID,
+		}).Scan(&status, &ignoreReason)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Dispute intake commits and wakes triage before the webhook handler
+			// persists the record-only feedback item. Retrying closes that ordering
+			// window; treating absence as idempotent success would let ingestion
+			// create a permanently ignored item after this transaction returns.
+			return fmt.Errorf("PR feedback item is not yet available for dispute release: %w", pgx.ErrNoRows)
+		}
+		if err != nil {
+			return fmt.Errorf("inspect unchanged code review dispute feedback release: %w", err)
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("commit unchanged code review dispute feedback release: %w", err)
 		}
