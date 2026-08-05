@@ -237,6 +237,7 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 		"code_review_decision_disputes_routing": toStrings(
 			CodeReviewDisputeRoutingReassess, CodeReviewDisputeRoutingPolicySignalOnly,
 			CodeReviewDisputeRoutingAnswerOnly, CodeReviewDisputeRoutingNotADispute,
+			CodeReviewDisputeRoutingReviewRequest,
 		),
 		"code_review_decision_disputes_intake_status": toStrings(
 			CodeReviewDisputeIntakePending, CodeReviewDisputeIntakeTriaged,

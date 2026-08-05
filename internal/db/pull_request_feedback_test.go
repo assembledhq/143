@@ -8,6 +8,7 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -123,6 +124,90 @@ func TestPullRequestFeedbackStore_IngestOrdinaryIgnoreStillSchedulesCollection(t
 	require.True(t, recorded, "the delivery should still be recorded")
 	require.NoError(t, mock.ExpectationsWereMet(),
 		"only a dispute capture may skip the collection window and collector job")
+}
+
+func TestPullRequestFeedbackStore_ReleaseCodeReviewDisputeItem(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		rowsAffected   int64
+		existingItem   bool
+		existingStatus models.PRFeedbackItemStatus
+		existingIgnore *string
+		expectJob      bool
+		expectErr      bool
+	}{
+		{name: "released inline comment schedules collection", rowsAffected: 1, expectJob: true},
+		{name: "already released comment is idempotent", existingItem: true, existingStatus: models.PRFeedbackItemStatusPending},
+		{name: "comment not yet ingested asks triage to retry", expectErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "test should create the database mock")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			pullRequestID := uuid.New()
+			providerObjectID := int64(5196810672)
+			mock.ExpectBegin()
+			mock.ExpectExec("UPDATE pull_request_feedback_items[\\s\\S]+ignore_reason = @ignore_reason").
+				WithArgs(pgx.NamedArgs{
+					"org_id": orgID, "pull_request_id": pullRequestID,
+					"surface":            models.PRFeedbackSurfaceReviewComment,
+					"provider_object_id": providerObjectID,
+					"ignore_reason":      models.PRFeedbackIgnoreReasonCodeReviewDispute,
+				}).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
+			if tt.rowsAffected == 0 {
+				expected := mock.ExpectQuery("SELECT status, ignore_reason[\\s\\S]+provider_object_id = @provider_object_id").
+					WithArgs(pgx.NamedArgs{
+						"org_id": orgID, "pull_request_id": pullRequestID,
+						"surface":            models.PRFeedbackSurfaceReviewComment,
+						"provider_object_id": providerObjectID,
+					})
+				if tt.existingItem {
+					expected.WillReturnRows(pgxmock.NewRows([]string{"status", "ignore_reason"}).
+						AddRow(tt.existingStatus, tt.existingIgnore))
+				} else {
+					expected.WillReturnError(pgx.ErrNoRows)
+				}
+			}
+			if tt.expectJob {
+				mock.ExpectExec("UPDATE pull_request_feedback_batches").
+					WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+			}
+			if tt.expectErr {
+				mock.ExpectRollback()
+			} else {
+				mock.ExpectCommit()
+			}
+
+			store := NewPullRequestFeedbackStore(mock)
+			store.SetJobStore(NewJobStore(mock))
+			err = store.ReleaseCodeReviewDisputeItem(
+				context.Background(), orgID, pullRequestID,
+				models.PRFeedbackSurfaceReviewComment, providerObjectID,
+			)
+
+			if tt.expectErr {
+				require.ErrorIs(t, err, pgx.ErrNoRows, "a release that races ahead of feedback ingestion should be retried")
+			} else {
+				require.NoError(t, err, "releasing a non-dispute comment should be idempotent")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "release and collector scheduling should share one transaction")
+		})
+	}
 }
 
 func expectPRFeedbackItemUpsert(mock pgxmock.PgxPoolIface) *pgxmock.ExpectedQuery {

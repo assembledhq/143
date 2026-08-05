@@ -394,6 +394,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		},
 	)
 	codeReviewDisputeSvc.SetAuditEmitter(auditEmitter)
+	codeReviewDisputeSvc.SetReviewRequestQueuer(codeReviewSvc)
+	codeReviewDisputeSvc.SetFeedbackReleaser(pullRequestFeedbackStore)
 	if prService != nil {
 		codeReviewDisputeSvc.SetPullRequestSnapshotter(prService)
 	}

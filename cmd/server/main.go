@@ -1800,8 +1800,11 @@ func buildServices(
 		},
 	)
 	codeReviewDisputes.SetAuditEmitter(auditEmitter)
+	codeReviewDisputes.SetReviewRequestQueuer(codeReviewLifecycle)
+	codeReviewDisputes.SetFeedbackReleaser(workerFeedbackStore)
 	codeReviewInsights := codereviewsvc.NewInsightService(db.NewCodeReviewInsightStore(pool), logger)
 	if prService != nil {
+		codeReviewDisputes.SetPullRequestSnapshotter(prService)
 		codeReviewInsights.SetOutcomeProvider(prService)
 	}
 	svc := &worker.Services{

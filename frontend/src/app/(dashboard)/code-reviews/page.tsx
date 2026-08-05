@@ -4238,11 +4238,14 @@ function CodeReviewEvidenceSheet({
                             {formatDate(dispute.created_at)} · {codeReviewDisputeStatusLabel(dispute.source)}
                           </div>
                         </div>
-                        <StatusLabel label={codeReviewDisputeStatusLabel(dispute.intake_status)} tone={dispute.intake_status === "failed" ? "destructive" : "neutral"} />
+                        <StatusLabel
+                          label={dispute.routing === "review_request" && dispute.intake_status === "discarded" ? "Review requested" : codeReviewDisputeStatusLabel(dispute.intake_status)}
+                          tone={dispute.intake_status === "failed" ? "destructive" : "neutral"}
+                        />
                       </div>
                       <div className="text-sm leading-6 text-muted-foreground">{dispute.body}</div>
                       <div className="flex flex-wrap items-center gap-2">
-                        <Badge variant="outline">{dispute.direction ? codeReviewDisputeStatusLabel(dispute.direction) : "Classifying"}</Badge>
+                        <Badge variant="outline">{dispute.routing === "review_request" ? "Ordinary review request" : dispute.direction ? codeReviewDisputeStatusLabel(dispute.direction) : "Classifying"}</Badge>
                         <Badge variant="outline">{codeReviewDisputeStatusLabel(dispute.reassessment_status)}</Badge>
                         {dispute.reassessment_status === "completed" && dispute.reassessment_flipped !== undefined ? (
                           <Badge variant="outline">{dispute.reassessment_flipped ? "Decision changed" : "Decision unchanged"}</Badge>
