@@ -85,7 +85,7 @@ func (s *captureDisputeStore) Escalate(context.Context, uuid.UUID, uuid.UUID, uu
 	return models.CodeReviewDispute{}, nil
 }
 func (s *captureDisputeStore) Adjudicate(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.CodeReviewDisputeAdjudicationUpdate) (models.CodeReviewDispute, error) {
-	return models.CodeReviewDispute{}, nil
+	return s.current, nil
 }
 
 type disputeReviewStoreStub struct {
@@ -339,6 +339,33 @@ func TestDisputeService_TriageDoesNotLetTrustedNonAuthorStartReassessment(t *tes
 		actions = append(actions, authorization.Action)
 	}
 	require.Equal(t, []models.CodeReviewDisputeAuthorizationAction{models.CodeReviewDisputeAuthorizationQueueInfluence}, actions, "queue influence should have one exact durable authorization snapshot")
+}
+
+func TestDisputeService_AdjudicateTrustOverrideEnqueuesRankRefresh(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	disputeID := uuid.New()
+	userID := uuid.New()
+	trustOverride := true
+	store := &captureDisputeStore{current: models.CodeReviewDispute{
+		ID: disputeID, OrgID: orgID, Version: 4, TrustOverride: &trustOverride,
+	}}
+	jobs := &disputeJobStoreStub{}
+	service := NewDisputeService(store, disputeReviewStoreStub{}, disputePullRequestStoreStub{}, jobs, nil, "", zerolog.Nop())
+
+	result, err := service.Adjudicate(context.Background(), orgID, disputeID, userID, models.CodeReviewDisputeAdjudicationUpdate{
+		ExpectedVersion: 3, TrustOverride: &trustOverride, TrustOverridePresent: true,
+	})
+
+	require.NoError(t, err, "adjudicating a trust override should succeed")
+	require.True(t, result.Trusted, "the adjudication response should expose the updated trust decision")
+	require.Len(t, jobs.enqueued, 2, "a trust override should enqueue both the reply and ranking refresh")
+	require.Equal(t, models.JobTypeReplyCodeReviewDispute, jobs.enqueued[0].JobType, "the first follow-up should refresh the durable reply")
+	require.Equal(t, models.JobTypeRankCodeReviewDispute, jobs.enqueued[1].JobType, "the second follow-up should refresh queue eligibility and priority")
+	require.Equal(t, models.CodeReviewInsightPayload{OrgID: orgID}, jobs.enqueued[1].Payload, "the ranking job should target the adjudicated tenant")
+	require.NotNil(t, jobs.enqueued[1].DedupeKey, "the ranking refresh should have a stable dedupe key")
+	require.Contains(t, *jobs.enqueued[1].DedupeKey, disputeID.String()+":trust_override:4", "the ranking refresh should be unique to the accepted dispute version")
 }
 
 // A triage job is enqueued at insert, so it still runs after a later edit of

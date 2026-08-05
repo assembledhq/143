@@ -152,7 +152,7 @@ func TestSchedulerRunOnce(t *testing.T) {
 			}},
 			repos:           &schedulerRuntimeRepoStoreMock{},
 			jobs:            &schedulerRuntimeJobsMock{},
-			expectedEnqueue: 12,
+			expectedEnqueue: 14,
 			expectedRelease: 1,
 		},
 	}

@@ -110,11 +110,11 @@ func TestMemoryHandler_ListComments_Success(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{
-				"id", "pull_request_id", "org_id", "github_comment_id", "reviewer", "body",
+				"id", "pull_request_id", "org_id", "github_comment_id", "reviewer", "reviewer_type", "body",
 				"diff_path", "diff_position", "filter_status", "category", "actionable",
 				"generalizable", "generalized_rule", "summary", "applied", "created_at",
 			}).AddRow(
-				commentID, prID, orgID, int64(123), "user1", "Fix this",
+				commentID, prID, orgID, int64(123), "user1", "User", "Fix this",
 				nil, nil, "accepted", nil, true,
 				false, nil, nil, false, createdAt,
 			),

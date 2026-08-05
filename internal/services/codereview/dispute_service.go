@@ -462,7 +462,13 @@ func (s *DisputeService) Triage(ctx context.Context, orgID, disputeID uuid.UUID)
 	if err != nil {
 		return err
 	}
-	return s.completeTriagedWorkflowWithTrust(ctx, updated, trusted, trustReason)
+	if err := s.completeTriagedWorkflowWithTrust(ctx, updated, trusted, trustReason); err != nil {
+		return err
+	}
+	if updated.SupersededByDisputeID != nil {
+		return nil
+	}
+	return s.enqueueRank(ctx, orgID, disputeID.String()+":triaged")
 }
 
 func (s *DisputeService) completeTriagedWorkflow(ctx context.Context, dispute models.CodeReviewDispute) error {
@@ -806,6 +812,22 @@ func (s *DisputeService) EnqueueReply(ctx context.Context, orgID, disputeID uuid
 	return nil
 }
 
+func (s *DisputeService) enqueueRank(ctx context.Context, orgID uuid.UUID, stage string) error {
+	if s.jobs == nil {
+		return nil
+	}
+	dedupeKey := "rank_code_review_disputes:" + orgID.String() + ":" + strings.TrimSpace(stage)
+	_, err := s.jobs.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue: "feedback", JobType: models.JobTypeRankCodeReviewDispute,
+		Payload: models.CodeReviewInsightPayload{OrgID: orgID}, Priority: 2,
+		DedupeKey: &dedupeKey, MaxAttempts: 6,
+	})
+	if err != nil {
+		return fmt.Errorf("enqueue code review dispute ranking: %w", err)
+	}
+	return nil
+}
+
 func (s *DisputeService) BuildReply(ctx context.Context, orgID, disputeID uuid.UUID) (models.CodeReviewDispute, string, error) {
 	dispute, err := s.disputes.GetByID(ctx, orgID, disputeID)
 	if err != nil {
@@ -932,6 +954,9 @@ func (s *DisputeService) Escalate(ctx context.Context, orgID, disputeID, userID 
 	if err := s.EnqueueReply(ctx, orgID, disputeID, "escalated"); err != nil {
 		return models.CodeReviewDispute{}, err
 	}
+	if err := s.enqueueRank(ctx, orgID, disputeID.String()+":escalated"); err != nil {
+		return models.CodeReviewDispute{}, err
+	}
 	return enrichCodeReviewDisputeTrust(result), nil
 }
 
@@ -956,6 +981,11 @@ func (s *DisputeService) Adjudicate(ctx context.Context, orgID, disputeID, userI
 	}
 	if err := s.EnqueueReply(ctx, orgID, disputeID, "adjudicated"); err != nil {
 		return models.CodeReviewDispute{}, err
+	}
+	if update.TrustOverridePresent {
+		if err := s.enqueueRank(ctx, orgID, fmt.Sprintf("%s:trust_override:%d", disputeID, result.Version)); err != nil {
+			return models.CodeReviewDispute{}, err
+		}
 	}
 	return enrichCodeReviewDisputeTrust(result), nil
 }

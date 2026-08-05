@@ -21,13 +21,22 @@ const codeReviewDisputeColumns = `id, org_id, session_id, pull_request_id, repos
 	body, contested_reason_codes, dispute_kind, asserts_new_information, routing, intake_status,
 	intake_confidence, reassessment_session_id, reassessment_decision, reassessment_flipped,
 	reassessment_status, semantic_input_hash_at_filing, semantic_input_hash_at_rerun,
-	adjudication_status, adjudicated_by_user_id, adjudicated_at, adjudication_note, escalated_at,
+	adjudication_status, adjudicated_by_user_id, adjudicated_at, adjudication_note, policy_owner_active_seconds, escalated_at,
 	escalated_by_user_id, queue_signals, queue_priority, reply_status, reply_cycle_reserved,
 	superseded_by_dispute_id, status_detail, version,
 	created_at, updated_at`
 
+var qualifiedCodeReviewDisputeColumns = func() string {
+	columns := strings.Split(codeReviewDisputeColumns, ",")
+	for i := range columns {
+		columns[i] = "dispute." + strings.TrimSpace(columns[i])
+	}
+	return strings.Join(columns, ", ")
+}()
+
 var (
-	ErrCodeReviewDisputeVersionConflict = errors.New("code review dispute version conflict")
+	ErrCodeReviewDisputeVersionConflict    = errors.New("code review dispute version conflict")
+	ErrCodeReviewDisputeQueueCursorExpired = errors.New("code review dispute queue cursor expired")
 	// ErrCodeReviewDisputeIntakeCapped reports that a filer reached a rolling
 	// intake ceiling for a pull request. It is an admission decision, not a
 	// failure: callers record the comment as ordinary feedback.
@@ -371,37 +380,122 @@ func (s *CodeReviewDisputeStore) ListQueue(ctx context.Context, orgID uuid.UUID,
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	args := pgx.NamedArgs{"org_id": orgID, "limit": limit + 1}
-	where := ` WHERE org_id = @org_id AND adjudication_status IS NOT NULL`
-	if filters.AdjudicationStatus != nil {
-		where += ` AND adjudication_status = @adjudication_status`
-		args["adjudication_status"] = *filters.AdjudicationStatus
+
+	var snapshotID uuid.UUID
+	position := int64(0)
+	queryDB := DBTX(s.db)
+	var tx pgx.Tx
+	if filters.Cursor == nil {
+		var err error
+		tx, err = s.db.Begin(ctx)
+		if err != nil {
+			return models.CodeReviewDisputePage{}, fmt.Errorf("begin code review dispute queue snapshot: %w", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		queryDB = tx
+		snapshotID = uuid.New()
+
+		if _, err := tx.Exec(ctx, `DELETE FROM code_review_dispute_queue_snapshots
+			WHERE org_id = @org_id AND expires_at <= now()`, pgx.NamedArgs{"org_id": orgID}); err != nil {
+			return models.CodeReviewDisputePage{}, fmt.Errorf("clean expired code review dispute queue snapshots: %w", err)
+		}
+
+		args := pgx.NamedArgs{
+			"org_id": orgID, "snapshot_id": snapshotID,
+			"expires_at": time.Now().UTC().Add(time.Hour),
+		}
+		where := ` WHERE dispute.org_id = @org_id AND dispute.adjudication_status IS NOT NULL`
+		if filters.AdjudicationStatus != nil {
+			where += ` AND dispute.adjudication_status = @adjudication_status`
+			args["adjudication_status"] = *filters.AdjudicationStatus
+		}
+		if filters.RepositoryID != nil {
+			where += ` AND dispute.repository_id = @repository_id`
+			args["repository_id"] = *filters.RepositoryID
+		}
+		if filters.Direction != nil {
+			where += ` AND dispute.direction = @direction`
+			args["direction"] = *filters.Direction
+		}
+		// Materializing the full ordered identity list freezes both priorities and
+		// membership for this paging session. A later rerank can update any row
+		// without moving it across the client's cursor boundary.
+		if _, err := tx.Exec(ctx, `INSERT INTO code_review_dispute_queue_snapshots
+				(org_id, snapshot_id, position, dispute_id, expires_at)
+			SELECT @org_id, @snapshot_id,
+				row_number() OVER (ORDER BY dispute.queue_priority DESC, dispute.created_at DESC, dispute.id DESC),
+				dispute.id, @expires_at
+			FROM code_review_decision_disputes AS dispute`+where, args); err != nil {
+			return models.CodeReviewDisputePage{}, fmt.Errorf("materialize code review dispute queue snapshot: %w", err)
+		}
+	} else {
+		snapshotID = filters.Cursor.SnapshotID
+		position = filters.Cursor.Position
+		var active bool
+		if err := s.db.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM code_review_dispute_queue_snapshots
+			WHERE org_id = @org_id AND snapshot_id = @snapshot_id AND expires_at > now()
+		)`, pgx.NamedArgs{"org_id": orgID, "snapshot_id": snapshotID}).Scan(&active); err != nil {
+			return models.CodeReviewDisputePage{}, fmt.Errorf("validate code review dispute queue snapshot: %w", err)
+		}
+		if !active {
+			return models.CodeReviewDisputePage{}, ErrCodeReviewDisputeQueueCursorExpired
+		}
 	}
-	if filters.RepositoryID != nil {
-		where += ` AND repository_id = @repository_id`
-		args["repository_id"] = *filters.RepositoryID
+
+	type queueRow struct {
+		models.CodeReviewDispute
+		SnapshotPosition int64 `db:"snapshot_position"`
 	}
-	if filters.Direction != nil {
-		where += ` AND direction = @direction`
-		args["direction"] = *filters.Direction
-	}
-	if filters.Cursor != nil {
-		where += ` AND (queue_priority, created_at, id) < (SELECT queue_priority, created_at, id FROM code_review_decision_disputes WHERE org_id = @org_id AND id = @cursor)`
-		args["cursor"] = *filters.Cursor
-	}
-	// queue_priority stays uniformly 0 until Phase 1B computes ranking signals,
-	// so created_at carries the order today. Without it the tiebreak is a
-	// random v4 id and the queue looks shuffled on every page.
-	rows, err := s.db.Query(ctx, `SELECT `+codeReviewDisputeColumns+` FROM code_review_decision_disputes`+where+`
-		ORDER BY queue_priority DESC, created_at DESC, id DESC LIMIT @limit`, args)
+	rows, err := queryDB.Query(ctx, `SELECT `+qualifiedCodeReviewDisputeColumns+`, snapshot.position AS snapshot_position
+		FROM code_review_dispute_queue_snapshots AS snapshot
+		JOIN code_review_decision_disputes AS dispute
+		  ON dispute.org_id = snapshot.org_id AND dispute.id = snapshot.dispute_id
+		WHERE snapshot.org_id = @org_id
+		  AND snapshot.snapshot_id = @snapshot_id
+		  AND snapshot.position > @position
+		  AND snapshot.expires_at > now()
+		ORDER BY snapshot.position
+		LIMIT @limit`, pgx.NamedArgs{
+		"org_id": orgID, "snapshot_id": snapshotID, "position": position, "limit": limit + 1,
+	})
 	if err != nil {
 		return models.CodeReviewDisputePage{}, fmt.Errorf("list code review dispute queue: %w", err)
 	}
-	items, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.CodeReviewDispute])
+	queueRows, err := pgx.CollectRows(rows, pgx.RowToStructByName[queueRow])
 	if err != nil {
 		return models.CodeReviewDisputePage{}, err
 	}
-	return codeReviewDisputePage(items, limit), nil
+	if tx != nil {
+		if err := tx.Commit(ctx); err != nil {
+			return models.CodeReviewDisputePage{}, fmt.Errorf("commit code review dispute queue snapshot: %w", err)
+		}
+	}
+
+	page := models.CodeReviewDisputePage{Items: make([]models.CodeReviewDispute, 0, min(len(queueRows), limit))}
+	for i, row := range queueRows {
+		if i == limit {
+			last := queueRows[limit-1]
+			page.NextQueueCursor = &models.CodeReviewDisputeQueueCursor{
+				SnapshotID: snapshotID,
+				Position:   last.SnapshotPosition,
+			}
+			break
+		}
+		page.Items = append(page.Items, row.CodeReviewDispute)
+	}
+	return page, nil
+}
+
+// DeleteExpiredQueueSnapshots reclaims materialized pagination rows even when
+// an organization does not open another queue paging session.
+func (s *CodeReviewDisputeStore) DeleteExpiredQueueSnapshots(ctx context.Context, orgID uuid.UUID) (int64, error) {
+	result, err := s.db.Exec(ctx, `DELETE FROM code_review_dispute_queue_snapshots
+		WHERE org_id = @org_id AND expires_at <= now()`, pgx.NamedArgs{"org_id": orgID})
+	if err != nil {
+		return 0, fmt.Errorf("delete expired code review dispute queue snapshots: %w", err)
+	}
+	return result.RowsAffected(), nil
 }
 
 func (s *CodeReviewDisputeStore) ListRecentKinds(ctx context.Context, orgID uuid.UUID, limit int) ([]string, error) {
@@ -883,6 +977,9 @@ func (s *CodeReviewDisputeStore) Adjudicate(ctx context.Context, orgID, disputeI
 	if update.ExpectedVersion <= 0 {
 		return models.CodeReviewDispute{}, fmt.Errorf("expected_version must be positive")
 	}
+	if update.PolicyOwnerActiveSeconds != nil && (*update.PolicyOwnerActiveSeconds < 0 || *update.PolicyOwnerActiveSeconds > 3600) {
+		return models.CodeReviewDispute{}, fmt.Errorf("policy_owner_active_seconds must be between 0 and 3600")
+	}
 	// Promotion may only open an adjudication slot for a dispute the table's
 	// own CHECK allows one on. Without the routing guard, promoting an
 	// answer_only, not_a_dispute, or intake-failed dispute writes 'pending'
@@ -904,6 +1001,7 @@ func (s *CodeReviewDisputeStore) Adjudicate(ctx context.Context, orgID, disputeI
 		    adjudicated_by_user_id = CASE WHEN @adjudication_status::text IS NULL THEN adjudicated_by_user_id ELSE @user_id END,
 		    adjudicated_at = CASE WHEN @adjudication_status::text IS NULL THEN adjudicated_at ELSE now() END,
 		    adjudication_note = COALESCE(@adjudication_note, adjudication_note),
+		    policy_owner_active_seconds = CASE WHEN @adjudication_status::text IS NULL THEN policy_owner_active_seconds ELSE @policy_owner_active_seconds END,
 		    trust_override = CASE WHEN @trust_override_present THEN @trust_override ELSE trust_override END,
 		    updated_at = now(), version = version + 1
 		WHERE org_id = @org_id AND id = @id AND version = @expected_version
@@ -911,7 +1009,8 @@ func (s *CodeReviewDisputeStore) Adjudicate(ctx context.Context, orgID, disputeI
 		RETURNING `+codeReviewDisputeColumns, pgx.NamedArgs{
 		"org_id": orgID, "id": disputeID, "user_id": userID, "expected_version": update.ExpectedVersion,
 		"adjudication_status": update.AdjudicationStatus, "adjudication_note": update.AdjudicationNote,
-		"trust_override_present": update.TrustOverridePresent, "trust_override": update.TrustOverride,
+		"policy_owner_active_seconds": update.PolicyOwnerActiveSeconds,
+		"trust_override_present":      update.TrustOverridePresent, "trust_override": update.TrustOverride,
 	})
 	if err != nil {
 		return models.CodeReviewDispute{}, fmt.Errorf("adjudicate code review dispute: %w", err)

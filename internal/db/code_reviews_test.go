@@ -1172,9 +1172,14 @@ func TestCodeReviewStore_SavePolicyExpectingVersionIncrementsFromCurrent(t *test
 			"review_instructions", "automated_approval_policy",
 			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at",
 		}).AddRow(policyID, orgID, nil, true, 4, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, nil, now))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(orgID, "feedback", models.JobTypeRankCodeReviewDispute, pgxmock.AnyArg(), 2, pgxmock.AnyArg(), 6).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectCommit()
 
-	record, err := NewCodeReviewStore(mock).SavePolicyExpectingVersion(context.Background(), orgID, config, 3, nil)
+	store := NewCodeReviewStore(mock)
+	store.SetJobStore(NewJobStore(mock))
+	record, err := store.SavePolicyExpectingVersion(context.Background(), orgID, config, 3, nil)
 
 	require.NoError(t, err, "matching expected version should save the next version")
 	require.Equal(t, 4, record.Version, "the new version should be current+1")

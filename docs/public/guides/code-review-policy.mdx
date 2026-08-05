@@ -36,6 +36,8 @@ On GitHub, a mention that questions or objects to a decision on a previously rev
 
 Unsafe-approval reports do not reverse an existing GitHub approval or automatically rerun the reviewer. They enter the policy-owner list for human judgment. Admins use the **Disputes** tab to uphold, reject, or request more context; only an upheld dispute is evidence that policy should change. An admin can also promote an untrusted captured report from the review's Evidence timeline when its provenance has been checked.
 
+For organizations with sustained dispute volume, 143 ranks that queue using explainable signals such as an independent human contradiction, an unchanged reassessment, repeat objections against the same reason, and whether the filer is the pull request author. These signals only order attention; an administrator still decides every dispute. The **Analytics** tab shows decision and objection distributions, reassessment flip rate and spend, and actual-versus-limit observations for deterministic policy gates.
+
 ## Monitor and recover reviews
 
 The **Reviews** tab reports the current stage of each active attempt: syncing with GitHub, reviewing, synthesizing, or publishing. If GitHub rate-limits an operation, the attempt moves to **Waiting for GitHub** and shows when automatic processing will resume. You do not need to start another review while that countdown is active.

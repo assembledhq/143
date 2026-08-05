@@ -226,6 +226,18 @@ func enqueueCodeReviewStatusCommentSync(ctx context.Context, stores *Stores, ser
 			}
 		}
 	}
+	if strings.TrimSpace(stage) == "terminal" && stores != nil && stores.Jobs != nil &&
+		services != nil && services.CodeReviewInsights != nil {
+		dedupeKey := fmt.Sprintf("code_review_outcome:%s", job.SessionID)
+		if _, err := stores.Jobs.EnqueueWithOpts(ctx, job.OrgID, db.EnqueueOpts{
+			Queue: "feedback", JobType: models.JobTypeReconcileCodeReviewOutcomes,
+			Payload:  codeReviewInsightJobPayload{OrgID: job.OrgID, SessionID: &job.SessionID},
+			Priority: 3, DedupeKey: &dedupeKey,
+		}); err != nil {
+			logger.Warn().Err(err).Str("session_id", job.SessionID.String()).
+				Msg("failed to enqueue code review decision outcome projection")
+		}
+	}
 	if stores == nil || stores.Jobs == nil || services == nil || services.CodeReviews == nil {
 		return
 	}

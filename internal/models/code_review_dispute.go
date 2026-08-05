@@ -207,6 +207,7 @@ type CodeReviewDispute struct {
 	AdjudicatedByUserID       *uuid.UUID                           `db:"adjudicated_by_user_id" json:"adjudicated_by_user_id,omitempty"`
 	AdjudicatedAt             *time.Time                           `db:"adjudicated_at" json:"adjudicated_at,omitempty"`
 	AdjudicationNote          *string                              `db:"adjudication_note" json:"adjudication_note,omitempty"`
+	PolicyOwnerActiveSeconds  *int                                 `db:"policy_owner_active_seconds" json:"policy_owner_active_seconds,omitempty"`
 	EscalatedAt               *time.Time                           `db:"escalated_at" json:"escalated_at,omitempty"`
 	EscalatedByUserID         *uuid.UUID                           `db:"escalated_by_user_id" json:"escalated_by_user_id,omitempty"`
 	QueueSignals              json.RawMessage                      `db:"queue_signals" json:"queue_signals"`
@@ -310,19 +311,29 @@ type CodeReviewDisputeListFilters struct {
 	AdjudicationStatus *CodeReviewDisputeAdjudicationStatus
 	RepositoryID       *uuid.UUID
 	Direction          *CodeReviewDisputeDirection
-	Cursor             *uuid.UUID
+	Cursor             *CodeReviewDisputeQueueCursor
 	Limit              int
 }
 
+// CodeReviewDisputeQueueCursor identifies an immutable materialized ordering and
+// the last position returned from it. Queue priorities can be recomputed while
+// an admin pages without moving rows within this snapshot.
+type CodeReviewDisputeQueueCursor struct {
+	SnapshotID uuid.UUID
+	Position   int64
+}
+
 type CodeReviewDisputePage struct {
-	Items      []CodeReviewDispute
-	NextCursor *uuid.UUID
+	Items           []CodeReviewDispute
+	NextCursor      *uuid.UUID
+	NextQueueCursor *CodeReviewDisputeQueueCursor
 }
 
 type CodeReviewDisputeAdjudicationUpdate struct {
-	ExpectedVersion      int
-	AdjudicationStatus   *CodeReviewDisputeAdjudicationStatus
-	AdjudicationNote     *string
-	TrustOverride        *bool
-	TrustOverridePresent bool
+	ExpectedVersion          int
+	AdjudicationStatus       *CodeReviewDisputeAdjudicationStatus
+	AdjudicationNote         *string
+	PolicyOwnerActiveSeconds *int
+	TrustOverride            *bool
+	TrustOverridePresent     bool
 }

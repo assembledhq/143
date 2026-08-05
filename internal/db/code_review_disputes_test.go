@@ -77,7 +77,11 @@ func codeReviewDisputeColumnNames() []string {
 }
 
 func codeReviewDisputeMockRows(dispute models.CodeReviewDispute) *pgxmock.Rows {
-	return pgxmock.NewRows(codeReviewDisputeColumnNames()).AddRow(
+	return pgxmock.NewRows(codeReviewDisputeColumnNames()).AddRow(codeReviewDisputeMockValues(dispute)...)
+}
+
+func codeReviewDisputeMockValues(dispute models.CodeReviewDispute) []any {
+	return []any{
 		dispute.ID, dispute.OrgID, dispute.SessionID, dispute.PullRequestID, dispute.RepositoryID, dispute.PolicyID,
 		dispute.ReviewedHeadSHA, dispute.Decision, dispute.Direction, dispute.FiledByUserID, dispute.FiledByLogin, dispute.AuthorAssociation,
 		dispute.AuthorIsPRAuthor, dispute.RepositoryVisibility, dispute.MembershipEvidence, dispute.TrustOverride, dispute.Source,
@@ -86,11 +90,11 @@ func codeReviewDisputeMockRows(dispute models.CodeReviewDispute) *pgxmock.Rows {
 		dispute.Body, dispute.ContestedReasonCodes, dispute.DisputeKind, dispute.AssertsNewInformation, dispute.Routing, dispute.IntakeStatus,
 		dispute.IntakeConfidence, dispute.ReassessmentSessionID, dispute.ReassessmentDecision, dispute.ReassessmentFlipped,
 		dispute.ReassessmentStatus, dispute.SemanticInputHashAtFiling, dispute.SemanticInputHashAtRerun,
-		dispute.AdjudicationStatus, dispute.AdjudicatedByUserID, dispute.AdjudicatedAt, dispute.AdjudicationNote, dispute.EscalatedAt,
+		dispute.AdjudicationStatus, dispute.AdjudicatedByUserID, dispute.AdjudicatedAt, dispute.AdjudicationNote, dispute.PolicyOwnerActiveSeconds, dispute.EscalatedAt,
 		dispute.EscalatedByUserID, dispute.QueueSignals, dispute.QueuePriority, dispute.ReplyStatus, dispute.ReplyCycleReserved,
 		dispute.SupersededByDisputeID, dispute.StatusDetail,
 		dispute.Version, dispute.CreatedAt, dispute.UpdatedAt,
-	)
+	}
 }
 
 func TestCodeReviewDisputeStore_CreateAndEnqueueTriageIntakeGuard(t *testing.T) {
@@ -458,7 +462,8 @@ func TestCodeReviewDisputeStore_AdjudicateDemotesUntrustedPendingItem(t *testing
 		WithArgs(pgx.NamedArgs{
 			"org_id": orgID, "id": disputeID, "user_id": userID, "expected_version": 3,
 			"adjudication_status": (*models.CodeReviewDisputeAdjudicationStatus)(nil), "adjudication_note": (*string)(nil),
-			"trust_override_present": true, "trust_override": &untrusted,
+			"policy_owner_active_seconds": (*int)(nil),
+			"trust_override_present":      true, "trust_override": &untrusted,
 		}).
 		WillReturnRows(codeReviewDisputeMockRows(dispute))
 
@@ -496,7 +501,8 @@ func TestCodeReviewDisputeStore_AdjudicatePromotionRespectsAdjudicableRouting(t 
 		WithArgs(pgx.NamedArgs{
 			"org_id": orgID, "id": disputeID, "user_id": userID, "expected_version": 3,
 			"adjudication_status": (*models.CodeReviewDisputeAdjudicationStatus)(nil), "adjudication_note": (*string)(nil),
-			"trust_override_present": true, "trust_override": &trusted,
+			"policy_owner_active_seconds": (*int)(nil),
+			"trust_override_present":      true, "trust_override": &trusted,
 		}).
 		WillReturnRows(codeReviewDisputeMockRows(dispute))
 
@@ -563,4 +569,113 @@ func TestCodeReviewDisputeStore_ReserveReplyCycle(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestCodeReviewDisputeStore_ListQueueContinuesMaterializedSnapshot(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	cursor := models.CodeReviewDisputeQueueCursor{
+		SnapshotID: uuid.New(),
+		Position:   50,
+	}
+	mock.ExpectQuery("SELECT EXISTS").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "snapshot_id": cursor.SnapshotID}).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+	mock.ExpectQuery(`FROM code_review_dispute_queue_snapshots AS snapshot[\s\S]+snapshot.position > @position`).
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "limit": 51,
+			"snapshot_id": cursor.SnapshotID, "position": cursor.Position,
+		}).
+		WillReturnRows(pgxmock.NewRows(append(codeReviewDisputeColumnNames(), "snapshot_position")))
+
+	page, err := NewCodeReviewDisputeStore(mock).ListQueue(context.Background(), orgID, models.CodeReviewDisputeListFilters{
+		Cursor: &cursor,
+	})
+
+	require.NoError(t, err, "queue pagination should continue the captured materialized ordering")
+	require.Empty(t, page.Items, "an empty database page should remain empty")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCodeReviewDisputeStore_ListQueueRejectsExpiredSnapshot(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	cursor := models.CodeReviewDisputeQueueCursor{SnapshotID: uuid.New(), Position: 50}
+	mock.ExpectQuery("SELECT EXISTS").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "snapshot_id": cursor.SnapshotID}).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+
+	_, err = NewCodeReviewDisputeStore(mock).ListQueue(context.Background(), orgID, models.CodeReviewDisputeListFilters{Cursor: &cursor})
+
+	require.ErrorIs(t, err, ErrCodeReviewDisputeQueueCursorExpired, "an expired snapshot should not masquerade as the end of the queue")
+	require.NoError(t, mock.ExpectationsWereMet(), "snapshot validation should stop before querying an expired page")
+}
+
+func TestCodeReviewDisputeStore_ListQueueMaterializesStableOrdering(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Date(2026, 8, 4, 7, 0, 0, 0, time.UTC)
+	first := models.CodeReviewDispute{ID: uuid.New(), OrgID: orgID, QueuePriority: 100, CreatedAt: now, UpdatedAt: now}
+	second := models.CodeReviewDispute{ID: uuid.New(), OrgID: orgID, QueuePriority: 50, CreatedAt: now.Add(-time.Minute), UpdatedAt: now}
+	rows := pgxmock.NewRows(append(codeReviewDisputeColumnNames(), "snapshot_position"))
+	rows.AddRow(append(codeReviewDisputeMockValues(first), int64(1))...)
+	rows.AddRow(append(codeReviewDisputeMockValues(second), int64(2))...)
+
+	mock.ExpectBegin()
+	mock.ExpectExec("DELETE FROM code_review_dispute_queue_snapshots").
+		WithArgs(pgx.NamedArgs{"org_id": orgID}).
+		WillReturnResult(pgxmock.NewResult("DELETE", 0))
+	mock.ExpectExec("INSERT INTO code_review_dispute_queue_snapshots[\\s\\S]+row_number\\(\\) OVER \\(ORDER BY dispute.queue_priority DESC").
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "snapshot_id": pgxmock.AnyArg(), "expires_at": pgxmock.AnyArg(),
+		}).
+		WillReturnResult(pgxmock.NewResult("INSERT", 2))
+	mock.ExpectQuery("FROM code_review_dispute_queue_snapshots AS snapshot").
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "snapshot_id": pgxmock.AnyArg(), "position": int64(0), "limit": 2,
+		}).
+		WillReturnRows(rows)
+	mock.ExpectCommit()
+
+	page, err := NewCodeReviewDisputeStore(mock).ListQueue(context.Background(), orgID, models.CodeReviewDisputeListFilters{Limit: 1})
+
+	require.NoError(t, err, "the first page should materialize and read one stable queue ordering")
+	require.Equal(t, []models.CodeReviewDispute{first}, page.Items, "the first page should return the first materialized row")
+	require.NotNil(t, page.NextQueueCursor, "a truncated materialized queue should return a continuation cursor")
+	require.Equal(t, int64(1), page.NextQueueCursor.Position, "the cursor should advance to the returned snapshot position")
+	require.NotEqual(t, uuid.Nil, page.NextQueueCursor.SnapshotID, "the cursor should identify the materialized queue snapshot")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCodeReviewDisputeStore_DeleteExpiredQueueSnapshots(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "mock pool should initialize")
+	defer mock.Close()
+	orgID := uuid.New()
+	mock.ExpectExec("DELETE FROM code_review_dispute_queue_snapshots[\\s\\S]+org_id = @org_id[\\s\\S]+expires_at <= now\\(\\)").
+		WithArgs(orgID).
+		WillReturnResult(pgxmock.NewResult("DELETE", 4))
+
+	deleted, err := NewCodeReviewDisputeStore(mock).DeleteExpiredQueueSnapshots(context.Background(), orgID)
+
+	require.NoError(t, err, "expired queue snapshot cleanup should succeed")
+	require.Equal(t, int64(4), deleted, "cleanup should report the deleted snapshot rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all snapshot cleanup expectations should be met")
 }

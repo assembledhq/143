@@ -288,6 +288,20 @@ func (s *PullRequestStore) UpdateStatus(ctx context.Context, orgID, id uuid.UUID
 	return err
 }
 
+// UpdateMergedStatus records the provider's authoritative merge time rather
+// than the time at which a delayed webhook or reconciliation was processed.
+func (s *PullRequestStore) UpdateMergedStatus(ctx context.Context, orgID, id uuid.UUID, mergedAt time.Time) error {
+	if mergedAt.IsZero() {
+		return fmt.Errorf("merged_at is required")
+	}
+	_, err := s.db.Exec(ctx, `UPDATE pull_requests
+		SET status = @status, merged_at = @merged_at, updated_at = now()
+		WHERE id = @id AND org_id = @org_id`, pgx.NamedArgs{
+		"id": id, "org_id": orgID, "status": models.PullRequestStatusMerged, "merged_at": mergedAt,
+	})
+	return err
+}
+
 func (s *PullRequestStore) UpdateTitle(ctx context.Context, orgID, id uuid.UUID, title string) error {
 	query := `UPDATE pull_requests SET title = @title, updated_at = now() WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{

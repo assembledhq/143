@@ -371,20 +371,82 @@ func TestCodeReviewHandler_ListDisputeQueueRejectsUnknownFilters(t *testing.T) {
 	t.Run("accepted filters reach the service", func(t *testing.T) {
 		t.Parallel()
 
-		cursor := uuid.New()
+		queueCursor := models.CodeReviewDisputeQueueCursor{
+			SnapshotID: uuid.New(),
+			Position:   50,
+		}
+		expectedStatus := models.CodeReviewDisputeAdjudicationPending
+		expectedDirection := models.CodeReviewDisputeDirectionShouldHaveApproved
+		expectedFilters := models.CodeReviewDisputeListFilters{
+			AdjudicationStatus: &expectedStatus,
+			RepositoryID:       &repositoryID,
+			Direction:          &expectedDirection,
+			Limit:              50,
+		}
+		cursor, err := encodeCodeReviewDisputeQueueCursor(orgID, expectedFilters, queueCursor)
+		require.NoError(t, err, "queue cursor should encode")
 		service := &stubCodeReviewDisputeService{}
 		handler := &CodeReviewHandler{disputes: service}
 		rr := httptest.NewRecorder()
 		handler.ListDisputeQueue(rr, disputeRequest(t, http.MethodGet,
 			"/api/v1/code-review-disputes?adjudication_status=pending&repository_id="+repositoryID.String()+
-				"&direction=should_have_approved&cursor="+cursor.String(), "", orgID, userID, ""))
+				"&direction=should_have_approved&cursor="+cursor, "", orgID, userID, ""))
 
 		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
 		require.Equal(t, models.CodeReviewDisputeAdjudicationPending, *service.queueFilters.AdjudicationStatus)
 		require.Equal(t, repositoryID, *service.queueFilters.RepositoryID)
 		require.Equal(t, models.CodeReviewDisputeDirectionShouldHaveApproved, *service.queueFilters.Direction)
-		require.Equal(t, cursor, *service.queueFilters.Cursor)
+		require.Equal(t, queueCursor, *service.queueFilters.Cursor)
 	})
+}
+
+func TestCodeReviewHandler_ListDisputeQueueReportsExpiredCursor(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	status := models.CodeReviewDisputeAdjudicationPending
+	filters := models.CodeReviewDisputeListFilters{AdjudicationStatus: &status, Limit: 50}
+	cursor, err := encodeCodeReviewDisputeQueueCursor(orgID, filters, models.CodeReviewDisputeQueueCursor{
+		SnapshotID: uuid.New(), Position: 50,
+	})
+	require.NoError(t, err, "queue cursor should encode")
+	service := &stubCodeReviewDisputeService{err: db.ErrCodeReviewDisputeQueueCursorExpired}
+	handler := &CodeReviewHandler{disputes: service}
+	rr := httptest.NewRecorder()
+
+	handler.ListDisputeQueue(rr, disputeRequest(t, http.MethodGet,
+		"/api/v1/code-review-disputes?adjudication_status=pending&cursor="+cursor, "", orgID, userID, ""))
+
+	require.Equal(t, http.StatusGone, rr.Code, "an expired paging session should ask the client to refresh")
+	require.Equal(t, "CODE_REVIEW_DISPUTE_QUEUE_CURSOR_EXPIRED", decodeDisputeErrorCode(t, rr), "expired cursors should have a stable error code")
+}
+
+func TestDisputeQueueListResponseCapturesStableOrderingCursor(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	status := models.CodeReviewDisputeAdjudicationPending
+	filters := models.CodeReviewDisputeListFilters{AdjudicationStatus: &status, Limit: 50}
+	queueCursor := models.CodeReviewDisputeQueueCursor{
+		SnapshotID: uuid.New(),
+		Position:   50,
+	}
+
+	response, err := disputeQueueListResponse(orgID, filters, models.CodeReviewDisputePage{
+		Items: []models.CodeReviewDispute{{ID: uuid.New()}}, NextQueueCursor: &queueCursor,
+	})
+	require.NoError(t, err, "queue response should encode its observed ordering boundary")
+	require.NotEmpty(t, response.Meta.NextCursor, "a truncated page should return an opaque cursor")
+
+	decoded, err := decodeCodeReviewDisputeQueueCursor(response.Meta.NextCursor, orgID, filters)
+	require.NoError(t, err, "the next request should decode the captured boundary")
+	require.Equal(t, queueCursor, decoded, "the cursor should preserve the immutable queue snapshot position")
+
+	changedDirection := models.CodeReviewDisputeDirectionShouldHaveApproved
+	filters.Direction = &changedDirection
+	_, err = decodeCodeReviewDisputeQueueCursor(response.Meta.NextCursor, orgID, filters)
+	require.Error(t, err, "a cursor from another queue scope should be rejected")
 }
 
 func TestCodeReviewHandler_EscalateDisputeReportsIneligibilityAsConflict(t *testing.T) {

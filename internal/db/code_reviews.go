@@ -23,9 +23,14 @@ const codeReviewActiveHeadConstraint = "idx_code_review_metadata_active_head"
 
 type CodeReviewStore struct {
 	db      DBTX
+	jobs    *JobStore
 	streams *cache.CodeReviewStreams
 	logger  zerolog.Logger
 }
+
+// SetJobStore wires the durable rank refresh triggered by policy supersession.
+// lint:allow-no-orgid reason="process-wide dependency injection for the durable job queue"
+func (s *CodeReviewStore) SetJobStore(jobs *JobStore) { s.jobs = jobs }
 
 func NewCodeReviewStore(db DBTX) *CodeReviewStore {
 	return &CodeReviewStore{db: db, logger: zerolog.Nop()}
@@ -417,8 +422,23 @@ func (s *CodeReviewStore) savePolicy(ctx context.Context, orgID uuid.UUID, confi
 	if err != nil {
 		return models.CodeReviewPolicyRecord{}, err
 	}
+	var rankJobID uuid.UUID
+	if s.jobs != nil {
+		dedupeKey := "rank_code_review_disputes:policy:" + orgID.String() + ":" + record.ID.String()
+		rankJobID, err = s.jobs.EnqueueInTxWithOpts(ctx, tx, orgID, EnqueueOpts{
+			Queue: "feedback", JobType: models.JobTypeRankCodeReviewDispute,
+			Payload: models.CodeReviewInsightPayload{OrgID: orgID}, Priority: 2,
+			DedupeKey: &dedupeKey, MaxAttempts: 6,
+		})
+		if err != nil {
+			return models.CodeReviewPolicyRecord{}, fmt.Errorf("enqueue policy supersession rank refresh: %w", err)
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return models.CodeReviewPolicyRecord{}, fmt.Errorf("commit code review policy tx: %w", err)
+	}
+	if rankJobID != uuid.Nil {
+		s.jobs.Notify(ctx, rankJobID)
 	}
 	logEvent := s.logger.Info().
 		Str("org_id", orgID.String()).

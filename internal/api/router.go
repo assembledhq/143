@@ -362,6 +362,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionSandboxHolderStore := db.NewSessionSandboxHolderStore(pool)
 	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
 	codeReviewStore := db.NewCodeReviewStore(pool)
+	codeReviewStore.SetJobStore(jobStore)
 	codeReviewStreams := cache.NewCodeReviewStreams(redisClient, logger)
 	codeReviewStore.SetStreams(codeReviewStreams)
 	codeReviewStore.SetLogger(logger)
@@ -397,6 +398,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		codeReviewDisputeSvc.SetPullRequestSnapshotter(prService)
 	}
 	codeReviewTriggerSetupSvc := codereviewsvc.NewGitHubTriggerSetupService(codeReviewStore, repoStore, appUserAuthSvc, logger)
+	codeReviewInsightStore := db.NewCodeReviewInsightStore(pool)
+	codeReviewInsightSvc := codereviewsvc.NewInsightService(codeReviewInsightStore, logger)
+	if prService != nil {
+		prService.SetCodeReviewInsightStore(codeReviewInsightStore)
+	}
 	webhookHandler.SetCodeReviewService(codeReviewSvc, pullRequestStore)
 	webhookHandler.SetCodeReviewDisputeService(codeReviewDisputeSvc)
 	sessionThreadFileEventStore := db.NewSessionThreadFileEventStore(pool)
@@ -410,6 +416,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	codeReviewHandler.SetAuditEmitter(auditEmitter)
 	codeReviewHandler.SetGitHubTriggerSetupService(codeReviewTriggerSetupSvc)
 	codeReviewHandler.SetDisputeService(codeReviewDisputeSvc)
+	codeReviewHandler.SetInsightService(codeReviewInsightSvc)
 	prHealthStreams := cache.NewPullRequestStreams(redisClient, logger)
 	publicationIntentCoordinator := publicationintent.NewCoordinator(
 		sessionStore,
@@ -1691,6 +1698,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/code-reviews/{id}/agent-results", codeReviewHandler.CreateAgentResult)
 				r.Post("/api/v1/code-reviews/{id}/findings", codeReviewHandler.CreateFinding)
 				r.Get("/api/v1/code-review-disputes", codeReviewHandler.ListDisputeQueue)
+				r.Get("/api/v1/code-review-insights", codeReviewHandler.Insights)
 				r.Patch("/api/v1/code-review-disputes/{id}", codeReviewHandler.UpdateDispute)
 				r.Put("/api/v1/repositories/{repository_id}/preview-policy", branchPreviewHandler.UpdatePolicy)
 				r.Post("/api/v1/repositories/{repository_id}/preview-policy/test-preview", branchPreviewHandler.TestPolicyPreview)
