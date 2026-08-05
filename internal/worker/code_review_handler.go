@@ -322,6 +322,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			Policy:                policy.Config(),
 			Job:                   job,
 			SessionURL:            codeReviewSessionURL(services.FrontendURL, job.SessionID),
+			PolicySettingsURL:     codeReviewPolicySettingsURL(services.FrontendURL),
 			PullRequest:           pr,
 			Health:                health,
 			AgentResults:          agentResults,
@@ -2599,6 +2600,7 @@ type liveCodeReviewOutcomeInput struct {
 	Policy                models.CodeReviewPolicyConfig
 	Job                   runCodeReviewPayload
 	SessionURL            string
+	PolicySettingsURL     string
 	PullRequest           models.PullRequest
 	Health                *models.PullRequestHealthResponse
 	AgentResults          []models.CodeReviewAgentResult
@@ -2687,6 +2689,7 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		ChangeSummary:             input.OrchestratorSynthesis.Summary,
 		OperationalSummary:        codeReviewOrchestratorOperationalSummary(input.AgentResults, decision.RiskReasonDetails),
 		SessionURL:                input.SessionURL,
+		PolicySettingsURL:         input.PolicySettingsURL,
 		DescriptionPassed:         descriptionPassed,
 		DescriptionIssues:         codeReviewFailedDescriptionRequirements(descriptionEvaluation.RequirementSummaries),
 		AgentSummaries:            codeReviewAgentSummaries(input.AgentResults, input.Findings),
@@ -2760,6 +2763,14 @@ func codeReviewSessionURL(frontendURL string, sessionID uuid.UUID) string {
 		return ""
 	}
 	return base + "/sessions/" + sessionID.String()
+}
+
+func codeReviewPolicySettingsURL(frontendURL string) string {
+	base := strings.TrimRight(strings.TrimSpace(frontendURL), "/")
+	if base == "" {
+		return ""
+	}
+	return base + "/code-reviews?tab=policy"
 }
 
 func loadCodeReviewChangedFiles(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, pr models.PullRequest) ([]codereviewsvc.PullRequestFile, bool, error) {

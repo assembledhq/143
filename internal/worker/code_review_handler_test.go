@@ -3113,6 +3113,30 @@ func TestCodeReviewSessionURL(t *testing.T) {
 	}
 }
 
+func TestCodeReviewPolicySettingsURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		frontendURL string
+		expected    string
+	}{
+		{name: "empty frontend URL omits link", expected: ""},
+		{name: "trims trailing slash", frontendURL: "https://143.dev/", expected: "https://143.dev/code-reviews?tab=policy"},
+		{name: "uses base URL", frontendURL: "https://app.143.dev", expected: "https://app.143.dev/code-reviews?tab=policy"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := codeReviewPolicySettingsURL(tt.frontendURL)
+
+			require.Equal(t, tt.expected, actual, "codeReviewPolicySettingsURL should build stable policy links")
+		})
+	}
+}
+
 func TestCodeReviewThreadCompletedByDeadline(t *testing.T) {
 	t.Parallel()
 

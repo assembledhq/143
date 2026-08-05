@@ -6,6 +6,13 @@
 
 ## Implementation status
 
+Phase 0A's readable decision output is implemented: blockers are grouped by remedy,
+policy-controlled blockers link to settings, a sole blocker is revision-bound,
+platform review failures are separated from code risk, and advisory findings are
+inspectable in a collapsed non-blocking section. Phase 0A's provisional publication
+of stable deterministic failures and `stop_after_deterministic_failure` remain to
+be implemented.
+
 The PR 3 Phase 1A runtime is implemented: in-app reconsideration, GitHub mention and inline-thread intake, evidence-grounded answers, durable acknowledgement/timeline states, authorization snapshots, versioned semantic cooldown dedupe, loop guards, latest-revision reassessment, admin promotion of untrusted evidence, the member escalation route, and the flat admin adjudication list. Reassessment workers use an operator kill switch and platform-wide active-work ceiling.
 
 Phase 1B(ii)'s volume-gated ranked queue and expanded Insights are implemented. Completed decisions project into an org-scoped outcome table, durable GitHub events add independent-human and terminal PR facts, daily reconciliation repairs missing or stale projections, and the queue persists explainable signal snapshots while remaining chronological below the sustained-volume trigger. Admin Insights reports objection directions and kinds, per-policy decision mix, reason distributions with actual-versus-limit observations, reassessment flips and spend, resolution time, and projection freshness.
