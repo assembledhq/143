@@ -279,7 +279,7 @@ test("persists detailed mode across reload, a second browser context, and expand
   await page.getByRole("button", { name: "Complete phase" }).click();
   await expect(page.getByRole("button", { name: /Worked for/ })).toHaveAttribute("aria-expanded", "true");
   await page.goto("/session-activity-e2e#tuse_1");
-  await expect(page.getByText("Running npm test")).toBeVisible();
+  await expect(page.getByText("Ran `npm test`")).toBeVisible();
 });
 
 test("restores the legacy flat renderer with the emergency switch", async ({ page }) => {
@@ -305,7 +305,7 @@ test("refreshes the emergency switch on initial load, focus, and the freshness i
   enabled = true;
   await Promise.all([
     page.waitForResponse((response) => response.url().includes("/api/v1/application-config")),
-    page.evaluate(() => document.dispatchEvent(new Event("visibilitychange"))),
+    page.evaluate(() => window.dispatchEvent(new Event("visibilitychange"))),
   ]);
   await expect(page.getByRole("button", { name: /Working for/ })).toBeVisible();
 
