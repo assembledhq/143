@@ -245,7 +245,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			}
 			enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "deterministic")
 		}
-		stopAfterDeterministicFailure := policy.Config().RiskPolicy.StopAfterDeterministicFailure
+		stopAfterDeterministicFailure := policy.Config().RiskPolicy.StopAfterDeterministicFailure && codeReviewCanStopBeforeAgentFanout(agentResults)
 		if !stableRisk.Acceptable && stopAfterDeterministicFailure && metadata.TriggerSource != models.CodeReviewTriggerSourceAutoPolicy {
 			priorEarlyStop, err := stores.CodeReviews.HasPriorDeterministicEarlyStop(ctx, job.OrgID, job.PullRequestID, job.SessionID, job.HeadSHA)
 			if err != nil {
@@ -2692,6 +2692,13 @@ func codeReviewStableDeterministicRisk(policy models.CodeReviewPolicyConfig, job
 		}
 	}
 	return stable
+}
+
+func codeReviewCanStopBeforeAgentFanout(agentResults []models.CodeReviewAgentResult) bool {
+	// Durable results are created before a reviewer message is dispatched. Their
+	// presence therefore means a retry must preserve that work, including when a
+	// rolling deployment resumes a session started by an older worker.
+	return len(agentResults) == 0
 }
 
 func completeCodeReviewAfterStableDeterministicFailure(

@@ -569,13 +569,13 @@ func groupedCodeReviewFindings(findings []CodeReviewFinding) []string {
 	}
 	out := make([]string, 0, len(sorted))
 	for _, finding := range sorted {
-		summary := strings.TrimSpace(finding.Summary)
+		summary := codeReviewUntrustedMarkdownInline(finding.Summary)
 		if summary == "" {
 			continue
 		}
 		prefix := string(finding.Severity)
 		if finding.Path != nil && strings.TrimSpace(*finding.Path) != "" {
-			coordinate := strings.TrimSpace(*finding.Path)
+			coordinate := codeReviewUntrustedMarkdownInline(*finding.Path)
 			if finding.StartLine != nil && *finding.StartLine > 0 {
 				coordinate = fmt.Sprintf("%s:%d", coordinate, *finding.StartLine)
 			}
@@ -588,6 +588,21 @@ func groupedCodeReviewFindings(findings []CodeReviewFinding) []string {
 		out = append(out, fmt.Sprintf("%d additional findings are available in the review session", len(findings)-len(sorted)))
 	}
 	return out
+}
+
+func codeReviewUntrustedMarkdownInline(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	return strings.NewReplacer(
+		"\\", "\\\\",
+		"`", "\\`",
+		"*", "\\*",
+		"_", "\\_",
+		"~", "\\~",
+		"[", "\\[",
+		"]", "\\]",
+		"<", "&lt;",
+		">", "&gt;",
+	).Replace(value)
 }
 
 func SelectCodeReviewInlineFindings(findings []CodeReviewFinding, limit int) []CodeReviewFinding {

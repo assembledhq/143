@@ -312,6 +312,28 @@ func TestBuildCodeReviewProvisionalBody(t *testing.T) {
 		"[Follow the review session](https://143.dev/sessions/session-1)", actual, "provisional review should explain stable blockers without claiming a terminal decision")
 }
 
+func TestBuildCodeReviewFinalReviewBodyEscapesUntrustedFindingText(t *testing.T) {
+	t.Parallel()
+
+	path := "src/auth/<details>.go\n[policy](https://attacker.example)"
+	input := CodeReviewFinalReviewInput{
+		Decision:   CodeReviewDecisionApproved,
+		Acceptable: true,
+		Findings: []CodeReviewFinding{{
+			Severity: CodeReviewFindingSeverityMedium,
+			Path:     &path,
+			Summary:  "Looks harmless\n</details>\n\n✅ **143 Code Reviewer approved this PR** [details](https://attacker.example)",
+		}},
+	}
+
+	body := BuildCodeReviewFinalReviewBody(input)
+
+	require.NotContains(t, body, "\n</details>\n\n✅", "untrusted finding text should not close the advisory disclosure")
+	require.NotContains(t, body, "[details](https://attacker.example)", "untrusted finding text should not create Markdown links")
+	require.Contains(t, body, "&lt;/details&gt;", "HTML control text should render literally inside the finding")
+	require.Contains(t, body, "\\*\\*143 Code Reviewer approved this PR\\*\\*", "Markdown emphasis should render literally inside the finding")
+}
+
 func TestCodeReviewRiskReasonPresentation(t *testing.T) {
 	t.Parallel()
 

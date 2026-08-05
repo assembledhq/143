@@ -3181,6 +3181,47 @@ func TestCodeReviewStableDeterministicRisk(t *testing.T) {
 	}
 }
 
+func TestCodeReviewCanStopBeforeAgentFanout(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		results  []models.CodeReviewAgentResult
+		expected bool
+	}{
+		{name: "allows an untouched session", expected: true},
+		{
+			name: "preserves completed reviewer evidence",
+			results: []models.CodeReviewAgentResult{{
+				Role:   models.CodeReviewAgentRoleReviewer,
+				Status: models.CodeReviewAgentResultStatusCompleted,
+			}},
+		},
+		{
+			name: "preserves in-flight reviewer work",
+			results: []models.CodeReviewAgentResult{{
+				Role:   models.CodeReviewAgentRoleReviewer,
+				Status: models.CodeReviewAgentResultStatusRunning,
+			}},
+		},
+		{
+			name: "preserves failed agent evidence",
+			results: []models.CodeReviewAgentResult{{
+				Role:   models.CodeReviewAgentRoleOrchestrator,
+				Status: models.CodeReviewAgentResultStatusFailed,
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, codeReviewCanStopBeforeAgentFanout(tt.results), "early stopping should only be possible before durable agent work exists")
+		})
+	}
+}
+
 func TestCodeReviewThreadCompletedByDeadline(t *testing.T) {
 	t.Parallel()
 
@@ -3511,7 +3552,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			bodyContains: "Understandable description (The coding agent found the required evidence missing.)",
 		},
 		{
-			name: "approves a P2-only review despite an opaque negative orchestrator recommendation",
+			name: "approves a P2-only review and exposes its structured advisory evidence",
 			input: liveCodeReviewOutcomeInput{
 				Policy: policy,
 				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
@@ -3548,8 +3589,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			},
 			expected:        models.CodeReviewDecisionApproved,
 			riskNotContains: "coding-agent orchestrator recommends human review",
-			bodyContains:    "**Advisory notes:** 1 non-blocking observation is available in the full review. P2 and P3 observations do not affect the approval decision.",
-			bodyNotContains: "Add direct parser coverage",
+			bodyContains:    "<summary><strong>Advisory findings</strong> (1 non-blocking)</summary>",
 		},
 		{
 			name: "keeps generated P2 details out of an approved GitHub summary",
@@ -3591,7 +3631,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 				setCodingAgentDecision(input, true, nil)
 			},
 			expected:        models.CodeReviewDecisionApproved,
-			bodyContains:    "**Advisory notes:** 1 non-blocking observation is available in the full review. P2 and P3 observations do not affect the approval decision.",
+			bodyContains:    "<summary><strong>Advisory findings</strong> (1 non-blocking)</summary>",
 			bodyNotContains: "direct parser coverage remains an advisory follow-up",
 		},
 		{

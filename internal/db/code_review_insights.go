@@ -827,13 +827,12 @@ func (s *CodeReviewInsightStore) GetInsights(ctx context.Context, orgID uuid.UUI
 		 FROM disputes d JOIN sessions s ON s.org_id = d.org_id AND s.id = d.reassessment_session_id),
 		(SELECT count(*)::bigint FROM deterministic_early_stops),
 		(SELECT COALESCE(sum(reviewer_runs_avoided), 0)::bigint FROM deterministic_early_stops),
-		(SELECT count(*)::bigint FROM deterministic_early_stops early
-		 WHERE EXISTS (
-			SELECT 1 FROM code_review_session_metadata later
-			WHERE later.org_id = @org_id AND later.pull_request_id = early.pull_request_id
-			  AND later.head_sha = early.head_sha AND later.created_at > early.created_at
-			  AND later.trigger_source <> 'auto_policy'
-		 )),
+		(SELECT count(DISTINCT later.session_id)::bigint
+		 FROM deterministic_early_stops early
+		 JOIN code_review_session_metadata later
+		   ON later.org_id = @org_id AND later.pull_request_id = early.pull_request_id
+		  AND later.head_sha = early.head_sha AND later.created_at > early.created_at
+		 WHERE later.trigger_source <> 'auto_policy'),
 		(SELECT avg(policy_owner_active_seconds)::double precision / 60.0
 		 FROM disputes WHERE adjudication_status IN ('upheld', 'rejected') AND policy_owner_active_seconds IS NOT NULL),
 		(SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (m.completed_at - m.created_at)))
