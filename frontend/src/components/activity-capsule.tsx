@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { activityToolCount } from "@/lib/activity-timeline";
 import type { InferredHistoricalActivity, TimelineActivityPhase } from "@/lib/activity-timeline";
 
 type CapsuleActivity = TimelineActivityPhase | InferredHistoricalActivity;
@@ -51,11 +52,7 @@ export function ActivityCapsule({ activity, expanded, onExpandedChange, onInspec
   children: ReactNode;
 }) {
   const elapsed = useElapsed(activity);
-  const toolCount = activity.inferredHistorical
-    ? activity.toolCallCount
-    : activity.status === "running"
-      ? Math.max(activity.tool_call_count, activity.provisionalToolCallCount ?? 0)
-      : activity.tool_call_count;
+  const toolCount = activityToolCount(activity);
   const summary = useMemo(() => {
     const parts = [capsuleStateLabel(activity)];
     if (elapsed) parts[0] += ` ${elapsed}`;

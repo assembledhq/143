@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildActivityTimelineNodes, sanitizeActivityLabel } from "./activity-timeline";
+import { activityToolCount, buildActivityTimelineNodes, sanitizeActivityLabel } from "./activity-timeline";
 import type { TimelineEntry } from "./timeline";
 import type { SessionLog, SessionTranscriptTurn } from "./types";
 
@@ -153,6 +153,55 @@ describe("buildActivityTimelineNodes", () => {
       },
     }]);
   });
+
+  it("never promotes content the backend marked undisplayable into the active label", () => {
+    const rawResult = log(1, "output", "phase-1");
+    rawResult.message = "SECRET_RESULT=do-not-summarize";
+    rawResult.metadata = { type: "tool_result" };
+    const hiddenDiagnostic = log(2, "info", "phase-1");
+    hiddenDiagnostic.message = "codex stream disconnected, retrying";
+    hiddenDiagnostic.metadata = { visibility: "hidden", diagnostic_class: "benign_runtime_diagnostic" };
+    const entries: TimelineEntry[] = [
+      { kind: "log", data: rawResult },
+      { kind: "log", data: hiddenDiagnostic },
+    ];
+    const turns: SessionTranscriptTurn[] = [{
+      turn_number: 1, started_at: rawResult.created_at, entries: [], phases: [{
+        id: "phase-1", anchor_id: "aph_phase-1", phase_number: 1, status: "running", trigger_kind: "initial",
+        started_at: rawResult.created_at, tool_call_count: 0,
+      }],
+    }];
+
+    expect(buildActivityTimelineNodes(entries, turns)).toEqual([{
+      kind: "phase",
+      phase: { ...turns[0].phases![0], turnNumber: 1, entries, inferredHistorical: false, provisionalToolCallCount: 0 },
+    }]);
+  });
+});
+
+describe("activityToolCount", () => {
+  const runningPhase = {
+    id: "phase-1", anchor_id: "aph_phase-1", phase_number: 1, status: "running" as const, trigger_kind: "initial" as const,
+    started_at: "2026-08-03T00:00:01Z", tool_call_count: 1, turnNumber: 1, entries: [], inferredHistorical: false as const,
+  };
+
+  it("prefers the locally derived count while the server counter lags a running phase", () => {
+    expect(activityToolCount({ ...runningPhase, provisionalToolCallCount: 3 })).toBe(3);
+    expect(activityToolCount({ ...runningPhase, tool_call_count: 5, provisionalToolCallCount: 3 })).toBe(5);
+    expect(activityToolCount(runningPhase)).toBe(1);
+  });
+
+  it("settles on the authoritative server count once the phase closes", () => {
+    expect(activityToolCount({
+      ...runningPhase, status: "completed", tool_call_count: 4, provisionalToolCallCount: 9,
+    })).toBe(4);
+  });
+
+  it("uses the inferred count for historical activity", () => {
+    expect(activityToolCount({
+      id: "historical-1", turnNumber: 1, entries: [], toolCallCount: 2, inferredHistorical: true,
+    })).toBe(2);
+  });
 });
 
 describe("sanitizeActivityLabel", () => {
@@ -166,21 +215,10 @@ describe("sanitizeActivityLabel", () => {
     );
   });
 
-  it("never promotes orphaned raw tool-result content into the active label", () => {
-    const rawResult = log(1, "output", "phase-1");
-    rawResult.message = "SECRET_RESULT=do-not-summarize";
-    rawResult.metadata = { type: "tool_result" };
-    const entry: TimelineEntry = { kind: "log", data: rawResult };
-    const turns: SessionTranscriptTurn[] = [{
-      turn_number: 1, started_at: rawResult.created_at, entries: [], phases: [{
-        id: "phase-1", anchor_id: "aph_phase-1", phase_number: 1, status: "running", trigger_kind: "initial",
-        started_at: rawResult.created_at, tool_call_count: 0,
-      }],
-    }];
-
-    expect(buildActivityTimelineNodes([entry], turns)).toEqual([{
-      kind: "phase",
-      phase: { ...turns[0].phases![0], turnNumber: 1, entries: [entry], inferredHistorical: false, provisionalToolCallCount: 0 },
-    }]);
+  it("redacts temporary AWS access keys and app-level Slack tokens", () => {
+    expect(sanitizeActivityLabel("assume ASIA1234567890ABCDEF then post xapp-1-A01-2345678901-abcdef")).toBe(
+      "assume [redacted] then post [redacted]",
+    );
+    expect(sanitizeActivityLabel("refresh xoxe-1-abcdefghijkl")).toBe("refresh [redacted]");
   });
 });

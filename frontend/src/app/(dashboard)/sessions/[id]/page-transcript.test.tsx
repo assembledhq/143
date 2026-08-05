@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { http, HttpResponse } from 'msw';
+import { delay, http, HttpResponse } from 'msw';
 import { createTestQueryClient, fireEvent, renderWithProviders, screen, userEvent, waitFor, within } from '@/test/test-utils';
 import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers, mockIssues } from '@/test/mocks/handlers';
@@ -548,6 +548,66 @@ describe('SessionDetailPage transcript and scroll', () => {
     expect(screen.getByText('No context in this tab yet.')).toBeInTheDocument();
     expect(screen.getByText('Send a task or add context to get started.')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
+  });
+
+  it('keeps a loaded transcript visible while the activity capsule config is still pending', async () => {
+    // The capsule flag decides how entries render, so an empty transcript may
+    // wait on it — but transcript content we already hold must never be
+    // replaced by a skeleton because /application-config is slow or hung.
+    const sessionId = 'session-config-pending';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Main',
+        status: 'running',
+        current_turn: 1,
+        created_at: '2026-05-04T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+    const messages: SessionMessage[] = [
+      {
+        id: 901,
+        session_id: sessionId,
+        org_id: 'org-1',
+        thread_id: 'thread-main',
+        turn_number: 1,
+        role: 'user',
+        content: 'Transcript loaded before config',
+        created_at: '2026-05-04T07:00:01Z',
+      },
+    ];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'running',
+            sandbox_state: 'ready',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(makeTranscriptWindow(messages, []));
+      }),
+      // Never settles: isPending stays true for the whole assertion window.
+      http.get('/api/v1/application-config', async () => {
+        await delay('infinite');
+        return HttpResponse.json({ data: {} });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByText('Transcript loaded before config')).toBeInTheDocument();
+    expect(screen.queryByTestId('session-timeline-skeleton')).not.toBeInTheDocument();
   });
 
   it('restores the saved scroll position when reopening an existing session', async () => {

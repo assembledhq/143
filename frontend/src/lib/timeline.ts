@@ -265,6 +265,10 @@ export function timelineEntryCreatedAt(entry: TimelineEntry): string {
 // conversation only when the runtime applies them. Keeping presentation time
 // separate prevents an instruction that waited in the pending lane from being
 // sorted back into older activity after acknowledgment.
+//
+// This is the ordering and day-grouping clock only. Individual bubbles keep
+// rendering created_at so the visible timestamp stays the audit truth, which
+// means a late-applied message can sit below an entry stamped later than it.
 export function timelineEntryPresentationAt(entry: TimelineEntry): string {
   if (entry.kind === "message" || entry.kind === "plan_message") {
     return entry.data.applied_at ?? entry.data.created_at;

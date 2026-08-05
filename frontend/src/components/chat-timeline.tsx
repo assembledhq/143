@@ -18,7 +18,7 @@ import { CopyButton } from "@/components/copy-button";
 import { HumanInputRequestCard } from "@/components/human-input-request-card";
 import { LinearIcon } from "@/components/linear-icon";
 import { looksLikeLinearRef } from "@/lib/linear-refs";
-import { PLAN_MODE_PREFIX } from "@/lib/timeline";
+import { PLAN_MODE_PREFIX, timelineEntryPresentationAt } from "@/lib/timeline";
 import type { TimelineEntry } from "@/lib/timeline";
 import type { HumanInputAnswerBody, HumanInputRequest, SessionInputReference, SessionMessage, SessionLog } from "@/lib/types";
 import { formatDateTime, isImageURL, fileNameFromURL } from "@/lib/utils";
@@ -719,9 +719,10 @@ function ChatTimelineImpl({ entries, isRunning, recoveryActive = false, stopping
 
     flushHidden();
 
-    const entryDateStr =
-      entry.kind === "tool_group" ? entry.toolUse.created_at : entry.data.created_at;
-    maybeEmitDaySeparator(entryDateStr);
+    // Day grouping must use the same clock the surrounding timeline sorts by,
+    // otherwise a message applied after midnight emits a second separator here
+    // for its older created_at right under the caller's `initialDay` one.
+    maybeEmitDaySeparator(timelineEntryPresentationAt(entry));
 
     switch (entry.kind) {
       case "message":

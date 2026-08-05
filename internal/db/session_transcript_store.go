@@ -419,30 +419,31 @@ func (s *SessionTranscriptStore) ListThreadWindow(
 	orgID, threadID uuid.UUID,
 	opts SessionTranscriptWindowOptions,
 ) (SessionTranscriptWindow, error) {
-	if starter, ok := s.db.(transcriptSnapshotStarter); ok {
-		// Boundary transactions update the visible entry and phase lifecycle
-		// together. The window is assembled by several queries, so keep them on
-		// one snapshot to avoid returning opposite sides of a concurrent commit.
-		tx, err := starter.BeginTx(ctx, pgx.TxOptions{
-			IsoLevel:   pgx.RepeatableRead,
-			AccessMode: pgx.ReadOnly,
-		})
-		if err != nil {
-			return SessionTranscriptWindow{}, fmt.Errorf("begin transcript snapshot: %w", err)
-		}
-		defer func() { _ = tx.Rollback(ctx) }()
-
-		window, err := (&SessionTranscriptStore{db: tx}).listThreadWindow(ctx, orgID, threadID, opts)
-		if err != nil {
-			return SessionTranscriptWindow{}, err
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return SessionTranscriptWindow{}, fmt.Errorf("commit transcript snapshot: %w", err)
-		}
-		return window, nil
+	// A store built over a pgx.Tx does not expose BeginTx and already reads
+	// inside its caller's transaction, so it takes the direct path.
+	starter, ok := s.db.(transcriptSnapshotStarter)
+	if !ok {
+		return s.listThreadWindow(ctx, orgID, threadID, opts)
 	}
 
-	return s.listThreadWindow(ctx, orgID, threadID, opts)
+	// Boundary transactions update the visible entry and phase lifecycle
+	// together. The window is assembled by several queries, so keep them on
+	// one snapshot to avoid returning opposite sides of a concurrent commit.
+	tx, err := starter.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return SessionTranscriptWindow{}, fmt.Errorf("begin transcript snapshot: %w", err)
+	}
+	// Nothing is written, so the snapshot is released by rollback. Committing
+	// instead would let a transient COMMIT error fail a request whose window
+	// has already been read in full.
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	snapshot := *s
+	snapshot.db = tx
+	return snapshot.listThreadWindow(ctx, orgID, threadID, opts)
 }
 
 func (s *SessionTranscriptStore) listThreadWindow(

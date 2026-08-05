@@ -7,7 +7,7 @@ import { ActivityCapsule } from "@/components/activity-capsule";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { ChatTimeline, DaySeparator, type ChatTimelineProps } from "@/components/chat-timeline";
-import { buildActivityTimelineNodes } from "@/lib/activity-timeline";
+import { activityToolCount, buildActivityTimelineNodes } from "@/lib/activity-timeline";
 import { timelineEntryPresentationAt } from "@/lib/timeline";
 import type { SessionActivityDetail, SessionTranscriptTurn } from "@/lib/types";
 import { recordSessionActivityEvent } from "@/lib/session-activity-events";
@@ -383,11 +383,7 @@ export function SessionActivityTimeline({
                   reason: activity.inferredHistorical ? undefined : activity.boundary_reason,
                   trigger: "manual",
                   viewport_class: typeof window !== "undefined" && window.innerWidth < 768 ? "mobile" : "desktop",
-                  tool_count_bucket: toolCountBucket(activity.inferredHistorical
-                    ? activity.toolCallCount
-                    : activity.status === "running"
-                      ? Math.max(activity.tool_call_count, activity.provisionalToolCallCount ?? 0)
-                      : activity.tool_call_count),
+                  tool_count_bucket: toolCountBucket(activityToolCount(activity)),
                   duration_bucket: activityDurationBucket(activity),
                 });
               }}

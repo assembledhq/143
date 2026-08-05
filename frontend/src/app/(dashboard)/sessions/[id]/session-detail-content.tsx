@@ -2668,11 +2668,15 @@ function ChatPanel({
   const expectingMoreContent = activeThread
     ? workingStatusesSet.has(activeThread.status)
     : activeSet.has(session.status);
+  // The capsule flag decides how an entry renders, so an empty transcript waits
+  // for the config read rather than flashing the un-capsuled shape first. It
+  // only ever extends an existing skeleton: transcript content we already hold
+  // must stay on screen even if /application-config is slow or never settles.
+  const awaitingActivityCapsulesConfig = !!activeThreadId && activityCapsulesConfigQuery.isPending;
   const showLoadingSkeleton =
-    (!!activeThreadId && activityCapsulesConfigQuery.isPending && activityCapsulesConfigQuery.data === undefined) ||
-    (timelineEntries.length === 0 &&
-      session.status !== "pending" &&
-      (!hasLoadedTimelineInputs || expectingMoreContent));
+    timelineEntries.length === 0 &&
+    session.status !== "pending" &&
+    (!hasLoadedTimelineInputs || expectingMoreContent || awaitingActivityCapsulesConfig);
   const hasThreadFailure = hasVisibleThreadFailure(activeThread);
   const showFreshThreadShell =
     !!activeThread &&

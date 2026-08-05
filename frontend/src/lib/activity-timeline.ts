@@ -9,14 +9,29 @@ export interface TimelineActivityPhase extends SessionTranscriptPhase {
   latestActivityLabel?: string;
 }
 
+// Single source for the tool count the capsule label shows and analytics
+// buckets, so the reported number can never drift from the rendered one. While
+// a phase runs the server counter can lag the entries already streamed in, so
+// the locally derived count wins; once the phase closes the server is
+// authoritative and the count settles to it.
+export function activityToolCount(activity: TimelineActivityPhase | InferredHistoricalActivity): number {
+  if (activity.inferredHistorical) return activity.toolCallCount;
+  if (activity.status === "running") return Math.max(activity.tool_call_count, activity.provisionalToolCallCount ?? 0);
+  return activity.tool_call_count;
+}
+
 export function sanitizeActivityLabel(value: string, maxLength = 160): string {
   let sanitized = value
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
     .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@")
     .replace(/([?&](?:access_token|api_key|auth|authorization|credential|key|password|secret|sig|signature|token|x-amz-credential|x-amz-signature)=)[^&#\s]*/gi, "$1[redacted]")
-    .replace(/\b(?:Bearer\s+)?(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|glpat-[A-Za-z0-9_-]{12,}|xox[baprs]-[A-Za-z0-9-]{12,})\b/gi, "[redacted]")
-    .replace(/\bAKIA[A-Z0-9]{16}\b/g, "[redacted]")
+    .replace(/\b(?:Bearer\s+)?(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|glpat-[A-Za-z0-9_-]{12,}|xox[baprse]-[A-Za-z0-9-]{12,}|xapp-[A-Za-z0-9-]{12,})\b/gi, "[redacted]")
+    // Long-lived (AKIA) and STS/temporary (ASIA) AWS access key IDs. Bare AWS
+    // secret keys are deliberately not matched: they are unprefixed 40-char
+    // base64 and a pattern loose enough to catch them would redact ordinary
+    // hashes and paths. They are covered only in `NAME=value` form below.
+    .replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, "[redacted]")
     .replace(/\b((?:[A-Z][A-Z0-9_]*_)?(?:API_?KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY))\s*[:=]\s*[^\s]+/gi, "$1=[redacted]")
     .replace(/\s+/g, " ")
     .trim();
@@ -24,13 +39,17 @@ export function sanitizeActivityLabel(value: string, maxLength = 160): string {
   return sanitized;
 }
 
+// Logs the backend already classified as not-for-display stay in the entry list
+// for the audit trail, but must not be promoted into capsule status text:
+// unmatched tool results would surface raw result payloads, and `hidden` logs
+// are benign runtime diagnostics the transcript deliberately suppresses.
+function isLabelableLog(log: TimelineEntry & { kind: "log" }): boolean {
+  return log.data.metadata?.type !== "tool_result" && log.data.metadata?.visibility !== "hidden";
+}
+
 function activityLabel(entry: TimelineEntry): string | undefined {
   if (entry.kind === "tool_group") return sanitizeActivityLabel(entry.toolUse.message);
-  // An unmatched tool result remains a plain log so the audit trail is not
-  // dropped, but raw result content must never become capsule status text.
-  if (entry.kind === "log" && entry.data.metadata?.type !== "tool_result") {
-    return sanitizeActivityLabel(entry.data.message);
-  }
+  if (entry.kind === "log" && isLabelableLog(entry)) return sanitizeActivityLabel(entry.data.message);
   return undefined;
 }
 
