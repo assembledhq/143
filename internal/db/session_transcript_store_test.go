@@ -431,8 +431,10 @@ func TestSessionTranscriptStore_ListThreadWindowSkipsSnapshotWithoutBeginTx(t *t
 
 	store := NewSessionTranscriptStore(queryOnlyDBTX{mock})
 	_, err = store.ListThreadWindow(context.Background(), orgID, threadID, SessionTranscriptWindowOptions{})
+	// An unexpected BeginTx would surface here as a mock error instead of the
+	// query error, so this also proves no transaction was started.
 	require.ErrorContains(t, err, "turn scan failed", "the direct path should still run the window queries")
-	require.NoError(t, mock.ExpectationsWereMet(), "no transaction should have been started")
+	require.NoError(t, mock.ExpectationsWereMet(), "the window query should have been issued")
 }
 
 // queryOnlyDBTX hides BeginTx so the snapshot type assertion fails, mirroring a

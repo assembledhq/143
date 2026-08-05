@@ -610,6 +610,70 @@ describe('SessionDetailPage transcript and scroll', () => {
     expect(screen.queryByTestId('session-timeline-skeleton')).not.toBeInTheDocument();
   });
 
+  it('holds the skeleton on an empty transcript until the capsule config resolves', async () => {
+    // The other half of the contract: with nothing to show yet, the skeleton
+    // waits for the flag instead of rendering the un-capsuled shape and then
+    // swapping it. Once the config lands the skeleton must clear.
+    const sessionId = 'session-config-gates-empty';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Main',
+        status: 'idle',
+        current_turn: 0,
+        created_at: '2026-05-04T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+    let releaseConfig: (() => void) | undefined;
+    const configReleased = new Promise<void>((resolve) => {
+      releaseConfig = resolve;
+    });
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'idle',
+            sandbox_state: 'ready',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(makeTranscriptWindow([], []));
+      }),
+      http.get('/api/v1/application-config', async () => {
+        await configReleased;
+        return HttpResponse.json({ data: { session_activity_capsules_enabled: true } });
+      }),
+    );
+
+    const queryClient = createTestQueryClient();
+    renderSessionDetailWithQueryClient(sessionId, queryClient);
+
+    // Barrier: every session-scoped query (including the transcript) has
+    // settled, so `hasLoadedTimelineInputs` is true and the thread is idle.
+    // The pending /application-config read is the only thing left that can
+    // still be holding the skeleton up.
+    await waitFor(() => {
+      expect(queryClient.isFetching({ queryKey: ['session', sessionId] })).toBe(0);
+    });
+    expect(screen.getByTestId('session-timeline-skeleton')).toBeInTheDocument();
+    expect(screen.queryByText('No context in this tab yet.')).not.toBeInTheDocument();
+
+    releaseConfig?.();
+
+    expect(await screen.findByText('No context in this tab yet.')).toBeInTheDocument();
+    expect(screen.queryByTestId('session-timeline-skeleton')).not.toBeInTheDocument();
+  });
+
   it('restores the saved scroll position when reopening an existing session', async () => {
     const idleSession: Session = {
       ...mockSessions[0],

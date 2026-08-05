@@ -183,4 +183,37 @@ describe("SessionActivityTimeline", () => {
     expect(screen.getByRole("button", { name: /Activity.*1 tool call/ })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("Ran `npm test`")).toBeVisible();
   });
+
+  it("emits one day separator for a steering message applied after midnight", () => {
+    // Regression: this component groups nodes by presentation time while the
+    // nested ChatTimeline grouped by created_at, so a message authored before
+    // midnight and applied after produced two stacked separators — the applied
+    // day from here, then the authored day from the timeline below it.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-03T12:00:00Z"));
+
+    const scrollRef = { current: document.createElement("div") };
+    const appliedMessage: SessionMessage = {
+      id: 42, session_id: "session-1", org_id: "org-1", thread_id: "thread-1",
+      turn_number: 1, role: "user", content: "Steering applied after midnight",
+      created_at: "2026-08-02T23:59:00Z", applied_at: "2026-08-03T00:00:02Z",
+    };
+    render(
+      <SessionActivityTimeline
+        entries={[{ kind: "message", data: appliedMessage, transcriptEntryId: "msg_42" }]}
+        isRunning={false}
+        turns={[{ turn_number: 1, started_at: "2026-08-03T00:00:00Z", entries: [], phases: [] }]}
+        detailPreference="compact"
+        threadID="thread-1"
+        scrollContainerRef={scrollRef}
+        userScrollEpoch={0}
+        atLiveEdge
+      />,
+    );
+
+    expect(screen.getAllByText("Today")).toHaveLength(1);
+    expect(screen.queryByText("Yesterday")).not.toBeInTheDocument();
+
+    vi.useRealTimers();
+  });
 });

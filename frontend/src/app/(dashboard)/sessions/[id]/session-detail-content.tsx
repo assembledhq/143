@@ -2146,7 +2146,8 @@ function transcriptEntryIDSelector(entryID: string): string {
 // flattenTranscriptPages returns the turns of the infinite query (newest page
 // first → older pages) followed by manually-loaded newer pages, all in a single
 // flat list. Order does not matter for rendering: buildTimeline +
-// sortTimelineEntries re-sort everything by created_at.
+// sortTimelineEntries re-sort everything by presentation time (applied_at for
+// user instructions, created_at otherwise).
 function flattenTranscriptPages(
   pages: SessionTranscriptWindowResponse[] | undefined,
   newerPages: SessionTranscriptWindowResponse[],

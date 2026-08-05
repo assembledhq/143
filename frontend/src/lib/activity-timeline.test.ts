@@ -215,6 +215,25 @@ describe("sanitizeActivityLabel", () => {
     );
   });
 
+  it("matches sensitive query parameter names on segment boundaries", () => {
+    expect(sanitizeActivityLabel("GET /v1?apikey=abc&token_secret=def&x-amz-credential=ghi")).toBe(
+      "GET /v1?apikey=[redacted]&token_secret=[redacted]&x-amz-credential=[redacted]",
+    );
+    // Words that merely contain a sensitive substring must survive intact,
+    // otherwise ordinary labels turn into noise.
+    expect(sanitizeActivityLabel("GET /zoo?monkey=1&keyboard=us&author=ada&sslmode=require")).toBe(
+      "GET /zoo?monkey=1&keyboard=us&author=ada&sslmode=require",
+    );
+  });
+
+  it("keeps a redaction inside its own query parameter", () => {
+    // Regression: the NAME=value rule used to run to the next whitespace, so a
+    // secret mid-query erased every parameter after it.
+    expect(sanitizeActivityLabel("GET /v1?SECRET=abc&page=2&sort=asc")).toBe(
+      "GET /v1?SECRET=[redacted]&page=2&sort=asc",
+    );
+  });
+
   it("redacts temporary AWS access keys and app-level Slack tokens", () => {
     expect(sanitizeActivityLabel("assume ASIA1234567890ABCDEF then post xapp-1-A01-2345678901-abcdef")).toBe(
       "assume [redacted] then post [redacted]",

@@ -1,4 +1,4 @@
-import { timelineEntryPresentationAt, type TimelineEntry } from "./timeline";
+import { isHiddenLog, isToolResultMetadata, timelineEntryPresentationAt, type TimelineEntry } from "./timeline";
 import type { SessionTranscriptPhase, SessionTranscriptTurn } from "./types";
 
 export interface TimelineActivityPhase extends SessionTranscriptPhase {
@@ -25,14 +25,23 @@ export function sanitizeActivityLabel(value: string, maxLength = 160): string {
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
     .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@")
-    .replace(/([?&](?:access_token|api_key|auth|authorization|credential|key|password|secret|sig|signature|token|x-amz-credential|x-amz-signature)=)[^&#\s]*/gi, "$1[redacted]")
+    // A sensitive word anywhere in a query parameter name, but only on `_`/`-`
+    // segment boundaries: `apikey`, `token_secret` and `x-amz-signature` all
+    // redact, while `monkey`, `keyboard`, `author` and `sslmode` do not.
+    .replace(
+      /([?&](?:[a-z0-9]+[_-])*(?:access_token|api[_-]?key|auth|authorization|credential|key|passwd|password|secret|sig|signature|token)(?:[_-][a-z0-9]+)*=)[^&#\s]*/gi,
+      "$1[redacted]",
+    )
     .replace(/\b(?:Bearer\s+)?(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|glpat-[A-Za-z0-9_-]{12,}|xox[baprse]-[A-Za-z0-9-]{12,}|xapp-[A-Za-z0-9-]{12,})\b/gi, "[redacted]")
     // Long-lived (AKIA) and STS/temporary (ASIA) AWS access key IDs. Bare AWS
     // secret keys are deliberately not matched: they are unprefixed 40-char
     // base64 and a pattern loose enough to catch them would redact ordinary
     // hashes and paths. They are covered only in `NAME=value` form below.
     .replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, "[redacted]")
-    .replace(/\b((?:[A-Z][A-Z0-9_]*_)?(?:API_?KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY))\s*[:=]\s*[^\s]+/gi, "$1=[redacted]")
+    // The value stops at `&`/`#` as well as whitespace: inside a query string a
+    // greedy run would swallow every following parameter into one redaction and
+    // erase the rest of the label.
+    .replace(/\b((?:[A-Z][A-Z0-9_]*_)?(?:API_?KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY))\s*[:=]\s*[^\s&#]+/gi, "$1=[redacted]")
     .replace(/\s+/g, " ")
     .trim();
   if (sanitized.length > maxLength) sanitized = `${sanitized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
@@ -41,10 +50,12 @@ export function sanitizeActivityLabel(value: string, maxLength = 160): string {
 
 // Logs the backend already classified as not-for-display stay in the entry list
 // for the audit trail, but must not be promoted into capsule status text:
-// unmatched tool results would surface raw result payloads, and `hidden` logs
-// are benign runtime diagnostics the transcript deliberately suppresses.
-function isLabelableLog(log: TimelineEntry & { kind: "log" }): boolean {
-  return log.data.metadata?.type !== "tool_result" && log.data.metadata?.visibility !== "hidden";
+// unmatched tool results would surface raw result payloads, and hidden logs are
+// benign runtime diagnostics the transcript deliberately suppresses. Both
+// predicates come from timeline.ts so this cannot drift from what the
+// transcript itself hides.
+function isLabelableLog(entry: Extract<TimelineEntry, { kind: "log" }>): boolean {
+  return !isToolResultMetadata(entry.data.metadata) && !isHiddenLog(entry.data);
 }
 
 function activityLabel(entry: TimelineEntry): string | undefined {
@@ -214,21 +225,19 @@ export function buildActivityTimelineNodes(entries: TimelineEntry[], turns: Sess
   flushHistorical();
 
   for (const phase of phases.values()) {
+    // A running phase's server counter can lag the entries already streamed in,
+    // so derive the count locally. Closed phases keep the server's total.
     if (phase.status === "running") {
       phase.provisionalToolCallCount = phase.entries.reduce(
         (count, entry) => count + (entry.kind === "tool_group" ? 1 : 0),
         0,
       );
     }
-  }
-
-  for (const phase of phases.values()) {
-    if (!emittedPhases.has(phase.id)) {
-      const node: ActivityTimelineNode = { kind: "phase", phase };
-      const insertAt = nodes.findIndex((candidate) => nodeTime(candidate) > nodeTime(node));
-      if (insertAt < 0) nodes.push(node);
-      else nodes.splice(insertAt, 0, node);
-    }
+    if (emittedPhases.has(phase.id)) continue;
+    const node: ActivityTimelineNode = { kind: "phase", phase };
+    const insertAt = nodes.findIndex((candidate) => nodeTime(candidate) > nodeTime(node));
+    if (insertAt < 0) nodes.push(node);
+    else nodes.splice(insertAt, 0, node);
   }
   const decorated: ActivityTimelineNode[] = [];
   for (const node of nodes) {
