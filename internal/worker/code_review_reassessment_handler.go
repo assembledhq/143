@@ -47,6 +47,7 @@ func newStartCodeReviewReassessmentHandler(stores *Stores, services *Services, l
 		if err != nil {
 			return fmt.Errorf("load current pull request for code review reassessment: %w", err)
 		}
+		queuedHeadSHA := strings.TrimSpace(input.HeadSHA)
 		snapshot, err := services.PR.GetCodeReviewPullRequestSnapshot(ctx, input.OrgID, input.RepositoryID, pr.GitHubPRNumber)
 		if err != nil {
 			wrapped := fmt.Errorf("load latest pull request for code review reassessment: %w", err)
@@ -62,6 +63,28 @@ func newStartCodeReviewReassessmentHandler(stores *Stores, services *Services, l
 		input.FromFork = snapshot.FromFork
 		if input.HeadSHA == "" {
 			return fmt.Errorf("latest pull request head is missing for code review reassessment")
+		}
+		if !input.ExplicitRequest && queuedHeadSHA != input.HeadSHA {
+			input.ChangeKey, err = codereviewsvc.MaterialChangeKey(input.HeadSHA)
+			if err != nil {
+				return fmt.Errorf("build latest code review material change key: %w", err)
+			}
+			queued, queueErr := services.CodeReviewLifecycle.QueueReviewChanged(ctx, input)
+			if queueErr != nil {
+				return fmt.Errorf("debounce newer code review head: %w", queueErr)
+			}
+			logEvent := logger.Info().
+				Str("org_id", input.OrgID.String()).
+				Str("pull_request_id", input.PullRequestID.String()).
+				Str("queued_head_sha", queuedHeadSHA).
+				Str("latest_head_sha", input.HeadSHA).
+				Bool("reused", queued.Reused).
+				Str("ignored_reason", queued.IgnoredReason)
+			if queued.JobID != uuid.Nil {
+				logEvent = logEvent.Str("job_id", queued.JobID.String())
+			}
+			logEvent.Msg("coalesced stale code review starter into latest debounced head")
+			return nil
 		}
 
 		result, err := services.CodeReviewLifecycle.HandleReviewChanged(ctx, input)

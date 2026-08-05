@@ -183,4 +183,80 @@ describe("SessionActivityTimeline", () => {
     expect(screen.getByRole("button", { name: /Activity.*1 tool call/ })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("Ran `npm test`")).toBeVisible();
   });
+
+  it("renders queued deliveries and runtime boundaries without full-width card treatments", () => {
+    const interruptedPhaseID = "10000000-0000-0000-0000-000000000010";
+    const recoveryPhaseID = "10000000-0000-0000-0000-000000000011";
+    const interruptedTool = {
+      ...toolUse,
+      id: 10,
+      activity_phase_id: interruptedPhaseID,
+      created_at: "2026-08-03T00:00:01Z",
+    };
+    const recoveryTool = {
+      ...toolUse,
+      id: 11,
+      activity_phase_id: recoveryPhaseID,
+      created_at: "2026-08-03T00:00:08Z",
+    };
+    const queuedMessage: SessionMessage = {
+      ...finalMessage,
+      id: 12,
+      role: "user",
+      content: "Keep the runtime state intact.",
+      created_at: "2026-08-03T00:00:07Z",
+      activity_phase_id: undefined,
+      inbox_sequence: 1,
+      delivery_state: "pending",
+      accepted_at: "2026-08-03T00:00:07Z",
+    };
+    const scrollRef = { current: document.createElement("div") };
+
+    render(
+      <SessionActivityTimeline
+        entries={[
+          { kind: "tool_group", toolUse: interruptedTool, transcriptEntryId: "tuse_interrupted" },
+          { kind: "message", data: queuedMessage, transcriptEntryId: "msg_queued" },
+          { kind: "tool_group", toolUse: recoveryTool, transcriptEntryId: "tuse_recovery" },
+        ]}
+        isRunning
+        turns={[{
+          turn_number: 1,
+          started_at: "2026-08-03T00:00:00Z",
+          entries: [],
+          phases: [{
+            id: interruptedPhaseID,
+            anchor_id: `aph_${interruptedPhaseID}`,
+            phase_number: 1,
+            status: "interrupted",
+            trigger_kind: "initial",
+            boundary_reason: "runtime_lost",
+            started_at: "2026-08-03T00:00:00Z",
+            completed_at: "2026-08-03T00:00:06Z",
+            tool_call_count: 1,
+          }, {
+            id: recoveryPhaseID,
+            anchor_id: `aph_${recoveryPhaseID}`,
+            phase_number: 2,
+            status: "running",
+            trigger_kind: "recovery",
+            started_at: "2026-08-03T00:00:08Z",
+            tool_call_count: 1,
+          }],
+        }]}
+        detailPreference="compact"
+        threadID="thread-1"
+        scrollContainerRef={scrollRef}
+        userScrollEpoch={0}
+        atLiveEdge
+      />,
+    );
+
+    const interruption = screen.getByText("Execution paused because the runtime was lost.").closest("[role='status']");
+    const recovery = screen.getByText("Runtime recovered and execution resumed.").closest("[role='status']");
+    const delivery = screen.getByText("Queued").closest("[data-activity-delivery]");
+    expect(interruption).not.toHaveClass("rounded-lg", "border-info/30", "bg-info/10");
+    expect(recovery).not.toHaveClass("rounded-lg", "border-info/30", "bg-info/10");
+    expect(delivery).not.toHaveClass("rounded-lg", "border", "bg-card");
+  });
 });
