@@ -3484,6 +3484,53 @@ export function PullRequestList({
   );
 }
 
+type OverviewRowSlot = "overview-suggestion" | "overview-action" | "overview-review-status";
+
+// Shared chrome for the quiet, card-free Overview rows, so a suggestion, an
+// action and a status row cannot drift apart on spacing or typography. `slot`
+// names the row and its derived `-icon`/`-control` query hooks; it is applied
+// after the forwarded props, along with `className`, so callers can pass role
+// and aria attributes but cannot rename or restyle the row.
+function OverviewRow({
+  icon,
+  title,
+  description,
+  action,
+  slot,
+  ...regionProps
+}: {
+  icon: ReactNode;
+  title: string;
+  description: string;
+  action?: ReactNode;
+  slot: OverviewRowSlot;
+} & Omit<ComponentProps<"section">, "title" | "children" | "className">) {
+  return (
+    <section
+      {...regionProps}
+      data-slot={slot}
+      className="flex items-center gap-2.5 px-1 py-1.5"
+    >
+      <div
+        data-slot={`${slot}-icon`}
+        aria-hidden="true"
+        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"
+      >
+        {icon}
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-xs font-medium text-foreground">{title}</p>
+        <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
+      </div>
+      {action != null ? (
+        <div data-slot={`${slot}-control`} className="shrink-0">
+          {action}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 export function ChangesetSplitPrompt({
   additions,
   filesChanged,
@@ -3503,82 +3550,24 @@ export function ChangesetSplitPrompt({
     : ` · ${filesChanged.toLocaleString()} ${filesChanged === 1 ? "file" : "files"}`;
 
   return (
-    <div
+    <OverviewRow
+      slot="overview-suggestion"
       role="region"
       aria-label="Pull request size suggestion"
-      data-slot="overview-suggestion"
-      className="flex items-center gap-2.5 px-1 py-1.5"
-    >
-      <div
-        data-slot="overview-suggestion-icon"
-        aria-hidden="true"
-        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"
-      >
-        <GitBranch className="h-4 w-4" />
-      </div>
-      <div className="min-w-0 flex-1">
-        <p className="text-xs font-medium text-foreground">
-          Large change · {additionCount.toLocaleString()} additions{fileLabel}
-        </p>
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          Split this diff into smaller, reviewable pull requests.
-        </p>
-      </div>
-      <Button
-        size="xs"
-        variant="ghost"
-        className="shrink-0"
-        disabled={requestSplitPending || !onRequestSplit}
-        onClick={onRequestSplit}
-      >
-        Split into PRs
-      </Button>
-    </div>
-  );
-}
-
-// Shared row chrome for the quiet, card-free Overview prompts. `slot` names the
-// row so callers can keep distinct test/query hooks; anything else (role,
-// aria-live, …) is forwarded so a status row and an action row cannot drift
-// apart on spacing or typography.
-function OverviewAction({
-  icon,
-  title,
-  description,
-  action,
-  slot = "overview-action",
-  ...regionProps
-}: {
-  icon: ReactNode;
-  title: string;
-  description: string;
-  action?: ReactNode;
-  slot?: string;
-} & Omit<ComponentProps<"section">, "title" | "children" | "className">) {
-  return (
-    <section
-      aria-label={title}
-      {...regionProps}
-      data-slot={slot}
-      className="flex items-center gap-2.5 px-1 py-1.5"
-    >
-      <div
-        data-slot={`${slot}-icon`}
-        aria-hidden="true"
-        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"
-      >
-        {icon}
-      </div>
-      <div className="min-w-0 flex-1">
-        <p className="text-xs font-medium text-foreground">{title}</p>
-        <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
-      </div>
-      {action ? (
-        <div data-slot={`${slot}-control`} className="shrink-0">
-          {action}
-        </div>
-      ) : null}
-    </section>
+      icon={<GitBranch className="h-4 w-4" />}
+      title={`Large change · ${additionCount.toLocaleString()} additions${fileLabel}`}
+      description="Split this diff into smaller, reviewable pull requests."
+      action={(
+        <Button
+          size="xs"
+          variant="ghost"
+          disabled={requestSplitPending || !onRequestSplit}
+          onClick={onRequestSplit}
+        >
+          Split into PRs
+        </Button>
+      )}
+    />
   );
 }
 
@@ -6749,7 +6738,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           )}
           {selectedIsPrimary && canManageSession && canUseNativeReviewLoop && !hasPR && !selectedPublicationOwnsActions && hasSessionChanges ? (
             reviewLoopRunning ? (
-              <OverviewAction
+              <OverviewRow
                 slot="overview-review-status"
                 role="status"
                 aria-live="polite"
@@ -6760,7 +6749,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                 description="The review loop is checking the changes and applying fixes."
               />
             ) : (
-              <OverviewAction
+              <OverviewRow
+                slot="overview-action"
                 icon={<ScanSearch className="h-4 w-4" />}
                 title="Review before creating a PR"
                 description="Check the current diff and apply any fixes before publishing."

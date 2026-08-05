@@ -471,6 +471,9 @@ describe('SessionDetailPage overview and review loop', () => {
     // of its own, so keep the structure asserted instead of the spacing utilities.
     expect(reviewSuggestion).toContainElement(reviewAction);
     expect(reviewSuggestion?.closest('[data-slot="card"]')).toBeNull();
+    // The row carries no accessible name of its own, so it stays a plain group
+    // rather than adding a landmark that just repeats the visible title.
+    expect(screen.queryByRole('region', { name: 'Review before creating a PR' })).not.toBeInTheDocument();
     expect(reviewSuggestion?.querySelector('[data-slot="overview-action-icon"] .lucide-scan-search')).toBeInTheDocument();
     expect(splitSuggestion?.querySelector('[data-slot="overview-suggestion-icon"] .lucide-git-branch')).toBeInTheDocument();
     expect(splitTitle.closest('[data-slot="card"]')).toBeNull();
@@ -577,9 +580,11 @@ describe('SessionDetailPage overview and review loop', () => {
 
     expect(statusRow).not.toBeNull();
     expect(statusRow).toHaveAttribute('role', 'status');
+    expect(statusRow).toHaveAttribute('aria-live', 'polite');
+    expect(statusRow).toHaveAttribute('aria-atomic', 'true');
     expect(statusRow?.closest('[data-slot="card"]')).toBeNull();
     expect(statusRow?.querySelector('[data-slot="overview-review-status-control"]')).toBeNull();
-    expect(statusRow?.querySelector('.lucide-loader-circle')).toBeInTheDocument();
+    expect(statusRow?.querySelector('[data-slot="overview-review-status-icon"] .lucide-loader-circle')).toBeInTheDocument();
     expect(within(statusRow as HTMLElement).getByText('The review loop is checking the changes and applying fixes.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
   });
