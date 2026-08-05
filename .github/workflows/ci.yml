@@ -40,6 +40,7 @@ jobs:
       docker: ${{ steps.filter.outputs.docker }}
       deploy: ${{ steps.filter.outputs.deploy }}
       ci: ${{ steps.filter.outputs.ci }}
+      session_transcript_e2e: ${{ steps.filter.outputs.session_transcript_e2e }}
     steps:
       - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v4
@@ -73,6 +74,14 @@ jobs:
             deploy:
               - 'deploy/scripts/**'
             ci:
+              - '.github/workflows/**'
+            # Keep this deliberately broad while activity capsules own the
+            # transcript renderer. One central classifier prevents required
+            # checks from silently disappearing on backend contract changes.
+            session_transcript_e2e:
+              - 'frontend/**'
+              - 'internal/**'
+              - 'migrations/**'
               - '.github/workflows/**'
 
   backend-lint:
@@ -293,6 +302,46 @@ jobs:
           name: frontend-coverage
           path: frontend/coverage
 
+  session-transcript-e2e:
+    name: Session Transcript E2E
+    needs: changes
+    # required-checks treats a skipped job as passing, so a plain job-level
+    # condition is enough — matching every other conditional job here.
+    if: needs.changes.outputs.session_transcript_e2e == 'true' || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Install browser engines
+        run: |
+          if [[ "${{ github.event_name }}" == "schedule" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            npx playwright install --with-deps chromium webkit
+          else
+            npx playwright install --with-deps chromium
+          fi
+      - name: Run focused transcript browser suite
+        env:
+          SESSION_ACTIVITY_BROWSER_MATRIX: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '1' || '0' }}
+        run: npm run test:session-transcript-e2e
+      - name: Upload browser diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: session-transcript-e2e-${{ github.run_id }}
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          if-no-files-found: ignore
+
   migration-check:
     name: Migration Safety
     needs: changes
@@ -403,7 +452,7 @@ jobs:
 
   required-checks:
     name: All Checks Pass
-    needs: [changes, backend-lint, backend-test, frontend-lint, frontend-test, migration-check, docker-build, security, deploy-scripts-test]
+    needs: [changes, backend-lint, backend-test, frontend-lint, frontend-test, session-transcript-e2e, migration-check, docker-build, security, deploy-scripts-test]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -413,6 +462,7 @@ jobs:
           echo "backend-test: ${{ needs.backend-test.result }}"
           echo "frontend-lint: ${{ needs.frontend-lint.result }}"
           echo "frontend-test: ${{ needs.frontend-test.result }}"
+          echo "session-transcript-e2e: ${{ needs.session-transcript-e2e.result }}"
           echo "migration-check: ${{ needs.migration-check.result }}"
           echo "docker-build: ${{ needs.docker-build.result }}"
           echo "security: ${{ needs.security.result }}"
@@ -423,6 +473,7 @@ jobs:
             "${{ needs.backend-test.result }}" \
             "${{ needs.frontend-lint.result }}" \
             "${{ needs.frontend-test.result }}" \
+            "${{ needs.session-transcript-e2e.result }}" \
             "${{ needs.migration-check.result }}" \
             "${{ needs.docker-build.result }}" \
             "${{ needs.security.result }}" \

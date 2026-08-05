@@ -20,6 +20,11 @@ func TestSessionStreamEventType_Validate(t *testing.T) {
 		{name: "thread inbox cleared", value: SessionStreamEventThreadInboxCleared},
 		{name: "thread runtime updated", value: SessionStreamEventThreadRuntimeUpdated},
 		{name: "workspace generation changed", value: SessionStreamEventWorkspaceGenerationChanged},
+		{name: "activity phase started", value: SessionStreamEventActivityPhaseStarted},
+		{name: "activity phase terminal", value: SessionStreamEventActivityPhaseTerminal},
+		{name: "inbox delivery acknowledged", value: SessionStreamEventInboxDeliveryAcknowledged},
+		{name: "inbox delivery started", value: SessionStreamEventInboxDeliveryStarted},
+		{name: "inbox delivery abandoned", value: SessionStreamEventInboxDeliveryAbandoned},
 		{name: "invalid", value: SessionStreamEventType("bad"), expectErr: true},
 	}
 

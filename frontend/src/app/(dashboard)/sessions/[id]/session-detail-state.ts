@@ -29,6 +29,27 @@ export type SessionDetailLoadState =
   // not be able to disagree.
   | { kind: "error"; session: SessionDetail | null; retrying: boolean };
 
+export interface ActivityLifecycleInvalidationEvent {
+  id: string;
+  thread_id: string;
+}
+
+export function shouldInvalidateForActivityLifecycleEvent(
+  seenEventIDs: Set<string>,
+  event: ActivityLifecycleInvalidationEvent,
+  activeThreadID?: string,
+  maxRememberedEventIDs = 500,
+): boolean {
+  if (seenEventIDs.has(event.id)) return false;
+  seenEventIDs.add(event.id);
+  while (seenEventIDs.size > maxRememberedEventIDs) {
+    const oldest = seenEventIDs.values().next().value;
+    if (!oldest) break;
+    seenEventIDs.delete(oldest);
+  }
+  return !!activeThreadID && event.thread_id === activeThreadID;
+}
+
 export function deriveSessionDetailLoadState({
   session,
   isLoading,

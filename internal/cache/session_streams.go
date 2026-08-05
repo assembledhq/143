@@ -926,9 +926,12 @@ func decodeEventEntry(entry redis.XMessage) (models.SessionStreamEvent, error) {
 		text = fmt.Sprint(v)
 	}
 	var envelope struct {
+		ID        uuid.UUID                     `json:"id"`
 		Type      models.SessionStreamEventType `json:"type"`
 		SessionID uuid.UUID                     `json:"session_id"`
 		OrgID     uuid.UUID                     `json:"org_id"`
+		ThreadID  uuid.UUID                     `json:"thread_id"`
+		EmittedAt time.Time                     `json:"emitted_at"`
 		Data      json.RawMessage               `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(text), &envelope); err != nil {
@@ -938,9 +941,12 @@ func decodeEventEntry(entry redis.XMessage) (models.SessionStreamEvent, error) {
 		return models.SessionStreamEvent{}, err
 	}
 	event := models.SessionStreamEvent{
+		ID:        envelope.ID,
 		Type:      envelope.Type,
 		SessionID: envelope.SessionID,
 		OrgID:     envelope.OrgID,
+		ThreadID:  envelope.ThreadID,
+		EmittedAt: envelope.EmittedAt,
 	}
 	switch envelope.Type {
 	case models.SessionStreamEventThreadInboxQueued, models.SessionStreamEventThreadInboxCleared:
@@ -957,6 +963,18 @@ func decodeEventEntry(entry redis.XMessage) (models.SessionStreamEvent, error) {
 		event.Data = payload
 	case models.SessionStreamEventWorkspaceGenerationChanged:
 		var payload models.SessionWorkspaceGenerationChangedEvent
+		if err := json.Unmarshal(envelope.Data, &payload); err != nil {
+			return models.SessionStreamEvent{}, err
+		}
+		event.Data = payload
+	case models.SessionStreamEventActivityPhaseStarted, models.SessionStreamEventActivityPhaseTerminal:
+		var payload models.ActivityPhaseEvent
+		if err := json.Unmarshal(envelope.Data, &payload); err != nil {
+			return models.SessionStreamEvent{}, err
+		}
+		event.Data = payload
+	case models.SessionStreamEventInboxDeliveryAcknowledged, models.SessionStreamEventInboxDeliveryStarted, models.SessionStreamEventInboxDeliveryAbandoned:
+		var payload models.ThreadInboxDeliveryBatchEvent
 		if err := json.Unmarshal(envelope.Data, &payload); err != nil {
 			return models.SessionStreamEvent{}, err
 		}

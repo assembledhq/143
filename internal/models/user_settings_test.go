@@ -43,6 +43,11 @@ func TestParseUserSettings(t *testing.T) {
 			want: UserSettings{ManualSessionPlanesHidden: true},
 		},
 		{
+			name: "parses detailed session activity preference",
+			raw:  json.RawMessage(`{"session_activity_detail":"detailed"}`),
+			want: UserSettings{SessionActivityDetail: SessionActivityDetailDetailed},
+		},
+		{
 			name: "parses automatic pr follow through preferences",
 			raw:  json.RawMessage(`{"automatic_pr_follow_through":{"resolve_conflicts_when_idle":"on","fix_tests_when_idle":"off","create_pr_when_agent_ready":"off","review_before_pr":"on"}}`),
 			want: UserSettings{
@@ -84,6 +89,11 @@ func TestParseUserSettings(t *testing.T) {
 			raw:     json.RawMessage(`{"automatic_pr_follow_through":{"fix_tests_when_idle":"sometimes"}}`),
 			wantErr: true,
 		},
+		{
+			name:    "rejects invalid session activity preference",
+			raw:     json.RawMessage(`{"session_activity_detail":"verbose"}`),
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -97,6 +107,34 @@ func TestParseUserSettings(t *testing.T) {
 			}
 			require.NoError(t, err, "ParseUserSettings should accept valid settings")
 			require.Equal(t, tt.want, got, "ParseUserSettings should return the expected settings")
+		})
+	}
+}
+
+func TestSessionActivityDetailValidateAndEffective(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		value     SessionActivityDetail
+		effective SessionActivityDetail
+		wantErr   bool
+	}{
+		{name: "missing defaults compact", value: "", effective: SessionActivityDetailCompact},
+		{name: "compact", value: SessionActivityDetailCompact, effective: SessionActivityDetailCompact},
+		{name: "detailed", value: SessionActivityDetailDetailed, effective: SessionActivityDetailDetailed},
+		{name: "invalid", value: "verbose", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.value.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "validation should reject unknown activity detail values")
+				return
+			}
+			require.NoError(t, err, "validation should accept the supported activity detail value")
+			require.Equal(t, tt.effective, tt.value.Effective(), "effective detail should apply the compact default")
 		})
 	}
 }

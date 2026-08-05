@@ -100,6 +100,15 @@ export interface UserSettings {
   diff_viewer_full_screen?: boolean;
   manual_session_planes_hidden?: boolean;
   automatic_pr_follow_through?: AutomaticPRFollowThroughUserSettings;
+  session_activity_detail?: SessionActivityDetail;
+}
+
+export type SessionActivityDetail = "compact" | "detailed";
+
+export interface ApplicationConfig {
+  session_activity_capsules_enabled: boolean;
+  revision: string;
+  updated_at: string;
 }
 
 export type AutomaticFollowThroughPreference = "inherit" | "on" | "off";
@@ -128,6 +137,7 @@ export interface UserSettingsUpdateRequest {
   diff_viewer_full_screen?: boolean | null;
   manual_session_planes_hidden?: boolean | null;
   automatic_pr_follow_through?: Partial<Record<keyof AutomaticPRFollowThroughUserSettings, AutomaticFollowThroughPreference | null>> | null;
+  session_activity_detail?: SessionActivityDetail | null;
 }
 
 export type CodeReviewApprovalMode = "comment_only" | "approve_acceptable";
@@ -1734,6 +1744,7 @@ export interface SessionLog {
   message_bytes: number;
   message_chars: number;
   message_truncated: boolean;
+  activity_phase_id?: string;
 }
 
 export interface SessionLogDetail extends Omit<
@@ -1779,6 +1790,12 @@ export interface SessionMessage {
   token_usage?: Record<string, unknown>;
   source?: "agent_tool" | "system_auto_repair";
   created_at: string;
+  activity_phase_id?: string;
+  inbox_sequence?: number;
+  delivery_state?: ThreadInboxDeliveryState;
+  accepted_at?: string;
+  acknowledged_at?: string;
+  applied_at?: string;
 }
 
 export type SessionInputReferenceKind = "file" | "directory" | "app" | "plugin";
@@ -1885,6 +1902,7 @@ export interface HumanInputRequest {
   answered_at?: string | null;
   expires_at?: string | null;
   created_at: string;
+  activity_phase_id?: string;
 }
 
 export interface HumanInputAnswerBody {
@@ -1909,6 +1927,12 @@ export interface SessionTranscriptEntry {
   message_id?: number;
   log_id?: number;
   request_id?: string;
+  activity_phase_id?: string;
+  inbox_sequence?: number;
+  delivery_state?: ThreadInboxDeliveryState;
+  accepted_at?: string;
+  acknowledged_at?: string;
+  applied_at?: string;
   role?: "user" | "assistant";
   level?: string;
   content?: string;
@@ -1923,10 +1947,25 @@ export interface SessionTranscriptEntry {
   human_input?: HumanInputRequest;
 }
 
+export type SessionActivityPhaseStatus = "running" | "completed" | "failed" | "cancelled" | "interrupted";
+
+export interface SessionTranscriptPhase {
+  id: string;
+  anchor_id: string;
+  phase_number: number;
+  status: SessionActivityPhaseStatus;
+  boundary_reason?: string;
+  trigger_kind: "initial" | "inbox_batch" | "recovery";
+  started_at: string;
+  completed_at?: string;
+  tool_call_count: number;
+}
+
 export interface SessionTranscriptTurn {
   turn_number: number;
   started_at: string;
   ended_at?: string;
+  phases?: SessionTranscriptPhase[];
   entries: SessionTranscriptEntry[];
 }
 

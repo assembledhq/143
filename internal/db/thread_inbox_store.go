@@ -283,6 +283,47 @@ func (s *ThreadInboxStore) MarkAckedForSeedMessages(ctx context.Context, orgID, 
 	return tag.RowsAffected(), nil
 }
 
+// MarkDeliveredForSeedMessages records the provider-bound seed prompt as
+// delivered without acknowledging it. The lifecycle service performs the
+// acknowledgment and batch allocation atomically immediately afterward.
+func (s *ThreadInboxStore) MarkDeliveredForSeedMessages(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, messageIDs []int64) (int64, error) {
+	if len(messageIDs) == 0 {
+		return 0, nil
+	}
+	var sequenceEnd int64
+	err := s.db.QueryRow(ctx, `
+		WITH delivered AS (
+			UPDATE thread_inbox_entries
+			SET delivery_state = 'delivered',
+				delivered_at = COALESCE(delivered_at, now()),
+				updated_at = now()
+			WHERE org_id = $1 AND thread_id = $2 AND runtime_id = $3
+			  AND message_id = ANY($4) AND delivery_state = 'delivering'
+			RETURNING sequence_no
+		)
+		SELECT COALESCE(MAX(sequence_no), 0) FROM delivered`, orgID, threadID, runtimeID, messageIDs).Scan(&sequenceEnd)
+	if err != nil {
+		return 0, fmt.Errorf("mark seed thread inbox messages delivered: %w", err)
+	}
+	return sequenceEnd, nil
+}
+
+func (s *ThreadInboxStore) LastAcknowledgedSequence(ctx context.Context, orgID, threadID uuid.UUID) (int64, error) {
+	var sequence int64
+	err := s.db.QueryRow(ctx, `
+		SELECT COALESCE(
+			MIN(sequence_no) FILTER (WHERE delivery_state NOT IN ('acked', 'dead_letter')) - 1,
+			MAX(sequence_no),
+			0
+		)
+		FROM thread_inbox_entries
+		WHERE org_id = $1 AND thread_id = $2`, orgID, threadID).Scan(&sequence)
+	if err != nil {
+		return 0, fmt.Errorf("get last acknowledged thread inbox sequence: %w", err)
+	}
+	return sequence, nil
+}
+
 func (s *ThreadInboxStore) MarkDeliveringForMessages(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, ownerNodeID string, messageIDs []int64) (int64, error) {
 	if len(messageIDs) == 0 {
 		return 0, nil

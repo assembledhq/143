@@ -122,6 +122,11 @@ export const SSE_EVENT = {
   THREAD_RUNTIME_UPDATED: "thread.runtime.updated",
   /** Sent when a session workspace generation advances. */
   SESSION_WORKSPACE_GENERATION_CHANGED: "session.workspace.generation_changed",
+  ACTIVITY_PHASE_STARTED: "session_activity_phase.started",
+  ACTIVITY_PHASE_TERMINAL: "session_activity_phase.terminal",
+  INBOX_DELIVERY_ACKNOWLEDGED: "thread_inbox_delivery.acknowledged",
+  INBOX_DELIVERY_STARTED: "thread_inbox_delivery.started",
+  INBOX_DELIVERY_ABANDONED: "thread_inbox_delivery.abandoned",
 } as const;
 
 export type SSEEventType = (typeof SSE_EVENT)[keyof typeof SSE_EVENT];
@@ -141,6 +146,20 @@ export interface SSEEventPayloads {
   [SSE_EVENT.THREAD_INBOX_CLEARED]: ThreadInboxEvent;
   [SSE_EVENT.THREAD_RUNTIME_UPDATED]: ThreadRuntimeEvent;
   [SSE_EVENT.SESSION_WORKSPACE_GENERATION_CHANGED]: SessionWorkspaceGenerationChangedEvent;
+  [SSE_EVENT.ACTIVITY_PHASE_STARTED]: SessionLifecycleEvent;
+  [SSE_EVENT.ACTIVITY_PHASE_TERMINAL]: SessionLifecycleEvent;
+  [SSE_EVENT.INBOX_DELIVERY_ACKNOWLEDGED]: SessionLifecycleEvent;
+  [SSE_EVENT.INBOX_DELIVERY_STARTED]: SessionLifecycleEvent;
+  [SSE_EVENT.INBOX_DELIVERY_ABANDONED]: SessionLifecycleEvent;
+}
+
+export interface SessionLifecycleEvent {
+  id: string;
+  session_id: string;
+  org_id: string;
+  thread_id: string;
+  emitted_at: string;
+  data: unknown;
 }
 
 /** Type-safe event listener adder for session SSE streams. */

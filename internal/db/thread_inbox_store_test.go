@@ -324,6 +324,26 @@ func TestThreadInboxStore_MarkAckedForSeedMessages(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestThreadInboxStore_LastAcknowledgedSequenceUsesContiguousTerminalPrefix(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	threadID := uuid.New()
+	mock.ExpectQuery(`MIN\(sequence_no\) FILTER \(WHERE delivery_state NOT IN \('acked', 'dead_letter'\)\) - 1`).
+		WithArgs(orgID, threadID).
+		WillReturnRows(pgxmock.NewRows([]string{"sequence"}).AddRow(int64(4)))
+
+	sequence, err := NewThreadInboxStore(mock).LastAcknowledgedSequence(context.Background(), orgID, threadID)
+
+	require.NoError(t, err, "LastAcknowledgedSequence should query the contiguous terminal prefix")
+	require.Equal(t, int64(4), sequence, "LastAcknowledgedSequence should stop before the first non-terminal gap")
+	require.NoError(t, mock.ExpectationsWereMet(), "the acknowledgment watermark query should stay tenant and thread scoped")
+}
+
 func TestThreadInboxStore_CountPendingByThread(t *testing.T) {
 	t.Parallel()
 

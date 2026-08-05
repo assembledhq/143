@@ -283,6 +283,30 @@ groups:
           summary: 'Session activity lifecycle reconciliation failed'
           description: '{{ $value }} activity-phase or acknowledged-batch reconciliation failures occurred in the last 10 minutes.'
           runbook: 'Inspect the matching worker logs and verify phase/batch constraints, runtime leases, and database health before manually changing lifecycle rows.'
+      - alert: SessionActivityAnchorRestorationFailures
+        expr: '_time:15m level:warn AND _msg:"session activity transcript viewport integrity event" AND session_activity_event:"scroll_restore_failed" | stats count() as failures | filter failures:>2'
+        for: 2m
+        labels:
+          service: api
+          severity: warning
+          team: product
+          signal: logs
+        annotations:
+          summary: 'Session transcript anchor restoration failures elevated'
+          description: '{{ $value }} privacy-safe activity-capsule anchor restoration failures were reported in the last 15 minutes.'
+          runbook: 'Check the session activity kill-switch state and recent transcript renderer/API changes. Use request-scoped identifiers from matching API logs; transcript content is intentionally absent.'
+      - alert: SessionActivityPhaseAssociationsMissing
+        expr: '_time:10m level:warn AND _msg:"session transcript entry missing expected activity phase association" | stats sum(missing_entry_count) as missing | filter missing:>0'
+        for: 2m
+        labels:
+          service: api
+          severity: warning
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Session transcript activity phase associations are missing'
+          description: '{{ $value }} transcript entries expected to belong to durable activity phases were missing associations in the last 10 minutes.'
+          runbook: 'Inspect matching API request logs by entry_kind and request-scoped identifiers, then verify the shared transcript writer context and phase ownership validation. Transcript content is intentionally absent.'
 
 # Scheduler heartbeat and queue backlog alerts are intentionally not yet
 # encoded here. The current system does not emit a dedicated scheduler

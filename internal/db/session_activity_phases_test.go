@@ -171,11 +171,11 @@ func TestSessionActivityPhaseStoreAcknowledgeInboxBatchReplaysAfterRuntimeLoss(t
 			models.InboxDeliveryBatchStarted, acknowledgedAt, &startedAt, nil, acknowledgedAt, startedAt,
 		))
 
-	batch, phaseTransitioned, err := NewSessionActivityPhaseStore(mock).AcknowledgeInboxBatchWithTransition(
+	batch, completedPhase, err := NewSessionActivityPhaseStore(mock).AcknowledgeInboxBatchWithTransition(
 		context.Background(), orgID, sessionID, threadID, runtimeID, leaseToken, nil, 5, acknowledgedAt.Add(time.Minute),
 	)
 	require.NoError(t, err, "AcknowledgeInboxBatch should replay durable success after the runtime lease is gone")
-	require.False(t, phaseTransitioned, "replayed acknowledgment should not report another phase transition")
+	require.Nil(t, completedPhase, "replayed acknowledgment should not report another phase transition")
 	require.Equal(t, batchID, batch.ID, "AcknowledgeInboxBatch replay should return the exact durable batch")
 	require.NoError(t, mock.ExpectationsWereMet(), "AcknowledgeInboxBatch replay should not require a live runtime transaction")
 }
@@ -200,9 +200,15 @@ func TestSessionActivityPhaseStoreAcknowledgeInboxBatchCommitsBoundaryAtomically
 	mock.ExpectQuery("SELECT count").
 		WithArgs(orgID, sessionID, threadID, runtimeID, int64(4), int64(5)).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(2)))
-	mock.ExpectExec("UPDATE session_activity_phases").
+	startedAt := acknowledgedAt.Add(-time.Minute)
+	mock.ExpectQuery("UPDATE session_activity_phases").
 		WithArgs(orgID, phaseID, acknowledgedAt, sessionID, threadID, runtimeID).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(activityPhaseTestColumns).AddRow(
+			phaseID, orgID, sessionID, threadID, 1, 1,
+			models.ActivityPhaseStatusCompleted, models.ActivityPhaseBoundarySteered,
+			startedAt, &acknowledgedAt, &runtimeID, models.ActivityPhaseTriggerInitial,
+			nil, nil, nil, startedAt, acknowledgedAt,
+		))
 	mock.ExpectQuery("INSERT INTO thread_inbox_delivery_batches").
 		WithArgs(orgID, sessionID, threadID, runtimeID, int64(4), int64(5), acknowledgedAt).
 		WillReturnRows(pgxmock.NewRows(inboxBatchTestColumns).AddRow(
@@ -217,11 +223,13 @@ func TestSessionActivityPhaseStoreAcknowledgeInboxBatchCommitsBoundaryAtomically
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
 
-	batch, phaseTransitioned, err := NewSessionActivityPhaseStore(mock).AcknowledgeInboxBatchWithTransition(
+	batch, completedPhase, err := NewSessionActivityPhaseStore(mock).AcknowledgeInboxBatchWithTransition(
 		context.Background(), orgID, sessionID, threadID, runtimeID, leaseToken, &phaseID, 5, acknowledgedAt,
 	)
 	require.NoError(t, err, "AcknowledgeInboxBatch should atomically close steering, persist its batch, and advance the watermark")
-	require.True(t, phaseTransitioned, "fresh steering acknowledgment should report its durable phase transition")
+	require.NotNil(t, completedPhase, "fresh steering acknowledgment should return its exact durable phase transition")
+	require.Equal(t, phaseID, completedPhase.ID, "fresh steering acknowledgment should return the completed phase identity")
+	require.Equal(t, startedAt, completedPhase.StartedAt, "fresh steering acknowledgment should preserve the full phase summary for SSE publication")
 	require.Equal(t, batchID, batch.ID, "AcknowledgeInboxBatch should return the exact acknowledged delivery batch")
 	require.NoError(t, mock.ExpectationsWereMet(), "AcknowledgeInboxBatch should commit every platform-owned boundary write together")
 }
@@ -356,6 +364,76 @@ func TestSessionActivityPhaseStoreCompletePhase(t *testing.T) {
 	require.True(t, transitioned, "fresh completion should report its durable terminal transition")
 	require.Equal(t, expected, actual, "CompletePhase should return the exact persisted terminal phase")
 	require.NoError(t, mock.ExpectationsWereMet(), "CompletePhase should scope its update by org and phase")
+}
+
+func TestSessionActivityPhaseStoreCreateAssistantMessageAndCompletePhaseCommitsAtomically(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "activity phase store test should create a database mock")
+	t.Cleanup(mock.Close)
+
+	orgID, sessionID, threadID, phaseID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	startedAt := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	completedAt := startedAt.Add(time.Minute)
+	message := &models.SessionMessage{
+		SessionID: sessionID, OrgID: orgID, ThreadID: &threadID, TurnNumber: 1,
+		Role: models.MessageRoleAssistant, Content: "done", ActivityPhaseID: &phaseID,
+	}
+	mock.ExpectBegin()
+	mock.ExpectQuery(sessionMessagePhaseInsertPattern).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(10), completedAt))
+	mock.ExpectQuery("UPDATE session_activity_phases").
+		WithArgs(orgID, phaseID, models.ActivityPhaseBoundaryFinalResponse, completedAt).
+		WillReturnRows(pgxmock.NewRows(activityPhaseTestColumns).AddRow(
+			phaseID, orgID, sessionID, threadID, 1, 1,
+			models.ActivityPhaseStatusCompleted, models.ActivityPhaseBoundaryFinalResponse,
+			startedAt, &completedAt, nil, models.ActivityPhaseTriggerInitial, nil, nil, nil,
+			startedAt, completedAt,
+		))
+	mock.ExpectCommit()
+
+	phase, err := NewSessionActivityPhaseStore(mock).CreateAssistantMessageAndCompletePhase(
+		context.Background(), orgID, phaseID, message, models.ActivityPhaseBoundaryFinalResponse, completedAt,
+	)
+	require.NoError(t, err, "assistant boundary and phase completion should commit together")
+	require.Equal(t, int64(10), message.ID, "atomic boundary persistence should return the durable message identity")
+	require.Equal(t, models.ActivityPhaseStatusCompleted, phase.Status, "atomic boundary persistence should return the terminal phase")
+	require.NoError(t, mock.ExpectationsWereMet(), "assistant boundary and phase completion should share one transaction")
+}
+
+func TestSessionActivityPhaseStoreCreateAssistantMessageAndCompletePhaseRollsBackOnPhaseConflict(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "activity phase store test should create a database mock")
+	t.Cleanup(mock.Close)
+
+	orgID, sessionID, threadID, phaseID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	completedAt := time.Date(2026, 7, 26, 10, 1, 0, 0, time.UTC)
+	message := &models.SessionMessage{
+		SessionID: sessionID, OrgID: orgID, ThreadID: &threadID, TurnNumber: 1,
+		Role: models.MessageRoleAssistant, Content: "done", ActivityPhaseID: &phaseID,
+	}
+	mock.ExpectBegin()
+	mock.ExpectQuery(sessionMessagePhaseInsertPattern).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(10), completedAt))
+	mock.ExpectQuery("UPDATE session_activity_phases").
+		WithArgs(orgID, phaseID, models.ActivityPhaseBoundaryFinalResponse, completedAt).
+		WillReturnRows(pgxmock.NewRows(activityPhaseTestColumns))
+	mock.ExpectRollback()
+
+	_, err = NewSessionActivityPhaseStore(mock).CreateAssistantMessageAndCompletePhase(
+		context.Background(), orgID, phaseID, message, models.ActivityPhaseBoundaryFinalResponse, completedAt,
+	)
+	require.ErrorIs(t, err, ErrActivityPhaseConflict, "a phase conflict should roll back the boundary message")
+	require.NoError(t, mock.ExpectationsWereMet(), "phase conflict should leave neither half of the boundary committed")
 }
 
 func TestSessionActivityPhaseStoreCompletePhaseIdempotentAtPostgresPrecision(t *testing.T) {
