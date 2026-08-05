@@ -380,6 +380,137 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(metadataRow).toHaveTextContent(/Completed/);
   });
 
+  it('separates the session vitals from the blocks stacked above it', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const vitals = await screen.findByTestId('session-overview-vitals');
+    expect(vitals).toHaveClass('border-t', 'border-border/60', 'pt-4');
+    expect(within(vitals).getByText('Completed')).toBeInTheDocument();
+    // Load-bearing: re-adding a wrapper around OverviewTab would make the
+    // vitals that wrapper's first child, silently collapsing the rule while
+    // real content still sits above them in the panel.
+    expect(vitals.parentElement!.firstElementChild).not.toBe(vitals);
+  });
+
+  it('keeps the vitals divider below a failure card raised by the same tab', async () => {
+    // The block above comes from inside OverviewTab rather than from the panel;
+    // the rule only draws if the two are flat siblings after the flattening.
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            status: 'failed',
+            failure_explanation: 'Could not reproduce the error in test environment',
+            threads: [],
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const vitals = await screen.findByTestId('session-overview-vitals');
+    expect(vitals).toHaveClass('border-t', 'first:pt-0');
+    expect(vitals.previousElementSibling).toHaveTextContent('Failure details');
+    // Not the first child, so `first:pt-0` stays inert and the rule draws.
+    expect(vitals.parentElement!.firstElementChild).not.toBe(vitals);
+  });
+
+  it('collapses the vitals divider when nothing renders above it', async () => {
+    // A bare session — no pull request, no result summary, a single changeset —
+    // renders nothing above the vitals, so the rule has to collapse instead of
+    // drawing across the top of the Overview panel separating nothing.
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            status: 'pending',
+            started_at: undefined,
+            completed_at: undefined,
+            result_summary: undefined,
+            threads: [],
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json({ data: null })),
+      http.get('/api/v1/sessions/:id/changesets', () => HttpResponse.json({ data: [], meta: {} })),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const vitals = await screen.findByTestId('session-overview-vitals');
+    expect(vitals).toHaveClass('first:border-t-0', 'first:pt-0');
+    // `first:border-t-0` resolves against the vitals' own parent, so the reset
+    // is only reachable while the overview blocks stay flat siblings. Re-adding
+    // a wrapper around OverviewTab would make the vitals a first child of that
+    // wrapper while real content still sits above them in the panel.
+    const panel = vitals.closest('[role="tabpanel"]')!;
+    expect(vitals.parentElement).toBe(panel.firstElementChild);
+    expect(vitals.parentElement!.firstElementChild).toBe(vitals);
+  });
+
+  // The audit trigger only mounts once /auth/me confirms an admin and the
+  // latest-entry query resolves. Both are seeded into the cache so the trigger
+  // renders in the same commit as the vitals block — a `queryByRole` on the
+  // unsettled DOM passes whether or not the status gate exists.
+  function renderWithSeededAuditTrail(sessionId: string) {
+    const latestEntry = {
+      id: 'audit-1',
+      actor_type: 'system',
+      action: 'session.completed',
+      created_at: new Date(Date.now() - 12 * 60000).toISOString(),
+    };
+    // The seed is what makes the assertions synchronous; the handler has to
+    // agree with it so the refetch on mount doesn't wipe the entry back out.
+    server.use(
+      http.get('/api/v1/audit-logs', () => HttpResponse.json({ data: [latestEntry], meta: {} })),
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(['auth', 'me'], { data: mockMembers[0] });
+    queryClient.setQueryData(['audit-logs', 'latest', { session_id: sessionId }], {
+      data: [latestEntry],
+      meta: {},
+    });
+    return renderSessionDetailWithQueryClient(sessionId, queryClient);
+  }
+
+  it('keeps the session activity trigger inline while a session is still running', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: { ...mockSessions[0], status: 'running', completed_at: undefined },
+        } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithSeededAuditTrail('session-abcdef12-3456-7890');
+
+    const vitals = await screen.findByTestId('session-overview-vitals');
+    expect(await within(vitals).findByRole('button', { name: /Updated.*ago by/i })).toBeInTheDocument();
+  });
+
+  // Both success terminals are gated, so both need covering — dropping either
+  // clause otherwise leaves the suite green.
+  it.each(['completed', 'pr_created'] as const)(
+    'omits low-value audit update metadata once a session is %s',
+    async (status) => {
+      server.use(
+        http.get('/api/v1/sessions/:id', () => {
+          return HttpResponse.json({
+            data: { ...mockSessions[0], status },
+          } satisfies SingleResponse<Session>);
+        }),
+      );
+
+      renderWithSeededAuditTrail('session-abcdef12-3456-7890');
+
+      const vitals = await screen.findByTestId('session-overview-vitals');
+      expect(within(vitals).queryByRole('button', { name: /Updated.*ago by/i })).not.toBeInTheDocument();
+    },
+  );
+
   it('keeps issue-trigger provenance compact without redundant workflow copy', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
