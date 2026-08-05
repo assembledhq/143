@@ -380,6 +380,29 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(metadataRow).toHaveTextContent(/Completed/);
   });
 
+  it('separates completed session vitals and omits low-value audit update metadata', async () => {
+    server.use(
+      http.get('/api/v1/audit-logs', () => {
+        return HttpResponse.json({
+          data: [{
+            id: 'audit-1',
+            actor_type: 'system',
+            action: 'session.completed',
+            created_at: new Date(Date.now() - 12 * 60000).toISOString(),
+          }],
+          meta: {},
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const vitals = await screen.findByTestId('session-overview-vitals');
+    expect(vitals).toHaveClass('border-t', 'border-border/60', 'pt-4');
+    expect(within(vitals).getByText('Completed')).toBeInTheDocument();
+    expect(within(vitals).queryByRole('button', { name: /Updated.*ago by/i })).not.toBeInTheDocument();
+  });
+
   it('keeps issue-trigger provenance compact without redundant workflow copy', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {

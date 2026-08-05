@@ -128,6 +128,7 @@ describe('ChangesetSplitPrompt', () => {
 
     const suggestion = screen.getByRole('region', { name: 'Pull request size suggestion' });
     expect(suggestion).toHaveAttribute('data-slot', 'overview-suggestion');
+    expect(suggestion).toHaveClass('border-t', 'border-border/60', 'pt-4');
     const description = screen.getByText('Split this diff into smaller, reviewable pull requests.');
     expect(description.parentElement).toBe(suggestion);
     expect(description).toHaveClass('col-span-3');

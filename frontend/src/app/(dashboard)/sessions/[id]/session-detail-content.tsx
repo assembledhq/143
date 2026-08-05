@@ -944,7 +944,10 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
       )}
 
       {/* Session vitals — identity row (status + agent + who triggered) */}
-      <div className="space-y-1.5">
+      <div
+        data-testid="session-overview-vitals"
+        className="space-y-1.5 border-t border-border/60 pt-4"
+      >
         <div className="flex items-center gap-x-3 gap-y-1 flex-wrap text-xs">
           <StatusLabel
             label={operationalStatus.label}
@@ -1003,12 +1006,14 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
                 <>Queued {formatTimeAgo(session.created_at)}</>
               )}
             </span>
-            <AuditLogTrigger
-              filters={{ session_id: session.id }}
-              members={members}
-              title="Session activity"
-              variant="inline"
-            />
+            {session.status !== "completed" && session.status !== "pr_created" && (
+              <AuditLogTrigger
+                filters={{ session_id: session.id }}
+                members={members}
+                title="Session activity"
+                variant="inline"
+              />
+            )}
           </div>
         </div>
       </div>
@@ -3508,6 +3513,7 @@ function OverviewRow({
   title,
   description,
   action,
+  divided = false,
   slot,
   ...regionProps
 }: {
@@ -3515,13 +3521,17 @@ function OverviewRow({
   title: string;
   description: string;
   action?: ReactNode;
+  divided?: boolean;
   slot: OverviewRowSlot;
 } & Omit<ComponentProps<"section">, "title" | "children" | "className">) {
   return (
     <section
       {...regionProps}
       data-slot={slot}
-      className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-1.5 gap-y-1.5 px-1 py-1.5"
+      className={cn(
+        "grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-1.5 gap-y-1.5 px-1 py-1.5",
+        divided && "border-t border-border/60 pt-4",
+      )}
     >
       <div
         data-slot={`${slot}-icon`}
@@ -3567,6 +3577,7 @@ export function ChangesetSplitPrompt({
       icon={<GitBranch className="h-4 w-4" />}
       title={`Large change · ${additionCount.toLocaleString()} additions${fileLabel}`}
       description="Split this diff into smaller, reviewable pull requests."
+      divided
       action={(
         <Button
           size="xs"
