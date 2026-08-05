@@ -593,6 +593,11 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(statusCard).not.toBeNull();
     expect(statusCard?.querySelector('.lucide-loader-circle')).toBeInTheDocument();
     expect(within(statusCard as HTMLElement).getByText('The review loop is checking the changes and applying fixes.')).toBeInTheDocument();
+    // Flat block: spinner and title share a row, description is its sibling.
+    const runningBody = statusCard?.querySelector('[data-slot="review-loop-running-body"]');
+    expect(reviewStatus.parentElement?.parentElement).toBe(runningBody);
+    expect(reviewStatus.parentElement).toHaveClass('gap-1.5');
+    expect(within(statusCard as HTMLElement).getByText('The review loop is checking the changes and applying fixes.').parentElement).toBe(runningBody);
     expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
   });
 

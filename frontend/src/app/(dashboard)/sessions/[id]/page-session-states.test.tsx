@@ -274,6 +274,17 @@ describe('SessionDetailPage session states', () => {
     expect(await screen.findByText('Your organization is already at its max concurrency limit of 2 running sessions.')).toBeInTheDocument();
     expect(screen.getByText('This session will start automatically when another session finishes or the limit is raised.')).toBeInTheDocument();
     expect(screen.queryByText('Setting up environment')).not.toBeInTheDocument();
+
+    // Flat block: clock, title and badge share one row, and both body lines are
+    // direct children so nothing is indented past a former icon tile.
+    const body = document.querySelector('[data-slot="pending-capacity-body"]');
+    expect(body).toBeInTheDocument();
+    const heading = screen.getByText('Waiting for capacity').parentElement;
+    expect(heading?.parentElement).toBe(body);
+    expect(heading).toHaveClass('gap-1.5');
+    expect(heading?.querySelector('.lucide-clock')).toBeInTheDocument();
+    expect(screen.getByText('Max concurrency reached').parentElement).toBe(heading);
+    expect(screen.getByText('This session will start automatically when another session finishes or the limit is raised.').parentElement).toBe(body);
   });
 
   it('shows the environment setup message for a pending session when the org is below its concurrency limit', async () => {

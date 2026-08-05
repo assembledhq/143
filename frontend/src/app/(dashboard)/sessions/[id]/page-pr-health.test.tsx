@@ -428,6 +428,14 @@ describe('SessionDetailPage PR health and merge', () => {
     const closedSection = screen.getByText('PR #42 was closed without merging.').closest('[data-slot="pr-closed-section"]');
     expect(closedSection).toBeInTheDocument();
     expect(closedSection?.closest('[data-slot="card"]')).toBeNull();
+    // Flat block: the icon leads the title row and the body copy runs the full
+    // width underneath rather than being indented past an icon column.
+    const closedIcon = closedSection?.querySelector('[data-slot="pr-closed-icon"]');
+    expect(closedIcon).toHaveAttribute('aria-hidden', 'true');
+    expect(closedIcon?.querySelector('.lucide-circle-x')).toBeInTheDocument();
+    const closedSummary = screen.getByText('PR #42 was closed without merging.');
+    expect(closedSummary.parentElement).toBe(closedSection);
+    expect(closedSummary.className).not.toContain('pl-');
     expect(screen.getByTestId('session-result-section')).toHaveClass('border-t', 'pt-4');
     expect(screen.getByRole('link', { name: 'View PR' })).toBeInTheDocument();
     expect(screen.queryByRole('region', { name: 'Pull request #42' })).not.toBeInTheDocument();
@@ -624,9 +632,14 @@ describe('SessionDetailPage PR health and merge', () => {
     expect(screen.getByText('PR #42 was merged successfully.')).toHaveClass('text-xs');
     expect(screen.getByText('This change has landed. Open a follow-up session if you need to make another revision.')).toHaveClass('text-xs');
     expect(screen.getByRole('link', { name: 'View PR' })).toBeInTheDocument();
-    expect(screen.getByLabelText('Merged PR status')).toHaveClass('text-success');
-    const mergedSection = screen.getByLabelText('Merged PR status').closest('[data-slot="pr-merged-section"]');
+    const mergedSection = document.querySelector('[data-slot="pr-merged-section"]');
     expect(mergedSection).toBeInTheDocument();
+    // The icon repeats the adjacent "PR #<n> merged" text, so it stays out of
+    // the accessibility tree like every other status icon in the overview.
+    const mergedIcon = mergedSection?.querySelector('[data-slot="pr-merged-icon"]');
+    expect(mergedIcon).toHaveClass('text-success');
+    expect(mergedIcon).toHaveAttribute('aria-hidden', 'true');
+    expect(screen.queryByLabelText('Merged PR status')).not.toBeInTheDocument();
     expect(mergedSection?.closest('[data-slot="card"]')).toBeNull();
     expect(screen.getByTestId('session-result-section')).toHaveClass('border-t', 'pt-4');
     expect(screen.queryAllByText('PR created')).toHaveLength(0);

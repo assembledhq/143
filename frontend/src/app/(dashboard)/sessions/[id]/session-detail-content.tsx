@@ -395,16 +395,12 @@ function PublicationWorkflowCard({
   return (
     <Card className={cn("border-border/60", needsAttention && "border-warning/50 bg-warning/5")} data-testid="publication-workflow-card">
       <CardContent className="space-y-3 p-4">
-        <div className="space-y-1">
-          <div className="flex items-center gap-1.5">
-            <div className={cn(
-              "shrink-0",
-              settled ? "text-success" : needsAttention ? "text-warning" : "text-info",
-            )} aria-hidden="true">
-              {settled ? <CheckCircle2 className="h-4 w-4" /> : needsAttention ? <AlertTriangle className="h-4 w-4" /> : <Loader2 className="h-4 w-4 animate-spin" />}
-            </div>
-            <p className="text-sm font-medium text-foreground">{title}</p>
-          </div>
+        <div className="space-y-1.5">
+          <SectionHeading
+            icon={settled ? <CheckCircle2 className="h-4 w-4" /> : needsAttention ? <AlertTriangle className="h-4 w-4" /> : <Loader2 className="h-4 w-4 animate-spin" />}
+            iconClassName={settled ? "text-success" : needsAttention ? "text-warning" : "text-info"}
+            title={title}
+          />
           <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
           {published && prNumber ? <p className="text-xs text-muted-foreground">Pull request #{prNumber}</p> : null}
         </div>
@@ -728,14 +724,16 @@ function SessionResultSection({ summary, divided }: { summary?: string; divided:
   return (
     <section
       aria-label="Session result"
-      className={cn(divided && "border-t border-border/60 pt-4")}
+      className={cn("space-y-1.5", divided && "border-t border-border/60 pt-4")}
       data-testid="session-result-section"
     >
-      <div className="flex items-center gap-1.5" data-slot="session-result-heading">
-        <CheckCircle2 aria-hidden="true" className="h-4 w-4 shrink-0 text-success" />
-        <div className="text-sm font-medium text-foreground">Result</div>
-      </div>
-      <div className="mt-2 min-w-0" data-slot="session-result-body">
+      <SectionHeading
+        slot="session-result-heading"
+        icon={<CheckCircle2 className="h-4 w-4" />}
+        iconClassName="text-success"
+        title="Result"
+      />
+      <div data-slot="session-result-body">
         <LazyMarkdownContent content={summary} className="text-xs" />
       </div>
     </section>
@@ -3320,8 +3318,8 @@ function PendingCapacityNotice({ maxConcurrentRuns }: { maxConcurrentRuns?: numb
   return (
     <div className="flex justify-center py-8">
       <Card className="w-full max-w-[34rem] border-amber-200/70 bg-amber-50/70 shadow-none dark:border-amber-900/60 dark:bg-amber-950/20">
-        <CardContent className="min-w-0 space-y-1.5 p-4">
-          <div className="flex flex-wrap items-center gap-2">
+        <CardContent className="space-y-1.5 p-4" data-slot="pending-capacity-body">
+          <div className="flex flex-wrap items-center gap-1.5">
             <Clock className="h-4 w-4 shrink-0 text-amber-700 dark:text-amber-300" aria-hidden />
             <p className="text-sm font-semibold text-foreground">Waiting for capacity</p>
             <Badge variant="outline" className="border-amber-300/80 bg-background/70 text-amber-800 dark:border-amber-800 dark:text-amber-300">
@@ -3494,32 +3492,32 @@ export function ChangesetSplitPrompt({
     : ` · ${filesChanged.toLocaleString()} ${filesChanged === 1 ? "file" : "files"}`;
 
   return (
+    // A grid rather than stacked flex rows: the button renders on the title row
+    // but still follows its own description in reading order.
     <div
       role="region"
       aria-label="Pull request size suggestion"
       data-slot="overview-suggestion"
-      className="space-y-1.5 px-1 py-1.5"
+      className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-1.5 gap-y-1.5 px-1 py-1.5"
     >
-      <div className="flex items-center gap-1.5">
-        <div data-slot="overview-suggestion-icon" aria-hidden="true" className="shrink-0 text-muted-foreground">
-          <GitBranch className="h-4 w-4" />
-        </div>
-        <p className="min-w-0 flex-1 text-xs font-medium text-foreground">
-          Large change · {additionCount.toLocaleString()} additions{fileLabel}
-        </p>
-        <Button
-          size="xs"
-          variant="ghost"
-          className="shrink-0"
-          disabled={requestSplitPending || !onRequestSplit}
-          onClick={onRequestSplit}
-        >
-          Split into PRs
-        </Button>
+      <div data-slot="overview-suggestion-icon" aria-hidden="true" className="text-muted-foreground">
+        <GitBranch className="h-4 w-4" />
       </div>
-      <p className="text-xs leading-relaxed text-muted-foreground">
+      <p className="text-xs font-medium text-foreground">
+        Large change · {additionCount.toLocaleString()} additions{fileLabel}
+      </p>
+      <p className="col-span-3 row-start-2 text-xs leading-relaxed text-muted-foreground">
         Split this diff into smaller, reviewable pull requests.
       </p>
+      <Button
+        size="xs"
+        variant="ghost"
+        className="col-start-3 row-start-1 shrink-0"
+        disabled={requestSplitPending || !onRequestSplit}
+        onClick={onRequestSplit}
+      >
+        Split into PRs
+      </Button>
     </div>
   );
 }
@@ -3541,16 +3539,7 @@ function AgentActionCard({
     <Card className="@container/agent-action border-border/60">
       <CardContent className="flex flex-col gap-3 p-4 @min-[24rem]/agent-action:flex-row @min-[24rem]/agent-action:items-center @min-[24rem]/agent-action:justify-between">
         <div className="min-w-0 flex-1 space-y-1.5">
-          <div className="flex items-center gap-1.5">
-            <div
-              data-slot="agent-action-card-icon"
-              aria-hidden="true"
-              className="shrink-0 text-muted-foreground"
-            >
-              {icon}
-            </div>
-            <p className="text-sm font-medium text-foreground">{title}</p>
-          </div>
+          <SectionHeading iconSlot="agent-action-card-icon" iconClassName="text-muted-foreground" icon={icon} title={title} />
           <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
         </div>
         <div
@@ -3561,6 +3550,32 @@ function AgentActionCard({
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+// Every status block in the overview leads with a 16px icon and a title on one
+// row, then full-width body copy underneath. Sharing the row keeps the icon gap
+// and title type from drifting apart across the nine places that render it.
+function SectionHeading({
+  icon,
+  iconClassName,
+  iconSlot,
+  slot,
+  title,
+}: {
+  icon: ReactNode;
+  iconClassName?: string;
+  iconSlot?: string;
+  slot?: string;
+  title: ReactNode;
+}) {
+  return (
+    <div className="flex items-center gap-1.5" data-slot={slot}>
+      <span aria-hidden="true" data-slot={iconSlot} className={cn("shrink-0", iconClassName)}>
+        {icon}
+      </span>
+      <p className="text-sm font-medium text-foreground">{title}</p>
+    </div>
   );
 }
 
@@ -6483,22 +6498,26 @@ export function SessionDetailContent({ id }: { id: string }) {
       </section>
     ) : null
   ) : prStatus === "closed" ? (
-    <section className="space-y-1" data-slot="pr-closed-section">
-      <div className="flex items-center gap-1.5">
-        <XCircle aria-hidden="true" className="h-4 w-4 shrink-0 text-muted-foreground" />
-        <div className="text-sm font-medium text-foreground">{closedPRLabel}</div>
-      </div>
+    <section className="space-y-1.5" data-slot="pr-closed-section">
+      <SectionHeading
+        iconSlot="pr-closed-icon"
+        icon={<XCircle className="h-4 w-4" />}
+        iconClassName="text-muted-foreground"
+        title={closedPRLabel}
+      />
       <p className="text-xs text-foreground">{closedPRSummary}</p>
       <p className="text-xs text-muted-foreground">
         This pull request is no longer active. Create a follow-up revision if you want to ship a new attempt.
       </p>
     </section>
   ) : prStatus === "merged" ? (
-    <section className="space-y-1" data-slot="pr-merged-section">
-      <div className="flex items-center gap-1.5">
-        <CheckCircle2 aria-label="Merged PR status" className={cn("h-4 w-4 shrink-0", prMergedAccent.text)} />
-        <div className="text-sm font-medium text-foreground">{mergedPRLabel}</div>
-      </div>
+    <section className="space-y-1.5" data-slot="pr-merged-section">
+      <SectionHeading
+        iconSlot="pr-merged-icon"
+        icon={<CheckCircle2 className="h-4 w-4" />}
+        iconClassName={prMergedAccent.text}
+        title={mergedPRLabel}
+      />
       <p className="text-xs text-foreground">{mergedPRSummary}</p>
       <p className="text-xs text-muted-foreground">
         This change has landed. Open a follow-up session if you need to make another revision.
@@ -6728,13 +6747,12 @@ export function SessionDetailContent({ id }: { id: string }) {
           {selectedIsPrimary && canManageSession && canUseNativeReviewLoop && !hasPR && !selectedPublicationOwnsActions && hasSessionChanges ? (
             reviewLoopRunning ? (
               <Card className="border-border/60">
-                <CardContent className="min-w-0 space-y-1.5 p-4">
-                  <div className="flex items-center gap-1.5">
-                    <Loader2 aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
-                    <p className="text-sm font-medium text-foreground">
-                      Fixing with {AGENTS_BY_KEY[latestReviewLoop?.agent_type ?? ""]?.label ?? "review agent"}
-                    </p>
-                  </div>
+                <CardContent className="space-y-1.5 p-4" data-slot="review-loop-running-body">
+                  <SectionHeading
+                    icon={<Loader2 className="h-4 w-4 animate-spin" />}
+                    iconClassName="text-muted-foreground"
+                    title={`Fixing with ${AGENTS_BY_KEY[latestReviewLoop?.agent_type ?? ""]?.label ?? "review agent"}`}
+                  />
                   <p className="text-xs leading-relaxed text-muted-foreground">
                     The review loop is checking the changes and applying fixes.
                   </p>

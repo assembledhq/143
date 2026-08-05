@@ -157,7 +157,7 @@ export function PRHealthBanner({
       <div className="flex items-start justify-between gap-2.5">
         <div className="min-w-0 flex-1 space-y-1">
           <div className="flex flex-wrap items-center gap-1.5">
-            <div aria-hidden="true" className={cn("shrink-0", prHealthStatusIconClassName(statusPresentation.variant))}>
+            <div aria-hidden="true" className={cn("shrink-0", prHealthStatusIconColor(statusPresentation.variant))}>
               {statusPresentation.variant === "success" ? <CheckCircle2 className="h-4 w-4" /> : isRepositoryDisconnected ? <AlertTriangle className="h-4 w-4" /> : <GitPullRequest className="h-4 w-4" />}
             </div>
             <div className="text-sm font-medium text-foreground">PR #{health.pull_request_number}</div>
@@ -572,7 +572,7 @@ function derivePRHealthStatusPresentation({
   return { label: "Open", variant: "secondary" };
 }
 
-function prHealthStatusIconClassName(variant: PRHealthStatusPresentation["variant"]): string {
+function prHealthStatusIconColor(variant: PRHealthStatusPresentation["variant"]): string {
   switch (variant) {
     case "success":
       return "text-success";

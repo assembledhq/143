@@ -359,6 +359,15 @@ describe('SessionDetailPage PR creation', () => {
     expect(within(workflow).getByText('No publication needed')).toBeInTheDocument();
     expect(within(workflow).getByText('The completed workflow found no changes to publish.')).toBeInTheDocument();
     expect(within(workflow).queryByText('Needs attention')).not.toBeInTheDocument();
+
+    // Flat block: the status icon leads the title row and the description is a
+    // sibling of that row, not a column indented past an icon tile.
+    const heading = within(workflow).getByText('No publication needed').parentElement;
+    expect(heading).toHaveClass('gap-1.5');
+    expect(heading?.querySelector('.lucide-circle-check')).toBeInTheDocument();
+    const description = within(workflow).getByText('The completed workflow found no changes to publish.');
+    expect(description.parentElement).toBe(heading?.parentElement);
+    expect(description.className).not.toContain('pl-');
   });
 
   // A no-op publication is the one settled outcome with neither a pull request

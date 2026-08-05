@@ -128,9 +128,27 @@ describe('ChangesetSplitPrompt', () => {
 
     const suggestion = screen.getByRole('region', { name: 'Pull request size suggestion' });
     expect(suggestion).toHaveAttribute('data-slot', 'overview-suggestion');
-    expect(suggestion).toHaveClass('space-y-1.5');
-    expect(screen.getByText('Split this diff into smaller, reviewable pull requests.').parentElement).toBe(suggestion);
+    const description = screen.getByText('Split this diff into smaller, reviewable pull requests.');
+    expect(description.parentElement).toBe(suggestion);
+    expect(description).toHaveClass('col-span-3');
     expect(suggestion.closest('[data-slot="card"]')).toBeNull();
+  });
+
+  // The button sits on the title row visually, but a reader should still meet
+  // the sentence explaining the action before the action itself.
+  it('reads the split description before the split action', () => {
+    render(
+      <ChangesetSplitPrompt
+        additions={CHANGESET_SPLIT_MIN_ADDITIONS}
+        onRequestSplit={vi.fn()}
+      />,
+    );
+
+    const description = screen.getByText('Split this diff into smaller, reviewable pull requests.');
+    const action = screen.getByRole('button', { name: 'Split into PRs' });
+
+    expect(description.compareDocumentPosition(action) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(action).toHaveClass('row-start-1');
   });
 
   it('uses a compact ghost action that stays aligned on narrow panels', () => {
