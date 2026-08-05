@@ -13,7 +13,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { codeReviewReasonLabel } from "@/lib/code-review-reasons";
-import type { CodeReviewAnalytics } from "@/lib/types";
+import type { CodeReviewAnalytics, CodeReviewInsights } from "@/lib/types";
 type AuthorSort = "author" | "reviews" | "approved" | "not_approved" | "approval_rate" | "first_round" | "median_rounds" | "median_additions" | "median_deletions";
 
 const APPROVAL_ROUND_LABELS: Record<CodeReviewAnalytics["approval_rounds"][number]["bucket"], string> = {
@@ -179,6 +179,10 @@ function ApprovalOutcomeCards({ summary }: { summary: CodeReviewAnalytics["summa
 
 export function CodeReviewAnalyticsReport({
   analytics,
+  insights,
+  insightsIsLoading = false,
+  insightsIsError = false,
+  onRetryInsights,
   isLoading,
   isError,
   onRetry,
@@ -189,6 +193,10 @@ export function CodeReviewAnalyticsReport({
   filters,
 }: {
   analytics?: CodeReviewAnalytics;
+  insights?: CodeReviewInsights;
+  insightsIsLoading?: boolean;
+  insightsIsError?: boolean;
+  onRetryInsights?: () => void;
   isLoading: boolean;
   isError: boolean;
   onRetry: () => void;
@@ -268,6 +276,16 @@ export function CodeReviewAnalyticsReport({
 
       <ApprovalOutcomeCards summary={summary} />
       {filters}
+
+      {insights ? <PolicyFeedbackInsights insights={insights} /> : null}
+      {!insights && insightsIsLoading ? <p className="py-6 text-center text-sm text-muted-foreground">Loading decision feedback…</p> : null}
+      {!insights && insightsIsError ? (
+        <ErrorNotice
+          title="Decision feedback unavailable"
+          description="Policy feedback metrics could not be loaded. The approval report above is unaffected."
+          action={onRetryInsights ? { label: "Retry", onClick: onRetryInsights } : undefined}
+        />
+      ) : null}
 
       <SectionGroup
         title="Usage by PR author"
@@ -530,5 +548,120 @@ export function CodeReviewAnalyticsReport({
         </SectionGroup>
       </div>
     </div>
+  );
+}
+
+function PolicyFeedbackInsights({ insights }: { insights: CodeReviewInsights }) {
+  const flipRate = insights.reassessments > 0
+    ? percentage(insights.reassessment_flips, insights.reassessments)
+    : "—";
+  const directionLabel = (direction: string) => direction === "should_have_approved" ? "Should have approved" : "Should not have approved";
+  const duration = (seconds?: number) => {
+    if (seconds === undefined || !Number.isFinite(seconds)) return "—";
+    if (seconds < 60) return `${Math.round(seconds)}s`;
+    if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+    return `${(seconds / 3600).toFixed(1)}h`;
+  };
+  const settingHref = (reasonCode: string) => {
+    if (reasonCode === "files_limit_exceeded") return "/code-reviews?tab=policy#policy-max-files-changed";
+    if (reasonCode === "lines_limit_exceeded") return "/code-reviews?tab=policy#policy-max-lines-changed";
+    return "/code-reviews?tab=policy";
+  };
+  return (
+    <SectionGroup
+      title="Decision feedback"
+      description={insights.ranking_enabled
+        ? "The policy-owner queue is ranked from explainable disagreement signals."
+        : "The queue stays chronological until one organization records at least 10 eligible disputes per month for two complete months."}
+    >
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <MetricCard label="Decisions observed" value={insights.decisions.toLocaleString()} />
+        <MetricCard label="Objection rate" value={`${Math.round(insights.objection_rate * 100)}%`} context={`${insights.disputes.toLocaleString()} objections · ${insights.upheld_disputes.toLocaleString()} upheld`} />
+        <MetricCard label="Reassessments" value={insights.reassessments.toLocaleString()} context={`${flipRate} changed decision · $${insights.reassessment_cost_usd.toFixed(2)} spend`} />
+        <MetricCard
+          label="Median resolution"
+          value={duration(insights.median_adjudication_seconds)}
+          context="Filed to adjudicated"
+        />
+        <MetricCard label="Median decision" value={duration(insights.median_decision_seconds)} context="Review started to decision" />
+        <MetricCard label="Owner time / resolution" value={insights.policy_owner_minutes_per_resolution === undefined ? "—" : `${insights.policy_owner_minutes_per_resolution.toFixed(1)}m`} context="Measured active queue interaction" />
+        <MetricCard label="Outcomes fresh through" value={insights.projection_fresh_through ? new Date(insights.projection_fresh_through).toLocaleString() : "—"} context={insights.projection_updated_at ? `Projection updated ${new Date(insights.projection_updated_at).toLocaleString()}` : "No projected outcomes"} />
+        <MetricCard label="Queue ordering" value={insights.ranking_enabled ? "Ranked" : "Chronological"} context="Ranking requires sustained dispute volume" />
+      </div>
+      <div className="grid gap-6 xl:grid-cols-2">
+        <InsightCountTable title="Objection directions" label="Direction" items={insights.directions.map((item) => ({ key: item.direction, label: directionLabel(item.direction), count: item.count }))} />
+        <InsightCountTable title="Objection kinds" label="Kind" items={insights.dispute_kinds.map((item) => ({ key: item.kind, label: item.kind.replaceAll("_", " "), count: item.count }))} />
+      </div>
+      {insights.reasons.length > 0 ? (
+        <Card>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Reason</TableHead>
+                <TableHead className="text-right">Decisions</TableHead>
+                <TableHead className="text-right">Objections</TableHead>
+                <TableHead className="text-right">Rate</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {insights.reasons.map((reason) => (
+                <TableRow key={reason.reason_code}>
+                  <TableCell>{codeReviewReasonLabel(reason.reason_code)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{reason.decisions.toLocaleString()}</TableCell>
+                  <TableCell className="text-right tabular-nums">{reason.disputes.toLocaleString()}</TableCell>
+                  <TableCell className="text-right tabular-nums">{Math.round(reason.dispute_rate * 100)}%</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Card>
+      ) : null}
+      {insights.actual_vs_limit.length > 0 ? (
+        <Card>
+          <CardContent className="space-y-2">
+            {insights.actual_vs_limit.map((item) => (
+              <p key={`${item.reason_code}:${item.actual}:${item.limit}`} className="text-sm text-muted-foreground">
+                <Link href={settingHref(item.reason_code)} className="font-medium text-foreground underline-offset-4 hover:underline">
+                  {codeReviewReasonLabel(item.reason_code)}
+                </Link>{": "}{item.actual.toLocaleString()} actual vs {item.limit.toLocaleString()} allowed ({item.count.toLocaleString()} decisions)
+              </p>
+            ))}
+          </CardContent>
+        </Card>
+      ) : null}
+      {insights.flip_buckets.length > 0 ? (
+        <Card>
+          <Table>
+            <TableHeader><TableRow><TableHead>Reassessment attempt</TableHead><TableHead>Input</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Flip rate</TableHead></TableRow></TableHeader>
+            <TableBody>{insights.flip_buckets.map((bucket) => (
+              <TableRow key={`${bucket.attempt}:${bucket.input_change}`}><TableCell>Attempt {bucket.attempt}</TableCell><TableCell className="capitalize">{bucket.input_change}</TableCell><TableCell className="text-right tabular-nums">{bucket.reassessments.toLocaleString()}</TableCell><TableCell className="text-right tabular-nums">{percentage(bucket.flips, bucket.reassessments)}</TableCell></TableRow>
+            ))}</TableBody>
+          </Table>
+        </Card>
+      ) : null}
+      {insights.policy_decision_mix.length > 0 ? (
+        <Card>
+          <Table>
+            <TableHeader><TableRow><TableHead>Policy version</TableHead><TableHead>Decision</TableHead><TableHead className="text-right">Decisions</TableHead></TableRow></TableHeader>
+            <TableBody>{insights.policy_decision_mix.map((item) => (
+              <TableRow key={`${item.policy_id}:${item.decision}`}><TableCell><span className="font-medium">v{item.policy_version}</span><span className="ml-2 font-mono text-xs text-muted-foreground">{item.policy_id.slice(0, 8)}</span></TableCell><TableCell className="capitalize">{item.decision.replaceAll("_", " ")}</TableCell><TableCell className="text-right tabular-nums">{item.count.toLocaleString()}</TableCell></TableRow>
+            ))}</TableBody>
+          </Table>
+        </Card>
+      ) : null}
+    </SectionGroup>
+  );
+}
+
+function InsightCountTable({ title, label, items }: { title: string; label: string; items: Array<{ key: string; label: string; count: number }> }) {
+  if (items.length === 0) return <Card><CardContent><p className="text-sm text-muted-foreground">No {title.toLowerCase()} in this period.</p></CardContent></Card>;
+  return (
+    <Card>
+      <CardContent className="pb-0"><p className="text-sm font-medium text-foreground">{title}</p></CardContent>
+      <Table>
+        <TableHeader><TableRow><TableHead>{label}</TableHead><TableHead className="text-right">Objections</TableHead></TableRow></TableHeader>
+        <TableBody>{items.map((item) => <TableRow key={item.key}><TableCell className="capitalize">{item.label}</TableCell><TableCell className="text-right tabular-nums">{item.count.toLocaleString()}</TableCell></TableRow>)}</TableBody>
+      </Table>
+    </Card>
   );
 }

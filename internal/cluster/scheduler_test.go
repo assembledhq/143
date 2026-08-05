@@ -63,12 +63,13 @@ func (m *mockRepos) ListByOrg(ctx context.Context, orgID uuid.UUID, _ db.Reposit
 }
 
 type trackingJobs struct {
-	enqueued   []string // jobType values
-	enqueuedTx []string // jobType values inserted in the scheduler tx
-	queues     []string
-	payloads   []any
-	dedupeKeys []string
-	enqueueErr error
+	enqueued        []string // jobType values
+	enqueuedTx      []string // jobType values inserted in the scheduler tx
+	queues          []string
+	payloads        []any
+	dedupeKeys      []string
+	enqueueErr      error
+	enqueueFailures int
 }
 
 func (m *trackingJobs) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
@@ -77,6 +78,10 @@ func (m *trackingJobs) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobT
 	m.payloads = append(m.payloads, payload)
 	if dedupeKey != nil {
 		m.dedupeKeys = append(m.dedupeKeys, *dedupeKey)
+	}
+	if m.enqueueFailures > 0 {
+		m.enqueueFailures--
+		return uuid.Nil, errors.New("enqueue failed")
 	}
 	return uuid.New(), nil
 }
@@ -164,6 +169,36 @@ func TestScheduler_SchedulePagerDutySync(t *testing.T) {
 	require.Equal(t, orgIDs[0].String(), firstPayload["org_id"], "scheduler should include the target org ID")
 	require.Len(t, jobs.dedupeKeys, 2, "should compute one dedupe key per PagerDuty sync job")
 	require.Contains(t, jobs.dedupeKeys[0], "pagerduty_sync:"+orgIDs[0].String()+":20260619182", "dedupe key should include org and UTC ten-minute bucket")
+}
+
+func TestScheduler_ScheduleCodeReviewOutcomeReconciliationOnFeedbackQueue(t *testing.T) {
+	t.Parallel()
+
+	orgIDs := []uuid.UUID{uuid.New(), uuid.New()}
+	jobs := &trackingJobs{}
+	s := &Scheduler{jobs: jobs, logger: zerolog.Nop()}
+	now := time.Date(2026, 8, 4, 7, 0, 0, 0, time.UTC)
+
+	s.scheduleDailyJob(context.Background(), "feedback", models.JobTypeReconcileCodeReviewOutcomes, orgIDs, now)
+
+	require.Equal(t, []string{models.JobTypeReconcileCodeReviewOutcomes, models.JobTypeReconcileCodeReviewOutcomes}, jobs.enqueued, "reconciliation should enqueue once for every organization")
+	require.Equal(t, []string{"feedback", "feedback"}, jobs.queues, "code review reconciliation should use the feedback worker queue")
+	require.Contains(t, jobs.dedupeKeys[0], models.JobTypeReconcileCodeReviewOutcomes+":"+orgIDs[0].String()+":2026-08-04", "reconciliation should dedupe each organization by UTC day")
+}
+
+func TestScheduler_ScheduleDailyJobRetriesAfterEnqueueFailure(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	jobs := &trackingJobs{enqueueFailures: 1}
+	s := &Scheduler{jobs: jobs, logger: zerolog.Nop()}
+	now := time.Date(2026, 8, 4, 7, 0, 0, 0, time.UTC)
+
+	s.scheduleDailyJob(context.Background(), "feedback", models.JobTypeReconcileCodeReviewOutcomes, []uuid.UUID{orgID}, now)
+	s.scheduleDailyJob(context.Background(), "feedback", models.JobTypeReconcileCodeReviewOutcomes, []uuid.UUID{orgID}, now)
+
+	require.Len(t, jobs.enqueued, 2, "a failed daily enqueue should be retried on the next scheduler tick")
+	require.Equal(t, "2026-08-04", s.lastDailyJobDates[models.JobTypeReconcileCodeReviewOutcomes], "the scheduler should mark the day complete only after enqueue succeeds")
 }
 
 func TestScheduler_ScheduleGitHubOrgRosterSyncs(t *testing.T) {

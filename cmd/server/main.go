@@ -432,6 +432,7 @@ func main() {
 		issueStore := db.NewIssueStore(pool)
 		sessionStore := db.NewSessionStore(pool)
 		jobStore = db.NewJobStore(pool)
+		codeReviewStore.SetJobStore(jobStore)
 		orgStore := db.NewOrganizationStore(pool)
 		repoStore := db.NewRepositoryStore(pool)
 		integrationStore := db.NewIntegrationStore(pool)
@@ -473,6 +474,7 @@ func main() {
 		workerPullRequestFeedbackStore.SetJobStore(jobStore)
 		workerCodeReviewDisputeStore := db.NewCodeReviewDisputeStore(pool)
 		workerCodeReviewDisputeStore.SetJobStore(jobStore)
+		workerCodeReviewInsightStore := db.NewCodeReviewInsightStore(pool)
 		stores := &worker.Stores{
 			Issues:              issueStore,
 			Users:               db.NewUserStore(pool),
@@ -508,6 +510,7 @@ func main() {
 			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
 			CodeReviews:         codeReviewStore,
 			CodeReviewDisputes:  workerCodeReviewDisputeStore,
+			CodeReviewInsights:  workerCodeReviewInsightStore,
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 			Previews:            previewStore,
 			PullRequests:        pullRequestStore,
@@ -1595,6 +1598,7 @@ func buildServices(
 	prService.SetPullRequestFeedbackStore(workerFeedbackStore)
 	prService.SetChangesetStore(db.NewSessionChangesetStore(pool))
 	prService.SetPublicationStore(db.NewSessionPublicationStore(pool))
+	prService.SetCodeReviewInsightStore(db.NewCodeReviewInsightStore(pool))
 	prService.SetPRPreviewSurfacesEnabled(cfg.PRPreviewSurfacesEnabled)
 	wireWorkerPRService(
 		prService,
@@ -1761,6 +1765,7 @@ func buildServices(
 	}
 
 	codeReviewLifecycleStore := db.NewCodeReviewStore(pool)
+	codeReviewLifecycleStore.SetJobStore(jobStore)
 	codeReviewLifecycleStore.SetStreams(cache.NewCodeReviewStreams(redisClient, logger))
 	codeReviewLifecycleStore.SetLogger(logger)
 	codeReviewLifecycle := codereviewsvc.NewService(
@@ -1794,6 +1799,10 @@ func buildServices(
 		},
 	)
 	codeReviewDisputes.SetAuditEmitter(auditEmitter)
+	codeReviewInsights := codereviewsvc.NewInsightService(db.NewCodeReviewInsightStore(pool), logger)
+	if prService != nil {
+		codeReviewInsights.SetOutcomeProvider(prService)
+	}
 	svc := &worker.Services{
 		Orchestrator:    orchestrator,
 		PR:              prService,
@@ -1811,6 +1820,7 @@ func buildServices(
 		),
 		CodeReviewLifecycle:        codeReviewLifecycle,
 		CodeReviewDisputes:         codeReviewDisputes,
+		CodeReviewInsights:         codeReviewInsights,
 		CodeReviewDisputePublisher: prService,
 		CodingAgents:               agentEnv,
 		GitHubOrgRoster:            ghSvc,

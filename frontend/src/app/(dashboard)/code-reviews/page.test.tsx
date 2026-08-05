@@ -42,6 +42,7 @@ import type {
   CodingCredentialSummary,
   CodeReviewAnalytics,
   CodeReviewEvidence,
+	CodeReviewInsights,
   CodeReviewDispute,
   CodeReviewGitHubTriggerResponse,
   CodeReviewListItem,
@@ -366,6 +367,31 @@ function mockCodeReviewBaseHandlers(
         data: reviewAnalytics,
       } satisfies SingleResponse<CodeReviewAnalytics>),
     ),
+		http.get("/api/v1/code-review-insights", () =>
+			HttpResponse.json({
+				data: {
+					decisions: 32,
+					disputes: 6,
+					objection_rate: 0.1875,
+					upheld_disputes: 2,
+					reassessments: 4,
+					reassessment_flips: 1,
+					reassessment_cost_usd: 4.25,
+					policy_owner_minutes_per_resolution: 4.5,
+					median_decision_seconds: 90,
+					median_adjudication_seconds: 7200,
+					projection_fresh_through: "2026-08-04T06:00:00Z",
+					projection_updated_at: "2026-08-04T07:00:00Z",
+					ranking_enabled: false,
+					directions: [{ direction: "should_have_approved", count: 6 }],
+					dispute_kinds: [{ kind: "threshold_too_strict", count: 3 }],
+					policy_decision_mix: [{ policy_id: "policy-1", policy_version: 4, decision: "blocked", count: 12 }],
+					reasons: [{ reason_code: "lines_limit_exceeded", decisions: 7, disputes: 3, dispute_rate: 3 / 7 }],
+					actual_vs_limit: [{ reason_code: "lines_limit_exceeded", actual: 431, limit: 300, count: 2 }],
+					flip_buckets: [{ attempt: 1, input_change: "unchanged", reassessments: 4, flips: 1 }],
+				} satisfies CodeReviewInsights,
+			} satisfies SingleResponse<CodeReviewInsights>),
+		),
     http.get("/api/v1/code-reviews/session-1/evidence", () =>
       HttpResponse.json({
         data: evidence,
@@ -709,6 +735,13 @@ describe("CodeReviewsPage", () => {
     expect(within(approvalOutcomes).getByText("2.0")).toBeInTheDocument();
     expect(within(approvalOutcomes).queryByText("128")).not.toBeInTheDocument();
     expect(screen.getByText("Approval by round")).toBeInTheDocument();
+		expect(screen.getByText("Decision feedback")).toBeInTheDocument();
+		expect(screen.getByText("The queue stays chronological until one organization records at least 10 eligible disputes per month for two complete months.")).toBeInTheDocument();
+		expect(screen.getByText("Objection directions")).toBeInTheDocument();
+		expect(screen.getByText("Objection kinds")).toBeInTheDocument();
+		expect(screen.getByText("Owner time / resolution")).toBeInTheDocument();
+		expect(screen.getByText("Attempt 1")).toBeInTheDocument();
+		expect(screen.getByRole("link", { name: "Line-count limit exceeded" })).toHaveAttribute("href", "/code-reviews?tab=policy#policy-max-lines-changed");
     expect(screen.getByText("Why PRs were not approved right away")).toBeInTheDocument();
     expect(screen.getByText("PR findings and operational outcomes")).toBeInTheDocument();
     const analyticsFilters = document.getElementById("code-review-analytics-filters");
@@ -716,7 +749,7 @@ describe("CodeReviewsPage", () => {
     expect(
       approvalOutcomes.compareDocumentPosition(analyticsFilters as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
-    expect(screen.getByText("Line-count limit exceeded")).toBeInTheDocument();
+		expect(screen.getAllByText("Line-count limit exceeded").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("Reviewers found a blocking issue")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "View 5 PRs where line-count limit exceeded" })).toHaveAttribute(
       "href",
@@ -796,6 +829,16 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findByRole("tab", { name: "Analytics" })).toHaveAttribute("data-state", "active");
     expect(await screen.findByText("Usage by PR author")).toBeInTheDocument();
   });
+
+	it("reveals a policy limit targeted by an Insights deep link", async () => {
+		mockCodeReviewBaseHandlers();
+		window.location.hash = "#policy-max-lines-changed";
+
+		renderWithProviders(<CodeReviewsPage />, { searchParams: { tab: "policy" } });
+
+		expect(await screen.findByRole("spinbutton", { name: "Lines changed" })).toBeInTheDocument();
+		expect(document.getElementById("policy-max-lines-changed")).not.toBeNull();
+	});
 
   it("writes tab navigation to the URL without dropping filters", async () => {
     const user = userEvent.setup();
@@ -1069,20 +1112,18 @@ describe("CodeReviewsPage", () => {
       expect(statsStatuses.length).toBeGreaterThan(0);
       expect(new Set(statsStatuses)).toEqual(new Set(["current"]));
     });
-    const statsRequestCount = statsStatuses.length;
-
     await user.click(screen.getByRole("combobox", { name: "Status" }));
     await user.click(await screen.findByRole("option", { name: "Superseded history" }));
     await waitFor(() => {
       expect(listStatuses).toContain("superseded");
-      expect(statsStatuses).toHaveLength(statsRequestCount);
+      expect(new Set(statsStatuses)).toEqual(new Set(["current"]));
     });
 
     await user.click(screen.getByRole("combobox", { name: "Status" }));
     await user.click(await screen.findByRole("option", { name: "All attempts" }));
     await waitFor(() => {
       expect(listStatuses).toContain("all");
-      expect(statsStatuses).toHaveLength(statsRequestCount);
+      expect(new Set(statsStatuses)).toEqual(new Set(["current"]));
     });
   });
 
@@ -1423,6 +1464,8 @@ describe("CodeReviewsPage", () => {
   it("shows the flat admin dispute list and submits a CAS adjudication", async () => {
     const user = userEvent.setup();
     let updateBody: unknown;
+    let currentTime = 1_000;
+    const performanceNow = vi.spyOn(performance, "now").mockImplementation(() => currentTime);
     const dispute: CodeReviewDispute = {
       id: "dispute-queue-1", org_id: "org-1", session_id: "session-1", pull_request_id: "pr-1",
       repository_id: "repo-1", policy_id: "policy-1", reviewed_head_sha: review.head_sha,
@@ -1433,12 +1476,22 @@ describe("CodeReviewsPage", () => {
       reassessment_status: "not_requested", adjudication_status: "pending", queue_signals: {
         pull_request_title: "Fix invoice rounding", github_repository: "acme/api", github_pr_number: 428,
         github_pr_url: "https://github.com/acme/api/pull/428",
-      }, queue_priority: 0,
+        independent_human_contradiction: true, reassessment_unchanged: true,
+        filer_is_not_pr_author: true, repeat_reason_disputes_14_days: 3,
+        ranking_enabled: true,
+      }, queue_priority: 75,
       reply_status: "not_applicable", version: 3, created_at: "2026-06-26T12:06:00Z", updated_at: "2026-06-26T12:06:00Z",
+    };
+    const secondDispute: CodeReviewDispute = {
+      ...dispute,
+      id: "dispute-queue-2",
+      body: "A second objection under review.",
+      queue_signals: {},
+      queue_priority: 0,
     };
     mockCodeReviewBaseHandlers();
     server.use(
-      http.get("/api/v1/code-review-disputes", () => HttpResponse.json({ data: [dispute], meta: {} } satisfies ListResponse<CodeReviewDispute>)),
+      http.get("/api/v1/code-review-disputes", () => HttpResponse.json({ data: [dispute, secondDispute], meta: {} } satisfies ListResponse<CodeReviewDispute>)),
       http.patch("/api/v1/code-review-disputes/dispute-queue-1", async ({ request }) => {
         updateBody = await request.json();
         return HttpResponse.json({ data: { ...dispute, adjudication_status: "upheld", version: 4 } } satisfies SingleResponse<CodeReviewDispute>);
@@ -1449,15 +1502,32 @@ describe("CodeReviewsPage", () => {
 
     await user.click(await screen.findByRole("tab", { name: "Disputes" }));
     expect(await screen.findByText("The size exception was already approved.")).toBeInTheDocument();
+    expect(screen.getByText("Human contradicted decision")).toBeInTheDocument();
+    expect(screen.getByText("Reassessment unchanged")).toBeInTheDocument();
+    expect(screen.getByText("Filed by another contributor")).toBeInTheDocument();
+    expect(screen.getByText("3 similar in 14 days")).toBeInTheDocument();
+    expect(screen.getByText("Priority 75")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "acme/api #428" })).toHaveAttribute("href", "https://github.com/acme/api/pull/428");
+    const disputeRow = screen.getByText("The size exception was already approved.").closest("tr");
+    const secondDisputeRow = screen.getByText("A second objection under review.").closest("tr");
+    expect(disputeRow).not.toBeNull();
+    expect(secondDisputeRow).not.toBeNull();
+    fireEvent.pointerEnter(disputeRow as HTMLTableRowElement);
+    currentTime = 2_000;
+    fireEvent.pointerEnter(secondDisputeRow as HTMLTableRowElement);
+    currentTime = 3_000;
+    fireEvent.blur(window);
+    currentTime = 62_000;
     await user.type(screen.getByLabelText("Adjudication note for dispute dispute-queue-1"), "Confirmed exception in the policy record.");
-    await user.click(screen.getByRole("button", { name: "Uphold" }));
+    await user.click(within(disputeRow as HTMLTableRowElement).getByRole("button", { name: "Uphold" }));
 
     await waitFor(() => expect(updateBody).toEqual({
       expected_version: 3,
       adjudication_status: "upheld",
       adjudication_note: "Confirmed exception in the policy record.",
+      policy_owner_active_seconds: 1,
     }));
+    performanceNow.mockRestore();
   });
 
   it("pages the dispute queue past the first cursor page", async () => {
@@ -1503,7 +1573,9 @@ describe("CodeReviewsPage", () => {
 
     expect(await screen.findByText("Second page objection.")).toBeInTheDocument();
     expect(screen.getByText("First page objection.")).toBeInTheDocument();
-    expect(requestedCursors).toEqual([null, "dispute-page-1"]);
+    // The first-page refetch on tab entry prevents a materialized ranking
+    // update from remaining hidden behind the query cache.
+    expect(requestedCursors).toEqual([null, null, "dispute-page-1"]);
     expect(screen.queryByRole("button", { name: "Load more disputes" })).not.toBeInTheDocument();
   });
 
@@ -2203,6 +2275,18 @@ describe("CodeReviewsPage", () => {
     await user.click(screen.getByRole("button", { name: /Structured PR-description checks/i }));
     expect(screen.getByRole("button", { name: "About Add structured PR-description check" })).toBeInTheDocument();
   }, 30_000);
+
+	it("surfaces an Insights failure without hiding the loaded approval report", async () => {
+		const user = userEvent.setup();
+		mockCodeReviewBaseHandlers();
+		server.use(http.get("/api/v1/code-review-insights", () => HttpResponse.json({ error: { code: "INSIGHTS_FAILED", message: "insights unavailable" } }, { status: 500 })));
+
+		renderWithProviders(<CodeReviewsPage />);
+		await user.click(await screen.findByRole("tab", { name: "Analytics" }));
+
+		expect(await screen.findByText("Decision feedback unavailable")).toBeInTheDocument();
+		expect(screen.getByText("Usage by PR author")).toBeInTheDocument();
+	});
 
   it("filters automatic approvals and successful non-approvals as distinct outcomes", async () => {
     const user = userEvent.setup();

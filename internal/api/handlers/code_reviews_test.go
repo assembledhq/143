@@ -24,6 +24,79 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type stubCodeReviewInsightService struct {
+	orgID   uuid.UUID
+	filters models.CodeReviewInsightFilters
+	report  models.CodeReviewInsights
+	err     error
+}
+
+func (s *stubCodeReviewInsightService) GetInsights(_ context.Context, orgID uuid.UUID, filters models.CodeReviewInsightFilters) (models.CodeReviewInsights, error) {
+	s.orgID = orgID
+	s.filters = filters
+	return s.report, s.err
+}
+
+func TestCodeReviewHandler_InsightsUsesServiceBoundaryAndFilters(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repositoryID := uuid.New()
+	from := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	service := &stubCodeReviewInsightService{report: models.CodeReviewInsights{Decisions: 12, ObjectionRate: 0.25}}
+	handler := NewCodeReviewHandler(nil, nil)
+	handler.SetInsightService(service)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-review-insights?repository_id="+repositoryID.String()+"&from="+from.Format(time.RFC3339)+"&decision=blocked&reason_code=lines_limit_exceeded&direction=should_have_approved", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.Insights(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "Insights should return the service report")
+	require.Equal(t, orgID, service.orgID, "Insights should preserve the authenticated organization")
+	require.Equal(t, &repositoryID, service.filters.RepositoryID, "Insights should pass the repository filter to the service")
+	require.Equal(t, &from, service.filters.From, "Insights should pass the time filter to the service")
+	require.Equal(t, models.CodeReviewDecisionBlocked, *service.filters.Decision, "Insights should pass the decision filter to the service")
+	require.Equal(t, models.CodeReviewRiskReasonLinesLimitExceeded, *service.filters.ReasonCode, "Insights should pass the reason filter to the service")
+	require.Equal(t, models.CodeReviewDisputeDirectionShouldHaveApproved, *service.filters.Direction, "Insights should pass the direction filter to the service")
+	var response models.SingleResponse[models.CodeReviewInsights]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response), "Insights response should be valid JSON")
+	require.Equal(t, service.report, response.Data, "Insights should serialize the service result")
+}
+
+func TestCodeReviewHandler_InsightsRejectsInvalidFilters(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		query string
+	}{
+		{name: "invalid repository", query: "repository_id=not-a-uuid"},
+		{name: "invalid timestamp", query: "from=yesterday"},
+		{name: "inverted range", query: "from=2026-08-05T00:00:00Z&to=2026-08-04T00:00:00Z"},
+		{name: "invalid decision", query: "decision=maybe"},
+		{name: "invalid reason", query: "reason_code=unknown"},
+		{name: "invalid direction", query: "direction=sideways"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			service := &stubCodeReviewInsightService{}
+			handler := NewCodeReviewHandler(nil, nil)
+			handler.SetInsightService(service)
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/code-review-insights?"+tt.query, nil)
+			req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+			rr := httptest.NewRecorder()
+
+			handler.Insights(rr, req)
+
+			require.Equal(t, http.StatusBadRequest, rr.Code, "invalid Insights filters should return a client error")
+			require.Equal(t, uuid.Nil, service.orgID, "invalid Insights filters should not reach the service")
+		})
+	}
+}
+
 func TestCodeReviewHandler_GetPolicyReturnsPromptFields(t *testing.T) {
 	t.Parallel()
 	orgID := uuid.New()

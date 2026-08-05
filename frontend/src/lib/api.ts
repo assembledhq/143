@@ -345,6 +345,24 @@ export const api = {
       const qs = searchParams.toString();
       return get<import('./types').SingleResponse<import('./types').CodeReviewAnalytics>>(`/api/v1/code-reviews/analytics${qs ? `?${qs}` : ''}`);
     },
+    insights: (params?: {
+      repository_id?: string;
+      from?: string;
+      to?: string;
+      decision?: import('./types').CodeReviewDecision;
+      reason_code?: string;
+      direction?: import('./types').CodeReviewDisputeDirection;
+    }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
+      if (params?.from) searchParams.set('from', params.from);
+      if (params?.to) searchParams.set('to', params.to);
+      if (params?.decision) searchParams.set('decision', params.decision);
+      if (params?.reason_code) searchParams.set('reason_code', params.reason_code);
+      if (params?.direction) searchParams.set('direction', params.direction);
+      const qs = searchParams.toString();
+      return get<import('./types').SingleResponse<import('./types').CodeReviewInsights>>(`/api/v1/code-review-insights${qs ? `?${qs}` : ''}`);
+    },
     promptExamples: () => get<import('./types').SingleResponse<import('./types').CodeReviewPromptExamplesResponse>>('/api/v1/code-reviews/prompt-examples'),
     policyEvent: (body: import('./types').CodeReviewPolicyAnalyticsEvent) => post<void>('/api/v1/code-reviews/policy-events', body),
     get: (sessionId: string) =>
@@ -366,7 +384,7 @@ export const api = {
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').CodeReviewDispute>>(`/api/v1/code-review-disputes${qs ? `?${qs}` : ''}`);
     },
-    adjudicateDispute: (disputeId: string, body: { expected_version: number; adjudication_status?: "upheld" | "rejected" | "needs_context"; adjudication_note?: string; trust_override?: boolean }) =>
+    adjudicateDispute: (disputeId: string, body: { expected_version: number; adjudication_status?: "upheld" | "rejected" | "needs_context"; adjudication_note?: string; policy_owner_active_seconds?: number; trust_override?: boolean }) =>
       patch<import('./types').SingleResponse<import('./types').CodeReviewDispute>>(`/api/v1/code-review-disputes/${disputeId}`, body),
     retry: (sessionId: string) =>
       post<import('./types').SingleResponse<import('./types').CodeReviewRetryResult>>(`/api/v1/code-reviews/${sessionId}/retry`),

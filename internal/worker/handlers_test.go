@@ -12913,6 +12913,26 @@ func TestDataRetentionHandler_SkipsZeroRetentionDays(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "no DB calls should be made")
 }
 
+func TestDataRetentionHandler_DeletesExpiredCodeReviewQueueSnapshots(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+	orgID := uuid.New()
+	stores := &Stores{CodeReviewDisputes: db.NewCodeReviewDisputeStore(mock)}
+	mock.ExpectExec("DELETE FROM code_review_dispute_queue_snapshots").
+		WithArgs(orgID).
+		WillReturnResult(pgxmock.NewResult("DELETE", 3))
+	payload, err := json.Marshal(map[string]string{"org_id": orgID.String()})
+	require.NoError(t, err, "retention payload should encode")
+
+	err = newDataRetentionCleanupHandler(stores, DataRetentionConfig{}, zerolog.Nop())(context.Background(), "data_retention_cleanup", payload)
+
+	require.NoError(t, err, "daily retention should reclaim expired queue snapshots")
+	require.NoError(t, mock.ExpectationsWereMet(), "all queue snapshot retention expectations should be met")
+}
+
 func TestDataRetentionHandler_RedactsSlackInboundPayloadsByOrg(t *testing.T) {
 	t.Parallel()
 

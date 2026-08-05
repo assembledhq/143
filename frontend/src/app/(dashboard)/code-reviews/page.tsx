@@ -25,10 +25,7 @@ import { EmptyState } from "@/components/empty-state";
 import { ListPage } from "@/components/list-page";
 import { PageTabContent } from "@/components/page-tab-content";
 import { ResourceRow } from "@/components/resource-row";
-import {
-  ResponsiveResourceList,
-  type ResponsiveResourceListColumn,
-} from "@/components/responsive-resource-list";
+import { ResponsiveResourceList, type ResponsiveResourceListColumn } from "@/components/responsive-resource-list";
 import { SectionGroup } from "@/components/section-group";
 import { StatusLabel, type StatusTone } from "@/components/status-label";
 import { Button } from "@/components/ui/button";
@@ -55,11 +52,7 @@ import { ApiError, api } from "@/lib/api";
 import { notify as toast } from "@/lib/notify";
 import { queryKeys } from "@/lib/query-keys";
 import { getActiveOrgId } from "@/lib/active-org";
-import {
-  ALL_CODE_REVIEW_REASONS,
-  CODE_REVIEW_REASON_CODES,
-  type CodeReviewReasonCode,
-} from "@/lib/code-review-reasons";
+import { ALL_CODE_REVIEW_REASONS, CODE_REVIEW_REASON_CODES, type CodeReviewReasonCode } from "@/lib/code-review-reasons";
 import { buildCodeReviewStreamURL, SSE_EVENT } from "@/lib/sse";
 import { useResourceSSE } from "@/lib/use-resource-sse";
 import { pollMs } from "@/lib/poll-intervals";
@@ -69,13 +62,7 @@ import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
 import { useOpenCodeAvailability, type OpenCodeModelAvailability } from "@/hooks/use-opencode-models";
 import { useAuth } from "@/hooks/use-auth";
-import {
-  DEFAULT_TIME_RANGE,
-  parseTimeRange,
-  timeRangeBounds,
-  timeRangeRefreshDelayMs,
-  type TimeRangeFilter,
-} from "@/lib/time-range";
+import { DEFAULT_TIME_RANGE, parseTimeRange, timeRangeBounds, timeRangeRefreshDelayMs, type TimeRangeFilter } from "@/lib/time-range";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { CodeReviewAnalyticsReport } from "@/components/code-review-analytics";
@@ -101,6 +88,7 @@ import type {
   CodeReviewActivityStatus,
   CodeReviewDecision,
   CodeReviewDispute,
+  CodeReviewInsights,
   CodeReviewDescriptionApplicabilityKind,
   CodeReviewEvidence,
   CodeReviewGitHubTriggerResponse,
@@ -193,10 +181,8 @@ type DescriptionApplicability = NonNullable<DescriptionRequirement["applies_when
 const QUALITY_GATE_DESCRIPTIONS = {
   requirePassingChecks:
     "Blocks approval until the PR's required GitHub checks are passing. When off, checks do not independently block approval; reviews can still leave comments either way.",
-  excludeSensitivePaths:
-    "Treats changes matching sensitive paths as blocking approval. When off, sensitive-path matches do not independently require human review.",
-  requireUpToDate:
-    "Requires the PR branch to be current with its base branch before approval. When off, branch freshness does not independently block approval.",
+  excludeSensitivePaths: "Treats changes matching sensitive paths as blocking approval. When off, sensitive-path matches do not independently require human review.",
+  requireUpToDate: "Requires the PR branch to be current with its base branch before approval. When off, branch freshness does not independently block approval.",
   disagreementBlocks:
     "Blocks approval when reviewer agents disagree. When off, disagreement is still visible but does not independently veto approval unless another safeguard does.",
   allowForks: "Allows approval decisions for PRs opened from forks. The safer default is off, which keeps forked PRs comment-only.",
@@ -204,10 +190,8 @@ const QUALITY_GATE_DESCRIPTIONS = {
 const NUMBER_POLICY_DESCRIPTIONS: Record<string, string> = {
   "Files changed": "Maximum number of changed files eligible for automatic approval. Reviews still leave comments above this deterministic limit.",
   "Lines changed": "Maximum total changed lines eligible for automatic approval. Reviews still leave comments above this deterministic limit.",
-  "Inline comments":
-    "Maximum inline findings posted to GitHub. Extra findings remain in review evidence; this limit does not make a pull request eligible for approval.",
-  "Reviewer quorum":
-    "Minimum configured reviewer agents that must return usable results before automatic approval is eligible. It cannot exceed the reviewer count.",
+  "Inline comments": "Maximum inline findings posted to GitHub. Extra findings remain in review evidence; this limit does not make a pull request eligible for approval.",
+  "Reviewer quorum": "Minimum configured reviewer agents that must return usable results before automatic approval is eligible. It cannot exceed the reviewer count.",
   "Files changed at least": "Minimum changed-file count that makes this structured PR-description check apply. The default remains in effect until changed.",
   "Lines changed at least": "Minimum changed-line count that makes this structured PR-description check apply. The default remains in effect until changed.",
 };
@@ -291,29 +275,15 @@ function ReviewTitle({ review }: { review: CodeReviewListItem }) {
   if (!review.github_review_url) return title;
 
   return (
-    <ExternalLink
-      href={review.github_review_url}
-      title="Open final review"
-    >
+    <ExternalLink href={review.github_review_url} title="Open final review">
       {title}
     </ExternalLink>
   );
 }
 
-function EvidenceButton({
-  selected,
-  onToggleEvidence,
-}: {
-  selected: boolean;
-  onToggleEvidence: () => void;
-}) {
+function EvidenceButton({ selected, onToggleEvidence }: { selected: boolean; onToggleEvidence: () => void }) {
   return (
-    <Button
-      variant={selected ? "secondary" : "ghost"}
-      size="sm"
-      className="h-7 px-2 text-muted-foreground hover:text-foreground"
-      onClick={onToggleEvidence}
-    >
+    <Button variant={selected ? "secondary" : "ghost"} size="sm" className="h-7 px-2 text-muted-foreground hover:text-foreground" onClick={onToggleEvidence}>
       <FileSearch className="h-4 w-4" />
       Evidence
     </Button>
@@ -345,13 +315,7 @@ function ReviewActions({
     <div className={cn("flex w-full items-center gap-1 md:w-auto md:justify-end", className)}>
       <EvidenceButton selected={evidenceSelected} onToggleEvidence={onToggleEvidence} />
       {canRetry && reviewCanBeRetried(review) ? (
-        <Button
-          className="min-h-11 flex-1 justify-center md:min-h-0 md:flex-none"
-          variant="outline"
-          size="sm"
-          disabled={isRetrying}
-          onClick={onRetry}
-        >
+        <Button className="min-h-11 flex-1 justify-center md:min-h-0 md:flex-none" variant="outline" size="sm" disabled={isRetrying} onClick={onRetry}>
           <RefreshCw className={isRetrying ? "animate-spin" : undefined} />
           {isRetrying ? "Retrying…" : "Retry review"}
         </Button>
@@ -475,18 +439,12 @@ function normalizeReasoningEffortForAgent(agent: string, effort: CodeReviewReaso
 
 function ensureReviewerReasoningEfforts(config: CodeReviewPolicyConfig): CodeReviewReasoningEffort[] {
   return config.agent_roster.reviewers.map((agent, index) =>
-    normalizeReasoningEffortForAgent(
-      agent,
-      config.agent_roster.reviewer_reasoning_efforts?.[index] ?? config.agent_roster.reasoning_effort,
-    ),
+    normalizeReasoningEffortForAgent(agent, config.agent_roster.reviewer_reasoning_efforts?.[index] ?? config.agent_roster.reasoning_effort),
   );
 }
 
 function normalizeOrchestratorReasoningEffort(config: CodeReviewPolicyConfig): void {
-  config.agent_roster.reasoning_effort = normalizeReasoningEffortForAgent(
-    config.agent_roster.orchestrator,
-    config.agent_roster.reasoning_effort,
-  );
+  config.agent_roster.reasoning_effort = normalizeReasoningEffortForAgent(config.agent_roster.orchestrator, config.agent_roster.reasoning_effort);
 }
 
 export default function CodeReviewsPage() {
@@ -495,12 +453,7 @@ export default function CodeReviewsPage() {
   const canManagePolicy = user?.role === "admin";
   const canFileDisputes = user?.role === "admin" || user?.role === "member";
   const canRetryReviews = canFileDisputes;
-  const [tabParam, setTabParam] = useQueryState(
-    "tab",
-    parseAsStringLiteral(CODE_REVIEW_TAB_VALUES)
-      .withDefault("reviews")
-      .withOptions({ history: "push" }),
-  );
+  const [tabParam, setTabParam] = useQueryState("tab", parseAsStringLiteral(CODE_REVIEW_TAB_VALUES).withDefault("reviews").withOptions({ history: "push" }));
   const activeTab: CodeReviewTab = tabParam === "disputes" && !canManagePolicy ? "reviews" : tabParam;
   const [addRepositoryParam, setAddRepositoryParam] = useQueryState("add_repository", parseAsString);
   const [githubConnectionResult, setGitHubConnectionResult] = useQueryState("github_pr", parseAsString);
@@ -513,10 +466,13 @@ export default function CodeReviewsPage() {
     setAddRepositoryOpen(true);
     void setAddRepositoryParam("1");
   }, [setAddRepositoryParam]);
-  const changeAddRepositoryOpen = useCallback((open: boolean) => {
+  const changeAddRepositoryOpen = useCallback(
+    (open: boolean) => {
     setAddRepositoryOpen(open);
     void setAddRepositoryParam(open ? "1" : null);
-  }, [setAddRepositoryParam]);
+    },
+    [setAddRepositoryParam],
+  );
   const setActiveTab = useCallback(
     (value: string) => {
       void setTabParam(value as CodeReviewTab);
@@ -524,25 +480,15 @@ export default function CodeReviewsPage() {
     [setTabParam],
   );
   const [repositoryFilter, setRepositoryFilter] = useQueryState("repository", parseAsString.withDefault(ALL_REPOSITORIES));
-  const [outcomeFilter, setOutcomeParam] = useQueryState(
-    "outcome",
-    parseAsStringLiteral(OUTCOME_FILTER_VALUES).withDefault(ALL_OUTCOMES),
-  );
-  const [timeRangeFilter, setTimeRangeParam] = useQueryState(
-    "range",
-    TIME_RANGE_FILTER_PARSER,
-  );
+  const [outcomeFilter, setOutcomeParam] = useQueryState("outcome", parseAsStringLiteral(OUTCOME_FILTER_VALUES).withDefault(ALL_OUTCOMES));
+  const [timeRangeFilter, setTimeRangeParam] = useQueryState("range", TIME_RANGE_FILTER_PARSER);
   const timeRangeAnchorMsRef = useRef(Date.now());
   const [riskFilter, setRiskFilter] = useQueryState("risk", parseAsStringLiteral(RISK_FILTER_VALUES).withDefault(ALL_RISKS));
   const [reasonFilter, setReasonFilter] = useQueryState(
     "reason",
-    parseAsStringLiteral([ALL_CODE_REVIEW_REASONS, ...CODE_REVIEW_REASON_CODES] as const)
-      .withDefault(ALL_CODE_REVIEW_REASONS),
+    parseAsStringLiteral([ALL_CODE_REVIEW_REASONS, ...CODE_REVIEW_REASON_CODES] as const).withDefault(ALL_CODE_REVIEW_REASONS),
   );
-  const [statusFilter, setStatusFilter] = useQueryState(
-    "status",
-    STATUS_FILTER_PARSER,
-  );
+  const [statusFilter, setStatusFilter] = useQueryState("status", STATUS_FILTER_PARSER);
   const [authorFilter, setAuthorFilter] = useQueryState("author", parseAsString.withDefault(""));
   const [searchParam, setSearchParam] = useQueryState("search", parseAsString.withDefault(""));
   const [reviewSort, setReviewSort] = useQueryState("sort", parseAsStringLiteral(REVIEW_SORT_VALUES));
@@ -580,11 +526,18 @@ export default function CodeReviewsPage() {
   }, []);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [editingRequirementKey, setEditingRequirementKey] = useState<string | null>(null);
-  const [promptExample, setPromptExample] = useState<{ field: "review_instructions" | "automated_approval_policy"; example: CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption } | null>(null);
+  const [promptExample, setPromptExample] = useState<{
+    field: "review_instructions" | "automated_approval_policy";
+    example: CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption;
+  } | null>(null);
   const [invalidPolicyField, setInvalidPolicyField] = useState<string | null>(null);
   const promptDraftsRef = useRef<Partial<Record<"review_instructions" | "automated_approval_policy", PromptDraftHandle>>>({});
   const saveSourceByConfigRef = useRef(new WeakMap<CodeReviewPolicyConfig, CodeReviewPolicyEditSource>());
-  const persistedPromptsRef = useRef({ scope: "", review_instructions: "", automated_approval_policy: DEFAULT_AUTOMATED_APPROVAL_POLICY });
+  const persistedPromptsRef = useRef({
+    scope: "",
+    review_instructions: "",
+    automated_approval_policy: DEFAULT_AUTOMATED_APPROVAL_POLICY,
+  });
   const setOutcomeFilter = useCallback(
     (value: string) => {
       void setOutcomeParam(value as OutcomeFilter);
@@ -606,12 +559,10 @@ export default function CodeReviewsPage() {
     () => ({
       repository_id: reviewRepositoryId,
       decision:
-        outcomeFilter !== ALL_OUTCOMES && outcomeFilter !== AUTOMATICALLY_APPROVED && outcomeFilter !== COMPLETED_NOT_APPROVED
-          ? (outcomeFilter as CodeReviewDecision)
-          : undefined,
+        outcomeFilter !== ALL_OUTCOMES && outcomeFilter !== AUTOMATICALLY_APPROVED && outcomeFilter !== COMPLETED_NOT_APPROVED ? (outcomeFilter as CodeReviewDecision) : undefined,
       outcome: outcomeFilter === AUTOMATICALLY_APPROVED || outcomeFilter === COMPLETED_NOT_APPROVED ? (outcomeFilter as CodeReviewListOutcome) : undefined,
       risk: riskFilter === ALL_RISKS ? undefined : (riskFilter as "acceptable" | "needs_review"),
-      reason: reasonFilter === ALL_CODE_REVIEW_REASONS ? undefined : reasonFilter as CodeReviewReasonCode,
+      reason: reasonFilter === ALL_CODE_REVIEW_REASONS ? undefined : (reasonFilter as CodeReviewReasonCode),
       author: authorFilter.trim() || undefined,
       search: searchParam.trim() || undefined,
     }),
@@ -620,7 +571,8 @@ export default function CodeReviewsPage() {
   // Which review attempts are in scope for the Reviews tab. Analytics selects
   // PR cohorts only by repository and first-request time.
   const scopedReviewFilters = useMemo(
-    () => statusFilter === "cancelled"
+    () =>
+      statusFilter === "cancelled"
       ? {
           ...baseReviewFilters,
           activity_status: DEFAULT_STATUS_FILTER as CodeReviewActivityStatus,
@@ -665,6 +617,7 @@ export default function CodeReviewsPage() {
     }),
     [authorSort, authorSortOrder, reviewRepositoryId, timeRangeFilter],
   );
+  const insightsScopeQueryKey = useMemo(() => ({ repository_id: reviewRepositoryId, time_range: timeRangeFilter }), [reviewRepositoryId, timeRangeFilter]);
   const statsScopeQueryKey = useMemo(
     () => ({
       ...statsReviewFilters,
@@ -703,14 +656,14 @@ export default function CodeReviewsPage() {
     [reviewScopeQueryKey],
   );
   const hasActiveReviewFilters = Boolean(
-    reviewRepositoryId
-    || outcomeFilter !== ALL_OUTCOMES
-    || riskFilter !== ALL_RISKS
-    || reasonFilter !== ALL_CODE_REVIEW_REASONS
-    || statusFilter !== DEFAULT_STATUS_FILTER
-    || authorFilter.trim()
-    || searchParam.trim()
-    || timeRangeFilter !== "all"
+    reviewRepositoryId ||
+    outcomeFilter !== ALL_OUTCOMES ||
+    riskFilter !== ALL_RISKS ||
+    reasonFilter !== ALL_CODE_REVIEW_REASONS ||
+    statusFilter !== DEFAULT_STATUS_FILTER ||
+    authorFilter.trim() ||
+    searchParam.trim() ||
+    timeRangeFilter !== "all",
   );
   const clearReviewFilters = useCallback(() => {
     void setRepositoryFilter(null);
@@ -776,18 +729,11 @@ export default function CodeReviewsPage() {
         return;
       }
 
-      timer = window.setTimeout(
-        () => waitUntil(refreshAtMs),
-        Math.min(remainingMs, MAX_BROWSER_TIMEOUT_MS),
-      );
+      timer = window.setTimeout(() => waitUntil(refreshAtMs), Math.min(remainingMs, MAX_BROWSER_TIMEOUT_MS));
     };
     const scheduleRefresh = () => {
       const anchor = new Date(timeRangeAnchorMsRef.current);
-      const delay = timeRangeRefreshDelayMs(
-        timeRangeFilter,
-        anchor,
-        CODE_REVIEW_TIME_WINDOW_REFRESH_MS,
-      );
+      const delay = timeRangeRefreshDelayMs(timeRangeFilter, anchor, CODE_REVIEW_TIME_WINDOW_REFRESH_MS);
       if (delay === null) return;
       waitUntil(anchor.getTime() + delay);
     };
@@ -838,7 +784,8 @@ export default function CodeReviewsPage() {
   });
   const reviewsQuery = useQuery({
     queryKey: queryKeys.codeReviews.list(reviewFiltersQueryKey),
-    queryFn: () => api.codeReviews.list({
+    queryFn: () =>
+      api.codeReviews.list({
       ...currentListReviewFilters(),
       limit: CODE_REVIEW_PAGE_SIZE,
     }),
@@ -846,20 +793,31 @@ export default function CodeReviewsPage() {
     // the observer blocks reconnects and unrelated broad invalidations from
     // replacing page one while the older pages remain appended.
     enabled: !isViewingReviewHistory,
-    refetchInterval: isViewingReviewHistory ? false : (codeReviewStreamHealthy ? pollMs(30_000) : pollMs(5_000)),
+    refetchInterval: isViewingReviewHistory ? false : codeReviewStreamHealthy ? pollMs(30_000) : pollMs(5_000),
   });
   const statsQuery = useQuery({
     queryKey: queryKeys.codeReviews.stat(statsScopeQueryKey),
     queryFn: () => api.codeReviews.stats(currentStatsReviewFilters()),
-    refetchInterval: isViewingReviewHistory ? false : (codeReviewStreamHealthy ? pollMs(30_000) : pollMs(5_000)),
+    refetchInterval: isViewingReviewHistory ? false : codeReviewStreamHealthy ? pollMs(30_000) : pollMs(5_000),
   });
   const analyticsQuery = useQuery<SingleResponse<CodeReviewAnalytics>>({
     queryKey: queryKeys.codeReviews.analyticsReport(analyticsScopeQueryKey),
     queryFn: () => api.codeReviews.analytics(currentAnalyticsFilters()),
     enabled: activeTab === "analytics",
-    refetchInterval: activeTab !== "analytics"
-      ? false
-      : (codeReviewStreamHealthy ? pollMs(30_000) : pollMs(5_000)),
+    refetchInterval: activeTab !== "analytics" ? false : codeReviewStreamHealthy ? pollMs(30_000) : pollMs(5_000),
+  });
+  const insightsQuery = useQuery<SingleResponse<CodeReviewInsights>>({
+    queryKey: queryKeys.codeReviews.insights(insightsScopeQueryKey),
+    queryFn: () => {
+      const filters = currentAnalyticsFilters();
+      return api.codeReviews.insights({
+        repository_id: filters.repository_id,
+        from: filters.created_after,
+        to: filters.created_before,
+      });
+    },
+    enabled: activeTab === "analytics" && canManagePolicy,
+    refetchInterval: activeTab !== "analytics" || !canManagePolicy ? false : pollMs(60_000),
   });
   const policyQuery = useQuery({
     queryKey: queryKeys.codeReviews.policy,
@@ -882,9 +840,7 @@ export default function CodeReviewsPage() {
     queryFn: () => api.codexAuth.status(),
   });
   const repositories = repositoriesQuery.data?.data ?? [];
-  const githubIntegration = integrationsQuery.data?.data.find(
-    (integration) => integration.provider === "github" && integration.status === "active",
-  );
+  const githubIntegration = integrationsQuery.data?.data.find((integration) => integration.provider === "github" && integration.status === "active");
   const githubTriggerStatuses = githubTriggerStatusesQuery.data?.data ?? [];
   const visibleGitHubTriggerStatuses = githubTriggerStatuses
     .filter((trigger) => trigger.repository_status !== "disconnected" || !!trigger.trigger)
@@ -904,8 +860,12 @@ export default function CodeReviewsPage() {
       description: "Choose a repository to connect and set up its reviewer.",
     });
     void queryClient.invalidateQueries({ queryKey: ["github-status"] });
-    void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.githubTriggers });
-    void queryClient.invalidateQueries({ queryKey: queryKeys.integrations.all });
+    void queryClient.invalidateQueries({
+      queryKey: queryKeys.codeReviews.githubTriggers,
+    });
+    void queryClient.invalidateQueries({
+      queryKey: queryKeys.integrations.all,
+    });
     void setGitHubConnectionResult(null);
   }, [githubConnectionResult, queryClient, setGitHubConnectionResult]);
   useEffect(() => {
@@ -913,7 +873,9 @@ export default function CodeReviewsPage() {
     toast.success("GitHub App connected", {
       description: "Choose a repository to connect and set up its reviewer.",
     });
-    void queryClient.invalidateQueries({ queryKey: queryKeys.integrations.all });
+    void queryClient.invalidateQueries({
+      queryKey: queryKeys.integrations.all,
+    });
     void setGitHubAppConnectionResult(null);
   }, [githubAppConnectionResult, queryClient, setGitHubAppConnectionResult]);
   const promptExamplesQuery = useQuery({
@@ -926,25 +888,38 @@ export default function CodeReviewsPage() {
     enabled: Boolean(selectedEvidenceSessionId),
   });
   const disputeQueueQuery = useInfiniteQuery({
-    queryKey: queryKeys.codeReviews.disputeQueue({ adjudication_status: "pending" }),
-    queryFn: ({ pageParam }) => api.codeReviews.disputeQueue({ adjudication_status: "pending", cursor: pageParam }),
+    queryKey: queryKeys.codeReviews.disputeQueue({
+      adjudication_status: "pending",
+    }),
+    queryFn: ({ pageParam }) =>
+      api.codeReviews.disputeQueue({
+        adjudication_status: "pending",
+        cursor: pageParam,
+      }),
     enabled: canManagePolicy,
+    refetchInterval: activeTab === "disputes" && canManagePolicy ? pollMs(30_000) : false,
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.meta?.next_cursor || undefined,
   });
-  const pendingDisputes = useMemo(
-    () => disputeQueueQuery.data?.pages.flatMap((page) => page.data ?? []) ?? [],
-    [disputeQueueQuery.data],
-  );
+  useEffect(() => {
+    if (activeTab !== "disputes" || !canManagePolicy) return;
+    void queryClient.invalidateQueries({
+      queryKey: ["code-reviews", "dispute-queue"],
+    });
+  }, [activeTab, canManagePolicy, queryClient]);
+  const pendingDisputes = useMemo(() => disputeQueueQuery.data?.pages.flatMap((page) => page.data ?? []) ?? [], [disputeQueueQuery.data]);
   const adjudicateDispute = useMutation({
-    mutationFn: ({ dispute, status, note }: { dispute: CodeReviewDispute; status: "upheld" | "rejected" | "needs_context"; note?: string }) =>
+    mutationFn: ({ dispute, status, note, activeSeconds }: { dispute: CodeReviewDispute; status: "upheld" | "rejected" | "needs_context"; note?: string; activeSeconds: number }) =>
       api.codeReviews.adjudicateDispute(dispute.id, {
         expected_version: dispute.version,
         adjudication_status: status,
         adjudication_note: note?.trim() || undefined,
+        policy_owner_active_seconds: activeSeconds,
       }),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["code-reviews", "dispute-queue"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["code-reviews", "dispute-queue"],
+      });
       toast.success("Dispute adjudication saved");
     },
     onError: () => toast.error("Dispute adjudication could not be saved"),
@@ -956,14 +931,22 @@ export default function CodeReviewsPage() {
   // back-to-back edits never clobber one another.
   const config = policyQuery.data?.data.config ?? null;
   if (config && persistedPromptsRef.current.scope !== "organization") {
-    persistedPromptsRef.current = { scope: "organization", review_instructions: config.review_instructions, automated_approval_policy: config.automated_approval_policy };
+    persistedPromptsRef.current = {
+      scope: "organization",
+      review_instructions: config.review_instructions,
+      automated_approval_policy: config.automated_approval_policy,
+    };
   }
   const viewedScopeRef = useRef<string | null>(null);
   useEffect(() => {
     if (!config) return;
     if (viewedScopeRef.current === "organization") return;
     viewedScopeRef.current = "organization";
-    trackCodeReviewPolicyEvent({ event: "code_review_policy_viewed", scope: "organization", configured: policyQuery.data?.data.source !== "default" });
+    trackCodeReviewPolicyEvent({
+      event: "code_review_policy_viewed",
+      scope: "organization",
+      configured: policyQuery.data?.data.source !== "default",
+    });
   }, [config, policyQuery.data?.data.source]);
   const coalescePolicy = useCallback((queued: CodeReviewPolicyConfig, incoming: CodeReviewPolicyConfig) => {
     const merged = coalesceCodeReviewPolicy(queued, incoming);
@@ -1014,10 +997,21 @@ export default function CodeReviewsPage() {
       void queryClient.invalidateQueries({
         queryKey: queryKeys.codeReviews.githubTrigger(targetRepositoryId),
       });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.githubTriggers });
-      trackCodeReviewPolicyEvent({ event: "code_review_github_setup_completed", scope: "repository", configured: true });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.codeReviews.githubTriggers,
+      });
+      trackCodeReviewPolicyEvent({
+        event: "code_review_github_setup_completed",
+        scope: "repository",
+        configured: true,
+      });
     },
-    onError: () => trackCodeReviewPolicyEvent({ event: "code_review_github_setup_failed", scope: "repository", configured: false }),
+    onError: () =>
+      trackCodeReviewPolicyEvent({
+        event: "code_review_github_setup_failed",
+        scope: "repository",
+        configured: false,
+      }),
   });
   const deleteGitHubTrigger = useMutation({
     mutationFn: (targetRepositoryId: string) => api.codeReviews.deleteGitHubTrigger(targetRepositoryId),
@@ -1025,7 +1019,9 @@ export default function CodeReviewsPage() {
       void queryClient.invalidateQueries({
         queryKey: queryKeys.codeReviews.githubTrigger(targetRepositoryId),
       });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.githubTriggers });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.codeReviews.githubTriggers,
+      });
     },
   });
   const [retryingReviewSessionIds, setRetryingReviewSessionIds] = useState<Set<string>>(() => new Set());
@@ -1038,16 +1034,24 @@ export default function CodeReviewsPage() {
       if (selectedEvidenceSessionId === sessionId) selectEvidenceSession(null);
       if (isViewingReviewHistory) setNewReviewsAvailable(true);
       else {
-        void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.lists() });
-        void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.stats() });
+        void queryClient.invalidateQueries({
+          queryKey: queryKeys.codeReviews.lists(),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: queryKeys.codeReviews.stats(),
+        });
       }
       toast.success("Code review retry started");
     },
     onError: (error) => {
       if (isViewingReviewHistory) setNewReviewsAvailable(true);
       else {
-        void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.lists() });
-        void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.stats() });
+        void queryClient.invalidateQueries({
+          queryKey: queryKeys.codeReviews.lists(),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: queryKeys.codeReviews.stats(),
+        });
       }
       toast.error("Code review could not be retried", {
         description: apiErrorMessage(error) ?? "Try again after checking the review failure details.",
@@ -1071,11 +1075,8 @@ export default function CodeReviewsPage() {
   const nextReviewCursor = isViewingReviewHistory ? loadMoreCursor : firstReviewCursor;
   const totalReviewCount = reviewsQuery.data?.meta?.total_count;
   const loadMoreReviews = useMutation({
-    mutationFn: (request: {
-      filters: ReturnType<typeof currentListReviewFilters> & { limit: number };
-      cursor: string;
-      scopeKey: string;
-    }) => api.codeReviews.list({ ...request.filters, cursor: request.cursor }),
+    mutationFn: (request: { filters: ReturnType<typeof currentListReviewFilters> & { limit: number }; cursor: string; scopeKey: string }) =>
+      api.codeReviews.list({ ...request.filters, cursor: request.cursor }),
     onSuccess: (response, request) => {
       if (request.scopeKey !== reviewScopeKey) return;
       setExtraReviewPages((pages) => [...pages, response.data ?? []]);
@@ -1102,10 +1103,7 @@ export default function CodeReviewsPage() {
     const timer = window.setInterval(() => setCountdownNowMs(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, [hasScheduledReviewRetry]);
-  const listedEvidenceReview = useMemo(
-    () => reviews.find((review) => review.session_id === selectedEvidenceSessionId) ?? null,
-    [reviews, selectedEvidenceSessionId],
-  );
+  const listedEvidenceReview = useMemo(() => reviews.find((review) => review.session_id === selectedEvidenceSessionId) ?? null, [reviews, selectedEvidenceSessionId]);
   // The list is windowed (default 30d) and paginated, but ?evidence=<session id>
   // is deep-linked from the dispute queue and from every GitHub dispute reply.
   // Without this fallback the sheet silently never opens for a review that has
@@ -1117,25 +1115,16 @@ export default function CodeReviewsPage() {
     // A deep link to a deleted or wrong session is a permanent 404, and
     // retrying it only delays the error notice below. Transient failures still
     // get one retry.
-    retry: (failureCount, error) =>
-      !(error instanceof ApiError && error.status === 404) && failureCount < 1,
+    retry: (failureCount, error) => !(error instanceof ApiError && error.status === 404) && failureCount < 1,
   });
-  const selectedEvidenceReview = listedEvidenceReview ?? (
-    selectedEvidenceSessionId && evidenceReviewQuery.data?.data?.session_id === selectedEvidenceSessionId
-      ? evidenceReviewQuery.data.data
-      : null
-  );
+  const selectedEvidenceReview =
+    listedEvidenceReview ?? (selectedEvidenceSessionId && evidenceReviewQuery.data?.data?.session_id === selectedEvidenceSessionId ? evidenceReviewQuery.data.data : null);
   // A deep link that cannot be resolved must say so. Leaving the sheet closed
   // reproduces the silent no-op this fallback exists to remove.
-  const evidenceDeepLinkError = Boolean(selectedEvidenceSessionId) && !listedEvidenceReview
-    ? evidenceReviewQuery.error
-    : null;
+  const evidenceDeepLinkError = Boolean(selectedEvidenceSessionId) && !listedEvidenceReview ? evidenceReviewQuery.error : null;
   const orgSettings = (settingsQuery.data?.data?.settings ?? {}) as OrgSettings;
   const orgCodingCredentials = useMemo(() => orgCodingCredentialsQuery.data?.data ?? [], [orgCodingCredentialsQuery.data?.data]);
-  const codeReviewResolvedCredentials = useMemo(
-    () => pmUsableResolvedCredentials(resolvedCredentialsQuery.data?.data ?? []),
-    [resolvedCredentialsQuery.data?.data],
-  );
+  const codeReviewResolvedCredentials = useMemo(() => pmUsableResolvedCredentials(resolvedCredentialsQuery.data?.data ?? []), [resolvedCredentialsQuery.data?.data]);
   const codeReviewModelGroups = useMemo(
     () =>
       availableAgentModelGroups(codeReviewResolvedCredentials, codexAuthQuery.data?.data, orgCodingCredentials, orgSettings.default_agent_type || "codex", {
@@ -1161,7 +1150,11 @@ export default function CodeReviewsPage() {
   // Instant commit for toggles/selects/buttons.
   const commitPolicy = (mutate: (next: CodeReviewPolicyConfig) => void, source: CodeReviewPolicyEditSource = "manual") => {
     const next = draftFrom(mutate);
-    if (next) { saveSourceByConfigRef.current.set(next, source); setInvalidPolicyField(null); autosave.save(next); }
+    if (next) {
+      saveSourceByConfigRef.current.set(next, source);
+      setInvalidPolicyField(null);
+      autosave.save(next);
+    }
   };
   // toPatch builder for numeric fields, which require a non-null payload. Safe
   // because numeric inputs are disabled until the policy has loaded.
@@ -1172,9 +1165,7 @@ export default function CodeReviewsPage() {
   };
   const commitRequirementByKey = (
     key: string,
-    updater: (
-      requirement: CodeReviewPolicyConfig["description_policy"]["requirements"][number],
-    ) => CodeReviewPolicyConfig["description_policy"]["requirements"][number],
+    updater: (requirement: CodeReviewPolicyConfig["description_policy"]["requirements"][number]) => CodeReviewPolicyConfig["description_policy"]["requirements"][number],
   ) => {
     commitPolicy((next) => {
       const index = next.description_policy.requirements.findIndex((requirement) => requirement.key === key);
@@ -1220,21 +1211,13 @@ export default function CodeReviewsPage() {
       id: "outcome",
       header: sortHeader("Outcome", "outcome"),
       sortDirection: reviewSort === "outcome" ? reviewSortOrder : false,
-      render: (review) => (
-        <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} indicator="none" />
-      ),
+      render: (review) => <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} indicator="none" />,
     },
     {
       id: "risk",
       header: sortHeader("Risk", "risk"),
       sortDirection: reviewSort === "risk" ? reviewSortOrder : false,
-      render: (review) => (
-        <StatusLabel
-          label={reviewRiskLabel(review)}
-          tone={reviewRiskTone(review)}
-          indicator="none"
-        />
-      ),
+      render: (review) => <StatusLabel label={reviewRiskLabel(review)} tone={reviewRiskTone(review)} indicator="none" />,
     },
     {
       id: "run-status",
@@ -1290,13 +1273,13 @@ export default function CodeReviewsPage() {
         setOutcomeFilter(value);
         break;
       case "risk":
-        void setRiskFilter(value === ALL_RISKS ? null : value as (typeof RISK_FILTER_VALUES)[number]);
+        void setRiskFilter(value === ALL_RISKS ? null : (value as (typeof RISK_FILTER_VALUES)[number]));
         break;
       case "reason":
-        void setReasonFilter(value === ALL_CODE_REVIEW_REASONS ? null : value as CodeReviewReasonCode);
+        void setReasonFilter(value === ALL_CODE_REVIEW_REASONS ? null : (value as CodeReviewReasonCode));
         break;
       case "status":
-        void setStatusFilter(value === DEFAULT_STATUS_FILTER ? null : value as StatusFilter);
+        void setStatusFilter(value === DEFAULT_STATUS_FILTER ? null : (value as StatusFilter));
         break;
       case "author":
         void setAuthorFilter(value || null);
@@ -1311,10 +1294,7 @@ export default function CodeReviewsPage() {
   };
 
   return (
-    <ListPage
-      title="Code reviews"
-      description="Bot-requested PR reviews, acceptable-risk policy, and review outcomes."
-    >
+    <ListPage title="Code reviews" description="Bot-requested PR reviews, acceptable-risk policy, and review outcomes.">
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
         <TabsList>
           <TabsTrigger value="reviews">
@@ -1343,21 +1323,22 @@ export default function CodeReviewsPage() {
         </TabsList>
 
         <PageTabContent value="reviews">
-            <CodeReviewSummaryCards
-              stats={statsQuery.data?.data}
-              isLoading={statsQuery.isLoading}
-              isError={statsQuery.isError}
-              onRetry={() => void statsQuery.refetch()}
+          <CodeReviewSummaryCards stats={statsQuery.data?.data} isLoading={statsQuery.isLoading} isError={statsQuery.isError} onRetry={() => void statsQuery.refetch()} />
+          <CodeReviewFilters
+            id="code-review-filters"
+            values={sharedFilterValues}
+            repositories={repositories}
+            mobileOpen={mobileFiltersOpen}
+            onMobileOpenChange={setMobileFiltersOpen}
+            onChange={changeSharedFilter}
             />
-            <CodeReviewFilters id="code-review-filters" values={sharedFilterValues} repositories={repositories} mobileOpen={mobileFiltersOpen} onMobileOpenChange={setMobileFiltersOpen} onChange={changeSharedFilter} />
-            <SectionGroup
-              title="Review activity"
-              description="Pull requests reviewed by the team policy and their current outcome."
-            >
+          <SectionGroup title="Review activity" description="Pull requests reviewed by the team policy and their current outcome.">
               {newReviewsAvailable ? (
                 <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm">
                   <span>New reviews are available.</span>
-                  <Button variant="outline" size="sm" onClick={refreshNewestReviews}>Refresh</Button>
+                <Button variant="outline" size="sm" onClick={refreshNewestReviews}>
+                  Refresh
+                </Button>
                 </div>
               ) : null}
               {reviewsQuery.isLoading ? (
@@ -1366,13 +1347,20 @@ export default function CodeReviewsPage() {
                 <ErrorNotice
                   title="Code reviews could not be loaded"
                   description="Try again to load review activity."
-                  action={{ label: "Retry", onClick: () => void reviewsQuery.refetch() }}
+                action={{
+                  label: "Retry",
+                  onClick: () => void reviewsQuery.refetch(),
+                }}
                 />
               ) : reviews.length === 0 ? (
                 <EmptyState
                   icon={ClipboardCheck}
                   title={hasActiveReviewFilters ? "No reviews match these filters" : "No code review sessions"}
-                  description={hasActiveReviewFilters ? "Adjust or clear the filters to see more review activity." : "Reviews will appear here after the GitHub reviewer bot is requested on a pull request."}
+                description={
+                  hasActiveReviewFilters
+                    ? "Adjust or clear the filters to see more review activity."
+                    : "Reviews will appear here after the GitHub reviewer bot is requested on a pull request."
+                }
                   action={hasActiveReviewFilters ? { label: "Clear filters", onClick: clearReviewFilters } : undefined}
                 />
               ) : (
@@ -1387,26 +1375,24 @@ export default function CodeReviewsPage() {
                   footer={
                     <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/50 bg-muted/20 px-4 py-2.5">
                       <span className="text-xs tabular-nums text-muted-foreground" aria-live="polite">
-                        {totalReviewCount !== undefined
-                          ? `Showing ${reviews.length} of ${totalReviewCount}`
-                          : `${reviews.length} review${reviews.length === 1 ? "" : "s"}`}
+                        {totalReviewCount !== undefined ? `Showing ${reviews.length} of ${totalReviewCount}` : `${reviews.length} review${reviews.length === 1 ? "" : "s"}`}
                       </span>
                       <div className="flex items-center gap-3">
-                        {loadMoreReviews.isError ? (
-                          <span className="text-xs text-destructive">Couldn&apos;t load more reviews.</span>
-                        ) : null}
+                        {loadMoreReviews.isError ? <span className="text-xs text-destructive">Couldn&apos;t load more reviews.</span> : null}
                         {nextReviewCursor ? (
                           <Button
                             variant="ghost"
                             size="sm"
-                            onClick={() => loadMoreReviews.mutate({
+                            onClick={() =>
+                              loadMoreReviews.mutate({
                               filters: {
                                 ...currentListReviewFilters(),
                                 limit: CODE_REVIEW_PAGE_SIZE,
                               },
                               cursor: nextReviewCursor,
                               scopeKey: reviewScopeKey,
-                            })}
+                              })
+                            }
                             disabled={loadMoreReviews.isPending}
                           >
                             {loadMoreReviews.isPending ? "Loading…" : "Show 50 more"}
@@ -1431,22 +1417,12 @@ export default function CodeReviewsPage() {
                       <div className="space-y-2.5 pt-1">
                         <ReviewOperationalStatus review={review} nowMs={countdownNowMs} />
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-                          <StatusLabel
-                            label={decisionLabel(review)}
-                            tone={reviewDecisionTone(review)}
-                            indicator="none"
-                          />
-                          {review.completed_at ? (
-                            <span className="text-foreground">{formatDate(review.completed_at)}</span>
-                          ) : null}
+                            <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} indicator="none" />
+                            {review.completed_at ? <span className="text-foreground">{formatDate(review.completed_at)}</span> : null}
                         </div>
                         <div className="flex flex-wrap items-center gap-2 text-xs">
                           <span className="text-muted-foreground">Risk</span>
-                          <StatusLabel
-                            label={reviewRiskLabel(review)}
-                            tone={reviewRiskTone(review)}
-                            indicator="none"
-                          />
+                            <StatusLabel label={reviewRiskLabel(review)} tone={reviewRiskTone(review)} indicator="none" />
                         </div>
                       </div>
                     }
@@ -1471,7 +1447,10 @@ export default function CodeReviewsPage() {
                   <ErrorNotice
                     title="That code review could not be opened"
                     description="The link may point at a review that no longer exists. Retry, or clear it to return to the list."
-                    action={{ label: "Retry", onClick: () => void evidenceReviewQuery.refetch() }}
+                    action={{
+                      label: "Retry",
+                      onClick: () => void evidenceReviewQuery.refetch(),
+                    }}
                     onDismiss={() => selectEvidenceSession(null)}
                     dismissLabel="Clear the evidence link"
                   />
@@ -1512,7 +1491,9 @@ export default function CodeReviewsPage() {
                 isLoadingMore={disputeQueueQuery.isFetchingNextPage}
                 onLoadMore={() => void disputeQueueQuery.fetchNextPage()}
                 onRetry={() => void disputeQueueQuery.refetch()}
-                onAdjudicate={(dispute, status, note, onSaved) => adjudicateDispute.mutate({ dispute, status, note }, { onSuccess: onSaved })}
+              onAdjudicate={(dispute, status, note, activeSeconds, onSaved, onFailed) =>
+                adjudicateDispute.mutate({ dispute, status, note, activeSeconds }, { onSuccess: onSaved, onError: onFailed })
+              }
               />
             </PageTabContent>
           ) : null}
@@ -1520,6 +1501,10 @@ export default function CodeReviewsPage() {
           <PageTabContent value="analytics">
             <CodeReviewAnalyticsReport
               analytics={analyticsQuery.data?.data}
+            insights={insightsQuery.data?.data}
+            insightsIsLoading={insightsQuery.isLoading}
+            insightsIsError={insightsQuery.isError}
+            onRetryInsights={() => void insightsQuery.refetch()}
               isLoading={analyticsQuery.isLoading}
               isError={analyticsQuery.isError}
               onRetry={() => void analyticsQuery.refetch()}
@@ -1533,7 +1518,7 @@ export default function CodeReviewsPage() {
                 repository: reviewRepositoryId,
                 range: timeRangeFilter,
               }}
-              filters={(
+            filters={
                 <CodeReviewFilters
                   id="code-review-analytics-filters"
                   values={sharedFilterValues}
@@ -1545,7 +1530,7 @@ export default function CodeReviewsPage() {
                   analyticsMode
                   mobileLabel="Filter analytics"
                 />
-              )}
+            }
             />
           </PageTabContent>
 
@@ -1557,9 +1542,7 @@ export default function CodeReviewsPage() {
               className="max-w-5xl space-y-6"
             >
               {!canManagePolicy ? (
-                <p className="text-sm text-muted-foreground">
-                  You have view-only access to this policy. An organization administrator can change review behavior and GitHub setup.
-                </p>
+              <p className="text-sm text-muted-foreground">You have view-only access to this policy. An organization administrator can change review behavior and GitHub setup.</p>
               ) : null}
               <fieldset disabled={!canManagePolicy} className="space-y-6">
                 <SectionGroup title="Review behavior" variant="bordered" headingLevel={3}>
@@ -1575,8 +1558,18 @@ export default function CodeReviewsPage() {
                           next.approval_mode = (outcome === "approve" ? "approve_acceptable" : "comment_only") as CodeReviewApprovalMode;
                         }
                       });
-                      if ((prior === "disabled") !== (outcome === "disabled")) trackCodeReviewPolicyEvent({ event: "code_review_policy_enabled", scope: "organization", configured: outcome !== "disabled" });
-                      if (outcome !== "disabled" && outcome !== prior) trackCodeReviewPolicyEvent({ event: "code_review_approval_mode_changed", scope: "organization", configured: true });
+                    if ((prior === "disabled") !== (outcome === "disabled"))
+                      trackCodeReviewPolicyEvent({
+                        event: "code_review_policy_enabled",
+                        scope: "organization",
+                        configured: outcome !== "disabled",
+                      });
+                    if (outcome !== "disabled" && outcome !== prior)
+                      trackCodeReviewPolicyEvent({
+                        event: "code_review_approval_mode_changed",
+                        scope: "organization",
+                        configured: true,
+                      });
                     }}
                   />
                   <PolicySummary config={config} />
@@ -1589,7 +1582,15 @@ export default function CodeReviewsPage() {
                   examples={promptExamplesQuery.data?.data}
                   examplesError={apiErrorMessage(promptExamplesQuery.error) ?? undefined}
                   onRetryExamples={() => void promptExamplesQuery.refetch()}
-                  onChooseExample={(field, example) => { setPromptExample({ field, example }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_example_previewed", scope: "organization", example_key: example.key, configured: true }); }}
+                onChooseExample={(field, example) => {
+                  setPromptExample({ field, example });
+                  trackCodeReviewPolicyEvent({
+                    event: "code_review_prompt_example_previewed",
+                    scope: "organization",
+                    example_key: example.key,
+                    configured: true,
+                  });
+                }}
                   onDraftHandle={registerPromptDraft}
                   invalidPolicyField={invalidPolicyField}
                 />
@@ -1600,7 +1601,15 @@ export default function CodeReviewsPage() {
                   commitPolicy={commitPolicy}
                   examples={promptExamplesQuery.data?.data}
                   onRetryExamples={() => void promptExamplesQuery.refetch()}
-                  onChooseExample={(field, example) => { setPromptExample({ field, example }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_example_previewed", scope: "organization", example_key: example.key, configured: true }); }}
+                onChooseExample={(field, example) => {
+                  setPromptExample({ field, example });
+                  trackCodeReviewPolicyEvent({
+                    event: "code_review_prompt_example_previewed",
+                    scope: "organization",
+                    example_key: example.key,
+                    configured: true,
+                  });
+                }}
                   onDraftHandle={registerPromptDraft}
                   invalidPolicyField={invalidPolicyField}
                 />
@@ -1621,21 +1630,14 @@ export default function CodeReviewsPage() {
                 description="Connect repositories and manage where teammates can request the 143 reviewer from GitHub."
                 variant="bordered"
                 headingLevel={3}
-                action={(
-                  <DisabledTooltip
-                    disabled={!canManagePolicy}
-                    content={!canManagePolicy ? "Only organization administrators can add GitHub reviewer connections." : undefined}
-                  >
-                    <Button
-                      size="sm"
-                      disabled={!canManagePolicy}
-                      onClick={openAddRepository}
-                    >
+              action={
+                <DisabledTooltip disabled={!canManagePolicy} content={!canManagePolicy ? "Only organization administrators can add GitHub reviewer connections." : undefined}>
+                  <Button size="sm" disabled={!canManagePolicy} onClick={openAddRepository}>
                       <Plus className="h-4 w-4" />
                       Add repository
                     </Button>
                   </DisabledTooltip>
-                )}
+              }
               >
                 <div className="space-y-3" aria-label="GitHub reviewer repositories">
                   {githubTriggerStatusesQuery.isLoading ? (
@@ -1644,7 +1646,10 @@ export default function CodeReviewsPage() {
                     <ErrorNotice
                       title="GitHub reviewer connections could not be loaded"
                       description={apiErrorMessage(githubTriggerStatusesQuery.error) ?? "Try again in a moment."}
-                      action={{ label: "Retry", onClick: () => void githubTriggerStatusesQuery.refetch() }}
+                    action={{
+                      label: "Retry",
+                      onClick: () => void githubTriggerStatusesQuery.refetch(),
+                    }}
                     />
                   ) : visibleGitHubTriggerStatuses.length === 0 ? (
                     <EmptyState
@@ -1652,9 +1657,17 @@ export default function CodeReviewsPage() {
                       icon={Github}
                       title="No GitHub reviewer connections"
                       description="Add a repository to make the 143 reviewer available from its pull requests."
-                      action={canManagePolicy ? { label: "Add your first repository", onClick: openAddRepository } : undefined}
+                    action={
+                      canManagePolicy
+                        ? {
+                            label: "Add your first repository",
+                            onClick: openAddRepository,
+                          }
+                        : undefined
+                    }
                     />
-                  ) : visibleGitHubTriggerStatuses.map((trigger) => {
+                ) : (
+                  visibleGitHubTriggerStatuses.map((trigger) => {
                     const setupPending = setupGitHubTrigger.isPending && setupGitHubTrigger.variables === trigger.repository_id;
                     const deletePending = deleteGitHubTrigger.isPending && deleteGitHubTrigger.variables === trigger.repository_id;
                     return (
@@ -1673,11 +1686,13 @@ export default function CodeReviewsPage() {
                         onDelete={() => deleteGitHubTrigger.mutate(trigger.repository_id)}
                       />
                     );
-                  })}
+                  })
+                )}
                   {!githubTriggerStatusesQuery.isLoading && !githubTriggerStatusesQuery.isError && visibleGitHubTriggerStatuses.length > 0 ? (
                     <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
                       <p className="text-xs tabular-nums text-muted-foreground">
-                        {visibleGitHubTriggerStatuses.filter((trigger) => trigger.status === "ready").length} ready of {visibleGitHubTriggerStatuses.length} repositor{visibleGitHubTriggerStatuses.length === 1 ? "y" : "ies"}
+                      {visibleGitHubTriggerStatuses.filter((trigger) => trigger.status === "ready").length} ready of {visibleGitHubTriggerStatuses.length} repositor
+                      {visibleGitHubTriggerStatuses.length === 1 ? "y" : "ies"}
                       </p>
                       <Button asChild variant="link" size="sm">
                         <Link href="/settings/integrations">Manage all GitHub settings</Link>
@@ -1686,24 +1701,31 @@ export default function CodeReviewsPage() {
                   ) : null}
                 </div>
               </SectionGroup>
-              <AuditLogTrigger
-                filters={{ resource_type: "code_review_policy" }}
-                title="Review policy history"
-                variant="footer"
-              />
+            <AuditLogTrigger filters={{ resource_type: "code_review_policy" }} title="Review policy history" variant="footer" />
             </SectionGroup>
             <CodeReviewPromptExampleDialog
               selection={promptExample}
               currentConfig={config}
               currentDraftValue={promptExample ? promptDraftsRef.current[promptExample.field]?.value : undefined}
               persistedValue={promptExample ? persistedPromptsRef.current[promptExample.field] : undefined}
-              onOpenChange={(open) => { if (!open) setPromptExample(null); }}
+            onOpenChange={(open) => {
+              if (!open) setPromptExample(null);
+            }}
               onApply={() => {
                 if (!promptExample) return;
                 const value = "instructions" in promptExample.example ? promptExample.example.instructions : promptExample.example.policy;
                 promptDraftsRef.current[promptExample.field]?.replace(value);
-                commitPolicy((next) => { next[promptExample.field] = value; }, "example");
-                trackCodeReviewPolicyEvent({ event: "code_review_prompt_example_applied", scope: "organization", source: "example", example_key: promptExample.example.key, character_bucket: promptCharacterBucket(value), configured: true });
+              commitPolicy((next) => {
+                next[promptExample.field] = value;
+              }, "example");
+              trackCodeReviewPolicyEvent({
+                event: "code_review_prompt_example_applied",
+                scope: "organization",
+                source: "example",
+                example_key: promptExample.example.key,
+                character_bucket: promptCharacterBucket(value),
+                configured: true,
+              });
                 setPromptExample(null);
               }}
             />
@@ -1753,7 +1775,12 @@ export default function CodeReviewsPage() {
   );
 }
 
-type PromptDraftHandle = { value: string; dirty: boolean; flush(): void; replace(value: string): void };
+type PromptDraftHandle = {
+  value: string;
+  dirty: boolean;
+  flush(): void;
+  replace(value: string): void;
+};
 
 function PolicyPromptComposer({
   field,
@@ -1771,7 +1798,10 @@ function PolicyPromptComposer({
   config: CodeReviewPolicyConfig | null;
   autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
   commitPolicy: (mutate: (next: CodeReviewPolicyConfig) => void, source?: CodeReviewPolicyEditSource) => void;
-  examples?: { review_instructions: CodeReviewPromptExampleOption[]; automated_approval_policies: CodeReviewAutomatedApprovalExampleOption[] };
+  examples?: {
+    review_instructions: CodeReviewPromptExampleOption[];
+    automated_approval_policies: CodeReviewAutomatedApprovalExampleOption[];
+  };
   examplesError?: string;
   onRetryExamples: () => void;
   onChooseExample: (field: "review_instructions" | "automated_approval_policy", example: CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption) => void;
@@ -1787,9 +1817,32 @@ function PolicyPromptComposer({
           disabled={!config}
           inactive={Boolean(config && config.approval_mode !== "approve_acceptable")}
           autosave={autosave}
-          onCommit={(value) => { commitPolicy((next) => { next.automated_approval_policy = value; }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: "organization", source: "manual", character_bucket: promptCharacterBucket(value.trim()), configured: true }); }}
+          onCommit={(value) => {
+            commitPolicy((next) => {
+              next.automated_approval_policy = value;
+            });
+            trackCodeReviewPolicyEvent({
+              event: "code_review_prompt_edited",
+              scope: "organization",
+              source: "manual",
+              character_bucket: promptCharacterBucket(value.trim()),
+              configured: true,
+            });
+          }}
           resetValue={DEFAULT_AUTOMATED_APPROVAL_POLICY}
-          onReset={() => { const resetValue = DEFAULT_AUTOMATED_APPROVAL_POLICY; commitPolicy((next) => { next.automated_approval_policy = resetValue; }, "reset"); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: "organization", source: "reset", character_bucket: promptCharacterBucket(resetValue), configured: true }); }}
+          onReset={() => {
+            const resetValue = DEFAULT_AUTOMATED_APPROVAL_POLICY;
+            commitPolicy((next) => {
+              next.automated_approval_policy = resetValue;
+            }, "reset");
+            trackCodeReviewPolicyEvent({
+              event: "code_review_prompt_edited",
+              scope: "organization",
+              source: "reset",
+              character_bucket: promptCharacterBucket(resetValue),
+              configured: true,
+            });
+          }}
           resetLabel="Reset to default"
           examples={examples?.automated_approval_policies ?? []}
           onChooseExample={(example) => onChooseExample("automated_approval_policy", example)}
@@ -1806,9 +1859,32 @@ function PolicyPromptComposer({
         value={config?.review_instructions ?? ""}
         disabled={!config}
         autosave={autosave}
-        onCommit={(value) => { commitPolicy((next) => { next.review_instructions = value; }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: "organization", source: "manual", character_bucket: promptCharacterBucket(value.trim()), configured: true }); }}
+        onCommit={(value) => {
+          commitPolicy((next) => {
+            next.review_instructions = value;
+          });
+          trackCodeReviewPolicyEvent({
+            event: "code_review_prompt_edited",
+            scope: "organization",
+            source: "manual",
+            character_bucket: promptCharacterBucket(value.trim()),
+            configured: true,
+          });
+        }}
         resetValue=""
-        onReset={() => { const resetValue = ""; commitPolicy((next) => { next.review_instructions = resetValue; }, "reset"); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: "organization", source: "reset", character_bucket: promptCharacterBucket(resetValue), configured: true }); }}
+        onReset={() => {
+          const resetValue = "";
+          commitPolicy((next) => {
+            next.review_instructions = resetValue;
+          }, "reset");
+          trackCodeReviewPolicyEvent({
+            event: "code_review_prompt_edited",
+            scope: "organization",
+            source: "reset",
+            character_bucket: promptCharacterBucket(resetValue),
+            configured: true,
+          });
+        }}
         resetLabel="Clear instructions"
         examples={examples?.review_instructions ?? []}
         onChooseExample={(example) => onChooseExample("review_instructions", example)}
@@ -1820,8 +1896,14 @@ function PolicyPromptComposer({
 }
 
 type CodeReviewPromptComposerProps = {
-  value: string; disabled: boolean; inactive?: boolean; autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
-  onCommit: (value: string) => void; onReset: () => void; resetValue: string; resetLabel: string;
+  value: string;
+  disabled: boolean;
+  inactive?: boolean;
+  autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
+  onCommit: (value: string) => void;
+  onReset: () => void;
+  resetValue: string;
+  resetLabel: string;
   examples: Array<CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption>;
   onChooseExample: (example: CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption) => void;
   onDraftHandle: (handle: PromptDraftHandle) => void;
@@ -1829,17 +1911,63 @@ type CodeReviewPromptComposerProps = {
 };
 
 function CodeReviewAutomatedApprovalPolicyComposer(props: CodeReviewPromptComposerProps) {
-  return <CodeReviewPromptComposerBase {...props} title="Automated approval policy" description="Guides how the orchestrator classifies findings and explicit human-review reasons. P0/P1 findings and hard safeguards block approval; P2/P3 findings are advisory." tooltip="Used only by the orchestrator when automatic approval is enabled. The backend derives the decision from explicit evidence, and the prompt cannot bypass hard safeguards. A non-empty value is required for automatic approval." required />;
+  return (
+    <CodeReviewPromptComposerBase
+      {...props}
+      title="Automated approval policy"
+      description="Guides how the orchestrator classifies findings and explicit human-review reasons. P0/P1 findings and hard safeguards block approval; P2/P3 findings are advisory."
+      tooltip="Used only by the orchestrator when automatic approval is enabled. The backend derives the decision from explicit evidence, and the prompt cannot bypass hard safeguards. A non-empty value is required for automatic approval."
+      required
+    />
+  );
 }
 
 function CodeReviewInstructionsComposer(props: CodeReviewPromptComposerProps) {
-  return <CodeReviewPromptComposerBase {...props} title="Additional review instructions (optional)" description="Add team-specific priorities or comment style. Empty means every reviewer uses its native /review behavior without extra guidance." tooltip="Optional guidance appended after each reviewer's native /review command and also supplied to the orchestrator. Leave empty for built-in review behavior; it does not grant approval authority." secondary />;
+  return (
+    <CodeReviewPromptComposerBase
+      {...props}
+      title="Additional review instructions (optional)"
+      description="Add team-specific priorities or comment style. Empty means every reviewer uses its native /review behavior without extra guidance."
+      tooltip="Optional guidance appended after each reviewer's native /review command and also supplied to the orchestrator. Leave empty for built-in review behavior; it does not grant approval authority."
+      secondary
+    />
+  );
 }
 
-function CodeReviewPromptComposerBase({ title, description, tooltip, value, disabled, inactive, required, autosave, onCommit, onReset, resetValue, resetLabel, secondary, examples, onChooseExample, onDraftHandle, focusOnError }: {
-  title: string; description: string; tooltip: string; value: string; disabled: boolean; inactive?: boolean; required?: boolean;
-  autosave: UseAutosaveResult<CodeReviewPolicyConfig>; onCommit: (value: string) => void; onReset: () => void; resetValue: string; resetLabel: string; secondary?: boolean;
-  examples: Array<CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption>; onChooseExample: (example: CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption) => void;
+function CodeReviewPromptComposerBase({
+  title,
+  description,
+  tooltip,
+  value,
+  disabled,
+  inactive,
+  required,
+  autosave,
+  onCommit,
+  onReset,
+  resetValue,
+  resetLabel,
+  secondary,
+  examples,
+  onChooseExample,
+  onDraftHandle,
+  focusOnError,
+}: {
+  title: string;
+  description: string;
+  tooltip: string;
+  value: string;
+  disabled: boolean;
+  inactive?: boolean;
+  required?: boolean;
+  autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
+  onCommit: (value: string) => void;
+  onReset: () => void;
+  resetValue: string;
+  resetLabel: string;
+  secondary?: boolean;
+  examples: Array<CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption>;
+  onChooseExample: (example: CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption) => void;
   onDraftHandle: (handle: PromptDraftHandle) => void;
   focusOnError: boolean;
 }) {
@@ -1851,14 +1979,25 @@ function CodeReviewPromptComposerBase({ title, description, tooltip, value, disa
   const invalidValue = (next: string) => [...next.trim()].length > CODE_REVIEW_PROMPT_MAX_LENGTH || Boolean(requiresValue && !next.trim());
   const field = useDebouncedTextField({
     serverValue: value,
-    onCommit: (next) => { if (!invalidValue(next)) onCommit(next); },
+    onCommit: (next) => {
+      if (!invalidValue(next)) onCommit(next);
+    },
     debounceMs: CODE_REVIEW_TEXTAREA_DEBOUNCE_MS,
     preserveLocalOnServerChange: autosave.status === "error",
     valuesEqual: codeReviewPromptValuesEqual,
   });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => { onDraftHandle({ value: field.value, dirty: field.dirty, flush: field.flush, replace: field.replace }); }, [field.value, field.dirty, field.flush, field.replace, onDraftHandle]);
-  useEffect(() => { if (focusOnError) textareaRef.current?.focus(); }, [focusOnError]);
+  useEffect(() => {
+    onDraftHandle({
+      value: field.value,
+      dirty: field.dirty,
+      flush: field.flush,
+      replace: field.replace,
+    });
+  }, [field.value, field.dirty, field.flush, field.replace, onDraftHandle]);
+  useEffect(() => {
+    if (focusOnError) textareaRef.current?.focus();
+  }, [focusOnError]);
   const count = [...field.value.trim()].length;
   const invalid = count > CODE_REVIEW_PROMPT_MAX_LENGTH || Boolean(requiresValue && !field.value.trim());
   // A running count is only worth reading as the limit approaches; showing it
@@ -1879,9 +2018,7 @@ function CodeReviewPromptComposerBase({ title, description, tooltip, value, disa
         </div>
         <p className="max-w-3xl text-sm leading-6 text-muted-foreground">{description}</p>
         {inactive ? (
-          <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
-            This policy is saved and ready, but it is only used when “Approve acceptable PRs” is selected above.
-          </p>
+          <p className="max-w-3xl text-sm leading-6 text-muted-foreground">This policy is saved and ready, but it is only used when “Approve acceptable PRs” is selected above.</p>
         ) : null}
       </div>
       <Textarea
@@ -1906,19 +2043,72 @@ function CodeReviewPromptComposerBase({ title, description, tooltip, value, disa
           <span aria-hidden="true">
             <AutosaveIndicator status={autosave.status} />
           </span>
-          {examples.length > 0 ? <Select value="" disabled={disabled} onValueChange={(key) => { const example = examples.find((candidate) => candidate.key === key); if (example) onChooseExample(example); }}><SelectTrigger density="compact" className="w-auto min-w-0 border-0 bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:bg-accent hover:text-accent-foreground" aria-label={`${title} prompt example`}><SelectValue placeholder="Examples" /></SelectTrigger><SelectContent><SelectGroup><SelectLabel>Prompt examples</SelectLabel>{examples.map((example) => <SelectItem key={example.key} value={example.key}>{example.title}</SelectItem>)}</SelectGroup></SelectContent></Select> : null}
+          {examples.length > 0 ? (
+            <Select
+              value=""
+              disabled={disabled}
+              onValueChange={(key) => {
+                const example = examples.find((candidate) => candidate.key === key);
+                if (example) onChooseExample(example);
+              }}
+            >
+              <SelectTrigger
+                density="compact"
+                className="w-auto min-w-0 border-0 bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:bg-accent hover:text-accent-foreground"
+                aria-label={`${title} prompt example`}
+              >
+                <SelectValue placeholder="Examples" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectLabel>Prompt examples</SelectLabel>
+                  {examples.map((example) => (
+                    <SelectItem key={example.key} value={example.key}>
+                      {example.title}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          ) : null}
           <DisabledTooltip disabled={disabled} content="Policy settings are still loading.">
-            <Button type="button" variant="ghost" size="sm" className="text-xs text-muted-foreground sm:h-8" disabled={disabled} onClick={() => { field.replace(resetValue); onReset(); }}>{resetLabel}</Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="text-xs text-muted-foreground sm:h-8"
+              disabled={disabled}
+              onClick={() => {
+                field.replace(resetValue);
+                onReset();
+              }}
+            >
+              {resetLabel}
+            </Button>
           </DisabledTooltip>
         </div>
       </div>
-      {invalid ? <p className="max-w-3xl text-xs text-destructive">{count > CODE_REVIEW_PROMPT_MAX_LENGTH ? "Prompt is too long." : "An automated approval policy is required while approval is enabled."}</p> : null}
+      {invalid ? (
+        <p className="max-w-3xl text-xs text-destructive">
+          {count > CODE_REVIEW_PROMPT_MAX_LENGTH ? "Prompt is too long." : "An automated approval policy is required while approval is enabled."}
+        </p>
+      ) : null}
     </section>
   );
 }
 
-function CodeReviewPromptExampleDialog({ selection, currentConfig, currentDraftValue, persistedValue, onOpenChange, onApply }: {
-  selection: { field: "review_instructions" | "automated_approval_policy"; example: CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption } | null;
+function CodeReviewPromptExampleDialog({
+  selection,
+  currentConfig,
+  currentDraftValue,
+  persistedValue,
+  onOpenChange,
+  onApply,
+}: {
+  selection: {
+    field: "review_instructions" | "automated_approval_policy";
+    example: CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption;
+  } | null;
   currentConfig: CodeReviewPolicyConfig | null;
   currentDraftValue?: string;
   persistedValue?: string;
@@ -1928,13 +2118,33 @@ function CodeReviewPromptExampleDialog({ selection, currentConfig, currentDraftV
   if (!selection) return null;
   const value = "instructions" in selection.example ? selection.example.instructions : selection.example.policy;
   const dirty = currentDraftValue !== undefined && currentDraftValue !== (persistedValue ?? currentConfig?.[selection.field] ?? "");
-  return <Dialog open onOpenChange={onOpenChange}><DialogContent>
-    <DialogHeader><DialogTitle>{selection.example.title}</DialogTitle><DialogDescription>{selection.example.description} Only {selection.field === "review_instructions" ? "additional review instructions" : "the automated approval policy"} will be replaced.</DialogDescription></DialogHeader>
+  return (
+    <Dialog open onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{selection.example.title}</DialogTitle>
+          <DialogDescription>
+            {selection.example.description} Only {selection.field === "review_instructions" ? "additional review instructions" : "the automated approval policy"} will be replaced.
+          </DialogDescription>
+        </DialogHeader>
     <div className="max-h-80 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-3 text-sm">{value}</div>
-    {selection.field === "automated_approval_policy" && currentConfig?.approval_mode !== "approve_acceptable" ? <p className="text-sm text-muted-foreground">This example does not enable automatic approval. Choose “Leave comments and approve when acceptable” separately.</p> : null}
-    {dirty ? <p className="text-sm text-warning">Your currently saved value differs. Applying this example replaces only this prompt field and creates a new policy version.</p> : null}
-    <DialogFooter><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button type="button" onClick={onApply}>Use example</Button></DialogFooter>
-  </DialogContent></Dialog>;
+        {selection.field === "automated_approval_policy" && currentConfig?.approval_mode !== "approve_acceptable" ? (
+          <p className="text-sm text-muted-foreground">This example does not enable automatic approval. Choose “Leave comments and approve when acceptable” separately.</p>
+        ) : null}
+        {dirty ? (
+          <p className="text-sm text-warning">Your currently saved value differs. Applying this example replaces only this prompt field and creates a new policy version.</p>
+        ) : null}
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button type="button" onClick={onApply}>
+            Use example
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 type AdvancedPolicySettingsProps = {
@@ -1960,30 +2170,78 @@ function AdvancedPolicySettings({
   invalidPolicyField,
   analyticsScope,
 }: AdvancedPolicySettingsProps) {
+  const [limitDeepLinkOpen, setLimitDeepLinkOpen] = useState(false);
+  useEffect(() => {
+    const revealLimitSetting = () => {
+      const settingID = window.location.hash.slice(1);
+      if (settingID !== "policy-max-files-changed" && settingID !== "policy-max-lines-changed") return;
+      setLimitDeepLinkOpen(true);
+      window.setTimeout(() => document.getElementById(settingID)?.scrollIntoView?.({ block: "center" }), 0);
+    };
+    revealLimitSetting();
+    window.addEventListener("hashchange", revealLimitSetting);
+    return () => window.removeEventListener("hashchange", revealLimitSetting);
+  }, []);
   return (
-                <AdvancedPolicyControls forceOpen={Boolean(invalidPolicyField && ["risk_policy", "inline_comment_limit", "agent_roster", "description_policy"].includes(invalidPolicyField))} onOpened={() => trackCodeReviewPolicyEvent({ event: "code_review_advanced_opened", scope: analyticsScope, subsection: "all", configured: true })}>
-                  {invalidPolicyField ? <ErrorNotice title="Could not save this policy setting" description={`Correct the highlighted ${invalidPolicyField.replaceAll("_", " ")} setting and try again.`} /> : null}
+    <AdvancedPolicyControls
+      forceOpen={limitDeepLinkOpen || Boolean(invalidPolicyField && ["risk_policy", "inline_comment_limit", "agent_roster", "description_policy"].includes(invalidPolicyField))}
+      onOpened={() =>
+        trackCodeReviewPolicyEvent({
+          event: "code_review_advanced_opened",
+          scope: analyticsScope,
+          subsection: "all",
+          configured: true,
+        })
+      }
+    >
+      {invalidPolicyField ? (
+        <ErrorNotice title="Could not save this policy setting" description={`Correct the highlighted ${invalidPolicyField.replaceAll("_", " ")} setting and try again.`} />
+      ) : null}
                 <div>
                   <div className="text-sm font-medium text-foreground">Fine-tuning</div>
                   <div className="mt-2 divide-y divide-border border-y border-border">
-                  <FineTuningSection title="Approval criteria" summary="Size thresholds, limits, timeout, and reviewer quorum" forceOpen={invalidPolicyField === "risk_policy" || invalidPolicyField === "inline_comment_limit"} onOpened={() => trackCodeReviewPolicyEvent({ event: "code_review_advanced_opened", scope: analyticsScope, subsection: "approval_criteria", configured: true })}>
+          <FineTuningSection
+            title="Approval criteria"
+            summary="Size thresholds, limits, timeout, and reviewer quorum"
+            forceOpen={limitDeepLinkOpen || invalidPolicyField === "risk_policy" || invalidPolicyField === "inline_comment_limit"}
+            onOpened={() =>
+              trackCodeReviewPolicyEvent({
+                event: "code_review_advanced_opened",
+                scope: analyticsScope,
+                subsection: "approval_criteria",
+                configured: true,
+              })
+            }
+          >
                     <div className="grid gap-3 md:grid-cols-3">
+              <div id="policy-max-files-changed" className="scroll-mt-24">
                       <NumberPolicyInput
                         label="Files changed"
                         serverValue={config?.risk_policy.max_files_changed}
                         min={1}
                         disabled={!config}
                         autosave={autosave}
-                        buildPatch={(value) => buildConfig((next) => { next.risk_policy.max_files_changed = value; })}
+                  buildPatch={(value) =>
+                    buildConfig((next) => {
+                      next.risk_policy.max_files_changed = value;
+                    })
+                  }
                       />
+              </div>
+              <div id="policy-max-lines-changed" className="scroll-mt-24">
                       <NumberPolicyInput
                         label="Lines changed"
                         serverValue={config?.risk_policy.max_lines_changed}
                         min={1}
                         disabled={!config}
                         autosave={autosave}
-                        buildPatch={(value) => buildConfig((next) => { next.risk_policy.max_lines_changed = value; })}
+                  buildPatch={(value) =>
+                    buildConfig((next) => {
+                      next.risk_policy.max_lines_changed = value;
+                    })
+                  }
                       />
+              </div>
                       <NumberPolicyInput
                         label="Inline comments"
                         serverValue={config?.inline_comment_limit}
@@ -1991,7 +2249,11 @@ function AdvancedPolicySettings({
                         max={10}
                         disabled={!config}
                         autosave={autosave}
-                        buildPatch={(value) => buildConfig((next) => { next.inline_comment_limit = value; })}
+                buildPatch={(value) =>
+                  buildConfig((next) => {
+                    next.inline_comment_limit = value;
+                  })
+                }
                       />
                       <DurationInput
                         label="Reassessment cooldown"
@@ -2006,7 +2268,11 @@ function AdvancedPolicySettings({
                         disabled={!config}
                         defaultUnit="minutes"
                         onChangeSeconds={(seconds) =>
-                          autosave.save(buildConfig((next) => { next.risk_policy.semantic_dedupe_cooldown_seconds = Math.min(86400, seconds); }))
+                  autosave.save(
+                    buildConfig((next) => {
+                      next.risk_policy.semantic_dedupe_cooldown_seconds = Math.min(86400, seconds);
+                    }),
+                  )
                         }
                       />
                       <DurationInput
@@ -2022,7 +2288,11 @@ function AdvancedPolicySettings({
                         disabled={!config}
                         defaultUnit="minutes"
                         onChangeSeconds={(seconds) =>
-                          autosave.save(buildConfig((next) => { next.agent_roster.timeout_seconds = seconds; }))
+                  autosave.save(
+                    buildConfig((next) => {
+                      next.agent_roster.timeout_seconds = seconds;
+                    }),
+                  )
                         }
                       />
                       <NumberPolicyInput
@@ -2032,52 +2302,98 @@ function AdvancedPolicySettings({
                         max={Math.max(1, config?.agent_roster.reviewers.length ?? 1)}
                         disabled={!config}
                         autosave={autosave}
-                        buildPatch={(value) => buildConfig((next) => { next.agent_roster.require_reviewer_quorum = value; })}
+                buildPatch={(value) =>
+                  buildConfig((next) => {
+                    next.agent_roster.require_reviewer_quorum = value;
+                  })
+                }
                       />
                     </div>
                   </FineTuningSection>
 
-                  <FineTuningSection title="Quality gates" summary="Merge and check requirements before approval" onOpened={() => trackCodeReviewPolicyEvent({ event: "code_review_advanced_opened", scope: analyticsScope, subsection: "quality_gates", configured: true })}>
+          <FineTuningSection
+            title="Quality gates"
+            summary="Merge and check requirements before approval"
+            onOpened={() =>
+              trackCodeReviewPolicyEvent({
+                event: "code_review_advanced_opened",
+                scope: analyticsScope,
+                subsection: "quality_gates",
+                configured: true,
+              })
+            }
+          >
                     <div className="grid gap-x-6 gap-y-2 md:grid-cols-2">
                       <PolicyToggle
                         label="Require passing checks"
                         description={QUALITY_GATE_DESCRIPTIONS.requirePassingChecks}
                         checked={config?.risk_policy.require_passing_checks ?? false}
                         disabled={!config}
-                        onCheckedChange={(checked) => commitPolicy((next) => { next.risk_policy.require_passing_checks = checked; })}
+                onCheckedChange={(checked) =>
+                  commitPolicy((next) => {
+                    next.risk_policy.require_passing_checks = checked;
+                  })
+                }
                       />
                       <PolicyToggle
                         label="Enforce sensitive paths"
                         description={QUALITY_GATE_DESCRIPTIONS.excludeSensitivePaths}
                         checked={config?.risk_policy.exclude_sensitive_paths ?? false}
                         disabled={!config}
-                        onCheckedChange={(checked) => commitPolicy((next) => { next.risk_policy.exclude_sensitive_paths = checked; })}
+                onCheckedChange={(checked) =>
+                  commitPolicy((next) => {
+                    next.risk_policy.exclude_sensitive_paths = checked;
+                  })
+                }
                       />
                       <PolicyToggle
                         label="Require up-to-date branch"
                         description={QUALITY_GATE_DESCRIPTIONS.requireUpToDate}
                         checked={config?.risk_policy.require_up_to_date ?? false}
                         disabled={!config}
-                        onCheckedChange={(checked) => commitPolicy((next) => { next.risk_policy.require_up_to_date = checked; })}
+                onCheckedChange={(checked) =>
+                  commitPolicy((next) => {
+                    next.risk_policy.require_up_to_date = checked;
+                  })
+                }
                       />
                       <PolicyToggle
                         label="Block reviewer disagreement"
                         description={QUALITY_GATE_DESCRIPTIONS.disagreementBlocks}
                         checked={config?.agent_roster.disagreement_blocks ?? false}
                         disabled={!config}
-                        onCheckedChange={(checked) => commitPolicy((next) => { next.agent_roster.disagreement_blocks = checked; })}
+                onCheckedChange={(checked) =>
+                  commitPolicy((next) => {
+                    next.agent_roster.disagreement_blocks = checked;
+                  })
+                }
                       />
                       <PolicyToggle
                         label="Allow fork PRs"
                         description={QUALITY_GATE_DESCRIPTIONS.allowForks}
                         checked={config?.risk_policy.allow_forks ?? false}
                         disabled={!config}
-                        onCheckedChange={(checked) => commitPolicy((next) => { next.risk_policy.allow_forks = checked; })}
+                onCheckedChange={(checked) =>
+                  commitPolicy((next) => {
+                    next.risk_policy.allow_forks = checked;
+                  })
+                }
                       />
                     </div>
                   </FineTuningSection>
 
-                  <FineTuningSection title="Paths, authors & checks" summary="Path filters, eligible authors, and required checks" onOpened={() => trackCodeReviewPolicyEvent({ event: "code_review_advanced_opened", scope: analyticsScope, subsection: "paths_authors_checks", configured: true })}>
+          <FineTuningSection
+            title="Paths, authors & checks"
+            summary="Path filters, eligible authors, and required checks"
+            onOpened={() =>
+              trackCodeReviewPolicyEvent({
+                event: "code_review_advanced_opened",
+                scope: analyticsScope,
+                subsection: "paths_authors_checks",
+                configured: true,
+              })
+            }
+          >
                     <div className="grid gap-3 lg:grid-cols-2">
                       <PolicyStringListEditor
                         label="Sensitive paths"
@@ -2087,7 +2403,11 @@ function AdvancedPolicySettings({
                         monospace
                         serverValue={config?.risk_policy.sensitive_paths ?? []}
                         disabled={!config}
-                        onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.sensitive_paths = items; })}
+                onCommitItems={(items) =>
+                  commitPolicy((next) => {
+                    next.risk_policy.sensitive_paths = items;
+                  })
+                }
                       />
                       <PolicyStringListEditor
                         label="Allowed path patterns"
@@ -2097,7 +2417,11 @@ function AdvancedPolicySettings({
                         monospace
                         serverValue={config?.risk_policy.allowed_path_patterns ?? []}
                         disabled={!config}
-                        onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.allowed_path_patterns = items; })}
+                onCommitItems={(items) =>
+                  commitPolicy((next) => {
+                    next.risk_policy.allowed_path_patterns = items;
+                  })
+                }
                       />
                       <PolicyStringListEditor
                         label="Blocked path patterns"
@@ -2107,7 +2431,11 @@ function AdvancedPolicySettings({
                         monospace
                         serverValue={config?.risk_policy.blocked_path_patterns ?? []}
                         disabled={!config}
-                        onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.blocked_path_patterns = items; })}
+                onCommitItems={(items) =>
+                  commitPolicy((next) => {
+                    next.risk_policy.blocked_path_patterns = items;
+                  })
+                }
                       />
                       <PolicyStringListEditor
                         label="Required checks"
@@ -2117,7 +2445,11 @@ function AdvancedPolicySettings({
                         monospace
                         serverValue={config?.risk_policy.required_checks ?? []}
                         disabled={!config}
-                        onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.required_checks = items; })}
+                onCommitItems={(items) =>
+                  commitPolicy((next) => {
+                    next.risk_policy.required_checks = items;
+                  })
+                }
                       />
                       <PolicyStringListEditor
                         label="Eligible authors"
@@ -2126,12 +2458,28 @@ function AdvancedPolicySettings({
                         emptyText="Any author is eligible."
                         serverValue={config?.risk_policy.eligible_authors ?? []}
                         disabled={!config}
-                        onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.eligible_authors = items; })}
+                onCommitItems={(items) =>
+                  commitPolicy((next) => {
+                    next.risk_policy.eligible_authors = items;
+                  })
+                }
                       />
                     </div>
                   </FineTuningSection>
 
-                  <FineTuningSection title="Reviewers & agents" summary="Reviewer agents and the orchestrating agent" forceOpen={invalidPolicyField === "agent_roster"} onOpened={() => trackCodeReviewPolicyEvent({ event: "code_review_advanced_opened", scope: analyticsScope, subsection: "reviewers_agents", configured: true })}>
+          <FineTuningSection
+            title="Reviewers & agents"
+            summary="Reviewer agents and the orchestrating agent"
+            forceOpen={invalidPolicyField === "agent_roster"}
+            onOpened={() =>
+              trackCodeReviewPolicyEvent({
+                event: "code_review_advanced_opened",
+                scope: analyticsScope,
+                subsection: "reviewers_agents",
+                configured: true,
+              })
+            }
+          >
                     <AgentRosterControls
                       config={config}
                       disabled={!config}
@@ -2141,7 +2489,19 @@ function AdvancedPolicySettings({
                     />
                   </FineTuningSection>
 
-                  <FineTuningSection title="Structured PR-description checks" summary="PR description rules checked before approval" forceOpen={invalidPolicyField === "description_policy"} onOpened={() => trackCodeReviewPolicyEvent({ event: "code_review_advanced_opened", scope: analyticsScope, subsection: "structured_description_checks", configured: true })}>
+          <FineTuningSection
+            title="Structured PR-description checks"
+            summary="PR description rules checked before approval"
+            forceOpen={invalidPolicyField === "description_policy"}
+            onOpened={() =>
+              trackCodeReviewPolicyEvent({
+                event: "code_review_advanced_opened",
+                scope: analyticsScope,
+                subsection: "structured_description_checks",
+                configured: true,
+              })
+            }
+          >
                     <DescriptionRequirementsList
                       requirements={config?.description_policy.requirements ?? []}
                       disabled={!config}
@@ -2170,7 +2530,13 @@ function AdvancedPolicySettings({
 function AdvancedPolicyControls({ children, forceOpen, onOpened }: { children: ReactNode; forceOpen: boolean; onOpened: () => void }) {
   const [open, setOpen] = useState(false);
   return (
-    <Collapsible open={open || forceOpen} onOpenChange={(next) => { setOpen(next); if (next) onOpened(); }}>
+    <Collapsible
+      open={open || forceOpen}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (next) onOpened();
+      }}
+    >
       <div className="rounded-xl border border-border bg-card">
         <div className="flex items-center gap-1 pr-3">
           <h3 className="min-w-0 flex-1">
@@ -2200,11 +2566,7 @@ function policyOutcome(config: CodeReviewPolicyConfig | null): "disabled" | "com
   return config.approval_mode === "approve_acceptable" ? "approve" : "comment";
 }
 
-function PolicySummary({
-  config,
-}: {
-  config: CodeReviewPolicyConfig | null;
-}) {
+function PolicySummary({ config }: { config: CodeReviewPolicyConfig | null }) {
   if (!config) {
     return <p className="text-sm text-muted-foreground">Loading review policy...</p>;
   }
@@ -2226,8 +2588,7 @@ function PolicySummary({
 
   return (
     <p className="text-sm leading-6 text-muted-foreground">
-      <span className="font-medium text-foreground">Current behavior:</span>{" "}
-      {summaryItems.join(" · ")}
+      <span className="font-medium text-foreground">Current behavior:</span> {summaryItems.join(" · ")}
     </p>
   );
 }
@@ -2306,9 +2667,7 @@ function OutcomeControl({
         ))}
       </RadioGroup>
       {config?.approval_mode === "approve_acceptable" ? (
-        <p className="text-xs text-muted-foreground">
-          Automatic approval is eligible only when all hard safeguards pass; uncertain or blocked changes still require a human.
-        </p>
+        <p className="text-xs text-muted-foreground">Automatic approval is eligible only when all hard safeguards pass; uncertain or blocked changes still require a human.</p>
       ) : null}
     </div>
   );
@@ -2367,9 +2726,7 @@ function GitHubTriggerPanel({
             <Badge variant={githubTriggerStatusVariant(status)}>{isLoading ? "Checking" : githubTriggerStatusLabel(status)}</Badge>
             {ready ? <span className="text-xs font-medium text-foreground">{reviewer}</span> : null}
           </div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            People select this team from GitHub&apos;s Reviewers menu on a PR to start a 143 code review.
-          </div>
+          <div className="mt-1 text-xs text-muted-foreground">People select this team from GitHub&apos;s Reviewers menu on a PR to start a 143 code review.</div>
           {trigger?.message ? (
             <div className="mt-3 flex items-start gap-2 text-xs text-muted-foreground">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -2385,12 +2742,7 @@ function GitHubTriggerPanel({
         </div>
         <div className="flex shrink-0 flex-wrap gap-2">
           {authRequired ? (
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={!canManage}
-              onClick={() => api.githubStatus.connect(undefined, "/code-reviews?tab=policy&add_repository=1")}
-            >
+            <Button variant="outline" size="sm" disabled={!canManage} onClick={() => api.githubStatus.connect(undefined, "/code-reviews?tab=policy&add_repository=1")}>
               <Users className="h-4 w-4" />
               Connect GitHub
             </Button>
@@ -2594,13 +2946,7 @@ function DescriptionRequirementsList({
                 <TableCell className="text-sm text-muted-foreground">{formatRequirementApplicability(requirement)}</TableCell>
                 <TableCell>
                   <div className="flex justify-end">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={disabled}
-                      aria-label={`Edit ${requirement.title || "requirement"}`}
-                      onClick={() => onEdit(requirement.key)}
-                    >
+                    <Button variant="ghost" size="sm" disabled={disabled} aria-label={`Edit ${requirement.title || "requirement"}`} onClick={() => onEdit(requirement.key)}>
                       Edit
                     </Button>
                   </div>
@@ -2679,10 +3025,7 @@ function DescriptionRequirementSheet({
             </div>
 
             <div className="space-y-2">
-              <SettingLabel
-                label="Applies to"
-                info="Controls which pull requests receive this structured description check. The default applies it to every pull request."
-              />
+              <SettingLabel label="Applies to" info="Controls which pull requests receive this structured description check. The default applies it to every pull request." />
               <Select
                 value={kind}
                 disabled={disabled}
@@ -2847,10 +3190,7 @@ function AgentRosterControls({
                   const reasoningEfforts = ensureReviewerReasoningEfforts(next);
                   next.agent_roster.reviewers = [...next.agent_roster.reviewers, fallbackGroup.key];
                   next.agent_roster.reviewer_models = [...reviewerModels, fallbackGroup.models[0] ?? ""];
-                  next.agent_roster.reviewer_reasoning_efforts = [
-                    ...reasoningEfforts,
-                    normalizeReasoningEffortForAgent(fallbackGroup.key, "high"),
-                  ];
+                  next.agent_roster.reviewer_reasoning_efforts = [...reasoningEfforts, normalizeReasoningEffortForAgent(fallbackGroup.key, "high")];
                 })
               }
             >
@@ -2866,10 +3206,7 @@ function AgentRosterControls({
 
         <div className="space-y-2">
           {reviewers.map((agent, index) => (
-            <div
-              key={`${agent}-${index}`}
-              className="grid gap-2 rounded-md border border-border p-3 sm:grid-cols-[minmax(0,1fr)_minmax(10rem,14rem)_auto]"
-            >
+            <div key={`${agent}-${index}`} className="grid gap-2 rounded-md border border-border p-3 sm:grid-cols-[minmax(0,1fr)_minmax(10rem,14rem)_auto]">
               <AgentModelSelect
                 ariaLabel={`Reviewer ${index + 1} model`}
                 infoDescription="Chooses the agent and model for this independent review slot. Each slot must have a selection; the current resolved default remains until changed and contributes to quorum and disagreement handling."
@@ -2919,10 +3256,7 @@ function AgentRosterControls({
                     next.agent_roster.reviewers = next.agent_roster.reviewers.filter((_, i) => i !== index);
                     next.agent_roster.reviewer_models = reviewerModels.filter((_, i) => i !== index);
                     next.agent_roster.reviewer_reasoning_efforts = reasoningEfforts.filter((_, i) => i !== index);
-                    next.agent_roster.require_reviewer_quorum = Math.min(
-                      next.agent_roster.require_reviewer_quorum,
-                      Math.max(1, next.agent_roster.reviewers.length),
-                    );
+                    next.agent_roster.require_reviewer_quorum = Math.min(next.agent_roster.require_reviewer_quorum, Math.max(1, next.agent_roster.reviewers.length));
                   })
                 }
               >
@@ -2963,10 +3297,7 @@ function AgentRosterControls({
           <ReasoningEffortSelect
             ariaLabel="Orchestrator reasoning level"
             agent={config?.agent_roster.orchestrator ?? ""}
-            value={normalizeReasoningEffortForAgent(
-              config?.agent_roster.orchestrator ?? "",
-              config?.agent_roster.reasoning_effort,
-            )}
+            value={normalizeReasoningEffortForAgent(config?.agent_roster.orchestrator ?? "", config?.agent_roster.reasoning_effort)}
             disabled={disabled}
             infoDescription="Sets reasoning for the orchestrator only; reviewer reasoning is configured independently in each reviewer row."
             onValueChange={(value) =>
@@ -3053,11 +3384,7 @@ function AgentModelSelect({
             </SelectItem>
           </SelectGroup>
         ) : null}
-        <ModelOptionGroups
-          modelGroups={modelGroups}
-          getOptionValue={(group, model) => selectionValue(group.key, model)}
-          openCodeAvailability={openCodeAvailability}
-        />
+          <ModelOptionGroups modelGroups={modelGroups} getOptionValue={(group, model) => selectionValue(group.key, model)} openCodeAvailability={openCodeAvailability} />
       </SelectContent>
     </Select>
       <SettingInfoTooltip label={ariaLabel} description={infoDescription} />
@@ -3097,17 +3424,7 @@ function NumberPolicyInput({
           description={NUMBER_POLICY_DESCRIPTIONS[label] ?? `${label} is a deterministic policy control. Its current default remains active until changed.`}
         />
       </div>
-      <Input
-        className="mt-2"
-        type="number"
-        aria-label={label}
-        min={min}
-        max={max}
-        value={field.value}
-        disabled={disabled}
-        onChange={field.onChange}
-        onBlur={field.onBlur}
-      />
+      <Input className="mt-2" type="number" aria-label={label} min={min} max={max} value={field.value} disabled={disabled} onChange={field.onChange} onBlur={field.onBlur} />
     </div>
   );
 }
@@ -3290,17 +3607,7 @@ function PolicyStringListEditor({
   );
 }
 
-function ListTextArea({
-  label,
-  serverValue,
-  disabled,
-  onCommitItems,
-}: {
-  label: string;
-  serverValue: string[];
-  disabled?: boolean;
-  onCommitItems: (items: string[]) => void;
-}) {
+function ListTextArea({ label, serverValue, disabled, onCommitItems }: { label: string; serverValue: string[]; disabled?: boolean; onCommitItems: (items: string[]) => void }) {
   const field = useDebouncedTextField({
     serverValue: serverValue.join("\n"),
     onCommit: (text) =>
@@ -3345,16 +3652,42 @@ function PolicyTextarea({
   serverValue: string;
   onCommit: (value: string) => void;
 } & Omit<ComponentProps<typeof Textarea>, "value" | "onChange" | "onBlur">) {
-  const field = useDebouncedTextField({ serverValue, onCommit, debounceMs: CODE_REVIEW_TEXTAREA_DEBOUNCE_MS });
+  const field = useDebouncedTextField({
+    serverValue,
+    onCommit,
+    debounceMs: CODE_REVIEW_TEXTAREA_DEBOUNCE_MS,
+  });
   return <Textarea {...props} value={field.value} disabled={disabled} onChange={(event) => field.onChange(event.target.value)} onBlur={field.onBlur} />;
 }
 
-function FineTuningSection({ title, summary, defaultOpen = false, forceOpen = false, onOpened, children }: { title: string; summary?: string; defaultOpen?: boolean; forceOpen?: boolean; onOpened?: () => void; children: ReactNode }) {
+function FineTuningSection({
+  title,
+  summary,
+  defaultOpen = false,
+  forceOpen = false,
+  onOpened,
+  children,
+}: {
+  title: string;
+  summary?: string;
+  defaultOpen?: boolean;
+  forceOpen?: boolean;
+  onOpened?: () => void;
+  children: ReactNode;
+}) {
   const [open, setOpen] = useState(defaultOpen);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => { if (forceOpen) triggerRef.current?.focus(); }, [forceOpen]);
+  useEffect(() => {
+    if (forceOpen) triggerRef.current?.focus();
+  }, [forceOpen]);
   return (
-    <Collapsible open={open || forceOpen} onOpenChange={(next) => { setOpen(next); if (next) onOpened?.(); }}>
+    <Collapsible
+      open={open || forceOpen}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (next) onOpened?.();
+      }}
+    >
       <CollapsibleTrigger ref={triggerRef} className="group flex w-full items-center justify-between gap-3 px-1 py-4 text-left hover:bg-muted/40">
         <div className="min-w-0">
           <div className="text-sm font-medium text-foreground">{title}</div>
@@ -3366,6 +3699,8 @@ function FineTuningSection({ title, summary, defaultOpen = false, forceOpen = fa
     </Collapsible>
   );
 }
+
+const policyOwnerActivityIdleMs = 30_000;
 
 function CodeReviewDisputeQueue({
   disputes,
@@ -3386,9 +3721,108 @@ function CodeReviewDisputeQueue({
   isLoadingMore: boolean;
   onLoadMore: () => void;
   onRetry: () => void;
-  onAdjudicate: (dispute: CodeReviewDispute, status: "upheld" | "rejected" | "needs_context", note: string | undefined, onSaved: () => void) => void;
+  onAdjudicate: (
+    dispute: CodeReviewDispute,
+    status: "upheld" | "rejected" | "needs_context",
+    note: string | undefined,
+    activeSeconds: number,
+    onSaved: () => void,
+    onFailed: () => void,
+  ) => void;
 }) {
   const [notes, setNotes] = useState<Record<string, string>>({});
+  const activeTimers = useRef<Record<string, { startedAt: number | null; accumulatedMs: number }>>({});
+  const activeInteractions = useRef<Record<string, { pointer: boolean; focus: boolean }>>({});
+  const activeDisputeID = useRef<string | null>(null);
+  const activityIdleTimer = useRef<number | null>(null);
+  const pageIsActive = useRef(true);
+  const startActiveTimer = useCallback((disputeID: string) => {
+    if (!pageIsActive.current) return;
+    const timer = activeTimers.current[disputeID] ?? {
+      startedAt: null,
+      accumulatedMs: 0,
+    };
+    if (timer.startedAt === null) timer.startedAt = performance.now();
+    activeTimers.current[disputeID] = timer;
+  }, []);
+  const pauseActiveTimer = useCallback((disputeID: string) => {
+    const timer = activeTimers.current[disputeID];
+    if (!timer || timer.startedAt === null) return;
+    timer.accumulatedMs += performance.now() - timer.startedAt;
+    timer.startedAt = null;
+  }, []);
+  const clearActivityIdleTimer = useCallback(() => {
+    if (activityIdleTimer.current !== null) {
+      window.clearTimeout(activityIdleTimer.current);
+      activityIdleTimer.current = null;
+    }
+  }, []);
+  const pauseCurrentActivity = useCallback(() => {
+    clearActivityIdleTimer();
+    if (activeDisputeID.current !== null) pauseActiveTimer(activeDisputeID.current);
+    activeDisputeID.current = null;
+  }, [clearActivityIdleTimer, pauseActiveTimer]);
+  const recordActiveInteraction = useCallback(
+    (disputeID: string) => {
+      if (!pageIsActive.current) return;
+      if (activeDisputeID.current !== null && activeDisputeID.current !== disputeID) {
+        pauseActiveTimer(activeDisputeID.current);
+      }
+      activeDisputeID.current = disputeID;
+      startActiveTimer(disputeID);
+      clearActivityIdleTimer();
+      activityIdleTimer.current = window.setTimeout(() => {
+        if (activeDisputeID.current === disputeID) pauseCurrentActivity();
+      }, policyOwnerActivityIdleMs);
+    },
+    [clearActivityIdleTimer, pauseActiveTimer, pauseCurrentActivity, startActiveTimer],
+  );
+  const setActiveInteraction = useCallback(
+    (disputeID: string, kind: "pointer" | "focus", active: boolean) => {
+      const current = activeInteractions.current[disputeID] ?? {
+        pointer: false,
+        focus: false,
+      };
+      const next = { ...current, [kind]: active };
+      activeInteractions.current[disputeID] = next;
+      if (active) {
+        recordActiveInteraction(disputeID);
+      } else if (activeDisputeID.current === disputeID && !next.pointer && !next.focus) {
+        pauseCurrentActivity();
+      }
+    },
+    [pauseCurrentActivity, recordActiveInteraction],
+  );
+  const resumeActiveInteraction = useCallback(
+    (disputeID: string) => {
+      const interaction = activeInteractions.current[disputeID];
+      if (interaction && (interaction.pointer || interaction.focus)) recordActiveInteraction(disputeID);
+    },
+    [recordActiveInteraction],
+  );
+  useEffect(() => {
+    const pauseAll = () => {
+      pageIsActive.current = false;
+      pauseCurrentActivity();
+    };
+    const resumePage = () => {
+      pageIsActive.current = document.visibilityState !== "hidden";
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") pauseAll();
+      else resumePage();
+    };
+    pageIsActive.current = document.visibilityState !== "hidden";
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("blur", pauseAll);
+    window.addEventListener("focus", resumePage);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("blur", pauseAll);
+      window.removeEventListener("focus", resumePage);
+      pauseAll();
+    };
+  }, [pauseCurrentActivity]);
   const clearNote = useCallback((disputeID: string) => {
     setNotes((current) => {
       if (current[disputeID] === undefined) return current;
@@ -3400,13 +3834,34 @@ function CodeReviewDisputeQueue({
   // Drop the draft only once the adjudication is durably saved. Clearing it
   // eagerly loses the admin's typed reasoning whenever the PATCH fails.
   const adjudicate = (dispute: CodeReviewDispute, status: "upheld" | "rejected" | "needs_context") => {
-    onAdjudicate(dispute, status, notes[dispute.id], () => clearNote(dispute.id));
+    pauseActiveTimer(dispute.id);
+    if (activeDisputeID.current === dispute.id) pauseCurrentActivity();
+    const activeSeconds = Math.min(3600, Math.max(0, Math.ceil((activeTimers.current[dispute.id]?.accumulatedMs ?? 0) / 1000)));
+    onAdjudicate(
+      dispute,
+      status,
+      notes[dispute.id],
+      activeSeconds,
+      () => {
+        delete activeTimers.current[dispute.id];
+        delete activeInteractions.current[dispute.id];
+        clearNote(dispute.id);
+      },
+      () => resumeActiveInteraction(dispute.id),
+    );
   };
   return (
-    <SectionGroup title="Decision disputes" description="A flat list of objections awaiting a policy owner's judgment. Reassessments and trust signals provide context but do not decide the outcome.">
+    <SectionGroup
+      title="Decision disputes"
+      description="Objections awaiting a policy owner's judgment. At sustained volume, explainable signals rank attention but never decide the outcome."
+    >
       {isLoading ? <div className="py-12 text-center text-sm text-muted-foreground">Loading disputes…</div> : null}
-      {error ? <ErrorNotice title="Disputes could not be loaded" description="Retry the request to view the adjudication list." action={{ label: "Retry", onClick: onRetry }} /> : null}
-      {!isLoading && !error && disputes.length === 0 ? <EmptyState icon={MessageSquareText} title="No disputes need adjudication" description="New trusted objections will appear here after intake." /> : null}
+      {error ? (
+        <ErrorNotice title="Disputes could not be loaded" description="Retry the request to view the adjudication list." action={{ label: "Retry", onClick: onRetry }} />
+      ) : null}
+      {!isLoading && !error && disputes.length === 0 ? (
+        <EmptyState icon={MessageSquareText} title="No disputes need adjudication" description="New trusted objections will appear here after intake." />
+      ) : null}
       {disputes.length > 0 ? (
         <Table>
           <TableHeader>
@@ -3421,15 +3876,34 @@ function CodeReviewDisputeQueue({
           </TableHeader>
           <TableBody>
             {disputes.map((dispute) => (
-              <TableRow key={dispute.id}>
+              <TableRow
+                key={dispute.id}
+                onPointerEnter={() => setActiveInteraction(dispute.id, "pointer", true)}
+                onPointerMove={() => recordActiveInteraction(dispute.id)}
+                onPointerLeave={() => setActiveInteraction(dispute.id, "pointer", false)}
+                onFocusCapture={() => setActiveInteraction(dispute.id, "focus", true)}
+                onKeyDownCapture={() => recordActiveInteraction(dispute.id)}
+                onBlurCapture={(event) => {
+                  if (!event.relatedTarget || !event.currentTarget.contains(event.relatedTarget as Node)) {
+                    setActiveInteraction(dispute.id, "focus", false);
+                  }
+                }}
+              >
                 <TableCell className="max-w-md align-top">
                   <div className="space-y-1">
                     <div className="line-clamp-3 text-sm text-foreground">{dispute.body}</div>
-                    <div className="text-xs text-muted-foreground">{dispute.filed_by_login || "143 user"} · {formatDate(dispute.created_at)} · {codeReviewDisputeStatusLabel(dispute.source)} · {dispute.reviewed_head_sha.slice(0, 7)}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {dispute.filed_by_login || "143 user"} · {formatDate(dispute.created_at)} · {codeReviewDisputeStatusLabel(dispute.source)} ·{" "}
+                      {dispute.reviewed_head_sha.slice(0, 7)}
+                    </div>
                     <CodeReviewDisputeContextLinks dispute={dispute} />
                     {dispute.contested_reason_codes.length > 0 ? (
                       <div className="flex flex-wrap gap-1 pt-1">
-                        {dispute.contested_reason_codes.map((code) => <Badge key={code} variant="outline">{codeReviewDisputeStatusLabel(code)}</Badge>)}
+                        {dispute.contested_reason_codes.map((code) => (
+                          <Badge key={code} variant="outline">
+                            {codeReviewDisputeStatusLabel(code)}
+                          </Badge>
+                        ))}
                       </div>
                     ) : null}
                   </div>
@@ -3440,9 +3914,15 @@ function CodeReviewDisputeQueue({
                     <div className="text-xs text-muted-foreground">{dispute.direction ? codeReviewDisputeStatusLabel(dispute.direction) : "Classifying"}</div>
                   </div>
                 </TableCell>
-                <TableCell className="align-top"><StatusLabel label={codeReviewDisputeStatusLabel(dispute.reassessment_status)} tone={dispute.reassessment_flipped ? "warning" : "neutral"} /></TableCell>
-                <TableCell className="align-top"><CodeReviewDisputeQueueSignals dispute={dispute} /></TableCell>
-                <TableCell className="align-top"><StatusLabel label={dispute.trusted ? "Trusted" : "Untrusted"} tone={dispute.trusted ? "success" : "warning"} /></TableCell>
+                <TableCell className="align-top">
+                  <StatusLabel label={codeReviewDisputeStatusLabel(dispute.reassessment_status)} tone={dispute.reassessment_flipped ? "warning" : "neutral"} />
+                </TableCell>
+                <TableCell className="align-top">
+                  <CodeReviewDisputeQueueSignals dispute={dispute} />
+                </TableCell>
+                <TableCell className="align-top">
+                  <StatusLabel label={dispute.trusted ? "Trusted" : "Untrusted"} tone={dispute.trusted ? "success" : "warning"} />
+                </TableCell>
                 <TableCell className="align-top">
                   <div className="ml-auto w-56 space-y-2">
                     <Textarea
@@ -3452,17 +3932,28 @@ function CodeReviewDisputeQueue({
                       maxLength={2000}
                       placeholder="Optional decision note"
                       disabled={isSaving}
-                      onChange={(event) => setNotes((current) => ({ ...current, [dispute.id]: event.target.value }))}
+                      onChange={(event) =>
+                        setNotes((current) => ({
+                          ...current,
+                          [dispute.id]: event.target.value,
+                        }))
+                      }
                     />
                     <div className="flex justify-end gap-1">
                     <DisabledTooltip disabled={isSaving} content="Wait for the current adjudication to finish.">
-                      <Button size="sm" variant="outline" disabled={isSaving} onClick={() => adjudicate(dispute, "needs_context")}>Needs context</Button>
+                        <Button size="sm" variant="outline" disabled={isSaving} onClick={() => adjudicate(dispute, "needs_context")}>
+                          Needs context
+                        </Button>
                     </DisabledTooltip>
                     <DisabledTooltip disabled={isSaving} content="Wait for the current adjudication to finish.">
-                      <Button size="sm" variant="outline" disabled={isSaving} onClick={() => adjudicate(dispute, "rejected")}>Reject</Button>
+                        <Button size="sm" variant="outline" disabled={isSaving} onClick={() => adjudicate(dispute, "rejected")}>
+                          Reject
+                        </Button>
                     </DisabledTooltip>
                     <DisabledTooltip disabled={isSaving} content="Wait for the current adjudication to finish.">
-                      <Button size="sm" disabled={isSaving} onClick={() => adjudicate(dispute, "upheld")}>Uphold</Button>
+                        <Button size="sm" disabled={isSaving} onClick={() => adjudicate(dispute, "upheld")}>
+                          Uphold
+                        </Button>
                     </DisabledTooltip>
                     </div>
                   </div>
@@ -3484,17 +3975,30 @@ function CodeReviewDisputeQueue({
 }
 
 function CodeReviewDisputeQueueSignals({ dispute }: { dispute: CodeReviewDispute }) {
-  const pullRequestAuthor = typeof dispute.queue_signals.pull_request_author === "string"
-    ? dispute.queue_signals.pull_request_author.trim()
-    : "";
+  const pullRequestAuthor = typeof dispute.queue_signals.pull_request_author === "string" ? dispute.queue_signals.pull_request_author.trim() : "";
   const trustedAtFiling = typeof dispute.queue_signals.trusted_at_filing === "boolean" ? dispute.queue_signals.trusted_at_filing : null;
   const filerIsAuthor = typeof dispute.queue_signals.filer_is_pr_author === "boolean" ? dispute.queue_signals.filer_is_pr_author : null;
+  const contradiction = dispute.queue_signals.independent_human_contradiction === true;
+  const unchanged = dispute.queue_signals.reassessment_unchanged === true;
+  const flipped = dispute.queue_signals.reassessment_flipped === true;
+  const filerIsNotAuthor = dispute.queue_signals.filer_is_not_pr_author === true;
+  const repeats = typeof dispute.queue_signals.repeat_reason_disputes_14_days === "number" ? dispute.queue_signals.repeat_reason_disputes_14_days : 0;
+  const superseded = dispute.queue_signals.base_policy_superseded === true;
+  const rankingEnabled = dispute.queue_signals.ranking_enabled === true;
   return (
     <div className="flex max-w-56 flex-wrap gap-1">
+      {contradiction ? <Badge variant="destructive">Human contradicted decision</Badge> : null}
+      {unchanged ? <Badge variant="secondary">Reassessment unchanged</Badge> : null}
+      {flipped ? <Badge variant="secondary">Decision changed on reassessment</Badge> : null}
+      {repeats > 0 ? <Badge variant="secondary">{repeats} similar in 14 days</Badge> : null}
+      {superseded ? <Badge variant="outline">Policy changed</Badge> : null}
+      {rankingEnabled && dispute.queue_priority > 0 ? <Badge variant="outline">Priority {dispute.queue_priority}</Badge> : null}
       {pullRequestAuthor ? <Badge variant="outline">PR author: {pullRequestAuthor}</Badge> : null}
-      {filerIsAuthor !== null ? <Badge variant="outline">{filerIsAuthor ? "Filed by PR author" : "Filed by another contributor"}</Badge> : null}
+      {filerIsAuthor !== null || filerIsNotAuthor ? <Badge variant="outline">{filerIsAuthor === true ? "Filed by PR author" : "Filed by another contributor"}</Badge> : null}
       {trustedAtFiling !== null ? <Badge variant="outline">{trustedAtFiling ? "Trusted at filing" : "Untrusted at filing"}</Badge> : null}
-      {!pullRequestAuthor && filerIsAuthor === null && trustedAtFiling === null ? <span className="text-xs text-muted-foreground">No queue signals</span> : null}
+      {!pullRequestAuthor && filerIsAuthor === null && !filerIsNotAuthor && trustedAtFiling === null && !contradiction && !unchanged && !flipped && repeats === 0 && !superseded ? (
+        <span className="text-xs text-muted-foreground">No queue signals</span>
+      ) : null}
     </div>
   );
 }
@@ -3508,7 +4012,9 @@ function CodeReviewDisputeContextLinks({ dispute }: { dispute: CodeReviewDispute
     <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
       {url ? (
         <Button size="sm" variant="link" className="h-auto p-0 text-xs" asChild>
-          <a href={url} target="_blank" rel="noreferrer">{repository && number ? `${repository} #${number}` : title || "Open pull request"}</a>
+          <a href={url} target="_blank" rel="noreferrer">
+            {repository && number ? `${repository} #${number}` : title || "Open pull request"}
+          </a>
         </Button>
       ) : null}
       <Button size="sm" variant="link" className="h-auto p-0 text-xs" asChild>
@@ -3520,10 +4026,14 @@ function CodeReviewDisputeContextLinks({ dispute }: { dispute: CodeReviewDispute
 
 function decisionLabelText(decision: CodeReviewDecision): string {
   switch (decision) {
-    case "approved": return "Approved";
-    case "needs_human_review": return "Needs human review";
-    case "comment_only": return "Comment only";
-    case "blocked": return "Blocked";
+    case "approved":
+      return "Approved";
+    case "needs_human_review":
+      return "Needs human review";
+    case "comment_only":
+      return "Comment only";
+    case "blocked":
+      return "Blocked";
   }
 }
 
@@ -3578,15 +4088,21 @@ function CodeReviewEvidenceSheet({
     // the interval by the number of loaded pages: the request rate stays flat
     // as the admin pages into history, and the newest page — the one whose
     // state is still moving — keeps updating instead of going stale.
-    refetchInterval: (query) =>
-      open && canFileDisputes ? 5000 * Math.max(1, query.state.data?.pages.length ?? 1) : false,
+    refetchInterval: (query) => (open && canFileDisputes ? 5000 * Math.max(1, query.state.data?.pages.length ?? 1) : false),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.meta?.next_cursor || undefined,
   });
   const createDispute = useMutation({
-    mutationFn: () => api.codeReviews.createDispute(review?.session_id ?? "", { body: disputeBody, contested_reason_codes: selectedReasonCodes }),
+    mutationFn: () =>
+      api.codeReviews.createDispute(review?.session_id ?? "", {
+        body: disputeBody,
+        contested_reason_codes: selectedReasonCodes,
+      }),
     onSuccess: () => {
-      if (review) void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.disputes(review.session_id) });
+      if (review)
+        void queryClient.invalidateQueries({
+          queryKey: queryKeys.codeReviews.disputes(review.session_id),
+        });
       setDisputeDialogOpen(false);
       setDisputeBody("");
       setSelectedReasonCodes([]);
@@ -3597,19 +4113,28 @@ function CodeReviewEvidenceSheet({
   const escalateDispute = useMutation({
     mutationFn: (disputeID: string) => api.codeReviews.escalateDispute(disputeID),
     onSuccess: () => {
-      if (review) void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.disputes(review.session_id) });
+      if (review)
+        void queryClient.invalidateQueries({
+          queryKey: queryKeys.codeReviews.disputes(review.session_id),
+        });
       toast.success("Dispute sent to a policy owner");
     },
     onError: () => toast.error("Dispute could not be escalated"),
   });
   const promoteDispute = useMutation({
-    mutationFn: (dispute: CodeReviewDispute) => api.codeReviews.adjudicateDispute(dispute.id, {
+    mutationFn: (dispute: CodeReviewDispute) =>
+      api.codeReviews.adjudicateDispute(dispute.id, {
       expected_version: dispute.version,
       trust_override: true,
     }),
     onSuccess: () => {
-      if (review) void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.disputes(review.session_id) });
-      void queryClient.invalidateQueries({ queryKey: ["code-reviews", "dispute-queue"] });
+      if (review)
+        void queryClient.invalidateQueries({
+          queryKey: queryKeys.codeReviews.disputes(review.session_id),
+        });
+      void queryClient.invalidateQueries({
+        queryKey: ["code-reviews", "dispute-queue"],
+      });
       toast.success("Dispute promoted to the policy queue");
     },
     onError: () => toast.error("Dispute could not be promoted"),
@@ -3630,10 +4155,7 @@ function CodeReviewEvidenceSheet({
         <div className="space-y-6 px-6 py-5">
           {review?.status === "failed" && !isSupersededReview(review) ? (
             <div className="space-y-3">
-              <ErrorNotice
-                title="Code review failed"
-                description={reviewStatusMessage(review) ?? "The review stopped before it could finish."}
-              />
+              <ErrorNotice title="Code review failed" description={reviewStatusMessage(review) ?? "The review stopped before it could finish."} />
               {canRetryReview && reviewCanBeRetried(review) ? (
                 <Button variant="outline" disabled={isRetryingReview} onClick={onRetryReview}>
                   <RefreshCw className={isRetryingReview ? "animate-spin" : undefined} />
@@ -3671,14 +4193,27 @@ function CodeReviewEvidenceSheet({
                     </Button>
                   </div>
                   {disputesQuery.isLoading ? <div className="text-sm text-muted-foreground">Loading decision feedback…</div> : null}
-                  {disputesQuery.error ? <ErrorNotice title="Decision feedback could not be loaded" description="Retry to view the dispute timeline." action={{ label: "Retry", onClick: () => void disputesQuery.refetch() }} /> : null}
-                  {!disputesQuery.isLoading && !disputesQuery.error && disputes.length === 0 ? <div className="text-sm text-muted-foreground">No one has challenged this decision.</div> : null}
+                  {disputesQuery.error ? (
+                    <ErrorNotice
+                      title="Decision feedback could not be loaded"
+                      description="Retry to view the dispute timeline."
+                      action={{
+                        label: "Retry",
+                        onClick: () => void disputesQuery.refetch(),
+                      }}
+                    />
+                  ) : null}
+                  {!disputesQuery.isLoading && !disputesQuery.error && disputes.length === 0 ? (
+                    <div className="text-sm text-muted-foreground">No one has challenged this decision.</div>
+                  ) : null}
                   {disputes.map((dispute) => (
                     <div key={dispute.id} className="space-y-2 border-t border-border pt-3 first:border-t-0 first:pt-0">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="text-sm font-medium text-foreground">{dispute.filed_by_login || "143 user"}</div>
-                          <div className="text-xs text-muted-foreground">{formatDate(dispute.created_at)} · {codeReviewDisputeStatusLabel(dispute.source)}</div>
+                          <div className="text-xs text-muted-foreground">
+                            {formatDate(dispute.created_at)} · {codeReviewDisputeStatusLabel(dispute.source)}
+                          </div>
                         </div>
                         <StatusLabel label={codeReviewDisputeStatusLabel(dispute.intake_status)} tone={dispute.intake_status === "failed" ? "destructive" : "neutral"} />
                       </div>
@@ -3686,23 +4221,41 @@ function CodeReviewEvidenceSheet({
                       <div className="flex flex-wrap items-center gap-2">
                         <Badge variant="outline">{dispute.direction ? codeReviewDisputeStatusLabel(dispute.direction) : "Classifying"}</Badge>
                         <Badge variant="outline">{codeReviewDisputeStatusLabel(dispute.reassessment_status)}</Badge>
-                        {dispute.reassessment_status === "completed" && dispute.reassessment_flipped !== undefined ? <Badge variant="outline">{dispute.reassessment_flipped ? "Decision changed" : "Decision unchanged"}</Badge> : null}
+                        {dispute.reassessment_status === "completed" && dispute.reassessment_flipped !== undefined ? (
+                          <Badge variant="outline">{dispute.reassessment_flipped ? "Decision changed" : "Decision unchanged"}</Badge>
+                        ) : null}
                         {dispute.adjudication_status ? <Badge variant="outline">Policy owner: {codeReviewDisputeStatusLabel(dispute.adjudication_status)}</Badge> : null}
                         {dispute.reply_status === "failed" ? <Badge variant="destructive">GitHub reply failed</Badge> : null}
                         {/* Editing a GitHub comment files a new dispute, so the
                             timeline shows both. Say which one is live. */}
                         {dispute.superseded_by_dispute_id ? <Badge variant="secondary">Replaced by a later edit</Badge> : null}
                         <Badge variant="outline">{dispute.trusted ? "Trusted" : "Untrusted"}</Badge>
-                        {dispute.reassessment_session_id ? <Button size="sm" variant="ghost" asChild><Link href={`/sessions/${dispute.reassessment_session_id}`}>View reassessment</Link></Button> : null}
-                        {dispute.routing === "policy_signal_only" && canManagePolicy ? <Button size="sm" variant="ghost" asChild><Link href="/code-reviews?tab=policy">Review policy</Link></Button> : null}
-                        {canManagePolicy && !dispute.trusted && !dispute.superseded_by_dispute_id && dispute.intake_status === "triaged" && (dispute.routing === "reassess" || dispute.routing === "policy_signal_only") ? (
+                        {dispute.reassessment_session_id ? (
+                          <Button size="sm" variant="ghost" asChild>
+                            <Link href={`/sessions/${dispute.reassessment_session_id}`}>View reassessment</Link>
+                          </Button>
+                        ) : null}
+                        {dispute.routing === "policy_signal_only" && canManagePolicy ? (
+                          <Button size="sm" variant="ghost" asChild>
+                            <Link href="/code-reviews?tab=policy">Review policy</Link>
+                          </Button>
+                        ) : null}
+                        {canManagePolicy &&
+                        !dispute.trusted &&
+                        !dispute.superseded_by_dispute_id &&
+                        dispute.intake_status === "triaged" &&
+                        (dispute.routing === "reassess" || dispute.routing === "policy_signal_only") ? (
                           <DisabledTooltip disabled={promoteDispute.isPending} content="Wait for this promotion to finish.">
-                            <Button size="sm" variant="outline" disabled={promoteDispute.isPending} onClick={() => promoteDispute.mutate(dispute)}>Promote to policy queue</Button>
+                            <Button size="sm" variant="outline" disabled={promoteDispute.isPending} onClick={() => promoteDispute.mutate(dispute)}>
+                              Promote to policy queue
+                            </Button>
                           </DisabledTooltip>
                         ) : null}
                         {dispute.routing === "policy_signal_only" && !dispute.escalated_at && !dispute.superseded_by_dispute_id ? (
                           <DisabledTooltip disabled={escalateDispute.isPending} content="Wait for this escalation to finish.">
-                            <Button size="sm" variant="ghost" disabled={escalateDispute.isPending} onClick={() => escalateDispute.mutate(dispute.id)}>Send to policy owner</Button>
+                            <Button size="sm" variant="ghost" disabled={escalateDispute.isPending} onClick={() => escalateDispute.mutate(dispute.id)}>
+                              Send to policy owner
+                            </Button>
                           </DisabledTooltip>
                         ) : null}
                       </div>
@@ -3710,12 +4263,7 @@ function CodeReviewEvidenceSheet({
                     </div>
                   ))}
                   {disputesQuery.hasNextPage ? (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={disputesQuery.isFetchingNextPage}
-                      onClick={() => void disputesQuery.fetchNextPage()}
-                    >
+                    <Button size="sm" variant="ghost" disabled={disputesQuery.isFetchingNextPage} onClick={() => void disputesQuery.fetchNextPage()}>
                       {disputesQuery.isFetchingNextPage ? "Loading…" : "Show earlier feedback"}
                     </Button>
                   ) : null}
@@ -3745,9 +4293,7 @@ function CodeReviewEvidenceSheet({
                         />
                       </div>
                       {result.raw_output ? (
-                        <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">
-                          {result.raw_output}
-                        </pre>
+                        <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">{result.raw_output}</pre>
                       ) : null}
                       {result.structured_result ? (
                         <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">
@@ -3775,9 +4321,7 @@ function CodeReviewEvidenceSheet({
                             <div className="text-sm font-medium text-foreground">{finding.summary}</div>
                             <div className="text-xs text-muted-foreground">{formatFindingLocation(finding)}</div>
                           </div>
-                          <Badge variant={findingBlocksApproval(finding.severity) ? "destructive" : "outline"}>
-                            {findingPriorityLabel(finding.severity)}
-                          </Badge>
+                          <Badge variant={findingBlocksApproval(finding.severity) ? "destructive" : "outline"}>{findingPriorityLabel(finding.severity)}</Badge>
                         </div>
                         <div className="text-sm leading-6 text-muted-foreground">{finding.body}</div>
                       </div>
@@ -3795,16 +4339,12 @@ function CodeReviewEvidenceSheet({
                     <div key={record.id} className="space-y-3 border-t border-border pt-3 first:border-t-0 first:pt-0">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0 space-y-1">
-                          <div className="truncate text-sm font-medium text-foreground">
-                            {record.record_key ?? record.artifact_key}
-                          </div>
+                          <div className="truncate text-sm font-medium text-foreground">{record.record_key ?? record.artifact_key}</div>
                           {record.agent_provider ? <div className="text-xs text-muted-foreground">{record.agent_provider}</div> : null}
                         </div>
                         <Badge variant="outline">{record.role}</Badge>
                       </div>
-                      <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">
-                        {record.content}
-                      </pre>
+                      <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">{record.content}</pre>
                     </div>
                   ))
                 )}
@@ -3817,12 +4357,22 @@ function CodeReviewEvidenceSheet({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{review?.decision === "approved" ? "Report an unsafe approval" : "Ask for reconsideration"}</DialogTitle>
-            <DialogDescription>Explain what the reviewer got wrong or what evidence it missed. Reconsideration cannot waive deterministic safeguards; a policy owner must change those rules. The original decision remains part of the record.</DialogDescription>
+            <DialogDescription>
+              Explain what the reviewer got wrong or what evidence it missed. Reconsideration cannot waive deterministic safeguards; a policy owner must change those rules. The
+              original decision remains part of the record.
+            </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="code-review-dispute-body">What should be reconsidered?</Label>
-              <Textarea id="code-review-dispute-body" value={disputeBody} maxLength={8000} rows={5} placeholder="Describe the part of the decision you disagree with…" onChange={(event) => setDisputeBody(event.target.value)} />
+              <Textarea
+                id="code-review-dispute-body"
+                value={disputeBody}
+                maxLength={8000}
+                rows={5}
+                placeholder="Describe the part of the decision you disagree with…"
+                onChange={(event) => setDisputeBody(event.target.value)}
+              />
             </div>
             {reasonCodes.length > 0 ? (
               <div className="space-y-2">
@@ -3830,7 +4380,10 @@ function CodeReviewEvidenceSheet({
                 <div className="space-y-2">
                   {reasonCodes.map((code) => (
                     <Label key={code} className="flex items-center gap-2 font-normal">
-                      <Checkbox checked={selectedReasonCodes.includes(code)} onCheckedChange={(checked) => setSelectedReasonCodes((current) => checked ? [...current, code] : current.filter((value) => value !== code))} />
+                      <Checkbox
+                        checked={selectedReasonCodes.includes(code)}
+                        onCheckedChange={(checked) => setSelectedReasonCodes((current) => (checked ? [...current, code] : current.filter((value) => value !== code)))}
+                      />
                       {codeReviewDisputeStatusLabel(code)}
                     </Label>
                   ))}
@@ -3839,12 +4392,16 @@ function CodeReviewEvidenceSheet({
             ) : null}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDisputeDialogOpen(false)}>Cancel</Button>
+            <Button variant="outline" onClick={() => setDisputeDialogOpen(false)}>
+              Cancel
+            </Button>
             <DisabledTooltip
               disabled={createDispute.isPending || disputeBody.trim().length === 0}
               content={createDispute.isPending ? "Wait for the feedback to be recorded." : "Describe what should be reconsidered."}
             >
-              <Button disabled={createDispute.isPending || disputeBody.trim().length === 0} onClick={() => createDispute.mutate()}>{createDispute.isPending ? "Recording…" : "Record feedback"}</Button>
+              <Button disabled={createDispute.isPending || disputeBody.trim().length === 0} onClick={() => createDispute.mutate()}>
+                {createDispute.isPending ? "Recording…" : "Record feedback"}
+              </Button>
             </DisabledTooltip>
           </DialogFooter>
         </DialogContent>

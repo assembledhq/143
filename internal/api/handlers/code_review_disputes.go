@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,6 +18,19 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
+
+type codeReviewDisputeQueueCursor struct {
+	SnapshotID uuid.UUID `json:"snapshot_id"`
+	Position   int64     `json:"position"`
+	Scope      [32]byte  `json:"scope"`
+}
+
+type codeReviewDisputeQueueCursorScope struct {
+	OrgID              uuid.UUID                                   `json:"org_id"`
+	AdjudicationStatus *models.CodeReviewDisputeAdjudicationStatus `json:"adjudication_status,omitempty"`
+	RepositoryID       *uuid.UUID                                  `json:"repository_id,omitempty"`
+	Direction          *models.CodeReviewDisputeDirection          `json:"direction,omitempty"`
+}
 
 func (h *CodeReviewHandler) CreateDispute(w http.ResponseWriter, r *http.Request) {
 	if h.disputes == nil {
@@ -173,17 +188,29 @@ func (h *CodeReviewHandler) ListDisputeQueue(w http.ResponseWriter, r *http.Requ
 		}
 		filters.Direction = &value
 	}
-	cursor, ok := parseOptionalDisputeCursor(w, r)
-	if !ok {
-		return
+	if raw := strings.TrimSpace(r.URL.Query().Get("cursor")); raw != "" {
+		cursor, err := decodeCodeReviewDisputeQueueCursor(raw, orgID, filters)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid cursor")
+			return
+		}
+		filters.Cursor = &cursor
 	}
-	filters.Cursor = cursor
 	page, err := h.disputes.ListQueue(r.Context(), orgID, filters)
 	if err != nil {
+		if errors.Is(err, db.ErrCodeReviewDisputeQueueCursorExpired) {
+			writeError(w, r, http.StatusGone, "CODE_REVIEW_DISPUTE_QUEUE_CURSOR_EXPIRED", "the queue changed; refresh to continue")
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_DISPUTE_QUEUE_FAILED", "failed to list the code review dispute queue", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, disputeListResponse(page))
+	response, err := disputeQueueListResponse(orgID, filters, page)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_DISPUTE_QUEUE_FAILED", "failed to encode the code review dispute queue cursor", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (h *CodeReviewHandler) UpdateDispute(w http.ResponseWriter, r *http.Request) {
@@ -198,10 +225,11 @@ func (h *CodeReviewHandler) UpdateDispute(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req struct {
-		ExpectedVersion    int                                         `json:"expected_version"`
-		AdjudicationStatus *models.CodeReviewDisputeAdjudicationStatus `json:"adjudication_status"`
-		AdjudicationNote   *string                                     `json:"adjudication_note"`
-		TrustOverride      json.RawMessage                             `json:"trust_override"`
+		ExpectedVersion          int                                         `json:"expected_version"`
+		AdjudicationStatus       *models.CodeReviewDisputeAdjudicationStatus `json:"adjudication_status"`
+		AdjudicationNote         *string                                     `json:"adjudication_note"`
+		PolicyOwnerActiveSeconds *int                                        `json:"policy_owner_active_seconds"`
+		TrustOverride            json.RawMessage                             `json:"trust_override"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -225,6 +253,10 @@ func (h *CodeReviewHandler) UpdateDispute(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusUnprocessableEntity, "INVALID_DISPUTE_UPDATE", "expected_version and at least one update are required")
 		return
 	}
+	if req.PolicyOwnerActiveSeconds != nil && (*req.PolicyOwnerActiveSeconds < 0 || *req.PolicyOwnerActiveSeconds > 3600) {
+		writeError(w, r, http.StatusUnprocessableEntity, "INVALID_POLICY_OWNER_ACTIVE_SECONDS", "policy_owner_active_seconds must be between 0 and 3600")
+		return
+	}
 	user := middleware.UserFromContext(r.Context())
 	if user == nil {
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user is required")
@@ -233,7 +265,8 @@ func (h *CodeReviewHandler) UpdateDispute(w http.ResponseWriter, r *http.Request
 	dispute, err := h.disputes.Adjudicate(r.Context(), orgID, disputeID, user.ID, models.CodeReviewDisputeAdjudicationUpdate{
 		ExpectedVersion: req.ExpectedVersion, AdjudicationStatus: req.AdjudicationStatus,
 		AdjudicationNote: req.AdjudicationNote, TrustOverride: trustOverride,
-		TrustOverridePresent: trustOverridePresent,
+		PolicyOwnerActiveSeconds: req.PolicyOwnerActiveSeconds,
+		TrustOverridePresent:     trustOverridePresent,
 	})
 	if err != nil {
 		switch {
@@ -279,10 +312,75 @@ func parseOptionalDisputeCursor(w http.ResponseWriter, r *http.Request) (*uuid.U
 	return &value, true
 }
 
+func codeReviewDisputeQueueCursorScopeHash(orgID uuid.UUID, filters models.CodeReviewDisputeListFilters) ([32]byte, error) {
+	encoded, err := json.Marshal(codeReviewDisputeQueueCursorScope{
+		OrgID: orgID, AdjudicationStatus: filters.AdjudicationStatus,
+		RepositoryID: filters.RepositoryID, Direction: filters.Direction,
+	})
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return sha256.Sum256(encoded), nil
+}
+
+func encodeCodeReviewDisputeQueueCursor(orgID uuid.UUID, filters models.CodeReviewDisputeListFilters, cursor models.CodeReviewDisputeQueueCursor) (string, error) {
+	scope, err := codeReviewDisputeQueueCursorScopeHash(orgID, filters)
+	if err != nil {
+		return "", err
+	}
+	encoded, err := json.Marshal(codeReviewDisputeQueueCursor{
+		SnapshotID: cursor.SnapshotID,
+		Position:   cursor.Position,
+		Scope:      scope,
+	})
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(encoded), nil
+}
+
+func decodeCodeReviewDisputeQueueCursor(raw string, orgID uuid.UUID, filters models.CodeReviewDisputeListFilters) (models.CodeReviewDisputeQueueCursor, error) {
+	encoded, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return models.CodeReviewDisputeQueueCursor{}, err
+	}
+	var cursor codeReviewDisputeQueueCursor
+	if err := json.Unmarshal(encoded, &cursor); err != nil {
+		return models.CodeReviewDisputeQueueCursor{}, err
+	}
+	if cursor.SnapshotID == uuid.Nil || cursor.Position <= 0 {
+		return models.CodeReviewDisputeQueueCursor{}, errors.New("cursor anchor is incomplete")
+	}
+	scope, err := codeReviewDisputeQueueCursorScopeHash(orgID, filters)
+	if err != nil {
+		return models.CodeReviewDisputeQueueCursor{}, err
+	}
+	if cursor.Scope != scope {
+		return models.CodeReviewDisputeQueueCursor{}, errors.New("cursor does not match the active filters")
+	}
+	return models.CodeReviewDisputeQueueCursor{
+		SnapshotID: cursor.SnapshotID,
+		Position:   cursor.Position,
+	}, nil
+}
+
 func disputeListResponse(page models.CodeReviewDisputePage) models.ListResponse[models.CodeReviewDispute] {
 	meta := models.PaginationMeta{}
 	if page.NextCursor != nil {
 		meta.NextCursor = page.NextCursor.String()
 	}
 	return models.ListResponse[models.CodeReviewDispute]{Data: page.Items, Meta: meta}
+}
+
+func disputeQueueListResponse(orgID uuid.UUID, filters models.CodeReviewDisputeListFilters, page models.CodeReviewDisputePage) (models.ListResponse[models.CodeReviewDispute], error) {
+	response := models.ListResponse[models.CodeReviewDispute]{Data: page.Items, Meta: models.PaginationMeta{}}
+	if page.NextQueueCursor == nil {
+		return response, nil
+	}
+	nextCursor, err := encodeCodeReviewDisputeQueueCursor(orgID, filters, *page.NextQueueCursor)
+	if err != nil {
+		return models.ListResponse[models.CodeReviewDispute]{}, err
+	}
+	response.Meta.NextCursor = nextCursor
+	return response, nil
 }

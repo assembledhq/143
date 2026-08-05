@@ -7,6 +7,7 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -289,6 +290,26 @@ func TestPullRequestStore_UpdateStatus_Merged(t *testing.T) {
 	err = store.UpdateStatus(context.Background(), orgID, id, "merged")
 	require.NoError(t, err, "should update pull request status to merged without error")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPullRequestStore_UpdateMergedStatusPreservesProviderTime(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+	orgID := uuid.New()
+	id := uuid.New()
+	mergedAt := time.Date(2026, time.August, 4, 12, 34, 56, 0, time.UTC)
+	mock.ExpectExec("UPDATE pull_requests[\\s\\S]+merged_at = @merged_at").
+		WithArgs(pgx.NamedArgs{
+			"id": id, "org_id": orgID, "status": models.PullRequestStatusMerged, "merged_at": mergedAt,
+		}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = NewPullRequestStore(mock).UpdateMergedStatus(context.Background(), orgID, id, mergedAt)
+
+	require.NoError(t, err, "merged status should preserve the provider timestamp")
+	require.NoError(t, mock.ExpectationsWereMet(), "the merge update should write the exact provider timestamp")
 }
 
 func TestPullRequestStore_ListByOrg_Success(t *testing.T) {
