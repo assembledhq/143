@@ -204,12 +204,11 @@ test("manual inspection protects a terminal phase and disclosure is keyboard ope
   await expect(page.getByRole("button", { name: /Worked for 6s .*1 tool call/ })).toHaveAttribute("aria-expanded", "true");
 });
 
-test("keeps queued steering visible and promotes it away from the pending lane", async ({ page }) => {
-  await expect(page.getByText("Queued")).toHaveCount(2);
-  await expect(page.getByText("Also preserve anchors")).toBeVisible();
-  await expect(page.getByText("Keep day separators stable")).toBeVisible();
-  await page.getByRole("button", { name: "Acknowledge steering" }).click();
+test("keeps queued steering out of the transcript until it is applied", async ({ page }) => {
   await expect(page.getByText("Queued")).toHaveCount(0);
+  await expect(page.getByText("Also preserve anchors")).toHaveCount(0);
+  await expect(page.getByText("Keep day separators stable")).toHaveCount(0);
+  await page.getByRole("button", { name: "Acknowledge steering" }).click();
   await expect(page.getByText("Also preserve anchors")).toBeVisible();
   await expect(page.getByText("Keep day separators stable")).toBeVisible();
   await expect(page.getByRole("button", { name: /Worked for 6s .*1 tool call/ })).toBeVisible();

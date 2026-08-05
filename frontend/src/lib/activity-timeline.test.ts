@@ -45,16 +45,39 @@ describe("buildActivityTimelineNodes", () => {
     }]);
   });
 
-  it("keeps unacknowledged steering in a queued delivery lane", () => {
+  it("omits steering until the runtime applies it, then renders the normal message", () => {
     const message = {
       id: 7, session_id: "session-1", org_id: "org-1", thread_id: "thread-1", turn_number: 2,
       role: "user" as const, content: "also update the tests", created_at: "2026-08-03T00:00:07Z",
       inbox_sequence: 4, delivery_state: "pending" as const,
     };
     const entry: TimelineEntry = { kind: "message", data: message };
-    expect(buildActivityTimelineNodes([entry], [])).toEqual([{
-      kind: "queued_delivery",
-      delivery: { id: "delivery-4", inboxSequence: 4, deliveryState: "queued", entry },
+    expect(buildActivityTimelineNodes([entry], [])).toEqual([]);
+
+    const appliedEntry: TimelineEntry = {
+      kind: "message",
+      data: { ...message, delivery_state: "acked", applied_at: "2026-08-03T00:00:08Z" },
+    };
+    expect(buildActivityTimelineNodes([appliedEntry], [])).toEqual([{ kind: "visible", entry: appliedEntry }]);
+  });
+
+  it("does not split historical activity around omitted steering", () => {
+    const before = { kind: "log", data: log(1, "info") } satisfies TimelineEntry;
+    const queued = {
+      kind: "message",
+      data: {
+        id: 7, session_id: "session-1", org_id: "org-1", thread_id: "thread-1", turn_number: 1,
+        role: "user" as const, content: "also update the tests", created_at: "2026-08-03T00:00:02Z",
+        inbox_sequence: 4, delivery_state: "pending" as const,
+      },
+    } satisfies TimelineEntry;
+    const after = { kind: "log", data: log(2, "info") } satisfies TimelineEntry;
+
+    expect(buildActivityTimelineNodes([before, queued, after], [])).toEqual([{
+      kind: "historical_activity",
+      activity: {
+        id: "historical-1-log-1", turnNumber: 1, entries: [before, after], toolCallCount: 0, inferredHistorical: true,
+      },
     }]);
   });
 

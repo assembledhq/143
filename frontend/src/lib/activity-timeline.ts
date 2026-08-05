@@ -37,13 +37,6 @@ export interface InferredHistoricalActivity {
   inferredHistorical: true;
 }
 
-export interface TimelineQueuedDelivery {
-  id: string;
-  inboxSequence: number;
-  deliveryState: "queued" | "acknowledged" | "abandoned";
-  entry: Extract<TimelineEntry, { kind: "message" }>;
-}
-
 export interface TimelineBoundaryNotice {
   id: string;
   phaseID: string;
@@ -55,7 +48,6 @@ export interface TimelineBoundaryNotice {
 export type ActivityTimelineNode =
   | { kind: "visible"; entry: TimelineEntry }
   | { kind: "phase"; phase: TimelineActivityPhase }
-  | { kind: "queued_delivery"; delivery: TimelineQueuedDelivery }
   | { kind: "boundary_notice"; notice: TimelineBoundaryNotice }
   | { kind: "historical_activity"; activity: InferredHistoricalActivity };
 
@@ -102,7 +94,6 @@ function nodeTime(node: ActivityTimelineNode): number {
   if (node.kind === "phase") {
     return node.phase.entries.length > 0 ? entryTime(node.phase.entries[0]) : Date.parse(node.phase.started_at);
   }
-  if (node.kind === "queued_delivery") return entryTime(node.delivery.entry);
   return entryTime(node.activity.entries[0]);
 }
 
@@ -139,18 +130,6 @@ export function buildActivityTimelineNodes(entries: TimelineEntry[], turns: Sess
 
   for (const entry of entries) {
     if (entry.kind === "message" && entry.data.role === "user" && entry.data.delivery_state && !entry.data.applied_at) {
-      flushHistorical();
-      const deliveryState = entry.data.delivery_state === "acked"
-        ? "acknowledged"
-        : entry.data.delivery_state === "dead_letter"
-          ? "abandoned"
-          : "queued";
-      nodes.push({ kind: "queued_delivery", delivery: {
-        id: `delivery-${entry.data.inbox_sequence ?? entry.data.id}`,
-        inboxSequence: entry.data.inbox_sequence ?? 0,
-        deliveryState,
-        entry,
-      } });
       continue;
     }
     const phaseID = phaseIDForEntry(entry);

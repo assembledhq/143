@@ -184,7 +184,7 @@ describe("SessionActivityTimeline", () => {
     expect(screen.getByText("Ran `npm test`")).toBeVisible();
   });
 
-  it("renders queued deliveries and runtime boundaries without full-width card treatments", () => {
+  it("omits queued deliveries and renders runtime boundaries without full-width card treatments", () => {
     const interruptedPhaseID = "10000000-0000-0000-0000-000000000010";
     const recoveryPhaseID = "10000000-0000-0000-0000-000000000011";
     const interruptedTool = {
@@ -254,9 +254,9 @@ describe("SessionActivityTimeline", () => {
 
     const interruption = screen.getByText("Execution paused because the runtime was lost.").closest("[role='status']");
     const recovery = screen.getByText("Runtime recovered and execution resumed.").closest("[role='status']");
-    const delivery = screen.getByText("Queued").closest("[data-activity-delivery]");
     expect(interruption).not.toHaveClass("rounded-lg", "border-info/30", "bg-info/10");
     expect(recovery).not.toHaveClass("rounded-lg", "border-info/30", "bg-info/10");
-    expect(delivery).not.toHaveClass("rounded-lg", "border", "bg-card");
+    expect(screen.queryByText("Queued")).not.toBeInTheDocument();
+    expect(screen.queryByText("Keep the runtime state intact.")).not.toBeInTheDocument();
   });
 });
