@@ -47,6 +47,10 @@ const sandboxCapacityRetryDelay = 10 * time.Second
 const previewCapacityRetryDelay = 5 * time.Second
 const previewStartupInterruptedRetryDelay = 2 * time.Second
 const prePRReviewRetryDelay = 5 * time.Second
+const reviewLoopRecoveryDelay = 30 * time.Second
+const reviewLoopRecoveryInactiveFor = 15 * time.Second
+const periodicReviewLoopRecoveryInactiveFor = 2 * time.Minute
+const reviewLoopRecoveryBatchSize = 50
 const continuePostSuccessActionPushPRChanges = "push_pr_changes"
 
 var enqueuePRPushChangesJobAfterContinue = enqueuePRPushChangesJob
@@ -450,6 +454,13 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 			w.Register(models.JobTypeStartCodeReviewReassessment, newStartCodeReviewReassessmentHandler(stores, services, logger))
 		}
 	}
+	if stores != nil && stores.CodeReviewDisputes != nil && services != nil && services.CodeReviewDisputes != nil {
+		w.Register(models.JobTypeTriageCodeReviewDispute, newTriageCodeReviewDisputeHandler(services.CodeReviewDisputes))
+		w.Register(models.JobTypeReplyCodeReviewDispute, newReplyCodeReviewDisputeHandler(stores, services, logger))
+	}
+	if services != nil && services.ReviewLoops != nil {
+		w.Register(models.JobTypeReconcileSessionReviewLoop, newReconcileSessionReviewLoopHandler(services, logger))
+	}
 	if services != nil && services.PagerDuty != nil {
 		w.Register(models.JobTypePagerDutyIngestEvent, newPagerDutyIngestEventHandler(services.PagerDuty, logger))
 	}
@@ -623,6 +634,7 @@ type Stores struct {
 	AutomationRuns      *db.AutomationRunStore // nil-safe: automations feature disabled if nil
 	ReviewLoops         *db.SessionReviewLoopStore
 	CodeReviews         *db.CodeReviewStore
+	CodeReviewDisputes  *db.CodeReviewDisputeStore
 	SessionIssueLinks   *db.SessionIssueLinkStore // nil-safe: needed for Linear milestones
 	Previews            *db.PreviewStore
 	PullRequests        *db.PullRequestStore
@@ -747,6 +759,7 @@ type prCreator interface {
 	CreateBranch(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*ghservice.CreateBranchResult, error)
 	PushChangesToPR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
 	SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error
+	GetCodeReviewPullRequestSnapshot(ctx context.Context, orgID, repositoryID uuid.UUID, number int) (ghservice.CodeReviewPullRequestSnapshot, error)
 	RebuildPullRequestHealthFromCheckStates(ctx context.Context, orgID, pullRequestID uuid.UUID) (bool, error)
 	ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error
 	EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error
@@ -781,36 +794,49 @@ type codeReviewLifecycle interface {
 	HandleReviewChanged(ctx context.Context, input codereviewsvc.ReviewChangedInput) (codereviewsvc.ReviewRequestedResult, error)
 }
 
+type codeReviewDisputeService interface {
+	Triage(ctx context.Context, orgID, disputeID uuid.UUID) error
+	FailTriage(ctx context.Context, orgID, disputeID uuid.UUID, detail string) error
+	BuildReply(ctx context.Context, orgID, disputeID uuid.UUID) (models.CodeReviewDispute, string, error)
+	EnqueueReply(ctx context.Context, orgID, disputeID uuid.UUID, stage string) error
+}
+
+type codeReviewDisputePublisher interface {
+	PublishCodeReviewDisputeReply(ctx context.Context, req ghservice.CodeReviewDisputeReplyRequest) (int64, error)
+}
+
 type codingAgentAvailability interface {
 	IsAgentAvailable(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, agentType models.AgentType, model string) (bool, error)
 }
 
 // Services holds the service dependencies needed by job handlers.
 type Services struct {
-	Orchestrator        orchestratorService
-	PR                  prCreator
-	Failure             *agent.FailureService
-	SandboxProvider     agent.SandboxProvider
-	ProjectTasks        agent.ProjectTaskUpdater   // nil-safe: updates project tasks on terminal session fallback paths
-	AutomationRuns      agent.AutomationRunUpdater // nil-safe: updates automation runs on terminal session fallback paths
-	Prioritization      *prioritization.Service
-	Feedback            *feedback.Service
-	Memory              MemoryReinforcer                               // optional — enables memory reinforcement on PR approval
-	SlackSummarizer     *ingestion.SlackSummarizer                     // nil-safe: Slack summarization disabled if nil
-	LLM                 llmClient                                      // nil-safe: needed for eval LLM judge grading
-	GitHub              agent.GitHubTokenProvider                      // nil-safe: needed for eval repo cloning
-	GitHubOrgRoster     githubOrgRosterService                         // nil-safe: needed for GitHub org auto-join roster sync
-	Snapshots           storage.SnapshotStore                          // nil-safe: needed for eval code_check grading
-	TitleService        *services.SessionTitleService                  // nil-safe: session title regeneration
-	Linear              *linear.Service                                // nil-safe: Linear session-linking disabled if nil
-	PagerDuty           pagerDutyEventProcessor                        // nil-safe: PagerDuty incident ingestion disabled if nil
-	PagerDutySync       pagerDutySyncer                                // nil-safe: PagerDuty reconciliation disabled if nil
-	PagerDutyWrites     pagerDutyPRWritebacker                         // nil-safe: PagerDuty writeback disabled if nil
-	CodeReviews         codeReviewSubmitter                            // nil-safe: GitHub review submission disabled if nil
-	CodeReviewLifecycle codeReviewLifecycle                            // nil-safe: starts durable follow-up assessments after webhook changes
-	CodingAgents        codingAgentAvailability                        // nil-safe: code review falls back to the configured roster when nil
-	PublicationIntents  publicationintent.PublicationIntentCoordinator // nil-safe: Slack falls back to an actionable error when publication is unavailable
-	SlackbotMetrics     *metrics.SlackbotMetrics                       // nil-safe: Slackbot observability disabled if nil
+	Orchestrator               orchestratorService
+	PR                         prCreator
+	Failure                    *agent.FailureService
+	SandboxProvider            agent.SandboxProvider
+	ProjectTasks               agent.ProjectTaskUpdater   // nil-safe: updates project tasks on terminal session fallback paths
+	AutomationRuns             agent.AutomationRunUpdater // nil-safe: updates automation runs on terminal session fallback paths
+	Prioritization             *prioritization.Service
+	Feedback                   *feedback.Service
+	Memory                     MemoryReinforcer                               // optional — enables memory reinforcement on PR approval
+	SlackSummarizer            *ingestion.SlackSummarizer                     // nil-safe: Slack summarization disabled if nil
+	LLM                        llmClient                                      // nil-safe: needed for eval LLM judge grading
+	GitHub                     agent.GitHubTokenProvider                      // nil-safe: needed for eval repo cloning
+	GitHubOrgRoster            githubOrgRosterService                         // nil-safe: needed for GitHub org auto-join roster sync
+	Snapshots                  storage.SnapshotStore                          // nil-safe: needed for eval code_check grading
+	TitleService               *services.SessionTitleService                  // nil-safe: session title regeneration
+	Linear                     *linear.Service                                // nil-safe: Linear session-linking disabled if nil
+	PagerDuty                  pagerDutyEventProcessor                        // nil-safe: PagerDuty incident ingestion disabled if nil
+	PagerDutySync              pagerDutySyncer                                // nil-safe: PagerDuty reconciliation disabled if nil
+	PagerDutyWrites            pagerDutyPRWritebacker                         // nil-safe: PagerDuty writeback disabled if nil
+	CodeReviews                codeReviewSubmitter                            // nil-safe: GitHub review submission disabled if nil
+	CodeReviewLifecycle        codeReviewLifecycle                            // nil-safe: starts durable follow-up assessments after webhook changes
+	CodeReviewDisputes         codeReviewDisputeService                       // nil-safe: triages and replies to decision disputes
+	CodeReviewDisputePublisher codeReviewDisputePublisher                     // nil-safe: publishes idempotent GitHub replies
+	CodingAgents               codingAgentAvailability                        // nil-safe: code review falls back to the configured roster when nil
+	PublicationIntents         publicationintent.PublicationIntentCoordinator // nil-safe: Slack falls back to an actionable error when publication is unavailable
+	SlackbotMetrics            *metrics.SlackbotMetrics                       // nil-safe: Slackbot observability disabled if nil
 	// Redis is optional and used for non-authoritative shared caches such as
 	// Slack user display names. Losing it should only increase provider lookups.
 	Redis       *cache.Client
@@ -824,6 +850,7 @@ type Services struct {
 		OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid.UUID, assistantSummary string) error
 		OnThreadTurnFailed(ctx context.Context, orgID, threadID uuid.UUID, summary string) error
 		Start(ctx context.Context, orgID, sessionID uuid.UUID, req reviewloopsvc.StartReviewLoopRequest) (*models.SessionReviewLoop, error)
+		ReconcileStrandedPublicationLoops(ctx context.Context, orgID uuid.UUID, inactiveBefore time.Time, limit int) (int, error)
 	}
 	// EvalBatchStreams publishes lightweight pub/sub signals on every batch
 	// or run state transition so the eval-batch detail page can replace its
@@ -8179,7 +8206,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		if err != nil {
 			return fmt.Errorf("fetch agent run: %w", err)
 		}
-		defer finalizeSessionBackedEvalArtifacts(ctx, stores, services, logger, orgID, runID)
+		defer finalizeSessionBackedEvalOutputs(ctx, stores, services, logger, orgID, runID)
 		if input.ThreadID != "" {
 			threadID, parseErr := uuid.Parse(input.ThreadID)
 			if parseErr != nil {
@@ -8646,7 +8673,7 @@ func markSessionBackedEvalRunning(ctx context.Context, stores *Stores, services 
 	}
 }
 
-func finalizeSessionBackedEvalArtifacts(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, sessionID uuid.UUID) {
+func finalizeSessionBackedEvalOutputs(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, sessionID uuid.UUID) {
 	if stores == nil || stores.Sessions == nil {
 		return
 	}
@@ -8736,8 +8763,8 @@ func finalizeSessionBackedEvalRun(ctx context.Context, stores *Stores, services 
 			}
 			return
 		}
-		if err := stores.EvalRuns.UpdatePostSessionArtifacts(ctx, session.OrgID, run.ID, diff.Diff, agentTrace, inputManifest); err != nil {
-			logger.Warn().Err(err).Str("eval_run_id", run.ID.String()).Msg("failed to persist session-backed eval run artifacts")
+		if err := stores.EvalRuns.UpdatePostSessionOutputs(ctx, session.OrgID, run.ID, diff.Diff, agentTrace, inputManifest); err != nil {
+			logger.Warn().Err(err).Str("eval_run_id", run.ID.String()).Msg("failed to persist session-backed eval run outputs")
 			return
 		}
 		if stores.Jobs != nil {
@@ -8807,14 +8834,14 @@ func newEvalGraderHandler(stores *Stores, services *Services, logger zerolog.Log
 			snapshots = services.Snapshots
 			llm = services.LLM
 		}
-		result, err := gradeEvalRunArtifacts(ctx, run, task, evalGraderDeps{
+		result, err := gradeEvalRunOutputs(ctx, run, task, evalGraderDeps{
 			session:   session,
 			provider:  provider,
 			snapshots: snapshots,
 			llm:       llm,
 		})
 		if err != nil {
-			return fmt.Errorf("grade eval run artifacts: %w", err)
+			return fmt.Errorf("grade eval run outputs: %w", err)
 		}
 		if err := stores.EvalRuns.UpdateResult(ctx, orgID, run.ID, result); err != nil {
 			return fmt.Errorf("update eval grader result: %w", err)
@@ -8831,7 +8858,7 @@ type evalGraderDeps struct {
 	llm       llmClient
 }
 
-func gradeEvalRunArtifacts(ctx context.Context, run models.EvalRun, task models.EvalTask, deps evalGraderDeps) (*models.EvalRunResult, error) {
+func gradeEvalRunOutputs(ctx context.Context, run models.EvalRun, task models.EvalTask, deps evalGraderDeps) (*models.EvalRunResult, error) {
 	var criteria []models.ScoringCriterion
 	if len(task.ScoringCriteria) > 0 {
 		if err := json.Unmarshal(task.ScoringCriteria, &criteria); err != nil {
@@ -9988,6 +10015,14 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 							Str("session_id", sessionID.String()).
 							Str("thread_id", threadID.String()).
 							Msg("failed to advance review loop after thread turn")
+						recoveryCtx, cancelRecovery := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+						if enqueueErr := enqueueSessionReviewLoopReconciliation(recoveryCtx, stores, orgID, threadID, time.Now().UTC()); enqueueErr != nil {
+							logger.Error().Err(enqueueErr).
+								Str("session_id", sessionID.String()).
+								Str("thread_id", threadID.String()).
+								Msg("failed to enqueue review loop recovery")
+						}
+						cancelRecovery()
 					}
 				}
 			} else {
@@ -10840,6 +10875,64 @@ func newSyncPRPreviewSurfacesHandler(services *Services, logger zerolog.Logger) 
 	}
 }
 
+func enqueueSessionReviewLoopReconciliation(
+	ctx context.Context,
+	stores *Stores,
+	orgID, threadID uuid.UUID,
+	now time.Time,
+) error {
+	if stores == nil || stores.Jobs == nil {
+		return errors.New("review loop recovery job store is unavailable")
+	}
+	runAt := now.Add(reviewLoopRecoveryDelay)
+	dedupeKey := models.JobTypeReconcileSessionReviewLoop + ":" + threadID.String()
+	_, err := stores.Jobs.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue:     "default",
+		JobType:   models.JobTypeReconcileSessionReviewLoop,
+		Payload:   map[string]any{"org_id": orgID.String(), "limit": reviewLoopRecoveryBatchSize},
+		Priority:  5,
+		RunAt:     &runAt,
+		DedupeKey: &dedupeKey,
+	})
+	if err != nil {
+		return fmt.Errorf("enqueue session review loop reconciliation: %w", err)
+	}
+	return nil
+}
+
+func newReconcileSessionReviewLoopHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID string `json:"org_id"`
+			Limit int    `json:"limit"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal reconcile_session_review_loop payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		if input.Limit <= 0 {
+			input.Limit = reviewLoopRecoveryBatchSize
+		}
+		if services == nil || services.ReviewLoops == nil {
+			return errors.New("review loop recovery service is unavailable")
+		}
+		restarted, err := services.ReviewLoops.ReconcileStrandedPublicationLoops(
+			ctx, orgID, time.Now().UTC().Add(-reviewLoopRecoveryInactiveFor), input.Limit,
+		)
+		if err != nil {
+			return fmt.Errorf("reconcile stranded publication reviews: %w", err)
+		}
+		if restarted > 0 {
+			logger.Warn().Str("org_id", orgID.String()).Int("restarted", restarted).
+				Msg("restarted stranded publication review loops")
+		}
+		return nil
+	}
+}
+
 func newReconcilePullRequestStateHandler(services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
@@ -10857,7 +10950,19 @@ func newReconcilePullRequestStateHandler(services *Services, logger zerolog.Logg
 			input.Limit = 50
 		}
 		logger.Info().Str("org_id", orgID.String()).Int("limit", input.Limit).Msg("starting reconcile_pull_request_state job")
-		return services.PR.ReconcilePullRequestState(ctx, orgID, input.Limit)
+		prErr := services.PR.ReconcilePullRequestState(ctx, orgID, input.Limit)
+		var reviewErr error
+		if services.ReviewLoops != nil {
+			var restarted int
+			restarted, reviewErr = services.ReviewLoops.ReconcileStrandedPublicationLoops(
+				ctx, orgID, time.Now().UTC().Add(-periodicReviewLoopRecoveryInactiveFor), input.Limit,
+			)
+			if restarted > 0 {
+				logger.Warn().Str("org_id", orgID.String()).Int("restarted", restarted).
+					Msg("periodic reconciliation restarted stranded publication review loops")
+			}
+		}
+		return errors.Join(prErr, reviewErr)
 	}
 }
 
@@ -10981,12 +11086,9 @@ func effectivePublicationRequestedRole(
 	if stores == nil || stores.Users == nil {
 		return "", errors.New("user store is required to authorize agent-tool publication")
 	}
-	user, err := stores.Users.GetByIDGlobalWithSettings(ctx, *run.TriggeredByUserID)
+	user, err := stores.Users.GetByIDWithSettings(ctx, run.OrgID, *run.TriggeredByUserID)
 	if err != nil {
 		return "", fmt.Errorf("load agent publication initiator: %w", err)
-	}
-	if user.OrgID != run.OrgID {
-		return "", errors.New("agent publication initiator is outside organization scope")
 	}
 	return string(user.Role), nil
 }
@@ -12142,7 +12244,8 @@ func ensurePublicationPrePRReview(
 	}
 	loop, err := services.ReviewLoops.Start(ctx, run.OrgID, run.ID, reviewloopsvc.StartReviewLoopRequest{
 		AgentType: reviewer, Model: model, MaxPasses: *publication.ReviewMaxPasses,
-		Source: models.ReviewLoopSourcePublication, AutomationRunID: run.AutomationRunID,
+		FixMode: models.ReviewLoopFixModeExhaustive,
+		Source:  models.ReviewLoopSourcePublication, AutomationRunID: run.AutomationRunID,
 		StartedByUserID: publication.InitiatedByUserID,
 		ReviewRequired:  true, ChangesetID: changesetID, WorkspaceRevision: &workspaceRevision,
 		DesiredHeadSHA: &desiredHeadSHA,
@@ -12297,6 +12400,7 @@ func ensureAutomationPrePRReview(ctx context.Context, stores *Stores, services *
 		AgentType:       run.AgentType,
 		Model:           stringValue(run.ModelOverride),
 		MaxPasses:       passCount,
+		FixMode:         models.ReviewLoopFixModeExhaustive,
 		Source:          models.ReviewLoopSourceAutomation,
 		AutomationRunID: run.AutomationRunID,
 		StartedByUserID: run.TriggeredByUserID,

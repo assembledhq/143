@@ -3,7 +3,9 @@ package ingestion
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -36,6 +38,11 @@ const (
 	// sentryMaxRetries is the maximum number of retry attempts for rate-limited
 	// Sentry API requests before giving up.
 	sentryMaxRetries = 3
+
+	// sentryMaxDrainBytes bounds how much of an unread response body is drained
+	// before closing it. The cap keeps a large or slow body from stalling
+	// cleanup; a body that exceeds it simply loses connection reuse.
+	sentryMaxDrainBytes = 64 << 10
 )
 
 // FetchIssues retrieves unresolved issues from a Sentry project since the given time.
@@ -84,10 +91,12 @@ func (c *SentryAPIClient) fetchPage(ctx context.Context, url, authToken string) 
 		if err != nil {
 			return nil, "", fmt.Errorf("fetch sentry issues: %w", err)
 		}
-		defer resp.Body.Close()
 
 		if resp.StatusCode == http.StatusTooManyRequests {
 			retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
+			if err := closeSentryResponseBody(resp.Body, nil); err != nil {
+				return nil, "", err
+			}
 			c.logger.Warn().
 				Str("url", url).
 				Int("attempt", attempt).
@@ -103,12 +112,17 @@ func (c *SentryAPIClient) fetchPage(ctx context.Context, url, authToken string) 
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			return nil, "", fmt.Errorf("unexpected status %d from sentry API", resp.StatusCode)
+			responseErr := fmt.Errorf("unexpected status %d from sentry API", resp.StatusCode)
+			return nil, "", closeSentryResponseBody(resp.Body, responseErr)
 		}
 
 		var issues []SentryIssue
-		if err := json.NewDecoder(resp.Body).Decode(&issues); err != nil {
-			return nil, "", fmt.Errorf("decode sentry issues: %w", err)
+		decodeErr := json.NewDecoder(resp.Body).Decode(&issues)
+		if decodeErr != nil {
+			decodeErr = fmt.Errorf("decode sentry issues: %w", decodeErr)
+		}
+		if err := closeSentryResponseBody(resp.Body, decodeErr); err != nil {
+			return nil, "", err
 		}
 
 		nextURL := parseLinkHeader(resp.Header.Get("Link"))
@@ -116,6 +130,33 @@ func (c *SentryAPIClient) fetchPage(ctx context.Context, url, authToken string) 
 	}
 
 	return nil, "", fmt.Errorf("sentry API rate limited after %d retries", sentryMaxRetries)
+}
+
+// closeSentryResponseBody drains and closes a response body, preserving any
+// error that was already being returned for the response. Keeping this out of a
+// defer is important in the retry loop: a rate-limited response must be
+// released before the client waits and starts the next attempt.
+//
+// The bounded drain is what lets the transport pool the connection for that
+// retry. Closing a body that was never read forces the transport to tear the
+// connection down, so every rate-limit retry would otherwise pay for a fresh
+// handshake against an API that is already shedding load.
+func closeSentryResponseBody(body io.ReadCloser, responseErr error) error {
+	// A drain failure is not worth reporting: it says nothing the response error
+	// does not already say, and the close below still runs either way.
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, sentryMaxDrainBytes))
+
+	closeErr := body.Close()
+	if closeErr == nil {
+		return responseErr
+	}
+
+	closeErr = fmt.Errorf("close sentry response body: %w", closeErr)
+	if responseErr == nil {
+		return closeErr
+	}
+
+	return errors.Join(responseErr, closeErr)
 }
 
 func (c *SentryAPIClient) normalizeIssue(integrationID uuid.UUID, issue SentryIssue) NormalizedIssue {

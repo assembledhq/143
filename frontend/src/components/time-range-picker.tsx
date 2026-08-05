@@ -1,13 +1,14 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { format, subDays } from "date-fns";
+import { format } from "date-fns";
 import { CalendarRange, Check, ChevronDown } from "lucide-react";
 import type { DateRange } from "react-day-picker";
 
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
 import { ControlTrigger } from "@/components/ui/control-trigger";
+import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -15,6 +16,7 @@ import { Separator } from "@/components/ui/separator";
 import {
   customTimeRange,
   customTimeRangeDates,
+  timeRangeDisplayDates,
   type PresetTimeRange,
   type TimeRangeFilter,
 } from "@/lib/time-range";
@@ -48,10 +50,7 @@ const PRESET_GROUPS: Array<{
 const PRESETS = PRESET_GROUPS.flatMap((group) => group.presets);
 
 function defaultDraft(value: TimeRangeFilter): DateRange {
-  const custom = customTimeRangeDates(value);
-  if (custom) return custom;
-  const today = new Date();
-  return { from: subDays(today, 30), to: today };
+  return timeRangeDisplayDates(value, new Date()) ?? { from: undefined, to: undefined };
 }
 
 export function timeRangeLabel(value: TimeRangeFilter): string {
@@ -87,9 +86,12 @@ export function TimeRangePicker({
   };
 
   const applyPreset = (preset: PresetTimeRange) => {
+    setDraft(defaultDraft(preset));
     onValueChange(preset);
     setOpen(false);
   };
+
+  const rangeIncomplete = !draft.from || !draft.to;
 
   const applyCustomRange = () => {
     if (!draft.from || !draft.to) return;
@@ -174,14 +176,14 @@ export function TimeRangePicker({
                   <Button type="button" variant="ghost" size="sm" onClick={() => setOpen(false)}>
                     Cancel
                   </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    disabled={!draft.from || !draft.to}
-                    onClick={applyCustomRange}
+                  <DisabledTooltip
+                    disabled={rangeIncomplete}
+                    content={draft.from ? "Select an end date to apply this range." : "Select a start and end date to apply this range."}
                   >
-                    Apply range
-                  </Button>
+                    <Button type="button" size="sm" disabled={rangeIncomplete} onClick={applyCustomRange}>
+                      Apply range
+                    </Button>
+                  </DisabledTooltip>
                 </div>
               </div>
             </div>

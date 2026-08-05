@@ -14,6 +14,56 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestCodeReviewDisputesMigrationEnforcesTenantScopedParents(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000281_code_review_decision_disputes.up.sql")
+	require.NoError(t, err, "test should read the code review disputes migration")
+	sql := string(body)
+
+	for _, parent := range []string{"sessions", "pull_requests", "repositories", "code_review_policies"} {
+		require.Contains(t, sql, "REFERENCES "+parent+"(org_id, id)", "dispute parent references should enforce organization ownership")
+	}
+	require.NotContains(t, sql, "REFERENCES sessions(id)", "session references should not permit a mismatched organization carrier")
+	require.NotContains(t, sql, "REFERENCES pull_requests(id)", "pull request references should not permit a mismatched organization carrier")
+	require.NotContains(t, sql, "REFERENCES repositories(id)", "repository references should not permit a mismatched organization carrier")
+	require.NotContains(t, sql, "REFERENCES code_review_policies(id)", "policy references should not permit a mismatched organization carrier")
+
+	// The composite referenced-key indexes are built on hot parent tables. The
+	// migration should fail fast rather than queue behind concurrent DDL, and
+	// must no-op when an operator pre-created them CONCURRENTLY.
+	require.Contains(t, sql, "SET LOCAL lock_timeout", "the migration should bound how long it waits to acquire parent-table locks")
+	for _, parent := range []string{"sessions", "pull_requests", "repositories", "code_review_policies"} {
+		require.Regexp(t, `CREATE UNIQUE INDEX IF NOT EXISTS \w+\n?\s+ON `+parent+` \(org_id, id\)`, sql,
+			"parent index builds should be idempotent so they can be pre-created CONCURRENTLY")
+	}
+	// Keep the ACCESS EXCLUSIVE portion metadata-only. Validation runs in the
+	// next migration under a weaker lock that does not block normal DML.
+	require.Contains(t, sql, "CHECK (code_review_dispute_cycles_in_epoch >= 0) NOT VALID;",
+		"the loop-guard CHECK should be installed without scanning the hot pull requests table")
+	require.NotContains(t, sql, "VALIDATE CONSTRAINT",
+		"the expand migration should not validate while retaining its ACCESS EXCLUSIVE lock")
+
+	validationBody, err := os.ReadFile("../../migrations/000282_validate_code_review_dispute_cycles.up.sql")
+	require.NoError(t, err, "test should read the code review dispute cycle validation migration")
+	validationSQL := string(validationBody)
+	require.Contains(t, validationSQL,
+		"ALTER TABLE pull_requests\n    VALIDATE CONSTRAINT chk_pr_code_review_dispute_cycles;",
+		"the follow-up migration should validate the loop-guard CHECK under a weaker lock")
+
+	// The adjudication UI always filters to pending; a broader partial index
+	// would accumulate every resolved dispute in the hot path.
+	require.Contains(t, sql, "ON code_review_decision_disputes (org_id, queue_priority DESC, created_at DESC, id DESC)\n    WHERE adjudication_status = 'pending'",
+		"the hot-path queue index should match the pending filter and the list ordering")
+	require.Contains(t, sql, "ON code_review_decision_disputes (org_id, repository_id, queue_priority DESC, created_at DESC, id DESC)\n    WHERE adjudication_status IS NOT NULL",
+		"the repository-scoped queue index should keep the same ordering")
+	// Both intake ceilings come from one windowed scan of the pull request, so
+	// the index only needs to reach that window; the login is a FILTER over the
+	// same rows and can never act as an access predicate.
+	require.Contains(t, sql, "ON code_review_decision_disputes (org_id, pull_request_id, created_at DESC)\n    WHERE source = 'github_comment'",
+		"the intake-cap index should reach the pull request's window without carrying an unusable login column")
+}
+
 func TestSessionChangesetsMigrationPinsPrimaryCompatibilityContract(t *testing.T) {
 	t.Parallel()
 
@@ -1550,4 +1600,146 @@ func TestActivityPhaseTranscriptAssociationMigration(t *testing.T) {
 			"down migration should remove the phase column from every transcript table",
 		)
 	}
+}
+
+func TestRenameLegacyOutputTermsMigrationPinsNamespaceContracts(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000280_rename_legacy_output_terms.up.sql")
+	require.NoError(t, err, "test should read the legacy output terminology migration")
+	sql := string(body)
+
+	require.Contains(t, sql, "sync_code_review_prompt_record_compatibility", "migration should synchronize both prompt storage tables during rolling deploys")
+	require.Contains(t, sql, "ADD COLUMN prompt_record_key", "migration should expand the prompt reference schema before contracting it")
+	require.Contains(t, sql, "ADD COLUMN captures jsonb", "migration should retain both verification screenshot columns during rolling deploys")
+	require.Contains(t, sql, "'review_bundle_' || suffix", "migration should add every review bundle metadata column")
+	require.Contains(t, sql, "WHEN 'install_artifact' THEN 'install_output'", "migration should rewrite persisted install cache kinds")
+	require.Contains(t, sql, "WHEN 'build_artifact' THEN 'build_output'", "migration should rewrite persisted build cache kinds")
+	require.Contains(t, sql, "ALTER COLUMN cache_kind SET DEFAULT 'install_output'", "migration should update installed cache column defaults")
+	require.Contains(t, sql, "metadata->>'kind'", "migration should rewrite cache kinds embedded in metadata")
+	require.Contains(t, sql, "jsonb_array_elements(steps)", "migration should backfill nested verification step references")
+	require.Contains(t, sql, "trg_normalize_preview_dependency_cache_kind", "migration should normalize cache writes from draining workers")
+	require.Contains(t, sql, "jsonb_build_object('prompt_record_key'", "migration should preserve persisted prompt record references")
+	require.Contains(t, sql, "jsonb_build_object('raw_record_key'", "migration should preserve persisted raw output references")
+	require.Contains(t, sql, "preview_verification_runs_captures_check", "migration should enforce the new verification collection while compatibility is active")
+
+	downBody, err := os.ReadFile("../../migrations/000280_rename_legacy_output_terms.down.sql")
+	require.NoError(t, err, "test should read the legacy output terminology rollback")
+	downSQL := string(downBody)
+	require.Contains(t, downSQL, "DROP FUNCTION IF EXISTS sync_code_review_prompt_record_compatibility", "rollback should remove prompt table synchronization")
+	require.Contains(t, downSQL, "ALTER COLUMN cache_kind SET DEFAULT 'install_artifact'", "rollback should restore installed cache defaults")
+	require.Contains(t, downSQL, "jsonb_array_elements(steps)", "rollback should restore historical verification step keys")
+	require.Contains(t, downSQL, "DROP TABLE code_review_prompt_records", "rollback should contract an expanded existing installation")
+	require.NotContains(t, downSQL, "RENAME TO code_review_prompt_artifacts", "rollback should undo only this migration's expansion; a fresh installation already had the new names at the prior version")
+	require.NotContains(t, downSQL, "RENAME COLUMN captures TO artifacts", "rollback should not rename a fresh installation's verification column")
+	require.NotContains(t, downSQL, "RENAME COLUMN prompt_record_key TO prompt_artifact_key", "rollback should not rename a fresh installation's prompt reference column")
+
+	// Dependency cache lookups match cache_kind exactly with no read-side
+	// fallback, so reverting kinds on a fresh installation (whose up made no
+	// cache changes) would silently miss every lookup.
+	require.Contains(t, downSQL, "is_legacy_installation", "rollback should revert data only on an installation that arrived with the legacy naming")
+	cacheRevert := strings.Index(downSQL, "ALTER COLUMN cache_kind SET DEFAULT 'install_artifact'")
+	require.Positive(t, cacheRevert, "rollback should restore installed cache defaults")
+	guard := strings.Index(downSQL, "IF NOT is_legacy_installation THEN")
+	require.Positive(t, guard, "rollback should guard its data reverts")
+	require.Less(t, guard, cacheRevert, "the cache kind revert should sit behind the legacy-installation guard")
+
+	// The verification and cache compatibility triggers normalize writes toward
+	// the new names, so a data revert that ran before they were dropped would be
+	// undone by them.
+	for _, trigger := range []string{
+		"DROP TRIGGER IF EXISTS trg_sync_preview_verification_captures",
+		"DROP TRIGGER IF EXISTS trg_normalize_preview_dependency_cache_kind",
+	} {
+		dropAt := strings.Index(downSQL, trigger)
+		require.Positive(t, dropAt, "rollback should drop the compatibility trigger %q", trigger)
+		require.Less(t, dropAt, guard, "compatibility triggers should be dropped before any data revert runs")
+	}
+}
+
+// TestRenamedOutputTermMigrationsInvertThemselves pins the property that made
+// the 219/225/226 rollbacks wrong when they were rewritten for the new names:
+// each down file must undo its own up on a fresh database (where those
+// migrations create the new names directly) while still working on a database
+// that migration 280 expanded and then contracted back to the legacy names.
+func TestRenamedOutputTermMigrationsInvertThemselves(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		path     string
+		contains []string
+	}{
+		{
+			name: "review bundle columns",
+			path: "../../migrations/000219_session_diff_review_bundles.down.sql",
+			contains: []string{
+				"DROP COLUMN IF EXISTS review_bundle_key",
+				"DROP COLUMN IF EXISTS review_artifact_key",
+				"DROP INDEX IF EXISTS idx_session_diff_snapshots_review_bundle_key",
+				"DROP INDEX IF EXISTS idx_session_diff_snapshots_review_artifact_key",
+			},
+		},
+		{
+			name: "prompt record table",
+			path: "../../migrations/000225_code_review_prompt_records.down.sql",
+			contains: []string{
+				"DROP TABLE IF EXISTS code_review_prompt_records",
+				"DROP TABLE IF EXISTS code_review_prompt_artifacts",
+			},
+		},
+		{
+			name: "prompt record roles",
+			path: "../../migrations/000226_code_review_output_record_roles.down.sql",
+			contains: []string{
+				"to_regclass('code_review_prompt_records')",
+				"chk_code_review_prompt_records_role",
+				"to_regclass('code_review_prompt_artifacts')",
+				"chk_code_review_prompt_artifacts_role",
+				// Any database with review history holds the *_output roles this
+				// narrowed check rejects; validating them would abort the rollback.
+				"CHECK (role IN ('reviewer', 'orchestrator', 'description_policy')) NOT VALID",
+			},
+		},
+		{
+			// A legacy installation sits at version 225 with only the artifacts
+			// table, so replaying this up after a deep rollback must not assume
+			// the records table exists.
+			name: "prompt record roles replay",
+			path: "../../migrations/000226_code_review_output_record_roles.up.sql",
+			contains: []string{
+				"to_regclass('code_review_prompt_records')",
+				"chk_code_review_prompt_records_role",
+				"to_regclass('code_review_prompt_artifacts')",
+				"chk_code_review_prompt_artifacts_role",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			body, err := os.ReadFile(tt.path)
+			require.NoError(t, err, "test should read the migration")
+			for _, needle := range tt.contains {
+				require.Contains(t, string(body), needle, "migration should handle both the fresh and contracted schema shapes")
+			}
+		})
+	}
+}
+
+func TestPublicationInitiatorMembershipScopeMigration(t *testing.T) {
+	t.Parallel()
+
+	upBody, err := os.ReadFile("../../migrations/000278_fix_publication_initiator_membership_scope.up.sql")
+	require.NoError(t, err, "test should read the publication initiator membership migration")
+	validateBody, err := os.ReadFile("../../migrations/000279_validate_publication_initiator_membership_scope.up.sql")
+	require.NoError(t, err, "test should read the publication initiator validation migration")
+
+	upSQL := string(upBody)
+	require.Contains(t, upSQL, "REFERENCES organization_memberships(user_id, org_id)", "publication attribution should follow authoritative multi-org membership")
+	require.Contains(t, upSQL, "ON DELETE SET NULL (initiated_by_user_id)", "membership removal should preserve publications while clearing stale attribution")
+	require.Contains(t, upSQL, "NOT VALID", "constraint replacement should avoid scanning rows under the catalog lock")
+	require.Contains(t, string(validateBody), "VALIDATE CONSTRAINT session_publications_initiator_scope_fkey", "a separate migration should validate existing publication attribution")
 }

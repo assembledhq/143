@@ -46,6 +46,7 @@ type runCodeReviewPayload struct {
 	PreviousReviewBody      *string                             `json:"previous_review_body,omitempty"`
 	ExistingGitHubReviewID  *int64                              `json:"existing_github_review_id,omitempty"`
 	ExistingGitHubReviewURL *string                             `json:"existing_github_review_url,omitempty"`
+	TriggeringDisputeID     *uuid.UUID                          `json:"triggering_dispute_id,omitempty"`
 }
 
 const codeReviewRawOutputInlineLimit = 32 * 1024
@@ -674,10 +675,10 @@ type codeReviewReviewerStructuredResult struct {
 	ReviewerKey       string  `json:"reviewer_key"`
 	ReviewerIndex     int     `json:"reviewer_index"`
 	ThreadID          string  `json:"thread_id"`
-	PromptArtifactKey string  `json:"prompt_artifact_key,omitempty"`
+	PromptRecordKey   string  `json:"prompt_record_key,omitempty"`
 	FindingCount      int     `json:"finding_count,omitempty"`
 	CostCents         float64 `json:"cost_cents,omitempty"`
-	RawArtifactKey    string  `json:"raw_artifact_key,omitempty"`
+	RawRecordKey      string  `json:"raw_record_key,omitempty"`
 	NativeReview      bool    `json:"native_review,omitempty"`
 	ReadOnly          bool    `json:"read_only,omitempty"`
 	ReadOnlyViolation bool    `json:"read_only_violation,omitempty"`
@@ -687,13 +688,50 @@ type codeReviewReviewerStructuredResult struct {
 	CompletedAt       string  `json:"completed_at,omitempty"`
 }
 
+// MarshalJSON/UnmarshalJSON keep the pre-rename prompt and raw output keys
+// readable and writable. Harvest decodes a persisted structured result,
+// mutates it, and writes it back, so without the compatibility keys a row
+// created by a draining worker generation would silently lose its prompt and
+// raw-output references on the first harvest by the other generation.
+func (r codeReviewReviewerStructuredResult) MarshalJSON() ([]byte, error) {
+	type reviewerStructuredResultAlias codeReviewReviewerStructuredResult
+	return json.Marshal(struct {
+		reviewerStructuredResultAlias
+		LegacyPromptRecordKey string `json:"prompt_artifact_key,omitempty"`
+		LegacyRawRecordKey    string `json:"raw_artifact_key,omitempty"`
+	}{
+		reviewerStructuredResultAlias: reviewerStructuredResultAlias(r),
+		LegacyPromptRecordKey:         r.PromptRecordKey,
+		LegacyRawRecordKey:            r.RawRecordKey,
+	})
+}
+
+func (r *codeReviewReviewerStructuredResult) UnmarshalJSON(data []byte) error {
+	type reviewerStructuredResultAlias codeReviewReviewerStructuredResult
+	decoded := struct {
+		*reviewerStructuredResultAlias
+		LegacyPromptRecordKey string `json:"prompt_artifact_key"`
+		LegacyRawRecordKey    string `json:"raw_artifact_key"`
+	}{reviewerStructuredResultAlias: (*reviewerStructuredResultAlias)(r)}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	if r.PromptRecordKey == "" {
+		r.PromptRecordKey = decoded.LegacyPromptRecordKey
+	}
+	if r.RawRecordKey == "" {
+		r.RawRecordKey = decoded.LegacyRawRecordKey
+	}
+	return nil
+}
+
 type codeReviewOrchestratorStructuredResult struct {
 	ThreadID                string                          `json:"thread_id,omitempty"`
-	PromptArtifactKey       string                          `json:"prompt_artifact_key,omitempty"`
+	PromptRecordKey         string                          `json:"prompt_record_key,omitempty"`
 	DescriptionInputHash    string                          `json:"description_input_hash,omitempty"`
 	FindingCount            int                             `json:"finding_count,omitempty"`
 	CostCents               float64                         `json:"cost_cents,omitempty"`
-	RawArtifactKey          string                          `json:"raw_artifact_key,omitempty"`
+	RawRecordKey            string                          `json:"raw_record_key,omitempty"`
 	Synthesis               codeReviewOrchestratorSynthesis `json:"synthesis,omitempty"`
 	SynthesisValidated      bool                            `json:"synthesis_validated,omitempty"`
 	SynthesisRepairCount    int                             `json:"synthesis_repair_count,omitempty"`
@@ -706,6 +744,38 @@ type codeReviewOrchestratorStructuredResult struct {
 	CompletedAt             string                          `json:"completed_at,omitempty"`
 }
 
+func (r codeReviewOrchestratorStructuredResult) MarshalJSON() ([]byte, error) {
+	type orchestratorStructuredResultAlias codeReviewOrchestratorStructuredResult
+	return json.Marshal(struct {
+		orchestratorStructuredResultAlias
+		LegacyPromptRecordKey string `json:"prompt_artifact_key,omitempty"`
+		LegacyRawRecordKey    string `json:"raw_artifact_key,omitempty"`
+	}{
+		orchestratorStructuredResultAlias: orchestratorStructuredResultAlias(r),
+		LegacyPromptRecordKey:             r.PromptRecordKey,
+		LegacyRawRecordKey:                r.RawRecordKey,
+	})
+}
+
+func (r *codeReviewOrchestratorStructuredResult) UnmarshalJSON(data []byte) error {
+	type orchestratorStructuredResultAlias codeReviewOrchestratorStructuredResult
+	decoded := struct {
+		*orchestratorStructuredResultAlias
+		LegacyPromptRecordKey string `json:"prompt_artifact_key"`
+		LegacyRawRecordKey    string `json:"raw_artifact_key"`
+	}{orchestratorStructuredResultAlias: (*orchestratorStructuredResultAlias)(r)}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	if r.PromptRecordKey == "" {
+		r.PromptRecordKey = decoded.LegacyPromptRecordKey
+	}
+	if r.RawRecordKey == "" {
+		r.RawRecordKey = decoded.LegacyRawRecordKey
+	}
+	return nil
+}
+
 func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile) error {
 	results, err := stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
 	if err != nil {
@@ -713,10 +783,10 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 	}
 	existing := codeReviewReviewerResultsByKey(results)
 	cfg := policy.Config()
-	rootKey := codeReviewPromptArtifactRoot(metadata, job)
-	if metadata.PromptArtifactKey == nil || strings.TrimSpace(*metadata.PromptArtifactKey) == "" {
-		if _, err := stores.CodeReviews.SetPromptArtifactKey(ctx, job.OrgID, job.SessionID, rootKey); err != nil {
-			return fmt.Errorf("set code review prompt artifact key: %w", err)
+	rootKey := codeReviewPromptRecordRoot(metadata, job)
+	if metadata.PromptRecordKey == nil || strings.TrimSpace(*metadata.PromptRecordKey) == "" {
+		if _, err := stores.CodeReviews.SetPromptRecordKey(ctx, job.OrgID, job.SessionID, rootKey); err != nil {
+			return fmt.Errorf("set code review prompt record key: %w", err)
 		}
 	}
 	threads := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
@@ -768,27 +838,27 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 			continue
 		}
 		promptText := codeReviewReviewerPrompt(job, pr, cfg, policy.Version, metadata.BaseSHA, changedFiles)
-		artifactKey := fmt.Sprintf("%s/reviewer-%02d-%s", rootKey, idx+1, agentType)
-		artifactMetadata, err := json.Marshal(map[string]any{
+		recordKey := fmt.Sprintf("%s/reviewer-%02d-%s", rootKey, idx+1, agentType)
+		recordMetadata, err := json.Marshal(map[string]any{
 			"reviewer_key": key,
 			"agent_type":   agentType,
 			"agent_model":  stringPtrValue(agentModel),
 			"head_sha":     job.HeadSHA,
 		})
 		if err != nil {
-			return fmt.Errorf("marshal reviewer prompt artifact metadata: %w", err)
+			return fmt.Errorf("marshal reviewer prompt record metadata: %w", err)
 		}
-		artifact := &models.CodeReviewPromptArtifact{
+		record := &models.CodeReviewPromptRecord{
 			OrgID:         job.OrgID,
 			SessionID:     job.SessionID,
-			ArtifactKey:   artifactKey,
+			RecordKey:     recordKey,
 			Role:          string(models.CodeReviewAgentRoleReviewer),
 			AgentProvider: string(agentType),
 			Content:       promptText,
-			Metadata:      artifactMetadata,
+			Metadata:      recordMetadata,
 		}
-		if err := stores.CodeReviews.CreatePromptArtifact(ctx, artifact); err != nil {
-			return fmt.Errorf("create reviewer prompt artifact: %w", err)
+		if err := stores.CodeReviews.CreatePromptRecord(ctx, record); err != nil {
+			return fmt.Errorf("create reviewer prompt record: %w", err)
 		}
 		thread, err := threads.CreateThread(ctx, threadsvc.CreateThreadInput{
 			SessionID:       job.SessionID,
@@ -806,12 +876,12 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 			return fmt.Errorf("create code review reviewer thread: %w", err)
 		}
 		structured := marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
-			ReviewerKey:       key,
-			ReviewerIndex:     idx,
-			ThreadID:          thread.ID.String(),
-			PromptArtifactKey: artifactKey,
-			NativeReview:      codeReviewAgentHasBuiltinReviewCommand(agentType),
-			ReadOnly:          true,
+			ReviewerKey:     key,
+			ReviewerIndex:   idx,
+			ThreadID:        thread.ID.String(),
+			PromptRecordKey: recordKey,
+			NativeReview:    codeReviewAgentHasBuiltinReviewCommand(agentType),
+			ReadOnly:        true,
 		})
 		result := &models.CodeReviewAgentResult{
 			OrgID:            job.OrgID,
@@ -835,11 +905,11 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 		}); err != nil {
 			raw := err.Error()
 			if _, updateErr := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, &raw, marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
-				ReviewerKey:       key,
-				ReviewerIndex:     idx,
-				ThreadID:          thread.ID.String(),
-				PromptArtifactKey: artifactKey,
-				Error:             raw,
+				ReviewerKey:     key,
+				ReviewerIndex:   idx,
+				ThreadID:        thread.ID.String(),
+				PromptRecordKey: recordKey,
+				Error:           raw,
 			})); updateErr != nil {
 				logger.Warn().Err(updateErr).
 					Str("session_id", job.SessionID.String()).
@@ -1039,11 +1109,11 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 			}
 			state.Error = failure
 			state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
-			rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleReviewer, result.AgentProvider, raw)
+			rawOutput, rawRecordKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleReviewer, result.AgentProvider, raw)
 			if err != nil {
 				return err
 			}
-			state.RawArtifactKey = rawArtifactKey
+			state.RawRecordKey = rawRecordKey
 			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, rawOutput, marshalCodeReviewReviewerStructuredResult(state)); err != nil {
 				return fmt.Errorf("mark reviewer failed: %w", err)
 			}
@@ -1064,11 +1134,11 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 				}
 				state.Error = raw
 				state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
-				rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleReviewer, result.AgentProvider, raw)
+				rawOutput, rawRecordKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleReviewer, result.AgentProvider, raw)
 				if err != nil {
 					return err
 				}
-				state.RawArtifactKey = rawArtifactKey
+				state.RawRecordKey = rawRecordKey
 				if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusCompleted, rawOutput, marshalCodeReviewReviewerStructuredResult(state)); err != nil {
 					return fmt.Errorf("mark read-only-violating reviewer completed: %w", err)
 				}
@@ -1086,11 +1156,11 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 		}
 		state.FindingCount = len(findings)
 		state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
-		rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleReviewer, result.AgentProvider, raw)
+		rawOutput, rawRecordKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleReviewer, result.AgentProvider, raw)
 		if err != nil {
 			return err
 		}
-		state.RawArtifactKey = rawArtifactKey
+		state.RawRecordKey = rawRecordKey
 		if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusCompleted, rawOutput, marshalCodeReviewReviewerStructuredResult(state)); err != nil {
 			return fmt.Errorf("mark reviewer completed: %w", err)
 		}
@@ -1177,9 +1247,9 @@ func codeReviewReviewerMessage(agentType models.AgentType, promptText string) st
 	return "/review " + promptText
 }
 
-func codeReviewPromptArtifactRoot(metadata models.CodeReviewSessionMetadata, job runCodeReviewPayload) string {
-	if metadata.PromptArtifactKey != nil && strings.TrimSpace(*metadata.PromptArtifactKey) != "" {
-		return strings.TrimSpace(*metadata.PromptArtifactKey)
+func codeReviewPromptRecordRoot(metadata models.CodeReviewSessionMetadata, job runCodeReviewPayload) string {
+	if metadata.PromptRecordKey != nil && strings.TrimSpace(*metadata.PromptRecordKey) != "" {
+		return strings.TrimSpace(*metadata.PromptRecordKey)
 	}
 	return fmt.Sprintf("code-review-prompts/%s/%s", job.SessionID, job.HeadSHA)
 }
@@ -1225,12 +1295,12 @@ func codeReviewOrchestratorAgentModel(cfg models.CodeReviewPolicyConfig) *string
 	return codeReviewDefaultAgentModel(cfg.AgentRoster.Orchestrator)
 }
 
-func storeCodeReviewPromptArtifact(ctx context.Context, stores *Stores, artifact models.CodeReviewPromptArtifact) error {
+func storeCodeReviewPromptRecord(ctx context.Context, stores *Stores, record models.CodeReviewPromptRecord) error {
 	if stores == nil || stores.CodeReviews == nil {
 		return nil
 	}
-	if err := stores.CodeReviews.CreatePromptArtifact(ctx, &artifact); err != nil {
-		return fmt.Errorf("store code review prompt artifact: %w", err)
+	if err := stores.CodeReviews.CreatePromptRecord(ctx, &record); err != nil {
+		return fmt.Errorf("store code review prompt record: %w", err)
 	}
 	return nil
 }
@@ -1243,7 +1313,7 @@ func mustMarshalCodeReviewJSON(value any) json.RawMessage {
 	return encoded
 }
 
-func safeCodeReviewArtifactSegment(value string) string {
+func safeCodeReviewRecordSegment(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	var builder strings.Builder
 	lastDash := false
@@ -1260,7 +1330,7 @@ func safeCodeReviewArtifactSegment(value string) string {
 	}
 	out := strings.Trim(builder.String(), "-")
 	if out == "" {
-		return "artifact"
+		return "record"
 	}
 	return out
 }
@@ -1270,19 +1340,19 @@ func codeReviewRawOutputForStorage(ctx context.Context, stores *Stores, job runC
 		return &raw, "", nil
 	}
 	if stores == nil || stores.CodeReviews == nil {
-		truncated := raw[:codeReviewRawOutputInlineLimit] + "\n\n[truncated: prompt artifact store unavailable]"
+		truncated := raw[:codeReviewRawOutputInlineLimit] + "\n\n[truncated: prompt record store unavailable]"
 		return &truncated, "", nil
 	}
-	artifactRole := string(role) + "_output"
-	artifactKey := fmt.Sprintf("code-review-prompts/%s/%s-output-%s", job.SessionID, safeCodeReviewArtifactSegment(string(role)), resultID)
+	recordRole := string(role) + "_output"
+	recordKey := fmt.Sprintf("code-review-prompts/%s/%s-output-%s", job.SessionID, safeCodeReviewRecordSegment(string(role)), resultID)
 	if strings.TrimSpace(job.OutputKey) != "" {
-		artifactKey = fmt.Sprintf("%s/%s-output-%s", strings.TrimSpace(job.OutputKey), safeCodeReviewArtifactSegment(string(role)), resultID)
+		recordKey = fmt.Sprintf("%s/%s-output-%s", strings.TrimSpace(job.OutputKey), safeCodeReviewRecordSegment(string(role)), resultID)
 	}
-	if err := storeCodeReviewPromptArtifact(ctx, stores, models.CodeReviewPromptArtifact{
+	if err := storeCodeReviewPromptRecord(ctx, stores, models.CodeReviewPromptRecord{
 		OrgID:         job.OrgID,
 		SessionID:     job.SessionID,
-		ArtifactKey:   artifactKey,
-		Role:          artifactRole,
+		RecordKey:     recordKey,
+		Role:          recordRole,
 		AgentProvider: provider,
 		Content:       raw,
 		Metadata: mustMarshalCodeReviewJSON(map[string]any{
@@ -1296,8 +1366,8 @@ func codeReviewRawOutputForStorage(ctx context.Context, stores *Stores, job runC
 	}); err != nil {
 		return nil, "", err
 	}
-	summary := fmt.Sprintf("Raw output stored in prompt artifact %s (%d bytes).", artifactKey, len(raw))
-	return &summary, artifactKey, nil
+	summary := fmt.Sprintf("Raw output stored in prompt record %s (%d bytes).", recordKey, len(raw))
+	return &summary, recordKey, nil
 }
 
 func cancelCodeReviewThread(ctx context.Context, stores *Stores, logger zerolog.Logger, job runCodeReviewPayload, threadID uuid.UUID) (models.SessionThread, error) {
@@ -1897,11 +1967,11 @@ func requestCodeReviewOrchestratorSynthesisRepair(
 	nextState.Error = "repairing invalid orchestrator synthesis: " + validationErr.Error()
 	nextState.CompletedAt = ""
 
-	rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, raw)
+	rawOutput, rawRecordKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, raw)
 	if err != nil {
 		return false, false, err
 	}
-	nextState.RawArtifactKey = rawArtifactKey
+	nextState.RawRecordKey = rawRecordKey
 	if _, err := stores.CodeReviews.UpdateAgentResultOutcome(
 		ctx,
 		job.OrgID,
@@ -2173,14 +2243,14 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 		}
 		return stores.CodeReviews.CreateAgentResult(ctx, result)
 	}
-	rootKey := codeReviewPromptArtifactRoot(metadata, job)
-	artifactKey := fmt.Sprintf("%s/orchestrator-%s", rootKey, agentType)
+	rootKey := codeReviewPromptRecordRoot(metadata, job)
+	recordKey := fmt.Sprintf("%s/orchestrator-%s", rootKey, agentType)
 	promptText := codeReviewOrchestratorPrompt(job, pr, health, cfg, policy.Version, metadata.BaseSHA, changedFiles, agentResults, findings)
 	descriptionInputHash := codeReviewDescriptionInputHash(pr)
-	if err := storeCodeReviewPromptArtifact(ctx, stores, models.CodeReviewPromptArtifact{
+	if err := storeCodeReviewPromptRecord(ctx, stores, models.CodeReviewPromptRecord{
 		OrgID:         job.OrgID,
 		SessionID:     job.SessionID,
-		ArtifactKey:   artifactKey,
+		RecordKey:     recordKey,
 		Role:          string(models.CodeReviewAgentRoleOrchestrator),
 		AgentProvider: string(agentType),
 		Content:       promptText,
@@ -2255,7 +2325,7 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 	}
 	structured := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
 		ThreadID:             threadID.String(),
-		PromptArtifactKey:    artifactKey,
+		PromptRecordKey:      recordKey,
 		DescriptionInputHash: descriptionInputHash,
 		ReadOnly:             false,
 	})
@@ -2293,7 +2363,7 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 			RawOutput:     &raw,
 			StructuredResult: marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
 				ThreadID:             threadID.String(),
-				PromptArtifactKey:    artifactKey,
+				PromptRecordKey:      recordKey,
 				DescriptionInputHash: descriptionInputHash,
 				Error:                raw,
 			}),
@@ -2411,11 +2481,11 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 					raw = "orchestrator thread did not complete successfully"
 				}
 				state.Error = raw
-				rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, raw)
+				rawOutput, rawRecordKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, raw)
 				if err != nil {
 					return err
 				}
-				state.RawArtifactKey = rawArtifactKey
+				state.RawRecordKey = rawRecordKey
 				if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, rawOutput, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
 					return fmt.Errorf("mark orchestrator failed: %w", err)
 				}
@@ -2457,12 +2527,12 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			state.SynthesisValidated = false
 			state.Error = "invalid orchestrator synthesis: " + synthesisErr.Error()
 			state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
-			rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, combinedRaw)
+			rawOutput, rawRecordKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, combinedRaw)
 			if err != nil {
 				return err
 			}
-			if rawArtifactKey != "" {
-				state.RawArtifactKey = rawArtifactKey
+			if rawRecordKey != "" {
+				state.RawRecordKey = rawRecordKey
 			}
 			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, rawOutput, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
 				return fmt.Errorf("mark malformed orchestrator synthesis failed: %w", err)
@@ -2480,12 +2550,12 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 		}
 		state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
 		state.Error = ""
-		rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, combinedRaw)
+		rawOutput, rawRecordKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, combinedRaw)
 		if err != nil {
 			return err
 		}
-		if rawArtifactKey != "" {
-			state.RawArtifactKey = rawArtifactKey
+		if rawRecordKey != "" {
+			state.RawRecordKey = rawRecordKey
 		}
 		if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusCompleted, rawOutput, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
 			return fmt.Errorf("mark orchestrator completed: %w", err)

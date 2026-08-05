@@ -1659,7 +1659,7 @@ CI infrastructure:
 - install/cache Chromium in the required PR job;
 - use deterministic API/SSE fixtures, not live coding agents;
 - start only the minimum deterministic web/API fixture;
-- upload trace, screenshot, and video artifacts on failure;
+- upload trace, screenshot, and video outputs on failure;
 - target approximately 2–5 minutes for the focused cached job;
 - add the job to required checks.
 
@@ -1700,7 +1700,7 @@ Before launch run:
 - preview update, screenshots, interactions, and console-error inspection.
 
 Use rootfs-backed temp and cache directories under `/home/sandbox` for large
-build/test artifacts.
+build/test outputs.
 
 ### Rollout Plan
 

@@ -278,6 +278,7 @@ export const api = {
       activity_status?: import('./types').CodeReviewActivityStatus;
       status?: import('./types').CodeReviewSessionStatus;
       risk?: "acceptable" | "needs_review";
+      reason?: import('./code-review-reasons').CodeReviewReasonCode;
       author?: string;
       search?: string;
       created_after?: string;
@@ -294,6 +295,7 @@ export const api = {
       if (params?.activity_status) searchParams.set('activity_status', params.activity_status);
       if (params?.status) searchParams.set('status', params.status);
       if (params?.risk) searchParams.set('risk', params.risk);
+      if (params?.reason) searchParams.set('reason', params.reason);
       if (params?.author) searchParams.set('author', params.author);
       if (params?.search) searchParams.set('search', params.search);
       if (params?.created_after) searchParams.set('created_after', params.created_after);
@@ -312,6 +314,7 @@ export const api = {
       activity_status?: import('./types').CodeReviewActivityStatus;
       status?: import('./types').CodeReviewSessionStatus;
       risk?: "acceptable" | "needs_review";
+      reason?: import('./code-review-reasons').CodeReviewReasonCode;
       author?: string;
       search?: string;
       created_after?: string;
@@ -324,6 +327,7 @@ export const api = {
       if (params?.activity_status) searchParams.set('activity_status', params.activity_status);
       if (params?.status) searchParams.set('status', params.status);
       if (params?.risk) searchParams.set('risk', params.risk);
+      if (params?.reason) searchParams.set('reason', params.reason);
       if (params?.author) searchParams.set('author', params.author);
       if (params?.search) searchParams.set('search', params.search);
       if (params?.created_after) searchParams.set('created_after', params.created_after);
@@ -349,14 +353,37 @@ export const api = {
     },
     promptExamples: () => get<import('./types').SingleResponse<import('./types').CodeReviewPromptExamplesResponse>>('/api/v1/code-reviews/prompt-examples'),
     policyEvent: (body: import('./types').CodeReviewPolicyAnalyticsEvent) => post<void>('/api/v1/code-reviews/policy-events', body),
+    get: (sessionId: string) =>
+      get<import('./types').SingleResponse<import('./types').CodeReviewListItem>>(`/api/v1/code-reviews/${sessionId}`),
     evidence: (sessionId: string) =>
       get<import('./types').SingleResponse<import('./types').CodeReviewEvidence>>(`/api/v1/code-reviews/${sessionId}/evidence`),
+    disputes: (sessionId: string, cursor?: string) =>
+      get<import('./types').ListResponse<import('./types').CodeReviewDispute>>(`/api/v1/code-reviews/${sessionId}/disputes${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`),
+    createDispute: (sessionId: string, body: { body: string; contested_reason_codes?: string[] }) =>
+      post<import('./types').SingleResponse<import('./types').CodeReviewDispute>>(`/api/v1/code-reviews/${sessionId}/disputes`, body),
+    escalateDispute: (disputeId: string, note?: string) =>
+      post<import('./types').SingleResponse<import('./types').CodeReviewDispute>>(`/api/v1/code-review-disputes/${disputeId}/escalate`, { note }),
+    disputeQueue: (params?: { adjudication_status?: import('./types').CodeReviewDisputeAdjudicationStatus; repository_id?: string; direction?: import('./types').CodeReviewDisputeDirection; cursor?: string }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.adjudication_status) searchParams.set('adjudication_status', params.adjudication_status);
+      if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
+      if (params?.direction) searchParams.set('direction', params.direction);
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').CodeReviewDispute>>(`/api/v1/code-review-disputes${qs ? `?${qs}` : ''}`);
+    },
+    adjudicateDispute: (disputeId: string, body: { expected_version: number; adjudication_status?: "upheld" | "rejected" | "needs_context"; adjudication_note?: string; trust_override?: boolean }) =>
+      patch<import('./types').SingleResponse<import('./types').CodeReviewDispute>>(`/api/v1/code-review-disputes/${disputeId}`, body),
     retry: (sessionId: string) =>
       post<import('./types').SingleResponse<import('./types').CodeReviewRetryResult>>(`/api/v1/code-reviews/${sessionId}/retry`),
     getPolicy: () => get<import('./types').SingleResponse<import('./types').CodeReviewResolvedPolicy>>('/api/v1/code-review-policies'),
     getGitHubTrigger: (repositoryId: string) =>
       get<import('./types').SingleResponse<import('./types').CodeReviewGitHubTriggerResponse>>(
         `/api/v1/code-review-github-trigger?repository_id=${encodeURIComponent(repositoryId)}`,
+      ),
+    listGitHubTriggers: () =>
+      get<import('./types').ListResponse<import('./types').CodeReviewGitHubTriggerResponse>>(
+        '/api/v1/code-review-github-triggers',
       ),
     setupGitHubTrigger: (repositoryId: string) =>
       post<import('./types').SingleResponse<import('./types').CodeReviewGitHubTriggerResponse>>(
@@ -896,8 +923,9 @@ export const api = {
     listMyExternalIdentities: () => get<import('./types').ListResponse<import('./types').ExternalUserLink>>('/api/v1/users/me/external-identities'),
     deleteMyExternalIdentity: (id: string) => del<void>(`/api/v1/users/me/external-identities/${encodeURIComponent(id)}`),
     claimExternalIdentity: (token: string) => post<import('./types').SingleResponse<import('./types').ExternalUserLink>>(`/api/v1/integrations/external-user-link-claims/${encodeURIComponent(token)}/claim`),
-    loginGitHub: () => {
-      window.location.href = `${API_BASE}/api/v1/integrations/github/login`;
+    loginGitHub: (returnTo?: string) => {
+      const query = returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : '';
+      window.location.href = `${API_BASE}/api/v1/integrations/github/login${query}`;
     },
     loginLinear: () => {
       window.location.href = `${API_BASE}/api/v1/integrations/linear/login`;
@@ -1093,9 +1121,10 @@ export const api = {
   },
   githubStatus: {
     get: () => get<{ connected: boolean; has_repo_scope: boolean; github_login?: string; pr_authorship_mode: string; pr_draft_default: boolean; account_requirement: 'required' | 'recommended' | 'optional'; needs_reconnect: boolean }>('/api/v1/users/me/github-status'),
-    connect: (resumeToken?: string) => {
+    connect: (resumeToken?: string, returnTo?: string) => {
       const searchParams = new URLSearchParams();
       if (resumeToken) searchParams.set('resume_token', resumeToken);
+      if (returnTo) searchParams.set('return_to', returnTo);
       const qs = searchParams.toString();
       window.location.href = `${API_BASE}/api/v1/users/me/github/connect${qs ? `?${qs}` : ''}`;
     },

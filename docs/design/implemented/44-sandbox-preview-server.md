@@ -376,7 +376,7 @@ Preview startup time is the single biggest UX bottleneck. A typical first-time p
 
 #### Filesystem Snapshot Caching
 
-For branch/PR previews pinned to a committed SHA, after a successful preview startup (all three phases complete), the system takes a **filesystem snapshot** of the sandbox workspace state — node_modules installed, build artifacts ready, source files restored. The snapshot is keyed by:
+For branch/PR previews pinned to a committed SHA, after a successful preview startup (all three phases complete), the system takes a **filesystem snapshot** of the sandbox workspace state — node_modules installed, build outputs ready, source files restored. The snapshot is keyed by:
 
 ```
 snapshot_key = hash(lockfile_contents + base_commit + preview_config_hash)
@@ -1306,7 +1306,7 @@ The system maintains a **single, updating PR comment** (not one per preview sess
 | Preview running | Live preview link + "View in 143" deep link + current screenshot thumbnail |
 | Preview stopped (idle timeout) | "Re-launch Preview" button + screenshot timeline from last session + "Last active: 5 min ago" |
 | Agent made changes after review feedback | Updated screenshot thumbnail + "Agent updated preview — 3 files changed" |
-| PR merged/closed | Final screenshot timeline preserved as static artifacts |
+| PR merged/closed | Final screenshot timeline preserved as static captures |
 
 The comment is posted via the GitHub API using the org's GitHub integration. It is scoped to the PR — one comment per PR, updated in place.
 
@@ -1357,11 +1357,11 @@ When a preview starts, 143 should:
 
 The deployment URL always points to `app.143.dev/sessions/{id}?preview=1`, which handles authentication and preview bootstrapping. Raw preview gateway URLs are never exposed in PR comments.
 
-### Preview Artifacts After Sandbox Teardown
+### Preview Captures After Sandbox Teardown
 
-When a preview stops (idle timeout, hard TTL, or manual stop), the screenshot timeline, assertion results, and visual diff summaries are **preserved as static artifacts** on the PR comment. Reviewers can browse the visual history even after the sandbox is torn down.
+When a preview stops (idle timeout, hard TTL, or manual stop), the screenshot timeline, assertion results, and visual diff summaries are **preserved as static captures** on the PR comment. Reviewers can browse the visual history even after the sandbox is torn down.
 
-These artifacts are stored in blob storage with the same retention policy as screenshots (session lifetime + 24h). For PRs that remain open, artifacts are retained until the PR is merged or closed, up to a maximum of 7 days after the last preview session.
+These captures are stored in blob storage with the same retention policy as screenshots (session lifetime + 24h). For PRs that remain open, captures are retained until the PR is merged or closed, up to a maximum of 7 days after the last preview session.
 
 When a reviewer clicks "Re-launch Preview" on a stopped preview, the system uses fast startup (filesystem snapshot caching, see below) to minimize wait time.
 
@@ -1514,7 +1514,7 @@ To support the PR comment lifecycle without keeping previews running, track PR p
 - `created_at`
 - `updated_at`
 
-This row is created when a PR is opened for a session that has preview configured. It is updated whenever a preview starts, stops, or produces new artifacts. The `github_comment_id` is set after the first PR comment is posted and used for subsequent updates.
+This row is created when a PR is opened for a session that has preview configured. It is updated whenever a preview starts, stops, or produces new captures. The `github_comment_id` is set after the first PR comment is posted and used for subsequent updates.
 
 ## API
 
@@ -1877,7 +1877,7 @@ Previews are expensive because they keep file watchers and application processes
 - idle timeout, default 15 minutes (activity-aware, see Frontend UX section)
 - hard TTL, default 30 minutes (auto-extendable to 2 hours on active use)
 
-No auto-start in MVP. If a user wants a preview, they request it explicitly — either from the session page or by clicking the "Launch Preview" link on the PR comment. The PR comment persists screenshot artifacts from the last session, so reviewers can browse the visual history without re-launching. When they do re-launch, filesystem snapshot caching (see Fast Startup) minimizes the wait.
+No auto-start in MVP. If a user wants a preview, they request it explicitly — either from the session page or by clicking the "Launch Preview" link on the PR comment. The PR comment persists screenshot captures from the last session, so reviewers can browse the visual history without re-launching. When they do re-launch, filesystem snapshot caching (see Fast Startup) minimizes the wait.
 
 ### Per-Preview Resource Limits
 
@@ -2092,8 +2092,8 @@ Phase 1 should support only:
 19. Semantic diff awareness: automatic before/after comparison showing pixel changes, DOM mutations, and style shifts after each code edit
 20. Agent-driven interaction replay: scripted browser interactions (click, type, navigate) for verifying multi-step flows like form submission and login
 21. Multi-viewport capture: simultaneous screenshots at mobile (375px), tablet (768px), and desktop (1280px) viewports
-22. PR preview integration: on-demand preview launch from PR comment, single updating PR comment with preview state and screenshot thumbnails, preview artifacts preserved after sandbox teardown
-23. Filesystem snapshot caching: cache and restore sandbox filesystem state (node_modules, build artifacts) after successful startup, keyed by lockfile + base commit + config, to skip the Build phase on subsequent preview starts
+22. PR preview integration: on-demand preview launch from PR comment, single updating PR comment with preview state and screenshot thumbnails, preview captures preserved after sandbox teardown
+23. Filesystem snapshot caching: cache and restore sandbox filesystem state (node_modules, build outputs) after successful startup, keyed by lockfile + base commit + config, to skip the Build phase on subsequent preview starts
 24. Progressive preview: show frontend preview before backend is fully ready (opt-in per config)
 
 Phase 1 should explicitly exclude:
@@ -2193,7 +2193,7 @@ That work should come only after the Phase 1 verification tools are solid and va
 8. For the `postMessage` bridge used by Visual Editing, should we limit the whitelist to a fixed set of ~30 CSS properties, or allow any property that is not on a denylist? The allowlist is safer; the denylist is more flexible.
 9. Should the headless browser (Preview Inspector) use Playwright or Puppeteer? Playwright has better cross-browser support and a more modern API, but Puppeteer has lower overhead for Chromium-only use.
 10. How should screenshot storage scale for orgs with high preview volume? Blob storage with aggressive TTL (24h post-session) keeps costs low, but some orgs may want longer retention for audit purposes.
-11. Should PR preview artifacts (screenshot timeline, visual diff) be retained longer than the standard 24h for open PRs? The current proposal is "until PR is merged/closed, up to 7 days after last session" — is this sufficient for slow-moving reviews?
+11. Should PR preview captures (screenshot timeline, visual diff) be retained longer than the standard 24h for open PRs? The current proposal is "until PR is merged/closed, up to 7 days after last session" — is this sufficient for slow-moving reviews?
 12. Should filesystem snapshot cache size be org-configurable or fixed platform-wide? More cache = faster starts for diverse repos, but higher disk cost per worker.
 13. Should filesystem snapshots be worker-local only (fast but not shared) or also uploaded to blob storage (shared across workers but slower restore)? Phase 1 proposes worker-local only; Phase 2 adds cross-worker sharing.
 14. For the PR "Launch Preview" button, should it be a GitHub Actions-style button (requires GitHub App permissions to handle the click) or a simple deep link to the 143 session page? The deep link is simpler but requires the user to be logged into 143.

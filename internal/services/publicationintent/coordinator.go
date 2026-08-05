@@ -77,8 +77,9 @@ const (
 )
 
 type Error struct {
-	Code ErrorCode
-	Err  error
+	Code    ErrorCode
+	Err     error
+	Details map[string]any
 }
 
 func (e *Error) Error() string {
@@ -109,7 +110,7 @@ type OrganizationStore interface {
 }
 
 type UserStore interface {
-	GetByIDGlobalWithSettings(ctx context.Context, userID uuid.UUID) (models.UserWithSettings, error)
+	GetByIDWithSettings(ctx context.Context, orgID, userID uuid.UUID) (models.UserWithSettings, error)
 }
 
 type PublicationStore interface {
@@ -270,18 +271,23 @@ func (c *Coordinator) RequestPullRequest(
 		return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("check existing publication intent: %w", publicationErr)}
 	}
 	hasExistingPublication := publicationErr == nil
-	// The audited draft bypass is the resolution offered for a publication whose
-	// review already stopped for human attention. It is deliberately not a way
-	// to open a first-time request without review: "give me a draft PR" and
-	// "skip the review gate" must not be the same request.
+	// Existing review gates predate or originate from automatic handoff. An
+	// authenticated explicit Create PR action is a new publication decision and
+	// replaces that gate, while first-time explicit requests continue to skip
+	// review through the ordinary policy path below.
 	executionParked := hasExistingPublication && !existingPublication.State.Terminal() &&
 		(!c.PublicationExecutionEnabled(existingPublication.Source) ||
 			(existingPublication.ReviewGateState == models.SessionPublicationReviewGatePending &&
 				!c.ReviewExecutionEnabled(existingPublication.Source)))
-	bypassRequested := hasExistingPublication &&
+	explicitReviewReplacement := hasExistingPublication && !existingPublication.State.Terminal() &&
+		(existingPublication.ReviewGateState == models.SessionPublicationReviewGatePending ||
+			existingPublication.ReviewGateState == models.SessionPublicationReviewGateNeedsHuman) &&
+		authorizedManualTakeover(req)
+	draftBypassRequested := hasExistingPublication &&
 		(reviewBlocksPublication(existingPublication) || executionParked) &&
 		authorizedDraftBypass(req)
-	manualTakeoverRequested := executionParked && authorizedManualTakeover(req)
+	bypassRequested := explicitReviewReplacement || draftBypassRequested
+	manualTakeoverRequested := executionParked && authorizedManualTakeover(req) && !bypassRequested
 	// A retryable terminal outcome (no-op or failed) is not a durable answer:
 	// re-requesting must reach EnsureRequested, whose generation-guarded reopen
 	// is the only path back. Anything else is a live intent the caller rejoins.
@@ -392,10 +398,16 @@ func (c *Coordinator) RequestPullRequest(
 	if req.TriggerKind == models.SessionPublicationTriggerExplicitAction {
 		automaticSource = models.PublicationPolicySourceExplicitAction
 	}
+	// The review-before-PR preference belongs to automatic handoff. An explicit
+	// authenticated-user Create PR action is already the user's publication
+	// decision and must queue the PR directly. Agent-ready requests keep the
+	// configured gate.
+	explicitUserAction := req.Source == models.SessionPublicationSourceUser &&
+		req.TriggerKind == models.SessionPublicationTriggerExplicitAction
 	// Execution switches must never rewrite effective review policy. If review
 	// is required while execution is stopped, persist a pending gate and park
 	// the intent; treating the switch as review=off would publish unreviewed.
-	reviewRequired := !automationRequest && !backendPolicyRequest && policy.ReviewBeforePR
+	reviewRequired := !automationRequest && !backendPolicyRequest && !explicitUserAction && policy.ReviewBeforePR
 	if manualTakeoverRequested && existingPublication.ReviewGateState == models.SessionPublicationReviewGatePending &&
 		existingPublication.ReviewMaxPasses != nil {
 		// A manual takeover changes execution authority, never the review
@@ -695,9 +707,14 @@ func resolvePublicationTarget(
 	changeset models.SessionChangeset,
 ) (headBranch string, desiredHeadSHA *string, err error) {
 	if _, unpublishable := unpublishableChangesetStates[changeset.Status]; unpublishable {
+		reason := changesetPublicationBlocker(changeset.Status)
 		return "", nil, &Error{
 			Code: ErrorWorkspaceNotReady,
 			Err:  fmt.Errorf("primary changeset is %s", changeset.Status),
+			Details: map[string]any{
+				"changeset_status": changeset.Status,
+				"reason":           reason,
+			},
 		}
 	}
 	headBranch = trimmedPointer(changeset.WorkingBranch)
@@ -719,6 +736,21 @@ func resolvePublicationTarget(
 	return headBranch, desiredHeadSHA, nil
 }
 
+func changesetPublicationBlocker(status models.ChangesetStatus) string {
+	switch status {
+	case models.ChangesetStatusExternalUpdateDetected:
+		return "The remote pull request branch differs from the session checkpoint. Reconcile the remote branch with the session before creating the PR."
+	case models.ChangesetStatusNeedsRestack, models.ChangesetStatusRestacking, models.ChangesetStatusRestackConflict:
+		return "This pull request must finish restacking before it can be published."
+	case models.ChangesetStatusPROpen:
+		return "A pull request already exists for this changeset."
+	case models.ChangesetStatusMerged, models.ChangesetStatusAbandoned:
+		return "This changeset is already in a terminal state."
+	default:
+		return "This changeset is not ready to publish."
+	}
+}
+
 func trimmedPointer(value *string) string {
 	if value == nil {
 		return ""
@@ -738,12 +770,9 @@ func (c *Coordinator) resolvePolicy(ctx context.Context, orgID uuid.UUID, initia
 	var personal *models.AutomaticPRFollowThroughSettings
 	initiatorRole := ""
 	if initiatorID != nil {
-		user, userErr := c.users.GetByIDGlobalWithSettings(ctx, *initiatorID)
+		user, userErr := c.users.GetByIDWithSettings(ctx, orgID, *initiatorID)
 		if userErr != nil {
 			return EffectivePolicy{}, "", fmt.Errorf("load session initiator policy: %w", userErr)
-		}
-		if user.OrgID != orgID {
-			return EffectivePolicy{}, "", errors.New("session initiator is outside organization scope")
 		}
 		personal = user.Settings.AutomaticPRFollowThrough
 		initiatorRole = string(user.Role)

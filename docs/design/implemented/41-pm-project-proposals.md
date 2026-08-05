@@ -104,7 +104,7 @@ The PM should create proposals during its run by calling an internal tool. That
 tool call is the source of truth for mutation.
 
 The `proposed_projects` field in the final PM plan can remain as a summary or
-audit artifact, but the server should not depend on parsing the final plan to
+audit output, but the server should not depend on parsing the final plan to
 create proposals. This is more reliable and matches the issue-creation pattern
 from design 39.
 

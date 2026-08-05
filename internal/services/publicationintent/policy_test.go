@@ -10,6 +10,7 @@ import (
 
 func TestResolvePolicy(t *testing.T) {
 	t.Parallel()
+	require.Equal(t, 3, UserInitiatedReviewMaxPasses, "user-initiated publication should default to three review passes")
 
 	enabled, disabled := true, false
 	tests := []struct {

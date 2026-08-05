@@ -33,6 +33,7 @@ const (
 	DemoBuilderEmail   = "preview-builder@143.dev"
 	DemoViewerEmail    = "preview-viewer@143.dev"
 	PrimarySessionID   = "00000000-0000-4000-a000-000000000300"
+	ShowcaseSessionID  = "00000000-0000-4000-a000-000000000308"
 	PreviewGroupID     = "00000000-0000-4000-a000-000000000430"
 	PreviewTargetID    = "00000000-0000-4000-a000-000000000431"
 	DemoPullRequestID  = "00000000-0000-4000-a000-000000000501"
@@ -248,6 +249,16 @@ func AssertDemoSeedState(ctx context.Context, pool seedDB) error {
 			name:     "demo sessions exist",
 			query:    `SELECT count(*) FROM sessions WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000300'::uuid, '00000000-0000-4000-a000-000000000301'::uuid, '00000000-0000-4000-a000-000000000302'::uuid, '00000000-0000-4000-a000-000000000303'::uuid, '00000000-0000-4000-a000-000000000304'::uuid)`,
 			expected: 5,
+		},
+		{
+			name:     "session detail showcase exists",
+			query:    `SELECT count(*) FROM sessions WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id = '00000000-0000-4000-a000-000000000308'::uuid AND origin = 'issue_trigger' AND result_summary IS NOT NULL AND diff IS NOT NULL`,
+			expected: 1,
+		},
+		{
+			name:     "session detail showcase threads exist",
+			query:    `SELECT count(*) FROM session_threads WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND session_id = '00000000-0000-4000-a000-000000000308'::uuid AND id IN ('00000000-0000-4000-a000-000000000708'::uuid, '00000000-0000-4000-a000-000000000709'::uuid, '00000000-0000-4000-a000-000000000710'::uuid)`,
+			expected: 3,
 		},
 		{
 			name:     "demo issues exist",
@@ -480,8 +491,8 @@ func AssertDemoSeedState(ctx context.Context, pool seedDB) error {
 			expected: 4,
 		},
 		{
-			name:     "demo code review prompt artifacts exist",
-			query:    `SELECT count(*) FROM code_review_prompt_artifacts WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000911'::uuid, '00000000-0000-4000-a000-000000000912'::uuid, '00000000-0000-4000-a000-000000000913'::uuid, '00000000-0000-4000-a000-000000000914'::uuid)`,
+			name:     "demo code review prompt records exist",
+			query:    `SELECT count(*) FROM code_review_prompt_records WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000911'::uuid, '00000000-0000-4000-a000-000000000912'::uuid, '00000000-0000-4000-a000-000000000913'::uuid, '00000000-0000-4000-a000-000000000914'::uuid)`,
 			expected: 4,
 		},
 		{

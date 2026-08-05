@@ -101,11 +101,12 @@ trigger remains installed between the two transactions.
 
 The failed production attempt left golang-migrate's separately committed dirty
 marker at version 267 even though PostgreSQL rolled back the migration
-transaction. App deploys therefore run `migrate repair-pr-readiness` before
-`migrate up`. That repair is intentionally narrow: it no-ops on clean databases,
-rewinds only an exactly dirty version 267 to 266, and refuses every other dirty
-version. Remove the repair command from the migrator and deploy script in the
-same follow-up that contracts the temporary rejection trigger.
+transaction. App deploys therefore run `migrate repair-known-dirty` before
+`migrate up`. That repair is intentionally narrow: it no-ops on clean databases
+and rewinds only explicitly allowlisted, transactionally rolled-back failures;
+version 267 rewinds to 266. Remove the version 267 allowlist entry (and the
+backward-compatible `repair-pr-readiness` command) in the same follow-up that
+contracts the temporary rejection trigger.
 
 Slack subscriptions that listed only `pr.readiness_attention` are pinned to the
 `custom` preset before the event is stripped. Without that, an emptied `events`

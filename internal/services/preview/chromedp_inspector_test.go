@@ -7,9 +7,20 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/cdproto/runtime"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+func TestAwaitPromiseEvaluation(t *testing.T) {
+	t.Parallel()
+
+	params := runtime.Evaluate("Promise.resolve(200)")
+	require.False(t, params.AwaitPromise, "runtime evaluation should not await promises by default")
+
+	actual := awaitPromiseEvaluation(params)
+	require.True(t, actual.AwaitPromise, "async browser evaluations should await the resolved promise value")
+}
 
 func TestChromeDPInspector_BindsSessionContextIdentity(t *testing.T) {
 	t.Parallel()
@@ -19,6 +30,18 @@ func TestChromeDPInspector_BindsSessionContextIdentity(t *testing.T) {
 	require.Equal(t, "session:session-1", inspector.contextKeys["preview-old"], "old preview instance should bind to the session context")
 	require.Equal(t, inspector.contextKeys["preview-old"], inspector.contextKeys["preview-new"], "replacement preview instance should retain browser identity")
 	require.False(t, inspector.HasContext(models.BrowserTarget{PreviewID: "preview-new", SessionID: "session-1", ContextKey: "session:session-1"}), "binding should not eagerly launch a browser")
+}
+
+func TestChromeDPInspector_BootstrapRejectsEmptyTokenWithStage(t *testing.T) {
+	t.Parallel()
+
+	inspector := NewChromeDPInspector(ChromeDPInspectorConfig{}, zerolog.Nop())
+	err := inspector.BootstrapPreviewAccess(context.Background(), models.BrowserTarget{PreviewID: "preview-1"}, " ")
+
+	require.Error(t, err, "bootstrap should reject an empty access token")
+	accessErr, ok := AsBrowserAccessError(err)
+	require.True(t, ok, "bootstrap token validation should return a staged error")
+	require.Equal(t, BrowserAccessStageTokenMint, accessErr.Stage, "empty bootstrap token should be classified at token mint stage")
 }
 
 func TestChromeDPInspector_BindAdoptsRawContext(t *testing.T) {

@@ -78,7 +78,7 @@ const codeReviewPolicyColumns = `id, org_id, repository_id, active, version, ena
 const codeReviewMetadataColumns = `id, org_id, session_id, repository_id, pull_request_id, policy_id,
 	base_sha, head_sha, from_fork, trigger_source, status, phase, status_code, status_message, retry_at,
 	last_error_at, retryable_failure, decision, acceptable, stale, superseded_by_session_id,
-	review_output_key, prompt_artifact_key, github_review_id, github_review_url, final_review_body,
+	review_output_key, prompt_record_key, github_review_id, github_review_url, final_review_body,
 	failure_reason, completed_at, created_at`
 
 const codeReviewAgentResultColumns = `id, org_id, session_id, agent_provider, agent_model, role, status,
@@ -87,7 +87,7 @@ const codeReviewAgentResultColumns = `id, org_id, session_id, agent_provider, ag
 const codeReviewFindingColumns = `id, org_id, session_id, agent_result_id, dedupe_key, severity,
 	confidence, path, start_line, end_line, summary, body, selected_for_inline, github_comment_id, created_at`
 
-const codeReviewPromptArtifactColumns = `id, org_id, session_id, artifact_key, role, agent_provider,
+const codeReviewPromptRecordColumns = `id, org_id, session_id, record_key, role, agent_provider,
 	content, metadata, created_at`
 
 const codeReviewGitHubTriggerSettingColumns = `id, org_id, repository_id, installation_id, active, version,
@@ -117,6 +117,19 @@ func (s *CodeReviewStore) GetActiveGitHubTrigger(ctx context.Context, orgID, rep
 		return models.CodeReviewGitHubTriggerSetting{}, fmt.Errorf("query code review GitHub trigger: %w", err)
 	}
 	return collectOneCodeReviewGitHubTriggerSetting(rows)
+}
+
+func (s *CodeReviewStore) ListActiveGitHubTriggers(ctx context.Context, orgID uuid.UUID) ([]models.CodeReviewGitHubTriggerSetting, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT `+codeReviewGitHubTriggerSettingColumns+`
+		FROM code_review_github_trigger_settings
+		WHERE org_id = @org_id
+		  AND active = true
+		ORDER BY repository_id ASC`, pgx.NamedArgs{"org_id": orgID})
+	if err != nil {
+		return nil, fmt.Errorf("query active code review GitHub triggers: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.CodeReviewGitHubTriggerSetting])
 }
 
 func (s *CodeReviewStore) SaveGitHubTrigger(ctx context.Context, orgID uuid.UUID, params SaveCodeReviewGitHubTriggerParams) (models.CodeReviewGitHubTriggerSetting, error) {
@@ -440,23 +453,10 @@ func (s *CodeReviewStore) CreateSessionMetadata(ctx context.Context, metadata *m
 			return err
 		}
 	}
-	rows, err := s.db.Query(ctx, `
-		INSERT INTO code_review_session_metadata (
-			org_id, session_id, repository_id, pull_request_id, policy_id, base_sha, head_sha,
-			from_fork, trigger_source, status, phase, status_code, status_message, retry_at,
-			last_error_at, retryable_failure, decision, acceptable, stale, superseded_by_session_id,
-			review_output_key, prompt_artifact_key, github_review_id, github_review_url, final_review_body,
-			failure_reason, completed_at
-		) VALUES (
-			@org_id, @session_id, @repository_id, @pull_request_id, @policy_id, @base_sha, @head_sha,
-			@from_fork, @trigger_source, @status, @phase, @status_code, @status_message, @retry_at,
-			@last_error_at, @retryable_failure, @decision, @acceptable, @stale, @superseded_by_session_id,
-			@review_output_key, @prompt_artifact_key, @github_review_id, @github_review_url, @final_review_body,
-			@failure_reason, @completed_at
-		)
-		ON CONFLICT (org_id, review_output_key) DO UPDATE
-		SET review_output_key = EXCLUDED.review_output_key
-		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
+	triggeringDisputeColumn := ""
+	triggeringDisputeValue := ""
+	triggeringDisputeUpdate := ""
+	args := pgx.NamedArgs{
 		"org_id":                   metadata.OrgID,
 		"session_id":               metadata.SessionID,
 		"repository_id":            metadata.RepositoryID,
@@ -478,13 +478,41 @@ func (s *CodeReviewStore) CreateSessionMetadata(ctx context.Context, metadata *m
 		"stale":                    metadata.Stale,
 		"superseded_by_session_id": metadata.SupersededBySessionID,
 		"review_output_key":        metadata.ReviewOutputKey,
-		"prompt_artifact_key":      metadata.PromptArtifactKey,
+		"prompt_record_key":        metadata.PromptRecordKey,
 		"github_review_id":         metadata.GitHubReviewID,
 		"github_review_url":        metadata.GitHubReviewURL,
 		"final_review_body":        metadata.FinalReviewBody,
 		"failure_reason":           metadata.FailureReason,
 		"completed_at":             metadata.CompletedAt,
-	})
+	}
+	if metadata.TriggeringDisputeID != nil {
+		triggeringDisputeColumn = ", triggering_dispute_id"
+		triggeringDisputeValue = ", @triggering_dispute_id"
+		// The conflict path returns an equivalent review that already exists for
+		// this output key. Without this the dispute link is silently dropped, and
+		// the status-comment handler's GetTriggeringDisputeID recovery -- the only
+		// way a reply gets reconciled when the job payload is lost -- finds NULL.
+		// COALESCE keeps the first dispute that claimed the review.
+		triggeringDisputeUpdate = `, triggering_dispute_id = COALESCE(code_review_session_metadata.triggering_dispute_id, EXCLUDED.triggering_dispute_id)`
+		args["triggering_dispute_id"] = metadata.TriggeringDisputeID
+	}
+	rows, err := s.db.Query(ctx, `
+		INSERT INTO code_review_session_metadata (
+			org_id, session_id, repository_id, pull_request_id, policy_id, base_sha, head_sha,
+			from_fork, trigger_source, status, phase, status_code, status_message, retry_at,
+			last_error_at, retryable_failure, decision, acceptable, stale, superseded_by_session_id,
+			review_output_key, prompt_record_key, github_review_id, github_review_url, final_review_body,
+			failure_reason, completed_at`+triggeringDisputeColumn+`
+		) VALUES (
+			@org_id, @session_id, @repository_id, @pull_request_id, @policy_id, @base_sha, @head_sha,
+			@from_fork, @trigger_source, @status, @phase, @status_code, @status_message, @retry_at,
+			@last_error_at, @retryable_failure, @decision, @acceptable, @stale, @superseded_by_session_id,
+			@review_output_key, @prompt_record_key, @github_review_id, @github_review_url, @final_review_body,
+			@failure_reason, @completed_at`+triggeringDisputeValue+`
+		)
+		ON CONFLICT (org_id, review_output_key) DO UPDATE
+		SET review_output_key = EXCLUDED.review_output_key`+triggeringDisputeUpdate+`
+		RETURNING `+codeReviewMetadataColumns, args)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if isUniqueViolation(err) && errors.As(err, &pgErr) && pgErr.ConstraintName == codeReviewActiveHeadConstraint {
@@ -496,6 +524,7 @@ func (s *CodeReviewStore) CreateSessionMetadata(ctx context.Context, metadata *m
 	if err != nil {
 		return err
 	}
+	created.TriggeringDisputeID = metadata.TriggeringDisputeID
 	*metadata = created
 	s.publishUpdated(ctx, created)
 	return nil
@@ -531,6 +560,91 @@ func (s *CodeReviewStore) GetBySessionID(ctx context.Context, orgID, sessionID u
 	return collectOneCodeReviewMetadata(rows)
 }
 
+func (s *CodeReviewStore) GetTriggeringDisputeID(ctx context.Context, orgID, sessionID uuid.UUID) (*uuid.UUID, error) {
+	var disputeID *uuid.UUID
+	if err := s.db.QueryRow(ctx, `SELECT triggering_dispute_id
+		FROM code_review_session_metadata
+		WHERE org_id = @org_id AND session_id = @session_id`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID,
+	}).Scan(&disputeID); err != nil {
+		return nil, fmt.Errorf("query code review triggering dispute: %w", err)
+	}
+	return disputeID, nil
+}
+
+// GetByGitHubFindingComment returns the completed review that authored an
+// inline finding comment. It is used to ensure an inline reply is attached to
+// a 143 Code Reviewer thread before accepting it as a decision dispute.
+func (s *CodeReviewStore) GetByGitHubFindingComment(ctx context.Context, orgID uuid.UUID, githubCommentID int64) (models.CodeReviewSessionMetadata, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT `+codeReviewMetadataColumns+`
+		FROM code_review_session_metadata
+		WHERE org_id = @org_id
+		  AND status = 'completed'
+		  AND session_id = (
+			SELECT session_id
+			FROM code_review_findings
+			WHERE org_id = @org_id
+			  AND github_comment_id = @github_comment_id
+			LIMIT 1
+		  )
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`, pgx.NamedArgs{"org_id": orgID, "github_comment_id": githubCommentID})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("query code review by GitHub finding comment: %w", err)
+	}
+	return collectOneCodeReviewMetadata(rows)
+}
+
+// GetRiskReasonCodesBySession returns the typed policy/risk reasons captured
+// with a terminal decision. Unknown historical values are ignored so a
+// retired code cannot prevent a user from disputing the decision.
+func (s *CodeReviewStore) GetRiskReasonCodesBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.CodeReviewRiskReasonCode, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT reason->>'code'
+		FROM code_review_session_metadata metadata
+		CROSS JOIN LATERAL jsonb_array_elements(metadata.risk_reason_details) reason
+		WHERE metadata.org_id = @org_id AND metadata.session_id = @session_id
+		ORDER BY reason->>'code'`, pgx.NamedArgs{"org_id": orgID, "session_id": sessionID})
+	if err != nil {
+		return nil, fmt.Errorf("query code review risk reason codes: %w", err)
+	}
+	values, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, err
+	}
+	codes := make([]models.CodeReviewRiskReasonCode, 0, len(values))
+	for _, value := range values {
+		code := models.CodeReviewRiskReasonCode(value)
+		if code.Validate() == nil {
+			codes = append(codes, code)
+		}
+	}
+	return codes, nil
+}
+
+func (s *CodeReviewStore) GetRiskReasonsBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.CodeReviewRiskReason, error) {
+	var raw []byte
+	if err := s.db.QueryRow(ctx, `SELECT risk_reason_details
+		FROM code_review_session_metadata
+		WHERE org_id = @org_id AND session_id = @session_id`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID,
+	}).Scan(&raw); err != nil {
+		return nil, fmt.Errorf("query code review risk reasons: %w", err)
+	}
+	var reasons []models.CodeReviewRiskReason
+	if err := json.Unmarshal(raw, &reasons); err != nil {
+		return nil, fmt.Errorf("decode code review risk reasons: %w", err)
+	}
+	valid := make([]models.CodeReviewRiskReason, 0, len(reasons))
+	for _, reason := range reasons {
+		if reason.Code.Validate() == nil {
+			valid = append(valid, reason)
+		}
+	}
+	return valid, nil
+}
+
 func (s *CodeReviewStore) GetLatestByPullRequest(ctx context.Context, orgID, pullRequestID uuid.UUID) (models.CodeReviewSessionMetadata, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT `+codeReviewMetadataColumns+`
@@ -544,6 +658,22 @@ func (s *CodeReviewStore) GetLatestByPullRequest(ctx context.Context, orgID, pul
 	})
 	if err != nil {
 		return models.CodeReviewSessionMetadata{}, fmt.Errorf("query latest code review by pull request: %w", err)
+	}
+	return collectOneCodeReviewMetadata(rows)
+}
+
+func (s *CodeReviewStore) GetLatestCompletedByPullRequest(ctx context.Context, orgID, pullRequestID uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT `+codeReviewMetadataColumns+`
+		FROM code_review_session_metadata
+		WHERE org_id = @org_id
+		  AND pull_request_id = @pull_request_id
+		  AND status = 'completed'
+		  AND decision IS NOT NULL
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`, pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("query latest completed code review by pull request: %w", err)
 	}
 	return collectOneCodeReviewMetadata(rows)
 }
@@ -763,19 +893,19 @@ func (s *CodeReviewStore) SetWaitingForGitHub(ctx context.Context, orgID, sessio
 	return metadata, nil
 }
 
-func (s *CodeReviewStore) SetPromptArtifactKey(ctx context.Context, orgID, sessionID uuid.UUID, artifactKey string) (models.CodeReviewSessionMetadata, error) {
+func (s *CodeReviewStore) SetPromptRecordKey(ctx context.Context, orgID, sessionID uuid.UUID, recordKey string) (models.CodeReviewSessionMetadata, error) {
 	rows, err := s.db.Query(ctx, `
 		UPDATE code_review_session_metadata
-		SET prompt_artifact_key = @prompt_artifact_key
+		SET prompt_record_key = @prompt_record_key
 		WHERE org_id = @org_id
 		  AND session_id = @session_id
 		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
-		"org_id":              orgID,
-		"session_id":          sessionID,
-		"prompt_artifact_key": artifactKey,
+		"org_id":            orgID,
+		"session_id":        sessionID,
+		"prompt_record_key": recordKey,
 	})
 	if err != nil {
-		return models.CodeReviewSessionMetadata{}, fmt.Errorf("set code review prompt artifact key: %w", err)
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("set code review prompt record key: %w", err)
 	}
 	return collectOneCodeReviewMetadata(rows)
 }
@@ -1068,7 +1198,7 @@ const codeReviewListItemSelect = `
 			SELECT m.id, m.org_id, m.session_id, m.repository_id, m.pull_request_id, m.policy_id,
 			       m.base_sha, m.head_sha, m.from_fork, m.trigger_source, m.status, m.phase, m.status_code,
 			       m.status_message, m.retry_at, m.last_error_at, m.retryable_failure, m.decision, m.acceptable, m.stale,
-			       m.superseded_by_session_id, m.review_output_key, m.prompt_artifact_key, m.github_review_id,
+			       m.superseded_by_session_id, m.review_output_key, m.prompt_record_key, m.github_review_id,
 			       m.github_review_url, m.final_review_body, m.failure_reason, m.completed_at, m.created_at,
 			       (
 			           m.status = 'failed'
@@ -1146,6 +1276,7 @@ type CodeReviewListFilters struct {
 	ActivityStatus  *models.CodeReviewActivityStatus
 	Status          *models.CodeReviewSessionStatus
 	Acceptable      *bool
+	Reason          *models.CodeReviewRiskReasonCode
 	Author          string
 	Search          string
 	Limit           int
@@ -1241,6 +1372,17 @@ func codeReviewListWhere(orgID uuid.UUID, filters CodeReviewListFilters, include
 	if filters.Acceptable != nil {
 		query += ` AND m.acceptable = @acceptable`
 		args["acceptable"] = *filters.Acceptable
+	}
+	if filters.Reason != nil {
+		if err := filters.Reason.Validate(); err != nil {
+			return "", nil, err
+		}
+		query += ` AND EXISTS (
+			SELECT 1
+			FROM jsonb_array_elements(m.risk_reason_details) AS risk_reason
+			WHERE risk_reason->>'code' = @reason
+		)`
+		args["reason"] = *filters.Reason
 	}
 	if author := strings.TrimSpace(filters.Author); author != "" {
 		query += ` AND LOWER(COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), 'Unknown')) = LOWER(@author)`
@@ -1515,6 +1657,7 @@ type CodeReviewStatsFilters struct {
 	ActivityStatus *models.CodeReviewActivityStatus
 	Status         *models.CodeReviewSessionStatus
 	Acceptable     *bool
+	Reason         *models.CodeReviewRiskReasonCode
 	Author         string
 	Search         string
 	CreatedAfter   *time.Time
@@ -1639,6 +1782,18 @@ func (s *CodeReviewStore) GetReviewStats(ctx context.Context, orgID uuid.UUID, f
 		  AND m.acceptable = @acceptable`
 		args["acceptable"] = *filters.Acceptable
 	}
+	if filters.Reason != nil {
+		if err := filters.Reason.Validate(); err != nil {
+			return models.CodeReviewStats{}, err
+		}
+		query += `
+		  AND EXISTS (
+			SELECT 1
+			FROM jsonb_array_elements(m.risk_reason_details) AS risk_reason
+			WHERE risk_reason->>'code' = @reason
+		  )`
+		args["reason"] = *filters.Reason
+	}
 	if author := strings.TrimSpace(filters.Author); author != "" {
 		query += `
 		  AND LOWER(COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), 'Unknown')) = LOWER(@author)`
@@ -1750,6 +1905,33 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 		FROM code_review_session_metadata m
 		JOIN cohort c ON c.pull_request_id = m.pull_request_id
 		WHERE m.org_id = @org_id` + scanWhere + `
+	),
+	comment_request_candidates AS (
+		SELECT a.pull_request_id,
+			COALESCE(
+				NULLIF(LOWER(BTRIM(s.revision_context #>> '{request_context,author_login}')), ''),
+				'Unknown'
+			) AS github_login,
+			BTRIM(s.revision_context->>'github_delivery_id') AS request_key,
+			a.created_at, a.id
+		FROM attempts a
+		JOIN sessions s ON s.id = a.session_id AND s.org_id = @org_id
+		WHERE s.revision_context #>> '{request_context,source}' = 'issue_comment'
+		  AND NULLIF(BTRIM(s.revision_context->>'github_delivery_id'), '') IS NOT NULL
+	),
+	comment_requests AS MATERIALIZED (
+		-- A GitHub redelivery or internal retry must not turn one human comment
+		-- into several request observations. Comment-triggered reviews always
+		-- persist the delivery id, falling back to the globally unique comment id.
+		SELECT DISTINCT ON (pull_request_id, request_key)
+			pull_request_id, request_key, github_login
+		FROM comment_request_candidates
+		ORDER BY pull_request_id, request_key, created_at, id
+	),
+	comment_request_users AS (
+		SELECT github_login, COUNT(*)::bigint AS requests
+		FROM comment_requests
+		GROUP BY github_login
 	),
 	attempt_flags AS (
 		-- One grouped pass instead of a correlated EXISTS per cohort PR: an
@@ -1877,12 +2059,17 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 	SELECT s.*,
 		(SELECT buckets FROM approval_rounds) AS approval_rounds,
 		COALESCE((SELECT jsonb_agg(to_jsonb(a) ORDER BY ` + authorOrder + `) FROM authors a), '[]') AS authors,
-		COALESCE((SELECT jsonb_agg(to_jsonb(r) ORDER BY r.prs DESC, r.code) FROM reasons r), '[]') AS reasons
+		COALESCE((SELECT jsonb_agg(to_jsonb(r) ORDER BY r.prs DESC, r.code) FROM reasons r), '[]') AS reasons,
+		(SELECT COUNT(*)::bigint FROM comment_requests) AS comment_requests_total,
+		COALESCE((
+			SELECT jsonb_agg(to_jsonb(requester) ORDER BY requester.requests DESC, requester.github_login)
+			FROM comment_request_users requester
+		), '[]') AS comment_requests_by_user
 	FROM summary s`
 
 	var analytics models.CodeReviewAnalytics
 	var medianRounds, medianAdditions, medianDeletions float64
-	var roundsJSON, authorsJSON, reasonsJSON []byte
+	var roundsJSON, authorsJSON, reasonsJSON, commentRequestUsersJSON []byte
 	err = s.db.QueryRow(ctx, query, args).Scan(
 		&analytics.Summary.PRsReviewed, &analytics.Summary.PRsWithCompletedRound,
 		&analytics.Summary.ApprovedBy143, &analytics.Summary.NotApproved,
@@ -1894,7 +2081,7 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 		&analytics.Summary.TotalFindings, &analytics.Summary.NeedsHumanReview,
 		&analytics.Summary.CommentOnly, &analytics.Summary.Blocked,
 		&analytics.Summary.ApprovalNotPosted, &roundsJSON, &authorsJSON,
-		&reasonsJSON,
+		&reasonsJSON, &analytics.CommentRequestsTotal, &commentRequestUsersJSON,
 	)
 	if err != nil {
 		return models.CodeReviewAnalytics{}, fmt.Errorf("query PR-centric code review analytics: %w", err)
@@ -1910,6 +2097,7 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 		{"approval rounds", roundsJSON, &analytics.ApprovalRounds},
 		{"authors", authorsJSON, &analytics.Authors},
 		{"non-approval reasons", reasonsJSON, &analytics.NonApprovalReasons},
+		{"comment requests by user", commentRequestUsersJSON, &analytics.CommentRequestsByUser},
 	} {
 		if err := json.Unmarshal(section.payload, section.target); err != nil {
 			return models.CodeReviewAnalytics{}, fmt.Errorf("decode PR-centric code review analytics %s: %w", section.name, err)
@@ -2038,47 +2226,47 @@ func (s *CodeReviewStore) UpdateAgentResultOutcome(ctx context.Context, orgID, r
 	return collectOneCodeReviewAgentResult(rows)
 }
 
-func (s *CodeReviewStore) CreatePromptArtifact(ctx context.Context, artifact *models.CodeReviewPromptArtifact) error {
+func (s *CodeReviewStore) CreatePromptRecord(ctx context.Context, record *models.CodeReviewPromptRecord) error {
 	rows, err := s.db.Query(ctx, `
-		INSERT INTO code_review_prompt_artifacts (
-			org_id, session_id, artifact_key, role, agent_provider, content, metadata
+		INSERT INTO code_review_prompt_records (
+			org_id, session_id, record_key, role, agent_provider, content, metadata
 		) VALUES (
-			@org_id, @session_id, @artifact_key, @role, @agent_provider, @content, COALESCE(@metadata, '{}'::jsonb)
+			@org_id, @session_id, @record_key, @role, @agent_provider, @content, COALESCE(@metadata, '{}'::jsonb)
 		)
-		ON CONFLICT (org_id, artifact_key) DO UPDATE
+		ON CONFLICT (org_id, record_key) DO UPDATE
 		SET content = EXCLUDED.content,
 		    metadata = EXCLUDED.metadata
-		RETURNING `+codeReviewPromptArtifactColumns, pgx.NamedArgs{
-		"org_id":         artifact.OrgID,
-		"session_id":     artifact.SessionID,
-		"artifact_key":   artifact.ArtifactKey,
-		"role":           artifact.Role,
-		"agent_provider": artifact.AgentProvider,
-		"content":        artifact.Content,
-		"metadata":       artifact.Metadata,
+		RETURNING `+codeReviewPromptRecordColumns, pgx.NamedArgs{
+		"org_id":         record.OrgID,
+		"session_id":     record.SessionID,
+		"record_key":     record.RecordKey,
+		"role":           record.Role,
+		"agent_provider": record.AgentProvider,
+		"content":        record.Content,
+		"metadata":       record.Metadata,
 	})
 	if err != nil {
-		return fmt.Errorf("create code review prompt artifact: %w", err)
+		return fmt.Errorf("create code review prompt record: %w", err)
 	}
-	created, err := collectOneCodeReviewPromptArtifact(rows)
+	created, err := collectOneCodeReviewPromptRecord(rows)
 	if err != nil {
 		return err
 	}
-	*artifact = created
+	*record = created
 	return nil
 }
 
-func (s *CodeReviewStore) ListPromptArtifacts(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.CodeReviewPromptArtifact, error) {
+func (s *CodeReviewStore) ListPromptRecords(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.CodeReviewPromptRecord, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT `+codeReviewPromptArtifactColumns+`
-		FROM code_review_prompt_artifacts
+		SELECT `+codeReviewPromptRecordColumns+`
+		FROM code_review_prompt_records
 		WHERE org_id = @org_id
 		  AND session_id = @session_id
 		ORDER BY created_at ASC, id ASC`, pgx.NamedArgs{"org_id": orgID, "session_id": sessionID})
 	if err != nil {
-		return nil, fmt.Errorf("list code review prompt artifacts: %w", err)
+		return nil, fmt.Errorf("list code review prompt records: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.CodeReviewPromptArtifact])
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.CodeReviewPromptRecord])
 }
 
 func (s *CodeReviewStore) CreateFinding(ctx context.Context, finding *models.CodeReviewFinding) error {
@@ -2330,11 +2518,11 @@ func collectOneCodeReviewFinding(rows pgx.Rows) (models.CodeReviewFinding, error
 	return finding, nil
 }
 
-func collectOneCodeReviewPromptArtifact(rows pgx.Rows) (models.CodeReviewPromptArtifact, error) {
+func collectOneCodeReviewPromptRecord(rows pgx.Rows) (models.CodeReviewPromptRecord, error) {
 	defer rows.Close()
-	artifact, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.CodeReviewPromptArtifact])
+	record, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.CodeReviewPromptRecord])
 	if err != nil {
-		return models.CodeReviewPromptArtifact{}, err
+		return models.CodeReviewPromptRecord{}, err
 	}
-	return artifact, nil
+	return record, nil
 }

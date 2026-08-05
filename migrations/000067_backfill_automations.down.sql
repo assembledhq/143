@@ -9,7 +9,7 @@
 --      project) after the up migration. On rollback those projects will start
 --      firing project_cycle jobs again. That's the intended fallback behavior:
 --      a rollback is meant to restore the pre-migration scheduling surface,
---      and the automation's paused state is a post-migration artifact that
+--      and the automation's paused state is a post-migration output that
 --      cannot be mapped back to a project attribute. Operators running this
 --      rollback in production should expect to manually re-pause legacy
 --      schedules for any automation a user had paused.

@@ -153,7 +153,7 @@ Sessions                                            Saved
 
 ### 4. Cleanup Defaults
 
-Owns cleanup and retention policies for runtime artifacts.
+Owns cleanup and retention policies for runtime outputs.
 
 Controls:
 - `Idle preview timeout`.

@@ -188,7 +188,7 @@ Use `preview.install` when a preview needs dependencies before services can boot
 | `lockfiles` | `string[]` | Repo-relative files included in the install cache key. Missing files fail the install phase. |
 | `clean_paths` | `string[]` | Repo-relative paths or simple globs to remove before reinstalling. Nothing is auto-deleted unless listed here. |
 | `verify_paths` | `string[]` | Repo-relative paths that must exist for a cached install to be reused. |
-| `cache.enabled` | `boolean` | Optional. Defaults to `true`; set to `false` to opt out of dependency artifact caching. |
+| `cache.enabled` | `boolean` | Optional. Defaults to `true`; set to `false` to opt out of dependency output caching. |
 | `cache.paths` | `string[]` | Optional additive dependency/build cache paths to persist in addition to `clean_paths` and inferred paths. Requires `lockfiles`. |
 | `cache.package_manager.enabled` | `boolean` | Optional. Defaults to `true`; set to `false` to opt out of package-manager global caching. |
 | `cache.package_manager.include` | `string[]` | Optional package-manager IDs to include in addition to inference: `npm`, `pnpm`, `yarn`, `bun`, `pip`, `uv`, `poetry`, `go`. |
@@ -198,17 +198,17 @@ Use `preview.install` when a preview needs dependencies before services can boot
 
 143 computes a cache key from the install config, lockfile contents, and sandbox runtime. If the platform-owned marker under `.143/cache/preview-install/` exists and every `verify_paths` entry exists, install is skipped. Otherwise 143 removes only `clean_paths`, runs `command`, and writes the marker only after the command succeeds.
 
-Declaring `verify_paths` also unlocks the cold-start fast path: when the marker is absent but a dependency artifact cache hit matches the exact install command, lockfile contents, and platform sandbox cache ABI, 143 restores the cached artifacts and — if every `verify_paths` entry exists afterwards — writes the marker and skips `command` entirely. Without `verify_paths`, cold starts always run `command`.
+Declaring `verify_paths` also unlocks the cold-start fast path: when the marker is absent but a dependency output cache hit matches the exact install command, lockfile contents, and platform sandbox cache ABI, 143 restores the cached outputs and — if every `verify_paths` entry exists afterwards — writes the marker and skips `command` entirely. Without `verify_paths`, cold starts always run `command`.
 
-Because the cache key contains no commit, install output is reused across commits whenever the install config and lockfiles are unchanged. `preview.install.command` must therefore produce output that depends only on those inputs — dependency installation, not application builds. A build step inside install that reads source files would be skipped at a newer commit and serve stale artifacts; keep source-dependent builds in the service `command`, where they run on every start.
+Because the cache key contains no commit, install output is reused across commits whenever the install config and lockfiles are unchanged. `preview.install.command` must therefore produce output that depends only on those inputs — dependency installation, not application builds. A build step inside install that reads source files would be skipped at a newer commit and serve stale outputs; keep source-dependent builds in the service `command`, where they run on every start.
 
-Session previews also use dependency artifact and package-manager global caches when object storage is configured. The dependency artifact path set is WorkDir-relative:
+Session previews also use dependency output and package-manager global caches when object storage is configured. The dependency output path set is WorkDir-relative:
 
 ```text
 clean_paths + cache.paths + inferred paths from known dependency files
 ```
 
-Platform-owned preview cache paths are excluded from dependency caching. Do not declare `.143/cache` or any descendant as a dependency cache path. `clean_paths` may still remove broad build output before a fresh install, but those paths are not automatically safe to persist as reusable artifacts.
+Platform-owned preview cache paths are excluded from dependency caching. Do not declare `.143/cache` or any descendant as a dependency cache path. `clean_paths` may still remove broad build output before a fresh install, but those paths are not automatically safe to persist as reusable outputs.
 
 Initial inferred paths:
 
@@ -220,7 +220,7 @@ Initial inferred paths:
 
 Inference is relative to the lockfile directory, so `frontend/package-lock.json` infers `frontend/node_modules`, `services/api/poetry.lock` infers `services/api/.venv`, and `go.mod` infers `vendor`. `cache.paths` is additive and is useful for specific repo-local build paths such as `.next/cache` or `.turbo/cache`.
 
-Package-manager global caches are separate from dependency artifacts and restore relative to the sandbox `HomeDir`, not the repo `WorkDir`.
+Package-manager global caches are separate from dependency outputs and restore relative to the sandbox `HomeDir`, not the repo `WorkDir`.
 
 | Package manager | HomeDir-relative cache paths |
 |---|---|
@@ -269,7 +269,7 @@ Pnpm example:
 }
 ```
 
-Opt out when a repo cannot safely reuse dependency artifacts:
+Opt out when a repo cannot safely reuse dependency outputs:
 
 ```json
 {

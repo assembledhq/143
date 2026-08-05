@@ -32,12 +32,14 @@ const sessionPublicationSelectColumns = `id, org_id, session_id, changeset_id, r
 
 // EnsureRequested upserts durable publication intent. Every mutable column is
 // guarded so a later replay cannot undo a decision an earlier writer already
-// made. review_gate_state is the strictest of those: once a coordinator has
-// recorded that review applies (a 'pending' gate with review_max_passes set),
-// no later request may downgrade it to 'not_required'. The open_pr worker
-// re-runs this upsert before it knows anything about review, so without that
-// guard the worker's default gate would silently skip the review it is about
-// to be asked to run.
+// made. The published head is branch-scoped ownership evidence: retries retain
+// it, branch/repository changes clear it, and legacy review publications can
+// recover it from the latest server-written review checkpoint. review_gate_state
+// is the strictest policy field: once a coordinator has recorded that review
+// applies (a 'pending' gate with review_max_passes set), no later request may
+// downgrade it to 'not_required'. The open_pr worker re-runs this upsert before
+// it knows anything about review, so without that guard the worker's default
+// gate would silently skip the review it is about to be asked to run.
 func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uuid.UUID, publication *models.SessionPublication) error {
 	if publication == nil {
 		return errors.New("session publication is required")
@@ -301,9 +303,25 @@ func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uui
 			ELSE session_publications.request_payload
 		END,
 		published_head_sha = CASE
-			WHEN session_publications.state IN ('completed_noop', 'terminal_failed')
-			 AND EXCLUDED.request_generation_at > session_publications.request_generation_at
-			THEN NULL ELSE session_publications.published_head_sha
+			WHEN session_publications.state = 'completed'
+			  OR EXCLUDED.request_generation_at < session_publications.request_generation_at
+			  OR (session_publications.state IN ('completed_noop', 'terminal_failed')
+			      AND EXCLUDED.request_generation_at <= session_publications.request_generation_at)
+			THEN session_publications.published_head_sha
+			WHEN EXCLUDED.repository_id IS DISTINCT FROM session_publications.repository_id
+			  OR EXCLUDED.head_branch IS DISTINCT FROM session_publications.head_branch
+			THEN NULL
+			ELSE COALESCE(session_publications.published_head_sha, (
+				SELECT loop.desired_head_sha
+				FROM session_review_loops AS loop
+				WHERE loop.org_id = session_publications.org_id
+				  AND loop.session_id = session_publications.session_id
+				  AND loop.changeset_id = session_publications.changeset_id
+				  AND loop.source = 'publication'
+				  AND loop.desired_head_sha IS NOT NULL
+				ORDER BY loop.started_at DESC, loop.id DESC
+				LIMIT 1
+			))
 		END,
 		github_pr_number = CASE
 			WHEN session_publications.state IN ('completed_noop', 'terminal_failed')
@@ -390,11 +408,11 @@ func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uui
 	return nil
 }
 
-// ApplyReviewBypass atomically detaches review evidence from a non-terminal
-// publication and advances it to draft publication. It is deliberately a
-// separate transition from EnsureRequested: replay protection normally keeps
-// terminal review decisions immutable, while this audited user action is the
-// one authorized exception.
+// ApplyReviewBypass atomically retires any linked review loop, detaches its
+// evidence from a non-terminal publication, and advances the publication. It
+// is deliberately separate from EnsureRequested: replay protection normally
+// keeps recorded review decisions immutable, while an explicit authenticated
+// Create PR action is the authorized exception.
 func (s *SessionPublicationStore) ApplyReviewBypass(ctx context.Context, orgID uuid.UUID, publication *models.SessionPublication) error {
 	if publication == nil {
 		return errors.New("session publication is required")
@@ -415,11 +433,28 @@ func (s *SessionPublicationStore) ApplyReviewBypass(ctx context.Context, orgID u
 	if requestPayload == "" {
 		return errors.New("publication review bypass payload is required")
 	}
-	rows, err := s.db.Query(ctx, `UPDATE session_publications
+	rows, err := s.db.Query(ctx, `WITH publication_to_bypass AS (
+		SELECT review_loop_id
+		FROM session_publications
+		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id
+		  AND state NOT IN ('completed', 'completed_noop', 'terminal_failed')
+		FOR UPDATE
+	), cancelled_review AS (
+		UPDATE session_review_loops AS loop
+		SET status = 'cancelled', review_required = false,
+			latest_summary = 'Review stopped because an explicit Create PR action superseded automatic review.',
+			bypass_reason = 'Explicit Create PR action',
+			completed_at = COALESCE(loop.completed_at, now())
+		FROM publication_to_bypass AS target
+		WHERE loop.org_id = @org_id AND loop.id = target.review_loop_id AND loop.status = 'running'
+		RETURNING loop.id
+	)
+	UPDATE session_publications
 		SET state = 'ready_to_publish', source = @source,
 			trigger_kind = 'explicit_action',
 			automatic_pr_policy_source = @automatic_policy_source,
 			review_policy_source = 'explicit_bypass',
+			published_head_sha = COALESCE(review_desired_head_sha, published_head_sha),
 			review_max_passes = NULL, review_loop_id = NULL,
 			review_workspace_revision = NULL, review_desired_head_sha = NULL,
 			review_gate_state = 'not_required', job_queue = @job_queue,
@@ -428,6 +463,7 @@ func (s *SessionPublicationStore) ApplyReviewBypass(ctx context.Context, orgID u
 			last_error_code = NULL, last_error_message = NULL, updated_at = now()
 		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id
 		  AND state NOT IN ('completed', 'completed_noop', 'terminal_failed')
+		  AND (SELECT count(*) FROM cancelled_review) >= 0
 		RETURNING `+sessionPublicationSelectColumns, pgx.NamedArgs{
 		"org_id": orgID, "session_id": publication.SessionID, "changeset_id": publication.ChangesetID,
 		"source": publication.Source, "automatic_policy_source": publication.AutomaticPolicySource,
@@ -695,7 +731,8 @@ func (s *SessionPublicationStore) RecordReviewTarget(ctx context.Context, orgID,
 		return errors.New("review target head SHA is required")
 	}
 	result, err := s.db.Exec(ctx, `UPDATE session_publications
-		SET desired_head_sha = @desired_head_sha, updated_at = now()
+		SET desired_head_sha = @desired_head_sha,
+			published_head_sha = @desired_head_sha, updated_at = now()
 		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id
 		  AND state NOT IN ('completed', 'completed_noop', 'terminal_failed')`, pgx.NamedArgs{
 		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,

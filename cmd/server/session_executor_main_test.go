@@ -4,10 +4,29 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestSessionExecutorWiresPublicationReviewEvidenceRefresher(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("session_executor_main.go")
+	require.NoError(t, err, "session_executor_main.go should be readable")
+
+	body := string(source)
+	storesBuilt := strings.Index(body, "stores := buildSessionExecutorStores(")
+	wired := strings.Index(body, "wirePublicationReviewEvidenceRefresher(services, stores)")
+	runtimeReturned := strings.Index(body, "return &worker.SessionExecutorRuntime{")
+	require.NotEqual(t, -1, storesBuilt, "session executor should build the complete worker store set")
+	require.NotEqual(t, -1, wired, "session executor should wire publication review evidence refresh after its stores exist")
+	require.NotEqual(t, -1, runtimeReturned, "session executor should return its runtime")
+	require.Greater(t, wired, storesBuilt, "publication evidence refresh should be wired after executor stores are built")
+	require.Less(t, wired, runtimeReturned, "publication evidence refresh should be wired before the executor starts processing jobs")
+}
 
 func TestBuildSessionExecutorStoresIncludesSlackCompletionDependencies(t *testing.T) {
 	t.Parallel()

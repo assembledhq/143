@@ -20,6 +20,10 @@ func TestEvaluatePRFeedbackEligibility(t *testing.T) {
 		{name: "trusted human", input: baseHuman, expected: prFeedbackEligibility{Eligible: true}},
 		{name: "untrusted human requires mention", input: withEligibility(baseHuman, func(v *prFeedbackEligibilityInput) { v.Association = "NONE" }), expected: prFeedbackEligibility{IgnoreReason: "untrusted_human_without_mention"}},
 		{name: "untrusted mentioned human", input: withEligibility(baseHuman, func(v *prFeedbackEligibilityInput) { v.Association = "NONE"; v.Mentioned = true }), expected: prFeedbackEligibility{Eligible: true}},
+		// Repository visibility widens dispute trust, not follow-through trust.
+		// Folding it in here would make every private-repo commenter eligible
+		// for automatic follow-through without a mention.
+		{name: "untrusted human in a private repo still requires mention", input: withEligibility(baseHuman, func(v *prFeedbackEligibilityInput) { v.Association = "NONE"; v.PrivateRepo = true }), expected: prFeedbackEligibility{IgnoreReason: "untrusted_human_without_mention"}},
 		{name: "mention mode", input: withEligibility(baseHuman, func(v *prFeedbackEligibilityInput) { v.HumanMode = models.PRFeedbackHumanModeMentions }), expected: prFeedbackEligibility{IgnoreReason: "mention_required"}},
 		{name: "self authored", input: withEligibility(baseBot, func(v *prFeedbackEligibilityInput) { v.OwnAppLogin = "reviewer" }), expected: prFeedbackEligibility{IgnoreReason: "self_authored"}},
 		{name: "private bot", input: withEligibility(baseBot, func(v *prFeedbackEligibilityInput) { v.PrivateRepo = true }), expected: prFeedbackEligibility{Eligible: true, BotEligibility: models.PRFeedbackBotEligibilityPrivateAll}},

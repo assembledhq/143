@@ -5,13 +5,16 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/assembledhq/143/internal/internalapi"
@@ -119,7 +122,7 @@ func (e *previewToolExecutor) tools() []mcp.Tool {
 			"viewport_h":    {Type: "number", Description: "Viewport height, default 720"},
 			"full_page":     {Type: "boolean", Description: "Capture full page"},
 			"delay_ms":      {Type: "number", Description: "Delay before capture in milliseconds"},
-			"inline_base64": {Type: "boolean", Description: "Keep png_base64 in output; defaults true until artifact storage is available"},
+			"inline_base64": {Type: "boolean", Description: "Keep png_base64 in output; defaults true until capture storage is available"},
 		})},
 		{Name: "preview_console", Description: "Read browser console messages from a preview.", InputSchema: previewTargetSchema(map[string]mcp.SchemaProperty{
 			"level": {Type: "string", Description: "Optional console level filter, e.g. error"},
@@ -138,8 +141,8 @@ func (e *previewToolExecutor) tools() []mcp.Tool {
 			"delay_ms":  {Type: "number", Description: "Delay before each capture in milliseconds"},
 		})},
 		{Name: "preview_visual_diff", Description: "Compare two stored preview snapshots.", InputSchema: previewTargetSchema(map[string]mcp.SchemaProperty{
-			"before_snapshot_id": {Type: "string", Description: "Before artifact or snapshot ID"},
-			"after_snapshot_id":  {Type: "string", Description: "After artifact or snapshot ID"},
+			"before_snapshot_id": {Type: "string", Description: "Before capture or snapshot ID"},
+			"after_snapshot_id":  {Type: "string", Description: "After capture or snapshot ID"},
 		})},
 		{Name: "preview_assert", Description: "Run browser/visual assertions against a preview. Pass --assertions as JSON array.", InputSchema: previewTargetSchema(map[string]mcp.SchemaProperty{
 			"assertions": {Type: "string", Description: "JSON array of assertion objects"},
@@ -391,13 +394,21 @@ func (w branchPreviewWire) view() previewView {
 }
 
 func (e *previewToolExecutor) sessionStatus(ctx context.Context, sessionID string) *mcp.ToolCallResult {
+	status, err := e.sessionStatusView(ctx, sessionID)
+	if err != nil {
+		return mcp.ErrorResult(fmt.Sprintf("preview status failed: %s", err))
+	}
+	return jsonResult(status)
+}
+
+func (e *previewToolExecutor) sessionStatusView(ctx context.Context, sessionID string) (map[string]any, error) {
 	var resp struct {
 		Data sessionPreviewStatusWire `json:"data"`
 	}
 	if err := e.client.Do(ctx, http.MethodGet, e.sessionPreviewPath(sessionID), nil, &resp); err != nil {
-		return mcp.ErrorResult(fmt.Sprintf("preview status failed: %s", err))
+		return nil, err
 	}
-	return jsonResult(resp.Data.view(sessionID))
+	return resp.Data.view(sessionID), nil
 }
 
 func (w sessionPreviewStatusWire) view(sessionID string) map[string]any {
@@ -430,23 +441,25 @@ func (w sessionPreviewStatusWire) view(sessionID string) map[string]any {
 func (e *previewToolExecutor) waitSessionReady(ctx context.Context, sessionID string) *mcp.ToolCallResult {
 	deadline := time.NewTimer(previewWaitTimeout)
 	defer deadline.Stop()
-	pollInterval := e.pollInterval
-	if pollInterval <= 0 {
-		pollInterval = 3 * time.Second
-	}
-	ticker := time.NewTicker(pollInterval)
-	defer ticker.Stop()
 	started := time.Now()
 	lastPhase := ""
+	transientReported := false
 	for {
-		result := e.sessionStatus(ctx, sessionID)
-		if result.IsError {
-			return result
+		status, err := e.sessionStatusView(ctx, sessionID)
+		if err != nil {
+			if !isRetryablePreviewWaitError(ctx, err) {
+				return mcp.ErrorResult(fmt.Sprintf("preview status failed: %s", err))
+			}
+			if e.progress != nil && !transientReported {
+				fmt.Fprintf(e.progress, "preview: status temporarily unavailable; retrying (%s elapsed)\n", time.Since(started).Round(time.Second))
+				transientReported = true
+			}
+			if result := e.waitForNextPreviewPoll(ctx, deadline.C, previewRetryDelay(err), fmt.Sprintf("timed out waiting for session preview %s", sessionID)); result != nil {
+				return result
+			}
+			continue
 		}
-		var status map[string]any
-		if err := json.Unmarshal([]byte(firstText(result)), &status); err != nil {
-			return result
-		}
+		transientReported = false
 		state, _ := status["status"].(string)
 		phase, _ := status["current_phase"].(string)
 		if phase == "" {
@@ -458,18 +471,77 @@ func (e *previewToolExecutor) waitSessionReady(ctx context.Context, sessionID st
 		}
 		switch state {
 		case "ready", "partially_ready", "running":
-			return result
+			return jsonResult(status)
 		case "failed", "stopped", "expired", "unavailable":
 			return mcp.ErrorResult(fmt.Sprintf("preview %s: %v", state, status["error"]))
 		}
-		select {
-		case <-ctx.Done():
-			return mcp.ErrorResult(ctx.Err().Error())
-		case <-deadline.C:
-			return mcp.ErrorResult(fmt.Sprintf("timed out waiting for session preview %s", sessionID))
-		case <-ticker.C:
+		if result := e.waitForNextPreviewPoll(ctx, deadline.C, 0, fmt.Sprintf("timed out waiting for session preview %s", sessionID)); result != nil {
+			return result
 		}
 	}
+}
+
+func (e *previewToolExecutor) waitForNextPreviewPoll(ctx context.Context, deadline <-chan time.Time, minimumDelay time.Duration, timeoutMessage string) *mcp.ToolCallResult {
+	delay := e.pollDelay()
+	if minimumDelay > delay {
+		delay = minimumDelay
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return mcp.ErrorResult(ctx.Err().Error())
+	case <-deadline:
+		return mcp.ErrorResult(timeoutMessage)
+	case <-timer.C:
+		return nil
+	}
+}
+
+// pollDelay is the gap between status polls, shared by the tool wait loops and
+// the human-facing `preview create --wait` loop so both honour a test override.
+func (e *previewToolExecutor) pollDelay() time.Duration {
+	if e.pollInterval > 0 {
+		return e.pollInterval
+	}
+	return 3 * time.Second
+}
+
+func previewRetryDelay(err error) time.Duration {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.RetryAfter
+	}
+	return 0
+}
+
+// isRetryablePreviewWaitError reports whether a failed status poll is worth
+// retrying inside the wait budget. ctx decides first: once the caller's context
+// is done the wait is over no matter what the request returned. That ordering
+// matters because every net-stack timeout — the per-request Client.Timeout, a
+// dial timeout, an i/o timeout — reports itself as context.DeadlineExceeded, so
+// matching on the error alone would misread a transient blip as a dead wait.
+// With ctx checked up front, a timeout that surfaces while ctx is still live can
+// only have come from the per-request budget, which is exactly what to retry.
+func isRetryablePreviewWaitError(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.Status {
+		case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return true
+		default:
+			return false
+		}
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func previewSessionAndWait(args json.RawMessage) (string, bool, error) {
@@ -643,32 +715,28 @@ func (e *previewToolExecutor) waitBranchReady(ctx context.Context, previewID str
 	}
 	deadline := time.NewTimer(previewWaitTimeout)
 	defer deadline.Stop()
-	ticker := time.NewTicker(3 * time.Second)
-	defer ticker.Stop()
 	for {
-		result := e.status(ctx, mustJSON(map[string]string{"preview_id": previewID}))
-		if result.IsError {
-			return result
-		}
-		var status previewView
-		if err := json.Unmarshal([]byte(firstText(result)), &status); err != nil {
-			return result
+		status, err := e.branchStatusView(ctx, previewID)
+		if err != nil {
+			if !isRetryablePreviewWaitError(ctx, err) {
+				return mcp.ErrorResult(fmt.Sprintf("preview status failed: %s", err))
+			}
+			if result := e.waitForNextPreviewPoll(ctx, deadline.C, previewRetryDelay(err), fmt.Sprintf("timed out waiting for preview %s", previewID)); result != nil {
+				return result
+			}
+			continue
 		}
 		switch status.Status {
 		case "running", "ready", "partially_ready":
-			return result
+			return jsonResult(status)
 		case "failed", "stopped", "expired", "unavailable":
 			if status.Error != "" {
 				return mcp.ErrorResult(fmt.Sprintf("preview %s: %s", status.Status, status.Error))
 			}
 			return mcp.ErrorResult(fmt.Sprintf("preview %s", status.Status))
 		}
-		select {
-		case <-ctx.Done():
-			return mcp.ErrorResult(ctx.Err().Error())
-		case <-deadline.C:
-			return mcp.ErrorResult(fmt.Sprintf("timed out waiting for preview %s", previewID))
-		case <-ticker.C:
+		if result := e.waitForNextPreviewPoll(ctx, deadline.C, 0, fmt.Sprintf("timed out waiting for preview %s", previewID)); result != nil {
+			return result
 		}
 	}
 }
@@ -687,13 +755,21 @@ func (e *previewToolExecutor) status(ctx context.Context, args json.RawMessage) 
 	if params.SessionID != "" {
 		return e.sessionStatus(ctx, params.SessionID)
 	}
+	status, err := e.branchStatusView(ctx, params.PreviewID)
+	if err != nil {
+		return mcp.ErrorResult(fmt.Sprintf("preview status failed: %s", err))
+	}
+	return jsonResult(status)
+}
+
+func (e *previewToolExecutor) branchStatusView(ctx context.Context, previewID string) (previewView, error) {
 	var resp struct {
 		Data branchPreviewWire `json:"data"`
 	}
-	if err := e.client.Do(ctx, http.MethodGet, "/api/v1/previews/"+params.PreviewID, nil, &resp); err != nil {
-		return mcp.ErrorResult(fmt.Sprintf("preview status failed: %s", err))
+	if err := e.client.Do(ctx, http.MethodGet, "/api/v1/previews/"+previewID, nil, &resp); err != nil {
+		return previewView{}, err
 	}
-	return jsonResult(resp.Data.view())
+	return resp.Data.view(), nil
 }
 
 func (e *previewToolExecutor) list(ctx context.Context, args json.RawMessage) *mcp.ToolCallResult {
@@ -709,13 +785,9 @@ func (e *previewToolExecutor) list(ctx context.Context, args json.RawMessage) *m
 		params.SessionID = codingSessionIDFromEnv()
 	}
 	if strings.TrimSpace(params.SessionID) != "" {
-		result := e.sessionStatus(ctx, params.SessionID)
-		if result.IsError {
-			return result
-		}
-		var status map[string]any
-		if err := json.Unmarshal([]byte(firstText(result)), &status); err != nil {
-			return result
+		status, err := e.sessionStatusView(ctx, params.SessionID)
+		if err != nil {
+			return mcp.ErrorResult(fmt.Sprintf("preview list failed: %s", err))
 		}
 		return jsonResult([]map[string]any{status})
 	}
@@ -831,8 +903,8 @@ func (e *previewToolExecutor) screenshot(ctx context.Context, args json.RawMessa
 		body["inline_base64"] = *params.InlineBase64
 	} else if target.SessionID != "" {
 		// The session path is served by /observe, whose inline_base64 defaults to
-		// false. Preserve the documented "inline until artifact storage exists"
-		// behavior: request the bytes, then drop them below when an artifact
+		// false. Preserve the documented "inline until capture storage exists"
+		// behavior: request the bytes, then drop them below when a capture
 		// reference is available so the transcript stays lean.
 		body["inline_base64"] = true
 	}
@@ -851,8 +923,9 @@ func (e *previewToolExecutor) screenshot(ctx context.Context, args json.RawMessa
 			if !*params.InlineBase64 {
 				delete(screenshot, "png_base64")
 			}
-		} else if _, hasArtifact := screenshot["artifact"]; hasArtifact {
-			// Smart default: an artifact reference is enough; drop the inline bytes.
+		} else if screenshot["capture"] != nil || screenshot["artifact"] != nil {
+			// Smart default: either supported stored-reference key is enough; drop
+			// the inline bytes while API generations overlap.
 			delete(screenshot, "png_base64")
 		}
 		return jsonResult(screenshot)

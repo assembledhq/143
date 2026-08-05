@@ -52,8 +52,12 @@ export const queryKeys = {
     analyticsReport: (params?: unknown) => ["code-reviews", "analytics", params ?? null] as const,
     policy: ["code-reviews", "policy"] as const,
     githubTrigger: (repositoryId?: string | null) => ["code-reviews", "github-trigger", repositoryId ?? null] as const,
+    githubTriggers: ["code-reviews", "github-triggers"] as const,
     promptExamples: ["code-reviews", "prompt-examples"] as const,
+    detail: (sessionId: string) => ["code-reviews", "detail", sessionId] as const,
     evidence: (sessionId: string) => ["code-reviews", "evidence", sessionId] as const,
+    disputes: (sessionId: string) => ["code-reviews", "disputes", sessionId] as const,
+    disputeQueue: (params?: unknown) => ["code-reviews", "dispute-queue", params ?? null] as const,
   },
   sessionComposer: {
     files: (repositoryId: string, branch: string, query: string) => ["session-composer", "files", repositoryId, branch, query] as const,

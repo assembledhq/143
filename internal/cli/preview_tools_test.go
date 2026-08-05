@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -54,6 +56,135 @@ func TestPreviewToolExecutor_WaitSessionReadyReportsPhaseChanges(t *testing.T) {
 	require.Contains(t, progress.String(), "readiness", "wait output should surface the terminal readiness phase")
 }
 
+func TestPreviewToolExecutor_WaitSessionReadyRetriesTransientStatusErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		statusCode int
+	}{
+		{name: "rate limited", statusCode: http.StatusTooManyRequests},
+		{name: "bad gateway", statusCode: http.StatusBadGateway},
+		{name: "service unavailable", statusCode: http.StatusServiceUnavailable},
+		{name: "gateway timeout", statusCode: http.StatusGatewayTimeout},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var calls atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if calls.Add(1) == 1 {
+					w.WriteHeader(tt.statusCode)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, err := w.Write([]byte(`{"data":{"instance":{"id":"preview-1","session_id":"session-1","status":"ready","current_phase":"readiness"}}}`))
+				require.NoError(t, err, "ready status response should write")
+			}))
+			defer server.Close()
+
+			var progress bytes.Buffer
+			executor := &previewToolExecutor{
+				client:       NewClient(Config{ServerURL: server.URL, Token: "token"}),
+				progress:     &progress,
+				pollInterval: time.Millisecond,
+			}
+			result := executor.waitSessionReady(context.Background(), "session-1")
+
+			require.False(t, result.IsError, "wait should recover from a transient status response")
+			require.Equal(t, int64(2), calls.Load(), "wait should poll again after a transient response")
+			require.Contains(t, progress.String(), "temporarily unavailable", "wait should explain that transient status errors are being retried")
+		})
+	}
+}
+
+func TestPreviewToolExecutor_WaitSessionReadyFailsFastOnPermanentStatusError(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	executor := &previewToolExecutor{
+		client:       NewClient(Config{ServerURL: server.URL, Token: "token"}),
+		pollInterval: time.Millisecond,
+	}
+	result := executor.waitSessionReady(context.Background(), "session-1")
+
+	require.True(t, result.IsError, "wait should return permanent authentication failures")
+	require.Equal(t, int64(1), calls.Load(), "wait should not retry a permanent status failure")
+	require.Contains(t, firstText(result), "HTTP 401", "wait should preserve the permanent status error")
+}
+
+func TestIsRetryablePreviewWaitError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		err       error
+		cancelCtx bool
+		expected  bool
+	}{
+		{name: "transient API status", err: &APIError{Status: http.StatusServiceUnavailable}, expected: true},
+		{name: "unexpected EOF", err: io.ErrUnexpectedEOF, expected: true},
+		{name: "authentication failure", err: &APIError{Status: http.StatusUnauthorized}, expected: false},
+		{name: "permanent transport error", err: errors.New("malformed request"), expected: false},
+		// Every net-stack timeout reports itself as context.DeadlineExceeded, so
+		// the live-context cases below are what separate a per-request timeout
+		// (retry) from an exhausted wait budget (give up).
+		{name: "per-request timeout while wait budget remains", err: context.DeadlineExceeded, expected: true},
+		{name: "i/o timeout while wait budget remains", err: os.ErrDeadlineExceeded, expected: true},
+		{name: "caller context cancelled", err: &APIError{Status: http.StatusServiceUnavailable}, cancelCtx: true, expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := t.Context()
+			if tt.cancelCtx {
+				cancelled, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = cancelled
+			}
+
+			require.Equal(t, tt.expected, isRetryablePreviewWaitError(ctx, tt.err), "retry classification should match the error's recoverability")
+		})
+	}
+}
+
+// A stalled request is the transient failure the preview wait exists to survive:
+// the API server accepts the connection but goes quiet while the sandbox comes
+// up. It reaches the classifier as context.DeadlineExceeded, indistinguishable
+// by error value from an exhausted wait budget, so it only stays retryable while
+// the caller's context is still live.
+func TestIsRetryablePreviewWaitErrorRetriesRequestTimeout(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		server.Close()
+	})
+
+	client := NewClient(Config{ServerURL: server.URL}).WithRequestTimeout(50 * time.Millisecond)
+	err := client.Do(t.Context(), http.MethodGet, "/api/v1/previews/preview-1", nil, nil)
+	require.Error(t, err, "a stalled response should trip the per-request timeout")
+
+	require.True(t, isRetryablePreviewWaitError(t.Context(), err), "a per-request timeout should be retried while the wait budget remains")
+}
+
 func TestPreviewToolExecutor_SessionScreenshotOmitsInlineBase64(t *testing.T) {
 	t.Parallel()
 
@@ -98,7 +229,7 @@ func TestPreviewToolExecutor_InternalCreateRejectsBranchTarget(t *testing.T) {
 	require.NotContains(t, firstText(result), "not both", "should not surface the misleading not-both error")
 }
 
-func TestPreviewToolExecutor_SessionScreenshotInlinesWithoutArtifact(t *testing.T) {
+func TestPreviewToolExecutor_SessionScreenshotInlinesWithoutCapture(t *testing.T) {
 	t.Parallel()
 
 	var gotBody map[string]any
@@ -115,15 +246,15 @@ func TestPreviewToolExecutor_SessionScreenshotInlinesWithoutArtifact(t *testing.
 
 	require.False(t, result.IsError, "screenshot should succeed")
 	require.Equal(t, true, gotBody["inline_base64"], "session screenshot should request bytes by default so the image is not silently dropped")
-	require.Contains(t, firstText(result), "png_base64", "without artifact storage the image must still be inlined by default")
+	require.Contains(t, firstText(result), "png_base64", "without capture storage the image must still be inlined by default")
 }
 
-func TestPreviewToolExecutor_SessionScreenshotDropsInlineWhenArtifactPresent(t *testing.T) {
+func TestPreviewToolExecutor_SessionScreenshotDropsInlineWhenCapturePresent(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, err := w.Write([]byte(`{"data":{"screenshot":{"page_title":"Home","url":"https://preview.test/","png_base64":"abc","artifact":{"id":"art-1","url":"https://cdn.test/art-1.png"},"captured_at":"2026-06-27T00:00:00Z"}}}`))
+		_, err := w.Write([]byte(`{"data":{"screenshot":{"page_title":"Home","url":"https://preview.test/","png_base64":"abc","capture":{"id":"art-1","url":"https://cdn.test/art-1.png"},"captured_at":"2026-06-27T00:00:00Z"}}}`))
 		require.NoError(t, err, "test response should write")
 	}))
 	defer server.Close()
@@ -132,8 +263,26 @@ func TestPreviewToolExecutor_SessionScreenshotDropsInlineWhenArtifactPresent(t *
 	result := executor.screenshot(context.Background(), mustJSON(map[string]any{"session_id": "session-1"}))
 
 	require.False(t, result.IsError, "screenshot should succeed")
-	require.NotContains(t, firstText(result), "png_base64", "an artifact reference should replace inline bytes in the transcript")
-	require.Contains(t, firstText(result), "art-1", "artifact reference should be retained")
+	require.NotContains(t, firstText(result), "png_base64", "a capture reference should replace inline bytes in the transcript")
+	require.Contains(t, firstText(result), "art-1", "capture reference should be retained")
+}
+
+func TestPreviewToolExecutor_SessionScreenshotDropsInlineForLegacyStoredReference(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"data":{"screenshot":{"png_base64":"abc","artifact":{"id":"legacy-1"}}}}`))
+		require.NoError(t, err, "test response should write")
+	}))
+	defer server.Close()
+
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
+	result := executor.screenshot(context.Background(), mustJSON(map[string]any{"session_id": "session-1"}))
+
+	require.False(t, result.IsError, "screenshot should succeed against a draining API generation")
+	require.NotContains(t, firstText(result), "png_base64", "legacy stored reference should still replace inline bytes")
+	require.Contains(t, firstText(result), "legacy-1", "legacy stored reference should remain in the response")
 }
 
 func TestPreviewToolExecutor_InteractParsesJSONSteps(t *testing.T) {
@@ -205,7 +354,7 @@ func TestPreviewToolExecutor_ActUsesUnifiedEndpoint(t *testing.T) {
 		require.Equal(t, "/api/v1/sessions/session-1/preview/act", r.URL.Path, "act should use the unified endpoint")
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody), "act body should decode")
 		w.Header().Set("Content-Type", "application/json")
-		_, err := w.Write([]byte(`{"data":{"interaction":{"steps":[{"success":true}]},"observation":{"screenshot":{"png_base64":"iVBORw0KGgo=","artifact":{"id":"artifact-1"}},"ready":true}}}`))
+		_, err := w.Write([]byte(`{"data":{"interaction":{"steps":[{"success":true}]},"observation":{"screenshot":{"png_base64":"iVBORw0KGgo=","capture":{"id":"capture-1"}},"ready":true}}}`))
 		require.NoError(t, err, "act response should write")
 	}))
 	defer server.Close()
@@ -217,7 +366,7 @@ func TestPreviewToolExecutor_ActUsesUnifiedEndpoint(t *testing.T) {
 	require.Len(t, steps, 1, "act should send every requested step")
 	require.Len(t, result.Content, 2, "act should return its structured result and final native image")
 	require.Equal(t, "image", result.Content[1].Type, "act should extract the image from its nested observation")
-	require.Contains(t, firstText(result), "artifact-1", "act should retain durable screenshot artifact metadata")
+	require.Contains(t, firstText(result), "capture-1", "act should retain durable screenshot capture metadata")
 	require.NotContains(t, firstText(result), "png_base64", "act text should not duplicate native image bytes")
 }
 
@@ -409,7 +558,7 @@ func TestPreviewToolExecutor_ScreenshotTargetsPreviewID(t *testing.T) {
 		gotPath = r.URL.Path
 		require.Equal(t, http.MethodPost, r.Method, "screenshot should use POST")
 		w.Header().Set("Content-Type", "application/json")
-		_, err := w.Write([]byte(`{"data":{"artifact":{"url":"/api/v1/uploads/files/org/preview.png"},"captured_at":"2026-06-27T00:00:00Z"}}`))
+		_, err := w.Write([]byte(`{"data":{"capture":{"url":"/api/v1/uploads/files/org/preview.png"},"captured_at":"2026-06-27T00:00:00Z"}}`))
 		require.NoError(t, err, "test response should write")
 	}))
 	defer server.Close()
@@ -422,7 +571,7 @@ func TestPreviewToolExecutor_ScreenshotTargetsPreviewID(t *testing.T) {
 
 	require.False(t, result.IsError, "screenshot should succeed")
 	require.Equal(t, "/api/v1/previews/preview-1/screenshot", gotPath, "screenshot should target preview-id endpoint")
-	require.Contains(t, firstText(result), "preview.png", "screenshot should print artifact metadata")
+	require.Contains(t, firstText(result), "preview.png", "screenshot should print capture metadata")
 }
 
 func TestPreviewToolExecutor_ListSessionPreview(t *testing.T) {
@@ -487,6 +636,31 @@ func TestPreviewToolExecutor_BranchCreateWaitPollsUntilReady(t *testing.T) {
 	require.False(t, result.IsError, "branch create with wait should succeed")
 	require.EqualValues(t, 1, atomic.LoadInt32(&statusCalls), "branch create wait should poll status until live")
 	require.Contains(t, firstText(result), `"status": "running"`, "wait result should return the ready preview status")
+}
+
+func TestPreviewToolExecutor_WaitBranchReadyRetriesTransientStatusError(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"data":{"target_id":"target-1","preview_id":"preview-1","status":"running","preview_url":"https://preview.test"}}`))
+		require.NoError(t, err, "ready branch status response should write")
+	}))
+	defer server.Close()
+
+	executor := &previewToolExecutor{
+		client:       NewClient(Config{ServerURL: server.URL, Token: "token"}),
+		pollInterval: time.Millisecond,
+	}
+	result := executor.waitBranchReady(context.Background(), "preview-1")
+
+	require.False(t, result.IsError, "branch wait should recover from a transient status response")
+	require.Equal(t, int64(2), calls.Load(), "branch wait should poll again after a transient response")
 }
 
 func TestPreviewToolExecutor_UpdateWaitReturnsUpdateResponse(t *testing.T) {

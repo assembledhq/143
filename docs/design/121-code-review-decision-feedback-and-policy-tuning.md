@@ -1,8 +1,16 @@
 # Design: Code Review Decision Feedback And Policy Tuning
 
-> **Status:** Not Started | **Last reviewed:** 2026-07-31
+> **Status:** Partially Implemented | **Last reviewed:** 2026-08-04
 >
-> **Depends on:** [../implemented/112-code-reviewer-bot-auto-approval.md](../implemented/112-code-reviewer-bot-auto-approval.md), [../backlog/11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md), [../future/116-automatic-pr-feedback-follow-through.md](116-automatic-pr-feedback-follow-through.md), [../future/16-ai-agent-evals.md](16-ai-agent-evals.md)
+> **Depends on:** [implemented/112-code-reviewer-bot-auto-approval.md](implemented/112-code-reviewer-bot-auto-approval.md), [backlog/11-review-feedback-loop.md](backlog/11-review-feedback-loop.md), [future/116-automatic-pr-feedback-follow-through.md](future/116-automatic-pr-feedback-follow-through.md), [future/16-ai-agent-evals.md](future/16-ai-agent-evals.md)
+
+## Implementation status
+
+The PR 3 Phase 1A runtime is implemented: in-app reconsideration, GitHub mention and inline-thread intake, evidence-grounded answers, durable acknowledgement/timeline states, authorization snapshots, versioned semantic cooldown dedupe, loop guards, latest-revision reassessment, admin promotion of untrusted evidence, the member escalation route, and the flat admin adjudication list. Reassessment workers use an operator kill switch and platform-wide active-work ceiling.
+
+Two cross-cutting contracts remain design gaps rather than Phase 1A implementation claims: the repository code-review-owner identity/delivery model needed for targeted notifications does not exist yet, and the retention section does not specify a retention duration, scanner behavior, or tombstone trigger. The current implementation bounds and isolates untrusted text, preserves immutable source versions, replies on GitHub, and surfaces escalation in the admin queue, but it does not invent notification recipients or destructive retention behavior without those decisions.
+
+Phase 1B remains deferred: approval spot-checks, ranked queue signals, Insights/digest expansion, and false-approval estimation. Phase 2 policy proposal generation, replay, activation, and guard-set workflows also remain deferred.
 
 ## Summary
 
@@ -106,8 +114,8 @@ code-review policy that produced the decision**, not by the feedback-bot setting
 
 | Who | Recorded | Answered | Can trigger a rerun | Queued for adjudication |
 | --- | --- | --- | --- | --- |
-| `OWNER` / `MEMBER` / `COLLABORATOR` | yes | yes | yes | yes |
-| Anyone on a private repo | yes | yes | yes | yes |
+| Trusted pull request author (`OWNER` / `MEMBER` / `COLLABORATOR`, or a human who can comment on a private repo) | yes | yes | yes | yes |
+| Other trusted humans | yes | yes | **no in Phase 1A** | yes |
 | Everyone else, including fork contributors | yes | yes | **no** | **not by default** |
 | Bots | no | no | no | no |
 
@@ -117,8 +125,10 @@ says that plainly — *"external contributors can't trigger a re-review; ask a
 maintainer to re-request one"* — because on public repositories this is the person
 most confused by a block, and a clear no is worth more than a vague yes.
 
-Compute current trust from observed facts and current org settings, with per-person
-and per-dispute overrides. Snapshot every authorization decision and its inputs,
+Compute current trust from observed facts and current org settings, with a
+per-dispute admin override in Phase 1A. A durable per-person override is deferred
+until repeated manual promotions prove it is needed; this design has no per-person
+schema or API contract. Snapshot every authorization decision and its inputs,
 settings version, evaluator version, override, and time so later rule changes do not
 rewrite history.
 
@@ -204,7 +214,7 @@ classifies direction, contested reasons, new information, and route.
 | --- | --- | --- |
 | `reassess` | Contains new information, or argues with a judgment call. Trusted author, blocked direction only | Rerun the review now |
 | `policy_signal_only` | Argues with a threshold or path rule, or triage wasn't confident enough to rerun | A rerun would change nothing — the threshold evaluates the same way every time. Say so, name the setting and its value, link to it, record the dispute, and offer **Send this to a policy owner** |
-| `answer_only` | It's a question, not a disagreement | Answer from the session evidence. No dispute record |
+| `answer_only` | It's a question, not a disagreement | Answer from the session evidence. Keep the captured source/version row for reply reconciliation and audit, but exclude it from policy influence and the adjudication queue |
 | `not_a_dispute` | Chatter | Recorded as discarded, with a one-line acknowledgement carrying the override link. No influence |
 
 `not_a_dispute` always receives a one-line acknowledgement with a link to file
@@ -221,8 +231,10 @@ explicit in-app action is always available to override it.
 threshold, here's the setting, here's who can change it" and then doing nothing is
 the low point of the whole flow: they took the trouble to explain themselves and got
 a link they can't click. **Send this to a policy owner** routes the dispute with its
-PR context into the owner's queue and digest and notifies them. The plumbing already
-exists for both, and the click doubles as the cleanest demand signal we have for
+PR context into the owner's queue and digest and notifies them. Phase 1A records the
+idempotent escalation demand signal and raises it in the admin queue; targeted
+delivery remains blocked on the repository-owner identity and channel contract in
+Open Questions. The click still doubles as the cleanest demand signal we have for
 Phase 2's volume trigger — a threshold nobody escalates is a threshold nobody
 actually minds.
 
@@ -243,14 +255,15 @@ input would be the wrong trade.
 A `reassess` uses the normal review path with trigger `dispute_reassessment`, keyed
 by dispute id. Existing explicit-request idempotency and starter-job behavior apply.
 
-**A reassessment only runs against the head it was filed on.** If the live head no
-longer equals `reviewed_head_sha`, the rerun does not start. The dispute is answered
-with *"the PR changed after you filed this — the review for `def5678` covers it"* and
-remains queued for adjudication on its own merits. Doc 112 already validates the live
-PR head on `POST /retry`, and this is the same guard for the same reason: a
-reassessment that inherits an argument about an older diff can submit a monotonic,
-unrevokable approval on code nobody actually vouched for. This is the only path in
-the design where user-supplied text can end in an approval, so it fails closed.
+**A reassessment reviews the latest GitHub revision, not `reviewed_head_sha`.** The
+reviewed head remains immutable provenance for the decision being disputed, but it
+is never an admission guard or rerun target. Admission fetches an authoritative PR
+snapshot for semantic dedupe and the starter fetches it again on every attempt. If
+commits land while an older assessment keeps the starter deferred, the next attempt
+therefore follows them. The normal review worker still detects a head change during
+an in-flight review and refuses to publish a stale decision; the ordinary
+head-change event then requests a review of the newer revision. This keeps the
+approval safety invariant while making reconsideration answer the current code.
 
 The dispute text goes in as **untrusted evidence**, screened the same way PR
 descriptions and diffs already are. It's a claim to check against the code, not
@@ -265,14 +278,14 @@ from instead of inventing one now.
 
 What remains is **not** a cost control and stays:
 
-- **Semantic dedupe** over head, title/body, dispute evidence, and policy, with a
+- **Semantic dedupe** over the latest provider head, title/body, dispute evidence,
+  and policy, with a
   short cooldown for semantically unchanged input. This is idempotency, not
   rationing: without it, three "please reconsider" comments produce three identical
   reruns and three identical replies on the same PR. Apply the same dedupe to
   empty-commit reviews.
-- **The head guard above**, which now carries more weight — with no per-PR cap, it
-  and semantic dedupe are the only things standing between a disputed decision and
-  unbounded reruns.
+- **Provider refresh at admission and starter execution**, which prevents a stale
+  local PR mirror or a long queue delay from selecting an obsolete revision.
 - **The bot-loop cycle budget** below, which stops two machines arguing forever.
 - **An operator hard ceiling and kill switch**, platform-side and invisible in normal
   operation. This is not a product limit; it's the thing you reach for at 2am when an
@@ -406,7 +419,7 @@ proposal will claim orchestrator-replayable evidence for an edit that actually
 conditioned the reviewers. Fail closed and let the test catch the omission.
 
 Persist immutable replay provenance: model/settings, rendered prompt, parser and
-implementation versions, policy, input hashes, reviewer outputs/artifacts, and
+implementation versions, policy, input hashes, reviewer records/outputs, and
 guard-member versions.
 
 **Replay measures candidate effect against a replayed baseline, not only history.**
@@ -496,7 +509,7 @@ listed.
 | Column | Type | Notes |
 | --- | --- | --- |
 | `session_id`, `pull_request_id`, `repository_id`, `policy_id` | uuid NOT NULL | FKs; deletion follows the explicit retention/tombstone policy below rather than blind cascade |
-| `reviewed_head_sha`, `decision` | text NOT NULL | What was being disputed |
+| `reviewed_head_sha`, `decision` | text NOT NULL | Immutable provenance for what was disputed; the SHA is not the reassessment target |
 | `direction` | text | Nullable until triage; then `should_have_approved` \| `should_not_have_approved` |
 | `filed_by_user_id`, `filed_by_login`, `author_association`, `author_is_pr_author` | uuid / text / bool | Filer identity and association observed at intake |
 | `repository_visibility`, `membership_evidence` | text / jsonb | Raw authorization inputs observed at intake |
@@ -543,6 +556,12 @@ override provenance, decision reason, and `decided_at`. A dispute may encounter 
 than one gate; current trust remains derived separately and never rewrites these
 events.
 
+**`code_review_dispute_escalations`** — one immutable demand-signal row per
+`(org_id, dispute_id, user_id)`, with the bounded member note and timestamp. The
+first escalation is also projected onto `escalated_at` / `escalated_by_user_id` on
+the dispute for queue reads; the ledger makes API retries idempotent per member
+without discarding escalation interest from additional members.
+
 GitHub deliveries use the existing immutable webhook-ingress ledger: one delivery
 record per delivery id, idempotent processing per delivery, and one source object
 identity per GitHub comment id. Comment edits create a new source version/body hash
@@ -566,7 +585,7 @@ awaiting a proposal.
 `superseded` | `expired`); `current_revision_id` points to an immutable structured,
 validated prompt-section delta; `rationale` cites the dispute and review;
 `replay_status`, `replay_target_result jsonb`,
-`replay_guard_result jsonb`, `replay_artifact_id`, `baseline_stable`,
+`replay_guard_result jsonb`, `replay_output_id`, `baseline_stable`,
 `guard_regressions int`, and `guard_set_size` /
 `guard_set_adjudicated int` so a reader can tell a meaningful regression count from a
 provisional one; and the outcome columns `activated_policy_id`, `decided_by_user_id`,
@@ -576,17 +595,17 @@ for the same upheld dispute; plus `(org_id, status, created_at DESC)`.
 
 **`code_review_policy_proposal_revisions`** — immutable edits to a proposal.
 `proposal_id`, `revision`, `proposed_changes jsonb NOT NULL`, `changes_hash`,
-`created_by_user_id`, replay status/artifact linkage, and supersession metadata.
+`created_by_user_id`, replay status/output linkage, and supersession metadata.
 Unique `(proposal_id, revision)` and `changes_hash`; revising a proposal inserts a
 new row and advances `current_revision_id` rather than overwriting the delta that an
 earlier replay evaluated.
 
-**`code_review_policy_replay_artifacts`** — immutable replay provenance.
+**`code_review_policy_replay_outputs`** — immutable replay provenance.
 `proposal_id`, `replay_kind`, model/version and inference settings, rendered prompt
-or artifact reference, parser/schema and implementation versions, policy id,
-title/body/head/diff hashes, reviewer-output artifact references, guard-member
+or output reference, parser/schema and implementation versions, policy id,
+title/body/head/diff hashes, reviewer-output record references, guard-member
 versions, baseline/candidate repetitions, and raw structured results. Large prompt
-and output bodies use the existing bounded artifact path.
+and output bodies use the existing bounded output path.
 
 **`code_review_approval_audits`** — the spot-check queue. `session_id`,
 `repository_id`, `pull_request_id`, and `policy_id` identify the approval.
@@ -620,14 +639,15 @@ may revise non-terminal facts. Periodic reconciliation repairs recent/non-termin
 PRs and the same projector handles backfill. Insights shows freshness, ranking
 ignores stale absence, and independence uses membership observed at event time.
 
-**`code_review_reassessment_admissions`** — one immutable row per semantic
-reassessment request, for dedupe and observability rather than rationing. Carries
+**`code_review_reassessment_admissions`** — one immutable row per dispute
+admission decision, for dedupe and observability rather than tenant rationing. Carries
 `dispute_id`, `pull_request_id`, `repository_id`, `user_id`, `semantic_input_hash`,
-`status` (`admitted` | `deduped` | `denied`), denial reason, and timestamps. Unique
-on `(org_id, pull_request_id, semantic_input_hash)` — that single constraint *is* the
-dedupe and the cooldown check, so admission is one insert whose conflict means "we
-already answered this," not a multi-counter transaction with a lock order to get
-wrong. Enqueue through the same transaction/outbox boundary. Retries reuse the row.
+`status` (`admitted` | `deduped` | `denied`), denial reason, and timestamps. It is
+unique on `(org_id, dispute_id)` so retries reuse the row. A rolling index on
+`(org_id, pull_request_id, semantic_input_hash, created_at DESC)` supports the
+15-minute semantic cooldown. Admission serializes the cooldown check and the
+operator-wide active-work ceiling under one platform advisory lock, then records the
+admission and enqueues through the same transaction/outbox boundary.
 
 There are no usage counters, no reservation/release lifecycle, and no per-tenant
 budget rows, because there are no quotas to enforce. Reassessment spend is a
@@ -647,9 +667,13 @@ ALTER TABLE code_review_session_metadata
 -- Risk reasons are only recorded when a gate FAILS, so an approval leaves no
 -- record of how close it came. Frontier margin scoring needs these.
 ALTER TABLE code_review_session_metadata
-    ADD COLUMN triggering_dispute_id uuid REFERENCES code_review_decision_disputes(id),
+    ADD COLUMN triggering_dispute_id uuid,
     ADD COLUMN files_changed int,
-    ADD COLUMN lines_changed int;
+    ADD COLUMN lines_changed int,
+    ADD CONSTRAINT fk_code_review_metadata_triggering_dispute_org
+        FOREIGN KEY (org_id, triggering_dispute_id)
+        REFERENCES code_review_decision_disputes(org_id, id)
+        ON DELETE SET NULL (triggering_dispute_id);
 
 -- Bot-loop cycle budget, mirroring the doc 116 epoch mechanic. This is a loop
 -- guard, not a cost cap: it bounds machine-only rounds, and any human comment
@@ -660,6 +684,14 @@ ALTER TABLE pull_requests
     ADD CONSTRAINT chk_pr_code_review_dispute_cycles
         CHECK (code_review_dispute_cycles_in_epoch >= 0);
 ```
+
+The production rollout installs the final `pull_requests` check constraint as
+`NOT VALID` in migration `000281`, then validates it in migration `000282`.
+This keeps the `ACCESS EXCLUSIVE` portion metadata-only and performs the table
+scan under PostgreSQL's weaker validation lock. The first `000281` production
+attempt timed out waiting for the hot table and rolled its transaction back;
+deploys therefore allowlist exactly dirty version 281 for rewind-and-retry via
+`migrate repair-known-dirty`.
 
 Versioned org/repository policy settings gain `stop_after_deterministic_failure` and
 the semantic-dedupe cooldown. They gain **no reassessment quotas** — no per-PR
@@ -672,7 +704,7 @@ platform-side they never surface to a user as a quota.
 | Job | Queue | Fires when |
 | --- | --- | --- |
 | `triage_code_review_dispute` | `feedback` | A comment is captured, or a dispute is filed in-app |
-| `run_code_review` (existing) | `agent` | Triage routed `reassess`; deduped on dispute id |
+| `start_code_review_reassessment` | `agent` | Triage routed `reassess`; creates a linked session and dispatches the existing review path |
 | `reply_code_review_dispute` | `feedback` | Triage routed `policy_signal_only` / `answer_only` / `not_a_dispute`, or a rerun finished |
 | `rank_code_review_dispute` | `feedback` | Rerun settles, PR closes, the window expires, or the dispute's base policy is superseded. Recomputes `queue_signals` and `queue_priority` |
 | `generate_code_review_policy_proposal` | `agent` | An admin upholds a dispute |
@@ -706,7 +738,7 @@ smaller dispute-body limit.
 | --- | --- | --- |
 | `POST /api/v1/code-reviews/{session_id}/disputes` | `{ body: string, contested_reason_codes?: string[] }` | `201` dispute with `intake_status: "pending"`. `422` if body empty, `404` if no such review. **No 409** — several distinct objections on one review are legitimate; GitHub source versions dedupe through the ingress ledger. Direction is inferred, never supplied |
 | `GET /api/v1/code-reviews/{session_id}/disputes` | `cursor?` | Disputes with routing, trust, and rerun linkage |
-| `POST /api/v1/code-review-disputes/{id}/escalate` | `{ note?: string }` | Member-level. Routes a `policy_signal_only` dispute to the repository's policy owners with PR context, notifies them, and marks it for the next digest. Idempotent per `(dispute, user)`; `409` if the dispute isn't in a route where escalation is meaningful |
+| `POST /api/v1/code-review-disputes/{id}/escalate` | `{ note?: string }` | Member-level. Records an idempotent escalation per `(dispute, user)` and raises the `policy_signal_only` dispute, with PR context, in the admin queue. Targeted owner notification/digest delivery starts only after the repository-owner identity/channel contract is settled; `409` if the dispute isn't in a route where escalation is meaningful |
 | `GET /api/v1/code-review-disputes` *(admin)* | `adjudication_status?`, `repository_id?`, `direction?`, `cursor?` | The adjudication queue, ordered by stable `(queue_priority, id)`, each dispute showing which signals raised it |
 | `PATCH /api/v1/code-review-disputes/{id}` *(admin)* | `{ expected_version: int, adjudication_status?: "upheld"\|"rejected"\|"needs_context", adjudication_note?, trust_override? }` | CAS update; trust override can promote an untrusted item without adjudicating it. `upheld` enqueues proposal generation only when Phase 2 is enabled. `409` if the supplied version lost a race |
 | `GET /api/v1/code-review-approval-audits` *(admin)* | `status?`, `repository_id?`, `cursor?` | Spot-check queue. `selection`, `frontier_score`, and `frontier_factors` are **omitted while queued** — the random control only works if the reviewer cannot infer the arm |
@@ -719,7 +751,10 @@ smaller dispute-body limit.
 
 Existing comment handlers capture flat-comment mentions and inline-thread replies.
 The durable ingress ledger handles delivery/source-version dedupe before triage;
-handlers do not classify meaning or parse syntax.
+handlers do not classify meaning or parse syntax. Once a comment is captured as a
+code-review dispute, its normalized PR-feedback item is retained as `ignored` with
+the dispute-specific reason and does not enter the separate automatic PR-feedback
+follow-through worker; ordinary GitHub automation triggers still observe the event.
 
 Activation atomically locks/CASes the proposal and replayed revision, validates the
 active base policy and exact delta, deactivates the old policy, inserts the new
@@ -735,7 +770,7 @@ the version acted on; the UI and retention/deletion workflows reflect current
 source state. Session/PR deletion follows explicit tombstone rules.
 
 Treat all user/repository text as delimited untrusted data. Secret-scan before
-long-term storage; bound, protect, export/delete, and never log raw artifacts.
+long-term storage; bound, protect, export/delete, and never log raw outputs.
 
 ## Success Metrics
 
@@ -762,10 +797,12 @@ minutes per resolution.
 
 ## Open Questions
 
+- What durable repository-level role defines a "code-review owner," and which in-app/email/Slack delivery channel is authoritative for escalation and merged-unsafe-approval notifications?
+- What audit retention duration, secret-scanner disposition (reject, redact, or quarantine), and source-deletion/tombstone trigger apply to dispute text?
 - After observing Phase 1 traffic, should trusted non-authors become
   `reassess`-eligible for additional judgment reason codes? They pass through the
-  same head guard and dedupe; the initial release keeps the narrower rule until
-  demand is measured.
+  same latest-revision refresh and dedupe; the initial release keeps the narrower
+  rule until demand is measured.
 - Does uncapped reassessment spend concentrate in a small number of orgs or PRs? If
   the tail is thin, it stays uncapped indefinitely. If one org is generating most of
   it, the answer is more likely a conversation with that org than a global quota.

@@ -7,6 +7,9 @@ import (
 	"github.com/google/uuid"
 )
 
+// DefaultReviewLoopMaxPasses is the product-wide default for enabled review loops.
+const DefaultReviewLoopMaxPasses = 3
+
 type ReviewLoopStatus string
 
 const (

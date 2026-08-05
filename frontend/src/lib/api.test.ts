@@ -116,12 +116,14 @@ describe('api client', () => {
         }),
       );
 
-      await api.codeReviews.list({ activity_status: 'superseded' });
-      await api.codeReviews.stats({ activity_status: 'current' });
+      await api.codeReviews.list({ activity_status: 'superseded', reason: 'blocking_findings' });
+      await api.codeReviews.stats({ activity_status: 'current', reason: 'description_failed' });
 
       expect(capturedUrls).toHaveLength(2);
       expect(new URL(capturedUrls[0]).searchParams.get('activity_status')).toBe('superseded');
       expect(new URL(capturedUrls[1]).searchParams.get('activity_status')).toBe('current');
+      expect(new URL(capturedUrls[0]).searchParams.get('reason')).toBe('blocking_findings');
+      expect(new URL(capturedUrls[1]).searchParams.get('reason')).toBe('description_failed');
     });
   });
 

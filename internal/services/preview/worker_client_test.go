@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/auth"
+	"github.com/assembledhq/143/internal/internalapi"
 	"github.com/assembledhq/143/internal/models"
+	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -235,7 +237,7 @@ func TestWorkerPreviewClient_PropagatesStructuredWorkerErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		require.NoError(t, json.NewEncoder(w).Encode(models.ErrorResponse{
-			Error: models.ErrorDetail{Code: PreviewCapacityCode, Message: "all preview slots are in use"},
+			Error: models.ErrorDetail{Code: PreviewCapacityCode, Message: "all preview slots are in use", Details: map[string]string{"stage": "bootstrap_exchange"}},
 		}), "worker error responses should encode structured errors")
 	}))
 	defer server.Close()
@@ -251,7 +253,36 @@ func TestWorkerPreviewClient_PropagatesStructuredWorkerErrors(t *testing.T) {
 	require.True(t, ok, "StartPreview should expose structured worker errors")
 	require.Equal(t, http.StatusServiceUnavailable, reqErr.StatusCode, "worker error status should be preserved")
 	require.Equal(t, PreviewCapacityCode, reqErr.Code, "worker error code should be preserved")
+	require.Equal(t, map[string]any{"stage": "bootstrap_exchange"}, reqErr.Details, "worker error details should be preserved for the public API")
+	require.Equal(t, worker.ID, reqErr.WorkerNodeID, "worker errors should retain the target node for correlated diagnostics")
 	require.Contains(t, reqErr.Error(), PreviewCapacityCode, "worker error string should include the code")
+}
+
+func TestWorkerPreviewClient_PropagatesParentRequestID(t *testing.T) {
+	t.Parallel()
+
+	const requestID = "public-request-123"
+	orgID, previewID := uuid.New(), uuid.New()
+	worker := WorkerNode{ID: "worker-1", Mode: "worker"}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, requestID, r.Header.Get(internalapi.ParentRequestIDHeader), "worker request should correlate to the originating public request")
+		require.NoError(t, json.NewEncoder(w).Encode(models.SingleResponse[*models.ScreenshotResult]{Data: &models.ScreenshotResult{URL: "https://preview.test"}}), "worker response should encode")
+	}))
+	defer server.Close()
+	worker.BaseURL = server.URL
+	client := NewWorkerPreviewClient("worker-secret")
+
+	var callErr error
+	inbound := httptest.NewRequest(http.MethodPost, "/api/v1/previews/preview/screenshot", nil)
+	inbound.Header.Set(chiMiddleware.RequestIDHeader, requestID)
+	rr := httptest.NewRecorder()
+	chiMiddleware.RequestID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, callErr = client.CaptureScreenshot(r.Context(), worker, orgID, previewID, models.ScreenshotOpts{})
+		w.WriteHeader(http.StatusNoContent)
+	})).ServeHTTP(rr, inbound)
+
+	require.NoError(t, callErr, "correlated worker request should succeed")
+	require.Equal(t, http.StatusNoContent, rr.Code, "test public handler should complete")
 }
 
 func TestWorkerPreviewClient_DecodeFailures(t *testing.T) {

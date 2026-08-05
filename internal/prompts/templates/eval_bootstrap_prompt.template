@@ -14,7 +14,7 @@ Score each PR on these dimensions:
 - **Reasonably scoped**: 10-500 lines changed, 1-15 files touched
 - **Clear problem description**: The commit message or PR body describes what was fixed/built
 - **Has associated tests**: Either existing tests cover the change, or new tests were added
-- **Clean merge**: No excessive conflict resolution artifacts
+- **Clean merge**: No leftover conflict-resolution debris such as stray conflict markers or half-merged hunks
 - **Single logical change**: Not a mega-commit with unrelated changes
 
 Prefer PRs that:

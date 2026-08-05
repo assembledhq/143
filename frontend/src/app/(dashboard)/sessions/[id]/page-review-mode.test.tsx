@@ -297,7 +297,9 @@ describe('SessionDetailPage review mode and mobile diff', () => {
 
     const actionsSheet = await screen.findByRole('dialog', { name: 'Session actions' });
     expect(within(actionsSheet).getByRole('button', { name: 'Switch to Main tab' })).toBeInTheDocument();
-    expect(within(actionsSheet).getByRole('button', { name: 'Switch to Review' })).toBeInTheDocument();
+    expect(
+      within(actionsSheet).getByRole('button', { name: 'Switch to Review (needs attention) (unread)' }),
+    ).toBeInTheDocument();
     expect(within(actionsSheet).getByRole('button', { name: 'Add agent tab' })).toBeInTheDocument();
     expect(within(actionsSheet).getByRole('button', { name: 'Rename session' })).toBeInTheDocument();
   });

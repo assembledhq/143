@@ -45,7 +45,7 @@ That shape works, but it is the wrong abstraction boundary.
    - It forces cancellation to be modeled out-of-band.
 
 2. Cancellation has leaked into shell glue.
-   - pidfiles and ttyfiles are implementation artifacts, not product concepts.
+   - pidfiles and ttyfiles are implementation outputs, not product concepts.
    - wrapper behavior is now coupled to adapter command construction.
 
 3. TTY-only agents are awkward.

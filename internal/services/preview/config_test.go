@@ -2491,5 +2491,5 @@ func TestCacheRestorablePreviewInstallVerifyPaths(t *testing.T) {
 		" .143/cache/preview-install/abc.done ",
 	})
 
-	require.Equal(t, []string{"node_modules/.bin/next"}, got, "cache-restorable verify paths should exclude platform cache paths and deduplicate workspace artifacts")
+	require.Equal(t, []string{"node_modules/.bin/next"}, got, "cache-restorable verify paths should exclude platform cache paths and deduplicate workspace outputs")
 }

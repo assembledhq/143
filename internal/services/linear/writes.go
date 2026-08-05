@@ -246,7 +246,7 @@ func (s *Service) HandleMilestone(ctx context.Context, in MilestoneInput) error 
 		})
 
 	if txErr != nil && hasRescue {
-		// Locked tx failed after we already created Linear-side artifacts.
+		// Locked tx failed after we already created Linear-side outputs.
 		// Persist the durable handles via the non-tx store on a separate
 		// connection so a retry sees them and takes the update branch.
 		// Best-effort: if this also fails the retry will double-post.

@@ -587,9 +587,15 @@ func (s *PRService) sessionURL(sessionID uuid.UUID) string {
 // API request (as opposed to org-level defaults). Fields use pointers to
 // distinguish "caller explicitly set this" from "use org default".
 type CreatePRParams struct {
-	Draft                     *bool                                `json:"draft,omitempty"`
-	AuthorMode                string                               `json:"author_mode,omitempty"`
-	ChangesetID               *uuid.UUID                           `json:"changeset_id,omitempty"`
+	Draft       *bool      `json:"draft,omitempty"`
+	AuthorMode  string     `json:"author_mode,omitempty"`
+	ChangesetID *uuid.UUID `json:"changeset_id,omitempty"`
+	// ExpectedRemoteHeadSHA is an internal branch lease derived from a durable
+	// publication or review checkpoint. It permits replacing a non-ancestor
+	// branch head only while the remote still equals the exact head previously
+	// published by this operation. It is deliberately excluded from persisted
+	// and client-controlled payloads.
+	ExpectedRemoteHeadSHA     string                               `json:"-"`
 	PublicationSource         models.SessionPublicationSource      `json:"publication_source,omitempty"`
 	PublicationQueue          models.SessionPublicationJobQueue    `json:"-"`
 	PublicationRequestPayload json.RawMessage                      `json:"-"`
@@ -837,6 +843,7 @@ func (s *PRService) PreparePublicationAttempt(
 	params.PublicationRequestPayload = append(json.RawMessage(nil), publication.RequestPayload...)
 	params.PublicationGenerationAt = publication.RequestGenerationAt
 	params.PublicationHeadBranch = publication.HeadBranch
+	params.ExpectedRemoteHeadSHA = strings.TrimSpace(stringValue(publication.PublishedHeadSHA))
 
 	started, err := s.publications.StartAttempt(ctx, run.OrgID, run.ID, changeset.ID)
 	if err != nil {
@@ -990,6 +997,9 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 		if param.ChangesetID != nil {
 			opts.ChangesetID = param.ChangesetID
+		}
+		if strings.TrimSpace(param.ExpectedRemoteHeadSHA) != "" {
+			opts.ExpectedRemoteHeadSHA = strings.TrimSpace(param.ExpectedRemoteHeadSHA)
 		}
 		if param.PublicationSource != "" {
 			opts.PublicationSource = param.PublicationSource
@@ -1160,6 +1170,10 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		if publicationErr := s.publications.EnsureRequested(ctx, run.OrgID, publication); publicationErr != nil {
 			return nil, fmt.Errorf("ensure publication operation: %w", publicationErr)
 		}
+		// The durable publication row is authoritative for branch ownership.
+		// Callers cannot grant this lease through request JSON, and reloading it
+		// here keeps direct and replayed CreatePR paths on the same safety model.
+		opts.ExpectedRemoteHeadSHA = strings.TrimSpace(stringValue(publication.PublishedHeadSHA))
 		if gateErr := validatePublicationReviewGateForCreate(run, publication.ReviewGateState); gateErr != nil {
 			return nil, gateErr
 		}
@@ -1178,9 +1192,9 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 
 	var pushed *pushResult
 	if materializedTarget {
-		pushed, err = s.pushChangesetBranch(ctx, run, &repo, orgSettings, *targetChangeset, commitMsg, authorName, authorEmail)
+		pushed, err = s.pushChangesetBranch(ctx, run, &repo, orgSettings, *targetChangeset, commitMsg, authorName, authorEmail, opts.ExpectedRemoteHeadSHA)
 	} else {
-		pushed, err = s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, defaultBranch, commitMsg, authorName, authorEmail)
+		pushed, err = s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, defaultBranch, commitMsg, authorName, authorEmail, opts.ExpectedRemoteHeadSHA)
 	}
 	if err != nil {
 		return nil, err
@@ -1381,6 +1395,7 @@ func (s *PRService) pushChangesetBranch(
 	orgSettings models.OrgSettings,
 	changeset models.SessionChangeset,
 	commitMsg, authorName, authorEmail string,
+	expectedRemoteHeadSHA string,
 ) (*pushResult, error) {
 	if s.sandboxAuth == nil {
 		return nil, fmt.Errorf("%w: sandbox auth socket not configured", ErrSandboxAuthUnavailable)
@@ -1408,6 +1423,10 @@ func (s *PRService) pushChangesetBranch(
 	if changeset.ExpectedRemoteHeadSHA != nil {
 		expected = strings.TrimSpace(*changeset.ExpectedRemoteHeadSHA)
 	}
+	publicationExpected := strings.TrimSpace(expectedRemoteHeadSHA)
+	if publicationExpected != "" {
+		expected = publicationExpected
+	}
 	if remoteHead != expected {
 		localHeadCmd := fmt.Sprintf("git -C %s rev-parse HEAD", shellQuote(*changeset.WorktreePath))
 		var localHeadOut, localHeadErr bytes.Buffer
@@ -1433,7 +1452,7 @@ func (s *PRService) pushChangesetBranch(
 	if changeset.BaseHeadSHA != nil {
 		baseHead = *changeset.BaseHeadSHA
 	}
-	script := buildPushScript(sandbox.WorkDir, commitMsgPath, authorName, authorEmail, *changeset.WorkingBranch, changeset.BaseBranch, baseHead, fmt.Sprintf("https://github.com/%s.git", repo.FullName))
+	script := buildPushScriptWithExpectedRemote(sandbox.WorkDir, commitMsgPath, authorName, authorEmail, *changeset.WorkingBranch, changeset.BaseBranch, baseHead, fmt.Sprintf("https://github.com/%s.git", repo.FullName), publicationExpected)
 	var stdout, stderr bytes.Buffer
 	exitCode, execErr = s.sandboxProvider.Exec(ctx, sandbox, script, &stdout, &stderr)
 	if execErr != nil {
@@ -1449,7 +1468,21 @@ func (s *PRService) pushChangesetBranch(
 	if err != nil {
 		return nil, fmt.Errorf("parse changeset push head: %w", err)
 	}
-	return &pushResult{HeadSHA: headSHA, Outcome: parsePushOutcome(stdout.String())}, nil
+	reconciledExpectedRemote := strings.Contains(stdout.String(), pushExpectedRemoteReconciledSentinel)
+	if reconciledExpectedRemote {
+		s.logger.Info().
+			Str("session_id", run.ID.String()).
+			Str("changeset_id", changeset.ID.String()).
+			Str("branch", *changeset.WorkingBranch).
+			Str("expected_remote_head_sha", publicationExpected).
+			Str("head_sha", headSHA).
+			Msg("reconciled publication against the expected remote checkpoint")
+	}
+	return &pushResult{
+		HeadSHA:                  headSHA,
+		Outcome:                  parsePushOutcome(stdout.String()),
+		ReconciledExpectedRemote: reconciledExpectedRemote,
+	}, nil
 }
 
 // CreateBranch pushes the session snapshot to the same remote branch that
@@ -1496,6 +1529,9 @@ func (s *PRService) CreateBranch(ctx context.Context, run *models.Session, param
 		if param.AuthorMode != "" {
 			opts.AuthorMode = param.AuthorMode
 		}
+		if strings.TrimSpace(param.ExpectedRemoteHeadSHA) != "" {
+			opts.ExpectedRemoteHeadSHA = strings.TrimSpace(param.ExpectedRemoteHeadSHA)
+		}
 	}
 	resolution, err := s.resolveToken(ctx, run, &repo, orgSettings, opts.AuthorMode)
 	if err != nil {
@@ -1514,7 +1550,7 @@ func (s *PRService) CreateBranch(ctx context.Context, run *models.Session, param
 	}
 
 	baseBranch := targetBranchForPR(run, &repo)
-	pushed, err := s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, baseBranch, commitMsg, authorName, authorEmail)
+	pushed, err := s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, baseBranch, commitMsg, authorName, authorEmail, opts.ExpectedRemoteHeadSHA)
 	if err != nil {
 		return nil, err
 	}
@@ -1597,6 +1633,9 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 		if param.ChangesetID != nil {
 			opts.ChangesetID = param.ChangesetID
 		}
+		if strings.TrimSpace(param.ExpectedRemoteHeadSHA) != "" {
+			opts.ExpectedRemoteHeadSHA = strings.TrimSpace(param.ExpectedRemoteHeadSHA)
+		}
 	}
 	var targetChangeset *models.SessionChangeset
 	if opts.ChangesetID != nil && s.changesets != nil {
@@ -1628,10 +1667,14 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 		return nil, ErrLegacyPRMissingHeadRef
 	}
 
-	if s.sandboxProvider == nil || (targetChangeset == nil && s.snapshots == nil) {
+	materializedTarget := targetChangeset != nil && targetChangeset.WorktreePath != nil && targetChangeset.WorkingBranch != nil
+	if targetChangeset != nil && !targetChangeset.IsPrimary && !materializedTarget {
+		return nil, errors.New("changeset must be materialized before PR push")
+	}
+	if s.sandboxProvider == nil || (!materializedTarget && s.snapshots == nil) {
 		return nil, fmt.Errorf("PRService: sandbox push dependencies not configured")
 	}
-	if targetChangeset == nil && (run.SnapshotKey == nil || *run.SnapshotKey == "") {
+	if !materializedTarget && (run.SnapshotKey == nil || *run.SnapshotKey == "") {
 		return nil, ErrSnapshotNotCaptured
 	}
 	if run.PendingSnapshotKey != nil && *run.PendingSnapshotKey != "" {
@@ -1690,10 +1733,10 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 	}
 
 	var pushed *pushResult
-	if targetChangeset != nil {
-		pushed, err = s.pushChangesetBranch(ctx, run, &repo, orgSettings, *targetChangeset, commitMsg, authorName, authorEmail)
+	if materializedTarget {
+		pushed, err = s.pushChangesetBranch(ctx, run, &repo, orgSettings, *targetChangeset, commitMsg, authorName, authorEmail, opts.ExpectedRemoteHeadSHA)
 	} else {
-		pushed, err = s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, "", commitMsg, authorName, authorEmail)
+		pushed, err = s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, "", commitMsg, authorName, authorEmail, opts.ExpectedRemoteHeadSHA)
 	}
 	if err != nil {
 		return nil, err
@@ -1724,7 +1767,7 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 			return nil, fmt.Errorf("record pushed changeset head: %w", recordErr)
 		}
 	}
-	if targetChangeset == nil {
+	if !materializedTarget {
 		if err := s.sessions.MarkLatestDiffSnapshotPushed(ctx, run.OrgID, run.ID, pushed.HeadSHA); err != nil {
 			s.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to mark latest diff snapshot as pushed after PR push")
 		}
@@ -1732,7 +1775,7 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 	pr.HeadSHA = &pushed.HeadSHA
 	s.enqueuePullRequestStateSync(ctx, pr, PullRequestSyncReasonHeadChanged)
 
-	if targetChangeset != nil {
+	if materializedTarget {
 		return &pr, nil
 	}
 	if pushed.CapturedSnapshotErr != nil {
@@ -1893,11 +1936,12 @@ func (s *PRService) SyncSessionTitle(ctx context.Context, session *models.Sessio
 // the caller can log it. The caller owns the temp file and MUST remove it
 // once it has finished streaming or has decided to abandon it.
 type pushResult struct {
-	HeadSHA              string
-	Outcome              branchPublishOutcome
-	CapturedSnapshotPath string
-	CapturedSnapshotSize int64
-	CapturedSnapshotErr  error
+	HeadSHA                  string
+	Outcome                  branchPublishOutcome
+	ReconciledExpectedRemote bool
+	CapturedSnapshotPath     string
+	CapturedSnapshotSize     int64
+	CapturedSnapshotErr      error
 }
 
 type branchPublishOutcome string
@@ -1914,6 +1958,7 @@ func (s *PRService) pushSessionBranch(
 	repo *models.Repository,
 	orgSettings models.OrgSettings,
 	snapshotKey, branchName, baseBranch, commitMsg, authorName, authorEmail string,
+	expectedRemoteHeadSHA string,
 ) (*pushResult, error) {
 	if s.sandboxAuth == nil {
 		return nil, fmt.Errorf("%w: sandbox auth socket not configured", ErrSandboxAuthUnavailable)
@@ -1976,7 +2021,8 @@ func (s *PRService) pushSessionBranch(
 	if run.BaseCommitSHA != nil {
 		baseCommitSHA = strings.TrimSpace(*run.BaseCommitSHA)
 	}
-	script := buildPushScript(sandbox.WorkDir, commitMsgPath, authorName, authorEmail, branchName, baseBranch, baseCommitSHA, pushURL)
+	expectedRemoteHeadSHA = strings.TrimSpace(expectedRemoteHeadSHA)
+	script := buildPushScriptWithExpectedRemote(sandbox.WorkDir, commitMsgPath, authorName, authorEmail, branchName, baseBranch, baseCommitSHA, pushURL, expectedRemoteHeadSHA)
 
 	var stdout, stderr bytes.Buffer
 	exitCode, execErr := s.sandboxProvider.Exec(ctx, sandbox, script, &stdout, &stderr)
@@ -2039,7 +2085,20 @@ func (s *PRService) pushSessionBranch(
 		return nil, fmt.Errorf("parse push head sha: %w", parseErr)
 	}
 
-	result := &pushResult{HeadSHA: headSHA, Outcome: parsePushOutcome(stdout.String())}
+	reconciledExpectedRemote := strings.Contains(stdout.String(), pushExpectedRemoteReconciledSentinel)
+	if reconciledExpectedRemote {
+		s.logger.Info().
+			Str("session_id", run.ID.String()).
+			Str("branch", branchName).
+			Str("expected_remote_head_sha", expectedRemoteHeadSHA).
+			Str("head_sha", headSHA).
+			Msg("reconciled publication against the expected remote checkpoint")
+	}
+	result := &pushResult{
+		HeadSHA:                  headSHA,
+		Outcome:                  parsePushOutcome(stdout.String()),
+		ReconciledExpectedRemote: reconciledExpectedRemote,
+	}
 	// Capture a snapshot of the post-push sandbox before the deferred Destroy
 	// runs. This is the state we want a "Fix tests" / continue resume to see:
 	// clean working tree, HEAD at the just-pushed commit, working branch
@@ -2180,6 +2239,11 @@ const pushHeadSHASentinel = "__143_HEAD_SHA="
 
 const pushOutcomeSentinel = "__143_PUSH_OUTCOME="
 
+// pushExpectedRemoteReconciledSentinel is emitted only when a server-owned
+// publication replaces a non-ancestor remote head that still exactly matches
+// its durable publication or review checkpoint.
+const pushExpectedRemoteReconciledSentinel = "__143_EXPECTED_REMOTE_RECONCILED=1"
+
 const pushBranchDivergedMessage = "remote branch has changes that are not present in this session checkpoint; refusing to force push"
 
 const pushBaseUnrelatedMessage = "remote base branch could not be found or session changes could not be replayed onto the current base branch; refusing to push"
@@ -2224,6 +2288,7 @@ branch=%[7]s
 base_branch=%[8]s
 base_commit=%[9]s
 push_url=%[6]s
+expected_remote_head=%[16]s
 remote_ref="refs/heads/$branch"
 remote_guard_ref="refs/remotes/__143_push_guard/$branch"
 base_ref="refs/heads/$base_branch"
@@ -2274,18 +2339,31 @@ push_outcome=created_remote_branch
 if [ -n "$remote_sha" ]; then
     push_outcome=updated_remote_branch
     git fetch --no-tags --quiet "$push_url" "+${remote_ref}:${remote_guard_ref}"
-    if [ "$remote_sha" = "$(git rev-parse HEAD)" ]; then
+    local_head=$(git rev-parse HEAD)
+    if [ -n "$expected_remote_head" ] && [ "$remote_sha" != "$expected_remote_head" ] && [ "$remote_sha" != "$local_head" ]; then
+        echo "%[13]s" >&2
+        exit %[14]d
+    fi
+    if [ "$remote_sha" = "$local_head" ]; then
         push_outcome=already_at_desired_head
     fi
     if ! git merge-base --is-ancestor "$remote_guard_ref" HEAD; then
         if [ "$transplanted" = 1 ]; then
             if ! git diff --quiet "$original_head" "$remote_guard_ref"; then
+                if [ -n "$expected_remote_head" ] && [ "$remote_sha" = "$expected_remote_head" ]; then
+                    echo "%[17]s"
+                else
+                    echo "%[13]s" >&2
+                    exit %[14]d
+                fi
+            fi
+        elif ! git diff --quiet HEAD "$remote_guard_ref"; then
+            if [ -n "$expected_remote_head" ] && [ "$remote_sha" = "$expected_remote_head" ]; then
+                echo "%[17]s"
+            else
                 echo "%[13]s" >&2
                 exit %[14]d
             fi
-        elif ! git diff --quiet HEAD "$remote_guard_ref"; then
-            echo "%[13]s" >&2
-            exit %[14]d
         fi
     fi
 fi
@@ -2299,6 +2377,16 @@ echo "%[10]s$(git rev-parse HEAD)"
 // handles embedded single quotes (via the `'\”` trick) — so any UTF-8
 // string is safe to interpolate.
 func buildPushScript(workDir, commitMsgPath, authorName, authorEmail, branchName, baseBranch, baseCommitSHA, pushURL string) string {
+	return buildPushScriptWithExpectedRemote(workDir, commitMsgPath, authorName, authorEmail, branchName, baseBranch, baseCommitSHA, pushURL, "")
+}
+
+// buildPushScriptWithExpectedRemote extends the normal divergence guard with
+// one narrow exception for a server-owned publication checkpoint. A
+// non-ancestor remote head may be replaced only when it still equals
+// expectedRemoteHeadSHA; the existing --force-with-lease then protects the
+// final observation-to-push race. Callers without durable ownership evidence
+// use buildPushScript and retain the original fail-closed behavior.
+func buildPushScriptWithExpectedRemote(workDir, commitMsgPath, authorName, authorEmail, branchName, baseBranch, baseCommitSHA, pushURL, expectedRemoteHeadSHA string) string {
 	return fmt.Sprintf(
 		pushScriptTemplate,
 		shellQuote(commitMsgPath),
@@ -2320,6 +2408,8 @@ func buildPushScript(workDir, commitMsgPath, authorName, authorEmail, branchName
 		pushBranchDivergedMessage,
 		pushExitBranchDiverged,
 		pushOutcomeSentinel,
+		shellQuote(strings.TrimSpace(expectedRemoteHeadSHA)),
+		pushExpectedRemoteReconciledSentinel,
 	)
 }
 
@@ -3093,11 +3183,15 @@ func (s *PRService) reconcileChildPRBasesAfterParentMerge(ctx context.Context, p
 			Base struct {
 				Ref string `json:"ref"`
 			} `json:"base"`
+			Head struct {
+				SHA string `json:"sha"`
+			} `json:"head"`
 		}
 		if jsonErr := json.Unmarshal(body, &remote); jsonErr != nil {
 			continue
 		}
 		if remote.Base.Ref == child.BaseBranch {
+			s.restoreChildPROpenAfterBaseReconciliation(ctx, child, remote.Head.SHA)
 			continue
 		}
 		if remote.Base.Ref != *parentPR.HeadRef {
@@ -3108,7 +3202,22 @@ func (s *PRService) reconcileChildPRBasesAfterParentMerge(ctx context.Context, p
 		}
 		if _, patchErr := s.doGitHubRequest(ctx, resolution.Token, http.MethodPatch, path, map[string]any{"base": child.BaseBranch}); patchErr != nil {
 			s.logger.Warn().Err(patchErr).Str("changeset_id", child.ID.String()).Str("base_branch", child.BaseBranch).Msg("failed to retarget child PR after parent merge")
+			continue
 		}
+		s.restoreChildPROpenAfterBaseReconciliation(ctx, child, remote.Head.SHA)
+	}
+}
+
+func (s *PRService) restoreChildPROpenAfterBaseReconciliation(ctx context.Context, child models.SessionChangeset, remoteHeadSHA string) {
+	if child.Status != models.ChangesetStatusExternalUpdateDetected ||
+		s.changesets == nil ||
+		child.ExpectedRemoteHeadSHA == nil ||
+		strings.TrimSpace(*child.ExpectedRemoteHeadSHA) == "" ||
+		strings.TrimSpace(remoteHeadSHA) != strings.TrimSpace(*child.ExpectedRemoteHeadSHA) {
+		return
+	}
+	if err := s.changesets.RestorePROpenAfterExternalUpdate(ctx, child.OrgID, child.SessionID, child.ID); err != nil {
+		s.logger.Warn().Err(err).Str("changeset_id", child.ID.String()).Msg("failed to restore reconciled child PR state")
 	}
 }
 
@@ -3386,6 +3495,7 @@ type PullRequestReviewCommentEvent struct {
 	OwnerOrgID       *uuid.UUID              `json:"-"`
 	DeliveryID       string                  `json:"-"`
 	FeedbackMetadata FeedbackWebhookMetadata `json:"-"`
+	RecordOnly       bool                    `json:"-"`
 	Sender           struct {
 		Login string `json:"login"`
 		Type  string `json:"type"`
@@ -3406,6 +3516,7 @@ type PullRequestReviewCommentEvent struct {
 		Side                  string                     `json:"side"`
 		DiffHunk              string                     `json:"diff_hunk"`
 		CommitID              string                     `json:"commit_id"`
+		UpdatedAt             *time.Time                 `json:"updated_at"`
 		PerformedViaGitHubApp *FeedbackGitHubAppIdentity `json:"performed_via_github_app"`
 	} `json:"comment"`
 	PullRequest struct {
@@ -3438,7 +3549,7 @@ func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, eve
 		if event.Action == "deleted" {
 			body = ""
 		}
-		if err := s.ingestPRFeedback(ctx, normalizedPRFeedback{Metadata: event.FeedbackMetadata, OwnerOrgID: event.OwnerOrgID, RepositoryID: event.Repository.ID, Repository: event.Repository.FullName, PullRequestNumber: event.PullRequest.Number, Surface: models.PRFeedbackSurfaceReviewComment, ProviderObjectID: event.Comment.ID, GitHubReviewID: &event.Comment.PullRequestReviewID, ThreadRootID: &rootID, InReplyToID: event.Comment.InReplyToID, AuthorLogin: event.Comment.User.Login, AuthorType: event.Comment.User.Type, AuthorAssociation: event.Comment.AuthorAssociation, GitHubAppID: appID, GitHubAppSlug: appSlug, Body: body, Path: &event.Comment.Path, Line: event.Comment.Line, Side: &event.Comment.Side, DiffHunk: &event.Comment.DiffHunk, CommitSHA: &event.Comment.CommitID}); err != nil {
+		if err := s.ingestPRFeedback(ctx, normalizedPRFeedback{Metadata: event.FeedbackMetadata, OwnerOrgID: event.OwnerOrgID, RepositoryID: event.Repository.ID, Repository: event.Repository.FullName, PullRequestNumber: event.PullRequest.Number, Surface: models.PRFeedbackSurfaceReviewComment, ProviderObjectID: event.Comment.ID, GitHubReviewID: &event.Comment.PullRequestReviewID, ThreadRootID: &rootID, InReplyToID: event.Comment.InReplyToID, AuthorLogin: event.Comment.User.Login, AuthorType: event.Comment.User.Type, AuthorAssociation: event.Comment.AuthorAssociation, GitHubAppID: appID, GitHubAppSlug: appSlug, Body: body, Path: &event.Comment.Path, Line: event.Comment.Line, Side: &event.Comment.Side, DiffHunk: &event.Comment.DiffHunk, CommitSHA: &event.Comment.CommitID, RecordOnly: event.RecordOnly}); err != nil {
 			return err
 		}
 	}
@@ -3461,6 +3572,9 @@ func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, eve
 		DedupeGroupID:     githubReviewCommentDedupeGroup(event.Comment.PullRequestReviewID),
 		Path:              event.Comment.Path,
 	}, event.OwnerOrgID, event.Repository.ID)
+	if event.RecordOnly {
+		return nil
+	}
 
 	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.PullRequest.Number)
 	if err != nil {
@@ -3501,15 +3615,17 @@ type IssueCommentEvent struct {
 	OwnerOrgID       *uuid.UUID              `json:"-"`
 	DeliveryID       string                  `json:"-"`
 	FeedbackMetadata FeedbackWebhookMetadata `json:"-"`
+	RecordOnly       bool                    `json:"-"`
 	Sender           struct {
 		Login string `json:"login"`
 		Type  string `json:"type"`
 	} `json:"sender"`
 	Comment struct {
-		ID      int64  `json:"id"`
-		Body    string `json:"body"`
-		HTMLURL string `json:"html_url"`
-		User    struct {
+		ID        int64      `json:"id"`
+		Body      string     `json:"body"`
+		HTMLURL   string     `json:"html_url"`
+		UpdatedAt *time.Time `json:"updated_at"`
+		User      struct {
 			Login string `json:"login"`
 			Type  string `json:"type"`
 		} `json:"user"`
@@ -3576,7 +3692,7 @@ func (s *PRService) HandleIssueCommentEvent(ctx context.Context, event IssueComm
 		if event.Action == "deleted" {
 			body = ""
 		}
-		if err := s.ingestPRFeedback(ctx, normalizedPRFeedback{Metadata: event.FeedbackMetadata, OwnerOrgID: event.OwnerOrgID, RepositoryID: event.Repository.ID, Repository: event.Repository.FullName, PullRequestNumber: event.Issue.Number, Surface: models.PRFeedbackSurfaceIssueComment, ProviderObjectID: event.Comment.ID, AuthorLogin: event.Comment.User.Login, AuthorType: event.Comment.User.Type, AuthorAssociation: event.Comment.AuthorAssociation, GitHubAppID: appID, GitHubAppSlug: appSlug, Body: body}); err != nil {
+		if err := s.ingestPRFeedback(ctx, normalizedPRFeedback{Metadata: event.FeedbackMetadata, OwnerOrgID: event.OwnerOrgID, RepositoryID: event.Repository.ID, Repository: event.Repository.FullName, PullRequestNumber: event.Issue.Number, Surface: models.PRFeedbackSurfaceIssueComment, ProviderObjectID: event.Comment.ID, AuthorLogin: event.Comment.User.Login, AuthorType: event.Comment.User.Type, AuthorAssociation: event.Comment.AuthorAssociation, GitHubAppID: appID, GitHubAppSlug: appSlug, Body: body, RecordOnly: event.RecordOnly}); err != nil {
 			return err
 		}
 	}
@@ -4051,9 +4167,8 @@ type PullRequestHead struct {
 	BaseBranch string
 }
 
-// CodeReviewPullRequestSnapshot is the current GitHub state needed to create
-// or refresh a pull request mirror before an issue-comment mention starts a
-// code review.
+// CodeReviewPullRequestSnapshot is the current GitHub state needed by code
+// review entry points that cannot safely rely on the asynchronous PR mirror.
 type CodeReviewPullRequestSnapshot struct {
 	Number      int
 	HTMLURL     string
@@ -4067,8 +4182,8 @@ type CodeReviewPullRequestSnapshot struct {
 	FromFork    bool
 }
 
-// GetCodeReviewPullRequestSnapshot loads the authoritative PR revision for an
-// issue_comment webhook, whose payload does not include head/base commit data.
+// GetCodeReviewPullRequestSnapshot loads the authoritative PR revision for
+// issue-comment mentions and dispute reassessments.
 func (s *PRService) GetCodeReviewPullRequestSnapshot(ctx context.Context, orgID, repositoryID uuid.UUID, number int) (CodeReviewPullRequestSnapshot, error) {
 	if s == nil || s.repos == nil {
 		return CodeReviewPullRequestSnapshot{}, fmt.Errorf("repository store is unavailable")

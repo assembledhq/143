@@ -54,7 +54,7 @@ create infers --repo from the cwd's git remote and --branch from HEAD when omitt
 		fmt.Fprintln(stderr, "error: not logged in — run `143-tools login`")
 		return 1
 	}
-	executor := &previewToolExecutor{client: NewClient(cfg)}
+	executor := &previewToolExecutor{client: NewClient(cfg).WithRequestTimeout(previewWaitTimeout)}
 	ctx, cancel := context.WithTimeout(context.Background(), previewWaitTimeout)
 	defer cancel()
 
@@ -191,26 +191,30 @@ func runPreviewCreate(ctx context.Context, executor *previewToolExecutor, args [
 		case <-ctx.Done():
 			fmt.Fprintf(stderr, "error: timed out waiting for preview %s\n", created.PreviewID)
 			return 1
-		case <-time.After(3 * time.Second):
+		case <-time.After(executor.pollDelay()):
 		}
 
-		statusResult := executor.status(ctx, mustJSON(map[string]string{"preview_id": created.PreviewID}))
-		if statusResult.IsError {
-			return printToolResult(statusResult, stdout, stderr)
+		current, err := executor.branchStatusView(ctx, created.PreviewID)
+		if err != nil {
+			if !isRetryablePreviewWaitError(ctx, err) {
+				fmt.Fprintf(stderr, "error: preview status failed: %s\n", err)
+				return 1
+			}
+			fmt.Fprintln(stdout, "  ... status temporarily unavailable, retrying")
+			continue
 		}
-		var current previewView
-		if err := json.Unmarshal([]byte(firstText(statusResult)), &current); err != nil {
-			return printToolResult(statusResult, stdout, stderr)
-		}
+		// These terminal sets must stay in step with waitBranchReady; a status it
+		// treats as terminal but this loop does not would poll here until the
+		// overall deadline and report a reached-ready preview as a timeout.
 		switch current.Status {
-		case "running":
+		case "running", "ready", "partially_ready":
 			url := ""
 			if current.PreviewURL != nil {
 				url = *current.PreviewURL
 			}
 			fmt.Fprintf(stdout, "Preview is live: %s\n", url)
 			return 0
-		case "failed", "stopped":
+		case "failed", "stopped", "expired", "unavailable":
 			fmt.Fprintf(stderr, "error: preview %s: %s\n", current.Status, current.Error)
 			return 1
 		default:

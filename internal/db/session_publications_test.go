@@ -96,6 +96,7 @@ func TestSessionPublicationStoreEnsureRequestedReopensRetryableTerminalOutcomeFo
 	orgID, sessionID, changesetID, repositoryID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	now := time.Now().UTC()
 	headSHA := "0123456789abcdef0123456789abcdef01234567"
+	publishedHeadSHA := "abcdef0123456789abcdef0123456789abcdef01"
 	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","changeset_id":"` + changesetID.String() + `","publication_source":"user","publication_queue":"agent"}`)
 	publication := models.SessionPublication{
 		OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID, RepositoryID: repositoryID,
@@ -107,10 +108,11 @@ func TestSessionPublicationStoreEnsureRequestedReopensRetryableTerminalOutcomeFo
 	stored := publication
 	stored.ID = uuid.New()
 	stored.State = models.SessionPublicationStateRequested
+	stored.PublishedHeadSHA = &publishedHeadSHA
 	stored.RequestedAt = now
 	stored.CreatedAt = now
 	stored.UpdatedAt = now
-	mock.ExpectQuery(`INSERT INTO session_publications[\s\S]+ON CONFLICT[\s\S]+state = CASE[\s\S]+state IN \('completed_noop', 'terminal_failed'\)[\s\S]+EXCLUDED.request_generation_at > session_publications.request_generation_at`).
+	mock.ExpectQuery(`INSERT INTO session_publications[\s\S]+ON CONFLICT[\s\S]+state = CASE[\s\S]+state IN \('completed_noop', 'terminal_failed'\)[\s\S]+EXCLUDED.request_generation_at > session_publications.request_generation_at[\s\S]+published_head_sha = CASE[\s\S]+EXCLUDED\.request_generation_at < session_publications\.request_generation_at[\s\S]+THEN session_publications\.published_head_sha[\s\S]+EXCLUDED\.repository_id IS DISTINCT FROM session_publications\.repository_id[\s\S]+EXCLUDED\.head_branch IS DISTINCT FROM session_publications\.head_branch[\s\S]+THEN NULL[\s\S]+ELSE COALESCE\(session_publications\.published_head_sha,[\s\S]+FROM session_review_loops AS loop[\s\S]+loop\.org_id = session_publications\.org_id[\s\S]+loop\.session_id = session_publications\.session_id[\s\S]+loop\.changeset_id = session_publications\.changeset_id[\s\S]+loop\.source = 'publication'[\s\S]+ORDER BY loop\.started_at DESC, loop\.id DESC`).
 		WithArgs(pgx.NamedArgs{
 			"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
 			"repository_id": repositoryID, "source": models.SessionPublicationSourceUser,
@@ -130,7 +132,7 @@ func TestSessionPublicationStoreEnsureRequestedReopensRetryableTerminalOutcomeFo
 
 	err = NewSessionPublicationStore(mock).EnsureRequested(context.Background(), orgID, &publication)
 	require.NoError(t, err, "a newer explicit request should reopen an earlier retryable terminal publication even when the desired head is unchanged")
-	require.Equal(t, stored, publication, "the reopened publication should expose the new durable intent")
+	require.Equal(t, stored, publication, "the reopened publication should preserve the branch-scoped published checkpoint")
 	require.NoError(t, mock.ExpectationsWereMet(), "publication generation reopening should remain tenant scoped")
 }
 
@@ -243,23 +245,48 @@ func TestSessionPublicationStoreEnsureRequestedGuardsPendingReviewGateInSQL(t *t
 	require.NoError(t, mock.ExpectationsWereMet(), "the review gate upsert must guard pending gates that carry a review pass budget")
 }
 
+func TestSessionPublicationStoreRecordReviewTargetAdvancesPublishedCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+	headSHA := "0123456789abcdef0123456789abcdef01234567"
+	mock.ExpectExec(`UPDATE session_publications[\s\S]+desired_head_sha = @desired_head_sha[\s\S]+published_head_sha = @desired_head_sha[\s\S]+org_id = @org_id[\s\S]+session_id = @session_id[\s\S]+changeset_id = @changeset_id`).
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+			"desired_head_sha": headSHA,
+		}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = NewSessionPublicationStore(mock).RecordReviewTarget(context.Background(), orgID, sessionID, changesetID, headSHA)
+	require.NoError(t, err, "recording a pushed review target should advance the publication-owned remote checkpoint")
+	require.NoError(t, mock.ExpectationsWereMet(), "the review target checkpoint should remain tenant and changeset scoped")
+}
+
 func TestSessionPublicationStoreApplyReviewBypassDetachesEvidence(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "test should create the database mock")
 	t.Cleanup(mock.Close)
-	orgID, sessionID, changesetID, repositoryID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	orgID, sessionID, changesetID, repositoryID, loopID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	now := time.Now().UTC()
+	revision := int64(7)
+	reviewHeadSHA := "0123456789abcdef0123456789abcdef01234567"
 	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","changeset_id":"` + changesetID.String() + `","draft":true}`)
 	publication := models.SessionPublication{
 		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID, RepositoryID: repositoryID,
 		State: models.SessionPublicationStateReviewPending, Source: models.SessionPublicationSourceUser,
 		TriggerKind: models.SessionPublicationTriggerExplicitAction, HandoffMode: models.PRHandoffModeDraftFirst,
-		AutomaticPolicySource: models.PublicationPolicySourceExplicitAction,
-		ReviewPolicySource:    models.PublicationPolicySourceExplicitBypass,
-		ReviewGateState:       models.SessionPublicationReviewGateNeedsHuman,
-		JobQueue:              models.SessionPublicationJobQueueAgent, RequestPayload: payload, RequestGenerationAt: now,
+		AutomaticPolicySource:   models.PublicationPolicySourceExplicitAction,
+		ReviewPolicySource:      models.PublicationPolicySourceExplicitBypass,
+		ReviewLoopID:            &loopID,
+		ReviewWorkspaceRevision: &revision,
+		ReviewDesiredHeadSHA:    &reviewHeadSHA,
+		ReviewGateState:         models.SessionPublicationReviewGateNeedsHuman,
+		JobQueue:                models.SessionPublicationJobQueueAgent, RequestPayload: payload, RequestGenerationAt: now,
 		BaseBranch: "main", HeadBranch: "143/session", RequestedAt: now, CreatedAt: now, UpdatedAt: now,
 	}
 	stored := publication
@@ -269,8 +296,9 @@ func TestSessionPublicationStoreApplyReviewBypassDetachesEvidence(t *testing.T) 
 	stored.ReviewLoopID = nil
 	stored.ReviewWorkspaceRevision = nil
 	stored.ReviewDesiredHeadSHA = nil
+	stored.PublishedHeadSHA = &reviewHeadSHA
 
-	mock.ExpectQuery(`UPDATE session_publications[\s\S]+review_loop_id = NULL[\s\S]+review_gate_state = 'not_required'[\s\S]+org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id`).
+	mock.ExpectQuery(`WITH publication_to_bypass AS[\s\S]+UPDATE session_review_loops AS loop[\s\S]+status = 'cancelled'[\s\S]+UPDATE session_publications[\s\S]+published_head_sha = COALESCE\(review_desired_head_sha, published_head_sha\)[\s\S]+review_loop_id = NULL[\s\S]+review_gate_state = 'not_required'[\s\S]+org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id`).
 		WithArgs(pgx.NamedArgs{
 			"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
 			"source":                  models.SessionPublicationSourceUser,
@@ -281,7 +309,7 @@ func TestSessionPublicationStoreApplyReviewBypassDetachesEvidence(t *testing.T) 
 		WillReturnRows(pgxmock.NewRows(sessionPublicationTestColumns()).AddRow(sessionPublicationTestRow(stored)...))
 
 	err = NewSessionPublicationStore(mock).ApplyReviewBypass(context.Background(), orgID, &publication)
-	require.NoError(t, err, "authorized draft bypass should atomically detach stale review evidence")
+	require.NoError(t, err, "explicit Create PR should atomically retire review and detach stale evidence")
 	require.Equal(t, stored, publication, "bypassed publication should be ready with review no longer required")
 	require.NoError(t, mock.ExpectationsWereMet(), "review bypass should remain scoped to org, session, and changeset")
 }

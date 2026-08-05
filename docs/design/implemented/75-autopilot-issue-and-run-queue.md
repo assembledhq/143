@@ -36,7 +36,7 @@ agent-driven issue execution:
   **needs a human**, or **can be started now**
 
 This is not a return to a noisy dashboard. The page should stay operationally
-calm, but the primary artifact is now a queue table instead of a briefing hero.
+calm, but the primary output is now a queue table instead of a briefing hero.
 `Sessions` remains the main operating surface for active execution, review, and
 human guidance.
 

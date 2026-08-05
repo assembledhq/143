@@ -2,7 +2,7 @@
 
 > **Status:** Partially Implemented | **Last reviewed:** 2026-06-30
 
-Preview URLs are durable product artifacts, but the process that can serve a
+Preview URLs are durable product outputs, but the process that can serve a
 preview is a live worker attachment. The control plane therefore separates:
 
 - Preview target: durable branch/session/config identity.

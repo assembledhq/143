@@ -38,7 +38,7 @@ When the document conflicts with the codebase or cannot be implemented safely as
 1. Make an end-to-end vertical slice work, then complete the remaining checklist.
 2. Keep business logic out of presentation and transport layers. Preserve module boundaries and invariants.
 3. Handle errors explicitly. Add logging, metrics, or diagnostics where operators will need them.
-4. Include migrations, generated artifacts, configuration, cleanup, and compatibility work required for a deployable result.
+4. Include migrations, generated outputs, configuration, cleanup, and compatibility work required for a deployable result.
 5. Add or update focused tests for every behavior change, including important negative cases and boundaries.
 6. Update public or internal documentation only when required by the specification or repository policy.
 7. Preserve unrelated user changes. Keep the diff focused on the selected scope.

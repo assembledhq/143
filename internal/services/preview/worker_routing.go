@@ -287,7 +287,7 @@ func (s *WorkerSelector) SelectStartNodeWithPlacement(ctx context.Context, orgID
 func (s *WorkerSelector) SelectStartNodeWithPlacementAndRequirements(ctx context.Context, orgID uuid.UUID, session *models.Session, repoID uuid.UUID, placementKey string, req WorkerSelectionRequirements) (WorkerNode, error) {
 	var placements []WorkerCachePlacement
 	if strings.TrimSpace(placementKey) != "" {
-		placements = []WorkerCachePlacement{{Kind: models.PreviewCacheKindInstallArtifact, PlacementKey: placementKey}}
+		placements = []WorkerCachePlacement{{Kind: models.PreviewCacheKindInstallOutput, PlacementKey: placementKey}}
 	}
 	return s.SelectStartNodeWithCachePlacementsAndRequirements(ctx, orgID, session, repoID, placements, req)
 }
@@ -701,7 +701,7 @@ func normalizeWorkerCachePlacements(placements []WorkerCachePlacement) []WorkerC
 		}
 		kind := placement.Kind
 		if kind == "" {
-			kind = models.PreviewCacheKindInstallArtifact
+			kind = models.PreviewCacheKindInstallOutput
 		}
 		dedupe := string(kind) + "\x00" + key
 		if _, ok := seen[dedupe]; ok {

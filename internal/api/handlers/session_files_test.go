@@ -16,7 +16,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
-	"github.com/assembledhq/143/internal/services/reviewartifact"
+	"github.com/assembledhq/143/internal/services/reviewbundle"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/assembledhq/143/internal/services/workspace"
@@ -62,10 +62,10 @@ func newTestSessionFileHandler(t *testing.T, mock pgxmock.PgxPoolIface, fr sandb
 
 func newTestSessionFileHandlerWithCache(t *testing.T, mock pgxmock.PgxPoolIface, fr sandbox.FileReader, cache *workspace.SnapshotCache) *SessionFileHandler {
 	t.Helper()
-	return newTestSessionFileHandlerWithArtifacts(t, mock, fr, cache, nil)
+	return newTestSessionFileHandlerWithBundles(t, mock, fr, cache, nil)
 }
 
-func newTestSessionFileHandlerWithArtifacts(t *testing.T, mock pgxmock.PgxPoolIface, fr sandbox.FileReader, cache *workspace.SnapshotCache, artifactReader *reviewartifact.CachedReader) *SessionFileHandler {
+func newTestSessionFileHandlerWithBundles(t *testing.T, mock pgxmock.PgxPoolIface, fr sandbox.FileReader, cache *workspace.SnapshotCache, bundleReader *reviewbundle.CachedReader) *SessionFileHandler {
 	t.Helper()
 	// Pass a nil repoStore by default — most tests don't attach a repo to
 	// the session, so resolveSandboxWorkDir falls back to /workspace and
@@ -76,7 +76,7 @@ func newTestSessionFileHandlerWithArtifacts(t *testing.T, mock pgxmock.PgxPoolIf
 		nil,
 		fr,
 		cache,
-		artifactReader,
+		bundleReader,
 		zerolog.Nop(),
 	)
 }
@@ -592,7 +592,7 @@ func TestSessionFileHandler_GetFileContext(t *testing.T) {
 	}
 }
 
-func TestSessionFileHandler_GetFileContextServesReviewArtifact(t *testing.T) {
+func TestSessionFileHandler_GetFileContextServesReviewBundle(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -601,11 +601,11 @@ func TestSessionFileHandler_GetFileContextServesReviewArtifact(t *testing.T) {
 
 	orgID := uuid.New()
 	sessionID := uuid.New()
-	artifactKey := "review-artifacts/test/session/artifact.json.gz"
-	artifactVersion := 1
-	store := stageReviewArtifactForHandlerTest(t, artifactKey, reviewartifact.Artifact{
-		Version: reviewartifact.Version,
-		Files: map[string]reviewartifact.File{
+	bundleKey := "review-bundles/test/session/bundle.json.gz"
+	bundleVersion := 1
+	store := stageReviewBundleForHandlerTest(t, bundleKey, reviewbundle.Bundle{
+		Version: reviewbundle.Version,
+		Files: map[string]reviewbundle.File{
 			"src/main.go": {
 				Path:       "src/main.go",
 				Content:    "package main\n\nfunc main() {}\n",
@@ -614,17 +614,17 @@ func TestSessionFileHandler_GetFileContextServesReviewArtifact(t *testing.T) {
 			},
 		},
 	})
-	artifactReader := reviewartifact.NewCachedReader(store, 128*1024*1024)
-	handler := newTestSessionFileHandlerWithArtifacts(t, mock, &mockFileReader{
+	bundleReader := reviewbundle.NewCachedReader(store, 128*1024*1024)
+	handler := newTestSessionFileHandlerWithBundles(t, mock, &mockFileReader{
 		readContextFn: func(context.Context, string, string, string, int, int, int) (sandbox.FileContextResult, error) {
-			t.Fatalf("workspace reader should not be called when review artifact contains the file")
+			t.Fatalf("workspace reader should not be called when review bundle contains the file")
 			return sandbox.FileContextResult{}, nil
 		},
-	}, nil, artifactReader)
+	}, nil, bundleReader)
 
-	mock.ExpectQuery("SELECT review_artifact_key, review_artifact_version").
+	mock.ExpectQuery("SELECT review_bundle_key, review_bundle_version").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"review_artifact_key", "review_artifact_version"}).AddRow(&artifactKey, &artifactVersion))
+		WillReturnRows(pgxmock.NewRows([]string{"review_bundle_key", "review_bundle_version"}).AddRow(&bundleKey, &bundleVersion))
 
 	url := fmt.Sprintf("/api/v1/sessions/%s/files/context?path=src/main.go&line=2&above=1&below=1", sessionID)
 	req := httptest.NewRequest(http.MethodGet, url, nil)
@@ -633,19 +633,19 @@ func TestSessionFileHandler_GetFileContextServesReviewArtifact(t *testing.T) {
 
 	withSessionRoute(handler.GetFileContext).ServeHTTP(w, req)
 
-	require.Equal(t, http.StatusOK, w.Code, "handler should serve context from the review artifact")
+	require.Equal(t, http.StatusOK, w.Code, "handler should serve context from the review bundle")
 	var resp models.SingleResponse[sandbox.FileContextResult]
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "response should decode")
 	require.Equal(t, []sandbox.FileLine{
 		{Number: 1, Content: "package main"},
 		{Number: 2, Content: ""},
 		{Number: 3, Content: "func main() {}"},
-	}, resp.Data.Lines, "artifact context should return the requested line window")
-	require.Equal(t, 3, resp.Data.TotalLines, "artifact context should include total line count")
+	}, resp.Data.Lines, "bundle context should return the requested line window")
+	require.Equal(t, 3, resp.Data.TotalLines, "bundle context should include total line count")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestSessionFileHandler_GetFileContextFallsBackWhenReviewArtifactMisses(t *testing.T) {
+func TestSessionFileHandler_GetFileContextFallsBackWhenReviewBundleMisses(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -655,11 +655,11 @@ func TestSessionFileHandler_GetFileContextFallsBackWhenReviewArtifactMisses(t *t
 	orgID := uuid.New()
 	sessionID := uuid.New()
 	containerID := "container-abc123"
-	artifactKey := "review-artifacts/test/session/artifact.json.gz"
-	artifactVersion := 1
-	store := stageReviewArtifactForHandlerTest(t, artifactKey, reviewartifact.Artifact{
-		Version: reviewartifact.Version,
-		Files: map[string]reviewartifact.File{
+	bundleKey := "review-bundles/test/session/bundle.json.gz"
+	bundleVersion := 1
+	store := stageReviewBundleForHandlerTest(t, bundleKey, reviewbundle.Bundle{
+		Version: reviewbundle.Version,
+		Files: map[string]reviewbundle.File{
 			"other.go": {
 				Path:       "other.go",
 				Content:    "package other\n",
@@ -668,8 +668,8 @@ func TestSessionFileHandler_GetFileContextFallsBackWhenReviewArtifactMisses(t *t
 			},
 		},
 	})
-	artifactReader := reviewartifact.NewCachedReader(store, 128*1024*1024)
-	handler := newTestSessionFileHandlerWithArtifacts(t, mock, &mockFileReader{
+	bundleReader := reviewbundle.NewCachedReader(store, 128*1024*1024)
+	handler := newTestSessionFileHandlerWithBundles(t, mock, &mockFileReader{
 		readContextFn: func(_ context.Context, gotContainerID, workDir, filePath string, line, above, below int) (sandbox.FileContextResult, error) {
 			require.Equal(t, containerID, gotContainerID, "fallback should use the live container")
 			require.Equal(t, "/workspace", workDir, "fallback should use the resolved workspace")
@@ -684,11 +684,11 @@ func TestSessionFileHandler_GetFileContextFallsBackWhenReviewArtifactMisses(t *t
 				TotalLines: 10,
 			}, nil
 		},
-	}, nil, artifactReader)
+	}, nil, bundleReader)
 
-	mock.ExpectQuery("SELECT review_artifact_key, review_artifact_version").
+	mock.ExpectQuery("SELECT review_bundle_key, review_bundle_version").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"review_artifact_key", "review_artifact_version"}).AddRow(&artifactKey, &artifactVersion))
+		WillReturnRows(pgxmock.NewRows([]string{"review_bundle_key", "review_bundle_version"}).AddRow(&bundleKey, &bundleVersion))
 	setupSessionMock(mock, orgID, sessionID, &containerID)
 
 	url := fmt.Sprintf("/api/v1/sessions/%s/files/context?path=src/main.go&line=7&above=2&below=2", sessionID)
@@ -738,13 +738,13 @@ func stageSnapshotForHandlerTest(t *testing.T, key, tarPrefix string, files map[
 	return cache
 }
 
-func stageReviewArtifactForHandlerTest(t *testing.T, key string, artifact reviewartifact.Artifact) storage.SnapshotStore {
+func stageReviewBundleForHandlerTest(t *testing.T, key string, bundle reviewbundle.Bundle) storage.SnapshotStore {
 	t.Helper()
 	store := storage.NewFileSnapshotStore(t.TempDir())
 	var buf bytes.Buffer
-	_, err := reviewartifact.Encode(&buf, artifact)
-	require.NoError(t, err, "review artifact should encode")
-	require.NoError(t, store.Save(context.Background(), key, bytes.NewReader(buf.Bytes())), "review artifact should be staged")
+	_, err := reviewbundle.Encode(&buf, bundle)
+	require.NoError(t, err, "review bundle should encode")
+	require.NoError(t, store.Save(context.Background(), key, bytes.NewReader(buf.Bytes())), "review bundle should be staged")
 	return store
 }
 

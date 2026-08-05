@@ -1,6 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
-import { mapSharedBrowserPoint, SharedBrowserSurface } from "./shared-browser-surface";
+import {
+  mapSharedBrowserPoint,
+  sharedBrowserErrorMessage,
+  SharedBrowserSurface,
+} from "./shared-browser-surface";
 
 const mocks = vi.hoisted(() => ({
   control: vi.fn(),
@@ -34,6 +39,10 @@ describe("SharedBrowserSurface", () => {
     mocks.acquire.mockResolvedValue({ state: "human_control" });
     mocks.release.mockResolvedValue({ state: "agent_control" });
     mocks.act.mockResolvedValue({});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("shows the agent-owned shared browser as watch-only", async () => {
@@ -82,6 +91,48 @@ describe("SharedBrowserSurface", () => {
     expect(mocks.act).toHaveBeenNthCalledWith(2, "session-1", [{ action: "press", value: "b" }]);
     expect(mocks.act).toHaveBeenNthCalledWith(3, "session-1", [{ action: "press", value: "c" }]);
   });
+
+  it("keeps a transient observation failure quiet when the next poll recovers", async () => {
+    vi.useFakeTimers();
+    mocks.control.mockResolvedValue({ state: "agent_control" });
+    mocks.observe.mockRejectedValueOnce(new Error("temporary preview failure"));
+
+    renderWithProviders(<SharedBrowserSurface sessionId="session-1" />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(7000);
+    });
+
+    expect(mocks.observe).toHaveBeenCalledTimes(3);
+    expect(screen.getByRole("img", { name: "Dashboard" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("shows one stable error after a sustained observation outage", async () => {
+    vi.useFakeTimers();
+    mocks.control.mockResolvedValue({ state: "agent_control" });
+    mocks.observe.mockRejectedValue(new Error("preview browser operation failed"));
+
+    renderWithProviders(<SharedBrowserSurface sessionId="session-1" />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4999);
+    });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5001);
+    });
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("Shared browser unavailable");
+    expect(alert).toHaveTextContent("The session browser is not responding. Retrying automatically.");
+    expect(alert).not.toHaveTextContent("ApiError");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+  });
 });
 
 describe("mapSharedBrowserPoint", () => {
@@ -89,5 +140,14 @@ describe("mapSharedBrowserPoint", () => {
     const rect = { left: 0, top: 0, width: 1000, height: 500 };
     expect(mapSharedBrowserPoint(rect, { width: 390, height: 844 }, 100, 250)).toBeNull();
     expect(mapSharedBrowserPoint(rect, { width: 390, height: 844 }, 500, 250)).toEqual({ x: 195, y: 422 });
+  });
+});
+
+describe("sharedBrowserErrorMessage", () => {
+  it("uses the readable message without exposing the error class name", () => {
+    const error = new Error("preview browser operation failed");
+    error.name = "ApiError";
+
+    expect(sharedBrowserErrorMessage(error)).toBe("preview browser operation failed");
   });
 });

@@ -4661,6 +4661,7 @@ type stubPRService struct {
 	pushChangesToPRFn              func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
 	markPullRequestReadyFn         func(context.Context, uuid.UUID, uuid.UUID, string) error
 	syncPullRequestStateFn         func(context.Context, uuid.UUID, uuid.UUID) error
+	getCodeReviewPRSnapshotFn      func(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewPullRequestSnapshot, error)
 	rebuildPullRequestHealthFn     func(context.Context, uuid.UUID, uuid.UUID) (bool, error)
 	reconcilePullRequestFn         func(context.Context, uuid.UUID, int) error
 	enrichPullRequestHealthFn      func(context.Context, uuid.UUID, uuid.UUID, int64) error
@@ -4719,6 +4720,13 @@ func (s *stubPRService) SyncPullRequestState(ctx context.Context, orgID, pullReq
 		return s.syncPullRequestStateFn(ctx, orgID, pullRequestID)
 	}
 	return nil
+}
+
+func (s *stubPRService) GetCodeReviewPullRequestSnapshot(ctx context.Context, orgID, repositoryID uuid.UUID, number int) (ghservice.CodeReviewPullRequestSnapshot, error) {
+	if s.getCodeReviewPRSnapshotFn != nil {
+		return s.getCodeReviewPRSnapshotFn(ctx, orgID, repositoryID, number)
+	}
+	return ghservice.CodeReviewPullRequestSnapshot{}, nil
 }
 
 func (s *stubPRService) RebuildPullRequestHealthFromCheckStates(ctx context.Context, orgID, pullRequestID uuid.UUID) (bool, error) {
@@ -5716,6 +5724,66 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEnqueueSessionReviewLoopReconciliationDefersDedicatedRecoveryJob(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	t.Cleanup(mock.Close)
+	orgID, threadID, jobID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Date(2026, 8, 3, 7, 0, 0, 0, time.UTC)
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(workerAnyArgs(7)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	err := enqueueSessionReviewLoopReconciliation(context.Background(), stores, orgID, threadID, now)
+
+	require.NoError(t, err, "review advancement failure should enqueue durable recovery")
+	require.NoError(t, mock.ExpectationsWereMet(), "recovery enqueue should include a deferred run time and thread-scoped dedupe key")
+}
+
+func TestReconcileSessionReviewLoopHandlerRestartsStrandedPublicationReviews(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	reviews := &stubWorkerReviewLoops{restarted: 3}
+	handler := newReconcileSessionReviewLoopHandler(&Services{ReviewLoops: reviews}, zerolog.Nop())
+	startedAt := time.Now().UTC()
+
+	err := handler(
+		context.Background(),
+		models.JobTypeReconcileSessionReviewLoop,
+		json.RawMessage(`{"org_id":"`+orgID.String()+`","limit":25}`),
+	)
+
+	require.NoError(t, err, "review loop recovery handler should restart eligible loops")
+	require.Len(t, reviews.reconciliations, 1, "recovery handler should run one bounded reconciliation pass")
+	require.Equal(t, orgID, reviews.reconciliations[0].orgID, "recovery should remain scoped to the job organization")
+	require.Equal(t, 25, reviews.reconciliations[0].limit, "recovery should preserve the requested batch size")
+	require.WithinDuration(t, startedAt.Add(-reviewLoopRecoveryInactiveFor), reviews.reconciliations[0].inactiveBefore, time.Second, "recovery should only restart threads idle past the safety window")
+}
+
+func TestPullRequestReconciliationAlsoRecoversStrandedPublicationReviews(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	reviews := &stubWorkerReviewLoops{restarted: 2}
+	services := &Services{PR: &stubPRService{}, ReviewLoops: reviews}
+	handler := newReconcilePullRequestStateHandler(services, zerolog.Nop())
+	startedAt := time.Now().UTC()
+
+	err := handler(
+		context.Background(),
+		"reconcile_pull_request_state",
+		json.RawMessage(`{"org_id":"`+orgID.String()+`","limit":10}`),
+	)
+
+	require.NoError(t, err, "periodic pull request reconciliation should include review recovery")
+	require.Len(t, reviews.reconciliations, 1, "periodic reconciliation should inspect stranded publication reviews")
+	require.Equal(t, orgID, reviews.reconciliations[0].orgID, "periodic recovery should remain tenant scoped")
+	require.Equal(t, 10, reviews.reconciliations[0].limit, "periodic recovery should share the bounded reconciliation batch")
+	require.WithinDuration(t, startedAt.Add(-periodicReviewLoopRecoveryInactiveFor), reviews.reconciliations[0].inactiveBefore, time.Second, "periodic recovery should use the conservative inactivity threshold")
 }
 
 func TestRebuildPullRequestHealthHandlerSkipsAutoRepairAfterNoOp(t *testing.T) {
@@ -7002,6 +7070,7 @@ func TestOpenPRHandler_StartsAutomationPrePRReviewBeforePushing(t *testing.T) {
 	require.Len(t, reviews.starts, 1, "open_pr should start exactly one automation review loop")
 	require.Equal(t, models.ReviewLoopSourceAutomation, reviews.starts[0].req.Source, "review loop should be marked automation-owned")
 	require.Equal(t, 1, reviews.starts[0].req.MaxPasses, "review loop should use the snapshotted automation pass count")
+	require.Equal(t, models.ReviewLoopFixModeExhaustive, reviews.starts[0].req.FixMode, "automation-created review loops should fix every finding")
 	require.NotNil(t, reviews.starts[0].req.AutomationRunID, "review loop should retain the automation run id")
 	require.Equal(t, automationRunID, *reviews.starts[0].req.AutomationRunID, "review loop should retain the automation run id")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
@@ -8762,8 +8831,11 @@ func workerReviewLoopColumns() []string {
 }
 
 type stubWorkerReviewLoops struct {
-	starts   []stubWorkerReviewLoopStart
-	failures []stubWorkerReviewLoopFailure
+	starts            []stubWorkerReviewLoopStart
+	failures          []stubWorkerReviewLoopFailure
+	reconciliations   []stubWorkerReviewLoopReconciliation
+	restarted         int
+	reconciliationErr error
 }
 
 type stubPublicationExecutionCoordinator struct {
@@ -8802,6 +8874,12 @@ type stubWorkerReviewLoopFailure struct {
 	summary  string
 }
 
+type stubWorkerReviewLoopReconciliation struct {
+	orgID          uuid.UUID
+	inactiveBefore time.Time
+	limit          int
+}
+
 func (s *stubWorkerReviewLoops) OnThreadTurnComplete(context.Context, uuid.UUID, uuid.UUID, string) error {
 	return nil
 }
@@ -8809,6 +8887,18 @@ func (s *stubWorkerReviewLoops) OnThreadTurnComplete(context.Context, uuid.UUID,
 func (s *stubWorkerReviewLoops) OnThreadTurnFailed(_ context.Context, orgID, threadID uuid.UUID, summary string) error {
 	s.failures = append(s.failures, stubWorkerReviewLoopFailure{orgID: orgID, threadID: threadID, summary: summary})
 	return nil
+}
+
+func (s *stubWorkerReviewLoops) ReconcileStrandedPublicationLoops(
+	_ context.Context,
+	orgID uuid.UUID,
+	inactiveBefore time.Time,
+	limit int,
+) (int, error) {
+	s.reconciliations = append(s.reconciliations, stubWorkerReviewLoopReconciliation{
+		orgID: orgID, inactiveBefore: inactiveBefore, limit: limit,
+	})
+	return s.restarted, s.reconciliationErr
 }
 
 func (s *stubWorkerReviewLoops) Start(_ context.Context, orgID, sessionID uuid.UUID, req reviewloopsvc.StartReviewLoopRequest) (*models.SessionReviewLoop, error) {
@@ -10132,8 +10222,8 @@ func TestEffectivePublicationRequestedRoleOverridesLegacyAgentPayload(t *testing
 	t.Cleanup(mock.Close)
 	orgID, userID := uuid.New(), uuid.New()
 	now := time.Now().UTC()
-	mock.ExpectQuery(`SELECT .+FROM users.+WHERE id = @id`).
-		WithArgs(pgx.NamedArgs{"id": userID}).
+	mock.ExpectQuery(`SELECT u\.id, @org_id::uuid AS org_id.+JOIN organization_memberships m.+m\.org_id = @org_id.+WHERE u\.id = @user_id`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "user_id": userID}).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url",
 			"google_id", "email_verified_at", "created_at", "settings",
@@ -10151,9 +10241,9 @@ func TestEffectivePublicationRequestedRoleOverridesLegacyAgentPayload(t *testing
 		string(models.RoleMember),
 	)
 
-	require.NoError(t, err, "legacy agent work should resolve current initiator authority")
-	require.Equal(t, string(models.RoleBuilder), role, "persisted sandbox input must not downgrade a builder initiator")
-	require.NoError(t, mock.ExpectationsWereMet(), "initiator lookup should use the scoped durable user identity")
+	require.NoError(t, err, "secondary-organization agent work should resolve current initiator authority")
+	require.Equal(t, string(models.RoleBuilder), role, "persisted sandbox input must not downgrade the active membership role")
+	require.NoError(t, mock.ExpectationsWereMet(), "worker authorization should use the session organization membership")
 }
 
 func TestPersistedOpenPRJobInputRejectsScopeDrift(t *testing.T) {
@@ -12985,7 +13075,7 @@ func TestEvalRunStatusForSession_Skipped(t *testing.T) {
 	require.NotNil(t, errMsg, "Skipped session should produce a non-nil error message")
 }
 
-func TestGradeEvalRunArtifacts_CodeCheckRequiresSnapshot(t *testing.T) {
+func TestGradeEvalRunOutputs_CodeCheckRequiresSnapshot(t *testing.T) {
 	t.Parallel()
 
 	diff := "diff --git a/app.go b/app.go"
@@ -13002,9 +13092,9 @@ func TestGradeEvalRunArtifacts_CodeCheckRequiresSnapshot(t *testing.T) {
 		PassThreshold:   0.75,
 	}
 
-	result, err := gradeEvalRunArtifacts(context.Background(), run, task, evalGraderDeps{})
+	result, err := gradeEvalRunOutputs(context.Background(), run, task, evalGraderDeps{})
 
-	require.NoError(t, err, "gradeEvalRunArtifacts should record non-executable code checks as criterion failures")
+	require.NoError(t, err, "gradeEvalRunOutputs should record non-executable code checks as criterion failures")
 	require.Equal(t, models.EvalRunStatusCompleted, result.Status, "graded eval run should be completed")
 	require.NotNil(t, result.Passed, "graded eval run should persist pass/fail")
 	require.False(t, *result.Passed, "required code checks without a snapshot should fail the run")
@@ -13014,7 +13104,7 @@ func TestGradeEvalRunArtifacts_CodeCheckRequiresSnapshot(t *testing.T) {
 	require.Equal(t, run.InputManifest, result.InputManifest, "grader should preserve the pinned input manifest")
 }
 
-func TestGradeEvalRunArtifacts_CodeCheckExecutesCommand(t *testing.T) {
+func TestGradeEvalRunOutputs_CodeCheckExecutesCommand(t *testing.T) {
 	t.Parallel()
 
 	diff := "diff --git a/app.go b/app.go"
@@ -13027,7 +13117,7 @@ func TestGradeEvalRunArtifacts_CodeCheckExecutesCommand(t *testing.T) {
 	task := models.EvalTask{ScoringCriteria: criteria, PassThreshold: 1}
 	session := models.Session{ID: uuid.New(), OrgID: uuid.New(), SnapshotKey: &snapshotKey}
 
-	result, err := gradeEvalRunArtifacts(context.Background(), run, task, evalGraderDeps{
+	result, err := gradeEvalRunOutputs(context.Background(), run, task, evalGraderDeps{
 		session:  &session,
 		provider: provider,
 		snapshots: fakeSnapshotStore{
@@ -13039,7 +13129,7 @@ func TestGradeEvalRunArtifacts_CodeCheckExecutesCommand(t *testing.T) {
 		},
 	})
 
-	require.NoError(t, err, "gradeEvalRunArtifacts should run configured code checks")
+	require.NoError(t, err, "gradeEvalRunOutputs should run configured code checks")
 	require.Equal(t, []string{"make test"}, provider.commands, "grader should execute the configured deterministic command")
 	require.NotNil(t, result.Passed, "graded eval run should persist pass/fail")
 	require.True(t, *result.Passed, "successful required code check should pass")
@@ -13047,7 +13137,7 @@ func TestGradeEvalRunArtifacts_CodeCheckExecutesCommand(t *testing.T) {
 	require.Contains(t, string(result.CriterionResults), "ok", "criterion details should include command output")
 }
 
-func TestGradeEvalRunArtifacts_LLMJudgeParsesJSON(t *testing.T) {
+func TestGradeEvalRunOutputs_LLMJudgeParsesJSON(t *testing.T) {
 	t.Parallel()
 
 	diff := "diff --git a/app.go b/app.go"
@@ -13058,9 +13148,9 @@ func TestGradeEvalRunArtifacts_LLMJudgeParsesJSON(t *testing.T) {
 	run := models.EvalRun{AgentDiff: &diff}
 	task := models.EvalTask{ScoringCriteria: criteria, PassThreshold: 0.75, IssueDescription: "Fix the bug"}
 
-	result, err := gradeEvalRunArtifacts(context.Background(), run, task, evalGraderDeps{llm: llm})
+	result, err := gradeEvalRunOutputs(context.Background(), run, task, evalGraderDeps{llm: llm})
 
-	require.NoError(t, err, "gradeEvalRunArtifacts should run LLM judge criteria")
+	require.NoError(t, err, "gradeEvalRunOutputs should run LLM judge criteria")
 	require.NotEmpty(t, llm.userPrompt, "LLM judge should receive the eval prompt and diff")
 	require.NotNil(t, result.Passed, "graded eval run should persist pass/fail")
 	require.True(t, *result.Passed, "passing LLM judge should pass")

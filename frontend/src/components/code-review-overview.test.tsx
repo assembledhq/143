@@ -1,10 +1,11 @@
+import { useState } from "react";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { subDays } from "date-fns";
+import { endOfMonth, format, startOfMonth, subDays, subMonths } from "date-fns";
 import { CodeReviewSummaryCards, formatReviewTurnaround } from "./code-review-overview";
 import { TimeRangePicker, timeRangeLabel } from "./time-range-picker";
-import { customTimeRange } from "@/lib/time-range";
+import { customTimeRange, type TimeRangeFilter } from "@/lib/time-range";
 
 function setDesktopMatch(matches: boolean) {
   Object.defineProperty(window, "matchMedia", {
@@ -104,8 +105,66 @@ describe("TimeRangePicker", () => {
     expect(screen.queryByRole("dialog", { name: "Choose time range" })).not.toBeInTheDocument();
   });
 
+  it("shows the active preset range in the calendar", async () => {
+    const user = userEvent.setup();
+    const anchor = new Date();
+    const expectedStart = startOfMonth(subMonths(anchor, 1));
+    const expectedEnd = endOfMonth(subMonths(anchor, 1));
+    render(<TimeRangePicker label="Time window" value="last_month" onValueChange={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "Time window" }));
+
+    expect(document.querySelector(`[data-day="${expectedStart.toLocaleDateString()}"]`))
+      .toHaveAttribute("data-range-start", "true");
+    expect(document.querySelector(`[data-day="${expectedEnd.toLocaleDateString()}"]`))
+      .toHaveAttribute("data-range-end", "true");
+    expect(screen.getByText(
+      `${format(expectedStart, "MMM d, yyyy")} – ${format(expectedEnd, "MMM d, yyyy")}`,
+    )).toBeInTheDocument();
+  });
+
+  it("keeps the calendar in sync after applying a preset", async () => {
+    const user = userEvent.setup();
+    const expectedStart = startOfMonth(subMonths(new Date(), 1));
+    const expectedEnd = endOfMonth(subMonths(new Date(), 1));
+
+    function Harness() {
+      const [value, setValue] = useState<TimeRangeFilter>("30d");
+      return <TimeRangePicker label="Time window" value={value} onValueChange={setValue} />;
+    }
+    render(<Harness />);
+
+    await user.click(screen.getByRole("button", { name: "Time window" }));
+    await user.click(screen.getByRole("button", { name: "Last month" }));
+    await user.click(screen.getByRole("button", { name: "Time window" }));
+
+    expect(document.querySelector(`[data-day="${expectedStart.toLocaleDateString()}"]`))
+      .toHaveAttribute("data-range-start", "true");
+    expect(document.querySelector(`[data-day="${expectedEnd.toLocaleDateString()}"]`))
+      .toHaveAttribute("data-range-end", "true");
+  });
+
   it("formats a custom range for the trigger", () => {
     expect(timeRangeLabel("custom:2026-07-01:2026-07-31")).toBe("Jul 1, 2026 – Jul 31, 2026");
+  });
+
+  it("explains why an incomplete custom range cannot be applied", async () => {
+    const user = userEvent.setup();
+    render(<TimeRangePicker label="Time window" value="30d" onValueChange={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "Time window" }));
+    const start = subDays(new Date(), 5);
+    const startButton = document.querySelector<HTMLElement>(`[data-day="${start.toLocaleDateString()}"]`);
+    expect(startButton).not.toBeNull();
+    await user.click(startButton as HTMLElement);
+    const applyButton = screen.getByRole("button", { name: "Apply range" });
+    expect(applyButton).toBeDisabled();
+
+    await user.hover(applyButton.parentElement as HTMLElement);
+
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Select an end date to apply this range.",
+    );
   });
 
   it.each([

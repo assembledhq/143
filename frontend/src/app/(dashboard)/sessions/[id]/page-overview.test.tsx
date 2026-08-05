@@ -371,11 +371,35 @@ describe('SessionDetailPage overview and review loop', () => {
 
     const repoBranchRow = screen.getByTestId('session-overview-repo-branch');
     expect(repoBranchRow).toHaveTextContent('assembledhq/143 · 143/feature-session-details');
+    expect(repoBranchRow).toHaveAttribute('title', 'assembledhq/143 · 143/feature-session-details');
+    expect(repoBranchRow).toHaveClass('truncate');
     expect(repoBranchRow).not.toHaveTextContent(/feature-session-details\s*·/);
 
     const metadataRow = screen.getByTestId('session-overview-timing');
     expect(metadataRow).not.toHaveTextContent('assembledhq/143');
     expect(metadataRow).toHaveTextContent(/Completed/);
+  });
+
+  it('keeps issue-trigger provenance compact without redundant workflow copy', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            origin: 'issue_trigger',
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={mockSessions[0].id} />);
+
+    const context = await screen.findByTestId('session-overview-context');
+    expect(within(context).getByText('Issue')).toBeInTheDocument();
+    expect(context).toContainElement(screen.getByTestId('session-overview-repo-branch'));
+    expect(context).toContainElement(screen.getByTestId('session-overview-timing'));
+    expect(screen.queryByText('Created from issue intake')).not.toBeInTheDocument();
+    expect(screen.queryByText('Started automatically from issue workflow')).not.toBeInTheDocument();
   });
 
   it('renders the session Linear chip as an outbound link when only linear_identifier_hint is available', async () => {
@@ -438,20 +462,29 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(screen.getByText('Ask a review agent to check the current diff and apply fixes.')).toBeInTheDocument();
     expect(reviewButton).toHaveAttribute('title', 'A reusable sandbox snapshot is required before review');
     const reviewAction = reviewButton.closest('[data-slot="agent-action-card-action"]');
-    expect(reviewAction).toHaveClass('w-fit', 'self-start');
+    expect(reviewAction).toHaveClass('ml-11', 'w-fit', 'self-start');
+    expect(reviewAction).toHaveClass('@min-[24rem]/agent-action:ml-0');
     expect(reviewAction).not.toHaveClass('w-full');
     expect(reviewButton).not.toHaveClass('w-full');
     const reviewTitle = screen.getByText('Review before creating a PR?');
-    const splitTitle = screen.getByText('Need smaller pull requests?');
+    const splitTitle = screen.getByText('Large change · 750 additions · 1 file');
     const reviewCard = reviewTitle.closest('[data-slot="card"]');
-    const splitCard = splitTitle.closest('[data-slot="card"]');
+    const splitSuggestion = splitTitle.closest('[data-slot="overview-suggestion"]');
     expect(reviewCard?.querySelector('[data-slot="agent-action-card-icon"] .lucide-scan-search')).toBeInTheDocument();
-    expect(splitCard?.querySelector('[data-slot="agent-action-card-icon"] .lucide-git-branch')).toBeInTheDocument();
+    // jsdom cannot evaluate container queries, so guard the placement instead:
+    // an element is never its own query container, so the row layout would be
+    // dead if the container were declared on the element that queries it.
+    const reviewCardContent = reviewCard?.querySelector('[data-slot="card-content"]');
+    expect(reviewCard?.className).toContain('@container/agent-action');
+    expect(reviewCardContent?.className).toContain('@min-[24rem]/agent-action:flex-row');
+    expect(reviewCardContent?.className).not.toContain('@container/agent-action');
+    expect(splitSuggestion?.querySelector('[data-slot="overview-suggestion-icon"] .lucide-git-branch')).toBeInTheDocument();
+    expect(splitTitle.closest('[data-slot="card"]')).toBeNull();
     expect(reviewTitle.compareDocumentPosition(splitTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
   });
 
-  it('keeps PR details at the very top of the overview before the split suggestion', async () => {
+  it('orders the card-free PR details and Result sections before the quiet split suggestion', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({
@@ -465,13 +498,48 @@ describe('SessionDetailPage overview and review loop', () => {
 
     renderWithProviders(<SessionDetailContent id={mockSessions[0].id} />);
 
-    const prDetailsTitle = await screen.findByText('PR health');
-    const splitTitle = screen.getByText('Need smaller pull requests?');
-    const prDetailsCard = prDetailsTitle.closest('[data-slot="card"]');
+    const prDetailsSection = await screen.findByRole('region', { name: 'Pull request #42' });
+    const resultSection = screen.getByTestId('session-result-section');
+    const splitSuggestion = screen.getByRole('region', { name: 'Pull request size suggestion' });
 
-    expect(prDetailsCard).not.toBeNull();
-    expect(prDetailsCard?.parentElement?.firstElementChild).toBe(prDetailsCard);
-    expect(prDetailsTitle.compareDocumentPosition(splitTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(prDetailsSection?.parentElement?.firstElementChild).toBe(prDetailsSection);
+    expect(prDetailsSection.closest('[data-slot="card"]')).toBeNull();
+    expect(resultSection.closest('[data-slot="card"]')).toBeNull();
+    expect(resultSection).toHaveClass('border-t', 'pt-4');
+    expect(prDetailsSection.compareDocumentPosition(resultSection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(resultSection.compareDocumentPosition(splitSuggestion) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('keeps the PR health placeholder card-free and still divides Result while health loads', async () => {
+    server.use(
+      http.get('/api/v1/pull-requests/:id/health', () => new Promise(() => {})),
+    );
+
+    renderWithProviders(<SessionDetailContent id={mockSessions[0].id} />);
+
+    const loadingSection = (await screen.findByText('Loading PR health...')).closest('[data-slot="pr-health-loading-section"]');
+    expect(loadingSection).toBeInTheDocument();
+    expect(loadingSection?.closest('[data-slot="card"]')).toBeNull();
+    expect(screen.getByTestId('session-result-section')).toHaveClass('border-t', 'pt-4');
+  });
+
+  it('renders Result without a leading divider when no pull request section precedes it', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json({ data: null });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={mockSessions[0].id} />);
+
+    const resultSection = await screen.findByTestId('session-result-section');
+
+    expect(screen.queryByRole('region', { name: /^Pull request #/ })).not.toBeInTheDocument();
+    expect(resultSection.closest('[data-slot="card"]')).toBeNull();
+    // Asserted separately: `.not.toHaveClass(a, b)` only requires one of the
+    // two classes to be absent, so a single call would pass on a half-divider.
+    expect(resultSection).not.toHaveClass('border-t');
+    expect(resultSection).not.toHaveClass('pt-4');
   });
 
   it('shows a compact status card while the Overview review loop is running', async () => {
@@ -540,7 +608,7 @@ describe('SessionDetailPage overview and review loop', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect(await screen.findByText('PR health')).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: 'Pull request #42' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Review' })).toBeInTheDocument();
     expect(screen.queryByText('Review work')).not.toBeInTheDocument();
     expect(screen.queryByText('Review this work')).not.toBeInTheDocument();
@@ -581,7 +649,7 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(dialog.querySelector('.lucide-clipboard-list')).not.toBeInTheDocument();
   });
 
-  it('starts a manual review loop with the selected pass count and default minimal fix mode', async () => {
+  it('starts a manual review loop with three passes and minimal fixes by default', async () => {
     const user = userEvent.setup();
     let postedBody: { max_passes: number; fix_mode?: ReviewLoopFixMode } | null = null;
 
@@ -628,7 +696,7 @@ describe('SessionDetailPage overview and review loop', () => {
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
 
     await user.click(await screen.findByRole('button', { name: 'Review & fix' }));
-    await user.click(await screen.findByRole('button', { name: 'Increase review passes' }));
+    expect(screen.getByRole('spinbutton', { name: 'Review passes' })).toHaveValue(3);
     await user.click(screen.getByRole('button', { name: 'Start review' }));
 
     await waitFor(() => {
@@ -748,7 +816,7 @@ describe('SessionDetailPage overview and review loop', () => {
     await user.click(screen.getByRole('button', { name: 'Start review' }));
 
     await waitFor(() => {
-      expect(postedBody).toEqual({ agent_type: 'claude_code', max_passes: 2, fix_mode: 'minimal' });
+      expect(postedBody).toEqual({ agent_type: 'claude_code', max_passes: 3, fix_mode: 'minimal' });
     });
   });
 

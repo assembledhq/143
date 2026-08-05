@@ -777,7 +777,7 @@ func (r *StartRunner) previewCachesAlreadyWarm(ctx context.Context, sb *agent.Sa
 		if err != nil {
 			return false, err
 		}
-		hit, err := r.dependencyCache.FindPathCache(ctx, opts.OrgID, opts.RepositoryID, models.PreviewCacheKindInstallArtifact, cacheKey)
+		hit, err := r.dependencyCache.FindPathCache(ctx, opts.OrgID, opts.RepositoryID, models.PreviewCacheKindInstallOutput, cacheKey)
 		if err != nil {
 			return false, err
 		}
@@ -819,7 +819,7 @@ func (r *StartRunner) previewCachePrewarmStartupSnapshotStatus(ctx context.Conte
 func previewBuildPrewarmPlatformEnv() map[string]string {
 	// Branch cache prewarm has no runtime preview instance yet, so it cannot
 	// safely set PREVIEW_ORIGIN without baking a fake per-instance URL into
-	// static build artifacts. Keep the stable preview-mode markers in parity
+	// static build outputs. Keep the stable preview-mode markers in parity
 	// with real launches and let runtime-specific env arrive on actual start.
 	return map[string]string{
 		previewPlatformNameEnv:    previewPlatformNameValue,

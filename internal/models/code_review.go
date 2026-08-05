@@ -194,17 +194,18 @@ type CodeReviewUpdatedEvent struct {
 type CodeReviewTriggerSource string
 
 const (
-	CodeReviewTriggerSourceAppReviewer   CodeReviewTriggerSource = "app_reviewer"
-	CodeReviewTriggerSourceAliasReviewer CodeReviewTriggerSource = "alias_reviewer"
-	CodeReviewTriggerSourceTeamReviewer  CodeReviewTriggerSource = "team_reviewer"
-	CodeReviewTriggerSourceSlashCommand  CodeReviewTriggerSource = "slash_command"
-	CodeReviewTriggerSourceAutoPolicy    CodeReviewTriggerSource = "auto_policy"
+	CodeReviewTriggerSourceAppReviewer         CodeReviewTriggerSource = "app_reviewer"
+	CodeReviewTriggerSourceAliasReviewer       CodeReviewTriggerSource = "alias_reviewer"
+	CodeReviewTriggerSourceTeamReviewer        CodeReviewTriggerSource = "team_reviewer"
+	CodeReviewTriggerSourceSlashCommand        CodeReviewTriggerSource = "slash_command"
+	CodeReviewTriggerSourceAutoPolicy          CodeReviewTriggerSource = "auto_policy"
+	CodeReviewTriggerSourceDisputeReassessment CodeReviewTriggerSource = "dispute_reassessment"
 )
 
 func (s CodeReviewTriggerSource) Validate() error {
 	switch s {
 	case CodeReviewTriggerSourceAppReviewer, CodeReviewTriggerSourceAliasReviewer, CodeReviewTriggerSourceTeamReviewer,
-		CodeReviewTriggerSourceSlashCommand, CodeReviewTriggerSourceAutoPolicy:
+		CodeReviewTriggerSourceSlashCommand, CodeReviewTriggerSourceAutoPolicy, CodeReviewTriggerSourceDisputeReassessment:
 		return nil
 	default:
 		return fmt.Errorf("invalid CodeReviewTriggerSource: %q", s)
@@ -239,6 +240,7 @@ const (
 	CodeReviewGitHubTriggerStatusReady              CodeReviewGitHubTriggerStatus = "ready"
 	CodeReviewGitHubTriggerStatusAuthRequired       CodeReviewGitHubTriggerStatus = "auth_required"
 	CodeReviewGitHubTriggerStatusPermissionRequired CodeReviewGitHubTriggerStatus = "permission_required"
+	CodeReviewGitHubTriggerStatusDisconnected       CodeReviewGitHubTriggerStatus = "disconnected"
 	CodeReviewGitHubTriggerStatusError              CodeReviewGitHubTriggerStatus = "error"
 )
 
@@ -246,7 +248,7 @@ func (s CodeReviewGitHubTriggerStatus) Validate() error {
 	switch s {
 	case CodeReviewGitHubTriggerStatusUnconfigured, CodeReviewGitHubTriggerStatusReady,
 		CodeReviewGitHubTriggerStatusAuthRequired, CodeReviewGitHubTriggerStatusPermissionRequired,
-		CodeReviewGitHubTriggerStatusError:
+		CodeReviewGitHubTriggerStatusDisconnected, CodeReviewGitHubTriggerStatusError:
 		return nil
 	default:
 		return fmt.Errorf("invalid CodeReviewGitHubTriggerStatus: %q", s)
@@ -272,6 +274,7 @@ type CodeReviewGitHubTriggerResponse struct {
 	Status             CodeReviewGitHubTriggerStatus         `json:"status"`
 	RepositoryID       uuid.UUID                             `json:"repository_id"`
 	RepositoryFullName string                                `json:"repository_full_name,omitempty"`
+	RepositoryStatus   RepositoryStatus                      `json:"repository_status"`
 	GitHubOrg          string                                `json:"github_org,omitempty"`
 	TeamSlug           string                                `json:"team_slug"`
 	TeamName           string                                `json:"team_name"`
@@ -463,18 +466,25 @@ type CodeReviewDescriptionPolicy struct {
 }
 
 type CodeReviewRiskPolicy struct {
-	MaxFilesChanged       int      `json:"max_files_changed"`
-	MaxLinesChanged       int      `json:"max_lines_changed"`
-	RequirePassingChecks  bool     `json:"require_passing_checks"`
-	ExcludeSensitivePaths bool     `json:"exclude_sensitive_paths"`
-	SensitivePaths        []string `json:"sensitive_paths,omitempty"`
-	AllowedPathPatterns   []string `json:"allowed_path_patterns,omitempty"`
-	BlockedPathPatterns   []string `json:"blocked_path_patterns,omitempty"`
-	RequireUpToDate       bool     `json:"require_up_to_date"`
-	AllowForks            bool     `json:"allow_forks"`
-	EligibleAuthors       []string `json:"eligible_authors,omitempty"`
-	RequiredChecks        []string `json:"required_checks,omitempty"`
+	MaxFilesChanged               int      `json:"max_files_changed"`
+	MaxLinesChanged               int      `json:"max_lines_changed"`
+	SemanticDedupeCooldownSeconds int      `json:"semantic_dedupe_cooldown_seconds"`
+	RequirePassingChecks          bool     `json:"require_passing_checks"`
+	ExcludeSensitivePaths         bool     `json:"exclude_sensitive_paths"`
+	SensitivePaths                []string `json:"sensitive_paths,omitempty"`
+	AllowedPathPatterns           []string `json:"allowed_path_patterns,omitempty"`
+	BlockedPathPatterns           []string `json:"blocked_path_patterns,omitempty"`
+	RequireUpToDate               bool     `json:"require_up_to_date"`
+	AllowForks                    bool     `json:"allow_forks"`
+	EligibleAuthors               []string `json:"eligible_authors,omitempty"`
+	RequiredChecks                []string `json:"required_checks,omitempty"`
 }
+
+const (
+	DefaultCodeReviewSemanticDedupeCooldownSeconds = 15 * 60
+	MinCodeReviewSemanticDedupeCooldownSeconds     = 60
+	MaxCodeReviewSemanticDedupeCooldownSeconds     = 24 * 60 * 60
+)
 
 type CodeReviewAgentRoster struct {
 	Reviewers                []AgentType       `json:"reviewers"`
@@ -583,13 +593,14 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 			},
 		}},
 		RiskPolicy: CodeReviewRiskPolicy{
-			MaxFilesChanged:       5,
-			MaxLinesChanged:       300,
-			RequirePassingChecks:  false,
-			ExcludeSensitivePaths: false,
-			SensitivePaths:        []string{},
-			RequireUpToDate:       false,
-			AllowForks:            false,
+			MaxFilesChanged:               5,
+			MaxLinesChanged:               300,
+			SemanticDedupeCooldownSeconds: DefaultCodeReviewSemanticDedupeCooldownSeconds,
+			RequirePassingChecks:          false,
+			ExcludeSensitivePaths:         false,
+			SensitivePaths:                []string{},
+			RequireUpToDate:               false,
+			AllowForks:                    false,
 		},
 		AgentRoster: CodeReviewAgentRoster{
 			Reviewers:                []AgentType{AgentTypeCodex, AgentTypeClaudeCode},
@@ -631,6 +642,9 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 	}
 	if config.RiskPolicy.MaxLinesChanged != 0 {
 		defaults.RiskPolicy.MaxLinesChanged = config.RiskPolicy.MaxLinesChanged
+	}
+	if config.RiskPolicy.SemanticDedupeCooldownSeconds != 0 {
+		defaults.RiskPolicy.SemanticDedupeCooldownSeconds = config.RiskPolicy.SemanticDedupeCooldownSeconds
 	}
 	defaults.RiskPolicy.RequirePassingChecks = config.RiskPolicy.RequirePassingChecks
 	defaults.RiskPolicy.ExcludeSensitivePaths = config.RiskPolicy.ExcludeSensitivePaths
@@ -720,6 +734,10 @@ func (c CodeReviewPolicyConfig) Validate() error {
 	}
 	if c.RiskPolicy.MaxLinesChanged < 1 {
 		return codeReviewPolicyFieldError(CodeReviewPolicyFieldRiskPolicy, "max_lines_changed must be positive")
+	}
+	if c.RiskPolicy.SemanticDedupeCooldownSeconds < MinCodeReviewSemanticDedupeCooldownSeconds ||
+		c.RiskPolicy.SemanticDedupeCooldownSeconds > MaxCodeReviewSemanticDedupeCooldownSeconds {
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldRiskPolicy, "semantic_dedupe_cooldown_seconds must be between 60 and 86400")
 	}
 	for _, requirement := range c.DescriptionPolicy.Requirements {
 		if err := requirement.AppliesWhen.Validate(); err != nil {
@@ -866,6 +884,7 @@ type CodeReviewSessionMetadata struct {
 	HeadSHA               string                  `db:"head_sha" json:"head_sha"`
 	FromFork              bool                    `db:"from_fork" json:"from_fork"`
 	TriggerSource         CodeReviewTriggerSource `db:"trigger_source" json:"trigger_source"`
+	TriggeringDisputeID   *uuid.UUID              `db:"-" json:"triggering_dispute_id,omitempty"`
 	Status                CodeReviewSessionStatus `db:"status" json:"status"`
 	Phase                 *CodeReviewPhase        `db:"phase" json:"phase,omitempty"`
 	StatusCode            *CodeReviewStatusCode   `db:"status_code" json:"status_code,omitempty"`
@@ -878,7 +897,7 @@ type CodeReviewSessionMetadata struct {
 	Stale                 bool                    `db:"stale" json:"stale"`
 	SupersededBySessionID *uuid.UUID              `db:"superseded_by_session_id" json:"superseded_by_session_id,omitempty"`
 	ReviewOutputKey       string                  `db:"review_output_key" json:"review_output_key"`
-	PromptArtifactKey     *string                 `db:"prompt_artifact_key" json:"prompt_artifact_key,omitempty"`
+	PromptRecordKey       *string                 `db:"prompt_record_key" json:"prompt_record_key,omitempty"`
 	GitHubReviewID        *int64                  `db:"github_review_id" json:"github_review_id,omitempty"`
 	GitHubReviewURL       *string                 `db:"github_review_url" json:"github_review_url,omitempty"`
 	FinalReviewBody       *string                 `db:"final_review_body" json:"final_review_body,omitempty"`
@@ -900,16 +919,29 @@ type CodeReviewAgentResult struct {
 	CreatedAt        time.Time                   `db:"created_at" json:"created_at"`
 }
 
-type CodeReviewPromptArtifact struct {
+type CodeReviewPromptRecord struct {
 	ID            uuid.UUID       `db:"id" json:"id"`
 	OrgID         uuid.UUID       `db:"org_id" json:"org_id"`
 	SessionID     uuid.UUID       `db:"session_id" json:"session_id"`
-	ArtifactKey   string          `db:"artifact_key" json:"artifact_key"`
+	RecordKey     string          `db:"record_key" json:"record_key"`
 	Role          string          `db:"role" json:"role"`
 	AgentProvider string          `db:"agent_provider" json:"agent_provider,omitempty"`
 	Content       string          `db:"content" json:"content"`
 	Metadata      json.RawMessage `db:"metadata" json:"metadata,omitempty"`
 	CreatedAt     time.Time       `db:"created_at" json:"created_at"`
+}
+
+// MarshalJSON retains the former identity key for separately deployed API
+// clients during the compatibility window.
+func (r CodeReviewPromptRecord) MarshalJSON() ([]byte, error) {
+	type codeReviewPromptRecordAlias CodeReviewPromptRecord
+	return json.Marshal(struct {
+		codeReviewPromptRecordAlias
+		LegacyRecordKey string `json:"artifact_key"`
+	}{
+		codeReviewPromptRecordAlias: codeReviewPromptRecordAlias(r),
+		LegacyRecordKey:             r.RecordKey,
+	})
 }
 
 type CodeReviewFinding struct {
@@ -940,6 +972,18 @@ type CodeReviewListItem struct {
 	GitHubPRURL       string  `db:"github_pr_url" json:"github_pr_url"`
 	PullRequestTitle  string  `db:"pull_request_title" json:"pull_request_title"`
 	PullRequestAuthor string  `db:"pull_request_author" json:"pull_request_author"`
+}
+
+// MarshalJSON keeps the former prompt reference alongside the renamed field.
+func (i CodeReviewListItem) MarshalJSON() ([]byte, error) {
+	type codeReviewListItemAlias CodeReviewListItem
+	return json.Marshal(struct {
+		codeReviewListItemAlias
+		LegacyPromptRecordKey *string `json:"prompt_artifact_key,omitempty"`
+	}{
+		codeReviewListItemAlias: codeReviewListItemAlias(i),
+		LegacyPromptRecordKey:   i.PromptRecordKey,
+	})
 }
 
 type CodeReviewStats struct {
@@ -986,6 +1030,11 @@ type CodeReviewNonApprovalReasonAnalytics struct {
 	PRs  int64                    `db:"prs" json:"prs"`
 }
 
+type CodeReviewCommentRequestUserAnalytics struct {
+	GitHubLogin string `db:"github_login" json:"github_login"`
+	Requests    int64  `db:"requests" json:"requests"`
+}
+
 type CodeReviewApprovalRoundBucket string
 
 const (
@@ -1018,16 +1067,32 @@ type CodeReviewApprovalRoundAnalytics struct {
 }
 
 type CodeReviewAnalytics struct {
-	Summary            CodeReviewAnalyticsSummary             `json:"summary"`
-	ApprovalRounds     []CodeReviewApprovalRoundAnalytics     `json:"approval_rounds"`
-	Authors            []CodeReviewAuthorAnalytics            `json:"authors"`
-	NonApprovalReasons []CodeReviewNonApprovalReasonAnalytics `json:"non_approval_reasons"`
+	Summary               CodeReviewAnalyticsSummary              `json:"summary"`
+	ApprovalRounds        []CodeReviewApprovalRoundAnalytics      `json:"approval_rounds"`
+	Authors               []CodeReviewAuthorAnalytics             `json:"authors"`
+	NonApprovalReasons    []CodeReviewNonApprovalReasonAnalytics  `json:"non_approval_reasons"`
+	CommentRequestsTotal  int64                                   `json:"comment_requests_total"`
+	CommentRequestsByUser []CodeReviewCommentRequestUserAnalytics `json:"comment_requests_by_user"`
 }
 
 type CodeReviewEvidence struct {
 	AgentResults    []CodeReviewAgentResult    `json:"agent_results"`
 	Findings        []CodeReviewFinding        `json:"findings"`
-	PromptArtifacts []CodeReviewPromptArtifact `json:"prompt_artifacts,omitempty"`
+	PromptRecords   []CodeReviewPromptRecord   `json:"prompt_records,omitempty"`
+	RiskReasonCodes []CodeReviewRiskReasonCode `json:"risk_reason_codes"`
+}
+
+// MarshalJSON emits both collection names until old API clients are outside
+// the supported version window.
+func (e CodeReviewEvidence) MarshalJSON() ([]byte, error) {
+	type codeReviewEvidenceAlias CodeReviewEvidence
+	return json.Marshal(struct {
+		codeReviewEvidenceAlias
+		LegacyPromptRecords []CodeReviewPromptRecord `json:"prompt_artifacts,omitempty"`
+	}{
+		codeReviewEvidenceAlias: codeReviewEvidenceAlias(e),
+		LegacyPromptRecords:     e.PromptRecords,
+	})
 }
 
 type CodeReviewPromptExample string

@@ -64,7 +64,7 @@ CREATE TABLE code_review_session_metadata (
     stale boolean NOT NULL DEFAULT false,
     superseded_by_session_id uuid REFERENCES sessions(id) ON DELETE SET NULL,
     review_output_key text NOT NULL,
-    prompt_artifact_key text,
+    prompt_record_key text,
     github_review_id bigint,
     github_review_url text,
     final_review_body text,

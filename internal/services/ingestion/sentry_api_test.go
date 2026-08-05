@@ -3,9 +3,12 @@ package ingestion
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,6 +17,35 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+type sentryRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f sentryRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+// trackedResponseBody records how a response body was consumed so tests can
+// assert that fetchPage drained it before closing it.
+type trackedResponseBody struct {
+	payload       *strings.Reader
+	closed        atomic.Bool
+	unreadAtClose atomic.Int64
+	closeErr      error
+}
+
+func newTrackedResponseBody(payload string) *trackedResponseBody {
+	return &trackedResponseBody{payload: strings.NewReader(payload)}
+}
+
+func (b *trackedResponseBody) Read(p []byte) (int, error) {
+	return b.payload.Read(p)
+}
+
+func (b *trackedResponseBody) Close() error {
+	b.unreadAtClose.Store(int64(b.payload.Len()))
+	b.closed.Store(true)
+	return b.closeErr
+}
 
 func TestSentryAPIClient_FetchIssues(t *testing.T) {
 	t.Parallel()
@@ -239,7 +271,7 @@ func TestSentryAPIClient_FetchIssues(t *testing.T) {
 			server := httptest.NewServer(tt.handler)
 			defer server.Close()
 
-			client := NewSentryAPIClient(&http.Client{}, zerolog.Nop())
+			client := NewSentryAPIClient(server.Client(), zerolog.Nop())
 			integrationID := uuid.New()
 			issues, err := client.FetchIssues(context.Background(), integrationID, server.URL, "test-token", "test-project", tt.since)
 
@@ -269,6 +301,91 @@ func TestSentryAPIClient_FetchIssues(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSentryAPIClient_FetchPageClosesRateLimitedResponseBeforeRetry(t *testing.T) {
+	t.Parallel()
+
+	rateLimitedBody := newTrackedResponseBody(`{"detail":"rate limited"}`)
+	successBody := newTrackedResponseBody(`[{"id":"300"}]`)
+	requestCount := 0
+	httpClient := &http.Client{Transport: sentryRoundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		requestCount++
+		if requestCount == 1 {
+			return &http.Response{
+				StatusCode: http.StatusTooManyRequests,
+				Header:     http.Header{"Retry-After": []string{"0"}},
+				Body:       rateLimitedBody,
+			}, nil
+		}
+
+		require.True(t, rateLimitedBody.closed.Load(), "rate-limited response body should be closed before retrying")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       successBody,
+		}, nil
+	})}
+	client := NewSentryAPIClient(httpClient, zerolog.Nop())
+
+	issues, nextURL, err := client.fetchPage(context.Background(), "https://sentry.example/issues", "test-token")
+
+	require.NoError(t, err, "fetchPage should succeed after the rate-limit retry")
+	require.Equal(t, []SentryIssue{{ID: "300"}}, issues, "fetchPage should return the successful retry response")
+	require.Empty(t, nextURL, "fetchPage should not return a next URL without a Link header")
+	require.Equal(t, 2, requestCount, "fetchPage should make exactly one retry")
+	require.True(t, rateLimitedBody.closed.Load(), "fetchPage should close the rate-limited response body")
+	require.True(t, successBody.closed.Load(), "fetchPage should close the successful response body")
+	require.Zero(t, rateLimitedBody.unreadAtClose.Load(), "fetchPage should drain the rate-limited response body so the retry can reuse the connection")
+}
+
+func TestSentryAPIClient_FetchPageReturnsResponseCloseError(t *testing.T) {
+	t.Parallel()
+
+	closeErr := errors.New("close failed")
+	body := newTrackedResponseBody(`[]`)
+	body.closeErr = closeErr
+	httpClient := &http.Client{Transport: sentryRoundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       body,
+		}, nil
+	})}
+	client := NewSentryAPIClient(httpClient, zerolog.Nop())
+
+	issues, nextURL, err := client.fetchPage(context.Background(), "https://sentry.example/issues", "test-token")
+
+	require.ErrorIs(t, err, closeErr, "fetchPage should propagate response body close failures")
+	require.Contains(t, err.Error(), "close sentry response body", "fetchPage should identify response cleanup failures")
+	require.Nil(t, issues, "fetchPage should not return issues when response cleanup fails")
+	require.Empty(t, nextURL, "fetchPage should not return a next URL when response cleanup fails")
+	require.True(t, body.closed.Load(), "fetchPage should attempt to close the response body")
+}
+
+func TestSentryAPIClient_FetchPagePreservesResponseAndCloseErrors(t *testing.T) {
+	t.Parallel()
+
+	closeErr := errors.New("close failed")
+	body := newTrackedResponseBody(`{"detail":"internal error"}`)
+	body.closeErr = closeErr
+	httpClient := &http.Client{Transport: sentryRoundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Header:     make(http.Header),
+			Body:       body,
+		}, nil
+	})}
+	client := NewSentryAPIClient(httpClient, zerolog.Nop())
+
+	issues, nextURL, err := client.fetchPage(context.Background(), "https://sentry.example/issues", "test-token")
+
+	require.ErrorIs(t, err, closeErr, "fetchPage should preserve response body close failures")
+	require.Contains(t, err.Error(), "unexpected status 500", "fetchPage should preserve the Sentry API response failure")
+	require.Contains(t, err.Error(), "close sentry response body", "fetchPage should identify the accompanying cleanup failure")
+	require.Nil(t, issues, "fetchPage should not return issues when the response fails")
+	require.Empty(t, nextURL, "fetchPage should not return a next URL when the response fails")
+	require.True(t, body.closed.Load(), "fetchPage should attempt to close a failed response body")
 }
 
 func TestParseLinkHeader(t *testing.T) {

@@ -1,6 +1,6 @@
 # Design: Agent-Initiated PR Publication with Automatic Review
 
-> **Status:** Implemented | **Last reviewed:** 2026-08-02
+> **Status:** Implemented | **Last reviewed:** 2026-08-03
 >
 > **Depends on:** [overall.md](../overall.md),
 > [review agent loops](../implemented/78-review-agent-loops.md),
@@ -16,7 +16,7 @@
 agent implements and verifies
   -> agent runs `143-tools pr create`
   -> 143 records durable publication intent
-  -> optional two-pass review/fix loop
+  -> optional three-pass review/fix loop
   -> clean review queues durable PR publication
   -> linked session remains available for CI, conflicts, and feedback
 ```
@@ -27,7 +27,7 @@ how** the external side effect occurs.
 Two organization settings govern the workflow:
 
 1. **Create a PR when the coding agent is ready**
-2. **Run a two-pass review/fix cycle before creating the PR**
+2. **Run a three-pass review/fix cycle before creating the PR**
 
 Both default on for existing and new organizations. Users may override either
 with `inherit`, `on`, or `off`.
@@ -95,13 +95,16 @@ implement -> create draft PR -> PR-dependent checks/review/fix
 ```
 
 Draft-first is an explicit repository setting, not a model judgment. It covers
-PR-only CI, previews, security scans, and policy bots. 143 never opens a normal
-non-draft PR before self-review.
+PR-only CI, previews, security scans, and policy bots. Automatic handoff never
+opens a normal non-draft PR before self-review; an authenticated user may make
+the explicit publication decision with **Create PR**.
 
 ### Two-pass review gate
 
-When effective pre-PR review is on, publication intent starts or joins one
-review loop tied to the current changeset, workspace revision, and head SHA:
+When effective pre-PR review is on, an automatic agent-ready publication
+intent starts or joins one review loop tied to the current changeset,
+workspace revision, and head SHA. An authenticated user **Create PR** action
+queues publication without this automatic review gate:
 
 1. Pass 1 reviews and fixes actionable findings.
 2. Pass 2 reviews the updated diff.
@@ -232,8 +235,8 @@ cannot grant permissions, bypass review requirements, override automation
 
 Organization **Session automation** shows two independent toggles; Account
 Settings shows `Use organization default (On) / On / Off`. Review remains
-editable when automatic creation is off because it also governs explicit
-publication.
+independently editable so an organization default and a personal automatic
+handoff override can be configured separately.
 
 ### Repository exception
 
@@ -271,7 +274,7 @@ create_pr
   -> persist publication intent and caller options
   -> pre_publish + review off: queue open_pr
   -> pre_publish + review on:
-       reuse fresh clean review, or start/join two-pass loop
+       reuse fresh clean review, or start/join three-pass loop
        clean -> atomically queue open_pr
        other terminal result -> block for in-product attention
   -> draft_first:
@@ -280,6 +283,12 @@ create_pr
        clean -> push final head and mark ready
        other terminal result -> leave draft and show attention
 ```
+
+An authenticated user-channel `explicit_action` skips the automatic review
+gate and queues `open_pr` directly. It still uses the durable publication row,
+authorship and builder authorization, repository handoff mode, deduplication,
+and recovery paths above. Agent-ready requests continue to use the configured
+review gate.
 
 Repeated requests join existing state; later edits invalidate clean evidence.
 
@@ -293,8 +302,9 @@ If an eligible implementation turn ends with a diff but no publication intent:
 - emit `agent_pr_intent_missing`
 
 V1 does not spend another model turn asking whether the agent forgot. UI,
-Slack, and API `Create PR` actions are explicit intent: they ignore the
-automatic-creation preference but still respect review or an authorized bypass.
+Slack, and API `Create PR` actions attributed to an authenticated user are
+explicit publication decisions: they ignore automatic-creation and automatic-
+review preferences while retaining authorization and repository policy.
 
 ### Automations and projects
 
@@ -303,9 +313,10 @@ automatic-creation preference but still respect review or an authorized bypass.
   for a successful non-empty result.
 - Project/stack publication remains parent-controlled.
 
-Two passes is the fixed count for **agent- and user-initiated** publication
-only. Automation-initiated publication keeps its configured
-`pre_pr_review_loops` (validated 0-5, passed straight through as `MaxPasses` by
+Two passes is the fixed count for **agent-ready** publication. Explicit
+user-channel publication queues directly. Automation-initiated publication
+keeps its configured `pre_pr_review_loops` (validated 0-5, passed straight
+through as `MaxPasses` by
 the existing worker path) and records that value in `review_max_passes`. The
 schema therefore bounds `review_max_passes` to 1-5 rather than pinning it to 2;
 pinning it would reject every automation not configured for exactly two loops.
@@ -883,7 +894,7 @@ Session detail adds resolved policy:
     "review_execution_enabled": true,
     "agent_publication_execution_enabled": true,
     "review_source": "personal",
-    "review_max_passes": 2,
+    "review_max_passes": 3,
     "pr_handoff_mode": "pre_publish"
   }
 }
@@ -952,7 +963,7 @@ closure/revert, publication success, cost, and latency.
    roll forward. Response changes up to this point are additive only; the
    `409` retirement waits for this step to drain and lands in PR 3.
 3. Enable prompt/tool states internally.
-4. Enable two-pass review internally and inspect churn/block rates.
+4. Enable three-pass review internally and inspect churn/block rates.
 5. Enable for selected organizations with visible default-on settings.
 6. Enable generally.
 7. Remove the generic manual-session completion trigger after agent-tool
@@ -961,7 +972,7 @@ closure/revert, publication success, cost, and latency.
 Kill switches affect execution only and never mutate customer settings.
 
 Step 2 is a hard ordering constraint, not a preference: the server and the
-agent-facing client ship in separate artifacts with independent rollout, so any
+agent-facing client ship in separate outputs with independent rollout, so any
 response-contract change that lands before the client drains breaks in-flight
 sandboxes.
 
@@ -1088,7 +1099,7 @@ Scope:
   automation loop parks the intent as `review_in_progress` instead of
   stranding it, and resume when that loop terminates. Do not relax
   `idx_session_review_loops_one_running_per_session`.
-- Run the bounded two-pass review/fix cycle for agent- and user-initiated
+- Run the bounded three-pass review/fix cycle for agent- and user-initiated
   publication, honor an automation's `pre_pr_review_loops` when that is the
   trigger, prefer and persist an independent reviewer, and block when the final
   pass changes code.

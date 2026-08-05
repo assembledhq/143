@@ -31,12 +31,13 @@ func (f *fakeDirtyMigrationRepairer) Force(version int) error {
 	return f.forceErr
 }
 
-func TestRepairPRReadinessDirtyMigration(t *testing.T) {
+func TestRepairKnownDirtyMigration(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name             string
 		repairer         fakeDirtyMigrationRepairer
+		expectedVersion  uint
 		expectedRepaired bool
 		expectedForce    int
 		expectForce      bool
@@ -45,17 +46,26 @@ func TestRepairPRReadinessDirtyMigration(t *testing.T) {
 		{
 			name:             "repairs exact dirty readiness migration",
 			repairer:         fakeDirtyMigrationRepairer{version: prReadinessDirtyMigrationVersion, dirty: true},
+			expectedVersion:  prReadinessDirtyMigrationVersion,
 			expectedRepaired: true,
 			expectedForce:    prReadinessDirtyMigrationVersion - 1,
 			expectForce:      true,
 		},
 		{
+			name:             "repairs exact dirty code review disputes migration",
+			repairer:         fakeDirtyMigrationRepairer{version: codeReviewDisputesDirtyMigrationVersion, dirty: true},
+			expectedVersion:  codeReviewDisputesDirtyMigrationVersion,
+			expectedRepaired: true,
+			expectedForce:    codeReviewDisputesDirtyMigrationVersion - 1,
+			expectForce:      true,
+		},
+		{
 			name:     "does nothing for clean database",
-			repairer: fakeDirtyMigrationRepairer{version: prReadinessDirtyMigrationVersion, dirty: false},
+			repairer: fakeDirtyMigrationRepairer{version: codeReviewDisputesDirtyMigrationVersion, dirty: false},
 		},
 		{
 			name:        "refuses unrelated dirty migration",
-			repairer:    fakeDirtyMigrationRepairer{version: prReadinessDirtyMigrationVersion + 1, dirty: true},
+			repairer:    fakeDirtyMigrationRepairer{version: codeReviewDisputesDirtyMigrationVersion + 1, dirty: true},
 			expectError: true,
 		},
 		{
@@ -69,9 +79,9 @@ func TestRepairPRReadinessDirtyMigration(t *testing.T) {
 		},
 		{
 			name:          "returns force failure",
-			repairer:      fakeDirtyMigrationRepairer{version: prReadinessDirtyMigrationVersion, dirty: true, forceErr: errors.New("force rejected")},
+			repairer:      fakeDirtyMigrationRepairer{version: codeReviewDisputesDirtyMigrationVersion, dirty: true, forceErr: errors.New("force rejected")},
 			expectForce:   true,
-			expectedForce: prReadinessDirtyMigrationVersion - 1,
+			expectedForce: codeReviewDisputesDirtyMigrationVersion - 1,
 			expectError:   true,
 		},
 	}
@@ -81,17 +91,56 @@ func TestRepairPRReadinessDirtyMigration(t *testing.T) {
 			t.Parallel()
 
 			repairer := tt.repairer
+			version, repaired, err := repairKnownDirtyMigration(&repairer)
+			if tt.expectError {
+				require.Error(t, err, "known migration repair should return the expected failure")
+			} else {
+				require.NoError(t, err, "known migration repair should complete without error")
+			}
+			require.Equal(t, tt.expectedVersion, version, "known migration repair should report the repaired version")
+			require.Equal(t, tt.expectedRepaired, repaired, "known migration repair should report whether it changed migration state")
+			require.Equal(t, tt.expectForce, repairer.forceInvoked, "known migration repair should only force an exact allowlisted dirty version")
+			if tt.expectForce {
+				require.Equal(t, tt.expectedForce, repairer.forcedTo, "known migration repair should rewind to the version before the failed transaction")
+			}
+		})
+	}
+}
+
+func TestRepairPRReadinessDirtyMigrationRemainsNarrow(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		version     uint
+		expectForce bool
+		expectError bool
+	}{
+		{
+			name:        "repairs readiness version",
+			version:     prReadinessDirtyMigrationVersion,
+			expectForce: true,
+		},
+		{
+			name:        "refuses code review disputes version",
+			version:     codeReviewDisputesDirtyMigrationVersion,
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			repairer := fakeDirtyMigrationRepairer{version: tt.version, dirty: true}
 			repaired, err := repairPRReadinessDirtyMigration(&repairer)
 			if tt.expectError {
-				require.Error(t, err, "targeted migration repair should return the expected failure")
+				require.Error(t, err, "legacy readiness repair should refuse a different dirty version")
 			} else {
-				require.NoError(t, err, "targeted migration repair should complete without error")
+				require.NoError(t, err, "legacy readiness repair should repair its exact dirty version")
 			}
-			require.Equal(t, tt.expectedRepaired, repaired, "targeted migration repair should report whether it changed migration state")
-			require.Equal(t, tt.expectForce, repairer.forceInvoked, "targeted migration repair should only force the exact known dirty version")
-			if tt.expectForce {
-				require.Equal(t, tt.expectedForce, repairer.forcedTo, "targeted migration repair should rewind to the version before readiness removal")
-			}
+			require.Equal(t, tt.expectForce, repairer.forceInvoked, "legacy readiness repair should remain scoped to version 267")
+			require.Equal(t, tt.expectForce, repaired, "legacy readiness repair should report only its own repair")
 		})
 	}
 }

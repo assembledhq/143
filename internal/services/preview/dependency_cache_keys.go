@@ -22,7 +22,7 @@ const PreviewBuildCacheRuntimeVersion = "preview-build-cache-v1"
 
 // PreviewBuildCacheHomeRuntimeVersion keys the HOME-rooted build cache (Go's
 // GOCACHE/GOMODCACHE). It is distinct from the workdir build cache version so
-// the two blobs occupy separate slots under the same build_artifact kind and
+// the two blobs occupy separate slots under the same build_output kind and
 // never overwrite each other.
 const PreviewBuildCacheHomeRuntimeVersion = "preview-build-cache-home-v2-split"
 
@@ -60,7 +60,7 @@ type dependencyCacheKeyReader interface {
 }
 
 func ComputePreviewDependencyCacheKey(ctx context.Context, executor dependencyCacheKeyReader, sb *agent.Sandbox, install *models.PreviewInstallConfig, effectivePaths []string) (string, []PreviewInstallLockfileKey, error) {
-	return computePreviewPathCacheKey(ctx, executor, sb, install, PreviewDependencyCacheRuntimeVersion, models.PreviewCacheKindInstallArtifact, effectivePaths, nil)
+	return computePreviewPathCacheKey(ctx, executor, sb, install, PreviewDependencyCacheRuntimeVersion, models.PreviewCacheKindInstallOutput, effectivePaths, nil)
 }
 
 func ComputePreviewPackageManagerCacheKey(ctx context.Context, executor dependencyCacheKeyReader, sb *agent.Sandbox, install *models.PreviewInstallConfig, homeRelativePaths []string, packageManagers []string) (string, []PreviewInstallLockfileKey, error) {
@@ -157,7 +157,7 @@ func ComputePreviewDependencyCachePlacementKey(orgID, repoID uuid.UUID, configNa
 }
 
 // ComputePreviewBuildCacheKey returns the latest-wins key for the
-// build-artifact cache. Unlike install-artifact keys it deliberately excludes
+// build-output cache. Unlike install-output keys it deliberately excludes
 // lockfile contents and sandbox identity: build tools (e.g. turbo) content-hash
 // their own cache entries, so a single blob per (org, repo, config, install,
 // paths) slot that is overwritten after every ready preview maximizes hit rate,
@@ -172,7 +172,7 @@ func ComputePreviewBuildCacheKey(orgID, repoID uuid.UUID, configName, configDige
 }
 
 // newPreviewBuildCachePlacementPayload builds the canonical placement-key
-// payload shared by the workdir and home build-artifact slots. Centralizing it
+// payload shared by the workdir and home build-output slots. Centralizing it
 // guarantees that ComputePreviewBuildCacheKey, ComputePreviewBuildCacheHomeKey,
 // and PreviewBuildCacheKeyDebug all hash byte-identical bytes.
 func newPreviewBuildCachePlacementPayload(runtimeVersion string, orgID, repoID uuid.UUID, configName, configDigest string, install *models.PreviewInstallConfig, effectivePaths []string) previewDependencyCachePlacementKey {
@@ -195,7 +195,7 @@ func newPreviewBuildCachePlacementPayload(runtimeVersion string, orgID, repoID u
 	return payload
 }
 
-// PreviewBuildCacheKeyDebug recomputes a build-artifact placement key and also
+// PreviewBuildCacheKeyDebug recomputes a build-output placement key and also
 // returns the exact canonical JSON payload that is SHA-256'd to produce it.
 //
 // TEMPORARY INSTRUMENTATION: this exists only to diagnose build-cache key
@@ -218,10 +218,10 @@ func PreviewBuildCacheKeyDebug(runtimeVersion string, orgID, repoID uuid.UUID, c
 }
 
 // ComputePreviewBuildCacheHomeKey returns the latest-wins key for the
-// HOME-rooted build-artifact cache (Go's GOCACHE/GOMODCACHE). It mirrors
+// HOME-rooted build-output cache (Go's GOCACHE/GOMODCACHE). It mirrors
 // ComputePreviewBuildCacheKey but uses a distinct runtime version so the
 // home-rooted blob occupies its own slot, separate from the workdir build
-// blob, within the build_artifact cache kind.
+// blob, within the build_output cache kind.
 func ComputePreviewBuildCacheHomeKey(orgID, repoID uuid.UUID, configName, configDigest string, install *models.PreviewInstallConfig, effectivePaths []string) (string, error) {
 	key, err := stableJSONSHA256(newPreviewBuildCachePlacementPayload(PreviewBuildCacheHomeRuntimeVersion, orgID, repoID, configName, configDigest, install, effectivePaths))
 	if err != nil {

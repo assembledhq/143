@@ -1,4 +1,4 @@
--- Code review policy, sessions, reviewer output, findings, and prompt artifacts.
+-- Code review policy, sessions, reviewer output, findings, and prompt records.
 
 INSERT INTO code_review_policies (
   id, org_id, repository_id, active, version, enabled, approval_mode,
@@ -75,7 +75,7 @@ INSERT INTO code_review_session_metadata (
   id, org_id, session_id, repository_id, pull_request_id, policy_id,
   base_sha, head_sha, from_fork, trigger_source, status, decision,
   acceptable, stale, superseded_by_session_id, review_output_key,
-  prompt_artifact_key, github_review_id, github_review_url,
+  prompt_record_key, github_review_id, github_review_url,
   final_review_body, failure_reason, completed_at, created_at
 )
 VALUES
@@ -135,7 +135,7 @@ SET status = EXCLUDED.status,
     acceptable = EXCLUDED.acceptable,
     stale = EXCLUDED.stale,
     review_output_key = EXCLUDED.review_output_key,
-    prompt_artifact_key = EXCLUDED.prompt_artifact_key,
+    prompt_record_key = EXCLUDED.prompt_record_key,
     github_review_id = EXCLUDED.github_review_id,
     github_review_url = EXCLUDED.github_review_url,
     final_review_body = EXCLUDED.final_review_body,
@@ -275,8 +275,8 @@ SET severity = EXCLUDED.severity,
     selected_for_inline = EXCLUDED.selected_for_inline,
     github_comment_id = EXCLUDED.github_comment_id;
 
-INSERT INTO code_review_prompt_artifacts (
-  id, org_id, session_id, artifact_key, role, agent_provider,
+INSERT INTO code_review_prompt_records (
+  id, org_id, session_id, record_key, role, agent_provider,
   content, metadata, created_at
 )
 VALUES
@@ -287,7 +287,7 @@ VALUES
     'seeded/code-review/42/pass-1/reviewer-codex.prompt',
     'reviewer',
     'codex',
-    'Synthetic prompt artifact: review PR 42 for preview teardown risk, tests, and user-visible status changes.',
+    'Synthetic prompt record: review PR 42 for preview teardown risk, tests, and user-visible status changes.',
     '{"policy_id":"00000000-0000-4000-a000-000000000900","pass":1}'::jsonb,
     now() - interval '44 minutes'
   ),
@@ -298,7 +298,7 @@ VALUES
     'seeded/code-review/42/pass-1/reviewer-codex.output',
     'reviewer_output',
     'codex',
-    'Synthetic output artifact: one medium finding selected for inline comment, two lower-severity observations retained as evidence.',
+    'Synthetic output record: one medium finding selected for inline comment, two lower-severity observations retained as evidence.',
     '{"finding_count":3,"selected_inline":1}'::jsonb,
     now() - interval '32 minutes'
   ),
@@ -309,7 +309,7 @@ VALUES
     'seeded/code-review/42/pass-2/orchestrator.prompt',
     'orchestrator',
     'opencode',
-    'Synthetic prompt artifact: compare reviewer disagreement and decide whether PR 42 should remain comment-only.',
+    'Synthetic prompt record: compare reviewer disagreement and decide whether PR 42 should remain comment-only.',
     '{"policy_id":"00000000-0000-4000-a000-000000000900","pass":2}'::jsonb,
     now() - interval '12 minutes'
   ),
@@ -320,11 +320,11 @@ VALUES
     'seeded/code-review/42/pass-2/description-policy.prompt',
     'description_policy',
     'opencode',
-    'Synthetic prompt artifact: verify PR description explains behavior and test plan.',
+    'Synthetic prompt record: verify PR description explains behavior and test plan.',
     '{"policy_id":"00000000-0000-4000-a000-000000000900","pass":2}'::jsonb,
     now() - interval '11 minutes'
   )
-ON CONFLICT (org_id, artifact_key) DO UPDATE
+ON CONFLICT (org_id, record_key) DO UPDATE
 SET role = EXCLUDED.role,
     agent_provider = EXCLUDED.agent_provider,
     content = EXCLUDED.content,

@@ -1516,16 +1516,17 @@ describe('SessionDetailPage agent tabs and threads', () => {
     const user = userEvent.setup();
     renderWithProviders(<SessionDetailContent id={sessionId} />);
 
-    expect(await screen.findByRole('tab', { name: 'Review' })).toBeInTheDocument();
+    // The tab has never been viewed, so its name carries the unread suffix.
+    expect(await screen.findByRole('tab', { name: /^Review/ })).toBeInTheDocument();
 
-    await user.click(screen.getByRole('tab', { name: 'Review' }));
+    await user.click(screen.getByRole('tab', { name: /^Review/ }));
     await user.click(screen.getByRole('button', { name: 'Close Review tab' }));
 
     await waitFor(() => {
       expect(archivedThreadId).toBe('thread-review');
     });
     await waitFor(() => {
-      expect(screen.queryByRole('tab', { name: 'Review' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('tab', { name: /^Review/ })).not.toBeInTheDocument();
     });
     expect(screen.getByPlaceholderText('Send a message to Main tab...')).toBeInTheDocument();
   });

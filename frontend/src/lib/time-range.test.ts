@@ -4,6 +4,7 @@ import {
   customTimeRangeDates,
   isRollingTimeRange,
   parseTimeRange,
+  timeRangeDisplayDates,
   timeRangeRefreshDelayMs,
   timeRangeBounds,
 } from "./time-range";
@@ -52,6 +53,33 @@ describe("time ranges", () => {
     expect(isRollingTimeRange("last_week")).toBe(false);
     expect(isRollingTimeRange("all")).toBe(false);
     expect(isRollingTimeRange("custom:2026-07-01:2026-07-31")).toBe(false);
+  });
+
+  it.each([
+    {
+      range: "7d" as const,
+      expected: {
+        from: new Date(2026, 6, 25, 12, 0, 0, 0),
+        to: new Date(2026, 7, 1, 12, 0, 0, 0),
+      },
+    },
+    {
+      range: "last_month" as const,
+      expected: {
+        from: new Date(2026, 6, 1, 0, 0, 0, 0),
+        to: new Date(2026, 6, 31, 23, 59, 59, 999),
+      },
+    },
+    {
+      range: "custom:2026-07-01:2026-07-31" as const,
+      expected: {
+        from: new Date(2026, 6, 1),
+        to: new Date(2026, 6, 31),
+      },
+    },
+    { range: "all" as const, expected: null },
+  ])("returns calendar display dates for $range", ({ range, expected }) => {
+    expect(timeRangeDisplayDates(range, new Date(2026, 7, 1, 12, 0, 0, 0))).toEqual(expected);
   });
 
   it.each([

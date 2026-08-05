@@ -270,7 +270,7 @@ Admin bundle setup:
 }
 ```
 
-143 writes the file inside the repo workspace before `preview.install` or service startup, depending on the bundle's phase. File paths must be relative, stay inside the repo, and should be excluded from artifacts and diff views. Because the current preview runtime uses a shared workspace, file outputs are workspace-wide: the repo config must list every preview service for a bundle that declares `files`.
+143 writes the file inside the repo workspace before `preview.install` or service startup, depending on the bundle's phase. File paths must be relative, stay inside the repo, and should be excluded from outputs and diff views. Because the current preview runtime uses a shared workspace, file outputs are workspace-wide: the repo config must list every preview service for a bundle that declares `files`.
 
 File delivery is inherently more exposed than product-owned process injection because the app expects a readable file. In the current preview model, app services and follow-up agent commands can share a sandbox filesystem. That means file-delivered values should be treated as **preview-runtime secrets**, not automatically **agent-hidden secrets**, unless the provider runs secret-bearing services in a separate user/container namespace or pauses same-sandbox agent command execution while the preview is connected.
 

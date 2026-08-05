@@ -48,6 +48,75 @@ func TestCodeReviewHandler_GetPolicyReturnsPromptFields(t *testing.T) {
 	require.Equal(t, config.AutomatedApprovalPolicy, response.Data.Config.AutomatedApprovalPolicy, "policy GET should return automated approval policy")
 }
 
+// Get backs the ?evidence=<session id> deep link used by the dispute queue and
+// by every GitHub dispute reply, so it has to answer for reviews the windowed
+// list endpoint would never return.
+func TestCodeReviewHandler_GetReportsMissingAndMalformedSessions(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	tests := []struct {
+		name string
+		// emptyResult exercises the "no such review" path with a genuinely empty
+		// result set, which is what CollectOneRow turns into pgx.ErrNoRows.
+		emptyResult  bool
+		malformedID  bool
+		storeErr     error
+		expectedCode int
+		expectedErr  string
+	}{
+		{name: "malformed session id", malformedID: true, expectedCode: http.StatusBadRequest, expectedErr: "INVALID_ID"},
+		{name: "unknown review", emptyResult: true, expectedCode: http.StatusNotFound, expectedErr: "CODE_REVIEW_NOT_FOUND"},
+		{
+			name: "store failure", storeErr: errors.New("connection refused"),
+			expectedCode: http.StatusInternalServerError, expectedErr: "CODE_REVIEW_LOAD_FAILED",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			sessionID := uuid.New()
+			routeID := sessionID.String()
+			if tt.malformedID {
+				routeID = "not-a-uuid"
+			}
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock should initialize")
+			defer mock.Close()
+			if !tt.malformedID {
+				expectation := mock.ExpectQuery("SELECT[\\s\\S]+FROM code_review_session_metadata").
+					WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID})
+				if tt.emptyResult {
+					expectation.WillReturnRows(pgxmock.NewRows([]string{"id"}))
+				} else {
+					expectation.WillReturnError(tt.storeErr)
+				}
+			}
+			handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/code-reviews/"+routeID, nil)
+			ctx := middleware.WithOrgID(req.Context(), orgID)
+			routeCtx := chi.NewRouteContext()
+			routeCtx.URLParams.Add("id", routeID)
+			req = req.WithContext(context.WithValue(ctx, chi.RouteCtxKey, routeCtx))
+			rr := httptest.NewRecorder()
+
+			handler.Get(rr, req)
+
+			require.Equal(t, tt.expectedCode, rr.Code, "body: %s", rr.Body.String())
+			var body struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body), "error body should be valid JSON")
+			require.Equal(t, tt.expectedErr, body.Error.Code)
+			require.NoError(t, mock.ExpectationsWereMet(), "a malformed id must not reach the database")
+		})
+	}
+}
+
 func TestCodeReviewHandler_PromptExamplesReturnsSeparateCollections(t *testing.T) {
 	t.Parallel()
 	handler := NewCodeReviewHandler(nil, nil)
@@ -230,7 +299,7 @@ func TestCodeReviewHandler_SetupGitHubTriggerMapsMissingUserAuth(t *testing.T) {
 	handler := NewCodeReviewHandler(nil, nil)
 	handler.SetGitHubTriggerSetupService(codereviewsvc.NewGitHubTriggerSetupService(
 		&codeReviewTriggerHandlerStoreStub{},
-		&codeReviewTriggerHandlerRepoStub{repo: models.Repository{ID: repoID, OrgID: orgID, FullName: "acme/api"}},
+		&codeReviewTriggerHandlerRepoStub{repo: models.Repository{ID: repoID, OrgID: orgID, FullName: "acme/api", Status: models.RepositoryStatusActive}},
 		&codeReviewTriggerHandlerAuthStub{err: ghservice.ErrGitHubAppUserCredentialMissing},
 		zerolog.Nop(),
 	))
@@ -245,6 +314,40 @@ func TestCodeReviewHandler_SetupGitHubTriggerMapsMissingUserAuth(t *testing.T) {
 
 	require.Equal(t, http.StatusConflict, rr.Code, "missing GitHub user authorization should return a conflict")
 	require.Contains(t, rr.Body.String(), "GITHUB_USER_AUTH_REQUIRED", "response should expose the reconnect error code")
+}
+
+func TestCodeReviewHandler_ListGitHubTriggersReturnsRepositoryStatuses(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	repo := models.Repository{ID: repoID, OrgID: orgID, FullName: "acme/api", Status: models.RepositoryStatusActive}
+	handler := NewCodeReviewHandler(nil, nil)
+	handler.SetGitHubTriggerSetupService(codereviewsvc.NewGitHubTriggerSetupService(
+		&codeReviewTriggerHandlerStoreStub{},
+		&codeReviewTriggerHandlerRepoStub{repos: []models.Repository{repo}},
+		&codeReviewTriggerHandlerAuthStub{err: ghservice.ErrGitHubAppUserCredentialMissing},
+		zerolog.Nop(),
+	))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-review-github-triggers", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: models.RoleViewer})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.ListGitHubTriggers(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "all organization roles should be able to read GitHub reviewer connection statuses")
+	var response models.ListResponse[models.CodeReviewGitHubTriggerResponse]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response), "GitHub reviewer status response should be valid JSON")
+	require.Equal(t, []models.CodeReviewGitHubTriggerResponse{{
+		Status: models.CodeReviewGitHubTriggerStatusAuthRequired, RepositoryID: repoID,
+		RepositoryFullName: "acme/api", RepositoryStatus: models.RepositoryStatusActive, GitHubOrg: "acme",
+		TeamSlug: models.DefaultCodeReviewGitHubTriggerTeamSlug, TeamName: models.DefaultCodeReviewGitHubTriggerTeamName,
+		TeamReviewer: "@acme/143-code-reviewer", RepoPermission: models.DefaultCodeReviewGitHubTriggerRepoPerm,
+		Message: "Connect your GitHub account before creating the reviewer team.",
+	}}, response.Data, "handler should return the exact aggregate repository status")
 }
 
 func TestCodeReviewHandler_ListRejectsInvalidOutcome(t *testing.T) {
@@ -273,6 +376,20 @@ func TestCodeReviewHandler_ListRejectsInvalidActivityStatus(t *testing.T) {
 
 	require.Equal(t, http.StatusBadRequest, rr.Code, "an invalid activity status should return a bad request")
 	require.Contains(t, rr.Body.String(), "INVALID_ACTIVITY_STATUS", "the response should identify the invalid activity status")
+}
+
+func TestCodeReviewHandler_ListRejectsInvalidReason(t *testing.T) {
+	t.Parallel()
+
+	handler := NewCodeReviewHandler(nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-reviews?reason=bogus", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	rr := httptest.NewRecorder()
+
+	handler.List(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "an invalid reason filter should return a bad request")
+	require.Contains(t, rr.Body.String(), "INVALID_REASON", "the response should identify the invalid reason filter")
 }
 
 func TestCodeReviewHandler_ListRejectsInvalidCursor(t *testing.T) {
@@ -305,7 +422,7 @@ func TestCodeReviewHandler_ListReturnsPaginationMetadata(t *testing.T) {
 			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
 			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code",
 			"status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
-			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id",
+			"superseded_by_session_id", "review_output_key", "prompt_record_key", "github_review_id",
 			"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
 			"retry_eligible", "session_title", "repository_name", "github_repo", "github_pr_number",
 			"github_pr_url", "pull_request_title", "pull_request_author",
@@ -338,7 +455,7 @@ func TestCodeReviewHandler_ListAppliesTimeWindow(t *testing.T) {
 			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
 			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message",
 			"retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
-			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id",
+			"superseded_by_session_id", "review_output_key", "prompt_record_key", "github_review_id",
 			"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at", "retry_eligible",
 			"session_title", "repository_name", "github_repo", "github_pr_number", "github_pr_url",
 			"pull_request_title", "pull_request_author",
@@ -363,11 +480,11 @@ func TestCodeReviewHandler_StatsReturnsFilteredAggregates(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
-	mock.ExpectQuery(`(?s)FROM code_review_session_metadata m.*m\.repository_id = @repository_id.*m\.decision = @decision.*m\.status <> 'stale'.*m\.superseded_by_session_id IS NULL.*m\.status = @status.*m\.acceptable = @acceptable.*LOWER\(COALESCE\(NULLIF\(s\.revision_context->>'pull_request_author', ''\), 'Unknown'\)\) = LOWER\(@author\).*m\.created_at >= @created_after.*pr\.title ILIKE @search`).
+	mock.ExpectQuery(`(?s)FROM code_review_session_metadata m.*m\.repository_id = @repository_id.*m\.decision = @decision.*m\.status <> 'stale'.*m\.superseded_by_session_id IS NULL.*m\.status = @status.*m\.acceptable = @acceptable.*risk_reason->>'code' = @reason.*LOWER\(COALESCE\(NULLIF\(s\.revision_context->>'pull_request_author', ''\), 'Unknown'\)\) = LOWER\(@author\).*m\.created_at >= @created_after.*pr\.title ILIKE @search`).
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"reviews_completed",
@@ -379,7 +496,7 @@ func TestCodeReviewHandler_StatsReturnsFilteredAggregates(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodGet,
 		"/api/v1/code-reviews/stats?repository_id="+repositoryID.String()+
-			"&decision=needs_human_review&activity_status=current&status=completed&risk=needs_review&author=Anya&search=auth&created_after=2026-06-01T00:00:00Z",
+			"&decision=needs_human_review&activity_status=current&status=completed&risk=needs_review&reason=blocking_findings&author=Anya&search=auth&created_after=2026-06-01T00:00:00Z",
 		nil,
 	)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -430,13 +547,14 @@ func TestCodeReviewHandler_AnalyticsReturnsReport(t *testing.T) {
 			"prs_with_change_breakdown", "median_additions", "median_deletions", "prs_with_findings",
 			"prs_with_blocking_findings", "total_findings", "needs_human_review",
 			"comment_only", "blocked", "approval_not_posted", "approval_rounds", "authors",
-			"non_approval_reasons",
+			"non_approval_reasons", "comment_requests_total", "comment_requests_by_user",
 		}).AddRow(
 			6, 5, 3, 2, 2, 1.0, 1, 0,
 			0, -1, -1, 1,
 			1, 2, 2, 0, 0, 0,
 			[]byte(`[{"bucket":"round_1","prs":2},{"bucket":"round_2","prs":1},{"bucket":"round_3","prs":0},{"bucket":"round_4_plus","prs":0},{"bucket":"not_yet_approved","prs":3}]`),
-			[]byte(`[]`), []byte(`[]`),
+			[]byte(`[]`), []byte(`[]`), 4,
+			[]byte(`[{"github_login":"anya","requests":3},{"github_login":"sam","requests":1}]`),
 		))
 	handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-reviews/analytics?repository_id="+repositoryID.String(), nil)
@@ -476,7 +594,12 @@ func TestCodeReviewHandler_AnalyticsReturnsReport(t *testing.T) {
 				{"bucket":"not_yet_approved","prs":3}
 			],
 			"authors": [],
-			"non_approval_reasons": []
+			"non_approval_reasons": [],
+			"comment_requests_total": 4,
+			"comment_requests_by_user": [
+				{"github_login":"anya","requests":3},
+				{"github_login":"sam","requests":1}
+			]
 		}
 	}`, rr.Body.String(), "analytics should return exact nullable metrics and empty breakdowns")
 	require.NoError(t, mock.ExpectationsWereMet(), "analytics handler should apply the repository scope to every query")
@@ -578,6 +701,12 @@ func TestCodeReviewListCursorRejectsChangedFilterButAllowsMutableRowChanges(t *t
 	changedFilters.Author = "sam"
 	_, err = decodeCodeReviewListCursor(cursor, orgID, changedFilters)
 	require.Error(t, err, "a cursor reused with a different author should be rejected")
+
+	reason := models.CodeReviewRiskReasonBlockingFindings
+	changedFilters = filters
+	changedFilters.Reason = &reason
+	_, err = decodeCodeReviewListCursor(cursor, orgID, changedFilters)
+	require.Error(t, err, "a cursor reused with a different reason should be rejected")
 }
 
 func TestCodeReviewSortCursorRoundTripsEveryListSort(t *testing.T) {
@@ -837,10 +966,16 @@ func (s *codeReviewRetryServiceStub) RetryReview(_ context.Context, input codere
 	return s.result, s.err
 }
 
-type codeReviewTriggerHandlerStoreStub struct{}
+type codeReviewTriggerHandlerStoreStub struct {
+	settings []models.CodeReviewGitHubTriggerSetting
+}
 
 func (s *codeReviewTriggerHandlerStoreStub) GetActiveGitHubTrigger(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewGitHubTriggerSetting, error) {
 	return models.CodeReviewGitHubTriggerSetting{}, pgx.ErrNoRows
+}
+
+func (s *codeReviewTriggerHandlerStoreStub) ListActiveGitHubTriggers(context.Context, uuid.UUID) ([]models.CodeReviewGitHubTriggerSetting, error) {
+	return s.settings, nil
 }
 
 func (s *codeReviewTriggerHandlerStoreStub) SaveGitHubTrigger(context.Context, uuid.UUID, db.SaveCodeReviewGitHubTriggerParams) (models.CodeReviewGitHubTriggerSetting, error) {
@@ -852,11 +987,19 @@ func (s *codeReviewTriggerHandlerStoreStub) DeactivateGitHubTrigger(context.Cont
 }
 
 type codeReviewTriggerHandlerRepoStub struct {
-	repo models.Repository
+	repo  models.Repository
+	repos []models.Repository
 }
 
 func (s *codeReviewTriggerHandlerRepoStub) GetByID(context.Context, uuid.UUID, uuid.UUID) (models.Repository, error) {
 	return s.repo, nil
+}
+
+func (s *codeReviewTriggerHandlerRepoStub) ListByOrg(context.Context, uuid.UUID, db.RepositoryFilters) ([]models.Repository, error) {
+	if s.repos != nil {
+		return s.repos, nil
+	}
+	return []models.Repository{s.repo}, nil
 }
 
 type codeReviewTriggerHandlerAuthStub struct {

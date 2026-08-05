@@ -281,6 +281,8 @@ func TestCodeReviewPolicyConfigValidate(t *testing.T) {
 		{name: "rejects invalid UTF-8 approval policy", mutate: func(c *CodeReviewPolicyConfig) { c.AutomatedApprovalPolicy = string([]byte{0xff}) }, expectErr: true},
 		{name: "rejects zero inline comments", mutate: func(c *CodeReviewPolicyConfig) { c.InlineCommentLimit = 0 }, expectErr: true},
 		{name: "rejects too many inline comments", mutate: func(c *CodeReviewPolicyConfig) { c.InlineCommentLimit = 11 }, expectErr: true},
+		{name: "rejects too short semantic cooldown", mutate: func(c *CodeReviewPolicyConfig) { c.RiskPolicy.SemanticDedupeCooldownSeconds = 59 }, expectErr: true},
+		{name: "rejects too long semantic cooldown", mutate: func(c *CodeReviewPolicyConfig) { c.RiskPolicy.SemanticDedupeCooldownSeconds = 86401 }, expectErr: true},
 		{name: "rejects no reviewers", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.Reviewers = nil }, expectErr: true},
 		{name: "rejects unsupported reviewer", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.Reviewers = []AgentType{AgentTypePMAgent} }, expectErr: true},
 		{name: "rejects reviewer model count mismatch", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.ReviewerModels = []string{DefaultCodexModel} }, expectErr: true},
@@ -320,6 +322,37 @@ func TestCodeReviewPolicyConfigValidate(t *testing.T) {
 				return
 			}
 			require.NoError(t, err, "valid code review policy should be accepted")
+		})
+	}
+}
+
+func TestCodeReviewGitHubTriggerStatusValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		status  CodeReviewGitHubTriggerStatus
+		wantErr bool
+	}{
+		{name: "unconfigured", status: CodeReviewGitHubTriggerStatusUnconfigured},
+		{name: "ready", status: CodeReviewGitHubTriggerStatusReady},
+		{name: "auth required", status: CodeReviewGitHubTriggerStatusAuthRequired},
+		{name: "permission required", status: CodeReviewGitHubTriggerStatusPermissionRequired},
+		{name: "disconnected", status: CodeReviewGitHubTriggerStatusDisconnected},
+		{name: "error", status: CodeReviewGitHubTriggerStatusError},
+		{name: "unknown", status: CodeReviewGitHubTriggerStatus("unknown"), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.status.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "unknown GitHub trigger status should be rejected")
+				return
+			}
+			require.NoError(t, err, "known GitHub trigger status should be accepted")
 		})
 	}
 }

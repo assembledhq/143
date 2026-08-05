@@ -46,7 +46,7 @@ import (
 	pagerdutysvc "github.com/assembledhq/143/internal/services/pagerduty"
 	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/publicationintent"
-	"github.com/assembledhq/143/internal/services/reviewartifact"
+	"github.com/assembledhq/143/internal/services/reviewbundle"
 	reviewloopservice "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
@@ -375,8 +375,30 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if prService != nil {
 		codeReviewSvc.SetRetryDependencies(pullRequestStore, prService)
 	}
+	codeReviewDisputeStore := db.NewCodeReviewDisputeStore(pool)
+	codeReviewDisputeStore.SetJobStore(jobStore)
+	codeReviewDisputeSvc := codereviewsvc.NewDisputeService(
+		codeReviewDisputeStore,
+		codeReviewStore,
+		pullRequestStore,
+		jobStore,
+		llmClient,
+		cfg.FrontendURL,
+		logger,
+		codereviewsvc.DisputeConfig{
+			ReassessmentsEnabled:    cfg.CodeReviewDisputeReassessmentsEnabled,
+			MaxActiveReassessments:  cfg.CodeReviewDisputeMaxActiveReassessments,
+			IntakePerUntrustedLogin: cfg.CodeReviewDisputeUntrustedIntakePerLogin,
+			IntakePerPullRequest:    cfg.CodeReviewDisputeUntrustedIntakePerPullRequest,
+		},
+	)
+	codeReviewDisputeSvc.SetAuditEmitter(auditEmitter)
+	if prService != nil {
+		codeReviewDisputeSvc.SetPullRequestSnapshotter(prService)
+	}
 	codeReviewTriggerSetupSvc := codereviewsvc.NewGitHubTriggerSetupService(codeReviewStore, repoStore, appUserAuthSvc, logger)
 	webhookHandler.SetCodeReviewService(codeReviewSvc, pullRequestStore)
+	webhookHandler.SetCodeReviewDisputeService(codeReviewDisputeSvc)
 	sessionThreadFileEventStore := db.NewSessionThreadFileEventStore(pool)
 	sessionViewStore := db.NewSessionViewStore(pool)
 	pullRequestHandler := handlers.NewPullRequestHandler(prService)
@@ -387,6 +409,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	codeReviewHandler.SetRetryService(codeReviewSvc)
 	codeReviewHandler.SetAuditEmitter(auditEmitter)
 	codeReviewHandler.SetGitHubTriggerSetupService(codeReviewTriggerSetupSvc)
+	codeReviewHandler.SetDisputeService(codeReviewDisputeSvc)
 	prHealthStreams := cache.NewPullRequestStreams(redisClient, logger)
 	publicationIntentCoordinator := publicationintent.NewCoordinator(
 		sessionStore,
@@ -789,12 +812,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			sessionFilesSnapshotCache = sc
 		}
 	}
-	var reviewArtifactReader *reviewartifact.CachedReader
+	var reviewBundleReader *reviewbundle.CachedReader
 	if snapshotStore != nil {
-		reviewArtifactReader = reviewartifact.NewCachedReader(snapshotStore, reviewartifact.DefaultCacheBytes)
+		reviewBundleReader = reviewbundle.NewCachedReader(snapshotStore, reviewbundle.DefaultCacheBytes)
 	}
 	sessionComposerHandler := handlers.NewSessionComposerHandlerWithWorkspace(repoStore, sessionStore, prService, fileReader, sessionFilesSnapshotCache, redisClient, logger)
-	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, repoStore, fileReader, sessionFilesSnapshotCache, reviewArtifactReader, logger)
+	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, repoStore, fileReader, sessionFilesSnapshotCache, reviewBundleReader, logger)
 
 	// Preview system: inspector, snapshot cache, HMR watcher, manager, recycler, gateway.
 	var previewInspector preview.PreviewInspector
@@ -1271,9 +1294,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/code-reviews/stream", codeReviewHandler.StreamUpdates)
 				r.Get("/api/v1/code-reviews/prompt-examples", codeReviewHandler.PromptExamples)
 				r.Post("/api/v1/code-reviews/policy-events", codeReviewHandler.PolicyEvent)
+				r.Get("/api/v1/code-reviews/{id}", codeReviewHandler.Get)
 				r.Get("/api/v1/code-reviews/{id}/evidence", codeReviewHandler.Evidence)
 				r.Get("/api/v1/code-review-policies", codeReviewHandler.GetPolicy)
 				r.Get("/api/v1/code-review-github-trigger", codeReviewHandler.GetGitHubTrigger)
+				r.Get("/api/v1/code-review-github-triggers", codeReviewHandler.ListGitHubTriggers)
 
 				// GitHub connection status for PR authorship
 				r.Get("/api/v1/users/me/github-status", githubStatusHandler.GetStatus)
@@ -1569,6 +1594,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 				r.Patch("/api/v1/repositories/{id}", repoHandler.Update)
 				r.Post("/api/v1/code-reviews/{id}/retry", codeReviewHandler.Retry)
+				r.Post("/api/v1/code-reviews/{id}/disputes", codeReviewHandler.CreateDispute)
+				r.Get("/api/v1/code-reviews/{id}/disputes", codeReviewHandler.ListSessionDisputes)
+				r.Post("/api/v1/code-review-disputes/{id}/escalate", codeReviewHandler.EscalateDispute)
 				r.Post("/api/v1/repositories/{id}/disconnect", repoHandler.Disconnect)
 				r.Post("/api/v1/repositories/{id}/reconnect", repoHandler.Reconnect)
 
@@ -1657,6 +1685,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/code-review-github-trigger", codeReviewHandler.DeleteGitHubTrigger)
 				r.Post("/api/v1/code-reviews/{id}/agent-results", codeReviewHandler.CreateAgentResult)
 				r.Post("/api/v1/code-reviews/{id}/findings", codeReviewHandler.CreateFinding)
+				r.Get("/api/v1/code-review-disputes", codeReviewHandler.ListDisputeQueue)
+				r.Patch("/api/v1/code-review-disputes/{id}", codeReviewHandler.UpdateDispute)
 				r.Put("/api/v1/repositories/{repository_id}/preview-policy", branchPreviewHandler.UpdatePolicy)
 				r.Post("/api/v1/repositories/{repository_id}/preview-policy/test-preview", branchPreviewHandler.TestPolicyPreview)
 				r.Get("/api/v1/previews/api-tokens", branchPreviewHandler.ListAPITokens)

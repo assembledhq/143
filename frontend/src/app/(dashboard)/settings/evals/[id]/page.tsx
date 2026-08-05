@@ -269,7 +269,7 @@ export default function EvalTaskDetailPage() {
                   <span className="w-24 text-right">Session</span>
                   <span className="w-20 text-right">Score</span>
                   <span className="w-16 text-right">Pass</span>
-                  <span className="w-28 text-right">Artifacts</span>
+                  <span className="w-28 text-right">Outputs</span>
                   <span className="w-24 text-right">Duration</span>
                 </div>
                 {runs.map((run) => (

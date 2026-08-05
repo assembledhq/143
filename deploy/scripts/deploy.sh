@@ -2221,12 +2221,12 @@ SELECT COUNT(*) FROM endpoint_blockers;"
     done
   }
 
-  # prune_docker_deploy_artifacts ROLE — reclaim Docker cache after a
+  # prune_unused_docker_resources ROLE — reclaim Docker cache after a
   # successful rollout. Runs only after the new service is healthy so the
   # freshly pulled image is protected by a running container. Detached worker
   # deploys embed and call this helper inside the detached rollover script for
   # the same reason.
-  prune_docker_deploy_artifacts() {
+  prune_unused_docker_resources() {
     local role="${1:-}"
     if [ "${DEPLOY_DOCKER_PRUNE:-1}" = "0" ]; then
       echo "Docker deploy prune skipped (DEPLOY_DOCKER_PRUNE=0)."
@@ -2242,7 +2242,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
     esac
 
     local prune_until="${DOCKER_PRUNE_UNTIL:-24h}"
-    echo "Pruning unused Docker artifacts older than $prune_until..."
+    echo "Pruning unused Docker resources older than $prune_until..."
     docker container prune -f --filter "until=$prune_until" || echo "WARNING: docker container prune failed; continuing."
     docker image prune -af --filter "until=$prune_until" || echo "WARNING: docker image prune failed; continuing."
     docker builder prune -af --filter "until=$prune_until" || echo "WARNING: docker builder prune failed; continuing."
@@ -2444,7 +2444,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
   # that the old schema doesn't have yet.
   if [ "$ROLE" = "app" ]; then
     echo "Running database migrations..."
-    docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate repair-pr-readiness < /dev/null
+    docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate repair-known-dirty < /dev/null
     docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate up < /dev/null
   fi
 
@@ -2505,7 +2505,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
       cat > "$rollover_script" <<EOS
 #!/bin/bash
 set -euo pipefail
-$(declare -f resolve_worker_drain_timeout_seconds drain_worker_service drain_worker_containers_blocking read_worker_env_value load_worker_endpoint_check_env sanitize_compose_project list_running_worker_containers worker_container_node_id worker_database_url first_running_worker_node_id run_worker_deployctl wait_worker_db_heartbeat worker_port_in_use worker_runtime_endpoint_in_use worker_blue_green_extra_ports_configured worker_host_capacity_preflight fingerprint_files compose_service_fingerprint worker_process_config_fingerprint worker_support_service_fingerprint worker_host_runtime_fingerprint worker_docker_daemon_fingerprint ensure_routine_worker_fingerprints_compatible worker_expected_schema_version protect_active_executor_images find_free_worker_port start_worker_generation pull_with_retry drain_old_worker_containers deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)
+$(declare -f resolve_worker_drain_timeout_seconds drain_worker_service drain_worker_containers_blocking read_worker_env_value load_worker_endpoint_check_env sanitize_compose_project list_running_worker_containers worker_container_node_id worker_database_url first_running_worker_node_id run_worker_deployctl wait_worker_db_heartbeat worker_port_in_use worker_runtime_endpoint_in_use worker_blue_green_extra_ports_configured worker_host_capacity_preflight fingerprint_files compose_service_fingerprint worker_process_config_fingerprint worker_support_service_fingerprint worker_host_runtime_fingerprint worker_docker_daemon_fingerprint ensure_routine_worker_fingerprints_compatible worker_expected_schema_version protect_active_executor_images find_free_worker_port start_worker_generation pull_with_retry drain_old_worker_containers deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_unused_docker_resources)
 COMPOSE_FILE='$COMPOSE_FILE'
 HEALTH_SERVICE='$HEALTH_SERVICE'
 STATUS_FILE='$status_file'
@@ -2552,7 +2552,7 @@ echo "[\$(date -u -Iseconds)] starting detached worker blue/green deploy (tag=$I
 deploy_worker_blue_green
 echo "[\$(date -u -Iseconds)] blue/green deploy succeeded"
 echo "ok" > "\$STATUS_FILE"
-prune_docker_deploy_artifacts worker
+prune_unused_docker_resources worker
 EOS
       chmod 700 "$rollover_script"
 
@@ -2599,7 +2599,7 @@ EOS
   fi
 
   if [ "$ROLE" != "worker" ] || [ -z "${WORKER_DEPLOY_DETACH:-}" ]; then
-    prune_docker_deploy_artifacts "$ROLE"
+    prune_unused_docker_resources "$ROLE"
   fi
 
   echo "Deploy complete ($ROLE)."

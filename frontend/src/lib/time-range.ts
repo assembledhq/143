@@ -7,6 +7,7 @@ import {
   endOfWeek,
   startOfMonth,
   startOfWeek,
+  subDays,
   subMonths,
   subWeeks,
 } from "date-fns";
@@ -77,6 +78,23 @@ export function customTimeRangeDates(range: TimeRangeFilter): { from: Date; to: 
 
 export function isRollingTimeRange(range: TimeRangeFilter): range is RollingTimeRange {
   return (ROLLING_TIME_RANGE_VALUES as readonly string[]).includes(range);
+}
+
+export function timeRangeDisplayDates(
+  range: TimeRangeFilter,
+  anchor: Date,
+): { from: Date; to: Date } | null {
+  const custom = customTimeRangeDates(range);
+  if (custom) return custom;
+
+  const calendarRange = calendarTimeRangeDates(range, anchor);
+  if (calendarRange) return calendarRange;
+
+  if (!isRollingTimeRange(range)) return null;
+  return {
+    from: subDays(anchor, Number.parseInt(range, 10)),
+    to: new Date(anchor),
+  };
 }
 
 export function timeRangeRefreshDelayMs(

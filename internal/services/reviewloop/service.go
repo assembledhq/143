@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -28,6 +29,8 @@ var (
 )
 
 const MaxReviewPasses = 5
+
+const strandedPublicationReviewSummary = "Publication review became idle without a live continuation job; restarting review from the current workspace."
 
 type Store interface {
 	GetPrimaryChangesetID(ctx context.Context, orgID, sessionID uuid.UUID) (uuid.UUID, error)
@@ -102,12 +105,52 @@ type PublicationEvidenceRefresher interface {
 	RefreshPublicationEvidence(ctx context.Context, loop models.SessionReviewLoop) (workspaceRevision int64, desiredHeadSHA string, err error)
 }
 
+type strandedPublicationReviewStore interface {
+	ListStrandedPublicationLoops(ctx context.Context, orgID uuid.UUID, inactiveBefore time.Time, limit int) ([]db.StrandedPublicationReviewLoop, error)
+	RestartStrandedPublicationLoop(ctx context.Context, orgID, loopID uuid.UUID, inactiveBefore time.Time, summary string) (bool, error)
+}
+
 func NewService(store Store, runtime Runtime) *Service {
 	return &Service{store: store, runtime: runtime, metrics: otelReviewLoopMetrics{}}
 }
 
 func (s *Service) SetPublicationEvidenceRefresher(refresher PublicationEvidenceRefresher) {
 	s.evidenceRefresher = refresher
+}
+
+// ReconcileStrandedPublicationLoops restarts publication reviews that have no
+// live agent work left to advance them. Restarting from the durable workspace
+// is safer than replaying an assistant summary because the failed transition
+// may have stopped before or after applying workspace edits.
+func (s *Service) ReconcileStrandedPublicationLoops(
+	ctx context.Context,
+	orgID uuid.UUID,
+	inactiveBefore time.Time,
+	limit int,
+) (int, error) {
+	recoveryStore, ok := s.store.(strandedPublicationReviewStore)
+	if !ok {
+		return 0, errors.New("publication review recovery store is unavailable")
+	}
+	candidates, err := recoveryStore.ListStrandedPublicationLoops(ctx, orgID, inactiveBefore, limit)
+	if err != nil {
+		return 0, err
+	}
+	restarted := 0
+	var reconcileErr error
+	for _, candidate := range candidates {
+		ok, err := recoveryStore.RestartStrandedPublicationLoop(
+			ctx, orgID, candidate.LoopID, inactiveBefore, strandedPublicationReviewSummary,
+		)
+		if err != nil {
+			reconcileErr = errors.Join(reconcileErr, fmt.Errorf("restart review loop %s: %w", candidate.LoopID, err))
+			continue
+		}
+		if ok {
+			restarted++
+		}
+	}
+	return restarted, reconcileErr
 }
 
 type StartReviewLoopRequest struct {
@@ -142,7 +185,11 @@ func (s *Service) Start(ctx context.Context, orgID, sessionID uuid.UUID, req Sta
 	}
 	fixMode := req.FixMode
 	if fixMode == "" {
-		fixMode = models.ReviewLoopFixModeMinimal
+		if source == models.ReviewLoopSourceManual {
+			fixMode = models.ReviewLoopFixModeMinimal
+		} else {
+			fixMode = models.ReviewLoopFixModeExhaustive
+		}
 	}
 	if err := fixMode.Validate(); err != nil {
 		return nil, ErrInvalidFixMode

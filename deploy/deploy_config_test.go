@@ -358,7 +358,7 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	require.Contains(t, fleetText, `DEPLOY_JOBS="${DEPLOY_JOBS:-4}"`, "fleet deploy should default to a bounded four-node deploy fan-out")
 	require.Contains(t, fleetText, `xargs -n1 -P "$DEPLOY_JOBS"`, "fleet deploy should deploy matching nodes concurrently instead of serializing the whole fleet")
 	require.Contains(t, fleetText, `LOG_DIR="$(mktemp -d /tmp/deploy-fleet.XXXXXX)"`, "parallel fleet deploy should keep per-host logs inspectable after failures")
-	require.Contains(t, fleetText, `LOG_DIR="$DEPLOY_FLEET_LOG_DIR"`, "fleet deploy should honor a stable log dir override so CI can upload per-host logs as an artifact")
+	require.Contains(t, fleetText, `LOG_DIR="$DEPLOY_FLEET_LOG_DIR"`, "fleet deploy should honor a stable log dir override so CI can upload per-host logs as a CI archive")
 	require.Contains(t, fleetText, `dump_failed_logs`, "fleet deploy should print failed hosts' log tails so CI output is introspectable without the runner's /tmp")
 	require.Contains(t, fleetText, `deploy_one()`, "fleet deploy should isolate single-host deploy behavior so parallel fan-out keeps role and host context")
 	require.Contains(t, fleetText, `App deployment barrier passed`, "fleet deploy should require app migrations and health checks to finish before post-app nodes start")
@@ -369,7 +369,7 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	workflow, err := os.ReadFile("../.github/workflows/deploy.yml")
 	require.NoError(t, err, "test should read the deploy workflow")
 	require.Contains(t, string(workflow), `./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ github.event.workflow_run.head_sha }}"`, "CI should use the successful CI run SHA with deploy-fleet's default app/worker role set")
-	require.Contains(t, string(workflow), `DEPLOY_FLEET_LOG_DIR: /tmp/deploy-fleet-logs`, "CI should pin the fleet log dir so the artifact upload step can find per-host logs")
+	require.Contains(t, string(workflow), `DEPLOY_FLEET_LOG_DIR: /tmp/deploy-fleet-logs`, "CI should pin the fleet log dir so the CI upload step can find per-host logs")
 	require.Contains(t, string(workflow), `uses: actions/upload-artifact@v7`, "CI should upload per-host deploy logs on failure; the runner's /tmp vanishes when the job ends")
 
 	makefile, err := os.ReadFile("../Makefile")
@@ -631,7 +631,7 @@ echo "healthy $role deploy detail that must stay out of failure output"
 	require.Contains(t, text, "::stop-commands::", "fleet output should fence dumped remote log content so the runner does not interpret ::-prefixed lines as workflow commands")
 	require.NotContains(t, text, "healthy app deploy detail", "fleet output should not dump logs of hosts that deployed cleanly")
 	require.NotContains(t, text, "stale failure from a previous run", "fleet deploy should clear prior-run state from a reused pinned log dir before deploying")
-	require.FileExists(t, filepath.Join(logDir, "worker-10.0.0.2.log"), "fleet deploy should write per-host logs into the pinned artifact dir")
+	require.FileExists(t, filepath.Join(logDir, "worker-10.0.0.2.log"), "fleet deploy should write per-host logs into the pinned log directory")
 
 	summary, err := os.ReadFile(summaryPath)
 	require.NoError(t, err, "fleet deploy should append failures to the GitHub step summary")
@@ -870,18 +870,18 @@ func TestRoutineWorkerDeployBuildsSandboxDNSOnlyWhenMissing(t *testing.T) {
 	}, "\n"), "routine worker deploy must not rebuild sandbox-dns unconditionally because that primes the next reconcile to recreate the sidecar")
 }
 
-func TestAppDeployRepairsKnownReadinessMigrationBeforeMigrating(t *testing.T) {
+func TestAppDeployRepairsKnownDirtyMigrationsBeforeMigrating(t *testing.T) {
 	t.Parallel()
 
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read deploy.sh")
 	deployText := string(deployScript)
-	repairCommand := `docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate repair-pr-readiness < /dev/null`
+	repairCommand := `docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate repair-known-dirty < /dev/null`
 	upCommand := `docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate up < /dev/null`
 	repairIndex := strings.Index(deployText, repairCommand)
 	upIndex := strings.Index(deployText, upCommand)
 
-	require.NotEqual(t, -1, repairIndex, "app deploy should run the narrowly scoped readiness migration repair")
+	require.NotEqual(t, -1, repairIndex, "app deploy should run the allowlisted dirty migration repair")
 	require.NotEqual(t, -1, upIndex, "app deploy should still run normal migrations")
 	require.Less(t, repairIndex, upIndex, "app deploy should repair the known dirty marker before normal migrations")
 }
@@ -2375,15 +2375,15 @@ func TestDBDeploySyncsMountedPostgresConfig(t *testing.T) {
 	require.Contains(t, deployText, "mkdir -p /opt/143/deploy/postgres", "db deploy should ensure the mounted config directory exists")
 }
 
-func TestDeployPrunesDockerArtifactsAfterSuccessfulRollout(t *testing.T) {
+func TestDeployPrunesUnusedDockerResourcesAfterSuccessfulRollout(t *testing.T) {
 	t.Parallel()
 
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read deploy script")
 	deployText := string(deployScript)
-	pruneFn := extractShellFunction(t, deployText, "prune_docker_deploy_artifacts", "run_worker_session_deploy_guardrail")
+	pruneFn := extractShellFunction(t, deployText, "prune_unused_docker_resources", "run_worker_session_deploy_guardrail")
 
-	require.Contains(t, deployText, "prune_docker_deploy_artifacts()", "deploy.sh should define one prune helper so app, worker, and detached worker paths stay aligned")
+	require.Contains(t, deployText, "prune_unused_docker_resources()", "deploy.sh should define one prune helper so app, worker, and detached worker paths stay aligned")
 	require.Contains(t, pruneFn, `docker container prune -f --filter "until=$prune_until"`, "deploy prune should remove stopped containers after a successful rollout")
 	require.NotContains(t, pruneFn, `docker rm -f`, "deploy prune must not force-remove running executor containers")
 	require.Contains(t, pruneFn, `docker image prune -af --filter "until=$prune_until"`, "deploy prune should remove old unused SHA-tagged images after a successful rollout")
@@ -2393,12 +2393,12 @@ func TestDeployPrunesDockerArtifactsAfterSuccessfulRollout(t *testing.T) {
 	require.Contains(t, deployText, `$(remote_env_assignment SESSION_EXECUTOR_DOCKER_NETWORK "${SESSION_EXECUTOR_DOCKER_NETWORK:-}")`, "deploy should pass the executor network override through SSH to the remote host")
 	require.Contains(t, deployText, `docker image inspect "$sandbox_image"`, "worker prune should verify the sandbox image survived image pruning")
 	require.Contains(t, deployText, `docker pull "$sandbox_image"`, "worker prune should re-pull the sandbox image when image pruning removes it")
-	require.Contains(t, deployText, `deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)`, "detached worker rollovers should embed the blue/green and prune helpers in the host-side script")
+	require.Contains(t, deployText, `deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_unused_docker_resources)`, "detached worker rollovers should embed the blue/green and prune helpers in the host-side script")
 	require.NotContains(t, deployText, "run_worker_deployctl_in_container", "detached worker rollovers should not embed worker-container-bound deploy control helpers")
 	require.Contains(t, deployText, `IMAGE_TAG='$IMAGE_TAG'`, "detached worker rollovers should bake IMAGE_TAG so the prune helper can protect the sandbox image")
-	require.Contains(t, deployText, `prune_docker_deploy_artifacts worker`, "detached worker rollovers should prune only after the new worker is healthy")
+	require.Contains(t, deployText, `prune_unused_docker_resources worker`, "detached worker rollovers should prune only after the new worker is healthy")
 	require.Contains(t, deployText, `flock -xo /tmp/143-deploy-worker.lock`, "detached worker rollovers should not let background drain watchers inherit the deploy lock")
-	require.Contains(t, deployText, `prune_docker_deploy_artifacts "$ROLE"`, "synchronous deploy paths should prune after the rollout and health checks succeed")
+	require.Contains(t, deployText, `prune_unused_docker_resources "$ROLE"`, "synchronous deploy paths should prune after the rollout and health checks succeed")
 	require.Contains(t, deployText, `DEPLOY_DOCKER_PRUNE=0`, "operators should have an explicit escape hatch for incident response or rollback-cache preservation")
 }
 
@@ -2408,7 +2408,7 @@ func TestDeployRetriesRegistryPulls(t *testing.T) {
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read deploy script")
 	deployText := string(deployScript)
-	retryFn := extractShellFunction(t, deployText, "pull_with_retry", "prune_docker_deploy_artifacts")
+	retryFn := extractShellFunction(t, deployText, "pull_with_retry", "prune_unused_docker_resources")
 
 	require.Contains(t, deployText, `remote_env_assignment DEPLOY_DOCKER_PULL_ATTEMPTS "${DEPLOY_DOCKER_PULL_ATTEMPTS:-}"`,
 		"deploy should forward the image pull attempt override to the remote host")
@@ -2514,7 +2514,7 @@ func TestDetachedWorkerDeployMarksSuccessBeforePrune(t *testing.T) {
 
 	rolloutIndex := strings.Index(detachedBody, "deploy_worker_blue_green")
 	okIndex := strings.Index(detachedBody, `echo "ok" > "\$STATUS_FILE"`)
-	pruneIndex := strings.Index(detachedBody, `prune_docker_deploy_artifacts worker`)
+	pruneIndex := strings.Index(detachedBody, `prune_unused_docker_resources worker`)
 	require.NotEqual(t, -1, rolloutIndex, "detached worker deploy should run blue/green rollout")
 	require.NotEqual(t, -1, okIndex, "detached worker deploy should write a terminal ok status")
 	require.NotEqual(t, -1, pruneIndex, "detached worker deploy should still prune after rollout")

@@ -128,6 +128,48 @@ func TestSessionHandlerCreatePRRejoinsCompletedPublicationBeforeSnapshotChecks(t
 	require.Empty(t, coordinator.requests, "a harmless replay should not enqueue or mutate publication work")
 }
 
+func TestSessionHandlerCreatePRDoesNotRejoinExistingReviewForExplicitAction(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+	handler := newSessionHandler(t, mock)
+	handler.SetPublicationStore(db.NewSessionPublicationStore(mock))
+	handler.SetPublicationIntentCoordinator(&internalPRCoordinatorStub{}, true)
+
+	orgID, sessionID, changesetID, repositoryID, userID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	loopID := uuid.New()
+	maxPasses := 2
+	publication := models.SessionPublication{
+		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID, RepositoryID: repositoryID,
+		State: models.SessionPublicationStateReviewPending, Source: models.SessionPublicationSourceUser,
+		TriggerKind: models.SessionPublicationTriggerExplicitAction, HandoffMode: models.PRHandoffModePrePublish,
+		AutomaticPolicySource: models.PublicationPolicySourceExplicitAction,
+		ReviewPolicySource:    models.PublicationPolicySourceProductDefault, ReviewMaxPasses: &maxPasses,
+		ReviewLoopID: &loopID, ReviewGateState: models.SessionPublicationReviewGatePending,
+		JobQueue: models.SessionPublicationJobQueueAgent, RequestPayload: json.RawMessage(`{"session_id":"old"}`),
+		RequestGenerationAt: now, BaseBranch: "main", HeadBranch: "143/change",
+		RequestedAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("(?s)SELECT .*FROM session_publications").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID}).
+		WillReturnRows(pgxmock.NewRows(handlerSessionPublicationColumns).AddRow(handlerSessionPublicationRow(publication)...))
+
+	result, found, err := handler.rejoinPublicationIntent(
+		context.Background(), orgID, sessionID,
+		models.SessionChangeset{ID: changesetID, OrgID: orgID, SessionID: sessionID, IsPrimary: true},
+		nil, models.SessionPublicationSourceUser, models.SessionPublicationTriggerExplicitAction,
+		&userID, string(models.RoleMember),
+	)
+
+	require.NoError(t, err, "explicit Create PR should inspect the existing publication without failing")
+	require.False(t, found, "an older review-pending intent should continue to the coordinator for explicit takeover")
+	require.Nil(t, result, "the rejoin helper should not return the older review workflow")
+	require.NoError(t, mock.ExpectationsWereMet(), "the publication lookup should remain tenant and changeset scoped")
+}
+
 type failingSSEWriter struct {
 	header       http.Header
 	failOnSubstr string
@@ -235,6 +277,74 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 	h.SetReviewLoopStore(db.NewSessionReviewLoopStore(mock))
 	h.SetTxStarter(mock)
 	return h
+}
+
+func TestSessionHandlerImportChangesetRemote(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		body               string
+		returnedStatus     models.ChangesetStatus
+		expectedStatusCode int
+		expectedCode       string
+		expectedResult     string
+	}{
+		{
+			name:               "matching local and remote heads report reconciliation",
+			body:               `{"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","local_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","remote_is_ancestor":true}`,
+			returnedStatus:     models.ChangesetStatusPublishedBranch,
+			expectedStatusCode: http.StatusOK,
+			expectedResult:     "reconciled",
+		},
+		{
+			name:               "invalid local head is rejected",
+			body:               `{"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","local_head_sha":"invalid"}`,
+			expectedStatusCode: http.StatusBadRequest,
+			expectedCode:       "INVALID_LOCAL_HEAD_SHA",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgx mock should initialize")
+			t.Cleanup(mock.Close)
+			orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+			if tt.expectedStatusCode == http.StatusOK {
+				mock.ExpectQuery(`UPDATE session_changesets SET`).
+					WithArgs(pgx.NamedArgs{
+						"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+						"remote_head_sha": strings.Repeat("a", 40), "local_head_sha": strings.Repeat("a", 40),
+						"remote_is_ancestor": true,
+					}).
+					WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow(tt.returnedStatus))
+			}
+
+			handler := newSessionHandler(t, mock)
+			handler.SetChangesetStore(db.NewSessionChangesetStore(mock))
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/changesets/"+changesetID.String()+"/import-remote", strings.NewReader(tt.body))
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("id", sessionID.String())
+			rctx.URLParams.Add("changeset_id", changesetID.String())
+			ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+			req = req.WithContext(middleware.WithOrgID(ctx, orgID))
+			w := httptest.NewRecorder()
+
+			handler.ImportChangesetRemote(w, req)
+
+			require.Equal(t, tt.expectedStatusCode, w.Code, "import-remote should return the expected HTTP status")
+			if tt.expectedCode != "" {
+				require.Contains(t, w.Body.String(), tt.expectedCode, "invalid input should return the expected error code")
+			} else {
+				require.Contains(t, w.Body.String(), `"status":"`+tt.expectedResult+`"`, "successful reconciliation should describe the durable result")
+				require.Contains(t, w.Body.String(), `"changeset_status":"published_branch"`, "successful reconciliation should return the publishable changeset state")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "import-remote should issue only the expected tenant-scoped query")
+		})
+	}
 }
 
 // sessionColumns is the standard column set for sessions queries.
@@ -11245,11 +11355,12 @@ func TestSessionHandler_CreatePR_CoordinatorOutcomes(t *testing.T) {
 	publicationID := uuid.New()
 	blockedReason := "publication intent is durable, but immediate queueing failed"
 	tests := []struct {
-		name       string
-		status     publicationintent.ResultStatus
-		reason     *string
-		wantCode   int
-		wantInBody string
+		name           string
+		status         publicationintent.ResultStatus
+		reason         *string
+		coordinatorErr error
+		wantCode       int
+		wantInBody     string
 	}{
 		{
 			name:       "queued intent reports queued",
@@ -11270,6 +11381,24 @@ func TestSessionHandler_CreatePR_CoordinatorOutcomes(t *testing.T) {
 			wantCode:   http.StatusAccepted,
 			wantInBody: `"status":"already_published"`,
 		},
+		{
+			name: "workspace rejection returns actionable product copy",
+			coordinatorErr: &publicationintent.Error{
+				Code: publicationintent.ErrorWorkspaceNotReady,
+				Err:  errors.New("primary changeset has no working branch to publish"),
+			},
+			wantCode:   http.StatusConflict,
+			wantInBody: "This workspace is not ready to publish a pull request. Review its status, then try again.",
+		},
+		{
+			name: "ineligible session rejection explains the current state",
+			coordinatorErr: &publicationintent.Error{
+				Code: publicationintent.ErrorSessionNotEligible,
+				Err:  errors.New("session cannot create a new pull request"),
+			},
+			wantCode:   http.StatusConflict,
+			wantInBody: "This session cannot create a pull request in its current state.",
+		},
 	}
 
 	for _, tt := range tests {
@@ -11286,7 +11415,7 @@ func TestSessionHandler_CreatePR_CoordinatorOutcomes(t *testing.T) {
 			handler := newSessionHandler(t, mock)
 			coordinator := &internalPRCoordinatorStub{result: &publicationintent.PublicationIntentResult{
 				Status: tt.status, SessionID: sessionID, PublicationID: &publicationID, Reason: tt.reason,
-			}}
+			}, err: tt.coordinatorErr}
 			handler.SetPublicationIntentCoordinator(coordinator, true)
 
 			diff := "--- a/file.go\n+++ b/file.go\n@@ -1 +1 @@\n-old\n+new"

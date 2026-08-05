@@ -27,7 +27,7 @@ The implemented branch preview primitive now has:
 
 Session previews continue to use their existing session-backed startup path while sharing the same runtime table, gateway, bootstrap token, lifecycle, worker routing machinery, and branch-preview target attachment when the user opens a branch-owned preview from session detail.
 
-143 previews should become a first-class branch artifact. A preview is no longer primarily something hidden inside session detail; it is a cloud runtime for a specific repository branch and commit, with optional links back to the session, PR, automation, API caller, or human who requested it.
+143 previews should become a first-class branch output. A preview is no longer primarily something hidden inside session detail; it is a cloud runtime for a specific repository branch and commit, with optional links back to the session, PR, automation, API caller, or human who requested it.
 
 This is the long-term path. Session previews, PR preview links, and externally created previews should all use the same branch-preview primitive.
 

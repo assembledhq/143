@@ -197,9 +197,9 @@ func (s *EvalRunStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID,
 	return nil
 }
 
-// UpdatePostSessionArtifacts persists the agent session output and moves the
+// UpdatePostSessionOutputs persists the agent session output and moves the
 // run into grading without marking it completed.
-func (s *EvalRunStore) UpdatePostSessionArtifacts(ctx context.Context, orgID, runID uuid.UUID, agentDiff *string, agentTrace json.RawMessage, inputManifest json.RawMessage) error {
+func (s *EvalRunStore) UpdatePostSessionOutputs(ctx context.Context, orgID, runID uuid.UUID, agentDiff *string, agentTrace json.RawMessage, inputManifest json.RawMessage) error {
 	query := `UPDATE eval_runs SET
 		status = @status,
 		agent_diff = @agent_diff,
@@ -216,7 +216,7 @@ func (s *EvalRunStore) UpdatePostSessionArtifacts(ctx context.Context, orgID, ru
 		"input_manifest": inputManifest,
 	})
 	if err != nil {
-		return fmt.Errorf("update eval run post-session artifacts: %w", err)
+		return fmt.Errorf("update eval run post-session outputs: %w", err)
 	}
 	return nil
 }

@@ -17,6 +17,11 @@ type SessionReviewLoopStore struct {
 	db DBTX
 }
 
+type StrandedPublicationReviewLoop struct {
+	LoopID   uuid.UUID `db:"loop_id"`
+	ThreadID uuid.UUID `db:"thread_id"`
+}
+
 func (s *SessionReviewLoopStore) GetPrimaryChangesetID(ctx context.Context, orgID, sessionID uuid.UUID) (uuid.UUID, error) {
 	var changesetID uuid.UUID
 	err := s.db.QueryRow(ctx, `SELECT id FROM session_changesets
@@ -27,6 +32,136 @@ func (s *SessionReviewLoopStore) GetPrimaryChangesetID(ctx context.Context, orgI
 		return uuid.Nil, fmt.Errorf("get primary changeset for review loop: %w", err)
 	}
 	return changesetID, nil
+}
+
+// ListStrandedPublicationLoops returns review loops whose agent thread has
+// been inactive past the recovery cutoff and has no live continuation job. The
+// linked publication predicate prevents manual/automation loops and detached
+// historical rows from being restarted by publication reconciliation.
+func (s *SessionReviewLoopStore) ListStrandedPublicationLoops(
+	ctx context.Context,
+	orgID uuid.UUID,
+	inactiveBefore time.Time,
+	limit int,
+) ([]StrandedPublicationReviewLoop, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT loop.id AS loop_id, loop.thread_id
+		FROM session_review_loops AS loop
+		JOIN session_threads AS thread
+		  ON thread.org_id = loop.org_id AND thread.id = loop.thread_id
+		JOIN session_publications AS publication
+		  ON publication.org_id = loop.org_id AND publication.review_loop_id = loop.id
+		WHERE loop.org_id = @org_id
+		  AND loop.source = 'publication' AND loop.status = 'running'
+		  AND publication.state = 'review_pending'
+		  AND publication.review_gate_state = 'pending'
+		  AND thread.status IN ('idle', 'completed', 'failed', 'cancelled')
+		  AND COALESCE(thread.last_activity_at, loop.started_at) < @inactive_before
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM jobs
+			WHERE jobs.org_id = loop.org_id
+			  AND jobs.job_type = 'continue_session'
+			  AND jobs.status IN ('pending', 'running')
+			  AND jobs.payload->>'thread_id' = loop.thread_id::text
+		  )
+		ORDER BY COALESCE(thread.last_activity_at, loop.started_at), loop.id
+		LIMIT @limit`, pgx.NamedArgs{
+		"org_id": orgID, "inactive_before": inactiveBefore, "limit": limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list stranded publication review loops: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[StrandedPublicationReviewLoop])
+}
+
+// RestartStrandedPublicationLoop atomically retires one stranded loop, clears
+// its stale evidence link, and requeues the original open_pr request. The new
+// worker attempt checkpoints the current workspace and starts a fresh review,
+// preserving any fixes the prior review wrote before it became stranded.
+func (s *SessionReviewLoopStore) RestartStrandedPublicationLoop(
+	ctx context.Context,
+	orgID, loopID uuid.UUID,
+	inactiveBefore time.Time,
+	summary string,
+) (bool, error) {
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return false, fmt.Errorf("restart stranded publication review requires transaction support")
+	}
+	tx, err := txStarter.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin stranded publication review restart: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var sessionID uuid.UUID
+	err = tx.QueryRow(ctx, `
+		UPDATE session_review_loops AS loop
+		SET status = 'failed',
+			latest_summary = @summary,
+			completed_passes = (
+				SELECT count(*)
+				FROM session_review_loop_passes
+				WHERE org_id = @org_id AND loop_id = @loop_id
+				  AND status IN ('clean', 'needs_fix')
+			),
+			completed_at = now()
+		FROM session_threads AS thread
+		WHERE loop.org_id = @org_id AND loop.id = @loop_id
+		  AND loop.source = 'publication' AND loop.status = 'running'
+		  AND thread.org_id = loop.org_id AND thread.id = loop.thread_id
+		  AND thread.status IN ('idle', 'completed', 'failed', 'cancelled')
+		  AND COALESCE(thread.last_activity_at, loop.started_at) < @inactive_before
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM jobs
+			WHERE jobs.org_id = loop.org_id
+			  AND jobs.job_type = 'continue_session'
+			  AND jobs.status IN ('pending', 'running')
+			  AND jobs.payload->>'thread_id' = loop.thread_id::text
+		  )
+		RETURNING loop.session_id`, pgx.NamedArgs{
+		"org_id": orgID, "loop_id": loopID, "inactive_before": inactiveBefore, "summary": summary,
+	}).Scan(&sessionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("retire stranded publication review loop: %w", err)
+	}
+
+	var payload json.RawMessage
+	var queue models.SessionPublicationJobQueue
+	var changesetID uuid.UUID
+	err = tx.QueryRow(ctx, `
+		UPDATE session_publications
+		SET state = 'review_pending', review_gate_state = 'pending',
+			review_loop_id = NULL, review_workspace_revision = NULL,
+			review_desired_head_sha = NULL, updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id
+		  AND review_loop_id = @loop_id
+		  AND state = 'review_pending'
+		  AND review_gate_state = 'pending'
+		RETURNING request_payload, job_queue, changeset_id`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "loop_id": loopID,
+	}).Scan(&payload, &queue, &changesetID)
+	if err != nil {
+		return false, fmt.Errorf("reset stranded publication review intent: %w", err)
+	}
+	dedupeKey := OpenPRDedupeKey(changesetID)
+	if _, err := enqueueOn(ctx, tx, orgID, EnqueueOpts{
+		Queue: string(queue), JobType: "open_pr", Payload: payload, Priority: 5, DedupeKey: &dedupeKey,
+	}); err != nil {
+		return false, fmt.Errorf("requeue stranded publication review: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit stranded publication review restart: %w", err)
+	}
+	return true, nil
 }
 
 func NewSessionReviewLoopStore(db DBTX) *SessionReviewLoopStore {
@@ -248,6 +383,7 @@ func (s *SessionReviewLoopStore) RefreshPublicationEvidence(ctx context.Context,
 		SET review_workspace_revision = @workspace_revision,
 			review_desired_head_sha = @desired_head_sha,
 			desired_head_sha = @desired_head_sha,
+			published_head_sha = @desired_head_sha,
 			updated_at = now()
 		WHERE org_id = @org_id AND review_loop_id = @loop_id
 		  AND state NOT IN ('completed', 'completed_noop', 'terminal_failed')`, pgx.NamedArgs{
@@ -556,7 +692,10 @@ func finishPublicationReviewOn(ctx context.Context, q DBTX, orgID, loopID uuid.U
 	var changesetID uuid.UUID
 	err := q.QueryRow(ctx, `UPDATE session_publications AS publication
 		SET review_gate_state = @gate, state = @state,
-			completed_at = CASE WHEN @state = 'terminal_failed' THEN COALESCE(completed_at, now()) ELSE completed_at END,
+			completed_at = CASE
+				WHEN @state = 'terminal_failed' THEN COALESCE(publication.completed_at, now())
+				ELSE publication.completed_at
+			END,
 			updated_at = now()
 		-- session and changeset are joined for the clean-evidence comparison
 		-- below. They are keyed to the publication here so the join stays

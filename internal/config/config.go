@@ -181,15 +181,22 @@ type Config struct {
 	PagerDutyIntegrationEnabled bool   `env:"PAGERDUTY_INTEGRATION_ENABLED" envDefault:"true"`
 
 	// GitHub App
-	GitHubAppID                 int64    `env:"GITHUB_APP_ID"`
-	GitHubAppClientID           string   `env:"GITHUB_APP_CLIENT_ID"`
-	GitHubAppClientSecret       string   `env:"GITHUB_APP_CLIENT_SECRET"`
-	GitHubAppPrivateKey         string   `env:"GITHUB_APP_PRIVATE_KEY"`
-	GitHubWebhookSecret         string   `env:"GITHUB_WEBHOOK_SECRET"`
-	GitHubAppSlug               string   `env:"GITHUB_APP_SLUG"`
-	CodeReviewAppReviewerLogins []string `env:"CODE_REVIEW_APP_REVIEWER_LOGINS" envSeparator:","`
-	CodeReviewAliasLogins       []string `env:"CODE_REVIEW_ALIAS_LOGINS"        envSeparator:","`
-	CodeReviewTeamSlugs         []string `env:"CODE_REVIEW_TEAM_SLUGS"          envSeparator:","`
+	GitHubAppID                             int64    `env:"GITHUB_APP_ID"`
+	GitHubAppClientID                       string   `env:"GITHUB_APP_CLIENT_ID"`
+	GitHubAppClientSecret                   string   `env:"GITHUB_APP_CLIENT_SECRET"`
+	GitHubAppPrivateKey                     string   `env:"GITHUB_APP_PRIVATE_KEY"`
+	GitHubWebhookSecret                     string   `env:"GITHUB_WEBHOOK_SECRET"`
+	GitHubAppSlug                           string   `env:"GITHUB_APP_SLUG"`
+	CodeReviewAppReviewerLogins             []string `env:"CODE_REVIEW_APP_REVIEWER_LOGINS" envSeparator:","`
+	CodeReviewAliasLogins                   []string `env:"CODE_REVIEW_ALIAS_LOGINS"        envSeparator:","`
+	CodeReviewTeamSlugs                     []string `env:"CODE_REVIEW_TEAM_SLUGS"          envSeparator:","`
+	CodeReviewDisputeReassessmentsEnabled   bool     `env:"CODE_REVIEW_DISPUTE_REASSESSMENTS_ENABLED" envDefault:"true"`
+	CodeReviewDisputeMaxActiveReassessments int      `env:"CODE_REVIEW_DISPUTE_MAX_ACTIVE_REASSESSMENTS" envDefault:"1000"`
+	// Rolling 24h ceilings on dispute intake from untrusted GitHub authors.
+	// Tunable because they are the only brake on third-party LLM and GitHub
+	// spend on public repositories.
+	CodeReviewDisputeUntrustedIntakePerLogin       int `env:"CODE_REVIEW_DISPUTE_UNTRUSTED_INTAKE_PER_LOGIN"        envDefault:"5"`
+	CodeReviewDisputeUntrustedIntakePerPullRequest int `env:"CODE_REVIEW_DISPUTE_UNTRUSTED_INTAKE_PER_PULL_REQUEST" envDefault:"20"`
 
 	// CSRF
 	CSRFSigningKey string `env:"CSRF_SIGNING_KEY"`
@@ -414,6 +421,21 @@ func Load() *Config {
 	}
 	if cfg.WorkerMaxActiveSandboxes < 0 {
 		cfg.WorkerMaxActiveSandboxes = 0
+	}
+	// These three normalizers deliberately differ. The reassessment ceiling
+	// treats a non-positive value as "unbounded", so a misconfigured 0 would
+	// remove the ceiling rather than tighten it -- halting reassessments is
+	// what CODE_REVIEW_DISPUTE_REASSESSMENTS_ENABLED is for. The intake
+	// ceilings have no such switch, so 0 legitimately means "no ceiling" there
+	// and only a negative value is nonsense.
+	if cfg.CodeReviewDisputeMaxActiveReassessments <= 0 {
+		cfg.CodeReviewDisputeMaxActiveReassessments = 1000
+	}
+	if cfg.CodeReviewDisputeUntrustedIntakePerLogin < 0 {
+		cfg.CodeReviewDisputeUntrustedIntakePerLogin = 5
+	}
+	if cfg.CodeReviewDisputeUntrustedIntakePerPullRequest < 0 {
+		cfg.CodeReviewDisputeUntrustedIntakePerPullRequest = 20
 	}
 	if cfg.DatabaseMaxConns < 0 {
 		cfg.DatabaseMaxConns = 0

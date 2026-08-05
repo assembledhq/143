@@ -96,12 +96,12 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 	_, err = conn.Exec(ctx, `
 		INSERT INTO sessions (id, org_id, revision_context)
 		VALUES
-			($1, $2, '{"pull_request_author":"anya"}'),
-			($3, $2, '{"pull_request_author":"sam"}'),
-			($4, $2, '{"pull_request_author":"anya"}'),
-			($5, $2, '{"pull_request_author":"old"}'),
+			($1, $2, '{"pull_request_author":"anya","github_delivery_id":"delivery-1","request_context":{"source":"issue_comment","author_login":"anya"}}'),
+			($3, $2, '{"pull_request_author":"sam","github_delivery_id":"delivery-2","request_context":{"source":"issue_comment","author_login":"anya"}}'),
+			($4, $2, '{"pull_request_author":"anya","github_delivery_id":"","request_context":{"source":"issue_comment","author_login":"anya"}}'),
+			($5, $2, '{"pull_request_author":"old","github_delivery_id":"delivery-old","request_context":{"source":"issue_comment","author_login":"old"}}'),
 			($6, $2, '{"pull_request_author":"anya"}'),
-			($7, $8, '{"pull_request_author":"other"}')`,
+			($7, $8, '{"pull_request_author":"other","github_delivery_id":"delivery-other","request_context":{"source":"issue_comment","author_login":"intruder"}}')`,
 		approvedSessionID, orgID, needsHumanSessionID, failedSessionID, oldSessionID,
 		legacySessionID, otherOrgSessionID, otherOrgID,
 	)
@@ -245,6 +245,10 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 			{Code: models.CodeReviewRiskReasonFilesLimitExceeded, PRs: 1},
 			{Code: models.CodeReviewRiskReasonLinesLimitExceeded, PRs: 1},
 		},
+		CommentRequestsTotal: 2,
+		CommentRequestsByUser: []models.CodeReviewCommentRequestUserAnalytics{
+			{GitHubLogin: "anya", Requests: 2},
+		},
 	}, analytics, "analytics should preserve outcome, author, size, reason, finding, time, and tenancy semantics")
 
 	// Author ordering is interpolated from a strict allowlist. Execute every
@@ -305,7 +309,11 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 				MedianDeletions:        &otherDeletions,
 			},
 		},
-		NonApprovalReasons: []models.CodeReviewNonApprovalReasonAnalytics{},
+		NonApprovalReasons:   []models.CodeReviewNonApprovalReasonAnalytics{},
+		CommentRequestsTotal: 1,
+		CommentRequestsByUser: []models.CodeReviewCommentRequestUserAnalytics{
+			{GitHubLogin: "intruder", Requests: 1},
+		},
 	}, otherOrgAnalytics, "analytics should remain isolated to the selected organization")
 
 	emptyAnalytics, err := NewCodeReviewStore(conn).GetReviewAnalytics(ctx, uuid.New(), CodeReviewAnalyticsFilters{})
@@ -319,8 +327,9 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 			{Bucket: models.CodeReviewApprovalRound4Plus, PRs: 0},
 			{Bucket: models.CodeReviewApprovalRoundNotYet, PRs: 0},
 		},
-		Authors:            []models.CodeReviewAuthorAnalytics{},
-		NonApprovalReasons: []models.CodeReviewNonApprovalReasonAnalytics{},
+		Authors:               []models.CodeReviewAuthorAnalytics{},
+		NonApprovalReasons:    []models.CodeReviewNonApprovalReasonAnalytics{},
+		CommentRequestsByUser: []models.CodeReviewCommentRequestUserAnalytics{},
 	}, emptyAnalytics, "an organization without reviews should receive zero summary values and empty breakdowns")
 }
 
@@ -451,6 +460,34 @@ func TestCodeReviewStore_GetReviewAnalyticsPRJourneys(t *testing.T) {
 		require.NoError(t, insertErr, "test should insert each PR-journey review fact")
 	}
 
+	_, err = conn.Exec(ctx, `
+		UPDATE sessions
+		SET revision_context = revision_context || jsonb_build_object(
+			'github_delivery_id', CASE id
+				WHEN $1 THEN 'delivery-alice'
+				WHEN $2 THEN 'delivery-alice'
+				WHEN $3 THEN 'delivery-reviewer-bob-1'
+				WHEN $4 THEN 'delivery-reviewer-bob-2'
+				WHEN $5 THEN 'delivery-other-org'
+			END,
+			'request_context', jsonb_build_object(
+				'source', 'issue_comment',
+				'author_login', CASE id
+					WHEN $1 THEN 'Alice'
+					WHEN $2 THEN 'alice'
+					WHEN $3 THEN 'reviewer-bob'
+					WHEN $4 THEN 'reviewer-bob'
+					WHEN $5 THEN 'intruder'
+				END
+			)
+		)
+		WHERE id = ANY($6::uuid[])`,
+		facts[0].sessionID, facts[1].sessionID, facts[4].sessionID,
+		facts[8].sessionID, facts[13].sessionID,
+		[]uuid.UUID{facts[0].sessionID, facts[1].sessionID, facts[4].sessionID, facts[8].sessionID, facts[13].sessionID},
+	)
+	require.NoError(t, err, "test should mark direct comment requests and a redelivery in session audit context")
+
 	iteratedApprovalSessionID := facts[8].sessionID
 	_, err = conn.Exec(ctx, `
 		INSERT INTO code_review_findings (org_id, session_id, severity) VALUES
@@ -497,6 +534,11 @@ func TestCodeReviewStore_GetReviewAnalyticsPRJourneys(t *testing.T) {
 		}
 		return authors
 	}(), "author aggregation should use the first captured author and preserve Unknown exactly once")
+	require.Equal(t, int64(3), analytics.CommentRequestsTotal, "comment request total should deduplicate GitHub redeliveries within a PR")
+	require.Equal(t, []models.CodeReviewCommentRequestUserAnalytics{
+		{GitHubLogin: "reviewer-bob", Requests: 2},
+		{GitHubLogin: "alice", Requests: 1},
+	}, analytics.CommentRequestsByUser, "comment requests should group case-insensitive GitHub logins and exclude other tenants")
 }
 
 // The rank a page cursor anchors on is computed in Go while the rank the
@@ -613,6 +655,109 @@ func TestCodeReviewSortRankMatchesPostgresForEveryRow(t *testing.T) {
 			}
 			require.NoError(t, rows.Err(), "the rank query should complete")
 			require.Equal(t, len(expected), seen, "every seeded combination should be compared")
+		})
+	}
+}
+
+// The reason filter is the only list predicate that reaches into JSONB, and
+// pgxmock never parses SQL: a malformed jsonb_array_elements block, a reason
+// code PostgreSQL cannot compare, or an attempt whose reason array is empty
+// would all satisfy the mocked expectations and only fail in production. Run
+// the generated predicate against PostgreSQL so the stored shape stays covered.
+//
+//nolint:paralleltest // reason subtests share one PostgreSQL connection and isolated schema, so they must run serially
+func TestCodeReviewListWhereReasonFilterMatchesPostgres(t *testing.T) {
+	t.Parallel()
+
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set TEST_DATABASE_URL to run the PostgreSQL reason filter test")
+	}
+
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, databaseURL)
+	require.NoError(t, err, "test should connect to TEST_DATABASE_URL")
+	defer func() {
+		require.NoError(t, conn.Close(context.Background()), "test should close the PostgreSQL connection")
+	}()
+
+	schema := "test_code_review_reason_filter_" + strings.ReplaceAll(uuid.NewString(), "-", "_")
+	_, err = conn.Exec(ctx, `CREATE SCHEMA `+schema)
+	require.NoError(t, err, "test should create an isolated reason filter schema")
+	defer func() {
+		_, cleanupErr := conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS `+schema+` CASCADE`)
+		require.NoError(t, cleanupErr, "test should remove the isolated reason filter schema")
+	}()
+	_, err = conn.Exec(ctx, `SET search_path TO `+schema+`, public`)
+	require.NoError(t, err, "test should isolate reason filter objects")
+
+	_, err = conn.Exec(ctx, `
+		CREATE TABLE code_review_session_metadata (
+			id uuid PRIMARY KEY,
+			org_id uuid NOT NULL,
+			risk_reason_details jsonb NOT NULL DEFAULT '[]'::jsonb
+		)`)
+	require.NoError(t, err, "test should create the columns the reason predicate reads")
+
+	orgID, otherOrgID := uuid.New(), uuid.New()
+	seeded := []struct {
+		name    string
+		orgID   uuid.UUID
+		details string
+	}{
+		{name: "blocking only", orgID: orgID, details: `[{"code": "blocking_findings", "detail": "reviewer flagged a regression"}]`},
+		{name: "blocking and lines", orgID: orgID, details: `[{"code": "lines_limit_exceeded"}, {"code": "blocking_findings"}]`},
+		{name: "no reasons", orgID: orgID, details: `[]`},
+		{name: "other org blocking", orgID: otherOrgID, details: `[{"code": "blocking_findings"}]`},
+	}
+	ids := map[string]uuid.UUID{}
+	for _, row := range seeded {
+		ids[row.name] = uuid.New()
+		_, insertErr := conn.Exec(ctx, `
+			INSERT INTO code_review_session_metadata (id, org_id, risk_reason_details)
+			VALUES ($1, $2, $3::jsonb)`, ids[row.name], row.orgID, row.details)
+		require.NoError(t, insertErr, "test should insert a reason combination")
+	}
+
+	tests := []struct {
+		name     string
+		reason   models.CodeReviewRiskReasonCode
+		expected []uuid.UUID
+	}{
+		{
+			name:     "matches every attempt carrying the reason",
+			reason:   models.CodeReviewRiskReasonBlockingFindings,
+			expected: []uuid.UUID{ids["blocking only"], ids["blocking and lines"]},
+		},
+		{
+			name:     "matches a reason recorded alongside others",
+			reason:   models.CodeReviewRiskReasonLinesLimitExceeded,
+			expected: []uuid.UUID{ids["blocking and lines"]},
+		},
+		{
+			name:     "matches nothing when no attempt recorded the reason",
+			reason:   models.CodeReviewRiskReasonHeadChanged,
+			expected: []uuid.UUID{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason := tt.reason
+			where, args, whereErr := codeReviewListWhere(orgID, CodeReviewListFilters{Reason: &reason}, false)
+			require.NoError(t, whereErr, "the reason predicate should build")
+
+			rows, queryErr := conn.Query(ctx, `SELECT m.id FROM code_review_session_metadata m`+where+` ORDER BY m.id`, args)
+			require.NoError(t, queryErr, "the reason predicate should execute against PostgreSQL")
+			defer rows.Close()
+
+			matched := []uuid.UUID{}
+			for rows.Next() {
+				var id uuid.UUID
+				require.NoError(t, rows.Scan(&id), "the reason query should return attempt IDs")
+				matched = append(matched, id)
+			}
+			require.NoError(t, rows.Err(), "the reason query should complete")
+			require.ElementsMatch(t, tt.expected, matched, "only same-org attempts recording the reason should match")
 		})
 	}
 }

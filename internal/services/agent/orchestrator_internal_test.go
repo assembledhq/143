@@ -1605,7 +1605,7 @@ func TestBuildRunResult_DoesNotPersistUnavailableTokenUsage(t *testing.T) {
 	require.Nil(t, result.TokenUsage, "buildRunResult should leave token usage nil when the provider reported no token payload")
 }
 
-func TestBuildRunResult_CapturesReviewArtifact(t *testing.T) {
+func TestBuildRunResult_CapturesReviewBundle(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.MustParse("12121212-3434-5656-7878-909090909090")
@@ -1619,7 +1619,7 @@ func TestBuildRunResult_CapturesReviewArtifact(t *testing.T) {
 		"-old",
 		"+new",
 	}, "\n")
-	store := &internalReviewArtifactStore{saved: map[string][]byte{}}
+	store := &internalReviewBundleStore{saved: map[string][]byte{}}
 	provider := &testInternalSandboxProvider{
 		execFn: func(cmd string, stdout, stderr io.Writer) (int, error) {
 			switch {
@@ -1646,20 +1646,20 @@ func TestBuildRunResult_CapturesReviewArtifact(t *testing.T) {
 
 	result := orch.buildRunResult(context.Background(), run, &Sandbox{WorkDir: "/workspace"}, &AgentResult{Diff: diff, Summary: "done"})
 
-	require.NotNil(t, result.ReviewArtifactKey, "buildRunResult should attach a review artifact key")
-	require.Contains(t, *result.ReviewArtifactKey, "review-artifacts/"+orgID.String()+"/"+runID.String()+"/", "artifact key should be scoped by org and session")
-	require.Equal(t, 1, result.ReviewArtifactFileCount, "buildRunResult should record stored file count")
-	require.Len(t, store.saved, 1, "buildRunResult should upload one artifact")
+	require.NotNil(t, result.ReviewBundleKey, "buildRunResult should attach a review bundle key")
+	require.Contains(t, *result.ReviewBundleKey, "review-bundles/"+orgID.String()+"/"+runID.String()+"/", "bundle key should be scoped by org and session")
+	require.Equal(t, 1, result.ReviewBundleFileCount, "buildRunResult should record stored file count")
+	require.Len(t, store.saved, 1, "buildRunResult should upload one bundle")
 }
 
-func TestBuildRunResult_ReviewArtifactUploadFailureIsNonFatal(t *testing.T) {
+func TestBuildRunResult_ReviewBundleUploadFailureIsNonFatal(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
 	runID := uuid.New()
 	baseSHA := "base123"
 	diff := "diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old\n+new\n"
-	store := &internalReviewArtifactStore{saveErr: errors.New("upload failed")}
+	store := &internalReviewBundleStore{saveErr: errors.New("upload failed")}
 	provider := &testInternalSandboxProvider{
 		execFn: func(cmd string, stdout, stderr io.Writer) (int, error) {
 			switch {
@@ -1682,29 +1682,29 @@ func TestBuildRunResult_ReviewArtifactUploadFailureIsNonFatal(t *testing.T) {
 	result := orch.buildRunResult(context.Background(), run, &Sandbox{WorkDir: "/workspace"}, &AgentResult{Diff: diff, Summary: "done"})
 
 	require.NotNil(t, result.Diff, "buildRunResult should still return the session diff")
-	require.Nil(t, result.ReviewArtifactKey, "buildRunResult should omit artifact metadata when upload fails")
+	require.Nil(t, result.ReviewBundleKey, "buildRunResult should omit bundle metadata when upload fails")
 }
 
-func TestCleanupReviewArtifactDeletesUploadedArtifact(t *testing.T) {
+func TestCleanupReviewBundleDeletesUploadedBundle(t *testing.T) {
 	t.Parallel()
 
-	key := "review-artifacts/org/session/artifact.json.gz"
-	store := &internalReviewArtifactStore{saved: map[string][]byte{key: []byte("payload")}}
+	key := "review-bundles/org/session/bundle.json.gz"
+	store := &internalReviewBundleStore{saved: map[string][]byte{key: []byte("payload")}}
 	orch := &Orchestrator{snapshots: store, logger: zerolog.Nop()}
 
-	orch.cleanupReviewArtifact(context.Background(), &models.SessionResult{ReviewArtifactKey: &key}, zerolog.Nop())
+	orch.cleanupReviewBundle(context.Background(), &models.SessionResult{ReviewBundleKey: &key}, zerolog.Nop())
 
-	require.Equal(t, []string{key}, store.deleted, "cleanupReviewArtifact should delete the uploaded artifact")
-	require.Empty(t, store.saved, "cleanupReviewArtifact should remove the stored payload")
+	require.Equal(t, []string{key}, store.deleted, "cleanupReviewBundle should delete the uploaded bundle")
+	require.Empty(t, store.saved, "cleanupReviewBundle should remove the stored payload")
 }
 
-type internalReviewArtifactStore struct {
+type internalReviewBundleStore struct {
 	saved   map[string][]byte
 	deleted []string
 	saveErr error
 }
 
-func (s *internalReviewArtifactStore) Save(_ context.Context, key string, reader io.Reader) error {
+func (s *internalReviewBundleStore) Save(_ context.Context, key string, reader io.Reader) error {
 	if s.saveErr != nil {
 		return s.saveErr
 	}
@@ -1719,12 +1719,12 @@ func (s *internalReviewArtifactStore) Save(_ context.Context, key string, reader
 	return nil
 }
 
-func (s *internalReviewArtifactStore) Load(_ context.Context, key string, writer io.Writer) error {
+func (s *internalReviewBundleStore) Load(_ context.Context, key string, writer io.Writer) error {
 	_, err := writer.Write(s.saved[key])
 	return err
 }
 
-func (s *internalReviewArtifactStore) Delete(_ context.Context, key string) error {
+func (s *internalReviewBundleStore) Delete(_ context.Context, key string) error {
 	s.deleted = append(s.deleted, key)
 	delete(s.saved, key)
 	return nil

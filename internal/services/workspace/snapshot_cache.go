@@ -181,7 +181,7 @@ const maxOpenRetries = 3
 // defaultMaxCompressedSnapshotBytes caps the object bytes written to the
 // staging file before extraction. Keep this below the decompressed stream cap
 // so a single snapshot cannot consume unbounded cache disk even if the
-// compressed artifact itself is pathological.
+// compressed output itself is pathological.
 const defaultMaxCompressedSnapshotBytes int64 = 2 << 30 // 2 GiB
 
 // Open returns a refcounted SnapshotEntry rooted at workspaceRel inside

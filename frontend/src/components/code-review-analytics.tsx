@@ -12,38 +12,9 @@ import { SortableTableHeader, sortDirectionAriaValue } from "@/components/sortab
 import { Card, CardContent } from "@/components/ui/card";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { codeReviewReasonLabel } from "@/lib/code-review-reasons";
 import type { CodeReviewAnalytics } from "@/lib/types";
 type AuthorSort = "author" | "reviews" | "approved" | "not_approved" | "approval_rate" | "first_round" | "median_rounds" | "median_additions" | "median_deletions";
-
-const NON_APPROVAL_REASON_LABELS: Record<string, string> = {
-  reviewer_disabled: "Automatic approval was disabled",
-  context_unavailable: "PR context was unavailable",
-  head_changed: "PR changed during review",
-  files_limit_exceeded: "File-count limit exceeded",
-  lines_limit_exceeded: "Line-count limit exceeded",
-  checks_failing: "Required checks were not passing",
-  required_check_failing: "A named required check was not passing",
-  description_failed: "PR description requirements were not met",
-  branch_out_of_date: "Branch was out of date",
-  fork_ineligible: "Fork PRs were not eligible",
-  author_ineligible: "Author was not eligible",
-  blocking_findings: "Reviewers found a blocking issue",
-  reviewer_disagreement: "Reviewer agents disagreed",
-  scope_mismatch: "Change scope did not match the PR",
-  unresolved_uncertainty: "Important uncertainty remained",
-  prompt_injection: "Prompt-injection risk was detected",
-  sensitive_path: "Sensitive paths changed",
-  path_outside_scope: "Paths were outside the allowed scope",
-  blocked_path: "Blocked paths changed",
-  reviewer_quorum: "Reviewer quorum was not met",
-  orchestrator_synthesis_invalid: "Final synthesis was unavailable",
-  orchestrator_context_stale: "Final synthesis used stale PR context",
-  architecture: "Architecture needed human judgment",
-  ownership: "Ownership needed human judgment",
-  operational_risk: "Operational risk needed human judgment",
-  sensitive_change: "Sensitive change needed human judgment",
-  policy_requirement: "An approval-policy requirement needed human judgment",
-};
 
 const APPROVAL_ROUND_LABELS: Record<CodeReviewAnalytics["approval_rounds"][number]["bucket"], string> = {
   round_1: "Approved in round 1",
@@ -81,13 +52,6 @@ function medianAriaLabel(value: number | null, sign: "+" | "-", noun: string): s
   return formatted === "—" ? `No ${noun} data overall` : `${formatted} ${noun} overall`;
 }
 
-function reasonLabel(code: string): string {
-  const known = NON_APPROVAL_REASON_LABELS[code];
-  if (known) return known;
-  const readable = code.replaceAll("_", " ");
-  return readable.charAt(0).toUpperCase() + readable.slice(1);
-}
-
 function authorReviewsHref({
   author,
   outcome,
@@ -112,6 +76,26 @@ function authorReviewsHref({
   return `/code-reviews?${params.toString()}`;
 }
 
+function reasonReviewsHref({
+  reason,
+  repository,
+  range,
+}: {
+  reason: string;
+  repository?: string;
+  range: string;
+}): string {
+  const params = new URLSearchParams({
+    tab: "reviews",
+    outcome: "completed_not_approved",
+    reason,
+    status: "all",
+    range,
+  });
+  if (repository) params.set("repository", repository);
+  return `/code-reviews?${params.toString()}`;
+}
+
 function AuthorReviewCountLink({
   author,
   count,
@@ -119,7 +103,6 @@ function AuthorReviewCountLink({
   outcome,
   repository,
   range,
-  onNavigate,
 }: {
   author: string;
   count: number;
@@ -127,24 +110,12 @@ function AuthorReviewCountLink({
   outcome?: "automatically_approved" | "completed_not_approved";
   repository?: string;
   range: string;
-  onNavigate: () => void;
 }) {
   return (
     <Link
       href={authorReviewsHref({ author, outcome, repository, range })}
       className="font-medium text-primary underline-offset-4 hover:underline focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       aria-label={`${count.toLocaleString()} ${label} by ${author}`}
-      onClick={(event) => {
-        if (
-          event.button === 0
-          && !event.metaKey
-          && !event.ctrlKey
-          && !event.shiftKey
-          && !event.altKey
-        ) {
-          onNavigate();
-        }
-      }}
     >
       {count.toLocaleString()}
     </Link>
@@ -215,7 +186,6 @@ export function CodeReviewAnalyticsReport({
   authorSortOrder,
   onAuthorSort,
   reviewLinkFilters,
-  onNavigateToReviews,
   filters,
 }: {
   analytics?: CodeReviewAnalytics;
@@ -229,7 +199,6 @@ export function CodeReviewAnalyticsReport({
     repository?: string;
     range: string;
   };
-  onNavigateToReviews: () => void;
   filters: ReactNode;
 }) {
   if (!analytics && isLoading) {
@@ -301,22 +270,6 @@ export function CodeReviewAnalyticsReport({
       {filters}
 
       <SectionGroup
-        title="Approval by round"
-        description="Each PR appears once, based on the first distinct completed head that received a posted 143 approval."
-      >
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5" aria-label="Approval by round">
-          {analytics.approval_rounds.map((bucket) => (
-            <MetricCard
-              key={bucket.bucket}
-              label={APPROVAL_ROUND_LABELS[bucket.bucket]}
-              value={bucket.prs.toLocaleString()}
-              context={`${percentage(bucket.prs, summary.prs_reviewed)} of PRs reviewed`}
-            />
-          ))}
-        </div>
-      </SectionGroup>
-
-      <SectionGroup
         title="Usage by PR author"
         description="Unique PR outcomes grouped by the author captured from the first available assessment."
       >
@@ -365,7 +318,6 @@ export function CodeReviewAnalyticsReport({
                         label="reviewed PRs"
                         repository={reviewLinkFilters.repository}
                         range={reviewLinkFilters.range}
-                        onNavigate={onNavigateToReviews}
                       />
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
@@ -376,7 +328,6 @@ export function CodeReviewAnalyticsReport({
                         outcome="automatically_approved"
                         repository={reviewLinkFilters.repository}
                         range={reviewLinkFilters.range}
-                        onNavigate={onNavigateToReviews}
                       />
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
@@ -387,7 +338,6 @@ export function CodeReviewAnalyticsReport({
                         outcome="completed_not_approved"
                         repository={reviewLinkFilters.repository}
                         range={reviewLinkFilters.range}
-                        onNavigate={onNavigateToReviews}
                       />
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
@@ -459,6 +409,62 @@ export function CodeReviewAnalyticsReport({
         )}
       </SectionGroup>
 
+      <SectionGroup
+        title="Direct review requests by user"
+        description="For the selected PR cohort, trusted comments that directly mentioned the configured 143 code reviewer. GitHub redeliveries count once."
+      >
+        {analytics.comment_requests_by_user.length === 0 ? (
+          <p className="py-6 text-center text-sm text-muted-foreground">
+            No direct comment requests were captured for this PR cohort.
+          </p>
+        ) : (
+          <Card className="overflow-x-auto">
+            <Table aria-label="Direct code review requests by GitHub user">
+              <TableHeader>
+                <TableRow>
+                  <TableHead>GitHub user</TableHead>
+                  <TableHead className="text-right">Direct comment requests</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {analytics.comment_requests_by_user.map((requester) => (
+                  <TableRow key={requester.github_login}>
+                    <TableCell className="font-medium">{requester.github_login}</TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {requester.requests.toLocaleString()}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+              <DataTableSummaryRow
+                description="Direct comment requests across all PRs first sent to 143 in the current repository and time filters."
+                cells={[{
+                  content: analytics.comment_requests_total.toLocaleString(),
+                  className: "text-right",
+                  ariaLabel: `${analytics.comment_requests_total.toLocaleString()} direct comment requests overall`,
+                }]}
+              />
+            </Table>
+          </Card>
+        )}
+      </SectionGroup>
+
+      <SectionGroup
+        title="Approval by round"
+        description="Each PR appears once, based on the first distinct completed head that received a posted 143 approval."
+      >
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5" aria-label="Approval by round">
+          {analytics.approval_rounds.map((bucket) => (
+            <MetricCard
+              key={bucket.bucket}
+              label={APPROVAL_ROUND_LABELS[bucket.bucket]}
+              value={bucket.prs.toLocaleString()}
+              context={`${percentage(bucket.prs, summary.prs_reviewed)} of PRs reviewed`}
+            />
+          ))}
+        </div>
+      </SectionGroup>
+
       <div className="grid gap-6 xl:grid-cols-2">
         <SectionGroup
           title="Why PRs were not approved right away"
@@ -472,10 +478,21 @@ export function CodeReviewAnalyticsReport({
             <Card>
               <CardContent className="divide-y divide-border p-0">
                 {analytics.non_approval_reasons.map((reason) => (
-                  <div key={reason.code} className="flex items-center justify-between gap-4 px-4 py-3">
-                    <span className="text-sm text-foreground">{reasonLabel(reason.code)}</span>
+                  <Link
+                    key={reason.code}
+                    href={reasonReviewsHref({
+                      reason: reason.code,
+                      repository: reviewLinkFilters.repository,
+                      range: reviewLinkFilters.range,
+                    })}
+                    className="group flex items-center justify-between gap-4 px-4 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring hover:bg-muted/50"
+                    aria-label={`View ${reason.prs.toLocaleString()} PRs where ${codeReviewReasonLabel(reason.code).toLowerCase()}`}
+                  >
+                    <span className="text-sm text-foreground underline-offset-4 group-hover:underline">
+                      {codeReviewReasonLabel(reason.code)}
+                    </span>
                     <Badge variant="secondary">{reason.prs.toLocaleString()} PRs</Badge>
-                  </div>
+                  </Link>
                 ))}
               </CardContent>
             </Card>

@@ -38,6 +38,17 @@ func newSyncCodeReviewStatusCommentHandler(stores *Stores, services *Services, l
 		if err != nil {
 			return fmt.Errorf("load code review for status comment: %w", err)
 		}
+		if job.TriggeringDisputeID == nil && metadata.TriggerSource == models.CodeReviewTriggerSourceDisputeReassessment {
+			job.TriggeringDisputeID, err = stores.CodeReviews.GetTriggeringDisputeID(ctx, job.OrgID, job.SessionID)
+			if err != nil {
+				return fmt.Errorf("load triggering dispute for status comment: %w", err)
+			}
+		}
+		if job.TriggeringDisputeID != nil && codeReviewMetadataTerminal(metadata.Status) && services.CodeReviewDisputes != nil {
+			if err := services.CodeReviewDisputes.EnqueueReply(ctx, job.OrgID, *job.TriggeringDisputeID, "status_sync_terminal"); err != nil {
+				return fmt.Errorf("enqueue terminal dispute reconciliation: %w", err)
+			}
+		}
 		latest, err := stores.CodeReviews.GetLatestByPullRequest(ctx, job.OrgID, metadata.PullRequestID)
 		if err != nil {
 			return fmt.Errorf("load latest code review for status comment: %w", err)
@@ -173,6 +184,48 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, sess
 }
 
 func enqueueCodeReviewStatusCommentSync(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, stage string) {
+	if strings.TrimSpace(stage) == "terminal" && job.TriggeringDisputeID != nil &&
+		stores != nil && stores.CodeReviews != nil && stores.CodeReviewDisputes != nil &&
+		services != nil && services.CodeReviewDisputes != nil {
+		metadata, err := stores.CodeReviews.GetBySessionID(ctx, job.OrgID, job.SessionID)
+		if err != nil {
+			logger.Warn().Err(err).
+				Str("session_id", job.SessionID.String()).
+				Str("dispute_id", job.TriggeringDisputeID.String()).
+				Msg("failed to load terminal reassessment for dispute reconciliation")
+		} else {
+			detail := strings.TrimSpace(stringPtrValue(metadata.StatusMessage))
+			transitioned, completeErr := stores.CodeReviewDisputes.CompleteReassessmentOnce(ctx, job.OrgID, *job.TriggeringDisputeID, job.SessionID, metadata.Status, metadata.Decision, detail)
+			if completeErr != nil {
+				logger.Warn().Err(completeErr).
+					Str("session_id", job.SessionID.String()).
+					Str("dispute_id", job.TriggeringDisputeID.String()).
+					Msg("failed to reconcile terminal reassessment with dispute")
+			}
+			if err := services.CodeReviewDisputes.EnqueueReply(ctx, job.OrgID, *job.TriggeringDisputeID, "terminal"); err != nil {
+				logger.Warn().Err(err).
+					Str("session_id", job.SessionID.String()).
+					Str("dispute_id", job.TriggeringDisputeID.String()).
+					Msg("failed to enqueue terminal dispute reply")
+			} else if completeErr == nil && transitioned && stores.AuditLogs != nil {
+				resourceID := job.TriggeringDisputeID.String()
+				details, marshalErr := json.Marshal(map[string]any{
+					"reassessment_session_id": job.SessionID,
+					"status":                  metadata.Status,
+					"decision":                metadata.Decision,
+				})
+				if marshalErr != nil {
+					logger.Warn().Err(marshalErr).Str("dispute_id", resourceID).Msg("failed to marshal code review dispute reassessment audit")
+				} else {
+					db.NewAuditEmitter(stores.AuditLogs, logger).EmitSystemAction(ctx, db.SystemActionParams{
+						OrgID: job.OrgID, ActorID: "code_review_dispute_reassessment",
+						Action: models.AuditActionCodeReviewDisputeReassessed, ResourceType: models.AuditResourceCodeReviewDispute,
+						ResourceID: &resourceID, Details: details, SessionID: &job.SessionID,
+					})
+				}
+			}
+		}
+	}
 	if stores == nil || stores.Jobs == nil || services == nil || services.CodeReviews == nil {
 		return
 	}
@@ -184,10 +237,11 @@ func enqueueCodeReviewStatusCommentSync(ctx context.Context, stores *Stores, ser
 		Queue:   "default",
 		JobType: models.JobTypeSyncCodeReviewStatusComment,
 		Payload: codereviewsvc.SyncReviewStatusCommentJobPayload{
-			OrgID:         job.OrgID,
-			SessionID:     job.SessionID,
-			RepositoryID:  job.RepositoryID,
-			PullRequestID: job.PullRequestID,
+			OrgID:               job.OrgID,
+			SessionID:           job.SessionID,
+			RepositoryID:        job.RepositoryID,
+			PullRequestID:       job.PullRequestID,
+			TriggeringDisputeID: job.TriggeringDisputeID,
 		},
 		Priority:    3,
 		DedupeKey:   &dedupeKey,

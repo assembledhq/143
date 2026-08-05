@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent, ComponentProps, KeyboardEvent, ReactNode } from "react";
-import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createParser, parseAsString, parseAsStringLiteral, useQueryState } from "nuqs";
 import {
   AlertTriangle,
@@ -12,6 +12,7 @@ import {
   CircleHelp,
   ClipboardCheck,
   FileSearch,
+  Github,
   MessageSquareText,
   Plus,
   PowerOff,
@@ -38,6 +39,7 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Switch } from "@/components/ui/switch";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -53,6 +55,11 @@ import { ApiError, api } from "@/lib/api";
 import { notify as toast } from "@/lib/notify";
 import { queryKeys } from "@/lib/query-keys";
 import { getActiveOrgId } from "@/lib/active-org";
+import {
+  ALL_CODE_REVIEW_REASONS,
+  CODE_REVIEW_REASON_CODES,
+  type CodeReviewReasonCode,
+} from "@/lib/code-review-reasons";
 import { buildCodeReviewStreamURL, SSE_EVENT } from "@/lib/sse";
 import { useResourceSSE } from "@/lib/use-resource-sse";
 import { pollMs } from "@/lib/poll-intervals";
@@ -72,6 +79,7 @@ import {
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { CodeReviewAnalyticsReport } from "@/components/code-review-analytics";
+import { GitHubReviewerConnectionSheet } from "@/components/code-review/github-reviewer-connection-sheet";
 import { SortableTableHeader } from "@/components/sortable-table-header";
 import {
   ALL_OUTCOMES,
@@ -92,6 +100,7 @@ import type {
   CodeReviewApprovalMode,
   CodeReviewActivityStatus,
   CodeReviewDecision,
+  CodeReviewDispute,
   CodeReviewDescriptionApplicabilityKind,
   CodeReviewEvidence,
   CodeReviewGitHubTriggerResponse,
@@ -109,7 +118,7 @@ import type {
   SingleResponse,
 } from "@/lib/types";
 
-const CODE_REVIEW_TAB_VALUES = ["reviews", "analytics", "policy"] as const;
+const CODE_REVIEW_TAB_VALUES = ["reviews", "analytics", "disputes", "policy"] as const;
 type CodeReviewTab = (typeof CODE_REVIEW_TAB_VALUES)[number];
 const OUTCOME_FILTER_VALUES = [ALL_OUTCOMES, AUTOMATICALLY_APPROVED, COMPLETED_NOT_APPROVED, "needs_human_review", "comment_only", "blocked"] as const;
 type OutcomeFilter = (typeof OUTCOME_FILTER_VALUES)[number];
@@ -484,20 +493,35 @@ export default function CodeReviewsPage() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const canManagePolicy = user?.role === "admin";
-  const canRetryReviews = user?.role === "admin" || user?.role === "member";
-  const [tabParam] = useQueryState(
+  const canFileDisputes = user?.role === "admin" || user?.role === "member";
+  const canRetryReviews = canFileDisputes;
+  const [tabParam, setTabParam] = useQueryState(
     "tab",
-    parseAsStringLiteral(CODE_REVIEW_TAB_VALUES).withDefault("reviews"),
+    parseAsStringLiteral(CODE_REVIEW_TAB_VALUES)
+      .withDefault("reviews")
+      .withOptions({ history: "push" }),
   );
-  const [activeTab, setActiveTabState] = useState<CodeReviewTab>(tabParam);
+  const activeTab: CodeReviewTab = tabParam === "disputes" && !canManagePolicy ? "reviews" : tabParam;
+  const [addRepositoryParam, setAddRepositoryParam] = useQueryState("add_repository", parseAsString);
+  const [githubConnectionResult, setGitHubConnectionResult] = useQueryState("github_pr", parseAsString);
+  const [githubAppConnectionResult, setGitHubAppConnectionResult] = useQueryState("github", parseAsString);
+  const [addRepositoryOpen, setAddRepositoryOpen] = useState(addRepositoryParam === "1");
   useEffect(() => {
-    setActiveTabState(tabParam);
-  }, [tabParam]);
+    if (addRepositoryParam === "1") setAddRepositoryOpen(true);
+  }, [addRepositoryParam]);
+  const openAddRepository = useCallback(() => {
+    setAddRepositoryOpen(true);
+    void setAddRepositoryParam("1");
+  }, [setAddRepositoryParam]);
+  const changeAddRepositoryOpen = useCallback((open: boolean) => {
+    setAddRepositoryOpen(open);
+    void setAddRepositoryParam(open ? "1" : null);
+  }, [setAddRepositoryParam]);
   const setActiveTab = useCallback(
     (value: string) => {
-      setActiveTabState(value as CodeReviewTab);
+      void setTabParam(value as CodeReviewTab);
     },
-    [],
+    [setTabParam],
   );
   const [repositoryFilter, setRepositoryFilter] = useQueryState("repository", parseAsString.withDefault(ALL_REPOSITORIES));
   const [outcomeFilter, setOutcomeParam] = useQueryState(
@@ -510,6 +534,11 @@ export default function CodeReviewsPage() {
   );
   const timeRangeAnchorMsRef = useRef(Date.now());
   const [riskFilter, setRiskFilter] = useQueryState("risk", parseAsStringLiteral(RISK_FILTER_VALUES).withDefault(ALL_RISKS));
+  const [reasonFilter, setReasonFilter] = useQueryState(
+    "reason",
+    parseAsStringLiteral([ALL_CODE_REVIEW_REASONS, ...CODE_REVIEW_REASON_CODES] as const)
+      .withDefault(ALL_CODE_REVIEW_REASONS),
+  );
   const [statusFilter, setStatusFilter] = useQueryState(
     "status",
     STATUS_FILTER_PARSER,
@@ -530,7 +559,25 @@ export default function CodeReviewsPage() {
     }, CODE_REVIEW_SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
   }, [search, setSearchParam]);
-  const [selectedEvidenceSessionId, setSelectedEvidenceSessionId] = useState<string | null>(null);
+  // The dispute queue deep-links here with ?evidence=<session id>, so the open
+  // sheet is URL state. Unlike the filter params this one writes the URL
+  // directly rather than through the nuqs setter: the sheet is driven by local
+  // state, and the setter's optimistic-then-settle update would re-run the sync
+  // effect and close the sheet on the click that just opened it. nuqs patches
+  // history.replaceState and syncs from it, so evidenceParam still tracks the
+  // write and back/forward still work.
+  const [evidenceParam] = useQueryState("evidence", parseAsString);
+  const [selectedEvidenceSessionId, setSelectedEvidenceSessionId] = useState<string | null>(evidenceParam);
+  useEffect(() => {
+    setSelectedEvidenceSessionId(evidenceParam);
+  }, [evidenceParam]);
+  const selectEvidenceSession = useCallback((sessionID: string | null) => {
+    setSelectedEvidenceSessionId(sessionID);
+    const url = new URL(window.location.href);
+    if (sessionID) url.searchParams.set("evidence", sessionID);
+    else url.searchParams.delete("evidence");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  }, []);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [editingRequirementKey, setEditingRequirementKey] = useState<string | null>(null);
   const [promptExample, setPromptExample] = useState<{ field: "review_instructions" | "automated_approval_policy"; example: CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption } | null>(null);
@@ -564,10 +611,11 @@ export default function CodeReviewsPage() {
           : undefined,
       outcome: outcomeFilter === AUTOMATICALLY_APPROVED || outcomeFilter === COMPLETED_NOT_APPROVED ? (outcomeFilter as CodeReviewListOutcome) : undefined,
       risk: riskFilter === ALL_RISKS ? undefined : (riskFilter as "acceptable" | "needs_review"),
+      reason: reasonFilter === ALL_CODE_REVIEW_REASONS ? undefined : reasonFilter as CodeReviewReasonCode,
       author: authorFilter.trim() || undefined,
       search: searchParam.trim() || undefined,
     }),
-    [authorFilter, outcomeFilter, reviewRepositoryId, riskFilter, searchParam],
+    [authorFilter, outcomeFilter, reasonFilter, reviewRepositoryId, riskFilter, searchParam],
   );
   // Which review attempts are in scope for the Reviews tab. Analytics selects
   // PR cohorts only by repository and first-request time.
@@ -658,6 +706,7 @@ export default function CodeReviewsPage() {
     reviewRepositoryId
     || outcomeFilter !== ALL_OUTCOMES
     || riskFilter !== ALL_RISKS
+    || reasonFilter !== ALL_CODE_REVIEW_REASONS
     || statusFilter !== DEFAULT_STATUS_FILTER
     || authorFilter.trim()
     || searchParam.trim()
@@ -667,12 +716,13 @@ export default function CodeReviewsPage() {
     void setRepositoryFilter(null);
     void setOutcomeParam(null);
     void setRiskFilter(null);
+    void setReasonFilter(null);
     void setStatusFilter(null);
     void setAuthorFilter(null);
     setSearch("");
     void setSearchParam(null);
     setTimeRangeFilter("all");
-  }, [setAuthorFilter, setOutcomeParam, setRepositoryFilter, setRiskFilter, setSearchParam, setStatusFilter, setTimeRangeFilter]);
+  }, [setAuthorFilter, setOutcomeParam, setReasonFilter, setRepositoryFilter, setRiskFilter, setSearchParam, setStatusFilter, setTimeRangeFilter]);
   const reviewScopeKey = JSON.stringify(reviewFiltersQueryKey);
   const [extraReviewPages, setExtraReviewPages] = useState<CodeReviewListItem[][]>([]);
   const [loadMoreCursor, setLoadMoreCursor] = useState<string | undefined>();
@@ -689,6 +739,18 @@ export default function CodeReviewsPage() {
   const repositoriesQuery = useQuery({
     queryKey: queryKeys.repositories.all,
     queryFn: () => api.repositories.list(),
+  });
+  const integrationsQuery = useQuery({
+    queryKey: queryKeys.integrations.all,
+    queryFn: () => api.integrations.list(),
+  });
+  const githubAccountQuery = useQuery({
+    queryKey: ["github-status"],
+    queryFn: () => api.githubStatus.get(),
+  });
+  const githubTriggerStatusesQuery = useQuery({
+    queryKey: queryKeys.codeReviews.githubTriggers,
+    queryFn: () => api.codeReviews.listGitHubTriggers(),
   });
   const refreshRelativeReviewWindow = useCallback(() => {
     timeRangeAnchorMsRef.current = Date.now();
@@ -820,12 +882,40 @@ export default function CodeReviewsPage() {
     queryFn: () => api.codexAuth.status(),
   });
   const repositories = repositoriesQuery.data?.data ?? [];
-  const githubTriggerQueries = useQueries({
-    queries: repositories.map((repository) => ({
-      queryKey: queryKeys.codeReviews.githubTrigger(repository.id),
-      queryFn: () => api.codeReviews.getGitHubTrigger(repository.id),
-    })),
-  });
+  const githubIntegration = integrationsQuery.data?.data.find(
+    (integration) => integration.provider === "github" && integration.status === "active",
+  );
+  const githubTriggerStatuses = githubTriggerStatusesQuery.data?.data ?? [];
+  const visibleGitHubTriggerStatuses = githubTriggerStatuses
+    .filter((trigger) => trigger.repository_status !== "disconnected" || !!trigger.trigger)
+    .slice()
+    .sort((left, right) => {
+      const priority = (status: CodeReviewGitHubTriggerResponse["status"]) => {
+        if (status === "disconnected" || status === "permission_required" || status === "error") return 0;
+        if (status === "ready") return 1;
+        return 2;
+      };
+      return priority(left.status) - priority(right.status) || (left.repository_full_name ?? "").localeCompare(right.repository_full_name ?? "");
+    });
+
+  useEffect(() => {
+    if (githubConnectionResult !== "connected") return;
+    toast.success("GitHub account connected", {
+      description: "Choose a repository to connect and set up its reviewer.",
+    });
+    void queryClient.invalidateQueries({ queryKey: ["github-status"] });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.githubTriggers });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.integrations.all });
+    void setGitHubConnectionResult(null);
+  }, [githubConnectionResult, queryClient, setGitHubConnectionResult]);
+  useEffect(() => {
+    if (githubAppConnectionResult !== "connected") return;
+    toast.success("GitHub App connected", {
+      description: "Choose a repository to connect and set up its reviewer.",
+    });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.integrations.all });
+    void setGitHubAppConnectionResult(null);
+  }, [githubAppConnectionResult, queryClient, setGitHubAppConnectionResult]);
   const promptExamplesQuery = useQuery({
     queryKey: queryKeys.codeReviews.promptExamples,
     queryFn: () => api.codeReviews.promptExamples(),
@@ -834,6 +924,30 @@ export default function CodeReviewsPage() {
     queryKey: queryKeys.codeReviews.evidence(selectedEvidenceSessionId ?? ""),
     queryFn: () => api.codeReviews.evidence(selectedEvidenceSessionId ?? ""),
     enabled: Boolean(selectedEvidenceSessionId),
+  });
+  const disputeQueueQuery = useInfiniteQuery({
+    queryKey: queryKeys.codeReviews.disputeQueue({ adjudication_status: "pending" }),
+    queryFn: ({ pageParam }) => api.codeReviews.disputeQueue({ adjudication_status: "pending", cursor: pageParam }),
+    enabled: canManagePolicy,
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.meta?.next_cursor || undefined,
+  });
+  const pendingDisputes = useMemo(
+    () => disputeQueueQuery.data?.pages.flatMap((page) => page.data ?? []) ?? [],
+    [disputeQueueQuery.data],
+  );
+  const adjudicateDispute = useMutation({
+    mutationFn: ({ dispute, status, note }: { dispute: CodeReviewDispute; status: "upheld" | "rejected" | "needs_context"; note?: string }) =>
+      api.codeReviews.adjudicateDispute(dispute.id, {
+        expected_version: dispute.version,
+        adjudication_status: status,
+        adjudication_note: note?.trim() || undefined,
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["code-reviews", "dispute-queue"] });
+      toast.success("Dispute adjudication saved");
+    },
+    onError: () => toast.error("Dispute adjudication could not be saved"),
   });
 
   // The policy is autosaved as a single whole-config PUT. Each control reads
@@ -900,6 +1014,7 @@ export default function CodeReviewsPage() {
       void queryClient.invalidateQueries({
         queryKey: queryKeys.codeReviews.githubTrigger(targetRepositoryId),
       });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.githubTriggers });
       trackCodeReviewPolicyEvent({ event: "code_review_github_setup_completed", scope: "repository", configured: true });
     },
     onError: () => trackCodeReviewPolicyEvent({ event: "code_review_github_setup_failed", scope: "repository", configured: false }),
@@ -910,6 +1025,7 @@ export default function CodeReviewsPage() {
       void queryClient.invalidateQueries({
         queryKey: queryKeys.codeReviews.githubTrigger(targetRepositoryId),
       });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.githubTriggers });
     },
   });
   const [retryingReviewSessionIds, setRetryingReviewSessionIds] = useState<Set<string>>(() => new Set());
@@ -919,7 +1035,7 @@ export default function CodeReviewsPage() {
       setRetryingReviewSessionIds((current) => new Set(current).add(sessionId));
     },
     onSuccess: (_result, sessionId) => {
-      setSelectedEvidenceSessionId((current) => (current === sessionId ? null : current));
+      if (selectedEvidenceSessionId === sessionId) selectEvidenceSession(null);
       if (isViewingReviewHistory) setNewReviewsAvailable(true);
       else {
         void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.lists() });
@@ -986,10 +1102,34 @@ export default function CodeReviewsPage() {
     const timer = window.setInterval(() => setCountdownNowMs(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, [hasScheduledReviewRetry]);
-  const selectedEvidenceReview = useMemo(
+  const listedEvidenceReview = useMemo(
     () => reviews.find((review) => review.session_id === selectedEvidenceSessionId) ?? null,
     [reviews, selectedEvidenceSessionId],
   );
+  // The list is windowed (default 30d) and paginated, but ?evidence=<session id>
+  // is deep-linked from the dispute queue and from every GitHub dispute reply.
+  // Without this fallback the sheet silently never opens for a review that has
+  // scrolled out of the loaded page or the selected time range.
+  const evidenceReviewQuery = useQuery({
+    queryKey: queryKeys.codeReviews.detail(selectedEvidenceSessionId ?? ""),
+    queryFn: () => api.codeReviews.get(selectedEvidenceSessionId ?? ""),
+    enabled: Boolean(selectedEvidenceSessionId) && !listedEvidenceReview,
+    // A deep link to a deleted or wrong session is a permanent 404, and
+    // retrying it only delays the error notice below. Transient failures still
+    // get one retry.
+    retry: (failureCount, error) =>
+      !(error instanceof ApiError && error.status === 404) && failureCount < 1,
+  });
+  const selectedEvidenceReview = listedEvidenceReview ?? (
+    selectedEvidenceSessionId && evidenceReviewQuery.data?.data?.session_id === selectedEvidenceSessionId
+      ? evidenceReviewQuery.data.data
+      : null
+  );
+  // A deep link that cannot be resolved must say so. Leaving the sheet closed
+  // reproduces the silent no-op this fallback exists to remove.
+  const evidenceDeepLinkError = Boolean(selectedEvidenceSessionId) && !listedEvidenceReview
+    ? evidenceReviewQuery.error
+    : null;
   const orgSettings = (settingsQuery.data?.data?.settings ?? {}) as OrgSettings;
   const orgCodingCredentials = useMemo(() => orgCodingCredentialsQuery.data?.data ?? [], [orgCodingCredentialsQuery.data?.data]);
   const codeReviewResolvedCredentials = useMemo(
@@ -1126,9 +1266,7 @@ export default function CodeReviewsPage() {
           isRetrying={retryingReviewSessionIds.has(review.session_id)}
           evidenceSelected={selectedEvidenceSessionId === review.session_id}
           onRetry={() => retryReview.mutate(review.session_id)}
-          onToggleEvidence={() => setSelectedEvidenceSessionId((current) => (
-            current === review.session_id ? null : review.session_id
-          ))}
+          onToggleEvidence={() => selectEvidenceSession(selectedEvidenceSessionId === review.session_id ? null : review.session_id)}
         />
       ),
     },
@@ -1137,6 +1275,7 @@ export default function CodeReviewsPage() {
     repository: repositoryFilter,
     outcome: outcomeFilter,
     risk: riskFilter,
+    reason: reasonFilter,
     status: statusFilter,
     author: authorFilter,
     search,
@@ -1152,6 +1291,9 @@ export default function CodeReviewsPage() {
         break;
       case "risk":
         void setRiskFilter(value === ALL_RISKS ? null : value as (typeof RISK_FILTER_VALUES)[number]);
+        break;
+      case "reason":
+        void setReasonFilter(value === ALL_CODE_REVIEW_REASONS ? null : value as CodeReviewReasonCode);
         break;
       case "status":
         void setStatusFilter(value === DEFAULT_STATUS_FILTER ? null : value as StatusFilter);
@@ -1183,6 +1325,17 @@ export default function CodeReviewsPage() {
             <ChartNoAxesColumnIncreasing className="h-4 w-4" />
             Analytics
           </TabsTrigger>
+          {canManagePolicy ? (
+            <TabsTrigger value="disputes">
+              <MessageSquareText className="h-4 w-4" />
+              Disputes
+              {pendingDisputes.length > 0 ? (
+                <Badge variant="secondary" aria-hidden="true">
+                  {disputeQueueQuery.hasNextPage ? `${pendingDisputes.length}+` : pendingDisputes.length}
+                </Badge>
+              ) : null}
+            </TabsTrigger>
+          ) : null}
           <TabsTrigger value="policy">
             <Settings2 className="h-4 w-4" />
             Policy
@@ -1305,9 +1458,7 @@ export default function CodeReviewsPage() {
                           isRetrying={retryingReviewSessionIds.has(review.session_id)}
                           evidenceSelected={selectedEvidenceSessionId === review.session_id}
                           onRetry={() => retryReview.mutate(review.session_id)}
-                          onToggleEvidence={() => setSelectedEvidenceSessionId((current) => (
-                            current === review.session_id ? null : review.session_id
-                          ))}
+                          onToggleEvidence={() => selectEvidenceSession(selectedEvidenceSessionId === review.session_id ? null : review.session_id)}
                           className="ml-auto w-auto"
                         />
                       </div>
@@ -1316,13 +1467,25 @@ export default function CodeReviewsPage() {
                   />
                   )}
                 />
+                {evidenceDeepLinkError ? (
+                  <ErrorNotice
+                    title="That code review could not be opened"
+                    description="The link may point at a review that no longer exists. Retry, or clear it to return to the list."
+                    action={{ label: "Retry", onClick: () => void evidenceReviewQuery.refetch() }}
+                    onDismiss={() => selectEvidenceSession(null)}
+                    dismissLabel="Clear the evidence link"
+                  />
+                ) : null}
                 <CodeReviewEvidenceSheet
+                  key={selectedEvidenceReview?.session_id ?? "no-review"}
                   review={selectedEvidenceReview}
                   evidence={evidenceQuery.data?.data}
                   isLoading={evidenceQuery.isLoading}
                   error={evidenceQuery.error}
                   nowMs={countdownNowMs}
                   canRetryReview={canRetryReviews}
+                  canFileDisputes={canFileDisputes}
+                  canManagePolicy={canManagePolicy}
                   isRetryingReview={Boolean(selectedEvidenceReview && retryingReviewSessionIds.has(selectedEvidenceReview.session_id))}
                   onRetryEvidence={() => void evidenceQuery.refetch()}
                   onRetryReview={() => {
@@ -1330,13 +1493,29 @@ export default function CodeReviewsPage() {
                   }}
                   open={Boolean(selectedEvidenceReview)}
                   onOpenChange={(open) => {
-                    if (!open) setSelectedEvidenceSessionId(null);
+                    if (!open) selectEvidenceSession(null);
                   }}
                 />
                 </>
               )}
             </SectionGroup>
           </PageTabContent>
+
+          {canManagePolicy ? (
+            <PageTabContent value="disputes">
+              <CodeReviewDisputeQueue
+                disputes={pendingDisputes}
+                isLoading={disputeQueueQuery.isLoading}
+                error={disputeQueueQuery.error}
+                isSaving={adjudicateDispute.isPending}
+                hasMore={disputeQueueQuery.hasNextPage}
+                isLoadingMore={disputeQueueQuery.isFetchingNextPage}
+                onLoadMore={() => void disputeQueueQuery.fetchNextPage()}
+                onRetry={() => void disputeQueueQuery.refetch()}
+                onAdjudicate={(dispute, status, note, onSaved) => adjudicateDispute.mutate({ dispute, status, note }, { onSuccess: onSaved })}
+              />
+            </PageTabContent>
+          ) : null}
 
           <PageTabContent value="analytics">
             <CodeReviewAnalyticsReport
@@ -1354,7 +1533,6 @@ export default function CodeReviewsPage() {
                 repository: reviewRepositoryId,
                 range: timeRangeFilter,
               }}
-              onNavigateToReviews={() => setActiveTab("reviews")}
               filters={(
                 <CodeReviewFilters
                   id="code-review-analytics-filters"
@@ -1439,38 +1617,73 @@ export default function CodeReviewsPage() {
                 />
               </fieldset>
               <SectionGroup
-                title="GitHub setup"
-                description="See which repositories can receive review requests from GitHub and manage each reviewer entry point."
+                title="GitHub reviewer connections"
+                description="Connect repositories and manage where teammates can request the 143 reviewer from GitHub."
                 variant="bordered"
                 headingLevel={3}
+                action={(
+                  <DisabledTooltip
+                    disabled={!canManagePolicy}
+                    content={!canManagePolicy ? "Only organization administrators can add GitHub reviewer connections." : undefined}
+                  >
+                    <Button
+                      size="sm"
+                      disabled={!canManagePolicy}
+                      onClick={openAddRepository}
+                    >
+                      <Plus className="h-4 w-4" />
+                      Add repository
+                    </Button>
+                  </DisabledTooltip>
+                )}
               >
                 <div className="space-y-3" aria-label="GitHub reviewer repositories">
-                  {repositoriesQuery.isLoading ? (
+                  {githubTriggerStatusesQuery.isLoading ? (
                     <div className="rounded-md border border-border p-4 text-sm text-muted-foreground">Loading repositories…</div>
-                  ) : repositories.length === 0 ? (
-                    <div className="rounded-md border border-border p-4 text-sm text-muted-foreground">
-                      No GitHub repositories are connected to this organization.
-                    </div>
-                  ) : repositories.map((repository, index) => {
-                    const triggerQuery = githubTriggerQueries[index];
-                    const setupPending = setupGitHubTrigger.isPending && setupGitHubTrigger.variables === repository.id;
-                    const deletePending = deleteGitHubTrigger.isPending && deleteGitHubTrigger.variables === repository.id;
+                  ) : githubTriggerStatusesQuery.isError ? (
+                    <ErrorNotice
+                      title="GitHub reviewer connections could not be loaded"
+                      description={apiErrorMessage(githubTriggerStatusesQuery.error) ?? "Try again in a moment."}
+                      action={{ label: "Retry", onClick: () => void githubTriggerStatusesQuery.refetch() }}
+                    />
+                  ) : visibleGitHubTriggerStatuses.length === 0 ? (
+                    <EmptyState
+                      variant="inline"
+                      icon={Github}
+                      title="No GitHub reviewer connections"
+                      description="Add a repository to make the 143 reviewer available from its pull requests."
+                      action={canManagePolicy ? { label: "Add your first repository", onClick: openAddRepository } : undefined}
+                    />
+                  ) : visibleGitHubTriggerStatuses.map((trigger) => {
+                    const setupPending = setupGitHubTrigger.isPending && setupGitHubTrigger.variables === trigger.repository_id;
+                    const deletePending = deleteGitHubTrigger.isPending && deleteGitHubTrigger.variables === trigger.repository_id;
                     return (
                       <GitHubTriggerPanel
-                        key={repository.id}
-                        repositoryName={repository.full_name}
-                        trigger={triggerQuery?.data?.data}
-                        isLoading={triggerQuery?.isLoading || triggerQuery?.isFetching}
-                        errorMessage={apiErrorMessage(triggerQuery?.error)}
-                        setupErrorMessage={setupGitHubTrigger.variables === repository.id ? apiErrorMessage(setupGitHubTrigger.error) : null}
+                        key={trigger.repository_id}
+                        repositoryName={trigger.repository_full_name ?? "Unknown repository"}
+                        trigger={trigger}
+                        isLoading={false}
+                        errorMessage={null}
+                        setupErrorMessage={setupGitHubTrigger.variables === trigger.repository_id ? apiErrorMessage(setupGitHubTrigger.error) : null}
                         setupPending={setupPending}
                         deletePending={deletePending}
                         canManage={canManagePolicy}
-                        onSetup={() => setupGitHubTrigger.mutate(repository.id)}
-                        onDelete={() => deleteGitHubTrigger.mutate(repository.id)}
+                        onSetup={() => setupGitHubTrigger.mutate(trigger.repository_id)}
+                        onReconnect={openAddRepository}
+                        onDelete={() => deleteGitHubTrigger.mutate(trigger.repository_id)}
                       />
                     );
                   })}
+                  {!githubTriggerStatusesQuery.isLoading && !githubTriggerStatusesQuery.isError && visibleGitHubTriggerStatuses.length > 0 ? (
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
+                      <p className="text-xs tabular-nums text-muted-foreground">
+                        {visibleGitHubTriggerStatuses.filter((trigger) => trigger.status === "ready").length} ready of {visibleGitHubTriggerStatuses.length} repositor{visibleGitHubTriggerStatuses.length === 1 ? "y" : "ies"}
+                      </p>
+                      <Button asChild variant="link" size="sm">
+                        <Link href="/settings/integrations">Manage all GitHub settings</Link>
+                      </Button>
+                    </div>
+                  ) : null}
                 </div>
               </SectionGroup>
               <AuditLogTrigger
@@ -1493,6 +1706,22 @@ export default function CodeReviewsPage() {
                 trackCodeReviewPolicyEvent({ event: "code_review_prompt_example_applied", scope: "organization", source: "example", example_key: promptExample.example.key, character_bucket: promptCharacterBucket(value), configured: true });
                 setPromptExample(null);
               }}
+            />
+            <GitHubReviewerConnectionSheet
+              open={addRepositoryOpen}
+              onOpenChange={changeAddRepositoryOpen}
+              canManage={canManagePolicy}
+              githubConnected={!!githubIntegration}
+              githubStatusLoading={integrationsQuery.isLoading}
+              githubStatusError={apiErrorMessage(integrationsQuery.error) ?? undefined}
+              onRetryGithubStatus={() => void integrationsQuery.refetch()}
+              installationId={githubIntegration?.github_installation_id}
+              accountConnected={githubAccountQuery.data?.connected ?? false}
+              accountNeedsReconnect={githubAccountQuery.data?.needs_reconnect ?? false}
+              accountStatusLoading={githubAccountQuery.isLoading}
+              accountStatusError={apiErrorMessage(githubAccountQuery.error) ?? undefined}
+              onRetryAccountStatus={() => void githubAccountQuery.refetch()}
+              triggerStatuses={githubTriggerStatuses}
             />
             <DescriptionRequirementSheet
               requirement={editingRequirement}
@@ -1765,6 +1994,22 @@ function AdvancedPolicySettings({
                         buildPatch={(value) => buildConfig((next) => { next.inline_comment_limit = value; })}
                       />
                       <DurationInput
+                        label="Reassessment cooldown"
+                        labelAction={
+                          <SettingInfoTooltip
+                            label="Reassessment cooldown"
+                            description="Deduplicates semantically unchanged reconsideration requests for the same pull request. It prevents duplicate work without limiting distinct objections."
+                          />
+                        }
+                        valueSeconds={config?.risk_policy.semantic_dedupe_cooldown_seconds ?? 900}
+                        minSeconds={60}
+                        disabled={!config}
+                        defaultUnit="minutes"
+                        onChangeSeconds={(seconds) =>
+                          autosave.save(buildConfig((next) => { next.risk_policy.semantic_dedupe_cooldown_seconds = Math.min(86400, seconds); }))
+                        }
+                      />
+                      <DurationInput
                         label="Timeout"
                         labelAction={
                           <SettingInfoTooltip
@@ -1927,15 +2172,25 @@ function AdvancedPolicyControls({ children, forceOpen, onOpened }: { children: R
   return (
     <Collapsible open={open || forceOpen} onOpenChange={(next) => { setOpen(next); if (next) onOpened(); }}>
       <div className="rounded-xl border border-border bg-card">
-        <div className="flex items-center gap-1 pr-3">
+        {/* Padding is split rather than a plain `p-4 sm:p-5`: the trigger is not the
+            full card width, so only its left edge carries the card inset that
+            `CollapsibleContent` and sibling `SectionGroup`s use. The right inset comes
+            from this row's `pr`, which lands the help icon — not the chevron — on it. */}
+        <div className="flex items-center gap-1 pr-3 sm:pr-4">
           <h3 className="min-w-0 flex-1">
             <CollapsibleTrigger asChild>
-              <Button variant="ghost" className="group h-auto w-full min-w-0 justify-between whitespace-normal rounded-xl p-4 text-left sm:h-auto sm:p-5" aria-label="Safeguards">
+              <Button variant="ghost" className="group h-auto w-full min-w-0 justify-between whitespace-normal rounded-xl py-4 pr-2 pl-4 text-left sm:h-auto sm:py-5 sm:pl-5" aria-label="Safeguards">
                 <span className="min-w-0">
                   <span className="block font-display text-lg leading-6 font-semibold tracking-[-0.025em] text-foreground">Safeguards</span>
                   <span className="mt-0.5 block text-xs font-normal text-muted-foreground">These settings apply whether or not this section is open.</span>
                 </span>
-                <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+                {/* Wrapped so the chevron is not a direct child: `size="default"` carries
+                    `has-[>svg]:px-2`, whose `:has()` specificity silently outranks the plain
+                    padding utilities set above. `DisclosureCard` wraps its chevron too and is
+                    immune for the same reason. */}
+                <span className="flex shrink-0 items-center">
+                  <ChevronDown className="h-4 w-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+                </span>
               </Button>
             </CollapsibleTrigger>
           </h3>
@@ -2079,6 +2334,7 @@ function GitHubTriggerPanel({
   deletePending,
   canManage,
   onSetup,
+  onReconnect,
   onDelete,
 }: {
   repositoryName: string;
@@ -2090,12 +2346,14 @@ function GitHubTriggerPanel({
   deletePending: boolean;
   canManage: boolean;
   onSetup: () => void;
+  onReconnect: () => void;
   onDelete: () => void;
 }) {
   const status = trigger?.status ?? "unconfigured";
   const ready = status === "ready";
   const authRequired = status === "auth_required";
   const permissionRequired = status === "permission_required";
+  const disconnected = status === "disconnected";
   const needsRepair = status === "error" || permissionRequired;
   const reviewer = trigger?.team_reviewer ?? "@org/143-code-reviewer";
   const setupDisabledReason = githubTriggerSetupDisabledReason({
@@ -2137,16 +2395,21 @@ function GitHubTriggerPanel({
         </div>
         <div className="flex shrink-0 flex-wrap gap-2">
           {authRequired ? (
-            <Button variant="outline" size="sm" disabled={!canManage} onClick={() => api.githubStatus.connect()}>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={!canManage}
+              onClick={() => api.githubStatus.connect(undefined, "/code-reviews?tab=policy&add_repository=1")}
+            >
               <Users className="h-4 w-4" />
               Connect GitHub
             </Button>
           ) : null}
           {!ready ? (
             <DisabledTooltip disabled={!!setupDisabledReason} content={setupDisabledReason}>
-              <Button variant="default" size="sm" disabled={!!setupDisabledReason} onClick={onSetup}>
+              <Button variant="default" size="sm" disabled={!!setupDisabledReason} onClick={disconnected ? onReconnect : onSetup}>
                 <Users className="h-4 w-4" />
-                {needsRepair ? "Repair GitHub reviewer" : "Set up GitHub reviewer"}
+                {disconnected ? "Reconnect repository" : needsRepair ? "Repair GitHub reviewer" : "Set up GitHub reviewer"}
               </Button>
             </DisabledTooltip>
           ) : null}
@@ -2229,6 +2492,8 @@ function githubTriggerStatusLabel(status: CodeReviewGitHubTriggerResponse["statu
       return "Needs GitHub account";
     case "permission_required":
       return "Needs app permissions";
+    case "disconnected":
+      return "Repository disconnected";
     case "error":
       return "Needs attention";
     default:
@@ -2238,7 +2503,7 @@ function githubTriggerStatusLabel(status: CodeReviewGitHubTriggerResponse["statu
 
 function githubTriggerStatusVariant(status: CodeReviewGitHubTriggerResponse["status"]): "success" | "secondary" | "destructive" | "outline" {
   if (status === "ready") return "success";
-  if (status === "permission_required" || status === "error") return "destructive";
+  if (status === "permission_required" || status === "disconnected" || status === "error") return "destructive";
   if (status === "auth_required") return "secondary";
   return "outline";
 }
@@ -3112,6 +3377,171 @@ function FineTuningSection({ title, summary, defaultOpen = false, forceOpen = fa
   );
 }
 
+function CodeReviewDisputeQueue({
+  disputes,
+  isLoading,
+  error,
+  isSaving,
+  hasMore,
+  isLoadingMore,
+  onLoadMore,
+  onRetry,
+  onAdjudicate,
+}: {
+  disputes: CodeReviewDispute[];
+  isLoading: boolean;
+  error: Error | null;
+  isSaving: boolean;
+  hasMore: boolean;
+  isLoadingMore: boolean;
+  onLoadMore: () => void;
+  onRetry: () => void;
+  onAdjudicate: (dispute: CodeReviewDispute, status: "upheld" | "rejected" | "needs_context", note: string | undefined, onSaved: () => void) => void;
+}) {
+  const [notes, setNotes] = useState<Record<string, string>>({});
+  const clearNote = useCallback((disputeID: string) => {
+    setNotes((current) => {
+      if (current[disputeID] === undefined) return current;
+      const next = { ...current };
+      delete next[disputeID];
+      return next;
+    });
+  }, []);
+  // Drop the draft only once the adjudication is durably saved. Clearing it
+  // eagerly loses the admin's typed reasoning whenever the PATCH fails.
+  const adjudicate = (dispute: CodeReviewDispute, status: "upheld" | "rejected" | "needs_context") => {
+    onAdjudicate(dispute, status, notes[dispute.id], () => clearNote(dispute.id));
+  };
+  return (
+    <SectionGroup title="Decision disputes" description="A flat list of objections awaiting a policy owner's judgment. Reassessments and trust signals provide context but do not decide the outcome.">
+      {isLoading ? <div className="py-12 text-center text-sm text-muted-foreground">Loading disputes…</div> : null}
+      {error ? <ErrorNotice title="Disputes could not be loaded" description="Retry the request to view the adjudication list." action={{ label: "Retry", onClick: onRetry }} /> : null}
+      {!isLoading && !error && disputes.length === 0 ? <EmptyState icon={MessageSquareText} title="No disputes need adjudication" description="New trusted objections will appear here after intake." /> : null}
+      {disputes.length > 0 ? (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Dispute</TableHead>
+              <TableHead>Decision</TableHead>
+              <TableHead>Reassessment</TableHead>
+              <TableHead>Queue signals</TableHead>
+              <TableHead>Trust</TableHead>
+              <TableHead className="text-right">Adjudicate</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {disputes.map((dispute) => (
+              <TableRow key={dispute.id}>
+                <TableCell className="max-w-md align-top">
+                  <div className="space-y-1">
+                    <div className="line-clamp-3 text-sm text-foreground">{dispute.body}</div>
+                    <div className="text-xs text-muted-foreground">{dispute.filed_by_login || "143 user"} · {formatDate(dispute.created_at)} · {codeReviewDisputeStatusLabel(dispute.source)} · {dispute.reviewed_head_sha.slice(0, 7)}</div>
+                    <CodeReviewDisputeContextLinks dispute={dispute} />
+                    {dispute.contested_reason_codes.length > 0 ? (
+                      <div className="flex flex-wrap gap-1 pt-1">
+                        {dispute.contested_reason_codes.map((code) => <Badge key={code} variant="outline">{codeReviewDisputeStatusLabel(code)}</Badge>)}
+                      </div>
+                    ) : null}
+                  </div>
+                </TableCell>
+                <TableCell className="align-top">
+                  <div className="space-y-1">
+                    <Badge variant="outline">{decisionLabelText(dispute.decision)}</Badge>
+                    <div className="text-xs text-muted-foreground">{dispute.direction ? codeReviewDisputeStatusLabel(dispute.direction) : "Classifying"}</div>
+                  </div>
+                </TableCell>
+                <TableCell className="align-top"><StatusLabel label={codeReviewDisputeStatusLabel(dispute.reassessment_status)} tone={dispute.reassessment_flipped ? "warning" : "neutral"} /></TableCell>
+                <TableCell className="align-top"><CodeReviewDisputeQueueSignals dispute={dispute} /></TableCell>
+                <TableCell className="align-top"><StatusLabel label={dispute.trusted ? "Trusted" : "Untrusted"} tone={dispute.trusted ? "success" : "warning"} /></TableCell>
+                <TableCell className="align-top">
+                  <div className="ml-auto w-56 space-y-2">
+                    <Textarea
+                      aria-label={`Adjudication note for dispute ${dispute.id}`}
+                      value={notes[dispute.id] ?? ""}
+                      rows={2}
+                      maxLength={2000}
+                      placeholder="Optional decision note"
+                      disabled={isSaving}
+                      onChange={(event) => setNotes((current) => ({ ...current, [dispute.id]: event.target.value }))}
+                    />
+                    <div className="flex justify-end gap-1">
+                    <DisabledTooltip disabled={isSaving} content="Wait for the current adjudication to finish.">
+                      <Button size="sm" variant="outline" disabled={isSaving} onClick={() => adjudicate(dispute, "needs_context")}>Needs context</Button>
+                    </DisabledTooltip>
+                    <DisabledTooltip disabled={isSaving} content="Wait for the current adjudication to finish.">
+                      <Button size="sm" variant="outline" disabled={isSaving} onClick={() => adjudicate(dispute, "rejected")}>Reject</Button>
+                    </DisabledTooltip>
+                    <DisabledTooltip disabled={isSaving} content="Wait for the current adjudication to finish.">
+                      <Button size="sm" disabled={isSaving} onClick={() => adjudicate(dispute, "upheld")}>Uphold</Button>
+                    </DisabledTooltip>
+                    </div>
+                  </div>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      ) : null}
+      {hasMore ? (
+        <div className="flex justify-center pt-2">
+          <Button variant="outline" size="sm" disabled={isLoadingMore} onClick={onLoadMore}>
+            {isLoadingMore ? "Loading…" : "Load more disputes"}
+          </Button>
+        </div>
+      ) : null}
+    </SectionGroup>
+  );
+}
+
+function CodeReviewDisputeQueueSignals({ dispute }: { dispute: CodeReviewDispute }) {
+  const pullRequestAuthor = typeof dispute.queue_signals.pull_request_author === "string"
+    ? dispute.queue_signals.pull_request_author.trim()
+    : "";
+  const trustedAtFiling = typeof dispute.queue_signals.trusted_at_filing === "boolean" ? dispute.queue_signals.trusted_at_filing : null;
+  const filerIsAuthor = typeof dispute.queue_signals.filer_is_pr_author === "boolean" ? dispute.queue_signals.filer_is_pr_author : null;
+  return (
+    <div className="flex max-w-56 flex-wrap gap-1">
+      {pullRequestAuthor ? <Badge variant="outline">PR author: {pullRequestAuthor}</Badge> : null}
+      {filerIsAuthor !== null ? <Badge variant="outline">{filerIsAuthor ? "Filed by PR author" : "Filed by another contributor"}</Badge> : null}
+      {trustedAtFiling !== null ? <Badge variant="outline">{trustedAtFiling ? "Trusted at filing" : "Untrusted at filing"}</Badge> : null}
+      {!pullRequestAuthor && filerIsAuthor === null && trustedAtFiling === null ? <span className="text-xs text-muted-foreground">No queue signals</span> : null}
+    </div>
+  );
+}
+
+function CodeReviewDisputeContextLinks({ dispute }: { dispute: CodeReviewDispute }) {
+  const title = typeof dispute.queue_signals.pull_request_title === "string" ? dispute.queue_signals.pull_request_title.trim() : "";
+  const repository = typeof dispute.queue_signals.github_repository === "string" ? dispute.queue_signals.github_repository.trim() : "";
+  const number = typeof dispute.queue_signals.github_pr_number === "number" ? dispute.queue_signals.github_pr_number : null;
+  const url = typeof dispute.queue_signals.github_pr_url === "string" ? dispute.queue_signals.github_pr_url.trim() : "";
+  return (
+    <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+      {url ? (
+        <Button size="sm" variant="link" className="h-auto p-0 text-xs" asChild>
+          <a href={url} target="_blank" rel="noreferrer">{repository && number ? `${repository} #${number}` : title || "Open pull request"}</a>
+        </Button>
+      ) : null}
+      <Button size="sm" variant="link" className="h-auto p-0 text-xs" asChild>
+        <Link href={`/code-reviews?evidence=${dispute.session_id}`}>View evidence</Link>
+      </Button>
+    </div>
+  );
+}
+
+function decisionLabelText(decision: CodeReviewDecision): string {
+  switch (decision) {
+    case "approved": return "Approved";
+    case "needs_human_review": return "Needs human review";
+    case "comment_only": return "Comment only";
+    case "blocked": return "Blocked";
+  }
+}
+
+function codeReviewDisputeStatusLabel(value: string): string {
+  const normalized = value.replaceAll("_", " ");
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
 function CodeReviewEvidenceSheet({
   review,
   evidence,
@@ -3119,6 +3549,8 @@ function CodeReviewEvidenceSheet({
   error,
   nowMs,
   canRetryReview,
+  canFileDisputes,
+  canManagePolicy,
   isRetryingReview,
   onRetryEvidence,
   onRetryReview,
@@ -3131,15 +3563,68 @@ function CodeReviewEvidenceSheet({
   error: Error | null;
   nowMs: number;
   canRetryReview: boolean;
+  canFileDisputes: boolean;
+  canManagePolicy: boolean;
   isRetryingReview: boolean;
   onRetryEvidence: () => void;
   onRetryReview: () => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const queryClient = useQueryClient();
+  const [disputeDialogOpen, setDisputeDialogOpen] = useState(false);
+  const [disputeBody, setDisputeBody] = useState("");
+  const [selectedReasonCodes, setSelectedReasonCodes] = useState<string[]>([]);
   const agentResults = evidence?.agent_results ?? [];
   const findings = evidence?.findings ?? [];
-  const artifacts = evidence?.prompt_artifacts ?? [];
+  const records = evidence?.prompt_records ?? evidence?.prompt_artifacts ?? [];
+  const reasonCodes = evidence?.risk_reason_codes ?? [];
+  const disputesQuery = useInfiniteQuery({
+    queryKey: queryKeys.codeReviews.disputes(review?.session_id ?? ""),
+    queryFn: ({ pageParam }) => api.codeReviews.disputes(review?.session_id ?? "", pageParam),
+    enabled: open && canFileDisputes && Boolean(review?.session_id),
+    // Intake and reassessment states move on their own, so the timeline polls.
+    // React Query refetches *every* loaded page on each interval, so stretch
+    // the interval by the number of loaded pages: the request rate stays flat
+    // as the admin pages into history, and the newest page — the one whose
+    // state is still moving — keeps updating instead of going stale.
+    refetchInterval: (query) =>
+      open && canFileDisputes ? 5000 * Math.max(1, query.state.data?.pages.length ?? 1) : false,
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.meta?.next_cursor || undefined,
+  });
+  const createDispute = useMutation({
+    mutationFn: () => api.codeReviews.createDispute(review?.session_id ?? "", { body: disputeBody, contested_reason_codes: selectedReasonCodes }),
+    onSuccess: () => {
+      if (review) void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.disputes(review.session_id) });
+      setDisputeDialogOpen(false);
+      setDisputeBody("");
+      setSelectedReasonCodes([]);
+      toast.success("Reconsideration request recorded");
+    },
+    onError: () => toast.error("Reconsideration request could not be recorded"),
+  });
+  const escalateDispute = useMutation({
+    mutationFn: (disputeID: string) => api.codeReviews.escalateDispute(disputeID),
+    onSuccess: () => {
+      if (review) void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.disputes(review.session_id) });
+      toast.success("Dispute sent to a policy owner");
+    },
+    onError: () => toast.error("Dispute could not be escalated"),
+  });
+  const promoteDispute = useMutation({
+    mutationFn: (dispute: CodeReviewDispute) => api.codeReviews.adjudicateDispute(dispute.id, {
+      expected_version: dispute.version,
+      trust_override: true,
+    }),
+    onSuccess: () => {
+      if (review) void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.disputes(review.session_id) });
+      void queryClient.invalidateQueries({ queryKey: ["code-reviews", "dispute-queue"] });
+      toast.success("Dispute promoted to the policy queue");
+    },
+    onError: () => toast.error("Dispute could not be promoted"),
+  });
+  const disputes = disputesQuery.data?.pages.flatMap((page) => page.data ?? []) ?? [];
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-[calc(100vw-1rem)] p-0 sm:max-w-xl">
@@ -3183,8 +3668,69 @@ function CodeReviewEvidenceSheet({
               <div className="grid grid-cols-3 gap-3">
                 <EvidenceMetric label="Agents" value={agentResults.length} />
                 <EvidenceMetric label="Findings" value={findings.length} />
-                <EvidenceMetric label="Prompts" value={artifacts.length} />
+                <EvidenceMetric label="Prompts" value={records.length} />
               </div>
+
+              {canFileDisputes && review?.status === "completed" && review.decision ? (
+                <section className="space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <EvidenceSectionHeader title="Decision feedback" empty={disputes.length === 0} />
+                    <Button size="sm" variant="outline" onClick={() => setDisputeDialogOpen(true)}>
+                      <MessageSquareText className="h-4 w-4" />
+                      {review.decision === "approved" ? "Report an unsafe approval" : "Ask for reconsideration"}
+                    </Button>
+                  </div>
+                  {disputesQuery.isLoading ? <div className="text-sm text-muted-foreground">Loading decision feedback…</div> : null}
+                  {disputesQuery.error ? <ErrorNotice title="Decision feedback could not be loaded" description="Retry to view the dispute timeline." action={{ label: "Retry", onClick: () => void disputesQuery.refetch() }} /> : null}
+                  {!disputesQuery.isLoading && !disputesQuery.error && disputes.length === 0 ? <div className="text-sm text-muted-foreground">No one has challenged this decision.</div> : null}
+                  {disputes.map((dispute) => (
+                    <div key={dispute.id} className="space-y-2 border-t border-border pt-3 first:border-t-0 first:pt-0">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium text-foreground">{dispute.filed_by_login || "143 user"}</div>
+                          <div className="text-xs text-muted-foreground">{formatDate(dispute.created_at)} · {codeReviewDisputeStatusLabel(dispute.source)}</div>
+                        </div>
+                        <StatusLabel label={codeReviewDisputeStatusLabel(dispute.intake_status)} tone={dispute.intake_status === "failed" ? "destructive" : "neutral"} />
+                      </div>
+                      <div className="text-sm leading-6 text-muted-foreground">{dispute.body}</div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant="outline">{dispute.direction ? codeReviewDisputeStatusLabel(dispute.direction) : "Classifying"}</Badge>
+                        <Badge variant="outline">{codeReviewDisputeStatusLabel(dispute.reassessment_status)}</Badge>
+                        {dispute.reassessment_status === "completed" && dispute.reassessment_flipped !== undefined ? <Badge variant="outline">{dispute.reassessment_flipped ? "Decision changed" : "Decision unchanged"}</Badge> : null}
+                        {dispute.adjudication_status ? <Badge variant="outline">Policy owner: {codeReviewDisputeStatusLabel(dispute.adjudication_status)}</Badge> : null}
+                        {dispute.reply_status === "failed" ? <Badge variant="destructive">GitHub reply failed</Badge> : null}
+                        {/* Editing a GitHub comment files a new dispute, so the
+                            timeline shows both. Say which one is live. */}
+                        {dispute.superseded_by_dispute_id ? <Badge variant="secondary">Replaced by a later edit</Badge> : null}
+                        <Badge variant="outline">{dispute.trusted ? "Trusted" : "Untrusted"}</Badge>
+                        {dispute.reassessment_session_id ? <Button size="sm" variant="ghost" asChild><Link href={`/sessions/${dispute.reassessment_session_id}`}>View reassessment</Link></Button> : null}
+                        {dispute.routing === "policy_signal_only" && canManagePolicy ? <Button size="sm" variant="ghost" asChild><Link href="/code-reviews?tab=policy">Review policy</Link></Button> : null}
+                        {canManagePolicy && !dispute.trusted && !dispute.superseded_by_dispute_id && dispute.intake_status === "triaged" && (dispute.routing === "reassess" || dispute.routing === "policy_signal_only") ? (
+                          <DisabledTooltip disabled={promoteDispute.isPending} content="Wait for this promotion to finish.">
+                            <Button size="sm" variant="outline" disabled={promoteDispute.isPending} onClick={() => promoteDispute.mutate(dispute)}>Promote to policy queue</Button>
+                          </DisabledTooltip>
+                        ) : null}
+                        {dispute.routing === "policy_signal_only" && !dispute.escalated_at && !dispute.superseded_by_dispute_id ? (
+                          <DisabledTooltip disabled={escalateDispute.isPending} content="Wait for this escalation to finish.">
+                            <Button size="sm" variant="ghost" disabled={escalateDispute.isPending} onClick={() => escalateDispute.mutate(dispute.id)}>Send to policy owner</Button>
+                          </DisabledTooltip>
+                        ) : null}
+                      </div>
+                      {dispute.status_detail ? <div className="text-xs leading-5 text-muted-foreground">{dispute.status_detail}</div> : null}
+                    </div>
+                  ))}
+                  {disputesQuery.hasNextPage ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={disputesQuery.isFetchingNextPage}
+                      onClick={() => void disputesQuery.fetchNextPage()}
+                    >
+                      {disputesQuery.isFetchingNextPage ? "Loading…" : "Show earlier feedback"}
+                    </Button>
+                  ) : null}
+                </section>
+              ) : null}
 
               <section className="space-y-3">
                 <EvidenceSectionHeader title="Agent results" empty={agentResults.length === 0} />
@@ -3251,21 +3797,23 @@ function CodeReviewEvidenceSheet({
               </section>
 
               <section className="space-y-3">
-                <EvidenceSectionHeader title="Prompt artifacts" empty={artifacts.length === 0} />
-                {artifacts.length === 0 ? (
-                  <div className="text-sm text-muted-foreground">No prompt artifacts recorded.</div>
+                <EvidenceSectionHeader title="Prompt records" empty={records.length === 0} />
+                {records.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">No prompt records recorded.</div>
                 ) : (
-                  artifacts.map((artifact) => (
-                    <div key={artifact.id} className="space-y-3 border-t border-border pt-3 first:border-t-0 first:pt-0">
+                  records.map((record) => (
+                    <div key={record.id} className="space-y-3 border-t border-border pt-3 first:border-t-0 first:pt-0">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0 space-y-1">
-                          <div className="truncate text-sm font-medium text-foreground">{artifact.artifact_key}</div>
-                          {artifact.agent_provider ? <div className="text-xs text-muted-foreground">{artifact.agent_provider}</div> : null}
+                          <div className="truncate text-sm font-medium text-foreground">
+                            {record.record_key ?? record.artifact_key}
+                          </div>
+                          {record.agent_provider ? <div className="text-xs text-muted-foreground">{record.agent_provider}</div> : null}
                         </div>
-                        <Badge variant="outline">{artifact.role}</Badge>
+                        <Badge variant="outline">{record.role}</Badge>
                       </div>
                       <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">
-                        {artifact.content}
+                        {record.content}
                       </pre>
                     </div>
                   ))
@@ -3275,6 +3823,42 @@ function CodeReviewEvidenceSheet({
           ) : null}
         </div>
       </SheetContent>
+      <Dialog open={disputeDialogOpen} onOpenChange={setDisputeDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{review?.decision === "approved" ? "Report an unsafe approval" : "Ask for reconsideration"}</DialogTitle>
+            <DialogDescription>Explain what the reviewer got wrong or what evidence it missed. Reconsideration cannot waive deterministic safeguards; a policy owner must change those rules. The original decision remains part of the record.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="code-review-dispute-body">What should be reconsidered?</Label>
+              <Textarea id="code-review-dispute-body" value={disputeBody} maxLength={8000} rows={5} placeholder="Describe the part of the decision you disagree with…" onChange={(event) => setDisputeBody(event.target.value)} />
+            </div>
+            {reasonCodes.length > 0 ? (
+              <div className="space-y-2">
+                <Label>Contested policy reasons</Label>
+                <div className="space-y-2">
+                  {reasonCodes.map((code) => (
+                    <Label key={code} className="flex items-center gap-2 font-normal">
+                      <Checkbox checked={selectedReasonCodes.includes(code)} onCheckedChange={(checked) => setSelectedReasonCodes((current) => checked ? [...current, code] : current.filter((value) => value !== code))} />
+                      {codeReviewDisputeStatusLabel(code)}
+                    </Label>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDisputeDialogOpen(false)}>Cancel</Button>
+            <DisabledTooltip
+              disabled={createDispute.isPending || disputeBody.trim().length === 0}
+              content={createDispute.isPending ? "Wait for the feedback to be recorded." : "Describe what should be reconsidered."}
+            >
+              <Button disabled={createDispute.isPending || disputeBody.trim().length === 0} onClick={() => createDispute.mutate()}>{createDispute.isPending ? "Recording…" : "Record feedback"}</Button>
+            </DisabledTooltip>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Sheet>
   );
 }

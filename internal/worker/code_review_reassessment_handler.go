@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/assembledhq/143/internal/jobctx"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -22,6 +23,9 @@ func newStartCodeReviewReassessmentHandler(stores *Stores, services *Services, l
 		if services == nil || services.CodeReviewLifecycle == nil {
 			return fmt.Errorf("code review lifecycle service unavailable")
 		}
+		if services.PR == nil {
+			return fmt.Errorf("pull request snapshot service unavailable for code review reassessment")
+		}
 		var input codereviewsvc.ReviewChangedInput
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("decode code review reassessment starter payload: %w", err)
@@ -29,16 +33,36 @@ func newStartCodeReviewReassessmentHandler(stores *Stores, services *Services, l
 		if input.OrgID == uuid.Nil || input.PullRequestID == uuid.Nil {
 			return fmt.Errorf("org_id and pull_request_id are required for code review reassessment")
 		}
+		if input.TriggeringDisputeID != nil && services.CodeReviewDisputes != nil {
+			jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+				writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
+				defer cancel()
+				detail := "The reassessment could not start after repeated attempts. The objection remains recorded for a policy owner."
+				if err := services.CodeReviewDisputes.FailTriage(writeCtx, input.OrgID, *input.TriggeringDisputeID, detail); err != nil {
+					logger.Warn().Err(err).Str("dispute_id", input.TriggeringDisputeID.String()).Msg("failed to terminalize dead-lettered code review reassessment starter")
+				}
+			})
+		}
 		pr, err := stores.PullRequests.GetByID(ctx, input.OrgID, input.PullRequestID)
 		if err != nil {
 			return fmt.Errorf("load current pull request for code review reassessment: %w", err)
 		}
+		snapshot, err := services.PR.GetCodeReviewPullRequestSnapshot(ctx, input.OrgID, input.RepositoryID, pr.GitHubPRNumber)
+		if err != nil {
+			wrapped := fmt.Errorf("load latest pull request for code review reassessment: %w", err)
+			return classifyGitHubJobError(wrapped, input.PullRequestID.String())
+		}
 		input.GitHubRepo = pr.GitHubRepo
-		input.GitHubPRNumber = pr.GitHubPRNumber
-		input.GitHubPRURL = pr.GitHubPRURL
-		input.PullRequestTitle = pr.Title
-		input.BaseSHA = strings.TrimSpace(stringPtrValue(pr.BaseSHA))
-		input.HeadSHA = strings.TrimSpace(stringPtrValue(pr.HeadSHA))
+		input.GitHubPRNumber = snapshot.Number
+		input.GitHubPRURL = snapshot.HTMLURL
+		input.PullRequestTitle = snapshot.Title
+		input.PullRequestAuthor = snapshot.AuthorLogin
+		input.BaseSHA = strings.TrimSpace(snapshot.BaseSHA)
+		input.HeadSHA = strings.TrimSpace(snapshot.HeadSHA)
+		input.FromFork = snapshot.FromFork
+		if input.HeadSHA == "" {
+			return fmt.Errorf("latest pull request head is missing for code review reassessment")
+		}
 
 		result, err := services.CodeReviewLifecycle.HandleReviewChanged(ctx, input)
 		if err != nil {
@@ -55,6 +79,24 @@ func newStartCodeReviewReassessmentHandler(stores *Stores, services *Services, l
 				Err:                    fmt.Errorf("older code review assessment is still active"),
 				RetryAfter:             &delay,
 				BypassMaxRetryDuration: true,
+			}
+		}
+		if input.TriggeringDisputeID != nil && result.SessionID == uuid.Nil {
+			detail := "The reassessment could not start. The objection remains recorded for a policy owner."
+			if result.IgnoredReason != "" {
+				detail = "The reassessment could not start (" + strings.ReplaceAll(result.IgnoredReason, "_", " ") + "). The objection remains recorded for a policy owner."
+			}
+			if services.CodeReviewDisputes == nil {
+				return fmt.Errorf("code review dispute service unavailable after reassessment was not started")
+			}
+			return services.CodeReviewDisputes.FailTriage(ctx, input.OrgID, *input.TriggeringDisputeID, detail)
+		}
+		if input.TriggeringDisputeID != nil && result.SessionID != uuid.Nil {
+			if stores.CodeReviewDisputes == nil {
+				return fmt.Errorf("code review dispute store unavailable after reassessment start")
+			}
+			if err := stores.CodeReviewDisputes.MarkReassessmentStarted(ctx, input.OrgID, *input.TriggeringDisputeID, result.SessionID); err != nil {
+				return err
 			}
 		}
 		return nil

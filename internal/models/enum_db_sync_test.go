@@ -192,7 +192,7 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 		"code_review_session_metadata_trigger_source": toStrings(
 			CodeReviewTriggerSourceAppReviewer, CodeReviewTriggerSourceAliasReviewer,
 			CodeReviewTriggerSourceTeamReviewer, CodeReviewTriggerSourceSlashCommand,
-			CodeReviewTriggerSourceAutoPolicy,
+			CodeReviewTriggerSourceAutoPolicy, CodeReviewTriggerSourceDisputeReassessment,
 		),
 		"code_review_session_metadata_status": toStrings(
 			CodeReviewSessionStatusQueued, CodeReviewSessionStatusRunning,
@@ -218,6 +218,51 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 		),
 		"code_review_findings_confidence": toStrings(
 			CodeReviewFindingConfidenceLow, CodeReviewFindingConfidenceMedium, CodeReviewFindingConfidenceHigh,
+		),
+		// code_review_dispute.go
+		"code_review_decision_disputes_decision": toStrings(
+			CodeReviewDecisionApproved, CodeReviewDecisionCommentOnly,
+			CodeReviewDecisionNeedsHumanReview, CodeReviewDecisionBlocked,
+		),
+		"code_review_decision_disputes_direction": toStrings(
+			CodeReviewDisputeDirectionShouldHaveApproved, CodeReviewDisputeDirectionShouldNotHaveApproved,
+		),
+		"code_review_decision_disputes_source": toStrings(
+			CodeReviewDisputeSourceGitHubComment, CodeReviewDisputeSourceAppUI,
+			CodeReviewDisputeSourceAPI, CodeReviewDisputeSourceSpotCheck,
+		),
+		"code_review_decision_disputes_repository_visibility": toStrings(
+			CodeReviewRepositoryVisibilityPublic, CodeReviewRepositoryVisibilityPrivate, CodeReviewRepositoryVisibilityUnknown,
+		),
+		"code_review_decision_disputes_routing": toStrings(
+			CodeReviewDisputeRoutingReassess, CodeReviewDisputeRoutingPolicySignalOnly,
+			CodeReviewDisputeRoutingAnswerOnly, CodeReviewDisputeRoutingNotADispute,
+		),
+		"code_review_decision_disputes_intake_status": toStrings(
+			CodeReviewDisputeIntakePending, CodeReviewDisputeIntakeTriaged,
+			CodeReviewDisputeIntakeDiscarded, CodeReviewDisputeIntakeFailed,
+		),
+		"code_review_decision_disputes_reassessment_decision": toStrings(
+			CodeReviewDecisionApproved, CodeReviewDecisionCommentOnly,
+			CodeReviewDecisionNeedsHumanReview, CodeReviewDecisionBlocked,
+		),
+		"code_review_decision_disputes_reassessment_status": toStrings(
+			CodeReviewDisputeReassessmentNotRequested, CodeReviewDisputeReassessmentQueued,
+			CodeReviewDisputeReassessmentRunning, CodeReviewDisputeReassessmentCompleted,
+			CodeReviewDisputeReassessmentDeduped, CodeReviewDisputeReassessmentFailed,
+		),
+		"code_review_decision_disputes_adjudication_status": toStrings(
+			CodeReviewDisputeAdjudicationPending, CodeReviewDisputeAdjudicationUpheld,
+			CodeReviewDisputeAdjudicationRejected, CodeReviewDisputeAdjudicationExpired,
+			CodeReviewDisputeAdjudicationNeedsContext,
+		),
+		"code_review_decision_disputes_reply_status": toStrings(
+			CodeReviewDisputeReplyPending, CodeReviewDisputeReplyNotApplicable,
+			CodeReviewDisputeReplyPublished, CodeReviewDisputeReplyFailed,
+		),
+		"code_review_dispute_authorizations_action": toStrings(
+			CodeReviewDisputeAuthorizationRerun, CodeReviewDisputeAuthorizationQueueInfluence,
+			CodeReviewDisputeAuthorizationAdminPromotion,
 		),
 	}
 

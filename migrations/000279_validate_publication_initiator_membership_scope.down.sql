@@ -1,0 +1,1 @@
+-- Validation is intentionally irreversible. The constraint remains valid.

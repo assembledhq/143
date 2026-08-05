@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	threadsvc "github.com/assembledhq/143/internal/services/thread"
 )
@@ -102,6 +103,51 @@ func TestService_StartStoresRequestedFixMode(t *testing.T) {
 	require.Equal(t, models.ReviewLoopFixModeExhaustive, store.createdLoops[0].FixMode, "Start should persist the requested fix mode")
 }
 
+func TestService_StartDefaultsAutomaticFixModesToExhaustive(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		source models.ReviewLoopSource
+	}{
+		{name: "automation", source: models.ReviewLoopSourceAutomation},
+		{name: "publication", source: models.ReviewLoopSourcePublication},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			threadID := uuid.New()
+			changesetID := uuid.New()
+			workspaceRevision := int64(7)
+			desiredHeadSHA := "reviewed-head"
+			snapshotKey := "snapshots/automatic-review-loop.tar.zst"
+			store := &fakeReviewLoopStore{}
+			threads := &fakeThreadService{
+				session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Status: models.SessionStatusIdle, SandboxState: models.SandboxStateSnapshotted, SnapshotKey: &snapshotKey},
+				thread:  models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Label: "Codex Review"},
+				message: models.SessionMessage{ID: 77, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID},
+			}
+			req := StartReviewLoopRequest{MaxPasses: 2, Source: tt.source}
+			if tt.source == models.ReviewLoopSourcePublication {
+				req.ChangesetID = &changesetID
+				req.WorkspaceRevision = &workspaceRevision
+				req.DesiredHeadSHA = &desiredHeadSHA
+			}
+
+			loop, err := NewService(store, threads).Start(context.Background(), orgID, sessionID, req)
+
+			require.NoError(t, err, "Start should create an automatic review loop")
+			require.Equal(t, models.ReviewLoopFixModeExhaustive, loop.FixMode, "automatic review loops should default to fixing every finding")
+			require.Equal(t, models.ReviewLoopFixModeExhaustive, store.createdLoops[0].FixMode, "automatic review loops should persist exhaustive fix mode")
+			require.Contains(t, threads.sent[0].Message, "Report every issue you find", "automatic review loops should ask the reviewer to report every finding")
+		})
+	}
+}
+
 func TestService_StartRejectsExistingRunningLoop(t *testing.T) {
 	t.Parallel()
 
@@ -134,6 +180,33 @@ func TestService_StartRejectsExistingRunningLoop(t *testing.T) {
 	require.Nil(t, loop, "Start should not return a loop when another loop is running")
 	require.Empty(t, store.createdLoops, "Start should not create another loop row")
 	require.Empty(t, threads.created, "Start should not create an orphan review thread")
+}
+
+func TestService_ReconcileStrandedPublicationLoopsRestartsEveryCandidate(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	inactiveBefore := time.Now().UTC().Add(-2 * time.Minute)
+	candidates := []db.StrandedPublicationReviewLoop{
+		{LoopID: uuid.New(), ThreadID: uuid.New()},
+		{LoopID: uuid.New(), ThreadID: uuid.New()},
+		{LoopID: uuid.New(), ThreadID: uuid.New()},
+	}
+	store := &fakeRecoveryReviewLoopStore{
+		fakeReviewLoopStore: &fakeReviewLoopStore{},
+		candidates:          candidates,
+	}
+
+	restarted, err := NewService(store, &fakeThreadService{}).ReconcileStrandedPublicationLoops(
+		context.Background(), orgID, inactiveBefore, 25,
+	)
+
+	require.NoError(t, err, "stranded publication review reconciliation should succeed")
+	require.Equal(t, len(candidates), restarted, "reconciliation should restart every eligible loop")
+	require.Equal(t, candidates, store.restarted, "reconciliation should restart the listed loops in order")
+	require.Equal(t, orgID, store.seenOrgID, "reconciliation should remain scoped to the requested organization")
+	require.Equal(t, inactiveBefore, store.seenInactiveBefore, "reconciliation should preserve the inactivity cutoff")
+	require.Equal(t, 25, store.seenLimit, "reconciliation should preserve the bounded batch size")
 }
 
 func TestService_StartPublicationRequiresAndPersistsEvidence(t *testing.T) {
@@ -707,6 +780,43 @@ type fakeReviewLoopStore struct {
 	terminalErr                  error
 	events                       []string
 	primaryChangesetID           uuid.UUID
+}
+
+type fakeRecoveryReviewLoopStore struct {
+	*fakeReviewLoopStore
+	candidates         []db.StrandedPublicationReviewLoop
+	restarted          []db.StrandedPublicationReviewLoop
+	seenOrgID          uuid.UUID
+	seenInactiveBefore time.Time
+	seenLimit          int
+}
+
+func (f *fakeRecoveryReviewLoopStore) ListStrandedPublicationLoops(
+	_ context.Context,
+	orgID uuid.UUID,
+	inactiveBefore time.Time,
+	limit int,
+) ([]db.StrandedPublicationReviewLoop, error) {
+	f.seenOrgID = orgID
+	f.seenInactiveBefore = inactiveBefore
+	f.seenLimit = limit
+	return f.candidates, nil
+}
+
+func (f *fakeRecoveryReviewLoopStore) RestartStrandedPublicationLoop(
+	_ context.Context,
+	_ uuid.UUID,
+	loopID uuid.UUID,
+	_ time.Time,
+	_ string,
+) (bool, error) {
+	for _, candidate := range f.candidates {
+		if candidate.LoopID == loopID {
+			f.restarted = append(f.restarted, candidate)
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 type recordedReviewLoopMetric struct {

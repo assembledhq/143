@@ -1,4 +1,4 @@
-package reviewartifact
+package reviewbundle
 
 import (
 	"bytes"
@@ -60,7 +60,7 @@ func TestParseChangedFiles(t *testing.T) {
 	}, got, "ParseChangedFiles should return the head-side changed files with skip flags")
 }
 
-func TestCaptureStoresCompressedArtifact(t *testing.T) {
+func TestCaptureStoresCompressedBundle(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
@@ -84,27 +84,27 @@ func TestCaptureStoresCompressedArtifact(t *testing.T) {
 
 	meta, err := Capture(context.Background(), store, execFromMap(map[string]string{
 		"src/app.ts": "package main\n\nfunc main() {}\n",
-	}), orgID, sessionID, diff, Options{Key: "review-artifacts/test/session/artifact.json.gz"})
-	require.NoError(t, err, "Capture should store a compressed review artifact")
-	require.Equal(t, "review-artifacts/test/session/artifact.json.gz", meta.Key, "Capture should use the configured key")
-	require.Equal(t, Version, meta.Version, "Capture should record the artifact schema version")
+	}), orgID, sessionID, diff, Options{Key: "review-bundles/test/session/bundle.json.gz"})
+	require.NoError(t, err, "Capture should store a compressed review bundle")
+	require.Equal(t, "review-bundles/test/session/bundle.json.gz", meta.Key, "Capture should use the configured key")
+	require.Equal(t, Version, meta.Version, "Capture should record the bundle schema version")
 	require.Equal(t, 1, meta.FileCount, "Capture should store changed text files")
 	require.Equal(t, 2, meta.SkippedCount, "Capture should record skipped deleted and binary files")
 	require.Greater(t, meta.CompressedBytes, int64(0), "Capture should report compressed size")
 	require.Greater(t, meta.UncompressedBytes, int64(0), "Capture should report uncompressed size")
 
-	artifact, err := Load(context.Background(), store, meta.Key, DefaultMaxUncompressedBytes)
-	require.NoError(t, err, "stored artifact should load")
-	file := artifact.Files["src/app.ts"]
-	require.Equal(t, "package main\n\nfunc main() {}\n", file.Content, "artifact should contain the full head-side text")
-	require.Equal(t, 3, file.TotalLines, "artifact should count logical lines like the file context readers")
+	bundle, err := Load(context.Background(), store, meta.Key, DefaultMaxUncompressedBytes)
+	require.NoError(t, err, "stored bundle should load")
+	file := bundle.Files["src/app.ts"]
+	require.Equal(t, "package main\n\nfunc main() {}\n", file.Content, "bundle should contain the full head-side text")
+	require.Equal(t, 3, file.TotalLines, "bundle should count logical lines like the file context readers")
 	require.Equal(t, []SkippedFile{
 		{Path: "deleted.go", Reason: SkipReasonDeleted},
 		{Path: "blob.bin", Reason: SkipReasonBinary},
-	}, artifact.Skipped, "artifact should preserve skip reasons")
+	}, bundle.Skipped, "bundle should preserve skip reasons")
 }
 
-func TestCaptureAppliesFileAndArtifactLimits(t *testing.T) {
+func TestCaptureAppliesFileAndBundleLimits(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
@@ -136,28 +136,28 @@ func TestCaptureAppliesFileAndArtifactLimits(t *testing.T) {
 		"two.txt":  "two\n",
 		"huge.txt": strings.Repeat("x", 16),
 	}), orgID, sessionID, diff, Options{
-		Key:                  "review-artifacts/test/limited.json.gz",
+		Key:                  "review-bundles/test/limited.json.gz",
 		MaxFiles:             1,
 		PerFileMaxBytes:      8,
 		MaxUncompressedBytes: DefaultMaxUncompressedBytes,
 	})
 	require.NoError(t, err, "Capture should not fail when limits skip files")
-	require.True(t, meta.Truncated, "Capture should mark the artifact truncated when limits skip changed files")
+	require.True(t, meta.Truncated, "Capture should mark the bundle truncated when limits skip changed files")
 
-	artifact, err := Load(context.Background(), store, meta.Key, DefaultMaxUncompressedBytes)
-	require.NoError(t, err, "limited artifact should load")
-	require.Contains(t, artifact.Files, "one.txt", "first file should be stored before max file count is reached")
-	require.NotContains(t, artifact.Files, "two.txt", "second file should be skipped by max file count")
-	require.NotContains(t, artifact.Files, "huge.txt", "oversized file should not be stored")
-	require.Contains(t, artifact.Skipped, SkippedFile{Path: "two.txt", Reason: SkipReasonMaxFiles}, "artifact should record max-file skips")
-	require.Contains(t, artifact.Skipped, SkippedFile{Path: "huge.txt", Reason: SkipReasonTooLarge}, "artifact should record per-file size skips")
+	bundle, err := Load(context.Background(), store, meta.Key, DefaultMaxUncompressedBytes)
+	require.NoError(t, err, "limited bundle should load")
+	require.Contains(t, bundle.Files, "one.txt", "first file should be stored before max file count is reached")
+	require.NotContains(t, bundle.Files, "two.txt", "second file should be skipped by max file count")
+	require.NotContains(t, bundle.Files, "huge.txt", "oversized file should not be stored")
+	require.Contains(t, bundle.Skipped, SkippedFile{Path: "two.txt", Reason: SkipReasonMaxFiles}, "bundle should record max-file skips")
+	require.Contains(t, bundle.Skipped, SkippedFile{Path: "huge.txt", Reason: SkipReasonTooLarge}, "bundle should record per-file size skips")
 }
 
 func TestCachedReaderReturnsFileContext(t *testing.T) {
 	t.Parallel()
 
 	store := newMemoryStore()
-	artifact := Artifact{
+	bundle := Bundle{
 		Version: Version,
 		Files: map[string]File{
 			"src/app.ts": {
@@ -169,13 +169,13 @@ func TestCachedReaderReturnsFileContext(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	meta, err := Encode(&buf, artifact)
-	require.NoError(t, err, "test artifact should encode")
-	store.saved["artifact-key"] = buf.Bytes()
+	meta, err := Encode(&buf, bundle)
+	require.NoError(t, err, "test bundle should encode")
+	store.saved["bundle-key"] = buf.Bytes()
 
 	reader := NewCachedReader(store, 1024*1024)
-	got, ok, err := reader.ReadFileContext(context.Background(), "artifact-key", "src/app.ts", 3, 1, 1)
-	require.NoError(t, err, "ReadFileContext should load the artifact")
+	got, ok, err := reader.ReadFileContext(context.Background(), "bundle-key", "src/app.ts", 3, 1, 1)
+	require.NoError(t, err, "ReadFileContext should load the bundle")
 	require.True(t, ok, "ReadFileContext should report a stored file")
 	require.Equal(t, int64(buf.Len()), meta.CompressedBytes, "Encode should return compressed size metadata")
 	require.Equal(t, []int{2, 3, 4}, []int{got.Lines[0].Number, got.Lines[1].Number, got.Lines[2].Number}, "ReadFileContext should return the requested line window")
@@ -184,9 +184,9 @@ func TestCachedReaderReturnsFileContext(t *testing.T) {
 	require.True(t, got.HasMoreAbove, "ReadFileContext should report lines above")
 	require.False(t, got.HasMoreBelow, "ReadFileContext should report no lines below")
 
-	_, ok, err = reader.ReadFileContext(context.Background(), "artifact-key", "missing.ts", 1, 0, 0)
-	require.NoError(t, err, "missing artifact file should not be an error")
-	require.False(t, ok, "missing artifact file should fall back to the workspace reader")
+	_, ok, err = reader.ReadFileContext(context.Background(), "bundle-key", "missing.ts", 1, 0, 0)
+	require.NoError(t, err, "missing bundle file should not be an error")
+	require.False(t, ok, "missing bundle file should fall back to the workspace reader")
 }
 
 type memoryStore struct {
@@ -238,7 +238,7 @@ func execFromMap(files map[string]string) ExecFunc {
 				return 0, nil
 			}
 		}
-		_, _ = io.WriteString(stderr, "reviewartifact:missing")
+		_, _ = io.WriteString(stderr, "reviewbundle:missing")
 		return 2, nil
 	}
 }

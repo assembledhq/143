@@ -110,6 +110,11 @@ import {
   syncReferencesWithMessage,
 } from "@/lib/session-composer-mentions";
 import { queryKeys } from "@/lib/query-keys";
+import {
+  DEFAULT_REVIEW_MAX_PASSES,
+  MAX_REVIEW_MAX_PASSES,
+  MIN_REVIEW_MAX_PASSES,
+} from "@/lib/review-loop-constants";
 import { api, ApiError } from "@/lib/api";
 import { AGENTS, AGENTS_BY_KEY } from "@/lib/agents";
 import { getActiveOrgId } from "@/lib/active-org";
@@ -124,6 +129,7 @@ import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, flattenTra
 import { formatReviewMessage } from "@/lib/format-review-message";
 import {
   classifyPRSnapshotState,
+  formatPRCreationError,
   prErrorTitle,
   snapshotPRMessage,
 } from "@/lib/session-pr-snapshot";
@@ -145,7 +151,7 @@ import {
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
 import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
-import type { ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionPublication, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequest, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
+import type { ChangesetStatus, ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionPublication, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequest, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -174,7 +180,7 @@ import {
 } from "@/hooks/use-session-keyboard-shortcuts";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { recordSessionActivityEvent } from "@/lib/session-activity-events";
-import { continueFromPRBranchMessage, deriveCreatePRActionState, derivePushChangesActionState, hasRepairableFailedChecks, prHealthBlocksPRActions } from "@/lib/session-pr-action-state";
+import { changesetPublicationBlocker, continueFromPRBranchMessage, deriveCreatePRActionState, derivePushChangesActionState, hasRepairableFailedChecks, prHealthBlocksPRActions } from "@/lib/session-pr-action-state";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { isProvisionalSessionDetail } from "@/lib/session-detail-cache";
 import { useReconcileOptimisticAction } from "./use-optimistic-pr-action";
@@ -314,7 +320,7 @@ function PublicationWorkflowCard({
   executionPaused,
   reviewExecutionPaused,
   actionPending,
-  onCreateDraft,
+  onCreatePR,
   onOpenReview,
   onContinue,
   onRetry,
@@ -327,7 +333,7 @@ function PublicationWorkflowCard({
   executionPaused: boolean;
   reviewExecutionPaused: boolean;
   actionPending: boolean;
-  onCreateDraft: () => void;
+  onCreatePR: () => void;
   onOpenReview: () => void;
   onContinue: () => void;
   onRetry: () => void;
@@ -346,8 +352,13 @@ function PublicationWorkflowCard({
   const reviewQueued = reviewing && !reviewLoop;
   const reviewPassed = publication.review_gate_state === "passed";
   const activePass = reviewLoop?.passes?.at(-1);
-  const passNumber = activePass?.pass_index ?? Math.min((reviewLoop?.completed_passes ?? 0) + 1, publication.review_max_passes ?? reviewLoop?.max_passes ?? 2);
-  const maxPasses = publication.review_max_passes ?? reviewLoop?.max_passes ?? 2;
+  const passNumber = activePass?.pass_index ?? Math.min(
+    (reviewLoop?.completed_passes ?? 0) + 1,
+    publication.review_max_passes ?? reviewLoop?.max_passes ?? DEFAULT_REVIEW_MAX_PASSES,
+  );
+  const maxPasses = publication.review_max_passes
+    ?? reviewLoop?.max_passes
+    ?? DEFAULT_REVIEW_MAX_PASSES;
   const activity = activePass?.status === "fixing"
     ? "Applying fixes"
     : activePass?.status === "deciding"
@@ -416,9 +427,9 @@ function PublicationWorkflowCard({
             publication.review_gate_state === "needs_human" ||
             (executionActuallyPaused && reviewExecutionPaused && publication.review_gate_state === "pending")
           ) ? (
-            <Button size="sm" disabled={actionPending} onClick={onCreateDraft}>
+            <Button size="sm" disabled={actionPending} onClick={onCreatePR}>
               {actionPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GitPullRequest className="h-3.5 w-3.5" />}
-              Create draft PR
+              Create PR
             </Button>
           ) : null}
           {needsAttention && reviewLoop?.thread_id ? <Button size="sm" variant="outline" onClick={onOpenReview}>Open review</Button> : null}
@@ -534,8 +545,6 @@ function buildReviewLoopThreadPreview(loop: SessionReviewLoop, session?: Session
 
 type SessionOriginDisplay = {
   badge: string;
-  title: string;
-  detail?: string;
 };
 
 function getSessionOriginDisplay(session: Session): SessionOriginDisplay | null {
@@ -543,26 +552,18 @@ function getSessionOriginDisplay(session: Session): SessionOriginDisplay | null 
     case "automation":
       return {
         badge: "Automation",
-        title: "Created by automation",
-        detail: session.automation_run_id ? "Automation run" : "Scheduled or manually triggered automation",
       };
     case "project":
       return {
         badge: "Project",
-        title: "Created from project work",
-        detail: "Started as part of a tracked project task",
       };
     case "issue_trigger":
       return {
         badge: "Issue",
-        title: "Created from issue intake",
-        detail: "Started automatically from issue workflow",
       };
     case "revision":
       return {
         badge: "Revision",
-        title: "Created from a prior session",
-        detail: "Follow-up run spun out from an earlier session",
       };
     default:
       return null;
@@ -605,7 +606,33 @@ type PRAuthPromptState =
 type PRActionErrorState = {
   code?: string;
   message: string;
+  changesetID?: string;
+  changesetUpdatedAt?: string;
+  changesetStatus?: ChangesetStatus;
 };
+
+function publicationBlockerDetails(value: unknown): { reason?: string; changesetStatus?: ChangesetStatus } {
+  if (!value || typeof value !== "object") return {};
+  const details = value as { reason?: unknown; changeset_status?: unknown };
+  const candidateStatus = typeof details.changeset_status === "string"
+    ? details.changeset_status as ChangesetStatus
+    : undefined;
+  return {
+    reason: typeof details.reason === "string" ? details.reason : undefined,
+    changesetStatus: changesetPublicationBlocker(candidateStatus) ? candidateStatus : undefined,
+  };
+}
+
+function changesetAgentRecoveryMessage(changeset: ChangesetSummary, status = changeset.status): string | null {
+  switch (status) {
+    case "restack_conflict":
+      return "Resolve the restack conflict while preserving this pull request's intent. Explain any semantic changes and do not push; I will review and confirm the result.";
+    case "external_update_detected":
+      return "Run `143-tools changesets import-remote --changeset " + changeset.id + "` first. If it reports `reconciled`, stop and tell me Create PR is ready. Otherwise, fetch the remote branch and reconcile its commits with the local worktree without dropping either side's intended changes. Do not push. After the turn is checkpointed, run the import command again in a follow-up so the platform can verify that the checkpoint matches local HEAD and safely contains the remote HEAD.";
+    default:
+      return null;
+  }
+}
 
 const terminalSessionStatuses = new Set<SessionStatus>(["completed", "pr_created", "failed", "cancelled", "skipped"]);
 
@@ -701,6 +728,31 @@ function ThreadFailureDetailsCard({ thread }: { thread: SessionThread }) {
   );
 }
 
+function SessionResultSection({ summary, divided }: { summary?: string; divided: boolean }) {
+  if (!summary) return null;
+
+  return (
+    <section
+      aria-label="Session result"
+      className={cn(divided && "border-t border-border/60 pt-4")}
+      data-testid="session-result-section"
+    >
+      <div className="flex items-start gap-2.5">
+        <div
+          aria-hidden="true"
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-success/10 text-success"
+        >
+          <CheckCircle2 className="h-4 w-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium text-foreground">Result</div>
+          <LazyMarkdownContent content={summary} className="mt-2 text-xs" />
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function OverviewTab({ session, activeThread, members, prStatus }: { session: Session; activeThread?: SessionThread | null; members: User[]; prStatus?: PullRequestStatus | null }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
@@ -746,21 +798,6 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
 
   return (
     <div className="space-y-4">
-      {/* Result card — most important for completed sessions, shown first */}
-      {session.result_summary && (
-        <Card className="border-l-2 border-l-success bg-success/5">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-xs flex items-center gap-2">
-              <CheckCircle2 className="h-3.5 w-3.5 text-success" />
-              Result
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <LazyMarkdownContent content={session.result_summary} className="text-xs" />
-          </CardContent>
-        </Card>
-      )}
-
       {isDeployRecovery && (
         <Card className="border-l-2 border-l-warning bg-warning/5">
           <CardHeader className="pb-2">
@@ -897,7 +934,7 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
       )}
 
       {/* Session vitals — identity row (status + agent + who triggered) */}
-      <div className="space-y-2">
+      <div className="space-y-1.5">
         <div className="flex items-center gap-x-3 gap-y-1 flex-wrap text-xs">
           <StatusLabel
             label={operationalStatus.label}
@@ -913,62 +950,56 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
           </span>
         </div>
 
-        {originDisplay && (
-          <div className="flex items-center gap-x-2 gap-y-1 flex-wrap text-xs text-muted-foreground">
+        <div
+          data-testid="session-overview-context"
+          className="flex min-w-0 items-center gap-x-2 gap-y-1 flex-wrap text-xs text-muted-foreground"
+        >
+          {originDisplay && (
             <Badge variant="outline" className="h-5 rounded-full px-2 text-xs font-medium">
               {originDisplay.badge}
             </Badge>
-            <span className="font-medium text-foreground">{originDisplay.title}</span>
-            {originDisplay.detail && (
-              <>
-                <span aria-hidden="true" className="text-muted-foreground/50">·</span>
-                <span>{originDisplay.detail}</span>
-              </>
-            )}
-          </div>
-        )}
-
-        {repoBranchLabel && (
-          <div
-            data-testid="session-overview-repo-branch"
-            className="text-xs text-muted-foreground break-words"
-          >
-            {repoBranchLabel}
-          </div>
-        )}
-
-        {/* Timestamps + audit — secondary reference data, kept separate from long repo/branch labels */}
-        <div
-          data-testid="session-overview-timing"
-          className="flex items-center gap-x-1.5 gap-y-1 flex-wrap text-xs text-muted-foreground"
-        >
-          {terminalSessionStatuses.has(session.status) &&
-            !((session.status === "failed" || session.status === "cancelled") &&
-              !hasMeaningfulDuration(session.started_at, session.completed_at)) && (
-            <span>
-              {formatDuration(session.started_at, session.completed_at)}
-              <span aria-hidden="true" className="ml-1.5 text-muted-foreground/50">·</span>
+          )}
+          {repoBranchLabel && (
+            <span
+              data-testid="session-overview-repo-branch"
+              className="min-w-0 flex-1 basis-40 truncate"
+              title={repoBranchLabel}
+            >
+              {repoBranchLabel}
             </span>
           )}
-          <span>
-            {!isActive && session.completed_at ? (
-              session.status === "failed"
-                ? <>Failed {formatTimeAgo(session.completed_at)}</>
-                : session.status === "cancelled"
-                  ? <>Cancelled {formatTimeAgo(session.completed_at)}</>
-                  : <>Completed {formatTimeAgo(session.completed_at)}</>
-            ) : session.started_at ? (
-              <>Started {formatTimeAgo(session.started_at)}</>
-            ) : (
-              <>Queued {formatTimeAgo(session.created_at)}</>
+          <div
+            data-testid="session-overview-timing"
+            className="inline-flex shrink-0 items-center gap-x-1.5 whitespace-nowrap"
+          >
+            {terminalSessionStatuses.has(session.status) &&
+              !((session.status === "failed" || session.status === "cancelled") &&
+                !hasMeaningfulDuration(session.started_at, session.completed_at)) && (
+              <span>
+                {formatDuration(session.started_at, session.completed_at)}
+                <span aria-hidden="true" className="ml-1.5 text-muted-foreground/50">·</span>
+              </span>
             )}
-          </span>
-          <AuditLogTrigger
-            filters={{ session_id: session.id }}
-            members={members}
-            title="Session activity"
-            variant="inline"
-          />
+            <span>
+              {!isActive && session.completed_at ? (
+                session.status === "failed"
+                  ? <>Failed {formatTimeAgo(session.completed_at)}</>
+                  : session.status === "cancelled"
+                    ? <>Cancelled {formatTimeAgo(session.completed_at)}</>
+                    : <>Completed {formatTimeAgo(session.completed_at)}</>
+              ) : session.started_at ? (
+                <>Started {formatTimeAgo(session.started_at)}</>
+              ) : (
+                <>Queued {formatTimeAgo(session.created_at)}</>
+              )}
+            </span>
+            <AuditLogTrigger
+              filters={{ session_id: session.id }}
+              members={members}
+              title="Session activity"
+              variant="inline"
+            />
+          </div>
         </div>
       </div>
 
@@ -3516,26 +3547,54 @@ export function PullRequestList({
 
 export function ChangesetSplitPrompt({
   additions,
+  filesChanged,
   onRequestSplit,
   requestSplitPending = false,
 }: {
   additions?: number;
+  filesChanged?: number;
   onRequestSplit?: () => void;
   requestSplitPending?: boolean;
 }) {
   if (!shouldOfferChangesetSplit(additions)) return null;
 
+  const additionCount = additions ?? 0;
+  const fileLabel = filesChanged === undefined
+    ? ""
+    : ` · ${filesChanged.toLocaleString()} ${filesChanged === 1 ? "file" : "files"}`;
+
   return (
-    <AgentActionCard
-      icon={<GitBranch className="h-4 w-4" />}
-      title="Need smaller pull requests?"
-      description="Ask the coding agent to split the current diff into reviewable branches."
-      action={(
-        <Button size="sm" variant="outline" disabled={requestSplitPending || !onRequestSplit} onClick={onRequestSplit}>
-          Split PRs
-        </Button>
-      )}
-    />
+    <div
+      role="region"
+      aria-label="Pull request size suggestion"
+      data-slot="overview-suggestion"
+      className="flex items-center gap-2.5 px-1 py-1.5"
+    >
+      <div
+        data-slot="overview-suggestion-icon"
+        aria-hidden="true"
+        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"
+      >
+        <GitBranch className="h-4 w-4" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-xs font-medium text-foreground">
+          Large change · {additionCount.toLocaleString()} additions{fileLabel}
+        </p>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          Split this diff into smaller, reviewable pull requests.
+        </p>
+      </div>
+      <Button
+        size="xs"
+        variant="ghost"
+        className="shrink-0"
+        disabled={requestSplitPending || !onRequestSplit}
+        onClick={onRequestSplit}
+      >
+        Split into PRs
+      </Button>
+    </div>
   );
 }
 
@@ -3570,7 +3629,7 @@ function AgentActionCard({
         </div>
         <div
           data-slot="agent-action-card-action"
-          className="w-fit shrink-0 self-start @min-[24rem]/agent-action:self-auto"
+          className="ml-11 w-fit shrink-0 self-start @min-[24rem]/agent-action:ml-0 @min-[24rem]/agent-action:self-auto"
         >
           {action}
         </div>
@@ -3614,7 +3673,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [mobileRenameOpen, setMobileRenameOpen] = useState(false);
   const [keyboardHelpOpen, setKeyboardHelpOpen] = useState(false);
   const [reviewConfigOpen, setReviewConfigOpen] = useState(false);
-  const [reviewPasses, setReviewPasses] = useState(2);
+  const [reviewPasses, setReviewPasses] = useState(DEFAULT_REVIEW_MAX_PASSES);
   const [reviewAgentType, setReviewAgentType] = useState<string>("codex");
   const [reviewFixMode, setReviewFixMode] = useState<ReviewLoopFixMode>("minimal");
   const [detailWidth, setDetailWidth] = useState(SESSION_DETAIL_PANEL_DEFAULT_WIDTH);
@@ -3916,6 +3975,18 @@ export function SessionDetailContent({ id }: { id: string }) {
   const primaryChangeset = changesets.find((changeset) => changeset.is_primary) ?? changesets[0];
   const [selectedChangesetID, setSelectedChangesetID] = useState<string | null>(changesetParam);
   const selectedChangeset = changesets.find((changeset) => changeset.id === selectedChangesetID) ?? primaryChangeset;
+  const selectedLocalPRActionError = localPRActionError &&
+    (!localPRActionError.changesetID || localPRActionError.changesetID === selectedChangeset?.id) &&
+    (!localPRActionError.changesetUpdatedAt ||
+      localPRActionError.changesetUpdatedAt === selectedChangeset?.updated_at ||
+      localPRActionError.changesetStatus === selectedChangeset?.status)
+    ? localPRActionError
+    : null;
+  useEffect(() => {
+    if (localPRActionError && !selectedLocalPRActionError) {
+      setLocalPRActionError(null);
+    }
+  }, [localPRActionError, selectedLocalPRActionError]);
   const selectedPublication = (session?.publications ?? []).find((publication) => publication.changeset_id === selectedChangeset?.id);
   const selectedPublicationPresentation = selectedPublication ? publicationPresentation(selectedPublication) : null;
   const selectedPublicationHasReviewWarning = selectedPublication ? publicationHasReviewWarning(selectedPublication) : false;
@@ -3929,6 +4000,30 @@ export function SessionDetailContent({ id }: { id: string }) {
       toast.success("Pull request action queued");
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Pull request action failed"),
+  });
+  const publishChangesetMutation = useMutation({
+    mutationFn: (target: ChangesetSummary) => api.sessions.publishChangeset(id, target.id),
+    onMutate: () => {
+      setLocalPRActionError(null);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["session", id] });
+      toast.success("Pull request action queued");
+    },
+    onError: (error, target) => {
+      const blockerDetails = error instanceof ApiError ? publicationBlockerDetails(error.details) : {};
+      if (blockerDetails.changesetStatus) {
+        setLocalPRActionError({
+          code: error instanceof ApiError ? error.code : undefined,
+          message: blockerDetails.reason || (error instanceof Error ? error.message : "Pull request action failed"),
+          changesetID: target.id,
+          changesetUpdatedAt: target.updated_at,
+          changesetStatus: blockerDetails.changesetStatus,
+        });
+        void queryClient.invalidateQueries({ queryKey: ["session", id] });
+      }
+      toast.error(blockerDetails.reason || (error instanceof Error ? error.message : "Pull request action failed"));
+    },
   });
   // Stack publishing coordinates each changeset independently, so the request
   // can succeed while individual entries are rejected. A generic success toast
@@ -4911,6 +5006,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     onMutate: () => {
       setLocalPRActionError(null);
       setLocalPRState("submitting");
+      return {
+        changesetID: selectedChangeset?.id,
+        changesetUpdatedAt: selectedChangeset?.updated_at,
+      };
     },
     onSuccess: (data, options) => {
       setLocalPRActionError(null);
@@ -4922,7 +5021,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       queryClient.invalidateQueries({ queryKey: ["session", id] });
       queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
     },
-    onError: (err, options) => {
+    onError: (err, options, context) => {
       if (err instanceof ApiError &&
         (err.code === "GITHUB_PR_AUTHORSHIP_REQUIRED" || err.code === "GITHUB_PR_AUTHORSHIP_REAUTH_REQUIRED") &&
         isPRAuthInterceptDetails(err.details)) {
@@ -4933,11 +5032,18 @@ export function SessionDetailContent({ id }: { id: string }) {
         return;
       }
       setLocalPRState("idle");
-      const msg = err instanceof Error ? err.message : PR_ERROR_TOAST_MESSAGE;
+      const blockerDetails = err instanceof ApiError ? publicationBlockerDetails(err.details) : {};
+      const msg = blockerDetails.reason || (err instanceof Error ? err.message : PR_ERROR_TOAST_MESSAGE);
       setLocalPRActionError({
         code: err instanceof ApiError ? err.code : undefined,
         message: msg,
+        changesetID: context?.changesetID,
+        changesetUpdatedAt: context?.changesetUpdatedAt,
+        changesetStatus: blockerDetails.changesetStatus,
       });
+      if (blockerDetails.changesetStatus) {
+        void queryClient.invalidateQueries({ queryKey: ["session", id] });
+      }
       if (options?.resumeToken) {
         clearPRResumeParams();
       }
@@ -6212,17 +6318,35 @@ export function SessionDetailContent({ id }: { id: string }) {
     sessionSnapshotKey: session.snapshot_key,
     sessionSandboxState: session.sandbox_state,
     serverMessage: session.pr_creation_error,
-    localCode: localPRActionError?.code,
+    localCode: selectedLocalPRActionError?.code,
     allowImplicitMissingSnapshot: showExpiredPRAction,
   });
   const snapshotUnavailable = snapshotState !== null;
   const snapshotMessage = snapshotPRMessage(
     snapshotState,
-    localPRActionError?.code ? localPRActionError.message : session.pr_creation_error,
+    selectedLocalPRActionError?.code ? selectedLocalPRActionError.message : session.pr_creation_error,
   );
+  // The button tooltip repeats the notice copy, so it reads the same polished
+  // sentence the notice renders instead of the raw server detail.
+  const selectedLocalPRActionMessage = selectedLocalPRActionError?.message
+    ? formatPRCreationError(selectedLocalPRActionError.code, selectedLocalPRActionError.message)
+    : undefined;
+  const blockingChangesetStatus = selectedLocalPRActionError?.changesetStatus ?? selectedChangeset?.status;
+  const publicationBlocker = changesetPublicationBlocker(blockingChangesetStatus);
+  const selectedChangesetActionBlocker = publicationBlocker;
+  const selectedChangesetRecoveryMessage = selectedChangeset
+    ? changesetAgentRecoveryMessage(selectedChangeset, blockingChangesetStatus)
+    : null;
+  const requestSelectedChangesetRecovery = () => {
+    if (!selectedChangeset || !selectedChangesetRecoveryMessage) return;
+    setComposerChangesetID(selectedChangeset.id);
+    setComposerMessage(selectedChangesetRecoveryMessage);
+    focusComposerFromKeyboard();
+  };
   const prActionError = hasPR
     ? null
-    : (localPRActionError?.code && snapshotState ? snapshotMessage : localPRActionError?.message) ||
+    : publicationBlocker ||
+      (selectedLocalPRActionError?.code && snapshotState ? snapshotMessage : selectedLocalPRActionMessage) ||
       (snapshotUnavailable ? snapshotMessage : null) ||
       (prState === "failed" ? session.pr_creation_error || PR_ERROR_TOAST_MESSAGE : null);
   const createPRAction = deriveCreatePRActionState({
@@ -6240,8 +6364,9 @@ export function SessionDetailContent({ id }: { id: string }) {
     creatingPR,
     finalizingPR,
     prState,
+    changesetStatus: blockingChangesetStatus,
     prCreationError: session.pr_creation_error,
-    localError: snapshotUnavailable ? undefined : localPRActionError?.message,
+    localError: snapshotUnavailable ? undefined : selectedLocalPRActionMessage,
     hasRecoverableError: Boolean(prActionError),
   });
   // A durable publication owns the workflow until it settles. Its Overview
@@ -6331,9 +6456,16 @@ export function SessionDetailContent({ id }: { id: string }) {
   }
 
   const prErrorNotice = prActionError ? {
-    title: prErrorTitle(snapshotState, localPRActionError?.code),
-    description: prActionError,
-    action: prActionDisabled ? undefined : {
+    title: blockingChangesetStatus === "external_update_detected"
+      ? "Branch reconciliation required"
+      : publicationBlocker
+        ? "Publication blocked"
+        : prErrorTitle(snapshotState, selectedLocalPRActionError?.code),
+    description: publicationBlocker || formatPRCreationError(selectedLocalPRActionError?.code, prActionError),
+    action: selectedChangesetRecoveryMessage ? {
+      label: blockingChangesetStatus === "external_update_detected" ? "Reconcile with agent" : "Resolve with agent",
+      onClick: requestSelectedChangesetRecovery,
+    } : prActionDisabled ? undefined : {
       label: prActionLabel,
       onClick: () => submitCreatePR(undefined),
     },
@@ -6365,6 +6497,92 @@ export function SessionDetailContent({ id }: { id: string }) {
   };
   const detailActionSize = isMobileReviewViewport ? "xs" : "sm";
   const detailActionIconSize = isMobileReviewViewport ? "icon-xs" : "icon-sm";
+  // The PR summary that leads the Overview column. Built as a single value so
+  // the Result divider below is derived from whether this actually rendered
+  // instead of from a second copy of these conditions.
+  const prOverviewSection = !pullRequestId ? null : prStatus === "open" ? (
+    prHealth ? (
+      <PRHealthBanner
+        health={prHealth}
+        currentSessionId={id}
+        currentThreadId={activeThread?.id ?? null}
+        pendingAction={pendingPRAction}
+        repairError={repairActionError}
+        mergeAuthRequired={ghBlocked}
+        mergeWhenReadyPending={pendingMergeWhenReady}
+        onFixTests={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: true })}
+        onFixTestsWithoutPushing={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: false })}
+        onResolveConflicts={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: true })}
+        onResolveConflictsWithoutPushing={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: false })}
+        onMerge={handleMergeAction}
+        onQueueMergeWhenReady={handleQueueMergeWhenReady}
+        onCancelMergeWhenReady={handleCancelMergeWhenReady}
+        onOpenRepairSession={(sessionId, threadId) => {
+          if (sessionId === id && threadId) {
+            setActiveThreadId(threadId);
+            return;
+          }
+          router.push(`/sessions/${sessionId}`);
+        }}
+        onStopAutoRepair={(sessionId, threadId) => stopAutoRepairMutation.mutate({ sessionId, threadId })}
+        stopAutoRepairPending={stopAutoRepairMutation.isPending}
+        reviewAction={selectedIsPrimary && canManageSession && canUseNativeReviewLoop ? {
+          disabled: reviewActionDisabled,
+          spinning: startReviewLoopMutation.isPending || reviewLoopRunning,
+          title: reviewActionDisabledReason,
+          onClick: () => setReviewConfigOpen(true),
+        } : undefined}
+        pushChanges={showPushAction ? {
+          label: pushActionLabel,
+          disabled: pushActionDisabled,
+          spinning: pushActionSpinning || (pushActionRequiresBranchSync && continueFromPRBranchMutation.isPending),
+          showError: pushState === "failed" || !!localPushActionError,
+          title: pushActionTitle,
+          onClick: () => {
+            if (pushActionRequiresBranchSync) {
+              continueFromPRBranchMutation.mutate();
+              return;
+            }
+            pushChangesMutation.mutate(undefined);
+          },
+        } : undefined}
+      />
+    ) : isPRHealthLoading ? (
+      <section
+        className="flex items-center gap-2 text-sm text-muted-foreground"
+        data-slot="pr-health-loading-section"
+      >
+        <Loader2 className="h-4 w-4 animate-spin" />
+        <span>Loading PR health...</span>
+      </section>
+    ) : null
+  ) : prStatus === "closed" ? (
+    <section className="flex items-start gap-2.5" data-slot="pr-closed-section">
+      <div aria-hidden="true" className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+        <XCircle className="h-4 w-4" />
+      </div>
+      <div className="min-w-0 space-y-1">
+        <div className="text-sm font-medium text-foreground">{closedPRLabel}</div>
+        <p className="text-xs text-foreground">{closedPRSummary}</p>
+        <p className="text-xs text-muted-foreground">
+          This pull request is no longer active. Create a follow-up revision if you want to ship a new attempt.
+        </p>
+      </div>
+    </section>
+  ) : prStatus === "merged" ? (
+    <section className="flex items-start gap-2.5" data-slot="pr-merged-section">
+      <div aria-label="Merged PR status" className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-md", prMergedAccent.bg, prMergedAccent.text)}>
+        <CheckCircle2 className="h-4 w-4" />
+      </div>
+      <div className="min-w-0 space-y-1">
+        <div className="text-sm font-medium text-foreground">{mergedPRLabel}</div>
+        <p className="text-xs text-foreground">{mergedPRSummary}</p>
+        <p className="text-xs text-muted-foreground">
+          This change has landed. Open a follow-up session if you need to make another revision.
+        </p>
+      </div>
+    </section>
+  ) : null;
   // Right-panel content. Rendered inline on desktop and inside a bottom sheet
   // on mobile — the same JSX in both places so tab state stays consistent.
   const panelTabsEl = (
@@ -6455,7 +6673,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                       title={prActionTitle ? `${prActionTitle} (p c)` : `${prActionLabel} (p c)`}
                       onClick={() => submitCreatePR(undefined)}
                     >
-                      {!prActionSpinning && (prState === "failed" || localPRActionError ? (
+                      {!prActionSpinning && (prState === "failed" || selectedLocalPRActionError ? (
                         <AlertTriangle className="h-3 w-3" />
                       ) : (
                         <GitPullRequest className="h-3 w-3" />
@@ -6521,7 +6739,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         </div>
         {prErrorNotice && (
           <ErrorNotice
-            className="mx-2 mt-2"
+            className="mx-4 mt-2"
             title={prErrorNotice.title}
             description={prErrorNotice.description}
             action={prErrorNotice.action}
@@ -6557,102 +6775,15 @@ export function SessionDetailContent({ id }: { id: string }) {
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <div className="space-y-4">
-          {pullRequestId && prStatus === "open" && (
-            prHealth ? (
-              <PRHealthBanner
-                health={prHealth}
-                currentSessionId={id}
-                currentThreadId={activeThread?.id ?? null}
-                pendingAction={pendingPRAction}
-                repairError={repairActionError}
-                mergeAuthRequired={ghBlocked}
-                mergeWhenReadyPending={pendingMergeWhenReady}
-                onFixTests={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: true })}
-                onFixTestsWithoutPushing={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: false })}
-                onResolveConflicts={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: true })}
-                onResolveConflictsWithoutPushing={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: false })}
-                onMerge={handleMergeAction}
-                onQueueMergeWhenReady={handleQueueMergeWhenReady}
-                onCancelMergeWhenReady={handleCancelMergeWhenReady}
-                onOpenRepairSession={(sessionId, threadId) => {
-                  if (sessionId === id && threadId) {
-                    setActiveThreadId(threadId);
-                    return;
-                  }
-                  router.push(`/sessions/${sessionId}`);
-                }}
-                onStopAutoRepair={(sessionId, threadId) => stopAutoRepairMutation.mutate({ sessionId, threadId })}
-                stopAutoRepairPending={stopAutoRepairMutation.isPending}
-                reviewAction={selectedIsPrimary && canManageSession && canUseNativeReviewLoop ? {
-                  disabled: reviewActionDisabled,
-                  spinning: startReviewLoopMutation.isPending || reviewLoopRunning,
-                  title: reviewActionDisabledReason,
-                  onClick: () => setReviewConfigOpen(true),
-                } : undefined}
-                pushChanges={showPushAction ? {
-                  label: pushActionLabel,
-                  disabled: pushActionDisabled,
-                  spinning: pushActionSpinning || (pushActionRequiresBranchSync && continueFromPRBranchMutation.isPending),
-                  showError: pushState === "failed" || !!localPushActionError,
-                  title: pushActionTitle,
-                  onClick: () => {
-                    if (pushActionRequiresBranchSync) {
-                      continueFromPRBranchMutation.mutate();
-                      return;
-                    }
-                    pushChangesMutation.mutate(undefined);
-                  },
-                } : undefined}
-              />
-            ) : isPRHealthLoading ? (
-              <Card className="border-border/60">
-                <CardContent className="flex items-center gap-2 p-4 text-sm text-muted-foreground">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  <span>Loading PR health...</span>
-                </CardContent>
-              </Card>
-            ) : null
-          )}
-          {pullRequestId && prStatus === "closed" && (
-            <Card className="border-border/60">
-              <CardContent className="p-4">
-                <div className="flex items-start gap-3">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-muted-foreground">
-                    <XCircle className="h-4 w-4" />
-                  </div>
-                  <div className="min-w-0 space-y-1">
-                    <div className="text-sm font-medium text-foreground">{closedPRLabel}</div>
-                    <p className="text-xs text-foreground">{closedPRSummary}</p>
-                    <p className="text-xs text-muted-foreground">
-                      This pull request is no longer active. Create a follow-up revision if you want to ship a new attempt.
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          )}
-          {pullRequestId && prStatus === "merged" && (
-            <Card className="border-border/60">
-              <CardContent className="p-4">
-                <div className="flex items-start gap-3">
-                  <div aria-label="Merged PR status" className={cn("flex h-8 w-8 items-center justify-center rounded-full", prMergedAccent.bg, prMergedAccent.text)}>
-                    <CheckCircle2 className="h-4 w-4" />
-                  </div>
-                  <div className="min-w-0 space-y-1">
-                    <div className="text-sm font-medium text-foreground">{mergedPRLabel}</div>
-                    <p className="text-xs text-foreground">{mergedPRSummary}</p>
-                    <p className="text-xs text-muted-foreground">
-                      This change has landed. Open a follow-up session if you need to make another revision.
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          )}
+          {prOverviewSection}
+          <SessionResultSection summary={session.result_summary} divided={prOverviewSection !== null} />
           <PullRequestList
             changesets={changesets}
             selectedID={selectedChangeset?.id ?? ""}
             onSelect={(changesetID) => {
+              if (localPRActionError?.changesetID && localPRActionError.changesetID !== changesetID) {
+                setLocalPRActionError(null);
+              }
               setSelectedChangesetID(changesetID);
               void setChangesetParam(changesetID);
             }}
@@ -6715,12 +6846,13 @@ export function SessionDetailContent({ id }: { id: string }) {
           ) : null}
           <ChangesetSplitPrompt
             additions={session.diff_stats?.added}
+            filesChanged={session.diff_stats?.files_changed}
             onRequestSplit={() => queueSend({
               overrideMessage: "Split the current diff into smaller, independently reviewable pull requests. Before making changes, run `143-tools changesets list`, `143-tools changesets current`, and `143-tools changesets status` so the platform changeset state is authoritative. Then use the changeset tools to create and materialize the split; do not create worktrees manually. Keep each pull request cohesive, account for every changed file, and verify the completed split with the changeset tools.",
             })}
             requestSplitPending={sendMutation.isPending || !composerCanSendMessage}
           />
-          {hasMultipleChangesets && selectedChangeset && (
+          {(hasMultipleChangesets || selectedChangesetRecoveryMessage) && selectedChangeset && (
             <Card className="border-border/60" data-testid="selected-pull-request-panel">
               <CardContent className="space-y-1 p-4">
                 <div className="text-sm font-medium">{selectedChangeset.title}</div>
@@ -6752,25 +6884,33 @@ export function SessionDetailContent({ id }: { id: string }) {
                 ) : null}
                 <div className="flex flex-wrap gap-2 pt-2">
                 {!selectedChangeset.pull_request && !selectedPublicationOwnsActions && (
-                  <DisabledTooltip disabled={!!selectedChangeset.worktree_path} content="Create PR becomes available after branch materialization">
-                    <Button type="button" size="sm" disabled={!selectedChangeset.worktree_path || changesetLifecycleMutation.isPending} onClick={() => changesetLifecycleMutation.mutate(() => api.sessions.publishChangeset(id, selectedChangeset.id))}>
+                  <DisabledTooltip
+                    disabled={!selectedChangeset.worktree_path || !!selectedChangesetActionBlocker || publishChangesetMutation.isPending}
+                    content={selectedChangesetActionBlocker || (!selectedChangeset.worktree_path ? "Create PR becomes available after branch materialization" : "Publishing pull request…")}
+                  >
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={!selectedChangeset.worktree_path || !!selectedChangesetActionBlocker || publishChangesetMutation.isPending}
+                      title={selectedChangesetActionBlocker || (!selectedChangeset.worktree_path ? "Create PR becomes available after branch materialization" : publishChangesetMutation.isPending ? "Publishing pull request…" : undefined)}
+                      onClick={() => publishChangesetMutation.mutate(selectedChangeset)}
+                    >
                       <GitPullRequest className="h-3.5 w-3.5" />
                       Create PR
                     </Button>
                   </DisabledTooltip>
                 )}
                 <Button type="button" size="sm" variant="outline" disabled={!selectedChangeset.worktree_path} onClick={() => {
-                  setComposerChangesetID(selectedChangeset.id);
-                  if (selectedChangeset.status === "restack_conflict") {
-                    setComposerMessage("Resolve the restack conflict while preserving this pull request's intent. Explain any semantic changes and do not push; I will review and confirm the result.");
-                  } else if (selectedChangeset.status === "external_update_detected") {
-                    setComposerMessage("Run `143-tools changesets import-remote --changeset " + selectedChangeset.id + "`, fetch this pull request's remote branch, and reconcile its remote commits with the local worktree without dropping either side's intended changes. Do not push; I will review and confirm the result.");
+                  if (selectedChangesetRecoveryMessage) {
+                    requestSelectedChangesetRecovery();
+                  } else {
+                    setComposerChangesetID(selectedChangeset.id);
+                    focusComposerFromKeyboard();
                   }
-                  focusComposerFromKeyboard();
                 }}>
-                  {selectedChangeset.status === "restack_conflict"
+                  {blockingChangesetStatus === "restack_conflict"
                     ? "Resolve with agent"
-                    : selectedChangeset.status === "external_update_detected"
+                    : blockingChangesetStatus === "external_update_detected"
                       ? "Reconcile with agent"
                       : "Ask agent"}
                 </Button>
@@ -6807,7 +6947,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 session.publication_policy?.review_execution_enabled === false
               }
               actionPending={createPRMutation.isPending}
-              onCreateDraft={() => createPRMutation.mutate({ draft: true })}
+              onCreatePR={() => createPRMutation.mutate(undefined)}
               onOpenReview={() => {
                 if (publicationReviewLoop?.thread_id) setActiveThreadId(publicationReviewLoop.thread_id);
               }}
@@ -7285,8 +7425,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                   size="icon"
                   className="h-9 w-9 shrink-0"
                   aria-label="Decrease review passes"
-                  disabled={reviewPasses <= 1 || startReviewLoopMutation.isPending}
-                  onClick={() => setReviewPasses((current) => Math.max(1, current - 1))}
+                  disabled={reviewPasses <= MIN_REVIEW_MAX_PASSES || startReviewLoopMutation.isPending}
+                  onClick={() => setReviewPasses((current) => Math.max(MIN_REVIEW_MAX_PASSES, current - 1))}
                 >
                   <Minus className="h-3.5 w-3.5" />
                 </Button>
@@ -7294,19 +7434,22 @@ export function SessionDetailContent({ id }: { id: string }) {
                   id="review-pass-count"
                   aria-label="Review passes"
                   type="number"
-                  min={1}
-                  max={5}
+                  min={MIN_REVIEW_MAX_PASSES}
+                  max={MAX_REVIEW_MAX_PASSES}
                   value={reviewPasses}
                   disabled={startReviewLoopMutation.isPending}
                   onChange={(event) => {
                     const next = Number.parseInt(event.target.value, 10);
                     if (Number.isNaN(next)) {
-                      setReviewPasses(1);
+                      setReviewPasses(MIN_REVIEW_MAX_PASSES);
                       return;
                     }
-                    setReviewPasses(Math.min(5, Math.max(1, next)));
+                    setReviewPasses(Math.min(
+                      MAX_REVIEW_MAX_PASSES,
+                      Math.max(MIN_REVIEW_MAX_PASSES, next),
+                    ));
                   }}
-                      className="text-center"
+                  className="text-center"
                 />
                 <Button
                   type="button"
@@ -7314,8 +7457,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                   size="icon"
                   className="h-9 w-9 shrink-0"
                   aria-label="Increase review passes"
-                  disabled={reviewPasses >= 5 || startReviewLoopMutation.isPending}
-                  onClick={() => setReviewPasses((current) => Math.min(5, current + 1))}
+                  disabled={reviewPasses >= MAX_REVIEW_MAX_PASSES || startReviewLoopMutation.isPending}
+                  onClick={() => setReviewPasses((current) => Math.min(MAX_REVIEW_MAX_PASSES, current + 1))}
                 >
                   <Plus className="h-3.5 w-3.5" />
                 </Button>

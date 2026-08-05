@@ -187,6 +187,7 @@ export interface CodeReviewPolicyConfig {
   risk_policy: {
     max_files_changed: number;
     max_lines_changed: number;
+    semantic_dedupe_cooldown_seconds: number;
     require_passing_checks: boolean;
     exclude_sensitive_paths: boolean;
     sensitive_paths?: string[];
@@ -232,6 +233,7 @@ export type CodeReviewGitHubTriggerStatus =
   | "ready"
   | "auth_required"
   | "permission_required"
+  | "disconnected"
   | "error";
 
 export interface CodeReviewGitHubTriggerSetting {
@@ -253,6 +255,7 @@ export interface CodeReviewGitHubTriggerResponse {
   status: CodeReviewGitHubTriggerStatus;
   repository_id: string;
   repository_full_name?: string;
+  repository_status: "active" | "paused" | "disconnected";
   github_org?: string;
   team_slug: string;
   team_name: string;
@@ -305,6 +308,8 @@ export interface CodeReviewListItem {
   stale: boolean;
   superseded_by_session_id?: string;
   review_output_key: string;
+  prompt_record_key?: string;
+  /** @deprecated Compatibility with API instances still draining during rollout. */
   prompt_artifact_key?: string;
   github_review_id?: number;
   github_review_url?: string;
@@ -373,6 +378,11 @@ export interface CodeReviewAnalytics {
   }>;
   authors: CodeReviewAuthorAnalytics[];
   non_approval_reasons: CodeReviewNonApprovalReasonAnalytics[];
+  comment_requests_total: number;
+  comment_requests_by_user: Array<{
+    github_login: string;
+    requests: number;
+  }>;
 }
 
 export type CodeReviewPhase =
@@ -426,11 +436,13 @@ export interface CodeReviewFinding {
   created_at: string;
 }
 
-export interface CodeReviewPromptArtifact {
+export interface CodeReviewPromptRecord {
   id: string;
   org_id: string;
   session_id: string;
-  artifact_key: string;
+  record_key?: string;
+  /** @deprecated Compatibility with API instances still draining during rollout. */
+  artifact_key?: string;
   role: "reviewer" | "orchestrator" | "description_policy" | string;
   agent_provider?: string;
   content: string;
@@ -441,7 +453,58 @@ export interface CodeReviewPromptArtifact {
 export interface CodeReviewEvidence {
   agent_results: CodeReviewAgentResult[];
   findings: CodeReviewFinding[];
-  prompt_artifacts?: CodeReviewPromptArtifact[];
+  prompt_records?: CodeReviewPromptRecord[];
+  /** @deprecated Compatibility with API instances still draining during rollout. */
+  prompt_artifacts?: CodeReviewPromptRecord[];
+  risk_reason_codes?: string[];
+}
+
+export type CodeReviewDisputeDirection = "should_have_approved" | "should_not_have_approved";
+export type CodeReviewDisputeRouting = "reassess" | "policy_signal_only" | "answer_only" | "not_a_dispute";
+export type CodeReviewDisputeIntakeStatus = "pending" | "triaged" | "discarded" | "failed";
+export type CodeReviewDisputeReassessmentStatus = "not_requested" | "queued" | "running" | "completed" | "deduped" | "failed";
+export type CodeReviewDisputeAdjudicationStatus = "pending" | "upheld" | "rejected" | "expired" | "needs_context";
+
+export interface CodeReviewDispute {
+  id: string;
+  org_id: string;
+  session_id: string;
+  pull_request_id: string;
+  repository_id: string;
+  policy_id: string;
+  reviewed_head_sha: string;
+  decision: CodeReviewDecision;
+  direction?: CodeReviewDisputeDirection;
+  filed_by_login: string;
+  author_association: string;
+  author_is_pr_author: boolean;
+  repository_visibility: "public" | "private" | "unknown";
+  trust_override?: boolean;
+  trusted: boolean;
+  current_authorization_reason?: string;
+  source: "github_comment" | "app_ui" | "api" | "spot_check";
+  body: string;
+  contested_reason_codes: string[];
+  dispute_kind?: string;
+  asserts_new_information?: boolean;
+  routing?: CodeReviewDisputeRouting;
+  intake_status: CodeReviewDisputeIntakeStatus;
+  intake_confidence?: number;
+  reassessment_session_id?: string;
+  reassessment_decision?: CodeReviewDecision;
+  reassessment_flipped?: boolean;
+  reassessment_status: CodeReviewDisputeReassessmentStatus;
+  adjudication_status?: CodeReviewDisputeAdjudicationStatus;
+  adjudication_note?: string;
+  escalated_at?: string;
+  queue_signals: Record<string, unknown>;
+  queue_priority: number;
+  reply_status: "pending" | "not_applicable" | "published" | "failed";
+  superseded_by_dispute_id?: string;
+  status_detail?: string;
+  version: number;
+  created_at: string;
+  updated_at: string;
 }
 
 export type AgentCapabilityID =

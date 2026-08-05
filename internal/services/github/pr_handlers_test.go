@@ -2175,6 +2175,21 @@ func TestHandlePullRequestReviewCommentEvent_NonCreatedAction(t *testing.T) {
 	require.NoError(t, err, "HandlePullRequestReviewCommentEvent should ignore non-created actions")
 }
 
+func TestHandlePullRequestReviewCommentEvent_RecordOnlySkipsLegacyFeedback(t *testing.T) {
+	t.Parallel()
+
+	svc := &PRService{logger: zerolog.Nop()}
+	event := PullRequestReviewCommentEvent{Action: "created", RecordOnly: true}
+	event.Comment.ID = 67890
+	event.Comment.Body = "The code-review finding is based on an incorrect assumption"
+	event.PullRequest.Number = 42
+	event.Repository.FullName = "testorg/testrepo"
+
+	err := svc.HandlePullRequestReviewCommentEvent(context.Background(), event)
+
+	require.NoError(t, err, "record-only dispute reply should not enter the legacy review-comment worker")
+}
+
 func TestHandlePullRequestReviewCommentEvent_UnknownPR(t *testing.T) {
 	t.Parallel()
 
