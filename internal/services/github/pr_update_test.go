@@ -104,13 +104,15 @@ func TestPRServiceUpdateSessionPullRequest(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all tenant-scoped database expectations should be met")
 }
 
-func TestExisting143PreviewFooterLink(t *testing.T) {
+func TestPRServiceExistingPRPreviewFooterLink(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		body     string
-		expected string
+		name                  string
+		appBaseURL            string
+		previewOriginTemplate string
+		body                  string
+		expected              string
 	}{
 		{
 			name:     "stable 143 preview",
@@ -118,18 +120,32 @@ func TestExisting143PreviewFooterLink(t *testing.T) {
 			expected: "https://143.dev/previews/github/acme/repo/pull/42?launch=1",
 		},
 		{
-			name:     "legacy preview origin",
+			name:       "self-hosted stable preview",
+			appBaseURL: "https://app.example.com/143",
+			body:       "Description\n\nPreview: https://app.example.com/143/previews/github/acme/repo/pull/42?launch=1",
+			expected:   "https://app.example.com/143/previews/github/acme/repo/pull/42?launch=1",
+		},
+		{
+			name:                  "self-hosted legacy preview origin",
+			previewOriginTemplate: "https://{id}.preview.example.com",
+			body:                  "Description\n\nPreview: https://target-1.preview.example.com",
+			expected:              "https://target-1.preview.example.com",
+		},
+		{
+			name:     "hosted legacy preview origin",
 			body:     "Description\n\nPreview: https://target-1.preview.143.dev",
 			expected: "https://target-1.preview.143.dev",
 		},
 		{name: "repository template field", body: "Preview: https://staging.example.com"},
+		{name: "different Pull Request preview", body: "Preview: https://143.dev/previews/github/acme/repo/pull/99?launch=1"},
 		{name: "invalid URL", body: "Preview: TBD"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tt.expected, existing143PreviewFooterLink(tt.body), "only platform-owned 143 preview footers should be preserved")
+			service := &PRService{appBaseURL: tt.appBaseURL, previewOriginTemplate: tt.previewOriginTemplate}
+			require.Equal(t, tt.expected, service.existingPRPreviewFooterLink(tt.body, "acme", "repo", 42), "only platform-owned preview footers for the configured deployment should be preserved")
 		})
 	}
 }

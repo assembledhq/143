@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
@@ -98,6 +99,7 @@ func (s *PRService) UpdateSessionPullRequest(
 		return nil, fmt.Errorf("get installation token for pull request update: %w", err)
 	}
 
+	owner, repoName := splitRepo(pr.GitHubRepo)
 	payload := make(map[string]any, 2)
 	if params.Title != nil {
 		payload["title"] = *params.Title
@@ -115,7 +117,7 @@ func (s *PRService) UpdateSessionPullRequest(
 			body = upsertPublicationMarker(body, sessionID, markerChangesetID)
 		}
 		if pr.Body != nil {
-			if previewLink := existing143PreviewFooterLink(*pr.Body); previewLink != "" {
+			if previewLink := s.existingPRPreviewFooterLink(*pr.Body, owner, repoName, pr.GitHubPRNumber); previewLink != "" {
 				body = upsertPRPreviewFooter(body, previewLink)
 			}
 		}
@@ -123,7 +125,6 @@ func (s *PRService) UpdateSessionPullRequest(
 		payload["body"] = body
 	}
 
-	owner, repoName := splitRepo(pr.GitHubRepo)
 	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repoName, pr.GitHubPRNumber)
 	responseBody, err := s.doGitHubRequest(ctx, token, http.MethodPatch, path, payload)
 	if err != nil {
@@ -192,22 +193,47 @@ func pullRequestWritePermissionMissing(err error) bool {
 		strings.Contains(strings.ToLower(apiError.Message()), "resource not accessible by integration")
 }
 
-func existing143PreviewFooterLink(body string) string {
+func (s *PRService) existingPRPreviewFooterLink(body, owner, repo string, number int) string {
+	stableURL, err := url.Parse(s.stablePRPreviewURL(owner, repo, number))
+	if err != nil {
+		stableURL = nil
+	}
 	for _, line := range strings.Split(body, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if !strings.HasPrefix(trimmed, "Preview: ") {
 			continue
 		}
 		rawURL := strings.TrimSpace(strings.TrimPrefix(trimmed, "Preview: "))
-		parsed, err := url.Parse(rawURL)
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		parsed, parseErr := url.Parse(rawURL)
+		if parseErr != nil || parsed.Scheme == "" || parsed.Host == "" {
 			continue
 		}
-		host := strings.ToLower(parsed.Hostname())
-		if (strings.HasSuffix(host, ".143.dev") || host == "143.dev") &&
-			(strings.HasPrefix(parsed.Path, "/previews/github/") || strings.HasSuffix(host, ".preview.143.dev")) {
+		if stableURL != nil &&
+			strings.EqualFold(parsed.Scheme, stableURL.Scheme) &&
+			strings.EqualFold(parsed.Host, stableURL.Host) &&
+			parsed.EscapedPath() == stableURL.EscapedPath() {
+			return rawURL
+		}
+		if previewURLMatchesOriginTemplate(rawURL, s.previewOriginTemplate) {
+			return rawURL
+		}
+		// Preserve hosted legacy per-preview origins even when an old record is
+		// updated before PREVIEW_ORIGIN_TEMPLATE has been wired into the service.
+		if (strings.EqualFold(parsed.Scheme, "http") || strings.EqualFold(parsed.Scheme, "https")) &&
+			strings.HasSuffix(strings.ToLower(parsed.Hostname()), ".preview.143.dev") {
 			return rawURL
 		}
 	}
 	return ""
+}
+
+func previewURLMatchesOriginTemplate(rawURL, template string) bool {
+	template = strings.TrimSpace(template)
+	if template == "" || !strings.Contains(template, "{id}") {
+		return false
+	}
+	pattern := regexp.QuoteMeta(template)
+	pattern = strings.ReplaceAll(pattern, regexp.QuoteMeta("{id}"), `[^/?#]+`)
+	matched, err := regexp.MatchString("^"+pattern+"$", rawURL)
+	return err == nil && matched
 }

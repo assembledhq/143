@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -144,6 +145,15 @@ func TestInternalPullRequestCreator_UpdatePullRequestFromBodyFile(t *testing.T) 
 	require.NoError(t, err, "UpdatePullRequest should accept a body file")
 	require.Equal(t, "updated", result.Status, "UpdatePullRequest should decode the completed status")
 	require.Equal(t, 42, result.PullRequestNumber, "UpdatePullRequest should identify the changed Pull Request")
+}
+
+func TestNewInternalPullRequestCreatorUsesLongerUpdateTimeout(t *testing.T) {
+	t.Parallel()
+
+	creator := NewInternalPullRequestCreator("test-token", "https://platform.example.com")
+
+	require.Equal(t, 10*time.Second, creator.client.Timeout, "asynchronous Pull Request creation should retain its short internal API timeout")
+	require.Equal(t, internalPullRequestUpdateTimeout, creator.updateClient.Timeout, "synchronous Pull Request updates should cover token issuance and the GitHub request window")
 }
 
 func TestInternalPullRequestCreator_UpdatePullRequestValidatesBodySources(t *testing.T) {

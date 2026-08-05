@@ -12,12 +12,15 @@ import (
 	"time"
 )
 
+const internalPullRequestUpdateTimeout = 60 * time.Second
+
 // InternalPullRequestCreator requests PR creation via the 143 internal API.
 // It runs inside an agent sandbox with a short-lived scoped token.
 type InternalPullRequestCreator struct {
-	token   string
-	baseURL string
-	client  *http.Client
+	token        string
+	baseURL      string
+	client       *http.Client
+	updateClient *http.Client
 }
 
 // PullRequestCreationError carries the API's structured error code alongside
@@ -57,9 +60,10 @@ func (e *PullRequestUpdateError) Error() string {
 // NewInternalPullRequestCreator creates a PullRequestCreator that calls the internal API.
 func NewInternalPullRequestCreator(token, baseURL string) *InternalPullRequestCreator {
 	return &InternalPullRequestCreator{
-		token:   token,
-		baseURL: internalAPIBaseURL(baseURL),
-		client:  &http.Client{Timeout: 10 * time.Second},
+		token:        token,
+		baseURL:      internalAPIBaseURL(baseURL),
+		client:       &http.Client{Timeout: 10 * time.Second},
+		updateClient: &http.Client{Timeout: internalPullRequestUpdateTimeout},
 	}
 }
 
@@ -163,7 +167,7 @@ func (c *InternalPullRequestCreator) UpdatePullRequest(ctx context.Context, para
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.token)
 
-	resp, err := c.client.Do(req)
+	resp, err := c.updateClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("send request: %w", err)
 	}
