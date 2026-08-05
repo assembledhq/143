@@ -590,11 +590,11 @@ type CreatePRParams struct {
 	Draft       *bool      `json:"draft,omitempty"`
 	AuthorMode  string     `json:"author_mode,omitempty"`
 	ChangesetID *uuid.UUID `json:"changeset_id,omitempty"`
-	// ExpectedRemoteHeadSHA is an internal revision-bound lease consumed only
-	// by the review evidence refresh paths (CreateBranch and PushChangesToPR).
-	// It permits replacing a non-ancestor branch head when the remote still
-	// equals the exact checkpoint that the review loop inspected. It is
-	// deliberately excluded from persisted/client payloads.
+	// ExpectedRemoteHeadSHA is an internal branch lease derived from a durable
+	// publication or review checkpoint. It permits replacing a non-ancestor
+	// branch head only while the remote still equals the exact head previously
+	// published by this operation. It is deliberately excluded from persisted
+	// and client-controlled payloads.
 	ExpectedRemoteHeadSHA     string                               `json:"-"`
 	PublicationSource         models.SessionPublicationSource      `json:"publication_source,omitempty"`
 	PublicationQueue          models.SessionPublicationJobQueue    `json:"-"`
@@ -843,6 +843,7 @@ func (s *PRService) PreparePublicationAttempt(
 	params.PublicationRequestPayload = append(json.RawMessage(nil), publication.RequestPayload...)
 	params.PublicationGenerationAt = publication.RequestGenerationAt
 	params.PublicationHeadBranch = publication.HeadBranch
+	params.ExpectedRemoteHeadSHA = strings.TrimSpace(stringValue(publication.PublishedHeadSHA))
 
 	started, err := s.publications.StartAttempt(ctx, run.OrgID, run.ID, changeset.ID)
 	if err != nil {
@@ -996,6 +997,9 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 		if param.ChangesetID != nil {
 			opts.ChangesetID = param.ChangesetID
+		}
+		if strings.TrimSpace(param.ExpectedRemoteHeadSHA) != "" {
+			opts.ExpectedRemoteHeadSHA = strings.TrimSpace(param.ExpectedRemoteHeadSHA)
 		}
 		if param.PublicationSource != "" {
 			opts.PublicationSource = param.PublicationSource
@@ -1166,6 +1170,10 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		if publicationErr := s.publications.EnsureRequested(ctx, run.OrgID, publication); publicationErr != nil {
 			return nil, fmt.Errorf("ensure publication operation: %w", publicationErr)
 		}
+		// The durable publication row is authoritative for branch ownership.
+		// Callers cannot grant this lease through request JSON, and reloading it
+		// here keeps direct and replayed CreatePR paths on the same safety model.
+		opts.ExpectedRemoteHeadSHA = strings.TrimSpace(stringValue(publication.PublishedHeadSHA))
 		if gateErr := validatePublicationReviewGateForCreate(run, publication.ReviewGateState); gateErr != nil {
 			return nil, gateErr
 		}
@@ -1184,9 +1192,9 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 
 	var pushed *pushResult
 	if materializedTarget {
-		pushed, err = s.pushChangesetBranch(ctx, run, &repo, orgSettings, *targetChangeset, commitMsg, authorName, authorEmail, "")
+		pushed, err = s.pushChangesetBranch(ctx, run, &repo, orgSettings, *targetChangeset, commitMsg, authorName, authorEmail, opts.ExpectedRemoteHeadSHA)
 	} else {
-		pushed, err = s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, defaultBranch, commitMsg, authorName, authorEmail, "")
+		pushed, err = s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, defaultBranch, commitMsg, authorName, authorEmail, opts.ExpectedRemoteHeadSHA)
 	}
 	if err != nil {
 		return nil, err
@@ -1387,7 +1395,7 @@ func (s *PRService) pushChangesetBranch(
 	orgSettings models.OrgSettings,
 	changeset models.SessionChangeset,
 	commitMsg, authorName, authorEmail string,
-	reviewExpectedRemoteHeadSHA string,
+	expectedRemoteHeadSHA string,
 ) (*pushResult, error) {
 	if s.sandboxAuth == nil {
 		return nil, fmt.Errorf("%w: sandbox auth socket not configured", ErrSandboxAuthUnavailable)
@@ -1415,9 +1423,9 @@ func (s *PRService) pushChangesetBranch(
 	if changeset.ExpectedRemoteHeadSHA != nil {
 		expected = strings.TrimSpace(*changeset.ExpectedRemoteHeadSHA)
 	}
-	reviewExpected := strings.TrimSpace(reviewExpectedRemoteHeadSHA)
-	if reviewExpected != "" {
-		expected = reviewExpected
+	publicationExpected := strings.TrimSpace(expectedRemoteHeadSHA)
+	if publicationExpected != "" {
+		expected = publicationExpected
 	}
 	if remoteHead != expected {
 		localHeadCmd := fmt.Sprintf("git -C %s rev-parse HEAD", shellQuote(*changeset.WorktreePath))
@@ -1444,7 +1452,7 @@ func (s *PRService) pushChangesetBranch(
 	if changeset.BaseHeadSHA != nil {
 		baseHead = *changeset.BaseHeadSHA
 	}
-	script := buildPushScriptWithExpectedRemote(sandbox.WorkDir, commitMsgPath, authorName, authorEmail, *changeset.WorkingBranch, changeset.BaseBranch, baseHead, fmt.Sprintf("https://github.com/%s.git", repo.FullName), reviewExpected)
+	script := buildPushScriptWithExpectedRemote(sandbox.WorkDir, commitMsgPath, authorName, authorEmail, *changeset.WorkingBranch, changeset.BaseBranch, baseHead, fmt.Sprintf("https://github.com/%s.git", repo.FullName), publicationExpected)
 	var stdout, stderr bytes.Buffer
 	exitCode, execErr = s.sandboxProvider.Exec(ctx, sandbox, script, &stdout, &stderr)
 	if execErr != nil {
@@ -1466,9 +1474,9 @@ func (s *PRService) pushChangesetBranch(
 			Str("session_id", run.ID.String()).
 			Str("changeset_id", changeset.ID.String()).
 			Str("branch", *changeset.WorkingBranch).
-			Str("expected_remote_head_sha", reviewExpected).
+			Str("expected_remote_head_sha", publicationExpected).
 			Str("head_sha", headSHA).
-			Msg("reconciled review fixes against the expected remote checkpoint")
+			Msg("reconciled publication against the expected remote checkpoint")
 	}
 	return &pushResult{
 		HeadSHA:                  headSHA,
@@ -2084,7 +2092,7 @@ func (s *PRService) pushSessionBranch(
 			Str("branch", branchName).
 			Str("expected_remote_head_sha", expectedRemoteHeadSHA).
 			Str("head_sha", headSHA).
-			Msg("reconciled review fixes against the expected remote checkpoint")
+			Msg("reconciled publication against the expected remote checkpoint")
 	}
 	result := &pushResult{
 		HeadSHA:                  headSHA,
@@ -2231,9 +2239,9 @@ const pushHeadSHASentinel = "__143_HEAD_SHA="
 
 const pushOutcomeSentinel = "__143_PUSH_OUTCOME="
 
-// pushExpectedRemoteReconciledSentinel is emitted only when a revision-bound
-// review push replaces a non-ancestor remote head that still exactly matches
-// the checkpoint persisted on the review loop.
+// pushExpectedRemoteReconciledSentinel is emitted only when a server-owned
+// publication replaces a non-ancestor remote head that still exactly matches
+// its durable publication or review checkpoint.
 const pushExpectedRemoteReconciledSentinel = "__143_EXPECTED_REMOTE_RECONCILED=1"
 
 const pushBranchDivergedMessage = "remote branch has changes that are not present in this session checkpoint; refusing to force push"
@@ -2373,11 +2381,11 @@ func buildPushScript(workDir, commitMsgPath, authorName, authorEmail, branchName
 }
 
 // buildPushScriptWithExpectedRemote extends the normal divergence guard with
-// one narrow exception for revision-bound review fixes. A non-ancestor remote
-// head may be replaced only when it still equals expectedRemoteHeadSHA; the
-// existing --force-with-lease then protects the final observation-to-push
-// race. Callers without durable review evidence use buildPushScript and retain
-// the original fail-closed behavior.
+// one narrow exception for a server-owned publication checkpoint. A
+// non-ancestor remote head may be replaced only when it still equals
+// expectedRemoteHeadSHA; the existing --force-with-lease then protects the
+// final observation-to-push race. Callers without durable ownership evidence
+// use buildPushScript and retain the original fail-closed behavior.
 func buildPushScriptWithExpectedRemote(workDir, commitMsgPath, authorName, authorEmail, branchName, baseBranch, baseCommitSHA, pushURL, expectedRemoteHeadSHA string) string {
 	return fmt.Sprintf(
 		pushScriptTemplate,
