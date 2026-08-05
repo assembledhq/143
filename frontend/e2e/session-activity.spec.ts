@@ -10,11 +10,24 @@ async function installFixtureRoutes(context: BrowserContext) {
       body: JSON.stringify({ data: { session_activity_capsules_enabled: true, revision: "fixture-on", updated_at: "2026-08-03T12:00:00Z" } }),
     });
   });
+  await context.route("**/api/v1/auth/me/settings", async (route) => {
+    const request = route.request().postDataJSON() as { session_activity_detail?: "compact" | "detailed" };
+    if (request.session_activity_detail) activityDetail = request.session_activity_detail;
+    await route.fulfill({
+      contentType: "application/json",
+      headers: { "cache-control": "no-store" },
+      body: JSON.stringify({
+        data: {
+          id: "fixture-user",
+          org_id: "fixture-org",
+          email: "fixture@example.com",
+          name: "Fixture User",
+          settings: { session_activity_detail: activityDetail },
+        },
+      }),
+    });
+  });
   await context.route("**/api/v1/auth/me", async (route) => {
-    if (route.request().method() === "PATCH") {
-      const request = route.request().postDataJSON() as { session_activity_detail?: "compact" | "detailed" };
-      if (request.session_activity_detail) activityDetail = request.session_activity_detail;
-    }
     await route.fulfill({
       contentType: "application/json",
       headers: { "cache-control": "no-store" },
@@ -192,7 +205,7 @@ test("manual inspection protects a terminal phase and disclosure is keyboard ope
 });
 
 test("keeps queued steering visible and promotes it away from the pending lane", async ({ page }) => {
-  await expect(page.getByText("Queued")).toBeVisible();
+  await expect(page.getByText("Queued")).toHaveCount(2);
   await expect(page.getByText("Also preserve anchors")).toBeVisible();
   await expect(page.getByText("Keep day separators stable")).toBeVisible();
   await page.getByRole("button", { name: "Acknowledge steering" }).click();
@@ -232,7 +245,7 @@ test("historical fallback remains inspectable without invented duration", async 
   await expect(historical).toBeVisible();
   await expect(historical).not.toContainText("Worked for");
   await historical.click();
-  await expect(page.getByText("Read historical transcript")).toBeVisible();
+  await expect(page.getByText("Ran `cat transcript.json`")).toBeVisible();
 });
 
 test("prepends an older transcript window without moving the visible position", async ({ page }) => {
@@ -272,7 +285,7 @@ test("persists detailed mode across reload, a second browser context, and expand
 test("restores the legacy flat renderer with the emergency switch", async ({ page }) => {
   await page.getByRole("button", { name: "Capsules: on" }).click();
   await expect(page.getByRole("button", { name: /Working for/ })).toHaveCount(0);
-  await expect(page.getByText("Running npm test")).toBeVisible();
+  await expect(page.getByText("Ran `npm test`")).toBeVisible();
 });
 
 test("refreshes the emergency switch on initial load, focus, and the freshness interval", async ({ context, page }) => {
@@ -290,11 +303,17 @@ test("refreshes the emergency switch on initial load, focus, and the freshness i
   await expect(page.getByRole("button", { name: /Working for/ })).toHaveCount(0);
 
   enabled = true;
-  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await Promise.all([
+    page.waitForResponse((response) => response.url().includes("/api/v1/application-config")),
+    page.evaluate(() => document.dispatchEvent(new Event("visibilitychange"))),
+  ]);
   await expect(page.getByRole("button", { name: /Working for/ })).toBeVisible();
 
   enabled = false;
-  await page.clock.fastForward(30_001);
+  await Promise.all([
+    page.waitForResponse((response) => response.url().includes("/api/v1/application-config")),
+    page.clock.fastForward(30_001),
+  ]);
   await expect(page.getByRole("button", { name: /Working for/ })).toHaveCount(0);
 });
 

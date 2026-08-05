@@ -132,10 +132,10 @@ describe("SessionActivityTimeline", () => {
   });
 
   it("keeps terminal phases expanded in Detailed mode", () => {
-    render(<Harness status="completed" detail="detailed" />);
+    const { container } = render(<Harness status="completed" detail="detailed" />);
     expect(screen.getByRole("button", { name: /Worked for 6s.*1 tool call/ })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("Ran `npm test`")).toBeVisible();
-    expect(screen.getAllByText(/Today|Yesterday/)).toHaveLength(1);
+    expect(container.querySelectorAll(".my-4.flex.items-center.gap-3.px-1")).toHaveLength(1);
   });
 
   it("clears capsule overrides on preference changes and allows a fresh later override", async () => {

@@ -11,7 +11,7 @@ export function useSessionActivityCapsulesEnabled() {
     queryFn: () => api.applicationConfig.get(),
     staleTime: SESSION_ACTIVITY_CONFIG_FRESHNESS_MS,
     refetchInterval: SESSION_ACTIVITY_CONFIG_FRESHNESS_MS,
-    refetchOnWindowFocus: true,
+    refetchOnWindowFocus: "always",
     retry: false,
   });
 

@@ -25,10 +25,10 @@ interface FixtureTranscriptSnapshot {
   is_running: boolean;
 }
 
-function log(id: number, level: string, message: string, createdAt: string, activityPhaseID = phaseID): SessionLog {
+function log(id: number, level: string, message: string, createdAt: string, activityPhaseID = phaseID, command = "npm test"): SessionLog {
   return {
     id, session_id: "fixture-session", thread_id: "fixture-thread", level, message,
-    metadata: level === "tool_use" ? { type: "tool_use", tool: "shell", input: { command: "npm test" }, call_id: `call-${id}` } : null,
+    metadata: level === "tool_use" ? { type: "tool_use", tool: "shell", input: { command }, call_id: `call-${id}` } : null,
     turn_number: 1, created_at: createdAt, message_bytes: message.length,
     message_chars: message.length, message_truncated: false, activity_phase_id: activityPhaseID,
   };
@@ -156,7 +156,7 @@ export function SessionActivityE2EFixture() {
     if (showHistorical) {
       values.push({
         kind: "tool_group",
-        toolUse: log(20, "tool_use", "Read historical transcript", "2026-08-03T12:00:14Z", ""),
+        toolUse: log(20, "tool_use", "Read historical transcript", "2026-08-03T12:00:14Z", "", "cat transcript.json"),
         transcriptEntryId: "tuse_legacy",
       });
     }
