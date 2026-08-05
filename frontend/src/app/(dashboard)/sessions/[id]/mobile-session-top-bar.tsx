@@ -26,6 +26,14 @@ import {
 import { cn } from "@/lib/utils";
 import { deriveSessionStatusPresentation } from "@/lib/session-display-status";
 import type { SessionThread } from "@/lib/types";
+import {
+  canArchiveThread,
+  isThreadLabelProminent,
+  isThreadUnread,
+  threadIndicatorTone,
+  threadNeedsAttention,
+  threadStateSuffix,
+} from "./session-thread-presentation";
 
 interface MobileSessionTopBarProps {
   sessionTitle: string;
@@ -46,18 +54,6 @@ interface MobileSessionTopBarProps {
 
 function threadStatusLabel(status: string): string {
   return deriveSessionStatusPresentation(status as SessionThread["status"]).label;
-}
-
-function isActiveStatus(status: string): boolean {
-  return status === "pending" || status === "running" || status === "awaiting_input";
-}
-
-function shouldShowUnreadDot(thread: SessionThread, viewedThreadIds: ReadonlySet<string>): boolean {
-  return !viewedThreadIds.has(thread.id);
-}
-
-function canArchiveThread(thread: SessionThread, threadCount: number): boolean {
-  return threadCount > 1 && !isActiveStatus(thread.status);
 }
 
 export function MobileSessionTopBar({
@@ -143,8 +139,11 @@ export function MobileSessionTopBar({
                   const agent = AGENTS_BY_KEY[thread.agent_type];
                   const statusLabel = threadStatusLabel(thread.status);
                   const isActive = thread.id === activeThreadId;
-                  const showUnreadDot = shouldShowUnreadDot(thread, viewedThreadIds);
+                  const isUnread = isThreadUnread(thread, viewedThreadIds);
+                  const needsAttention = threadNeedsAttention(thread);
                   const operationalStatus = deriveSessionStatusPresentation(thread.status);
+                  const indicatorTone = threadIndicatorTone(operationalStatus, needsAttention);
+                  const isLabelProminent = isThreadLabelProminent(thread, { isUnread, isActive });
                   const showArchiveButton = canArchiveThread(thread, threads.length);
                   const isNonInteractive = nonInteractiveThreadIds?.has(thread.id) ?? false;
                   const closeLabel = `Close ${thread.label}${thread.label.toLowerCase().endsWith(" tab") ? "" : " tab"}`;
@@ -157,7 +156,7 @@ export function MobileSessionTopBar({
                           "h-auto flex-1 justify-start rounded-xl border px-3 py-3 text-left",
                           isActive ? "border-primary/30 bg-primary/5" : "border-border bg-background",
                         )}
-                        aria-label={`Switch to ${thread.label}`}
+                        aria-label={`Switch to ${thread.label}${threadStateSuffix(needsAttention, isUnread)}`}
                         disabled={isNonInteractive}
                         onClick={() => {
                           if (isNonInteractive) return;
@@ -167,17 +166,24 @@ export function MobileSessionTopBar({
                       >
                         <div className="flex w-full items-start gap-3">
                           <StatusIndicator
-                            tone={operationalStatus.tone}
+                            tone={indicatorTone}
                             activity={operationalStatus.activity}
                             stateKey={thread.status}
                             className="mt-1.5"
                           />
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-2">
-                              <span className="truncate text-sm font-medium text-foreground">{thread.label}</span>
-                              {showUnreadDot ? (
-                                <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-label="Unread activity" />
-                              ) : null}
+                              {/* Only settled lanes the user has already seen
+                                  recede; bolding instead of dimming would
+                                  resize the row as soon as it is read. */}
+                              <span
+                                className={cn(
+                                  "truncate text-sm font-medium",
+                                  isLabelProminent ? "text-foreground" : "text-muted-foreground",
+                                )}
+                              >
+                                {thread.label}
+                              </span>
                               {isActive ? <Badge variant="secondary" className="text-xs">Active</Badge> : null}
                             </div>
                             <p className="truncate text-xs text-muted-foreground">
