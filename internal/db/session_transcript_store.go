@@ -112,6 +112,10 @@ type SessionTranscriptStore struct {
 	db DBTX
 }
 
+type transcriptSnapshotStarter interface {
+	BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
+}
+
 // NewSessionTranscriptStore constructs a SessionTranscriptStore.
 func NewSessionTranscriptStore(db DBTX) *SessionTranscriptStore {
 	return &SessionTranscriptStore{db: db}
@@ -411,6 +415,37 @@ func (s *SessionTranscriptStore) fetchWindowData(ctx context.Context, orgID, thr
 
 // ListThreadWindow implements turn-based cursor pagination for the transcript.
 func (s *SessionTranscriptStore) ListThreadWindow(
+	ctx context.Context,
+	orgID, threadID uuid.UUID,
+	opts SessionTranscriptWindowOptions,
+) (SessionTranscriptWindow, error) {
+	if starter, ok := s.db.(transcriptSnapshotStarter); ok {
+		// Boundary transactions update the visible entry and phase lifecycle
+		// together. The window is assembled by several queries, so keep them on
+		// one snapshot to avoid returning opposite sides of a concurrent commit.
+		tx, err := starter.BeginTx(ctx, pgx.TxOptions{
+			IsoLevel:   pgx.RepeatableRead,
+			AccessMode: pgx.ReadOnly,
+		})
+		if err != nil {
+			return SessionTranscriptWindow{}, fmt.Errorf("begin transcript snapshot: %w", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+
+		window, err := (&SessionTranscriptStore{db: tx}).listThreadWindow(ctx, orgID, threadID, opts)
+		if err != nil {
+			return SessionTranscriptWindow{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return SessionTranscriptWindow{}, fmt.Errorf("commit transcript snapshot: %w", err)
+		}
+		return window, nil
+	}
+
+	return s.listThreadWindow(ctx, orgID, threadID, opts)
+}
+
+func (s *SessionTranscriptStore) listThreadWindow(
 	ctx context.Context,
 	orgID, threadID uuid.UUID,
 	opts SessionTranscriptWindowOptions,

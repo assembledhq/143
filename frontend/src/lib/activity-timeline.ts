@@ -1,10 +1,11 @@
-import type { TimelineEntry } from "./timeline";
+import { timelineEntryPresentationAt, type TimelineEntry } from "./timeline";
 import type { SessionTranscriptPhase, SessionTranscriptTurn } from "./types";
 
 export interface TimelineActivityPhase extends SessionTranscriptPhase {
   turnNumber: number;
   entries: TimelineEntry[];
   inferredHistorical: false;
+  provisionalToolCallCount?: number;
   latestActivityLabel?: string;
 }
 
@@ -12,9 +13,9 @@ export function sanitizeActivityLabel(value: string, maxLength = 160): string {
   let sanitized = value
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
-    .replace(/\b(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@")
-    .replace(/([?&](?:access_token|api_key|key|password|secret|signature|token)=)[^&#\s]*/gi, "$1[redacted]")
-    .replace(/\b(?:Bearer\s+)?(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,})\b/gi, "[redacted]")
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@")
+    .replace(/([?&](?:access_token|api_key|auth|authorization|credential|key|password|secret|sig|signature|token|x-amz-credential|x-amz-signature)=)[^&#\s]*/gi, "$1[redacted]")
+    .replace(/\b(?:Bearer\s+)?(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|glpat-[A-Za-z0-9_-]{12,}|xox[baprs]-[A-Za-z0-9-]{12,})\b/gi, "[redacted]")
     .replace(/\bAKIA[A-Z0-9]{16}\b/g, "[redacted]")
     .replace(/\b((?:[A-Z][A-Z0-9_]*_)?(?:API_?KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY))\s*[:=]\s*[^\s]+/gi, "$1=[redacted]")
     .replace(/\s+/g, " ")
@@ -25,7 +26,11 @@ export function sanitizeActivityLabel(value: string, maxLength = 160): string {
 
 function activityLabel(entry: TimelineEntry): string | undefined {
   if (entry.kind === "tool_group") return sanitizeActivityLabel(entry.toolUse.message);
-  if (entry.kind === "log") return sanitizeActivityLabel(entry.data.message);
+  // An unmatched tool result remains a plain log so the audit trail is not
+  // dropped, but raw result content must never become capsule status text.
+  if (entry.kind === "log" && entry.data.metadata?.type !== "tool_result") {
+    return sanitizeActivityLabel(entry.data.message);
+  }
   return undefined;
 }
 
@@ -91,7 +96,7 @@ function entryKey(entry: TimelineEntry): string {
 }
 
 function entryTime(entry: TimelineEntry): number {
-  const value = entry.kind === "tool_group" ? entry.toolUse.created_at : entry.data.created_at;
+  const value = timelineEntryPresentationAt(entry);
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
 }
@@ -188,6 +193,15 @@ export function buildActivityTimelineNodes(entries: TimelineEntry[], turns: Sess
     nodes.push({ kind: "visible", entry });
   }
   flushHistorical();
+
+  for (const phase of phases.values()) {
+    if (phase.status === "running") {
+      phase.provisionalToolCallCount = phase.entries.reduce(
+        (count, entry) => count + (entry.kind === "tool_group" ? 1 : 0),
+        0,
+      );
+    }
+  }
 
   for (const phase of phases.values()) {
     if (!emittedPhases.has(phase.id)) {

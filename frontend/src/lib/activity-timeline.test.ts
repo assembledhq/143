@@ -58,6 +58,43 @@ describe("buildActivityTimelineNodes", () => {
     }]);
   });
 
+  it("keeps an applied steering message between the phases it separates", () => {
+    const oldPhaseTool: TimelineEntry = { kind: "tool_group", toolUse: log(1, "tool_use", "phase-1") };
+    const appliedMessage: TimelineEntry = {
+      kind: "message",
+      data: {
+        id: 7, session_id: "session-1", org_id: "org-1", thread_id: "thread-1", turn_number: 1,
+        role: "user", content: "use the restored anchor", created_at: "2026-08-02T23:59:00Z",
+        applied_at: "2026-08-03T00:00:02Z", inbox_sequence: 4, delivery_state: "acked",
+      },
+    };
+    const resumedTool: TimelineEntry = { kind: "tool_group", toolUse: log(3, "tool_use", "phase-2") };
+    const turns: SessionTranscriptTurn[] = [{
+      turn_number: 1, started_at: "2026-08-03T00:00:01Z", entries: [], phases: [
+        {
+          id: "phase-1", anchor_id: "aph_phase-1", phase_number: 1, status: "completed", trigger_kind: "initial",
+          boundary_reason: "steered", started_at: "2026-08-03T00:00:01Z", completed_at: "2026-08-03T00:00:02Z", tool_call_count: 1,
+        },
+        {
+          id: "phase-2", anchor_id: "aph_phase-2", phase_number: 2, status: "running", trigger_kind: "inbox_batch",
+          started_at: "2026-08-03T00:00:02Z", tool_call_count: 1,
+        },
+      ],
+    }];
+
+    expect(buildActivityTimelineNodes([oldPhaseTool, appliedMessage, resumedTool], turns)).toEqual([
+      { kind: "phase", phase: { ...turns[0].phases![0], turnNumber: 1, entries: [oldPhaseTool], inferredHistorical: false } },
+      { kind: "visible", entry: appliedMessage },
+      {
+        kind: "phase",
+        phase: {
+          ...turns[0].phases![1], turnNumber: 1, entries: [resumedTool], inferredHistorical: false,
+          latestActivityLabel: "log 3", provisionalToolCallCount: 1,
+        },
+      },
+    ]);
+  });
+
   it("derives durable visible notices around interruption and recovery phases", () => {
     const turns: SessionTranscriptTurn[] = [{
       turn_number: 1,
@@ -92,8 +129,29 @@ describe("buildActivityTimelineNodes", () => {
           label: "Runtime recovered and execution resumed.", createdAt: "2026-08-03T00:00:05Z",
         },
       },
-      { kind: "phase", phase: { ...turns[0].phases![1], turnNumber: 1, entries: [], inferredHistorical: false } },
+      { kind: "phase", phase: { ...turns[0].phases![1], turnNumber: 1, entries: [], inferredHistorical: false, provisionalToolCallCount: 0 } },
     ]);
+  });
+
+  it("derives a deduplicated provisional tool count only for a running phase", () => {
+    const entries: TimelineEntry[] = [
+      { kind: "tool_group", toolUse: log(1, "tool_use", "phase-1") },
+      { kind: "tool_group", toolUse: log(2, "tool_use", "phase-1") },
+    ];
+    const turns: SessionTranscriptTurn[] = [{
+      turn_number: 1, started_at: "2026-08-03T00:00:01Z", entries: [], phases: [{
+        id: "phase-1", anchor_id: "aph_phase-1", phase_number: 1, status: "running", trigger_kind: "initial",
+        started_at: "2026-08-03T00:00:01Z", tool_call_count: 1,
+      }],
+    }];
+
+    expect(buildActivityTimelineNodes(entries, turns)).toEqual([{
+      kind: "phase",
+      phase: {
+        ...turns[0].phases![0], turnNumber: 1, entries, inferredHistorical: false,
+        latestActivityLabel: "log 2", provisionalToolCallCount: 2,
+      },
+    }]);
   });
 });
 
@@ -103,5 +161,26 @@ describe("sanitizeActivityLabel", () => {
       "Running API_TOKEN=[redacted] https://[redacted]@example.com?a=1&token=[redacted]",
     );
     expect(sanitizeActivityLabel("password: hunter2 AKIA1234567890ABCDEF")).toBe("password=[redacted] [redacted]");
+    expect(sanitizeActivityLabel("Connecting postgres://dbuser:dbpass@db.example/app?sslmode=require&x-amz-signature=signed")).toBe(
+      "Connecting postgres://[redacted]@db.example/app?sslmode=require&x-amz-signature=[redacted]",
+    );
+  });
+
+  it("never promotes orphaned raw tool-result content into the active label", () => {
+    const rawResult = log(1, "output", "phase-1");
+    rawResult.message = "SECRET_RESULT=do-not-summarize";
+    rawResult.metadata = { type: "tool_result" };
+    const entry: TimelineEntry = { kind: "log", data: rawResult };
+    const turns: SessionTranscriptTurn[] = [{
+      turn_number: 1, started_at: rawResult.created_at, entries: [], phases: [{
+        id: "phase-1", anchor_id: "aph_phase-1", phase_number: 1, status: "running", trigger_kind: "initial",
+        started_at: rawResult.created_at, tool_call_count: 0,
+      }],
+    }];
+
+    expect(buildActivityTimelineNodes([entry], turns)).toEqual([{
+      kind: "phase",
+      phase: { ...turns[0].phases![0], turnNumber: 1, entries: [entry], inferredHistorical: false, provisionalToolCallCount: 0 },
+    }]);
   });
 });

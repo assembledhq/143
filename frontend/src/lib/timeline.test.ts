@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildTimeline, flattenTimelineResponse, flattenTranscriptWindows } from "./timeline";
+import { buildTimeline, flattenTimelineResponse, flattenTranscriptWindows, sortTimelineEntries, type TimelineEntry } from "./timeline";
 import type { SessionMessage, SessionLog, SessionTranscriptTurn, HumanInputRequest } from "./types";
 
 function makeMessage(overrides: Partial<SessionMessage> & { id: number; created_at: string }): SessionMessage {
@@ -26,6 +26,30 @@ function makeLog(overrides: Partial<SessionLog> & { id: number; created_at: stri
     ...overrides,
   };
 }
+
+describe("sortTimelineEntries", () => {
+  it("orders applied user instructions by their applied boundary instead of their audit timestamp", () => {
+    const oldLog = makeLog({ id: 1, level: "info", created_at: "2026-08-03T00:00:01Z" });
+    const appliedMessage = makeMessage({
+      id: 2,
+      role: "user",
+      created_at: "2026-08-02T23:00:00Z",
+      applied_at: "2026-08-03T00:00:02Z",
+    });
+    const resumedLog = makeLog({ id: 3, level: "info", created_at: "2026-08-03T00:00:03Z" });
+    const entries: TimelineEntry[] = [
+      { kind: "message", data: appliedMessage },
+      { kind: "log", data: resumedLog },
+      { kind: "log", data: oldLog },
+    ];
+
+    expect(sortTimelineEntries(entries)).toEqual([
+      { kind: "log", data: oldLog },
+      { kind: "message", data: appliedMessage },
+      { kind: "log", data: resumedLog },
+    ]);
+  });
+});
 
 describe("buildTimeline", () => {
   it("returns message entries for messages only", () => {

@@ -2372,7 +2372,7 @@ function ChatPanel({
 }: ChatPanelProps) {
   const queryClient = useQueryClient();
   const { detail: activityDetail, setDetail: setActivityDetail, mutation: activityDetailMutation } = useSessionActivityDetail();
-  const { enabled: activityCapsulesEnabled } = useSessionActivityCapsulesEnabled();
+  const { enabled: activityCapsulesEnabled, query: activityCapsulesConfigQuery } = useSessionActivityCapsulesEnabled();
   const [dismissedHumanInputIds, setDismissedHumanInputIds] = useState<Set<string>>(() => new Set());
   const [newerThreadMessagePages, setNewerThreadMessagePages] = useState<SessionTranscriptWindowResponse[]>([]);
   const [isFetchingNewerThreadMessages, setIsFetchingNewerThreadMessages] = useState(false);
@@ -2669,9 +2669,10 @@ function ChatPanel({
     ? workingStatusesSet.has(activeThread.status)
     : activeSet.has(session.status);
   const showLoadingSkeleton =
-    timelineEntries.length === 0 &&
-    session.status !== "pending" &&
-    (!hasLoadedTimelineInputs || expectingMoreContent);
+    (!!activeThreadId && activityCapsulesConfigQuery.isPending && activityCapsulesConfigQuery.data === undefined) ||
+    (timelineEntries.length === 0 &&
+      session.status !== "pending" &&
+      (!hasLoadedTimelineInputs || expectingMoreContent));
   const hasThreadFailure = hasVisibleThreadFailure(activeThread);
   const showFreshThreadShell =
     !!activeThread &&

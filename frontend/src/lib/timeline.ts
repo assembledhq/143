@@ -261,8 +261,19 @@ export function timelineEntryCreatedAt(entry: TimelineEntry): string {
   }
 }
 
+// User instructions are audited at created_at but become part of the
+// conversation only when the runtime applies them. Keeping presentation time
+// separate prevents an instruction that waited in the pending lane from being
+// sorted back into older activity after acknowledgment.
+export function timelineEntryPresentationAt(entry: TimelineEntry): string {
+  if (entry.kind === "message" || entry.kind === "plan_message") {
+    return entry.data.applied_at ?? entry.data.created_at;
+  }
+  return timelineEntryCreatedAt(entry);
+}
+
 export function sortTimelineEntries(entries: TimelineEntry[]): TimelineEntry[] {
-  return [...entries].sort((a, b) => timelineEntryCreatedAt(a).localeCompare(timelineEntryCreatedAt(b)));
+  return [...entries].sort((a, b) => timelineEntryPresentationAt(a).localeCompare(timelineEntryPresentationAt(b)));
 }
 
 export function flattenTimelineResponse(entries: SessionTimelineResponseEntry[]): {

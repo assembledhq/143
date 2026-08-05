@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"sort"
 	"strings"
@@ -279,6 +280,7 @@ func TestSessionTranscriptStore_ListThreadWindowIncludesTurnZeroInitialMessage(t
 	now := time.Now().UTC()
 	turnOneTime := now.Add(time.Second)
 	turnOneCompletedAt := turnOneTime.Add(time.Second)
+	mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 
 	mock.ExpectQuery(`SELECT DISTINCT turn_number FROM \(.+session_messages.+session_logs.+\) t\s+WHERE turn_number >= 0`).
 		WithArgs(pgx.NamedArgs{
@@ -338,6 +340,7 @@ func TestSessionTranscriptStore_ListThreadWindowIncludesTurnZeroInitialMessage(t
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID}).
 		WillReturnRows(pgxmock.NewRows([]string{"entry_kind", "source_id", "message_id", "hiq_uuid", "level", "metadata"}).
 			AddRow(models.TranscriptEntryKindLog, int64(101), nil, nil, models.SessionLogLevelInfo, json.RawMessage(`{}`)))
+	mock.ExpectCommit()
 
 	window, err := store.ListThreadWindow(context.Background(), orgID, threadID, SessionTranscriptWindowOptions{
 		Include: TranscriptInclude{Messages: true, System: true},
@@ -368,6 +371,24 @@ func TestSessionTranscriptStore_ListThreadWindowIncludesTurnZeroInitialMessage(t
 	}, gotKinds, "window should include turn-zero message and positive-turn log entries")
 	require.Equal(t, []int{0, 1, 1}, gotTurns, "turn-zero should appear only for the initial message")
 	require.Equal(t, []string{"initial prompt", "assistant response", "turn one log"}, gotContents, "turn-zero log noise should stay out of the transcript")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionTranscriptStore_ListThreadWindowReturnsSnapshotStartError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "mock pool should be created")
+	defer mock.Close()
+
+	mock.ExpectBeginTx(pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	}).WillReturnError(errors.New("snapshot unavailable"))
+
+	store := NewSessionTranscriptStore(mock)
+	_, err = store.ListThreadWindow(context.Background(), uuid.New(), uuid.New(), SessionTranscriptWindowOptions{})
+	require.ErrorContains(t, err, "begin transcript snapshot: snapshot unavailable", "snapshot startup failures should be returned to the caller")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
