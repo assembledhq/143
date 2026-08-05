@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom/vitest';
 import { cleanup } from '@testing-library/react';
-import { afterAll, afterEach, beforeAll, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, vi } from 'vitest';
 import { server } from './mocks/server';
 
 (
@@ -91,6 +91,12 @@ beforeAll(() => {
   if (holder[mswListeningKey]) return;
   holder[mswListeningKey] = true;
   server.listen({ onUnhandledRequest: 'error' });
+});
+beforeEach(() => {
+  // A test that aborts or times out before its local cleanup can leave fake
+  // timers installed on the reused jsdom worker. Real-time polling and
+  // debounce tests must never inherit that state from an unrelated file.
+  vi.useRealTimers();
 });
 afterEach(() => {
   cleanup();
