@@ -62,6 +62,7 @@ const (
 	AuditActionSessionThreadMessagedByAgentTool AuditAction = "session.thread.messaged_by_agent_tool"
 
 	// Pull request actions
+	AuditActionPullRequestUpdated           AuditAction = "pull_request.updated"
 	AuditActionPullRequestAutoRepairStarted AuditAction = "pull_request.auto_repair_started"
 
 	// Project actions
@@ -205,7 +206,7 @@ func (a AuditAction) Validate() error {
 		AuditActionSessionArchived, AuditActionSessionUnarchived, AuditActionSessionPreviewLifetimeSet,
 		AuditActionSessionSplitStarted, AuditActionSessionSplitUpdated, AuditActionSessionSplitMaterialized, AuditActionSessionSplitAccepted,
 		AuditActionSessionThreadInboxReplayed, AuditActionSessionThreadCreatedByAgentTool, AuditActionSessionThreadMessagedByAgentTool,
-		AuditActionPullRequestAutoRepairStarted,
+		AuditActionPullRequestUpdated, AuditActionPullRequestAutoRepairStarted,
 		AuditActionProjectCreated, AuditActionProjectUpdated, AuditActionProjectDeleted,
 		AuditActionProjectStarted, AuditActionProjectCompleted, AuditActionProjectArchived,
 		AuditActionProjectUnarchived, AuditActionProjectRunTriggered,

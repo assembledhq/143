@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -114,3 +116,54 @@ func TestInternalPullRequestCreator_CreatePullRequestDecodesTypedOutcomes(t *tes
 }
 
 func stringResultPointer(value string) *string { return &value }
+
+func TestInternalPullRequestCreator_UpdatePullRequestFromBodyFile(t *testing.T) {
+	t.Parallel()
+
+	bodyPath := filepath.Join(t.TempDir(), "pr-description.md")
+	require.NoError(t, os.WriteFile(bodyPath, []byte("# Expanded summary\n\nDetails"), 0o600), "test PR description should be written")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodPatch, r.Method, "UpdatePullRequest should use the metadata update method")
+		require.Equal(t, "/api/v1/internal/session/pr", r.URL.Path, "UpdatePullRequest should use token-scoped session identity by default")
+		require.Equal(t, "Bearer test-token", r.Header.Get("Authorization"), "UpdatePullRequest should send the internal bearer token")
+
+		var request UpdatePullRequestParams
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request), "request body should decode as PR update params")
+		require.NotNil(t, request.Body, "body_file should be resolved before calling the internal API")
+		require.Equal(t, "# Expanded summary\n\nDetails", *request.Body, "resolved body should preserve the Markdown file")
+
+		w.WriteHeader(http.StatusOK)
+		_, err := w.Write([]byte(`{"status":"updated","session_id":"session-from-token","pull_request_id":"pr-1","pull_request_number":42,"pull_request_url":"https://github.com/acme/repo/pull/42","title":"Existing title","body":"# Expanded summary\n\nDetails"}`))
+		require.NoError(t, err, "test response should be written")
+	}))
+	t.Cleanup(server.Close)
+
+	result, err := NewInternalPullRequestCreator("test-token", server.URL).UpdatePullRequest(context.Background(), UpdatePullRequestParams{BodyFile: bodyPath})
+
+	require.NoError(t, err, "UpdatePullRequest should accept a body file")
+	require.Equal(t, "updated", result.Status, "UpdatePullRequest should decode the completed status")
+	require.Equal(t, 42, result.PullRequestNumber, "UpdatePullRequest should identify the changed Pull Request")
+}
+
+func TestInternalPullRequestCreator_UpdatePullRequestValidatesBodySources(t *testing.T) {
+	t.Parallel()
+
+	body := "inline"
+	tests := []struct {
+		name   string
+		params UpdatePullRequestParams
+	}{
+		{name: "missing metadata", params: UpdatePullRequestParams{}},
+		{name: "inline body and file", params: UpdatePullRequestParams{Body: &body, BodyFile: "/tmp/pr.md"}},
+		{name: "missing body file", params: UpdatePullRequestParams{BodyFile: "/path/that/does/not/exist"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := NewInternalPullRequestCreator("test-token", "http://127.0.0.1").UpdatePullRequest(context.Background(), tt.params)
+			require.Error(t, err, "invalid body sources should fail before an API request")
+		})
+	}
+}
