@@ -305,6 +305,30 @@ function publicationErrorDescription(publication: SessionPublication) {
   }
 }
 
+// Every status block in the overview leads with a 16px icon and a title on one
+// row, then full-width body copy underneath. Sharing the row keeps the icon gap
+// and title type from drifting apart across the places that render it.
+function SectionHeading({
+  icon,
+  iconClassName,
+  iconSlot,
+  title,
+}: {
+  icon: ReactNode;
+  iconClassName?: string;
+  iconSlot?: string;
+  title: ReactNode;
+}) {
+  return (
+    <div className="flex items-center gap-1.5" data-slot="section-heading">
+      <span aria-hidden="true" data-slot={iconSlot} className={cn("shrink-0", iconClassName)}>
+        {icon}
+      </span>
+      <p className="text-sm font-medium text-foreground">{title}</p>
+    </div>
+  );
+}
+
 function PublicationWorkflowCard({
   publication,
   reviewLoop,
@@ -722,17 +746,14 @@ function SessionResultSection({ summary, divided }: { summary?: string; divided:
   if (!summary) return null;
 
   return (
+    // Looser than the other status blocks on purpose: the body here is a
+    // markdown block rather than a one-line caption.
     <section
       aria-label="Session result"
-      className={cn("space-y-1.5", divided && "border-t border-border/60 pt-4")}
+      className={cn("space-y-2", divided && "border-t border-border/60 pt-4")}
       data-testid="session-result-section"
     >
-      <SectionHeading
-        slot="session-result-heading"
-        icon={<CheckCircle2 className="h-4 w-4" />}
-        iconClassName="text-success"
-        title="Result"
-      />
+      <SectionHeading icon={<CheckCircle2 className="h-4 w-4" />} iconClassName="text-success" title="Result" />
       <div data-slot="session-result-body">
         <LazyMarkdownContent content={summary} className="text-xs" />
       </div>
@@ -3318,7 +3339,7 @@ function PendingCapacityNotice({ maxConcurrentRuns }: { maxConcurrentRuns?: numb
   return (
     <div className="flex justify-center py-8">
       <Card className="w-full max-w-[34rem] border-amber-200/70 bg-amber-50/70 shadow-none dark:border-amber-900/60 dark:bg-amber-950/20">
-        <CardContent className="space-y-1.5 p-4" data-slot="pending-capacity-body">
+        <CardContent className="space-y-1.5 p-4" data-testid="pending-capacity-body">
           <div className="flex flex-wrap items-center gap-1.5">
             <Clock className="h-4 w-4 shrink-0 text-amber-700 dark:text-amber-300" aria-hidden />
             <p className="text-sm font-semibold text-foreground">Waiting for capacity</p>
@@ -3512,7 +3533,7 @@ export function ChangesetSplitPrompt({
       <Button
         size="xs"
         variant="ghost"
-        className="col-start-3 row-start-1 shrink-0"
+        className="col-start-3 row-start-1"
         disabled={requestSplitPending || !onRequestSplit}
         onClick={onRequestSplit}
       >
@@ -3550,32 +3571,6 @@ function AgentActionCard({
         </div>
       </CardContent>
     </Card>
-  );
-}
-
-// Every status block in the overview leads with a 16px icon and a title on one
-// row, then full-width body copy underneath. Sharing the row keeps the icon gap
-// and title type from drifting apart across the nine places that render it.
-function SectionHeading({
-  icon,
-  iconClassName,
-  iconSlot,
-  slot,
-  title,
-}: {
-  icon: ReactNode;
-  iconClassName?: string;
-  iconSlot?: string;
-  slot?: string;
-  title: ReactNode;
-}) {
-  return (
-    <div className="flex items-center gap-1.5" data-slot={slot}>
-      <span aria-hidden="true" data-slot={iconSlot} className={cn("shrink-0", iconClassName)}>
-        {icon}
-      </span>
-      <p className="text-sm font-medium text-foreground">{title}</p>
-    </div>
   );
 }
 
@@ -6747,7 +6742,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           {selectedIsPrimary && canManageSession && canUseNativeReviewLoop && !hasPR && !selectedPublicationOwnsActions && hasSessionChanges ? (
             reviewLoopRunning ? (
               <Card className="border-border/60">
-                <CardContent className="space-y-1.5 p-4" data-slot="review-loop-running-body">
+                <CardContent className="space-y-1.5 p-4" data-testid="review-loop-running-body">
                   <SectionHeading
                     icon={<Loader2 className="h-4 w-4 animate-spin" />}
                     iconClassName="text-muted-foreground"

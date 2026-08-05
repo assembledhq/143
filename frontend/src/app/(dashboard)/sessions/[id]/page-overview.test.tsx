@@ -510,7 +510,7 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(prDetailsSection.closest('[data-slot="card"]')).toBeNull();
     expect(resultSection.closest('[data-slot="card"]')).toBeNull();
     expect(resultSection).toHaveClass('border-t', 'pt-4');
-    expect(resultSection.querySelector('[data-slot="session-result-heading"]')?.parentElement).toBe(resultSection);
+    expect(resultSection.querySelector('[data-slot="section-heading"]')?.parentElement).toBe(resultSection);
     const resultBody = resultSection.querySelector('[data-slot="session-result-body"]');
     expect(resultBody?.parentElement).toBe(resultSection);
     expect(resultBody?.className).not.toContain('pl-');
@@ -592,12 +592,12 @@ describe('SessionDetailPage overview and review loop', () => {
 
     expect(statusCard).not.toBeNull();
     expect(statusCard?.querySelector('.lucide-loader-circle')).toBeInTheDocument();
-    expect(within(statusCard as HTMLElement).getByText('The review loop is checking the changes and applying fixes.')).toBeInTheDocument();
     // Flat block: spinner and title share a row, description is its sibling.
-    const runningBody = statusCard?.querySelector('[data-slot="review-loop-running-body"]');
+    const runningBody = screen.getByTestId('review-loop-running-body');
+    const runningDescription = within(statusCard as HTMLElement).getByText('The review loop is checking the changes and applying fixes.');
     expect(reviewStatus.parentElement?.parentElement).toBe(runningBody);
     expect(reviewStatus.parentElement).toHaveClass('gap-1.5');
-    expect(within(statusCard as HTMLElement).getByText('The review loop is checking the changes and applying fixes.').parentElement).toBe(runningBody);
+    expect(runningDescription.parentElement).toBe(runningBody);
     expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
   });
 

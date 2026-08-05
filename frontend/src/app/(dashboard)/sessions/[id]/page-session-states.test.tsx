@@ -277,8 +277,7 @@ describe('SessionDetailPage session states', () => {
 
     // Flat block: clock, title and badge share one row, and both body lines are
     // direct children so nothing is indented past a former icon tile.
-    const body = document.querySelector('[data-slot="pending-capacity-body"]');
-    expect(body).toBeInTheDocument();
+    const body = screen.getByTestId('pending-capacity-body');
     const heading = screen.getByText('Waiting for capacity').parentElement;
     expect(heading?.parentElement).toBe(body);
     expect(heading).toHaveClass('gap-1.5');

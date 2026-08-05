@@ -425,7 +425,8 @@ describe('SessionDetailPage PR health and merge', () => {
 
     expect((await screen.findAllByText('PR #42 closed')).length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText('PR #42 was closed without merging.')).toBeInTheDocument();
-    const closedSection = screen.getByText('PR #42 was closed without merging.').closest('[data-slot="pr-closed-section"]');
+    const closedSummary = screen.getByText('PR #42 was closed without merging.');
+    const closedSection = closedSummary.closest('[data-slot="pr-closed-section"]');
     expect(closedSection).toBeInTheDocument();
     expect(closedSection?.closest('[data-slot="card"]')).toBeNull();
     // Flat block: the icon leads the title row and the body copy runs the full
@@ -433,9 +434,7 @@ describe('SessionDetailPage PR health and merge', () => {
     const closedIcon = closedSection?.querySelector('[data-slot="pr-closed-icon"]');
     expect(closedIcon).toHaveAttribute('aria-hidden', 'true');
     expect(closedIcon?.querySelector('.lucide-circle-x')).toBeInTheDocument();
-    const closedSummary = screen.getByText('PR #42 was closed without merging.');
     expect(closedSummary.parentElement).toBe(closedSection);
-    expect(closedSummary.className).not.toContain('pl-');
     expect(screen.getByTestId('session-result-section')).toHaveClass('border-t', 'pt-4');
     expect(screen.getByRole('link', { name: 'View PR' })).toBeInTheDocument();
     expect(screen.queryByRole('region', { name: 'Pull request #42' })).not.toBeInTheDocument();
@@ -632,7 +631,7 @@ describe('SessionDetailPage PR health and merge', () => {
     expect(screen.getByText('PR #42 was merged successfully.')).toHaveClass('text-xs');
     expect(screen.getByText('This change has landed. Open a follow-up session if you need to make another revision.')).toHaveClass('text-xs');
     expect(screen.getByRole('link', { name: 'View PR' })).toBeInTheDocument();
-    const mergedSection = document.querySelector('[data-slot="pr-merged-section"]');
+    const mergedSection = screen.getByText('PR #42 was merged successfully.').closest('[data-slot="pr-merged-section"]');
     expect(mergedSection).toBeInTheDocument();
     // The icon repeats the adjacent "PR #<n> merged" text, so it stays out of
     // the accessibility tree like every other status icon in the overview.

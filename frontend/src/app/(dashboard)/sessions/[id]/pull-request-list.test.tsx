@@ -162,6 +162,8 @@ describe('ChangesetSplitPrompt', () => {
     const button = screen.getByRole('button', { name: 'Split into PRs' });
     expect(button).toHaveAttribute('data-size', 'xs');
     expect(button).toHaveAttribute('data-variant', 'ghost');
-    expect(button).toHaveClass('shrink-0');
+    // Pinned to the trailing auto-sized column, so the title column absorbs the
+    // slack instead of squeezing the action.
+    expect(button).toHaveClass('col-start-3');
   });
 });
