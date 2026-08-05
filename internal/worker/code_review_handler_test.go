@@ -98,13 +98,75 @@ func TestStartCodeReviewReassessmentHandlerDefersBehindOlderAssessment(t *testin
 	require.NoError(t, mock.ExpectationsWereMet(), "starter should load the current pull request with org isolation")
 }
 
+func TestStartCodeReviewReassessmentHandlerCoalescesStaleAutomaticHead(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+	repositoryID := uuid.New()
+	priorSessionID := uuid.New()
+	now := time.Now().UTC()
+	row := workerPullRequestRow(pullRequestID, uuid.New(), orgID, "acme/repo", "feature/reassess", now)
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery("(?s)FROM pull_requests.*WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(workerPullRequestColumns).AddRow(row...))
+
+	queuedJobID := uuid.New()
+	lifecycle := &codeReviewLifecycleStub{result: codereview.ReviewRequestedResult{Processed: true, JobID: queuedJobID}}
+	prService := &stubPRService{getCodeReviewPRSnapshotFn: func(_ context.Context, actualOrgID, actualRepositoryID uuid.UUID, number int) (ghservice.CodeReviewPullRequestSnapshot, error) {
+		require.Equal(t, orgID, actualOrgID, "starter should refresh the PR within the job organization")
+		require.Equal(t, repositoryID, actualRepositoryID, "starter should refresh the queued repository")
+		require.Equal(t, 42, number, "starter should refresh the mirrored pull request number")
+		return ghservice.CodeReviewPullRequestSnapshot{
+			Number: 42, HTMLURL: "https://github.com/acme/repo/pull/42", Title: "Newest PR title",
+			AuthorLogin: "octocat", HeadSHA: "newest-head", BaseSHA: "newest-base",
+		}, nil
+	}}
+	payload, err := json.Marshal(codereview.ReviewChangedInput{
+		OrgID: orgID, RepositoryID: repositoryID, PullRequestID: pullRequestID, PriorSessionID: priorSessionID,
+		HeadSHA: "superseded-head", ChangeKey: "material:old", ChangeReason: "pull_request.synchronize",
+	})
+	require.NoError(t, err, "automatic reassessment payload should marshal")
+
+	err = newStartCodeReviewReassessmentHandler(
+		&Stores{PullRequests: db.NewPullRequestStore(mock)},
+		&Services{PR: prService, CodeReviewLifecycle: lifecycle},
+		zerolog.Nop(),
+	)(context.Background(), models.JobTypeStartCodeReviewReassessment, payload)
+
+	require.NoError(t, err, "stale automatic starter should coalesce into a fresh delayed job")
+	require.Equal(t, 1, lifecycle.queueCalls, "stale automatic starter should enqueue the latest head once")
+	require.Equal(t, 0, lifecycle.handleCalls, "stale automatic starter should not launch an obsolete assessment")
+	require.Equal(t, "newest-head", lifecycle.queuedInput.HeadSHA, "replacement job should target GitHub's latest head")
+	require.Equal(t, "newest-base", lifecycle.queuedInput.BaseSHA, "replacement job should preserve the latest base revision")
+	require.Equal(t, "Newest PR title", lifecycle.queuedInput.PullRequestTitle, "replacement job should preserve the latest pull request context")
+	require.Equal(t, priorSessionID, lifecycle.queuedInput.PriorSessionID, "replacement job should retain ordering against the previous assessment")
+	expectedChangeKey, err := codereview.MaterialChangeKey("newest-head")
+	require.NoError(t, err, "latest material change key should be deterministic")
+	require.Equal(t, expectedChangeKey, lifecycle.queuedInput.ChangeKey, "replacement job should deduplicate by the latest head")
+	require.NoError(t, mock.ExpectationsWereMet(), "starter should load the pull request with org isolation")
+}
+
 type codeReviewLifecycleStub struct {
-	input  codereview.ReviewChangedInput
-	result codereview.ReviewRequestedResult
-	err    error
+	input       codereview.ReviewChangedInput
+	queuedInput codereview.ReviewChangedInput
+	result      codereview.ReviewRequestedResult
+	err         error
+	queueCalls  int
+	handleCalls int
+}
+
+func (s *codeReviewLifecycleStub) QueueReviewChanged(_ context.Context, input codereview.ReviewChangedInput) (codereview.ReviewRequestedResult, error) {
+	s.queueCalls++
+	s.queuedInput = input
+	return s.result, s.err
 }
 
 func (s *codeReviewLifecycleStub) HandleReviewChanged(_ context.Context, input codereview.ReviewChangedInput) (codereview.ReviewRequestedResult, error) {
+	s.handleCalls++
 	s.input = input
 	return s.result, s.err
 }

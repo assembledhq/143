@@ -791,6 +791,7 @@ type codeReviewStatusCommentUpdater interface {
 }
 
 type codeReviewLifecycle interface {
+	QueueReviewChanged(ctx context.Context, input codereviewsvc.ReviewChangedInput) (codereviewsvc.ReviewRequestedResult, error)
 	HandleReviewChanged(ctx context.Context, input codereviewsvc.ReviewChangedInput) (codereviewsvc.ReviewRequestedResult, error)
 }
 
