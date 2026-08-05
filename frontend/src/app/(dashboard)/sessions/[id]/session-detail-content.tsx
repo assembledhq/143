@@ -744,6 +744,12 @@ function ThreadFailureDetailsCard({ thread }: { thread: SessionThread }) {
   );
 }
 
+// Rule drawn above a stacked Overview block. Every block above any given one is
+// conditional (no PR, no result summary, a single changeset, …), so the `first:`
+// resets keep the divider from drawing across the top of the panel with nothing
+// above it.
+const OVERVIEW_DIVIDER_CLASSNAME = "border-t border-border/60 pt-4 first:border-t-0 first:pt-0";
+
 function SessionResultSection({ summary, divided }: { summary?: string; divided: boolean }) {
   if (!summary) return null;
 
@@ -752,7 +758,7 @@ function SessionResultSection({ summary, divided }: { summary?: string; divided:
     // markdown block rather than a one-line caption.
     <section
       aria-label="Session result"
-      className={cn("space-y-2", divided && "border-t border-border/60 pt-4")}
+      className={cn("space-y-2", divided && OVERVIEW_DIVIDER_CLASSNAME)}
       data-testid="session-result-section"
     >
       <SectionHeading icon={<CheckCircle2 className="h-4 w-4" />} iconClassName="text-success" title="Result" />
@@ -807,7 +813,11 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
       : "System";
 
   return (
-    <div className="space-y-4">
+    // Fragment rather than a wrapper: the parent panel is already `space-y-4`,
+    // so flattening keeps the same spacing while letting the divider below
+    // resolve `first:` against the whole Overview panel instead of against a
+    // nested div where the vitals block is always the first child.
+    <>
       {isDeployRecovery && (
         <Card className="border-l-2 border-l-warning bg-warning/5">
           <CardHeader className="pb-2">
@@ -946,7 +956,7 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
       {/* Session vitals — identity row (status + agent + who triggered) */}
       <div
         data-testid="session-overview-vitals"
-        className="space-y-1.5 border-t border-border/60 pt-4"
+        className={cn("space-y-1.5", OVERVIEW_DIVIDER_CLASSNAME)}
       >
         <div className="flex items-center gap-x-3 gap-y-1 flex-wrap text-xs">
           <StatusLabel
@@ -1006,6 +1016,12 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
                 <>Queued {formatTimeAgo(session.created_at)}</>
               )}
             </span>
+            {/*
+              Suppressed on the two success terminals only: their last audit
+              entry restates the "Completed …" caption immediately to its left.
+              Failed/cancelled/skipped sessions keep the trigger because their
+              activity trail is what explains how they got there.
+            */}
             {session.status !== "completed" && session.status !== "pr_created" && (
               <AuditLogTrigger
                 filters={{ session_id: session.id }}
@@ -1042,7 +1058,7 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
           </Card>
         )}
 
-    </div>
+    </>
   );
 }
 
@@ -3530,7 +3546,7 @@ function OverviewRow({
       data-slot={slot}
       className={cn(
         "grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-1.5 gap-y-1.5 px-1 py-1.5",
-        divided && "border-t border-border/60 pt-4",
+        divided && OVERVIEW_DIVIDER_CLASSNAME,
       )}
     >
       <div
