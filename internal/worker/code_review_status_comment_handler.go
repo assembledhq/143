@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 )
 
@@ -98,11 +100,20 @@ func newSyncCodeReviewStatusCommentHandler(stores *Stores, services *Services, l
 					Msg("skipping superseded code review status comment sync under lock")
 				return nil
 			}
+			var previousCompleted *models.CodeReviewSessionMetadata
+			if !codeReviewMetadataTerminal(lockedLatest.Status) {
+				previous, previousErr := lockedCodeReviews.GetLatestCompletedByPullRequest(lockCtx, job.OrgID, metadata.PullRequestID)
+				if previousErr == nil {
+					previousCompleted = &previous
+				} else if !errors.Is(previousErr, pgx.ErrNoRows) {
+					return fmt.Errorf("load previous completed code review for status comment: %w", previousErr)
+				}
+			}
 			existingCommentID, existingErr := lockedPullRequests.GetCodeReviewStatusCommentID(lockCtx, job.OrgID, metadata.PullRequestID)
 			if existingErr != nil {
 				return fmt.Errorf("load durable code review status comment id: %w", existingErr)
 			}
-			body := codeReviewStatusCommentBody(lockedLatest, codeReviewSessionURL(services.FrontendURL, lockedLatest.SessionID))
+			body := codeReviewStatusCommentBody(lockedLatest, previousCompleted, codeReviewSessionURL(services.FrontendURL, lockedLatest.SessionID))
 			var updateErr error
 			commentID, updateErr = updater.UpsertReviewStatusComment(lockCtx, codereviewsvc.UpsertReviewStatusCommentRequest{
 				InstallationID:    repository.InstallationID,
@@ -150,7 +161,7 @@ func newSyncCodeReviewStatusCommentHandler(stores *Stores, services *Services, l
 	}
 }
 
-func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, sessionURL string) string {
+func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, previousCompleted *models.CodeReviewSessionMetadata, sessionURL string) string {
 	var paragraphs []string
 	switch metadata.Status {
 	case models.CodeReviewSessionStatusCompleted:
@@ -171,7 +182,28 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, sess
 	case models.CodeReviewSessionStatusCancelled:
 		paragraphs = append(paragraphs, "This 143 code review was cancelled.")
 	default:
-		paragraphs = append(paragraphs, "143 Code Reviewer has started reviewing this pull request.")
+		previousBody := ""
+		if previousCompleted != nil {
+			previousBody = strings.TrimSpace(stringPtrValue(previousCompleted.FinalReviewBody))
+			if previousBody == "" && previousCompleted.Decision != nil && *previousCompleted.Decision == models.CodeReviewDecisionApproved {
+				previousBody = "143 Code Reviewer approved this PR."
+			} else if previousBody == "" {
+				previousBody = "143 Code Reviewer completed its previous review."
+			}
+		}
+		if previousBody == "" {
+			paragraphs = append(paragraphs, "143 Code Reviewer has started reviewing this pull request.")
+			break
+		}
+		paragraphs = append(paragraphs, fmt.Sprintf(
+			"143 Code Reviewer is reassessing this pull request at `%s`.",
+			codeReviewStatusShortSHA(metadata.HeadSHA),
+		))
+		paragraphs = append(paragraphs, fmt.Sprintf(
+			"The previous completed assessment for `%s` remains visible until the new review finishes.",
+			codeReviewStatusShortSHA(previousCompleted.HeadSHA),
+		))
+		paragraphs = append(paragraphs, previousBody)
 	}
 	if sessionURL != "" && !strings.Contains(strings.Join(paragraphs, "\n\n"), sessionURL) {
 		label := "Follow the review session"
@@ -181,6 +213,14 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, sess
 		paragraphs = append(paragraphs, fmt.Sprintf("[%s](%s)", label, sessionURL))
 	}
 	return strings.Join(paragraphs, "\n\n")
+}
+
+func codeReviewStatusShortSHA(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 7 {
+		return value[:7]
+	}
+	return value
 }
 
 func enqueueCodeReviewStatusCommentSync(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, stage string) {

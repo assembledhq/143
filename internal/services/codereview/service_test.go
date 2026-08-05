@@ -876,11 +876,13 @@ func TestService_QueueReviewChanged(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name          string
-		setup         func(*metadataStub)
-		explicit      bool
-		expectedQueue bool
-		expectedWhy   string
+		name              string
+		setup             func(*metadataStub)
+		explicit          bool
+		expectedQueue     bool
+		expectedProcessed bool
+		expectedReused    bool
+		expectedWhy       string
 	}{
 		{
 			name: "queues a durable reassessment behind the current session",
@@ -888,6 +890,17 @@ func TestService_QueueReviewChanged(t *testing.T) {
 				metadata.latest = models.CodeReviewSessionMetadata{ID: uuid.New(), SessionID: uuid.New(), Status: models.CodeReviewSessionStatusRunning}
 			},
 			expectedQueue: true,
+		},
+		{
+			name: "reuses a current assessment that already covers the automatic head",
+			setup: func(metadata *metadataStub) {
+				metadata.latest = models.CodeReviewSessionMetadata{
+					ID: uuid.New(), SessionID: uuid.New(), HeadSHA: "head", Status: models.CodeReviewSessionStatusCompleted,
+				}
+			},
+			expectedProcessed: true,
+			expectedReused:    true,
+			expectedWhy:       "change_already_reassessed",
 		},
 		{
 			name:        "ignores pull requests without review history",
@@ -923,12 +936,14 @@ func TestService_QueueReviewChanged(t *testing.T) {
 			svc := NewService(newPolicyStub(), metadata, &sessionStub{}, jobs, zerolog.Nop(), Config{})
 			input := newReviewChangedInput()
 			input.ExplicitRequest = tt.explicit
+			enqueuedAfter := time.Now().UTC()
 
 			result, err := svc.QueueReviewChanged(context.Background(), input)
 
 			require.NoError(t, err, "QueueReviewChanged should handle valid event input")
 			if !tt.expectedQueue {
-				require.False(t, result.Processed, "ignored event should not report queued work")
+				require.Equal(t, tt.expectedProcessed, result.Processed, "non-queued event should report whether existing work satisfied it")
+				require.Equal(t, tt.expectedReused, result.Reused, "non-queued event should report whether it reused an existing assessment")
 				require.Equal(t, tt.expectedWhy, result.IgnoredReason, "ignored event should explain why no work was queued")
 				require.Equal(t, 0, jobs.enqueueCalls, "ignored event should not enqueue a reassessment starter")
 				return
@@ -938,6 +953,12 @@ func TestService_QueueReviewChanged(t *testing.T) {
 			require.Equal(t, models.JobTypeStartCodeReviewReassessment, jobs.jobType, "event should use the reassessment starter job type")
 			require.Equal(t, metadata.latest.SessionID, jobs.reassessmentPayload.PriorSessionID, "queued event should remember the assessment current when it arrived")
 			require.Contains(t, jobs.dedupeKey, input.ChangeKey, "starter job should dedupe webhook redeliveries")
+			if tt.explicit {
+				require.Nil(t, jobs.opts.RunAt, "explicit reassessment requests should start as soon as prior work permits")
+				return
+			}
+			require.NotNil(t, jobs.opts.RunAt, "automatic head changes should wait for a quiet window")
+			require.WithinDuration(t, enqueuedAfter.Add(time.Minute), *jobs.opts.RunAt, time.Second, "automatic reassessment should use the one-minute debounce window")
 		})
 	}
 }
