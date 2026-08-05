@@ -386,6 +386,34 @@ describe('SessionDetailPage overview and review loop', () => {
     const vitals = await screen.findByTestId('session-overview-vitals');
     expect(vitals).toHaveClass('border-t', 'border-border/60', 'pt-4');
     expect(within(vitals).getByText('Completed')).toBeInTheDocument();
+    // Load-bearing: re-adding a wrapper around OverviewTab would make the
+    // vitals that wrapper's first child, silently collapsing the rule while
+    // real content still sits above them in the panel.
+    expect(vitals.parentElement!.firstElementChild).not.toBe(vitals);
+  });
+
+  it('keeps the vitals divider below a failure card raised by the same tab', async () => {
+    // The block above comes from inside OverviewTab rather than from the panel;
+    // the rule only draws if the two are flat siblings after the flattening.
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            status: 'failed',
+            failure_explanation: 'Could not reproduce the error in test environment',
+            threads: [],
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const vitals = await screen.findByTestId('session-overview-vitals');
+    expect(vitals).toHaveClass('border-t', 'first:pt-0');
+    expect(vitals.previousElementSibling).toHaveTextContent('Failure details');
+    // Not the first child, so `first:pt-0` stays inert and the rule draws.
     expect(vitals.parentElement!.firstElementChild).not.toBe(vitals);
   });
 

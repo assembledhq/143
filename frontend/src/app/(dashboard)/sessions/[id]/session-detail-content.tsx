@@ -745,10 +745,11 @@ function ThreadFailureDetailsCard({ thread }: { thread: SessionThread }) {
 }
 
 // Rule drawn above a stacked Overview block. Every block above any given one is
-// conditional (no PR, no result summary, a single changeset, …), so the `first:`
-// resets keep the divider from drawing across the top of the panel with nothing
-// above it.
-const OVERVIEW_DIVIDER_CLASSNAME = "border-t border-border/60 pt-4 first:border-t-0 first:pt-0";
+// conditional (no PR, no result summary, a single changeset, …), so
+// `first:border-t-0` keeps the rule from drawing across the top of the panel
+// with nothing above it. Call sites pair this with their own `first:pt-*`: the
+// padding the rule collapses back to is whatever that block already had.
+const OVERVIEW_DIVIDER_CLASSNAME = "border-t border-border/60 pt-4 first:border-t-0";
 
 function SessionResultSection({ summary, divided }: { summary?: string; divided: boolean }) {
   if (!summary) return null;
@@ -758,7 +759,7 @@ function SessionResultSection({ summary, divided }: { summary?: string; divided:
     // markdown block rather than a one-line caption.
     <section
       aria-label="Session result"
-      className={cn("space-y-2", divided && OVERVIEW_DIVIDER_CLASSNAME)}
+      className={cn("space-y-2", divided && OVERVIEW_DIVIDER_CLASSNAME, divided && "first:pt-0")}
       data-testid="session-result-section"
     >
       <SectionHeading icon={<CheckCircle2 className="h-4 w-4" />} iconClassName="text-success" title="Result" />
@@ -956,7 +957,7 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
       {/* Session vitals — identity row (status + agent + who triggered) */}
       <div
         data-testid="session-overview-vitals"
-        className={cn("space-y-1.5", OVERVIEW_DIVIDER_CLASSNAME)}
+        className={cn("space-y-1.5", OVERVIEW_DIVIDER_CLASSNAME, "first:pt-0")}
       >
         <div className="flex items-center gap-x-3 gap-y-1 flex-wrap text-xs">
           <StatusLabel
@@ -3547,9 +3548,8 @@ function OverviewRow({
       className={cn(
         "grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-1.5 gap-y-1.5 px-1 py-1.5",
         divided && OVERVIEW_DIVIDER_CLASSNAME,
-        // The divider's `first:pt-0` assumes a block with no padding of its
-        // own; restore this row's base `py-1.5` top so a first-child divided
-        // row lines up with the undivided ones.
+        // Collapses back to the `py-1.5` above, not to zero, so a first-child
+        // divided row lines up with the undivided ones.
         divided && "first:pt-1.5",
       )}
     >
