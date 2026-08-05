@@ -182,6 +182,10 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, prev
 	case models.CodeReviewSessionStatusCancelled:
 		paragraphs = append(paragraphs, "This 143 code review was cancelled.")
 	default:
+		provisionalBody := strings.TrimSpace(stringPtrValue(metadata.FinalReviewBody))
+		if !strings.HasPrefix(provisionalBody, models.CodeReviewProvisionalReviewHeading) {
+			provisionalBody = ""
+		}
 		previousBody := ""
 		if previousCompleted != nil {
 			previousBody = strings.TrimSpace(stringPtrValue(previousCompleted.FinalReviewBody))
@@ -192,7 +196,11 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, prev
 			}
 		}
 		if previousBody == "" {
-			paragraphs = append(paragraphs, "143 Code Reviewer has started reviewing this pull request.")
+			if provisionalBody != "" {
+				paragraphs = append(paragraphs, provisionalBody)
+			} else {
+				paragraphs = append(paragraphs, "143 Code Reviewer has started reviewing this pull request.")
+			}
 			break
 		}
 		paragraphs = append(paragraphs, codereviewsvc.WithCodeReviewReassessmentHistory(
@@ -201,6 +209,9 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, prev
 			metadata.CreatedAt,
 			sessionURL,
 		))
+		if provisionalBody != "" {
+			paragraphs = append(paragraphs, provisionalBody)
+		}
 	}
 	if sessionURL != "" && !strings.Contains(strings.Join(paragraphs, "\n\n"), sessionURL) {
 		label := "Follow the review session"

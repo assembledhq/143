@@ -110,6 +110,7 @@ const policy: CodeReviewResolvedPolicy = {
       max_files_changed: 5,
       max_lines_changed: 300,
       semantic_dedupe_cooldown_seconds: 900,
+      stop_after_deterministic_failure: false,
       require_passing_checks: true,
       exclude_sensitive_paths: true,
       sensitive_paths: ["*auth*"],
@@ -377,6 +378,9 @@ function mockCodeReviewBaseHandlers(
 					reassessments: 4,
 					reassessment_flips: 1,
 					reassessment_cost_usd: 4.25,
+					deterministic_early_stops: 2,
+					reviewer_runs_avoided: 6,
+					full_review_requests_after_early_stop: 1,
 					policy_owner_minutes_per_resolution: 4.5,
 					median_decision_seconds: 90,
 					median_adjudication_seconds: 7200,
@@ -683,6 +687,7 @@ describe("CodeReviewsPage", () => {
     await user.click(screen.getByRole("button", { name: /Quality gates/i }));
     expect(await screen.findByText("Enforce sensitive paths")).toBeInTheDocument();
     expect(screen.getByText("Block reviewer disagreement")).toBeInTheDocument();
+    expect(screen.getByText("Stop after stable policy blockers")).toBeInTheDocument();
     await user.hover(screen.getByRole("button", { name: /About Require passing checks/i }));
     expect((await screen.findAllByText(/Blocks approval until the PR's required GitHub checks are passing/i)).length).toBeGreaterThan(0);
 
@@ -740,6 +745,9 @@ describe("CodeReviewsPage", () => {
 		expect(screen.getByText("Objection directions")).toBeInTheDocument();
 		expect(screen.getByText("Objection kinds")).toBeInTheDocument();
 		expect(screen.getByText("Owner time / resolution")).toBeInTheDocument();
+		expect(screen.getByText("Early policy stops")).toBeInTheDocument();
+		expect(screen.getByText("6 reviewer runs avoided")).toBeInTheDocument();
+		expect(screen.getByText("Full reviews after early stop")).toBeInTheDocument();
 		expect(screen.getByText("Attempt 1")).toBeInTheDocument();
 		expect(screen.getByRole("link", { name: "Line-count limit exceeded" })).toHaveAttribute("href", "/code-reviews?tab=policy#policy-max-lines-changed");
     expect(screen.getByText("Why PRs were not approved right away")).toBeInTheDocument();
@@ -2278,6 +2286,7 @@ describe("CodeReviewsPage", () => {
       "Require up-to-date branch",
       "Block reviewer disagreement",
       "Allow fork PRs",
+      "Stop after stable policy blockers",
     ]) {
       expect(screen.getByRole("button", { name: `About ${label}` })).toBeInTheDocument();
     }

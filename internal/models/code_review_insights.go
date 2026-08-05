@@ -127,25 +127,28 @@ type CodeReviewInsightActualLimit struct {
 }
 
 type CodeReviewInsights struct {
-	Decisions                       int64                             `json:"decisions"`
-	Disputes                        int64                             `json:"disputes"`
-	ObjectionRate                   float64                           `json:"objection_rate"`
-	UpheldDisputes                  int64                             `json:"upheld_disputes"`
-	Reassessments                   int64                             `json:"reassessments"`
-	ReassessmentFlips               int64                             `json:"reassessment_flips"`
-	ReassessmentCostUSD             float64                           `json:"reassessment_cost_usd"`
-	PolicyOwnerMinutesPerResolution *float64                          `json:"policy_owner_minutes_per_resolution,omitempty"`
-	MedianDecisionSeconds           *float64                          `json:"median_decision_seconds,omitempty"`
-	MedianAdjudicationSeconds       *float64                          `json:"median_adjudication_seconds,omitempty"`
-	ProjectionFreshThrough          *time.Time                        `json:"projection_fresh_through,omitempty"`
-	ProjectionUpdatedAt             *time.Time                        `json:"projection_updated_at,omitempty"`
-	RankingEnabled                  bool                              `json:"ranking_enabled"`
-	Directions                      []CodeReviewInsightDirectionCount `json:"directions"`
-	DisputeKinds                    []CodeReviewInsightKindCount      `json:"dispute_kinds"`
-	PolicyDecisionMix               []CodeReviewInsightPolicyMix      `json:"policy_decision_mix"`
-	Reasons                         []CodeReviewInsightReasonCount    `json:"reasons"`
-	ActualVsLimit                   []CodeReviewInsightActualLimit    `json:"actual_vs_limit"`
-	FlipBuckets                     []CodeReviewInsightFlipBucket     `json:"flip_buckets"`
+	Decisions                        int64                             `json:"decisions"`
+	Disputes                         int64                             `json:"disputes"`
+	ObjectionRate                    float64                           `json:"objection_rate"`
+	UpheldDisputes                   int64                             `json:"upheld_disputes"`
+	Reassessments                    int64                             `json:"reassessments"`
+	ReassessmentFlips                int64                             `json:"reassessment_flips"`
+	ReassessmentCostUSD              float64                           `json:"reassessment_cost_usd"`
+	DeterministicEarlyStops          int64                             `json:"deterministic_early_stops"`
+	ReviewerRunsAvoided              int64                             `json:"reviewer_runs_avoided"`
+	FullReviewRequestsAfterEarlyStop int64                             `json:"full_review_requests_after_early_stop"`
+	PolicyOwnerMinutesPerResolution  *float64                          `json:"policy_owner_minutes_per_resolution,omitempty"`
+	MedianDecisionSeconds            *float64                          `json:"median_decision_seconds,omitempty"`
+	MedianAdjudicationSeconds        *float64                          `json:"median_adjudication_seconds,omitempty"`
+	ProjectionFreshThrough           *time.Time                        `json:"projection_fresh_through,omitempty"`
+	ProjectionUpdatedAt              *time.Time                        `json:"projection_updated_at,omitempty"`
+	RankingEnabled                   bool                              `json:"ranking_enabled"`
+	Directions                       []CodeReviewInsightDirectionCount `json:"directions"`
+	DisputeKinds                     []CodeReviewInsightKindCount      `json:"dispute_kinds"`
+	PolicyDecisionMix                []CodeReviewInsightPolicyMix      `json:"policy_decision_mix"`
+	Reasons                          []CodeReviewInsightReasonCount    `json:"reasons"`
+	ActualVsLimit                    []CodeReviewInsightActualLimit    `json:"actual_vs_limit"`
+	FlipBuckets                      []CodeReviewInsightFlipBucket     `json:"flip_buckets"`
 }
 
 type CodeReviewInsightFilters struct {

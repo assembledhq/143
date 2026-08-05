@@ -422,13 +422,14 @@ func TestCodeReviewInsightStore_GetInsightsScansAggregateShape(t *testing.T) {
 	medianAdjudication := 180.0
 	ownerMinutes := 4.5
 	columns := []string{
-		"decisions", "disputes", "objection_rate", "upheld", "reassessments", "flips", "cost", "owner_minutes",
-		"median_decision", "median_adjudication", "fresh_through", "projection_updated",
+		"decisions", "disputes", "objection_rate", "upheld", "reassessments", "flips", "cost",
+		"early_stops", "runs_avoided", "full_review_requests", "owner_minutes", "median_decision", "median_adjudication", "fresh_through", "projection_updated",
 		"directions", "kinds", "policy_mix", "reasons", "actual_vs_limit", "flip_buckets",
 	}
-	pool.ExpectQuery("WITH first_requests AS MATERIALIZED[\\s\\S]+min\\(m.created_at\\)[\\s\\S]+first_request.first_requested_at >= @from[\\s\\S]+JOIN outcomes cohort[\\s\\S]+d.superseded_by_dispute_id IS NULL[\\s\\S]+count\\(DISTINCT session_id\\)[\\s\\S]+policy_version").WithArgs(orgID, from).
+	pool.ExpectQuery("WITH first_requests AS MATERIALIZED[\\s\\S]+min\\(m.created_at\\)[\\s\\S]+first_request.first_requested_at >= @from[\\s\\S]+JOIN outcomes cohort[\\s\\S]+d.superseded_by_dispute_id IS NULL[\\s\\S]+count\\(DISTINCT later.session_id\\)[\\s\\S]+policy_version").
+		WithArgs(orgID, from, models.CodeReviewStableDeterministicRiskReasonStrings()).
 		WillReturnRows(pgxmock.NewRows(columns).AddRow(
-			int64(12), int64(4), 0.25, int64(2), int64(3), int64(1), 1.25, &ownerMinutes,
+			int64(12), int64(4), 0.25, int64(2), int64(3), int64(1), 1.25, int64(2), int64(6), int64(1), &ownerMinutes,
 			&medianDecision, &medianAdjudication, nil, nil,
 			[]byte(`[]`), []byte(`[]`), []byte(`[]`), []byte(`[]`), []byte(`[]`), []byte(`[]`),
 		))
@@ -440,6 +441,9 @@ func TestCodeReviewInsightStore_GetInsightsScansAggregateShape(t *testing.T) {
 	require.Equal(t, int64(3), actual.Reassessments, "insights should preserve the reassessment count")
 	require.Equal(t, int64(1), actual.ReassessmentFlips, "insights should preserve the flip count")
 	require.Equal(t, 1.25, actual.ReassessmentCostUSD, "insights should preserve reassessment spend")
+	require.Equal(t, int64(2), actual.DeterministicEarlyStops, "insights should count reviews stopped by stable deterministic policy")
+	require.Equal(t, int64(6), actual.ReviewerRunsAvoided, "insights should report avoided reviewer and orchestrator runs")
+	require.Equal(t, int64(1), actual.FullReviewRequestsAfterEarlyStop, "insights should report same-head full-review demand after early stops")
 	require.Equal(t, 0.25, actual.ObjectionRate, "insights should preserve the decision-level objection rate")
 	require.Equal(t, &ownerMinutes, actual.PolicyOwnerMinutesPerResolution, "insights should preserve measured owner time per resolution")
 	require.True(t, actual.RankingEnabled, "insights should include the sustained-volume ranking state")

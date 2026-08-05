@@ -188,6 +188,7 @@ export interface CodeReviewPolicyConfig {
     max_files_changed: number;
     max_lines_changed: number;
     semantic_dedupe_cooldown_seconds: number;
+    stop_after_deterministic_failure: boolean;
     require_passing_checks: boolean;
     exclude_sensitive_paths: boolean;
     sensitive_paths?: string[];
@@ -516,6 +517,9 @@ export interface CodeReviewInsights {
   reassessments: number;
   reassessment_flips: number;
   reassessment_cost_usd: number;
+  deterministic_early_stops: number;
+  reviewer_runs_avoided: number;
+  full_review_requests_after_early_stop: number;
   policy_owner_minutes_per_resolution?: number;
   median_decision_seconds?: number;
   median_adjudication_seconds?: number;
