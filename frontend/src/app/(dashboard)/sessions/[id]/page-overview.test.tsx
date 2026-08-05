@@ -428,7 +428,7 @@ describe('SessionDetailPage overview and review loop', () => {
 
     await screen.findByText('Could not reproduce the error in test environment');
     expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
-    expect(screen.queryByText('Review before creating a PR?')).not.toBeInTheDocument();
+    expect(screen.queryByText('Review before creating a PR')).not.toBeInTheDocument();
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Code review' })).not.toBeInTheDocument();
   });
@@ -458,26 +458,20 @@ describe('SessionDetailPage overview and review loop', () => {
 
     const reviewButton = await screen.findByRole('button', { name: 'Review & fix' });
     expect(reviewButton).toBeDisabled();
-    expect(screen.getByText('Review before creating a PR?')).toBeInTheDocument();
-    expect(screen.getByText('Ask a review agent to check the current diff and apply fixes.')).toBeInTheDocument();
+    expect(screen.getByText('Review before creating a PR')).toBeInTheDocument();
+    expect(screen.getByText('Check the current diff and apply any fixes before publishing.')).toBeInTheDocument();
     expect(reviewButton).toHaveAttribute('title', 'A reusable sandbox snapshot is required before review');
-    const reviewAction = reviewButton.closest('[data-slot="agent-action-card-action"]');
-    expect(reviewAction).toHaveClass('ml-11', 'w-fit', 'self-start');
-    expect(reviewAction).toHaveClass('@min-[24rem]/agent-action:ml-0');
-    expect(reviewAction).not.toHaveClass('w-full');
+    const reviewAction = reviewButton.closest<HTMLElement>('[data-slot="overview-action-control"]');
     expect(reviewButton).not.toHaveClass('w-full');
-    const reviewTitle = screen.getByText('Review before creating a PR?');
+    const reviewTitle = screen.getByText('Review before creating a PR');
     const splitTitle = screen.getByText('Large change · 750 additions · 1 file');
-    const reviewCard = reviewTitle.closest('[data-slot="card"]');
+    const reviewSuggestion = reviewTitle.closest('[data-slot="overview-action"]');
     const splitSuggestion = splitTitle.closest('[data-slot="overview-suggestion"]');
-    expect(reviewCard?.querySelector('[data-slot="agent-action-card-icon"] .lucide-scan-search')).toBeInTheDocument();
-    // jsdom cannot evaluate container queries, so guard the placement instead:
-    // an element is never its own query container, so the row layout would be
-    // dead if the container were declared on the element that queries it.
-    const reviewCardContent = reviewCard?.querySelector('[data-slot="card-content"]');
-    expect(reviewCard?.className).toContain('@container/agent-action');
-    expect(reviewCardContent?.className).toContain('@min-[24rem]/agent-action:flex-row');
-    expect(reviewCardContent?.className).not.toContain('@container/agent-action');
+    // The action sits in the same quiet row as the copy rather than in a card
+    // of its own, so keep the structure asserted instead of the spacing utilities.
+    expect(reviewSuggestion).toContainElement(reviewAction);
+    expect(reviewSuggestion?.closest('[data-slot="card"]')).toBeNull();
+    expect(reviewSuggestion?.querySelector('[data-slot="overview-action-icon"] .lucide-scan-search')).toBeInTheDocument();
     expect(splitSuggestion?.querySelector('[data-slot="overview-suggestion-icon"] .lucide-git-branch')).toBeInTheDocument();
     expect(splitTitle.closest('[data-slot="card"]')).toBeNull();
     expect(reviewTitle.compareDocumentPosition(splitTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -542,7 +536,7 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(resultSection).not.toHaveClass('pt-4');
   });
 
-  it('shows a compact status card while the Overview review loop is running', async () => {
+  it('shows a quiet inline status while the Overview review loop is running', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({
@@ -579,11 +573,14 @@ describe('SessionDetailPage overview and review loop', () => {
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
 
     const reviewStatus = await screen.findByText('Fixing with Claude Code');
-    const statusCard = reviewStatus.closest('[data-slot="card"]');
+    const statusRow = reviewStatus.closest('[data-slot="overview-review-status"]');
 
-    expect(statusCard).not.toBeNull();
-    expect(statusCard?.querySelector('.lucide-loader-circle')).toBeInTheDocument();
-    expect(within(statusCard as HTMLElement).getByText('The review loop is checking the changes and applying fixes.')).toBeInTheDocument();
+    expect(statusRow).not.toBeNull();
+    expect(statusRow).toHaveAttribute('role', 'status');
+    expect(statusRow?.closest('[data-slot="card"]')).toBeNull();
+    expect(statusRow?.querySelector('[data-slot="overview-review-status-control"]')).toBeNull();
+    expect(statusRow?.querySelector('.lucide-loader-circle')).toBeInTheDocument();
+    expect(within(statusRow as HTMLElement).getByText('The review loop is checking the changes and applying fixes.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
   });
 
