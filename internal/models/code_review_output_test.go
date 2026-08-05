@@ -287,6 +287,31 @@ P2 and P3 observations do not affect the approval decision.
 	}
 }
 
+func TestBuildCodeReviewProvisionalBody(t *testing.T) {
+	t.Parallel()
+
+	input := CodeReviewFinalReviewInput{
+		RiskReasons: []CodeReviewRiskReason{
+			{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: 6, Limit: 5},
+			{Code: CodeReviewRiskReasonBlockedPath, Subject: "migrations/**"},
+		},
+		PolicySettingsURL: "https://143.dev/code-reviews?tab=policy",
+		SessionURL:        "https://143.dev/sessions/session-1",
+		HeadSHA:           "1234567890abcdef",
+		AssessedAt:        time.Date(2026, time.August, 5, 18, 0, 0, 0, time.UTC),
+	}
+
+	actual := BuildCodeReviewProvisionalBody(input)
+
+	require.Equal(t, "⚠️ **143 Code Reviewer found stable policy blockers**\n\n"+
+		"**Policy thresholds:**\n"+
+		"- This change touches 6 files; the policy limit is 5. [View policy setting](https://143.dev/code-reviews?tab=policy#policy-max-files-changed)\n"+
+		"- Repository policy blocks automated approval for changes to `migrations/**`. [View policy setting](https://143.dev/code-reviews?tab=policy)\n\n"+
+		"These blockers are stable for this commit. The substantive code review is still running and may identify additional findings.\n\n"+
+		"**Latest assessment:** `1234567` at 2026-08-05T18:00:00Z\n\n"+
+		"[Follow the review session](https://143.dev/sessions/session-1)", actual, "provisional review should explain stable blockers without claiming a terminal decision")
+}
+
 func TestCodeReviewRiskReasonPresentation(t *testing.T) {
 	t.Parallel()
 

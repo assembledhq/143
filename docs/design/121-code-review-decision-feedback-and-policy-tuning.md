@@ -6,12 +6,15 @@
 
 ## Implementation status
 
-Phase 0A's readable decision output is implemented: blockers are grouped by remedy,
+Phase 0 is implemented: blockers are grouped by remedy,
 policy-controlled blockers link to settings, a sole blocker is revision-bound,
 platform review failures are separated from code risk, and advisory findings are
-inspectable in a collapsed non-blocking section. Phase 0A's provisional publication
-of stable deterministic failures and `stop_after_deterministic_failure` remain to
-be implemented.
+inspectable in a collapsed non-blocking section. Stable head-bound deterministic
+failures publish provisionally before agent fan-out while mutable GitHub-state gates
+remain terminal-only. The optional `stop_after_deterministic_failure` setting ends
+the first attempt without agent spend; an explicit same-head rerequest after that
+early stop forces the full review. Insights reports early stops, avoided agent runs,
+and that full-review demand.
 
 The PR 3 Phase 1A runtime is implemented: in-app reconsideration, GitHub mention and inline-thread intake, evidence-grounded answers, durable acknowledgement/timeline states, authorization snapshots, versioned semantic cooldown dedupe, loop guards, latest-revision reassessment, admin promotion of untrusted evidence, the member escalation route, and the flat admin adjudication list. Reassessment workers use an operator kill switch and platform-wide active-work ceiling.
 

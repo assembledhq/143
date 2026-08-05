@@ -34,6 +34,21 @@ func BuildCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) string {
 	return buildDefaultCodeReviewFinalReviewBody(input)
 }
 
+const CodeReviewProvisionalReviewHeading = "⚠️ **143 Code Reviewer found stable policy blockers**"
+
+func BuildCodeReviewProvisionalBody(input CodeReviewFinalReviewInput) string {
+	paragraphs := []string{CodeReviewProvisionalReviewHeading}
+	paragraphs = append(paragraphs, codeReviewBlockerSections(input)...)
+	paragraphs = append(paragraphs, "These blockers are stable for this commit. The substantive code review is still running and may identify additional findings.")
+	if assessment := codeReviewAssessmentSummary(input.HeadSHA, input.AssessedAt); assessment != "" {
+		paragraphs = append(paragraphs, assessment)
+	}
+	if input.SessionURL != "" {
+		paragraphs = append(paragraphs, "[Follow the review session]("+input.SessionURL+")")
+	}
+	return strings.Join(paragraphs, "\n\n")
+}
+
 func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) string {
 	paragraphs := make([]string, 0, 9)
 	if input.Decision == CodeReviewDecisionApproved {

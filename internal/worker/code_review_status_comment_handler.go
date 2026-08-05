@@ -171,7 +171,11 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, sess
 	case models.CodeReviewSessionStatusCancelled:
 		paragraphs = append(paragraphs, "This 143 code review was cancelled.")
 	default:
-		paragraphs = append(paragraphs, "143 Code Reviewer has started reviewing this pull request.")
+		if body := strings.TrimSpace(stringPtrValue(metadata.FinalReviewBody)); strings.HasPrefix(body, models.CodeReviewProvisionalReviewHeading) {
+			paragraphs = append(paragraphs, body)
+		} else {
+			paragraphs = append(paragraphs, "143 Code Reviewer has started reviewing this pull request.")
+		}
 	}
 	if sessionURL != "" && !strings.Contains(strings.Join(paragraphs, "\n\n"), sessionURL) {
 		label := "Follow the review session"

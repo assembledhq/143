@@ -214,10 +214,6 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			return fmt.Errorf("list code review findings: %w", err)
 		}
-		changedFiles, _, err := loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
-		if err != nil {
-			return fmt.Errorf("load code review changed files: %w", err)
-		}
 		if codeReviewHeadChanged(job.HeadSHA, pr, health) {
 			if _, staleErr := stores.CodeReviews.MarkStale(ctx, job.OrgID, job.SessionID, "PR head changed after review started"); staleErr != nil {
 				return fmt.Errorf("mark code review stale: %w", staleErr)
@@ -230,6 +226,58 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			reconcileCodeReviewSessionStale(ctx, stores, logger, job)
 			enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
 			return nil
+		}
+		changedFiles, changedFilesAvailable, err := loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
+		if err != nil {
+			return fmt.Errorf("load code review changed files: %w", err)
+		}
+		stableRisk := codeReviewStableDeterministicRisk(policy.Config(), job, pr, changedFiles, changedFilesAvailable)
+		if !stableRisk.Acceptable && metadata.FinalReviewBody == nil {
+			provisionalBody := models.BuildCodeReviewProvisionalBody(models.CodeReviewFinalReviewInput{
+				RiskReasons:       stableRisk.ReasonDetails,
+				SessionURL:        codeReviewSessionURL(services.FrontendURL, job.SessionID),
+				PolicySettingsURL: codeReviewPolicySettingsURL(services.FrontendURL),
+				HeadSHA:           job.HeadSHA,
+				AssessedAt:        time.Now().UTC(),
+			})
+			if _, err := stores.CodeReviews.SetProvisionalReviewBody(ctx, job.OrgID, job.SessionID, provisionalBody); err != nil {
+				return fmt.Errorf("persist provisional deterministic blockers: %w", err)
+			}
+			enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "deterministic")
+		}
+		stopAfterDeterministicFailure := policy.Config().RiskPolicy.StopAfterDeterministicFailure
+		if !stableRisk.Acceptable && stopAfterDeterministicFailure && metadata.TriggerSource != models.CodeReviewTriggerSourceAutoPolicy {
+			priorEarlyStop, err := stores.CodeReviews.HasPriorDeterministicEarlyStop(ctx, job.OrgID, job.PullRequestID, job.SessionID, job.HeadSHA)
+			if err != nil {
+				return err
+			}
+			if priorEarlyStop {
+				stopAfterDeterministicFailure = false
+				logger.Info().Str("org_id", job.OrgID.String()).Str("session_id", job.SessionID.String()).
+					Msg("continuing full code review after explicit same-head request following deterministic early stop")
+			}
+		}
+		if !stableRisk.Acceptable && stopAfterDeterministicFailure {
+			if syncErr := syncCodeReviewPullRequestState(ctx, services, logger, job); syncErr != nil {
+				return syncErr
+			}
+			pr, err = stores.PullRequests.GetByID(ctx, job.OrgID, job.PullRequestID)
+			if err != nil {
+				return fmt.Errorf("reload pull request before deterministic early stop: %w", err)
+			}
+			health, err = loadStoredCodeReviewHealth(ctx, stores, job, pr)
+			if err != nil {
+				return fmt.Errorf("reload pull request health before deterministic early stop: %w", err)
+			}
+			if codeReviewHeadChanged(job.HeadSHA, pr, health) {
+				if _, staleErr := stores.CodeReviews.MarkStale(ctx, job.OrgID, job.SessionID, "PR head changed before deterministic early-stop decision"); staleErr != nil {
+					return fmt.Errorf("mark deterministic early-stop review stale: %w", staleErr)
+				}
+				reconcileCodeReviewSessionStale(ctx, stores, logger, job)
+				enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
+				return nil
+			}
+			return completeCodeReviewAfterStableDeterministicFailure(ctx, stores, services, logger, job, metadata, policy.Config(), pr, changedFiles, stableRisk)
 		}
 		if codeReviewCanRunReviewerThreads(stores) {
 			if _, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhaseReviewing); err != nil {
@@ -314,7 +362,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
 			return nil
 		}
-		changedFiles, changedFilesAvailable, err := loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
+		changedFiles, changedFilesAvailable, err = loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
 		if err != nil {
 			return fmt.Errorf("reload code review changed files before decision: %w", err)
 		}
@@ -2609,6 +2657,103 @@ type liveCodeReviewOutcomeInput struct {
 	ChangedFilesAvailable bool
 	OrchestratorSynthesis codeReviewOrchestratorSynthesis
 	AssessedAt            time.Time
+}
+
+func codeReviewStableDeterministicRisk(policy models.CodeReviewPolicyConfig, job runCodeReviewPayload, pr models.PullRequest, changedFiles []codereviewsvc.PullRequestFile, changedFilesAvailable bool) models.CodeReviewRiskEvaluation {
+	if !changedFilesAvailable {
+		return models.CodeReviewRiskEvaluation{Acceptable: true}
+	}
+	requiredChecksPassing := make(map[string]bool, len(policy.RiskPolicy.RequiredChecks))
+	for _, check := range policy.RiskPolicy.RequiredChecks {
+		requiredChecksPassing[check] = true
+	}
+	evaluated := models.EvaluateCodeReviewRisk(policy, models.CodeReviewRiskInput{
+		FilesChanged:          len(changedFiles),
+		LinesChanged:          codeReviewLinesChanged(changedFiles),
+		ChangedPaths:          codeReviewChangedPaths(changedFiles),
+		ChecksPassing:         true,
+		RequiredChecksPassing: requiredChecksPassing,
+		DescriptionPassed:     true,
+		UpToDate:              true,
+		Author:                codeReviewAuthor(job, pr),
+		AuthorClass:           codeReviewAuthorClass(pr),
+		FromFork:              job.FromFork,
+	})
+	stable := models.CodeReviewRiskEvaluation{Acceptable: true}
+	for _, reason := range evaluated.ReasonDetails {
+		switch reason.Code {
+		case models.CodeReviewRiskReasonFilesLimitExceeded,
+			models.CodeReviewRiskReasonLinesLimitExceeded,
+			models.CodeReviewRiskReasonBlockedPath,
+			models.CodeReviewRiskReasonPathOutsideScope,
+			models.CodeReviewRiskReasonForkIneligible,
+			models.CodeReviewRiskReasonAuthorIneligible:
+			stable.AddReason(reason)
+		}
+	}
+	return stable
+}
+
+func completeCodeReviewAfterStableDeterministicFailure(
+	ctx context.Context,
+	stores *Stores,
+	services *Services,
+	logger zerolog.Logger,
+	job runCodeReviewPayload,
+	metadata models.CodeReviewSessionMetadata,
+	policy models.CodeReviewPolicyConfig,
+	pr models.PullRequest,
+	changedFiles []codereviewsvc.PullRequestFile,
+	risk models.CodeReviewRiskEvaluation,
+) error {
+	decision := models.EvaluateCodeReviewDecision(policy, risk)
+	body := models.BuildCodeReviewFinalReviewBody(models.CodeReviewFinalReviewInput{
+		Decision:             decision.Decision,
+		Acceptable:           decision.Acceptable,
+		RiskReasons:          decision.RiskReasonDetails,
+		SessionURL:           codeReviewSessionURL(services.FrontendURL, job.SessionID),
+		PolicySettingsURL:    codeReviewPolicySettingsURL(services.FrontendURL),
+		ChangeStatsAvailable: true,
+		FilesChanged:         len(changedFiles),
+		LinesChanged:         codeReviewLinesChanged(changedFiles),
+		HeadSHA:              job.HeadSHA,
+		AssessedAt:           time.Now().UTC(),
+	})
+	if _, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhasePublishing); err != nil {
+		return fmt.Errorf("set deterministic early-stop publishing phase: %w", err)
+	}
+	submission, submitted, err := submitCodeReviewToGitHub(ctx, stores, services, job, metadata, decision.Decision, body)
+	if err != nil {
+		return err
+	}
+	finalReviewBody := body
+	if strings.TrimSpace(submission.FinalReviewBody) != "" {
+		finalReviewBody = submission.FinalReviewBody
+	}
+	additions, deletions := codeReviewLineChanges(changedFiles)
+	removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
+	if _, err := stores.CodeReviews.CompleteReview(ctx, job.OrgID, db.CompleteCodeReviewParams{
+		SessionID:         job.SessionID,
+		Decision:          decision.Decision,
+		Acceptable:        decision.Acceptable,
+		GitHubReviewID:    submission.GitHubReviewID,
+		GitHubReviewURL:   submission.GitHubReviewURL,
+		FinalReviewBody:   finalReviewBody,
+		Additions:         &additions,
+		Deletions:         &deletions,
+		RiskReasonDetails: decision.RiskReasonDetails,
+	}); err != nil {
+		return fmt.Errorf("complete deterministic early-stop code review: %w", err)
+	}
+	logger.Info().
+		Str("org_id", job.OrgID.String()).
+		Str("session_id", job.SessionID.String()).
+		Bool("github_submitted", submitted).
+		Int("reviewer_runs_avoided", len(policy.AgentRoster.Reviewers)+1).
+		Msg("completed code review after stable deterministic failure")
+	reconcileCodeReviewSessionSuccess(ctx, stores, logger, job)
+	enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
+	return nil
 }
 
 func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.CodeReviewDecisionEvaluation, string) {

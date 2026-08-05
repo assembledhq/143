@@ -3137,6 +3137,50 @@ func TestCodeReviewPolicySettingsURL(t *testing.T) {
 	}
 }
 
+func TestCodeReviewStableDeterministicRisk(t *testing.T) {
+	t.Parallel()
+
+	policy := models.DefaultCodeReviewPolicyConfig()
+	policy.RiskPolicy.MaxFilesChanged = 1
+	policy.RiskPolicy.MaxLinesChanged = 5
+	policy.RiskPolicy.BlockedPathPatterns = []string{"migrations/**"}
+	policy.RiskPolicy.RequirePassingChecks = true
+	policy.RiskPolicy.RequiredChecks = []string{"tests"}
+	policy.RiskPolicy.RequireUpToDate = true
+	tests := []struct {
+		name                  string
+		available             bool
+		files                 []codereview.PullRequestFile
+		expectedReasonDetails []models.CodeReviewRiskReason
+	}{
+		{
+			name:      "keeps only stable head-bound failures",
+			available: true,
+			files: []codereview.PullRequestFile{
+				{Filename: "migrations/001.sql", Additions: 4, Deletions: 0},
+				{Filename: "internal/api.go", Additions: 2, Deletions: 0},
+			},
+			expectedReasonDetails: []models.CodeReviewRiskReason{
+				{Code: models.CodeReviewRiskReasonFilesLimitExceeded, Actual: 2, Limit: 1},
+				{Code: models.CodeReviewRiskReasonLinesLimitExceeded, Actual: 6, Limit: 5},
+				{Code: models.CodeReviewRiskReasonBlockedPath, Subject: "migrations/001.sql"},
+			},
+		},
+		{name: "does not publish when changed files are unavailable", available: false, files: []codereview.PullRequestFile{{Filename: "migrations/001.sql", Additions: 10}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := codeReviewStableDeterministicRisk(policy, runCodeReviewPayload{}, models.PullRequest{AuthoredBy: models.GitIdentitySourceUser}, tt.files, tt.available)
+
+			require.Equal(t, tt.expectedReasonDetails, actual.ReasonDetails, "early evaluation should publish only stable deterministic failures")
+			require.Equal(t, len(tt.expectedReasonDetails) == 0, actual.Acceptable, "early evaluation acceptability should reflect stable failures")
+		})
+	}
+}
+
 func TestCodeReviewThreadCompletedByDeadline(t *testing.T) {
 	t.Parallel()
 

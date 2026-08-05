@@ -2377,7 +2377,18 @@ function AdvancedPolicySettings({
                   commitPolicy((next) => {
                     next.risk_policy.allow_forks = checked;
                   })
-                }
+                        }
+                      />
+                      <PolicyToggle
+                        label="Stop after stable policy blockers"
+                        description="Skip reviewer agents when a commit already fails a stable size, path, fork, or author rule. The rolling comment publishes those blockers immediately; leave this off to continue the substantive review and collect findings."
+                        checked={config?.risk_policy.stop_after_deterministic_failure ?? false}
+                        disabled={!config}
+                        onCheckedChange={(checked) =>
+                          commitPolicy((next) => {
+                            next.risk_policy.stop_after_deterministic_failure = checked;
+                          })
+                        }
                       />
                     </div>
                   </FineTuningSection>

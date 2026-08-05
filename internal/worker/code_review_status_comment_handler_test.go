@@ -41,6 +41,22 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			expectedCalls: []string{"upsert"},
 		},
 		{
+			name:            "publishes durable provisional blockers while review continues",
+			initialStatus:   models.CodeReviewSessionStatusRunning,
+			lockedStatus:    models.CodeReviewSessionStatusRunning,
+			lockedFinalBody: statusCommentStringPtr(models.CodeReviewProvisionalReviewHeading + "\n\nSubstantive review is still running."),
+			expectedBody:    models.CodeReviewProvisionalReviewHeading + "\n\nSubstantive review is still running.",
+			expectedCalls:   []string{"upsert"},
+		},
+		{
+			name:            "does not expose a terminal body before the decision commits",
+			initialStatus:   models.CodeReviewSessionStatusRunning,
+			lockedStatus:    models.CodeReviewSessionStatusRunning,
+			lockedFinalBody: statusCommentStringPtr("❌ 143 Code Reviewer needs human review."),
+			expectedBody:    "143 Code Reviewer has started reviewing this pull request.",
+			expectedCalls:   []string{"upsert"},
+		},
+		{
 			name:                      "refreshes state under lock before publishing completed result",
 			initialStatus:             models.CodeReviewSessionStatusRunning,
 			lockedStatus:              models.CodeReviewSessionStatusCompleted,

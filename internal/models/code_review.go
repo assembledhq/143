@@ -469,6 +469,7 @@ type CodeReviewRiskPolicy struct {
 	MaxFilesChanged               int      `json:"max_files_changed"`
 	MaxLinesChanged               int      `json:"max_lines_changed"`
 	SemanticDedupeCooldownSeconds int      `json:"semantic_dedupe_cooldown_seconds"`
+	StopAfterDeterministicFailure bool     `json:"stop_after_deterministic_failure"`
 	RequirePassingChecks          bool     `json:"require_passing_checks"`
 	ExcludeSensitivePaths         bool     `json:"exclude_sensitive_paths"`
 	SensitivePaths                []string `json:"sensitive_paths,omitempty"`
@@ -647,6 +648,7 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 		defaults.RiskPolicy.SemanticDedupeCooldownSeconds = config.RiskPolicy.SemanticDedupeCooldownSeconds
 	}
 	defaults.RiskPolicy.RequirePassingChecks = config.RiskPolicy.RequirePassingChecks
+	defaults.RiskPolicy.StopAfterDeterministicFailure = config.RiskPolicy.StopAfterDeterministicFailure
 	defaults.RiskPolicy.ExcludeSensitivePaths = config.RiskPolicy.ExcludeSensitivePaths
 	if len(config.RiskPolicy.SensitivePaths) > 0 {
 		defaults.RiskPolicy.SensitivePaths = config.RiskPolicy.SensitivePaths

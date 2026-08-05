@@ -800,6 +800,20 @@ func (s *CodeReviewInsightStore) GetInsights(ctx context.Context, orgID uuid.UUI
 		SELECT d.*,
 			row_number() OVER (PARTITION BY pull_request_id ORDER BY created_at, id)::integer AS attempt
 		FROM disputes d WHERE reassessment_status = 'completed'
+	), deterministic_early_stops AS MATERIALIZED (
+		SELECT o.session_id, o.pull_request_id, m.head_sha, m.created_at,
+			(jsonb_array_length(COALESCE(p.agent_roster->'reviewers', '[]'::jsonb)) + 1)::bigint AS reviewer_runs_avoided
+		FROM outcomes o
+		JOIN code_review_session_metadata m ON m.org_id = o.org_id AND m.session_id = o.session_id
+		JOIN code_review_policies p ON p.org_id = o.org_id AND p.id = o.policy_id
+		WHERE COALESCE((p.risk_policy->>'stop_after_deterministic_failure')::boolean, false)
+		  AND cardinality(o.reason_codes) > 0
+		  AND o.reason_codes <@ ARRAY['files_limit_exceeded', 'lines_limit_exceeded', 'blocked_path',
+			'path_outside_scope', 'fork_ineligible', 'author_ineligible']::text[]
+		  AND NOT EXISTS (
+			SELECT 1 FROM code_review_agent_results result
+			WHERE result.org_id = o.org_id AND result.session_id = o.session_id
+		  )
 	)
 	SELECT
 		(SELECT count(*)::bigint FROM outcomes),
@@ -811,6 +825,15 @@ func (s *CodeReviewInsightStore) GetInsights(ctx context.Context, orgID uuid.UUI
 		(SELECT count(*)::bigint FROM disputes WHERE reassessment_flipped = true),
 		(SELECT COALESCE(sum(NULLIF(s.token_usage->>'total_cost_usd', '')::double precision), 0)
 		 FROM disputes d JOIN sessions s ON s.org_id = d.org_id AND s.id = d.reassessment_session_id),
+		(SELECT count(*)::bigint FROM deterministic_early_stops),
+		(SELECT COALESCE(sum(reviewer_runs_avoided), 0)::bigint FROM deterministic_early_stops),
+		(SELECT count(*)::bigint FROM deterministic_early_stops early
+		 WHERE EXISTS (
+			SELECT 1 FROM code_review_session_metadata later
+			WHERE later.org_id = @org_id AND later.pull_request_id = early.pull_request_id
+			  AND later.head_sha = early.head_sha AND later.created_at > early.created_at
+			  AND later.trigger_source <> 'auto_policy'
+		 )),
 		(SELECT avg(policy_owner_active_seconds)::double precision / 60.0
 		 FROM disputes WHERE adjudication_status IN ('upheld', 'rejected') AND policy_owner_active_seconds IS NOT NULL),
 		(SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (m.completed_at - m.created_at)))
@@ -865,7 +888,9 @@ func (s *CodeReviewInsightStore) GetInsights(ctx context.Context, orgID uuid.UUI
 	err := s.db.QueryRow(ctx, query, args).Scan(
 		&insights.Decisions, &insights.Disputes, &insights.ObjectionRate, &insights.UpheldDisputes,
 		&insights.Reassessments, &insights.ReassessmentFlips,
-		&insights.ReassessmentCostUSD, &insights.PolicyOwnerMinutesPerResolution,
+		&insights.ReassessmentCostUSD, &insights.DeterministicEarlyStops,
+		&insights.ReviewerRunsAvoided, &insights.FullReviewRequestsAfterEarlyStop,
+		&insights.PolicyOwnerMinutesPerResolution,
 		&insights.MedianDecisionSeconds, &insights.MedianAdjudicationSeconds,
 		&insights.ProjectionFreshThrough, &insights.ProjectionUpdatedAt,
 		&directionsJSON, &kindsJSON, &mixJSON, &reasonsJSON, &actualVsLimitJSON, &flipBucketsJSON,

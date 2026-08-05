@@ -578,6 +578,8 @@ function PolicyFeedbackInsights({ insights }: { insights: CodeReviewInsights }) 
         <MetricCard label="Decisions observed" value={insights.decisions.toLocaleString()} />
         <MetricCard label="Objection rate" value={`${Math.round(insights.objection_rate * 100)}%`} context={`${insights.disputes.toLocaleString()} objections · ${insights.upheld_disputes.toLocaleString()} upheld`} />
         <MetricCard label="Reassessments" value={insights.reassessments.toLocaleString()} context={`${flipRate} changed decision · $${insights.reassessment_cost_usd.toFixed(2)} spend`} />
+        <MetricCard label="Early policy stops" value={insights.deterministic_early_stops.toLocaleString()} context={`${insights.reviewer_runs_avoided.toLocaleString()} reviewer runs avoided`} />
+        <MetricCard label="Full reviews after early stop" value={insights.full_review_requests_after_early_stop.toLocaleString()} context="Same-head explicit requests" />
         <MetricCard
           label="Median resolution"
           value={duration(insights.median_adjudication_seconds)}
