@@ -240,10 +240,21 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 				HeadSHA:           job.HeadSHA,
 				AssessedAt:        time.Now().UTC(),
 			})
+			// A concurrent supersede, stale mark, or cancellation can move the
+			// session out of queued/running while these blockers are being
+			// published. Provisional publication is best effort, so a terminal
+			// session skips it instead of failing the job.
 			if _, err := stores.CodeReviews.SetProvisionalReviewBody(ctx, job.OrgID, job.SessionID, provisionalBody); err != nil {
-				return fmt.Errorf("persist provisional deterministic blockers: %w", err)
+				if !errors.Is(err, pgx.ErrNoRows) {
+					return fmt.Errorf("persist provisional deterministic blockers: %w", err)
+				}
+				logger.Info().
+					Str("org_id", job.OrgID.String()).
+					Str("session_id", job.SessionID.String()).
+					Msg("skipped provisional deterministic blockers for a code review that is no longer running")
+			} else {
+				enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "deterministic")
 			}
-			enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "deterministic")
 		}
 		stopAfterDeterministicFailure := policy.Config().RiskPolicy.StopAfterDeterministicFailure && codeReviewCanStopBeforeAgentFanout(agentResults)
 		if !stableRisk.Acceptable && stopAfterDeterministicFailure && metadata.TriggerSource != models.CodeReviewTriggerSourceAutoPolicy {
@@ -2681,13 +2692,7 @@ func codeReviewStableDeterministicRisk(policy models.CodeReviewPolicyConfig, job
 	})
 	stable := models.CodeReviewRiskEvaluation{Acceptable: true}
 	for _, reason := range evaluated.ReasonDetails {
-		switch reason.Code {
-		case models.CodeReviewRiskReasonFilesLimitExceeded,
-			models.CodeReviewRiskReasonLinesLimitExceeded,
-			models.CodeReviewRiskReasonBlockedPath,
-			models.CodeReviewRiskReasonPathOutsideScope,
-			models.CodeReviewRiskReasonForkIneligible,
-			models.CodeReviewRiskReasonAuthorIneligible:
+		if models.IsCodeReviewStableDeterministicRiskReason(reason.Code) {
 			stable.AddReason(reason)
 		}
 	}
@@ -2713,6 +2718,9 @@ func completeCodeReviewAfterStableDeterministicFailure(
 	changedFiles []codereviewsvc.PullRequestFile,
 	risk models.CodeReviewRiskEvaluation,
 ) error {
+	if cancelled, err := stopCodeReviewIfParentSessionCancelled(ctx, stores, services, logger, job, pr); cancelled || err != nil {
+		return err
+	}
 	decision := models.EvaluateCodeReviewDecision(policy, risk)
 	body := models.BuildCodeReviewFinalReviewBody(models.CodeReviewFinalReviewInput{
 		Decision:             decision.Decision,

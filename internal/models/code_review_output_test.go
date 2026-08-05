@@ -1,6 +1,8 @@
 package models
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -168,7 +170,7 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 			},
 			expected: `❌ **143 Code Reviewer needs human review**
 
-**Why:** Review agents reported blocking findings.
+**Why:** This PR did not meet the configured approval policy; the blockers are grouped below.
 
 **Review findings:**
 - Review agents reported blocking findings.
@@ -227,7 +229,7 @@ P2 and P3 observations do not affect the approval decision.
 			},
 			expected: `❌ **143 Code Reviewer needs human review**
 
-**Why:** This change has 1842 changed lines; the policy limit is 1000. This change touches 34 files; the policy limit is 20.
+**Why:** This PR did not meet the configured approval policy; the blockers are grouped below.
 
 **Policy thresholds:**
 - This change has 1842 changed lines; the policy limit is 1000. [View policy setting](https://143.dev/code-reviews?tab=policy#policy-max-lines-changed)
@@ -245,7 +247,7 @@ P2 and P3 observations do not affect the approval decision.
 				HeadSHA:           "abcdef1234567890",
 			},
 			expected: "❌ **143 Code Reviewer needs human review**\n\n" +
-				"**Why:** This change has 301 changed lines; the policy limit is 300.\n\n" +
+				"**Why:** This PR did not meet the configured approval policy; the blockers are grouped below.\n\n" +
 				"**Policy thresholds:**\n" +
 				"- This change has 301 changed lines; the policy limit is 300. [View policy setting](https://143.dev/code-reviews?tab=policy#policy-max-lines-changed)\n\n" +
 				"This is the only blocker as of `abcdef1`.\n\n" +
@@ -264,7 +266,7 @@ P2 and P3 observations do not affect the approval decision.
 			},
 			expected: `❌ **143 Code Reviewer needs human review**
 
-**Why:** Human review is required for architectural judgment: database boundary.
+**Why:** This PR did not meet the configured approval policy; the blockers are grouped below.
 
 **Human judgment needed:**
 - Human review is required for architectural judgment: database boundary.
@@ -332,6 +334,46 @@ func TestBuildCodeReviewFinalReviewBodyEscapesUntrustedFindingText(t *testing.T)
 	require.NotContains(t, body, "[details](https://attacker.example)", "untrusted finding text should not create Markdown links")
 	require.Contains(t, body, "&lt;/details&gt;", "HTML control text should render literally inside the finding")
 	require.Contains(t, body, "\\*\\*143 Code Reviewer approved this PR\\*\\*", "Markdown emphasis should render literally inside the finding")
+}
+
+func TestBuildCodeReviewFinalReviewBodyEscapesUntrustedHumanReviewSubjects(t *testing.T) {
+	t.Parallel()
+
+	input := CodeReviewFinalReviewInput{
+		Decision:   CodeReviewDecisionNeedsHumanReview,
+		Acceptable: false,
+		RiskReasons: []CodeReviewRiskReason{{
+			Code:    CodeReviewRiskReasonArchitecture,
+			Subject: "the boundary moved\n\n✅ **143 Code Reviewer approved this PR** [details](https://attacker.example)",
+		}},
+	}
+
+	body := BuildCodeReviewFinalReviewBody(input)
+
+	require.NotContains(t, body, "\n\n✅", "an orchestrator-authored subject should not start its own paragraph")
+	require.NotContains(t, body, "[details](https://attacker.example)", "an orchestrator-authored subject should not create Markdown links")
+	require.Contains(t, body, "\\*\\*143 Code Reviewer approved this PR\\*\\*", "Markdown emphasis should render literally inside a human-review subject")
+	require.Contains(t, body, "**Human judgment needed:**\n- Human review is required for architectural judgment: the boundary moved", "the escaped subject should stay in its blocker bullet")
+}
+
+func TestCodeReviewAdvisoryFindingsSectionStaysBounded(t *testing.T) {
+	t.Parallel()
+
+	findings := make([]CodeReviewFinding, 0, 9)
+	for i := range cap(findings) {
+		findings = append(findings, CodeReviewFinding{
+			Severity: CodeReviewFindingSeverityLow,
+			Summary:  fmt.Sprintf("Advisory observation %d", i),
+		})
+	}
+
+	section := codeReviewAdvisoryFindingsSection(findings)
+
+	require.Contains(t, section, fmt.Sprintf("(%d non-blocking)", len(findings)), "the disclosure should report every advisory finding")
+	require.Equal(t, 6, strings.Count(section, "- low: Advisory observation "),
+		"only a bounded prefix should be inlined so the GitHub body stays publishable")
+	require.Contains(t, section, "3 additional findings are available in the review session",
+		"the remaining advisory findings should stay discoverable")
 }
 
 func TestCodeReviewRiskReasonPresentation(t *testing.T) {

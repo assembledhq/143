@@ -749,7 +749,7 @@ func (s *CodeReviewInsightStore) UpdateDisputeRanks(ctx context.Context, orgID u
 }
 
 func (s *CodeReviewInsightStore) GetInsights(ctx context.Context, orgID uuid.UUID, filters models.CodeReviewInsightFilters) (models.CodeReviewInsights, error) {
-	args := pgx.NamedArgs{"org_id": orgID}
+	args := pgx.NamedArgs{"org_id": orgID, "stable_reason_codes": models.CodeReviewStableDeterministicRiskReasonStrings()}
 	outcomeWhere := " WHERE o.org_id = @org_id"
 	disputeWhere := " WHERE d.org_id = @org_id AND d.superseded_by_dispute_id IS NULL"
 	firstRequestWhere := " WHERE m.org_id = @org_id"
@@ -808,8 +808,7 @@ func (s *CodeReviewInsightStore) GetInsights(ctx context.Context, orgID uuid.UUI
 		JOIN code_review_policies p ON p.org_id = o.org_id AND p.id = o.policy_id
 		WHERE COALESCE((p.risk_policy->>'stop_after_deterministic_failure')::boolean, false)
 		  AND cardinality(o.reason_codes) > 0
-		  AND o.reason_codes <@ ARRAY['files_limit_exceeded', 'lines_limit_exceeded', 'blocked_path',
-			'path_outside_scope', 'fork_ineligible', 'author_ineligible']::text[]
+		  AND o.reason_codes <@ @stable_reason_codes::text[]
 		  AND NOT EXISTS (
 			SELECT 1 FROM code_review_agent_results result
 			WHERE result.org_id = o.org_id AND result.session_id = o.session_id

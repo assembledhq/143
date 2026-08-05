@@ -755,10 +755,7 @@ func (s *CodeReviewStore) HasPriorDeterministicEarlyStop(ctx context.Context, or
 			  AND NOT EXISTS (
 				SELECT 1
 				FROM jsonb_array_elements(COALESCE(prior.risk_reason_details, '[]'::jsonb)) reason
-				WHERE reason->>'code' NOT IN (
-					'files_limit_exceeded', 'lines_limit_exceeded', 'blocked_path',
-					'path_outside_scope', 'fork_ineligible', 'author_ineligible'
-				)
+				WHERE NOT (reason->>'code' = ANY(@stable_reason_codes))
 			  )
 			  AND NOT EXISTS (
 				SELECT 1 FROM code_review_agent_results result
@@ -766,6 +763,7 @@ func (s *CodeReviewStore) HasPriorDeterministicEarlyStop(ctx context.Context, or
 			  )
 		)`, pgx.NamedArgs{
 		"org_id": orgID, "pull_request_id": pullRequestID, "session_id": sessionID, "head_sha": strings.TrimSpace(headSHA),
+		"stable_reason_codes": models.CodeReviewStableDeterministicRiskReasonStrings(),
 	}).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("query prior deterministic early stop: %w", err)

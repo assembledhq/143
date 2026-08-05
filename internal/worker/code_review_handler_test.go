@@ -3181,6 +3181,27 @@ func TestCodeReviewStableDeterministicRisk(t *testing.T) {
 	}
 }
 
+func TestCodeReviewStableDeterministicRiskIncludesSensitivePaths(t *testing.T) {
+	t.Parallel()
+
+	policy := models.DefaultCodeReviewPolicyConfig()
+	policy.RiskPolicy.ExcludeSensitivePaths = true
+	policy.RiskPolicy.SensitivePaths = []string{"internal/auth/**"}
+
+	actual := codeReviewStableDeterministicRisk(
+		policy,
+		runCodeReviewPayload{},
+		models.PullRequest{AuthoredBy: models.GitIdentitySourceUser},
+		[]codereview.PullRequestFile{{Filename: "internal/auth/session.go", Additions: 2}},
+		true,
+	)
+
+	require.Equal(t,
+		[]models.CodeReviewRiskReason{{Code: models.CodeReviewRiskReasonSensitivePath, Subject: "internal/auth/session.go"}},
+		actual.ReasonDetails,
+		"sensitive-path matches are decided by the assessed commit, so they publish with the other stable path rules")
+}
+
 func TestCodeReviewCanStopBeforeAgentFanout(t *testing.T) {
 	t.Parallel()
 

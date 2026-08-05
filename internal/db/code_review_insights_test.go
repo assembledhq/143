@@ -426,7 +426,8 @@ func TestCodeReviewInsightStore_GetInsightsScansAggregateShape(t *testing.T) {
 		"early_stops", "runs_avoided", "full_review_requests", "owner_minutes", "median_decision", "median_adjudication", "fresh_through", "projection_updated",
 		"directions", "kinds", "policy_mix", "reasons", "actual_vs_limit", "flip_buckets",
 	}
-	pool.ExpectQuery("WITH first_requests AS MATERIALIZED[\\s\\S]+min\\(m.created_at\\)[\\s\\S]+first_request.first_requested_at >= @from[\\s\\S]+JOIN outcomes cohort[\\s\\S]+d.superseded_by_dispute_id IS NULL[\\s\\S]+count\\(DISTINCT later.session_id\\)[\\s\\S]+policy_version").WithArgs(orgID, from).
+	pool.ExpectQuery("WITH first_requests AS MATERIALIZED[\\s\\S]+min\\(m.created_at\\)[\\s\\S]+first_request.first_requested_at >= @from[\\s\\S]+JOIN outcomes cohort[\\s\\S]+d.superseded_by_dispute_id IS NULL[\\s\\S]+count\\(DISTINCT later.session_id\\)[\\s\\S]+policy_version").
+		WithArgs(orgID, from, models.CodeReviewStableDeterministicRiskReasonStrings()).
 		WillReturnRows(pgxmock.NewRows(columns).AddRow(
 			int64(12), int64(4), 0.25, int64(2), int64(3), int64(1), 1.25, int64(2), int64(6), int64(1), &ownerMinutes,
 			&medianDecision, &medianAdjudication, nil, nil,

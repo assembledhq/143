@@ -61,12 +61,23 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 
 	generatedSummary := codeReviewGeneratedSummary(input.GeneratedSummary)
 	operationalSummary := codeReviewGeneratedSummary(input.OperationalSummary)
+	var blockerSections []string
+	if !input.Acceptable {
+		blockerSections = codeReviewBlockerSections(input)
+	}
 	explanation := operationalSummary
 	if explanation == "" {
 		explanation = generatedSummary
 	}
 	if explanation == "" {
-		explanation = codeReviewDecisionExplanation(input)
+		// Without a model-written summary the derived explanation is the same
+		// reason list the grouped sections spell out below, so lead into them
+		// instead of repeating every blocker verbatim.
+		if len(blockerSections) > 0 {
+			explanation = "This PR did not meet the configured approval policy; the blockers are grouped below."
+		} else {
+			explanation = codeReviewDecisionExplanation(input)
+		}
 	}
 	paragraphs = append(paragraphs, "**Why:** "+explanation)
 
@@ -75,7 +86,7 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 	}
 
 	if !input.Acceptable {
-		paragraphs = append(paragraphs, codeReviewBlockerSections(input)...)
+		paragraphs = append(paragraphs, blockerSections...)
 		if issues := codeReviewReviewIssueSection(input.RiskReasons, input.DescriptionIssues); issues != "" {
 			paragraphs = append(paragraphs, issues)
 		}
@@ -400,6 +411,8 @@ func codeReviewAdvisoryFindingsSection(findings []CodeReviewFinding) string {
 	var section strings.Builder
 	section.WriteString("<details>\n")
 	section.WriteString(fmt.Sprintf("<summary><strong>Advisory findings</strong> (%d non-blocking)</summary>\n\n", len(findings)))
+	// groupedCodeReviewFindings bounds the inlined bullets and reports the
+	// remainder, so the disclosure cannot grow past the GitHub body limit.
 	for _, finding := range groupedCodeReviewFindings(findings) {
 		section.WriteString("- " + finding + "\n")
 	}
@@ -497,8 +510,11 @@ func humanizeCodeReviewRiskReason(reason CodeReviewRiskReason, descriptionIssues
 	return codeReviewSentence(reason.Message())
 }
 
+// codeReviewExplicitHumanReviewExplanation renders an orchestrator-authored
+// human-review reason. The detail is model output derived from PR content, so
+// it is escaped exactly like finding text before reaching a GitHub comment.
 func codeReviewExplicitHumanReviewExplanation(kind, detail string) string {
-	detail = strings.TrimSpace(detail)
+	detail = codeReviewUntrustedMarkdownInline(detail)
 	if detail == "" {
 		return "Human review is required for " + kind + "."
 	}

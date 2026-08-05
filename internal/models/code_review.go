@@ -597,6 +597,7 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 			MaxFilesChanged:               5,
 			MaxLinesChanged:               300,
 			SemanticDedupeCooldownSeconds: DefaultCodeReviewSemanticDedupeCooldownSeconds,
+			StopAfterDeterministicFailure: false,
 			RequirePassingChecks:          false,
 			ExcludeSensitivePaths:         false,
 			SensitivePaths:                []string{},
@@ -1247,6 +1248,45 @@ func (c CodeReviewRiskReasonCode) Validate() error {
 	default:
 		return fmt.Errorf("invalid CodeReviewRiskReasonCode: %q", c)
 	}
+}
+
+// codeReviewStableDeterministicRiskReasonCodes are the risk reasons that are
+// fully determined by the assessed commit and the captured policy: they are
+// decided from the changed-file set, the fork flag, and the PR author, so they
+// cannot change while reviewer agents run. Mutable GitHub state (checks, branch
+// freshness, head SHA) and any agent-derived reason is deliberately absent.
+//
+// Publishing, early stopping, same-head rerequest detection, and Insights all
+// read this one list so the definition cannot drift between Go and SQL.
+var codeReviewStableDeterministicRiskReasonCodes = []CodeReviewRiskReasonCode{
+	CodeReviewRiskReasonFilesLimitExceeded,
+	CodeReviewRiskReasonLinesLimitExceeded,
+	CodeReviewRiskReasonBlockedPath,
+	CodeReviewRiskReasonPathOutsideScope,
+	CodeReviewRiskReasonSensitivePath,
+	CodeReviewRiskReasonForkIneligible,
+	CodeReviewRiskReasonAuthorIneligible,
+}
+
+// IsCodeReviewStableDeterministicRiskReason reports whether a risk reason is
+// stable for the assessed commit.
+func IsCodeReviewStableDeterministicRiskReason(code CodeReviewRiskReasonCode) bool {
+	for _, stable := range codeReviewStableDeterministicRiskReasonCodes {
+		if stable == code {
+			return true
+		}
+	}
+	return false
+}
+
+// CodeReviewStableDeterministicRiskReasonStrings returns the stable reason
+// codes as query parameters for the stores that filter on them.
+func CodeReviewStableDeterministicRiskReasonStrings() []string {
+	codes := make([]string, 0, len(codeReviewStableDeterministicRiskReasonCodes))
+	for _, code := range codeReviewStableDeterministicRiskReasonCodes {
+		codes = append(codes, string(code))
+	}
+	return codes
 }
 
 type CodeReviewRiskReason struct {

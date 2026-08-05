@@ -110,6 +110,7 @@ const policy: CodeReviewResolvedPolicy = {
       max_files_changed: 5,
       max_lines_changed: 300,
       semantic_dedupe_cooldown_seconds: 900,
+      stop_after_deterministic_failure: false,
       require_passing_checks: true,
       exclude_sensitive_paths: true,
       sensitive_paths: ["*auth*"],

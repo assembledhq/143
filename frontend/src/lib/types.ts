@@ -188,7 +188,7 @@ export interface CodeReviewPolicyConfig {
     max_files_changed: number;
     max_lines_changed: number;
     semantic_dedupe_cooldown_seconds: number;
-    stop_after_deterministic_failure?: boolean;
+    stop_after_deterministic_failure: boolean;
     require_passing_checks: boolean;
     exclude_sensitive_paths: boolean;
     sensitive_paths?: string[];

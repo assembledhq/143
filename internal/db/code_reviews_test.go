@@ -513,6 +513,24 @@ func TestCodeReviewStore_SetProvisionalReviewBody(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "provisional update should remain org and session scoped")
 }
 
+func TestCodeReviewStore_SetProvisionalReviewBodyReportsNoRunningReview(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery("(?s)UPDATE code_review_session_metadata.*final_review_body = @body").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "body": "blockers"}).
+		WillReturnRows(codeReviewMetadataRowsForTest())
+
+	_, err = NewCodeReviewStore(mock).SetProvisionalReviewBody(context.Background(), orgID, sessionID, "blockers")
+
+	require.ErrorIs(t, err, pgx.ErrNoRows, "a session that left queued or running should be reported so callers can skip best-effort publication")
+	require.NoError(t, mock.ExpectationsWereMet(), "provisional update should remain org and session scoped")
+}
+
 func TestCodeReviewStore_HasPriorDeterministicEarlyStop(t *testing.T) {
 	t.Parallel()
 
@@ -523,7 +541,10 @@ func TestCodeReviewStore_HasPriorDeterministicEarlyStop(t *testing.T) {
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
 	mock.ExpectQuery("(?s)SELECT EXISTS.*prior.org_id = @org_id.*prior.pull_request_id = @pull_request_id.*prior.session_id <> @session_id.*prior.head_sha = @head_sha.*code_review_agent_results").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "session_id": sessionID, "head_sha": "head"}).
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "pull_request_id": pullRequestID, "session_id": sessionID, "head_sha": "head",
+			"stable_reason_codes": models.CodeReviewStableDeterministicRiskReasonStrings(),
+		}).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
 
 	exists, err := NewCodeReviewStore(mock).HasPriorDeterministicEarlyStop(context.Background(), orgID, pullRequestID, sessionID, " head ")
