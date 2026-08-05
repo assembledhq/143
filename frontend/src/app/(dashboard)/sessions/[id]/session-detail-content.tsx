@@ -3547,6 +3547,10 @@ function OverviewRow({
       className={cn(
         "grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-1.5 gap-y-1.5 px-1 py-1.5",
         divided && OVERVIEW_DIVIDER_CLASSNAME,
+        // The divider's `first:pt-0` assumes a block with no padding of its
+        // own; restore this row's base `py-1.5` top so a first-child divided
+        // row lines up with the undivided ones.
+        divided && "first:pt-1.5",
       )}
     >
       <div

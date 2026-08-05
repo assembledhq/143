@@ -399,14 +399,12 @@ describe('SessionDetailPage overview and review loop', () => {
           data: {
             ...mockSessions[0],
             status: 'pending',
-            started_at: null,
-            completed_at: null,
-            result_summary: null,
-            diff_stats: undefined,
+            started_at: undefined,
+            completed_at: undefined,
+            result_summary: undefined,
             threads: [],
-            changesets: [],
           },
-        });
+        } satisfies SingleResponse<Session>);
       }),
       http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json({ data: null })),
       http.get('/api/v1/sessions/:id/changesets', () => HttpResponse.json({ data: [], meta: {} })),
@@ -453,7 +451,9 @@ describe('SessionDetailPage overview and review loop', () => {
   it('keeps the session activity trigger inline while a session is still running', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: { ...mockSessions[0], status: 'running', completed_at: null } });
+        return HttpResponse.json({
+          data: { ...mockSessions[0], status: 'running', completed_at: undefined },
+        } satisfies SingleResponse<Session>);
       }),
     );
 
@@ -463,13 +463,25 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(await within(vitals).findByRole('button', { name: /Updated.*ago by/i })).toBeInTheDocument();
   });
 
-  it('omits low-value audit update metadata once a session has completed', async () => {
-    renderWithSeededAuditTrail('session-abcdef12-3456-7890');
+  // Both success terminals are gated, so both need covering — dropping either
+  // clause otherwise leaves the suite green.
+  it.each(['completed', 'pr_created'] as const)(
+    'omits low-value audit update metadata once a session is %s',
+    async (status) => {
+      server.use(
+        http.get('/api/v1/sessions/:id', () => {
+          return HttpResponse.json({
+            data: { ...mockSessions[0], status },
+          } satisfies SingleResponse<Session>);
+        }),
+      );
 
-    const vitals = await screen.findByTestId('session-overview-vitals');
-    expect(within(vitals).getByText('Completed')).toBeInTheDocument();
-    expect(within(vitals).queryByRole('button', { name: /Updated.*ago by/i })).not.toBeInTheDocument();
-  });
+      renderWithSeededAuditTrail('session-abcdef12-3456-7890');
+
+      const vitals = await screen.findByTestId('session-overview-vitals');
+      expect(within(vitals).queryByRole('button', { name: /Updated.*ago by/i })).not.toBeInTheDocument();
+    },
+  );
 
   it('keeps issue-trigger provenance compact without redundant workflow copy', async () => {
     server.use(

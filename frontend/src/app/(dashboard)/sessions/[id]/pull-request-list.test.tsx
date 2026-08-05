@@ -129,6 +129,10 @@ describe('ChangesetSplitPrompt', () => {
     const suggestion = screen.getByRole('region', { name: 'Pull request size suggestion' });
     expect(suggestion).toHaveAttribute('data-slot', 'overview-suggestion');
     expect(suggestion).toHaveClass('border-t', 'border-border/60', 'pt-4');
+    // As a first child the rule collapses, but this row carries its own
+    // `py-1.5`, so the collapse has to fall back to that rather than to zero.
+    expect(suggestion).toHaveClass('first:border-t-0', 'first:pt-1.5');
+    expect(suggestion).not.toHaveClass('first:pt-0');
     const description = screen.getByText('Split this diff into smaller, reviewable pull requests.');
     expect(description.parentElement).toBe(suggestion);
     expect(description).toHaveClass('col-span-3');
