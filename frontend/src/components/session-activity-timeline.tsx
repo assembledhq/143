@@ -4,8 +4,6 @@
 
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { ActivityCapsule } from "@/components/activity-capsule";
-import { Badge } from "@/components/ui/badge";
-import { Card } from "@/components/ui/card";
 import { ChatTimeline, DaySeparator, type ChatTimelineProps } from "@/components/chat-timeline";
 import { activityToolCount, buildActivityTimelineNodes } from "@/lib/activity-timeline";
 import { timelineEntryPresentationAt } from "@/lib/timeline";
@@ -139,7 +137,7 @@ export function SessionActivityTimeline({
       if (previous === "running") pendingTerminalTransitions.current.add(node.phase.id);
       if (!pendingTerminalTransitions.current.has(node.phase.id)) return;
       const followingBoundaryRendered = nodes.slice(index + 1).some((candidate) => (
-        candidate.kind === "visible" || candidate.kind === "queued_delivery" || candidate.kind === "boundary_notice"
+        candidate.kind === "visible" || candidate.kind === "boundary_notice"
       ));
       if (!followingBoundaryRendered) return;
       pendingTerminalTransitions.current.delete(node.phase.id);
@@ -251,7 +249,6 @@ export function SessionActivityTimeline({
     const nodeKey = nodes.map((node) => {
       if (node.kind === "phase") return `phase:${node.phase.id}:${node.phase.status}`;
       if (node.kind === "historical_activity") return `historical:${node.activity.id}`;
-      if (node.kind === "queued_delivery") return `delivery:${node.delivery.id}:${node.delivery.deliveryState}`;
       if (node.kind === "boundary_notice") return `notice:${node.notice.id}`;
       return `entry:${node.entry.transcriptEntryId ?? node.entry.kind}`;
     }).join("|");
@@ -333,35 +330,22 @@ export function SessionActivityTimeline({
             </Fragment>
           );
         }
-        if (node.kind === "queued_delivery") {
-          const prepared = prepareNodeEntries([node.delivery.entry], index);
-          const label = node.delivery.deliveryState === "queued" ? "Queued" : node.delivery.deliveryState === "acknowledged" ? "Acknowledged" : "Delivery failed";
-          return (
-            <Fragment key={node.delivery.id}>
-              {prepared.separator}
-              <div className="space-y-1 rounded-lg border border-border bg-card p-2">
-                <Badge variant={node.delivery.deliveryState === "abandoned" ? "destructive" : "secondary"}>{label}</Badge>
-                <ChatTimeline {...prepared.props} />
-              </div>
-            </Fragment>
-          );
-        }
         if (node.kind === "boundary_notice") {
           const day = nodeDays[index];
           return (
             <Fragment key={node.notice.id}>
               {day.showSeparator && day.firstDate ? <DaySeparator dateStr={day.firstDate} /> : null}
-              <Card
+              <div
                 role="status"
-                className="flex items-center gap-2 border-info/30 bg-info/10 px-3 py-2 text-xs text-info"
+                className="mx-2 flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground"
                 data-activity-boundary={node.notice.kind}
                 data-activity-phase-id={node.notice.phaseID}
               >
                 {node.notice.kind === "recovery"
-                  ? <RotateCcw className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                  : <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />}
+                  ? <RotateCcw className="h-3.5 w-3.5 shrink-0 text-info" aria-hidden="true" />
+                  : <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-warning" aria-hidden="true" />}
                 <span>{node.notice.label}</span>
-              </Card>
+              </div>
             </Fragment>
           );
         }
@@ -452,10 +436,8 @@ function activityNodeDayMetadata(nodes: ReturnType<typeof buildActivityTimelineN
   return nodes.map((node) => {
     const entries = node.kind === "visible"
       ? [node.entry]
-      : node.kind === "queued_delivery"
-        ? [node.delivery.entry]
-        : node.kind === "boundary_notice"
-          ? []
+      : node.kind === "boundary_notice"
+        ? []
         : node.kind === "phase"
           ? node.phase.entries
           : node.activity.entries;

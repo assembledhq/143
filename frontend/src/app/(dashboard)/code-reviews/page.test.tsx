@@ -42,6 +42,7 @@ import type {
   CodingCredentialSummary,
   CodeReviewAnalytics,
   CodeReviewEvidence,
+	CodeReviewInsights,
   CodeReviewDispute,
   CodeReviewGitHubTriggerResponse,
   CodeReviewListItem,
@@ -109,6 +110,7 @@ const policy: CodeReviewResolvedPolicy = {
       max_files_changed: 5,
       max_lines_changed: 300,
       semantic_dedupe_cooldown_seconds: 900,
+      stop_after_deterministic_failure: false,
       require_passing_checks: true,
       exclude_sensitive_paths: true,
       sensitive_paths: ["*auth*"],
@@ -366,6 +368,34 @@ function mockCodeReviewBaseHandlers(
         data: reviewAnalytics,
       } satisfies SingleResponse<CodeReviewAnalytics>),
     ),
+		http.get("/api/v1/code-review-insights", () =>
+			HttpResponse.json({
+				data: {
+					decisions: 32,
+					disputes: 6,
+					objection_rate: 0.1875,
+					upheld_disputes: 2,
+					reassessments: 4,
+					reassessment_flips: 1,
+					reassessment_cost_usd: 4.25,
+					deterministic_early_stops: 2,
+					reviewer_runs_avoided: 6,
+					full_review_requests_after_early_stop: 1,
+					policy_owner_minutes_per_resolution: 4.5,
+					median_decision_seconds: 90,
+					median_adjudication_seconds: 7200,
+					projection_fresh_through: "2026-08-04T06:00:00Z",
+					projection_updated_at: "2026-08-04T07:00:00Z",
+					ranking_enabled: false,
+					directions: [{ direction: "should_have_approved", count: 6 }],
+					dispute_kinds: [{ kind: "threshold_too_strict", count: 3 }],
+					policy_decision_mix: [{ policy_id: "policy-1", policy_version: 4, decision: "blocked", count: 12 }],
+					reasons: [{ reason_code: "lines_limit_exceeded", decisions: 7, disputes: 3, dispute_rate: 3 / 7 }],
+					actual_vs_limit: [{ reason_code: "lines_limit_exceeded", actual: 431, limit: 300, count: 2 }],
+					flip_buckets: [{ attempt: 1, input_change: "unchanged", reassessments: 4, flips: 1 }],
+				} satisfies CodeReviewInsights,
+			} satisfies SingleResponse<CodeReviewInsights>),
+		),
     http.get("/api/v1/code-reviews/session-1/evidence", () =>
       HttpResponse.json({
         data: evidence,
@@ -638,14 +668,13 @@ describe("CodeReviewsPage", () => {
     expect(screen.queryByRole("button", { name: /Repair GitHub reviewer/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Set up GitHub reviewer/i })).not.toBeInTheDocument();
 
-    // Safeguards and their focused groups are collapsed by default.
-    const advancedControls = screen.getByRole("button", {
-      name: "Safeguards",
-    });
-    expect(advancedControls).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByRole("button", { name: /Approval criteria/i })).not.toBeInTheDocument();
-    await user.click(advancedControls);
-    expect(advancedControls).toHaveAttribute("aria-expanded", "true");
+    // Safeguard categories are visible without opening a second disclosure, but
+    // their details still start collapsed — that is now the only progressive
+    // disclosure left on this card.
+    expect(screen.getByRole("heading", { level: 3, name: "Safeguards" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Safeguards" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Approval criteria/i })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByLabelText("Files changed")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Paths, authors & checks/i }));
     expect(await screen.findByText("*auth*")).toBeInTheDocument();
     expect(screen.getByText("internal/**")).toBeInTheDocument();
@@ -657,6 +686,7 @@ describe("CodeReviewsPage", () => {
     await user.click(screen.getByRole("button", { name: /Quality gates/i }));
     expect(await screen.findByText("Enforce sensitive paths")).toBeInTheDocument();
     expect(screen.getByText("Block reviewer disagreement")).toBeInTheDocument();
+    expect(screen.getByText("Stop after stable policy blockers")).toBeInTheDocument();
     await user.hover(screen.getByRole("button", { name: /About Require passing checks/i }));
     expect((await screen.findAllByText(/Blocks approval until the PR's required GitHub checks are passing/i)).length).toBeGreaterThan(0);
 
@@ -709,6 +739,16 @@ describe("CodeReviewsPage", () => {
     expect(within(approvalOutcomes).getByText("2.0")).toBeInTheDocument();
     expect(within(approvalOutcomes).queryByText("128")).not.toBeInTheDocument();
     expect(screen.getByText("Approval by round")).toBeInTheDocument();
+		expect(screen.getByText("Decision feedback")).toBeInTheDocument();
+		expect(screen.getByText("The queue stays chronological until one organization records at least 10 eligible disputes per month for two complete months.")).toBeInTheDocument();
+		expect(screen.getByText("Objection directions")).toBeInTheDocument();
+		expect(screen.getByText("Objection kinds")).toBeInTheDocument();
+		expect(screen.getByText("Owner time / resolution")).toBeInTheDocument();
+		expect(screen.getByText("Early policy stops")).toBeInTheDocument();
+		expect(screen.getByText("6 reviewer runs avoided")).toBeInTheDocument();
+		expect(screen.getByText("Full reviews after early stop")).toBeInTheDocument();
+		expect(screen.getByText("Attempt 1")).toBeInTheDocument();
+		expect(screen.getByRole("link", { name: "Line-count limit exceeded" })).toHaveAttribute("href", "/code-reviews?tab=policy#policy-max-lines-changed");
     expect(screen.getByText("Why PRs were not approved right away")).toBeInTheDocument();
     expect(screen.getByText("PR findings and operational outcomes")).toBeInTheDocument();
     const analyticsFilters = document.getElementById("code-review-analytics-filters");
@@ -716,7 +756,7 @@ describe("CodeReviewsPage", () => {
     expect(
       approvalOutcomes.compareDocumentPosition(analyticsFilters as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
-    expect(screen.getByText("Line-count limit exceeded")).toBeInTheDocument();
+		expect(screen.getAllByText("Line-count limit exceeded").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("Reviewers found a blocking issue")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "View 5 PRs where line-count limit exceeded" })).toHaveAttribute(
       "href",
@@ -796,6 +836,16 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findByRole("tab", { name: "Analytics" })).toHaveAttribute("data-state", "active");
     expect(await screen.findByText("Usage by PR author")).toBeInTheDocument();
   });
+
+	it("reveals a policy limit targeted by an Insights deep link", async () => {
+		mockCodeReviewBaseHandlers();
+		window.location.hash = "#policy-max-lines-changed";
+
+		renderWithProviders(<CodeReviewsPage />, { searchParams: { tab: "policy" } });
+
+		expect(await screen.findByRole("spinbutton", { name: "Lines changed" })).toBeInTheDocument();
+		expect(document.getElementById("policy-max-lines-changed")).not.toBeNull();
+	});
 
   it("writes tab navigation to the URL without dropping filters", async () => {
     const user = userEvent.setup();
@@ -1069,20 +1119,18 @@ describe("CodeReviewsPage", () => {
       expect(statsStatuses.length).toBeGreaterThan(0);
       expect(new Set(statsStatuses)).toEqual(new Set(["current"]));
     });
-    const statsRequestCount = statsStatuses.length;
-
     await user.click(screen.getByRole("combobox", { name: "Status" }));
     await user.click(await screen.findByRole("option", { name: "Superseded history" }));
     await waitFor(() => {
       expect(listStatuses).toContain("superseded");
-      expect(statsStatuses).toHaveLength(statsRequestCount);
+      expect(new Set(statsStatuses)).toEqual(new Set(["current"]));
     });
 
     await user.click(screen.getByRole("combobox", { name: "Status" }));
     await user.click(await screen.findByRole("option", { name: "All attempts" }));
     await waitFor(() => {
       expect(listStatuses).toContain("all");
-      expect(statsStatuses).toHaveLength(statsRequestCount);
+      expect(new Set(statsStatuses)).toEqual(new Set(["current"]));
     });
   });
 
@@ -1380,6 +1428,35 @@ describe("CodeReviewsPage", () => {
     expect(within(evidenceSheet).getByText("Pending")).toBeInTheDocument();
   });
 
+  it("labels a classified bare mention as an ordinary review request", async () => {
+    const user = userEvent.setup();
+    const reviewRequest: CodeReviewDispute = {
+      id: "review-request-1", org_id: "org-1", session_id: "session-1", pull_request_id: "pr-1",
+      repository_id: "repo-1", policy_id: "policy-1", reviewed_head_sha: review.head_sha,
+      decision: "approved", direction: "should_not_have_approved", filed_by_login: "anya",
+      author_association: "MEMBER", author_is_pr_author: true, repository_visibility: "private",
+      trusted: true, source: "github_comment", body: "@acme/reviewers please review again",
+      contested_reason_codes: [], intake_status: "discarded", routing: "review_request",
+      reassessment_status: "not_requested", queue_signals: {}, queue_priority: 0,
+      reply_status: "not_applicable", version: 2, created_at: "2026-06-26T12:06:00Z", updated_at: "2026-06-26T12:06:00Z",
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews/session-1/disputes", () =>
+        HttpResponse.json({ data: [reviewRequest], meta: {} } satisfies ListResponse<CodeReviewDispute>),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
+    await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
+    expect(within(evidenceSheet).getByText("Review requested")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("Ordinary review request")).toBeInTheDocument();
+    expect(within(evidenceSheet).queryByText("Discarded")).not.toBeInTheDocument();
+  });
+
   it("does not request or show decision feedback for viewer roles", async () => {
     const user = userEvent.setup();
     let disputeRequests = 0;
@@ -1423,6 +1500,8 @@ describe("CodeReviewsPage", () => {
   it("shows the flat admin dispute list and submits a CAS adjudication", async () => {
     const user = userEvent.setup();
     let updateBody: unknown;
+    let currentTime = 1_000;
+    const performanceNow = vi.spyOn(performance, "now").mockImplementation(() => currentTime);
     const dispute: CodeReviewDispute = {
       id: "dispute-queue-1", org_id: "org-1", session_id: "session-1", pull_request_id: "pr-1",
       repository_id: "repo-1", policy_id: "policy-1", reviewed_head_sha: review.head_sha,
@@ -1433,12 +1512,22 @@ describe("CodeReviewsPage", () => {
       reassessment_status: "not_requested", adjudication_status: "pending", queue_signals: {
         pull_request_title: "Fix invoice rounding", github_repository: "acme/api", github_pr_number: 428,
         github_pr_url: "https://github.com/acme/api/pull/428",
-      }, queue_priority: 0,
+        independent_human_contradiction: true, reassessment_unchanged: true,
+        filer_is_not_pr_author: true, repeat_reason_disputes_14_days: 3,
+        ranking_enabled: true,
+      }, queue_priority: 75,
       reply_status: "not_applicable", version: 3, created_at: "2026-06-26T12:06:00Z", updated_at: "2026-06-26T12:06:00Z",
+    };
+    const secondDispute: CodeReviewDispute = {
+      ...dispute,
+      id: "dispute-queue-2",
+      body: "A second objection under review.",
+      queue_signals: {},
+      queue_priority: 0,
     };
     mockCodeReviewBaseHandlers();
     server.use(
-      http.get("/api/v1/code-review-disputes", () => HttpResponse.json({ data: [dispute], meta: {} } satisfies ListResponse<CodeReviewDispute>)),
+      http.get("/api/v1/code-review-disputes", () => HttpResponse.json({ data: [dispute, secondDispute], meta: {} } satisfies ListResponse<CodeReviewDispute>)),
       http.patch("/api/v1/code-review-disputes/dispute-queue-1", async ({ request }) => {
         updateBody = await request.json();
         return HttpResponse.json({ data: { ...dispute, adjudication_status: "upheld", version: 4 } } satisfies SingleResponse<CodeReviewDispute>);
@@ -1449,15 +1538,32 @@ describe("CodeReviewsPage", () => {
 
     await user.click(await screen.findByRole("tab", { name: "Disputes" }));
     expect(await screen.findByText("The size exception was already approved.")).toBeInTheDocument();
+    expect(screen.getByText("Human contradicted decision")).toBeInTheDocument();
+    expect(screen.getByText("Reassessment unchanged")).toBeInTheDocument();
+    expect(screen.getByText("Filed by another contributor")).toBeInTheDocument();
+    expect(screen.getByText("3 similar in 14 days")).toBeInTheDocument();
+    expect(screen.getByText("Priority 75")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "acme/api #428" })).toHaveAttribute("href", "https://github.com/acme/api/pull/428");
+    const disputeRow = screen.getByText("The size exception was already approved.").closest("tr");
+    const secondDisputeRow = screen.getByText("A second objection under review.").closest("tr");
+    expect(disputeRow).not.toBeNull();
+    expect(secondDisputeRow).not.toBeNull();
+    fireEvent.pointerEnter(disputeRow as HTMLTableRowElement);
+    currentTime = 2_000;
+    fireEvent.pointerEnter(secondDisputeRow as HTMLTableRowElement);
+    currentTime = 3_000;
+    fireEvent.blur(window);
+    currentTime = 62_000;
     await user.type(screen.getByLabelText("Adjudication note for dispute dispute-queue-1"), "Confirmed exception in the policy record.");
-    await user.click(screen.getByRole("button", { name: "Uphold" }));
+    await user.click(within(disputeRow as HTMLTableRowElement).getByRole("button", { name: "Uphold" }));
 
     await waitFor(() => expect(updateBody).toEqual({
       expected_version: 3,
       adjudication_status: "upheld",
       adjudication_note: "Confirmed exception in the policy record.",
+      policy_owner_active_seconds: 1,
     }));
+    performanceNow.mockRestore();
   });
 
   it("pages the dispute queue past the first cursor page", async () => {
@@ -1503,7 +1609,9 @@ describe("CodeReviewsPage", () => {
 
     expect(await screen.findByText("Second page objection.")).toBeInTheDocument();
     expect(screen.getByText("First page objection.")).toBeInTheDocument();
-    expect(requestedCursors).toEqual([null, "dispute-page-1"]);
+    // The first-page refetch on tab entry prevents a materialized ranking
+    // update from remaining hidden behind the query cache.
+    expect(requestedCursors).toEqual([null, null, "dispute-page-1"]);
     expect(screen.queryByRole("button", { name: "Load more disputes" })).not.toBeInTheDocument();
   });
 
@@ -2102,26 +2210,16 @@ describe("CodeReviewsPage", () => {
     const approvalRegion = screen.getByRole("region", { name: "Automated approval policy" });
     const instructionsRegion = screen.getByRole("region", { name: "Additional review instructions (optional)" });
     const summaryHeading = screen.getByText("Current behavior:");
-    const advancedTrigger = screen.getByRole("button", {
-      name: "Safeguards",
-    });
-    // The trigger owns the card's left inset; the right inset comes from the header
-    // row so the help icon, not the chevron, lands on the card edge.
-    expect(advancedTrigger).toHaveClass("h-auto", "py-4", "pr-2", "pl-4", "sm:h-auto", "sm:py-5", "sm:pl-5");
-    expect(advancedTrigger.closest("h3")?.parentElement).toHaveClass("pr-3", "sm:pr-4");
-    // The chevron must stay wrapped. As a direct child it matches the Button size
-    // variant's `has-[>svg]:px-2`, whose `:has()` specificity outranks the padding
-    // above and silently collapses the title back to an 8px inset. jsdom applies no
-    // CSS, so this structural check — not the class list above — is what catches it:
-    // the button also still carries an unmerged `px-2.5`, and these assertions would
-    // pass even if it started winning.
-    expect(advancedTrigger.querySelector(":scope > svg")).toBeNull();
+    const safeguardsHeading = screen.getByRole("heading", { level: 3, name: "Safeguards" });
+    const safeguardsCard = safeguardsHeading.closest("section");
+    expect(screen.getByText("Reviewer setup and the rules that gate automatic approval.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Safeguards" })).not.toBeInTheDocument();
     // Behavior, then both prompts together, then safeguards, then GitHub setup.
     expect(enablement.compareDocumentPosition(summaryHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(summaryHeading.compareDocumentPosition(approvalHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(approvalHeading.compareDocumentPosition(instructionsHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(instructionsHeading.compareDocumentPosition(advancedTrigger) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(advancedTrigger.compareDocumentPosition(githubHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(instructionsHeading.compareDocumentPosition(safeguardsHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(safeguardsHeading.compareDocumentPosition(githubHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // Prominence comes from order and size only — no badge, tint, ring, or shadow.
     expect(within(approvalRegion).queryByText("Primary policy")).not.toBeInTheDocument();
     expect(approvalRegion.className).toBe(instructionsRegion.className);
@@ -2130,15 +2228,18 @@ describe("CodeReviewsPage", () => {
     // Every section title is a real heading, nested under the tab's own h2,
     // and all of them share one size.
     expect(screen.getByRole("heading", { level: 2, name: "Review policy" })).toBeInTheDocument();
-    for (const name of ["Review behavior", "Automated approval policy", "Additional review instructions (optional)", "GitHub reviewer connections"]) {
+    for (const name of ["Review behavior", "Automated approval policy", "Additional review instructions (optional)", "Safeguards", "GitHub reviewer connections"]) {
       expect(screen.getByRole("heading", { level: 3, name })).toBeInTheDocument();
     }
-    // Safeguards wraps its disclosure trigger, so the heading carries the
-    // trigger's descriptive line too.
-    expect(screen.getByRole("heading", { level: 3, name: /^Safeguards/ })).toBeInTheDocument();
-    for (const heading of [approvalHeading, instructionsHeading]) {
+    for (const heading of [approvalHeading, instructionsHeading, safeguardsHeading]) {
       expect(heading).toHaveClass("font-display", "text-lg", "font-semibold");
     }
+    // Safeguards is a plain bordered card like its siblings — no extra tint, ring,
+    // or shadow. Asserted by class rather than string-equality with approvalRegion:
+    // that card hardcodes its chrome while this one comes from `SectionGroup`, and
+    // the shared component is allowed to evolve (the fix then is to move the prompt
+    // composers onto it too, not to re-pin this test).
+    expect(safeguardsCard).toHaveClass("rounded-xl", "border", "border-border", "bg-card", "p-4", "sm:p-5");
 
     const outcomeInfo = screen.getByRole("button", {
       name: "About Review outcome",
@@ -2152,7 +2253,7 @@ describe("CodeReviewsPage", () => {
     act(() => enablementInfo.blur());
     const advancedInfo = screen.getByRole("button", { name: "About Safeguards" });
     await user.hover(advancedInfo);
-    expect(await screen.findByRole("tooltip")).toHaveTextContent(/deterministic approval safeguards/i);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(/Reviewer models, limits.*always enforced.*require human review/i);
     await user.unhover(advancedInfo);
     const instructionsInfo = screen.getByRole("button", { name: "About Additional review instructions (optional)" });
     await user.click(instructionsInfo);
@@ -2172,7 +2273,6 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByText("Repository access")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Disable reviewer" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Safeguards" }));
     expect(screen.queryByRole("combobox", { name: /Advanced policy preset/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Apply preset/i })).not.toBeInTheDocument();
     for (const section of ["Approval criteria", "Paths, authors & checks", "Reviewers & agents"]) {
@@ -2206,6 +2306,7 @@ describe("CodeReviewsPage", () => {
       "Require up-to-date branch",
       "Block reviewer disagreement",
       "Allow fork PRs",
+      "Stop after stable policy blockers",
     ]) {
       expect(screen.getByRole("button", { name: `About ${label}` })).toBeInTheDocument();
     }
@@ -2213,6 +2314,18 @@ describe("CodeReviewsPage", () => {
     await user.click(screen.getByRole("button", { name: /Structured PR-description checks/i }));
     expect(screen.getByRole("button", { name: "About Add structured PR-description check" })).toBeInTheDocument();
   }, 30_000);
+
+	it("surfaces an Insights failure without hiding the loaded approval report", async () => {
+		const user = userEvent.setup();
+		mockCodeReviewBaseHandlers();
+		server.use(http.get("/api/v1/code-review-insights", () => HttpResponse.json({ error: { code: "INSIGHTS_FAILED", message: "insights unavailable" } }, { status: 500 })));
+
+		renderWithProviders(<CodeReviewsPage />);
+		await user.click(await screen.findByRole("tab", { name: "Analytics" }));
+
+		expect(await screen.findByText("Decision feedback unavailable")).toBeInTheDocument();
+		expect(screen.getByText("Usage by PR author")).toBeInTheDocument();
+	});
 
   it("filters automatic approvals and successful non-approvals as distinct outcomes", async () => {
     const user = userEvent.setup();
@@ -2389,7 +2502,6 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(await screen.findByRole("button", { name: "Safeguards" }));
     await user.click(
       await screen.findByRole("button", {
         name: /Structured PR-description checks/i,
@@ -2466,7 +2578,6 @@ describe("CodeReviewsPage", () => {
 
     renderWithProviders(<CodeReviewsPage />);
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("button", { name: "Safeguards" }));
     await user.click(screen.getByRole("button", { name: /Reviewers & agents/i }));
     await user.click(await screen.findByRole("combobox", { name: "Reviewer 1 reasoning level" }));
     await user.click(await screen.findByRole("option", { name: "Extra high" }));
@@ -2530,7 +2641,6 @@ describe("CodeReviewsPage", () => {
 
     renderWithProviders(<CodeReviewsPage />);
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("button", { name: "Safeguards" }));
     await user.click(screen.getByRole("button", { name: /Reviewers & agents/i }));
 
     const reasoningSelect = await screen.findByRole("combobox", { name: "Reviewer 1 reasoning level" });
@@ -2738,7 +2848,6 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(await screen.findByRole("button", { name: "Safeguards" }));
     await user.click(await screen.findByRole("button", { name: /Paths, authors & checks/i }));
 
     const sensitivePathsInput = await screen.findByRole("textbox", {
@@ -2804,7 +2913,6 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("button", { name: "Safeguards" }));
     await user.click(screen.getByRole("button", { name: /Approval criteria/i }));
 
     expect(await screen.findByLabelText("Timeout value")).toHaveValue(30);
@@ -2876,7 +2984,6 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(await screen.findByRole("button", { name: "Safeguards" }));
     await user.click(await screen.findByRole("button", { name: /Reviewers & agents/i }));
     await user.click(await screen.findByRole("combobox", { name: "Reviewer 1 model" }));
 
@@ -3529,6 +3636,12 @@ describe("CodeReviewsPage", () => {
     await user.click(screen.getByRole("switch", { name: "Code reviews enabled" }));
     const subsection = await screen.findByRole("button", { name: /Reviewers & agents/i });
     await waitFor(() => expect(subsection).toHaveFocus());
-    expect(screen.getByRole("button", { name: "Safeguards" })).toHaveAttribute("aria-expanded", "true");
+    expect(subsection).toHaveAttribute("aria-expanded", "true");
+    // The save error sits in the Safeguards card above the divided subsection list,
+    // not inside it, so no divider hairline lands against the notice's card border.
+    const notice = screen.getByRole("alert");
+    expect(notice).toHaveTextContent("Could not save this policy setting");
+    expect(notice.parentElement).toBe(screen.getByRole("heading", { level: 3, name: "Safeguards" }).closest("section"));
+    expect(notice.compareDocumentPosition(subsection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });

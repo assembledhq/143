@@ -25,6 +25,9 @@ type captureDisputeStore struct {
 	admittedPayload  ReviewChangedInput
 	guards           []db.CodeReviewDisputeIntakeGuard
 	createErr        error
+	failed           bool
+	failDetail       string
+	failReply        bool
 }
 
 func (s *captureDisputeStore) CreateAndEnqueueTriage(_ context.Context, dispute *models.CodeReviewDispute, guard db.CodeReviewDisputeIntakeGuard) (bool, error) {
@@ -53,6 +56,9 @@ func (s *captureDisputeStore) SetTriage(_ context.Context, _ uuid.UUID, _ uuid.U
 	s.current.Direction = &result.Direction
 	s.current.Routing = &result.Routing
 	s.current.IntakeStatus = models.CodeReviewDisputeIntakeTriaged
+	if result.Routing == models.CodeReviewDisputeRoutingNotADispute || result.Routing == models.CodeReviewDisputeRoutingReviewRequest {
+		s.current.IntakeStatus = models.CodeReviewDisputeIntakeDiscarded
+	}
 	s.current.StatusDetail = &detail
 	if adjudicationEligible {
 		status := models.CodeReviewDisputeAdjudicationPending
@@ -60,7 +66,10 @@ func (s *captureDisputeStore) SetTriage(_ context.Context, _ uuid.UUID, _ uuid.U
 	}
 	return s.current, nil
 }
-func (s *captureDisputeStore) FailTriage(context.Context, uuid.UUID, uuid.UUID, string) error {
+func (s *captureDisputeStore) FailTriage(_ context.Context, _ uuid.UUID, _ uuid.UUID, detail string, replyApplicable bool) error {
+	s.failed = true
+	s.failDetail = detail
+	s.failReply = replyApplicable
 	return nil
 }
 
@@ -85,7 +94,7 @@ func (s *captureDisputeStore) Escalate(context.Context, uuid.UUID, uuid.UUID, uu
 	return models.CodeReviewDispute{}, nil
 }
 func (s *captureDisputeStore) Adjudicate(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.CodeReviewDisputeAdjudicationUpdate) (models.CodeReviewDispute, error) {
-	return models.CodeReviewDispute{}, nil
+	return s.current, nil
 }
 
 type disputeReviewStoreStub struct {
@@ -151,6 +160,21 @@ func (s *disputeJobStoreStub) EnqueueWithOpts(_ context.Context, _ uuid.UUID, op
 type disputeLLMStub struct {
 	response   string
 	userPrompt string
+}
+
+type disputeReviewRequestQueuerStub struct {
+	inputs []ReviewChangedInput
+	result ReviewRequestedResult
+	err    error
+}
+
+func (s *disputeReviewRequestQueuerStub) QueueReviewChanged(_ context.Context, input ReviewChangedInput) (ReviewRequestedResult, error) {
+	s.inputs = append(s.inputs, input)
+	result := s.result
+	if result == (ReviewRequestedResult{}) && s.err == nil {
+		result.Processed = true
+	}
+	return result, s.err
 }
 
 func (s *disputeLLMStub) Complete(_ context.Context, _ string, userPrompt string) (string, error) {
@@ -239,7 +263,7 @@ func TestDisputeService_FileFromGitHubAppliesUntrustedIntakeGuard(t *testing.T) 
 			expectCapture: true,
 		},
 		{
-			name: "capped untrusted filing is declined without an error", association: "NONE",
+			name: "capped untrusted filing cannot fall through to direct review", association: "NONE",
 			createErr: db.ErrCodeReviewDisputeIntakeCapped,
 			expectedGuard: db.CodeReviewDisputeIntakeGuard{
 				Window: codeReviewDisputeIntakeWindow, PerLoginMax: 5, PerPullRequestMax: 20,
@@ -270,7 +294,11 @@ func TestDisputeService_FileFromGitHubAppliesUntrustedIntakeGuard(t *testing.T) 
 				Body: "This should never have been blocked.", GitHubCommentID: 99, SourceVersion: 1,
 			})
 
-			require.NoError(t, err, "an intake ceiling is an admission decision, not an error the webhook should retry")
+			if tt.createErr != nil {
+				require.ErrorIs(t, err, db.ErrCodeReviewDisputeIntakeCapped, "a capped intake should stop direct review fallback without failing the webhook delivery")
+			} else {
+				require.NoError(t, err, "admitted intake should not return an error")
+			}
 			require.Equal(t, tt.expectCapture, captured, "only a stored dispute may suppress ordinary PR feedback handling")
 			require.Equal(t, []db.CodeReviewDisputeIntakeGuard{tt.expectedGuard}, store.guards,
 				"the ceiling must be evaluated in the same transaction as the insert, so it travels with the create call")
@@ -297,7 +325,8 @@ func TestDisputeService_TriageRecordsTrustNotEligibilityInAuthorizationSnapshot(
 		ReassessmentStatus:   models.CodeReviewDisputeReassessmentNotRequested,
 	}}
 	reviews := disputeReviewStoreStub{item: models.CodeReviewListItem{PullRequestAuthor: "octocat"}}
-	service := NewDisputeService(store, reviews, disputePullRequestStoreStub{}, &disputeJobStoreStub{}, nil, "", zerolog.Nop())
+	client := &disputeLLMStub{response: `{"direction":"should_have_approved","contested_reason_codes":[],"dispute_kind":"explanation_question","asserts_new_information":false,"routing":"answer_only","confidence":0.98,"reply":"The review evidence explains the block."}`}
+	service := NewDisputeService(store, reviews, disputePullRequestStoreStub{}, &disputeJobStoreStub{}, client, "", zerolog.Nop())
 
 	err := service.Triage(context.Background(), orgID, disputeID)
 
@@ -339,6 +368,33 @@ func TestDisputeService_TriageDoesNotLetTrustedNonAuthorStartReassessment(t *tes
 		actions = append(actions, authorization.Action)
 	}
 	require.Equal(t, []models.CodeReviewDisputeAuthorizationAction{models.CodeReviewDisputeAuthorizationQueueInfluence}, actions, "queue influence should have one exact durable authorization snapshot")
+}
+
+func TestDisputeService_AdjudicateTrustOverrideEnqueuesRankRefresh(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	disputeID := uuid.New()
+	userID := uuid.New()
+	trustOverride := true
+	store := &captureDisputeStore{current: models.CodeReviewDispute{
+		ID: disputeID, OrgID: orgID, Version: 4, TrustOverride: &trustOverride,
+	}}
+	jobs := &disputeJobStoreStub{}
+	service := NewDisputeService(store, disputeReviewStoreStub{}, disputePullRequestStoreStub{}, jobs, nil, "", zerolog.Nop())
+
+	result, err := service.Adjudicate(context.Background(), orgID, disputeID, userID, models.CodeReviewDisputeAdjudicationUpdate{
+		ExpectedVersion: 3, TrustOverride: &trustOverride, TrustOverridePresent: true,
+	})
+
+	require.NoError(t, err, "adjudicating a trust override should succeed")
+	require.True(t, result.Trusted, "the adjudication response should expose the updated trust decision")
+	require.Len(t, jobs.enqueued, 2, "a trust override should enqueue both the reply and ranking refresh")
+	require.Equal(t, models.JobTypeReplyCodeReviewDispute, jobs.enqueued[0].JobType, "the first follow-up should refresh the durable reply")
+	require.Equal(t, models.JobTypeRankCodeReviewDispute, jobs.enqueued[1].JobType, "the second follow-up should refresh queue eligibility and priority")
+	require.Equal(t, models.CodeReviewInsightPayload{OrgID: orgID}, jobs.enqueued[1].Payload, "the ranking job should target the adjudicated tenant")
+	require.NotNil(t, jobs.enqueued[1].DedupeKey, "the ranking refresh should have a stable dedupe key")
+	require.Contains(t, *jobs.enqueued[1].DedupeKey, disputeID.String()+":trust_override:4", "the ranking refresh should be unique to the accepted dispute version")
 }
 
 // A triage job is enqueued at insert, so it still runs after a later edit of
@@ -474,17 +530,6 @@ func TestDisputeService_TriageResultDeterministic(t *testing.T) {
 				Routing: models.CodeReviewDisputeRoutingPolicySignalOnly, Confidence: 1,
 			},
 		},
-		{
-			name: "acknowledgement is not a dispute",
-			dispute: models.CodeReviewDispute{
-				Source: models.CodeReviewDisputeSourceGitHubComment, Decision: models.CodeReviewDecisionBlocked, Body: "Thanks!",
-			},
-			expected: models.CodeReviewDisputeTriageResult{
-				Direction:   models.CodeReviewDisputeDirectionShouldHaveApproved,
-				DisputeKind: "acknowledgement", Routing: models.CodeReviewDisputeRoutingNotADispute,
-				Confidence: 1, Reply: "Noted. If you meant to challenge this decision, use the reconsideration action in 143.",
-			},
-		},
 	}
 
 	service := &DisputeService{}
@@ -493,8 +538,8 @@ func TestDisputeService_TriageResultDeterministic(t *testing.T) {
 			t.Parallel()
 
 			actual, err := service.triageResult(context.Background(), tt.dispute, nil, models.CodeReviewListItem{}, nil, nil)
-			require.NoError(t, err, "deterministic dispute triage should not require an LLM")
-			require.Equal(t, tt.expected, actual, "triage should return the exact deterministic classification")
+			require.NoError(t, err, "explicit in-app dispute actions should not require an LLM")
+			require.Equal(t, tt.expected, actual, "explicit actions should return the exact deterministic route")
 		})
 	}
 }
@@ -516,8 +561,199 @@ func TestDisputeService_TriageAnswerOnlyUsesReviewEvidence(t *testing.T) {
 	require.NoError(t, err, "an explanation question should be answered from review evidence")
 	require.Equal(t, models.CodeReviewDisputeRoutingAnswerOnly, result.Routing, "the evidence answer should remain answer-only")
 	require.Equal(t, "The review blocked because the authorization finding is P1.", result.Reply, "the reply should contain the evidence-grounded answer")
-	require.Contains(t, client.userPrompt, `"deterministic_route_hint":"answer_only"`, "the LLM should receive the deterministic answer-only hint")
+	require.NotContains(t, client.userPrompt, "deterministic_route_hint", "punctuation must not bias the LLM route")
 	require.Contains(t, client.userPrompt, "A P1 authorization finding blocked approval.", "the LLM should receive the bounded review evidence")
+}
+
+func TestDisputeService_GitHubCommentMeaningIsClassifiedOnlyByLLM(t *testing.T) {
+	t.Parallel()
+
+	comments := []string{
+		"Thanks!",
+		"@assembledhq/143-code-reviewer can you re-review this?",
+		"@assembledhq/143-code-reviewer I don't believe this is a sensitive change judgment; this is only minor security hardening.",
+		"@assembledhq/143-code-reviewer while this technically touches OAuth code, it only fixes the mutex error path.",
+		"@assembledhq/143-code-reviewer this is adding security tightening and should be safe based on the observed sign-on rates.",
+	}
+	for _, comment := range comments {
+		comment := comment
+		t.Run(comment, func(t *testing.T) {
+			t.Parallel()
+
+			client := &disputeLLMStub{response: `{"direction":"should_have_approved","contested_reason_codes":[],"dispute_kind":"security_hardening","asserts_new_information":true,"routing":"reassess","confidence":0.97,"reply":"I will reassess the stated hardening rationale."}`}
+			service := &DisputeService{llm: client}
+			result, err := service.triageResult(context.Background(), models.CodeReviewDispute{
+				Source: models.CodeReviewDisputeSourceGitHubComment, Decision: models.CodeReviewDecisionBlocked,
+				Body: comment, FiledByLogin: "octocat",
+			}, nil, models.CodeReviewListItem{}, nil, nil)
+
+			require.NoError(t, err, "every post-decision GitHub comment should reach LLM classification")
+			require.Equal(t, models.CodeReviewDisputeRoutingReassess, result.Routing, "the LLM output should determine the semantic route")
+			require.Contains(t, client.userPrompt, comment, "the exact human comment should be passed as untrusted evidence")
+			require.NotContains(t, client.userPrompt, "deterministic_route_hint", "keyword and punctuation hints should not influence classification")
+		})
+	}
+}
+
+func TestDisputeService_ReviewRequestQueuesNormalReviewWithoutDisputeArtifacts(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	disputeID := uuid.New()
+	pullRequestID := uuid.New()
+	repositoryID := uuid.New()
+	commentID := int64(5196810672)
+	store := &captureDisputeStore{current: models.CodeReviewDispute{
+		ID: disputeID, OrgID: orgID, PullRequestID: pullRequestID, RepositoryID: repositoryID,
+		SessionID: uuid.New(), PolicyID: uuid.New(), Source: models.CodeReviewDisputeSourceGitHubComment,
+		Decision: models.CodeReviewDecisionBlocked, Body: "@acme/reviewers please review again",
+		FiledByLogin: "octocat", AuthorAssociation: "MEMBER", AuthorIsPRAuthor: true,
+		RepositoryVisibility: models.CodeReviewRepositoryVisibilityPublic,
+		GitHubCommentID:      &commentID,
+		QueueSignals:         json.RawMessage(`{"review_request_allowed":true,"github_comment_url":"https://github.com/acme/payments/pull/42#issuecomment-5196810672"}`),
+		IntakeStatus:         models.CodeReviewDisputeIntakePending,
+		ReassessmentStatus:   models.CodeReviewDisputeReassessmentNotRequested,
+	}}
+	client := &disputeLLMStub{response: `{"direction":"should_have_approved","contested_reason_codes":[],"dispute_kind":"review_request","asserts_new_information":false,"routing":"review_request","confidence":0.99,"reply":""}`}
+	jobs := &disputeJobStoreStub{}
+	queue := &disputeReviewRequestQueuerStub{}
+	service := NewDisputeService(store, disputeReviewStoreStub{reasons: []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonLinesLimitExceeded}}, disputePullRequestStoreStub{pullRequest: models.PullRequest{
+		ID: pullRequestID, OrgID: orgID, GitHubRepo: "acme/payments", GitHubPRNumber: 42,
+	}}, jobs, client, "", zerolog.Nop())
+	service.SetPullRequestSnapshotter(disputePullRequestSnapshotterStub{snapshot: ghservice.CodeReviewPullRequestSnapshot{
+		Number: 42, HTMLURL: "https://github.com/acme/payments/pull/42", Title: "Harden auth",
+		AuthorLogin: "octocat", HeadSHA: "latest-head", BaseSHA: "base", FromFork: false,
+	}})
+	service.SetReviewRequestQueuer(queue)
+
+	err := service.Triage(context.Background(), orgID, disputeID)
+
+	require.NoError(t, err, "a bare review request should return to the ordinary durable review path")
+	require.Equal(t, models.CodeReviewDisputeRoutingReviewRequest, store.triage.Routing, "the review_request classification should be retained for audit")
+	require.Nil(t, store.current.AdjudicationStatus, "an ordinary review request must not enter the disputes queue")
+	require.Empty(t, store.authorizations, "an ordinary review request must not record dispute influence authorization")
+	require.Len(t, jobs.enqueued, 1, "the normal review route should only enqueue the ranking refresh")
+	require.Equal(t, models.JobTypeRankCodeReviewDispute, jobs.enqueued[0].JobType, "the normal review route must not enqueue a duplicate GitHub reply")
+	require.Len(t, queue.inputs, 1, "the normal review lifecycle should receive exactly one idempotent request")
+	queued := queue.inputs[0]
+	require.Equal(t, models.CodeReviewTriggerSourceTeamReviewer, queued.TriggerSource, "the ordinary review should retain the team-reviewer trigger")
+	require.Nil(t, queued.TriggeringDisputeID, "an ordinary review request must not be linked as a dispute reassessment")
+	require.Equal(t, &disputeID, queued.ReviewRequestDisputeID, "the starter should retain failure-only correlation to the classified request")
+	require.Equal(t, "latest-head", queued.HeadSHA, "the review should target the authoritative current head")
+	require.NotNil(t, queued.RequestContext, "the classified review request should retain its human-authored context")
+	require.Equal(t, "@acme/reviewers please review again", queued.RequestContext.Body, "the comment should still reach orchestrator synthesis")
+}
+
+func TestDisputeService_ApprovedDecisionQuestionRemainsAnswerOnly(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	disputeID := uuid.New()
+	store := &captureDisputeStore{current: models.CodeReviewDispute{
+		ID: disputeID, OrgID: orgID, SessionID: uuid.New(), Source: models.CodeReviewDisputeSourceGitHubComment,
+		Decision: models.CodeReviewDecisionApproved, Body: "Why was this approved?",
+		AuthorAssociation: "MEMBER", RepositoryVisibility: models.CodeReviewRepositoryVisibilityPublic,
+		IntakeStatus: models.CodeReviewDisputeIntakePending,
+	}}
+	client := &disputeLLMStub{response: `{"direction":"should_not_have_approved","contested_reason_codes":[],"dispute_kind":"approval_question","asserts_new_information":false,"routing":"answer_only","confidence":0.98,"reply":"The stored evidence explains the approval."}`}
+	jobs := &disputeJobStoreStub{}
+	service := NewDisputeService(store, disputeReviewStoreStub{}, disputePullRequestStoreStub{}, jobs, client, "", zerolog.Nop())
+
+	err := service.Triage(context.Background(), orgID, disputeID)
+
+	require.NoError(t, err, "approval monotonicity should not turn a question into a policy dispute")
+	require.Equal(t, models.CodeReviewDisputeRoutingAnswerOnly, store.triage.Routing, "only reassessment routes should be closed after an approval")
+	require.Nil(t, store.current.AdjudicationStatus, "an explanation question should not enter policy-owner adjudication")
+	require.Len(t, jobs.enqueued, 2, "the evidence-grounded answer and ranking refresh should each be enqueued once")
+	require.Equal(t, models.JobTypeReplyCodeReviewDispute, jobs.enqueued[0].JobType, "the evidence-grounded answer should be published once")
+	require.Equal(t, models.JobTypeRankCodeReviewDispute, jobs.enqueued[1].JobType, "triage should refresh dispute ranking after publishing the answer")
+}
+
+func TestDisputeService_ReviewRequestSafetyChecksRunAfterClassification(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	disputeID := uuid.New()
+	commentID := int64(123)
+	store := &captureDisputeStore{current: models.CodeReviewDispute{
+		ID: disputeID, OrgID: orgID, SessionID: uuid.New(), Source: models.CodeReviewDisputeSourceGitHubComment,
+		Decision: models.CodeReviewDecisionBlocked, Body: "@acme/reviewers please review again",
+		FiledByLogin: "octocat", AuthorAssociation: "MEMBER", AuthorIsPRAuthor: true,
+		RepositoryVisibility: models.CodeReviewRepositoryVisibilityPublic, GitHubCommentID: &commentID,
+		QueueSignals: json.RawMessage(`{"review_request_allowed":false}`), IntakeStatus: models.CodeReviewDisputeIntakePending,
+	}}
+	client := &disputeLLMStub{response: `{"direction":"should_have_approved","contested_reason_codes":[],"dispute_kind":"review_request","asserts_new_information":false,"routing":"review_request","confidence":0.99,"reply":""}`}
+	jobs := &disputeJobStoreStub{}
+	queue := &disputeReviewRequestQueuerStub{}
+	service := NewDisputeService(store, disputeReviewStoreStub{}, disputePullRequestStoreStub{}, jobs, client, "", zerolog.Nop())
+	service.SetReviewRequestQueuer(queue)
+
+	err := service.Triage(context.Background(), orgID, disputeID)
+
+	require.NoError(t, err, "an edited review request should be classified without starting work")
+	require.Equal(t, models.CodeReviewDisputeRoutingNotADispute, store.triage.Routing, "the event provenance guard should override the expensive route after LLM classification")
+	require.Equal(t, "An edited comment can't start another code review. Post a new reviewer mention to request one.", store.triage.Reply, "the commenter should receive the exact safety explanation")
+	require.Empty(t, queue.inputs, "editing an existing comment must not start another agent fan-out")
+	require.Len(t, jobs.enqueued, 2, "the safety explanation and ranking refresh should each be enqueued once")
+	require.Equal(t, models.JobTypeReplyCodeReviewDispute, jobs.enqueued[0].JobType, "the safety explanation should use one marker-protected dispute reply")
+	require.Equal(t, models.JobTypeRankCodeReviewDispute, jobs.enqueued[1].JobType, "triage should refresh dispute ranking after publishing the safety explanation")
+}
+
+func TestDisputeService_FailedTriageFallsBackForTrustedPullRequestAuthor(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	disputeID := uuid.New()
+	pullRequestID := uuid.New()
+	commentID := int64(456)
+	store := &captureDisputeStore{current: models.CodeReviewDispute{
+		ID: disputeID, OrgID: orgID, PullRequestID: pullRequestID, RepositoryID: uuid.New(),
+		Source: models.CodeReviewDisputeSourceGitHubComment, Decision: models.CodeReviewDecisionBlocked,
+		Body: "@acme/reviewers please take another look", FiledByLogin: "octocat",
+		AuthorAssociation: "MEMBER", AuthorIsPRAuthor: true,
+		RepositoryVisibility: models.CodeReviewRepositoryVisibilityPublic, GitHubCommentID: &commentID,
+		QueueSignals: json.RawMessage(`{"review_request_allowed":true}`), IntakeStatus: models.CodeReviewDisputeIntakePending,
+	}}
+	jobs := &disputeJobStoreStub{}
+	queue := &disputeReviewRequestQueuerStub{}
+	service := NewDisputeService(store, disputeReviewStoreStub{}, disputePullRequestStoreStub{pullRequest: models.PullRequest{
+		ID: pullRequestID, OrgID: orgID, GitHubRepo: "acme/payments", GitHubPRNumber: 42,
+	}}, jobs, nil, "", zerolog.Nop())
+	service.SetPullRequestSnapshotter(disputePullRequestSnapshotterStub{snapshot: ghservice.CodeReviewPullRequestSnapshot{
+		Number: 42, HeadSHA: "latest-head", AuthorLogin: "octocat",
+	}})
+	service.SetReviewRequestQueuer(queue)
+
+	err := service.FailTriage(context.Background(), orgID, disputeID, "classification failed")
+
+	require.NoError(t, err, "trusted-author comments should retain a useful fallback when classification exhausts retries")
+	require.True(t, store.failed, "the failed intake should remain durable and visible")
+	require.False(t, store.failReply, "the normal review status should replace a duplicate dispute reply")
+	require.Equal(t, "We could not classify this comment automatically, so we started a normal code review instead.", store.failDetail, "the durable failure state should explain the fallback")
+	require.Len(t, queue.inputs, 1, "the original comment should still reach the ordinary review lifecycle")
+	require.Empty(t, jobs.enqueued, "a successful fallback should not enqueue a second GitHub reply")
+}
+
+func TestDisputeService_FailedReviewRequestBecomesVisibleAndReplyable(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	disputeID := uuid.New()
+	routing := models.CodeReviewDisputeRoutingReviewRequest
+	store := &captureDisputeStore{current: models.CodeReviewDispute{
+		ID: disputeID, OrgID: orgID, Source: models.CodeReviewDisputeSourceGitHubComment,
+		Routing: &routing, IntakeStatus: models.CodeReviewDisputeIntakeDiscarded,
+	}}
+	jobs := &disputeJobStoreStub{}
+	service := NewDisputeService(store, disputeReviewStoreStub{}, disputePullRequestStoreStub{}, jobs, nil, "", zerolog.Nop())
+
+	err := service.FailTriage(context.Background(), orgID, disputeID, "triage job exhausted retries")
+
+	require.NoError(t, err, "a classified review request that cannot start should reach a terminal visible state")
+	require.True(t, store.failed, "the discarded routing row should transition to failed")
+	require.True(t, store.failReply, "the commenter should receive a marker-protected failure response")
+	require.Equal(t, "We classified this as a code review request but could not start the review. Post a new reviewer mention to try again.", store.failDetail, "the terminal detail should explain the failed handoff")
+	require.Len(t, jobs.enqueued, 1, "the terminal failure should enqueue exactly one GitHub response")
 }
 
 func TestDeterministicPolicySignalReplyNamesSettingsAndValues(t *testing.T) {
@@ -607,54 +843,6 @@ func TestCodeReviewDisputeSemanticHashNormalization(t *testing.T) {
 
 			actual := codeReviewDisputeSemanticHash(tt.head, policyID, tt.evidence, tt.title, tt.body)
 			require.Equal(t, tt.expected, baseline == actual, "semantic input hashing should normalize non-meaningful text changes")
-		})
-	}
-}
-
-func TestIsLikelyDisputeMention(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		body     string
-		expected bool
-	}{
-		{name: "bare review request is not diverted", body: "@acme/reviewers review this PR", expected: false},
-		{name: "explicit disagreement is captured", body: "@acme/reviewers this is wrong; the test already covers it", expected: true},
-		{name: "explanation question is captured", body: "@acme/reviewers why was this blocked?", expected: true},
-		{name: "unsafe approval report is captured", body: "@acme/reviewers this approval is unsafe", expected: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			actual := IsLikelyDisputeMention(tt.body)
-			require.Equal(t, tt.expected, actual, "mention routing should distinguish objections from ordinary review requests")
-		})
-	}
-}
-
-func TestContainsDisputeObjection(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		body     string
-		expected bool
-	}{
-		{name: "re-review request is not an objection", body: "@acme/reviewers can you re-review this?", expected: false},
-		{name: "plain question is not an objection", body: "@acme/reviewers what triggered this?", expected: false},
-		{name: "disagreement is an objection", body: "@acme/reviewers I disagree, this is covered", expected: true},
-		{name: "should-have phrasing is an objection", body: "@acme/reviewers this should have been approved", expected: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			require.Equal(t, tt.expected, ContainsDisputeObjection(tt.body),
-				"a question mark alone must not divert an explicit review request into dispute intake")
 		})
 	}
 }

@@ -12,7 +12,7 @@ import (
 )
 
 var rcColumns = []string{
-	"id", "pull_request_id", "org_id", "github_comment_id", "reviewer", "body",
+	"id", "pull_request_id", "org_id", "github_comment_id", "reviewer", "reviewer_type", "body",
 	"diff_path", "diff_position", "filter_status", "category", "actionable",
 	"generalizable", "generalized_rule", "summary", "applied", "created_at",
 }
@@ -22,7 +22,7 @@ func rcIntPtr(i int) *int       { return &i }
 
 func newReviewCommentRow(id, prID, orgID uuid.UUID, now time.Time) []any {
 	return []any{
-		id, prID, orgID, int64(1001), "reviewer-alice", "Please fix the nil check",
+		id, prID, orgID, int64(1001), "reviewer-alice", "User", "Please fix the nil check",
 		rcStrPtr("main.go"), rcIntPtr(42), "pending", (*string)(nil), false,
 		false, (*string)(nil), (*string)(nil), false, now,
 	}
@@ -43,6 +43,7 @@ func TestReviewCommentStore_Create_Success(t *testing.T) {
 		OrgID:           uuid.New(),
 		GitHubCommentID: 1001,
 		Reviewer:        "reviewer-alice",
+		ReviewerType:    "User",
 		Body:            "Please fix the nil check",
 		DiffPath:        rcStrPtr("main.go"),
 		DiffPosition:    rcIntPtr(42),
@@ -51,7 +52,7 @@ func TestReviewCommentStore_Create_Success(t *testing.T) {
 
 	mock.ExpectQuery("INSERT INTO review_comments").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at"}).
 				AddRow(generatedID, now),
@@ -79,6 +80,7 @@ func TestReviewCommentStore_Create_DuplicateGitHubCommentID(t *testing.T) {
 		OrgID:           uuid.New(),
 		GitHubCommentID: 1001,
 		Reviewer:        "reviewer-alice",
+		ReviewerType:    "User",
 		Body:            "Please fix the nil check",
 		FilterStatus:    "pending",
 	}
@@ -86,7 +88,7 @@ func TestReviewCommentStore_Create_DuplicateGitHubCommentID(t *testing.T) {
 	// ON CONFLICT DO UPDATE SET id = review_comments.id returns the existing row on conflict.
 	mock.ExpectQuery("INSERT INTO review_comments").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at"}).
 				AddRow(existingID, existingTime),
@@ -125,6 +127,7 @@ func TestReviewCommentStore_GetByID_Success(t *testing.T) {
 	require.Equal(t, orgID, rc.OrgID, "should return the correct org ID")
 	require.Equal(t, int64(1001), rc.GitHubCommentID, "should return the correct GitHub comment ID")
 	require.Equal(t, "reviewer-alice", rc.Reviewer, "should return the correct reviewer")
+	require.Equal(t, "User", rc.ReviewerType, "should return the reviewer type")
 	require.Equal(t, "Please fix the nil check", rc.Body, "should return the correct body")
 	require.Equal(t, rcStrPtr("main.go"), rc.DiffPath, "should return the correct diff path")
 	require.Equal(t, rcIntPtr(42), rc.DiffPosition, "should return the correct diff position")
@@ -318,7 +321,7 @@ func TestReviewCommentStore_ListActionableByPullRequest_Success(t *testing.T) {
 
 	// Construct a row where actionable=true and filter_status='accepted'
 	actionableRow := []any{
-		id, prID, orgID, int64(1001), "reviewer-alice", "Please fix the nil check",
+		id, prID, orgID, int64(1001), "reviewer-alice", "User", "Please fix the nil check",
 		rcStrPtr("main.go"), rcIntPtr(42), "accepted", rcStrPtr("style"), true,
 		false, (*string)(nil), (*string)(nil), false, now,
 	}

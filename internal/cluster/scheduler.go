@@ -246,6 +246,7 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 	// Enqueue daily audit retention cleanup for each org (deduplicated per day).
 	s.scheduleAuditRetentionCleanup(ctx, orgIDs, now)
 	s.scheduleDataRetentionCleanup(ctx, orgIDs, now)
+	s.scheduleDailyJob(ctx, "feedback", models.JobTypeReconcileCodeReviewOutcomes, orgIDs, now)
 
 	// Second pass: reap stuck automation runs so a crashed worker does not
 	// saturate max_concurrent forever. Runs before scheduleAutomationRuns so a
@@ -409,17 +410,17 @@ func (s *Scheduler) scheduleLinearTeamKeyRefresh(ctx context.Context, orgIDs []u
 }
 
 func (s *Scheduler) scheduleAuditRetentionCleanup(ctx context.Context, orgIDs []uuid.UUID, now time.Time) {
-	s.scheduleDailyCleanupJob(ctx, "audit_retention_cleanup", orgIDs, now)
+	s.scheduleDailyJob(ctx, "default", "audit_retention_cleanup", orgIDs, now)
 }
 
 func (s *Scheduler) scheduleDataRetentionCleanup(ctx context.Context, orgIDs []uuid.UUID, now time.Time) {
-	s.scheduleDailyCleanupJob(ctx, "data_retention_cleanup", orgIDs, now)
+	s.scheduleDailyJob(ctx, "default", "data_retention_cleanup", orgIDs, now)
 }
 
-// scheduleDailyCleanupJob enqueues one job per org, deduplicated per UTC day.
+// scheduleDailyJob enqueues one job per org, deduplicated per UTC day.
 // It avoids N redundant Enqueue calls on every scheduler tick after the first
 // tick of the day.
-func (s *Scheduler) scheduleDailyCleanupJob(ctx context.Context, jobType string, orgIDs []uuid.UUID, now time.Time) {
+func (s *Scheduler) scheduleDailyJob(ctx context.Context, queue, jobType string, orgIDs []uuid.UUID, now time.Time) {
 	dateKey := now.UTC().Format("2006-01-02")
 	if s.lastDailyJobDates == nil {
 		s.lastDailyJobDates = make(map[string]string)
@@ -428,15 +429,19 @@ func (s *Scheduler) scheduleDailyCleanupJob(ctx context.Context, jobType string,
 		return
 	}
 
+	allEnqueued := true
 	for _, orgID := range orgIDs {
 		dedupeKey := fmt.Sprintf("%s:%s:%s", jobType, orgID.String(), dateKey)
 		payload := map[string]string{"org_id": orgID.String()}
-		if _, err := s.jobs.Enqueue(ctx, orgID, "default", jobType, payload, 1, &dedupeKey); err != nil {
+		if _, err := s.jobs.Enqueue(ctx, orgID, queue, jobType, payload, 1, &dedupeKey); err != nil {
+			allEnqueued = false
 			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msgf("failed to enqueue %s job", jobType)
 		}
 	}
 
-	s.lastDailyJobDates[jobType] = dateKey
+	if allEnqueued {
+		s.lastDailyJobDates[jobType] = dateKey
+	}
 }
 
 // reapStrandedPendingSnapshots clears pending_snapshot_key on sessions whose

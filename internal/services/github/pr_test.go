@@ -7165,7 +7165,7 @@ func TestCheckpointExistingPullRequestPublicationPreservesMergedLifecycle(t *tes
 	mock.ExpectQuery("UPDATE sessions SET status").WithArgs(githubAnyArgs(3)...).
 		WillReturnRows(pgxmock.NewRows(prHealthSessionColumns).AddRow(newPRHealthSessionRow(sessionID, orgID, now, models.SessionStatusPRCreated)...))
 	mock.ExpectExec("UPDATE pull_requests SET status").WithArgs(pgx.NamedArgs{
-		"id": pullRequestID, "org_id": orgID, "status": models.PullRequestStatusMerged,
+		"id": pullRequestID, "org_id": orgID, "status": models.PullRequestStatusMerged, "merged_at": pgxmock.AnyArg(),
 	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE session_publications[\\s\\S]*SET state").
 		WithArgs(githubAnyArgs(7)...).

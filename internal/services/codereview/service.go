@@ -61,6 +61,7 @@ type JobStore interface {
 const (
 	codeReviewJobMaxAttempts          = 8
 	codeReviewJobEnqueueGracePeriod   = time.Minute
+	defaultReassessmentDebounce       = time.Minute
 	explicitReviewRequestChangeReason = "pull_request.review_requested"
 	commentMentionChangeReason        = "issue_comment.mentioned"
 	codeReviewUndispatchedReason      = "code review job was not queued"
@@ -83,9 +84,10 @@ type Service struct {
 }
 
 type Config struct {
-	AppReviewerLogins []string
-	AliasLogins       []string
-	TeamSlugs         []string
+	AppReviewerLogins    []string
+	AliasLogins          []string
+	TeamSlugs            []string
+	ReassessmentDebounce time.Duration
 }
 
 type ReviewRequestedInput struct {
@@ -150,6 +152,10 @@ type ReviewChangedInput struct {
 	ExplicitRequest        bool                           `json:"explicit_request,omitempty"`
 	TriggerSource          models.CodeReviewTriggerSource `json:"trigger_source,omitempty"`
 	TriggeringDisputeID    *uuid.UUID                     `json:"triggering_dispute_id,omitempty"`
+	// ReviewRequestDisputeID correlates a classified ordinary review request
+	// with starter failures only. Unlike TriggeringDisputeID, it must never flow
+	// into review metadata or the dispute reassessment/reply lifecycle.
+	ReviewRequestDisputeID *uuid.UUID `json:"review_request_dispute_id,omitempty"`
 }
 
 type ReviewRequestedResult struct {
@@ -659,9 +665,10 @@ func (s *Service) handleExplicitReviewRequest(
 	return queued, nil
 }
 
-// QueueReviewChanged durably records a pass-relevant webhook change. The
-// starter job waits for any older assessment to finish, so a change cannot be
-// acknowledged and then lost merely because reviewer agents are still active.
+// QueueReviewChanged durably records a pass-relevant webhook change. Automatic
+// head changes wait for a quiet window; explicit requests remain immediate.
+// The starter job also waits for any older assessment to finish, so a change
+// cannot be acknowledged and then lost merely because reviewer agents are active.
 func (s *Service) QueueReviewChanged(ctx context.Context, input ReviewChangedInput) (ReviewRequestedResult, error) {
 	if input.OrgID == uuid.Nil || input.RepositoryID == uuid.Nil || input.PullRequestID == uuid.Nil {
 		return ReviewRequestedResult{}, fmt.Errorf("org_id, repository_id, and pull_request_id are required")
@@ -686,20 +693,41 @@ func (s *Service) QueueReviewChanged(ctx context.Context, input ReviewChangedInp
 	if err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("load current code review before queueing reassessment: %w", err)
 	}
+	if !input.ExplicitRequest && strings.EqualFold(strings.TrimSpace(latest.HeadSHA), strings.TrimSpace(input.HeadSHA)) {
+		switch latest.Status {
+		case models.CodeReviewSessionStatusQueued, models.CodeReviewSessionStatusRunning, models.CodeReviewSessionStatusCompleted:
+			result := reusedReviewRequestedResult(latest, latest.TriggerSource)
+			result.IgnoredReason = "change_already_reassessed"
+			return result, nil
+		}
+	}
 	input.PriorSessionID = latest.SessionID
 	dedupeKey := fmt.Sprintf("code_review_reassessment:%s:%s", input.PullRequestID, strings.TrimSpace(input.ChangeKey))
+	var runAt *time.Time
+	if !input.ExplicitRequest {
+		debouncedUntil := time.Now().UTC().Add(s.reassessmentDebounce())
+		runAt = &debouncedUntil
+	}
 	jobID, err := s.jobs.EnqueueWithOpts(ctx, input.OrgID, db.EnqueueOpts{
 		Queue:       "agent",
 		JobType:     models.JobTypeStartCodeReviewReassessment,
 		Payload:     input,
 		Priority:    5,
 		DedupeKey:   &dedupeKey,
+		RunAt:       runAt,
 		MaxAttempts: codeReviewJobMaxAttempts,
 	})
 	if err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("enqueue code review reassessment starter: %w", err)
 	}
 	return ReviewRequestedResult{Processed: true, JobID: jobID}, nil
+}
+
+func (s *Service) reassessmentDebounce() time.Duration {
+	if s.cfg.ReassessmentDebounce > 0 {
+		return s.cfg.ReassessmentDebounce
+	}
+	return defaultReassessmentDebounce
 }
 
 // HandleReviewChanged recomputes the recommendation for a PR that previously
@@ -1152,6 +1180,20 @@ func retryOutputKey(base string, previousAttemptID uuid.UUID) string {
 func reassessmentOutputKey(base, changeKey string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(changeKey)))
 	return fmt.Sprintf("%s:change:%x", base, sum[:])
+}
+
+// MaterialChangeKey identifies the head revision covered by an automatic PR
+// reassessment. Both webhook admission and the delayed starter use this exact
+// encoding so a newer webhook and a stale starter converge on one durable job.
+func MaterialChangeKey(headSHA string) (string, error) {
+	raw, err := json.Marshal(struct {
+		HeadSHA string `json:"head_sha"`
+	}{HeadSHA: strings.TrimSpace(headSHA)})
+	if err != nil {
+		return "", fmt.Errorf("marshal material assessment state: %w", err)
+	}
+	sum := sha256.Sum256(raw)
+	return fmt.Sprintf("material:%x", sum[:]), nil
 }
 
 func explicitReviewRequestOutputKey(pullRequestID uuid.UUID, deliveryID string) string {

@@ -23,9 +23,14 @@ const codeReviewActiveHeadConstraint = "idx_code_review_metadata_active_head"
 
 type CodeReviewStore struct {
 	db      DBTX
+	jobs    *JobStore
 	streams *cache.CodeReviewStreams
 	logger  zerolog.Logger
 }
+
+// SetJobStore wires the durable rank refresh triggered by policy supersession.
+// lint:allow-no-orgid reason="process-wide dependency injection for the durable job queue"
+func (s *CodeReviewStore) SetJobStore(jobs *JobStore) { s.jobs = jobs }
 
 func NewCodeReviewStore(db DBTX) *CodeReviewStore {
 	return &CodeReviewStore{db: db, logger: zerolog.Nop()}
@@ -417,8 +422,23 @@ func (s *CodeReviewStore) savePolicy(ctx context.Context, orgID uuid.UUID, confi
 	if err != nil {
 		return models.CodeReviewPolicyRecord{}, err
 	}
+	var rankJobID uuid.UUID
+	if s.jobs != nil {
+		dedupeKey := "rank_code_review_disputes:policy:" + orgID.String() + ":" + record.ID.String()
+		rankJobID, err = s.jobs.EnqueueInTxWithOpts(ctx, tx, orgID, EnqueueOpts{
+			Queue: "feedback", JobType: models.JobTypeRankCodeReviewDispute,
+			Payload: models.CodeReviewInsightPayload{OrgID: orgID}, Priority: 2,
+			DedupeKey: &dedupeKey, MaxAttempts: 6,
+		})
+		if err != nil {
+			return models.CodeReviewPolicyRecord{}, fmt.Errorf("enqueue policy supersession rank refresh: %w", err)
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return models.CodeReviewPolicyRecord{}, fmt.Errorf("commit code review policy tx: %w", err)
+	}
+	if rankJobID != uuid.Nil {
+		s.jobs.Notify(ctx, rankJobID)
 	}
 	logEvent := s.logger.Info().
 		Str("org_id", orgID.String()).
@@ -717,6 +737,40 @@ func (s *CodeReviewStore) HasApprovedByPullRequest(ctx context.Context, orgID, p
 	return approved, nil
 }
 
+func (s *CodeReviewStore) HasPriorDeterministicEarlyStop(ctx context.Context, orgID, pullRequestID, sessionID uuid.UUID, headSHA string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM code_review_session_metadata prior
+			JOIN code_review_policies policy
+			  ON policy.org_id = prior.org_id AND policy.id = prior.policy_id
+			WHERE prior.org_id = @org_id
+			  AND prior.pull_request_id = @pull_request_id
+			  AND prior.session_id <> @session_id
+			  AND prior.head_sha = @head_sha
+			  AND prior.status = 'completed'
+			  AND COALESCE((policy.risk_policy->>'stop_after_deterministic_failure')::boolean, false)
+			  AND jsonb_array_length(COALESCE(prior.risk_reason_details, '[]'::jsonb)) > 0
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM jsonb_array_elements(COALESCE(prior.risk_reason_details, '[]'::jsonb)) reason
+				WHERE NOT (reason->>'code' = ANY(@stable_reason_codes))
+			  )
+			  AND NOT EXISTS (
+				SELECT 1 FROM code_review_agent_results result
+				WHERE result.org_id = prior.org_id AND result.session_id = prior.session_id
+			  )
+		)`, pgx.NamedArgs{
+		"org_id": orgID, "pull_request_id": pullRequestID, "session_id": sessionID, "head_sha": strings.TrimSpace(headSHA),
+		"stable_reason_codes": models.CodeReviewStableDeterministicRiskReasonStrings(),
+	}).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("query prior deterministic early stop: %w", err)
+	}
+	return exists, nil
+}
+
 func (s *CodeReviewStore) GetRunningByPullRequestHead(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA string, policyID uuid.UUID) (models.CodeReviewSessionMetadata, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT `+codeReviewMetadataColumns+`
@@ -908,6 +962,34 @@ func (s *CodeReviewStore) SetPromptRecordKey(ctx context.Context, orgID, session
 		return models.CodeReviewSessionMetadata{}, fmt.Errorf("set code review prompt record key: %w", err)
 	}
 	return collectOneCodeReviewMetadata(rows)
+}
+
+// SetProvisionalReviewBody durably updates the rolling GitHub comment while a
+// review is still running. CompleteReview replaces this field with the one
+// terminal decision body, so provisional publication never creates a decision.
+func (s *CodeReviewStore) SetProvisionalReviewBody(ctx context.Context, orgID, sessionID uuid.UUID, body string) (models.CodeReviewSessionMetadata, error) {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("provisional review body is required")
+	}
+	rows, err := s.db.Query(ctx, `
+		UPDATE code_review_session_metadata
+		SET final_review_body = @body
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		  AND status IN ('queued', 'running')
+		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "body": body,
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("set provisional code review body: %w", err)
+	}
+	metadata, err := collectOneCodeReviewMetadata(rows)
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	s.publishUpdated(ctx, metadata)
+	return metadata, nil
 }
 
 func (s *CodeReviewStore) MarkStaleForPullRequestExceptHead(ctx context.Context, orgID, pullRequestID uuid.UUID, currentHeadSHA string, supersededBySessionID *uuid.UUID) (int64, error) {

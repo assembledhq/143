@@ -922,7 +922,7 @@ func TestWebhook_CodeReviewReassessmentUsesSameKeyForEquivalentDeliveries(t *tes
 	now := time.Now().UTC()
 	metadata := &codeReviewWebhookMetadataStore{latest: models.CodeReviewSessionMetadata{
 		ID: uuid.New(), SessionID: priorSessionID, RepositoryID: repoID, PullRequestID: prID, PolicyID: policyID,
-		HeadSHA: "head-sha", TriggerSource: models.CodeReviewTriggerSourceTeamReviewer,
+		HeadSHA: "previous-head-sha", TriggerSource: models.CodeReviewTriggerSourceTeamReviewer,
 		Status: models.CodeReviewSessionStatusCompleted, ReviewOutputKey: "prior-output",
 	}}
 	jobs := &codeReviewWebhookJobStore{jobID: uuid.New()}
@@ -1281,24 +1281,23 @@ func TestWebhook_HandleCodeReviewMentionedDoesNotStartAReviewWhenDisputeCaptureF
 	require.Empty(t, rr.Body.String(), "a non-fatal capture failure should not write an error response")
 }
 
-// A finding thread is also the main channel for PR feedback follow-through, and
-// capture marks the feedback item ignored with no way back. An actionable reply
-// that does not object must therefore stay with follow-through.
-func TestWebhook_HandleCodeReviewInlineDisputeLeavesActionableRepliesToFeedback(t *testing.T) {
+// Inline finding replies enter the same asynchronous LLM classification path.
+// Comments classified as not_a_dispute are later released back to ordinary PR
+// feedback follow-through, so the webhook does not guess from wording.
+func TestWebhook_HandleCodeReviewInlineDisputeDefersMeaningToTriage(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
 	repoID := uuid.New()
 	rootID := int64(778899)
 	tests := []struct {
-		name              string
-		body              string
-		expectIntakeEntry bool
+		name string
+		body string
 	}{
-		{name: "actionable reply stays with follow-through", body: "Good catch, please apply that rename."},
-		{name: "acknowledgement stays with follow-through", body: "Thanks, fixing now."},
-		{name: "objection enters intake", body: "I disagree, the helper already handles nil.", expectIntakeEntry: true},
-		{name: "question enters intake", body: "Why is this flagged as sensitive?", expectIntakeEntry: true},
+		{name: "actionable reply is classified asynchronously", body: "Good catch, please apply that rename."},
+		{name: "acknowledgement is classified asynchronously", body: "Thanks, fixing now."},
+		{name: "objection is classified asynchronously", body: "I disagree, the helper already handles nil."},
+		{name: "question is classified asynchronously", body: "Why is this flagged as sensitive?"},
 	}
 
 	for _, tt := range tests {
@@ -1308,9 +1307,8 @@ func TestWebhook_HandleCodeReviewInlineDisputeLeavesActionableRepliesToFeedback(
 			mock, err := pgxmock.NewPool()
 			require.NoError(t, err, "pgxmock pool should initialize")
 			defer mock.Close()
-			// The pull request lookup is the first thing past the gate. Expecting
-			// it unconditionally makes both directions assertable: consumed means
-			// the reply entered intake, unfulfilled means the gate held it back.
+			// The pull request lookup is the first structural step after provenance.
+			// Every human reply should reach it regardless of comment wording.
 			mock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*WHERE org_id").
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": "assembledhq/assembled", "github_pr_number": 54903}).
 				WillReturnError(pgx.ErrNoRows)
@@ -1334,21 +1332,15 @@ func TestWebhook_HandleCodeReviewInlineDisputeLeavesActionableRepliesToFeedback(
 				OrgID: orgID, RepositoryID: repoID, FullName: "assembledhq/assembled", Status: "active",
 			})
 
-			require.False(t, captured, "no dispute is stored in either case, so the feedback item stays actionable")
-			if tt.expectIntakeEntry {
-				require.NoError(t, mock.ExpectationsWereMet(), "an objection or question belongs to dispute intake")
-			} else {
-				require.Error(t, mock.ExpectationsWereMet(),
-					"an actionable reply must never be claimed away from feedback follow-through")
-			}
+			require.False(t, captured, "the missing pull request means no intake row can be stored")
+			require.NoError(t, mock.ExpectationsWereMet(), "comment meaning must not be inferred before durable LLM triage")
 		})
 	}
 }
 
-// A trusted author's new mention is a review request first. Because
-// IsLikelyDisputeMention treats any question mark as dispute-shaped, capture
-// would swallow "@team can you re-review?" -- and triage routes a non-author's
-// objection to policy_signal_only, so nothing would run at all.
+// When dispute intake is unavailable, a trusted created mention retains the
+// normal first-review behavior. The production path captures post-decision
+// mentions and lets LLM triage return review_request asynchronously.
 func TestWebhook_HandleCodeReviewMentionedStartsReviewForTrustedQuestionWithoutObjection(t *testing.T) {
 	t.Parallel()
 
@@ -1374,14 +1366,10 @@ func TestWebhook_HandleCodeReviewMentionedStartsReviewForTrustedQuestionWithoutO
 		zerolog.Nop(),
 		codereviewsvc.Config{TeamSlugs: []string{"143-code-reviewer"}},
 	)
-	// An unconfigured dispute service: if the handler treated this as a dispute
-	// candidate it would fail capture and refuse to start the review, so the
-	// assertion below can tell the two routes apart.
 	handler := &WebhookHandler{
-		codeReviews:        codeReviews,
-		codeReviewPRs:      loader,
-		pullRequests:       db.NewPullRequestStore(mock),
-		codeReviewDisputes: codereviewsvc.NewDisputeService(nil, nil, nil, nil, nil, "", zerolog.Nop()),
+		codeReviews:   codeReviews,
+		codeReviewPRs: loader,
+		pullRequests:  db.NewPullRequestStore(mock),
 	}
 
 	staleBody := "old body"
@@ -1430,14 +1418,14 @@ func TestWebhook_HandleCodeReviewMentionedStartsReviewForTrustedQuestionWithoutO
 	})
 
 	require.True(t, ok, "a trusted review request should not fail the webhook: %s", rr.Body.String())
-	require.False(t, captured, "a review request without objection language is not a dispute")
+	require.False(t, captured, "without dispute intake, a trusted created mention should fall through to the normal review path")
 	require.NotEqual(t, uuid.Nil, jobs.payload.SessionID, "an explicit re-review request must still start a review")
 }
 
-// The objection gate deliberately ignores event.Action. Gating it on "created"
-// would make a typo fix on a trusted author's question file a dispute, spending
-// an LLM triage to answer an edit the created event already answered.
-func TestWebhook_HandleCodeReviewMentionedIgnoresEditedTrustedQuestion(t *testing.T) {
+// When dispute intake is unavailable, edited mentions cannot safely start a
+// review. The configured production path retains the edit as a new immutable
+// intake version and lets provenance checks prevent a review request route.
+func TestWebhook_HandleCodeReviewMentionedIgnoresEditedTrustedQuestionWithoutDisputeIntake(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
@@ -1452,9 +1440,8 @@ func TestWebhook_HandleCodeReviewMentionedIgnoresEditedTrustedQuestion(t *testin
 		codereviewsvc.Config{TeamSlugs: []string{"143-code-reviewer"}},
 	)
 	handler := &WebhookHandler{
-		codeReviews:        codeReviews,
-		codeReviewPRs:      loader,
-		codeReviewDisputes: codereviewsvc.NewDisputeService(nil, nil, nil, nil, nil, "", zerolog.Nop()),
+		codeReviews:   codeReviews,
+		codeReviewPRs: loader,
 	}
 	var event ghservice.IssueCommentEvent
 	event.Action = "edited"
@@ -1475,8 +1462,8 @@ func TestWebhook_HandleCodeReviewMentionedIgnoresEditedTrustedQuestion(t *testin
 	})
 
 	require.True(t, ok, "an edited question should not fail the webhook")
-	require.False(t, captured, "a trusted author's question is a review request, not a dispute, however it arrives")
-	require.Equal(t, 0, loader.number, "an edited trusted question should not spend a GitHub request or an LLM triage")
+	require.False(t, captured, "no dispute intake is configured for the edited mention")
+	require.Equal(t, 0, loader.number, "an edited trusted question should not start a review when durable intake is unavailable")
 	require.Empty(t, rr.Body.String(), "an ignored edit should not write an error response")
 }
 
@@ -1512,11 +1499,137 @@ func TestWebhook_HandleCodeReviewMentionedIgnoresEditedNonDisputeBeforeGitHubLoa
 	})
 
 	require.True(t, ok, "an edited mention should not fail the webhook")
-	require.False(t, captured, "an ordinary edited mention is not a dispute")
+	require.False(t, captured, "no dispute intake is configured for the edited mention")
 	// Every edit carries a fresh delivery ID, so reaching the mention path
 	// again would force a whole new agent fan-out for a typo fix.
 	require.Equal(t, 0, loader.number, "an edited non-dispute mention should not spend a GitHub API request or start a review")
 	require.Empty(t, rr.Body.String(), "an ignored edit should not write an error response")
+}
+
+func TestWebhook_HandleCodeReviewMentionedCapturesEveryHumanPostDecisionMention(t *testing.T) {
+	t.Parallel()
+
+	comments := []string{
+		"@assembledhq/143-code-reviewer while this affects EKS, it is a minimal established server timeout change. can you check again",
+		"@assembledhq/143-code-reviewer this is adding security tightening; SAML and magic-link usage is low enough that this is only a security improvement",
+		"@assembledhq/143-code-reviewer while this technically touches OAuth code, it only fixes the mutex error path and follows a standard Go pattern",
+		"@assembledhq/143-code-reviewer I don't believe this is a sensitive change judgment; this is only minor security hardening",
+		"@assembledhq/143-code-reviewer can you re-review this?",
+		"@assembledhq/143-code-reviewer thanks",
+	}
+	for _, comment := range comments {
+		comment := comment
+		t.Run(comment, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should initialize")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			repositoryID := uuid.New()
+			pullRequestID := uuid.New()
+			sessionID := uuid.New()
+			policyID := uuid.New()
+			commentID := int64(5196810672)
+			now := time.Now().UTC()
+			remote := ghservice.CodeReviewPullRequestSnapshot{
+				Number: 55422, State: "open", HTMLURL: "https://github.com/assembledhq/assembled/pull/55422",
+				Title: "Harden authentication", Body: "body", AuthorLogin: "assembled-matthew",
+				HeadSHA: "head-sha", HeadRef: "feature", BaseSHA: "base-sha",
+			}
+			loader := &codeReviewPullRequestLoaderStub{snapshot: remote}
+			jobs := &codeReviewWebhookJobStore{jobID: uuid.New()}
+			codeReviews := codereviewsvc.NewService(
+				&codeReviewWebhookPolicyStore{policyID: policyID, config: models.DefaultCodeReviewPolicyConfig()},
+				&codeReviewWebhookMetadataStore{},
+				&codeReviewWebhookSessionStore{},
+				jobs,
+				zerolog.Nop(),
+				codereviewsvc.Config{TeamSlugs: []string{"143-code-reviewer"}},
+			)
+			disputeStore := &webhookCaptureDisputeStore{}
+			decision := models.CodeReviewDecisionNeedsHumanReview
+			disputeReviews := webhookCaptureDisputeReviewStore{
+				metadata: models.CodeReviewSessionMetadata{
+					OrgID: orgID, SessionID: sessionID, PullRequestID: pullRequestID,
+					RepositoryID: repositoryID, PolicyID: policyID, HeadSHA: "reviewed-head",
+					Status: models.CodeReviewSessionStatusCompleted, Decision: &decision,
+				},
+				item: models.CodeReviewListItem{
+					PullRequestAuthor: "assembled-matthew", PullRequestTitle: remote.Title,
+					GitHubRepo: "assembledhq/assembled", GitHubPRNumber: remote.Number, GitHubPRURL: remote.HTMLURL,
+				},
+			}
+			disputeService := codereviewsvc.NewDisputeService(
+				disputeStore,
+				disputeReviews,
+				webhookCaptureDisputePullRequestStore{pullRequest: models.PullRequest{
+					ID: pullRequestID, OrgID: orgID, GitHubRepo: "assembledhq/assembled",
+					GitHubPRNumber: remote.Number, Title: remote.Title,
+				}},
+				&codeReviewWebhookJobStore{},
+				nil,
+				"",
+				zerolog.Nop(),
+			)
+			handler := &WebhookHandler{
+				codeReviews: codeReviews, codeReviewPRs: loader,
+				pullRequests: db.NewPullRequestStore(mock), codeReviewDisputes: disputeService,
+			}
+
+			staleBody := "old body"
+			staleHead := "old-head"
+			staleRef := "old-ref"
+			staleBase := "old-base"
+			mock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*WHERE org_id").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": "assembledhq/assembled", "github_pr_number": 55422}).
+				WillReturnRows(pgxmock.NewRows(codeReviewWebhookPullRequestColumns()).AddRow(
+					pullRequestID, nil, orgID, 55422, remote.HTMLURL, "assembledhq/assembled",
+					"Old title", &staleBody, "open", "pending", "user", "", &staleHead, &staleRef, &staleBase,
+					"unknown", false, 0, false, nil, int64(0),
+					models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil,
+					nil, now, now,
+				))
+			mock.ExpectExec("UPDATE pull_requests[\\s\\S]*github_pr_url = @github_pr_url").
+				WithArgs(pgx.NamedArgs{
+					"id": pullRequestID, "org_id": orgID, "github_pr_url": remote.HTMLURL,
+					"title": remote.Title, "body": stringPointerArg{value: remote.Body},
+					"head_sha": stringPointerArg{value: remote.HeadSHA}, "head_ref": stringPointerArg{value: remote.HeadRef},
+					"base_sha": stringPointerArg{value: remote.BaseSHA}, "merge_state": models.PullRequestMergeStateUnknown,
+				}).
+				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+			var event ghservice.IssueCommentEvent
+			event.Action = "created"
+			event.DeliveryID = "delivery-post-decision-comment"
+			event.Repository.FullName = "assembledhq/assembled"
+			event.Issue.Number = 55422
+			event.Issue.PullRequest = &struct{}{}
+			event.Comment.ID = commentID
+			event.Comment.Body = comment
+			event.Comment.HTMLURL = remote.HTMLURL + "#issuecomment-5196810672"
+			event.Comment.User.Login = "assembled-matthew"
+			event.Comment.User.Type = "User"
+			event.Comment.AuthorAssociation = "MEMBER"
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", nil)
+			rr := httptest.NewRecorder()
+
+			ok, captured := handler.handleCodeReviewMentioned(rr, req, event, db.GitHubRepoOwner{
+				OrgID: orgID, RepositoryID: repositoryID, FullName: "assembledhq/assembled", Status: "active",
+			})
+
+			require.True(t, ok, "post-decision mention capture should not fail the webhook: %s", rr.Body.String())
+			require.True(t, captured, "every human mention after a completed decision should enter durable LLM triage")
+			require.Equal(t, uuid.Nil, jobs.payload.SessionID, "webhook wording must not directly start a new code review")
+			require.Len(t, disputeStore.created, 1, "the comment should produce exactly one durable intake row")
+			require.Equal(t, comment, disputeStore.created[0].Body, "the complete comment should be retained as untrusted classification evidence")
+			var signals map[string]any
+			require.NoError(t, json.Unmarshal(disputeStore.created[0].QueueSignals, &signals), "intake queue signals should be valid JSON")
+			require.Equal(t, true, signals["review_request_allowed"], "a trusted new comment may be returned to the normal review path after classification")
+			require.NoError(t, mock.ExpectationsWereMet(), "post-decision capture should keep mirror access org-scoped")
+		})
+	}
 }
 
 func TestWebhook_HandleCodeReviewMentionedRejectsUntrustedAuthorsBeforeGitHubLoad(t *testing.T) {
@@ -1564,14 +1677,9 @@ func TestWebhook_HandleCodeReviewMentionedRejectsUntrustedAuthorsBeforeGitHubLoa
 				zerolog.Nop(),
 				codereviewsvc.Config{TeamSlugs: []string{"143-code-reviewer"}},
 			)
-			// Dispute intake is wired and the action is "created", so the only
-			// thing that can stop this comment before the GitHub load is the
-			// untrusted-author gate itself. The body is a plain review request,
-			// not an objection, so it is not a dispute candidate either.
 			handler := &WebhookHandler{
-				codeReviews:        codeReviews,
-				codeReviewPRs:      loader,
-				codeReviewDisputes: codereviewsvc.NewDisputeService(nil, nil, nil, nil, nil, "", zerolog.Nop()),
+				codeReviews:   codeReviews,
+				codeReviewPRs: loader,
 			}
 			var event ghservice.IssueCommentEvent
 			event.Action = "created"
@@ -1595,6 +1703,105 @@ func TestWebhook_HandleCodeReviewMentionedRejectsUntrustedAuthorsBeforeGitHubLoa
 			require.Empty(t, rr.Body.String(), "ignored mention should not write an error response")
 		})
 	}
+}
+
+type webhookCaptureDisputeStore struct {
+	created []models.CodeReviewDispute
+}
+
+func (s *webhookCaptureDisputeStore) CreateAndEnqueueTriage(_ context.Context, dispute *models.CodeReviewDispute, _ db.CodeReviewDisputeIntakeGuard) (bool, error) {
+	dispute.ID = uuid.New()
+	s.created = append(s.created, *dispute)
+	return true, nil
+}
+
+func (*webhookCaptureDisputeStore) GetByID(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewDispute, error) {
+	return models.CodeReviewDispute{}, pgx.ErrNoRows
+}
+
+func (*webhookCaptureDisputeStore) ListBySession(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID, int) (models.CodeReviewDisputePage, error) {
+	return models.CodeReviewDisputePage{}, nil
+}
+
+func (*webhookCaptureDisputeStore) ListQueue(context.Context, uuid.UUID, models.CodeReviewDisputeListFilters) (models.CodeReviewDisputePage, error) {
+	return models.CodeReviewDisputePage{}, nil
+}
+
+func (*webhookCaptureDisputeStore) ListRecentKinds(context.Context, uuid.UUID, int) ([]string, error) {
+	return nil, nil
+}
+
+func (*webhookCaptureDisputeStore) SetTriage(context.Context, uuid.UUID, uuid.UUID, models.CodeReviewDisputeTriageResult, bool, string) (models.CodeReviewDispute, error) {
+	return models.CodeReviewDispute{}, nil
+}
+
+func (*webhookCaptureDisputeStore) FailTriage(context.Context, uuid.UUID, uuid.UUID, string, bool) error {
+	return nil
+}
+
+func (*webhookCaptureDisputeStore) RecordAuthorization(context.Context, models.CodeReviewDisputeAuthorization) error {
+	return nil
+}
+
+func (*webhookCaptureDisputeStore) AdmitAndEnqueueReassessment(context.Context, models.CodeReviewDispute, *uuid.UUID, string, time.Duration, int, any) (bool, error) {
+	return false, nil
+}
+
+func (*webhookCaptureDisputeStore) CompleteReassessment(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.CodeReviewSessionStatus, *models.CodeReviewDecision, string) error {
+	return nil
+}
+
+func (*webhookCaptureDisputeStore) MarkReassessmentFailed(context.Context, uuid.UUID, uuid.UUID, string) error {
+	return nil
+}
+
+func (*webhookCaptureDisputeStore) Escalate(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string) (models.CodeReviewDispute, error) {
+	return models.CodeReviewDispute{}, nil
+}
+
+func (*webhookCaptureDisputeStore) Adjudicate(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.CodeReviewDisputeAdjudicationUpdate) (models.CodeReviewDispute, error) {
+	return models.CodeReviewDispute{}, nil
+}
+
+type webhookCaptureDisputeReviewStore struct {
+	metadata models.CodeReviewSessionMetadata
+	item     models.CodeReviewListItem
+}
+
+func (s webhookCaptureDisputeReviewStore) GetBySessionID(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	return s.metadata, nil
+}
+
+func (s webhookCaptureDisputeReviewStore) GetLatestCompletedByPullRequest(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	return s.metadata, nil
+}
+
+func (s webhookCaptureDisputeReviewStore) GetByGitHubFindingComment(context.Context, uuid.UUID, int64) (models.CodeReviewSessionMetadata, error) {
+	return s.metadata, nil
+}
+
+func (s webhookCaptureDisputeReviewStore) GetListItemBySessionID(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewListItem, error) {
+	return s.item, nil
+}
+
+func (webhookCaptureDisputeReviewStore) GetRiskReasonCodesBySession(context.Context, uuid.UUID, uuid.UUID) ([]models.CodeReviewRiskReasonCode, error) {
+	return nil, nil
+}
+
+func (webhookCaptureDisputeReviewStore) ListFindings(context.Context, uuid.UUID, uuid.UUID, bool) ([]models.CodeReviewFinding, error) {
+	return nil, nil
+}
+
+type webhookCaptureDisputePullRequestStore struct {
+	pullRequest models.PullRequest
+}
+
+func (s webhookCaptureDisputePullRequestStore) GetByID(context.Context, uuid.UUID, uuid.UUID) (models.PullRequest, error) {
+	return s.pullRequest, nil
+}
+
+func (webhookCaptureDisputePullRequestStore) GetHealthCurrent(context.Context, uuid.UUID, uuid.UUID) (models.PullRequestHealthCurrent, error) {
+	return models.PullRequestHealthCurrent{}, nil
 }
 
 func codeReviewWebhookPullRequestColumns() []string {

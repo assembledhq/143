@@ -1,16 +1,28 @@
 # Design: Code Review Decision Feedback And Policy Tuning
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-08-04
+> **Status:** Partially Implemented | **Last reviewed:** 2026-08-05
 >
 > **Depends on:** [implemented/112-code-reviewer-bot-auto-approval.md](implemented/112-code-reviewer-bot-auto-approval.md), [backlog/11-review-feedback-loop.md](backlog/11-review-feedback-loop.md), [future/116-automatic-pr-feedback-follow-through.md](future/116-automatic-pr-feedback-follow-through.md), [future/16-ai-agent-evals.md](future/16-ai-agent-evals.md)
 
 ## Implementation status
 
+Phase 0 is implemented: blockers are grouped by remedy,
+policy-controlled blockers link to settings, a sole blocker is revision-bound,
+platform review failures are separated from code risk, and advisory findings are
+inspectable in a collapsed non-blocking section. Stable head-bound deterministic
+failures publish provisionally before agent fan-out while mutable GitHub-state gates
+remain terminal-only. The optional `stop_after_deterministic_failure` setting ends
+the first attempt without agent spend; an explicit same-head rerequest after that
+early stop forces the full review. Insights reports early stops, avoided agent runs,
+and that full-review demand.
+
 The PR 3 Phase 1A runtime is implemented: in-app reconsideration, GitHub mention and inline-thread intake, evidence-grounded answers, durable acknowledgement/timeline states, authorization snapshots, versioned semantic cooldown dedupe, loop guards, latest-revision reassessment, admin promotion of untrusted evidence, the member escalation route, and the flat admin adjudication list. Reassessment workers use an operator kill switch and platform-wide active-work ceiling.
+
+Phase 1B(ii)'s volume-gated ranked queue and expanded Insights are implemented. Completed decisions project into an org-scoped outcome table, durable GitHub events add independent-human and terminal PR facts, daily reconciliation repairs missing or stale projections, and the queue persists explainable signal snapshots while remaining chronological below the sustained-volume trigger. Admin Insights reports objection directions and kinds, per-policy decision mix, reason distributions with actual-versus-limit observations, reassessment flips and spend, resolution time, and projection freshness.
 
 Two cross-cutting contracts remain design gaps rather than Phase 1A implementation claims: the repository code-review-owner identity/delivery model needed for targeted notifications does not exist yet, and the retention section does not specify a retention duration, scanner behavior, or tombstone trigger. The current implementation bounds and isolates untrusted text, preserves immutable source versions, replies on GitHub, and surfaces escalation in the admin queue, but it does not invent notification recipients or destructive retention behavior without those decisions.
 
-Phase 1B remains deferred: approval spot-checks, ranked queue signals, Insights/digest expansion, and false-approval estimation. Phase 2 policy proposal generation, replay, activation, and guard-set workflows also remain deferred.
+Phase 1B(i) remains deferred: approval spot-checks, guard-set curation, and false-approval estimation. Targeted weekly digest delivery remains blocked on the repository-owner identity/channel contract above. Phase 2 policy proposal generation, replay, activation, and guard-set workflows also remain deferred.
 
 ## Summary
 
@@ -206,9 +218,12 @@ triage's job, not the webhook handler's.
 
 ### Triage
 
-`triage_code_review_dispute` runs `deterministicPRFeedbackTriage`, then one LLM pass
-over the comment, decision, reason codes, diff summary, and surrounding context. It
-classifies direction, contested reasons, new information, and route.
+`triage_code_review_dispute` runs one LLM pass over the comment, decision, reason
+codes, diff summary, and surrounding context. It classifies direction, contested
+reasons, new information, and route. Webhooks do not classify meaning from keywords,
+punctuation, acknowledgements, or other phrasing. Deterministic provenance, trust,
+approval monotonicity, policy blockers, confidence, dedupe, and operator controls run
+after classification as safety checks.
 
 | Route | When | What happens |
 | --- | --- | --- |
@@ -216,9 +231,18 @@ classifies direction, contested reasons, new information, and route.
 | `policy_signal_only` | Argues with a threshold or path rule, or triage wasn't confident enough to rerun | A rerun would change nothing — the threshold evaluates the same way every time. Say so, name the setting and its value, link to it, record the dispute, and offer **Send this to a policy owner** |
 | `answer_only` | It's a question, not a disagreement | Answer from the session evidence. Keep the captured source/version row for reply reconciliation and audit, but exclude it from policy influence and the adjudication queue |
 | `not_a_dispute` | Chatter | Recorded as discarded, with a one-line acknowledgement carrying the override link. No influence |
+| `review_request` | A bare request to review or re-review, without challenging the prior decision | Recorded as discarded, excluded from Disputes, and handed to the normal team-reviewer workflow with the comment as untrusted orchestrator context. A failure-only correlation terminalizes the intake if the starter never creates a review; after a session exists, the rolling review comment provides status, so no dispute reply is published |
 
 `not_a_dispute` always receives a one-line acknowledgement with a link to file
 explicitly in-app. That explicit action bypasses classification.
+
+For GitHub comments, classification is asynchronous and durable. Every human mention
+of the configured reviewer after a completed decision enters intake; if no completed
+decision exists, a trusted new mention follows the normal first-review path. Comment
+edits may be classified but cannot start another ordinary review. Inline finding
+replies classified `not_a_dispute` are released back to the PR-feedback
+follow-through pipeline so broad intake does not consume actionable code-change
+requests.
 
 **Route to `reassess` only above a confidence floor.** One LLM pass decides whether
 to spend agent compute and, on a blocked PR, whether an approval becomes reachable.
@@ -521,12 +545,13 @@ listed.
 | `contested_reason_codes` | text[] | Inferred by triage |
 | `dispute_kind` | text | **Free text from triage, no constraint.** See below |
 | `asserts_new_information` | boolean | Nullable until triage; drives the `reassess` route |
-| `routing` | text | `reassess` \| `policy_signal_only` \| `answer_only` \| `not_a_dispute` |
+| `routing` | text | `reassess` \| `policy_signal_only` \| `answer_only` \| `not_a_dispute` \| `review_request` |
 | `intake_status`, `intake_confidence` | text | `pending` \| `triaged` \| `discarded` \| `failed`; confidence is nullable until triage |
 | `reassessment_session_id`, `reassessment_decision`, `reassessment_flipped` | uuid / text / bool | Rerun linkage |
 | `semantic_input_hash_at_filing`, `semantic_input_hash_at_rerun` | text | Both hashes, so a reader can tell a flip caused by changed input from an unstable judge. Makes the "exclude flips as evidence" rule auditable rather than asserted |
 | `adjudication_status` | text | NULL when not adjudication-eligible; otherwise `pending` \| `upheld` \| `rejected` \| `expired` \| `needs_context`. `upheld` is the only status eligible to draft a proposal when Phase 2 is enabled |
 | `adjudicated_by_user_id`, `adjudicated_at`, `adjudication_note` | uuid / timestamptz / text | Who decided, and why |
+| `policy_owner_active_seconds` | integer | Optional client-measured active queue interaction for a completed adjudication, bounded to one hour |
 | `escalated_at`, `escalated_by_user_id` | timestamptz / uuid | Set by **Send this to a policy owner**. Also a ranking signal: a filer who bothered to escalate cares more than one who didn't |
 | `queue_signals` | jsonb | The ranking signals observed on this dispute, with their inputs |
 | `queue_priority` | numeric | Derived from `queue_signals`; orders the admin queue and decides nothing |
@@ -545,7 +570,7 @@ hundred near-duplicates and the promotion step never gets a signal to act on.
 
 State-dependent checks require classified fields after `triaged`, require routing
 and direction for an adjudication-eligible dispute, and require adjudicator/time for
-terminal adjudication. `answer_only`, `not_a_dispute`, failed intake, and untrusted
+terminal adjudication. `answer_only`, `not_a_dispute`, `review_request`, failed intake, and untrusted
 items not explicitly promoted have NULL adjudication status and cannot enter the
 queue.
 
@@ -577,6 +602,14 @@ may raise two genuinely different objections. Partial index on `intake_status =
 `adjudication_status = 'pending'`, to build the admin queue; partial on `(org_id,
 adjudicated_at DESC)` where `adjudication_status = 'upheld'`, to find disputes
 awaiting a proposal.
+
+**`code_review_dispute_queue_snapshots`** — short-lived, org-scoped materialized
+queue orderings used only for pagination. The first page stores dispute identities
+at monotonically increasing positions ordered by `(queue_priority, created_at, id)`;
+the opaque cursor carries the snapshot identity and last returned position. Later
+rank recomputation therefore cannot skip or duplicate a different dispute across a
+cursor boundary. Snapshots expire after one hour and stale rows are cleaned when a
+new paging session starts and by the daily per-organization retention job.
 
 **`code_review_policy_proposals`** — one row per proposal. `repository_id`,
 `base_policy_id`, and `source_dispute_id` (uuid; exactly one, no clustering);
@@ -631,8 +664,16 @@ re-derive PR history on every read, and so the tenancy invariant is enforced by 
 key rather than by every query remembering to filter. Carries `decision`, `reason_codes text[]` (GIN
 indexed), `merged`, `merged_at`, `independent_approver_login`,
 `independent_blocking_review_login`, `human_review_comment_count`, `terminal`,
-`observed_until`, and `projection_updated_at`. Reverts and incidents remain outside
-this projection because the design does not use them even for ranking.
+`lifecycle_observed_at`, `observed_until`, and `projection_updated_at`.
+`lifecycle_observed_at` orders provider close/reopen facts independently from the
+aggregate `observed_until` projection-freshness watermark. Reverts and incidents
+remain outside this projection because the design does not use them even for
+ranking.
+
+**`code_review_pull_request_lifecycle_observations`** — the latest durable
+provider lifecycle fact per `(org_id, pull_request_id)`. Close, merge, and reopen
+events upsert this row before projecting any completed review sessions, so an
+event remains available when it arrives before its decision outcome exists.
 
 Durable GitHub events update the projection idempotently; dismissal and late reviews
 may revise non-terminal facts. Periodic reconciliation repairs recent/non-terminal
@@ -704,7 +745,7 @@ platform-side they never surface to a user as a quota.
 | Job | Queue | Fires when |
 | --- | --- | --- |
 | `triage_code_review_dispute` | `feedback` | A comment is captured, or a dispute is filed in-app |
-| `start_code_review_reassessment` | `agent` | Triage routed `reassess`; creates a linked session and dispatches the existing review path |
+| `start_code_review_reassessment` | `agent` | Triage routed `reassess`, or classified a bare `review_request`; creates the appropriate linked dispute reassessment or ordinary team-reviewer session through the existing review path |
 | `reply_code_review_dispute` | `feedback` | Triage routed `policy_signal_only` / `answer_only` / `not_a_dispute`, or a rerun finished |
 | `rank_code_review_dispute` | `feedback` | Rerun settles, PR closes, the window expires, or the dispute's base policy is superseded. Recomputes `queue_signals` and `queue_priority` |
 | `generate_code_review_policy_proposal` | `agent` | An admin upholds a dispute |
@@ -739,8 +780,8 @@ smaller dispute-body limit.
 | `POST /api/v1/code-reviews/{session_id}/disputes` | `{ body: string, contested_reason_codes?: string[] }` | `201` dispute with `intake_status: "pending"`. `422` if body empty, `404` if no such review. **No 409** — several distinct objections on one review are legitimate; GitHub source versions dedupe through the ingress ledger. Direction is inferred, never supplied |
 | `GET /api/v1/code-reviews/{session_id}/disputes` | `cursor?` | Disputes with routing, trust, and rerun linkage |
 | `POST /api/v1/code-review-disputes/{id}/escalate` | `{ note?: string }` | Member-level. Records an idempotent escalation per `(dispute, user)` and raises the `policy_signal_only` dispute, with PR context, in the admin queue. Targeted owner notification/digest delivery starts only after the repository-owner identity/channel contract is settled; `409` if the dispute isn't in a route where escalation is meaningful |
-| `GET /api/v1/code-review-disputes` *(admin)* | `adjudication_status?`, `repository_id?`, `direction?`, `cursor?` | The adjudication queue, ordered by stable `(queue_priority, id)`, each dispute showing which signals raised it |
-| `PATCH /api/v1/code-review-disputes/{id}` *(admin)* | `{ expected_version: int, adjudication_status?: "upheld"\|"rejected"\|"needs_context", adjudication_note?, trust_override? }` | CAS update; trust override can promote an untrusted item without adjudicating it. `upheld` enqueues proposal generation only when Phase 2 is enabled. `409` if the supplied version lost a race |
+| `GET /api/v1/code-review-disputes` *(admin)* | `adjudication_status?`, `repository_id?`, `direction?`, `cursor?` | The adjudication queue, materialized in stable `(queue_priority, created_at, id)` order for each paging session, each dispute showing which signals raised it |
+| `PATCH /api/v1/code-review-disputes/{id}` *(admin)* | `{ expected_version: int, adjudication_status?: "upheld"\|"rejected"\|"needs_context", adjudication_note?, policy_owner_active_seconds?, trust_override? }` | CAS update; active seconds are the bounded client-measured queue interaction used for the owner-minutes metric, and trust override can promote an untrusted item without adjudicating it. `upheld` enqueues proposal generation only when Phase 2 is enabled. `409` if the supplied version lost a race |
 | `GET /api/v1/code-review-approval-audits` *(admin)* | `status?`, `repository_id?`, `cursor?` | Spot-check queue. `selection`, `frontier_score`, and `frontier_factors` are **omitted while queued** — the random control only works if the reviewer cannot infer the arm |
 | `POST /api/v1/code-review-approval-audits/{id}/verdict` *(admin)* | `{ expected_version: int, verdict: "correct"\|"should_not_have_approved", note? }` | CAS verdict; `should_not_have_approved` creates an already-upheld dispute; `correct` adds the session to the guard set |
 | `GET /api/v1/code-review-insights` *(admin)* | `repository_id?`, `from?`, `to?`, `decision?`, `reason_code?`, `direction?` | Decisions and dispute rate by reason code, with actual-vs-limit distributions and an authorization-aware deep link to each setting; totals; disputes by direction; **`dispute_kind` frequencies**; flip rate by attempt; reassessment spend; estimated false-approval rate with sample size/response rate/confidence interval; median decision time; projection freshness; policy-owner minutes; per-policy-version decision mix |
@@ -751,10 +792,14 @@ smaller dispute-body limit.
 
 Existing comment handlers capture flat-comment mentions and inline-thread replies.
 The durable ingress ledger handles delivery/source-version dedupe before triage;
-handlers do not classify meaning or parse syntax. Once a comment is captured as a
-code-review dispute, its normalized PR-feedback item is retained as `ignored` with
-the dispute-specific reason and does not enter the separate automatic PR-feedback
-follow-through worker; ordinary GitHub automation triggers still observe the event.
+handlers do not classify meaning or parse syntax. While classification is pending,
+the normalized PR-feedback item is retained as `ignored` with the dispute-specific
+reason and does not enter the separate automatic PR-feedback follow-through worker.
+An inline item classified `not_a_dispute` is atomically returned to pending feedback
+and its collector is enqueued. If triage runs before webhook ingestion creates that
+feedback row, the release remains retryable rather than accepting a false no-op;
+other routes remain claimed by code review. Ordinary GitHub automation triggers
+still observe the event.
 
 Activation atomically locks/CASes the proposal and replayed revision, validates the
 active base policy and exact delta, deactivates the old policy, inserts the new

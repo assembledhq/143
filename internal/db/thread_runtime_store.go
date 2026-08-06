@@ -345,6 +345,12 @@ func (s *ThreadRuntimeStore) CommitInboxDeliveryWithLease(ctx context.Context, o
 		return false, nil
 	}
 
+	// This is the watermark branch of acknowledgeDeliveredThreadInboxSegment,
+	// taken when no activity phase is registered for the thread. There is no
+	// delivery batch here and so no later phase start to stamp applied_at, so
+	// it must be stamped now: an entry left 'acked' with a NULL applied_at is
+	// hidden from the transcript permanently and is not recoverable through
+	// the inbox failure notice either.
 	if _, err := tx.Exec(ctx, `
 		UPDATE thread_inbox_entries
 		SET delivery_state = 'acked',
@@ -352,6 +358,7 @@ func (s *ThreadRuntimeStore) CommitInboxDeliveryWithLease(ctx context.Context, o
 			owner_node_id = NULLIF($4, ''),
 			delivered_at = COALESCE(delivered_at, now()),
 			acked_at = COALESCE(acked_at, now()),
+			applied_at = COALESCE(applied_at, now()),
 			updated_at = now()
 		WHERE org_id = $1
 		  AND thread_id = $2

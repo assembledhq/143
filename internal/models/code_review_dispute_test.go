@@ -48,6 +48,7 @@ func TestCodeReviewDisputeEnumsValidate(t *testing.T) {
 		{name: "valid source", validate: CodeReviewDisputeSourceGitHubComment.Validate},
 		{name: "invalid source", validate: CodeReviewDisputeSource("email").Validate, expectErr: true},
 		{name: "valid routing", validate: CodeReviewDisputeRoutingPolicySignalOnly.Validate},
+		{name: "valid review request routing", validate: CodeReviewDisputeRoutingReviewRequest.Validate},
 		{name: "invalid routing", validate: CodeReviewDisputeRouting("ignore").Validate, expectErr: true},
 		{name: "valid intake status", validate: CodeReviewDisputeIntakeTriaged.Validate},
 		{name: "invalid intake status", validate: CodeReviewDisputeIntakeStatus("done").Validate, expectErr: true},

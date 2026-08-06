@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -112,17 +111,8 @@ func (h *WebhookHandler) reassessCodeReviewTarget(ctx context.Context, owner db.
 	return nil
 }
 
-type codeReviewMaterialAssessmentState struct {
-	HeadSHA string `json:"head_sha"`
-}
-
 func codeReviewMaterialChangeKey(pr models.PullRequest) (string, error) {
-	raw, err := json.Marshal(codeReviewMaterialAssessmentState{HeadSHA: codeReviewStringValue(pr.HeadSHA)})
-	if err != nil {
-		return "", fmt.Errorf("marshal material assessment state: %w", err)
-	}
-	sum := sha256.Sum256(raw)
-	return fmt.Sprintf("material:%x", sum[:]), nil
+	return codereviewsvc.MaterialChangeKey(codeReviewStringValue(pr.HeadSHA))
 }
 
 func codeReviewStringValue(value *string) string {

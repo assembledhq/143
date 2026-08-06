@@ -177,6 +177,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 	// live code reviews list. nil-safe when redisClient is unavailable.
 	codeReviewStreams := cache.NewCodeReviewStreams(redisClient, logger)
 	codeReviewStore := db.NewCodeReviewStore(pool)
+	codeReviewStore.SetJobStore(jobStore)
 	codeReviewStore.SetStreams(codeReviewStreams)
 	codeReviewStore.SetLogger(logger)
 
@@ -418,6 +419,7 @@ func buildSessionExecutorStores(deps sessionExecutorStoreDeps) *worker.Stores {
 	if deps.CodeReviews == nil {
 		deps.CodeReviews = db.NewCodeReviewStore(pool)
 	}
+	deps.CodeReviews.SetJobStore(deps.Jobs)
 	return &worker.Stores{
 		Issues:              deps.Issues,
 		Sessions:            deps.Sessions,

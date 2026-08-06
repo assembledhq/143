@@ -1102,6 +1102,8 @@ const (
 	JobTypeStartCodeReviewReassessment   = "start_code_review_reassessment"
 	JobTypeTriageCodeReviewDispute       = "triage_code_review_dispute"
 	JobTypeReplyCodeReviewDispute        = "reply_code_review_dispute"
+	JobTypeRankCodeReviewDispute         = "rank_code_review_dispute"
+	JobTypeReconcileCodeReviewOutcomes   = "reconcile_code_review_decision_outcomes"
 	JobTypeSyncCodeReviewStatusComment   = "sync_code_review_status_comment"
 	JobTypeMaterializeChangeset          = "materialize_changeset"
 	JobTypeVerifyChangesetSplit          = "verify_changeset_split"
@@ -1204,6 +1206,7 @@ type ReviewComment struct {
 	OrgID           uuid.UUID `db:"org_id" json:"org_id"`
 	GitHubCommentID int64     `db:"github_comment_id" json:"github_comment_id"`
 	Reviewer        string    `db:"reviewer" json:"reviewer"`
+	ReviewerType    string    `db:"reviewer_type" json:"reviewer_type"`
 	Body            string    `db:"body" json:"body"`
 	DiffPath        *string   `db:"diff_path" json:"diff_path,omitempty"`
 	DiffPosition    *int      `db:"diff_position" json:"diff_position,omitempty"`

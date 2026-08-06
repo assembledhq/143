@@ -20,9 +20,10 @@ func NewReviewCommentStore(db DBTX) *ReviewCommentStore {
 
 func (s *ReviewCommentStore) Create(ctx context.Context, c *models.ReviewComment) error {
 	query := `
-		INSERT INTO review_comments (pull_request_id, org_id, github_comment_id, reviewer, body, diff_path, diff_position, filter_status)
-		VALUES (@pull_request_id, @org_id, @github_comment_id, @reviewer, @body, @diff_path, @diff_position, @filter_status)
-		ON CONFLICT (pull_request_id, github_comment_id) DO UPDATE SET id = review_comments.id
+		INSERT INTO review_comments (pull_request_id, org_id, github_comment_id, reviewer, reviewer_type, body, diff_path, diff_position, filter_status)
+		VALUES (@pull_request_id, @org_id, @github_comment_id, @reviewer, @reviewer_type, @body, @diff_path, @diff_position, @filter_status)
+		ON CONFLICT (pull_request_id, github_comment_id) DO UPDATE SET
+			reviewer_type = EXCLUDED.reviewer_type
 		RETURNING id, created_at`
 
 	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
@@ -30,6 +31,7 @@ func (s *ReviewCommentStore) Create(ctx context.Context, c *models.ReviewComment
 		"org_id":            c.OrgID,
 		"github_comment_id": c.GitHubCommentID,
 		"reviewer":          c.Reviewer,
+		"reviewer_type":     c.ReviewerType,
 		"body":              c.Body,
 		"diff_path":         c.DiffPath,
 		"diff_position":     c.DiffPosition,
@@ -62,7 +64,7 @@ func (s *ReviewCommentStore) IsDuplicate(ctx context.Context, c *models.ReviewCo
 
 func (s *ReviewCommentStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (models.ReviewComment, error) {
 	query := `
-		SELECT id, pull_request_id, org_id, github_comment_id, reviewer, body,
+		SELECT id, pull_request_id, org_id, github_comment_id, reviewer, reviewer_type, body,
 		       diff_path, diff_position, filter_status, category, actionable,
 		       generalizable, generalized_rule, summary, applied, created_at
 		FROM review_comments
@@ -87,7 +89,7 @@ type ReviewCommentFilters struct {
 
 func (s *ReviewCommentStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters ReviewCommentFilters) ([]models.ReviewComment, error) {
 	query := `
-		SELECT id, pull_request_id, org_id, github_comment_id, reviewer, body,
+		SELECT id, pull_request_id, org_id, github_comment_id, reviewer, reviewer_type, body,
 		       diff_path, diff_position, filter_status, category, actionable,
 		       generalizable, generalized_rule, summary, applied, created_at
 		FROM review_comments
@@ -128,7 +130,7 @@ func (s *ReviewCommentStore) ListByOrg(ctx context.Context, orgID uuid.UUID, fil
 
 func (s *ReviewCommentStore) ListByPullRequest(ctx context.Context, orgID, prID uuid.UUID) ([]models.ReviewComment, error) {
 	query := `
-		SELECT id, pull_request_id, org_id, github_comment_id, reviewer, body,
+		SELECT id, pull_request_id, org_id, github_comment_id, reviewer, reviewer_type, body,
 		       diff_path, diff_position, filter_status, category, actionable,
 		       generalizable, generalized_rule, summary, applied, created_at
 		FROM review_comments
@@ -147,7 +149,7 @@ func (s *ReviewCommentStore) ListByPullRequest(ctx context.Context, orgID, prID 
 
 func (s *ReviewCommentStore) ListActionableByPullRequest(ctx context.Context, orgID, prID uuid.UUID) ([]models.ReviewComment, error) {
 	query := `
-		SELECT id, pull_request_id, org_id, github_comment_id, reviewer, body,
+		SELECT id, pull_request_id, org_id, github_comment_id, reviewer, reviewer_type, body,
 		       diff_path, diff_position, filter_status, category, actionable,
 		       generalizable, generalized_rule, summary, applied, created_at
 		FROM review_comments

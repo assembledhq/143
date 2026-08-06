@@ -60,6 +60,64 @@ var handlerPreviewInstanceColumns = []string{
 	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
 }
 
+type recordingCodeReviewInsightProjector struct {
+	recordedReviewID     int64
+	recordedLogin        string
+	recordedReviewerType string
+	recordedAssociation  string
+	recordedPRAuthor     string
+	recordedState        string
+	recordedAt           time.Time
+	dismissedReviewID    int64
+	dismissedLogin       string
+	dismissedPRAuthor    string
+	refreshedCommentOrg  uuid.UUID
+	refreshedCommentPR   uuid.UUID
+	refreshedCommentAt   time.Time
+	terminalMerged       bool
+	terminalMergedAt     *time.Time
+	terminalObservedAt   time.Time
+	openObservedAt       time.Time
+	rejectLifecycle      bool
+}
+
+func (p *recordingCodeReviewInsightProjector) RecordHumanReview(_ context.Context, _, _ uuid.UUID, reviewID int64, login, reviewerType, authorAssociation, pullRequestAuthor, state string, observedAt time.Time) error {
+	p.recordedReviewID = reviewID
+	p.recordedLogin = login
+	p.recordedReviewerType = reviewerType
+	p.recordedAssociation = authorAssociation
+	p.recordedPRAuthor = pullRequestAuthor
+	p.recordedState = state
+	p.recordedAt = observedAt
+	return nil
+}
+
+func (p *recordingCodeReviewInsightProjector) DismissHumanReview(_ context.Context, _, _ uuid.UUID, reviewID int64, login, _, _, pullRequestAuthor string, _ time.Time) error {
+	p.dismissedReviewID = reviewID
+	p.dismissedLogin = login
+	p.dismissedPRAuthor = pullRequestAuthor
+	return nil
+}
+
+func (p *recordingCodeReviewInsightProjector) RefreshHumanReviewCommentCount(_ context.Context, orgID, pullRequestID uuid.UUID, observedAt time.Time) error {
+	p.refreshedCommentOrg = orgID
+	p.refreshedCommentPR = pullRequestID
+	p.refreshedCommentAt = observedAt
+	return nil
+}
+
+func (p *recordingCodeReviewInsightProjector) RecordPullRequestTerminal(_ context.Context, _, _ uuid.UUID, merged bool, mergedAt *time.Time, observedAt time.Time) (bool, error) {
+	p.terminalMerged = merged
+	p.terminalMergedAt = mergedAt
+	p.terminalObservedAt = observedAt
+	return !p.rejectLifecycle, nil
+}
+
+func (p *recordingCodeReviewInsightProjector) RecordPullRequestOpen(_ context.Context, _, _ uuid.UUID, observedAt time.Time) (bool, error) {
+	p.openObservedAt = observedAt
+	return !p.rejectLifecycle, nil
+}
+
 // sessionColumns matches the SELECT columns from SessionStore queries
 // (internal/db/session_store.go — sessionSelectColumns). pgx maps by name so
 // column order is not critical, but the set of names must match the query.
@@ -89,6 +147,49 @@ func newMockPool(t *testing.T) pgxmock.PgxPoolIface {
 	require.NoError(t, err, "should create mock pool")
 	t.Cleanup(func() { mock.Close() })
 	return mock
+}
+
+func TestPRServiceApplyClosedPRTransitionPreservesProviderMergedAt(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockPool(t)
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+	providerMergedAt := time.Date(2026, time.August, 4, 12, 34, 56, 0, time.UTC)
+	providerUpdatedAt := providerMergedAt.Add(time.Minute)
+	projector := &recordingCodeReviewInsightProjector{}
+	service := &PRService{
+		pullRequests:       db.NewPullRequestStore(mock),
+		codeReviewInsights: projector,
+		logger:             zerolog.Nop(),
+	}
+	applied, err := service.applyClosedPRTransition(context.Background(), models.PullRequest{
+		ID: pullRequestID, OrgID: orgID,
+	}, true, &providerMergedAt, &providerUpdatedAt, "merge-sha", "head-sha")
+
+	require.NoError(t, err, "merged transition should project the terminal outcome")
+	require.True(t, applied, "a current merged transition should be accepted")
+	require.True(t, projector.terminalMerged, "the terminal projection should record the PR as merged")
+	require.NotNil(t, projector.terminalMergedAt, "the terminal projection should include a merge timestamp")
+	require.Equal(t, providerMergedAt, *projector.terminalMergedAt, "the terminal projection should preserve GitHub's authoritative merge time")
+	require.Equal(t, providerUpdatedAt, projector.terminalObservedAt, "the terminal projection should preserve GitHub's lifecycle ordering timestamp")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPRServiceApplyClosedPRTransitionSkipsStaleProviderEvent(t *testing.T) {
+	t.Parallel()
+
+	providerUpdatedAt := time.Date(2026, time.August, 4, 12, 34, 56, 0, time.UTC)
+	projector := &recordingCodeReviewInsightProjector{rejectLifecycle: true}
+	service := &PRService{codeReviewInsights: projector, logger: zerolog.Nop()}
+
+	applied, err := service.applyClosedPRTransition(context.Background(), models.PullRequest{
+		ID: uuid.New(), OrgID: uuid.New(),
+	}, false, nil, &providerUpdatedAt, "", "head-sha")
+
+	require.NoError(t, err, "a stale close transition should be ignored without an error")
+	require.False(t, applied, "a close older than the durable lifecycle watermark should not run terminal side effects")
+	require.Equal(t, providerUpdatedAt, projector.terminalObservedAt, "the close transition should be ordered by the provider timestamp")
 }
 
 func handlerPRRow(prID uuid.UUID, sessionID *uuid.UUID, orgID uuid.UUID, repo string, now time.Time) []any {
@@ -868,7 +969,7 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 
 	// Mock: UpdateStatus to merged.
 	prMock.ExpectExec("UPDATE pull_requests SET status").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	// Mock: GetByID for session.
@@ -1016,7 +1117,7 @@ func TestHandlePullRequestEvent_MergedWithNilSessionID(t *testing.T) {
 
 	// Mock: UpdateStatus to merged.
 	prMock.ExpectExec("UPDATE pull_requests SET status").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	// Mock: no existing deploy, then create deploy.
@@ -1088,7 +1189,7 @@ func TestHandlePullRequestEvent_MergedPrefersMergeCommitSHA(t *testing.T) {
 				AddRow(handlerPRRow(prID, (*uuid.UUID)(nil), orgID, "testorg/testrepo", now)...),
 		)
 	prMock.ExpectExec("UPDATE pull_requests SET status").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	deployMock.ExpectQuery("SELECT id, pull_request_id, org_id, environment, deployed_at, commit_sha, created_at\n\t\tFROM deploys").
@@ -1150,7 +1251,7 @@ func TestHandlePullRequestEvent_MergedFallsBackToHeadSHAWhenMergeCommitMissing(t
 				AddRow(handlerPRRow(prID, (*uuid.UUID)(nil), orgID, "testorg/testrepo", now)...),
 		)
 	prMock.ExpectExec("UPDATE pull_requests SET status").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	deployMock.ExpectQuery("SELECT id, pull_request_id, org_id, environment, deployed_at, commit_sha, created_at\n\t\tFROM deploys").
@@ -1907,6 +2008,75 @@ func TestHandlePullRequestReviewEvent_ApprovedFlow(t *testing.T) {
 	require.NoError(t, jobMock.ExpectationsWereMet(), "all job store expectations should be met")
 }
 
+func TestHandlePullRequestReviewEvent_ProjectsReviewIdentityAndIndependenceEvidence(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionID := uuid.New()
+	submittedAt := time.Date(2026, 8, 4, 6, 30, 0, 0, time.UTC)
+	prMock := newMockPool(t)
+	projector := &recordingCodeReviewInsightProjector{}
+	svc := &PRService{pullRequests: db.NewPullRequestStore(prMock), codeReviewInsights: projector, logger: zerolog.Nop()}
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(handlerPRColumns).AddRow(handlerPRRow(prID, &sessionID, orgID, "testorg/testrepo", submittedAt)...))
+	prMock.ExpectExec("UPDATE pull_requests SET review_status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	event := PullRequestReviewEvent{Action: "submitted"}
+	event.Review.ID = 90210
+	event.Review.State = "changes_requested"
+	event.Review.SubmittedAt = submittedAt
+	event.Review.User.Login = "maintainer"
+	event.Review.User.Type = "User"
+	event.Review.AuthorAssociation = "MEMBER"
+	event.PullRequest.User.Login = "pull-request-author"
+	event.PullRequest.Number = 42
+	event.Repository.FullName = "testorg/testrepo"
+
+	err := svc.HandlePullRequestReviewEvent(context.Background(), event)
+	require.NoError(t, err, "submitted review projection should succeed")
+	require.Equal(t, int64(90210), projector.recordedReviewID, "projection should retain the exact provider review ID")
+	require.Equal(t, "maintainer", projector.recordedLogin, "projection should retain the reviewer login")
+	require.Equal(t, "User", projector.recordedReviewerType, "projection should retain the provider actor type")
+	require.Equal(t, "MEMBER", projector.recordedAssociation, "projection should retain membership evidence")
+	require.Equal(t, "pull-request-author", projector.recordedPRAuthor, "projection should retain the pull request author for independence checks")
+	require.Equal(t, "changes_requested", projector.recordedState, "projection should retain the review state")
+	require.Equal(t, submittedAt, projector.recordedAt, "projection should use provider observation time")
+	require.NoError(t, prMock.ExpectationsWereMet(), "all pull request expectations should be met")
+}
+
+func TestHandlePullRequestReviewEvent_DismissesExactReviewBeforeSubmittedGuard(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now().UTC()
+	prMock := newMockPool(t)
+	projector := &recordingCodeReviewInsightProjector{}
+	svc := &PRService{pullRequests: db.NewPullRequestStore(prMock), codeReviewInsights: projector, logger: zerolog.Nop()}
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(handlerPRColumns).AddRow(handlerPRRow(prID, &sessionID, orgID, "testorg/testrepo", now)...))
+
+	event := PullRequestReviewEvent{Action: "dismissed"}
+	event.Review.ID = 12345
+	event.Review.User.Login = "maintainer"
+	event.PullRequest.User.Login = "pull-request-author"
+	event.PullRequest.Number = 42
+	event.Repository.FullName = "testorg/testrepo"
+
+	err := svc.HandlePullRequestReviewEvent(context.Background(), event)
+	require.NoError(t, err, "dismissed review projection should succeed")
+	require.Equal(t, int64(12345), projector.dismissedReviewID, "dismissal should target the exact provider review ID")
+	require.Equal(t, "maintainer", projector.dismissedLogin, "dismissal should retain the provider reviewer identity")
+	require.Equal(t, "pull-request-author", projector.dismissedPRAuthor, "dismissal should retain the pull request author used for independence")
+	require.NoError(t, prMock.ExpectationsWereMet(), "all pull request expectations should be met")
+}
+
 func TestHandlePullRequestReviewEvent_ChangesRequestedWithBody(t *testing.T) {
 	t.Parallel()
 
@@ -1947,7 +2117,7 @@ func TestHandlePullRequestReviewEvent_ChangesRequestedWithBody(t *testing.T) {
 	commentID := uuid.New()
 	reviewMock.ExpectQuery("INSERT INTO review_comments").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at"}).
 				AddRow(commentID, now),
@@ -1968,6 +2138,8 @@ func TestHandlePullRequestReviewEvent_ChangesRequestedWithBody(t *testing.T) {
 	event.Review.State = "changes_requested"
 	event.Review.Body = "Please fix the error handling"
 	event.Review.User.Login = "reviewer1"
+	event.Review.User.Type = "User"
+	event.Review.SubmittedAt = now
 	event.PullRequest.Number = 42
 	event.Repository.FullName = "testorg/testrepo"
 
@@ -2109,12 +2281,14 @@ func TestHandlePullRequestReviewCommentEvent_Created(t *testing.T) {
 	prStore := db.NewPullRequestStore(prMock)
 	reviewStore := db.NewReviewCommentStore(reviewMock)
 	jobStore := db.NewJobStore(jobMock)
+	projector := &recordingCodeReviewInsightProjector{}
 
 	svc := &PRService{
-		pullRequests:   prStore,
-		reviewComments: reviewStore,
-		jobs:           jobStore,
-		logger:         zerolog.Nop(),
+		pullRequests:       prStore,
+		reviewComments:     reviewStore,
+		codeReviewInsights: projector,
+		jobs:               jobStore,
+		logger:             zerolog.Nop(),
 	}
 
 	// Mock: GetByRepoAndNumber returns a PR.
@@ -2129,7 +2303,7 @@ func TestHandlePullRequestReviewCommentEvent_Created(t *testing.T) {
 	commentID := uuid.New()
 	reviewMock.ExpectQuery("INSERT INTO review_comments").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at"}).
 				AddRow(commentID, now),
@@ -2152,10 +2326,16 @@ func TestHandlePullRequestReviewCommentEvent_Created(t *testing.T) {
 	event.Comment.Path = "internal/main.go"
 	event.Comment.Position = &position
 	event.Comment.User.Login = "reviewer1"
+	event.Comment.User.Type = "User"
+	event.Comment.UpdatedAt = &now
 	event.PullRequest.Number = 42
 	event.Repository.FullName = "testorg/testrepo"
 
 	err := svc.HandlePullRequestReviewCommentEvent(context.Background(), event)
+	require.NoError(t, err, "created review comment should be projected")
+	require.Equal(t, orgID, projector.refreshedCommentOrg, "comment projection should retain the tenant")
+	require.Equal(t, prID, projector.refreshedCommentPR, "comment projection should target the pull request")
+	require.Equal(t, now, projector.refreshedCommentAt, "comment projection should retain the provider observation time")
 	require.NoError(t, err, "HandlePullRequestReviewCommentEvent should not return an error for a created comment")
 	require.NoError(t, prMock.ExpectationsWereMet(), "all PR store expectations should be met")
 	require.NoError(t, reviewMock.ExpectationsWereMet(), "all review comment store expectations should be met")
@@ -3118,7 +3298,7 @@ func TestHandlePullRequestEvent_MergedStopsPreview(t *testing.T) {
 
 	// 2. UpdateStatus to merged.
 	prMock.ExpectExec("UPDATE pull_requests SET status").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	// 3. No existing deploy row, then create deploy.

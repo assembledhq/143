@@ -296,7 +296,7 @@ func TestSessionActivityPhaseStoreAbandonInboxBatch(t *testing.T) {
 	orgID, sessionID, threadID, runtimeID, batchID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	acknowledgedAt := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
 	abandonedAt := acknowledgedAt.Add(time.Minute)
-	mock.ExpectQuery("UPDATE thread_inbox_delivery_batches").
+	mock.ExpectQuery(`(?s)UPDATE thread_inbox_delivery_batches.+UPDATE thread_inbox_entries e.+delivery_state = 'unknown_delivery'.+e\.delivery_state = 'acked' AND e\.applied_at IS NULL`).
 		WithArgs(orgID, batchID, abandonedAt).
 		WillReturnRows(pgxmock.NewRows(inboxBatchTestColumns).AddRow(
 			batchID, orgID, sessionID, threadID, runtimeID, int64(4), int64(5),
@@ -647,7 +647,7 @@ func TestSessionActivityPhaseStoreReconcileAbandonedInboxBatchesAcrossOrgs(t *te
 		SequenceStart: 4, SequenceEnd: 5, Status: models.InboxDeliveryBatchAbandoned,
 		AcknowledgedAt: acknowledgedAt, AbandonedAt: &abandonedAt, CreatedAt: acknowledgedAt, UpdatedAt: abandonedAt,
 	}
-	mock.ExpectQuery(`(?s)WITH candidates AS.+b\.status = 'acknowledged'.+r\.status IN \('lost', 'closed', 'failed'\).+FOR UPDATE OF b, r SKIP LOCKED.+UPDATE thread_inbox_delivery_batches`).
+	mock.ExpectQuery(`(?s)WITH candidates AS.+b\.status = 'acknowledged'.+r\.status IN \('lost', 'closed', 'failed'\).+FOR UPDATE OF b, r SKIP LOCKED.+UPDATE thread_inbox_delivery_batches.+UPDATE thread_inbox_entries e.+delivery_state = 'unknown_delivery'.+e\.delivery_state = 'acked' AND e\.applied_at IS NULL`).
 		WithArgs(cutoff, 100, abandonedAt).
 		WillReturnRows(pgxmock.NewRows(inboxBatchTestColumns).AddRow(
 			batchID, orgID, sessionID, threadID, runtimeID, int64(4), int64(5),

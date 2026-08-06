@@ -136,15 +136,17 @@ var (
 )
 
 type gitHubPullRequestDetails struct {
-	Number         int    `json:"number"`
-	HTMLURL        string `json:"html_url"`
-	Title          string `json:"title"`
-	Body           string `json:"body"`
-	State          string `json:"state"`
-	Merged         bool   `json:"merged"`
-	MergeCommitSHA string `json:"merge_commit_sha"`
-	Mergeable      *bool  `json:"mergeable"`
-	MergeableState string `json:"mergeable_state"`
+	Number         int        `json:"number"`
+	HTMLURL        string     `json:"html_url"`
+	Title          string     `json:"title"`
+	Body           string     `json:"body"`
+	State          string     `json:"state"`
+	Merged         bool       `json:"merged"`
+	MergedAt       *time.Time `json:"merged_at"`
+	UpdatedAt      *time.Time `json:"updated_at"`
+	MergeCommitSHA string     `json:"merge_commit_sha"`
+	Mergeable      *bool      `json:"mergeable"`
+	MergeableState string     `json:"mergeable_state"`
 	Head           struct {
 		Ref  string `json:"ref"`
 		SHA  string `json:"sha"`
@@ -700,7 +702,8 @@ func (s *PRService) syncPullRequestState(ctx context.Context, orgID, pullRequest
 			Int("number", pr.GitHubPRNumber).
 			Bool("merged", details.Merged).
 			Msg("self-healing PR status drift during sync; closed-event webhook was likely dropped")
-		return s.applyClosedPRTransition(ctx, pr, details.Merged, details.MergeCommitSHA, details.Head.SHA)
+		_, err := s.applyClosedPRTransition(ctx, pr, details.Merged, details.MergedAt, details.UpdatedAt, details.MergeCommitSHA, details.Head.SHA)
+		return err
 	}
 
 	checkRuns, err := s.listCheckRunsForRef(ctx, token, owner, repoName, details.Head.SHA)
@@ -1119,7 +1122,7 @@ func (s *PRService) reconcileSessionPublication(ctx context.Context, publication
 		return s.resumeSessionPublicationCreation(ctx, publication)
 	}
 	if existing, err := s.pullRequests.GetByChangesetID(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID); err == nil {
-		if err := s.completeReconciledSessionPublication(ctx, publication, existing, ""); err != nil {
+		if err := s.completeReconciledSessionPublication(ctx, publication, existing, existing.MergedAt, &existing.UpdatedAt, ""); err != nil {
 			return err
 		}
 		metrics.RecordSessionPublicationReconciliation(ctx, "already_recorded")
@@ -1195,7 +1198,7 @@ func (s *PRService) reconcileSessionPublication(ctx context.Context, publication
 	if err := s.pullRequests.AssociateGitHubPullRequest(ctx, publication.OrgID, &pr); err != nil {
 		return err
 	}
-	if err := s.completeReconciledSessionPublication(ctx, publication, pr, details.MergeCommitSHA); err != nil {
+	if err := s.completeReconciledSessionPublication(ctx, publication, pr, details.MergedAt, details.UpdatedAt, details.MergeCommitSHA); err != nil {
 		return err
 	}
 	s.logger.Info().
@@ -1240,6 +1243,8 @@ func (s *PRService) completeReconciledSessionPublication(
 	ctx context.Context,
 	publication models.SessionPublication,
 	pr models.PullRequest,
+	mergedAt *time.Time,
+	lifecycleUpdatedAt *time.Time,
 	mergeCommitSHA string,
 ) error {
 	headSHA := strings.TrimSpace(stringValue(pr.HeadSHA))
@@ -1268,11 +1273,11 @@ func (s *PRService) completeReconciledSessionPublication(
 	case models.PullRequestStatusOpen:
 		// The ordinary open-PR checkpoints above are the complete lifecycle.
 	case models.PullRequestStatusMerged:
-		if err := s.applyClosedPRTransition(ctx, pr, true, mergeCommitSHA, headSHA); err != nil {
+		if _, err := s.applyClosedPRTransition(ctx, pr, true, mergedAt, lifecycleUpdatedAt, mergeCommitSHA, headSHA); err != nil {
 			return fmt.Errorf("apply reconciled merged pull request transition: %w", err)
 		}
 	case models.PullRequestStatusClosed:
-		if err := s.applyClosedPRTransition(ctx, pr, false, "", headSHA); err != nil {
+		if _, err := s.applyClosedPRTransition(ctx, pr, false, nil, lifecycleUpdatedAt, "", headSHA); err != nil {
 			return fmt.Errorf("apply reconciled closed pull request transition: %w", err)
 		}
 	default:
