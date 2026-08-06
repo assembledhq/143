@@ -93,6 +93,7 @@ type SessionTranscriptRawRow struct {
 type SessionTranscriptWindow struct {
 	Rows                     []SessionTranscriptRawRow
 	Phases                   map[int][]models.SessionTranscriptPhase
+	ThreadStatus             models.ThreadStatus
 	Position                 models.TranscriptWindowPosition
 	HasOlder                 bool
 	HasNewer                 bool
@@ -451,17 +452,34 @@ func (s *SessionTranscriptStore) listThreadWindow(
 	orgID, threadID uuid.UUID,
 	opts SessionTranscriptWindowOptions,
 ) (SessionTranscriptWindow, error) {
+	var threadStatus models.ThreadStatus
+	if err := s.db.QueryRow(ctx, `
+		SELECT status
+		FROM session_threads
+		WHERE org_id = @org_id AND id = @thread_id AND archived_at IS NULL`,
+		pgx.NamedArgs{"org_id": orgID, "thread_id": threadID},
+	).Scan(&threadStatus); err != nil {
+		return SessionTranscriptWindow{}, fmt.Errorf("get transcript thread status: %w", err)
+	}
+
 	limit := normalizeTranscriptLimitTurns(opts.LimitTurns)
 	opts.Include = normalizeTranscriptInclude(opts.Include)
 
+	var window SessionTranscriptWindow
+	var err error
 	switch opts.Position {
 	case models.TranscriptWindowPositionNewer:
-		return s.listNewerWindow(ctx, orgID, threadID, opts, limit)
+		window, err = s.listNewerWindow(ctx, orgID, threadID, opts, limit)
 	case models.TranscriptWindowPositionAround:
-		return s.listAroundWindow(ctx, orgID, threadID, opts, limit)
+		window, err = s.listAroundWindow(ctx, orgID, threadID, opts, limit)
 	default: // latest or older
-		return s.listLatestOrOlderWindow(ctx, orgID, threadID, opts, limit)
+		window, err = s.listLatestOrOlderWindow(ctx, orgID, threadID, opts, limit)
 	}
+	if err != nil {
+		return SessionTranscriptWindow{}, err
+	}
+	window.ThreadStatus = threadStatus
+	return window, nil
 }
 
 func (s *SessionTranscriptStore) listLatestOrOlderWindow(

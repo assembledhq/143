@@ -43,7 +43,7 @@ func newSQLCapturingPool(t *testing.T) (pgxmock.PgxPoolIface, *string) {
 
 const sessionLogValidatedInsertPattern = `(?s)INSERT INTO session_logs[\s\S]+FROM sessions s\s+WHERE s\.id = @session_id\s+AND s\.org_id = @org_id\s+RETURNING id, timestamp`
 
-const sessionLogPhaseInsertPattern = `(?s)JOIN session_activity_phases p.+p\.id = @activity_phase_id AND p\.org_id = @org_id.+p\.session_id = @session_id.+p\.thread_id IS NOT DISTINCT FROM @thread_id.+p\.turn_number = @turn_number`
+const sessionLogPhaseInsertPattern = `(?s)r\.lease_token = CAST\(@activity_phase_lease_token AS uuid\).+FROM session_activity_phases p.+p\.id = @activity_phase_id AND p\.org_id = @org_id.+p\.session_id = @session_id.+p\.thread_id IS NOT DISTINCT FROM @thread_id.+p\.turn_number = @turn_number.+p\.status = 'running'`
 
 func newLogRow(id int64, sessionID uuid.UUID, now time.Time) []any {
 	return []any{
@@ -96,7 +96,7 @@ func TestSessionLogStore_Create_ValidatesActivityPhaseOwnership(t *testing.T) {
 		ActivityPhaseID: &phaseID,
 	}
 	mock.ExpectQuery(sessionLogPhaseInsertPattern).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WithArgs(anyArgs(10)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "timestamp"}).AddRow(int64(1), time.Now()))
 
 	err = NewSessionLogStore(mock).Create(context.Background(), log)
@@ -104,7 +104,7 @@ func TestSessionLogStore_Create_ValidatesActivityPhaseOwnership(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestSessionLogStore_Create_DoesNotRequireRunningActivityPhase(t *testing.T) {
+func TestSessionLogStore_Create_RequiresRunningActivityPhase(t *testing.T) {
 	t.Parallel()
 
 	mock, capturedSQL := newSQLCapturingPool(t)
@@ -117,14 +117,13 @@ func TestSessionLogStore_Create_DoesNotRequireRunningActivityPhase(t *testing.T)
 		ActivityPhaseID: &phaseID,
 	}
 	mock.ExpectQuery(sessionLogPhaseInsertPattern).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WithArgs(anyArgs(10)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "timestamp"}).AddRow(int64(7), time.Now()))
 
 	err := NewSessionLogStore(mock).Create(context.Background(), log)
-	require.NoError(t, err, "phase-closing log should be inserted regardless of the phase's terminal status")
-	// An entry that closes a phase is written after the phase reaches a terminal
-	// status, so the validated insert must not filter on phase status.
-	require.NotContains(t, *capturedSQL, "p.status", "validated insert should not constrain the phase status")
+	require.NoError(t, err, "phase-associated log should be inserted while the phase is running")
+	require.Contains(t, *capturedSQL, "p.status = 'running'", "validated insert should reject writes after phase closure")
+	require.Contains(t, *capturedSQL, "r.lease_token", "validated insert should require the runtime lease that opened the phase")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -143,7 +142,7 @@ func TestSessionLogStore_Create_RejectsMismatchedActivityPhase(t *testing.T) {
 		ActivityPhaseID: &phaseID,
 	}
 	mock.ExpectQuery(sessionLogPhaseInsertPattern).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WithArgs(anyArgs(10)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "timestamp"}))
 	// Follow-up check: the session/org pair is valid, so the phase is at fault.
 	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM sessions WHERE id = @id AND org_id = @org_id\)`).
@@ -172,7 +171,7 @@ func TestSessionLogStore_Create_PhaseInsertReportsOrgMismatchOverPhaseMismatch(t
 		ActivityPhaseID: &phaseID,
 	}
 	mock.ExpectQuery(sessionLogPhaseInsertPattern).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WithArgs(anyArgs(10)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "timestamp"}))
 	// The session does not belong to the org, so the phase is not the cause.
 	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM sessions WHERE id = @id AND org_id = @org_id\)`).

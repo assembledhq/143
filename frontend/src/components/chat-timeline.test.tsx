@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactElement } from "react";
 import { ChatTimeline, formatMessageTime } from "./chat-timeline";
 import type { TimelineEntry } from "@/lib/timeline";
@@ -88,6 +88,12 @@ describe("ChatTimeline", () => {
     canCopyToClipboardMock.mockReturnValue(true);
     copyTextToClipboardMock.mockClear();
     copyTextToClipboardMock.mockResolvedValue(undefined);
+  });
+
+  // A test that throws between useFakeTimers and useRealTimers would otherwise
+  // leak fake timers into every waitFor/userEvent case after it.
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("renders message bubbles", () => {
@@ -606,8 +612,6 @@ describe("ChatTimeline", () => {
     expect(todayLabel).toBeInTheDocument();
     expect(yesterdayLabel.parentElement?.parentElement).not.toHaveClass("sticky");
     expect(yesterdayLabel.parentElement?.parentElement).not.toHaveClass("top-0");
-
-    vi.useRealTimers();
   });
 
   it("groups a late-applied message under the day it was applied, not authored", () => {
@@ -633,7 +637,5 @@ describe("ChatTimeline", () => {
 
     expect(screen.queryByText("Yesterday")).not.toBeInTheDocument();
     expect(screen.queryByText("Today")).not.toBeInTheDocument();
-
-    vi.useRealTimers();
   });
 });

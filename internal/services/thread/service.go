@@ -1633,5 +1633,11 @@ func (s *Service) GetTranscriptWindow(ctx context.Context, orgID, sessionID, thr
 	if err != nil {
 		return TranscriptWindowResult{}, fmt.Errorf("list transcript window: %w", err)
 	}
-	return TranscriptWindowResult{Window: window, ThreadStatus: thread.Status}, nil
+	threadStatus := window.ThreadStatus
+	if threadStatus == "" {
+		// Test doubles and alternate transcript-store implementations predating
+		// snapshot status may omit it. Production stores always populate it.
+		threadStatus = thread.Status
+	}
+	return TranscriptWindowResult{Window: window, ThreadStatus: threadStatus}, nil
 }

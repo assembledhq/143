@@ -3473,6 +3473,23 @@ func TestService_GetTranscriptWindow(t *testing.T) {
 			wantHasOlder: true,
 			wantStatus:   models.ThreadStatusRunning,
 		},
+		{
+			name: "snapshot thread status wins over preflight read",
+			setup: func(threadStore *mockThreadStore, ts *mockTranscriptStore) {
+				threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:        threadID,
+						SessionID: sessionID,
+						OrgID:     orgID,
+						Status:    models.ThreadStatusRunning,
+					}, nil
+				}
+				ts.listWindowFn = func(_ context.Context, _, _ uuid.UUID, _ db.SessionTranscriptWindowOptions) (db.SessionTranscriptWindow, error) {
+					return db.SessionTranscriptWindow{ThreadStatus: models.ThreadStatusAwaitingInput}, nil
+				}
+			},
+			wantStatus: models.ThreadStatusAwaitingInput,
+		},
 	}
 
 	for _, tt := range tests {

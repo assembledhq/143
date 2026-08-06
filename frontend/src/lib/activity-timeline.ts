@@ -38,10 +38,15 @@ export function sanitizeActivityLabel(value: string, maxLength = 160): string {
     // base64 and a pattern loose enough to catch them would redact ordinary
     // hashes and paths. They are covered only in `NAME=value` form below.
     .replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, "[redacted]")
-    // The value stops at `&`/`#` as well as whitespace: inside a query string a
-    // greedy run would swallow every following parameter into one redaction and
-    // erase the rest of the label.
-    .replace(/\b((?:[A-Z][A-Z0-9_]*_)?(?:API_?KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY))\s*[:=]\s*[^\s&#]+/gi, "$1=[redacted]")
+    // Bare `NAME=value` outside a query string, so the value runs to the next
+    // whitespace — a secret may legitimately contain `&` or `#` and must not
+    // survive in part. The lookahead skips values the query-parameter rule
+    // above already redacted; without it this would re-match `?SECRET=[redacted]`
+    // and swallow every parameter after it.
+    .replace(
+      /\b((?:[A-Z][A-Z0-9_]*_)?(?:API_?KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY))\s*[:=]\s*(?!\[redacted\])[^\s]+/gi,
+      "$1=[redacted]",
+    )
     .replace(/\s+/g, " ")
     .trim();
   if (sanitized.length > maxLength) sanitized = `${sanitized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;

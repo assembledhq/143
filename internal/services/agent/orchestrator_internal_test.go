@@ -1827,6 +1827,44 @@ func TestStreamLogsReturnsAtomicHumanInputPersistenceFailure(t *testing.T) {
 	require.Equal(t, []uuid.UUID(nil), phaseStore.completed, "a rolled-back boundary must not terminally complete the phase")
 }
 
+func TestStreamLogsKeepsBoundaryRequestGuardedAndCompanionLogUnassociated(t *testing.T) {
+	t.Parallel()
+
+	orgID, sessionID, threadID := uuid.New(), uuid.New(), uuid.New()
+	runtimeID, leaseToken := uuid.New(), uuid.New()
+	phaseStore := &activityPhaseStoreFake{}
+	execution, err := newActivityPhaseExecution(
+		context.Background(), NewActivityPhaseService(phaseStore, zerolog.Nop()), zerolog.Nop(),
+		orgID, sessionID, threadID, 2, &runtimeID, &leaseToken,
+		models.ActivityPhaseTrigger{Kind: models.ActivityPhaseTriggerInitial},
+	)
+	require.NoError(t, err, "runtime-backed activity phase should start for the human-input boundary")
+	phaseID := *execution.phaseID()
+
+	logs := &testInternalSessionLogStore{}
+	orch := &Orchestrator{
+		humanInputRequests: &testInternalHumanInputStore{},
+		agentRunLogs:       logs,
+		logger:             zerolog.Nop(),
+	}
+	logCh := make(chan LogEntry, 1)
+	logCh <- LogEntry{Level: "human_input", Message: "Choose", HumanInput: &HumanInputRequest{Body: "Choose"}}
+	close(logCh)
+
+	err = orch.streamLogs(context.Background(), sessionID, orgID, models.AgentTypeCodex, TranscriptWriteContext{
+		ThreadID: &threadID, TurnNumber: 2, ActivityPhase: execution,
+	}, logCh, nil)
+
+	require.NoError(t, err, "human-input boundary and companion log should persist")
+	require.Len(t, phaseStore.humanRequests, 1, "atomic boundary should persist exactly one human-input request")
+	require.Equal(t, &phaseID, phaseStore.humanRequests[0].ActivityPhaseID, "boundary request should remain associated with the phase it closes")
+	require.Equal(t, &models.ActivityPhaseWriteGuard{RuntimeID: runtimeID, LeaseToken: leaseToken}, phaseStore.humanRequests[0].ActivityPhaseWriteGuard, "boundary request should carry the exact active runtime lease")
+	require.Len(t, logs.logs, 1, "human-input event should persist exactly one companion log")
+	require.Nil(t, logs.logs[0].ActivityPhaseID, "companion log written after phase closure should not append to the terminal phase")
+	require.Nil(t, logs.logs[0].ActivityPhaseWriteGuard, "unassociated companion log should not retain runtime lease metadata")
+	require.Nil(t, execution.phaseID(), "successful atomic boundary should clear the active phase")
+}
+
 func TestStreamLogs_DropsPhaseAssociationForEntriesFromAnotherThread(t *testing.T) {
 	t.Parallel()
 

@@ -1,7 +1,7 @@
 import { useRef } from "react";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionActivityTimeline } from "./session-activity-timeline";
 import type { TimelineEntry } from "@/lib/timeline";
 import type { SessionActivityDetail, SessionLog, SessionMessage, SessionTranscriptTurn } from "@/lib/types";
@@ -55,6 +55,12 @@ function Harness({ status, detail = "compact", atLiveEdge = true, anchorEntryId,
 }
 
 describe("SessionActivityTimeline", () => {
+  // A test that throws between useFakeTimers and useRealTimers would otherwise
+  // leak fake timers into every waitFor/userEvent case after it.
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("collapses an untouched running phase only after its terminal boundary is rendered", async () => {
     const rendered = render(<Harness status="running" />);
     expect(screen.getByRole("button", { name: /Working for.*1 tool call/ })).toHaveAttribute("aria-expanded", "true");
@@ -213,7 +219,5 @@ describe("SessionActivityTimeline", () => {
 
     expect(screen.getAllByText("Today")).toHaveLength(1);
     expect(screen.queryByText("Yesterday")).not.toBeInTheDocument();
-
-    vi.useRealTimers();
   });
 });

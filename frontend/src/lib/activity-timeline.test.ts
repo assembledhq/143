@@ -227,11 +227,20 @@ describe("sanitizeActivityLabel", () => {
   });
 
   it("keeps a redaction inside its own query parameter", () => {
-    // Regression: the NAME=value rule used to run to the next whitespace, so a
-    // secret mid-query erased every parameter after it.
+    // Regression: the NAME=value rule used to re-match an already-redacted
+    // parameter and run on to the next whitespace, erasing every parameter
+    // after it.
     expect(sanitizeActivityLabel("GET /v1?SECRET=abc&page=2&sort=asc")).toBe(
       "GET /v1?SECRET=[redacted]&page=2&sort=asc",
     );
+  });
+
+  it("redacts a whole secret that contains query-delimiter characters", () => {
+    // Regression: bounding the NAME=value run at `&`/`#` stopped the redaction
+    // mid-secret and published the tail. `#` and `&` are legal password bytes.
+    expect(sanitizeActivityLabel("PASSWORD=hunter#2")).toBe("PASSWORD=[redacted]");
+    expect(sanitizeActivityLabel("PASSWORD=p@ss&word")).toBe("PASSWORD=[redacted]");
+    expect(sanitizeActivityLabel("export API_KEY=ab#cd-ef")).toBe("export API_KEY=[redacted]");
   });
 
   it("redacts temporary AWS access keys and app-level Slack tokens", () => {

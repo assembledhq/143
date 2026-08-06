@@ -63,22 +63,17 @@ func (s *SessionLogStore) Create(ctx context.Context, log *models.SessionLog) er
 		"turn_number": log.TurnNumber,
 	}
 	if log.ActivityPhaseID != nil {
-		// The phase must belong to the same org, session, thread, and turn as the
-		// log line. Phase status is deliberately not constrained: an entry that
-		// closes a phase (final output, human input) can be persisted after the
-		// phase reaches its terminal status and still belongs to it.
-		query = `
+		// The phase must belong to the same org, session, thread, and turn and
+		// still be writable by the runtime lease that opened it.
+		query = activityPhaseWritableCTE + `
 			INSERT INTO session_logs (session_id, org_id, thread_id, level, message, metadata, turn_number, activity_phase_id)
-			SELECT @session_id, @org_id, @thread_id, @level, @message, @metadata, @turn_number, @activity_phase_id
+			SELECT @session_id, @org_id, @thread_id, @level, @message, @metadata, @turn_number, p.id
 			FROM sessions s
-			JOIN session_activity_phases p
-			  ON p.id = @activity_phase_id AND p.org_id = @org_id
-			 AND p.session_id = @session_id
-			 AND p.thread_id IS NOT DISTINCT FROM @thread_id
-			 AND p.turn_number = @turn_number
+			JOIN writable_activity_phase p ON true
 			WHERE s.id = @session_id AND s.org_id = @org_id
 			RETURNING id, timestamp`
 		args["activity_phase_id"] = log.ActivityPhaseID
+		addActivityPhaseWriteGuardArgs(args, log.ActivityPhaseWriteGuard)
 	}
 
 	row := s.db.QueryRow(ctx, query, args)

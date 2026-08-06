@@ -24,6 +24,7 @@ type activityPhaseStoreFake struct {
 	reconciledOrgs []uuid.UUID
 	reconcile      bool
 	batches        []models.ThreadInboxDeliveryBatch
+	humanRequests  []models.HumanInputRequest
 }
 
 type activityPhasePublisherFake struct {
@@ -151,11 +152,14 @@ func (f *activityPhaseStoreFake) CreateAssistantMessageAndCompletePhase(_ contex
 	return models.SessionActivityPhase{ID: phaseID, Status: models.ActivityPhaseStatusCompleted, BoundaryReason: reason}, nil
 }
 
-func (f *activityPhaseStoreFake) CreateHumanInputRequestAndCompletePhase(_ context.Context, _ uuid.UUID, phaseID uuid.UUID, _ *models.HumanInputRequest, reason models.ActivityPhaseBoundaryReason, _ time.Time) (models.SessionActivityPhase, error) {
+func (f *activityPhaseStoreFake) CreateHumanInputRequestAndCompletePhase(_ context.Context, _ uuid.UUID, phaseID uuid.UUID, request *models.HumanInputRequest, reason models.ActivityPhaseBoundaryReason, _ time.Time) (models.SessionActivityPhase, error) {
 	if f.completeErr != nil {
 		return models.SessionActivityPhase{}, f.completeErr
 	}
 	f.completed = append(f.completed, phaseID)
+	if request != nil {
+		f.humanRequests = append(f.humanRequests, *request)
+	}
 	return models.SessionActivityPhase{ID: phaseID, Status: models.ActivityPhaseStatusCompleted, BoundaryReason: reason}, nil
 }
 
@@ -298,6 +302,28 @@ func TestActivityPhaseExecutionCompletesAndClearsAssociation(t *testing.T) {
 	require.NoError(t, err, "completing an execution phase should succeed")
 	require.Nil(t, execution.phaseID(), "a terminal execution should no longer associate new transcript entries")
 	require.Equal(t, []uuid.UUID{store.started[0].ID}, store.completed, "completion should transition the exact active phase")
+}
+
+func TestActivityPhaseExecutionWriteAssociationCarriesRuntimeLease(t *testing.T) {
+	t.Parallel()
+
+	runtimeID, leaseToken := uuid.New(), uuid.New()
+	execution, err := newActivityPhaseExecution(
+		context.Background(), NewActivityPhaseService(&activityPhaseStoreFake{}, zerolog.Nop()), zerolog.Nop(),
+		uuid.New(), uuid.New(), uuid.New(), 2, &runtimeID, &leaseToken,
+		models.ActivityPhaseTrigger{Kind: models.ActivityPhaseTriggerInitial},
+	)
+	require.NoError(t, err, "starting a runtime-backed activity phase should succeed")
+
+	phaseID, guard := execution.writeAssociation()
+	require.NotNil(t, phaseID, "running activity phase should expose its durable identity")
+	require.Equal(t, &models.ActivityPhaseWriteGuard{RuntimeID: runtimeID, LeaseToken: leaseToken}, guard, "transcript writes should carry the exact runtime lease that opened the phase")
+
+	err = execution.complete(context.Background(), models.ActivityPhaseStatusCompleted, models.ActivityPhaseBoundaryFinalResponse)
+	require.NoError(t, err, "completing the runtime-backed activity phase should succeed")
+	phaseID, guard = execution.writeAssociation()
+	require.Nil(t, phaseID, "terminal activity phase should stop associating transcript writes")
+	require.Nil(t, guard, "terminal activity phase should stop exposing its runtime lease")
 }
 
 func TestActivityPhaseExecutionPublishesAtomicTerminalBoundaryInCommitOrder(t *testing.T) {

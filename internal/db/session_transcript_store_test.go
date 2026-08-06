@@ -281,6 +281,9 @@ func TestSessionTranscriptStore_ListThreadWindowIncludesTurnZeroInitialMessage(t
 	turnOneTime := now.Add(time.Second)
 	turnOneCompletedAt := turnOneTime.Add(time.Second)
 	mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	mock.ExpectQuery(`SELECT status\s+FROM session_threads`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID}).
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow(models.ThreadStatusRunning))
 
 	mock.ExpectQuery(`SELECT DISTINCT turn_number FROM \(.+session_messages.+session_logs.+\) t\s+WHERE turn_number >= 0`).
 		WithArgs(pgx.NamedArgs{
@@ -347,6 +350,7 @@ func TestSessionTranscriptStore_ListThreadWindowIncludesTurnZeroInitialMessage(t
 	})
 	require.NoError(t, err, "ListThreadWindow should include the initial prompt without error")
 	require.False(t, window.HasOlder, "turn zero and turn one should fit in the default latest window")
+	require.Equal(t, models.ThreadStatusRunning, window.ThreadStatus, "thread status should come from the same snapshot as transcript entries and phases")
 	require.Equal(t, int64(11), window.LatestAssistantMessageID, "latest assistant metadata should still point at the assistant response")
 	require.Equal(t, models.ActivityPhaseTriggerRecovery, window.Phases[1][0].TriggerKind, "transcript phase metadata should preserve the durable recovery trigger")
 	require.Equal(t, "log_101", window.LiveEdgeEntryID, "live edge metadata should ignore turn-zero history and use the latest positive-turn entry")
@@ -404,6 +408,9 @@ func TestSessionTranscriptStore_ListThreadWindowRollsBackSnapshotOnQueryError(t 
 		IsoLevel:   pgx.RepeatableRead,
 		AccessMode: pgx.ReadOnly,
 	})
+	mock.ExpectQuery(`SELECT status\s+FROM session_threads`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID}).
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow(models.ThreadStatusRunning))
 	mock.ExpectQuery(`SELECT DISTINCT turn_number`).
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID, "limit": DefaultTranscriptLimitTurns + 1}).
 		WillReturnError(errors.New("turn scan failed"))
@@ -425,6 +432,9 @@ func TestSessionTranscriptStore_ListThreadWindowSkipsSnapshotWithoutBeginTx(t *t
 	defer mock.Close()
 
 	orgID, threadID := uuid.New(), uuid.New()
+	mock.ExpectQuery(`SELECT status\s+FROM session_threads`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID}).
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow(models.ThreadStatusRunning))
 	mock.ExpectQuery(`SELECT DISTINCT turn_number`).
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID, "limit": DefaultTranscriptLimitTurns + 1}).
 		WillReturnError(errors.New("turn scan failed"))

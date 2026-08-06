@@ -382,9 +382,7 @@ func TestSessionActivityPhaseStoreCreateAssistantMessageAndCompletePhaseCommitsA
 	}
 	mock.ExpectBegin()
 	mock.ExpectQuery(sessionMessagePhaseInsertPattern).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WithArgs(anyArgs(14)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(10), completedAt))
 	mock.ExpectQuery("UPDATE session_activity_phases").
 		WithArgs(orgID, phaseID, models.ActivityPhaseBoundaryFinalResponse, completedAt).
@@ -420,9 +418,7 @@ func TestSessionActivityPhaseStoreCreateAssistantMessageAndCompletePhaseRollsBac
 	}
 	mock.ExpectBegin()
 	mock.ExpectQuery(sessionMessagePhaseInsertPattern).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WithArgs(anyArgs(14)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(10), completedAt))
 	mock.ExpectQuery("UPDATE session_activity_phases").
 		WithArgs(orgID, phaseID, models.ActivityPhaseBoundaryFinalResponse, completedAt).
