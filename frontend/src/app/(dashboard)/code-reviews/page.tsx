@@ -9,6 +9,7 @@ import {
   AlertTriangle,
   ChartNoAxesColumnIncreasing,
   ChevronDown,
+  ChevronRight,
   CircleHelp,
   ClipboardCheck,
   FileSearch,
@@ -29,6 +30,7 @@ import { ResponsiveResourceList, type ResponsiveResourceListColumn } from "@/com
 import { SectionGroup } from "@/components/section-group";
 import { StatusLabel, type StatusTone } from "@/components/status-label";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import { ExternalLink } from "@/components/ui/external-link";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { ErrorNotice } from "@/components/ui/error-notice";
@@ -3721,6 +3723,11 @@ function CodeReviewDisputeQueue({
   ) => void;
 }) {
   const [notes, setNotes] = useState<Record<string, string>>({});
+  // Hold the id, not the object. The queue polls while this tab is open, so a
+  // snapshot taken at click time would keep showing pre-reassessment context
+  // and would submit a stale expected_version once the row is refetched.
+  const [selectedDisputeID, setSelectedDisputeID] = useState<string | null>(null);
+  const selectedDispute = useMemo(() => disputes.find((dispute) => dispute.id === selectedDisputeID) ?? null, [disputes, selectedDisputeID]);
   const activeTimers = useRef<Record<string, { startedAt: number | null; accumulatedMs: number }>>({});
   const activeInteractions = useRef<Record<string, { pointer: boolean; focus: boolean }>>({});
   const activeDisputeID = useRef<string | null>(null);
@@ -3836,14 +3843,82 @@ function CodeReviewDisputeQueue({
         delete activeTimers.current[dispute.id];
         delete activeInteractions.current[dispute.id];
         clearNote(dispute.id);
+        setSelectedDisputeID(null);
       },
       () => resumeActiveInteraction(dispute.id),
     );
   };
+  const openDispute = (dispute: CodeReviewDispute) => {
+    setSelectedDisputeID(dispute.id);
+    recordActiveInteraction(dispute.id);
+  };
+  // Radix unmounts the sheet without always firing pointerleave/blur, so a
+  // leftover pointer:true would stop the next pointer-leave from pausing the
+  // timer and inflate policy_owner_active_seconds.
+  const releaseDispute = useCallback(
+    (disputeID: string) => {
+      pauseCurrentActivity();
+      delete activeInteractions.current[disputeID];
+    },
+    [pauseCurrentActivity],
+  );
+  const closeDispute = (disputeID: string | null) => {
+    if (disputeID !== null) releaseDispute(disputeID);
+    else pauseCurrentActivity();
+    setSelectedDisputeID(null);
+  };
+  // A dispute adjudicated elsewhere drops out of the pending queue on the next
+  // poll, which closes the sheet on its own because `selectedDispute` is
+  // derived. Stop its timer too, rather than billing a row that is gone.
+  useEffect(() => {
+    if (selectedDisputeID !== null && selectedDispute === null) releaseDispute(selectedDisputeID);
+  }, [releaseDispute, selectedDispute, selectedDisputeID]);
+  const disputeColumns: ResponsiveResourceListColumn<CodeReviewDispute>[] = [
+    {
+      id: "objection",
+      header: "Objection",
+      cellClassName: "min-w-[22rem] max-w-xl",
+      render: (dispute) => (
+        <div className="space-y-1">
+          <div className="line-clamp-2 font-medium leading-5 text-foreground">{dispute.body}</div>
+          <div className="text-xs text-muted-foreground">
+            {codeReviewDisputePullRequestLabel(dispute)} · {dispute.filed_by_login || "143 user"} · {formatDate(dispute.created_at)}
+          </div>
+        </div>
+      ),
+    },
+    {
+      id: "decision",
+      header: "Original decision",
+      render: (dispute) => (
+        <div className="space-y-1">
+          <StatusLabel label={decisionLabelText(dispute.decision)} tone={codeReviewDecisionTone(dispute.decision)} indicator="none" />
+          <div className="text-xs text-muted-foreground">{codeReviewDisputeDirectionLabel(dispute.direction)}</div>
+        </div>
+      ),
+    },
+    {
+      id: "reassessment",
+      header: "Reassessment",
+      render: (dispute) => <CodeReviewDisputeReassessment dispute={dispute} />,
+    },
+    {
+      id: "actions",
+      header: <span className="sr-only">Actions</span>,
+      className: "text-right",
+      cellClassName: "text-right",
+      render: (dispute) => (
+        <Button variant="ghost" size="sm" aria-label={`Review dispute on ${codeReviewDisputePullRequestLabel(dispute)}`} onClick={() => openDispute(dispute)}>
+          Review
+          <ChevronRight />
+        </Button>
+      ),
+    },
+  ];
   return (
     <SectionGroup
-      title="Decision disputes"
-      description="Objections awaiting a policy owner's judgment. At sustained volume, explainable signals rank attention but never decide the outcome."
+      title="Disputes"
+      description="Objections to code review decisions that need a policy owner."
     >
       {isLoading ? <div className="py-12 text-center text-sm text-muted-foreground">Loading disputes…</div> : null}
       {error ? (
@@ -3853,114 +3928,184 @@ function CodeReviewDisputeQueue({
         <EmptyState icon={MessageSquareText} title="No disputes need adjudication" description="New trusted objections will appear here after intake." />
       ) : null}
       {disputes.length > 0 ? (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Dispute</TableHead>
-              <TableHead>Decision</TableHead>
-              <TableHead>Reassessment</TableHead>
-              <TableHead>Queue signals</TableHead>
-              <TableHead>Trust</TableHead>
-              <TableHead className="text-right">Adjudicate</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {disputes.map((dispute) => (
-              <TableRow
-                key={dispute.id}
-                onPointerEnter={() => setActiveInteraction(dispute.id, "pointer", true)}
-                onPointerMove={() => recordActiveInteraction(dispute.id)}
-                onPointerLeave={() => setActiveInteraction(dispute.id, "pointer", false)}
-                onFocusCapture={() => setActiveInteraction(dispute.id, "focus", true)}
-                onKeyDownCapture={() => recordActiveInteraction(dispute.id)}
-                onBlurCapture={(event) => {
-                  if (!event.relatedTarget || !event.currentTarget.contains(event.relatedTarget as Node)) {
-                    setActiveInteraction(dispute.id, "focus", false);
-                  }
-                }}
-              >
-                <TableCell className="max-w-md align-top">
-                  <div className="space-y-1">
-                    <div className="line-clamp-3 text-sm text-foreground">{dispute.body}</div>
-                    <div className="text-xs text-muted-foreground">
-                      {dispute.filed_by_login || "143 user"} · {formatDate(dispute.created_at)} · {codeReviewDisputeStatusLabel(dispute.source)} ·{" "}
-                      {dispute.reviewed_head_sha.slice(0, 7)}
-                    </div>
-                    <CodeReviewDisputeContextLinks dispute={dispute} />
-                    {dispute.contested_reason_codes.length > 0 ? (
-                      <div className="flex flex-wrap gap-1 pt-1">
-                        {dispute.contested_reason_codes.map((code) => (
-                          <Badge key={code} variant="outline">
-                            {codeReviewDisputeStatusLabel(code)}
-                          </Badge>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                </TableCell>
-                <TableCell className="align-top">
-                  <div className="space-y-1">
-                    <Badge variant="outline">{decisionLabelText(dispute.decision)}</Badge>
-                    <div className="text-xs text-muted-foreground">{dispute.direction ? codeReviewDisputeStatusLabel(dispute.direction) : "Classifying"}</div>
-                  </div>
-                </TableCell>
-                <TableCell className="align-top">
-                  <StatusLabel label={codeReviewDisputeStatusLabel(dispute.reassessment_status)} tone={dispute.reassessment_flipped ? "warning" : "neutral"} />
-                </TableCell>
-                <TableCell className="align-top">
-                  <CodeReviewDisputeQueueSignals dispute={dispute} />
-                </TableCell>
-                <TableCell className="align-top">
-                  <StatusLabel label={dispute.trusted ? "Trusted" : "Untrusted"} tone={dispute.trusted ? "success" : "warning"} />
-                </TableCell>
-                <TableCell className="align-top">
-                  <div className="ml-auto w-56 space-y-2">
-                    <Textarea
-                      aria-label={`Adjudication note for dispute ${dispute.id}`}
-                      value={notes[dispute.id] ?? ""}
-                      rows={2}
-                      maxLength={2000}
-                      placeholder="Optional decision note"
-                      disabled={isSaving}
-                      onChange={(event) =>
-                        setNotes((current) => ({
-                          ...current,
-                          [dispute.id]: event.target.value,
-                        }))
-                      }
-                    />
-                    <div className="flex justify-end gap-1">
-                    <DisabledTooltip disabled={isSaving} content="Wait for the current adjudication to finish.">
-                        <Button size="sm" variant="outline" disabled={isSaving} onClick={() => adjudicate(dispute, "needs_context")}>
-                          Needs context
-                        </Button>
-                    </DisabledTooltip>
-                    <DisabledTooltip disabled={isSaving} content="Wait for the current adjudication to finish.">
-                        <Button size="sm" variant="outline" disabled={isSaving} onClick={() => adjudicate(dispute, "rejected")}>
-                          Reject
-                        </Button>
-                    </DisabledTooltip>
-                    <DisabledTooltip disabled={isSaving} content="Wait for the current adjudication to finish.">
-                        <Button size="sm" disabled={isSaving} onClick={() => adjudicate(dispute, "upheld")}>
-                          Uphold
-                        </Button>
-                    </DisabledTooltip>
-                    </div>
-                  </div>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+        <ResponsiveResourceList
+          ariaLabel="Code review disputes"
+          mobileAriaLabel="Code review dispute queue"
+          items={disputes}
+          getItemKey={(dispute) => dispute.id}
+          columns={disputeColumns}
+          emptyState="No disputes need adjudication."
+          footer={
+            <div className="flex items-center justify-between gap-3 border-t border-border/50 bg-muted/20 px-4 py-2.5">
+              <span className="text-xs tabular-nums text-muted-foreground" aria-live="polite">
+                {disputes.length}{hasMore ? "+" : ""} pending
+              </span>
+              {hasMore ? (
+                <Button variant="ghost" size="sm" disabled={isLoadingMore} onClick={onLoadMore}>
+                  {isLoadingMore ? "Loading…" : "Show more"}
+                </Button>
+              ) : null}
+            </div>
+          }
+          getDesktopRowProps={(dispute) => ({ "data-state": selectedDispute?.id === dispute.id ? "selected" : undefined })}
+          renderMobileItem={(dispute) => (
+            <ResourceRow
+              selected={selectedDispute?.id === dispute.id}
+              title={<span className="line-clamp-2 text-sm leading-5">{dispute.body}</span>}
+              metadata={
+                <span>
+                  {codeReviewDisputePullRequestLabel(dispute)} · {dispute.filed_by_login || "143 user"} · {formatDate(dispute.created_at)}
+                </span>
+              }
+              detail={
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pt-1">
+                  <StatusLabel label={decisionLabelText(dispute.decision)} tone={codeReviewDecisionTone(dispute.decision)} indicator="none" />
+                  <CodeReviewDisputeReassessment dispute={dispute} />
+                </div>
+              }
+              actions={
+                <Button variant="outline" size="sm" aria-label={`Review dispute on ${codeReviewDisputePullRequestLabel(dispute)}`} onClick={() => openDispute(dispute)}>
+                  Review dispute
+                </Button>
+              }
+            />
+          )}
+        />
       ) : null}
-      {hasMore ? (
-        <div className="flex justify-center pt-2">
-          <Button variant="outline" size="sm" disabled={isLoadingMore} onClick={onLoadMore}>
-            {isLoadingMore ? "Loading…" : "Load more disputes"}
-          </Button>
-        </div>
-      ) : null}
+      <Sheet open={selectedDispute !== null} onOpenChange={(open) => !open && closeDispute(selectedDisputeID)}>
+        <SheetContent
+          className="flex w-[calc(100vw-1rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-xl"
+          onPointerEnter={() => selectedDispute && setActiveInteraction(selectedDispute.id, "pointer", true)}
+          onPointerMove={() => selectedDispute && recordActiveInteraction(selectedDispute.id)}
+          onPointerLeave={() => selectedDispute && setActiveInteraction(selectedDispute.id, "pointer", false)}
+          onFocusCapture={() => selectedDispute && setActiveInteraction(selectedDispute.id, "focus", true)}
+          onKeyDownCapture={() => selectedDispute && recordActiveInteraction(selectedDispute.id)}
+          onBlurCapture={(event) => {
+            if (selectedDispute && (!event.relatedTarget || !event.currentTarget.contains(event.relatedTarget as Node))) {
+              setActiveInteraction(selectedDispute.id, "focus", false);
+            }
+          }}
+        >
+          {selectedDispute ? (
+            <>
+              <SheetHeader className="border-b border-border px-6 py-5 pr-12">
+                <SheetTitle>Review dispute</SheetTitle>
+                <SheetDescription>
+                  {codeReviewDisputePullRequestLabel(selectedDispute)} · filed by {selectedDispute.filed_by_login || "143 user"} · {formatDate(selectedDispute.created_at)}
+                </SheetDescription>
+              </SheetHeader>
+              <div className="flex-1 space-y-6 overflow-y-auto px-6 py-5">
+                <SectionGroup title="Objection" headingLevel={3} className="space-y-3">
+                  <p className="text-sm leading-6 text-foreground">{selectedDispute.body}</p>
+                  <CodeReviewDisputeContextLinks dispute={selectedDispute} />
+                  <div className="text-xs text-muted-foreground">
+                    {codeReviewDisputeStatusLabel(selectedDispute.source)} · reviewed {selectedDispute.reviewed_head_sha.slice(0, 7)}
+                  </div>
+                  {selectedDispute.contested_reason_codes.length > 0 ? (
+                    <div className="flex flex-wrap gap-1.5">
+                      {selectedDispute.contested_reason_codes.map((code) => (
+                        <Badge key={code} variant="outline">
+                          {codeReviewDisputeStatusLabel(code)}
+                        </Badge>
+                      ))}
+                    </div>
+                  ) : null}
+                </SectionGroup>
+
+                <SectionGroup title="Decision context" headingLevel={3}>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Card variant="recessed">
+                      <CardContent className="space-y-1 p-3.5">
+                        <div className="text-xs text-muted-foreground">Original decision</div>
+                        <StatusLabel label={decisionLabelText(selectedDispute.decision)} tone={codeReviewDecisionTone(selectedDispute.decision)} indicator="none" />
+                      </CardContent>
+                    </Card>
+                    <Card variant="recessed">
+                      <CardContent className="space-y-1 p-3.5">
+                        <div className="text-xs text-muted-foreground">Dispute direction</div>
+                        <div className="text-sm font-medium text-foreground">{codeReviewDisputeDirectionLabel(selectedDispute.direction)}</div>
+                      </CardContent>
+                    </Card>
+                    <Card variant="recessed">
+                      <CardContent className="space-y-1 p-3.5">
+                        <div className="text-xs text-muted-foreground">Reassessment</div>
+                        <CodeReviewDisputeReassessment dispute={selectedDispute} />
+                      </CardContent>
+                    </Card>
+                    <Card variant="recessed">
+                      <CardContent className="space-y-1 p-3.5">
+                        <div className="text-xs text-muted-foreground">Filer trust</div>
+                        <StatusLabel label={selectedDispute.trusted ? "Trusted" : "Untrusted"} tone={selectedDispute.trusted ? "success" : "warning"} />
+                      </CardContent>
+                    </Card>
+                  </div>
+                </SectionGroup>
+
+                <SectionGroup
+                  title="Queue context"
+                  description="Signals explain this dispute's position in the queue; they do not determine the outcome."
+                  headingLevel={3}
+                >
+                  <CodeReviewDisputeQueueSignals dispute={selectedDispute} />
+                </SectionGroup>
+              </div>
+              <div className="space-y-3 border-t border-border bg-background px-6 py-4">
+                <div className="space-y-2">
+                  <Label htmlFor={`adjudication-note-${selectedDispute.id}`}>Decision note <span className="font-normal text-muted-foreground">(optional)</span></Label>
+                  <Textarea
+                    id={`adjudication-note-${selectedDispute.id}`}
+                    value={notes[selectedDispute.id] ?? ""}
+                    rows={3}
+                    maxLength={2000}
+                    placeholder="Add context for the decision"
+                    disabled={isSaving}
+                    onChange={(event) =>
+                      setNotes((current) => ({
+                        ...current,
+                        [selectedDispute.id]: event.target.value,
+                      }))
+                    }
+                  />
+                </div>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <DisabledTooltip disabled={isSaving} content="Wait for the current adjudication to finish.">
+                    <Button size="sm" variant="outline" disabled={isSaving} onClick={() => adjudicate(selectedDispute, "needs_context")}>
+                      Needs context
+                    </Button>
+                  </DisabledTooltip>
+                  <DisabledTooltip disabled={isSaving} content="Wait for the current adjudication to finish.">
+                    <Button size="sm" variant="outline" disabled={isSaving} onClick={() => adjudicate(selectedDispute, "rejected")}>
+                      Reject
+                    </Button>
+                  </DisabledTooltip>
+                  <DisabledTooltip disabled={isSaving} content="Wait for the current adjudication to finish.">
+                    <Button size="sm" disabled={isSaving} onClick={() => adjudicate(selectedDispute, "upheld")}>
+                      Uphold
+                    </Button>
+                  </DisabledTooltip>
+                </div>
+              </div>
+            </>
+          ) : null}
+        </SheetContent>
+      </Sheet>
     </SectionGroup>
+  );
+}
+
+function CodeReviewDisputeReassessment({ dispute }: { dispute: CodeReviewDispute }) {
+  const label = dispute.reassessment_status === "not_requested"
+    ? "Not run"
+    : dispute.reassessment_status === "completed" && dispute.reassessment_decision
+      ? decisionLabelText(dispute.reassessment_decision)
+      : codeReviewDisputeStatusLabel(dispute.reassessment_status);
+  return (
+    <StatusLabel
+      label={label}
+      detail={dispute.reassessment_flipped ? "Decision changed" : undefined}
+      tone={dispute.reassessment_flipped ? "warning" : "neutral"}
+      indicator={dispute.reassessment_flipped ? "dot" : "none"}
+    />
   );
 }
 
@@ -3975,20 +4120,20 @@ function CodeReviewDisputeQueueSignals({ dispute }: { dispute: CodeReviewDispute
   const repeats = typeof dispute.queue_signals.repeat_reason_disputes_14_days === "number" ? dispute.queue_signals.repeat_reason_disputes_14_days : 0;
   const superseded = dispute.queue_signals.base_policy_superseded === true;
   const rankingEnabled = dispute.queue_signals.ranking_enabled === true;
+  const hasQueueSignal = contradiction || unchanged || flipped || repeats > 0 || superseded || (rankingEnabled && dispute.queue_priority > 0)
+    || Boolean(pullRequestAuthor) || filerIsAuthor !== null || filerIsNotAuthor || trustedAtFiling !== null;
   return (
-    <div className="flex max-w-56 flex-wrap gap-1">
-      {contradiction ? <Badge variant="destructive">Human contradicted decision</Badge> : null}
-      {unchanged ? <Badge variant="secondary">Reassessment unchanged</Badge> : null}
-      {flipped ? <Badge variant="secondary">Decision changed on reassessment</Badge> : null}
-      {repeats > 0 ? <Badge variant="secondary">{repeats} similar in 14 days</Badge> : null}
-      {superseded ? <Badge variant="outline">Policy changed</Badge> : null}
-      {rankingEnabled && dispute.queue_priority > 0 ? <Badge variant="outline">Priority {dispute.queue_priority}</Badge> : null}
+    <div className="flex flex-wrap gap-1.5">
+      {contradiction ? <Badge variant="destructive">Human reviewer disagreed</Badge> : null}
+      {unchanged ? <Badge variant="secondary">Same result after reassessment</Badge> : null}
+      {flipped ? <Badge variant="secondary">Changed after reassessment</Badge> : null}
+      {repeats > 0 ? <Badge variant="secondary">{repeats} similar objections</Badge> : null}
+      {superseded ? <Badge variant="outline">Policy has changed</Badge> : null}
+      {rankingEnabled && dispute.queue_priority > 0 ? <Badge variant="outline">Queue priority {dispute.queue_priority}</Badge> : null}
       {pullRequestAuthor ? <Badge variant="outline">PR author: {pullRequestAuthor}</Badge> : null}
       {filerIsAuthor !== null || filerIsNotAuthor ? <Badge variant="outline">{filerIsAuthor === true ? "Filed by PR author" : "Filed by another contributor"}</Badge> : null}
       {trustedAtFiling !== null ? <Badge variant="outline">{trustedAtFiling ? "Trusted at filing" : "Untrusted at filing"}</Badge> : null}
-      {!pullRequestAuthor && filerIsAuthor === null && !filerIsNotAuthor && trustedAtFiling === null && !contradiction && !unchanged && !flipped && repeats === 0 && !superseded ? (
-        <span className="text-xs text-muted-foreground">No queue signals</span>
-      ) : null}
+      {!hasQueueSignal ? <span className="text-xs text-muted-foreground">No queue signals</span> : null}
     </div>
   );
 }
@@ -4007,8 +4152,15 @@ function CodeReviewDisputeContextLinks({ dispute }: { dispute: CodeReviewDispute
           </a>
         </Button>
       ) : null}
+      {/*
+        Opens in a new tab deliberately. The evidence sheet lives in the reviews
+        tab, so navigating in place unmounts the disputes tab and discards the
+        open sheet, the typed decision note, and the accumulated active time.
+      */}
       <Button size="sm" variant="link" className="h-auto p-0 text-xs" asChild>
-        <Link href={`/code-reviews?evidence=${dispute.session_id}`}>View evidence</Link>
+        <Link href={`/code-reviews?evidence=${dispute.session_id}`} target="_blank" rel="noreferrer">
+          View evidence
+        </Link>
       </Button>
     </div>
   );
@@ -4025,6 +4177,30 @@ function decisionLabelText(decision: CodeReviewDecision): string {
     case "blocked":
       return "Blocked";
   }
+}
+
+function codeReviewDecisionTone(decision: CodeReviewDecision): StatusTone {
+  if (decision === "approved") return "success";
+  if (decision === "blocked") return "destructive";
+  if (decision === "needs_human_review") return "warning";
+  return "neutral";
+}
+
+// Self-describing on purpose: this sits directly under the original decision in
+// the queue, where a bare "Approve" reads like a second, contradictory verdict.
+function codeReviewDisputeDirectionLabel(direction?: CodeReviewDispute["direction"]): string {
+  if (direction === "should_have_approved") return "Asks to approve";
+  if (direction === "should_not_have_approved") return "Asks not to approve";
+  return "Classification pending";
+}
+
+function codeReviewDisputePullRequestLabel(dispute: CodeReviewDispute): string {
+  const repository = typeof dispute.queue_signals.github_repository === "string" ? dispute.queue_signals.github_repository.trim() : "";
+  const number = typeof dispute.queue_signals.github_pr_number === "number" ? dispute.queue_signals.github_pr_number : null;
+  const title = typeof dispute.queue_signals.pull_request_title === "string" ? dispute.queue_signals.pull_request_title.trim() : "";
+  if (repository && number) return `${repository} #${number}`;
+  if (title) return title;
+  return `Review ${dispute.reviewed_head_sha.slice(0, 7)}`;
 }
 
 function codeReviewDisputeStatusLabel(value: string): string {
