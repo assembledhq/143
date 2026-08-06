@@ -1,8 +1,15 @@
 # Design: Code Review Decision Feedback And Policy Tuning
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-08-05
+> **Status:** Partially Implemented | **Last reviewed:** 2026-08-06
 >
 > **Depends on:** [implemented/112-code-reviewer-bot-auto-approval.md](implemented/112-code-reviewer-bot-auto-approval.md), [backlog/11-review-feedback-loop.md](backlog/11-review-feedback-loop.md), [future/116-automatic-pr-feedback-follow-through.md](future/116-automatic-pr-feedback-follow-through.md), [future/16-ai-agent-evals.md](future/16-ai-agent-evals.md)
+
+> **Product update (2026-08-06):** The admin Decision feedback analytics section
+> and `GET /api/v1/code-review-insights` report were retired to keep the Analytics
+> page focused on PR-author usage. Dispute intake and adjudication, outcome
+> projection, and policy-owner queue ranking remain implemented operational
+> workflows. References to Insights below describe the original design and its
+> historical implementation, not a current product or API surface.
 
 ## Implementation status
 
@@ -13,12 +20,13 @@ inspectable in a collapsed non-blocking section. Stable head-bound deterministic
 failures publish provisionally before agent fan-out while mutable GitHub-state gates
 remain terminal-only. The optional `stop_after_deterministic_failure` setting ends
 the first attempt without agent spend; an explicit same-head rerequest after that
-early stop forces the full review. Insights reports early stops, avoided agent runs,
-and that full-review demand.
+early stop forces the full review. The early-stop, avoided-agent-run, and
+full-review-demand reporting that Insights carried was retired with the rest of
+the aggregate report; the underlying decisions are still recorded.
 
 The PR 3 Phase 1A runtime is implemented: in-app reconsideration, GitHub mention and inline-thread intake, evidence-grounded answers, durable acknowledgement/timeline states, authorization snapshots, versioned semantic cooldown dedupe, loop guards, latest-revision reassessment, admin promotion of untrusted evidence, the member escalation route, and the flat admin adjudication list. Reassessment workers use an operator kill switch and platform-wide active-work ceiling.
 
-Phase 1B(ii)'s volume-gated ranked queue and expanded Insights are implemented. Completed decisions project into an org-scoped outcome table, durable GitHub events add independent-human and terminal PR facts, daily reconciliation repairs missing or stale projections, and the queue persists explainable signal snapshots while remaining chronological below the sustained-volume trigger. Admin Insights reports objection directions and kinds, per-policy decision mix, reason distributions with actual-versus-limit observations, reassessment flips and spend, resolution time, and projection freshness.
+Phase 1B(ii)'s volume-gated ranked queue is implemented. Completed decisions project into an org-scoped outcome table, durable GitHub events add independent-human and terminal PR facts, daily reconciliation repairs missing or stale projections, and the queue persists explainable signal snapshots while remaining chronological below the sustained-volume trigger. The expanded Insights report built on those projections was implemented and then retired (see the product update above): objection directions and kinds, per-policy decision mix, reason distributions with actual-versus-limit observations, reassessment flips and spend, resolution time, and projection freshness are no longer exposed through any API or admin surface. The projections and ranking signals they were derived from are still maintained, because the policy-owner queue depends on them.
 
 Two cross-cutting contracts remain design gaps rather than Phase 1A implementation claims: the repository code-review-owner identity/delivery model needed for targeted notifications does not exist yet, and the retention section does not specify a retention duration, scanner behavior, or tombstone trigger. The current implementation bounds and isolates untrusted text, preserves immutable source versions, replies on GitHub, and surfaces escalation in the admin queue, but it does not invent notification recipients or destructive retention behavior without those decisions.
 
@@ -769,11 +777,11 @@ generator.
 ## API Contract
 
 Org-scoped, existing auth conventions. Filing and reading a session's own disputes
-are member-level; aggregate Insights, the cross-session queue, adjudication,
-spot-check verdicts, trust overrides, and proposal decisions are admin-level. Every
-list uses the standard `{data, meta: {next_cursor}}` cursor contract. Bodies are
-trimmed, non-empty, valid UTF-8, and bounded by the normal request limit plus a
-smaller dispute-body limit.
+are member-level; the cross-session queue, adjudication, spot-check verdicts, trust
+overrides, and proposal decisions are admin-level. Every list uses the standard
+`{data, meta: {next_cursor}}` cursor contract. Bodies are trimmed, non-empty,
+valid UTF-8, and bounded by the normal request limit plus a smaller dispute-body
+limit.
 
 | Route | Body / query | Returns |
 | --- | --- | --- |
@@ -781,10 +789,9 @@ smaller dispute-body limit.
 | `GET /api/v1/code-reviews/{session_id}/disputes` | `cursor?` | Disputes with routing, trust, and rerun linkage |
 | `POST /api/v1/code-review-disputes/{id}/escalate` | `{ note?: string }` | Member-level. Records an idempotent escalation per `(dispute, user)` and raises the `policy_signal_only` dispute, with PR context, in the admin queue. Targeted owner notification/digest delivery starts only after the repository-owner identity/channel contract is settled; `409` if the dispute isn't in a route where escalation is meaningful |
 | `GET /api/v1/code-review-disputes` *(admin)* | `adjudication_status?`, `repository_id?`, `direction?`, `cursor?` | The adjudication queue, materialized in stable `(queue_priority, created_at, id)` order for each paging session, each dispute showing which signals raised it |
-| `PATCH /api/v1/code-review-disputes/{id}` *(admin)* | `{ expected_version: int, adjudication_status?: "upheld"\|"rejected"\|"needs_context", adjudication_note?, policy_owner_active_seconds?, trust_override? }` | CAS update; active seconds are the bounded client-measured queue interaction used for the owner-minutes metric, and trust override can promote an untrusted item without adjudicating it. `upheld` enqueues proposal generation only when Phase 2 is enabled. `409` if the supplied version lost a race |
+| `PATCH /api/v1/code-review-disputes/{id}` *(admin)* | `{ expected_version: int, adjudication_status?: "upheld"\|"rejected"\|"needs_context", adjudication_note?, policy_owner_active_seconds?, trust_override? }` | CAS update; trust override can promote an untrusted item without adjudicating it. Active seconds are the bounded client-measured queue interaction, still recorded on adjudication but no longer read by any surface since the owner-minutes metric retired with Insights. `upheld` enqueues proposal generation only when Phase 2 is enabled. `409` if the supplied version lost a race |
 | `GET /api/v1/code-review-approval-audits` *(admin)* | `status?`, `repository_id?`, `cursor?` | Spot-check queue. `selection`, `frontier_score`, and `frontier_factors` are **omitted while queued** — the random control only works if the reviewer cannot infer the arm |
 | `POST /api/v1/code-review-approval-audits/{id}/verdict` *(admin)* | `{ expected_version: int, verdict: "correct"\|"should_not_have_approved", note? }` | CAS verdict; `should_not_have_approved` creates an already-upheld dispute; `correct` adds the session to the guard set |
-| `GET /api/v1/code-review-insights` *(admin)* | `repository_id?`, `from?`, `to?`, `decision?`, `reason_code?`, `direction?` | Decisions and dispute rate by reason code, with actual-vs-limit distributions and an authorization-aware deep link to each setting; totals; disputes by direction; **`dispute_kind` frequencies**; flip rate by attempt; reassessment spend; estimated false-approval rate with sample size/response rate/confidence interval; median decision time; projection freshness; policy-owner minutes; per-policy-version decision mix |
 | `GET /api/v1/code-review-policy-proposals` *(admin)* | `status?`, `repository_id?`, `direction?`, `cursor?` | Proposals including baseline stability, replay results, and relevant guard coverage |
 | `POST /api/v1/code-review-policy-proposals/{id}/activate` *(admin)* | `{ expected_version: int, replayed_changes_hash: string, confirm_insufficient_guard_coverage?: boolean }` | New policy + proposal. Activation accepts only the exact replayed delta; `409` if not open, replay incomplete/unstable beyond policy, hash differs, required coverage confirmation or second high-risk-loosening confirmation is absent, or base policy is superseded; `422` invalid delta; `403` touches a locked dimension |
 | `POST /api/v1/code-review-policy-proposals/{id}/revise` *(admin)* | `{ proposed_changes: object }` | Validates and stores a new proposal revision, invalidates prior replay, and enqueues replay. Editing can never activate an unreplayed delta |
