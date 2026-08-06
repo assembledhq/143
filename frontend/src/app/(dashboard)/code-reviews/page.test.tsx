@@ -42,7 +42,6 @@ import type {
   CodingCredentialSummary,
   CodeReviewAnalytics,
   CodeReviewEvidence,
-	CodeReviewInsights,
   CodeReviewDispute,
   CodeReviewGitHubTriggerResponse,
   CodeReviewListItem,
@@ -368,34 +367,6 @@ function mockCodeReviewBaseHandlers(
         data: reviewAnalytics,
       } satisfies SingleResponse<CodeReviewAnalytics>),
     ),
-		http.get("/api/v1/code-review-insights", () =>
-			HttpResponse.json({
-				data: {
-					decisions: 32,
-					disputes: 6,
-					objection_rate: 0.1875,
-					upheld_disputes: 2,
-					reassessments: 4,
-					reassessment_flips: 1,
-					reassessment_cost_usd: 4.25,
-					deterministic_early_stops: 2,
-					reviewer_runs_avoided: 6,
-					full_review_requests_after_early_stop: 1,
-					policy_owner_minutes_per_resolution: 4.5,
-					median_decision_seconds: 90,
-					median_adjudication_seconds: 7200,
-					projection_fresh_through: "2026-08-04T06:00:00Z",
-					projection_updated_at: "2026-08-04T07:00:00Z",
-					ranking_enabled: false,
-					directions: [{ direction: "should_have_approved", count: 6 }],
-					dispute_kinds: [{ kind: "threshold_too_strict", count: 3 }],
-					policy_decision_mix: [{ policy_id: "policy-1", policy_version: 4, decision: "blocked", count: 12 }],
-					reasons: [{ reason_code: "lines_limit_exceeded", decisions: 7, disputes: 3, dispute_rate: 3 / 7 }],
-					actual_vs_limit: [{ reason_code: "lines_limit_exceeded", actual: 431, limit: 300, count: 2 }],
-					flip_buckets: [{ attempt: 1, input_change: "unchanged", reassessments: 4, flips: 1 }],
-				} satisfies CodeReviewInsights,
-			} satisfies SingleResponse<CodeReviewInsights>),
-		),
     http.get("/api/v1/code-reviews/session-1/evidence", () =>
       HttpResponse.json({
         data: evidence,
@@ -710,9 +681,13 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findByDisplayValue("Custom requirement")).toBeInTheDocument();
   }, 30_000);
 
-  it("reports PR approval usage, authors, and policy signals in Analytics", async () => {
+  it("renders the PR-centric Analytics report with author usage first", async () => {
     const user = userEvent.setup();
     const analyticsRequests: URLSearchParams[] = [];
+    // The retired insights report has no handler in the base mocks, so a
+    // regression that reintroduces the query would only log an unhandled
+    // request. Record it explicitly instead so the test fails.
+    const insightsRequests: string[] = [];
     mockCodeReviewBaseHandlers();
     server.use(
       http.get("/api/v1/code-reviews/analytics", ({ request }) => {
@@ -720,6 +695,10 @@ describe("CodeReviewsPage", () => {
         return HttpResponse.json({
           data: reviewAnalytics,
         } satisfies SingleResponse<CodeReviewAnalytics>);
+      }),
+      http.get("/api/v1/code-review-insights", ({ request }) => {
+        insightsRequests.push(request.url);
+        return new HttpResponse(null, { status: 410 });
       }),
     );
 
@@ -739,24 +718,30 @@ describe("CodeReviewsPage", () => {
     expect(within(approvalOutcomes).getByText("2.0")).toBeInTheDocument();
     expect(within(approvalOutcomes).queryByText("128")).not.toBeInTheDocument();
     expect(screen.getByText("Approval by round")).toBeInTheDocument();
-		expect(screen.getByText("Decision feedback")).toBeInTheDocument();
-		expect(screen.getByText("The queue stays chronological until one organization records at least 10 eligible disputes per month for two complete months.")).toBeInTheDocument();
-		expect(screen.getByText("Objection directions")).toBeInTheDocument();
-		expect(screen.getByText("Objection kinds")).toBeInTheDocument();
-		expect(screen.getByText("Owner time / resolution")).toBeInTheDocument();
-		expect(screen.getByText("Early policy stops")).toBeInTheDocument();
-		expect(screen.getByText("6 reviewer runs avoided")).toBeInTheDocument();
-		expect(screen.getByText("Full reviews after early stop")).toBeInTheDocument();
-		expect(screen.getByText("Attempt 1")).toBeInTheDocument();
-		expect(screen.getByRole("link", { name: "Line-count limit exceeded" })).toHaveAttribute("href", "/code-reviews?tab=policy#policy-max-lines-changed");
+    expect(screen.queryByText("Decision feedback")).not.toBeInTheDocument();
     expect(screen.getByText("Why PRs were not approved right away")).toBeInTheDocument();
     expect(screen.getByText("PR findings and operational outcomes")).toBeInTheDocument();
     const analyticsFilters = document.getElementById("code-review-analytics-filters");
     expect(analyticsFilters).not.toBeNull();
+    const authorUsage = screen.getByText("Usage by PR author");
+    const authorTable = screen.getByRole("table", { name: "Code review analytics by PR author" });
     expect(
-      approvalOutcomes.compareDocumentPosition(analyticsFilters as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
+      (analyticsFilters as Node).compareDocumentPosition(authorUsage) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
-		expect(screen.getAllByText("Line-count limit exceeded").length).toBeGreaterThanOrEqual(2);
+    // Anchor on the table rather than the section heading: the cards following
+    // the heading also holds when they render inside the author section above
+    // the table, which is the one-line regression this is guarding against.
+    expect(
+      authorTable.compareDocumentPosition(approvalOutcomes) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // Pin the far side too. The filters/author-section check above still held
+    // before the cards moved, so only the full author-table → cards → request-table
+    // window proves the new placement.
+    expect(
+      approvalOutcomes.compareDocumentPosition(screen.getByText("Direct review requests by user")) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(screen.getByText("Line-count limit exceeded")).toBeInTheDocument();
     expect(screen.getByText("Reviewers found a blocking issue")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "View 5 PRs where line-count limit exceeded" })).toHaveAttribute(
       "href",
@@ -774,7 +759,6 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByText(/20 of 32 PRs whose representative assessment captured a change/))
       .toBeInTheDocument();
 
-    const authorTable = screen.getByRole("table", { name: "Code review analytics by PR author" });
     expect(within(authorTable).getAllByRole("columnheader").map((header) => header.textContent)).toEqual([
       "PR author",
       "PRs",
@@ -820,6 +804,7 @@ describe("CodeReviewsPage", () => {
     await user.click(within(authorTable).getByRole("button", { name: "Sort by PR author ascending" }));
     await waitFor(() => expect(analyticsRequests.at(-1)?.get("author_sort_by")).toBe("author"));
     expect(analyticsRequests.at(-1)?.get("author_sort_order")).toBe("asc");
+    expect(insightsRequests).toEqual([]);
   });
 
   it("restores the analytics section from the URL", async () => {
@@ -2516,18 +2501,6 @@ describe("CodeReviewsPage", () => {
     await user.click(screen.getByRole("button", { name: /Structured PR-description checks/i }));
     expect(screen.getByRole("button", { name: "About Add structured PR-description check" })).toBeInTheDocument();
   }, 30_000);
-
-	it("surfaces an Insights failure without hiding the loaded approval report", async () => {
-		const user = userEvent.setup();
-		mockCodeReviewBaseHandlers();
-		server.use(http.get("/api/v1/code-review-insights", () => HttpResponse.json({ error: { code: "INSIGHTS_FAILED", message: "insights unavailable" } }, { status: 500 })));
-
-		renderWithProviders(<CodeReviewsPage />);
-		await user.click(await screen.findByRole("tab", { name: "Analytics" }));
-
-		expect(await screen.findByText("Decision feedback unavailable")).toBeInTheDocument();
-		expect(screen.getByText("Usage by PR author")).toBeInTheDocument();
-	});
 
   it("filters automatic approvals and successful non-approvals as distinct outcomes", async () => {
     const user = userEvent.setup();

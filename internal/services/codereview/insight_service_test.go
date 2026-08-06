@@ -105,9 +105,6 @@ func TestInsightService_RankPendingPropagatesEnabledMode(t *testing.T) {
 	require.True(t, enabled, "ranking should return the current organization-wide mode")
 	require.Equal(t, []bool{true}, store.rankModes, "candidate selection should invalidate snapshots computed under the previous ranking mode")
 }
-func (s *insightServiceStoreStub) GetInsights(context.Context, uuid.UUID, models.CodeReviewInsightFilters) (models.CodeReviewInsights, error) {
-	return models.CodeReviewInsights{}, nil
-}
 
 type insightOutcomeProviderStub struct {
 	calledRepositoryID uuid.UUID

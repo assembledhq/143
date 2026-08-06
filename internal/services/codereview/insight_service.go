@@ -22,18 +22,10 @@ type codeReviewInsightStore interface {
 	RankingEnabled(ctx context.Context, orgID uuid.UUID) (bool, error)
 	ListPendingRankCandidates(ctx context.Context, orgID uuid.UUID, limit int, rankingEnabled bool) ([]db.CodeReviewRankCandidate, error)
 	UpdateDisputeRanks(ctx context.Context, orgID uuid.UUID, updates []models.CodeReviewRankUpdate) error
-	GetInsights(ctx context.Context, orgID uuid.UUID, filters models.CodeReviewInsightFilters) (models.CodeReviewInsights, error)
 }
 
 type codeReviewOutcomeProvider interface {
 	GetCodeReviewOutcomeSnapshot(ctx context.Context, orgID, repositoryID uuid.UUID, pullRequestNumber int) (models.CodeReviewOutcomeSnapshot, error)
-}
-
-func (s *InsightService) GetInsights(ctx context.Context, orgID uuid.UUID, filters models.CodeReviewInsightFilters) (models.CodeReviewInsights, error) {
-	if s == nil || s.store == nil {
-		return models.CodeReviewInsights{}, fmt.Errorf("code review insight store is unavailable")
-	}
-	return s.store.GetInsights(ctx, orgID, filters)
 }
 
 type InsightService struct {

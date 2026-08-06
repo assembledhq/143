@@ -509,31 +509,6 @@ export interface CodeReviewDispute {
   updated_at: string;
 }
 
-export interface CodeReviewInsights {
-  decisions: number;
-  disputes: number;
-  objection_rate: number;
-  upheld_disputes: number;
-  reassessments: number;
-  reassessment_flips: number;
-  reassessment_cost_usd: number;
-  deterministic_early_stops: number;
-  reviewer_runs_avoided: number;
-  full_review_requests_after_early_stop: number;
-  policy_owner_minutes_per_resolution?: number;
-  median_decision_seconds?: number;
-  median_adjudication_seconds?: number;
-  projection_fresh_through?: string;
-  projection_updated_at?: string;
-  ranking_enabled: boolean;
-  directions: Array<{ direction: CodeReviewDisputeDirection; count: number }>;
-  dispute_kinds: Array<{ kind: string; count: number }>;
-  policy_decision_mix: Array<{ policy_id: string; policy_version: number; decision: CodeReviewDecision; count: number }>;
-  reasons: Array<{ reason_code: string; decisions: number; disputes: number; dispute_rate: number }>;
-  actual_vs_limit: Array<{ reason_code: string; actual: number; limit: number; count: number }>;
-  flip_buckets: Array<{ attempt: number; input_change: "changed" | "unchanged" | "unknown"; reassessments: number; flips: number }>;
-}
-
 export type AgentCapabilityID =
   | 'repo_context'
   | 'pr_history'
