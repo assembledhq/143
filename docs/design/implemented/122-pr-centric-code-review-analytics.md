@@ -1,6 +1,6 @@
 # Design: PR-Centric Code Review Analytics
 
-> **Status:** Implemented | **Last reviewed:** 2026-08-03
+> **Status:** Implemented | **Last reviewed:** 2026-08-06
 >
 > **Depends on:** [112-code-reviewer-bot-auto-approval.md](112-code-reviewer-bot-auto-approval.md), [../overall.md](../overall.md)
 
@@ -156,36 +156,10 @@ while still describing the final observed state of the PR.
 ## Analytics page
 
 Keep the existing page shell, repository selector, and time-window selector.
-Replace the current review-based report with the sections below.
+Replace the current review-based report with the sections below, numbered in the
+order the page renders them.
 
-### 1. Headline cards
-
-Show four cards:
-
-| Card | Definition | Supporting text |
-| --- | --- | --- |
-| **PRs reviewed** | Unique PRs in the cohort | “First sent to 143 in this period” |
-| **Approved by 143** | Cohort PRs with a posted 143 approval | Percentage of PRs reviewed |
-| **Approval rate** | Approved by 143 / PRs reviewed | Approved PR count |
-| **Median rounds to approval** | Median among approved cohort PRs | Approved PRs only |
-
-If no PRs are in the cohort, show the existing analytics empty state with PR-based
-copy. If PRs exist but none are approved, show `—` for median rounds.
-
-### 2. Approval by round
-
-Show one compact distribution with these mutually exclusive outcomes:
-
-- Approved in round 1
-- Approved in round 2
-- Approved in round 3
-- Approved in round 4+
-- Not yet approved
-
-Each item shows a PR count and percentage of PRs reviewed. A simple row or set of
-cards is sufficient; this does not require a charting library.
-
-### 3. Usage by PR author
+### 1. Usage by PR author
 
 Keep the current author table and convert every count to unique PRs:
 
@@ -206,7 +180,51 @@ outcome filters where the existing list supports them. The Reviews tab may still
 show individual sessions after navigation; grouping that tab by PR is outside
 this design.
 
-### 4. Why PRs were not approved right away
+### 2. Headline cards
+
+Show four cards. Each card is a label and a value with no subdescription; the
+definition is reachable from an info tooltip on the label, so the cards stay
+scannable and the wording lives in one place.
+
+| Card | Definition | Tooltip |
+| --- | --- | --- |
+| **PRs reviewed** | Unique PRs in the cohort | Unique pull requests first sent to 143 during the selected time period |
+| **Approved by 143** | Cohort PRs with a posted 143 approval | Reviewed pull requests where 143 posted an approval on GitHub |
+| **Approval rate** | Approved by 143 / PRs reviewed | The percentage of reviewed pull requests where 143 posted an approval on GitHub |
+| **Median rounds to approval** | Median among approved cohort PRs | The median number of distinct completed revisions before 143 first posted an approval, among approved pull requests |
+
+If no PRs are in the cohort, show the existing analytics empty state with PR-based
+copy. If PRs exist but none are approved, show `—` for median rounds.
+
+### 3. Direct review requests by user
+
+Show a compact table of trusted GitHub users whose newly created PR conversation
+comments directly mentioned the configured 143 code reviewer:
+
+| Column | Definition |
+| --- | --- |
+| GitHub user | Lowercased captured login from the triggering comment |
+| Direct comment requests | Distinct GitHub delivery/comment identities for PRs in the selected cohort |
+
+Show the total in the table summary. A GitHub webhook redelivery counts once.
+Automatic head reassessments, reviewer assignments, and manual retries do not
+count. Later comment requests for a PR in the selected cohort remain included,
+matching the report's existing full-PR-journey semantics.
+
+### 4. Approval by round
+
+Show one compact distribution with these mutually exclusive outcomes:
+
+- Approved in round 1
+- Approved in round 2
+- Approved in round 3
+- Approved in round 4+
+- Not yet approved
+
+Each item shows a PR count and percentage of PRs reviewed. A simple row or set of
+cards is sufficient; this does not require a charting library.
+
+### 5. Why PRs were not approved right away
 
 Show the existing structured non-approval reason labels, but count each reason at
 most once per PR.
@@ -219,7 +237,7 @@ reasons.
 This preserves evidence about friction encountered during the PR journey without
 allowing long-running PRs to dominate the report.
 
-### 5. PR findings and operational outcomes
+### 6. PR findings and operational outcomes
 
 Keep the current findings and decision-outcome section, using the representative
 assessment:
@@ -242,37 +260,22 @@ overlap other outcomes: a PR can have a stale attempt and later be approved. The
 copy must make this clear rather than presenting them as mutually exclusive final
 outcomes.
 
-### 6. Direct review requests by user
-
-Show a compact table of trusted GitHub users whose newly created PR conversation
-comments directly mentioned the configured 143 code reviewer:
-
-| Column | Definition |
-| --- | --- |
-| GitHub user | Lowercased captured login from the triggering comment |
-| Direct comment requests | Distinct GitHub delivery/comment identities for PRs in the selected cohort |
-
-Show the total in the table summary. A GitHub webhook redelivery counts once.
-Automatic head reassessments, reviewer assignments, and manual retries do not
-count. Later comment requests for a PR in the selected cohort remain included,
-matching the report's existing full-PR-journey semantics.
-
 ## Suggested layout
 
 ```text
 Analytics
 [Repository] [PRs first sent to 143: Last 30 days]
 
-[PRs reviewed] [Approved by 143] [Approval rate] [Median rounds]
-
-Approval by round
-[Round 1] [Round 2] [Round 3] [Round 4+] [Not yet approved]
-
 Usage by PR author
 Author       PRs   Approved   Not approved   First-round approval   Median rounds
 
+[PRs reviewed] [Approved by 143] [Approval rate] [Median rounds]
+
 Direct review requests by user
 GitHub user                                  Direct comment requests
+
+Approval by round
+[Round 1] [Round 2] [Round 3] [Round 4+] [Not yet approved]
 
 Why PRs were not approved right away
 Reason                                      PRs
@@ -434,6 +437,7 @@ the report is derived from current durable review and PR records.
 - Each PR contributes once to PR counts and outcome rates.
 - Failed, stale, and same-head retries do not inflate rounds.
 - The page directly answers how many rounds approval took.
+- The PR-author usage table is the primary report immediately after the filters.
 - Existing author, finding, non-approval, and operational
   insights remain available with PR-based denominators.
 - No PR contributes more than once to an author row, outcome count,

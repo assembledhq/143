@@ -53,10 +53,6 @@ type codeReviewDisputeService interface {
 	Adjudicate(ctx context.Context, orgID, disputeID, userID uuid.UUID, update models.CodeReviewDisputeAdjudicationUpdate) (models.CodeReviewDispute, error)
 }
 
-type codeReviewInsightService interface {
-	GetInsights(ctx context.Context, orgID uuid.UUID, filters models.CodeReviewInsightFilters) (models.CodeReviewInsights, error)
-}
-
 type codeReviewListCursor struct {
 	ID        uuid.UUID             `json:"id"`
 	CreatedAt time.Time             `json:"created_at"`
@@ -228,7 +224,6 @@ type CodeReviewHandler struct {
 	memberships  codeReviewMembershipStore
 	retryService codeReviewRetryService
 	disputes     codeReviewDisputeService
-	insights     codeReviewInsightService
 }
 
 func (h *CodeReviewHandler) SetAuditEmitter(audit *db.AuditEmitter) { h.audit = audit }
@@ -262,71 +257,6 @@ func (h *CodeReviewHandler) SetDisputeService(service *codereviewsvc.DisputeServ
 		return
 	}
 	h.disputes = service
-}
-
-func (h *CodeReviewHandler) SetInsightService(service codeReviewInsightService) {
-	h.insights = service
-}
-
-func (h *CodeReviewHandler) Insights(w http.ResponseWriter, r *http.Request) {
-	if h.insights == nil {
-		writeError(w, r, http.StatusServiceUnavailable, "service_unavailable", "Code review insights are unavailable")
-		return
-	}
-	filters := models.CodeReviewInsightFilters{}
-	query := r.URL.Query()
-	if raw := strings.TrimSpace(query.Get("repository_id")); raw != "" {
-		id, err := uuid.Parse(raw)
-		if err != nil {
-			writeError(w, r, http.StatusBadRequest, "invalid_repository_id", "repository_id must be a UUID")
-			return
-		}
-		filters.RepositoryID = &id
-	}
-	for key, target := range map[string]**time.Time{"from": &filters.From, "to": &filters.To} {
-		if raw := strings.TrimSpace(query.Get(key)); raw != "" {
-			value, err := time.Parse(time.RFC3339, raw)
-			if err != nil {
-				writeError(w, r, http.StatusBadRequest, "invalid_time", key+" must be RFC3339")
-				return
-			}
-			*target = &value
-		}
-	}
-	if filters.From != nil && filters.To != nil && filters.From.After(*filters.To) {
-		writeError(w, r, http.StatusBadRequest, "invalid_time_range", "from must be before or equal to to")
-		return
-	}
-	if raw := strings.TrimSpace(query.Get("decision")); raw != "" {
-		value := models.CodeReviewDecision(raw)
-		if err := value.Validate(); err != nil {
-			writeError(w, r, http.StatusBadRequest, "invalid_decision", err.Error())
-			return
-		}
-		filters.Decision = &value
-	}
-	if raw := strings.TrimSpace(query.Get("reason_code")); raw != "" {
-		value := models.CodeReviewRiskReasonCode(raw)
-		if err := value.Validate(); err != nil {
-			writeError(w, r, http.StatusBadRequest, "invalid_reason_code", err.Error())
-			return
-		}
-		filters.ReasonCode = &value
-	}
-	if raw := strings.TrimSpace(query.Get("direction")); raw != "" {
-		value := models.CodeReviewDisputeDirection(raw)
-		if err := value.Validate(); err != nil {
-			writeError(w, r, http.StatusBadRequest, "invalid_direction", err.Error())
-			return
-		}
-		filters.Direction = &value
-	}
-	report, err := h.insights.GetInsights(r.Context(), middleware.OrgIDFromContext(r.Context()), filters)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "internal_error", "Failed to load code review insights", err)
-		return
-	}
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewInsights]{Data: report})
 }
 
 // StreamUpdates is the org-scoped SSE endpoint backing the live code reviews

@@ -88,7 +88,6 @@ import type {
   CodeReviewActivityStatus,
   CodeReviewDecision,
   CodeReviewDispute,
-  CodeReviewInsights,
   CodeReviewDescriptionApplicabilityKind,
   CodeReviewEvidence,
   CodeReviewGitHubTriggerResponse,
@@ -619,7 +618,6 @@ export default function CodeReviewsPage() {
     }),
     [authorSort, authorSortOrder, reviewRepositoryId, timeRangeFilter],
   );
-  const insightsScopeQueryKey = useMemo(() => ({ repository_id: reviewRepositoryId, time_range: timeRangeFilter }), [reviewRepositoryId, timeRangeFilter]);
   const statsScopeQueryKey = useMemo(
     () => ({
       ...statsReviewFilters,
@@ -807,19 +805,6 @@ export default function CodeReviewsPage() {
     queryFn: () => api.codeReviews.analytics(currentAnalyticsFilters()),
     enabled: activeTab === "analytics",
     refetchInterval: activeTab !== "analytics" ? false : codeReviewStreamHealthy ? pollMs(30_000) : pollMs(5_000),
-  });
-  const insightsQuery = useQuery<SingleResponse<CodeReviewInsights>>({
-    queryKey: queryKeys.codeReviews.insights(insightsScopeQueryKey),
-    queryFn: () => {
-      const filters = currentAnalyticsFilters();
-      return api.codeReviews.insights({
-        repository_id: filters.repository_id,
-        from: filters.created_after,
-        to: filters.created_before,
-      });
-    },
-    enabled: activeTab === "analytics" && canManagePolicy,
-    refetchInterval: activeTab !== "analytics" || !canManagePolicy ? false : pollMs(60_000),
   });
   const policyQuery = useQuery({
     queryKey: queryKeys.codeReviews.policy,
@@ -1503,10 +1488,6 @@ export default function CodeReviewsPage() {
           <PageTabContent value="analytics">
             <CodeReviewAnalyticsReport
               analytics={analyticsQuery.data?.data}
-            insights={insightsQuery.data?.data}
-            insightsIsLoading={insightsQuery.isLoading}
-            insightsIsError={insightsQuery.isError}
-            onRetryInsights={() => void insightsQuery.refetch()}
               isLoading={analyticsQuery.isLoading}
               isError={analyticsQuery.isError}
               onRetry={() => void analyticsQuery.refetch()}
@@ -3721,6 +3702,10 @@ function CodeReviewDisputeQueue({
   ) => void;
 }) {
   const [notes, setNotes] = useState<Record<string, string>>({});
+  // Active queue time is still measured and sent on adjudication even though the
+  // Insights report that charted it was retired: the value is only observable
+  // while the owner works the dispute, so pausing collection would leave an
+  // unrecoverable gap if owner-time reporting returns.
   const activeTimers = useRef<Record<string, { startedAt: number | null; accumulatedMs: number }>>({});
   const activeInteractions = useRef<Record<string, { pointer: boolean; focus: boolean }>>({});
   const activeDisputeID = useRef<string | null>(null);

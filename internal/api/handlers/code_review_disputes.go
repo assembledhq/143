@@ -253,6 +253,10 @@ func (h *CodeReviewHandler) UpdateDispute(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusUnprocessableEntity, "INVALID_DISPUTE_UPDATE", "expected_version and at least one update are required")
 		return
 	}
+	// PolicyOwnerActiveSeconds is recorded but unread since the Insights
+	// owner-minutes metric retired. The measurement only exists while the owner
+	// works the dispute, so collection continues rather than leaving a gap no
+	// backfill could repair.
 	if req.PolicyOwnerActiveSeconds != nil && (*req.PolicyOwnerActiveSeconds < 0 || *req.PolicyOwnerActiveSeconds > 3600) {
 		writeError(w, r, http.StatusUnprocessableEntity, "INVALID_POLICY_OWNER_ACTIVE_SECONDS", "policy_owner_active_seconds must be between 0 and 3600")
 		return
