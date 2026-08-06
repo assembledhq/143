@@ -1482,7 +1482,7 @@ describe("CodeReviewsPage", () => {
     expect(within(evidenceSheet).getByText("Decision feedback")).toBeInTheDocument();
   });
 
-  it("shows the flat admin dispute list and submits a CAS adjudication", async () => {
+  it("keeps the dispute list concise and submits a CAS adjudication from the review sheet", async () => {
     const user = userEvent.setup();
     let updateBody: unknown;
     let currentTime = 1_000;
@@ -1522,25 +1522,28 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: "Disputes" }));
-    expect(await screen.findByText("The size exception was already approved.")).toBeInTheDocument();
-    expect(screen.getByText("Human contradicted decision")).toBeInTheDocument();
-    expect(screen.getByText("Reassessment unchanged")).toBeInTheDocument();
-    expect(screen.getByText("Filed by another contributor")).toBeInTheDocument();
-    expect(screen.getByText("3 similar in 14 days")).toBeInTheDocument();
-    expect(screen.getByText("Priority 75")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "acme/api #428" })).toHaveAttribute("href", "https://github.com/acme/api/pull/428");
-    const disputeRow = screen.getByText("The size exception was already approved.").closest("tr");
-    const secondDisputeRow = screen.getByText("A second objection under review.").closest("tr");
+    const disputeTable = await screen.findByRole("table", { name: "Code review disputes" });
+    expect(within(disputeTable).getByRole("columnheader", { name: "Objection" })).toBeInTheDocument();
+    expect(within(disputeTable).getByRole("columnheader", { name: "Original decision" })).toBeInTheDocument();
+    expect(within(disputeTable).getByRole("columnheader", { name: "Reassessment" })).toBeInTheDocument();
+    expect(within(disputeTable).queryByRole("columnheader", { name: "Queue signals" })).not.toBeInTheDocument();
+    expect(within(disputeTable).queryByRole("columnheader", { name: "Trust" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Human reviewer disagreed")).not.toBeInTheDocument();
+    const disputeRow = within(disputeTable).getByText("The size exception was already approved.").closest("tr");
     expect(disputeRow).not.toBeNull();
-    expect(secondDisputeRow).not.toBeNull();
-    fireEvent.pointerEnter(disputeRow as HTMLTableRowElement);
+    // Self-describing, so it cannot read as a second verdict beside "Blocked".
+    expect(within(disputeRow as HTMLTableRowElement).getByText("Asks to approve")).toBeInTheDocument();
+    await user.click(within(disputeRow as HTMLTableRowElement).getByRole("button", { name: "Review dispute on acme/api #428" }));
+    const disputeSheet = await screen.findByRole("dialog", { name: "Review dispute" });
+    expect(within(disputeSheet).getByText("Human reviewer disagreed")).toBeInTheDocument();
+    expect(within(disputeSheet).getByText("Same result after reassessment")).toBeInTheDocument();
+    expect(within(disputeSheet).getByText("Filed by another contributor")).toBeInTheDocument();
+    expect(within(disputeSheet).getByText("3 similar objections")).toBeInTheDocument();
+    expect(within(disputeSheet).getByText("Queue priority 75")).toBeInTheDocument();
+    expect(within(disputeSheet).getByRole("link", { name: "acme/api #428" })).toHaveAttribute("href", "https://github.com/acme/api/pull/428");
     currentTime = 2_000;
-    fireEvent.pointerEnter(secondDisputeRow as HTMLTableRowElement);
-    currentTime = 3_000;
-    fireEvent.blur(window);
-    currentTime = 62_000;
-    await user.type(screen.getByLabelText("Adjudication note for dispute dispute-queue-1"), "Confirmed exception in the policy record.");
-    await user.click(within(disputeRow as HTMLTableRowElement).getByRole("button", { name: "Uphold" }));
+    await user.type(within(disputeSheet).getByLabelText(/Decision note/), "Confirmed exception in the policy record.");
+    await user.click(within(disputeSheet).getByRole("button", { name: "Uphold" }));
 
     await waitFor(() => expect(updateBody).toEqual({
       expected_version: 3,
@@ -1549,6 +1552,204 @@ describe("CodeReviewsPage", () => {
       policy_owner_active_seconds: 1,
     }));
     performanceNow.mockRestore();
+  });
+
+  // policy_owner_active_seconds feeds the adjudication-effort analytics, so the
+  // pauses matter as much as the accumulation: time spent on a different
+  // dispute, or with the window backgrounded, must not be billed.
+  it("bills only time spent actively on the dispute being adjudicated", async () => {
+    const user = userEvent.setup();
+    let updateBody: unknown;
+    let currentTime = 1_000;
+    const performanceNow = vi.spyOn(performance, "now").mockImplementation(() => currentTime);
+    const first: CodeReviewDispute = {
+      id: "dispute-timing-1", org_id: "org-1", session_id: "session-1", pull_request_id: "pr-1",
+      repository_id: "repo-1", policy_id: "policy-1", reviewed_head_sha: review.head_sha,
+      decision: "blocked", direction: "should_have_approved", filed_by_login: "anya",
+      author_association: "MEMBER", author_is_pr_author: true, repository_visibility: "private",
+      trusted: true, source: "app_ui", body: "First objection to read.",
+      contested_reason_codes: [], intake_status: "triaged", routing: "policy_signal_only",
+      reassessment_status: "not_requested", adjudication_status: "pending",
+      queue_signals: { github_repository: "acme/api", github_pr_number: 428 }, queue_priority: 0,
+      reply_status: "not_applicable", version: 3, created_at: "2026-06-26T12:06:00Z", updated_at: "2026-06-26T12:06:00Z",
+    };
+    const second: CodeReviewDispute = {
+      ...first,
+      id: "dispute-timing-2",
+      body: "Second objection to adjudicate.",
+      queue_signals: { github_repository: "acme/api", github_pr_number: 429 },
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-review-disputes", () => HttpResponse.json({ data: [first, second], meta: {} } satisfies ListResponse<CodeReviewDispute>)),
+      http.patch("/api/v1/code-review-disputes/dispute-timing-2", async ({ request }) => {
+        updateBody = await request.json();
+        return HttpResponse.json({ data: { ...second, adjudication_status: "upheld", version: 4 } } satisfies SingleResponse<CodeReviewDispute>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: "Disputes" }));
+    const disputeTable = await screen.findByRole("table", { name: "Code review disputes" });
+
+    // 1s spent on the first dispute, then closed. It must not reach the second.
+    await user.click(within(disputeTable).getByRole("button", { name: "Review dispute on acme/api #428" }));
+    const firstSheet = await screen.findByRole("dialog", { name: "Review dispute" });
+    expect(within(firstSheet).getByText("First objection to read.")).toBeInTheDocument();
+    currentTime = 2_000;
+    await user.click(within(firstSheet).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Review dispute" })).not.toBeInTheDocument());
+
+    currentTime = 50_000;
+    await user.click(within(disputeTable).getByRole("button", { name: "Review dispute on acme/api #429" }));
+    const secondSheet = await screen.findByRole("dialog", { name: "Review dispute" });
+    expect(within(secondSheet).getByText("Second objection to adjudicate.")).toBeInTheDocument();
+
+    // 1s of real attention, then the window is backgrounded for 39s.
+    currentTime = 51_000;
+    fireEvent.blur(window);
+    currentTime = 90_000;
+    fireEvent.focus(window);
+    await user.click(within(secondSheet).getByRole("button", { name: "Uphold" }));
+
+    await waitFor(() => expect(updateBody).toEqual({
+      expected_version: 3,
+      adjudication_status: "upheld",
+      policy_owner_active_seconds: 1,
+    }));
+    performanceNow.mockRestore();
+  });
+
+  // The queue polls while the sheet is open. A snapshot taken at click time
+  // would show pre-reassessment context and submit a stale CAS version.
+  it("refreshes the open dispute sheet when the queue reports a newer version", async () => {
+    const user = userEvent.setup();
+    const queryClient = createTestQueryClient();
+    let updateBody: unknown;
+    let reassessmentLanded = false;
+    const pending: CodeReviewDispute = {
+      id: "dispute-fresh-1", org_id: "org-1", session_id: "session-1", pull_request_id: "pr-1",
+      repository_id: "repo-1", policy_id: "policy-1", reviewed_head_sha: review.head_sha,
+      decision: "blocked", direction: "should_have_approved", filed_by_login: "anya",
+      author_association: "MEMBER", author_is_pr_author: true, repository_visibility: "private",
+      trusted: true, source: "app_ui", body: "Reassess this block please.",
+      contested_reason_codes: [], intake_status: "triaged", routing: "reassess",
+      reassessment_status: "running", adjudication_status: "pending",
+      queue_signals: { github_repository: "acme/api", github_pr_number: 428 }, queue_priority: 0,
+      reply_status: "not_applicable", version: 3, created_at: "2026-06-26T12:06:00Z", updated_at: "2026-06-26T12:06:00Z",
+    };
+    const reassessed: CodeReviewDispute = {
+      ...pending,
+      reassessment_status: "completed",
+      reassessment_decision: "approved",
+      reassessment_flipped: true,
+      version: 4,
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-review-disputes", () =>
+        HttpResponse.json({ data: [reassessmentLanded ? reassessed : pending], meta: {} } satisfies ListResponse<CodeReviewDispute>)),
+      http.patch("/api/v1/code-review-disputes/dispute-fresh-1", async ({ request }) => {
+        updateBody = await request.json();
+        return HttpResponse.json({ data: { ...reassessed, adjudication_status: "upheld", version: 5 } } satisfies SingleResponse<CodeReviewDispute>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, { queryClient });
+
+    await user.click(await screen.findByRole("tab", { name: "Disputes" }));
+    const disputeTable = await screen.findByRole("table", { name: "Code review disputes" });
+    await user.click(within(disputeTable).getByRole("button", { name: "Review dispute on acme/api #428" }));
+    const disputeSheet = await screen.findByRole("dialog", { name: "Review dispute" });
+    expect(within(disputeSheet).getByText("Running")).toBeInTheDocument();
+
+    reassessmentLanded = true;
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ["code-reviews", "dispute-queue"] });
+    });
+
+    // The reassessment landed while the sheet was open: the policy owner sees
+    // the flip they are adjudicating against, not the stale "Running".
+    expect(await within(disputeSheet).findByText("Decision changed")).toBeInTheDocument();
+    expect(within(disputeSheet).getByText("Approved")).toBeInTheDocument();
+    // The queue row behind the sheet tracks the same refresh.
+    expect(within(disputeTable).getByText("Approved")).toBeInTheDocument();
+
+    await user.click(within(disputeSheet).getByRole("button", { name: "Uphold" }));
+    await waitFor(() => expect(updateBody).toEqual({
+      expected_version: 4,
+      adjudication_status: "upheld",
+      policy_owner_active_seconds: expect.any(Number),
+    }));
+  });
+
+  // "Not run" is a deliberate state; "Failed" means the evidence the policy
+  // owner expected is missing. They must not read the same.
+  it("flags a failed reassessment rather than showing it as quietly as an unrequested one", async () => {
+    const user = userEvent.setup();
+    const failed: CodeReviewDispute = {
+      id: "dispute-failed-1", org_id: "org-1", session_id: "session-1", pull_request_id: "pr-1",
+      repository_id: "repo-1", policy_id: "policy-1", reviewed_head_sha: review.head_sha,
+      decision: "blocked", direction: "should_not_have_approved", filed_by_login: "anya",
+      author_association: "MEMBER", author_is_pr_author: true, repository_visibility: "private",
+      trusted: true, source: "app_ui", body: "The reassessment never produced a result.",
+      contested_reason_codes: [], intake_status: "triaged", routing: "reassess",
+      reassessment_status: "failed", adjudication_status: "pending",
+      queue_signals: {}, queue_priority: 0,
+      reply_status: "not_applicable", version: 3, created_at: "2026-06-26T12:06:00Z", updated_at: "2026-06-26T12:06:00Z",
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-review-disputes", () => HttpResponse.json({ data: [failed], meta: {} } satisfies ListResponse<CodeReviewDispute>)),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: "Disputes" }));
+    const disputeTable = await screen.findByRole("table", { name: "Code review disputes" });
+    expect(within(disputeTable).getByText("Failed")).toBeInTheDocument();
+    expect(within(disputeTable).getByText("Evidence unavailable")).toBeInTheDocument();
+    // Falls back to the reviewed commit when the PR context is missing.
+    expect(within(disputeTable).getByRole("button", { name: `Review dispute on commit ${review.head_sha.slice(0, 7)}` })).toBeInTheDocument();
+    expect(within(disputeTable).getByText("Asks not to approve")).toBeInTheDocument();
+  });
+
+  it("closes the dispute sheet when the dispute leaves the pending queue", async () => {
+    const user = userEvent.setup();
+    const queryClient = createTestQueryClient();
+    let adjudicatedElsewhere = false;
+    const pending: CodeReviewDispute = {
+      id: "dispute-gone-1", org_id: "org-1", session_id: "session-1", pull_request_id: "pr-1",
+      repository_id: "repo-1", policy_id: "policy-1", reviewed_head_sha: review.head_sha,
+      decision: "blocked", direction: "should_have_approved", filed_by_login: "anya",
+      author_association: "MEMBER", author_is_pr_author: true, repository_visibility: "private",
+      trusted: true, source: "app_ui", body: "Another admin is on this one.",
+      contested_reason_codes: [], intake_status: "triaged", routing: "policy_signal_only",
+      reassessment_status: "not_requested", adjudication_status: "pending",
+      queue_signals: { github_repository: "acme/api", github_pr_number: 428 }, queue_priority: 0,
+      reply_status: "not_applicable", version: 3, created_at: "2026-06-26T12:06:00Z", updated_at: "2026-06-26T12:06:00Z",
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-review-disputes", () =>
+        HttpResponse.json({ data: adjudicatedElsewhere ? [] : [pending], meta: {} } satisfies ListResponse<CodeReviewDispute>)),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, { queryClient });
+
+    await user.click(await screen.findByRole("tab", { name: "Disputes" }));
+    const disputeTable = await screen.findByRole("table", { name: "Code review disputes" });
+    await user.click(within(disputeTable).getByRole("button", { name: "Review dispute on acme/api #428" }));
+    expect(await screen.findByRole("dialog", { name: "Review dispute" })).toBeInTheDocument();
+
+    adjudicatedElsewhere = true;
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ["code-reviews", "dispute-queue"] });
+    });
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Review dispute" })).not.toBeInTheDocument());
+    expect(await screen.findByText("No disputes need adjudication")).toBeInTheDocument();
   });
 
   it("pages the dispute queue past the first cursor page", async () => {
@@ -1585,19 +1786,20 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: "Disputes" }));
-    expect(await screen.findByText("First page objection.")).toBeInTheDocument();
+    const disputeTable = await screen.findByRole("table", { name: "Code review disputes" });
+    expect(within(disputeTable).getByText("First page objection.")).toBeInTheDocument();
     // Without the cursor the badge would cap at the page size and the rest of
     // the queue would be unreachable.
-    expect(await screen.findByText("1+")).toBeInTheDocument();
+    expect(await within(screen.getByRole("tab", { name: /Disputes/ })).findByText("1+")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Load more disputes" }));
+    await user.click(screen.getByRole("button", { name: "Show more" }));
 
-    expect(await screen.findByText("Second page objection.")).toBeInTheDocument();
-    expect(screen.getByText("First page objection.")).toBeInTheDocument();
+    expect(await within(disputeTable).findByText("Second page objection.")).toBeInTheDocument();
+    expect(within(disputeTable).getByText("First page objection.")).toBeInTheDocument();
     // The first-page refetch on tab entry prevents a materialized ranking
     // update from remaining hidden behind the query cache.
     expect(requestedCursors).toEqual([null, null, "dispute-page-1"]);
-    expect(screen.queryByRole("button", { name: "Load more disputes" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
   });
 
   it("lets an admin promote an untrusted timeline dispute without adjudicating it", async () => {
