@@ -1404,9 +1404,17 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(within(selectedPanel).getByText('143/foundation')).toBeInTheDocument();
     expect(within(selectedPanel).getByText('changes requested')).toBeInTheDocument();
     // Card titles sit on the same label tier as the flat blocks they interleave
-    // with in this column, so a card doesn't read as a level of hierarchy.
-    expect(within(selectedPanel).getByText('API integration')).toHaveClass('text-xs', 'font-medium', 'text-foreground');
-    expect(within(screen.getByTestId('stack-health')).getByText('Stack health')).toHaveClass('text-xs', 'font-medium', 'text-foreground');
+    // with in this column, so a card doesn't read as a level of hierarchy. They
+    // inherit the card's own foreground rather than pinning `text-foreground`.
+    const selectedTitle = within(selectedPanel).getByText('API integration');
+    expect(selectedTitle).toHaveClass('text-xs', 'font-medium');
+    expect(selectedTitle).not.toHaveClass('text-foreground');
+    expect(within(screen.getByTestId('stack-health')).getByText('Stack health')).toHaveClass('text-xs', 'font-medium');
+    // The list row titles the same changeset as the panel above, so the two
+    // must not disagree about the size of that title.
+    const listRowTitle = within(screen.getByTestId('pull-request-list')).getAllByText('API integration')[0];
+    expect(listRowTitle).toHaveClass('text-xs', 'font-medium');
+    expect(within(screen.getByTestId('pull-request-list')).getByText('Pull requests')).toHaveClass('text-xs', 'font-medium');
     expect(screen.getByTestId('branch-actions-unavailable')).toBeInTheDocument();
     await waitFor(() => expect(requestedChangesets).toContain(childChangesetID));
     await waitFor(() => expect(requestedHealthPRs).toContain(childPR.id));

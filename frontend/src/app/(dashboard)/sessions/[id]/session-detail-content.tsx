@@ -311,14 +311,20 @@ function publicationErrorDescription(publication: SessionPublication) {
   }
 }
 
-// The label tier for every block stacked in the Overview column, whether it is
-// flat (`SectionHeading`, `OverviewRow`) or wrapped in a card (`Stack health`,
-// the selected changeset). Those blocks interleave in one scroll column, so a
-// card title a step larger than the flat block above it reads as a level of
-// hierarchy that isn't there. The tier matches the size of the body copy it
-// heads, so weight alone carries the hierarchy in the blocks whose copy is
-// `text-foreground` rather than muted.
-const OVERVIEW_LABEL_CLASSNAME = "text-xs font-medium text-foreground";
+// Size and weight of every label in the Overview column, whether the block is
+// flat (`SectionHeading`, `OverviewRow`), wrapped in a card (`Stack health`,
+// the selected changeset), or a row of the pull request list. Those blocks
+// interleave in one scroll column, so a title a step larger than the block
+// above it reads as a level of hierarchy that isn't there. `CardTitle` already
+// resolves to this tier, so a carded block only needs this constant because it
+// titles its `CardContent` rather than a `CardHeader`.
+//
+// Color is deliberately left to the call site: blocks on the page background
+// pair this with `text-foreground`, while a card supplies `text-card-foreground`
+// and a selected list row supplies `text-secondary-foreground`. The tier matches
+// the size of the body copy it heads, so weight alone carries the hierarchy in
+// the blocks whose copy is `text-foreground` rather than muted.
+const OVERVIEW_LABEL_CLASSNAME = "text-xs font-medium";
 
 // Every status block in the overview leads with a 16px icon and a title on one
 // row, then full-width body copy underneath. Sharing the row and label style
@@ -342,7 +348,7 @@ function SectionHeading({
       <span aria-hidden="true" data-slot={iconSlot} className={cn("shrink-0 [&_svg]:size-4", iconClassName)}>
         {icon}
       </span>
-      <p className={OVERVIEW_LABEL_CLASSNAME}>{title}</p>
+      <p className={cn(OVERVIEW_LABEL_CLASSNAME, "text-foreground")}>{title}</p>
     </div>
   );
 }
@@ -3548,7 +3554,7 @@ export function PullRequestList({
   return (
     <Card className="border-border/60" data-testid="pull-request-list">
       <CardHeader className="p-3 pb-2">
-        <CardTitle className="text-sm">Pull requests</CardTitle>
+        <CardTitle>Pull requests</CardTitle>
       </CardHeader>
       <CardContent className="space-y-1 p-2 pt-0">
         {changesets.map((changeset, index) => {
@@ -3567,7 +3573,10 @@ export function PullRequestList({
                 {index + 1}
               </span>
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm font-medium">{changeset.title}</span>
+                {/* A row titles the same changeset the selected panel below it
+                    titles, so the two must not disagree about how big that
+                    title is. The button variant owns the color. */}
+                <span className={cn("block truncate", OVERVIEW_LABEL_CLASSNAME)}>{changeset.title}</span>
                 <span className="block truncate text-xs text-muted-foreground">
                   {pr ? `#${pr.github_pr_number} · ${pr.status}` : changeset.status.replaceAll("_", " ")}
                 </span>
@@ -3635,7 +3644,7 @@ function OverviewRow({
       >
         {icon}
       </div>
-      <p className={cn("col-start-2 row-start-1", OVERVIEW_LABEL_CLASSNAME)}>{title}</p>
+      <p className={cn("col-start-2 row-start-1", OVERVIEW_LABEL_CLASSNAME, "text-foreground")}>{title}</p>
       <p className="col-span-3 row-start-2 text-xs leading-relaxed text-muted-foreground">{description}</p>
       {action != null ? (
         <div data-slot={`${slot}-control`} className="col-start-3 row-start-1 shrink-0">
