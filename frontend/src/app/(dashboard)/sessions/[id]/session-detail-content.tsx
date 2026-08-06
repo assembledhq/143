@@ -5645,8 +5645,8 @@ export function SessionDetailContent({ id }: { id: string }) {
       return {
         response: {
           ...response,
-          deliveryState: undefined as ThreadInboxDeliveryState | undefined,
-          inboxEntry: undefined as ThreadInboxEntry | undefined,
+          deliveryState: undefined,
+          inboxEntry: undefined,
         },
         resolvedIDs: vars.resolvedIDs,
       };

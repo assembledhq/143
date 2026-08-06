@@ -1609,9 +1609,24 @@ func TestInboxAppliedAtBackfillMigrationOnlyRepairsUnreachableEntries(t *testing
 	require.NoError(t, err, "test should read the inbox applied_at backfill migration")
 	sql := string(body)
 
+	// Assertions about executable behavior must ignore comments: the header
+	// documents a pre-deploy row-count query that repeats these predicates.
+	statements := make([]string, 0)
+	for _, line := range strings.Split(sql, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "--") {
+			statements = append(statements, line)
+		}
+	}
+	executable := strings.Join(statements, "\n")
+
 	require.Contains(t, sql, "delivery_state = 'unknown_delivery'", "migration should reopen entries stranded by an abandoned batch")
 	require.Contains(t, sql, "b.status = 'abandoned'", "stranded-entry repair should only touch batches that were abandoned")
 	require.Contains(t, sql, "COALESCE(e.acked_at, e.delivered_at, e.updated_at)", "backfill should date applied_at from the entry's own acknowledgment history")
+
+	// Every other writer of 'unknown_delivery' explains itself, and the
+	// recoverable-inbox notice renders last_error, so a reopened entry must
+	// not present as "Uncertain" with a blank reason.
+	require.Contains(t, sql, "COALESCE(e.last_error,", "reopened entries should carry an explanation for the recovery UI")
 
 	// The backfill treats "acked with no covering batch" as proof that an
 	// entry predates the batch machinery. Without the NOT EXISTS guard it
@@ -1619,8 +1634,9 @@ func TestInboxAppliedAtBackfillMigrationOnlyRepairsUnreachableEntries(t *testing
 	// promoting steering into the transcript before the runtime applies it.
 	require.Contains(t, sql, "NOT EXISTS", "backfill must exclude entries owned by the current delivery-batch machinery")
 	require.Contains(t, sql, "e.sequence_no BETWEEN b.sequence_start AND b.sequence_end", "backfill exclusion should match entries to batches by sequence range")
-	require.Equal(t, 2, strings.Count(sql, "applied_at IS NULL"), "both repairs should be idempotent by skipping already-applied entries")
-	require.NotContains(t, sql, "DROP", "a data repair should not change schema")
+	require.Equal(t, 2, strings.Count(executable, "applied_at IS NULL"), "both repairs should be idempotent by skipping already-applied entries")
+	require.Equal(t, 2, strings.Count(executable, "UPDATE thread_inbox_entries"), "the repair should be exactly the two documented statements")
+	require.NotContains(t, executable, "DROP", "a data repair should not change schema")
 }
 
 func TestRenameLegacyOutputTermsMigrationPinsNamespaceContracts(t *testing.T) {

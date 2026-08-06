@@ -967,12 +967,26 @@ On failed or cancelled delivery:
 
 Hiding an unapplied message is only safe while every unapplied message is
 reachable from some other surface, so no delivery state may be both unapplied
-and terminal. Acknowledgment moves entries to `acked`, but only a started batch
-stamps `applied_at`; abandoning a batch therefore moves its still-unapplied
-entries to `unknown_delivery`, which is accurate — the runtime confirmed
-receipt but was lost before execution — and is the state the recoverable-inbox
-notice offers a replay action for. Entries predating the delivery-batch
-machinery have no batch at all and are backfilled as applied.
+and terminal. `applied_at` therefore has exactly one deferral: the inbox-batch
+branch of phase start, which withholds it only because it has a phase boundary
+to move the message to. Every other path that reaches `acked` stamps it at ack
+time, because none of them has a later boundary to wait for:
+
+- the seed-message ack, for the message a runtime boots executing;
+- the delivery-watermark commit, taken when no activity phase is registered for
+  the thread;
+- the batch path itself, when the phase actually starts.
+
+Abandoning a batch is the one case where the deferral can never be honored, so
+it moves the still-unapplied entries to `unknown_delivery` with an explanatory
+`last_error` — accurate, since the runtime confirmed receipt but was lost
+before execution, and it is the state the recoverable-inbox notice offers a
+replay action for. Entries predating the delivery-batch machinery have no batch
+at all and are backfilled as applied.
+
+Adding a new way to reach `acked` without stamping `applied_at` silently
+deletes user messages from the transcript, so it is a contract change, not an
+implementation detail.
 
 For the same reason the frontend enumerates the unapplied delivery states
 rather than treating a missing `applied_at` as proof of non-application: an

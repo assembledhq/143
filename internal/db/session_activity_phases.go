@@ -36,7 +36,9 @@ const inboxBatchColumnsB = `b.id, b.org_id, b.session_id, b.thread_id, b.runtime
 // receipt but was lost before execution began, so whether it ran is unknown —
 // and it is the state the recovery UI offers a replay action for.
 const strandedInboxEntriesUpdate = `UPDATE thread_inbox_entries e
-			SET delivery_state = 'unknown_delivery', updated_at = now()
+			SET delivery_state = 'unknown_delivery',
+				last_error = COALESCE(e.last_error, 'delivery batch abandoned after acknowledgment before execution started'),
+				updated_at = now()
 			FROM abandoned a
 			WHERE e.org_id = a.org_id AND e.session_id = a.session_id
 			  AND e.thread_id = a.thread_id AND e.runtime_id = a.runtime_id

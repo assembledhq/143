@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildActivityTimelineNodes, sanitizeActivityLabel } from "./activity-timeline";
 import type { TimelineEntry } from "./timeline";
-import type { SessionLog, SessionTranscriptTurn } from "./types";
+import type { SessionLog, SessionTranscriptTurn, ThreadInboxDeliveryState } from "./types";
 
 function log(id: number, level: string, phase?: string): SessionLog {
   return {
@@ -80,6 +80,21 @@ describe("buildActivityTimelineNodes", () => {
     expect(buildActivityTimelineNodes([entry], [])).toEqual([]);
   });
 
+  // Seed messages and watermark-committed messages reach 'acked' without a
+  // delivery batch, so the backend stamps applied_at for them at ack time.
+  // This is the shape the transcript sees for a message that started a run.
+  it("renders a run-starting message acked outside the batch path", () => {
+    const entry: TimelineEntry = {
+      kind: "message",
+      data: {
+        id: 1, session_id: "session-1", org_id: "org-1", thread_id: "thread-1", turn_number: 1,
+        role: "user" as const, content: "fix transcript scrolling", created_at: "2026-08-03T00:00:01Z",
+        inbox_sequence: 1, delivery_state: "acked" as const, applied_at: "2026-08-03T00:00:01Z",
+      },
+    };
+    expect(buildActivityTimelineNodes([entry], [])).toEqual([{ kind: "visible", entry }]);
+  });
+
   // applied_at is only written when an inbox batch actually starts, so it
   // cannot be the sole signal: an entry that never reaches a phase would be
   // hidden from the transcript forever. Anything outside the known unapplied
@@ -90,7 +105,7 @@ describe("buildActivityTimelineNodes", () => {
       data: {
         id: 7, session_id: "session-1", org_id: "org-1", thread_id: "thread-1", turn_number: 2,
         role: "user" as const, content: "also update the tests", created_at: "2026-08-03T00:00:07Z",
-        inbox_sequence: 4, delivery_state: "some_future_state" as never,
+        inbox_sequence: 4, delivery_state: "some_future_state" as unknown as ThreadInboxDeliveryState,
       },
     };
     expect(buildActivityTimelineNodes([entry], [])).toEqual([{ kind: "visible", entry }]);

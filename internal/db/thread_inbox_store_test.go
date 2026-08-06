@@ -312,7 +312,11 @@ func TestThreadInboxStore_MarkAckedForSeedMessages(t *testing.T) {
 	threadID := uuid.New()
 	runtimeID := uuid.New()
 
-	mock.ExpectExec("UPDATE thread_inbox_entries").
+	// A seed message is applied the moment the runtime boots on it: there is
+	// no delivery batch and so no later phase start to stamp applied_at. An
+	// entry left 'acked' with a NULL applied_at is hidden from the transcript
+	// permanently and is not reachable through the inbox failure notice.
+	mock.ExpectExec(`(?s)UPDATE thread_inbox_entries.+applied_at = COALESCE\(applied_at, now\(\)\)`).
 		WithArgs(orgID, threadID, runtimeID, []int64{11, 12}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
 
@@ -321,7 +325,7 @@ func TestThreadInboxStore_MarkAckedForSeedMessages(t *testing.T) {
 
 	require.NoError(t, err, "MarkAckedForSeedMessages should not return an error")
 	require.Equal(t, int64(2), updated, "MarkAckedForSeedMessages should return updated row count")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	require.NoError(t, mock.ExpectationsWereMet(), "seed acks should stamp applied_at so the message stays in the transcript")
 }
 
 func TestThreadInboxStore_LastAcknowledgedSequenceUsesContiguousTerminalPrefix(t *testing.T) {
