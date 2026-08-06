@@ -734,17 +734,13 @@ func queueCodeReviewReplacementForChangedHead(
 	if services == nil || services.CodeReviewLifecycle == nil {
 		return fmt.Errorf("queue replacement code review: lifecycle service unavailable")
 	}
-	latestHead := strings.TrimSpace(codeReviewCurrentHead(pr, health))
+	latestHead, baseSHA := codeReviewCurrentRevision(pr, health)
 	if latestHead == "" {
 		return fmt.Errorf("queue replacement code review: current PR head is missing")
 	}
 	changeKey, err := codereviewsvc.MaterialChangeKey(latestHead)
 	if err != nil {
 		return fmt.Errorf("build replacement code review change key: %w", err)
-	}
-	baseSHA := strings.TrimSpace(stringPtrValue(pr.BaseSHA))
-	if health != nil && strings.TrimSpace(health.BaseSHA) != "" {
-		baseSHA = strings.TrimSpace(health.BaseSHA)
 	}
 	queued, err := services.CodeReviewLifecycle.QueueReviewChanged(ctx, codereviewsvc.ReviewChangedInput{
 		OrgID:             job.OrgID,
@@ -777,11 +773,14 @@ func queueCodeReviewReplacementForChangedHead(
 	return nil
 }
 
-func codeReviewCurrentHead(pr models.PullRequest, health *models.PullRequestHealthResponse) string {
-	if health != nil && strings.TrimSpace(health.HeadSHA) != "" {
-		return health.HeadSHA
+func codeReviewCurrentRevision(pr models.PullRequest, health *models.PullRequestHealthResponse) (string, string) {
+	if headSHA := strings.TrimSpace(stringPtrValue(pr.HeadSHA)); headSHA != "" {
+		return headSHA, strings.TrimSpace(stringPtrValue(pr.BaseSHA))
 	}
-	return stringPtrValue(pr.HeadSHA)
+	if health != nil {
+		return strings.TrimSpace(health.HeadSHA), strings.TrimSpace(health.BaseSHA)
+	}
+	return "", ""
 }
 
 func codeReviewCanRunReviewerThreads(stores *Stores) bool {

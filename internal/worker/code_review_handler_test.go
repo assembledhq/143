@@ -171,7 +171,7 @@ func (s *codeReviewLifecycleStub) HandleReviewChanged(_ context.Context, input c
 	return s.result, s.err
 }
 
-func TestQueueCodeReviewReplacementForChangedHeadUsesLatestLiveSnapshot(t *testing.T) {
+func TestQueueCodeReviewReplacementForChangedHeadPrefersLatestPullRequestSnapshot(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
@@ -182,15 +182,17 @@ func TestQueueCodeReviewReplacementForChangedHeadUsesLatestLiveSnapshot(t *testi
 	pr := models.PullRequest{
 		ID: pullRequestID, OrgID: orgID, GitHubRepo: "acme/repo", GitHubPRNumber: 42,
 		GitHubPRURL: "https://github.com/acme/repo/pull/42", Title: "Latest title",
-		HeadSHA: stringPtr("mirrored-head"), BaseSHA: stringPtr("mirrored-base"),
+		HeadSHA: stringPtr("latest-head"), BaseSHA: stringPtr("latest-base"),
 	}
-	health := &models.PullRequestHealthResponse{HeadSHA: "live-head", BaseSHA: "live-base"}
+	health := &models.PullRequestHealthResponse{HeadSHA: "reviewed-old-head", BaseSHA: "reviewed-old-base"}
 	job := runCodeReviewPayload{
 		OrgID: orgID, RepositoryID: repositoryID, PullRequestID: pullRequestID,
-		SessionID: sessionID, HeadSHA: "reviewed-head", PullRequestAuthor: "octocat", FromFork: true,
+		SessionID: sessionID, HeadSHA: "reviewed-old-head", PullRequestAuthor: "octocat", FromFork: true,
 	}
+	expectedChangeKey, err := codereview.MaterialChangeKey("latest-head")
+	require.NoError(t, err, "latest head should produce a deterministic replacement key")
 
-	err := queueCodeReviewReplacementForChangedHead(
+	err = queueCodeReviewReplacementForChangedHead(
 		context.Background(),
 		&Services{CodeReviewLifecycle: lifecycle},
 		zerolog.Nop(),
@@ -201,19 +203,49 @@ func TestQueueCodeReviewReplacementForChangedHeadUsesLatestLiveSnapshot(t *testi
 
 	require.NoError(t, err, "changed-head handoff should queue a fresh assessment")
 	require.Equal(t, 1, lifecycle.queueCalls, "changed-head handoff should enqueue exactly one replacement")
-	require.Equal(t, orgID, lifecycle.queuedInput.OrgID, "replacement should remain isolated to the review organization")
-	require.Equal(t, repositoryID, lifecycle.queuedInput.RepositoryID, "replacement should target the reviewed repository")
-	require.Equal(t, pullRequestID, lifecycle.queuedInput.PullRequestID, "replacement should target the changed pull request")
-	require.Equal(t, sessionID, lifecycle.queuedInput.PriorSessionID, "replacement should preserve ordering behind the superseded assessment")
-	require.Equal(t, "live-head", lifecycle.queuedInput.HeadSHA, "replacement should assess the latest live head")
-	require.Equal(t, "live-base", lifecycle.queuedInput.BaseSHA, "replacement should retain the latest live base")
-	require.Equal(t, "Latest title", lifecycle.queuedInput.PullRequestTitle, "replacement should retain the latest mirrored title")
-	require.Equal(t, "octocat", lifecycle.queuedInput.PullRequestAuthor, "replacement should retain the pull request author")
-	require.True(t, lifecycle.queuedInput.FromFork, "replacement should preserve fork eligibility context")
-	require.Equal(t, "code_review.live_head_changed", lifecycle.queuedInput.ChangeReason, "replacement should identify the worker freshness fallback")
-	expectedChangeKey, err := codereview.MaterialChangeKey("live-head")
-	require.NoError(t, err, "latest head should produce a deterministic replacement key")
-	require.Equal(t, expectedChangeKey, lifecycle.queuedInput.ChangeKey, "replacement should deduplicate against webhook-triggered reassessment")
+	require.Equal(t, codereview.ReviewChangedInput{
+		OrgID: orgID, RepositoryID: repositoryID, PullRequestID: pullRequestID, PriorSessionID: sessionID,
+		GitHubRepo: "acme/repo", GitHubPRNumber: 42, GitHubPRURL: "https://github.com/acme/repo/pull/42",
+		PullRequestTitle: "Latest title", PullRequestAuthor: "octocat", BaseSHA: "latest-base", HeadSHA: "latest-head",
+		FromFork: true, ChangeKey: expectedChangeKey, ChangeReason: "code_review.live_head_changed",
+	}, lifecycle.queuedInput, "replacement should use the latest PR head/base pair instead of stale health data")
+}
+
+func TestCodeReviewCurrentRevision(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		pr       models.PullRequest
+		health   *models.PullRequestHealthResponse
+		expected [2]string
+	}{
+		{
+			name:     "prefers pull request revision as an atomic pair",
+			pr:       models.PullRequest{HeadSHA: stringPtr("pr-head"), BaseSHA: stringPtr("pr-base")},
+			health:   &models.PullRequestHealthResponse{HeadSHA: "health-head", BaseSHA: "health-base"},
+			expected: [2]string{"pr-head", "pr-base"},
+		},
+		{
+			name:     "falls back to health revision when pull request head is unavailable",
+			health:   &models.PullRequestHealthResponse{HeadSHA: "health-head", BaseSHA: "health-base"},
+			expected: [2]string{"health-head", "health-base"},
+		},
+		{
+			name:     "returns an empty revision when neither snapshot is available",
+			expected: [2]string{"", ""},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			headSHA, baseSHA := codeReviewCurrentRevision(tt.pr, tt.health)
+
+			require.Equal(t, tt.expected, [2]string{headSHA, baseSHA}, "revision selection should preserve the expected head/base source")
+		})
+	}
 }
 
 func TestQueueCodeReviewReplacementForChangedHeadRequiresDurableLifecycle(t *testing.T) {
