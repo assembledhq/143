@@ -4145,10 +4145,7 @@ function CodeReviewDisputeQueueSignals({ dispute }: { dispute: CodeReviewDispute
 }
 
 function CodeReviewDisputeContextLinks({ dispute }: { dispute: CodeReviewDispute }) {
-  const title = typeof dispute.queue_signals.pull_request_title === "string" ? dispute.queue_signals.pull_request_title.trim() : "";
-  const repository = typeof dispute.queue_signals.github_repository === "string" ? dispute.queue_signals.github_repository.trim() : "";
-  const number = typeof dispute.queue_signals.github_pr_number === "number" ? dispute.queue_signals.github_pr_number : null;
-  const url = typeof dispute.queue_signals.github_pr_url === "string" ? dispute.queue_signals.github_pr_url.trim() : "";
+  const { repository, number, title, url } = codeReviewDisputePullRequestContext(dispute);
   return (
     <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
       {url ? (
@@ -4202,10 +4199,24 @@ function codeReviewDisputeDirectionLabel(direction?: CodeReviewDispute["directio
   return "Classification pending";
 }
 
+// queue_signals is an untyped bag, so the guards live in one place rather than
+// being repeated by every caller that needs the PR context.
+function codeReviewDisputePullRequestContext(dispute: CodeReviewDispute): {
+  repository: string;
+  number: number | null;
+  title: string;
+  url: string;
+} {
+  return {
+    repository: typeof dispute.queue_signals.github_repository === "string" ? dispute.queue_signals.github_repository.trim() : "",
+    number: typeof dispute.queue_signals.github_pr_number === "number" ? dispute.queue_signals.github_pr_number : null,
+    title: typeof dispute.queue_signals.pull_request_title === "string" ? dispute.queue_signals.pull_request_title.trim() : "",
+    url: typeof dispute.queue_signals.github_pr_url === "string" ? dispute.queue_signals.github_pr_url.trim() : "",
+  };
+}
+
 function codeReviewDisputePullRequestLabel(dispute: CodeReviewDispute): string {
-  const repository = typeof dispute.queue_signals.github_repository === "string" ? dispute.queue_signals.github_repository.trim() : "";
-  const number = typeof dispute.queue_signals.github_pr_number === "number" ? dispute.queue_signals.github_pr_number : null;
-  const title = typeof dispute.queue_signals.pull_request_title === "string" ? dispute.queue_signals.pull_request_title.trim() : "";
+  const { repository, number, title } = codeReviewDisputePullRequestContext(dispute);
   if (repository && number) return `${repository} #${number}`;
   if (title) return title;
   // Reads as a subject in both the row metadata line and the "Review dispute
