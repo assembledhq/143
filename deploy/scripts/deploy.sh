@@ -860,6 +860,8 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "$(remote_env_assignment DEPLOY_REQUESTED_BY "${DEPLOY_REQUESTED_BY:-deploy-script}")" \
   "$(remote_env_assignment DEPLOY_REASON "${DEPLOY_REASON:-routine worker rollout}")" \
   "$(remote_env_assignment FORCE_DEPLOY_WITH_ACTIVE_SESSIONS "${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}")" \
+  "$(remote_env_assignment WORKER_DEPLOY_GUARDRAIL_ATTEMPTS "${WORKER_DEPLOY_GUARDRAIL_ATTEMPTS:-}")" \
+  "$(remote_env_assignment WORKER_DEPLOY_GUARDRAIL_RETRY_DELAY_SECONDS "${WORKER_DEPLOY_GUARDRAIL_RETRY_DELAY_SECONDS:-}")" \
   "$(remote_env_assignment FORCE_INTERRUPT_ACTIVE_RUNTIMES "${FORCE_INTERRUPT_ACTIVE_RUNTIMES:-}")" \
   "$(remote_env_assignment SESSION_EXECUTOR_DOCKER_NETWORK "${SESSION_EXECUTOR_DOCKER_NETWORK:-}")" \
   "$(remote_env_assignment DEPLOY_DOCKER_PRUNE "${DEPLOY_DOCKER_PRUNE:-1}")" \
@@ -2264,17 +2266,49 @@ SELECT COUNT(*) FROM endpoint_blockers;"
     if [ "$ROLE" != "worker" ]; then
       return 0
     fi
-    local database_url
+    local database_url attempts retry_delay attempt guardrail_status
     database_url="$(worker_database_url)"
-    echo "Checking active long-running sessions before worker deploy..."
-    docker run --rm -i \
-      --network 143_default \
-      --env-file /opt/143/.env \
-      -e "DATABASE_URL=$database_url" \
-      -e "FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}" \
-      -v /opt/143/.env.production.enc:/app/.env.production.enc:ro \
-      "ghcr.io/assembledhq/143-server:${IMAGE_TAG:-latest}" \
-      /bin/deploy-guardrail worker-sessions < /dev/null
+    attempts="${WORKER_DEPLOY_GUARDRAIL_ATTEMPTS:-31}"
+    retry_delay="${WORKER_DEPLOY_GUARDRAIL_RETRY_DELAY_SECONDS:-10}"
+    if ! [[ "$attempts" =~ ^[1-9][0-9]*$ ]]; then
+      echo "ERROR: WORKER_DEPLOY_GUARDRAIL_ATTEMPTS must be a positive integer, got '$attempts'." >&2
+      return 1
+    fi
+    if ! [[ "$retry_delay" =~ ^[0-9]+$ ]]; then
+      echo "ERROR: WORKER_DEPLOY_GUARDRAIL_RETRY_DELAY_SECONDS must be a non-negative integer, got '$retry_delay'." >&2
+      return 1
+    fi
+
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+      echo "Checking active long-running sessions before worker deploy (attempt $attempt/$attempts)..."
+      if docker run --rm -i \
+        --network 143_default \
+        --env-file /opt/143/.env \
+        -e "DATABASE_URL=$database_url" \
+        -e "FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}" \
+        -v /opt/143/.env.production.enc:/app/.env.production.enc:ro \
+        "ghcr.io/assembledhq/143-server:${IMAGE_TAG:-latest}" \
+        /bin/deploy-guardrail worker-sessions < /dev/null; then
+        return 0
+      else
+        guardrail_status=$?
+      fi
+
+      # Exit 3 is the guardrail's explicit "active inline session" result.
+      # Those sessions often reach a checkpoint seconds after parallel fleet
+      # workers inspect them, so wait briefly instead of failing the rollout
+      # on a timing race. Infrastructure and configuration failures retain
+      # their original exit status and fail immediately.
+      if [ "$guardrail_status" -ne 3 ]; then
+        return "$guardrail_status"
+      fi
+      if [ "$attempt" -ge "$attempts" ]; then
+        echo "ERROR: worker session deploy guardrail remained blocked after $attempts attempt(s)." >&2
+        return "$guardrail_status"
+      fi
+      echo "Worker session deploy guardrail is temporarily blocked; retrying in ${retry_delay}s..." >&2
+      sleep "$retry_delay"
+    done
   }
 
   # wait_container_healthy CONTAINER_ID TIMEOUT — poll until a specific container

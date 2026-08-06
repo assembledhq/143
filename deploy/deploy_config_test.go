@@ -2486,6 +2486,98 @@ pull_with_retry "test image" "$FAKE_PULL"
 	}
 }
 
+func TestWorkerDeployRetriesTransientSessionGuardrailBlocks(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy script")
+	deployText := string(deployScript)
+	guardrailFn := extractShellFunction(t, deployText, "run_worker_session_deploy_guardrail", "wait_container_healthy")
+
+	require.Contains(t, deployText, `remote_env_assignment WORKER_DEPLOY_GUARDRAIL_ATTEMPTS "${WORKER_DEPLOY_GUARDRAIL_ATTEMPTS:-}"`,
+		"deploy should forward the session guardrail attempt override to the remote host")
+	require.Contains(t, deployText, `remote_env_assignment WORKER_DEPLOY_GUARDRAIL_RETRY_DELAY_SECONDS "${WORKER_DEPLOY_GUARDRAIL_RETRY_DELAY_SECONDS:-}"`,
+		"deploy should forward the session guardrail retry delay override to the remote host")
+	require.Contains(t, guardrailFn, `WORKER_DEPLOY_GUARDRAIL_ATTEMPTS:-31`,
+		"worker deploy should wait up to five minutes for a transient active session to reach a safe boundary")
+
+	tests := []struct {
+		name             string
+		guardrailExit    int
+		succeedOnAttempt int
+		expectedAttempts string
+		expectError      bool
+	}{
+		{
+			name:             "retries explicit guardrail blocks until clear",
+			guardrailExit:    3,
+			succeedOnAttempt: 3,
+			expectedAttempts: "3",
+		},
+		{
+			name:             "fails closed after bounded guardrail attempts",
+			guardrailExit:    3,
+			expectedAttempts: "3",
+			expectError:      true,
+		},
+		{
+			name:             "does not retry infrastructure errors",
+			guardrailExit:    1,
+			expectedAttempts: "1",
+			expectError:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tempDir := t.TempDir()
+			countFile := filepath.Join(tempDir, "attempts")
+			fakeDocker := filepath.Join(tempDir, "docker")
+			require.NoError(t, os.WriteFile(fakeDocker, []byte(`#!/usr/bin/env bash
+set -euo pipefail
+count=0
+if [ -f "$COUNT_FILE" ]; then
+  count="$(cat "$COUNT_FILE")"
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$COUNT_FILE"
+if [ "$SUCCEED_ON_ATTEMPT" -gt 0 ] && [ "$count" -ge "$SUCCEED_ON_ATTEMPT" ]; then
+  exit 0
+fi
+exit "$GUARDRAIL_EXIT"
+`), 0o755), "test should create a fake docker command")
+
+			script := guardrailFn + `
+worker_database_url() { printf 'postgres://test'; }
+ROLE=worker
+IMAGE_TAG=test-tag
+run_worker_session_deploy_guardrail
+`
+			cmd := exec.Command("bash", "-c", script)
+			cmd.Env = append(os.Environ(),
+				"PATH="+tempDir+":"+os.Getenv("PATH"),
+				"COUNT_FILE="+countFile,
+				fmt.Sprintf("GUARDRAIL_EXIT=%d", tt.guardrailExit),
+				fmt.Sprintf("SUCCEED_ON_ATTEMPT=%d", tt.succeedOnAttempt),
+				"WORKER_DEPLOY_GUARDRAIL_ATTEMPTS=3",
+				"WORKER_DEPLOY_GUARDRAIL_RETRY_DELAY_SECONDS=0",
+			)
+			output, err := cmd.CombinedOutput()
+			if tt.expectError {
+				require.Error(t, err, "session guardrail helper should preserve the expected failure: %s", string(output))
+			} else {
+				require.NoError(t, err, "session guardrail helper should recover after a transient block: %s", string(output))
+			}
+
+			attempts, readErr := os.ReadFile(countFile)
+			require.NoError(t, readErr, "test should read the fake guardrail attempt count")
+			require.Equal(t, tt.expectedAttempts, string(attempts), "session guardrail helper should execute the expected number of attempts")
+		})
+	}
+}
+
 func TestWorkerDrainMonitorDeduplicatesPerContainer(t *testing.T) {
 	t.Parallel()
 
