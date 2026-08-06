@@ -668,14 +668,13 @@ describe("CodeReviewsPage", () => {
     expect(screen.queryByRole("button", { name: /Repair GitHub reviewer/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Set up GitHub reviewer/i })).not.toBeInTheDocument();
 
-    // Safeguards and their focused groups are collapsed by default.
-    const advancedControls = screen.getByRole("button", {
-      name: "Safeguards",
-    });
-    expect(advancedControls).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByRole("button", { name: /Approval criteria/i })).not.toBeInTheDocument();
-    await user.click(advancedControls);
-    expect(advancedControls).toHaveAttribute("aria-expanded", "true");
+    // Safeguard categories are visible without opening a second disclosure, but
+    // their details still start collapsed — that is now the only progressive
+    // disclosure left on this card.
+    expect(screen.getByRole("heading", { level: 3, name: "Safeguards" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Safeguards" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Approval criteria/i })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByLabelText("Files changed")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Paths, authors & checks/i }));
     expect(await screen.findByText("*auth*")).toBeInTheDocument();
     expect(screen.getByText("internal/**")).toBeInTheDocument();
@@ -2211,26 +2210,16 @@ describe("CodeReviewsPage", () => {
     const approvalRegion = screen.getByRole("region", { name: "Automated approval policy" });
     const instructionsRegion = screen.getByRole("region", { name: "Additional review instructions (optional)" });
     const summaryHeading = screen.getByText("Current behavior:");
-    const advancedTrigger = screen.getByRole("button", {
-      name: "Safeguards",
-    });
-    // The trigger owns the card's left inset; the right inset comes from the header
-    // row so the help icon, not the chevron, lands on the card edge.
-    expect(advancedTrigger).toHaveClass("h-auto", "py-4", "pr-2", "pl-4", "sm:h-auto", "sm:py-5", "sm:pl-5");
-    expect(advancedTrigger.closest("h3")?.parentElement).toHaveClass("pr-3", "sm:pr-4");
-    // The chevron must stay wrapped. As a direct child it matches the Button size
-    // variant's `has-[>svg]:px-2`, whose `:has()` specificity outranks the padding
-    // above and silently collapses the title back to an 8px inset. jsdom applies no
-    // CSS, so this structural check — not the class list above — is what catches it:
-    // the button also still carries an unmerged `px-2.5`, and these assertions would
-    // pass even if it started winning.
-    expect(advancedTrigger.querySelector(":scope > svg")).toBeNull();
+    const safeguardsHeading = screen.getByRole("heading", { level: 3, name: "Safeguards" });
+    const safeguardsCard = safeguardsHeading.closest("section");
+    expect(screen.getByText("Reviewer setup and the rules that gate automatic approval.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Safeguards" })).not.toBeInTheDocument();
     // Behavior, then both prompts together, then safeguards, then GitHub setup.
     expect(enablement.compareDocumentPosition(summaryHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(summaryHeading.compareDocumentPosition(approvalHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(approvalHeading.compareDocumentPosition(instructionsHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(instructionsHeading.compareDocumentPosition(advancedTrigger) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(advancedTrigger.compareDocumentPosition(githubHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(instructionsHeading.compareDocumentPosition(safeguardsHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(safeguardsHeading.compareDocumentPosition(githubHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // Prominence comes from order and size only — no badge, tint, ring, or shadow.
     expect(within(approvalRegion).queryByText("Primary policy")).not.toBeInTheDocument();
     expect(approvalRegion.className).toBe(instructionsRegion.className);
@@ -2239,15 +2228,18 @@ describe("CodeReviewsPage", () => {
     // Every section title is a real heading, nested under the tab's own h2,
     // and all of them share one size.
     expect(screen.getByRole("heading", { level: 2, name: "Review policy" })).toBeInTheDocument();
-    for (const name of ["Review behavior", "Automated approval policy", "Additional review instructions (optional)", "GitHub reviewer connections"]) {
+    for (const name of ["Review behavior", "Automated approval policy", "Additional review instructions (optional)", "Safeguards", "GitHub reviewer connections"]) {
       expect(screen.getByRole("heading", { level: 3, name })).toBeInTheDocument();
     }
-    // Safeguards wraps its disclosure trigger, so the heading carries the
-    // trigger's descriptive line too.
-    expect(screen.getByRole("heading", { level: 3, name: /^Safeguards/ })).toBeInTheDocument();
-    for (const heading of [approvalHeading, instructionsHeading]) {
+    for (const heading of [approvalHeading, instructionsHeading, safeguardsHeading]) {
       expect(heading).toHaveClass("font-display", "text-lg", "font-semibold");
     }
+    // Safeguards is a plain bordered card like its siblings — no extra tint, ring,
+    // or shadow. Asserted by class rather than string-equality with approvalRegion:
+    // that card hardcodes its chrome while this one comes from `SectionGroup`, and
+    // the shared component is allowed to evolve (the fix then is to move the prompt
+    // composers onto it too, not to re-pin this test).
+    expect(safeguardsCard).toHaveClass("rounded-xl", "border", "border-border", "bg-card", "p-4", "sm:p-5");
 
     const outcomeInfo = screen.getByRole("button", {
       name: "About Review outcome",
@@ -2261,7 +2253,7 @@ describe("CodeReviewsPage", () => {
     act(() => enablementInfo.blur());
     const advancedInfo = screen.getByRole("button", { name: "About Safeguards" });
     await user.hover(advancedInfo);
-    expect(await screen.findByRole("tooltip")).toHaveTextContent(/deterministic approval safeguards/i);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(/Reviewer models, limits.*always enforced.*require human review/i);
     await user.unhover(advancedInfo);
     const instructionsInfo = screen.getByRole("button", { name: "About Additional review instructions (optional)" });
     await user.click(instructionsInfo);
@@ -2281,7 +2273,6 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByText("Repository access")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Disable reviewer" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Safeguards" }));
     expect(screen.queryByRole("combobox", { name: /Advanced policy preset/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Apply preset/i })).not.toBeInTheDocument();
     for (const section of ["Approval criteria", "Paths, authors & checks", "Reviewers & agents"]) {
@@ -2511,7 +2502,6 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(await screen.findByRole("button", { name: "Safeguards" }));
     await user.click(
       await screen.findByRole("button", {
         name: /Structured PR-description checks/i,
@@ -2588,7 +2578,6 @@ describe("CodeReviewsPage", () => {
 
     renderWithProviders(<CodeReviewsPage />);
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("button", { name: "Safeguards" }));
     await user.click(screen.getByRole("button", { name: /Reviewers & agents/i }));
     await user.click(await screen.findByRole("combobox", { name: "Reviewer 1 reasoning level" }));
     await user.click(await screen.findByRole("option", { name: "Extra high" }));
@@ -2652,7 +2641,6 @@ describe("CodeReviewsPage", () => {
 
     renderWithProviders(<CodeReviewsPage />);
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("button", { name: "Safeguards" }));
     await user.click(screen.getByRole("button", { name: /Reviewers & agents/i }));
 
     const reasoningSelect = await screen.findByRole("combobox", { name: "Reviewer 1 reasoning level" });
@@ -2860,7 +2848,6 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(await screen.findByRole("button", { name: "Safeguards" }));
     await user.click(await screen.findByRole("button", { name: /Paths, authors & checks/i }));
 
     const sensitivePathsInput = await screen.findByRole("textbox", {
@@ -2926,7 +2913,6 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("button", { name: "Safeguards" }));
     await user.click(screen.getByRole("button", { name: /Approval criteria/i }));
 
     expect(await screen.findByLabelText("Timeout value")).toHaveValue(30);
@@ -2998,7 +2984,6 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(await screen.findByRole("button", { name: "Safeguards" }));
     await user.click(await screen.findByRole("button", { name: /Reviewers & agents/i }));
     await user.click(await screen.findByRole("combobox", { name: "Reviewer 1 model" }));
 
@@ -3651,6 +3636,12 @@ describe("CodeReviewsPage", () => {
     await user.click(screen.getByRole("switch", { name: "Code reviews enabled" }));
     const subsection = await screen.findByRole("button", { name: /Reviewers & agents/i });
     await waitFor(() => expect(subsection).toHaveFocus());
-    expect(screen.getByRole("button", { name: "Safeguards" })).toHaveAttribute("aria-expanded", "true");
+    expect(subsection).toHaveAttribute("aria-expanded", "true");
+    // The save error sits in the Safeguards card above the divided subsection list,
+    // not inside it, so no divider hairline lands against the notice's card border.
+    const notice = screen.getByRole("alert");
+    expect(notice).toHaveTextContent("Could not save this policy setting");
+    expect(notice.parentElement).toBe(screen.getByRole("heading", { level: 3, name: "Safeguards" }).closest("section"));
+    expect(notice.compareDocumentPosition(subsection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });

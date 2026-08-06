@@ -113,6 +113,7 @@ The Code reviews page retains the existing **Reviews** and **Policy** tabs. The 
    - Short badges for outcome, reviewer count, quorum, and active safety gates.
 8. **Advanced controls**
    - One collapsed container holding Safety gates; Paths, authors, and required checks; Review agents; Limits and timeout; and Structured PR-description checks.
+   - Later change: the outer container was converted into a standard always-visible **Safeguards** policy card, so the page no longer nests a disclosure inside a disclosure. Progressive disclosure now lives entirely in the five subsections, which all start collapsed; the relevant one still opens automatically for a limit deep link or a structured validation error. Wherever this document says advanced controls start collapsed or carry their own `aria-expanded` state, read it as applying to those subsections.
 
 The automated approval policy remains prominent whenever approval is enabled. Optional review instructions are available on the main screen but visually secondary. Structured description checks remain advanced because they answer a different question: whether required evidence exists in the PR description.
 

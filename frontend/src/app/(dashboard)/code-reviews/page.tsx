@@ -2186,25 +2186,15 @@ function AdvancedPolicySettings({
   }, []);
   return (
     <AdvancedPolicyControls
-      forceOpen={limitDeepLinkOpen || Boolean(invalidPolicyField && ["risk_policy", "inline_comment_limit", "agent_roster", "description_policy"].includes(invalidPolicyField))}
-      onOpened={() =>
-        trackCodeReviewPolicyEvent({
-          event: "code_review_advanced_opened",
-          scope: analyticsScope,
-          subsection: "all",
-          configured: true,
-        })
+      notice={
+        invalidPolicyField ? (
+          <ErrorNotice title="Could not save this policy setting" description={`Correct the highlighted ${invalidPolicyField.replaceAll("_", " ")} setting and try again.`} />
+        ) : null
       }
     >
-      {invalidPolicyField ? (
-        <ErrorNotice title="Could not save this policy setting" description={`Correct the highlighted ${invalidPolicyField.replaceAll("_", " ")} setting and try again.`} />
-      ) : null}
-                <div>
-                  <div className="text-sm font-medium text-foreground">Fine-tuning</div>
-                  <div className="mt-2 divide-y divide-border border-y border-border">
           <FineTuningSection
             title="Approval criteria"
-            summary="Size thresholds, limits, timeout, and reviewer quorum"
+            summary="Set limits for change size, review time, and reviewer agreement."
             forceOpen={limitDeepLinkOpen || invalidPolicyField === "risk_policy" || invalidPolicyField === "inline_comment_limit"}
             onOpened={() =>
               trackCodeReviewPolicyEvent({
@@ -2315,7 +2305,7 @@ function AdvancedPolicySettings({
 
           <FineTuningSection
             title="Quality gates"
-            summary="Merge and check requirements before approval"
+            summary="Choose what a pull request must pass before approval."
             onOpened={() =>
               trackCodeReviewPolicyEvent({
                 event: "code_review_advanced_opened",
@@ -2397,7 +2387,7 @@ function AdvancedPolicySettings({
 
           <FineTuningSection
             title="Paths, authors & checks"
-            summary="Path filters, eligible authors, and required checks"
+            summary="Choose which changes are eligible for approval."
             onOpened={() =>
               trackCodeReviewPolicyEvent({
                 event: "code_review_advanced_opened",
@@ -2482,7 +2472,7 @@ function AdvancedPolicySettings({
 
           <FineTuningSection
             title="Reviewers & agents"
-            summary="Reviewer agents and the orchestrating agent"
+            summary="Choose who reviews the code and weighs the evidence."
             forceOpen={invalidPolicyField === "agent_roster"}
             onOpened={() =>
               trackCodeReviewPolicyEvent({
@@ -2504,7 +2494,7 @@ function AdvancedPolicySettings({
 
           <FineTuningSection
             title="Structured PR-description checks"
-            summary="PR description rules checked before approval"
+            summary="Define what a pull request description must include."
             forceOpen={invalidPolicyField === "description_policy"}
             onOpened={() =>
               trackCodeReviewPolicyEvent({
@@ -2534,53 +2524,31 @@ function AdvancedPolicySettings({
                       }}
                     />
                   </FineTuningSection>
-                  </div>
-                </div>
-                </AdvancedPolicyControls>
+    </AdvancedPolicyControls>
   );
 }
 
-function AdvancedPolicyControls({ children, forceOpen, onOpened }: { children: ReactNode; forceOpen: boolean; onOpened: () => void }) {
-  const [open, setOpen] = useState(false);
+function AdvancedPolicyControls({ children, notice }: { children: ReactNode; notice?: ReactNode }) {
   return (
-    <Collapsible
-      open={open || forceOpen}
-      onOpenChange={(next) => {
-        setOpen(next);
-        if (next) onOpened();
-      }}
+    // Standard bordered policy card, same as the sibling sections, with the help
+    // icon in the header's action slot.
+    <SectionGroup
+      title="Safeguards"
+      description="Reviewer setup and the rules that gate automatic approval."
+      variant="bordered"
+      headingLevel={3}
+      action={
+        <SettingInfoTooltip
+          label="Safeguards"
+          description="Reviewer models, limits, and the deterministic rules that are always enforced. These rules can require human review even when the reviewers recommend approval."
+        />
+      }
     >
-      <div className="rounded-xl border border-border bg-card">
-        {/* Padding is split rather than a plain `p-4 sm:p-5`: the trigger is not the
-            full card width, so only its left edge carries the card inset that
-            `CollapsibleContent` and sibling `SectionGroup`s use. The right inset comes
-            from this row's `pr`, which lands the help icon — not the chevron — on it. */}
-        <div className="flex items-center gap-1 pr-3 sm:pr-4">
-          <h3 className="min-w-0 flex-1">
-            <CollapsibleTrigger asChild>
-              <Button variant="ghost" className="group h-auto w-full min-w-0 justify-between whitespace-normal rounded-xl py-4 pr-2 pl-4 text-left sm:h-auto sm:py-5 sm:pl-5" aria-label="Safeguards">
-                <span className="min-w-0">
-                  <span className="block font-display text-lg leading-6 font-semibold tracking-[-0.025em] text-foreground">Safeguards</span>
-                  <span className="mt-0.5 block text-xs font-normal text-muted-foreground">These settings apply whether or not this section is open.</span>
-                </span>
-                {/* Wrapped so the chevron is not a direct child: `size="default"` carries
-                    `has-[>svg]:px-2`, whose `:has()` specificity silently outranks the plain
-                    padding utilities set above. `DisclosureCard` wraps its chevron too and is
-                    immune for the same reason. */}
-                <span className="flex shrink-0 items-center">
-                  <ChevronDown className="h-4 w-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
-                </span>
-              </Button>
-            </CollapsibleTrigger>
-          </h3>
-          <SettingInfoTooltip
-            label="Safeguards"
-            description="Contains deterministic approval safeguards, reviewer configuration, limits, and structured PR-description checks. Defaults remain enforced while this section is closed."
-          />
-        </div>
-        <CollapsibleContent className="space-y-4 border-t border-border p-4 sm:p-5">{children}</CollapsibleContent>
-      </div>
-    </Collapsible>
+      {/* Save errors stay outside the divided list: an ErrorNotice is a bordered
+          card of its own, so a divider hairline against its edge reads as a seam. */}
+      {notice}
+      <div className="divide-y divide-border border-y border-border">{children}</div>
+    </SectionGroup>
   );
 }
 
@@ -2597,8 +2565,7 @@ function PolicySummary({ config }: { config: CodeReviewPolicyConfig | null }) {
   const outcome = policyOutcome(config);
   const reviewers = config.agent_roster.reviewers.length;
   // Deliberately excludes the selected outcome: the switch and radio group
-  // immediately above already state it. This line's job is to report the
-  // settings that live inside the collapsed Safeguards section.
+  // immediately above already state it.
   const summaryItems = [
     ...(outcome === "disabled" ? ["Reviews paused"] : []),
     `${reviewers} ${reviewers === 1 ? "reviewer" : "reviewers"}`,
