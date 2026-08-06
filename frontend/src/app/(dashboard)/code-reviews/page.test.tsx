@@ -1642,7 +1642,7 @@ describe("CodeReviewsPage", () => {
     const user = userEvent.setup();
     const queryClient = createTestQueryClient();
     let updateBody: unknown;
-    let listRequests = 0;
+    let reassessmentLanded = false;
     const pending: CodeReviewDispute = {
       id: "dispute-fresh-1", org_id: "org-1", session_id: "session-1", pull_request_id: "pr-1",
       repository_id: "repo-1", policy_id: "policy-1", reviewed_head_sha: review.head_sha,
@@ -1663,10 +1663,8 @@ describe("CodeReviewsPage", () => {
     };
     mockCodeReviewBaseHandlers();
     server.use(
-      http.get("/api/v1/code-review-disputes", () => {
-        listRequests += 1;
-        return HttpResponse.json({ data: [listRequests > 2 ? reassessed : pending], meta: {} } satisfies ListResponse<CodeReviewDispute>);
-      }),
+      http.get("/api/v1/code-review-disputes", () =>
+        HttpResponse.json({ data: [reassessmentLanded ? reassessed : pending], meta: {} } satisfies ListResponse<CodeReviewDispute>)),
       http.patch("/api/v1/code-review-disputes/dispute-fresh-1", async ({ request }) => {
         updateBody = await request.json();
         return HttpResponse.json({ data: { ...reassessed, adjudication_status: "upheld", version: 5 } } satisfies SingleResponse<CodeReviewDispute>);
@@ -1681,6 +1679,7 @@ describe("CodeReviewsPage", () => {
     const disputeSheet = await screen.findByRole("dialog", { name: "Review dispute" });
     expect(within(disputeSheet).getByText("Running")).toBeInTheDocument();
 
+    reassessmentLanded = true;
     await act(async () => {
       await queryClient.invalidateQueries({ queryKey: ["code-reviews", "dispute-queue"] });
     });
@@ -1689,6 +1688,8 @@ describe("CodeReviewsPage", () => {
     // the flip they are adjudicating against, not the stale "Running".
     expect(await within(disputeSheet).findByText("Decision changed")).toBeInTheDocument();
     expect(within(disputeSheet).getByText("Approved")).toBeInTheDocument();
+    // The queue row behind the sheet tracks the same refresh.
+    expect(within(disputeTable).getByText("Approved")).toBeInTheDocument();
 
     await user.click(within(disputeSheet).getByRole("button", { name: "Uphold" }));
     await waitFor(() => expect(updateBody).toEqual({
@@ -1698,10 +1699,41 @@ describe("CodeReviewsPage", () => {
     }));
   });
 
+  // "Not run" is a deliberate state; "Failed" means the evidence the policy
+  // owner expected is missing. They must not read the same.
+  it("flags a failed reassessment rather than showing it as quietly as an unrequested one", async () => {
+    const user = userEvent.setup();
+    const failed: CodeReviewDispute = {
+      id: "dispute-failed-1", org_id: "org-1", session_id: "session-1", pull_request_id: "pr-1",
+      repository_id: "repo-1", policy_id: "policy-1", reviewed_head_sha: review.head_sha,
+      decision: "blocked", direction: "should_not_have_approved", filed_by_login: "anya",
+      author_association: "MEMBER", author_is_pr_author: true, repository_visibility: "private",
+      trusted: true, source: "app_ui", body: "The reassessment never produced a result.",
+      contested_reason_codes: [], intake_status: "triaged", routing: "reassess",
+      reassessment_status: "failed", adjudication_status: "pending",
+      queue_signals: {}, queue_priority: 0,
+      reply_status: "not_applicable", version: 3, created_at: "2026-06-26T12:06:00Z", updated_at: "2026-06-26T12:06:00Z",
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-review-disputes", () => HttpResponse.json({ data: [failed], meta: {} } satisfies ListResponse<CodeReviewDispute>)),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: "Disputes" }));
+    const disputeTable = await screen.findByRole("table", { name: "Code review disputes" });
+    expect(within(disputeTable).getByText("Failed")).toBeInTheDocument();
+    expect(within(disputeTable).getByText("Evidence unavailable")).toBeInTheDocument();
+    // Falls back to the reviewed commit when the PR context is missing.
+    expect(within(disputeTable).getByRole("button", { name: `Review dispute on commit ${review.head_sha.slice(0, 7)}` })).toBeInTheDocument();
+    expect(within(disputeTable).getByText("Asks not to approve")).toBeInTheDocument();
+  });
+
   it("closes the dispute sheet when the dispute leaves the pending queue", async () => {
     const user = userEvent.setup();
     const queryClient = createTestQueryClient();
-    let listRequests = 0;
+    let adjudicatedElsewhere = false;
     const pending: CodeReviewDispute = {
       id: "dispute-gone-1", org_id: "org-1", session_id: "session-1", pull_request_id: "pr-1",
       repository_id: "repo-1", policy_id: "policy-1", reviewed_head_sha: review.head_sha,
@@ -1715,10 +1747,8 @@ describe("CodeReviewsPage", () => {
     };
     mockCodeReviewBaseHandlers();
     server.use(
-      http.get("/api/v1/code-review-disputes", () => {
-        listRequests += 1;
-        return HttpResponse.json({ data: listRequests > 2 ? [] : [pending], meta: {} } satisfies ListResponse<CodeReviewDispute>);
-      }),
+      http.get("/api/v1/code-review-disputes", () =>
+        HttpResponse.json({ data: adjudicatedElsewhere ? [] : [pending], meta: {} } satisfies ListResponse<CodeReviewDispute>)),
     );
 
     renderWithProviders(<CodeReviewsPage />, { queryClient });
@@ -1728,6 +1758,7 @@ describe("CodeReviewsPage", () => {
     await user.click(within(disputeTable).getByRole("button", { name: "Review dispute on acme/api #428" }));
     expect(await screen.findByRole("dialog", { name: "Review dispute" })).toBeInTheDocument();
 
+    adjudicatedElsewhere = true;
     await act(async () => {
       await queryClient.invalidateQueries({ queryKey: ["code-reviews", "dispute-queue"] });
     });

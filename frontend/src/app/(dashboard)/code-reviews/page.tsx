@@ -19,6 +19,7 @@ import {
   PowerOff,
   RefreshCw,
   Settings2,
+  SquareArrowOutUpRight,
   Trash2,
   Users,
 } from "lucide-react";
@@ -4099,12 +4100,17 @@ function CodeReviewDisputeReassessment({ dispute }: { dispute: CodeReviewDispute
     : dispute.reassessment_status === "completed" && dispute.reassessment_decision
       ? decisionLabelText(dispute.reassessment_decision)
       : codeReviewDisputeStatusLabel(dispute.reassessment_status);
+  // A failed reassessment means the policy owner is adjudicating without
+  // evidence that was meant to be there, so it cannot read as quietly as the
+  // deliberate "Not run".
+  const failed = dispute.reassessment_status === "failed";
+  const attention = dispute.reassessment_flipped || failed;
   return (
     <StatusLabel
       label={label}
-      detail={dispute.reassessment_flipped ? "Decision changed" : undefined}
-      tone={dispute.reassessment_flipped ? "warning" : "neutral"}
-      indicator={dispute.reassessment_flipped ? "dot" : "none"}
+      detail={dispute.reassessment_flipped ? "Decision changed" : failed ? "Evidence unavailable" : undefined}
+      tone={attention ? "warning" : "neutral"}
+      indicator={attention ? "dot" : "none"}
     />
   );
 }
@@ -4153,13 +4159,15 @@ function CodeReviewDisputeContextLinks({ dispute }: { dispute: CodeReviewDispute
         </Button>
       ) : null}
       {/*
-        Opens in a new tab deliberately. The evidence sheet lives in the reviews
-        tab, so navigating in place unmounts the disputes tab and discards the
-        open sheet, the typed decision note, and the accumulated active time.
+        Opens in a new tab deliberately, and says so: the evidence sheet lives in
+        the reviews tab, so navigating in place unmounts the disputes tab and
+        discards the open sheet, the typed decision note, and the active time.
       */}
       <Button size="sm" variant="link" className="h-auto p-0 text-xs" asChild>
         <Link href={`/code-reviews?evidence=${dispute.session_id}`} target="_blank" rel="noreferrer">
           View evidence
+          <SquareArrowOutUpRight aria-hidden="true" className="size-3" />
+          <span className="sr-only">(opens in a new tab)</span>
         </Link>
       </Button>
     </div>
@@ -4200,7 +4208,9 @@ function codeReviewDisputePullRequestLabel(dispute: CodeReviewDispute): string {
   const title = typeof dispute.queue_signals.pull_request_title === "string" ? dispute.queue_signals.pull_request_title.trim() : "";
   if (repository && number) return `${repository} #${number}`;
   if (title) return title;
-  return `Review ${dispute.reviewed_head_sha.slice(0, 7)}`;
+  // Reads as a subject in both the row metadata line and the "Review dispute
+  // on …" button label, which "Review <sha>" did not.
+  return `commit ${dispute.reviewed_head_sha.slice(0, 7)}`;
 }
 
 function codeReviewDisputeStatusLabel(value: string): string {
