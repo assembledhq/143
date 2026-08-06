@@ -599,6 +599,7 @@ describe('SessionDetailPage overview and review loop', () => {
     const reviewDescription = screen.getByText('Check the current diff and apply any fixes before publishing.');
     const splitTitle = screen.getByText('Large change · 750 additions · 1 file');
     const resultSection = screen.getByTestId('session-result-section');
+    const resultTitle = within(resultSection).getByText('Result');
     const reviewSuggestion = reviewTitle.closest('[data-slot="overview-action"]');
     const splitSuggestion = splitTitle.closest('[data-slot="overview-suggestion"]');
     // The action sits in the same quiet row as the copy rather than in a card
@@ -607,6 +608,9 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(reviewSuggestion?.closest('[data-slot="card"]')).toBeNull();
     expect(reviewDescription.parentElement).toBe(reviewSuggestion);
     expect(reviewDescription).toHaveClass('col-span-3', 'row-start-2');
+    expect(reviewTitle).toHaveClass('text-xs', 'font-medium', 'text-foreground');
+    expect(splitTitle).toHaveClass('text-xs', 'font-medium', 'text-foreground');
+    expect(resultTitle).toHaveClass('text-xs', 'font-medium', 'text-foreground');
     // The row carries no accessible name of its own, so it stays a plain group
     // rather than adding a landmark that just repeats the visible title.
     expect(screen.queryByRole('region', { name: 'Review before creating a PR' })).not.toBeInTheDocument();
@@ -1399,6 +1403,10 @@ describe('SessionDetailPage overview and review loop', () => {
     const selectedPanel = screen.getByTestId('selected-pull-request-panel');
     expect(within(selectedPanel).getByText('143/foundation')).toBeInTheDocument();
     expect(within(selectedPanel).getByText('changes requested')).toBeInTheDocument();
+    // Card titles sit on the same label tier as the flat blocks they interleave
+    // with in this column, so a card doesn't read as a level of hierarchy.
+    expect(within(selectedPanel).getByText('API integration')).toHaveClass('text-xs', 'font-medium', 'text-foreground');
+    expect(within(screen.getByTestId('stack-health')).getByText('Stack health')).toHaveClass('text-xs', 'font-medium', 'text-foreground');
     expect(screen.getByTestId('branch-actions-unavailable')).toBeInTheDocument();
     await waitFor(() => expect(requestedChangesets).toContain(childChangesetID));
     await waitFor(() => expect(requestedHealthPRs).toContain(childPR.id));

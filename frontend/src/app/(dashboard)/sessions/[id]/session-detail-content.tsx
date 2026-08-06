@@ -311,9 +311,19 @@ function publicationErrorDescription(publication: SessionPublication) {
   }
 }
 
+// The label tier for every block stacked in the Overview column, whether it is
+// flat (`SectionHeading`, `OverviewRow`) or wrapped in a card (`Stack health`,
+// the selected changeset). Those blocks interleave in one scroll column, so a
+// card title a step larger than the flat block above it reads as a level of
+// hierarchy that isn't there. The tier matches the size of the body copy it
+// heads, so weight alone carries the hierarchy in the blocks whose copy is
+// `text-foreground` rather than muted.
+const OVERVIEW_LABEL_CLASSNAME = "text-xs font-medium text-foreground";
+
 // Every status block in the overview leads with a 16px icon and a title on one
-// row, then full-width body copy underneath. Sharing the row keeps the icon gap
-// and title type from drifting apart across the places that render it.
+// row, then full-width body copy underneath. Sharing the row and label style
+// keeps the icon gap and title type from drifting apart across the places that
+// render it.
 function SectionHeading({
   icon,
   iconClassName,
@@ -332,7 +342,7 @@ function SectionHeading({
       <span aria-hidden="true" data-slot={iconSlot} className={cn("shrink-0 [&_svg]:size-4", iconClassName)}>
         {icon}
       </span>
-      <p className="text-sm font-medium text-foreground">{title}</p>
+      <p className={OVERVIEW_LABEL_CLASSNAME}>{title}</p>
     </div>
   );
 }
@@ -770,6 +780,10 @@ function SessionResultSection({ summary, divided }: { summary?: string; divided:
     >
       <SectionHeading icon={<CheckCircle2 className="h-4 w-4" />} iconClassName="text-success" title="Result" />
       <div data-slot="session-result-body">
+        {/* `text-xs` sets the paragraph scale only: the shared renderer gives
+            `h1`/`h2`/`h3` explicit sizes that override it, so a summary's own
+            headings keep their scale. Capping the block instead would flatten
+            `h1` and `h2` onto the same size and weight. */}
         <LazyMarkdownContent content={summary} className="text-xs" />
       </div>
     </section>
@@ -3621,7 +3635,7 @@ function OverviewRow({
       >
         {icon}
       </div>
-      <p className="col-start-2 row-start-1 text-xs font-medium text-foreground">{title}</p>
+      <p className={cn("col-start-2 row-start-1", OVERVIEW_LABEL_CLASSNAME)}>{title}</p>
       <p className="col-span-3 row-start-2 text-xs leading-relaxed text-muted-foreground">{description}</p>
       {action != null ? (
         <div data-slot={`${slot}-control`} className="col-start-3 row-start-1 shrink-0">
@@ -6840,7 +6854,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             <Card className="border-border/60" data-testid="stack-health">
               <CardContent className="flex items-center justify-between gap-3 p-4">
                 <div>
-                  <div className="text-sm font-medium">Stack health</div>
+                  <div className={OVERVIEW_LABEL_CLASSNAME}>Stack health</div>
                   <p className="text-xs text-muted-foreground">{(session.changeset_stack_state ?? "coherent").replaceAll("-", " ")}</p>
                 </div>
                 {selectedChangeset && changesets.some((item) => item.status === "needs_restack") && (
@@ -6897,7 +6911,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           {(hasMultipleChangesets || selectedChangesetRecoveryMessage) && selectedChangeset && (
             <Card className="border-border/60" data-testid="selected-pull-request-panel">
               <CardContent className="space-y-1 p-4">
-                <div className="text-sm font-medium">{selectedChangeset.title}</div>
+                <div className={OVERVIEW_LABEL_CLASSNAME}>{selectedChangeset.title}</div>
                 {selectedChangeset.summary && <p className="text-xs text-muted-foreground">{selectedChangeset.summary}</p>}
                 <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 pt-1 text-xs">
                   <dt className="text-muted-foreground">Base</dt><dd className="truncate">{selectedChangeset.base_branch}</dd>

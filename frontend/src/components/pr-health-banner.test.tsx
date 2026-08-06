@@ -54,7 +54,9 @@ describe("PRHealthBanner", () => {
     expect(prHealthSection).toBeInTheDocument();
     expect(prHealthSection).toHaveAttribute("data-slot", "pr-health-section");
     expect(prHealthSection.closest('[data-slot="card"]')).toBeNull();
-    expect(screen.getByText("PR #42")).toHaveClass("text-sm");
+    // Same label tier as the closed and merged blocks that take this banner's
+    // place in the Overview column once the pull request leaves the open state.
+    expect(screen.getByText("PR #42")).toHaveClass("text-xs", "font-medium", "text-foreground");
     expect(screen.getByText("Ready")).toHaveAttribute("data-variant", "success");
     expect(screen.getByText("acme/widgets")).toHaveClass("text-xs");
     expect(screen.getByText("Healthy.")).toHaveClass("text-xs");

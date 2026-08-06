@@ -366,6 +366,8 @@ describe('SessionDetailPage PR creation', () => {
     // sibling of that row, not a column indented past an icon tile.
     const heading = title.parentElement;
     expect(heading).toHaveClass('gap-1.5');
+    // Same label tier as the quiet overview rows this card sits among.
+    expect(title).toHaveClass('text-xs', 'font-medium', 'text-foreground');
     expect(heading?.querySelector('.lucide-circle-check')).toBeInTheDocument();
     expect(description.parentElement).toBe(heading?.parentElement);
   });

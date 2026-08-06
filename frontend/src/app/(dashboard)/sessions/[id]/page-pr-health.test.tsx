@@ -435,6 +435,8 @@ describe('SessionDetailPage PR health and merge', () => {
     expect(closedIcon).toHaveAttribute('aria-hidden', 'true');
     expect(closedIcon?.querySelector('.lucide-circle-x')).toBeInTheDocument();
     expect(closedSummary.parentElement).toBe(closedSection);
+    // Same label tier as the other flat status blocks stacked in this column.
+    expect(within(closedSection as HTMLElement).getByText('PR #42 closed')).toHaveClass('text-xs', 'font-medium', 'text-foreground');
     expect(screen.getByTestId('session-result-section')).toHaveClass('border-t', 'pt-4');
     expect(screen.getByRole('link', { name: 'View PR' })).toBeInTheDocument();
     expect(screen.queryByRole('region', { name: 'Pull request #42' })).not.toBeInTheDocument();
@@ -627,7 +629,8 @@ describe('SessionDetailPage PR health and merge', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     expect(await screen.findAllByText('PR merged')).toHaveLength(2);
-    expect(screen.getByText('PR #42 merged')).toBeInTheDocument();
+    // Same label tier as the other flat status blocks stacked in this column.
+    expect(screen.getByText('PR #42 merged')).toHaveClass('text-xs', 'font-medium', 'text-foreground');
     expect(screen.getByText('PR #42 was merged successfully.')).toHaveClass('text-xs');
     expect(screen.getByText('This change has landed. Open a follow-up session if you need to make another revision.')).toHaveClass('text-xs');
     expect(screen.getByRole('link', { name: 'View PR' })).toBeInTheDocument();

@@ -167,7 +167,10 @@ export function PRHealthBanner({
             >
               {statusPresentation.variant === "success" ? <CheckCircle2 className="h-4 w-4" /> : isRepositoryDisconnected ? <AlertTriangle className="h-4 w-4" /> : <GitPullRequest className="h-4 w-4" />}
             </div>
-            <div className="text-sm font-medium text-foreground">PR #{health.pull_request_number}</div>
+            {/* Same label tier as the closed and merged PR blocks that replace
+                this banner in the Overview column: the header shouldn't change
+                size when the pull request changes state. */}
+            <div className="text-xs font-medium text-foreground">PR #{health.pull_request_number}</div>
             <Badge variant={statusPresentation.variant} className="h-5 px-1.5 py-0 text-xs">
               {statusPresentation.label}
             </Badge>
