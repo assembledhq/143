@@ -1605,7 +1605,7 @@ func TestActivityPhaseTranscriptAssociationMigration(t *testing.T) {
 func TestInboxAppliedAtBackfillMigrationOnlyRepairsUnreachableEntries(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile("../../migrations/000284_backfill_inbox_applied_at.up.sql")
+	body, err := os.ReadFile("../../migrations/000285_backfill_inbox_applied_at.up.sql")
 	require.NoError(t, err, "test should read the inbox applied_at backfill migration")
 	sql := string(body)
 
