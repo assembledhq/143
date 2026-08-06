@@ -54,7 +54,9 @@ describe("PRHealthBanner", () => {
     expect(prHealthSection).toBeInTheDocument();
     expect(prHealthSection).toHaveAttribute("data-slot", "pr-health-section");
     expect(prHealthSection.closest('[data-slot="card"]')).toBeNull();
-    expect(screen.getByText("PR #42")).toHaveClass("text-sm");
+    // The header shares a tier with the banner's own body copy and badge, so
+    // weight and color carry it rather than size.
+    expect(screen.getByText("PR #42")).toHaveClass("text-xs", "font-medium", "text-foreground");
     expect(screen.getByText("Ready")).toHaveAttribute("data-variant", "success");
     expect(screen.getByText("acme/widgets")).toHaveClass("text-xs");
     expect(screen.getByText("Healthy.")).toHaveClass("text-xs");
