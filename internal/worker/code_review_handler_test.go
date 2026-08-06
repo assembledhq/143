@@ -263,6 +263,113 @@ func TestQueueCodeReviewReplacementForChangedHeadRequiresDurableLifecycle(t *tes
 	require.ErrorContains(t, err, "lifecycle service unavailable", "changed-head handoff should not report supersession before a fresh assessment is durable")
 }
 
+type codeReviewDisputeServiceRecorder struct {
+	failedOrgID     uuid.UUID
+	failedDisputeID uuid.UUID
+	failedDetail    string
+	failCalls       int
+}
+
+func (s *codeReviewDisputeServiceRecorder) Triage(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+
+func (s *codeReviewDisputeServiceRecorder) FailTriage(_ context.Context, orgID, disputeID uuid.UUID, detail string) error {
+	s.failedOrgID = orgID
+	s.failedDisputeID = disputeID
+	s.failedDetail = detail
+	s.failCalls++
+	return nil
+}
+
+func (s *codeReviewDisputeServiceRecorder) BuildReply(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewDispute, string, error) {
+	return models.CodeReviewDispute{}, "", nil
+}
+
+func (s *codeReviewDisputeServiceRecorder) EnqueueReply(context.Context, uuid.UUID, uuid.UUID, string) error {
+	return nil
+}
+
+func TestStartCodeReviewReassessmentHandlerTerminalizesIgnoredClassifiedReviewRequest(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	repoID := uuid.New()
+	requestID := uuid.New()
+	now := time.Now().UTC()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery("(?s)FROM pull_requests.*WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgx.NamedArgs{"id": prID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(workerPullRequestColumns).AddRow(
+			workerPullRequestRow(prID, uuid.New(), orgID, "acme/repo", "feature/review-request", now)...,
+		))
+	lifecycle := &codeReviewLifecycleStub{result: codereview.ReviewRequestedResult{IgnoredReason: "policy_disabled"}}
+	disputes := &codeReviewDisputeServiceRecorder{}
+	prService := &stubPRService{getCodeReviewPRSnapshotFn: func(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewPullRequestSnapshot, error) {
+		return ghservice.CodeReviewPullRequestSnapshot{Number: 42, HeadSHA: "latest-head", BaseSHA: "latest-base"}, nil
+	}}
+	payload, err := json.Marshal(codereview.ReviewChangedInput{
+		OrgID: orgID, RepositoryID: repoID, PullRequestID: prID,
+		HeadSHA: "filed-head", ChangeKey: "review_request:" + requestID.String(),
+		ExplicitRequest: true, ReviewRequestDisputeID: &requestID,
+	})
+	require.NoError(t, err, "classified review request payload should marshal")
+
+	err = newStartCodeReviewReassessmentHandler(
+		&Stores{PullRequests: db.NewPullRequestStore(mock)},
+		&Services{PR: prService, CodeReviewLifecycle: lifecycle, CodeReviewDisputes: disputes},
+		zerolog.Nop(),
+	)(context.Background(), models.JobTypeStartCodeReviewReassessment, payload)
+
+	require.NoError(t, err, "an ignored classified request should terminalize without retrying the starter")
+	require.Equal(t, 1, disputes.failCalls, "the intake row should be terminalized exactly once")
+	require.Equal(t, orgID, disputes.failedOrgID, "the failure should remain scoped to the request organization")
+	require.Equal(t, requestID, disputes.failedDisputeID, "the failure should update the originating classified request")
+	require.Contains(t, disputes.failedDetail, "policy disabled", "the terminal detail should explain why no review started")
+	require.Equal(t, &requestID, lifecycle.input.ReviewRequestDisputeID, "the starter should preserve failure-only correlation through the lifecycle call")
+	require.Nil(t, lifecycle.input.TriggeringDisputeID, "an ordinary classified request must not become a dispute reassessment")
+	require.NoError(t, mock.ExpectationsWereMet(), "the starter should load the pull request with org isolation")
+}
+
+func TestStartCodeReviewReassessmentHandlerDeadLetterTerminalizesClassifiedReviewRequest(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	requestID := uuid.New()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery("(?s)FROM pull_requests.*WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgx.NamedArgs{"id": prID, "org_id": orgID}).
+		WillReturnError(pgx.ErrNoRows)
+	disputes := &codeReviewDisputeServiceRecorder{}
+	payload, err := json.Marshal(codereview.ReviewChangedInput{
+		OrgID: orgID, RepositoryID: uuid.New(), PullRequestID: prID,
+		HeadSHA: "filed-head", ChangeKey: "review_request:" + requestID.String(),
+		ExplicitRequest: true, ReviewRequestDisputeID: &requestID,
+	})
+	require.NoError(t, err, "classified review request payload should marshal")
+	ctx := jobctx.WithDeadLetterHooks(context.Background())
+
+	err = newStartCodeReviewReassessmentHandler(
+		&Stores{PullRequests: db.NewPullRequestStore(mock)},
+		&Services{PR: &stubPRService{}, CodeReviewLifecycle: &codeReviewLifecycleStub{}, CodeReviewDisputes: disputes},
+		zerolog.Nop(),
+	)(ctx, models.JobTypeStartCodeReviewReassessment, payload)
+	require.Error(t, err, "a missing pull request should fail the starter")
+
+	jobctx.RunDeadLetterHooks(ctx, err)
+
+	require.Equal(t, 1, disputes.failCalls, "dead-lettering should terminalize the classified request exactly once")
+	require.Equal(t, requestID, disputes.failedDisputeID, "dead-lettering should retain failure correlation without creating a reassessment link")
+	require.Contains(t, disputes.failedDetail, "after repeated attempts", "the terminal detail should explain retry exhaustion")
+	require.NoError(t, mock.ExpectationsWereMet(), "the failed starter should still use the org-scoped pull request lookup")
+}
+
 func TestSyncCodeReviewPullRequestStateClassifiesTransientGitHubFailures(t *testing.T) {
 	t.Parallel()
 

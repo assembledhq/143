@@ -152,6 +152,10 @@ type ReviewChangedInput struct {
 	ExplicitRequest        bool                           `json:"explicit_request,omitempty"`
 	TriggerSource          models.CodeReviewTriggerSource `json:"trigger_source,omitempty"`
 	TriggeringDisputeID    *uuid.UUID                     `json:"triggering_dispute_id,omitempty"`
+	// ReviewRequestDisputeID correlates a classified ordinary review request
+	// with starter failures only. Unlike TriggeringDisputeID, it must never flow
+	// into review metadata or the dispute reassessment/reply lifecycle.
+	ReviewRequestDisputeID *uuid.UUID `json:"review_request_dispute_id,omitempty"`
 }
 
 type ReviewRequestedResult struct {

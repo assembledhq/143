@@ -185,3 +185,35 @@ func TestThreadRuntimeStore_ReclaimExpiredLeases(t *testing.T) {
 	require.Equal(t, ThreadRuntimeReclaimResult{LostRuntimes: 2, ExpiredHolders: 2, ResetInboxEntries: 3, UnknownDeliveryEntries: 1}, result, "ReclaimExpiredLeases should return affected row counts")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
+
+// The watermark branch of acknowledgeDeliveredThreadInboxSegment runs when no
+// activity phase is registered for the thread, so there is no delivery batch
+// and no later phase start to stamp applied_at. Without it here the entry stays
+// 'acked' with a NULL applied_at forever, which the activity timeline treats as
+// unapplied steering and hides from the transcript permanently.
+func TestThreadRuntimeStore_CommitInboxDeliveryStampsAppliedAt(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should be created")
+	defer mock.Close()
+
+	orgID, runtimeID, leaseToken, threadID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE thread_runtimes").
+		WithArgs(orgID, runtimeID, leaseToken, int64(7), int64(7)).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec(`(?s)UPDATE thread_inbox_entries.+applied_at = COALESCE\(applied_at, now\(\)\).+delivery_state = 'delivered'`).
+		WithArgs(orgID, threadID, runtimeID, "node-1", int64(7)).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+	mock.ExpectCommit()
+
+	ok, err := NewThreadRuntimeStore(mock).CommitInboxDeliveryWithLease(
+		context.Background(), orgID, runtimeID, leaseToken, threadID, "node-1", 7, 7,
+	)
+
+	require.NoError(t, err, "CommitInboxDeliveryWithLease should not return an error")
+	require.True(t, ok, "CommitInboxDeliveryWithLease should report the lease-held commit")
+	require.NoError(t, mock.ExpectationsWereMet(), "watermark acks should stamp applied_at so the message stays in the transcript")
+}

@@ -167,7 +167,11 @@ export function PRHealthBanner({
             >
               {statusPresentation.variant === "success" ? <CheckCircle2 className="h-4 w-4" /> : isRepositoryDisconnected ? <AlertTriangle className="h-4 w-4" /> : <GitPullRequest className="h-4 w-4" />}
             </div>
-            <div className="text-sm font-medium text-foreground">PR #{health.pull_request_number}</div>
+            {/* The header sits on the same tier as the banner's own body copy
+                and badge, so weight and color carry it rather than size. Hosts
+                that swap this banner out for a static block once the pull
+                request closes can then match it without a size jump. */}
+            <div className="text-xs font-medium text-foreground">PR #{health.pull_request_number}</div>
             <Badge variant={statusPresentation.variant} className="h-5 px-1.5 py-0 text-xs">
               {statusPresentation.label}
             </Badge>

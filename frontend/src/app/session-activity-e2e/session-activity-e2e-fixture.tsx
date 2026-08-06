@@ -94,7 +94,18 @@ export function SessionActivityE2EFixture() {
     const toolUse = log(1, "tool_use", "Running npm test", "2026-08-03T12:00:02Z");
     const toolResult = log(2, "tool_result", "All tests passed", "2026-08-03T12:00:04Z");
     const values: TimelineEntry[] = [
-      { kind: "message", data: message(1, "user", "Fix transcript scrolling", "2026-08-03T11:59:59Z"), transcriptEntryId: "msg_1" },
+      // The run-starting message is acked by the seed path, which stamps
+      // applied_at at ack time because it has no delivery batch. Carrying the
+      // real inbox metadata here keeps the fixture from hiding a regression
+      // that would blank out the prompt of every session.
+      {
+        kind: "message",
+        data: message(1, "user", "Fix transcript scrolling", "2026-08-03T11:59:59Z", {
+          inbox_sequence: 1, delivery_state: "acked", accepted_at: "2026-08-03T11:59:59Z",
+          acknowledged_at: "2026-08-03T12:00:00Z", applied_at: "2026-08-03T12:00:00Z",
+        }),
+        transcriptEntryId: "msg_1",
+      },
       { kind: "tool_group", toolUse, toolResult, transcriptEntryId: "tuse_1" },
     ];
     if (queued) {
