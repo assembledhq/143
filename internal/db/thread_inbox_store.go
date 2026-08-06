@@ -261,6 +261,12 @@ func (s *ThreadInboxStore) MarkDeliveredForEntry(ctx context.Context, orgID, thr
 // pulled in as its seed prompt. Restricted to entries the runtime already
 // owns (runtime_id = $3) or that no runtime has claimed yet (runtime_id IS
 // NULL) so it cannot steal ownership stamped by another runtime.
+//
+// A seed message is applied by definition: the runtime boots executing it, so
+// there is no later batch start to defer applied_at to. Only the inbox-batch
+// branch of StartActivityPhase may leave applied_at unset, because only it has
+// a phase boundary to move the message to; every other path that reaches
+// 'acked' must stamp it or the transcript hides the message forever.
 func (s *ThreadInboxStore) MarkAckedForSeedMessages(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, messageIDs []int64) (int64, error) {
 	if len(messageIDs) == 0 {
 		return 0, nil
@@ -271,6 +277,7 @@ func (s *ThreadInboxStore) MarkAckedForSeedMessages(ctx context.Context, orgID, 
 			runtime_id = $3,
 			delivered_at = COALESCE(delivered_at, now()),
 			acked_at = COALESCE(acked_at, now()),
+			applied_at = COALESCE(applied_at, now()),
 			updated_at = now()
 		WHERE org_id = $1
 		  AND thread_id = $2

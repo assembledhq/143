@@ -215,16 +215,14 @@ between them, each acknowledgment starts a separate phase.
 
 While a steering message is unacknowledged:
 
-- show it immediately as a distinct **Queued** timeline item below the active
-  capsule;
+- keep it out of the rendered transcript;
 - continue appending prior-phase activity inside the capsule above it;
 - do not attribute work to the new instruction yet;
-- on acknowledgment, close the prior phase and show the message as
-  acknowledged but pending execution;
-- only when execution resumes, atomically promote the message to its normal
-  applied position and start the new capsule below it;
-- on delivery failure or cancellation, retain a visible failed/cancelled
-  delivery state.
+- on acknowledgment, close the prior phase while the message remains hidden;
+- only when execution resumes, atomically add the message at its normal applied
+  position and start the new capsule below it;
+- on delivery failure or cancellation, retain the existing visible inbox
+  failure state outside the transcript.
 
 An explicit interrupt ends the phase when interruption is confirmed.
 
@@ -351,7 +349,6 @@ truncation behavior, and individual tool disclosure.
 The following remain visible outside collapsed activity:
 
 - user prompts and applied steering messages;
-- queued, failed, or cancelled steering-message delivery states;
 - unanswered human-input requests;
 - permission and approval requests;
 - plans awaiting approval or adjustment;
@@ -513,7 +510,8 @@ failed phases is expected.
 8. Duration measures actual execution only and excludes queueing, setup,
    waiting, recovery, and post-response cleanup.
 9. Historical inferred capsules never display guessed duration.
-10. Queued steering remains visibly queued until runtime acknowledgment.
+10. Queued steering stays out of the transcript until the runtime applies it,
+    then appears as a normal user message.
 11. One acknowledged delivery batch has durable identity and creates exactly
     one new phase only when execution actually resumes.
 12. Visible boundary events and final assistant responses are never hidden
@@ -945,7 +943,7 @@ The existing optimistic/queued message path must preserve delivery state.
 
 Before acknowledgment:
 
-- the message renders as queued;
+- the message stays out of the rendered transcript;
 - the active phase remains open;
 - subsequent old-phase entries retain the old phase ID.
 
@@ -962,8 +960,38 @@ On acknowledgment:
 On failed or cancelled delivery:
 
 - do not start a phase;
+- keep the unapplied message out of the transcript and surface recovery through
+  the existing inbox failure notice;
 - retain visible failure/cancellation state;
 - preserve the old phase until its actual execution state changes.
+
+Hiding an unapplied message is only safe while every unapplied message is
+reachable from some other surface, so no delivery state may be both unapplied
+and terminal. `applied_at` therefore has exactly one deferral: the inbox-batch
+branch of phase start, which withholds it only because it has a phase boundary
+to move the message to. Every other path that reaches `acked` stamps it at ack
+time, because none of them has a later boundary to wait for:
+
+- the seed-message ack, for the message a runtime boots executing;
+- the delivery-watermark commit, taken when no activity phase is registered for
+  the thread;
+- the batch path itself, when the phase actually starts.
+
+Abandoning a batch is the one case where the deferral can never be honored, so
+it moves the still-unapplied entries to `unknown_delivery` with an explanatory
+`last_error` — accurate, since the runtime confirmed receipt but was lost
+before execution, and it is the state the recoverable-inbox notice offers a
+replay action for. Entries predating the delivery-batch machinery have no batch
+at all and are backfilled as applied.
+
+Adding a new way to reach `acked` without stamping `applied_at` silently
+deletes user messages from the transcript, so it is a contract change, not an
+implementation detail.
+
+For the same reason the frontend enumerates the unapplied delivery states
+rather than treating a missing `applied_at` as proof of non-application: an
+unrecognized state must leave the message visible, because dropping
+user-authored content from every surface is worse than showing it early.
 
 Explicit interruption follows confirmation from runtime control rather than
 submission time.
@@ -1138,16 +1166,6 @@ interface TimelineActivityPhase {
   inferredHistorical: false;
 }
 
-interface TimelineQueuedDelivery {
-  id: string;
-  inboxSequence: number;
-  deliveryState: "queued" | "acknowledged" | "applied" | "abandoned";
-  createdAt: string;
-  acknowledgedAt?: string;
-  appliedAt?: string;
-  entry: TimelineEntry;
-}
-
 interface InferredHistoricalActivity {
   id: string;
   turnNumber: number;
@@ -1159,24 +1177,25 @@ interface InferredHistoricalActivity {
 type TimelineNode =
   | { kind: "visible"; entry: TimelineEntry }
   | { kind: "phase"; phase: TimelineActivityPhase }
-  | { kind: "queued_delivery"; delivery: TimelineQueuedDelivery }
   | { kind: "historical_activity"; activity: InferredHistoricalActivity };
 ```
 
 The final rendered timeline is one ordered `TimelineNode[]`. Visible boundary
 events split inferred historical activity. Authoritative phase IDs determine
 new-session membership; the frontend must not reconstruct authoritative phase
-membership from timestamps.
+membership from timestamps. Unapplied inbox messages are excluded before node
+construction and enter the visible timeline as normal user messages only after
+the runtime applies them.
 
 Queued or acknowledged-but-not-applied user messages are excluded from ordinary
-timestamp ordering and rendered in a pending-instruction lane immediately
-after the active capsule. The transcript API supplies stable inbox sequence,
-delivery state, and created/acknowledged/applied timestamps. Once the runtime
-starts the delivery batch, `applied_at` becomes its presentation boundary: the
-message moves atomically between the closed prior phase and the newly running
-phase. `created_at` remains the audit timestamp and must not pull the applied
-message back into older activity. Abandoned delivery remains visibly marked
-and actionable according to the existing inbox failure behavior.
+timestamp ordering and from the rendered timeline. The transcript API supplies
+stable inbox sequence, delivery state, and created/acknowledged/applied
+timestamps. Once the runtime starts the delivery batch, `applied_at` becomes
+its presentation boundary: the message appears atomically between the closed
+prior phase and the newly running phase. `created_at` remains the audit
+timestamp and must not pull the applied message back into older activity.
+Abandoned delivery remains actionable through the existing inbox failure
+behavior outside the transcript.
 
 Persisted assistant-role messages are authoritative final responses under the
 current message contract. `assistant_final` metadata remains authoritative for
@@ -1561,9 +1580,11 @@ Use table-driven Vitest cases for:
 - activity-label sanitation;
 - Compact/Detailed effective state;
 - transient override precedence;
-- queued steering state;
-- pending-lane ordering before acknowledgment and applied-boundary ordering
+- queued steering omission before acknowledgment and applied-boundary ordering
   after execution resumes;
+- omission across every unapplied delivery state, and visibility for an
+  unrecognized one;
+- optimistic send and refetch agreeing on steering visibility;
 - malformed legacy fallback.
 
 Compare complete expected structures rather than partial lengths where
@@ -1600,7 +1621,7 @@ Verify:
 - duplicated, missed, and out-of-order lifecycle SSE notifications reconcile
   to the durable transcript state;
 - two phases around human input in one turn;
-- queued steer to acknowledged new phase;
+- queued steer omitted until the acknowledged new phase starts;
 - multiple messages in one acknowledged batch;
 - interruption and recovery capsules;
 - query refresh preserves transient state;
@@ -1641,8 +1662,8 @@ The browser suite must cover:
 - active streaming and completion collapse;
 - inspection-aware non-collapse;
 - human-input and steering boundaries;
-- queued steering acknowledgment;
-- queued-message pending-lane placement and atomic promotion ordering;
+- queued steering omission before acknowledgment and atomic appearance after
+  application;
 - older-window prepend without scroll jumps;
 - deep-link expansion into collapsed activity;
 - Compact/Detailed persistence after reload and a second browser context;
@@ -1714,8 +1735,8 @@ build/test outputs.
 4. Embed phases in transcript windows and live updates.
 5. Add the typed database-backed user preference.
 6. Build the phase-preserving frontend model and capsule UI.
-7. Integrate anchors, pagination, scroll restoration, queued steering, and
-   inspection-aware collapse.
+7. Integrate anchors, pagination, scroll restoration, queued-steering omission,
+   and inspection-aware collapse.
 8. Add unit, integration, Playwright, and manual smoke coverage.
 9. Update public session documentation and final screenshots.
 10. Complete the full launch gate.
@@ -1755,7 +1776,7 @@ settings merge validator correctly rejects unknown fields on old API nodes.
 | Risk | Mitigation |
 | --- | --- |
 | A final answer is hidden in activity. | Persisted assistant messages are visible boundaries; final response and phase completion are atomic; conservative legacy fallback remains visible. |
-| Activity is assigned to the wrong instruction after steering. | Keep the old phase active until runtime acknowledgment; queued messages remain visibly queued; use one phase per acknowledged batch. |
+| Activity is assigned to the wrong instruction after steering. | Keep the old phase active until runtime acknowledgment; omit queued messages until application; use one phase per acknowledged batch. |
 | Duration includes waiting or setup. | Start at actual execution and close on confirmed pause/final persistence; store authoritative phase timestamps. |
 | A crash leaves a phase running forever. | Reaper closes lost-runtime phases, guarded by lease/status; alert and reconcile stranded rows. |
 | A stale worker writes to a replacement phase. | Propagate explicit phase ID and runtime/lease identity; reject stale terminal and append operations. |
@@ -1804,7 +1825,7 @@ settings merge validator correctly rejects unknown fields on old API nodes.
 - Expanded headers remain visible.
 - Historical sessions use inferred capsules without guessed duration.
 - Phases are embedded in transcript-window responses.
-- Queued messages use a pending-instruction lane and move to their applied
+- Queued messages stay out of the transcript and appear at their applied
   boundary only when execution begins.
 - Durable lifecycle SSE events invalidate and reconcile to transcript state.
 - Launch is immediate to all users with an emergency rendering kill switch.
@@ -1846,8 +1867,8 @@ settings merge validator correctly rejects unknown fields on old API nodes.
   emergency kill switch, and the full deterministic/manual/browser testing
   strategy.
 - **2026-07-26:** Closed the full-pass consistency gaps by adding phase-only
-  pagination and anchors, durable acknowledged-batch identity, pending-lane
-  ordering, separate acknowledgment/resume transactions, preference-reset
+  pagination and anchors, durable acknowledged-batch identity, unapplied-message
+  omission, separate acknowledgment/resume transactions, preference-reset
   semantics, a complete status/reason matrix, required lifecycle SSE events,
   kill-switch freshness/failure behavior, broad required Playwright path
   coverage, and a deterministic inspection state machine.

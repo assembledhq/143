@@ -27,6 +27,25 @@ const inboxBatchColumns = `id, org_id, session_id, thread_id, runtime_id, sequen
 const inboxBatchColumnsB = `b.id, b.org_id, b.session_id, b.thread_id, b.runtime_id, b.sequence_start,
 	b.sequence_end, b.status, b.acknowledged_at, b.started_at, b.abandoned_at, b.created_at, b.updated_at`
 
+// strandedInboxEntriesUpdate reopens the entries of a batch that is being
+// abandoned. Acknowledging a batch moves its entries to 'acked', but only a
+// started batch sets applied_at, so an abandoned batch would otherwise leave
+// them 'acked' with a NULL applied_at forever: never applied, never retried,
+// and invisible to both the transcript and the recoverable-inbox notice.
+// 'unknown_delivery' is the accurate terminal state — the runtime confirmed
+// receipt but was lost before execution began, so whether it ran is unknown —
+// and it is the state the recovery UI offers a replay action for.
+const strandedInboxEntriesUpdate = `UPDATE thread_inbox_entries e
+			SET delivery_state = 'unknown_delivery',
+				last_error = COALESCE(e.last_error, 'delivery batch abandoned after acknowledgment before execution started'),
+				updated_at = now()
+			FROM abandoned a
+			WHERE e.org_id = a.org_id AND e.session_id = a.session_id
+			  AND e.thread_id = a.thread_id AND e.runtime_id = a.runtime_id
+			  AND e.sequence_no BETWEEN a.sequence_start AND a.sequence_end
+			  AND e.delivery_state = 'acked' AND e.applied_at IS NULL
+			RETURNING e.id`
+
 type SessionActivityPhaseStore struct {
 	db TxStarter
 }
@@ -458,12 +477,18 @@ func (s *SessionActivityPhaseStore) ReconcileAbandonedInboxBatchesAcrossOrgs(ctx
 			ORDER BY b.acknowledged_at, b.id
 			LIMIT $2
 			FOR UPDATE OF b, r SKIP LOCKED
+		),
+		abandoned AS (
+			UPDATE thread_inbox_delivery_batches b
+			SET status = 'abandoned', abandoned_at = $3, updated_at = now()
+			FROM candidates c
+			WHERE b.id = c.id AND b.status = 'acknowledged'
+			RETURNING `+inboxBatchColumnsB+`
+		),
+		stranded AS (
+			`+strandedInboxEntriesUpdate+`
 		)
-		UPDATE thread_inbox_delivery_batches b
-		SET status = 'abandoned', abandoned_at = $3, updated_at = now()
-		FROM candidates c
-		WHERE b.id = c.id AND b.status = 'acknowledged'
-		RETURNING `+inboxBatchColumnsB, leaseExpiredBefore, limit, abandonedAt)
+		SELECT `+inboxBatchColumns+` FROM abandoned`, leaseExpiredBefore, limit, abandonedAt)
 	if err != nil {
 		return nil, fmt.Errorf("reconcile abandoned inbox delivery batches: %w", err)
 	}
@@ -477,10 +502,16 @@ func (s *SessionActivityPhaseStore) ReconcileAbandonedInboxBatchesAcrossOrgs(ctx
 func (s *SessionActivityPhaseStore) AbandonInboxBatch(ctx context.Context, orgID, batchID uuid.UUID, abandonedAt time.Time) (models.ThreadInboxDeliveryBatch, error) {
 	abandonedAt = postgresTimestamp(abandonedAt)
 	rows, err := s.db.Query(ctx, `
-		UPDATE thread_inbox_delivery_batches
-		SET status = 'abandoned', abandoned_at = $3, updated_at = now()
-		WHERE org_id = $1 AND id = $2 AND status = 'acknowledged'
-		RETURNING `+inboxBatchColumns, orgID, batchID, abandonedAt)
+		WITH abandoned AS (
+			UPDATE thread_inbox_delivery_batches
+			SET status = 'abandoned', abandoned_at = $3, updated_at = now()
+			WHERE org_id = $1 AND id = $2 AND status = 'acknowledged'
+			RETURNING `+inboxBatchColumns+`
+		),
+		stranded AS (
+			`+strandedInboxEntriesUpdate+`
+		)
+		SELECT `+inboxBatchColumns+` FROM abandoned`, orgID, batchID, abandonedAt)
 	if err != nil {
 		return models.ThreadInboxDeliveryBatch{}, fmt.Errorf("abandon inbox delivery batch: %w", err)
 	}
