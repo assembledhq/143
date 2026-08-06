@@ -171,6 +171,66 @@ func (s *codeReviewLifecycleStub) HandleReviewChanged(_ context.Context, input c
 	return s.result, s.err
 }
 
+func TestQueueCodeReviewReplacementForChangedHeadUsesLatestLiveSnapshot(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repositoryID := uuid.New()
+	pullRequestID := uuid.New()
+	sessionID := uuid.New()
+	lifecycle := &codeReviewLifecycleStub{result: codereview.ReviewRequestedResult{Processed: true}}
+	pr := models.PullRequest{
+		ID: pullRequestID, OrgID: orgID, GitHubRepo: "acme/repo", GitHubPRNumber: 42,
+		GitHubPRURL: "https://github.com/acme/repo/pull/42", Title: "Latest title",
+		HeadSHA: stringPtr("mirrored-head"), BaseSHA: stringPtr("mirrored-base"),
+	}
+	health := &models.PullRequestHealthResponse{HeadSHA: "live-head", BaseSHA: "live-base"}
+	job := runCodeReviewPayload{
+		OrgID: orgID, RepositoryID: repositoryID, PullRequestID: pullRequestID,
+		SessionID: sessionID, HeadSHA: "reviewed-head", PullRequestAuthor: "octocat", FromFork: true,
+	}
+
+	err := queueCodeReviewReplacementForChangedHead(
+		context.Background(),
+		&Services{CodeReviewLifecycle: lifecycle},
+		zerolog.Nop(),
+		job,
+		pr,
+		health,
+	)
+
+	require.NoError(t, err, "changed-head handoff should queue a fresh assessment")
+	require.Equal(t, 1, lifecycle.queueCalls, "changed-head handoff should enqueue exactly one replacement")
+	require.Equal(t, orgID, lifecycle.queuedInput.OrgID, "replacement should remain isolated to the review organization")
+	require.Equal(t, repositoryID, lifecycle.queuedInput.RepositoryID, "replacement should target the reviewed repository")
+	require.Equal(t, pullRequestID, lifecycle.queuedInput.PullRequestID, "replacement should target the changed pull request")
+	require.Equal(t, sessionID, lifecycle.queuedInput.PriorSessionID, "replacement should preserve ordering behind the superseded assessment")
+	require.Equal(t, "live-head", lifecycle.queuedInput.HeadSHA, "replacement should assess the latest live head")
+	require.Equal(t, "live-base", lifecycle.queuedInput.BaseSHA, "replacement should retain the latest live base")
+	require.Equal(t, "Latest title", lifecycle.queuedInput.PullRequestTitle, "replacement should retain the latest mirrored title")
+	require.Equal(t, "octocat", lifecycle.queuedInput.PullRequestAuthor, "replacement should retain the pull request author")
+	require.True(t, lifecycle.queuedInput.FromFork, "replacement should preserve fork eligibility context")
+	require.Equal(t, "code_review.live_head_changed", lifecycle.queuedInput.ChangeReason, "replacement should identify the worker freshness fallback")
+	expectedChangeKey, err := codereview.MaterialChangeKey("live-head")
+	require.NoError(t, err, "latest head should produce a deterministic replacement key")
+	require.Equal(t, expectedChangeKey, lifecycle.queuedInput.ChangeKey, "replacement should deduplicate against webhook-triggered reassessment")
+}
+
+func TestQueueCodeReviewReplacementForChangedHeadRequiresDurableLifecycle(t *testing.T) {
+	t.Parallel()
+
+	err := queueCodeReviewReplacementForChangedHead(
+		context.Background(),
+		&Services{},
+		zerolog.Nop(),
+		runCodeReviewPayload{OrgID: uuid.New(), SessionID: uuid.New()},
+		models.PullRequest{HeadSHA: stringPtr("latest-head")},
+		nil,
+	)
+
+	require.ErrorContains(t, err, "lifecycle service unavailable", "changed-head handoff should not report supersession before a fresh assessment is durable")
+}
+
 func TestSyncCodeReviewPullRequestStateClassifiesTransientGitHubFailures(t *testing.T) {
 	t.Parallel()
 
@@ -3758,7 +3818,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			bodyContains: "Human review is required for architectural judgment: the change introduces a new cross-service protocol.",
 		},
 		{
-			name: "withholds approval when PR description changed after coding-agent assessment",
+			name: "allows best-effort approval when PR description changed after coding-agent assessment",
 			input: liveCodeReviewOutcomeInput{
 				Policy: policy,
 				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
@@ -3783,20 +3843,14 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
 				},
 				ChangedFilesAvailable: true,
-				OrchestratorSynthesis: codeReviewOrchestratorSynthesis{
-					HumanReviewReasons: []codeReviewOrchestratorHumanReviewReason{{
-						Code:    models.CodeReviewHumanReviewReasonOwnership,
-						Summary: "the previous description left ownership unclear",
-					}},
-				},
 			},
 			configureOrchestrator: func(input *liveCodeReviewOutcomeInput) {
 				setCodingAgentDecision(input, true, nil)
 				input.OrchestratorSynthesis.DescriptionInputHash = "stale-description-hash"
 			},
-			expected:        models.CodeReviewDecisionNeedsHumanReview,
-			reason:          "PR title or description changed after the coding-agent assessment",
-			riskNotContains: "human review is required for ownership judgment: the previous description left ownership unclear",
+			expected:        models.CodeReviewDecisionApproved,
+			riskNotContains: "PR title or description changed after the coding-agent assessment",
+			bodyNotContains: "recommendation is stale",
 		},
 		{
 			name: "approves comment-only eslint frontend cleanup when coding agent marks screenshots not applicable",

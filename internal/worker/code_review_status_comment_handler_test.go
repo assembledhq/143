@@ -118,6 +118,13 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			expectedBody:              "143 Code Reviewer could not complete this review.",
 			expectedCalls:             []string{"upsert", "hide"},
 		},
+		{
+			name:          "explains that a changed commit receives a fresh approvable assessment",
+			initialStatus: models.CodeReviewSessionStatusStale,
+			lockedStatus:  models.CodeReviewSessionStatusStale,
+			expectedBody:  "A fresh assessment of the latest commit is queued automatically and can still approve the PR.",
+			expectedCalls: []string{"upsert"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

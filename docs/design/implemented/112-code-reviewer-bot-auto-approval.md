@@ -438,7 +438,7 @@ Rules:
 - If a new explicit request arrives while a review is already running for the same PR head SHA, retain a durable starter job until the active assessment finishes, then create the requested assessment. The request carries reviewer/team identity through the worker so GitHub assignment cleanup still occurs.
 - After the first explicit reviewer request, new commits automatically enqueue a fresh assessment until 143 approves. Human review submissions/edits/dismissals, ordinary issue and inline review comment changes, review thread changes, PR title/description edits, readiness changes, completed checks, and commit-status updates do not enqueue reviewer sessions; the exception is a newly created PR conversation comment that explicitly mentions the configured reviewer team.
 - Automatic new-commit reassessments schedule their durable starter after a 60-second quiet window. Each distinct head receives a delivery-idempotent job; when an older starter observes that GitHub has already advanced again, it queues the newest head behind a fresh quiet window and exits without starting obsolete reviewer work. Explicit rerequests and dispute-driven reassessments bypass this delay.
-- If new commits arrive while agents are running, retain a durable starter job until the older assessment finishes. Re-read mutable PR metadata and check gates immediately before every final recommendation so a stale assessment cannot approve, but do not queue a new session solely because metadata, human review activity, or CI changed.
+- If new commits arrive while agents are running, retain a durable starter job until the older assessment finishes. The active worker also queues a latest-head starter after its live refresh as a fallback for a delayed or missed webhook, then marks the old commit assessment superseded. Re-read mutable PR metadata and check gates immediately before every final recommendation so an assessment for an older commit cannot approve. Title or description edits alone do not invalidate otherwise usable coding-agent evidence or queue a new session; their captured description evaluation is best effort, while live deterministic gates still apply.
 - A submitted 143 approval is monotonic for the PR. Later webhook changes and explicit reviewer rerequests are ignored so automation never dismisses or contradicts an approval that has already occurred.
 - Reassessments update the rolling PR comment in place so the PR has one current visible 143 recommendation. The automatic quiet window does not publish a new running-state comment. Once the replacement session is queued or running, the comment identifies the current head, preserves the previous completed verdict with its assessed head, and links to the active session; completion replaces that provisional presentation with the new verdict. Backing 143 sessions remain immutable audit history.
 - The original formal review carries the latest visible result until each reassessment updates the rolling comment, then returns to marker-only. When a previously non-approved result becomes acceptable, update the rolling comment and submit a separate, marker-only formal GitHub approval for the current head. Editing a submitted review body alone never represents a review-state transition.
@@ -498,10 +498,12 @@ every applicable structured description requirement, plus explicit `findings`
 and `human_review_reasons` arrays. Unknown, duplicate, or omitted requirement
 keys, invalid finding coordinates or enums, and unknown human-review reason
 codes make the synthesis unusable for approval. It also captures a hash of the
-PR title and body supplied to the orchestrator; if either changes before the
-final decision, the assessment is stale and approval is withheld until a new
-review runs. These checks prevent malformed or out-of-date agent output from
-becoming approval authority.
+PR title and body supplied to the orchestrator for auditability. A later title
+or body edit does not create a hard stale-context blocker: the description
+assessment remains best-effort evidence from its captured input, while the
+worker refreshes live checks, head SHA, changed files, prompt-injection guards,
+and other deterministic gates before publication. A head SHA change still
+supersedes the old assessment and queues a fresh review of the latest commit.
 
 The final rolling PR comment should include:
 
