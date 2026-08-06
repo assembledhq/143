@@ -3573,9 +3573,9 @@ export function PullRequestList({
                 {index + 1}
               </span>
               <span className="min-w-0 flex-1">
-                {/* A row titles the same changeset the selected panel below it
-                    titles, so the two must not disagree about how big that
-                    title is. The button variant owns the color. */}
+                {/* A row names a changeset, so it sits on the Overview label
+                    tier like every other block that names one. The button
+                    variant owns the color. */}
                 <span className={cn("block truncate", OVERVIEW_LABEL_CLASSNAME)}>{changeset.title}</span>
                 <span className="block truncate text-xs text-muted-foreground">
                   {pr ? `#${pr.github_pr_number} · ${pr.status}` : changeset.status.replaceAll("_", " ")}
