@@ -1202,7 +1202,10 @@ const (
 	// CodeReviewRiskReasonOrchestratorEscalation is retained so historical
 	// decisions remain renderable. Current evaluations require an explicit
 	// structured blocker instead.
-	CodeReviewRiskReasonOrchestratorEscalation   CodeReviewRiskReasonCode = "orchestrator_escalation"
+	CodeReviewRiskReasonOrchestratorEscalation CodeReviewRiskReasonCode = "orchestrator_escalation"
+	// CodeReviewRiskReasonOrchestratorContextStale is retained so historical
+	// decisions remain renderable. Current evaluations treat metadata freshness
+	// as best-effort evidence instead of an approval blocker.
 	CodeReviewRiskReasonOrchestratorContextStale CodeReviewRiskReasonCode = "orchestrator_context_stale"
 	CodeReviewRiskReasonArchitecture             CodeReviewRiskReasonCode = "architecture"
 	CodeReviewRiskReasonOwnership                CodeReviewRiskReasonCode = "ownership"

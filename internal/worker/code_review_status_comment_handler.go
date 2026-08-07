@@ -178,7 +178,7 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, prev
 			paragraphs = append(paragraphs, message)
 		}
 	case models.CodeReviewSessionStatusStale:
-		paragraphs = append(paragraphs, "143 Code Reviewer stopped this review because the pull request changed before the result was published.")
+		paragraphs = append(paragraphs, "143 Code Reviewer superseded this assessment because the pull request code changed before publication. A fresh assessment of the latest commit is queued automatically and can still approve the PR.")
 	case models.CodeReviewSessionStatusCancelled:
 		paragraphs = append(paragraphs, "This 143 code review was cancelled.")
 	default:

@@ -215,17 +215,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			return fmt.Errorf("list code review findings: %w", err)
 		}
 		if codeReviewHeadChanged(job.HeadSHA, pr, health) {
-			if _, staleErr := stores.CodeReviews.MarkStale(ctx, job.OrgID, job.SessionID, "PR head changed after review started"); staleErr != nil {
-				return fmt.Errorf("mark code review stale: %w", staleErr)
-			}
-			logger.Info().
-				Str("org_id", job.OrgID.String()).
-				Str("session_id", job.SessionID.String()).
-				Str("reviewed_head", job.HeadSHA).
-				Msg("marked code review stale after PR head changed")
-			reconcileCodeReviewSessionStale(ctx, stores, logger, job)
-			enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
-			return nil
+			return supersedeCodeReviewForChangedHead(ctx, stores, services, logger, job, pr, health, "PR head changed after review started")
 		}
 		changedFiles, changedFilesAvailable, err := loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
 		if err != nil {
@@ -275,12 +265,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 				return fmt.Errorf("reload pull request health before deterministic early stop: %w", err)
 			}
 			if codeReviewHeadChanged(job.HeadSHA, pr, health) {
-				if _, staleErr := stores.CodeReviews.MarkStale(ctx, job.OrgID, job.SessionID, "PR head changed before deterministic early-stop decision"); staleErr != nil {
-					return fmt.Errorf("mark deterministic early-stop review stale: %w", staleErr)
-				}
-				reconcileCodeReviewSessionStale(ctx, stores, logger, job)
-				enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
-				return nil
+				return supersedeCodeReviewForChangedHead(ctx, stores, services, logger, job, pr, health, "PR head changed before deterministic early-stop decision")
 			}
 			return completeCodeReviewAfterStableDeterministicFailure(ctx, stores, services, logger, job, metadata, policy.Config(), pr, changedFiles, stableRisk)
 		}
@@ -360,12 +345,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			return fmt.Errorf("reload code review health before decision: %w", err)
 		}
 		if codeReviewHeadChanged(job.HeadSHA, pr, health) {
-			if _, staleErr := stores.CodeReviews.MarkStale(ctx, job.OrgID, job.SessionID, "PR head changed before final recommendation"); staleErr != nil {
-				return fmt.Errorf("mark code review stale before decision: %w", staleErr)
-			}
-			reconcileCodeReviewSessionStale(ctx, stores, logger, job)
-			enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
-			return nil
+			return supersedeCodeReviewForChangedHead(ctx, stores, services, logger, job, pr, health, "PR head changed before final recommendation")
 		}
 		changedFiles, changedFilesAvailable, err = loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
 		if err != nil {
@@ -714,6 +694,93 @@ func syncCodeReviewPullRequestState(ctx context.Context, services *Services, log
 		return classifyGitHubJobError(wrapped, job.SessionID.String())
 	}
 	return nil
+}
+
+// supersedeCodeReviewForChangedHead preserves commit-level approval integrity
+// without turning an in-flight push into a dead end. Webhooks normally queue
+// the replacement assessment first, but the worker also queues it here after
+// its live GitHub refresh so a delayed or missed webhook cannot strand the PR
+// with only a stale result.
+func supersedeCodeReviewForChangedHead(
+	ctx context.Context,
+	stores *Stores,
+	services *Services,
+	logger zerolog.Logger,
+	job runCodeReviewPayload,
+	pr models.PullRequest,
+	health *models.PullRequestHealthResponse,
+	reason string,
+) error {
+	if err := queueCodeReviewReplacementForChangedHead(ctx, services, logger, job, pr, health); err != nil {
+		return err
+	}
+
+	if _, err := stores.CodeReviews.MarkStale(ctx, job.OrgID, job.SessionID, reason); err != nil {
+		return fmt.Errorf("mark changed-head code review superseded: %w", err)
+	}
+	reconcileCodeReviewSessionStale(ctx, stores, logger, job)
+	enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
+	return nil
+}
+
+func queueCodeReviewReplacementForChangedHead(
+	ctx context.Context,
+	services *Services,
+	logger zerolog.Logger,
+	job runCodeReviewPayload,
+	pr models.PullRequest,
+	health *models.PullRequestHealthResponse,
+) error {
+	if services == nil || services.CodeReviewLifecycle == nil {
+		return fmt.Errorf("queue replacement code review: lifecycle service unavailable")
+	}
+	latestHead, baseSHA := codeReviewCurrentRevision(pr, health)
+	if latestHead == "" {
+		return fmt.Errorf("queue replacement code review: current PR head is missing")
+	}
+	changeKey, err := codereviewsvc.MaterialChangeKey(latestHead)
+	if err != nil {
+		return fmt.Errorf("build replacement code review change key: %w", err)
+	}
+	queued, err := services.CodeReviewLifecycle.QueueReviewChanged(ctx, codereviewsvc.ReviewChangedInput{
+		OrgID:             job.OrgID,
+		RepositoryID:      job.RepositoryID,
+		PullRequestID:     job.PullRequestID,
+		PriorSessionID:    job.SessionID,
+		GitHubRepo:        pr.GitHubRepo,
+		GitHubPRNumber:    pr.GitHubPRNumber,
+		GitHubPRURL:       pr.GitHubPRURL,
+		PullRequestTitle:  pr.Title,
+		PullRequestAuthor: codeReviewAuthor(job, pr),
+		BaseSHA:           baseSHA,
+		HeadSHA:           latestHead,
+		FromFork:          job.FromFork,
+		ChangeKey:         changeKey,
+		ChangeReason:      "code_review.live_head_changed",
+	})
+	if err != nil {
+		return fmt.Errorf("queue replacement code review for latest PR head: %w", err)
+	}
+	logger.Info().
+		Str("org_id", job.OrgID.String()).
+		Str("session_id", job.SessionID.String()).
+		Str("reviewed_head", job.HeadSHA).
+		Str("latest_head", latestHead).
+		Bool("replacement_queued", queued.Processed).
+		Bool("replacement_reused", queued.Reused).
+		Str("ignored_reason", queued.IgnoredReason).
+		Msg("ensured a fresh code review after PR head changed")
+	return nil
+}
+
+func codeReviewCurrentRevision(pr models.PullRequest, health *models.PullRequestHealthResponse) (string, string) {
+	if headSHA := strings.TrimSpace(stringPtrValue(pr.HeadSHA)); headSHA != "" {
+		return headSHA, strings.TrimSpace(stringPtrValue(pr.BaseSHA))
+	}
+	if health != nil {
+		return strings.TrimSpace(health.HeadSHA), strings.TrimSpace(health.BaseSHA)
+	}
+	return "", ""
 }
 
 func codeReviewCanRunReviewerThreads(stores *Stores) bool {
@@ -2772,12 +2839,9 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 	blockingFindings := codeReviewBlockingFindings(input.Findings)
 	orchestratorPresent, orchestratorEvidenceUsable := codeReviewOrchestratorEvidence(input.AgentResults)
 	orchestratorSynthesisUsable := codeReviewOrchestratorSynthesisUsable(input.OrchestratorSynthesis)
-	orchestratorFresh := orchestratorSynthesisUsable &&
-		strings.TrimSpace(input.OrchestratorSynthesis.DescriptionInputHash) != "" &&
-		input.OrchestratorSynthesis.DescriptionInputHash == codeReviewDescriptionInputHash(input.PullRequest)
 	descriptionEvaluation := codeReviewDescriptionEvaluation{Passed: true}
 	descriptionEvaluationValid := false
-	if orchestratorFresh {
+	if orchestratorSynthesisUsable {
 		var descriptionErr error
 		descriptionEvaluation, descriptionErr = codeReviewDescriptionEvaluationFromSynthesis(policy, input.ChangedFiles, input.OrchestratorSynthesis)
 		descriptionEvaluationValid = descriptionErr == nil
@@ -2788,7 +2852,7 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		ChangedPaths:          codeReviewChangedPaths(input.ChangedFiles),
 		ChecksPassing:         codeReviewChecksPassing(policy, input.Health),
 		RequiredChecksPassing: codeReviewRequiredChecksPassing(policy, input.Health),
-		DescriptionPassed:     !orchestratorFresh || (descriptionEvaluationValid && descriptionEvaluation.Passed),
+		DescriptionPassed:     !orchestratorSynthesisUsable || (descriptionEvaluationValid && descriptionEvaluation.Passed),
 		UpToDate:              codeReviewUpToDate(input.Health),
 		Author:                codeReviewAuthor(input.Job, input.PullRequest),
 		AuthorClass:           codeReviewAuthorClass(input.PullRequest),
@@ -2804,7 +2868,7 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 	if reviewerQuorum < requiredReviewerQuorum {
 		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonReviewerQuorum, Actual: reviewerQuorum, Limit: requiredReviewerQuorum})
 	}
-	if policy.ApprovalMode == models.CodeReviewApprovalModeApproveAcceptable && orchestratorFresh {
+	if policy.ApprovalMode == models.CodeReviewApprovalModeApproveAcceptable && orchestratorSynthesisUsable {
 		for _, reason := range input.OrchestratorSynthesis.HumanReviewReasons {
 			risk.AddReason(models.CodeReviewRiskReason{
 				Code:    reason.Code.RiskReasonCode(),
@@ -2814,8 +2878,6 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 	}
 	if policy.ApprovalMode == models.CodeReviewApprovalModeApproveAcceptable && (!orchestratorPresent || !orchestratorEvidenceUsable || !orchestratorSynthesisUsable) {
 		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonOrchestratorSynthesisInvalid})
-	} else if orchestratorSynthesisUsable && !orchestratorFresh {
-		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonOrchestratorContextStale})
 	} else if orchestratorSynthesisUsable && !descriptionEvaluationValid {
 		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonOrchestratorSynthesisInvalid})
 	} else if orchestratorPresent && !orchestratorEvidenceUsable {

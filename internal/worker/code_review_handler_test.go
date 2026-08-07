@@ -171,6 +171,98 @@ func (s *codeReviewLifecycleStub) HandleReviewChanged(_ context.Context, input c
 	return s.result, s.err
 }
 
+func TestQueueCodeReviewReplacementForChangedHeadPrefersLatestPullRequestSnapshot(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repositoryID := uuid.New()
+	pullRequestID := uuid.New()
+	sessionID := uuid.New()
+	lifecycle := &codeReviewLifecycleStub{result: codereview.ReviewRequestedResult{Processed: true}}
+	pr := models.PullRequest{
+		ID: pullRequestID, OrgID: orgID, GitHubRepo: "acme/repo", GitHubPRNumber: 42,
+		GitHubPRURL: "https://github.com/acme/repo/pull/42", Title: "Latest title",
+		HeadSHA: stringPtr("latest-head"), BaseSHA: stringPtr("latest-base"),
+	}
+	health := &models.PullRequestHealthResponse{HeadSHA: "reviewed-old-head", BaseSHA: "reviewed-old-base"}
+	job := runCodeReviewPayload{
+		OrgID: orgID, RepositoryID: repositoryID, PullRequestID: pullRequestID,
+		SessionID: sessionID, HeadSHA: "reviewed-old-head", PullRequestAuthor: "octocat", FromFork: true,
+	}
+	expectedChangeKey, err := codereview.MaterialChangeKey("latest-head")
+	require.NoError(t, err, "latest head should produce a deterministic replacement key")
+
+	err = queueCodeReviewReplacementForChangedHead(
+		context.Background(),
+		&Services{CodeReviewLifecycle: lifecycle},
+		zerolog.Nop(),
+		job,
+		pr,
+		health,
+	)
+
+	require.NoError(t, err, "changed-head handoff should queue a fresh assessment")
+	require.Equal(t, 1, lifecycle.queueCalls, "changed-head handoff should enqueue exactly one replacement")
+	require.Equal(t, codereview.ReviewChangedInput{
+		OrgID: orgID, RepositoryID: repositoryID, PullRequestID: pullRequestID, PriorSessionID: sessionID,
+		GitHubRepo: "acme/repo", GitHubPRNumber: 42, GitHubPRURL: "https://github.com/acme/repo/pull/42",
+		PullRequestTitle: "Latest title", PullRequestAuthor: "octocat", BaseSHA: "latest-base", HeadSHA: "latest-head",
+		FromFork: true, ChangeKey: expectedChangeKey, ChangeReason: "code_review.live_head_changed",
+	}, lifecycle.queuedInput, "replacement should use the latest PR head/base pair instead of stale health data")
+}
+
+func TestCodeReviewCurrentRevision(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		pr       models.PullRequest
+		health   *models.PullRequestHealthResponse
+		expected [2]string
+	}{
+		{
+			name:     "prefers pull request revision as an atomic pair",
+			pr:       models.PullRequest{HeadSHA: stringPtr("pr-head"), BaseSHA: stringPtr("pr-base")},
+			health:   &models.PullRequestHealthResponse{HeadSHA: "health-head", BaseSHA: "health-base"},
+			expected: [2]string{"pr-head", "pr-base"},
+		},
+		{
+			name:     "falls back to health revision when pull request head is unavailable",
+			health:   &models.PullRequestHealthResponse{HeadSHA: "health-head", BaseSHA: "health-base"},
+			expected: [2]string{"health-head", "health-base"},
+		},
+		{
+			name:     "returns an empty revision when neither snapshot is available",
+			expected: [2]string{"", ""},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			headSHA, baseSHA := codeReviewCurrentRevision(tt.pr, tt.health)
+
+			require.Equal(t, tt.expected, [2]string{headSHA, baseSHA}, "revision selection should preserve the expected head/base source")
+		})
+	}
+}
+
+func TestQueueCodeReviewReplacementForChangedHeadRequiresDurableLifecycle(t *testing.T) {
+	t.Parallel()
+
+	err := queueCodeReviewReplacementForChangedHead(
+		context.Background(),
+		&Services{},
+		zerolog.Nop(),
+		runCodeReviewPayload{OrgID: uuid.New(), SessionID: uuid.New()},
+		models.PullRequest{HeadSHA: stringPtr("latest-head")},
+		nil,
+	)
+
+	require.ErrorContains(t, err, "lifecycle service unavailable", "changed-head handoff should not report supersession before a fresh assessment is durable")
+}
+
 type codeReviewDisputeServiceRecorder struct {
 	failedOrgID     uuid.UUID
 	failedDisputeID uuid.UUID
@@ -3865,7 +3957,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			bodyContains: "Human review is required for architectural judgment: the change introduces a new cross-service protocol.",
 		},
 		{
-			name: "withholds approval when PR description changed after coding-agent assessment",
+			name: "allows best-effort approval when PR description changed after coding-agent assessment",
 			input: liveCodeReviewOutcomeInput{
 				Policy: policy,
 				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
@@ -3890,20 +3982,14 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
 				},
 				ChangedFilesAvailable: true,
-				OrchestratorSynthesis: codeReviewOrchestratorSynthesis{
-					HumanReviewReasons: []codeReviewOrchestratorHumanReviewReason{{
-						Code:    models.CodeReviewHumanReviewReasonOwnership,
-						Summary: "the previous description left ownership unclear",
-					}},
-				},
 			},
 			configureOrchestrator: func(input *liveCodeReviewOutcomeInput) {
 				setCodingAgentDecision(input, true, nil)
 				input.OrchestratorSynthesis.DescriptionInputHash = "stale-description-hash"
 			},
-			expected:        models.CodeReviewDecisionNeedsHumanReview,
-			reason:          "PR title or description changed after the coding-agent assessment",
-			riskNotContains: "human review is required for ownership judgment: the previous description left ownership unclear",
+			expected:        models.CodeReviewDecisionApproved,
+			riskNotContains: "PR title or description changed after the coding-agent assessment",
+			bodyNotContains: "recommendation is stale",
 		},
 		{
 			name: "approves comment-only eslint frontend cleanup when coding agent marks screenshots not applicable",
