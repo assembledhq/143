@@ -1,30 +1,34 @@
 import type { TimelineEntry } from "./timeline";
 import type { SessionTranscriptPhase, SessionTranscriptTurn, ThreadInboxDeliveryState } from "./types";
 
-// Delivery states in which a steering message has not yet been applied to a
-// running phase. Such a message is kept out of the transcript so its content
-// is never attributed to work that has not happened yet; the failure states
-// stay actionable through the recoverable-inbox notice instead.
+// Delivery states in which a steering message has failed (or its delivery is
+// uncertain) but stays actionable through the recoverable-inbox notice, which
+// is the dedicated surface that shows the message content and retry controls.
+// Such a message is kept out of the transcript so a failed delivery never
+// looks like a successfully sent prompt.
+//
+// In-flight unapplied states (pending, delivering, delivered, acked) are NOT
+// hidden: once the queued-message card was removed, the transcript became the
+// only surface that could show a sent follow-up before the runtime applies it,
+// so hiding them would make the user's own message vanish after send. The
+// runtime applying the message (stamping applied_at) does not move it — it
+// stays a visible node at its submission time.
 //
 // Enumerated rather than derived from a missing applied_at: applied_at is only
 // written when an inbox batch actually starts, so treating "no applied_at" as
 // "not applied" also hides entries that will never reach a phase at all. An
 // unrecognised state must fail open and keep the message visible - dropping
 // user-authored content from every surface is the worse failure.
-const UNAPPLIED_DELIVERY_STATES = new Set<ThreadInboxDeliveryState>([
-  "pending",
-  "delivering",
-  "delivered",
-  "acked",
+const RECOVERABLE_DELIVERY_STATES = new Set<ThreadInboxDeliveryState>([
   "unknown_delivery",
   "dead_letter",
 ]);
 
-function isUnappliedSteering(entry: TimelineEntry): boolean {
+function isRecoverableSteering(entry: TimelineEntry): boolean {
   if (entry.kind !== "message" || entry.data.role !== "user") return false;
   const state = entry.data.delivery_state;
   if (!state || entry.data.applied_at) return false;
-  return UNAPPLIED_DELIVERY_STATES.has(state);
+  return RECOVERABLE_DELIVERY_STATES.has(state);
 }
 
 export interface TimelineActivityPhase extends SessionTranscriptPhase {
@@ -155,7 +159,7 @@ export function buildActivityTimelineNodes(entries: TimelineEntry[], turns: Sess
   };
 
   for (const entry of entries) {
-    if (isUnappliedSteering(entry)) {
+    if (isRecoverableSteering(entry)) {
       continue;
     }
     const phaseID = phaseIDForEntry(entry);
