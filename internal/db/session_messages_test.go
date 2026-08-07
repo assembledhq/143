@@ -13,7 +13,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
-const sessionMessagePhaseInsertPattern = `(?s)FROM session_activity_phases p.+p\.id = @activity_phase_id AND p\.org_id = @org_id.+p\.session_id = @session_id.+p\.thread_id IS NOT DISTINCT FROM @thread_id.+p\.turn_number = @turn_number`
+const sessionMessagePhaseInsertPattern = `(?s)r\.lease_token = CAST\(@activity_phase_lease_token AS uuid\).+FROM session_activity_phases p.+p\.id = @activity_phase_id AND p\.org_id = @org_id.+p\.session_id = @session_id.+p\.thread_id IS NOT DISTINCT FROM @thread_id.+p\.turn_number = @turn_number.+p\.status = 'running'`
 
 func TestSessionMessageStore_Create(t *testing.T) {
 	t.Parallel()
@@ -80,7 +80,7 @@ func TestSessionMessageStore_Create_ValidatesActivityPhaseOwnership(t *testing.T
 		ActivityPhaseID: &phaseID,
 	}
 	mock.ExpectQuery(sessionMessagePhaseInsertPattern).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WithArgs(anyArgs(14)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), time.Now()))
 
 	err = NewSessionMessageStore(mock).Create(context.Background(), &msg)
@@ -88,27 +88,34 @@ func TestSessionMessageStore_Create_ValidatesActivityPhaseOwnership(t *testing.T
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestSessionMessageStore_Create_DoesNotRequireRunningActivityPhase(t *testing.T) {
+func TestSessionMessageStore_Create_RequiresRunningActivityPhase(t *testing.T) {
 	t.Parallel()
 
 	mock, capturedSQL := newSQLCapturingPool(t)
 
 	phaseID := uuid.New()
 	threadID := uuid.New()
+	runtimeID := uuid.New()
+	leaseToken := uuid.New()
 	msg := models.SessionMessage{
 		SessionID: uuid.New(), OrgID: uuid.New(), ThreadID: &threadID,
 		TurnNumber: 1, Role: models.MessageRoleAssistant, Content: "final answer",
-		ActivityPhaseID: &phaseID,
+		ActivityPhaseID:         &phaseID,
+		ActivityPhaseWriteGuard: &models.ActivityPhaseWriteGuard{RuntimeID: runtimeID, LeaseToken: leaseToken},
 	}
+	expectedArgs := anyArgs(14)
+	expectedArgs[3] = runtimeID
+	expectedArgs[4] = leaseToken
 	mock.ExpectQuery(sessionMessagePhaseInsertPattern).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WithArgs(expectedArgs...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), time.Now()))
 
 	err := NewSessionMessageStore(mock).Create(context.Background(), &msg)
-	require.NoError(t, err, "phase-closing message should be inserted regardless of the phase's terminal status")
-	// The final assistant summary closes its phase, so it is written after the
-	// phase reaches a terminal status.
-	require.NotContains(t, *capturedSQL, "p.status", "validated insert should not constrain the phase status")
+	require.NoError(t, err, "phase-associated message should be inserted while the phase is running")
+	require.Contains(t, *capturedSQL, "p.status = 'running'", "validated insert should reject writes after phase closure")
+	require.Contains(t, *capturedSQL, "r.lease_token", "validated insert should require the runtime lease that opened the phase")
+	require.Contains(t, *capturedSQL, "FOR UPDATE OF p", "validated insert should serialize with concurrent phase closure")
+	require.Contains(t, *capturedSQL, "FOR UPDATE OF r", "validated insert should serialize with concurrent runtime loss")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -127,7 +134,7 @@ func TestSessionMessageStore_Create_RejectsMismatchedActivityPhase(t *testing.T)
 		ActivityPhaseID: &phaseID,
 	}
 	mock.ExpectQuery(sessionMessagePhaseInsertPattern).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WithArgs(anyArgs(14)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}))
 
 	err = NewSessionMessageStore(mock).Create(context.Background(), &msg)
@@ -150,7 +157,7 @@ func TestSessionMessageStore_CreateWithSource_RejectsMismatchedActivityPhase(t *
 		Source: models.SessionMessageSourceAgentTool, ActivityPhaseID: &phaseID,
 	}
 	mock.ExpectQuery(sessionMessagePhaseInsertPattern).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WithArgs(anyArgs(15)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}))
 
 	err = NewSessionMessageStore(mock).CreateWithSource(context.Background(), &msg)

@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"sort"
 	"strings"
@@ -279,6 +280,10 @@ func TestSessionTranscriptStore_ListThreadWindowIncludesTurnZeroInitialMessage(t
 	now := time.Now().UTC()
 	turnOneTime := now.Add(time.Second)
 	turnOneCompletedAt := turnOneTime.Add(time.Second)
+	mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	mock.ExpectQuery(`SELECT status\s+FROM session_threads`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID}).
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow(models.ThreadStatusRunning))
 
 	mock.ExpectQuery(`SELECT DISTINCT turn_number FROM \(.+session_messages.+session_logs.+\) t\s+WHERE turn_number >= 0`).
 		WithArgs(pgx.NamedArgs{
@@ -338,12 +343,14 @@ func TestSessionTranscriptStore_ListThreadWindowIncludesTurnZeroInitialMessage(t
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID}).
 		WillReturnRows(pgxmock.NewRows([]string{"entry_kind", "source_id", "message_id", "hiq_uuid", "level", "metadata"}).
 			AddRow(models.TranscriptEntryKindLog, int64(101), nil, nil, models.SessionLogLevelInfo, json.RawMessage(`{}`)))
+	mock.ExpectRollback()
 
 	window, err := store.ListThreadWindow(context.Background(), orgID, threadID, SessionTranscriptWindowOptions{
 		Include: TranscriptInclude{Messages: true, System: true},
 	})
 	require.NoError(t, err, "ListThreadWindow should include the initial prompt without error")
 	require.False(t, window.HasOlder, "turn zero and turn one should fit in the default latest window")
+	require.Equal(t, models.ThreadStatusRunning, window.ThreadStatus, "thread status should come from the same snapshot as transcript entries and phases")
 	require.Equal(t, int64(11), window.LatestAssistantMessageID, "latest assistant metadata should still point at the assistant response")
 	require.Equal(t, models.ActivityPhaseTriggerRecovery, window.Phases[1][0].TriggerKind, "transcript phase metadata should preserve the durable recovery trigger")
 	require.Equal(t, "log_101", window.LiveEdgeEntryID, "live edge metadata should ignore turn-zero history and use the latest positive-turn entry")
@@ -370,6 +377,79 @@ func TestSessionTranscriptStore_ListThreadWindowIncludesTurnZeroInitialMessage(t
 	require.Equal(t, []string{"initial prompt", "assistant response", "turn one log"}, gotContents, "turn-zero log noise should stay out of the transcript")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
+
+func TestSessionTranscriptStore_ListThreadWindowReturnsSnapshotStartError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "mock pool should be created")
+	defer mock.Close()
+
+	mock.ExpectBeginTx(pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	}).WillReturnError(errors.New("snapshot unavailable"))
+
+	store := NewSessionTranscriptStore(mock)
+	_, err = store.ListThreadWindow(context.Background(), uuid.New(), uuid.New(), SessionTranscriptWindowOptions{})
+	require.ErrorContains(t, err, "begin transcript snapshot: snapshot unavailable", "snapshot startup failures should be returned to the caller")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionTranscriptStore_ListThreadWindowRollsBackSnapshotOnQueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "mock pool should be created")
+	defer mock.Close()
+
+	orgID, threadID := uuid.New(), uuid.New()
+	mock.ExpectBeginTx(pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	})
+	mock.ExpectQuery(`SELECT status\s+FROM session_threads`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID}).
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow(models.ThreadStatusRunning))
+	mock.ExpectQuery(`SELECT DISTINCT turn_number`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID, "limit": DefaultTranscriptLimitTurns + 1}).
+		WillReturnError(errors.New("turn scan failed"))
+	mock.ExpectRollback()
+
+	store := NewSessionTranscriptStore(mock)
+	_, err = store.ListThreadWindow(context.Background(), orgID, threadID, SessionTranscriptWindowOptions{})
+	require.ErrorContains(t, err, "turn scan failed", "query failures inside the snapshot should reach the caller")
+	require.NoError(t, mock.ExpectationsWereMet(), "the snapshot should be released by rollback")
+}
+
+// A store scoped to an existing transaction cannot open its own snapshot, so it
+// must fall through to reading directly on the caller's connection.
+func TestSessionTranscriptStore_ListThreadWindowSkipsSnapshotWithoutBeginTx(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "mock pool should be created")
+	defer mock.Close()
+
+	orgID, threadID := uuid.New(), uuid.New()
+	mock.ExpectQuery(`SELECT status\s+FROM session_threads`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID}).
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow(models.ThreadStatusRunning))
+	mock.ExpectQuery(`SELECT DISTINCT turn_number`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID, "limit": DefaultTranscriptLimitTurns + 1}).
+		WillReturnError(errors.New("turn scan failed"))
+
+	store := NewSessionTranscriptStore(queryOnlyDBTX{mock})
+	_, err = store.ListThreadWindow(context.Background(), orgID, threadID, SessionTranscriptWindowOptions{})
+	// An unexpected BeginTx would surface here as a mock error instead of the
+	// query error, so this also proves no transaction was started.
+	require.ErrorContains(t, err, "turn scan failed", "the direct path should still run the window queries")
+	require.NoError(t, mock.ExpectationsWereMet(), "the window query should have been issued")
+}
+
+// queryOnlyDBTX hides BeginTx so the snapshot type assertion fails, mirroring a
+// store constructed over a pgx.Tx.
+type queryOnlyDBTX struct{ DBTX }
 
 func TestTranscriptTurnSelectBranchesFiltersLogIncludes(t *testing.T) {
 	t.Parallel()

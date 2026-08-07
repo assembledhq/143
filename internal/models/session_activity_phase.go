@@ -107,6 +107,14 @@ type ActivityPhaseTrigger struct {
 	BatchID *uuid.UUID
 }
 
+// ActivityPhaseWriteGuard proves that a transcript write still belongs to the
+// runtime lease that opened its phase. It is write-only process metadata: the
+// lease token must never be serialized into transcript or API responses.
+type ActivityPhaseWriteGuard struct {
+	RuntimeID  uuid.UUID `json:"-"`
+	LeaseToken uuid.UUID `json:"-"`
+}
+
 type SessionActivityPhase struct {
 	ID                   uuid.UUID                   `db:"id" json:"id"`
 	OrgID                uuid.UUID                   `db:"org_id" json:"org_id"`

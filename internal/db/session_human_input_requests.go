@@ -87,11 +87,9 @@ func (s *SessionHumanInputRequestStore) Create(ctx context.Context, req *models.
 		"answer_payload":      nullRawMessage(req.AnswerPayload),
 	}
 	if req.ActivityPhaseID != nil {
-		// The phase must belong to the same org, session, thread, and turn as the
-		// request. Phase status is deliberately not constrained: a human input
-		// request is itself a phase-closing event and can be persisted after the
-		// phase reaches its terminal status.
-		query = `
+		// Boundary transactions persist the request before closing its phase, so
+		// the ordinary guarded insert can require a live phase/runtime lease.
+		query = activityPhaseWritableCTE + `
 			INSERT INTO session_human_input_requests (
 				org_id, session_id, thread_id, turn_number, agent_type,
 				provider_request_id, request_kind, status, title, body, context,
@@ -104,14 +102,11 @@ func (s *SessionHumanInputRequestStore) Create(ctx context.Context, req *models.
 				@provider_request_id, @request_kind, @status, @title, @body, @context,
 				@blocks_phase, @assigned_user_id, @sensitivity, @preferred_channel,
 				@choices, @response_schema, @provider_payload,
-				@answer_text, @answer_payload, @activity_phase_id
-			FROM session_activity_phases p
-			WHERE p.id = @activity_phase_id AND p.org_id = @org_id
-			  AND p.session_id = @session_id
-			  AND p.thread_id IS NOT DISTINCT FROM @thread_id
-			  AND p.turn_number = @turn_number
+				@answer_text, @answer_payload, p.id
+			FROM writable_activity_phase p
 			RETURNING id, created_at`
 		args["activity_phase_id"] = req.ActivityPhaseID
+		addActivityPhaseWriteGuardArgs(args, req.ActivityPhaseWriteGuard)
 	}
 	row := s.db.QueryRow(ctx, query, args)
 	if err := row.Scan(&req.ID, &req.CreatedAt); err != nil {

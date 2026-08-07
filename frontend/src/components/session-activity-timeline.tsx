@@ -5,7 +5,8 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { ActivityCapsule } from "@/components/activity-capsule";
 import { ChatTimeline, DaySeparator, type ChatTimelineProps } from "@/components/chat-timeline";
-import { buildActivityTimelineNodes } from "@/lib/activity-timeline";
+import { activityToolCount, buildActivityTimelineNodes } from "@/lib/activity-timeline";
+import { timelineEntryPresentationAt } from "@/lib/timeline";
 import type { SessionActivityDetail, SessionTranscriptTurn } from "@/lib/types";
 import { recordSessionActivityEvent } from "@/lib/session-activity-events";
 import { AlertTriangle, RotateCcw } from "lucide-react";
@@ -53,14 +54,14 @@ export function SessionActivityTimeline({
   const recordedAnchorExpansions = useRef<Set<string>>(new Set());
   const previousDetailPreference = useRef(detailPreference);
   const previousThreadID = useRef(threadID);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (previousDetailPreference.current === detailPreference) return;
     previousDetailPreference.current = detailPreference;
     // Preference changes intentionally reset ephemeral disclosure state.
     setOverrides(new Map());
     setInspection(new Map());
   }, [detailPreference]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (previousThreadID.current === threadID) return;
     previousThreadID.current = threadID;
     // A thread switch defines a fresh local inspection scope.
@@ -366,7 +367,7 @@ export function SessionActivityTimeline({
                   reason: activity.inferredHistorical ? undefined : activity.boundary_reason,
                   trigger: "manual",
                   viewport_class: typeof window !== "undefined" && window.innerWidth < 768 ? "mobile" : "desktop",
-                  tool_count_bucket: toolCountBucket(activity.inferredHistorical ? activity.toolCallCount : activity.tool_call_count),
+                  tool_count_bucket: toolCountBucket(activityToolCount(activity)),
                   duration_bucket: activityDurationBucket(activity),
                 });
               }}
@@ -445,7 +446,7 @@ function activityNodeDayMetadata(nodes: ReturnType<typeof buildActivityTimelineN
       : node.kind === "boundary_notice"
         ? node.notice.createdAt
         : undefined;
-    const datedEntries = entries.map((entry) => entry.kind === "tool_group" ? entry.toolUse.created_at : entry.data.created_at);
+    const datedEntries = entries.map(timelineEntryPresentationAt);
     const firstDate = datedEntries[0] ?? fallbackDate;
     const firstDay = validDay(firstDate) ?? previousDay;
     const showSeparator = firstDay !== undefined && firstDay !== previousDay;

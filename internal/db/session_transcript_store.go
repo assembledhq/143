@@ -93,6 +93,7 @@ type SessionTranscriptRawRow struct {
 type SessionTranscriptWindow struct {
 	Rows                     []SessionTranscriptRawRow
 	Phases                   map[int][]models.SessionTranscriptPhase
+	ThreadStatus             models.ThreadStatus
 	Position                 models.TranscriptWindowPosition
 	HasOlder                 bool
 	HasNewer                 bool
@@ -110,6 +111,10 @@ type SessionTranscriptWindow struct {
 // window.
 type SessionTranscriptStore struct {
 	db DBTX
+}
+
+type transcriptSnapshotStarter interface {
+	BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
 }
 
 // NewSessionTranscriptStore constructs a SessionTranscriptStore.
@@ -415,17 +420,66 @@ func (s *SessionTranscriptStore) ListThreadWindow(
 	orgID, threadID uuid.UUID,
 	opts SessionTranscriptWindowOptions,
 ) (SessionTranscriptWindow, error) {
+	// A store built over a pgx.Tx does not expose BeginTx and already reads
+	// inside its caller's transaction, so it takes the direct path.
+	starter, ok := s.db.(transcriptSnapshotStarter)
+	if !ok {
+		return s.listThreadWindow(ctx, orgID, threadID, opts)
+	}
+
+	// Boundary transactions update the visible entry and phase lifecycle
+	// together. The window is assembled by several queries, so keep them on
+	// one snapshot to avoid returning opposite sides of a concurrent commit.
+	tx, err := starter.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return SessionTranscriptWindow{}, fmt.Errorf("begin transcript snapshot: %w", err)
+	}
+	// Nothing is written, so the snapshot is released by rollback. Committing
+	// instead would let a transient COMMIT error fail a request whose window
+	// has already been read in full.
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	snapshot := *s
+	snapshot.db = tx
+	return snapshot.listThreadWindow(ctx, orgID, threadID, opts)
+}
+
+func (s *SessionTranscriptStore) listThreadWindow(
+	ctx context.Context,
+	orgID, threadID uuid.UUID,
+	opts SessionTranscriptWindowOptions,
+) (SessionTranscriptWindow, error) {
+	var threadStatus models.ThreadStatus
+	if err := s.db.QueryRow(ctx, `
+		SELECT status
+		FROM session_threads
+		WHERE org_id = @org_id AND id = @thread_id AND archived_at IS NULL`,
+		pgx.NamedArgs{"org_id": orgID, "thread_id": threadID},
+	).Scan(&threadStatus); err != nil {
+		return SessionTranscriptWindow{}, fmt.Errorf("get transcript thread status: %w", err)
+	}
+
 	limit := normalizeTranscriptLimitTurns(opts.LimitTurns)
 	opts.Include = normalizeTranscriptInclude(opts.Include)
 
+	var window SessionTranscriptWindow
+	var err error
 	switch opts.Position {
 	case models.TranscriptWindowPositionNewer:
-		return s.listNewerWindow(ctx, orgID, threadID, opts, limit)
+		window, err = s.listNewerWindow(ctx, orgID, threadID, opts, limit)
 	case models.TranscriptWindowPositionAround:
-		return s.listAroundWindow(ctx, orgID, threadID, opts, limit)
+		window, err = s.listAroundWindow(ctx, orgID, threadID, opts, limit)
 	default: // latest or older
-		return s.listLatestOrOlderWindow(ctx, orgID, threadID, opts, limit)
+		window, err = s.listLatestOrOlderWindow(ctx, orgID, threadID, opts, limit)
 	}
+	if err != nil {
+		return SessionTranscriptWindow{}, err
+	}
+	window.ThreadStatus = threadStatus
+	return window, nil
 }
 
 func (s *SessionTranscriptStore) listLatestOrOlderWindow(

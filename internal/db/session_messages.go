@@ -77,6 +77,7 @@ func (s *SessionMessageStore) Create(ctx context.Context, msg *models.SessionMes
 	if msg.ActivityPhaseID != nil {
 		query = phaseValidatedMessageInsert()
 		args["activity_phase_id"] = msg.ActivityPhaseID
+		addActivityPhaseWriteGuardArgs(args, msg.ActivityPhaseWriteGuard)
 	}
 
 	row := s.db.QueryRow(ctx, query, args)
@@ -98,11 +99,10 @@ func phaseValidatedMessageInsertWithSource() string {
 	return buildPhaseValidatedMessageInsert(true)
 }
 
-// buildPhaseValidatedMessageInsert validates that the phase belongs to the same
-// org, session, thread, and turn as the message. Phase status is deliberately
-// not constrained: a message that closes a phase (the final assistant summary)
-// can be persisted after the phase reaches its terminal status and still
-// belongs to it.
+// buildPhaseValidatedMessageInsert validates phase ownership and rejects
+// writes whose phase or runtime lease is no longer active. Platform-owned
+// boundary transactions persist their message before terminally updating the
+// phase, so they use this same guarded path.
 func buildPhaseValidatedMessageInsert(withSource bool) string {
 	columns := `session_id, org_id, thread_id, user_id, turn_number, role, content, attachments, "references", commands, token_usage`
 	values := `@session_id, @org_id, @thread_id, @user_id, @turn_number, @role, @content, @attachments, @references_data, @commands, @token_usage`
@@ -110,14 +110,10 @@ func buildPhaseValidatedMessageInsert(withSource bool) string {
 		columns += `, source`
 		values += `, @source`
 	}
-	return `
+	return activityPhaseWritableCTE + `
 		INSERT INTO session_messages (` + columns + `, activity_phase_id)
-		SELECT ` + values + `, @activity_phase_id
-		FROM session_activity_phases p
-		WHERE p.id = @activity_phase_id AND p.org_id = @org_id
-		  AND p.session_id = @session_id
-		  AND p.thread_id IS NOT DISTINCT FROM @thread_id
-		  AND p.turn_number = @turn_number
+		SELECT ` + values + `, p.id
+		FROM writable_activity_phase p
 		RETURNING id, created_at`
 }
 
@@ -128,7 +124,7 @@ func buildPhaseValidatedMessageInsert(withSource bool) string {
 func wrapPhaseOwnershipError(operation string, phaseID *uuid.UUID, err error) error {
 	if phaseID != nil && errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf(
-			"%s: activity phase %s does not match org/session/thread/turn ownership: %w",
+			"%s: activity phase %s does not match org/session/thread/turn ownership or an active runtime lease: %w",
 			operation,
 			*phaseID,
 			err,
@@ -160,6 +156,7 @@ func (s *SessionMessageStore) CreateWithSource(ctx context.Context, msg *models.
 	if msg.ActivityPhaseID != nil {
 		query = phaseValidatedMessageInsertWithSource()
 		args["activity_phase_id"] = msg.ActivityPhaseID
+		addActivityPhaseWriteGuardArgs(args, msg.ActivityPhaseWriteGuard)
 	}
 
 	row := s.db.QueryRow(ctx, query, args)

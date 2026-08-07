@@ -60,17 +60,28 @@ func newActivityPhaseExecution(
 	}, nil
 }
 
-func (e *activityPhaseExecution) phaseID() *uuid.UUID {
+func (e *activityPhaseExecution) writeAssociation() (*uuid.UUID, *models.ActivityPhaseWriteGuard) {
 	if e == nil {
-		return nil
+		return nil, nil
 	}
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.phase == nil {
-		return nil
+		return nil, nil
 	}
 	id := e.phase.ID
-	return &id
+	if e.runtimeID == nil || e.leaseToken == nil {
+		return &id, nil
+	}
+	return &id, &models.ActivityPhaseWriteGuard{
+		RuntimeID:  *e.runtimeID,
+		LeaseToken: *e.leaseToken,
+	}
+}
+
+func (e *activityPhaseExecution) phaseID() *uuid.UUID {
+	phaseID, _ := e.writeAssociation()
+	return phaseID
 }
 
 func (e *activityPhaseExecution) complete(ctx context.Context, status models.ActivityPhaseStatus, reason models.ActivityPhaseBoundaryReason) error {

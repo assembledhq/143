@@ -122,6 +122,34 @@ describe("ActivityCapsule", () => {
     expect(trigger).not.toHaveAccessibleName(/tool call/);
   });
 
+  it("uses the live provisional tool count only while a phase is running", () => {
+    const activity = {
+      id: "phase-1", anchor_id: "aph_phase-1", phase_number: 1, status: "running" as const, trigger_kind: "initial" as const,
+      started_at: new Date(Date.now() - 2_000).toISOString(), tool_call_count: 1, provisionalToolCallCount: 2,
+      turnNumber: 1, entries: [], inferredHistorical: false as const,
+    };
+    const { rerender } = render(
+      <ActivityCapsule activity={activity} expanded={false} onExpandedChange={vi.fn()}>
+        <div>activity</div>
+      </ActivityCapsule>,
+    );
+    expect(screen.getByRole("button", { name: /Working for.*2 tool calls/ })).toBeVisible();
+
+    rerender(
+      <ActivityCapsule
+        activity={{
+          ...activity, status: "completed", boundary_reason: "final_response",
+          completed_at: new Date().toISOString(),
+        }}
+        expanded={false}
+        onExpandedChange={vi.fn()}
+      >
+        <div>activity</div>
+      </ActivityCapsule>,
+    );
+    expect(screen.getByRole("button", { name: /Worked for.*1 tool call$/ })).toBeVisible();
+  });
+
   it("keeps inferred historical activity truthful by omitting duration", () => {
     render(
       <ActivityCapsule

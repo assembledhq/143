@@ -2166,7 +2166,8 @@ function transcriptEntryIDSelector(entryID: string): string {
 // flattenTranscriptPages returns the turns of the infinite query (newest page
 // first → older pages) followed by manually-loaded newer pages, all in a single
 // flat list. Order does not matter for rendering: buildTimeline +
-// sortTimelineEntries re-sort everything by created_at.
+// sortTimelineEntries re-sort everything by presentation time (applied_at for
+// user instructions, created_at otherwise).
 function flattenTranscriptPages(
   pages: SessionTranscriptWindowResponse[] | undefined,
   newerPages: SessionTranscriptWindowResponse[],
@@ -2403,7 +2404,7 @@ function ChatPanel({
 }: ChatPanelProps) {
   const queryClient = useQueryClient();
   const { detail: activityDetail, setDetail: setActivityDetail, mutation: activityDetailMutation } = useSessionActivityDetail();
-  const { enabled: activityCapsulesEnabled } = useSessionActivityCapsulesEnabled();
+  const { enabled: activityCapsulesEnabled, query: activityCapsulesConfigQuery } = useSessionActivityCapsulesEnabled();
   const [dismissedHumanInputIds, setDismissedHumanInputIds] = useState<Set<string>>(() => new Set());
   const [newerThreadMessagePages, setNewerThreadMessagePages] = useState<SessionTranscriptWindowResponse[]>([]);
   const [isFetchingNewerThreadMessages, setIsFetchingNewerThreadMessages] = useState(false);
@@ -2699,10 +2700,15 @@ function ChatPanel({
   const expectingMoreContent = activeThread
     ? workingStatusesSet.has(activeThread.status)
     : activeSet.has(session.status);
+  // The capsule flag decides how an entry renders, so an empty transcript waits
+  // for the config read rather than flashing the un-capsuled shape first. It
+  // only ever extends an existing skeleton: transcript content we already hold
+  // must stay on screen even if /application-config is slow or never settles.
+  const awaitingActivityCapsulesConfig = !!activeThreadId && activityCapsulesConfigQuery.isPending;
   const showLoadingSkeleton =
     timelineEntries.length === 0 &&
     session.status !== "pending" &&
-    (!hasLoadedTimelineInputs || expectingMoreContent);
+    (!hasLoadedTimelineInputs || expectingMoreContent || awaitingActivityCapsulesConfig);
   const hasThreadFailure = hasVisibleThreadFailure(activeThread);
   const showFreshThreadShell =
     !!activeThread &&

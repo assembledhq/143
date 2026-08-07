@@ -6179,13 +6179,21 @@ func (c TranscriptWriteContext) withTurn(turnNumber int) TranscriptWriteContext 
 // .thread_id is NOT NULL, so an unthreaded context carries no phase — every
 // transcript writer goes through here so the invariant holds in one place.
 func (c TranscriptWriteContext) phaseAssociation() *uuid.UUID {
+	id, _ := c.phaseWriteAssociation()
+	return id
+}
+
+// phaseWriteAssociation resolves phase identity and its runtime lease under
+// the same execution lock, so steering cannot pair a replacement phase ID with
+// the previous phase's write guard.
+func (c TranscriptWriteContext) phaseWriteAssociation() (*uuid.UUID, *models.ActivityPhaseWriteGuard) {
 	if c.ThreadID == nil {
-		return nil
+		return nil, nil
 	}
 	if c.ActivityPhase != nil {
-		return c.ActivityPhase.phaseID()
+		return c.ActivityPhase.writeAssociation()
 	}
-	return c.ActivityPhaseID
+	return c.ActivityPhaseID, nil
 }
 
 // forThread rescopes the context to the thread an entry actually resolved to.
@@ -6250,22 +6258,20 @@ func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, a
 			}
 		}
 
-		// A human-input boundary closes the phase as it persists the request, so
-		// the prompt's own log must stay attached to the phase it ended rather
-		// than falling through to the now-cleared association.
-		activityPhaseID := entryCtx.phaseAssociation()
-		if humanInputRecord != nil && humanInputRecord.ActivityPhaseID != nil {
-			activityPhaseID = humanInputRecord.ActivityPhaseID
-		}
+		// A blocking human-input request is the durable phase-closing boundary.
+		// Its companion log is written afterward, so it must not reuse the now
+		// terminal phase ID; doing so would also let stale workers append there.
+		activityPhaseID, activityPhaseWriteGuard := entryCtx.phaseWriteAssociation()
 		log := &models.SessionLog{
-			SessionID:       runID,
-			OrgID:           orgID,
-			ThreadID:        entryCtx.ThreadID,
-			Level:           models.SessionLogLevel(entry.Level),
-			Message:         entry.Message,
-			Metadata:        metadata,
-			TurnNumber:      entryCtx.TurnNumber,
-			ActivityPhaseID: activityPhaseID,
+			SessionID:               runID,
+			OrgID:                   orgID,
+			ThreadID:                entryCtx.ThreadID,
+			Level:                   models.SessionLogLevel(entry.Level),
+			Message:                 entry.Message,
+			Metadata:                metadata,
+			TurnNumber:              entryCtx.TurnNumber,
+			ActivityPhaseID:         activityPhaseID,
+			ActivityPhaseWriteGuard: activityPhaseWriteGuard,
 		}
 		if err := o.agentRunLogs.Create(ctx, log); err != nil {
 			o.logger.Error().Err(err).Str("run_id", runID.String()).Msg("failed to persist log entry")
@@ -6304,23 +6310,25 @@ func (o *Orchestrator) handleHumanInputRequest(
 			value := strings.TrimSpace(req.ProviderRequestID)
 			providerRequestID = &value
 		}
+		activityPhaseID, activityPhaseWriteGuard := writeCtx.phaseWriteAssociation()
 		record := &models.HumanInputRequest{
-			OrgID:             orgID,
-			SessionID:         sessionID,
-			ThreadID:          writeCtx.ThreadID,
-			TurnNumber:        writeCtx.TurnNumber,
-			ActivityPhaseID:   writeCtx.phaseAssociation(),
-			AgentType:         agentType,
-			ProviderRequestID: providerRequestID,
-			Kind:              req.Kind,
-			Status:            models.HumanInputRequestStatusPending,
-			Title:             title,
-			Body:              body,
-			Context:           req.Context,
-			BlocksPhase:       req.BlocksPhase,
-			Choices:           req.Choices,
-			ResponseSchema:    req.ResponseSchema,
-			ProviderPayload:   req.ProviderPayload,
+			OrgID:                   orgID,
+			SessionID:               sessionID,
+			ThreadID:                writeCtx.ThreadID,
+			TurnNumber:              writeCtx.TurnNumber,
+			ActivityPhaseID:         activityPhaseID,
+			ActivityPhaseWriteGuard: activityPhaseWriteGuard,
+			AgentType:               agentType,
+			ProviderRequestID:       providerRequestID,
+			Kind:                    req.Kind,
+			Status:                  models.HumanInputRequestStatusPending,
+			Title:                   title,
+			Body:                    body,
+			Context:                 req.Context,
+			BlocksPhase:             req.BlocksPhase,
+			Choices:                 req.Choices,
+			ResponseSchema:          req.ResponseSchema,
+			ProviderPayload:         req.ProviderPayload,
 		}
 		if record.Kind == "" {
 			record.Kind = models.HumanInputRequestKindFreeText
@@ -8295,14 +8303,16 @@ func (o *Orchestrator) createAssistantMessage(ctx context.Context, sessionID, or
 		return nil
 	}
 
+	activityPhaseID, activityPhaseWriteGuard := writeCtx.phaseWriteAssociation()
 	assistantMsg := &models.SessionMessage{
-		SessionID:       sessionID,
-		OrgID:           orgID,
-		ThreadID:        writeCtx.ThreadID,
-		TurnNumber:      writeCtx.TurnNumber,
-		Role:            models.MessageRoleAssistant,
-		Content:         result.Summary,
-		ActivityPhaseID: writeCtx.phaseAssociation(),
+		SessionID:               sessionID,
+		OrgID:                   orgID,
+		ThreadID:                writeCtx.ThreadID,
+		TurnNumber:              writeCtx.TurnNumber,
+		Role:                    models.MessageRoleAssistant,
+		Content:                 result.Summary,
+		ActivityPhaseID:         activityPhaseID,
+		ActivityPhaseWriteGuard: activityPhaseWriteGuard,
 	}
 	if HasPersistableTokenUsage(result.TokenUsage) {
 		tokenJSON, err := json.Marshal(result.TokenUsage)

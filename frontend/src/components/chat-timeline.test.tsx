@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactElement } from "react";
 import { ChatTimeline, formatMessageTime } from "./chat-timeline";
 import type { TimelineEntry } from "@/lib/timeline";
@@ -88,6 +88,12 @@ describe("ChatTimeline", () => {
     canCopyToClipboardMock.mockReturnValue(true);
     copyTextToClipboardMock.mockClear();
     copyTextToClipboardMock.mockResolvedValue(undefined);
+  });
+
+  // A test that throws between useFakeTimers and useRealTimers would otherwise
+  // leak fake timers into every waitFor/userEvent case after it.
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("renders message bubbles", () => {
@@ -606,7 +612,30 @@ describe("ChatTimeline", () => {
     expect(todayLabel).toBeInTheDocument();
     expect(yesterdayLabel.parentElement?.parentElement).not.toHaveClass("sticky");
     expect(yesterdayLabel.parentElement?.parentElement).not.toHaveClass("top-0");
+  });
 
-    vi.useRealTimers();
+  it("groups a late-applied message under the day it was applied, not authored", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-02T12:00:00Z"));
+
+    // Authored just before midnight, applied just after: the caller already
+    // emitted the "Today" separator from the applied day, so this timeline must
+    // not add a second "Yesterday" one from created_at.
+    const entries: TimelineEntry[] = [
+      {
+        kind: "message",
+        data: makeMessage({
+          id: 21,
+          created_at: "2026-01-01T23:59:00Z",
+          applied_at: "2026-01-02T00:00:02Z",
+          content: "Steering applied after midnight",
+        }),
+      },
+    ];
+
+    render(<ChatTimeline entries={entries} isRunning={false} initialDay={new Date("2026-01-02T00:00:02Z").toDateString()} />);
+
+    expect(screen.queryByText("Yesterday")).not.toBeInTheDocument();
+    expect(screen.queryByText("Today")).not.toBeInTheDocument();
   });
 });

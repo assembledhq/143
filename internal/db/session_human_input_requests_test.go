@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const humanInputPhaseInsertPattern = `(?s)FROM session_activity_phases p.+p\.id = @activity_phase_id AND p\.org_id = @org_id.+p\.session_id = @session_id.+p\.thread_id IS NOT DISTINCT FROM @thread_id.+p\.turn_number = @turn_number`
+const humanInputPhaseInsertPattern = `(?s)r\.lease_token = CAST\(@activity_phase_lease_token AS uuid\).+FROM session_activity_phases p.+p\.id = @activity_phase_id AND p\.org_id = @org_id.+p\.session_id = @session_id.+p\.thread_id IS NOT DISTINCT FROM @thread_id.+p\.turn_number = @turn_number.+p\.status = 'running'`
 
 var humanInputRequestColumns = []string{
 	"id", "org_id", "session_id", "thread_id", "turn_number", "agent_type",
@@ -93,7 +93,7 @@ func TestSessionHumanInputRequestStore_Create_ValidatesActivityPhaseOwnership(t 
 		Title: "Question", Body: "Choose", ActivityPhaseID: &phaseID,
 	}
 	mock.ExpectQuery(humanInputPhaseInsertPattern).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WithArgs(anyArgs(23)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), time.Now()))
 
 	err = NewSessionHumanInputRequestStore(mock).Create(context.Background(), &req)
@@ -101,7 +101,7 @@ func TestSessionHumanInputRequestStore_Create_ValidatesActivityPhaseOwnership(t 
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestSessionHumanInputRequestStore_Create_DoesNotRequireRunningActivityPhase(t *testing.T) {
+func TestSessionHumanInputRequestStore_Create_RequiresRunningActivityPhase(t *testing.T) {
 	t.Parallel()
 
 	mock, capturedSQL := newSQLCapturingPool(t)
@@ -114,14 +114,13 @@ func TestSessionHumanInputRequestStore_Create_DoesNotRequireRunningActivityPhase
 		Title: "Question", Body: "Choose", ActivityPhaseID: &phaseID,
 	}
 	mock.ExpectQuery(humanInputPhaseInsertPattern).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WithArgs(anyArgs(23)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), time.Now()))
 
 	err := NewSessionHumanInputRequestStore(mock).Create(context.Background(), &req)
-	require.NoError(t, err, "phase-closing human input should be inserted regardless of the phase's terminal status")
-	// A human input request is itself a phase-closing event, so it is written
-	// after the phase reaches a terminal status.
-	require.NotContains(t, *capturedSQL, "p.status", "validated insert should not constrain the phase status")
+	require.NoError(t, err, "phase-associated human input should be inserted while the phase is running")
+	require.Contains(t, *capturedSQL, "p.status = 'running'", "validated insert should reject writes after phase closure")
+	require.Contains(t, *capturedSQL, "r.lease_token", "validated insert should require the runtime lease that opened the phase")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -140,7 +139,7 @@ func TestSessionHumanInputRequestStore_Create_RejectsMismatchedActivityPhase(t *
 		Title: "Question", Body: "Choose", ActivityPhaseID: &phaseID,
 	}
 	mock.ExpectQuery(humanInputPhaseInsertPattern).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &phaseID).
+		WithArgs(anyArgs(23)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}))
 
 	err = NewSessionHumanInputRequestStore(mock).Create(context.Background(), &req)
