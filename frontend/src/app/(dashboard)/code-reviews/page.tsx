@@ -1618,7 +1618,7 @@ export default function CodeReviewsPage() {
                 headingLevel={3}
               action={
                 <DisabledTooltip disabled={!canManagePolicy} content={!canManagePolicy ? "Only organization administrators can add GitHub reviewer connections." : undefined}>
-                  <Button size="sm" disabled={!canManagePolicy} onClick={openAddRepository}>
+                  <Button size="sm" variant="outline" disabled={!canManagePolicy} onClick={openAddRepository}>
                       <Plus className="h-4 w-4" />
                       Add repository
                     </Button>
