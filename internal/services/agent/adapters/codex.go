@@ -234,10 +234,8 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 	}
 
 	if exitCode != 0 {
-		result.Error = fmt.Sprintf("codex CLI exited with code %d", exitCode)
-		if filteredStderr != "" {
-			result.Error += ": " + filteredStderr
-		}
+		parsedError := result.Error
+		result.Error = finalizeCLIExitError("codex", exitCode, parsedError, filteredStderr)
 
 		// Surface abnormal exits to the structured logger (and thus
 		// VictoriaLogs). Codex's raw stderr otherwise lands only in per-session
@@ -249,6 +247,9 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 		// (e.g. a resume that the orchestrator recovers via fallback) that never
 		// reach the terminal FailureService classification.
 		snippet := filteredStderr
+		if snippet == "" {
+			snippet = parsedError
+		}
 		if len(snippet) > 600 {
 			snippet = snippet[:600]
 		}
@@ -341,8 +342,8 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 	// Handle legacy single-object JSON format (no type field).
 	if event.Type == "" {
 		var legacy codexJSONOutput
-		if err := json.Unmarshal(line, &legacy); err == nil && legacy.Response != "" {
-			if !isDuplicateOutput("legacy", legacy.Response, lastByType) {
+		if err := json.Unmarshal(line, &legacy); err == nil && (legacy.Response != "" || legacy.Error != "") {
+			if legacy.Response != "" && !isDuplicateOutput("legacy", legacy.Response, lastByType) {
 				logCh <- agent.LogEntry{
 					Timestamp: time.Now(),
 					Level:     "output",
@@ -356,6 +357,14 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 					InputTokens:  legacy.Stats.InputTokens,
 					OutputTokens: legacy.Stats.OutputTokens,
 				})
+			}
+			if legacy.Error != "" {
+				setResultError(result, legacy.Error)
+				logCh <- agent.LogEntry{
+					Timestamp: time.Now(),
+					Level:     "error",
+					Message:   legacy.Error,
+				}
 			}
 			return
 		}
@@ -447,14 +456,8 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 			Metadata:  map[string]interface{}{"type": "thinking"},
 		}
 
-	case "error":
-		msg := event.Error
-		if msg == "" {
-			msg = event.Message
-		}
-		if msg == "" {
-			msg = event.Content
-		}
+	case "error", "turn.failed":
+		msg := firstNonEmpty(decodeStreamError(event.Error), event.Message, event.Content, "unknown error")
 		// Suppress refresh-token errors entirely — they are expected when
 		// tokens are shared and showing them is alarming and unhelpful.
 		if isRefreshTokenError(msg) {
@@ -469,6 +472,7 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 			}
 			return
 		}
+		setResultError(result, msg)
 		logCh <- agent.LogEntry{
 			Timestamp: time.Now(),
 			Level:     "error",
@@ -636,6 +640,7 @@ func parseCodexOutput(output []byte, result *agent.AgentResult, logCh chan<- age
 			})
 		}
 		if codexResp.Error != "" {
+			setResultError(result, codexResp.Error)
 			logCh <- agent.LogEntry{
 				Timestamp: time.Now(),
 				Level:     "error",
@@ -681,7 +686,7 @@ type codexStreamEvent struct {
 		InputTokens  int `json:"inputTokens"`
 		OutputTokens int `json:"outputTokens"`
 	} `json:"stats,omitempty"`
-	Error string          `json:"error,omitempty"`
+	Error json.RawMessage `json:"error,omitempty"`
 	Item  *codexItem      `json:"item,omitempty"`
 	Usage json.RawMessage `json:"usage,omitempty"`
 	// ThreadID is emitted by Codex on the `thread.started` event at the start

@@ -383,6 +383,8 @@ func TestOpenCodeAdapter_Execute_CapturesFailureLogs(t *testing.T) {
 	provider.ExecStreamFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
 		require.Contains(t, cmd, "opencode run", "OpenCode adapter should execute the OpenCode CLI")
 		onLine([]byte(`{"type":"error","sessionID":"ses_opencode","error":{"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_123"}}}`))
+		_, writeErr := stderr.Write([]byte("OpenCode diagnostic warning"))
+		require.NoError(t, writeErr, "OpenCode test transport should write stderr")
 		return 1, nil
 	}
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
@@ -410,6 +412,7 @@ func TestOpenCodeAdapter_Execute_CapturesFailureLogs(t *testing.T) {
 	require.Equal(t, 1, result.ExitCode, "OpenCode execution should preserve the CLI exit code")
 	require.Contains(t, result.Error, "opencode CLI exited with code 1", "OpenCode execution should surface the non-zero exit")
 	require.Contains(t, result.Error, "UnknownError: Unexpected server error. Check server logs for details. (ref: err_123)", "OpenCode execution should preserve parsed terminal error details")
+	require.Contains(t, result.Error, "OpenCode diagnostic warning", "OpenCode execution should preserve stderr alongside the parsed provider error")
 	close(logCh)
 
 	logs := drain(logCh)

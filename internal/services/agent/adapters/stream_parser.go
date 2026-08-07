@@ -1,6 +1,7 @@
 package adapters
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -163,6 +164,7 @@ func parseAgentStreamLine(
 		if msg == "" {
 			msg = "unknown error"
 		}
+		setResultError(result, msg)
 		logCh <- agent.LogEntry{
 			Timestamp: time.Now(),
 			Level:     "error",
@@ -255,6 +257,112 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// decodeStreamError normalizes the error shapes used by coding-agent JSONL
+// protocols. Providers have emitted errors as strings, nested error objects,
+// and objects whose useful message lives under data/error/message. Keeping the
+// normalization here lets the orchestrator classify a stable AgentResult.Error
+// without knowing each provider's wire format.
+func decodeStreamError(raw json.RawMessage) string {
+	return decodeStreamErrorDepth(raw, 0)
+}
+
+func decodeStreamErrorDepth(raw json.RawMessage, depth int) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return ""
+	}
+	if depth >= 5 {
+		return string(trimmed)
+	}
+
+	var text string
+	if err := json.Unmarshal(trimmed, &text); err == nil {
+		return strings.TrimSpace(text)
+	}
+
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &object); err == nil && object != nil {
+		label := firstNonEmpty(
+			decodeStreamErrorDepth(object["name"], depth+1),
+			decodeStreamErrorDepth(object["type"], depth+1),
+			decodeStreamErrorDepth(object["code"], depth+1),
+		)
+		detail := firstNonEmpty(
+			decodeStreamErrorDepth(object["message"], depth+1),
+			decodeStreamErrorDepth(object["detail"], depth+1),
+			decodeStreamErrorDepth(object["reason"], depth+1),
+			decodeStreamErrorDepth(object["error"], depth+1),
+			decodeStreamErrorDepth(object["data"], depth+1),
+		)
+		switch {
+		case label != "" && detail != "" && !strings.EqualFold(label, detail):
+			return label + ": " + detail
+		case detail != "":
+			return detail
+		case label != "":
+			return label
+		default:
+			return string(trimmed)
+		}
+	}
+
+	return string(trimmed)
+}
+
+// setResultError records provider-reported failures without duplicating the
+// same message when a CLI emits both an error event and a terminal failed
+// event for one failure.
+func setResultError(result *agent.AgentResult, detail string) {
+	if result == nil {
+		return
+	}
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		return
+	}
+	current := strings.TrimSpace(result.Error)
+	if current == "" {
+		result.Error = detail
+		return
+	}
+	if current == detail || strings.Contains(current, detail) {
+		return
+	}
+	result.Error = current + "; " + detail
+}
+
+// finalizeCLIExitError preserves provider output and stderr alongside the
+// generic process-exit context. Rate-limit classification depends on the
+// provider detail, while the generic context remains useful for operators.
+func finalizeCLIExitError(cliName string, exitCode int, parsedError, stderr string, fallbackDetails ...string) string {
+	parts := []string{fmt.Sprintf("%s CLI exited with code %d", cliName, exitCode)}
+	appendUniqueErrorPart := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		for _, part := range parts {
+			if part == value {
+				return
+			}
+		}
+		parts = append(parts, value)
+	}
+
+	appendUniqueErrorPart(parsedError)
+	appendUniqueErrorPart(stderr)
+	if len(parts) == 1 {
+		for _, detail := range fallbackDetails {
+			if strings.TrimSpace(detail) != "" {
+				appendUniqueErrorPart(detail)
+				break
+			}
+		}
+	}
+
+	return strings.Join(parts, ": ")
 }
 
 // streamingAgentConfig drives runStreamingAgent. BuildCmd receives the already
@@ -354,24 +462,18 @@ func runStreamingAgent(
 	}
 
 	if exitCode != 0 {
-		parsedError := strings.TrimSpace(result.Error)
-		result.Error = fmt.Sprintf("%s CLI exited with code %d", cfg.CLIName, exitCode)
-		errorDetail := strings.TrimSpace(string(stderr))
-		if errorDetail == "" {
-			if parsedError != "" {
-				errorDetail = parsedError
-			}
-			// TTY transports merge stderr into the visible output stream, so
-			// preserve the last visible line as the best-effort failure detail.
-			if errorDetail == "" && len(summaryParts) > 0 {
-				errorDetail = strings.TrimSpace(summaryParts[len(summaryParts)-1])
-			} else if errorDetail == "" && lastAssistantContent != "" {
-				errorDetail = strings.TrimSpace(lastAssistantContent)
-			}
+		var lastSummary string
+		if len(summaryParts) > 0 {
+			lastSummary = summaryParts[len(summaryParts)-1]
 		}
-		if errorDetail != "" {
-			result.Error += ": " + errorDetail
-		}
+		result.Error = finalizeCLIExitError(
+			cfg.CLIName,
+			exitCode,
+			result.Error,
+			string(stderr),
+			lastSummary,
+			lastAssistantContent,
+		)
 	}
 
 	diff, err := collectDiff(ctx, provider, sandbox, logger)

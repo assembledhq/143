@@ -227,6 +227,7 @@ func TestParseCodexOutput_JSONWithError(t *testing.T) {
 	if result.Summary != "Attempted fix." {
 		t.Errorf("expected summary 'Attempted fix.', got %q", result.Summary)
 	}
+	require.Equal(t, "rate limit exceeded", result.Error, "legacy Codex errors should populate the adapter result error")
 
 	// Verify error log entry was sent.
 	foundError := false
@@ -351,6 +352,17 @@ func TestParseCodexStreamOutput(t *testing.T) {
 					}
 				}
 				require.True(t, hasError, "should have error log entry")
+				require.Equal(t, "context deadline exceeded", result.Error, "error events should populate the adapter result error")
+			},
+		},
+		{
+			name:   "turn failed event preserves nested provider message",
+			output: `{"type":"turn.failed","error":{"message":"You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Aug 8th, 2026 4:11 AM."}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Equal(t, "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Aug 8th, 2026 4:11 AM.", result.Error, "turn.failed should preserve the nested Codex provider message")
+				require.Len(t, logs, 1, "turn.failed should emit one error log")
+				require.Equal(t, "error", logs[0].Level, "turn.failed should be logged as an error")
 			},
 		},
 		{
@@ -639,6 +651,20 @@ func TestCodexAdapter_Execute(t *testing.T) {
 				require.Equal(t, 1, result.ExitCode)
 				require.Contains(t, result.Error, "exited with code 1")
 				require.Contains(t, result.Error, "command not found")
+			},
+		},
+		{
+			name: "non-zero exit preserves stdout usage-limit event",
+			codexOutput: `{"type":"error","message":"You've hit your usage limit. Try again at Aug 8th, 2026 4:11 AM."}
+{"type":"turn.failed","error":{"message":"You've hit your usage limit. Try again at Aug 8th, 2026 4:11 AM."}}`,
+			codexExitCode: 1,
+			diffOutput:    "",
+			diffExitCode:  0,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Equal(t, 1, result.ExitCode, "Codex execution should preserve the CLI exit code")
+				require.Contains(t, result.Error, "codex CLI exited with code 1", "Codex execution should retain the generic exit context")
+				require.Contains(t, result.Error, "You've hit your usage limit", "Codex execution should retain the provider rate-limit detail for fallback classification")
 			},
 		},
 		{
