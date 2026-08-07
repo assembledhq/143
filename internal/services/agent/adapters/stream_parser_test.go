@@ -311,6 +311,7 @@ func TestParseAgentStreamLine_EmptyErrorFallsBackToUnknown(t *testing.T) {
 	require.Equal(t, "error", logs[0].Level)
 	require.Equal(t, "unknown error", logs[0].Message,
 		"empty error events must surface a placeholder instead of a blank message")
+	require.Equal(t, "unknown error", result.Error, "empty error events should still populate the adapter result error")
 }
 
 func TestParseAgentStreamLine_NormalizesActionChoiceHumanInput(t *testing.T) {

@@ -9020,6 +9020,7 @@ func isInvalidAuthTokenMessage(errMsg string) bool {
 
 var (
 	retryAfterRe     = regexp.MustCompile(`retry-after[=: ]+([0-9]+)`)
+	tryAgainOnDateRe = regexp.MustCompile(`try again at ([a-z]{3,9}) ([0-9]{1,2})(?:st|nd|rd|th)?,?\s+([0-9]{4})\s+([0-9]{1,2})(?::([0-9]{2}))?\s*(am|pm)?`)
 	tryAgainAtRe     = regexp.MustCompile(`try again at ([0-9]{1,2})(?::([0-9]{2}))?\s*(am|pm)?`)
 	resetInSecondsRe = regexp.MustCompile(`(?:reset|retry)[^0-9]{0,20}in ([0-9]+) seconds?`)
 )
@@ -9033,6 +9034,40 @@ func parseCredentialRateLimitUntil(msg string, now time.Time) time.Time {
 	if match := resetInSecondsRe.FindStringSubmatch(msg); len(match) == 2 {
 		if seconds, err := strconv.Atoi(match[1]); err == nil && seconds > 0 {
 			return now.Add(time.Duration(seconds) * time.Second)
+		}
+	}
+	if match := tryAgainOnDateRe.FindStringSubmatch(msg); len(match) == 7 {
+		monthName := strings.ToUpper(match[1][:1]) + match[1][1:]
+		monthLayout := "January"
+		if len(monthName) == 3 {
+			monthLayout = "Jan"
+		}
+		parsedMonth, monthErr := time.Parse(monthLayout, monthName)
+		day, dayErr := strconv.Atoi(match[2])
+		year, yearErr := strconv.Atoi(match[3])
+		hour, hourErr := strconv.Atoi(match[4])
+		minute := 0
+		var minuteErr error
+		if match[5] != "" {
+			minute, minuteErr = strconv.Atoi(match[5])
+		}
+		if monthErr == nil && dayErr == nil && yearErr == nil && hourErr == nil && minuteErr == nil {
+			switch match[6] {
+			case "pm":
+				if hour < 12 {
+					hour += 12
+				}
+			case "am":
+				if hour == 12 {
+					hour = 0
+				}
+			}
+			if day > 0 && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59 {
+				candidate := time.Date(year, parsedMonth.Month(), day, hour, minute, 0, 0, now.Location())
+				if candidate.After(now) && candidate.Day() == day {
+					return candidate
+				}
+			}
 		}
 	}
 	if match := tryAgainAtRe.FindStringSubmatch(msg); len(match) >= 2 {

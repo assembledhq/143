@@ -180,6 +180,21 @@ func TestClaudeCodeAdapter_Execute(t *testing.T) {
 			},
 		},
 		{
+			name:           "non-zero exit preserves rate-limit result event",
+			claudeOutput:   `{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Claude Code usage limit reached. Try again at 8:50 AM.","session_id":"sess-rate-limit"}`,
+			claudeExitCode: 1,
+			stderrOutput:   "Claude diagnostic warning",
+			diffOutput:     "",
+			diffExitCode:   0,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Equal(t, 1, result.ExitCode, "Claude execution should preserve the CLI exit code")
+				require.Contains(t, result.Error, "claude CLI exited with code 1", "Claude execution should retain the generic exit context")
+				require.Contains(t, result.Error, "usage limit reached", "Claude execution should retain the provider rate-limit detail for fallback classification")
+				require.Contains(t, result.Error, "Claude diagnostic warning", "Claude execution should preserve stderr alongside the parsed provider error")
+			},
+		},
+		{
 			name:           "empty output",
 			claudeOutput:   "",
 			claudeExitCode: 0,
@@ -803,6 +818,25 @@ func TestParseStreamOutput(t *testing.T) {
 				require.Equal(t, 1000, result.TokenUsage.InputTokens)
 				require.Equal(t, 500, result.TokenUsage.OutputTokens)
 				require.Equal(t, "sess-z", result.AgentSessionID)
+			},
+		},
+		{
+			name:   "error result populates result error",
+			output: `{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Claude Code usage limit reached. Try again at 8:50 AM.","session_id":"sess-rate-limit"}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Equal(t, "Claude Code usage limit reached. Try again at 8:50 AM.", result.Error, "is_error result events should populate the adapter result error")
+				require.Equal(t, "sess-rate-limit", result.AgentSessionID, "error result events should still preserve the Claude session id")
+			},
+		},
+		{
+			name:   "typed error event preserves nested message",
+			output: `{"type":"error","error":{"type":"rate_limit_error","message":"rate limit exceeded"}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Equal(t, "rate_limit_error: rate limit exceeded", result.Error, "typed Claude errors should preserve nested provider details")
+				require.Len(t, logs, 1, "typed Claude errors should emit one error log")
+				require.Equal(t, "error", logs[0].Level, "typed Claude errors should be logged as errors")
 			},
 		},
 		{

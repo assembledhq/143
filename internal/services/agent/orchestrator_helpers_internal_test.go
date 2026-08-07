@@ -1258,6 +1258,11 @@ func TestParseCredentialFailureSignalRateLimitMetadata(t *testing.T) {
 			errorText: "You've hit your usage limit. try again at 8:50 AM.",
 			wantUntil: time.Date(now.Year(), now.Month(), now.Day(), 8, 50, 0, 0, now.Location()),
 		},
+		{
+			name:      "codex try again full date",
+			errorText: "You've hit your usage limit. try again at Aug 8th, 2026 4:11 AM.",
+			wantUntil: time.Date(2026, time.August, 8, 4, 11, 0, 0, now.Location()),
+		},
 	}
 	for _, tc := range cases {
 		tc := tc

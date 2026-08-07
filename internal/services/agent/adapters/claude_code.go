@@ -205,10 +205,18 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 	}
 
 	if exitCode != 0 {
-		result.Error = fmt.Sprintf("claude CLI exited with code %d", exitCode)
-		if len(stderr) > 0 {
-			result.Error += ": " + string(stderr)
+		var lastSummary string
+		if len(summaryParts) > 0 {
+			lastSummary = summaryParts[len(summaryParts)-1]
 		}
+		result.Error = finalizeCLIExitError(
+			"claude",
+			exitCode,
+			result.Error,
+			string(stderr),
+			lastSummary,
+			lastAssistantContent,
+		)
 	}
 
 	// Collect the git diff from the sandbox.
@@ -483,13 +491,41 @@ output({
 // the UI, so we walk the nested blocks here and emit one structured LogEntry
 // per block.
 func parseClaudeStreamLine(line []byte, result *agent.AgentResult, logCh chan<- agent.LogEntry, summaryParts *[]string, lastAssistant *string) {
+	// Error events vary between Claude Code versions and Anthropic API
+	// passthroughs: message/error/content may each be a string or a nested
+	// object. Decode this small envelope before the strongly typed event so a
+	// nested error cannot make the whole line fall back to plain output.
+	var failureEvent struct {
+		Type    string          `json:"type"`
+		Error   json.RawMessage `json:"error,omitempty"`
+		Message json.RawMessage `json:"message,omitempty"`
+		Content json.RawMessage `json:"content,omitempty"`
+	}
+	if err := json.Unmarshal(line, &failureEvent); err == nil && failureEvent.Type == "error" {
+		msg := firstNonEmpty(
+			decodeStreamError(failureEvent.Error),
+			decodeStreamError(failureEvent.Message),
+			decodeStreamError(failureEvent.Content),
+			"unknown error",
+		)
+		setResultError(result, msg)
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "error",
+			Message:   msg,
+		}
+		return
+	}
+
 	var event claudeStreamEvent
 	if err := json.Unmarshal(line, &event); err != nil {
+		text := string(line)
 		logCh <- agent.LogEntry{
 			Timestamp: time.Now(),
 			Level:     "output",
-			Message:   string(line),
+			Message:   text,
 		}
+		*summaryParts = append(*summaryParts, text)
 		return
 	}
 	if event.SessionID != "" {
@@ -512,18 +548,11 @@ func parseClaudeStreamLine(line []byte, result *agent.AgentResult, logCh chan<- 
 	case "user":
 		emitClaudeUserBlocks(event, logCh)
 
-	case "error":
-		// `error` is not part of the documented stream-json schema but we keep
-		// the case so unexpected-but-typed errors still surface as errors
-		// rather than as raw debug blobs.
-		logCh <- agent.LogEntry{
-			Timestamp: time.Now(),
-			Level:     "error",
-			Message:   string(line),
-		}
-
 	case "result":
 		summary := decodeClaudeResultSummary(event)
+		if event.IsError || strings.HasPrefix(strings.ToLower(strings.TrimSpace(event.Subtype)), "error") {
+			setResultError(result, firstNonEmpty(summary, event.Content, event.Subtype, "unknown error"))
+		}
 		logCh <- agent.LogEntry{
 			Timestamp: time.Now(),
 			Level:     "info",
