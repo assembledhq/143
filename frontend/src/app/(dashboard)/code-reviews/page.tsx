@@ -1536,12 +1536,12 @@ export default function CodeReviewsPage() {
             />
           </PageTabContent>
 
-          <PageTabContent value="policy">
+          <PageTabContent value="policy" className="mx-auto w-full max-w-5xl">
             <SectionGroup
-              title="Review policy"
+              title="Organization review policy"
               description="How the reviewer bot handles pull requests across this organization."
               action={<AutosaveIndicator status={autosave.status} />}
-              className="max-w-5xl space-y-6"
+              className="space-y-6"
             >
               {!canManagePolicy ? (
               <p className="text-sm text-muted-foreground">You have view-only access to this policy. An organization administrator can change review behavior and GitHub setup.</p>
@@ -1832,7 +1832,7 @@ function PolicyPromptComposer({
             });
           }}
           resetValue={DEFAULT_AUTOMATED_APPROVAL_POLICY}
-          onReset={() => {
+          onReset={(previousValue) => {
             const resetValue = DEFAULT_AUTOMATED_APPROVAL_POLICY;
             commitPolicy((next) => {
               next.automated_approval_policy = resetValue;
@@ -1844,8 +1844,26 @@ function PolicyPromptComposer({
               character_bucket: promptCharacterBucket(resetValue),
               configured: true,
             });
+            toast.info("Recommended approval policy restored", {
+              description: "The previous policy can be restored while you continue editing.",
+              action: {
+                label: "Undo",
+                onClick: () => {
+                  commitPolicy((next) => {
+                    next.automated_approval_policy = previousValue;
+                  });
+                  trackCodeReviewPolicyEvent({
+                    event: "code_review_prompt_edited",
+                    scope: "organization",
+                    source: "manual",
+                    character_bucket: promptCharacterBucket(previousValue.trim()),
+                    configured: true,
+                  });
+                },
+              },
+            });
           }}
-          resetLabel="Reset to default"
+          resetLabel="Restore recommended policy"
           examples={examples?.automated_approval_policies ?? []}
           onChooseExample={(example) => onChooseExample("automated_approval_policy", example)}
           onDraftHandle={(handle) => onDraftHandle("automated_approval_policy", handle)}
@@ -1874,7 +1892,7 @@ function PolicyPromptComposer({
           });
         }}
         resetValue=""
-        onReset={() => {
+        onReset={(previousValue) => {
           const resetValue = "";
           commitPolicy((next) => {
             next.review_instructions = resetValue;
@@ -1885,6 +1903,24 @@ function PolicyPromptComposer({
             source: "reset",
             character_bucket: promptCharacterBucket(resetValue),
             configured: true,
+          });
+          toast.info("Additional instructions cleared", {
+            description: "Reviewers will use their native review behavior.",
+            action: {
+              label: "Undo",
+              onClick: () => {
+                commitPolicy((next) => {
+                  next.review_instructions = previousValue;
+                });
+                trackCodeReviewPolicyEvent({
+                  event: "code_review_prompt_edited",
+                  scope: "organization",
+                  source: "manual",
+                  character_bucket: promptCharacterBucket(previousValue.trim()),
+                  configured: true,
+                });
+              },
+            },
           });
         }}
         resetLabel="Clear instructions"
@@ -1903,7 +1939,7 @@ type CodeReviewPromptComposerProps = {
   inactive?: boolean;
   autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
   onCommit: (value: string) => void;
-  onReset: () => void;
+  onReset: (previousValue: string) => void;
   resetValue: string;
   resetLabel: string;
   examples: Array<CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption>;
@@ -1917,7 +1953,7 @@ function CodeReviewAutomatedApprovalPolicyComposer(props: CodeReviewPromptCompos
     <CodeReviewPromptComposerBase
       {...props}
       title="Automated approval policy"
-      description="Guides how the orchestrator classifies findings and explicit human-review reasons. P0/P1 findings and hard safeguards block approval; P2/P3 findings are advisory."
+      description="Describe when 143 may approve a pull request. The safeguards below always take precedence."
       tooltip="Used only by the orchestrator when automatic approval is enabled. The backend derives the decision from explicit evidence, and the prompt cannot bypass hard safeguards. A non-empty value is required for automatic approval."
       required
     />
@@ -1964,7 +2000,7 @@ function CodeReviewPromptComposerBase({
   required?: boolean;
   autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
   onCommit: (value: string) => void;
-  onReset: () => void;
+  onReset: (previousValue: string) => void;
   resetValue: string;
   resetLabel: string;
   secondary?: boolean;
@@ -2007,95 +2043,132 @@ function CodeReviewPromptComposerBase({
   const showCount = invalid || count >= CODE_REVIEW_PROMPT_COUNT_VISIBLE_AT;
   const fieldId = `prompt-${title.replaceAll(" ", "-")}`;
   const countId = `prompt-count-${title.replaceAll(" ", "-")}`;
+  const optionalEmpty = Boolean(secondary && !value.trim());
+  const [optionalEditorOpen, setOptionalEditorOpen] = useState(false);
+  // An invalid local draft has not reached the policy query yet. Keep it
+  // visible so collapsing the optional editor cannot conceal the validation
+  // error and make the unsaved draft easy to lose on navigation.
+  const editorOpen = !optionalEmpty || invalid || focusOnError || optionalEditorOpen;
+  const draftMatchesReset = codeReviewPromptValuesEqual(field.value, resetValue);
+  const policyMatchesReset = codeReviewPromptValuesEqual(value, resetValue);
+  const resetUnavailable = draftMatchesReset && policyMatchesReset;
+  const resetDisabled = disabled || resetUnavailable;
+  const resetDisabledReason = disabled
+    ? "Policy settings are still loading."
+    : secondary
+      ? "There are no additional instructions to clear."
+      : "This policy already uses the recommended instructions.";
   return (
-    <section className="space-y-4 rounded-xl border border-border bg-card p-4 sm:p-5" aria-label={title}>
-      <div className="space-y-1">
-        <div className="flex items-center gap-1.5">
-          <h3>
-            <Label htmlFor={fieldId} className="font-display text-lg leading-6 font-semibold tracking-[-0.025em] text-foreground">
-              {title}
-            </Label>
-          </h3>
-          <SettingInfoTooltip label={title} description={tooltip} />
-        </div>
-        <p className="max-w-3xl text-sm leading-6 text-muted-foreground">{description}</p>
-        {inactive ? (
-          <p className="max-w-3xl text-sm leading-6 text-muted-foreground">This policy is saved and ready, but it is only used when “Approve acceptable PRs” is selected above.</p>
-        ) : null}
-      </div>
-      <Textarea
-        ref={textareaRef}
-        id={fieldId}
-        // Prose measure: the card may be wide, but a policy someone has to read
-        // and edit should not run to 130 characters a line.
-        className={`max-w-3xl resize-y text-sm leading-6 ${secondary ? "min-h-32" : "min-h-72"}`}
-        value={field.value}
-        disabled={disabled}
-        rows={secondary ? 5 : 12}
-        onChange={(event) => field.onChange(event.target.value)}
-        onBlur={field.onBlur}
-        aria-invalid={invalid || focusOnError}
-        aria-describedby={showCount ? countId : undefined}
-      />
-      <div className="flex max-w-3xl flex-wrap items-center justify-between gap-2">
-        <span id={countId} className={`text-xs ${invalid ? "text-destructive" : "text-muted-foreground"}`}>
-          {showCount ? `${count} / ${CODE_REVIEW_PROMPT_MAX_LENGTH}` : null}
-        </span>
-        <div className="flex flex-wrap items-center justify-end gap-1" role="group" aria-label={`${title} actions`}>
-          <span aria-hidden="true">
-            <AutosaveIndicator status={autosave.status} />
-          </span>
-          {examples.length > 0 ? (
-            <Select
-              value=""
-              disabled={disabled}
-              onValueChange={(key) => {
-                const example = examples.find((candidate) => candidate.key === key);
-                if (example) onChooseExample(example);
-              }}
-            >
-              <SelectTrigger
-                density="compact"
-                className="w-auto min-w-0 border-0 bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:bg-accent hover:text-accent-foreground"
-                aria-label={`${title} prompt example`}
-              >
-                <SelectValue placeholder="Examples" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectLabel>Prompt examples</SelectLabel>
-                  {examples.map((example) => (
-                    <SelectItem key={example.key} value={example.key}>
-                      {example.title}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
+    <Collapsible open={editorOpen} onOpenChange={setOptionalEditorOpen}>
+      <section className="space-y-4 rounded-xl border border-border bg-card p-4 sm:p-5" aria-label={title}>
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0 space-y-1">
+            <div className="flex items-center gap-1.5">
+              <h3>
+                <Label htmlFor={fieldId} className="font-display text-lg leading-6 font-semibold tracking-[-0.025em] text-foreground">
+                  {title}
+                </Label>
+              </h3>
+              <SettingInfoTooltip label={title} description={tooltip} />
+            </div>
+            <p className="max-w-2xl text-sm leading-6 text-muted-foreground">{description}</p>
+            {inactive ? (
+              <p className="max-w-2xl text-sm leading-6 text-muted-foreground">This policy is saved and ready, but it is only used when “Approve acceptable PRs” is selected above.</p>
+            ) : null}
+          </div>
+          {optionalEmpty && !invalid ? (
+            <CollapsibleTrigger asChild>
+              <Button type="button" variant="outline" size="sm" disabled={disabled}>
+                {editorOpen ? "Hide editor" : "Add instructions"}
+                <ChevronDown className={cn("transition-transform", editorOpen && "rotate-180")} aria-hidden="true" />
+              </Button>
+            </CollapsibleTrigger>
           ) : null}
-          <DisabledTooltip disabled={disabled} content="Policy settings are still loading.">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="text-xs text-muted-foreground sm:h-8"
-              disabled={disabled}
-              onClick={() => {
-                field.replace(resetValue);
-                onReset();
-              }}
-            >
-              {resetLabel}
-            </Button>
-          </DisabledTooltip>
         </div>
-      </div>
-      {invalid ? (
-        <p className="max-w-3xl text-xs text-destructive">
-          {count > CODE_REVIEW_PROMPT_MAX_LENGTH ? "Prompt is too long." : "An automated approval policy is required while approval is enabled."}
-        </p>
-      ) : null}
-    </section>
+        <CollapsibleContent className="space-y-3">
+          <div
+            className={cn(
+              "overflow-hidden rounded-md border border-border-strong bg-surface-raised focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/18",
+              (invalid || focusOnError) && "border-destructive",
+            )}
+          >
+            <Textarea
+              ref={textareaRef}
+              id={fieldId}
+              className={`w-full rounded-none border-0 bg-transparent shadow-none focus-visible:border-transparent focus-visible:ring-0 ${secondary ? "min-h-32" : "min-h-72"} resize-y text-sm leading-6`}
+              value={field.value}
+              disabled={disabled}
+              rows={secondary ? 5 : 12}
+              onChange={(event) => field.onChange(event.target.value)}
+              onBlur={field.onBlur}
+              aria-invalid={invalid || focusOnError}
+              aria-describedby={showCount ? countId : undefined}
+            />
+            <div className="flex min-h-10 w-full flex-wrap items-center justify-between gap-2 border-t border-border bg-muted/20 px-2 py-1">
+              <span id={countId} className={`text-xs ${invalid ? "text-destructive" : "text-muted-foreground"}`}>
+                {showCount ? `${count} / ${CODE_REVIEW_PROMPT_MAX_LENGTH}` : null}
+              </span>
+              <div className="flex flex-wrap items-center justify-end gap-1" role="group" aria-label={`${title} actions`}>
+                <span aria-hidden="true">
+                  <AutosaveIndicator status={autosave.status} />
+                </span>
+                {examples.length > 0 ? (
+                  <Select
+                    value=""
+                    disabled={disabled}
+                    onValueChange={(key) => {
+                      const example = examples.find((candidate) => candidate.key === key);
+                      if (example) onChooseExample(example);
+                    }}
+                  >
+                    <SelectTrigger
+                      density="compact"
+                      className="w-auto min-w-0 border-0 bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:bg-accent hover:text-accent-foreground"
+                      aria-label={`${title} prompt example`}
+                    >
+                      <SelectValue placeholder="Use an example…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectLabel>Prompt examples</SelectLabel>
+                        {examples.map((example) => (
+                          <SelectItem key={example.key} value={example.key}>
+                            {example.title}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                ) : null}
+                <DisabledTooltip disabled={resetDisabled} content={resetDisabledReason}>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="text-xs text-muted-foreground sm:h-8"
+                    disabled={resetDisabled}
+                    onClick={() => {
+                      // Undo restores the policy snapshot, never an arbitrary
+                      // local draft that may be empty or over the length limit.
+                      const previousValue = value;
+                      field.replace(resetValue);
+                      onReset(previousValue);
+                    }}
+                  >
+                    {resetLabel}
+                  </Button>
+                </DisabledTooltip>
+              </div>
+            </div>
+          </div>
+          {invalid ? (
+            <p className="text-xs text-destructive">
+              {count > CODE_REVIEW_PROMPT_MAX_LENGTH ? "Prompt is too long." : "An automated approval policy is required while approval is enabled."}
+            </p>
+          ) : null}
+        </CollapsibleContent>
+      </section>
+    </Collapsible>
   );
 }
 
@@ -2564,22 +2637,29 @@ function PolicySummary({ config }: { config: CodeReviewPolicyConfig | null }) {
 
   const outcome = policyOutcome(config);
   const reviewers = config.agent_roster.reviewers.length;
-  // Deliberately excludes the selected outcome: the switch and radio group
-  // immediately above already state it.
-  const summaryItems = [
-    ...(outcome === "disabled" ? ["Reviews paused"] : []),
-    `${reviewers} ${reviewers === 1 ? "reviewer" : "reviewers"}`,
-    `quorum ${config.agent_roster.require_reviewer_quorum}`,
-  ];
-
-  if (config.risk_policy.require_passing_checks) summaryItems.push("passing checks required");
-  if (config.agent_roster.disagreement_blocks) summaryItems.push("disagreement blocks approval");
-  if (config.risk_policy.exclude_sensitive_paths) summaryItems.push("sensitive paths need human review");
+  const quorum = config.agent_roster.require_reviewer_quorum;
+  let summary: string;
+  if (outcome === "disabled") {
+    summary = "Reviews are paused. The selected outcome and policy are preserved.";
+  } else if (outcome === "comment") {
+    summary = `Reviews use ${reviewers} ${reviewers === 1 ? "reviewer" : "reviewers"} with a quorum of ${quorum} and leave comments without approving.`;
+  } else {
+    const approvalRequirements = [`Approval requires ${quorum} of ${reviewers} ${reviewers === 1 ? "reviewer" : "reviewers"}.`];
+    if (config.risk_policy.require_passing_checks) approvalRequirements.push("Checks must pass.");
+    const humanReviewReasons = [
+      ...(config.agent_roster.disagreement_blocks ? ["reviewer disagreement"] : []),
+      ...(config.risk_policy.exclude_sensitive_paths ? ["sensitive-path changes"] : []),
+    ];
+    if (humanReviewReasons.length > 0) {
+      approvalRequirements.push(`${humanReviewReasons.join(" and ")} ${humanReviewReasons.length === 1 ? "requires" : "require"} human review.`);
+    }
+    summary = approvalRequirements.join(" ");
+  }
 
   return (
-    <p className="text-sm leading-6 text-muted-foreground">
-      <span className="font-medium text-foreground">Current behavior:</span> {summaryItems.join(" · ")}
-    </p>
+    <div className="rounded-md bg-surface-recessed px-3 py-2.5 text-sm leading-6 text-muted-foreground">
+      <span className="font-medium text-foreground">Effective policy:</span> {summary}
+    </div>
   );
 }
 
@@ -2647,7 +2727,10 @@ function OutcomeControl({
         onValueChange={(value) => onChange(value as "comment" | "approve")}
       >
         {options.map((option) => (
-          <Label key={option.value} className="flex cursor-pointer items-start gap-3 rounded-md border border-border p-3">
+          <Label
+            key={option.value}
+            className="flex cursor-pointer items-start gap-3 rounded-md border border-border p-3 transition-colors hover:bg-muted/40 has-[[data-state=checked]]:border-primary has-[[data-state=checked]]:bg-primary/5"
+          >
             <RadioGroupItem value={option.value} aria-label={option.title} className="mt-0.5" />
             <span className="flex min-w-0 flex-col gap-1">
               <span className="text-sm font-medium text-foreground">{option.title}</span>
