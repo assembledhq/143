@@ -76,3 +76,22 @@ export function codeReviewReasonLabel(code: string): string {
   const readable = code.replaceAll("_", " ");
   return readable.charAt(0).toUpperCase() + readable.slice(1);
 }
+
+export function codeReviewReasonDescription(reason: {
+  code: string;
+  actual?: number;
+  limit?: number;
+  subject?: string;
+}): string {
+  const label = codeReviewReasonLabel(reason.code);
+  const subject = reason.subject?.trim();
+  if (subject) return `${label}: ${subject}`;
+  // The API omits zero-valued counts, so render whichever side is present
+  // instead of dropping the measurement entirely.
+  if (reason.actual !== undefined && reason.limit !== undefined) {
+    return `${label} (${reason.actual.toLocaleString()} of ${reason.limit.toLocaleString()})`;
+  }
+  if (reason.actual !== undefined) return `${label} (${reason.actual.toLocaleString()})`;
+  if (reason.limit !== undefined) return `${label} (limit ${reason.limit.toLocaleString()})`;
+  return label;
+}
