@@ -45,6 +45,7 @@ import { Switch } from "@/components/ui/switch";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
@@ -55,7 +56,7 @@ import { ApiError, api } from "@/lib/api";
 import { notify as toast } from "@/lib/notify";
 import { queryKeys } from "@/lib/query-keys";
 import { getActiveOrgId } from "@/lib/active-org";
-import { ALL_CODE_REVIEW_REASONS, CODE_REVIEW_REASON_CODES, type CodeReviewReasonCode } from "@/lib/code-review-reasons";
+import { ALL_CODE_REVIEW_REASONS, CODE_REVIEW_REASON_CODES, codeReviewReasonDescription, type CodeReviewReasonCode } from "@/lib/code-review-reasons";
 import { buildCodeReviewStreamURL, SSE_EVENT } from "@/lib/sse";
 import { useResourceSSE } from "@/lib/use-resource-sse";
 import { pollMs } from "@/lib/poll-intervals";
@@ -116,7 +117,7 @@ const RISK_FILTER_VALUES = [ALL_RISKS, "acceptable", "needs_review"] as const;
 const STATUS_FILTER_VALUES = ["current", "completed", "in_progress", "failed", "cancelled", "superseded", "all"] as const;
 type StatusFilter = (typeof STATUS_FILTER_VALUES)[number];
 const DEFAULT_STATUS_FILTER = "current" satisfies StatusFilter;
-const REVIEW_SORT_VALUES = ["pull_request", "outcome", "risk", "run_status", "repository", "completed"] as const;
+const REVIEW_SORT_VALUES = ["pull_request", "outcome", "run_status", "completed"] as const;
 type ReviewSort = (typeof REVIEW_SORT_VALUES)[number];
 // "reviews" now orders the PR count: the column became unique PRs, but the
 // parameter keeps its name so shared analytics links stay valid.
@@ -263,14 +264,71 @@ function reviewStatusTone(status: string): StatusTone {
   return "neutral";
 }
 
-function reviewRiskTone(review: CodeReviewListItem): StatusTone {
-  if (isSupersededReview(review)) return "neutral";
-  return review.acceptable ? "success" : "warning";
+// Path-based risk reasons are recorded once per changed path, so a broad PR can
+// produce a very long list. Show a readable slice and summarize the remainder.
+const WHY_NOT_APPROVED_REASON_LIMIT = 10;
+
+function whyNotApprovedReasons(review: CodeReviewListItem): string[] {
+  if (isSupersededReview(review) || review.status !== "completed" || wasAutomaticallyApproved(review)) return [];
+
+  const structuredReasons = (review.risk_reason_details ?? []).map(codeReviewReasonDescription);
+  if (structuredReasons.length > 0) return structuredReasons;
+
+  if (review.decision === "comment_only") return ["Configured for comment-only reviews"];
+  if (review.decision === "approved") return ["Approval could not be posted"];
+  if (review.decision === "needs_human_review") return ["Human review was required"];
+  if (review.decision === "blocked") return ["Approval was blocked"];
+  return ["No approval decision was recorded"];
 }
 
-function reviewRiskLabel(review: CodeReviewListItem): string {
-  if (isSupersededReview(review)) return "Not applicable";
-  return review.acceptable ? "Acceptable" : "Review needed";
+function WhyNotApproved({ reasons, compact = false }: { reasons: string[]; compact?: boolean }) {
+  if (reasons.length === 0) return <span className="text-muted-foreground">—</span>;
+
+  return (
+    <div className="max-w-[18rem] space-y-1">
+      <p className={cn("line-clamp-2 leading-5 text-foreground", compact ? "text-xs" : "text-sm")} title={reasons[0]}>
+        {reasons[0]}
+      </p>
+      {reasons.length > 1 ? (
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button variant="link" size="sm" className="h-auto p-0 text-xs font-normal text-muted-foreground">
+              +{reasons.length - 1} more
+            </Button>
+          </PopoverTrigger>
+          {/* Path-based reasons are emitted per changed file, so this list can run
+              to hundreds of entries; cap it and let the rest scroll. */}
+          <PopoverContent className="max-h-[60vh] w-80 overflow-y-auto p-4">
+            <div className="space-y-2">
+              <p className="text-sm font-medium text-foreground">Why this review was not approved</p>
+              <ul className="list-disc space-y-2 pl-4 text-sm leading-5 text-muted-foreground">
+                {reasons.slice(0, WHY_NOT_APPROVED_REASON_LIMIT).map((reason, index) => (
+                  <li key={`${reason}-${index}`}>{reason}</li>
+                ))}
+              </ul>
+              {reasons.length > WHY_NOT_APPROVED_REASON_LIMIT ? (
+                <p className="text-xs text-muted-foreground">
+                  and {reasons.length - WHY_NOT_APPROVED_REASON_LIMIT} more
+                </p>
+              ) : null}
+            </div>
+          </PopoverContent>
+        </Popover>
+      ) : null}
+    </div>
+  );
+}
+
+function MobileWhyNotApproved({ review }: { review: CodeReviewListItem }) {
+  const reasons = whyNotApprovedReasons(review);
+  if (reasons.length === 0) return null;
+
+  return (
+    <div className="space-y-1 text-xs">
+      <span className="text-muted-foreground">Why not approved</span>
+      <WhyNotApproved reasons={reasons} compact />
+    </div>
+  );
 }
 
 function ReviewTitle({ review }: { review: CodeReviewListItem }) {
@@ -1192,7 +1250,7 @@ export default function CodeReviewsPage() {
             <ReviewTitle review={review} />
           </div>
           <div className="mt-1 text-xs text-muted-foreground">
-            {review.pull_request_author || "Unknown author"} · {review.head_sha.slice(0, 7)}
+            {review.repository_name || review.github_repo} · {review.pull_request_author || "Unknown author"} · {review.head_sha.slice(0, 7)}
           </div>
         </>
       ),
@@ -1204,22 +1262,16 @@ export default function CodeReviewsPage() {
       render: (review) => <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} indicator="none" />,
     },
     {
-      id: "risk",
-      header: sortHeader("Risk", "risk"),
-      sortDirection: reviewSort === "risk" ? reviewSortOrder : false,
-      render: (review) => <StatusLabel label={reviewRiskLabel(review)} tone={reviewRiskTone(review)} indicator="none" />,
+      id: "why-not-approved",
+      header: "Why not approved",
+      cellClassName: "min-w-[14rem]",
+      render: (review) => <WhyNotApproved reasons={whyNotApprovedReasons(review)} />,
     },
     {
       id: "run-status",
       header: sortHeader("Run status", "run_status"),
       sortDirection: reviewSort === "run_status" ? reviewSortOrder : false,
       render: (review) => <ReviewOperationalStatus review={review} nowMs={countdownNowMs} />,
-    },
-    {
-      id: "repository",
-      header: sortHeader("Repo", "repository"),
-      sortDirection: reviewSort === "repository" ? reviewSortOrder : false,
-      render: (review) => review.repository_name || review.github_repo,
     },
     {
       id: "completed",
@@ -1410,10 +1462,7 @@ export default function CodeReviewsPage() {
                             <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} indicator="none" />
                             {review.completed_at ? <span className="text-foreground">{formatDate(review.completed_at)}</span> : null}
                         </div>
-                        <div className="flex flex-wrap items-center gap-2 text-xs">
-                          <span className="text-muted-foreground">Risk</span>
-                            <StatusLabel label={reviewRiskLabel(review)} tone={reviewRiskTone(review)} indicator="none" />
-                        </div>
+                        <MobileWhyNotApproved review={review} />
                       </div>
                     }
                     actions={
@@ -4334,6 +4383,7 @@ function CodeReviewEvidenceSheet({
   const findings = evidence?.findings ?? [];
   const records = evidence?.prompt_records ?? evidence?.prompt_artifacts ?? [];
   const reasonCodes = evidence?.risk_reason_codes ?? [];
+  const approvalReasons = review ? whyNotApprovedReasons(review) : [];
   const disputesQuery = useInfiniteQuery({
     queryKey: queryKeys.codeReviews.disputes(review?.session_id ?? ""),
     queryFn: ({ pageParam }) => api.codeReviews.disputes(review?.session_id ?? "", pageParam),
@@ -4430,6 +4480,20 @@ function CodeReviewEvidenceSheet({
             />
           ) : null}
           {!isLoading && !error && !evidence ? <div className="text-sm text-muted-foreground">No evidence recorded for this review.</div> : null}
+          {/* Derived from the review row rather than the evidence payload, so it
+              stays available when the evidence request is empty or failed. */}
+          {approvalReasons.length > 0 ? (
+            <section className="space-y-3">
+              <EvidenceSectionHeader title="Why not approved" empty={false} />
+              <div className="space-y-2">
+                {approvalReasons.map((reason, index) => (
+                  <div key={`${reason}-${index}`} className="border-t border-border pt-2 text-sm leading-6 text-muted-foreground first:border-t-0 first:pt-0">
+                    {reason}
+                  </div>
+                ))}
+              </div>
+            </section>
+          ) : null}
           {evidence ? (
             <>
               <div className="grid grid-cols-3 gap-3">

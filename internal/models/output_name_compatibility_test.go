@@ -67,9 +67,13 @@ func TestCodeReviewResponsesExposeCompatibilityFields(t *testing.T) {
 	require.Contains(t, string(encoded), `"record_key":"`+key+`"`, "prompt record should expose the current identity key")
 	require.Contains(t, string(encoded), `"artifact_key":"`+key+`"`, "prompt record should expose the compatibility identity key")
 
-	item := CodeReviewListItem{CodeReviewSessionMetadata: CodeReviewSessionMetadata{PromptRecordKey: &key}}
+	item := CodeReviewListItem{
+		CodeReviewSessionMetadata: CodeReviewSessionMetadata{PromptRecordKey: &key},
+		RiskReasonDetails:         json.RawMessage(`[{"code":"blocking_findings"}]`),
+	}
 	encoded, err = json.Marshal(item)
 	require.NoError(t, err, "code review list item should marshal")
 	require.Contains(t, string(encoded), `"prompt_record_key":"`+key+`"`, "list item should expose the current prompt reference")
 	require.Contains(t, string(encoded), `"prompt_artifact_key":"`+key+`"`, "list item should expose the compatibility prompt reference")
+	require.Contains(t, string(encoded), `"risk_reason_details":[{"code":"blocking_findings"}]`, "list item should expose structured non-approval reasons")
 }

@@ -967,14 +967,15 @@ type CodeReviewFinding struct {
 
 type CodeReviewListItem struct {
 	CodeReviewSessionMetadata
-	RetryEligible     bool    `db:"retry_eligible" json:"retry_eligible"`
-	SessionTitle      *string `db:"session_title" json:"session_title,omitempty"`
-	RepositoryName    *string `db:"repository_name" json:"repository_name,omitempty"`
-	GitHubRepo        string  `db:"github_repo" json:"github_repo"`
-	GitHubPRNumber    int     `db:"github_pr_number" json:"github_pr_number"`
-	GitHubPRURL       string  `db:"github_pr_url" json:"github_pr_url"`
-	PullRequestTitle  string  `db:"pull_request_title" json:"pull_request_title"`
-	PullRequestAuthor string  `db:"pull_request_author" json:"pull_request_author"`
+	RiskReasonDetails json.RawMessage `db:"risk_reason_details" json:"risk_reason_details,omitempty"`
+	RetryEligible     bool            `db:"retry_eligible" json:"retry_eligible"`
+	SessionTitle      *string         `db:"session_title" json:"session_title,omitempty"`
+	RepositoryName    *string         `db:"repository_name" json:"repository_name,omitempty"`
+	GitHubRepo        string          `db:"github_repo" json:"github_repo"`
+	GitHubPRNumber    int             `db:"github_pr_number" json:"github_pr_number"`
+	GitHubPRURL       string          `db:"github_pr_url" json:"github_pr_url"`
+	PullRequestTitle  string          `db:"pull_request_title" json:"pull_request_title"`
+	PullRequestAuthor string          `db:"pull_request_author" json:"pull_request_author"`
 }
 
 // MarshalJSON keeps the former prompt reference alongside the renamed field.
