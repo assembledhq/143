@@ -1520,7 +1520,7 @@ export default function CodeReviewsPage() {
             />
           </PageTabContent>
 
-          <PageTabContent value="policy" className="mx-auto w-full max-w-5xl">
+          <PageTabContent value="policy">
             <SectionGroup
               title="Organization review policy"
               description="How the reviewer bot handles pull requests across this organization."
