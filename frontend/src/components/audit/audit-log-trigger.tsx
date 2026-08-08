@@ -23,9 +23,11 @@ interface AuditLogTriggerProps {
    * - `default`: standalone row with a leading Clock icon.
    * - `inline`: drops the icon, adds a leading middle-dot separator, and removes
    *   horizontal padding so the trigger reads as part of a surrounding sentence.
+   * - `icon`: keeps the activity sidesheet available without rendering audit
+   *   timestamp or actor metadata.
    * - `footer`: muted page footer for low-priority settings activity metadata.
    */
-  variant?: "default" | "inline" | "footer";
+  variant?: "default" | "inline" | "icon" | "footer";
 }
 
 export function AuditLogTrigger({ filters, members: membersProp, title, variant = "default" }: AuditLogTriggerProps) {
@@ -86,7 +88,33 @@ export function AuditLogTrigger({ filters, members: membersProp, title, variant 
   })();
 
   const isInline = variant === "inline";
+  const isIcon = variant === "icon";
   const isFooter = variant === "footer";
+
+  if (isIcon) {
+    const accessibleTitle = title ?? "View activity";
+    return (
+      <>
+        <Button
+          variant="ghost"
+          size="icon-compact"
+          onClick={() => setOpen(true)}
+          className="text-muted-foreground transition-colors hover:text-foreground"
+          aria-label={accessibleTitle}
+          title={accessibleTitle}
+        >
+          <Clock className="size-3.5" />
+        </Button>
+        <AuditLogSidesheet
+          open={open}
+          onOpenChange={setOpen}
+          filters={sidesheetFilters}
+          title={title}
+          members={members}
+        />
+      </>
+    );
+  }
 
   if (isFooter) {
     return (
