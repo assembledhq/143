@@ -184,7 +184,7 @@ describe("SessionActivityTimeline", () => {
     expect(screen.getByText("Ran `npm test`")).toBeVisible();
   });
 
-  it("omits queued deliveries and renders runtime boundaries without full-width card treatments", () => {
+  it("renders a not-yet-applied follow-up inline and renders runtime boundaries without full-width card treatments", () => {
     const interruptedPhaseID = "10000000-0000-0000-0000-000000000010";
     const recoveryPhaseID = "10000000-0000-0000-0000-000000000011";
     const interruptedTool = {
@@ -257,6 +257,8 @@ describe("SessionActivityTimeline", () => {
     expect(interruption).not.toHaveClass("rounded-lg", "border-info/30", "bg-info/10");
     expect(recovery).not.toHaveClass("rounded-lg", "border-info/30", "bg-info/10");
     expect(screen.queryByText("Queued")).not.toBeInTheDocument();
-    expect(screen.queryByText("Keep the runtime state intact.")).not.toBeInTheDocument();
+    // A follow-up the user just sent stays visible even before the runtime
+    // applies it; the transcript is the only surface that shows it now.
+    expect(screen.getByText("Keep the runtime state intact.")).toBeVisible();
   });
 });

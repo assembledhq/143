@@ -35,9 +35,10 @@ function inboxEntry(overrides: Partial<ThreadInboxEntry> = {}): ThreadInboxEntry
 }
 
 // The optimistic patch and the eventual /transcript refetch must agree on
-// whether a steering message is visible. When the patch omitted the delivery
-// state the message rendered once and then vanished as soon as the refetch
-// supplied it, reappearing only when the runtime applied it.
+// whether a steering message is visible. A not-yet-applied follow-up must
+// stay visible after send (the transcript is the only surface that shows it
+// once the queued-message card was removed); only a failed delivery is hidden
+// and surfaced by the recoverable-inbox notice.
 function visibleContentAfterPatch(delivery?: {
   deliveryState?: ThreadInboxEntry['delivery_state'];
   inboxEntry?: ThreadInboxEntry;
@@ -52,10 +53,21 @@ function visibleContentAfterPatch(delivery?: {
 }
 
 describe('appendMessageToTranscriptCache', () => {
-  it('hides a still-queued steering message exactly as the refetch will', () => {
+  it('keeps a still-queued steering message visible exactly as the refetch will', () => {
     expect(visibleContentAfterPatch({
       deliveryState: 'pending',
       inboxEntry: inboxEntry(),
+    })).toEqual(['also preserve anchors']);
+  });
+
+  it('hides a failed steering message exactly as the refetch will', () => {
+    expect(visibleContentAfterPatch({
+      deliveryState: 'dead_letter',
+      inboxEntry: inboxEntry({ delivery_state: 'dead_letter' }),
+    })).toEqual([]);
+    expect(visibleContentAfterPatch({
+      deliveryState: 'unknown_delivery',
+      inboxEntry: inboxEntry({ delivery_state: 'unknown_delivery' }),
     })).toEqual([]);
   });
 

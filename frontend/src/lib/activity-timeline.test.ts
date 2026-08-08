@@ -45,19 +45,21 @@ describe("buildActivityTimelineNodes", () => {
     }]);
   });
 
-  it("omits steering until the runtime applies it, then renders the normal message", () => {
+  it("keeps an in-flight steering message visible until the runtime applies it", () => {
     const message = {
       id: 7, session_id: "session-1", org_id: "org-1", thread_id: "thread-1", turn_number: 2,
       role: "user" as const, content: "also update the tests", created_at: "2026-08-03T00:00:07Z",
       inbox_sequence: 4, delivery_state: "pending" as const,
     };
     const entry: TimelineEntry = { kind: "message", data: message };
-    expect(buildActivityTimelineNodes([entry], [])).toEqual([]);
+    // Before application the user must still see the message they just sent.
+    expect(buildActivityTimelineNodes([entry], [])).toEqual([{ kind: "visible", entry }]);
 
     const appliedEntry: TimelineEntry = {
       kind: "message",
       data: { ...message, delivery_state: "acked", applied_at: "2026-08-03T00:00:08Z" },
     };
+    // After application it stays in the same visible position.
     expect(buildActivityTimelineNodes([appliedEntry], [])).toEqual([{ kind: "visible", entry: appliedEntry }]);
   });
 
@@ -66,9 +68,22 @@ describe("buildActivityTimelineNodes", () => {
     ["delivering" as const],
     ["delivered" as const],
     ["acked" as const],
+  ])("renders a not-yet-applied steering message in delivery state %s", (deliveryState) => {
+    const entry: TimelineEntry = {
+      kind: "message",
+      data: {
+        id: 7, session_id: "session-1", org_id: "org-1", thread_id: "thread-1", turn_number: 2,
+        role: "user" as const, content: "also update the tests", created_at: "2026-08-03T00:00:07Z",
+        inbox_sequence: 4, delivery_state: deliveryState,
+      },
+    };
+    expect(buildActivityTimelineNodes([entry], [])).toEqual([{ kind: "visible", entry }]);
+  });
+
+  it.each([
     ["unknown_delivery" as const],
     ["dead_letter" as const],
-  ])("omits steering still in delivery state %s", (deliveryState) => {
+  ])("omits a failed steering message in delivery state %s (surfaced by the recoverable inbox)", (deliveryState) => {
     const entry: TimelineEntry = {
       kind: "message",
       data: {
@@ -123,9 +138,9 @@ describe("buildActivityTimelineNodes", () => {
     expect(buildActivityTimelineNodes([entry], [])).toEqual([{ kind: "visible", entry }]);
   });
 
-  it("does not split historical activity around omitted steering", () => {
+  it("splits historical activity around an in-flight steering message", () => {
     const before = { kind: "log", data: log(1, "info") } satisfies TimelineEntry;
-    const queued = {
+    const inFlight = {
       kind: "message",
       data: {
         id: 7, session_id: "session-1", org_id: "org-1", thread_id: "thread-1", turn_number: 1,
@@ -135,7 +150,40 @@ describe("buildActivityTimelineNodes", () => {
     } satisfies TimelineEntry;
     const after = { kind: "log", data: log(2, "info") } satisfies TimelineEntry;
 
-    expect(buildActivityTimelineNodes([before, queued, after], [])).toEqual([{
+    // The user's not-yet-applied follow-up is a real interjection, so it
+    // appears between the two tool/log activities rather than being dropped.
+    expect(buildActivityTimelineNodes([before, inFlight, after], [])).toEqual([
+      {
+        kind: "historical_activity",
+        activity: {
+          id: "historical-1-log-1", turnNumber: 1, entries: [before], toolCallCount: 0, inferredHistorical: true,
+        },
+      },
+      { kind: "visible", entry: inFlight },
+      {
+        kind: "historical_activity",
+        activity: {
+          id: "historical-1-log-2", turnNumber: 1, entries: [after], toolCallCount: 0, inferredHistorical: true,
+        },
+      },
+    ]);
+  });
+
+  it("does not split historical activity around a failed steering message", () => {
+    const before = { kind: "log", data: log(1, "info") } satisfies TimelineEntry;
+    const failed = {
+      kind: "message",
+      data: {
+        id: 7, session_id: "session-1", org_id: "org-1", thread_id: "thread-1", turn_number: 1,
+        role: "user" as const, content: "also update the tests", created_at: "2026-08-03T00:00:02Z",
+        inbox_sequence: 4, delivery_state: "dead_letter" as const,
+      },
+    } satisfies TimelineEntry;
+    const after = { kind: "log", data: log(2, "info") } satisfies TimelineEntry;
+
+    // A failed delivery is omitted from the transcript (the recoverable-inbox
+    // notice surfaces it), so the surrounding tool/log activity stays grouped.
+    expect(buildActivityTimelineNodes([before, failed, after], [])).toEqual([{
       kind: "historical_activity",
       activity: {
         id: "historical-1-log-1", turnNumber: 1, entries: [before, after], toolCallCount: 0, inferredHistorical: true,

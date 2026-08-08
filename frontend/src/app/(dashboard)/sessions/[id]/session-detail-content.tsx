@@ -2181,10 +2181,12 @@ function flattenTranscriptPages(
 // (newest) cached transcript page so the optimistic message can be dropped from
 // local state without a flicker before the next /transcript refetch lands.
 //
-// The inbox metadata has to be carried over verbatim: the activity timeline
-// hides a steering message until the runtime applies it, so an entry patched
-// in without its delivery state renders once and then vanishes as soon as the
-// refetch supplies the real state. Same state in, same visibility out.
+// The inbox metadata has to be carried over verbatim: a steering message that
+// failed delivery is hidden from the transcript and surfaced by the
+// recoverable-inbox notice, so an entry patched in without its delivery state
+// would render once and then vanish as soon as the refetch supplies the real
+// state. Same state in, same visibility out. In-flight (not-yet-applied)
+// steering messages stay visible in both the patch and the refetch.
 export function appendMessageToTranscriptCache(
   previous: TranscriptWindowInfiniteData | undefined,
   message: SessionMessage,
