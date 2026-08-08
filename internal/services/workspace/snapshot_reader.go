@@ -228,13 +228,19 @@ func wrapScanError(err error, filePath string, line int) error {
 	return fmt.Errorf("read context %s:%d: %w", filePath, line, err)
 }
 
+const snapshotScannerMaxTokenSize = 4 * 1024 * 1024
+
+func newSnapshotScanner(src io.Reader) *bufio.Scanner {
+	sc := bufio.NewScanner(src)
+	sc.Buffer(make([]byte, 64*1024), snapshotScannerMaxTokenSize)
+	return sc
+}
+
 // scanLineRange returns lines in [startLine, endLine] (1-indexed,
 // inclusive) without computing a total. Used on the hot path when the
 // total line count is already memoized.
 func scanLineRange(src io.Reader, startLine, endLine int) ([]sandbox.FileLine, error) {
-	const scannerBuf = 4 * 1024 * 1024
-	sc := bufio.NewScanner(src)
-	sc.Buffer(make([]byte, 64*1024), scannerBuf)
+	sc := newSnapshotScanner(src)
 
 	var captured []sandbox.FileLine
 	if endLine >= startLine {
@@ -269,9 +275,7 @@ func scanLineRange(src io.Reader, startLine, endLine int) ([]sandbox.FileLine, e
 // enough to handle multi-megabyte minified files). A line longer than
 // the buffer triggers a scan error rather than silent truncation.
 func scanLineWindow(src io.Reader, startLine, endLine int) ([]sandbox.FileLine, int, error) {
-	const scannerBuf = 4 * 1024 * 1024 // 4 MiB max line — more than any real source file
-	sc := bufio.NewScanner(src)
-	sc.Buffer(make([]byte, 64*1024), scannerBuf)
+	sc := newSnapshotScanner(src)
 
 	var captured []sandbox.FileLine
 	if endLine >= startLine {

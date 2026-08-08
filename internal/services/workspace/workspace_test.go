@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -742,6 +743,47 @@ func TestSnapshotReader_LineTooLong(t *testing.T) {
 	require.Error(t, err, "ReadFileContext should fail on lines over the scanner buffer")
 	require.ErrorIs(t, err, ErrSnapshotUnreadable, "oversize lines should map to ErrSnapshotUnreadable so the handler returns 500, not 404")
 	require.NotErrorIs(t, err, sandbox.ErrFileNotFound, "oversize lines must not be reported as missing files")
+}
+
+func TestSnapshotLineScanners(t *testing.T) {
+	t.Parallel()
+
+	const existingMaxTokenSize = 4 * 1024 * 1024
+	expectedLines := []sandbox.FileLine{
+		{Number: 2, Content: "second"},
+		{Number: 3, Content: "third"},
+	}
+	tests := []struct {
+		name string
+		scan func(io.Reader) ([]sandbox.FileLine, error)
+	}{
+		{
+			name: "range scan",
+			scan: func(src io.Reader) ([]sandbox.FileLine, error) {
+				return scanLineRange(src, 2, 3)
+			},
+		},
+		{
+			name: "window scan",
+			scan: func(src io.Reader) ([]sandbox.FileLine, error) {
+				lines, _, err := scanLineWindow(src, 2, 3)
+				return lines, err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			lines, err := tt.scan(strings.NewReader("first\nsecond\nthird\nfourth\n"))
+			require.NoError(t, err, "scanner should read ordinary source lines")
+			require.Equal(t, expectedLines, lines, "scanner should preserve the requested line numbers, content, and order")
+
+			_, err = tt.scan(strings.NewReader(strings.Repeat("a", existingMaxTokenSize+1)))
+			require.ErrorIs(t, err, bufio.ErrTooLong, "scanner should preserve the shared maximum line size")
+		})
+	}
 }
 
 func TestSnapshotReader_RejectsTraversal(t *testing.T) {
