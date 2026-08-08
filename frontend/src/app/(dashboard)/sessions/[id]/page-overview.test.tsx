@@ -365,6 +365,68 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(screen.getAllByText(/Claude Code/).length).toBeGreaterThanOrEqual(1);
   });
 
+  it('uses the shared overview heading tier for session status and compact agent metadata', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const vitals = await screen.findByTestId('session-overview-vitals');
+    const statusHeading = within(vitals).getByText('Completed');
+    // Shared tier for size and weight; tone still owns the color, so the
+    // overview and the page header render one status the same way.
+    expect(statusHeading).toHaveClass('text-xs', 'font-medium', 'text-success');
+    expect(statusHeading).not.toHaveClass('text-foreground');
+    expect(statusHeading.parentElement).toHaveAttribute('data-slot', 'section-heading');
+
+    const agentLabel = within(vitals).getByText('Claude Code');
+    expect(agentLabel).toHaveClass('text-xs');
+    // Both halves matter: the badge's own default is `h-5 w-5`, and only
+    // tailwind-merge drops it. Asserting `size-4` alone passes just as well
+    // when the 20px default survives next to it and wins on stylesheet order.
+    expect(agentLabel.previousElementSibling).toHaveClass('size-4');
+    expect(agentLabel.previousElementSibling).not.toHaveClass('h-5', 'w-5');
+
+    // The indicator is an 8px dot; the slot around it stays 16px so this title
+    // and the ones on the sibling overview blocks share a left edge.
+    const iconSlot = statusHeading.previousElementSibling!;
+    expect(iconSlot).toHaveClass('w-4');
+
+    // A heading whose title is not a status keeps the default foreground
+    // color — the tone branch must not bleed into the rest of the column.
+    expect(within(vitals.parentElement!).getByText('Result')).toHaveClass('text-xs', 'font-medium', 'text-foreground');
+  });
+
+  it('lets the status indicator size its own spinner inside the overview heading', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: { ...mockSessions[0], status: 'pending', completed_at: undefined },
+        } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const vitals = await screen.findByTestId('session-overview-vitals');
+    const statusHeading = within(vitals).getByText('Starting');
+    // The neutral tones are the ones with no color to spend, so this title
+    // lands muted — the same rendering the page header gives this status.
+    // Without a case here, a silent fall back to `text-foreground` for the
+    // half of the statuses that are neutral would keep the suite green.
+    expect(statusHeading).toHaveClass('text-muted-foreground');
+    expect(statusHeading).not.toHaveClass('text-foreground');
+
+    const iconSlot = statusHeading.parentElement!.firstElementChild!;
+    // The heading pins bare caller icons to 16px, but a descendant selector
+    // outranks the spinner's own `size-3` (0,1,1 over 0,1,0) and bursts it out
+    // of the 8px indicator wrapper. Scope stays on the direct child. Asserting
+    // the spinner's own class instead would prove nothing: the class list is
+    // identical either way, and only the parent selector decides which wins.
+    expect(iconSlot.className).toContain('[&>svg]:size-4');
+    // Scoped to the sizing utility: an unrelated `[&_svg]:` rule added later is
+    // not the regression this case is guarding against.
+    expect(iconSlot.className).not.toContain('[&_svg]:size');
+    expect(iconSlot.querySelector('svg')).toBeInTheDocument();
+  });
+
   it('shows the current repository and branch in the overview details', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -451,19 +513,20 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(vitals.parentElement!.firstElementChild).toBe(vitals);
   });
 
-  // The audit trigger only mounts once /auth/me confirms an admin and the
-  // latest-entry query resolves. Both are seeded into the cache so the trigger
-  // renders in the same commit as the vitals block — a `queryByRole` on the
-  // unsettled DOM passes whether or not the status gate exists.
+  // Seeding is what makes the audit assertions load-bearing. The trigger only
+  // mounts once /auth/me confirms an admin AND the latest-entry query returns a
+  // non-empty page — the default handler returns `[]`, so an unseeded render
+  // shows no trigger whether or not the component still renders one, and the
+  // assertion passes for the wrong reason. The handler has to agree with the
+  // seed so the refetch on mount doesn't wipe the entry back out.
   function renderWithSeededAuditTrail(sessionId: string) {
     const latestEntry = {
       id: 'audit-1',
-      actor_type: 'system',
-      action: 'session.completed',
+      actor_type: 'user',
+      user_id: mockMembers[0].id,
+      action: 'session.status_changed',
       created_at: new Date(Date.now() - 12 * 60000).toISOString(),
     };
-    // The seed is what makes the assertions synchronous; the handler has to
-    // agree with it so the refetch on mount doesn't wipe the entry back out.
     server.use(
       http.get('/api/v1/audit-logs', () => HttpResponse.json({ data: [latestEntry], meta: {} })),
     );
@@ -476,30 +539,31 @@ describe('SessionDetailPage overview and review loop', () => {
     return renderSessionDetailWithQueryClient(sessionId, queryClient);
   }
 
-  it('keeps the session activity trigger inline while a session is still running', async () => {
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({
-          data: { ...mockSessions[0], status: 'running', completed_at: undefined },
-        } satisfies SingleResponse<Session>);
-      }),
-    );
-
-    renderWithSeededAuditTrail('session-abcdef12-3456-7890');
-
-    const vitals = await screen.findByTestId('session-overview-vitals');
-    expect(await within(vitals).findByRole('button', { name: /Updated.*ago by/i })).toBeInTheDocument();
-  });
-
-  // Both success terminals are gated, so both need covering — dropping either
-  // clause otherwise leaves the suite green.
-  it.each(['completed', 'pr_created'] as const)(
-    'omits low-value audit update metadata once a session is %s',
-    async (status) => {
+  // Every status, not just the terminals: the audit caption used to be gated on
+  // status, and a status-shaped gate is exactly what a regression would restore.
+  // The trigger's accessible name is its caption ("Updated … ago by …") — the
+  // `title` prop only names the sidesheet, so matching on that would never fail.
+  it.each([
+    // `pr_created` shares the "Completed" caption; naming the expected caption
+    // per status keeps the case from passing on a neighbouring terminal's copy.
+    { status: 'running', caption: /Started / },
+    { status: 'completed', caption: /Completed / },
+    { status: 'pr_created', caption: /Completed / },
+    { status: 'failed', caption: /Failed / },
+    { status: 'cancelled', caption: /Cancelled / },
+  ] as const)(
+    'shows one concise session timestamp without duplicate audit attribution when $status',
+    async ({ status, caption }) => {
+      const isTerminal = status !== 'running';
       server.use(
         http.get('/api/v1/sessions/:id', () => {
           return HttpResponse.json({
-            data: { ...mockSessions[0], status },
+            data: {
+              ...mockSessions[0],
+              status,
+              completed_at: isTerminal ? mockSessions[0].completed_at : undefined,
+              triggered_by_user_id: mockMembers[0].id,
+            },
           } satisfies SingleResponse<Session>);
         }),
       );
@@ -507,7 +571,21 @@ describe('SessionDetailPage overview and review loop', () => {
       renderWithSeededAuditTrail('session-abcdef12-3456-7890');
 
       const vitals = await screen.findByTestId('session-overview-vitals');
+      const timing = within(vitals).getByTestId('session-overview-timing');
+      expect(timing).toHaveTextContent(caption);
+      expect(timing).not.toHaveTextContent('Updated');
       expect(within(vitals).queryByRole('button', { name: /Updated.*ago by/i })).not.toBeInTheDocument();
+      expect(await within(vitals).findByRole('button', { name: 'Session activity' })).toBeInTheDocument();
+      // Settle the members query before asserting absence: the identity row
+      // reads "Unknown user" until it lands, and the seeded trigger resolves
+      // its actor name from that same query — so once this name is on screen,
+      // a restored trigger would have rendered its caption alongside it.
+      await within(vitals).findByText('Alice Smith');
+      // Match the whole caption, not the bare name. The trigger renders
+      // "Updated … by Alice Smith" as one node, so an exact-string
+      // `getAllByText('Alice Smith')` never matches it — counting the name
+      // would return 1 with the trigger present and prove nothing.
+      expect(within(vitals).queryAllByText(/Updated .* by Alice Smith/)).toHaveLength(0);
     },
   );
 

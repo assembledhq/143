@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { renderWithProviders, screen, waitFor } from '@/test/test-utils';
+import { renderWithProviders, screen, userEvent, waitFor } from '@/test/test-utils';
 import { AuditLogTrigger } from './audit-log-trigger';
 import type { User } from '@/lib/types';
 
@@ -95,6 +95,35 @@ describe('AuditLogTrigger', () => {
     const separator = container.querySelector('span[aria-hidden="true"]');
     expect(separator?.textContent).toBe('·');
     expect(container.querySelector('svg')).toBeNull();
+  });
+
+  it('icon variant: opens audit activity without rendering timestamp or actor metadata', async () => {
+    auditLogListMock.mockResolvedValue({
+      data: [{
+        id: 'audit-icon',
+        actor_type: 'user',
+        user_id: 'user-1',
+        action: 'session.created',
+        created_at: new Date(Date.now() - 2 * 60000).toISOString(),
+      }],
+      meta: {},
+    });
+
+    renderWithProviders(
+      <AuditLogTrigger
+        filters={{ session_id: 'sess-1' }}
+        members={mockMembers}
+        title="Session activity"
+        variant="icon"
+      />
+    );
+
+    const trigger = await screen.findByRole('button', { name: 'Session activity' });
+    expect(screen.queryByText(/Updated.*ago by Alice/)).not.toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(trigger);
+    expect(screen.getByRole('heading', { name: 'Session activity' })).toBeInTheDocument();
   });
 
   it('footer variant: renders as low-priority last activity text', async () => {

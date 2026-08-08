@@ -91,7 +91,8 @@ import { ChatTimeline } from "@/components/chat-timeline";
 import { SessionActivityTimeline } from "@/components/session-activity-timeline";
 import { ContextHeader } from "@/components/context-header";
 import { StatusLabel } from "@/components/status-label";
-import { StatusIndicator } from "@/components/status-indicator";
+import { StatusIndicator, statusToneTextClass } from "@/components/status-indicator";
+import type { OperationalTone } from "@/lib/operational-state";
 import { SessionComposerAttachmentMenu } from "@/components/session-composer-attachment-menu";
 import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
 import { useSessionComposerSlashCommands } from "@/hooks/use-session-composer-slash-commands";
@@ -324,6 +325,11 @@ function publicationErrorDescription(publication: SessionPublication) {
 // and a selected list row supplies `text-secondary-foreground`. The tier matches
 // the size of the body copy it heads, so weight alone carries the hierarchy in
 // the blocks whose copy is `text-foreground` rather than muted.
+//
+// One exception: a title that *is* an operational status takes that status'
+// tone instead (`SectionHeading`'s `tone`), which lands muted for the neutral
+// tones. The page header renders the same status through `StatusLabel`, and one
+// status reading two colors on one screen is the worse trade.
 const OVERVIEW_LABEL_CLASSNAME = "text-xs font-medium";
 
 // Every status block in the overview leads with a 16px icon and a title on one
@@ -335,20 +341,34 @@ function SectionHeading({
   iconClassName,
   iconSlot,
   title,
+  // Tier is fixed; color is not. A heading whose title *is* an operational
+  // status carries that status' tone, the same way `StatusLabel` does in the
+  // page header, so the two renderings of one status never disagree. The tone
+  // arrives as an axis rather than a class so no caller hand-picks a status
+  // color — `AGENTS.md` keeps that mapping inside the status primitives.
+  tone,
 }: {
   icon: ReactNode;
   iconClassName?: string;
   iconSlot?: string;
   title: ReactNode;
+  tone?: OperationalTone;
 }) {
   return (
     <div className="flex items-center gap-1.5" data-slot="section-heading">
-      {/* Pin the glyph size here so a caller-supplied icon cannot reintroduce
-          the size drift this component exists to prevent. */}
-      <span aria-hidden="true" data-slot={iconSlot} className={cn("shrink-0 [&_svg]:size-4", iconClassName)}>
+      {/* Pin the glyph size here so a caller-supplied bare icon cannot
+          reintroduce the size drift this component exists to prevent. The
+          child combinator is load-bearing: a composite indicator like
+          `StatusIndicator` scales its own nested svg against its own wrapper,
+          and a descendant selector would outrank that sizing (0,1,1 beats the
+          0,1,0 of the svg's own class) and burst the glyph out of its box.
+          The cost is that the pin now reaches bare svgs only — an icon handed
+          over inside a wrapper element sizes itself, so a caller that composes
+          one owes the slot a width through `iconClassName`. */}
+      <span aria-hidden="true" data-slot={iconSlot} className={cn("shrink-0 [&>svg]:size-4", iconClassName)}>
         {icon}
       </span>
-      <p className={cn(OVERVIEW_LABEL_CLASSNAME, "text-foreground")}>{title}</p>
+      <p className={cn(OVERVIEW_LABEL_CLASSNAME, tone ? statusToneTextClass(tone) : "text-foreground")}>{title}</p>
     </div>
   );
 }
@@ -980,21 +1000,36 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
         />
       )}
 
-      {/* Session vitals — identity row (status + agent + who triggered) */}
+      {/* Session vitals — status heading with compact identity and timing metadata. */}
       <div
         data-testid="session-overview-vitals"
         className={cn("space-y-1.5", OVERVIEW_DIVIDER_CLASSNAME, "first:pt-0")}
       >
-        <div className="flex items-center gap-x-3 gap-y-1 flex-wrap text-xs">
-          <StatusLabel
-            label={operationalStatus.label}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          {/* `iconClassName` holds the slot at 16px because the indicator is an
+              8px dot, not a 16px glyph: without it this title starts on a
+              different left edge than every other heading in the column, and
+              sharing the type tier is only half of what makes these blocks read
+              as one list. */}
+          <SectionHeading
+            icon={(
+              <StatusIndicator
+                tone={operationalStatus.tone}
+                activity={operationalStatus.activity}
+                stateKey={`${session.status}:${operationalStatus.kind}`}
+                size="sm"
+              />
+            )}
+            iconClassName="inline-flex w-4 items-center justify-center"
+            title={operationalStatus.label}
             tone={operationalStatus.tone}
-            activity={operationalStatus.activity}
-            stateKey={`${session.status}:${operationalStatus.kind}`}
-            size="md"
           />
-          <span className="inline-flex items-center gap-x-1.5 text-muted-foreground">
-            <AgentBadge agentType={session.agent_type} labelClassName="text-xs" />
+          <span className="inline-flex items-center gap-x-1.5 text-xs text-muted-foreground">
+            <AgentBadge
+              agentType={session.agent_type}
+              className="size-4"
+              labelClassName="text-xs"
+            />
             <span aria-hidden="true" className="text-muted-foreground/50">·</span>
             <span>{triggeredByLabel}</span>
           </span>
@@ -1002,7 +1037,7 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
 
         <div
           data-testid="session-overview-context"
-          className="flex min-w-0 items-center gap-x-2 gap-y-1 flex-wrap text-xs text-muted-foreground"
+          className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground"
         >
           {originDisplay && (
             <Badge variant="outline" className="h-5 rounded-full px-2 text-xs font-medium">
@@ -1043,20 +1078,12 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
                 <>Queued {formatTimeAgo(session.created_at)}</>
               )}
             </span>
-            {/*
-              Suppressed on the two success terminals only: their last audit
-              entry restates the "Completed …" caption immediately to its left.
-              Failed/cancelled/skipped sessions keep the trigger because their
-              activity trail is what explains how they got there.
-            */}
-            {session.status !== "completed" && session.status !== "pr_created" && (
-              <AuditLogTrigger
-                filters={{ session_id: session.id }}
-                members={members}
-                title="Session activity"
-                variant="inline"
-              />
-            )}
+            <AuditLogTrigger
+              filters={{ session_id: session.id }}
+              members={members}
+              title="Session activity"
+              variant="icon"
+            />
           </div>
         </div>
       </div>
