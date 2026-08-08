@@ -567,7 +567,6 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByRole("heading", { level: 2, name: "Review activity" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Status" })).toHaveTextContent("Current reviews");
     expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
-    expect(screen.getAllByText("Acceptable")).toHaveLength(2);
     expect(screen.getAllByText("Approved")).toHaveLength(2);
     expect(
       screen.getAllByText("Completed").filter((element) => element.closest('[data-slot="status-label"]')),
@@ -596,19 +595,18 @@ describe("CodeReviewsPage", () => {
     expect(within(reviewTable).getAllByRole("columnheader").map((header) => header.textContent)).toEqual([
       "PR",
       "Outcome",
-      "Risk",
+      "Why not approved",
       "Run status",
-      "Repo",
       "Completed",
       "Actions",
     ]);
     const reviewCells = within(reviewRow).getAllByRole("cell");
-    expect(within(reviewCells[2]).getByText("Acceptable").closest('[data-slot="status-label"]')).not.toBeNull();
     expect(within(reviewCells[1]).getByText("Approved").closest('[data-slot="status-label"]')).not.toBeNull();
     expect(within(reviewCells[3]).getByText("Completed").closest('[data-slot="status-label"]')).not.toBeNull();
-    expect(reviewCells[2].querySelector('[aria-hidden="true"]')).toBeNull();
-    expect(within(reviewCells[6]).getByRole("button", { name: "Evidence" })).toBeInTheDocument();
-    expect(within(reviewCells[6]).getByRole("link", { name: "Session" }).querySelector("svg")).toBeInTheDocument();
+    expect(within(reviewCells[0]).getByText(/api · anya · abcdef1/)).toBeInTheDocument();
+    expect(within(reviewCells[2]).getByText("—")).toBeInTheDocument();
+    expect(within(reviewCells[5]).getByRole("button", { name: "Evidence" })).toBeInTheDocument();
+    expect(within(reviewCells[5]).getByRole("link", { name: "Session" }).querySelector("svg")).toBeInTheDocument();
     await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
     const evidenceSheet = await screen.findByRole("dialog", {
       name: /Evidence for #428/i,
@@ -683,6 +681,127 @@ describe("CodeReviewsPage", () => {
     await user.click(screen.getByRole("button", { name: /Add requirement/i }));
     expect(await screen.findByDisplayValue("Custom requirement")).toBeInTheDocument();
   }, 30_000);
+
+  it("explains completed non-approvals in the table, mobile row, and evidence sheet", async () => {
+    const user = userEvent.setup();
+    const needsReview: CodeReviewListItem = {
+      ...review,
+      decision: "needs_human_review",
+      acceptable: false,
+      github_review_id: undefined,
+      github_review_url: undefined,
+      risk_reason_details: [
+        { code: "blocking_findings" },
+        { code: "files_limit_exceeded", actual: 34, limit: 25 },
+      ],
+    };
+    const commentOnly: CodeReviewListItem = {
+      ...review,
+      id: "review-2",
+      session_id: "session-2",
+      pull_request_id: "pr-2",
+      github_pr_number: 429,
+      pull_request_title: "Document the billing flow",
+      decision: "comment_only",
+      acceptable: true,
+      github_review_id: undefined,
+      github_review_url: undefined,
+      risk_reason_details: [],
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", () =>
+        HttpResponse.json({ data: [needsReview, commentOnly], meta: { total_count: 2 } } satisfies ListResponse<CodeReviewListItem>),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    const reviewTable = await screen.findByRole("table", { name: "Code reviews" });
+    const needsReviewRow = within(reviewTable).getByRole("row", { name: /#428 Fix invoice rounding/i });
+    const needsReviewCells = within(needsReviewRow).getAllByRole("cell");
+    expect(within(needsReviewCells[2]).getByText("Reviewers found a blocking issue")).toBeInTheDocument();
+    expect(within(needsReviewCells[2]).getByText("+1 more")).toBeInTheDocument();
+    await user.click(
+      within(needsReviewCells[2]).getByRole("button", { name: "Show all 2 reasons this review was not approved" }),
+    );
+    expect(await screen.findByText(/File-count limit exceeded \(34 of 25\)/)).toBeInTheDocument();
+
+    const commentOnlyRow = within(reviewTable).getByRole("row", { name: /#429 Document the billing flow/i });
+    expect(within(commentOnlyRow).getByText("Configured for comment-only reviews")).toBeInTheDocument();
+
+    const mobileList = screen.getByRole("list", { name: "Code review activity" });
+    const mobileNeedsReview = within(mobileList).getAllByRole("listitem")[0];
+    expect(within(mobileNeedsReview).getByText("Why not approved")).toBeInTheDocument();
+    expect(within(mobileNeedsReview).getByText("Reviewers found a blocking issue")).toBeInTheDocument();
+    expect(within(mobileNeedsReview).queryByText("Risk")).not.toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    await user.click(within(needsReviewCells[5]).getByRole("button", { name: "Evidence" }));
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
+    expect(within(evidenceSheet).getByText("Why not approved")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("Reviewers found a blocking issue")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("File-count limit exceeded (34 of 25)")).toBeInTheDocument();
+  });
+
+  it("caps the non-approval reason list a path-heavy review produces", async () => {
+    const user = userEvent.setup();
+    const pathHeavy: CodeReviewListItem = {
+      ...review,
+      decision: "needs_human_review",
+      acceptable: false,
+      github_review_id: undefined,
+      github_review_url: undefined,
+      risk_reason_details: Array.from({ length: 15 }, (_, index) => ({
+        code: "path_outside_scope",
+        subject: `services/api/file-${index}.go`,
+      })),
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", () =>
+        HttpResponse.json({ data: [pathHeavy], meta: { total_count: 1 } } satisfies ListResponse<CodeReviewListItem>),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    const reviewTable = await screen.findByRole("table", { name: "Code reviews" });
+    const reviewRow = within(reviewTable).getByRole("row", { name: /#428 Fix invoice rounding/i });
+    const cells = within(reviewRow).getAllByRole("cell");
+    await user.click(within(cells[2]).getByRole("button", { name: "Show all 15 reasons this review was not approved" }));
+    const popover = (await screen.findByText("Why this review was not approved")).parentElement as HTMLElement;
+    expect(within(popover).getAllByRole("listitem")).toHaveLength(10);
+    expect(within(popover).getByText("and 5 more")).toBeInTheDocument();
+  });
+
+  it("keeps the non-approval explanation in the evidence sheet when evidence cannot be loaded", async () => {
+    const user = userEvent.setup();
+    const needsReview: CodeReviewListItem = {
+      ...review,
+      decision: "needs_human_review",
+      acceptable: false,
+      github_review_id: undefined,
+      github_review_url: undefined,
+      risk_reason_details: [{ code: "checks_failing" }],
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", () =>
+        HttpResponse.json({ data: [needsReview], meta: { total_count: 1 } } satisfies ListResponse<CodeReviewListItem>),
+      ),
+      http.get("/api/v1/code-reviews/session-1/evidence", () => HttpResponse.json({ error: "boom" }, { status: 500 })),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await screen.findAllByText("#428 Fix invoice rounding");
+    await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
+    expect(await within(evidenceSheet).findByText("Evidence could not be loaded")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("Why not approved")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("Required checks were not passing")).toBeInTheDocument();
+  });
 
   it("renders the PR-centric Analytics report with author usage first", async () => {
     const user = userEvent.setup();
@@ -994,14 +1113,14 @@ describe("CodeReviewsPage", () => {
       expect(listRequests.at(-1)?.get("activity_status")).toBe("current");
       expect(statsRequests.at(-1)?.get("activity_status")).toBe("current");
     });
-    await user.click(screen.getByRole("button", { name: "Sort by Repo ascending" }));
-    await waitFor(() => expect(listRequests.at(-1)?.get("sort_by")).toBe("repository"));
+    await user.click(screen.getByRole("button", { name: "Sort by PR ascending" }));
+    await waitFor(() => expect(listRequests.at(-1)?.get("sort_by")).toBe("pull_request"));
     expect(listRequests.at(-1)?.get("sort_order")).toBe("asc");
-    await user.click(screen.getByRole("button", { name: "Sort by Repo descending" }));
+    await user.click(screen.getByRole("button", { name: "Sort by PR descending" }));
     await waitFor(() => expect(listRequests.at(-1)?.get("sort_order")).toBe("desc"));
     // A third click has to reach the default newest-first order again;
     // otherwise the two-state cycle strands the user in an explicit sort.
-    await user.click(screen.getByRole("button", { name: "Stop sorting by Repo" }));
+    await user.click(screen.getByRole("button", { name: "Stop sorting by PR" }));
     await waitFor(() => expect(listRequests.at(-1)?.has("sort_by")).toBe(false));
     expect(listRequests.at(-1)?.has("sort_order")).toBe(false);
     const initialListCreatedAfter = listRequests.at(-1)?.get("created_after");
@@ -2067,7 +2186,10 @@ describe("CodeReviewsPage", () => {
     const supersededLabels = await screen.findAllByText("Superseded");
     expect(supersededLabels).toHaveLength(2);
     expect(screen.getAllByText("No outcome")).toHaveLength(2);
-    expect(screen.getAllByText("Not applicable")).toHaveLength(2);
+    expect(screen.queryByText("Not applicable")).not.toBeInTheDocument();
+    const supersededTable = screen.getByRole("table", { name: "Code reviews" });
+    const supersededRow = within(supersededTable).getByRole("row", { name: /#428 Fix invoice rounding/i });
+    expect(within(within(supersededRow).getAllByRole("cell")[2]).getByText("—")).toBeInTheDocument();
     for (const label of supersededLabels) {
       expect(label).toHaveClass("text-muted-foreground");
       expect(label).not.toHaveClass("text-destructive");
@@ -2560,7 +2682,7 @@ describe("CodeReviewsPage", () => {
     );
 
     expect(await screen.findAllByText("#429 Keep manual approval")).toHaveLength(2);
-    expect(screen.getAllByText("Review needed")).toHaveLength(4);
+    expect(screen.getAllByText("Review needed")).toHaveLength(2);
     expect(
       screen.getAllByText("Completed").filter((element) => element.closest('[data-slot="status-label"]')),
     ).toHaveLength(2);

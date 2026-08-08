@@ -1281,7 +1281,7 @@ const codeReviewListItemSelect = `
 			       m.base_sha, m.head_sha, m.from_fork, m.trigger_source, m.status, m.phase, m.status_code,
 			       m.status_message, m.retry_at, m.last_error_at, m.retryable_failure, m.decision, m.acceptable, m.stale,
 			       m.superseded_by_session_id, m.review_output_key, m.prompt_record_key, m.github_review_id,
-			       m.github_review_url, m.final_review_body, m.failure_reason, m.completed_at, m.created_at,
+			       m.github_review_url, m.final_review_body, m.failure_reason, m.risk_reason_details, m.completed_at, m.created_at,
 			       (
 			           m.status = 'failed'
 			           AND m.retryable_failure = true

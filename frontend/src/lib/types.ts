@@ -316,6 +316,7 @@ export interface CodeReviewListItem {
   github_review_url?: string;
   final_review_body?: string;
   failure_reason?: string;
+  risk_reason_details?: CodeReviewRiskReason[];
   completed_at?: string;
   created_at: string;
   session_title?: string;
@@ -325,6 +326,13 @@ export interface CodeReviewListItem {
   github_pr_url: string;
   pull_request_title: string;
   pull_request_author: string;
+}
+
+export interface CodeReviewRiskReason {
+  code: string;
+  actual?: number;
+  limit?: number;
+  subject?: string;
 }
 
 export interface CodeReviewStats {
