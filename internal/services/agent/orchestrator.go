@@ -164,6 +164,13 @@ var ErrSandboxWorkspaceNotReady = errors.New("sandbox workspace is not ready, re
 // cancelled thread to idle or retrying it.
 var ErrThreadCancelledBeforeWorkspaceReady = errors.New("thread cancelled before sandbox workspace became ready")
 
+// ErrCodeReviewThreadFailed marks a code-review agent failure whose durable
+// thread result has already been recorded without terminalizing the shared
+// parent session. The run_code_review controller owns that parent lifecycle;
+// workers must dead-letter this individual turn instead of retrying it or
+// resetting the failed thread to idle.
+var ErrCodeReviewThreadFailed = errors.New("code review agent thread failed")
+
 // ErrSandboxOnDifferentNode is returned from ContinueSession's reuse path
 // when the session's recorded worker_node_id points at a different worker
 // than the one running this job. Container ids are local to a docker
@@ -3868,11 +3875,21 @@ func (o *Orchestrator) shouldQueueAutomaticPR(ctx context.Context, run *models.S
 // Authorization: callers must verify the requesting user is authorized before
 // invoking this method. The SendMessage HTTP handler enforces this via org_id
 // scoping and ClaimIdleForSession atomicity.
-func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Session, opts *ContinueSessionOptions) error {
+func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Session, opts *ContinueSessionOptions) (returnErr error) {
 	// Create a cancellable context. The cancel registry is populated later
 	// once the sandbox is available, so CancelSession can send SIGINT.
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
+	// Auth failures are categorized and persisted inside the credential setup
+	// helpers before they return. Convert those direct-return paths to the same
+	// terminal per-thread sentinel used by post-execution failures so the worker
+	// does not reset and retry an already-failed code-review thread.
+	defer func() {
+		if returnErr == nil || errors.Is(returnErr, ErrCodeReviewThreadFailed) || !isRunFailureRecorded(returnErr) || opts == nil || !isCodeReviewThreadTurn(session, opts.ThreadID) {
+			return
+		}
+		returnErr = fmt.Errorf("%w: %w", ErrCodeReviewThreadFailed, returnErr)
+	}()
 
 	log := o.logger.With().
 		Str("session_id", session.ID.String()).
@@ -3989,15 +4006,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// 2. Get the adapter.
 	adapter, ok := o.adapters[session.AgentType]
 	if !ok {
-		o.failRun(ctx, session, fmt.Sprintf("unknown agent type: %s", session.AgentType))
-		return fmt.Errorf("unknown agent type: %s", session.AgentType)
+		return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("unknown agent type: %s", session.AgentType), log)
 	}
 
 	// 3. Get the latest user message for this turn.
 	messages, err := o.sessionMessages.ListBySession(ctx, session.OrgID, session.ID)
 	if err != nil {
-		o.failRun(ctx, session, fmt.Sprintf("fetch session messages: %s", err))
-		return fmt.Errorf("fetch session messages: %w", err)
+		return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("fetch session messages: %w", err), log)
 	}
 
 	// Scope the latest-user-message lookup to the thread the worker enqueued
@@ -4016,8 +4031,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		latestMsg, err = queuedUserMessageInScope(messages, *opts.QueuedMessageID, opts.ThreadID)
 		if err != nil {
 			log.Warn().Err(err).Int64("queued_message_id", *opts.QueuedMessageID).Msg("continue_session queued message selection failed")
-			o.failRun(ctx, session, fmt.Sprintf("select queued user message: %s", err))
-			return fmt.Errorf("select queued user message: %w", err)
+			return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("select queued user message: %w", err), log)
 		}
 	} else if opts != nil && opts.ThreadID != nil {
 		latestMsg = latestUserMessageInScope(messages, opts.ThreadID)
@@ -4025,8 +4039,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		latestMsg = latestUserMessage(messages)
 	}
 	if latestMsg == nil || (strings.TrimSpace(latestMsg.Content) == "" && len(latestMsg.Attachments) == 0) {
-		o.failRun(ctx, session, "no user message found for continue_session")
-		return fmt.Errorf("no user message found")
+		return o.failContinueSessionError(ctx, session, opts, errors.New("no user message found for continue_session"), log)
 	}
 	threadID := latestMsg.ThreadID
 	scopedMessages := messagesInScope(messages, threadID)
@@ -4086,8 +4099,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	if opts != nil && opts.PRFeedback != nil {
 		if strings.TrimSpace(opts.PRFeedback.StructuredPrompt) == "" {
-			o.failRun(ctx, session, "PR feedback continuation prompt is empty")
-			return errors.New("PR feedback continuation prompt is empty")
+			return o.failContinueSessionError(ctx, session, opts, errors.New("PR feedback continuation prompt is empty"), log)
 		}
 		userMessage = opts.PRFeedback.StructuredPrompt
 	}
@@ -4095,17 +4107,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	var humanInputAnswer *HumanInputAnswer
 	if opts != nil && opts.HumanInputRequestID != nil {
 		if o.humanInputRequests == nil {
-			o.failRun(ctx, session, "human input request store is not configured")
-			return fmt.Errorf("human input request store is not configured")
+			return o.failContinueSessionError(ctx, session, opts, errors.New("human input request store is not configured"), log)
 		}
 		request, err := o.humanInputRequests.GetByID(ctx, session.OrgID, session.ID, *opts.HumanInputRequestID)
 		if err != nil {
-			o.failRun(ctx, session, fmt.Sprintf("fetch human input answer: %s", err))
-			return fmt.Errorf("fetch human input answer: %w", err)
+			return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("fetch human input answer: %w", err), log)
 		}
 		if request.Status != models.HumanInputRequestStatusAnswered && request.Status != models.HumanInputRequestStatusCancelled {
-			o.failRun(ctx, session, fmt.Sprintf("human input request is %s", request.Status))
-			return fmt.Errorf("human input request is %s", request.Status)
+			return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("human input request is %s", request.Status), log)
 		}
 		humanInputAnswer = humanInputAnswerFromRequest(request)
 	}
@@ -4142,8 +4151,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	issueSnapshot, err := o.createIssueSnapshotForTurn(ctx, session, sessionTurnNumber)
 	if err != nil {
-		o.failRun(ctx, session, fmt.Sprintf("resolve issue context: %s", err))
-		return fmt.Errorf("resolve issue context: %w", err)
+		return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("resolve issue context: %w", err), log)
 	}
 	promptIssue, linkedIssues := o.promptSeedForSession(session, latestMsg, issueSnapshot)
 	if promptIssue != nil && promptIssue.ID != uuid.Nil {
@@ -4856,8 +4864,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			if errors.Is(err, ErrThreadRuntimeAlreadyActive) {
 				return fmt.Errorf("start thread runtime: %w", err)
 			}
-			o.failRun(ctx, session, fmt.Sprintf("start thread runtime: %s", err))
-			return fmt.Errorf("start thread runtime: %w", err)
+			return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("start thread runtime: %w", err), log)
 		}
 		if threadRuntimeCtl != nil {
 			stopHeartbeat := threadRuntimeCtl.StartHeartbeat(ctx, 0, func() { cancel(ErrWorkerDrainCause) })
@@ -4927,8 +4934,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if !reusedExisting {
 			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
 			if err := PrepareSandboxRepository(ctx, o.provider, sandbox, sandboxCfg.WorkDir, log); err != nil {
-				o.failRun(ctx, session, fmt.Sprintf("prepare repository: %s", err))
-				return fmt.Errorf("prepare repository: %w", err)
+				return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("prepare repository: %w", err), log)
 			}
 		}
 
@@ -4978,14 +4984,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if threadScopedExecution && !hasThreadAgentSessionID {
 			prompt, err = adapter.PreparePrompt(ctx, buildSnapshotContinueInput())
 			if err != nil {
-				o.failRun(ctx, session, fmt.Sprintf("prepare prompt for thread: %s", err))
-				return fmt.Errorf("prepare prompt for thread: %w", err)
+				return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("prepare prompt for thread: %w", err), log)
 			}
 		} else if missingResumeID {
 			basePrompt, err := adapter.PreparePrompt(ctx, buildSnapshotContinueInput())
 			if err != nil {
-				o.failRun(ctx, session, fmt.Sprintf("prepare prompt for resume fallback: %s", err))
-				return fmt.Errorf("prepare prompt for resume fallback: %w", err)
+				return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("prepare prompt for resume fallback: %w", err), log)
 			}
 			// Override UserPrompt with conversation history so the agent has
 			// prior context when running a fresh exec. The snapshot already
@@ -5056,14 +5060,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				return err
 			}
 			if !isRunFailureRecorded(err) {
-				o.failRun(ctx, session, fmt.Sprintf("setup fresh sandbox: %s", err))
+				return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("setup fresh sandbox: %w", err), log)
 			}
 			return fmt.Errorf("setup fresh sandbox: %w", err)
 		}
 		authBillingMode = authMode
 		if err := PrepareSandboxRepository(ctx, o.provider, sandbox, sandboxCfg.WorkDir, log); err != nil {
-			o.failRun(ctx, session, fmt.Sprintf("prepare repository: %s", err))
-			return fmt.Errorf("prepare repository: %w", err)
+			return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("prepare repository: %w", err), log)
 		}
 
 		// Build a full prompt via PreparePrompt so the agent gets the system
@@ -5107,8 +5110,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 		basePrompt, err := adapter.PreparePrompt(ctx, input)
 		if err != nil {
-			o.failRun(ctx, session, fmt.Sprintf("prepare prompt for resume: %s", err))
-			return fmt.Errorf("prepare prompt for resume: %w", err)
+			return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("prepare prompt for resume: %w", err), log)
 		}
 
 		// Override UserPrompt with resume context (conversation history + diff).
@@ -5161,8 +5163,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			trigger,
 		)
 		if err != nil {
-			o.failRun(ctx, session, fmt.Sprintf("start activity phase for resume: %s", err))
-			return fmt.Errorf("start activity phase for resume: %w", err)
+			return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("start activity phase for resume: %w", err), log)
 		}
 		if activityExecution != nil {
 			o.activeActivityPhases.Store(*threadID, activityExecution)
@@ -5285,11 +5286,28 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			elapsed := time.Since(turnStartedAt).Round(time.Second)
+			runResult := &models.SessionResult{Error: strPtr(err.Error())}
+			if result != nil {
+				runResult = o.buildRunResult(ctx, session, sandbox, result)
+			}
+			if o.failCodeReviewThreadTurn(ctx, session, threadID, runResult, err.Error(), activityExecution, log) {
+				return fmt.Errorf("%w after %s: %w", ErrCodeReviewThreadFailed, elapsed, err)
+			}
 			o.failTimedOutSession(session, elapsed, messageTurnNumber, err, log, activityExecution)
 			return fmt.Errorf("%w on turn %d after %s: %w", ErrSessionTimedOut, messageTurnNumber, elapsed, err)
 		}
+		if isRunFailureRecorded(err) && isCodeReviewThreadTurn(session, threadID) {
+			return fmt.Errorf("%w: %w", ErrCodeReviewThreadFailed, err)
+		}
 		if !isRunFailureRecorded(err) {
-			o.failRunWithResultAndActivityPhase(ctx, session, &models.SessionResult{Error: strPtr(err.Error())}, err.Error(), activityExecution)
+			runResult := &models.SessionResult{Error: strPtr(err.Error())}
+			if result != nil {
+				runResult = o.buildRunResult(ctx, session, sandbox, result)
+			}
+			if o.failCodeReviewThreadTurn(ctx, session, threadID, runResult, err.Error(), activityExecution, log) {
+				return fmt.Errorf("%w: %w", ErrCodeReviewThreadFailed, err)
+			}
+			o.failRunWithResultAndActivityPhase(ctx, session, runResult, err.Error(), activityExecution)
 		} else {
 			completeActivityPhaseDetached(activityExecution, models.ActivityPhaseStatusFailed, models.ActivityPhaseBoundaryError, log)
 		}
@@ -5337,6 +5355,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		agentErr := errors.New(strings.TrimSpace(result.Error))
 		err = agentErr
 		runResult := o.buildRunResult(ctx, session, sandbox, result)
+		if o.failCodeReviewThreadTurn(ctx, session, threadID, runResult, agentErr.Error(), activityExecution, log) {
+			return fmt.Errorf("%w: %w", ErrCodeReviewThreadFailed, agentErr)
+		}
 		o.failRunWithResultAndActivityPhase(ctx, session, runResult, agentErr.Error(), activityExecution)
 		o.failNonPrimaryThreadWithResult(ctx, session, threadID, runResult, log)
 		return fmt.Errorf("execute agent on continue: %w", agentErr)
@@ -5346,6 +5367,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if err := o.createAssistantMessage(ctx, session.ID, session.OrgID, writeCtx, result); err != nil {
 		if activityExecution != nil {
 			err = fmt.Errorf("persist final assistant response: %w", err)
+			if o.failCodeReviewThreadTurn(ctx, session, threadID, &models.SessionResult{Error: strPtr(err.Error())}, err.Error(), activityExecution, log) {
+				return fmt.Errorf("%w: %w", ErrCodeReviewThreadFailed, err)
+			}
 			o.failRunWithResultAndActivityPhase(ctx, session, &models.SessionResult{Error: strPtr(err.Error())}, err.Error(), activityExecution)
 			return err
 		}
@@ -5462,6 +5486,9 @@ func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, 
 		if threadID == nil && m.ThreadID != nil {
 			continue
 		}
+		if o.queuedMessageBelongsToTerminalCodeReviewThread(ctx, session, &m, log) {
+			continue
+		}
 		if m.ThreadID != nil && o.threadInbox != nil {
 			acked, ackErr := o.threadInbox.IsMessageAcked(ctx, session.OrgID, *m.ThreadID, m.ID)
 			if ackErr != nil {
@@ -5519,6 +5546,37 @@ func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, 
 		if err := o.sessionThreads.ClearPendingMessages(ctx, session.OrgID, *queuedThreadID); err != nil {
 			log.Warn().Err(err).Str("thread_id", queuedThreadID.String()).Msg("failed to clear pending_message_count after drain")
 		}
+	}
+}
+
+func (o *Orchestrator) queuedMessageBelongsToTerminalCodeReviewThread(ctx context.Context, session *models.Session, message *models.SessionMessage, log zerolog.Logger) bool {
+	if session == nil || session.Origin != models.SessionOriginCodeReview || message == nil || message.ThreadID == nil || *message.ThreadID == uuid.Nil || o.sessionThreads == nil {
+		return false
+	}
+	thread, err := o.sessionThreads.GetByID(ctx, session.OrgID, *message.ThreadID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false
+	}
+	if err != nil {
+		log.Warn().Err(err).
+			Str("thread_id", message.ThreadID.String()).
+			Int64("message_id", message.ID).
+			Msg("failed to load code review thread during queue drain")
+		return false
+	}
+	if thread.ExecutionMode != models.ThreadExecutionModeReview || thread.FilesystemMode != models.ThreadFilesystemModeReadOnly {
+		return false
+	}
+	switch thread.Status {
+	case models.ThreadStatusCompleted, models.ThreadStatusFailed, models.ThreadStatusCancelled:
+		log.Info().
+			Str("thread_id", thread.ID.String()).
+			Int64("message_id", message.ID).
+			Str("thread_status", string(thread.Status)).
+			Msg("skipping queued message for terminal code review thread")
+		return true
+	default:
+		return false
 	}
 }
 
@@ -6609,6 +6667,70 @@ func (o *Orchestrator) failRunWithResultAndPhaseTerminal(ctx context.Context, ru
 	o.enqueueLinearMilestone(ctx, run, "failed")
 }
 
+func isCodeReviewThreadTurn(run *models.Session, threadID *uuid.UUID) bool {
+	return run != nil && run.Origin == models.SessionOriginCodeReview && threadID != nil && *threadID != uuid.Nil
+}
+
+func (o *Orchestrator) failContinueSessionError(ctx context.Context, run *models.Session, opts *ContinueSessionOptions, cause error, log zerolog.Logger) error {
+	if cause == nil {
+		return nil
+	}
+	var threadID *uuid.UUID
+	if opts != nil {
+		threadID = opts.ThreadID
+	}
+	if o.failCodeReviewThreadTurn(ctx, run, threadID, &models.SessionResult{Error: strPtr(cause.Error())}, cause.Error(), nil, log) {
+		return fmt.Errorf("%w: %w", ErrCodeReviewThreadFailed, cause)
+	}
+	o.failRun(ctx, run, cause.Error())
+	return cause
+}
+
+// failCodeReviewThreadTurn records a terminal result for one reviewer or
+// synthesis thread while returning the shared parent to an orchestration-ready
+// state. The durable run_code_review controller, not an individual agent turn,
+// decides whether the overall review is completed, degraded, or failed.
+func (o *Orchestrator) failCodeReviewThreadTurn(ctx context.Context, run *models.Session, threadID *uuid.UUID, result *models.SessionResult, errMsg string, activityExecution *activityPhaseExecution, log zerolog.Logger) bool {
+	if !isCodeReviewThreadTurn(run, threadID) {
+		return false
+	}
+	if result == nil {
+		result = &models.SessionResult{}
+	}
+	if result.Error == nil || strings.TrimSpace(*result.Error) == "" {
+		result.Error = strPtr(errMsg)
+	}
+	failureCtx, cancelFailure := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancelFailure()
+	if o.sessionThreads != nil {
+		if err := o.sessionThreads.UpdateResult(failureCtx, run.OrgID, *threadID, models.ThreadStatusFailed, result); err != nil {
+			log.Error().Err(err).
+				Str("session_id", run.ID.String()).
+				Str("thread_id", threadID.String()).
+				Msg("failed to persist code review thread failure")
+		}
+	}
+	completeActivityPhaseDetached(activityExecution, models.ActivityPhaseStatusFailed, models.ActivityPhaseBoundaryError, log)
+
+	current, err := o.sessions.GetByID(failureCtx, run.OrgID, run.ID)
+	if err != nil {
+		log.Error().Err(err).
+			Str("session_id", run.ID.String()).
+			Msg("failed to refresh code review parent after thread failure")
+		return true
+	}
+	if current.Status == models.SessionStatusCompleted || current.Status == models.SessionStatusCancelled || current.Status == models.SessionStatusSkipped {
+		return true
+	}
+	if err := o.sessions.UpdateStatus(failureCtx, run.OrgID, run.ID, models.SessionStatusIdle); err != nil {
+		log.Error().Err(err).
+			Str("session_id", run.ID.String()).
+			Str("thread_id", threadID.String()).
+			Msg("failed to release code review parent after thread failure")
+	}
+	return true
+}
+
 func (o *Orchestrator) failNonPrimaryThreadWithResult(ctx context.Context, run *models.Session, threadID *uuid.UUID, result *models.SessionResult, log zerolog.Logger) {
 	if o.sessionThreads == nil || run == nil || threadID == nil || *threadID == uuid.Nil {
 		return
@@ -6686,6 +6808,9 @@ func (o *Orchestrator) failRunWithCategoryForThreadAndActivityPhase(ctx context.
 		FailureCategory:     strPtr(category),
 		FailureNextSteps:    append([]string(nil), nextSteps...),
 		FailureRetryAdvised: true,
+	}
+	if o.failCodeReviewThreadTurn(ctx, run, threadID, result, errMsg, activityExecution, o.logger) {
+		return
 	}
 	// Persist the exact executing thread first. failRunWithResult then persists
 	// the primary thread before atomically writing and publishing the fully
@@ -8929,6 +9054,19 @@ func parseCredentialFailureSignal(result *AgentResult, now time.Time) Credential
 	}
 	msg := strings.TrimSpace(result.Error)
 	lower := strings.ToLower(msg)
+	if result.CredentialFailure != nil {
+		signal := *result.CredentialFailure
+		if msg != "" {
+			signal.Message = msg
+		}
+		if signal.RateLimited && signal.RateLimitedUntil.IsZero() {
+			signal.RateLimitedUntil = parseCredentialRateLimitUntil(lower, now)
+			if signal.RateLimitedUntil.IsZero() {
+				signal.RateLimitedUntil = now.Add(defaultCredentialRateLimitTTL)
+			}
+		}
+		return signal
+	}
 	switch {
 	case isAuthRejectedError(lower):
 		return CredentialFailureSignal{AuthRejected: true, Message: msg}
@@ -8980,7 +9118,8 @@ func isRateLimitedError(errMsg string) bool {
 		strings.Contains(errMsg, "429") ||
 		strings.Contains(errMsg, "too many requests") ||
 		strings.Contains(errMsg, "quota exceeded") ||
-		strings.Contains(errMsg, "usage limit")
+		strings.Contains(errMsg, "usage limit") ||
+		strings.Contains(errMsg, "weekly limit")
 }
 
 // isAuthRejectedError detects 401-class signals indicating the credential is
@@ -9023,6 +9162,7 @@ var (
 	tryAgainOnDateRe = regexp.MustCompile(`try again at ([a-z]{3,9}) ([0-9]{1,2})(?:st|nd|rd|th)?,?\s+([0-9]{4})\s+([0-9]{1,2})(?::([0-9]{2}))?\s*(am|pm)?`)
 	tryAgainAtRe     = regexp.MustCompile(`try again at ([0-9]{1,2})(?::([0-9]{2}))?\s*(am|pm)?`)
 	resetInSecondsRe = regexp.MustCompile(`(?:reset|retry)[^0-9]{0,20}in ([0-9]+) seconds?`)
+	claudeResetAtRe  = regexp.MustCompile(`resets?\s+([a-z]{3,9})\s+([0-9]{1,2}),?\s+([0-9]{1,2})(?::([0-9]{2}))?\s*(am|pm)(?:\s*\(([^)]+)\))?`)
 )
 
 func parseCredentialRateLimitUntil(msg string, now time.Time) time.Time {
@@ -9034,6 +9174,38 @@ func parseCredentialRateLimitUntil(msg string, now time.Time) time.Time {
 	if match := resetInSecondsRe.FindStringSubmatch(msg); len(match) == 2 {
 		if seconds, err := strconv.Atoi(match[1]); err == nil && seconds > 0 {
 			return now.Add(time.Duration(seconds) * time.Second)
+		}
+	}
+	if match := claudeResetAtRe.FindStringSubmatch(msg); len(match) == 7 {
+		location := now.Location()
+		if strings.EqualFold(strings.TrimSpace(match[6]), "utc") {
+			location = time.UTC
+		}
+		monthName := strings.ToUpper(match[1][:1]) + match[1][1:]
+		monthLayout := "January"
+		if len(monthName) == 3 {
+			monthLayout = "Jan"
+		}
+		parsedMonth, monthErr := time.Parse(monthLayout, monthName)
+		day, dayErr := strconv.Atoi(match[2])
+		hour, hourErr := strconv.Atoi(match[3])
+		minute := 0
+		var minuteErr error
+		if match[4] != "" {
+			minute, minuteErr = strconv.Atoi(match[4])
+		}
+		if monthErr == nil && dayErr == nil && hourErr == nil && minuteErr == nil && hour >= 1 && hour <= 12 && minute >= 0 && minute <= 59 {
+			if hour == 12 {
+				hour = 0
+			}
+			if strings.EqualFold(match[5], "pm") {
+				hour += 12
+			}
+			until := time.Date(now.In(location).Year(), parsedMonth.Month(), day, hour, minute, 0, 0, location)
+			if !until.After(now.In(location)) {
+				until = until.AddDate(1, 0, 0)
+			}
+			return until
 		}
 	}
 	if match := tryAgainOnDateRe.FindStringSubmatch(msg); len(match) == 7 {

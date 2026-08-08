@@ -581,6 +581,14 @@ func parseClaudeStreamLine(line []byte, result *agent.AgentResult, logCh chan<- 
 			setDirectUSDCost(&result.TokenUsage, *event.CostUSD, "claude_result_cost_usd")
 		}
 
+	case "rate_limit_event":
+		captureClaudeRateLimitEvent(event.RateLimitInfo, result)
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "debug",
+			Message:   string(line),
+		}
+
 	default:
 		logCh <- agent.LogEntry{
 			Timestamp: time.Now(),
@@ -753,6 +761,35 @@ type claudeStreamEvent struct {
 	IsError         bool                   `json:"is_error,omitempty"`
 	StopReason      string                 `json:"stop_reason,omitempty"`
 	DeferredToolUse *claudeDeferredToolUse `json:"deferred_tool_use,omitempty"`
+	RateLimitInfo   *claudeRateLimitInfo   `json:"rate_limit_info,omitempty"`
+}
+
+type claudeRateLimitInfo struct {
+	Status                string `json:"status,omitempty"`
+	ResetsAt              int64  `json:"resetsAt,omitempty"`
+	RateLimitType         string `json:"rateLimitType,omitempty"`
+	OverageStatus         string `json:"overageStatus,omitempty"`
+	OverageDisabledReason string `json:"overageDisabledReason,omitempty"`
+	IsUsingOverage        bool   `json:"isUsingOverage,omitempty"`
+}
+
+func captureClaudeRateLimitEvent(info *claudeRateLimitInfo, result *agent.AgentResult) {
+	if info == nil || result == nil || !strings.EqualFold(strings.TrimSpace(info.Status), "rejected") {
+		return
+	}
+	until := time.Time{}
+	if info.ResetsAt > 0 {
+		until = time.Unix(info.ResetsAt, 0).UTC()
+	}
+	message := "Claude Code rate limit rejected the request"
+	if rateLimitType := strings.TrimSpace(info.RateLimitType); rateLimitType != "" {
+		message += " (" + rateLimitType + ")"
+	}
+	result.CredentialFailure = &agent.CredentialFailureSignal{
+		RateLimited:      true,
+		RateLimitedUntil: until,
+		Message:          message,
+	}
 }
 
 // claudeMessageBody is the inner Anthropic Messages API payload carried by

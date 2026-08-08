@@ -1857,9 +1857,10 @@ func TestRunAgent_RateLimitRetriesWithFallbackCredential(t *testing.T) {
 
 	firstCredID := uuid.New()
 	secondCredID := uuid.New()
+	resetAt := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC)
 	d := defaultDeps()
 	d.adapter = &mockAgentAdapter{name: models.AgentTypeAmp}
-	d.codingCreds = &mockCodingCredentialProvider{
+	codingCreds := &mockCodingCredentialProvider{
 		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
 			models.ProviderAmp: {
 				{
@@ -1883,13 +1884,21 @@ func TestRunAgent_RateLimitRetriesWithFallbackCredential(t *testing.T) {
 			},
 		},
 	}
+	d.codingCreds = codingCreds
 	d.issues.issue = issue
 
 	var seenKeys []string
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		seenKeys = append(seenKeys, sandbox.Env["AMP_API_KEY"])
 		if len(seenKeys) == 1 {
-			return &agent.AgentResult{ExitCode: 1, Error: "rate limit exceeded retry-after=60"}, errors.New("rate limit exceeded")
+			return &agent.AgentResult{
+				ExitCode: 1,
+				Error:    "You've hit your weekly limit · resets Aug 9, 12pm (UTC)",
+				CredentialFailure: &agent.CredentialFailureSignal{
+					RateLimited:      true,
+					RateLimitedUntil: resetAt,
+				},
+			}, errors.New("Claude Code weekly limit reached")
 		}
 		return &agent.AgentResult{
 			Diff:     "--- a/main.go\n+++ b/main.go",
@@ -1901,6 +1910,8 @@ func TestRunAgent_RateLimitRetriesWithFallbackCredential(t *testing.T) {
 	err := buildOrchestrator(d).RunAgent(context.Background(), run)
 	require.NoError(t, err, "RunAgent should retry with a fallback credential after a rate-limit result")
 	require.Equal(t, []string{"amp-first", "amp-fallback"}, seenKeys, "RunAgent should refresh agent credentials before retrying")
+	require.Equal(t, resetAt, codingCreds.rateLimitedIDs[firstCredID].Until, "credential shedding should persist the provider's exact structured reset timestamp")
+	require.Contains(t, codingCreds.rateLimitedIDs[firstCredID].Message, "weekly limit", "credential shedding should retain the provider diagnostic")
 	require.Len(t, d.sessions.getResultUpdates(), 1, "RunAgent should persist one successful result after fallback retry")
 }
 
@@ -6941,6 +6952,159 @@ func TestContinueSession_ResultErrorMarksActiveThreadFailed(t *testing.T) {
 	require.NotContains(t, d.sessionThreads.statusesForThread(activeThreadID), models.ThreadStatusCompleted, "continue_session should not mark an errored secondary thread completed")
 	require.Empty(t, d.sessions.getTurnUpdates(), "continue_session should not persist a successful turn for an adapter result error")
 	require.Len(t, d.messages.getMessages(), 1, "continue_session should not append an assistant success message for an adapter result error")
+}
+
+func TestContinueSession_CodeReviewResultErrorFailsOnlyReviewerThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	primaryThreadID := uuid.New()
+	reviewerThreadID := uuid.New()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginCodeReview
+	session.InteractionMode = models.SessionInteractionModeSingleRun
+	session.ValidationPolicy = models.SessionValidationPolicySkip
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 1
+	session.SnapshotKey = strPtr("snapshots/test/code-review-session.tar")
+	session.PrimaryThreadID = &primaryThreadID
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.sessionThreads = &mockSessionThreadStore{getByIDResult: &models.SessionThread{
+		ID:             reviewerThreadID,
+		OrgID:          orgID,
+		SessionID:      session.ID,
+		Status:         models.ThreadStatusRunning,
+		ExecutionMode:  models.ThreadExecutionModeReview,
+		FilesystemMode: models.ThreadFilesystemModeReadOnly,
+	}}
+	d.sessions.getByIDFn = func(gotOrgID, gotSessionID uuid.UUID) (models.Session, error) {
+		require.Equal(t, orgID, gotOrgID, "code-review parent refresh should remain tenant scoped")
+		require.Equal(t, session.ID, gotSessionID, "code-review parent refresh should target the active review")
+		current := *session
+		current.Status = models.SessionStatusRunning
+		return current, nil
+	}
+	d.messages.messages = []models.SessionMessage{{
+		ID:         1,
+		SessionID:  session.ID,
+		OrgID:      orgID,
+		ThreadID:   &reviewerThreadID,
+		TurnNumber: 1,
+		Role:       models.MessageRoleUser,
+		Content:    "Review the pull request.",
+	}}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.adapter.executeFn = func(context.Context, *agent.Sandbox, *agent.AgentPrompt, chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Summary:  "You've hit your weekly limit · resets Aug 9, 12pm (UTC)",
+			Error:    "claude CLI exited with code 1: You've hit your weekly limit · resets Aug 9, 12pm (UTC)",
+			ExitCode: 1,
+		}, nil
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-code-review-snapshot"),
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{ThreadID: &reviewerThreadID})
+
+	require.ErrorIs(t, err, agent.ErrCodeReviewThreadFailed, "a failed reviewer should return the terminal per-thread sentinel")
+	require.Empty(t, d.sessions.getResultUpdates(), "a reviewer failure must not publish a terminal result on the shared code-review session")
+	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "the shared parent should return to idle so synthesis can be dispatched")
+	require.Contains(t, d.sessionThreads.statusesForThread(reviewerThreadID), models.ThreadStatusFailed, "the failed reviewer thread should retain its terminal result")
+	require.NotContains(t, d.sessionThreads.statusesForThread(primaryThreadID), models.ThreadStatusFailed, "a reviewer failure must not poison the primary synthesis thread")
+	require.Empty(t, d.sessions.getTurnUpdates(), "a failed reviewer must not be persisted as a successful shared-session turn")
+}
+
+func TestContinueSession_CodeReviewAuthFailureIsTerminalOnlyForReviewerThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	primaryThreadID := uuid.New()
+	reviewerThreadID := uuid.New()
+	issue := testIssue(orgID)
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginCodeReview
+	session.Status = models.SessionStatusIdle
+	session.SnapshotKey = strPtr("snapshots/test/code-review-auth-session.tar")
+	session.PrimaryThreadID = &primaryThreadID
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.creds = &mockCredentialProvider{}
+	d.codingCreds = &mockCodingCredentialProvider{resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{}}
+	d.sessionThreads = &mockSessionThreadStore{getByIDResult: &models.SessionThread{
+		ID:             reviewerThreadID,
+		OrgID:          orgID,
+		SessionID:      session.ID,
+		Status:         models.ThreadStatusRunning,
+		ExecutionMode:  models.ThreadExecutionModeReview,
+		FilesystemMode: models.ThreadFilesystemModeReadOnly,
+	}}
+	d.sessions.getByIDFn = func(uuid.UUID, uuid.UUID) (models.Session, error) {
+		current := *session
+		current.Status = models.SessionStatusRunning
+		return current, nil
+	}
+	d.messages.messages = []models.SessionMessage{{
+		ID:         1,
+		SessionID:  session.ID,
+		OrgID:      orgID,
+		ThreadID:   &reviewerThreadID,
+		TurnNumber: 1,
+		Role:       models.MessageRoleUser,
+		Content:    "Review the pull request.",
+	}}
+	d.provider.RestoreFn = func(_ context.Context, _ *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-code-review-auth-snapshot"),
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
+		AgentType: models.AgentTypeClaudeCode,
+		ThreadID:  &reviewerThreadID,
+	})
+
+	require.ErrorIs(t, err, agent.ErrCodeReviewThreadFailed, "a categorized reviewer auth failure should use the no-retry thread sentinel")
+	require.Contains(t, err.Error(), "no credentials for claude code agent", "the terminal reviewer error should preserve its actionable auth cause")
+	require.Empty(t, d.sessions.getResultUpdates(), "a reviewer auth failure must not terminalize the shared code-review parent")
+	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "the parent should remain available to the review controller")
+	require.Contains(t, d.sessionThreads.statusesForThread(reviewerThreadID), models.ThreadStatusFailed, "the reviewer thread should persist the categorized auth failure")
+	require.NotContains(t, d.sessionThreads.statusesForThread(primaryThreadID), models.ThreadStatusFailed, "the primary synthesis thread should remain available")
+}
+
+func TestContinueSession_CodeReviewPreExecutionFailureDoesNotPoisonParent(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	reviewerThreadID := uuid.New()
+	session := testRun(orgID, testIssue(orgID).ID)
+	session.Origin = models.SessionOriginCodeReview
+	session.AgentType = models.AgentTypeOpenCode
+	session.Status = models.SessionStatusRunning
+
+	d := defaultDeps()
+	d.sessionThreads = &mockSessionThreadStore{}
+	d.sessions.getByIDFn = func(uuid.UUID, uuid.UUID) (models.Session, error) {
+		return *session, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{ThreadID: &reviewerThreadID})
+
+	require.ErrorIs(t, err, agent.ErrCodeReviewThreadFailed, "pre-execution reviewer failures should use the same terminal thread boundary as provider failures")
+	require.Contains(t, err.Error(), "unknown agent type", "the thread failure should retain its original setup cause")
+	require.Empty(t, d.sessions.getResultUpdates(), "pre-execution failures must not publish a terminal parent result")
+	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "the controller should be able to continue after a pre-execution reviewer failure")
+	require.Contains(t, d.sessionThreads.statusesForThread(reviewerThreadID), models.ThreadStatusFailed, "the exact reviewer thread should retain the setup failure")
 }
 
 func TestContinueSession_ClaudeAuthFailureMarksActiveReviewerThread(t *testing.T) {

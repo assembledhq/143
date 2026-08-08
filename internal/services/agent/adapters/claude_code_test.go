@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -192,6 +193,21 @@ func TestClaudeCodeAdapter_Execute(t *testing.T) {
 				require.Contains(t, result.Error, "claude CLI exited with code 1", "Claude execution should retain the generic exit context")
 				require.Contains(t, result.Error, "usage limit reached", "Claude execution should retain the provider rate-limit detail for fallback classification")
 				require.Contains(t, result.Error, "Claude diagnostic warning", "Claude execution should preserve stderr alongside the parsed provider error")
+			},
+		},
+		{
+			name: "structured weekly rate limit preserves exact reset",
+			claudeOutput: `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1786276800,"rateLimitType":"seven_day","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false}}
+{"type":"result","subtype":"error_during_execution","is_error":true,"result":"You've hit your weekly limit · resets Aug 9, 12pm (UTC)","session_id":"sess-weekly-limit"}`,
+			claudeExitCode: 1,
+			diffOutput:     "",
+			diffExitCode:   0,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.NotNil(t, result.CredentialFailure, "Claude's structured rate-limit event should survive adapter parsing")
+				require.True(t, result.CredentialFailure.RateLimited, "the rejected structured event should classify as rate limited")
+				require.Equal(t, time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC), result.CredentialFailure.RateLimitedUntil, "the structured Unix reset should be preserved exactly")
+				require.Contains(t, result.Error, "weekly limit", "the human-readable Claude error should remain available for diagnostics")
 			},
 		},
 		{

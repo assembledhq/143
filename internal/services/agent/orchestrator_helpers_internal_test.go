@@ -1194,6 +1194,7 @@ func TestIsRateLimitedError(t *testing.T) {
 		{"too many requests phrase", "Error: too many requests; retry later", true},
 		{"quota exceeded phrase", "quota exceeded for this account", true},
 		{"codex usage limit phrase", "you've hit your usage limit. try again at 8:50 am.", true},
+		{"claude weekly limit phrase", "you've hit your weekly limit · resets aug 9, 12pm (utc)", true},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -1262,6 +1263,11 @@ func TestParseCredentialFailureSignalRateLimitMetadata(t *testing.T) {
 			name:      "codex try again full date",
 			errorText: "You've hit your usage limit. try again at Aug 8th, 2026 4:11 AM.",
 			wantUntil: time.Date(2026, time.August, 8, 4, 11, 0, 0, now.Location()),
+		},
+		{
+			name:      "claude weekly reset in UTC",
+			errorText: "You've hit your weekly limit · resets Aug 9, 12pm (UTC)",
+			wantUntil: time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC),
 		},
 	}
 	for _, tc := range cases {

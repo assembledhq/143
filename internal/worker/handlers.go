@@ -9901,6 +9901,14 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Msg("code review thread was cancelled while waiting for the shared workspace")
 				return &FatalError{Err: err}
 			}
+			if errors.Is(err, agent.ErrCodeReviewThreadFailed) {
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Str("thread_id", input.ThreadID).
+					Err(err).
+					Msg("code review agent thread failed; leaving parent lifecycle to review controller")
+				return &FatalError{Err: err}
+			}
 			if errors.Is(err, agent.ErrSandboxRaceLoser) {
 				// A duplicate continue_session job lost the AcquireTurnHold
 				// race to the winner. Dead-letter immediately without

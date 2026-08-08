@@ -301,11 +301,17 @@ type AgentPrompt struct {
 
 // AgentResult is the outcome of an agent execution.
 type AgentResult struct {
-	Diff               string
-	Summary            string
-	TokenUsage         TokenUsage
-	ExitCode           int
-	Error              string
+	Diff       string
+	Summary    string
+	TokenUsage TokenUsage
+	ExitCode   int
+	Error      string
+
+	// CredentialFailure preserves structured provider failure metadata that
+	// would otherwise be flattened into Error by the CLI adapter. Runtime
+	// credential shedding prefers this signal so exact reset timestamps survive
+	// provider-specific human-readable wording changes.
+	CredentialFailure  *CredentialFailureSignal
 	AgentSessionID     string // agent's internal session ID, used for --resume on subsequent turns
 	RequiresHumanInput bool
 }
