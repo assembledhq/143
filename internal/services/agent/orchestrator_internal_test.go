@@ -159,16 +159,18 @@ func TestThreadRuntimeAlreadyActiveDoesNotFailSessionBeforeRetry(t *testing.T) {
 
 	body := string(src)
 	for _, tt := range []struct {
-		name        string
-		start       string
-		nextStart   string
-		failureCall string
+		name              string
+		start             string
+		nextStart         string
+		failureCall       string
+		expectFailureCall bool
 	}{
 		{
-			name:        "RunAgent",
-			start:       "threadRuntimeCtl, err = o.startThreadRuntimeControl(ctx, run, *primaryThreadID, sandbox",
-			nextStart:   "if threadRuntimeCtl != nil {",
-			failureCall: "o.failRun",
+			name:              "RunAgent",
+			start:             "threadRuntimeCtl, err = o.startThreadRuntimeControl(ctx, run, *primaryThreadID, sandbox",
+			nextStart:         "if threadRuntimeCtl != nil {",
+			failureCall:       "o.failRun",
+			expectFailureCall: true,
 		},
 		{
 			name:        "ContinueSession",
@@ -190,8 +192,13 @@ func TestThreadRuntimeAlreadyActiveDoesNotFailSessionBeforeRetry(t *testing.T) {
 			activeRuntimeCheck := strings.Index(block, "errors.Is(err, ErrThreadRuntimeAlreadyActive)")
 			failRun := strings.Index(block, tt.failureCall)
 			require.NotEqual(t, -1, activeRuntimeCheck, "active runtime conflicts should be recognized before generic failure cleanup in "+tt.name)
-			require.NotEqual(t, -1, failRun, "non-retryable thread runtime startup errors should still use generic failure cleanup in "+tt.name)
-			require.Less(t, activeRuntimeCheck, failRun, "active runtime conflicts should return for worker retry before marking the session failed in "+tt.name)
+			if tt.expectFailureCall {
+				require.NotEqual(t, -1, failRun, "non-retryable thread runtime startup errors should still use generic failure cleanup in "+tt.name)
+				require.Less(t, activeRuntimeCheck, failRun, "active runtime conflicts should return for worker retry before marking the session failed in "+tt.name)
+				return
+			}
+			require.Equal(t, -1, failRun, "continue-session runtime store failures should remain retryable instead of terminalizing the thread")
+			require.Contains(t, block, `return fmt.Errorf("start thread runtime: %w", err)`, "continue-session runtime failures should propagate to the worker retry path")
 		})
 	}
 }

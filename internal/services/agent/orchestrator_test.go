@@ -972,6 +972,7 @@ type mockSessionMessageStore struct {
 	mu        sync.Mutex
 	messages  []models.SessionMessage
 	createErr error
+	listErr   error
 }
 
 func (m *mockSessionMessageStore) Create(ctx context.Context, msg *models.SessionMessage) error {
@@ -993,6 +994,9 @@ func (m *mockSessionMessageStore) Create(ctx context.Context, msg *models.Sessio
 func (m *mockSessionMessageStore) ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionMessage, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
 	var out []models.SessionMessage
 	for _, msg := range m.messages {
 		if msg.OrgID == orgID && msg.SessionID == sessionID {
@@ -1415,6 +1419,7 @@ type mockSessionThreadStore struct {
 	mu                sync.Mutex
 	eventHook         func(string)
 	getByIDResult     *models.SessionThread
+	updateResultErr   error
 	updateStatusCalls []struct {
 		threadID uuid.UUID
 		status   models.ThreadStatus
@@ -1462,6 +1467,9 @@ func (m *mockSessionThreadStore) CompleteTurn(_ context.Context, _, threadID uui
 func (m *mockSessionThreadStore) UpdateResult(_ context.Context, _, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.updateResultErr != nil {
+		return m.updateResultErr
+	}
 	if m.eventHook != nil {
 		m.eventHook("thread_result:" + threadID.String() + ":" + string(status))
 	}
@@ -7016,7 +7024,7 @@ func TestContinueSession_CodeReviewResultErrorFailsOnlyReviewerThread(t *testing
 
 	require.ErrorIs(t, err, agent.ErrCodeReviewThreadFailed, "a failed reviewer should return the terminal per-thread sentinel")
 	require.Empty(t, d.sessions.getResultUpdates(), "a reviewer failure must not publish a terminal result on the shared code-review session")
-	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "the shared parent should return to idle so synthesis can be dispatched")
+	require.NotContains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "reviewer failure handling should leave parent lifecycle transitions to the review controller")
 	require.Contains(t, d.sessionThreads.statusesForThread(reviewerThreadID), models.ThreadStatusFailed, "the failed reviewer thread should retain its terminal result")
 	require.NotContains(t, d.sessionThreads.statusesForThread(primaryThreadID), models.ThreadStatusFailed, "a reviewer failure must not poison the primary synthesis thread")
 	require.Empty(t, d.sessions.getTurnUpdates(), "a failed reviewer must not be persisted as a successful shared-session turn")
@@ -7077,7 +7085,7 @@ func TestContinueSession_CodeReviewAuthFailureIsTerminalOnlyForReviewerThread(t 
 	require.ErrorIs(t, err, agent.ErrCodeReviewThreadFailed, "a categorized reviewer auth failure should use the no-retry thread sentinel")
 	require.Contains(t, err.Error(), "no credentials for claude code agent", "the terminal reviewer error should preserve its actionable auth cause")
 	require.Empty(t, d.sessions.getResultUpdates(), "a reviewer auth failure must not terminalize the shared code-review parent")
-	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "the parent should remain available to the review controller")
+	require.NotContains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "reviewer auth failure handling should not overwrite the controller-owned parent state")
 	require.Contains(t, d.sessionThreads.statusesForThread(reviewerThreadID), models.ThreadStatusFailed, "the reviewer thread should persist the categorized auth failure")
 	require.NotContains(t, d.sessionThreads.statusesForThread(primaryThreadID), models.ThreadStatusFailed, "the primary synthesis thread should remain available")
 }
@@ -7103,8 +7111,111 @@ func TestContinueSession_CodeReviewPreExecutionFailureDoesNotPoisonParent(t *tes
 	require.ErrorIs(t, err, agent.ErrCodeReviewThreadFailed, "pre-execution reviewer failures should use the same terminal thread boundary as provider failures")
 	require.Contains(t, err.Error(), "unknown agent type", "the thread failure should retain its original setup cause")
 	require.Empty(t, d.sessions.getResultUpdates(), "pre-execution failures must not publish a terminal parent result")
-	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "the controller should be able to continue after a pre-execution reviewer failure")
+	require.NotContains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "pre-execution reviewer failure handling should not mutate the controller-owned parent state")
 	require.Contains(t, d.sessionThreads.statusesForThread(reviewerThreadID), models.ThreadStatusFailed, "the exact reviewer thread should retain the setup failure")
+}
+
+func TestContinueSession_CodeReviewPreflightRateLimitFailsReviewerWithoutRetry(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	reviewerThreadID := uuid.New()
+	issue := testIssue(orgID)
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginCodeReview
+	session.Status = models.SessionStatusRunning
+	resetAt := time.Now().Add(48 * time.Hour).UTC()
+	credentialID := uuid.New()
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.codingCreds = &mockCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderAnthropicSubscription: {{
+				ID:               credentialID,
+				OrgID:            orgID,
+				Provider:         models.ProviderAnthropicSubscription,
+				Status:           models.CodingCredentialStatusActive,
+				Config:           models.AnthropicSubscriptionConfig{AccessToken: "rate-limited-subscription"},
+				RateLimitedUntil: &resetAt,
+			}},
+		},
+		rateLimitedIDs: map[uuid.UUID]models.CodingCredentialRateLimit{
+			credentialID: {Until: resetAt, Message: "weekly limit"},
+		},
+	}
+	d.sessionThreads = &mockSessionThreadStore{getByIDResult: &models.SessionThread{
+		ID:             reviewerThreadID,
+		OrgID:          orgID,
+		SessionID:      session.ID,
+		Status:         models.ThreadStatusRunning,
+		ExecutionMode:  models.ThreadExecutionModeReview,
+		FilesystemMode: models.ThreadFilesystemModeReadOnly,
+	}}
+	d.messages.messages = []models.SessionMessage{{
+		ID:         1,
+		SessionID:  session.ID,
+		OrgID:      orgID,
+		ThreadID:   &reviewerThreadID,
+		TurnNumber: 1,
+		Role:       models.MessageRoleUser,
+		Content:    "Review the pull request.",
+	}}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
+		AgentType: models.AgentTypeClaudeCode,
+		ThreadID:  &reviewerThreadID,
+	})
+
+	require.ErrorIs(t, err, agent.ErrCodeReviewThreadFailed, "a persistently rate-limited credential should terminate only its reviewer turn")
+	require.Contains(t, err.Error(), "rate limited until", "the reviewer failure should preserve the credential reset guidance")
+	require.Contains(t, d.sessionThreads.statusesForThread(reviewerThreadID), models.ThreadStatusFailed, "the preflight-blocked reviewer should become terminal immediately")
+	require.NotContains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "preflight rate limiting should not overwrite the shared parent status")
+	require.Empty(t, d.sessions.getResultUpdates(), "preflight rate limiting should not fail the shared review session")
+}
+
+func TestContinueSession_CodeReviewMessageFetchFailureRemainsRetryable(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	reviewerThreadID := uuid.New()
+	session := testRun(orgID, testIssue(orgID).ID)
+	session.Origin = models.SessionOriginCodeReview
+	session.Status = models.SessionStatusRunning
+	fetchErr := errors.New("temporary message database outage")
+
+	d := defaultDeps()
+	d.messages.listErr = fetchErr
+	d.sessionThreads = &mockSessionThreadStore{}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{ThreadID: &reviewerThreadID})
+
+	require.ErrorIs(t, err, fetchErr, "message-store failures should retain their retryable cause")
+	require.NotErrorIs(t, err, agent.ErrCodeReviewThreadFailed, "transient startup failures must not use the terminal reviewer sentinel")
+	require.NotContains(t, d.sessionThreads.statusesForThread(reviewerThreadID), models.ThreadStatusFailed, "a transient dependency outage should not consume reviewer quorum")
+	require.Empty(t, d.sessions.getResultUpdates(), "a transient dependency outage should not terminalize the parent session")
+}
+
+func TestContinueSession_CodeReviewThreadFailureWriteMustBeDurable(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	reviewerThreadID := uuid.New()
+	session := testRun(orgID, testIssue(orgID).ID)
+	session.Origin = models.SessionOriginCodeReview
+	session.AgentType = models.AgentTypeOpenCode
+	session.Status = models.SessionStatusRunning
+	persistErr := errors.New("temporary thread result write failure")
+
+	d := defaultDeps()
+	d.sessionThreads = &mockSessionThreadStore{updateResultErr: persistErr}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{ThreadID: &reviewerThreadID})
+
+	require.ErrorIs(t, err, persistErr, "thread-result persistence failures should be returned for worker retry")
+	require.NotErrorIs(t, err, agent.ErrCodeReviewThreadFailed, "an undurable thread failure must not be dead-lettered as recorded")
+	require.NotContains(t, d.sessionThreads.statusesForThread(reviewerThreadID), models.ThreadStatusFailed, "the test store should expose that no terminal thread write landed")
+	require.Empty(t, d.sessions.getResultUpdates(), "a thread persistence outage must not fall back to failing the shared parent")
 }
 
 func TestContinueSession_ClaudeAuthFailureMarksActiveReviewerThread(t *testing.T) {

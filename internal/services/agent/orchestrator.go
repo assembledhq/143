@@ -692,6 +692,10 @@ type SessionThreadStore interface {
 	ClaimNextQueuedForSession(ctx context.Context, orgID, sessionID uuid.UUID, maxRunning int) (models.SessionThread, error)
 }
 
+type sessionThreadDrainLister interface {
+	ListBySessionWithOptions(ctx context.Context, orgID, sessionID uuid.UUID, includeArchived bool) ([]models.SessionThread, error)
+}
+
 type sessionThreadRecoveryMetadataStore interface {
 	RecordRecoveryMetadata(ctx context.Context, orgID, threadID uuid.UUID, reason models.RuntimeStopReason, stopAfter time.Time, recoveryState, recoveryReason string) error
 }
@@ -1870,7 +1874,9 @@ func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Sessi
 			Msg("no-checkpoint recovery exhausted; failing session")
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		o.failRunWithCategory(cleanupCtx, session, errMsg, FailureCategoryRecovery, explanation, nextSteps)
+		if failErr := o.failRunWithCategory(cleanupCtx, session, errMsg, FailureCategoryRecovery, explanation, nextSteps); failErr != nil {
+			return fmt.Errorf("persist exhausted recovery failure: %w", failErr)
+		}
 		// failRun (via failRunWithCategory) terminalizes the primary thread.
 		if err := o.sessions.UpdateRecoveryState(cleanupCtx, session.OrgID, session.ID, models.RecoveryStateNone, nil, nil, false); err != nil {
 			log.Warn().Err(err).Msg("failed to clear recovery state after exhausting no-checkpoint recovery")
@@ -4012,7 +4018,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// 3. Get the latest user message for this turn.
 	messages, err := o.sessionMessages.ListBySession(ctx, session.OrgID, session.ID)
 	if err != nil {
-		return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("fetch session messages: %w", err), log)
+		return fmt.Errorf("fetch session messages: %w", err)
 	}
 
 	// Scope the latest-user-message lookup to the thread the worker enqueued
@@ -4111,10 +4117,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		request, err := o.humanInputRequests.GetByID(ctx, session.OrgID, session.ID, *opts.HumanInputRequestID)
 		if err != nil {
-			return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("fetch human input answer: %w", err), log)
+			return fmt.Errorf("fetch human input answer: %w", err)
 		}
 		if request.Status != models.HumanInputRequestStatusAnswered && request.Status != models.HumanInputRequestStatusCancelled {
-			return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("human input request is %s", request.Status), log)
+			return fmt.Errorf("human input request is %s", request.Status)
 		}
 		humanInputAnswer = humanInputAnswerFromRequest(request)
 	}
@@ -4151,7 +4157,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	issueSnapshot, err := o.createIssueSnapshotForTurn(ctx, session, sessionTurnNumber)
 	if err != nil {
-		return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("resolve issue context: %w", err), log)
+		return fmt.Errorf("resolve issue context: %w", err)
 	}
 	promptIssue, linkedIssues := o.promptSeedForSession(session, latestMsg, issueSnapshot)
 	if promptIssue != nil && promptIssue.ID != uuid.Nil {
@@ -4205,9 +4211,6 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			}
 		}
 		authLog.Msg("agent auth pre-flight failed during continue_session")
-		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
-			log.Error().Err(revertErr).Msg("failed to revert session to idle after auth pre-flight failure")
-		}
 		if o.sessionMessages != nil {
 			errMsg := &models.SessionMessage{
 				SessionID:  session.ID,
@@ -4220,6 +4223,16 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			if createErr := o.sessionMessages.Create(ctx, errMsg); createErr != nil {
 				log.Error().Err(createErr).Msg("failed to create error message for auth pre-flight failure")
 			}
+		}
+		handled, persistErr := o.failCodeReviewThreadTurn(ctx, session, threadID, &models.SessionResult{Error: strPtr(authErr.Error())}, authErr.Error(), nil, log)
+		if persistErr != nil {
+			return errors.Join(authErr, persistErr)
+		}
+		if handled {
+			return fmt.Errorf("%w: %w", ErrCodeReviewThreadFailed, authErr)
+		}
+		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
+			log.Error().Err(revertErr).Msg("failed to revert session to idle after auth pre-flight failure")
 		}
 		return authErr
 	}
@@ -4864,7 +4877,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			if errors.Is(err, ErrThreadRuntimeAlreadyActive) {
 				return fmt.Errorf("start thread runtime: %w", err)
 			}
-			return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("start thread runtime: %w", err), log)
+			return fmt.Errorf("start thread runtime: %w", err)
 		}
 		if threadRuntimeCtl != nil {
 			stopHeartbeat := threadRuntimeCtl.StartHeartbeat(ctx, 0, func() { cancel(ErrWorkerDrainCause) })
@@ -4934,7 +4947,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if !reusedExisting {
 			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
 			if err := PrepareSandboxRepository(ctx, o.provider, sandbox, sandboxCfg.WorkDir, log); err != nil {
-				return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("prepare repository: %w", err), log)
+				return fmt.Errorf("prepare repository: %w", err)
 			}
 		}
 
@@ -5060,13 +5073,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				return err
 			}
 			if !isRunFailureRecorded(err) {
-				return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("setup fresh sandbox: %w", err), log)
+				return fmt.Errorf("setup fresh sandbox: %w", err)
 			}
 			return fmt.Errorf("setup fresh sandbox: %w", err)
 		}
 		authBillingMode = authMode
 		if err := PrepareSandboxRepository(ctx, o.provider, sandbox, sandboxCfg.WorkDir, log); err != nil {
-			return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("prepare repository: %w", err), log)
+			return fmt.Errorf("prepare repository: %w", err)
 		}
 
 		// Build a full prompt via PreparePrompt so the agent gets the system
@@ -5163,7 +5176,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			trigger,
 		)
 		if err != nil {
-			return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("start activity phase for resume: %w", err), log)
+			return fmt.Errorf("start activity phase for resume: %w", err)
 		}
 		if activityExecution != nil {
 			o.activeActivityPhases.Store(*threadID, activityExecution)
@@ -5290,7 +5303,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			if result != nil {
 				runResult = o.buildRunResult(ctx, session, sandbox, result)
 			}
-			if o.failCodeReviewThreadTurn(ctx, session, threadID, runResult, err.Error(), activityExecution, log) {
+			handled, persistErr := o.failCodeReviewThreadTurn(ctx, session, threadID, runResult, err.Error(), activityExecution, log)
+			if persistErr != nil {
+				return errors.Join(err, persistErr)
+			}
+			if handled {
 				return fmt.Errorf("%w after %s: %w", ErrCodeReviewThreadFailed, elapsed, err)
 			}
 			o.failTimedOutSession(session, elapsed, messageTurnNumber, err, log, activityExecution)
@@ -5304,7 +5321,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			if result != nil {
 				runResult = o.buildRunResult(ctx, session, sandbox, result)
 			}
-			if o.failCodeReviewThreadTurn(ctx, session, threadID, runResult, err.Error(), activityExecution, log) {
+			handled, persistErr := o.failCodeReviewThreadTurn(ctx, session, threadID, runResult, err.Error(), activityExecution, log)
+			if persistErr != nil {
+				return errors.Join(err, persistErr)
+			}
+			if handled {
 				return fmt.Errorf("%w: %w", ErrCodeReviewThreadFailed, err)
 			}
 			o.failRunWithResultAndActivityPhase(ctx, session, runResult, err.Error(), activityExecution)
@@ -5355,7 +5376,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		agentErr := errors.New(strings.TrimSpace(result.Error))
 		err = agentErr
 		runResult := o.buildRunResult(ctx, session, sandbox, result)
-		if o.failCodeReviewThreadTurn(ctx, session, threadID, runResult, agentErr.Error(), activityExecution, log) {
+		handled, persistErr := o.failCodeReviewThreadTurn(ctx, session, threadID, runResult, agentErr.Error(), activityExecution, log)
+		if persistErr != nil {
+			return errors.Join(agentErr, persistErr)
+		}
+		if handled {
 			return fmt.Errorf("%w: %w", ErrCodeReviewThreadFailed, agentErr)
 		}
 		o.failRunWithResultAndActivityPhase(ctx, session, runResult, agentErr.Error(), activityExecution)
@@ -5367,7 +5392,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if err := o.createAssistantMessage(ctx, session.ID, session.OrgID, writeCtx, result); err != nil {
 		if activityExecution != nil {
 			err = fmt.Errorf("persist final assistant response: %w", err)
-			if o.failCodeReviewThreadTurn(ctx, session, threadID, &models.SessionResult{Error: strPtr(err.Error())}, err.Error(), activityExecution, log) {
+			handled, persistErr := o.failCodeReviewThreadTurn(ctx, session, threadID, &models.SessionResult{Error: strPtr(err.Error())}, err.Error(), activityExecution, log)
+			if persistErr != nil {
+				return errors.Join(err, persistErr)
+			}
+			if handled {
 				return fmt.Errorf("%w: %w", ErrCodeReviewThreadFailed, err)
 			}
 			o.failRunWithResultAndActivityPhase(ctx, session, &models.SessionResult{Error: strPtr(err.Error())}, err.Error(), activityExecution)
@@ -5473,6 +5502,7 @@ func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, 
 		log.Warn().Err(err).Msg("failed to fetch messages for post-turn queue drain")
 		return
 	}
+	terminalCodeReviewThreads := o.terminalCodeReviewThreadsForDrain(ctx, session, log)
 	var queued *models.SessionMessage
 	for i := range messages {
 		m := messages[i]
@@ -5486,8 +5516,15 @@ func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, 
 		if threadID == nil && m.ThreadID != nil {
 			continue
 		}
-		if o.queuedMessageBelongsToTerminalCodeReviewThread(ctx, session, &m, log) {
-			continue
+		if m.ThreadID != nil {
+			if terminalThread, terminal := terminalCodeReviewThreads[*m.ThreadID]; terminal {
+				log.Info().
+					Str("thread_id", terminalThread.ID.String()).
+					Int64("message_id", m.ID).
+					Str("thread_status", string(terminalThread.Status)).
+					Msg("skipping queued message for terminal code review thread")
+				continue
+			}
 		}
 		if m.ThreadID != nil && o.threadInbox != nil {
 			acked, ackErr := o.threadInbox.IsMessageAcked(ctx, session.OrgID, *m.ThreadID, m.ID)
@@ -5549,35 +5586,33 @@ func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, 
 	}
 }
 
-func (o *Orchestrator) queuedMessageBelongsToTerminalCodeReviewThread(ctx context.Context, session *models.Session, message *models.SessionMessage, log zerolog.Logger) bool {
-	if session == nil || session.Origin != models.SessionOriginCodeReview || message == nil || message.ThreadID == nil || *message.ThreadID == uuid.Nil || o.sessionThreads == nil {
-		return false
+func (o *Orchestrator) terminalCodeReviewThreadsForDrain(ctx context.Context, session *models.Session, log zerolog.Logger) map[uuid.UUID]models.SessionThread {
+	terminal := make(map[uuid.UUID]models.SessionThread)
+	if session == nil || session.Origin != models.SessionOriginCodeReview || o.sessionThreads == nil {
+		return terminal
 	}
-	thread, err := o.sessionThreads.GetByID(ctx, session.OrgID, *message.ThreadID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false
+	lister, ok := o.sessionThreads.(sessionThreadDrainLister)
+	if !ok {
+		log.Warn().Msg("session thread store does not support batched code review queue-drain lookup")
+		return terminal
 	}
+	threads, err := lister.ListBySessionWithOptions(ctx, session.OrgID, session.ID, true)
 	if err != nil {
 		log.Warn().Err(err).
-			Str("thread_id", message.ThreadID.String()).
-			Int64("message_id", message.ID).
-			Msg("failed to load code review thread during queue drain")
-		return false
+			Str("session_id", session.ID.String()).
+			Msg("failed to list code review threads during queue drain")
+		return terminal
 	}
-	if thread.ExecutionMode != models.ThreadExecutionModeReview || thread.FilesystemMode != models.ThreadFilesystemModeReadOnly {
-		return false
+	for _, thread := range threads {
+		if thread.ExecutionMode != models.ThreadExecutionModeReview || thread.FilesystemMode != models.ThreadFilesystemModeReadOnly {
+			continue
+		}
+		switch thread.Status {
+		case models.ThreadStatusCompleted, models.ThreadStatusFailed, models.ThreadStatusCancelled:
+			terminal[thread.ID] = thread
+		}
 	}
-	switch thread.Status {
-	case models.ThreadStatusCompleted, models.ThreadStatusFailed, models.ThreadStatusCancelled:
-		log.Info().
-			Str("thread_id", thread.ID.String()).
-			Int64("message_id", message.ID).
-			Str("thread_status", string(thread.Status)).
-			Msg("skipping queued message for terminal code review thread")
-		return true
-	default:
-		return false
-	}
+	return terminal
 }
 
 func (o *Orchestrator) admitNextQueuedThread(ctx context.Context, session *models.Session, log zerolog.Logger) {
@@ -5978,7 +6013,13 @@ func (o *Orchestrator) registerSandboxInfraFailure(
 		// updates and the assistant message insert.
 		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
 		defer cancel()
-		o.failRunWithCategory(writeCtx, &sessionCopy, errMsg, category, explanation, nextSteps)
+		if failErr := o.failRunWithCategory(writeCtx, &sessionCopy, errMsg, category, explanation, nextSteps); failErr != nil {
+			o.logger.Error().Err(failErr).
+				Str("session_id", sessionCopy.ID.String()).
+				Str("org_id", sessionCopy.OrgID.String()).
+				Str("stage", stage).
+				Msg("failed to persist categorized sandbox infrastructure failure")
+		}
 		if o.sessionMessages != nil {
 			errEntry := &models.SessionMessage{
 				SessionID:  sessionCopy.ID,
@@ -6679,7 +6720,11 @@ func (o *Orchestrator) failContinueSessionError(ctx context.Context, run *models
 	if opts != nil {
 		threadID = opts.ThreadID
 	}
-	if o.failCodeReviewThreadTurn(ctx, run, threadID, &models.SessionResult{Error: strPtr(cause.Error())}, cause.Error(), nil, log) {
+	handled, persistErr := o.failCodeReviewThreadTurn(ctx, run, threadID, &models.SessionResult{Error: strPtr(cause.Error())}, cause.Error(), nil, log)
+	if persistErr != nil {
+		return errors.Join(cause, persistErr)
+	}
+	if handled {
 		return fmt.Errorf("%w: %w", ErrCodeReviewThreadFailed, cause)
 	}
 	o.failRun(ctx, run, cause.Error())
@@ -6687,12 +6732,17 @@ func (o *Orchestrator) failContinueSessionError(ctx context.Context, run *models
 }
 
 // failCodeReviewThreadTurn records a terminal result for one reviewer or
-// synthesis thread while returning the shared parent to an orchestration-ready
-// state. The durable run_code_review controller, not an individual agent turn,
-// decides whether the overall review is completed, degraded, or failed.
-func (o *Orchestrator) failCodeReviewThreadTurn(ctx context.Context, run *models.Session, threadID *uuid.UUID, result *models.SessionResult, errMsg string, activityExecution *activityPhaseExecution, log zerolog.Logger) bool {
+// synthesis thread without changing the shared parent. The durable
+// run_code_review controller, not an individual agent turn, decides whether
+// the overall review is completed, degraded, or failed.
+//
+// The handled result is true for code-review thread turns even when the
+// persistence write fails. Callers must propagate persistErr without wrapping
+// it in ErrCodeReviewThreadFailed so the worker retries the write instead of
+// dead-lettering a thread whose terminal result is not durable.
+func (o *Orchestrator) failCodeReviewThreadTurn(ctx context.Context, run *models.Session, threadID *uuid.UUID, result *models.SessionResult, errMsg string, activityExecution *activityPhaseExecution, log zerolog.Logger) (handled bool, persistErr error) {
 	if !isCodeReviewThreadTurn(run, threadID) {
-		return false
+		return false, nil
 	}
 	if result == nil {
 		result = &models.SessionResult{}
@@ -6702,33 +6752,18 @@ func (o *Orchestrator) failCodeReviewThreadTurn(ctx context.Context, run *models
 	}
 	failureCtx, cancelFailure := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancelFailure()
-	if o.sessionThreads != nil {
-		if err := o.sessionThreads.UpdateResult(failureCtx, run.OrgID, *threadID, models.ThreadStatusFailed, result); err != nil {
-			log.Error().Err(err).
-				Str("session_id", run.ID.String()).
-				Str("thread_id", threadID.String()).
-				Msg("failed to persist code review thread failure")
-		}
+	if o.sessionThreads == nil {
+		return true, errors.New("persist code review thread failure: session thread store is not configured")
 	}
-	completeActivityPhaseDetached(activityExecution, models.ActivityPhaseStatusFailed, models.ActivityPhaseBoundaryError, log)
-
-	current, err := o.sessions.GetByID(failureCtx, run.OrgID, run.ID)
-	if err != nil {
-		log.Error().Err(err).
-			Str("session_id", run.ID.String()).
-			Msg("failed to refresh code review parent after thread failure")
-		return true
-	}
-	if current.Status == models.SessionStatusCompleted || current.Status == models.SessionStatusCancelled || current.Status == models.SessionStatusSkipped {
-		return true
-	}
-	if err := o.sessions.UpdateStatus(failureCtx, run.OrgID, run.ID, models.SessionStatusIdle); err != nil {
+	if err := o.sessionThreads.UpdateResult(failureCtx, run.OrgID, *threadID, models.ThreadStatusFailed, result); err != nil {
 		log.Error().Err(err).
 			Str("session_id", run.ID.String()).
 			Str("thread_id", threadID.String()).
-			Msg("failed to release code review parent after thread failure")
+			Msg("failed to persist code review thread failure")
+		return true, fmt.Errorf("persist code review thread failure: %w", err)
 	}
-	return true
+	completeActivityPhaseDetached(activityExecution, models.ActivityPhaseStatusFailed, models.ActivityPhaseBoundaryError, log)
+	return true, nil
 }
 
 func (o *Orchestrator) failNonPrimaryThreadWithResult(ctx context.Context, run *models.Session, threadID *uuid.UUID, result *models.SessionResult, log zerolog.Logger) {
@@ -6789,19 +6824,19 @@ func (o *Orchestrator) enqueueLinearMilestone(ctx context.Context, run *models.S
 // failRunWithCategory marks a run as failed with a structured failure category,
 // explanation, and next steps. Used for well-known failure modes (e.g. auth expiry)
 // where we can provide actionable guidance in the UI.
-func (o *Orchestrator) failRunWithCategory(ctx context.Context, run *models.Session, errMsg, category, explanation string, nextSteps []string) {
-	o.failRunWithCategoryForThread(ctx, run, nil, errMsg, category, explanation, nextSteps)
+func (o *Orchestrator) failRunWithCategory(ctx context.Context, run *models.Session, errMsg, category, explanation string, nextSteps []string) error {
+	return o.failRunWithCategoryForThread(ctx, run, nil, errMsg, category, explanation, nextSteps)
 }
 
 // failRunWithCategoryForThread mirrors categorized failure metadata onto the
 // exact executing thread in addition to the session's primary thread. Reviewer
 // tabs are non-primary threads, so session-level failure bookkeeping alone does
 // not give their per-tab UI enough information to explain the failure.
-func (o *Orchestrator) failRunWithCategoryForThread(ctx context.Context, run *models.Session, threadID *uuid.UUID, errMsg, category, explanation string, nextSteps []string) {
-	o.failRunWithCategoryForThreadAndActivityPhase(ctx, run, threadID, errMsg, category, explanation, nextSteps, nil)
+func (o *Orchestrator) failRunWithCategoryForThread(ctx context.Context, run *models.Session, threadID *uuid.UUID, errMsg, category, explanation string, nextSteps []string) error {
+	return o.failRunWithCategoryForThreadAndActivityPhase(ctx, run, threadID, errMsg, category, explanation, nextSteps, nil)
 }
 
-func (o *Orchestrator) failRunWithCategoryForThreadAndActivityPhase(ctx context.Context, run *models.Session, threadID *uuid.UUID, errMsg, category, explanation string, nextSteps []string, activityExecution *activityPhaseExecution) {
+func (o *Orchestrator) failRunWithCategoryForThreadAndActivityPhase(ctx context.Context, run *models.Session, threadID *uuid.UUID, errMsg, category, explanation string, nextSteps []string, activityExecution *activityPhaseExecution) error {
 	result := &models.SessionResult{
 		Error:               strPtr(errMsg),
 		FailureExplanation:  strPtr(explanation),
@@ -6809,14 +6844,19 @@ func (o *Orchestrator) failRunWithCategoryForThreadAndActivityPhase(ctx context.
 		FailureNextSteps:    append([]string(nil), nextSteps...),
 		FailureRetryAdvised: true,
 	}
-	if o.failCodeReviewThreadTurn(ctx, run, threadID, result, errMsg, activityExecution, o.logger) {
-		return
+	handled, persistErr := o.failCodeReviewThreadTurn(ctx, run, threadID, result, errMsg, activityExecution, o.logger)
+	if persistErr != nil {
+		return persistErr
+	}
+	if handled {
+		return nil
 	}
 	// Persist the exact executing thread first. failRunWithResult then persists
 	// the primary thread before atomically writing and publishing the fully
 	// structured terminal session result.
 	o.failNonPrimaryThreadWithResult(ctx, run, threadID, result, o.logger)
 	o.failRunWithResultAndActivityPhase(ctx, run, result, errMsg, activityExecution)
+	return nil
 }
 
 // failTimedOutSession handles the common bookkeeping for a session that hit
@@ -6872,7 +6912,7 @@ func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Dur
 		errMsg = fmt.Sprintf("Session timed out %s. Raise max_session_duration_seconds in org settings or split the task into smaller sub-tasks.", elapsedDesc)
 		explanation = "The session hit its configured wall-clock limit before the agent could finish. Any work committed inside the sandbox during this run was discarded — no snapshot was taken."
 	}
-	o.failRunWithCategoryForThreadAndActivityPhase(cleanupCtx, run, nil,
+	if failErr := o.failRunWithCategoryForThreadAndActivityPhase(cleanupCtx, run, nil,
 		errMsg,
 		FailureCategoryTimeout,
 		explanation,
@@ -6882,7 +6922,9 @@ func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Dur
 			"Retry the session — transient slowness (LLM latency, git clone) may have pushed the run over the edge",
 		},
 		activityExecution,
-	)
+	); failErr != nil {
+		log.Error().Err(failErr).Msg("failed to persist timed-out session")
+	}
 	// failRun (via failRunWithCategory) terminalizes the primary thread.
 }
 
@@ -6916,12 +6958,14 @@ func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session,
 	injected, err := o.env.InjectCodexAuthForUser(ctx, run.OrgID, run.TriggeredByUserID, sandbox)
 	if err != nil {
 		if errors.Is(err, ErrCodexAuthInvalid) {
-			o.failRunWithCategoryForThread(ctx, run, threadID,
+			if failErr := o.failRunWithCategoryForThread(ctx, run, threadID,
 				fmt.Sprintf("codex auth injection failed: %s", err),
 				FailureCategoryCodexAuth,
 				"Your ChatGPT authentication has expired or was revoked. Please re-authenticate to continue using Codex.",
 				[]string{"Re-authenticate with ChatGPT from the session page to sign in again"},
-			)
+			); failErr != nil {
+				return TokenBillingModeUnknown, errors.Join(fmt.Errorf("codex auth injection: %w", err), failErr)
+			}
 			return TokenBillingModeUnknown, markRunFailureRecorded(fmt.Errorf("codex auth injection: %w", err))
 		}
 		// Transient infra failure: defer the user-facing failure to the
@@ -6938,12 +6982,14 @@ func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session,
 		return TokenBillingModeUnknown, fmt.Errorf("codex auth injection: %w", err)
 	}
 	if !injected {
-		o.failRunWithCategoryForThread(ctx, run, threadID,
+		if failErr := o.failRunWithCategoryForThread(ctx, run, threadID,
 			"no credentials configured for codex: connect ChatGPT from the Overview page",
 			FailureCategoryCodexAuth,
 			"No ChatGPT credentials are configured. Please connect your ChatGPT account to use Codex.",
 			[]string{"Re-authenticate with ChatGPT from the session page to sign in"},
-		)
+		); failErr != nil {
+			return TokenBillingModeUnknown, errors.Join(errors.New("no credentials for codex agent"), failErr)
+		}
 		return TokenBillingModeUnknown, markRunFailureRecorded(fmt.Errorf("no credentials for codex agent"))
 	}
 	return TokenBillingModeSubscription, nil
@@ -7626,12 +7672,14 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 		// the credentials file over the env var, so leaving it in place
 		// would silently bill a revoked/stale subscription token.
 		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr != nil {
-			o.failRunWithCategoryForThread(ctx, run, threadID,
+			if failErr := o.failRunWithCategoryForThread(ctx, run, threadID,
 				fmt.Sprintf("claude API-key auth could not be prepared: %s", fallbackErr),
 				FailureCategoryClaudeCodeAuth,
 				"The Anthropic API key is configured, but the sandbox could not be prepared to use it because stale Claude credentials could not be cleared.",
 				[]string{"Retry the session after verifying sandbox access"},
-			)
+			); failErr != nil {
+				return TokenBillingModeUnknown, errors.Join(fmt.Errorf("prepare claude code API-key auth: %w", fallbackErr), failErr)
+			}
 			return TokenBillingModeUnknown, markRunFailureRecorded(fmt.Errorf("prepare claude code API-key auth: %w", fallbackErr))
 		}
 		return TokenBillingModeAPIKey, nil
@@ -7647,12 +7695,14 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 				Msg("unified claude subscription injection failed; continuing with Anthropic API-key fallback")
 			return TokenBillingModeAPIKey, nil
 		}
-		o.failRunWithCategoryForThread(ctx, run, threadID,
+		if failErr := o.failRunWithCategoryForThread(ctx, run, threadID,
 			fmt.Sprintf("unified claude subscription injection failed: %s", err),
 			FailureCategoryClaudeCodeAuth,
 			"Your Claude subscription token could not be injected into the sandbox. The token may have been revoked or the refresh failed.",
 			[]string{"Reconnect your Claude subscription from Account settings"},
-		)
+		); failErr != nil {
+			return TokenBillingModeUnknown, errors.Join(fmt.Errorf("unified claude code auth injection: %w", err), failErr)
+		}
 		return TokenBillingModeUnknown, markRunFailureRecorded(fmt.Errorf("unified claude code auth injection: %w", err))
 	}
 	if injected {
@@ -7670,20 +7720,24 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 				Msg("claude subscription injection failed; continuing with Anthropic API-key fallback")
 			return TokenBillingModeAPIKey, nil
 		} else if !errors.Is(fallbackErr, errClaudeCodeFallbackUnavailable) {
-			o.failRunWithCategoryForThread(ctx, run, threadID,
+			if failErr := o.failRunWithCategoryForThread(ctx, run, threadID,
 				fmt.Sprintf("claude subscription injection failed and API-key fallback could not be prepared: %s", fallbackErr),
 				FailureCategoryClaudeCodeAuth,
 				"Your Claude subscription token could not be injected, and the sandbox could not be prepared to use the Anthropic API key fallback.",
 				[]string{"Retry the session after reconnecting your Claude subscription or verifying Anthropic credentials"},
-			)
+			); failErr != nil {
+				return TokenBillingModeUnknown, errors.Join(fmt.Errorf("prepare claude code API-key fallback: %w", fallbackErr), failErr)
+			}
 			return TokenBillingModeUnknown, markRunFailureRecorded(fmt.Errorf("prepare claude code API-key fallback: %w", fallbackErr))
 		}
-		o.failRunWithCategoryForThread(ctx, run, threadID,
+		if failErr := o.failRunWithCategoryForThread(ctx, run, threadID,
 			fmt.Sprintf("claude subscription injection failed: %s", err),
 			FailureCategoryClaudeCodeAuth,
 			"Your Claude subscription token could not be injected into the sandbox. The token may have been revoked or the refresh failed.",
 			[]string{"Reconnect your Claude subscription from Account settings"},
-		)
+		); failErr != nil {
+			return TokenBillingModeUnknown, errors.Join(fmt.Errorf("claude code auth injection: %w", err), failErr)
+		}
 		return TokenBillingModeUnknown, markRunFailureRecorded(fmt.Errorf("claude code auth injection: %w", err))
 	}
 	if injected {
@@ -7697,12 +7751,14 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 	if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr == nil {
 		return TokenBillingModeAPIKey, nil
 	} else if !errors.Is(fallbackErr, errClaudeCodeFallbackUnavailable) {
-		o.failRunWithCategoryForThread(ctx, run, threadID,
+		if failErr := o.failRunWithCategoryForThread(ctx, run, threadID,
 			fmt.Sprintf("claude API-key fallback could not be prepared: %s", fallbackErr),
 			FailureCategoryClaudeCodeAuth,
 			"The Anthropic API key fallback is configured, but the sandbox could not be prepared to use it because stale Claude credentials could not be cleared.",
 			[]string{"Retry the session after reconnecting your Claude subscription or verifying sandbox access"},
-		)
+		); failErr != nil {
+			return TokenBillingModeUnknown, errors.Join(fmt.Errorf("prepare claude code API-key fallback: %w", fallbackErr), failErr)
+		}
 		return TokenBillingModeUnknown, markRunFailureRecorded(fmt.Errorf("prepare claude code API-key fallback: %w", fallbackErr))
 	}
 
@@ -7710,7 +7766,7 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 	// was invalidated" — telling a user who DID connect a subscription that
 	// no credentials are configured sends them hunting in the wrong place.
 	if o.claudeCodeInvalidSubscriptionExists(ctx, run) {
-		o.failRunWithCategoryForThread(ctx, run, threadID,
+		if failErr := o.failRunWithCategoryForThread(ctx, run, threadID,
 			"claude subscription is marked invalid; reconnect required",
 			FailureCategoryClaudeCodeAuth,
 			"Your Claude subscription is no longer valid (its token was rejected or revoked), so it was removed from rotation. Reconnect it from Account settings to continue.",
@@ -7718,11 +7774,13 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 				"Reconnect your Claude subscription from Account settings",
 				"Or add an Anthropic API key in Account settings",
 			},
-		)
+		); failErr != nil {
+			return TokenBillingModeUnknown, errors.Join(errors.New("claude subscription invalid for claude code agent"), failErr)
+		}
 		return TokenBillingModeUnknown, markRunFailureRecorded(fmt.Errorf("claude subscription invalid for claude code agent"))
 	}
 
-	o.failRunWithCategoryForThread(ctx, run, threadID,
+	if failErr := o.failRunWithCategoryForThread(ctx, run, threadID,
 		"no credentials configured for Claude Code: connect a Claude subscription or add an Anthropic API key",
 		FailureCategoryClaudeCodeAuth,
 		"No Claude Code credentials are configured. Connect your Claude subscription (recommended) or add an Anthropic API key from Account settings.",
@@ -7730,7 +7788,9 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 			"Connect a Claude subscription from Account settings",
 			"Or add an Anthropic API key in Account settings",
 		},
-	)
+	); failErr != nil {
+		return TokenBillingModeUnknown, errors.Join(errors.New("no credentials for claude code agent"), failErr)
+	}
 	return TokenBillingModeUnknown, markRunFailureRecorded(fmt.Errorf("no credentials for claude code agent"))
 }
 
