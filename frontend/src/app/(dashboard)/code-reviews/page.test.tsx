@@ -2403,7 +2403,13 @@ describe("CodeReviewsPage", () => {
     const safeguardsHeading = screen.getByRole("heading", { level: 3, name: "Safeguards" });
     const safeguardsCard = safeguardsHeading.closest("section");
     const policyPanel = screen.getByRole("tabpanel");
-    expect(policyPanel).toHaveClass("mx-auto", "w-full", "max-w-5xl");
+    // Width and centering belong to the page shell — `ListPage` wraps this page in
+    // `PageContainer size="wide"` — so this panel keeps only the canonical tab
+    // rhythm and its left edge stays flush with the left-aligned tab bar. It carries
+    // no width constraint or centering of its own, so any `mx-auto` or `max-w-*` on
+    // this panel — responsive variants and `max-w-none` included — fails here.
+    expect(policyPanel).toHaveClass("space-y-6");
+    expect(policyPanel.className).not.toMatch(/\bmx-auto\b|\bmax-w-/);
     expect(screen.getByText("Reviewer setup and the rules that gate automatic approval.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Safeguards" })).not.toBeInTheDocument();
     // Behavior, then both prompts together, then safeguards, then GitHub setup.
