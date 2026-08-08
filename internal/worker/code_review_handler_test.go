@@ -2886,6 +2886,45 @@ func TestCodeReviewReviewerExecutionFailed(t *testing.T) {
 	}
 }
 
+func TestCodeReviewSessionNeedsOrchestratorNormalization(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		session  models.Session
+		expected bool
+	}{
+		{
+			name:     "normalizes a pending shared session",
+			session:  models.Session{Status: models.SessionStatusPending, Origin: models.SessionOriginCodeReview},
+			expected: true,
+		},
+		{
+			name:     "recovers a reviewer-poisoned code review parent",
+			session:  models.Session{Status: models.SessionStatusFailed, Origin: models.SessionOriginCodeReview},
+			expected: true,
+		},
+		{
+			name:     "preserves a failed non-review session",
+			session:  models.Session{Status: models.SessionStatusFailed, Origin: models.SessionOriginManual},
+			expected: false,
+		},
+		{
+			name:     "preserves a cancelled code review",
+			session:  models.Session{Status: models.SessionStatusCancelled, Origin: models.SessionOriginCodeReview},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, codeReviewSessionNeedsOrchestratorNormalization(tt.session), "only recoverable orchestration states should be normalized before synthesis")
+		})
+	}
+}
+
 func TestCodeReviewRequiredReviewerQuorum(t *testing.T) {
 	t.Parallel()
 

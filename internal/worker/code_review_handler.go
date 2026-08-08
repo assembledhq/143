@@ -2396,18 +2396,25 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 	}
 
 	// A sibling reviewer's sandbox-node retry can park the parent session in a
-	// non-claimable 'pending' state. Every reviewer thread is terminal by the
-	// time we dispatch the orchestrator, so reset a stranded 'pending' session
-	// back to idle so the SendMessage below can claim it instead of failing with
-	// ErrSessionNotResumable — which would degrade the review and strand the
-	// session for the reaper to sweep as "unable to start within the expected
-	// time".
-	if session.Status == models.SessionStatusPending {
+	// non-claimable 'pending' state. Older workers could also mark the shared
+	// code-review parent failed when one reviewer failed, even though this
+	// controller still had quorum and needed to dispatch synthesis. Every
+	// reviewer thread is terminal by this point, so normalize either poisoned
+	// state back to idle. Cancelled/completed parents remain terminal and are
+	// handled before this phase.
+	if codeReviewSessionNeedsOrchestratorNormalization(session) {
+		previousStatus := session.Status
 		if resetErr := stores.Sessions.UpdateStatus(ctx, job.OrgID, job.SessionID, models.SessionStatusIdle); resetErr != nil {
-			logger.Warn().Err(resetErr).Str("session_id", job.SessionID.String()).Msg("failed to reset stranded code review session before orchestrator dispatch")
+			logger.Warn().Err(resetErr).
+				Str("session_id", job.SessionID.String()).
+				Str("previous_status", string(previousStatus)).
+				Msg("failed to normalize code review session before orchestrator dispatch")
 		} else {
 			session.Status = models.SessionStatusIdle
-			logger.Warn().Str("session_id", job.SessionID.String()).Msg("reset stranded pending code review session to idle before orchestrator dispatch")
+			logger.Warn().
+				Str("session_id", job.SessionID.String()).
+				Str("previous_status", string(previousStatus)).
+				Msg("normalized code review session to idle before orchestrator dispatch")
 		}
 	}
 
@@ -2508,6 +2515,11 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 		return fmt.Errorf("create code review orchestrator result: %w", err)
 	}
 	return nil
+}
+
+func codeReviewSessionNeedsOrchestratorNormalization(session models.Session) bool {
+	return session.Status == models.SessionStatusPending ||
+		(session.Status == models.SessionStatusFailed && session.Origin == models.SessionOriginCodeReview)
 }
 
 func codeReviewAgentModelsEqual(left, right *string) bool {

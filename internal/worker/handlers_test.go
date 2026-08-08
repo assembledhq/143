@@ -12470,6 +12470,48 @@ func TestContinueSessionHandler_DeadLettersThreadCancelledDuringWorkspaceWait(t 
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestContinueSessionHandler_DeadLettersRecordedCodeReviewThreadFailure(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+	sessionRow := workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)
+	setWorkerSessionColumn(sessionRow, "origin", models.SessionOriginCodeReview)
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeClaudeCode, nil, models.ThreadStatusFailed)...,
+		))
+
+	providerErr := errors.New("Claude Code weekly limit reached")
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(context.Context, *models.Session, *agent.ContinueSessionOptions) error {
+			return fmt.Errorf("%w: %w", agent.ErrCodeReviewThreadFailed, providerErr)
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+
+	require.Error(t, err, "a recorded reviewer failure should terminate its worker job")
+	var fatal *FatalError
+	require.ErrorAs(t, err, &fatal, "a recorded reviewer failure should dead-letter without retrying the exhausted provider")
+	require.ErrorIs(t, fatal.Err, agent.ErrCodeReviewThreadFailed, "the fatal error should preserve the code-review thread sentinel")
+	require.ErrorIs(t, fatal.Err, providerErr, "the fatal error should preserve the provider diagnostic")
+	require.Equal(t, 1, orch.continueSessionCalls, "the worker should execute the failed reviewer exactly once")
+	require.NoError(t, mock.ExpectationsWereMet(), "the worker must not reset the already-failed reviewer thread to idle")
+}
+
 func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T) {
 	t.Parallel()
 

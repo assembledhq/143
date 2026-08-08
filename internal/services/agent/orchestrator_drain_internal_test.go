@@ -206,11 +206,15 @@ func (j *drainStubJobs) QueueChangesetPRCreation(ctx context.Context, orgID, _, 
 // drainStubThreads records ClearPendingMessages calls so tests can assert
 // the counter is reset whenever a queued thread message is drained.
 type drainStubThreads struct {
-	clearedThreadIDs []uuid.UUID
-	clearErr         error
-	nextQueuedThread models.SessionThread
-	claimNextErr     error
-	claimNextCalls   int
+	clearedThreadIDs   []uuid.UUID
+	clearErr           error
+	threadsByID        map[uuid.UUID]models.SessionThread
+	getByIDErr         error
+	listBySessionErr   error
+	listBySessionCalls int
+	nextQueuedThread   models.SessionThread
+	claimNextErr       error
+	claimNextCalls     int
 }
 
 func (t *drainStubThreads) UpdateStatus(context.Context, uuid.UUID, uuid.UUID, models.ThreadStatus) error {
@@ -222,8 +226,26 @@ func (t *drainStubThreads) CompleteTurn(context.Context, uuid.UUID, uuid.UUID, i
 func (t *drainStubThreads) UpdateResult(context.Context, uuid.UUID, uuid.UUID, models.ThreadStatus, *models.SessionResult) error {
 	return nil
 }
-func (t *drainStubThreads) GetByID(context.Context, uuid.UUID, uuid.UUID) (models.SessionThread, error) {
+
+func (t *drainStubThreads) GetByID(_ context.Context, _ uuid.UUID, threadID uuid.UUID) (models.SessionThread, error) {
+	if t.getByIDErr != nil {
+		return models.SessionThread{}, t.getByIDErr
+	}
+	if thread, ok := t.threadsByID[threadID]; ok {
+		return thread, nil
+	}
 	return models.SessionThread{}, pgx.ErrNoRows
+}
+func (t *drainStubThreads) ListBySessionWithOptions(_ context.Context, _, _ uuid.UUID, _ bool) ([]models.SessionThread, error) {
+	t.listBySessionCalls++
+	if t.listBySessionErr != nil {
+		return nil, t.listBySessionErr
+	}
+	threads := make([]models.SessionThread, 0, len(t.threadsByID))
+	for _, thread := range t.threadsByID {
+		threads = append(threads, thread)
+	}
+	return threads, nil
 }
 func (t *drainStubThreads) ClearPendingMessages(_ context.Context, _, threadID uuid.UUID) error {
 	if t.clearErr != nil {
@@ -442,6 +464,46 @@ func TestDrainQueuedMessages_ThreadScopeDrainsQueuedSiblingThread(t *testing.T) 
 	require.Len(t, jobs.enqueues, 1, "thread-scope drain must enqueue continue_session for a queued sibling thread")
 	payload := jobs.enqueues[0].payload.(map[string]string)
 	require.Equal(t, threadB.String(), payload["thread_id"], "thread-scope drain must target the queued sibling thread")
+}
+
+func TestDrainQueuedMessages_SkipsTerminalCodeReviewReviewerThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	completedReviewerThreadID := uuid.New()
+	failedReviewerThreadID := uuid.New()
+	processed := &models.SessionMessage{
+		ID:        5,
+		OrgID:     orgID,
+		SessionID: sessionID,
+		Role:      models.MessageRoleUser,
+		ThreadID:  &completedReviewerThreadID,
+	}
+	messages := &drainStubMessages{messages: []models.SessionMessage{
+		*processed,
+		{ID: 6, OrgID: orgID, SessionID: sessionID, Role: models.MessageRoleUser, ThreadID: &failedReviewerThreadID, Content: "run the failed reviewer again"},
+	}}
+	sessions := &drainStubSessions{session: models.Session{Status: models.SessionStatusIdle, Origin: models.SessionOriginCodeReview}}
+	jobs := &drainStubJobs{}
+	threads := &drainStubThreads{threadsByID: map[uuid.UUID]models.SessionThread{
+		failedReviewerThreadID: {
+			ID:             failedReviewerThreadID,
+			OrgID:          orgID,
+			SessionID:      sessionID,
+			Status:         models.ThreadStatusFailed,
+			ExecutionMode:  models.ThreadExecutionModeReview,
+			FilesystemMode: models.ThreadFilesystemModeReadOnly,
+		},
+	}}
+	o := newDrainOrchestrator(messages, sessions, jobs, threads)
+	session := &models.Session{ID: sessionID, OrgID: orgID, Origin: models.SessionOriginCodeReview}
+
+	o.drainQueuedMessages(context.Background(), session, processed, &completedReviewerThreadID, zerolog.Nop())
+
+	require.Empty(t, jobs.enqueues, "a failed code-review reviewer prompt must not be redispatched by a sibling's post-turn queue drain")
+	require.Empty(t, threads.clearedThreadIDs, "skipped terminal reviewer messages should retain their pending count for auditability")
+	require.Equal(t, 1, threads.listBySessionCalls, "queue drain should batch all reviewer thread states into one store read")
 }
 
 func TestDrainQueuedMessages_ThreadScopeClearsAndEnqueues(t *testing.T) {
