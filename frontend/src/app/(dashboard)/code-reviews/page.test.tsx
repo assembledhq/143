@@ -722,9 +722,12 @@ describe("CodeReviewsPage", () => {
     const needsReviewCells = within(needsReviewRow).getAllByRole("cell");
     expect(within(needsReviewCells[2]).getByText("Reviewers found a blocking issue")).toBeInTheDocument();
     expect(within(needsReviewCells[2]).getByText("+1 more")).toBeInTheDocument();
-    await user.click(
-      within(needsReviewCells[2]).getByRole("button", { name: "Show all 2 reasons this review was not approved" }),
-    );
+    const reasonDisclosure = within(needsReviewCells[2]).getByRole("button", {
+      name: "Show all 2 reasons this review was not approved",
+    });
+    expect(reasonDisclosure).toHaveAttribute("data-size", "xs");
+    expect(reasonDisclosure).not.toHaveClass("h-auto", "p-0");
+    await user.click(reasonDisclosure);
     expect(await screen.findByText(/File-count limit exceeded \(34 of 25\)/)).toBeInTheDocument();
 
     const commentOnlyRow = within(reviewTable).getByRole("row", { name: /#429 Document the billing flow/i });

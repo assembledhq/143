@@ -294,8 +294,8 @@ function WhyNotApproved({ reasons, compact = false }: { reasons: string[]; compa
           <PopoverTrigger asChild>
             <Button
               variant="link"
-              size="sm"
-              className="h-auto p-0 text-xs font-normal text-muted-foreground"
+              size="xs"
+              className="font-normal text-muted-foreground"
               aria-label={`Show all ${reasons.length} reasons this review was not approved`}
             >
               +{reasons.length - 1} more
