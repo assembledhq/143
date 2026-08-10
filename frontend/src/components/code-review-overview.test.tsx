@@ -2,7 +2,7 @@ import { useState } from "react";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { endOfMonth, format, startOfMonth, subDays, subMonths } from "date-fns";
+import { addDays, endOfMonth, format, startOfMonth, subDays, subMonths } from "date-fns";
 import { CodeReviewSummaryCards, formatReviewTurnaround } from "./code-review-overview";
 import { TimeRangePicker, timeRangeLabel } from "./time-range-picker";
 import { customTimeRange, type TimeRangeFilter } from "@/lib/time-range";
@@ -209,8 +209,9 @@ describe("TimeRangePicker", () => {
     setDesktopMatch(false);
     const user = userEvent.setup();
     const onValueChange = vi.fn();
-    const start = subDays(new Date(), 12);
-    const end = subDays(new Date(), 6);
+    const visibleMonth = startOfMonth(subDays(new Date(), 30));
+    const start = addDays(visibleMonth, 2);
+    const end = addDays(visibleMonth, 8);
     render(<TimeRangePicker label="Time window" value="30d" onValueChange={onValueChange} />);
 
     await user.click(screen.getByRole("button", { name: "Time window" }));
