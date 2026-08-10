@@ -10786,6 +10786,41 @@ func TestRunAgentHandler_SandboxCapacityRetries(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSandboxTurnCapacityRetryTargetImmediatelyReservesAlternateWorker(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	jobID, orgID := uuid.New(), uuid.New()
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT id, org_id, workload_class.*FROM jobs.*status = 'running'`).
+		WithArgs(jobID).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "workload_class"}).AddRow(jobID, orgID, models.SandboxWorkloadClassInteractive))
+	mock.ExpectQuery(`(?s)WITH raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), models.SandboxWorkloadClassInteractive).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow("worker-with-space"))
+	mock.ExpectQuery(`SELECT pg_try_advisory_xact_lock`).
+		WithArgs("worker-with-space").
+		WillReturnRows(pgxmock.NewRows([]string{"locked"}).AddRow(true))
+	mock.ExpectQuery(`(?s)SELECT.*FROM nodes n.*WHERE n.id =`).
+		WithArgs(jobID, "worker-with-space", pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"live", "local_reserved", "sandbox_turn_local_reserved", "max_active", "interactive_reserved", "pending_durable_reserved", "running_durable_reserved"}).AddRow(1, 0, 0, 4, 1, 0, 0))
+	mock.ExpectExec(`(?s)UPDATE jobs.*sandbox_slot_reserved_until =`).
+		WithArgs("worker-with-space", pgxmock.AnyArg(), jobID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+	mock.ExpectRollback()
+
+	ctx := jobctx.WithJobID(jobctx.WithWorkerNodeID(context.Background(), "worker-full"), jobID)
+	targetNodeID, clearTargetNodeID, retryAfter := sandboxTurnCapacityRetryTarget(ctx, stores, zerolog.Nop())
+	require.NotNil(t, targetNodeID, "capacity retry should return the atomically reserved alternate worker")
+	require.Equal(t, "worker-with-space", *targetNodeID, "capacity retry should exclude the full worker")
+	require.False(t, clearTargetNodeID, "capacity retry should preserve the new target reservation")
+	require.Equal(t, time.Duration(0), retryAfter, "capacity retry should reroute immediately when another worker has capacity")
+	require.NoError(t, mock.ExpectationsWereMet(), "alternate selection and reservation should commit before the immediate retry")
+}
+
 func TestRunAgentHandler_SandboxCapacityRetriesClearsTargetWhenNoWorkerAvailable(t *testing.T) {
 	t.Parallel()
 

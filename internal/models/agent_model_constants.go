@@ -551,6 +551,11 @@ func providerHostsLLMModel(byProvider map[string][]string, provider, model strin
 }
 
 func ValidateSettingsModels(settings OrgSettings) error {
+	if settings.CodeReviewMaxConcurrentTurns != 0 &&
+		(settings.CodeReviewMaxConcurrentTurns < MinCodeReviewMaxConcurrentTurns ||
+			settings.CodeReviewMaxConcurrentTurns > MaxCodeReviewMaxConcurrentTurns) {
+		return fmt.Errorf("code_review_max_concurrent_turns must be between %d and %d", MinCodeReviewMaxConcurrentTurns, MaxCodeReviewMaxConcurrentTurns)
+	}
 	if settings.PreviewMaxPreviewsPerUser != 0 && (settings.PreviewMaxPreviewsPerUser < MinPreviewMaxPreviewsPerUser || settings.PreviewMaxPreviewsPerUser > MaxPreviewMaxPreviewsPerUser) {
 		return fmt.Errorf("preview_max_previews_per_user must be between %d and %d", MinPreviewMaxPreviewsPerUser, MaxPreviewMaxPreviewsPerUser)
 	}

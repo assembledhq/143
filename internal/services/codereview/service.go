@@ -1080,12 +1080,13 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 	}
 	dedupeKey := "code_review:" + outputKey
 	jobID, err := s.jobs.EnqueueWithOpts(ctx, input.OrgID, db.EnqueueOpts{
-		Queue:       "agent",
-		JobType:     models.JobTypeRunCodeReview,
-		Payload:     payload,
-		Priority:    5,
-		DedupeKey:   &dedupeKey,
-		MaxAttempts: codeReviewJobMaxAttempts,
+		Queue:         "agent",
+		JobType:       models.JobTypeRunCodeReview,
+		Payload:       payload,
+		Priority:      5,
+		DedupeKey:     &dedupeKey,
+		MaxAttempts:   codeReviewJobMaxAttempts,
+		WorkloadClass: models.SandboxWorkloadClassCodeReview,
 	})
 	if err != nil {
 		reason := fmt.Sprintf("%s: %v", codeReviewUndispatchedReason, err)

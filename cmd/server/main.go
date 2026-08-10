@@ -321,13 +321,15 @@ func main() {
 			apiSandboxProvider = sandboxExec
 			maxActiveSandboxes := resolveWorkerMaxActiveSandboxes(cfg.WorkerProcessCount, cfg.WorkerMaxActiveSandboxes)
 			sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
-				Counter:   sandboxExec,
-				MaxActive: maxActiveSandboxes,
-				NodeID:    cfg.NodeID,
-				Logger:    logger,
+				Counter:             sandboxExec,
+				MaxActive:           maxActiveSandboxes,
+				InteractiveReserved: cfg.WorkerInteractiveReservedSandboxes,
+				NodeID:              cfg.NodeID,
+				Logger:              logger,
 			})
 			logger.Info().
 				Int("max_active_sandboxes", maxActiveSandboxes).
+				Int("interactive_reserved_sandboxes", sandboxCapacity.InteractiveReserved()).
 				Int("worker_process_count", cfg.WorkerProcessCount).
 				Msg("sandbox capacity gate enabled")
 		} else {
@@ -1023,6 +1025,7 @@ func startProcessWorkers(
 	workers := make([]*worker.Worker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
 		w := worker.New(pool, logger, nodeID)
+		w.EnableSandboxRouting()
 		worker.RegisterHandlers(w, stores, services, retentionCfg, logger)
 		workers = append(workers, w)
 	}
@@ -1103,7 +1106,9 @@ func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, 
 			cancel()
 			metadata["live_sandbox_count"] = snapshot.Live
 			metadata["reserved_sandbox_count"] = snapshot.Reserved
+			metadata["sandbox_turn_reserved_count"] = snapshot.SandboxTurnReserved
 			metadata["max_active_sandboxes"] = snapshot.MaxActive
+			metadata["interactive_reserved_sandbox_slots"] = snapshot.InteractiveReserved
 			if snapshot.CountError != "" {
 				metadata["live_sandbox_count_error"] = snapshot.CountError
 			}

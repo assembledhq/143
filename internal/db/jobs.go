@@ -170,6 +170,10 @@ type EnqueueOpts struct {
 	Payload   any
 	Priority  int
 	DedupeKey *string
+	// WorkloadClass controls sandbox routing and admission. Empty defaults to
+	// interactive for backward compatibility with non-sandbox jobs and older
+	// enqueue call sites.
+	WorkloadClass models.SandboxWorkloadClass
 	// RunAt defers the job until the requested time. Nil keeps the jobs table
 	// default of now(), preserving immediate execution for existing callers.
 	RunAt *time.Time
@@ -344,6 +348,21 @@ func (s *JobStore) EnqueueWithTarget(ctx context.Context, orgID uuid.UUID, queue
 		Priority:     priority,
 		DedupeKey:    dedupeKey,
 		TargetNodeID: targetNodeID,
+	})
+}
+
+// EnqueueWithTargetAndWorkload is the sandbox-aware affinity enqueue path.
+// It keeps workload classification durable across orchestrator-generated
+// continuation drains without changing the legacy positional API.
+func (s *JobStore) EnqueueWithTargetAndWorkload(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string, targetNodeID *string, workloadClass models.SandboxWorkloadClass) (uuid.UUID, error) {
+	return s.EnqueueWithOpts(ctx, orgID, EnqueueOpts{
+		Queue:         queue,
+		JobType:       jobType,
+		Payload:       payload,
+		Priority:      priority,
+		DedupeKey:     dedupeKey,
+		TargetNodeID:  targetNodeID,
+		WorkloadClass: workloadClass,
 	})
 }
 
@@ -643,6 +662,11 @@ func enqueueOn(ctx context.Context, q jobQuerier, orgID uuid.UUID, opts EnqueueO
 	if err != nil {
 		return uuid.Nil, err
 	}
+	if opts.WorkloadClass != "" {
+		if err := opts.WorkloadClass.Validate(); err != nil {
+			return uuid.Nil, err
+		}
+	}
 
 	var id uuid.UUID
 	args := pgx.NamedArgs{
@@ -655,6 +679,11 @@ func enqueueOn(ctx context.Context, q jobQuerier, orgID uuid.UUID, opts EnqueueO
 	}
 	columns := []string{"queue", "job_type", "payload", "priority", "dedupe_key"}
 	values := []string{"@queue", "@job_type", "@payload", "@priority", "@dedupe_key"}
+	if opts.WorkloadClass != "" {
+		columns = append(columns, "workload_class")
+		values = append(values, "@workload_class")
+		args["workload_class"] = opts.WorkloadClass
+	}
 	if opts.TargetNodeID != nil {
 		columns = append(columns, "target_node_id")
 		values = append(values, "@target_node_id")
@@ -699,13 +728,453 @@ func (s *JobStore) DeleteExpiredCompleted(ctx context.Context, retentionDays int
 const claimedJobColumns = `j.id, j.org_id, j.queue, j.job_type, j.payload, j.priority, j.status,
 	j.attempts, j.max_attempts, j.run_at, j.locked_by_node_id, j.locked_at,
 	j.lease_expires_at, j.lock_token, j.run_owner_id, j.owner_kind, j.last_error,
-	j.dedupe_key, j.target_node_id, j.retry_window_started_at, j.created_at, j.updated_at, j.completed_at`
+	j.dedupe_key, j.workload_class, j.target_node_id, j.sandbox_slot_reserved_until,
+	j.retry_window_started_at, j.created_at, j.updated_at, j.completed_at`
 
 // nodeDeadHeartbeatThreshold is how long a node can go without heartbeating
 // before its pinned jobs become claimable by any worker. Set generously
 // above the node manager's heartbeat interval (currently 10s) so a transient
 // network blip doesn't unpin jobs from a healthy worker.
 const nodeDeadHeartbeatThreshold = 90 * time.Second
+
+const (
+	sandboxSlotReservationTTL = 30 * time.Second
+	sandboxFleetRetryDelay    = 10 * time.Second
+	sandboxOrgLimitRetryDelay = 5 * time.Second
+)
+
+type SandboxRoutingReason string
+
+const (
+	SandboxRoutingReasonReserved       SandboxRoutingReason = "reserved"
+	SandboxRoutingReasonFleetCapacity  SandboxRoutingReason = "fleet_capacity"
+	SandboxRoutingReasonOrgLimit       SandboxRoutingReason = "org_limit"
+	SandboxRoutingReasonLockContention SandboxRoutingReason = "lock_contention"
+)
+
+// SandboxRoutingResult reports the durable placement decision made before a
+// fresh sandbox job can be claimed. A nil TargetNodeID with Deferred=false is
+// lock contention, not real fleet exhaustion; callers should leave the job due
+// so another dispatcher can retry immediately.
+type SandboxRoutingResult struct {
+	JobID         uuid.UUID
+	WorkloadClass models.SandboxWorkloadClass
+	TargetNodeID  *string
+	Deferred      bool
+	Reason        SandboxRoutingReason
+}
+
+type sandboxRoutingJob struct {
+	ID            uuid.UUID
+	OrgID         uuid.UUID
+	WorkloadClass models.SandboxWorkloadClass
+}
+
+// RouteNextSandboxJob assigns one due, fresh-sandbox job to a worker before
+// normal queue claim. The job row, org admission decision, worker selection,
+// and expiring reservation are committed atomically. Existing-sandbox affinity
+// jobs are excluded because they must stay on their recorded owner.
+// lint:allow-no-orgid reason="system worker dispatcher routes sandbox jobs across organizations"
+func (s *JobStore) RouteNextSandboxJob(ctx context.Context) (*SandboxRoutingResult, error) {
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return nil, fmt.Errorf("job store does not support sandbox routing transactions")
+	}
+	tx, err := txStarter.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin sandbox job routing: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var job sandboxRoutingJob
+	err = tx.QueryRow(ctx, `
+		SELECT j.id, j.org_id, j.workload_class
+		FROM jobs j
+		LEFT JOIN nodes target ON target.id = j.target_node_id
+		WHERE j.status = 'pending'
+		  AND j.run_at <= now()
+		  AND j.job_type IN ('run_agent', 'continue_session')
+		  AND (
+			j.target_node_id IS NULL
+			OR (
+				j.sandbox_slot_reserved_until IS NOT NULL
+				AND (
+					j.sandbox_slot_reserved_until <= now()
+					OR target.id IS NULL
+					OR target.status IN ('dead', 'draining')
+					OR target.last_heartbeat_at < @dead_before
+				)
+			)
+		  )
+		ORDER BY j.priority DESC, j.created_at ASC
+		FOR UPDATE OF j SKIP LOCKED
+		LIMIT 1`, pgx.NamedArgs{
+		"dead_before": time.Now().Add(-nodeDeadHeartbeatThreshold),
+	}).Scan(&job.ID, &job.OrgID, &job.WorkloadClass)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("select sandbox job for routing: %w", err)
+	}
+
+	result, err := reserveSandboxSlotForLockedJob(ctx, tx, job, "")
+	if err != nil {
+		return nil, err
+	}
+	if result.TargetNodeID == nil && result.Reason != SandboxRoutingReasonLockContention {
+		retryDelay := sandboxFleetRetryDelay
+		if result.Reason == SandboxRoutingReasonOrgLimit {
+			retryDelay = sandboxOrgLimitRetryDelay
+		}
+		deferredUntil := time.Now().Add(retryDelay)
+		if _, err := tx.Exec(ctx, `
+			UPDATE jobs
+			SET target_node_id = NULL,
+				sandbox_slot_reserved_until = NULL,
+				run_at = @run_at,
+				updated_at = now()
+			WHERE id = @job_id`, pgx.NamedArgs{
+			"job_id": job.ID,
+			"run_at": deferredUntil,
+		}); err != nil {
+			return nil, fmt.Errorf("defer sandbox job without capacity: %w", err)
+		}
+		result.Deferred = true
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit sandbox job routing: %w", err)
+	}
+	if result.TargetNodeID != nil {
+		s.notify(ctx, job.ID)
+	}
+	return result, nil
+}
+
+// ReserveSandboxSlotForRetry atomically retargets a currently running sandbox
+// job after the worker-local gate rejects it. The worker's fenced retry write
+// preserves the target and reservation selected here.
+// lint:allow-no-orgid reason="worker retry routes a globally identified job across worker nodes"
+func (s *JobStore) ReserveSandboxSlotForRetry(ctx context.Context, jobID uuid.UUID, excludeNodeID string) (*SandboxRoutingResult, error) {
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return nil, fmt.Errorf("job store does not support sandbox routing transactions")
+	}
+	tx, err := txStarter.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin sandbox retry routing: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var job sandboxRoutingJob
+	err = tx.QueryRow(ctx, `
+		SELECT id, org_id, workload_class
+		FROM jobs
+		WHERE id = @job_id
+		  AND status = 'running'
+		  AND job_type IN ('run_agent', 'continue_session')
+		FOR UPDATE`, pgx.NamedArgs{"job_id": jobID}).Scan(&job.ID, &job.OrgID, &job.WorkloadClass)
+	if err != nil {
+		return nil, fmt.Errorf("lock sandbox retry job: %w", err)
+	}
+
+	result, err := reserveSandboxSlotForLockedJob(ctx, tx, job, excludeNodeID)
+	if err != nil {
+		return nil, err
+	}
+	if result.TargetNodeID == nil {
+		if _, err := tx.Exec(ctx, `
+			UPDATE jobs
+			SET target_node_id = NULL,
+				sandbox_slot_reserved_until = NULL,
+				updated_at = now()
+			WHERE id = @job_id`, pgx.NamedArgs{"job_id": job.ID}); err != nil {
+			return nil, fmt.Errorf("clear sandbox retry reservation: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit sandbox retry routing: %w", err)
+	}
+	return result, nil
+}
+
+func reserveSandboxSlotForLockedJob(ctx context.Context, tx pgx.Tx, job sandboxRoutingJob, excludeNodeID string) (*SandboxRoutingResult, error) {
+	result := &SandboxRoutingResult{
+		JobID:         job.ID,
+		WorkloadClass: job.WorkloadClass,
+		Reason:        SandboxRoutingReasonFleetCapacity,
+	}
+	if err := job.WorkloadClass.Validate(); err != nil {
+		return nil, fmt.Errorf("route sandbox job workload class: %w", err)
+	}
+
+	if job.WorkloadClass == models.SandboxWorkloadClassCodeReview {
+		var rawSettings json.RawMessage
+		if err := tx.QueryRow(ctx, `
+			SELECT settings
+			FROM organizations
+			WHERE id = @org_id
+			FOR UPDATE`, pgx.NamedArgs{"org_id": job.OrgID}).Scan(&rawSettings); err != nil {
+			return nil, fmt.Errorf("lock organization for code-review admission: %w", err)
+		}
+		settings, err := models.ParseOrgSettings(rawSettings)
+		if err != nil {
+			return nil, fmt.Errorf("parse organization settings for code-review admission: %w", err)
+		}
+		var active int
+		if err := tx.QueryRow(ctx, `
+			SELECT COUNT(*)
+			FROM jobs
+			WHERE org_id = @org_id
+			  AND id <> @job_id
+			  AND job_type IN ('run_agent', 'continue_session')
+			  AND workload_class = 'code_review'
+			  AND (
+				status = 'running'
+				OR (status = 'pending' AND sandbox_slot_reserved_until > now())
+			  )`, pgx.NamedArgs{
+			"org_id": job.OrgID,
+			"job_id": job.ID,
+		}).Scan(&active); err != nil {
+			return nil, fmt.Errorf("count active code-review sandbox turns: %w", err)
+		}
+		if active >= settings.CodeReviewMaxConcurrentTurns {
+			result.Reason = SandboxRoutingReasonOrgLimit
+			return result, nil
+		}
+	}
+
+	excludedNodeIDs := []string{}
+	if excludeNodeID != "" {
+		excludedNodeIDs = append(excludedNodeIDs, excludeNodeID)
+	}
+	lockContended := false
+	for {
+		candidate, err := selectSandboxRoutingCandidate(ctx, tx, job.WorkloadClass, excludedNodeIDs)
+		if errors.Is(err, pgx.ErrNoRows) {
+			if lockContended {
+				result.Reason = SandboxRoutingReasonLockContention
+			}
+			return result, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		var locked bool
+		if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(hashtextextended(@node_id, 143))`, pgx.NamedArgs{
+			"node_id": candidate,
+		}).Scan(&locked); err != nil {
+			return nil, fmt.Errorf("lock sandbox routing candidate %s: %w", candidate, err)
+		}
+		if !locked {
+			lockContended = true
+			excludedNodeIDs = append(excludedNodeIDs, candidate)
+			continue
+		}
+
+		hasCapacity, err := sandboxRoutingCandidateHasCapacity(ctx, tx, candidate, job.ID, job.WorkloadClass)
+		if err != nil {
+			return nil, err
+		}
+		if !hasCapacity {
+			excludedNodeIDs = append(excludedNodeIDs, candidate)
+			continue
+		}
+
+		expiresAt := time.Now().Add(sandboxSlotReservationTTL)
+		if _, err := tx.Exec(ctx, `
+			UPDATE jobs
+			SET target_node_id = @target_node_id,
+				sandbox_slot_reserved_until = @reserved_until,
+				updated_at = now()
+			WHERE id = @job_id`, pgx.NamedArgs{
+			"job_id":         job.ID,
+			"target_node_id": candidate,
+			"reserved_until": expiresAt,
+		}); err != nil {
+			return nil, fmt.Errorf("persist sandbox slot reservation: %w", err)
+		}
+		result.TargetNodeID = &candidate
+		result.Reason = SandboxRoutingReasonReserved
+		return result, nil
+	}
+}
+
+// lint:allow-no-orgid reason="worker capacity routing intentionally aggregates reservations across organizations"
+func selectSandboxRoutingCandidate(ctx context.Context, tx pgx.Tx, workloadClass models.SandboxWorkloadClass, excludedNodeIDs []string) (string, error) {
+	var nodeID string
+	err := tx.QueryRow(ctx, `
+		WITH raw_load AS (
+			SELECT
+				n.id,
+				COALESCE(NULLIF(n.metadata->>'live_sandbox_count', '')::int, 0) AS live_sandboxes,
+				COALESCE(NULLIF(n.metadata->>'reserved_sandbox_count', '')::int, 0) AS local_reservations,
+				COALESCE(NULLIF(n.metadata->>'sandbox_turn_reserved_count', '')::int, 0) AS sandbox_turn_local_reservations,
+				COALESCE(NULLIF(n.metadata->>'max_active_sandboxes', '')::int, 0) AS max_sandboxes,
+				COALESCE(
+					NULLIF(n.metadata->>'interactive_reserved_sandbox_slots', '')::int,
+					CASE WHEN COALESCE(NULLIF(n.metadata->>'max_active_sandboxes', '')::int, 0) > 1 THEN 1 ELSE 0 END
+				) AS interactive_reservations,
+				COALESCE(NULLIF(n.metadata->>'active_job_count', '')::int, 0) AS active_jobs,
+				(
+					SELECT COUNT(*)
+					FROM jobs reserved_job
+					WHERE reserved_job.target_node_id = n.id
+					  AND reserved_job.sandbox_slot_reserved_until > now()
+					  AND reserved_job.status = 'pending'
+				) AS pending_durable_reservations,
+				(
+					SELECT COUNT(*)
+					FROM jobs reserved_job
+					WHERE reserved_job.target_node_id = n.id
+					  AND reserved_job.sandbox_slot_reserved_until > now()
+					  AND reserved_job.status = 'running'
+				) AS running_durable_reservations,
+				n.last_heartbeat_at
+			FROM nodes n
+			WHERE n.mode IN ('worker', 'all')
+			  AND n.status = 'active'
+			  AND n.last_heartbeat_at >= @dead_before
+			  AND COALESCE(n.metadata->>'live_sandbox_count_error', '') = ''
+			  AND NOT (n.id = ANY(@excluded_node_ids::text[]))
+		),
+		candidate_load AS (
+			SELECT
+				*,
+				live_sandboxes
+					+ GREATEST(local_reservations - sandbox_turn_local_reservations, 0)
+					+ pending_durable_reservations
+					+ GREATEST(sandbox_turn_local_reservations, running_durable_reservations) AS capacity_load
+			FROM raw_load
+		)
+		SELECT id
+		FROM candidate_load
+		WHERE max_sandboxes > 0
+		  AND capacity_load <
+			CASE
+				WHEN @workload_class = 'code_review' THEN max_sandboxes - interactive_reservations
+				ELSE max_sandboxes
+			END
+		ORDER BY
+			capacity_load::double precision / max_sandboxes ASC,
+			capacity_load ASC,
+			active_jobs ASC,
+			last_heartbeat_at DESC,
+			id ASC
+		LIMIT 1`, pgx.NamedArgs{
+		"dead_before":       time.Now().Add(-nodeDeadHeartbeatThreshold),
+		"excluded_node_ids": excludedNodeIDs,
+		"workload_class":    workloadClass,
+	}).Scan(&nodeID)
+	if err != nil {
+		return "", err
+	}
+	return nodeID, nil
+}
+
+// lint:allow-no-orgid reason="worker capacity routing intentionally aggregates reservations across organizations"
+func sandboxRoutingCandidateHasCapacity(ctx context.Context, tx pgx.Tx, nodeID string, jobID uuid.UUID, workloadClass models.SandboxWorkloadClass) (bool, error) {
+	var live, localReserved, sandboxTurnLocalReserved, maxActive, interactiveReserved, pendingDurableReserved, runningDurableReserved int
+	err := tx.QueryRow(ctx, `
+		SELECT
+			COALESCE(NULLIF(n.metadata->>'live_sandbox_count', '')::int, 0),
+			COALESCE(NULLIF(n.metadata->>'reserved_sandbox_count', '')::int, 0),
+			COALESCE(NULLIF(n.metadata->>'sandbox_turn_reserved_count', '')::int, 0),
+			COALESCE(NULLIF(n.metadata->>'max_active_sandboxes', '')::int, 0),
+			COALESCE(
+				NULLIF(n.metadata->>'interactive_reserved_sandbox_slots', '')::int,
+				CASE WHEN COALESCE(NULLIF(n.metadata->>'max_active_sandboxes', '')::int, 0) > 1 THEN 1 ELSE 0 END
+			),
+			(
+				SELECT COUNT(*)
+				FROM jobs reserved_job
+				WHERE reserved_job.target_node_id = n.id
+				  AND reserved_job.id <> @job_id
+				  AND reserved_job.sandbox_slot_reserved_until > now()
+				  AND reserved_job.status = 'pending'
+			),
+			(
+				SELECT COUNT(*)
+				FROM jobs reserved_job
+				WHERE reserved_job.target_node_id = n.id
+				  AND reserved_job.id <> @job_id
+				  AND reserved_job.sandbox_slot_reserved_until > now()
+				  AND reserved_job.status = 'running'
+			)
+		FROM nodes n
+		WHERE n.id = @node_id
+		  AND n.mode IN ('worker', 'all')
+		  AND n.status = 'active'
+		  AND n.last_heartbeat_at >= @dead_before
+		  AND COALESCE(n.metadata->>'live_sandbox_count_error', '') = ''`, pgx.NamedArgs{
+		"job_id":      jobID,
+		"node_id":     nodeID,
+		"dead_before": time.Now().Add(-nodeDeadHeartbeatThreshold),
+	}).Scan(&live, &localReserved, &sandboxTurnLocalReserved, &maxActive, &interactiveReserved, &pendingDurableReserved, &runningDurableReserved)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("recheck sandbox capacity on worker %s: %w", nodeID, err)
+	}
+	effectiveMax := maxActive
+	if workloadClass == models.SandboxWorkloadClassCodeReview {
+		effectiveMax -= interactiveReserved
+	}
+	load := sandboxRoutingCapacityLoad(live, localReserved, sandboxTurnLocalReserved, pendingDurableReserved, runningDurableReserved)
+	return effectiveMax > 0 && load < effectiveMax, nil
+}
+
+func sandboxRoutingCapacityLoad(live, localReserved, sandboxTurnLocalReserved, pendingDurableReserved, runningDurableReserved int) int {
+	localOnlyReserved := max(localReserved-sandboxTurnLocalReserved, 0)
+	overlappingSandboxTurns := max(sandboxTurnLocalReserved, runningDurableReserved)
+	return live + localOnlyReserved + pendingDurableReserved + overlappingSandboxTurns
+}
+
+// CountActiveSandboxTurnsByOrgAndClass returns claimed agent turns for the
+// workload admission fence. The current job is included, so callers reject
+// only when the count is greater than the configured limit.
+func (s *JobStore) CountActiveSandboxTurnsByOrgAndClass(ctx context.Context, orgID uuid.UUID, workloadClass models.SandboxWorkloadClass) (int, error) {
+	if err := workloadClass.Validate(); err != nil {
+		return 0, err
+	}
+	var count int
+	err := s.db.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM jobs
+		WHERE org_id = @org_id
+		  AND workload_class = @workload_class
+		  AND job_type IN ('run_agent', 'continue_session')
+		  AND status = 'running'`, pgx.NamedArgs{
+		"org_id":         orgID,
+		"workload_class": workloadClass,
+	}).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count active sandbox turns by workload class: %w", err)
+	}
+	return count, nil
+}
+
+// ReleaseSandboxSlotReservationWithLease clears a routing reservation once
+// the authoritative local gate has finished creating or hydrating the
+// sandbox. The fencing token prevents a stale executor from clearing a newer
+// attempt's placement.
+// lint:allow-no-orgid reason="fenced worker cleanup addresses a globally unique job id"
+func (s *JobStore) ReleaseSandboxSlotReservationWithLease(ctx context.Context, jobID, lockToken uuid.UUID) (bool, error) {
+	result, err := s.db.Exec(ctx, `
+		UPDATE jobs
+		SET sandbox_slot_reserved_until = NULL,
+			updated_at = now()
+		WHERE id = $1
+		  AND status = 'running'
+		  AND lock_token = $2
+		  AND sandbox_slot_reserved_until IS NOT NULL`, jobID, lockToken)
+	if err != nil {
+		return false, fmt.Errorf("release sandbox slot reservation with lease: %w", err)
+	}
+	return result.RowsAffected() == 1, nil
+}
 
 type jobExecer interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
@@ -741,10 +1210,11 @@ func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string
 			LEFT JOIN unavailable_target_nodes d ON d.id = j.target_node_id
 			JOIN claiming_node cn ON TRUE
 			WHERE j.status = 'pending' AND j.run_at <= now()
+			  AND (j.job_type NOT IN ('run_agent', 'continue_session') OR j.target_node_id IS NOT NULL)
 			  AND (
 			    j.target_node_id IS NULL
 			    OR j.target_node_id = @node_id
-			    OR d.id IS NOT NULL
+			    OR (d.id IS NOT NULL AND j.sandbox_slot_reserved_until IS NULL)
 			  )
 			ORDER BY j.priority DESC, j.created_at ASC
 			FOR UPDATE SKIP LOCKED
@@ -791,13 +1261,15 @@ func scanJobRow(row pgx.Row) (*models.Job, error) {
 	var lastError pgtype.Text
 	var dedupeKey pgtype.Text
 	var targetNodeID pgtype.Text
+	var sandboxSlotReservedUntil pgtype.Timestamptz
 	var retryWindowStartedAt pgtype.Timestamptz
 	var completedAt pgtype.Timestamptz
 	err := row.Scan(
 		&job.ID, &job.OrgID, &job.Queue, &job.JobType, &job.Payload, &job.Priority,
 		&job.Status, &job.Attempts, &job.MaxAttempts, &job.RunAt, &lockedByNodeID,
 		&lockedAt, &leaseExpiresAt, &persistedLockToken, &runOwnerID,
-		&ownerKind, &lastError, &dedupeKey, &targetNodeID, &retryWindowStartedAt, &job.CreatedAt, &job.UpdatedAt, &completedAt,
+		&ownerKind, &lastError, &dedupeKey, &job.WorkloadClass, &targetNodeID,
+		&sandboxSlotReservedUntil, &retryWindowStartedAt, &job.CreatedAt, &job.UpdatedAt, &completedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -827,6 +1299,9 @@ func scanJobRow(row pgx.Row) (*models.Job, error) {
 	}
 	if targetNodeID.Valid {
 		job.TargetNodeID = &targetNodeID.String
+	}
+	if sandboxSlotReservedUntil.Valid {
+		job.SandboxSlotReservedUntil = &sandboxSlotReservedUntil.Time
 	}
 	if retryWindowStartedAt.Valid {
 		job.RetryWindowStartedAt = &retryWindowStartedAt.Time

@@ -43,7 +43,11 @@ import (
 	threadsvc "github.com/assembledhq/143/internal/services/thread"
 )
 
-const sandboxCapacityRetryDelay = 10 * time.Second
+const (
+	sandboxCapacityRetryDelay     = 10 * time.Second
+	sandboxOrgLimitRetryDelay     = 5 * time.Second
+	sandboxRoutingErrorRetryDelay = 2 * time.Second
+)
 const previewCapacityRetryDelay = 5 * time.Second
 const previewStartupInterruptedRetryDelay = 2 * time.Second
 const prePRReviewRetryDelay = 5 * time.Second
@@ -133,6 +137,46 @@ func summarizeWorkerLoadForSandboxCapacity(samples []db.WorkerLoadSample) (int64
 		runningSessionJobs += sample.RunningSessionJobs
 	}
 	return runningSessions, sandboxContainers, activePreviews, previewHeldContainers, runningSessionJobs
+}
+
+func sandboxTurnCapacityRetryTarget(ctx context.Context, stores *Stores, logger zerolog.Logger) (*string, bool, time.Duration) {
+	if stores == nil || stores.Jobs == nil {
+		return nil, false, sandboxCapacityRetryDelay
+	}
+	jobID, ok := jobctx.JobIDFromContext(ctx)
+	if !ok || jobID == uuid.Nil {
+		// Non-worker callers (including direct handler tests) do not carry a
+		// claimed job id, so they cannot persist an atomic reservation. Preserve
+		// the legacy read-only selector for that compatibility path; real worker
+		// attempts always carry jobctx.JobID and use the reservation path below.
+		targetNodeID, clearTargetNodeID := sandboxCapacityRetryTarget(ctx, stores, logger)
+		return targetNodeID, clearTargetNodeID, sandboxCapacityRetryDelay
+	}
+	excludeNodeID, _ := jobctx.WorkerNodeIDFromContext(ctx)
+	result, err := stores.Jobs.ReserveSandboxSlotForRetry(ctx, jobID, excludeNodeID)
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to reserve worker sandbox capacity for retry")
+		return nil, false, sandboxRoutingErrorRetryDelay
+	}
+	if result.TargetNodeID != nil {
+		logger.Info().
+			Str("target_node_id", *result.TargetNodeID).
+			Str("excluded_node_id", excludeNodeID).
+			Str("routing_reason", string(result.Reason)).
+			Msg("immediately routing sandbox capacity retry to reserved worker slot")
+		return result.TargetNodeID, false, 0
+	}
+	logger.Info().
+		Str("excluded_node_id", excludeNodeID).
+		Str("routing_reason", string(result.Reason)).
+		Msg("no alternate worker slot reserved; clearing retry target pin")
+	if result.Reason == db.SandboxRoutingReasonLockContention {
+		return nil, true, 0
+	}
+	if result.Reason == db.SandboxRoutingReasonOrgLimit {
+		return nil, true, sandboxOrgLimitRetryDelay
+	}
+	return nil, true, sandboxCapacityRetryDelay
 }
 
 func sandboxCapacityRetryTarget(ctx context.Context, stores *Stores, logger zerolog.Logger) (*string, bool) {
@@ -6205,7 +6249,18 @@ func enqueueSlackSessionContinuationMessage(ctx context.Context, stores *Stores,
 		"session_id": session.ID.String(),
 		"thread_id":  thread.ID.String(),
 	}
-	_, err = stores.Jobs.Enqueue(ctx, orgID, "agent", "continue_session", payload, 5, &dedupeKey)
+	enqueueOpts := db.EnqueueOpts{
+		Queue:        "agent",
+		JobType:      "continue_session",
+		Payload:      payload,
+		Priority:     5,
+		DedupeKey:    &dedupeKey,
+		TargetNodeID: models.SessionWorkerTarget(&session),
+	}
+	if models.SandboxWorkloadClassForSession(&session) == models.SandboxWorkloadClassCodeReview {
+		enqueueOpts.WorkloadClass = models.SandboxWorkloadClassCodeReview
+	}
+	_, err = stores.Jobs.EnqueueWithOpts(ctx, orgID, enqueueOpts)
 	return err
 }
 
@@ -6544,7 +6599,7 @@ func handleSlackHumanInputFreeformModal(ctx context.Context, stores *Stores, ser
 }
 
 func handleSlackHumanInputAnswer(ctx context.Context, stores *Stores, services *Services, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
-	if stores == nil || stores.HumanInputRequests == nil || stores.Jobs == nil || (stores.SlackUserLinks == nil && stores.ExternalUserLinks == nil) {
+	if stores == nil || stores.Sessions == nil || stores.HumanInputRequests == nil || stores.Jobs == nil || (stores.SlackUserLinks == nil && stores.ExternalUserLinks == nil) {
 		return fmt.Errorf("slack human-input dependencies are not configured")
 	}
 	var value struct {
@@ -6559,6 +6614,10 @@ func handleSlackHumanInputAnswer(ctx context.Context, stores *Stores, services *
 	orgID, sessionID, err := parseSlackSessionJobIDs(input.OrgID, value.SessionID)
 	if err != nil {
 		return err
+	}
+	session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+	if err != nil {
+		return fmt.Errorf("load session for Slack human-input continuation: %w", err)
 	}
 	requestID, err := uuid.Parse(value.RequestID)
 	if err != nil {
@@ -6619,7 +6678,18 @@ func handleSlackHumanInputAnswer(ctx context.Context, stores *Stores, services *
 	if req.ThreadID != nil {
 		payload["thread_id"] = req.ThreadID.String()
 	}
-	_, err = stores.Jobs.Enqueue(ctx, orgID, "agent", "continue_session", payload, 5, &dedupeKey)
+	enqueueOpts := db.EnqueueOpts{
+		Queue:        "agent",
+		JobType:      "continue_session",
+		Payload:      payload,
+		Priority:     5,
+		DedupeKey:    &dedupeKey,
+		TargetNodeID: models.SessionWorkerTarget(&session),
+	}
+	if models.SandboxWorkloadClassForSession(&session) == models.SandboxWorkloadClassCodeReview {
+		enqueueOpts.WorkloadClass = models.SandboxWorkloadClassCodeReview
+	}
+	_, err = stores.Jobs.EnqueueWithOpts(ctx, orgID, enqueueOpts)
 	return err
 }
 
@@ -8297,8 +8367,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		}
 		if err := runErr; err != nil {
 			if errors.Is(err, agent.ErrSandboxCapacity) {
-				retryAfter := sandboxCapacityRetryDelay
-				targetNodeID, clearTargetNodeID := sandboxCapacityRetryTarget(ctx, stores, logger)
+				targetNodeID, clearTargetNodeID, retryAfter := sandboxTurnCapacityRetryTarget(ctx, stores, logger)
 				registerSandboxCapacityDeadLetter(ctx, stores, services, logger, run, run.PrimaryThreadID, "run_agent")
 				logger.Info().
 					Str("session_id", runID.String()).
@@ -8387,7 +8456,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 					Msg("duplicate run_agent job lost sandbox-hold race; dead-lettering silently — winner retains the session row")
 				return &FatalError{Err: err}
 			}
-			if errors.Is(err, agent.ErrConcurrencyLimit) {
+			if errors.Is(err, agent.ErrConcurrencyLimit) || errors.Is(err, agent.ErrSandboxTurnConcurrency) {
 				// If the session has been pending for too long, fail it
 				// instead of retrying indefinitely.
 				if time.Since(run.CreatedAt) > 8*time.Minute {
@@ -9753,9 +9822,21 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		}
 
 		if err := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts); err != nil {
+			if errors.Is(err, agent.ErrConcurrencyLimit) || errors.Is(err, agent.ErrSandboxTurnConcurrency) {
+				var capacityThreadID *uuid.UUID
+				if hasThread {
+					threadIDLocal := threadID
+					capacityThreadID = &threadIDLocal
+				}
+				registerSandboxCapacityDeadLetter(ctx, stores, services, logger, session, capacityThreadID, "continue_session")
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Err(err).
+					Msg("sandbox turn concurrency reached; retrying continue_session")
+				return &RetryableError{Err: err}
+			}
 			if errors.Is(err, agent.ErrSandboxCapacity) {
-				retryAfter := sandboxCapacityRetryDelay
-				targetNodeID, clearTargetNodeID := sandboxCapacityRetryTarget(ctx, stores, logger)
+				targetNodeID, clearTargetNodeID, retryAfter := sandboxTurnCapacityRetryTarget(ctx, stores, logger)
 				var capacityThreadID *uuid.UUID
 				if hasThread {
 					threadIDLocal := threadID

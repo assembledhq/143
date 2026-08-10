@@ -437,6 +437,36 @@ func TestSettingsHandler_Update(t *testing.T) {
 			expectedBody: "preview_max_previews_per_user",
 		},
 		{
+			name: "accepts code review concurrency within bounds",
+			body: `{"settings":{"code_review_max_concurrent_turns":8}}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(orgColumns()).AddRow(
+							orgID, "Test Org", json.RawMessage(`{}`), now, now,
+						),
+					)
+				mock.ExpectQuery("UPDATE organizations").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"updated_at"}).AddRow(now),
+					)
+			},
+			expectedCode: http.StatusOK,
+			expectedBody: "code_review_max_concurrent_turns",
+		},
+		{
+			name: "returns bad request for code review concurrency above maximum",
+			body: `{"settings":{"code_review_max_concurrent_turns":99}}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				// no DB calls expected
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_SETTINGS",
+		},
+		{
 			name: "returns bad request for preview capacity below minimum",
 			body: `{"settings":{"preview_max_previews_per_user":-1}}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {

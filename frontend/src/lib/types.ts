@@ -2194,6 +2194,8 @@ export interface Memory {
 
 export interface OrgSettings {
   max_concurrent_runs?: number;
+  code_review_max_concurrent_turns?: number;
+  org_size?: "small" | "medium" | "large" | "enterprise";
   max_session_duration_seconds?: number;
   preview_max_previews_per_user?: number;
   preview_auto_pool_max_active?: number;

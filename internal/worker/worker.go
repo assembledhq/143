@@ -115,6 +115,10 @@ type targetRetryLeaseStore interface {
 	RetryWithoutConsumingAttemptWithLeaseAndTarget(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time, targetNodeID *string) (bool, error)
 }
 
+type sandboxJobRouter interface {
+	RouteNextSandboxJob(ctx context.Context) (*db.SandboxRoutingResult, error)
+}
+
 // maxRetryableDuration is the maximum wall-clock time a retryable job is
 // allowed to keep retrying before being dead-lettered. This prevents jobs
 // from retrying indefinitely (e.g. when stuck behind a concurrency limit).
@@ -124,6 +128,7 @@ var defaultMaxLongRunningJobDuration = time.Duration(models.MaxAbsoluteRuntimeCe
 
 type Worker struct {
 	jobs          jobLeaseStore
+	sandboxRouter sandboxJobRouter
 	logger        zerolog.Logger
 	nodeID        string
 	handlers      map[string]JobHandler
@@ -139,6 +144,15 @@ type Worker struct {
 	draining           atomic.Bool
 	activeJobs         atomic.Int32
 	activeRunAgentJobs atomic.Int32
+}
+
+// EnableSandboxRouting turns on the capacity-aware pre-claim routing pass.
+// Keeping this explicit lets lightweight workers and unit tests use the core
+// queue consumer without requiring the cluster routing schema.
+func (w *Worker) EnableSandboxRouting() {
+	if router, ok := w.jobs.(sandboxJobRouter); ok {
+		w.sandboxRouter = router
+	}
 }
 
 func New(pool db.DBTX, logger zerolog.Logger, nodeID string) *Worker {
@@ -187,6 +201,22 @@ func (w *Worker) Start(ctx context.Context) {
 func (w *Worker) poll(ctx context.Context) {
 	if w.draining.Load() {
 		return
+	}
+	if w.sandboxRouter != nil {
+		result, err := w.sandboxRouter.RouteNextSandboxJob(ctx)
+		if err != nil {
+			w.logger.Error().Err(err).Msg("failed to route pending sandbox job")
+		} else if result != nil {
+			event := w.logger.Info().
+				Str("job_id", result.JobID.String()).
+				Str("workload_class", string(result.WorkloadClass)).
+				Str("routing_reason", string(result.Reason)).
+				Bool("deferred", result.Deferred)
+			if result.TargetNodeID != nil {
+				event.Str("target_node_id", *result.TargetNodeID)
+			}
+			event.Msg("sandbox job routing evaluated")
+		}
 	}
 
 	lockToken := uuid.New()
