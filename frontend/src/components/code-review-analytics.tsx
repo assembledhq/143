@@ -266,6 +266,8 @@ export function CodeReviewAnalyticsReport({
         />
       ) : null}
 
+      <ApprovalOutcomeCards summary={summary} />
+
       {filters}
 
       <SectionGroup
@@ -407,8 +409,6 @@ export function CodeReviewAnalyticsReport({
           </>
         )}
       </SectionGroup>
-
-      <ApprovalOutcomeCards summary={summary} />
 
       <SectionGroup
         title="Direct review requests by user"
