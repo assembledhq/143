@@ -1865,7 +1865,7 @@ func TestRunAgent_RateLimitRetriesWithFallbackCredential(t *testing.T) {
 
 	firstCredID := uuid.New()
 	secondCredID := uuid.New()
-	resetAt := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC)
+	resetAt := time.Now().Add(48 * time.Hour).UTC().Truncate(time.Second)
 	d := defaultDeps()
 	d.adapter = &mockAgentAdapter{name: models.AgentTypeAmp}
 	codingCreds := &mockCodingCredentialProvider{
