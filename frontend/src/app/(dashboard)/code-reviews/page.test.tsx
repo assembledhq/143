@@ -803,7 +803,7 @@ describe("CodeReviewsPage", () => {
     expect(within(evidenceSheet).getByText("Required checks were not passing")).toBeInTheDocument();
   });
 
-  it("renders the PR-centric Analytics report with author usage first", async () => {
+  it("renders the PR-centric Analytics report with headline metrics first", async () => {
     const user = userEvent.setup();
     const analyticsRequests: URLSearchParams[] = [];
     // The retired insights report has no handler in the base mocks, so a
@@ -848,20 +848,10 @@ describe("CodeReviewsPage", () => {
     const authorUsage = screen.getByText("Usage by PR author");
     const authorTable = screen.getByRole("table", { name: "Code review analytics by PR author" });
     expect(
+      approvalOutcomes.compareDocumentPosition(analyticsFilters as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
       (analyticsFilters as Node).compareDocumentPosition(authorUsage) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-    // Anchor on the table rather than the section heading: the cards following
-    // the heading also holds when they render inside the author section above
-    // the table, which is the one-line regression this is guarding against.
-    expect(
-      authorTable.compareDocumentPosition(approvalOutcomes) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-    // Pin the far side too. The filters/author-section check above still held
-    // before the cards moved, so only the full author-table → cards → request-table
-    // window proves the new placement.
-    expect(
-      approvalOutcomes.compareDocumentPosition(screen.getByText("Direct review requests by user")) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(screen.getByText("Line-count limit exceeded")).toBeInTheDocument();
     expect(screen.getByText("Reviewers found a blocking issue")).toBeInTheDocument();
