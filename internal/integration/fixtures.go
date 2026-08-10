@@ -78,7 +78,7 @@ func setWorkerSandboxCapacity(t *testing.T, pool *pgxpool.Pool, nodeID string, m
 			'live_sandbox_count', 0,
 			'reserved_sandbox_count', 0,
 			'sandbox_turn_reserved_count', 0,
-			'max_active_sandboxes', $1,
+			'max_active_sandboxes', $1::integer,
 			'interactive_reserved_sandbox_slots', 0,
 			'active_job_count', 0
 		)
