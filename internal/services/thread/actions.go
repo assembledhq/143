@@ -179,19 +179,28 @@ func (s *Service) enqueueThreadContinuation(ctx context.Context, orgID, sessionI
 	if s.jobStore == nil {
 		return nil
 	}
+	session, err := s.sessionStore.GetByID(ctx, orgID, sessionID)
+	if err != nil {
+		return fmt.Errorf("load session for thread continuation: %w", err)
+	}
 	payload := map[string]string{
 		"session_id": sessionID.String(),
 		"thread_id":  threadID.String(),
 		"org_id":     orgID.String(),
 	}
 	dedupeKey := db.ContinueSessionDedupeKey(threadID)
-	_, err := s.jobStore.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
-		Queue:     "agent",
-		JobType:   "continue_session",
-		Payload:   payload,
-		Priority:  5,
-		DedupeKey: &dedupeKey,
-	})
+	enqueueOpts := db.EnqueueOpts{
+		Queue:        "agent",
+		JobType:      "continue_session",
+		Payload:      payload,
+		Priority:     5,
+		DedupeKey:    &dedupeKey,
+		TargetNodeID: models.SessionWorkerTarget(&session),
+	}
+	if models.SandboxWorkloadClassForSession(&session) == models.SandboxWorkloadClassCodeReview {
+		enqueueOpts.WorkloadClass = models.SandboxWorkloadClassCodeReview
+	}
+	_, err = s.jobStore.EnqueueWithOpts(ctx, orgID, enqueueOpts)
 	return err
 }
 

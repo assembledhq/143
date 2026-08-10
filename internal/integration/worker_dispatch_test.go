@@ -72,7 +72,9 @@ func TestIntegration_WorkerDispatch_PicksUpAndCallsHandler(t *testing.T) {
 	received := make(chan recvJob, 1)
 	nodeID := "test-node-" + jobID.String()[:8]
 	seedWorkerNode(t, pool, nodeID)
+	setWorkerSandboxCapacity(t, pool, nodeID, 1)
 	w := worker.New(pool, zerolog.Nop(), nodeID)
+	w.EnableSandboxRouting()
 	w.Register("continue_session", func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		received <- recvJob{JobType: jobType, Payload: payload}
 		return nil

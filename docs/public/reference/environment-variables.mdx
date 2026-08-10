@@ -39,6 +39,7 @@ Use these settings as the deployment contract for a self-hosted 143 environment.
 <ConfigField name="NODE_ID" type="string" description="Stable node identifier used for worker heartbeats and preview routing." />
 <ConfigField name="WORKER_PROCESS_COUNT" type="integer" description="Worker loops per host." />
 <ConfigField name="WORKER_MAX_ACTIVE_SANDBOXES" type="integer" description="Maximum live sandboxes on a worker host." />
+<ConfigField name="WORKER_INTERACTIVE_RESERVED_SANDBOXES" type="integer" description="Sandbox slots per worker reserved from code-review work for interactive sessions. Defaults to 1 and is clamped for single-slot workers." />
 <ConfigField name="SESSION_EXECUTOR_IMAGE" type="string" description="Server image used for durable session-executor containers in production worker-capable modes." />
 <ConfigField name="SESSION_EXECUTOR_DOCKER_NETWORK" type="string" description="Docker network session executors join to reach Postgres and worker APIs." />
 <ConfigField name="SANDBOX_IMAGE" type="string" description="Sandbox runtime image used by worker-created sandbox containers." />

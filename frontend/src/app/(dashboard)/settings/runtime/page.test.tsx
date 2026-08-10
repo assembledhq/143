@@ -214,6 +214,46 @@ describe("RuntimeSettingsPage", () => {
     expect(screen.getByLabelText("Maximum session length")).toHaveValue(60);
   });
 
+  it("mirrors the backend medium-org defaults for concurrency limits", async () => {
+    settingsGetMock.mockResolvedValueOnce({
+      data: {
+        id: "org-1",
+        name: "Test Org",
+        settings: {},
+        created_at: "2026-05-01T12:00:00Z",
+        updated_at: "2026-05-01T12:00:00Z",
+      },
+    });
+
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    expect(await screen.findByText("3 concurrent")).toBeInTheDocument();
+    expect(screen.getByLabelText("Concurrent agent runs")).toHaveValue(3);
+    expect(screen.getByLabelText("Concurrent code-review turns")).toHaveValue(
+      3,
+    );
+  });
+
+  it("mirrors the backend large-org defaults for concurrency limits", async () => {
+    settingsGetMock.mockResolvedValueOnce({
+      data: {
+        id: "org-1",
+        name: "Large Org",
+        settings: { org_size: "large" },
+        created_at: "2026-05-01T12:00:00Z",
+        updated_at: "2026-05-01T12:00:00Z",
+      },
+    });
+
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    expect(await screen.findByText("15 concurrent")).toBeInTheDocument();
+    expect(screen.getByLabelText("Concurrent agent runs")).toHaveValue(15);
+    expect(screen.getByLabelText("Concurrent code-review turns")).toHaveValue(
+      10,
+    );
+  });
+
   it("uses concise visible helper copy with question mark tooltips for caveats", async () => {
     renderWithProviders(<RuntimeSettingsPage />);
 
@@ -476,6 +516,19 @@ describe("RuntimeSettingsPage", () => {
       });
     });
 
+    const codeReviewTurns = screen.getByLabelText(
+      "Concurrent code-review turns",
+    );
+    await user.click(codeReviewTurns);
+    await user.keyboard("{Control>}a{/Control}12");
+    await user.tab();
+
+    await waitFor(() => {
+      expect(settingsUpdateMock).toHaveBeenCalledWith({
+        settings: { code_review_max_concurrent_turns: 12 },
+      });
+    });
+
     await openSessionLifecycleControls(user);
     const sessionDuration = screen.getByLabelText("Maximum session length");
     await user.click(sessionDuration);
@@ -501,6 +554,15 @@ describe("RuntimeSettingsPage", () => {
   });
 
   it("uses the current setting value when stepping an empty numeric field", async () => {
+    settingsUpdateMock.mockResolvedValueOnce({
+      data: {
+        id: "org-1",
+        name: "Test Org",
+        settings: { max_concurrent_runs: 6 },
+        created_at: "2026-05-01T12:00:00Z",
+        updated_at: "2026-05-06T15:30:00Z",
+      },
+    });
     renderWithProviders(<RuntimeSettingsPage />);
 
     const user = userEvent.setup();

@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 )
 
@@ -176,6 +177,79 @@ func TestSandboxCapacityGate_AcquireRejectsWhenFull(t *testing.T) {
 	require.ErrorIs(t, err, agent.ErrSandboxCapacity, "Acquire should reject when live sandboxes are already at capacity")
 	require.Nil(t, reservation, "Acquire should not return a reservation when capacity is exhausted")
 	require.Equal(t, 0, gate.ReservedCount(), "Rejected acquire should not leak a reservation")
+}
+
+func TestSandboxCapacityGate_SnapshotSeparatesSandboxTurnReservations(t *testing.T) {
+	t.Parallel()
+
+	gate := agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:   &fakeLiveSandboxCounter{},
+		MaxActive: 4,
+		NodeID:    "worker-1",
+		Logger:    zerolog.Nop(),
+	})
+
+	turnReservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "continue_session"})
+	require.NoError(t, err, "sandbox turn should reserve local capacity")
+	previewReservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "branch_preview"})
+	require.NoError(t, err, "preview should reserve local capacity")
+
+	snapshot := gate.Snapshot(context.Background())
+	require.Equal(t, 2, snapshot.Reserved, "snapshot should include every local reservation")
+	require.Equal(t, 1, snapshot.SandboxTurnReserved, "snapshot should identify only reservations that overlap durable sandbox-turn routing")
+
+	turnReservation.Release()
+	previewReservation.Release()
+	released := gate.Snapshot(context.Background())
+	require.Equal(t, 0, released.Reserved, "releasing reservations should clear the total count")
+	require.Equal(t, 0, released.SandboxTurnReserved, "releasing a sandbox turn should clear the overlapping count")
+}
+
+func TestSandboxCapacityGate_AcquireReservesInteractiveCapacity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                string
+		maxActive           int
+		interactiveReserved int
+		live                int
+		workloadClass       models.SandboxWorkloadClass
+		expectAllowed       bool
+		expectedReserve     int
+	}{
+		{name: "code review can use non-reserved capacity", maxActive: 4, interactiveReserved: 1, live: 2, workloadClass: models.SandboxWorkloadClassCodeReview, expectAllowed: true, expectedReserve: 1},
+		{name: "code review cannot consume interactive reserve", maxActive: 4, interactiveReserved: 1, live: 3, workloadClass: models.SandboxWorkloadClassCodeReview},
+		{name: "interactive work can consume reserved slot", maxActive: 4, interactiveReserved: 1, live: 3, workloadClass: models.SandboxWorkloadClassInteractive, expectAllowed: true, expectedReserve: 1},
+		{name: "single-slot workers remain usable for code review", maxActive: 1, interactiveReserved: 1, live: 0, workloadClass: models.SandboxWorkloadClassCodeReview, expectAllowed: true, expectedReserve: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			gate := agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+				Counter:             &fakeLiveSandboxCounter{count: tt.live},
+				MaxActive:           tt.maxActive,
+				InteractiveReserved: tt.interactiveReserved,
+				NodeID:              "worker-1",
+				Logger:              zerolog.Nop(),
+			})
+			reservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{
+				Purpose:       "agent_run",
+				WorkloadClass: tt.workloadClass,
+			})
+
+			if !tt.expectAllowed {
+				require.ErrorIs(t, err, agent.ErrSandboxCapacity, "code-review admission should preserve capacity reserved for interactive work")
+				require.Nil(t, reservation, "rejected code-review admission should not return a reservation")
+				return
+			}
+			require.NoError(t, err, "workload should be admitted within its effective local capacity")
+			require.NotNil(t, reservation, "successful admission should return a local slot reservation")
+			require.Equal(t, tt.expectedReserve, gate.InteractiveReserved(), "interactive reserve should be clamped safely for the worker size")
+			reservation.Release()
+		})
+	}
 }
 
 func TestSandboxCapacityGate_AcquireRunsPressureCleanupBeforeRejectingFullHost(t *testing.T) {

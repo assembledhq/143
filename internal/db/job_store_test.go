@@ -124,6 +124,44 @@ func TestJobStore_Enqueue(t *testing.T) {
 	}
 }
 
+func TestJobStore_EnqueueWithTargetAndWorkloadPersistsClass(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID, jobID := uuid.New(), uuid.New()
+	targetNodeID := "worker-2"
+	mock.ExpectQuery(`(?s)INSERT INTO jobs \(org_id,.*workload_class.*target_node_id.*\)`).
+		WithArgs(
+			orgID,
+			"agent",
+			"continue_session",
+			pgxmock.AnyArg(),
+			5,
+			pgxmock.AnyArg(),
+			models.SandboxWorkloadClassCodeReview,
+			&targetNodeID,
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	got, err := NewJobStore(mock).EnqueueWithTargetAndWorkload(
+		context.Background(),
+		orgID,
+		"agent",
+		"continue_session",
+		map[string]string{"session_id": uuid.NewString()},
+		5,
+		nil,
+		&targetNodeID,
+		models.SandboxWorkloadClassCodeReview,
+	)
+	require.NoError(t, err, "classified enqueue should persist a valid workload class")
+	require.Equal(t, jobID, got, "classified enqueue should return the inserted job id")
+	require.NoError(t, mock.ExpectationsWereMet(), "classified enqueue should persist the workload and target arguments")
+}
+
 func TestJobStoreQueueChangesetPRCreationIsAtomic(t *testing.T) {
 	t.Parallel()
 
@@ -568,10 +606,10 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
 						"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
-						"dedupe_key", "target_node_id", "retry_window_started_at", "created_at", "updated_at", "completed_at",
+						"dedupe_key", "workload_class", "target_node_id", "sandbox_slot_reserved_until", "retry_window_started_at", "created_at", "updated_at", "completed_at",
 					}).AddRow(
 						jobID, orgID, "default", "run_agent", []byte(`{"session_id":"abc"}`), 5, "running",
-						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "worker", nil, nil, nil, nil, now, now, nil,
+						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "worker", nil, nil, models.SandboxWorkloadClassInteractive, nil, nil, nil, now, now, nil,
 					))
 			},
 		},
@@ -588,10 +626,10 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
 						"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
-						"dedupe_key", "target_node_id", "retry_window_started_at", "created_at", "updated_at", "completed_at",
+						"dedupe_key", "workload_class", "target_node_id", "sandbox_slot_reserved_until", "retry_window_started_at", "created_at", "updated_at", "completed_at",
 					}).AddRow(
 						jobID, orgID, "default", "run_agent", []byte(`{"session_id":"abc"}`), 5, "running",
-						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "worker", "boom", "dedupe-1", "worker-1", persistedRetryStart, now, now, completedAt,
+						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "worker", "boom", "dedupe-1", models.SandboxWorkloadClassCodeReview, "worker-1", nil, persistedRetryStart, now, now, completedAt,
 					))
 			},
 			expectedRetryWindowStart: &persistedRetryStart,
@@ -641,11 +679,31 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 			} else {
 				require.NotNil(t, job, "ClaimNextRunnable should return the claimed job")
 				require.Equal(t, lockToken, *job.LockToken, "ClaimNextRunnable should persist the fencing token")
+				require.NotEmpty(t, job.WorkloadClass, "ClaimNextRunnable should hydrate workload admission policy")
 				require.Equal(t, tt.expectedRetryWindowStart, job.RetryWindowStartedAt, "ClaimNextRunnable should hydrate the durable retry window start")
 			}
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestJobStore_ClaimNextRunnableRequiresSandboxRouting(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	leaseDuration := 60 * time.Second
+	lockToken := uuid.New()
+	mock.ExpectQuery(`(?s)WITH unavailable_target_nodes AS.*j.job_type NOT IN \('run_agent', 'continue_session'\) OR j.target_node_id IS NOT NULL.*d.id IS NOT NULL AND j.sandbox_slot_reserved_until IS NULL`).
+		WithArgs(pgxmock.AnyArg(), "worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
+		WillReturnError(pgx.ErrNoRows)
+
+	job, err := NewJobStore(mock).ClaimNextRunnable(context.Background(), "worker-1", "worker-1", lockToken, leaseDuration)
+	require.NoError(t, err, "claim should treat an unreserved sandbox job as not runnable")
+	require.Nil(t, job, "unbound sandbox jobs should wait for capacity-aware routing before claim")
+	require.NoError(t, mock.ExpectationsWereMet(), "claim SQL should require routing while preserving real dead-worker affinity recovery")
 }
 
 func TestJobStore_EnsureRetryWindowStartedAtWithLease(t *testing.T) {
@@ -1315,6 +1373,152 @@ func TestJobStore_SelectWorkerWithSandboxCapacity_NoAvailableWorker(t *testing.T
 	require.NoError(t, err, "SelectWorkerWithSandboxCapacity should not treat no rows as an error")
 	require.Nil(t, nodeID, "SelectWorkerWithSandboxCapacity should return nil when no worker advertises capacity")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestJobStore_RouteNextSandboxJob(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		workloadClass    models.SandboxWorkloadClass
+		orgSettings      string
+		activeCodeReview int
+		candidateNodeID  string
+		expectedReason   SandboxRoutingReason
+		expectedDeferred bool
+	}{
+		{
+			name:            "reserves an available worker for interactive work",
+			workloadClass:   models.SandboxWorkloadClassInteractive,
+			candidateNodeID: "worker-with-space",
+			expectedReason:  SandboxRoutingReasonReserved,
+		},
+		{
+			name:             "waits ten seconds only when the fleet is full",
+			workloadClass:    models.SandboxWorkloadClassInteractive,
+			expectedReason:   SandboxRoutingReasonFleetCapacity,
+			expectedDeferred: true,
+		},
+		{
+			name:             "defers code review at the org-specific turn limit",
+			workloadClass:    models.SandboxWorkloadClassCodeReview,
+			orgSettings:      `{"max_concurrent_runs":20,"code_review_max_concurrent_turns":2}`,
+			activeCodeReview: 2,
+			expectedReason:   SandboxRoutingReasonOrgLimit,
+			expectedDeferred: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			jobID, orgID := uuid.New(), uuid.New()
+			mock.ExpectBegin()
+			mock.ExpectQuery(`(?s)SELECT j.id, j.org_id, j.workload_class.*FROM jobs j`).
+				WithArgs(pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "workload_class"}).AddRow(jobID, orgID, tt.workloadClass))
+			if tt.workloadClass == models.SandboxWorkloadClassCodeReview {
+				mock.ExpectQuery(`(?s)SELECT settings.*FROM organizations`).
+					WithArgs(orgID).
+					WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow([]byte(tt.orgSettings)))
+				mock.ExpectQuery(`(?s)SELECT COUNT\(\*\).*FROM jobs.*workload_class = 'code_review'`).
+					WithArgs(orgID, jobID).
+					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(tt.activeCodeReview))
+			}
+			if tt.expectedReason != SandboxRoutingReasonOrgLimit {
+				candidateQuery := mock.ExpectQuery(`(?s)WITH raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), tt.workloadClass)
+				if tt.candidateNodeID == "" {
+					candidateQuery.WillReturnRows(pgxmock.NewRows([]string{"id"}))
+				} else {
+					candidateQuery.WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(tt.candidateNodeID))
+					mock.ExpectQuery(`SELECT pg_try_advisory_xact_lock`).
+						WithArgs(tt.candidateNodeID).
+						WillReturnRows(pgxmock.NewRows([]string{"locked"}).AddRow(true))
+					mock.ExpectQuery(`(?s)SELECT.*FROM nodes n.*WHERE n.id =`).
+						WithArgs(jobID, tt.candidateNodeID, pgxmock.AnyArg()).
+						WillReturnRows(pgxmock.NewRows([]string{"live", "local_reserved", "sandbox_turn_local_reserved", "max_active", "interactive_reserved", "pending_durable_reserved", "running_durable_reserved"}).AddRow(1, 0, 0, 4, 1, 0, 0))
+					mock.ExpectExec(`(?s)UPDATE jobs.*sandbox_slot_reserved_until =`).
+						WithArgs(tt.candidateNodeID, pgxmock.AnyArg(), jobID).
+						WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				}
+			}
+			if tt.expectedDeferred {
+				mock.ExpectExec(`(?s)UPDATE jobs.*run_at =`).
+					WithArgs(pgxmock.AnyArg(), jobID).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			}
+			mock.ExpectCommit()
+			mock.ExpectRollback()
+
+			result, err := NewJobStore(mock).RouteNextSandboxJob(context.Background())
+			require.NoError(t, err, "routing should make an atomic reservation or bounded deferral decision")
+			require.NotNil(t, result, "routing should report the selected sandbox job")
+			require.Equal(t, jobID, result.JobID, "routing result should identify the locked job")
+			require.Equal(t, tt.workloadClass, result.WorkloadClass, "routing should preserve the job workload class")
+			require.Equal(t, tt.expectedReason, result.Reason, "routing should report why the job was reserved or deferred")
+			require.Equal(t, tt.expectedDeferred, result.Deferred, "routing should only defer for genuine fleet or org capacity")
+			if tt.candidateNodeID == "" {
+				require.Nil(t, result.TargetNodeID, "routing without capacity should not leave a stale worker target")
+			} else {
+				require.NotNil(t, result.TargetNodeID, "routing with capacity should return the reserved worker")
+				require.Equal(t, tt.candidateNodeID, *result.TargetNodeID, "routing should return the worker whose slot was reserved")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "routing should keep the job, org decision, and worker reservation in one transaction")
+		})
+	}
+}
+
+func TestSandboxRoutingCapacityLoadDoesNotDoubleCountRunningTurns(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                     string
+		live                     int
+		localReserved            int
+		sandboxTurnLocalReserved int
+		pendingDurable           int
+		runningDurable           int
+		expected                 int
+	}{
+		{name: "running turn overlaps local reservation", localReserved: 1, sandboxTurnLocalReserved: 1, runningDurable: 1, expected: 1},
+		{name: "pending reservation remains additive", localReserved: 1, sandboxTurnLocalReserved: 1, runningDurable: 1, pendingDurable: 1, expected: 2},
+		{name: "preview reservation remains independent", localReserved: 2, sandboxTurnLocalReserved: 1, runningDurable: 1, expected: 2},
+		{name: "durable reservation covers pre-admission heartbeat lag", runningDurable: 1, expected: 1},
+		{name: "live sandboxes remain additive", live: 2, localReserved: 1, sandboxTurnLocalReserved: 1, runningDurable: 1, expected: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := sandboxRoutingCapacityLoad(tt.live, tt.localReserved, tt.sandboxTurnLocalReserved, tt.pendingDurable, tt.runningDurable)
+			require.Equal(t, tt.expected, actual, "capacity load should count each distinct sandbox or reservation exactly once")
+		})
+	}
+}
+
+func TestJobStore_ReleaseSandboxSlotReservationWithLease(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	jobID, lockToken := uuid.New(), uuid.New()
+	mock.ExpectExec(`(?s)UPDATE jobs.*sandbox_slot_reserved_until = NULL.*lock_token = \$2`).
+		WithArgs(jobID, lockToken).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	released, err := NewJobStore(mock).ReleaseSandboxSlotReservationWithLease(context.Background(), jobID, lockToken)
+	require.NoError(t, err, "fenced reservation release should succeed")
+	require.True(t, released, "matching running job lease should release its durable worker slot")
+	require.NoError(t, mock.ExpectationsWereMet(), "reservation release should require the current fencing token")
 }
 
 func jobDedupeKeyPtr(s string) *string {
