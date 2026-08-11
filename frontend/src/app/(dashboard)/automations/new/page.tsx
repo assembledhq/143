@@ -1326,9 +1326,6 @@ export default function NewAutomationPage() {
                               }
                               placeholder="frontend, backend"
                             />
-                            <p className="text-xs text-muted-foreground">
-                              Runs only when the PR carries one of these labels.
-                            </p>
                           </div>
                           <div className="space-y-1.5">
                             <Label htmlFor="trigger-feedback-types">
