@@ -66,6 +66,28 @@ function renderReport(analytics: CodeReviewAnalytics) {
 }
 
 describe("CodeReviewAnalyticsReport PR cohort states", () => {
+  it("keeps the headline metric region before filters while analytics load", () => {
+    render(
+      <CodeReviewAnalyticsReport
+        isLoading
+        isError={false}
+        onRetry={vi.fn()}
+        authorSort="reviews"
+        authorSortOrder="desc"
+        onAuthorSort={vi.fn()}
+        reviewLinkFilters={{ range: "30d" }}
+        filters={<div data-testid="analytics-filters">Filters</div>}
+      />,
+    );
+
+    const outcomes = screen.getByRole("region", { name: "Approval outcomes" });
+    const filters = screen.getByTestId("analytics-filters");
+    expect(outcomes).toHaveAttribute("aria-busy", "true");
+    expect(outcomes.compareDocumentPosition(filters) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
+    expect(within(outcomes).getAllByText("—")).toHaveLength(4);
+  });
+
   it("shows headline metric definitions in tooltips without subdescriptions", async () => {
     const user = userEvent.setup();
     const analytics = emptyAnalytics(4);

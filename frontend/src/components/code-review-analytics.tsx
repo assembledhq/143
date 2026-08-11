@@ -150,27 +150,38 @@ function MetricCard({
 // Derived from the same report as the tables below, so the headline numbers
 // always agree with them. The reviews tab's cards deliberately describe current
 // review activity only and answer a different question.
-function ApprovalOutcomeCards({ summary }: { summary: CodeReviewAnalytics["summary"] }) {
+function ApprovalOutcomeCards({
+  summary,
+  isLoading = false,
+}: {
+  summary?: CodeReviewAnalytics["summary"];
+  isLoading?: boolean;
+}) {
   return (
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Approval outcomes">
+    <div
+      className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"
+      role="region"
+      aria-label="Approval outcomes"
+      aria-busy={isLoading}
+    >
       <MetricCard
         label="PRs reviewed"
-        value={summary.prs_reviewed.toLocaleString()}
+        value={summary?.prs_reviewed.toLocaleString() ?? "—"}
         definition="Unique pull requests first sent to 143 during the selected time period."
       />
       <MetricCard
         label="Approved by 143"
-        value={summary.approved_by_143.toLocaleString()}
+        value={summary?.approved_by_143.toLocaleString() ?? "—"}
         definition="Reviewed pull requests where 143 posted an approval on GitHub."
       />
       <MetricCard
         label="Approval rate"
-        value={percentage(summary.approved_by_143, summary.prs_reviewed)}
+        value={summary ? percentage(summary.approved_by_143, summary.prs_reviewed) : "—"}
         definition="The percentage of reviewed pull requests where 143 posted an approval on GitHub."
       />
       <MetricCard
         label="Median rounds to approval"
-        value={decimalMetric(summary.median_rounds_to_approval)}
+        value={summary ? decimalMetric(summary.median_rounds_to_approval) : "—"}
         definition="The median number of distinct completed revisions before 143 first posted an approval, among approved pull requests."
       />
     </div>
@@ -203,7 +214,8 @@ export function CodeReviewAnalyticsReport({
 }) {
   if (!analytics && isLoading) {
     return (
-      <div className="space-y-4">
+      <div className="space-y-6">
+        <ApprovalOutcomeCards isLoading />
         {filters}
         <p className="py-12 text-center text-sm text-muted-foreground">Loading code review analytics…</p>
       </div>
