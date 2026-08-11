@@ -10821,6 +10821,21 @@ func TestSandboxTurnCapacityRetryTargetImmediatelyReservesAlternateWorker(t *tes
 	require.NoError(t, mock.ExpectationsWereMet(), "alternate selection and reservation should commit before the immediate retry")
 }
 
+func TestSandboxTurnCapacityRetryTargetClearsPinWhenFencingTokenIsMissing(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	ctx := jobctx.WithJobID(context.Background(), uuid.New())
+	targetNodeID, clearTargetNodeID, retryAfter := sandboxTurnCapacityRetryTarget(ctx, stores, zerolog.Nop())
+
+	require.Nil(t, targetNodeID, "routing failure should not preserve an unverified worker target")
+	require.True(t, clearTargetNodeID, "routing failure should clear the current target so another worker can claim the retry")
+	require.Equal(t, sandboxCapacityRetryDelay, retryAfter, "routing failure should use fleet backoff instead of a tight retry loop")
+	require.NoError(t, mock.ExpectationsWereMet(), "missing fencing token should be detected before any database routing call")
+}
+
 func TestRunAgentHandler_SandboxCapacityRetriesClearsTargetWhenNoWorkerAvailable(t *testing.T) {
 	t.Parallel()
 
@@ -11920,6 +11935,37 @@ func TestContinueSessionHandler_WrapsSnapshotPendingAsRetryable(t *testing.T) {
 	require.ErrorAs(t, err, &retryable, "ErrSnapshotPending must be wrapped as RetryableError so the worker requeues without consuming an attempt")
 	require.ErrorIs(t, retryable.Err, agent.ErrSnapshotPending, "the wrapped error must preserve the ErrSnapshotPending sentinel")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before bailing")
+}
+
+func TestContinueSessionHandler_PreservesContinuationWhileWaitingForOrgCapacity(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID, sessionID, issueID := uuid.New(), uuid.New(), uuid.New()
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
+		))
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(context.Context, *models.Session, *agent.ContinueSessionOptions) error {
+			return fmt.Errorf("review turns full: %w", agent.ErrSandboxTurnConcurrency)
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "org-capacity wait should remain retryable")
+	require.ErrorIs(t, retryable.Err, agent.ErrSandboxTurnConcurrency, "retry should preserve the org-capacity sentinel")
+	require.True(t, retryable.BypassMaxRetryDuration, "an accepted continuation should not dead-letter under the generic eight-minute retry window")
+	require.NotNil(t, retryable.RetryAfter, "org-capacity wait should use an explicit policy delay")
+	require.Equal(t, sandboxOrgLimitRetryDelay, *retryable.RetryAfter, "org-capacity wait should poll at the review admission cadence")
+	require.NoError(t, mock.ExpectationsWereMet(), "continuation capacity wait should only reload the tenant-scoped session")
 }
 
 func TestContinueSessionHandler_PinsWrongNodeRetryToSandboxOwner(t *testing.T) {

@@ -39,9 +39,13 @@ table:
 | `sandbox_slot_reserved_until` | `timestamptz NULL` | Expiry for a pre-claim worker slot reservation; null also distinguishes normal session-affinity pins. |
 
 `idx_jobs_sandbox_routing` is a partial dequeue index over pending
-`run_agent`/`continue_session` work. `idx_jobs_active_workload` supports
-org/workload admission counts for pending and running sandbox turns. No new
-table is introduced; `jobs.org_id` remains the tenant boundary.
+`run_agent`/`continue_session` work, ordered to match priority,
+interactive-first workload class, and FIFO dispatch. `idx_jobs_active_workload`
+supports org/workload admission counts for pending and running sandbox turns.
+Because `jobs` is hot and migrations are transactional, production pre-builds
+both indexes concurrently; the migration uses `IF NOT EXISTS` and a short lock
+timeout as the rollout-safe fallback. No new table is introduced;
+`jobs.org_id` remains the tenant boundary.
 
 ## API contract
 
@@ -90,7 +94,10 @@ code-review job is nevertheless serialized by the same organization-row lock
 and active-turn check. The claim transaction preserves the worker target while
 atomically changing the admitted job to `running`; an org-limited affinity job
 keeps its affinity pin and is briefly deferred so other runnable work can be
-considered.
+considered. Each candidate is handled in its own transaction, so committing an
+org-limit deferral releases that organization's row lock before the dispatcher
+examines another tenant. This prevents cross-org lock-order deadlocks and keeps
+runtime-settings writes independent of a long claim scan.
 
 If a worker's authoritative local gate still rejects a fresh sandbox, the
 running job immediately performs the same atomic reservation against an
@@ -99,6 +106,13 @@ The existing 10-second delay is retained only when no fleet slot is available.
 The code-review org limit uses a shorter policy retry, while advisory-lock
 contention leaves the job immediately runnable so another dispatcher can retry
 without pretending the fleet is full.
+
+If fresh workers exist but none advertises usable `max_active_sandboxes`
+metadata, the router does not treat the fleet as saturated for eight minutes.
+It immediately uses the fresh-worker compatibility route and emits the
+`capacity_metadata_unavailable` routing reason as an operational warning. This
+keeps lightweight/self-hosted workers usable while making incomplete heartbeat
+configuration visible.
 
 Retry-time retargeting is fenced by the running attempt's `lock_token` in both
 the locked read and every placement write. If shared admission rejects a
@@ -113,6 +127,13 @@ rejects it through the normal claimed-job retry path, which invokes the
 existing user-visible failure updates, dead-letter hooks, and operational
 signals instead of leaving the job silently pending forever.
 
+Accepted `continue_session` work waiting on an org turn limit is a durable user
+input, not a generic transient dependency. It retries on the short admission
+cadence without consuming attempts or the generic eight-minute retry window;
+session/thread terminal-state checks remain the independent termination path.
+After any successful requeue, the worker publishes the queue wake-up only once
+the pending transition (including a new target) has committed.
+
 ## Capacity isolation
 
 `WORKER_INTERACTIVE_RESERVED_SANDBOXES` defaults to `1`. Code-review routing
@@ -125,9 +146,11 @@ self-hosted worker remains usable for code review.
 `max_concurrent_runs` and `10`, and is configurable from Runtime settings. The
 router and affinity-aware claim path serialize this decision per organization,
 and the shared local admission layer remains the authoritative final fence
-after claim. Interactive admission counts only active `interactive` jobs, so
-review turns do not consume the interactive org limit in addition to their own
-review-specific limit.
+after claim. Interactive admission preserves the established session-based
+`max_concurrent_runs` contract and excludes sessions whose origin is
+`code_review`; multiple threads in one interactive session therefore do not
+consume multiple org slots, while code-review work uses its independent
+review-specific turn limit.
 
 Worker heartbeats publish
 `interactive_reserved_sandbox_slots` and `sandbox_turn_reserved_count`

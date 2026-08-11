@@ -45,6 +45,21 @@ type retryWindowLeaseStoreStub struct {
 	calls     int
 }
 
+type retryNotifyStore struct {
+	wakeTestStore
+	retriedJobID  uuid.UUID
+	notifiedJobID uuid.UUID
+}
+
+func (s *retryNotifyStore) RetryWithLease(_ context.Context, jobID, _ uuid.UUID, _ string, _ time.Time) (bool, error) {
+	s.retriedJobID = jobID
+	return true, nil
+}
+
+func (s *retryNotifyStore) Notify(_ context.Context, jobID uuid.UUID) {
+	s.notifiedJobID = jobID
+}
+
 func (s *retryWindowLeaseStoreStub) EnsureRetryWindowStartedAtWithLease(context.Context, uuid.UUID, uuid.UUID, time.Time) (time.Time, bool, error) {
 	s.calls++
 	return s.startedAt, s.ok, s.err
@@ -102,6 +117,19 @@ func TestRetryableError(t *testing.T) {
 
 	require.Equal(t, "capacity reached", retryable.Error(), "Error should return the wrapped error message")
 	require.ErrorIs(t, retryable.Unwrap(), cause, "Unwrap should expose the wrapped error")
+}
+
+func TestWorker_RetryNotifiesAfterJobBecomesRunnable(t *testing.T) {
+	t.Parallel()
+
+	store := &retryNotifyStore{}
+	w := &Worker{jobs: store, logger: zerolog.Nop()}
+	jobID := uuid.New()
+
+	w.retryJobWithDelay(context.Background(), jobID, uuid.New(), "capacity moved", 1, false, nil, nil, false)
+
+	require.Equal(t, jobID, store.retriedJobID, "retry should first persist the pending job transition")
+	require.Equal(t, jobID, store.notifiedJobID, "successful requeue should wake the destination after the job is runnable")
 }
 
 func TestRetryableDurationExceeded(t *testing.T) {

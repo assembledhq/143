@@ -585,6 +585,7 @@ type SessionStore interface {
 	UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus) error
 	UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult) error
 	CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
+	CountRunningInteractiveByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
 	UpdateTurnComplete(ctx context.Context, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string) error
 	UpdateSnapshotInfo(ctx context.Context, orgID, sessionID uuid.UUID, agentSessionID, snapshotKey string) error
 	BeginRuntime(ctx context.Context, orgID, sessionID uuid.UUID, capability models.CheckpointCapability, softDeadline, hardDeadline, observedAt time.Time) error
@@ -6251,9 +6252,9 @@ func manualSessionReferences(issue *models.Issue) []models.SessionInputReference
 // excludeCurrentRunning should be true when re-entering RunAgent for a session
 // that is already marked running, so recovery does not deadlock on its own slot.
 func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID uuid.UUID, excludeCurrentRunning bool) error {
-	count, err := o.sessions.CountRunningByOrg(ctx, orgID)
+	count, err := o.sessions.CountRunningInteractiveByOrg(ctx, orgID)
 	if err != nil {
-		return fmt.Errorf("count running runs: %w", err)
+		return fmt.Errorf("count running interactive sessions: %w", err)
 	}
 	if excludeCurrentRunning && count > 0 {
 		count--

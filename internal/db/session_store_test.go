@@ -1259,9 +1259,29 @@ func TestSessionStore_CountRunningByOrg(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
 
 	count, err := store.CountRunningByOrg(context.Background(), orgID)
-	require.NoError(t, err)
-	require.Equal(t, 3, count)
-	require.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "running session count should succeed")
+	require.Equal(t, 3, count, "running session count should include every origin")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_CountRunningInteractiveByOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+
+	mock.ExpectQuery("SELECT count\\(\\*\\).*FROM sessions.*org_id.*status = 'running'.*origin <>").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(2))
+
+	count, err := store.CountRunningInteractiveByOrg(context.Background(), orgID)
+	require.NoError(t, err, "interactive running session count should succeed")
+	require.Equal(t, 2, count, "interactive running session count should exclude code reviews")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionStore_ListByIDs_Empty(t *testing.T) {

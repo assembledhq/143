@@ -64,6 +64,9 @@ func (s *drainStubSessions) UpdateResult(context.Context, uuid.UUID, uuid.UUID, 
 func (s *drainStubSessions) CountRunningByOrg(context.Context, uuid.UUID) (int, error) {
 	return 0, nil
 }
+func (s *drainStubSessions) CountRunningInteractiveByOrg(context.Context, uuid.UUID) (int, error) {
+	return 0, nil
+}
 func (s *drainStubSessions) UpdateTurnComplete(context.Context, uuid.UUID, uuid.UUID, int, *models.SessionResult, string, string) error {
 	return nil
 }

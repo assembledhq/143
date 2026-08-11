@@ -44,9 +44,8 @@ import (
 )
 
 const (
-	sandboxCapacityRetryDelay     = 10 * time.Second
-	sandboxOrgLimitRetryDelay     = 5 * time.Second
-	sandboxRoutingErrorRetryDelay = 2 * time.Second
+	sandboxCapacityRetryDelay = 10 * time.Second
+	sandboxOrgLimitRetryDelay = 5 * time.Second
 )
 const previewCapacityRetryDelay = 5 * time.Second
 const previewStartupInterruptedRetryDelay = 2 * time.Second
@@ -155,13 +154,13 @@ func sandboxTurnCapacityRetryTarget(ctx context.Context, stores *Stores, logger 
 	lockToken, ok := jobctx.LockTokenFromContext(ctx)
 	if !ok || lockToken == uuid.Nil {
 		logger.Warn().Str("job_id", jobID.String()).Msg("sandbox capacity retry is missing its fencing token")
-		return nil, false, sandboxRoutingErrorRetryDelay
+		return nil, true, sandboxCapacityRetryDelay
 	}
 	excludeNodeID, _ := jobctx.WorkerNodeIDFromContext(ctx)
 	result, err := stores.Jobs.ReserveSandboxSlotForRetry(ctx, jobID, lockToken, excludeNodeID)
 	if err != nil {
 		logger.Warn().Err(err).Msg("failed to reserve worker sandbox capacity for retry")
-		return nil, false, sandboxRoutingErrorRetryDelay
+		return nil, true, sandboxCapacityRetryDelay
 	}
 	if result.TargetNodeID != nil {
 		logger.Info().
@@ -778,7 +777,7 @@ func enqueueRunAgentForSession(ctx context.Context, stores *Stores, session mode
 		return errors.New("org id is required to enqueue run_agent")
 	}
 	dedupeKey := db.RunAgentDedupeKey(session.ID)
-	if _, err := stores.Jobs.Enqueue(ctx, session.OrgID, "agent", "run_agent", db.RunAgentPayload(&session), 5, &dedupeKey); err != nil {
+	if _, err := stores.Jobs.EnqueueWithOpts(ctx, session.OrgID, db.RunAgentEnqueueOpts(&session, 5, &dedupeKey)); err != nil {
 		return fmt.Errorf("enqueue run_agent: %w", err)
 	}
 	return nil
@@ -2471,8 +2470,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 		// the job store rejects the second insert and the second handler
 		// returns cleanly without a duplicate agent run.
 		dedupeKey := db.RunAgentDedupeKey(session.ID)
-		agentPayload := db.RunAgentPayload(session)
-		if _, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "run_agent", agentPayload, 5, &dedupeKey); err != nil {
+		if _, err := stores.Jobs.EnqueueWithOpts(ctx, orgID, db.RunAgentEnqueueOpts(session, 5, &dedupeKey)); err != nil {
 			return fmt.Errorf("enqueue run_agent: %w", err)
 		}
 
@@ -8489,7 +8487,8 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 					enqueueSlackSessionNotifications(ctx, stores, logger, orgID, runID, run.AutomationRunID, string(models.SlackNotificationSessionFailed), "143 session failed", errMsg)
 					return &FatalError{Err: fmt.Errorf("session timed out waiting for concurrency slot: %w", err)}
 				}
-				return &RetryableError{Err: err}
+				retryAfter := sandboxOrgLimitRetryDelay
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
 			}
 			enqueueSlackRunUpdateIfLinked(ctx, stores, logger, orgID, runID, "failed", "143 session failed", err.Error(), true)
 			enqueueSlackSessionNotifications(ctx, stores, logger, orgID, runID, run.AutomationRunID, string(models.SlackNotificationSessionFailed), "143 session failed", err.Error())
@@ -8620,7 +8619,7 @@ func newLegacyRunEvalBootstrapCompatHandler(stores *Stores, logger zerolog.Logge
 
 func enqueueCompatRunAgent(ctx context.Context, stores *Stores, orgID uuid.UUID, session models.Session) error {
 	dedupeKey := db.RunAgentDedupeKey(session.ID)
-	if _, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "run_agent", db.RunAgentPayload(&session), 5, &dedupeKey); err != nil {
+	if _, err := stores.Jobs.EnqueueWithOpts(ctx, orgID, db.RunAgentEnqueueOpts(&session, 5, &dedupeKey)); err != nil {
 		return fmt.Errorf("enqueue converted eval session: %w", err)
 	}
 	return nil
@@ -9838,7 +9837,8 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Str("session_id", sessionID.String()).
 					Err(err).
 					Msg("sandbox turn concurrency reached; retrying continue_session")
-				return &RetryableError{Err: err}
+				retryAfter := sandboxOrgLimitRetryDelay
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
 			}
 			if errors.Is(err, agent.ErrSandboxCapacity) {
 				targetNodeID, clearTargetNodeID, retryAfter := sandboxTurnCapacityRetryTarget(ctx, stores, logger)
