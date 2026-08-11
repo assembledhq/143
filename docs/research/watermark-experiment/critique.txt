@@ -1,0 +1,30 @@
+## Core problem in one line
+The design conflates *"no green-list signal is recoverable without the key"* with *"no watermark is present."* Only the first is demonstrable here, and even that is demonstrable only for one watermark family at one granularity. Keep every conclusion inside those walls.
+
+## 1. Is the NULL a valid demonstration? Partly — but it is closer to a tautology than evidence, and it has real confounds.
+
+- **It cannot distinguish the two worlds it needs to distinguish.** "Unwatermarked" and "watermarked under a secret key k_secret not in your 2000 random draws" both produce z ~ N(0,1) for random keys. The key space is ~2^128; P(a random draw hits k_secret) ≈ 0. So the null is guaranteed by construction regardless of whether Claude is watermarked. A result that is identical under both hypotheses is not evidence about which hypothesis is true — it is evidence about hash functions.
+- **The persuasive content is the key-space/search argument, not the histogram.** The 2000-key null is a calibration sanity check. The actual identifiability claim rests on: the true key is one unsearchable point, and any brute-force threshold loose enough to admit a weakly-watermarked corpus also admits a flood of false positives. Foreground that; the histogram is decorative.
+- **Independence is violated, so "expect N(0,1)" may be wrong.** The z-statistic assumes T i.i.d. Bernoulli(γ) trials. But seeding on w_{t-1} makes greenness a deterministic function of the bigram (w_{t-1}, w_t); every repeated bigram is a perfectly correlated (all-green or all-red) cluster. Natural text is bigram-heavy, so the effective trial count << T and the empirical null is **overdispersed** (SD > 1, heavier tails). Comparing to a theoretical N(0,1) will then mislabel chance |z|>4 events. Fix: set thresholds from the *empirical* null (mean/SD/quantiles of the 2000 keys), not from Gaussian theory.
+- **K=2000 cannot support the 3.2e-5 you later quote.** Expected |z|>4 events in 2000 keys ≈ 0.06–0.13, so "≈none" is a foregone conclusion that says nothing about the 3.2e-5 tail. Empirically resolving a 3.2e-5 rate needs ~10^5–10^6 keys. As written, 3.2e-5 is pure Gaussian extrapolation that the overdispersion concern directly undercuts — an internal inconsistency. Either raise K by ~1000x or label 3.2e-5 explicitly as theoretical-and-contingent-on-calibration.
+- **Two internal spec bugs to fix before running:** (a) `hash(...) mod 1` is identically 0 for integer hashes → every word "green" → degenerate huge z; you mean `hash/HASH_MAX ∈ [0,1) < γ`. (b) "|z|>4" (two-sided, 6.3e-5) is notationally inconsistent with the quoted 3.2e-5 (one-sided). A watermark only *raises* green count, so one-sided z>4 is correct — then write it as `z>4`, not `|z|>4`.
+
+## 2. Is the POSITIVE CONTROL sound? It validates the pipeline, not the hypothesis — and it is circular as specified.
+
+- **Self-consistency trap.** If you synthesize the watermark with the *same* hash, γ, w_{t-1} seeding, and tokenization the detector uses, then "k* gives huge z, wrong keys give 0" is guaranteed. It proves the detector detects its own construction — not that a *real* watermark (different context width h, token-level not word-level, or a different family entirely) would register.
+- **The genuinely on-thesis part** is "wrong keys give ~0": that is the real result — a watermark is visible *only* with the key. But make the watermark realistic or it tempts overclaim. Force-greening tokens gives z=200 and fluency collapse; a real logit-bias (δ boost) sampler yields a realistic green fraction (~0.6) and a modest z, which is the honest operating regime.
+- **What would make it convincing:**
+  1. **Scheme-mismatch collapse** — watermark under one scheme (word h=1), detect assuming another (h=2, or token-level). Show detection dies. This is the single most decision-relevant plot for the thesis: you're missing the *scheme and tokenizer*, not just the key.
+  2. **Power/ROC surface** over (δ, γ, T): the minimum strength and corpus length at which detection becomes reliable — i.e., the sensitivity floor.
+  3. **Blind mixture test**: hand the detector a set of candidate keys, only one real, plus unwatermarked decoys; report TPR/FPR without telling it k*.
+  4. **Token vs word**: real watermarks key on BPE tokens; a whitespace-word detector cannot reproduce the partition even with the true key. Demonstrate this gap explicitly.
+
+## 3. Where it will OVERCLAIM, and the defensible conclusion
+
+Do **not** let it read as "Claude has no watermark," "outputs are clean," or "scanning proves nothing is there." Stylometry (Part 1) especially cannot rule a watermark out — a watermark is designed to be stylometrically invisible; present that section as orthogonal, not as absence-of-watermark.
+
+**Precise, defensible conclusion:** *From output text alone — without the secret key, the exact scheme (context width, hashing, γ), and the model's tokenization — a Kirchenbauer-style keyed green-list watermark is not identifiable: random and brute-forced keys yield a null indistinguishable from unwatermarked text, and the key space is too large to search without false positives swamping any true hit. This is a statement about keyless non-identifiability within one watermark family, not about the existence of a watermark, and it says nothing about other families (Aaronson/Gumbel, distortion-free / Kuditipudi-style) that would be invisible to this detector by construction.*
+
+## 4. The single most important caveat the writeup must include
+
+**Absence of evidence is not evidence of absence.** The null result is a near-mathematical certainty for random keys whether or not a watermark exists, because the true key is one point in an unsearchable space and other watermark families/tokenizations don't register on a word-level green-list test at all. State plainly that the finding is *"a keyed watermark cannot be identified from outputs without the key/scheme,"* never *"the outputs are unwatermarked."*

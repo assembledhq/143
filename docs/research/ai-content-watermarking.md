@@ -408,6 +408,14 @@ scientifically a dead end for recovering a watermark, and a detour into stylomet
 productive redirection is to stop trying to read the secret off the outside and instead *rebuild the
 mechanism yourself where you can see all of it.*
 
+> **Empirical companion.** This claim is demonstrated, not just asserted, in
+> [`watermark-experiment/`](./watermark-experiment/watermark-identifiability-experiment.md): a
+> deterministic study over a ~11k-word corpus of Claude output. With a **positive control** (a
+> known-key watermark we inject ourselves), the detector reads *z*≈18–60 when it holds the key **and**
+> the scheme, yet collapses to the noise floor (*z*≈0) when it has the wrong key **or** the wrong
+> scheme — while the strongest of 4,000 random-key guesses on un-watermarked text reaches only
+> *z*≈5.7. That is keyless non-identifiability, shown with real numbers.
+
 ---
 
 ## 7. A legitimate hands-on research program

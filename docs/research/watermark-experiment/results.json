@@ -1,0 +1,205 @@
+{
+  "corpus_path": "corpus",
+  "n_samples": 8,
+  "stylometry": {
+    "n_tokens": 10935,
+    "n_types": 2759,
+    "type_token_ratio": 0.2523,
+    "hapax_fraction": 0.6542,
+    "mean_word_len": 4.394,
+    "n_sentences": 483,
+    "sent_len_mean": 22.64,
+    "sent_len_stdev": 16.61,
+    "sent_len_cv_burstiness": 0.734,
+    "punct_per_1000": {
+      "em_dash": 1.006,
+      "comma": 70.416,
+      "semicolon": 1.555,
+      "colon": 1.738,
+      "paren": 0.0
+    },
+    "function_word_fraction": 0.4128,
+    "top_content_unigrams": [
+      [
+        "its",
+        54
+      ],
+      [
+        "have",
+        53
+      ],
+      [
+        "had",
+        46
+      ],
+      [
+        "one",
+        42
+      ],
+      [
+        "light",
+        42
+      ],
+      [
+        "out",
+        40
+      ],
+      [
+        "has",
+        37
+      ],
+      [
+        "up",
+        35
+      ],
+      [
+        "blue",
+        35
+      ],
+      [
+        "there",
+        34
+      ],
+      [
+        "only",
+        32
+      ],
+      [
+        "something",
+        30
+      ]
+    ],
+    "top_bigrams": [
+      [
+        "and the",
+        58
+      ],
+      [
+        "of the",
+        54
+      ],
+      [
+        "in the",
+        44
+      ],
+      [
+        "it is",
+        34
+      ],
+      [
+        "of a",
+        32
+      ],
+      [
+        "on the",
+        29
+      ],
+      [
+        "and a",
+        25
+      ],
+      [
+        "is a",
+        25
+      ],
+      [
+        "to the",
+        25
+      ],
+      [
+        "is the",
+        24
+      ],
+      [
+        "i have",
+        23
+      ],
+      [
+        "and i",
+        23
+      ]
+    ]
+  },
+  "key_dependence": {
+    "detector": "word-level green-list, gamma=0.5, one-sided z, keyed blake2b",
+    "null_full_tokens_real_corpus": {
+      "n_keys": 4000,
+      "z_mean": -0.0115,
+      "z_stdev": 1.858,
+      "z_min": -6.981,
+      "z_max": 5.662,
+      "frac_over_z4_onesided": 0.01325,
+      "pct": {
+        "p50": 0.0,
+        "p99": 4.189,
+        "p999": 5.279
+      }
+    },
+    "null_distinct_ngrams_real_corpus": {
+      "n_keys": 1500,
+      "z_mean": -0.011,
+      "z_stdev": 1.0273,
+      "z_min": -3.133,
+      "z_max": 3.025,
+      "frac_over_z4_onesided": 0.0,
+      "pct": {
+        "p50": -0.022,
+        "p99": 2.35,
+        "p999": 2.981
+      }
+    },
+    "overdispersion_note": "null_full z_stdev > 1 because repeated bigrams are perfectly correlated green/red clusters; scoring DISTINCT n-grams (null_distinct) restores independence and z_stdev -> ~1. This is why thresholds must come from the empirical null.",
+    "positive_control": {
+      "delta_0.5": {
+        "z_true_key_correct_scheme": 18.46,
+        "green_fraction": 0.6032,
+        "one_sided_p_true_key": 2.170926831588125e-76,
+        "wrong_key_scan": {
+          "z_mean": -0.0048,
+          "z_stdev": 1.7356,
+          "z_max_best_false_positive": 4.662
+        },
+        "z_true_key_WRONG_scheme_h2": 1.1,
+        "gap_true_vs_best_decoy": 13.8
+      },
+      "delta_1.0": {
+        "z_true_key_correct_scheme": 35.52,
+        "green_fraction": 0.6986,
+        "one_sided_p_true_key": 1.1181471386722911e-276,
+        "wrong_key_scan": {
+          "z_mean": -0.038,
+          "z_stdev": 1.7886,
+          "z_max_best_false_positive": 6.273
+        },
+        "z_true_key_WRONG_scheme_h2": -0.78,
+        "gap_true_vs_best_decoy": 29.25
+      },
+      "delta_2.0": {
+        "z_true_key_correct_scheme": 59.56,
+        "green_fraction": 0.833,
+        "one_sided_p_true_key": 0.0,
+        "wrong_key_scan": {
+          "z_mean": -0.0698,
+          "z_stdev": 1.9115,
+          "z_max_best_false_positive": 5.423
+        },
+        "z_true_key_WRONG_scheme_h2": -0.02,
+        "gap_true_vs_best_decoy": 54.14
+      }
+    },
+    "keyspace_argument": {
+      "empirical_strongest_false_positive_z_over_4000_keys": 5.662,
+      "empirical_frac_keys_over_z4": 0.01325,
+      "theoretical_one_sided_tail_at_z4": 3.1671241833119965e-05,
+      "theoretical_caveat": "Theoretical tail assumes i.i.d. Bernoulli, which repeated n-grams violate (see null_distinct vs null_full). Use the EMPIRICAL null for thresholds. Resolving a 3.2e-05 rate empirically would need ~1e5-1e6 keys, not 4000.",
+      "search_argument": "A real key space is cryptographically large (e.g. 2^128). Random/brute-forced keys yield the empirical null above; the one true key is a single unsearchable point, and any threshold loose enough to admit a weak watermark also admits many false positives. Hence the scheme/key is NOT identifiable from outputs alone."
+    }
+  },
+  "capacity": {
+    "unigram_entropy_bits_per_word": 9.058,
+    "bigram_conditional_entropy_bits": 3.618,
+    "frac_low_entropy_positions_gt0.9": 0.1717,
+    "note": "word-level proxy; a watermark can only bias high-entropy positions"
+  },
+  "defensible_conclusion": "From output text alone \u2014 without the secret key, the exact scheme (context width, hashing, gamma), and the model's tokenization \u2014 a Kirchenbauer-style keyed green-list watermark is NOT identifiable: random and brute-forced keys yield a null indistinguishable from unwatermarked text, and the key space is too large to search without false positives swamping any true hit. The positive control shows the signal is unmistakable WITH the key+scheme (z_true >> best decoy) and vanishes without EITHER the key (wrong-key scan) OR the scheme (h2 mismatch). This is keyless non-identifiability within ONE watermark family; it is NOT evidence that outputs are unwatermarked, and it says nothing about other families (Aaronson/Gumbel, distortion-free) invisible to this detector by construction. Absence of evidence is not evidence of absence."
+}
