@@ -1006,15 +1006,13 @@ func reserveSandboxSlotForLockedJob(ctx context.Context, tx pgx.Tx, job sandboxR
 		return nil, fmt.Errorf("route sandbox job workload class: %w", err)
 	}
 
-	if job.WorkloadClass == models.SandboxWorkloadClassCodeReview {
-		admitted, err := admitLockedCodeReviewTurn(ctx, tx, job)
-		if err != nil {
-			return nil, err
-		}
-		if !admitted {
-			result.Reason = SandboxRoutingReasonOrgLimit
-			return result, nil
-		}
+	admitted, err := admitLockedSandboxTurn(ctx, tx, job)
+	if err != nil {
+		return nil, err
+	}
+	if !admitted {
+		result.Reason = SandboxRoutingReasonOrgLimit
+		return result, nil
 	}
 
 	excludedNodeIDs := []string{}
@@ -1065,18 +1063,18 @@ func reserveSandboxSlotForLockedJob(ctx context.Context, tx pgx.Tx, job sandboxR
 	}
 }
 
-func admitLockedCodeReviewTurn(ctx context.Context, tx pgx.Tx, job sandboxRoutingJob) (bool, error) {
+func admitLockedSandboxTurn(ctx context.Context, tx pgx.Tx, job sandboxRoutingJob) (bool, error) {
 	var rawSettings json.RawMessage
 	if err := tx.QueryRow(ctx, `
 		SELECT settings
 		FROM organizations
 		WHERE id = @org_id
 		FOR UPDATE`, pgx.NamedArgs{"org_id": job.OrgID}).Scan(&rawSettings); err != nil {
-		return false, fmt.Errorf("lock organization for code-review admission: %w", err)
+		return false, fmt.Errorf("lock organization for shared sandbox admission: %w", err)
 	}
 	settings, err := models.ParseOrgSettings(rawSettings)
 	if err != nil {
-		return false, fmt.Errorf("parse organization settings for code-review admission: %w", err)
+		return false, fmt.Errorf("parse organization settings for shared sandbox admission: %w", err)
 	}
 	var active int
 	if err := tx.QueryRow(ctx, `
@@ -1085,7 +1083,6 @@ func admitLockedCodeReviewTurn(ctx context.Context, tx pgx.Tx, job sandboxRoutin
 		WHERE org_id = @org_id
 		  AND id <> @job_id
 		  AND job_type IN ('run_agent', 'continue_session')
-		  AND workload_class = 'code_review'
 		  AND (
 			status = 'running'
 			OR (status = 'pending' AND sandbox_slot_reserved_until > now())
@@ -1093,9 +1090,9 @@ func admitLockedCodeReviewTurn(ctx context.Context, tx pgx.Tx, job sandboxRoutin
 		"org_id": job.OrgID,
 		"job_id": job.ID,
 	}).Scan(&active); err != nil {
-		return false, fmt.Errorf("count active code-review sandbox turns: %w", err)
+		return false, fmt.Errorf("count active sandbox turns: %w", err)
 	}
-	return active < settings.CodeReviewMaxConcurrentTurns, nil
+	return active < settings.MaxConcurrentRuns, nil
 }
 
 func updateSandboxRoutingPlacement(ctx context.Context, tx pgx.Tx, job sandboxRoutingJob, targetNodeID string, reservedUntil *time.Time) error {
@@ -1279,26 +1276,21 @@ func sandboxRoutingCapacityLoad(live, localReserved, sandboxTurnLocalReserved, p
 	return live + localOnlyReserved + pendingDurableReserved + overlappingSandboxTurns
 }
 
-// CountActiveSandboxTurnsByOrgAndClass returns claimed agent turns for the
-// workload admission fence. The current job is included, so callers reject
-// only when the count is greater than the configured limit.
-func (s *JobStore) CountActiveSandboxTurnsByOrgAndClass(ctx context.Context, orgID uuid.UUID, workloadClass models.SandboxWorkloadClass) (int, error) {
-	if err := workloadClass.Validate(); err != nil {
-		return 0, err
-	}
+// CountActiveSandboxTurnsByOrg returns claimed interactive and code-review
+// turns for the shared organization admission fence. The current job is
+// included, so callers reject only when the count is greater than the limit.
+func (s *JobStore) CountActiveSandboxTurnsByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
 	var count int
 	err := s.db.QueryRow(ctx, `
 		SELECT COUNT(*)
 		FROM jobs
 		WHERE org_id = @org_id
-		  AND workload_class = @workload_class
 		  AND job_type IN ('run_agent', 'continue_session')
 		  AND status = 'running'`, pgx.NamedArgs{
-		"org_id":         orgID,
-		"workload_class": workloadClass,
+		"org_id": orgID,
 	}).Scan(&count)
 	if err != nil {
-		return 0, fmt.Errorf("count active sandbox turns by workload class: %w", err)
+		return 0, fmt.Errorf("count active sandbox turns: %w", err)
 	}
 	return count, nil
 }
@@ -1445,8 +1437,8 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 	}
 
 	isSandboxJob := candidate.JobType == "run_agent" || candidate.JobType == "continue_session"
-	if isSandboxJob && candidate.WorkloadClass == models.SandboxWorkloadClassCodeReview && time.Since(candidate.CreatedAt) < sandboxRoutingTerminalProbeAge {
-		admitted, admissionErr := admitLockedCodeReviewTurn(ctx, tx, candidate.sandboxRoutingJob)
+	if isSandboxJob && time.Since(candidate.CreatedAt) < sandboxRoutingTerminalProbeAge {
+		admitted, admissionErr := admitLockedSandboxTurn(ctx, tx, candidate.sandboxRoutingJob)
 		if admissionErr != nil {
 			return nil, false, admissionErr
 		}
@@ -1466,10 +1458,10 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 				"retry_seconds": int(sandboxOrgLimitRetryDelay.Seconds()),
 			})
 			if deferErr != nil {
-				return nil, false, fmt.Errorf("defer affinity-bound code-review job at org limit: %w", deferErr)
+				return nil, false, fmt.Errorf("defer affinity-bound sandbox job at org limit: %w", deferErr)
 			}
 			if deferResult.RowsAffected() != 1 {
-				return nil, false, fmt.Errorf("defer affinity-bound code-review job at org limit: pending job %s changed ownership", candidate.ID)
+				return nil, false, fmt.Errorf("defer affinity-bound sandbox job at org limit: pending job %s changed ownership", candidate.ID)
 			}
 			if err := tx.Commit(ctx); err != nil {
 				return nil, false, fmt.Errorf("commit sandbox org-limit deferral: %w", err)

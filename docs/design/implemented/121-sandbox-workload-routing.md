@@ -40,8 +40,9 @@ table:
 
 `idx_jobs_sandbox_routing` is a partial dequeue index over pending
 `run_agent`/`continue_session` work, ordered to match priority,
-interactive-first workload class, and FIFO dispatch. `idx_jobs_active_workload`
-supports org/workload admission counts for pending and running sandbox turns.
+interactive-first workload class, and FIFO dispatch.
+`idx_jobs_active_sandbox_turns` supports shared org admission counts for pending
+and running sandbox turns.
 Because `jobs` is hot and migrations are transactional, production pre-builds
 both indexes concurrently; the migration uses `IF NOT EXISTS` and a short lock
 timeout as the rollout-safe fallback. No new table is introduced;
@@ -49,17 +50,10 @@ timeout as the rollout-safe fallback. No new table is introduced;
 
 ## API contract
 
-No new route is introduced. The existing authenticated settings APIs expose
-the org setting:
-
-- `GET /api/v1/settings` may include
-  `data.settings.code_review_max_concurrent_turns` as an integer.
-- Admin-only `PATCH /api/v1/settings` accepts the existing JSON merge-patch
-  body `{"settings":{"code_review_max_concurrent_turns": N}}`.
-- Explicit values must be in the inclusive range `1..25`; absent/zero values
-  resolve to `min(max_concurrent_runs, 10)`.
-- Existing settings errors remain unchanged:
-  `400 INVALID_JSON` or `400 INVALID_SETTINGS`.
+No new route or setting is introduced. The existing authenticated settings
+APIs expose `max_concurrent_runs`, and the Runtime settings page describes it as
+the shared limit for interactive and code-review turns. Existing settings
+errors remain unchanged: `400 INVALID_JSON` or `400 INVALID_SETTINGS`.
 
 Worker capacity reservation is an internal queue/heartbeat contract, not a
 public API. Heartbeat metadata adds
@@ -69,15 +63,16 @@ or external event payload changes.
 ## Admission and routing
 
 Both `RunAgent` and `ContinueSession` enter the same sandbox-turn admission
-layer. It applies the relevant org policy and reserves local capacity only when
-the turn needs a fresh sandbox. A continuation reusing its existing container
-still passes org admission but does not consume a second sandbox slot.
+layer. Every workload draws from `max_concurrent_runs`; workload class only
+affects placement and worker-level interactive capacity reservation. A
+continuation reusing its existing container still passes org admission but does
+not consume a second sandbox slot.
 
 Before normal queue claim, a dispatcher transaction:
 
 1. locks one due, unbound `run_agent` or `continue_session` job;
-2. for `code_review`, locks the organization admission row and checks
-   `code_review_max_concurrent_turns`;
+2. locks the organization admission row and checks all active interactive and
+   code-review turns against `max_concurrent_runs`;
 3. chooses a fresh active worker from heartbeat capacity metadata;
 4. obtains a transaction-scoped advisory lock for that worker and rechecks its
    live, local-reserved, and durable-reserved counts without counting the same
@@ -89,23 +84,23 @@ prefer interactive work at equal queue priority and continue routing after a
 capacity deferral, so an older org-limited review cannot monopolize each poll.
 
 Existing sandbox affinity remains authoritative and is only released through
-the existing dead/draining-worker recovery path. Claiming an affinity-bound
-code-review job is nevertheless serialized by the same organization-row lock
-and active-turn check. The claim transaction preserves the worker target while
-atomically changing the admitted job to `running`; an org-limited affinity job
-keeps its affinity pin and is briefly deferred so other runnable work can be
-considered. Each candidate is handled in its own transaction, so committing an
-org-limit deferral releases that organization's row lock before the dispatcher
-examines another tenant. This prevents cross-org lock-order deadlocks and keeps
-runtime-settings writes independent of a long claim scan.
+the existing dead/draining-worker recovery path. Claiming any affinity-bound
+sandbox job is nevertheless serialized by the same organization-row lock and
+shared active-turn check. The claim transaction preserves the worker target
+while atomically changing the admitted job to `running`; an org-limited
+affinity job keeps its affinity pin and is briefly deferred so other runnable
+work can be considered. Each candidate is handled in its own transaction, so
+committing an org-limit deferral releases that organization's row lock before
+the dispatcher examines another tenant. This prevents cross-org lock-order
+deadlocks and keeps runtime-settings writes independent of a long claim scan.
 
 If a worker's authoritative local gate still rejects a fresh sandbox, the
 running job immediately performs the same atomic reservation against an
 alternate worker. A successful alternate reservation retries with zero delay.
 The existing 10-second delay is retained only when no fleet slot is available.
-The code-review org limit uses a shorter policy retry, while advisory-lock
-contention leaves the job immediately runnable so another dispatcher can retry
-without pretending the fleet is full.
+The shared org limit uses a shorter policy retry, while advisory-lock contention
+leaves the job immediately runnable so another dispatcher can retry without
+pretending the fleet is full.
 
 If fresh workers exist but none advertises usable `max_active_sandboxes`
 metadata, the router does not treat the fleet as saturated for eight minutes.
@@ -142,15 +137,11 @@ interactive work may use the full `WORKER_MAX_ACTIVE_SANDBOXES` value. The
 reserve is clamped to at most `max_active_sandboxes - 1`, so a single-slot
 self-hosted worker remains usable for code review.
 
-`code_review_max_concurrent_turns` defaults to the smaller of the org's
-`max_concurrent_runs` and `10`, and is configurable from Runtime settings. The
-router and affinity-aware claim path serialize this decision per organization,
-and the shared local admission layer remains the authoritative final fence
-after claim. Interactive admission preserves the established session-based
-`max_concurrent_runs` contract and excludes sessions whose origin is
-`code_review`; multiple threads in one interactive session therefore do not
-consume multiple org slots, while code-review work uses its independent
-review-specific turn limit.
+`max_concurrent_runs` is the single organization limit for interactive and
+code-review turns. The router and affinity-aware claim path serialize this
+decision per organization and count both workload classes in the same active
+pool. The shared local admission layer remains the authoritative final fence
+after claim.
 
 Worker heartbeats publish
 `interactive_reserved_sandbox_slots` and `sandbox_turn_reserved_count`

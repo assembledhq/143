@@ -214,7 +214,7 @@ describe("RuntimeSettingsPage", () => {
     expect(screen.getByLabelText("Maximum session length")).toHaveValue(60);
   });
 
-  it("mirrors the backend medium-org defaults for concurrency limits", async () => {
+  it("mirrors the backend medium-org default for the shared concurrency limit", async () => {
     settingsGetMock.mockResolvedValueOnce({
       data: {
         id: "org-1",
@@ -229,12 +229,12 @@ describe("RuntimeSettingsPage", () => {
 
     expect(await screen.findByText("3 concurrent")).toBeInTheDocument();
     expect(screen.getByLabelText("Concurrent agent runs")).toHaveValue(3);
-    expect(screen.getByLabelText("Concurrent code-review turns")).toHaveValue(
-      3,
-    );
+    expect(
+      screen.queryByLabelText("Concurrent code-review turns"),
+    ).not.toBeInTheDocument();
   });
 
-  it("mirrors the backend large-org defaults for concurrency limits", async () => {
+  it("mirrors the backend large-org default for the shared concurrency limit", async () => {
     settingsGetMock.mockResolvedValueOnce({
       data: {
         id: "org-1",
@@ -249,9 +249,6 @@ describe("RuntimeSettingsPage", () => {
 
     expect(await screen.findByText("15 concurrent")).toBeInTheDocument();
     expect(screen.getByLabelText("Concurrent agent runs")).toHaveValue(15);
-    expect(screen.getByLabelText("Concurrent code-review turns")).toHaveValue(
-      10,
-    );
   });
 
   it("uses concise visible helper copy with question mark tooltips for caveats", async () => {
@@ -270,7 +267,7 @@ describe("RuntimeSettingsPage", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Limit simultaneous coding-agent turns across the organization.",
+        "Limit simultaneous interactive and code-review turns across the organization.",
       ),
     ).toBeInTheDocument();
     expect(
@@ -513,19 +510,6 @@ describe("RuntimeSettingsPage", () => {
     await waitFor(() => {
       expect(settingsUpdateMock).toHaveBeenCalledWith({
         settings: { max_concurrent_runs: 8 },
-      });
-    });
-
-    const codeReviewTurns = screen.getByLabelText(
-      "Concurrent code-review turns",
-    );
-    await user.click(codeReviewTurns);
-    await user.keyboard("{Control>}a{/Control}12");
-    await user.tab();
-
-    await waitFor(() => {
-      expect(settingsUpdateMock).toHaveBeenCalledWith({
-        settings: { code_review_max_concurrent_turns: 12 },
       });
     });
 

@@ -17,8 +17,8 @@ ALTER TABLE jobs VALIDATE CONSTRAINT chk_jobs_workload_class;
 --   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_jobs_sandbox_routing
 --     ON jobs (priority DESC, (CASE WHEN workload_class = 'interactive' THEN 0 ELSE 1 END), created_at ASC, run_at)
 --     WHERE status = 'pending' AND job_type IN ('run_agent', 'continue_session');
---   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_jobs_active_workload
---     ON jobs (org_id, workload_class, status)
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_jobs_active_sandbox_turns
+--     ON jobs (org_id, status)
 --     WHERE job_type IN ('run_agent', 'continue_session') AND status IN ('pending', 'running');
 --
 -- IF NOT EXISTS makes the transactional migration a no-op after that rollout
@@ -38,7 +38,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_sandbox_routing
     WHERE status = 'pending'
       AND job_type IN ('run_agent', 'continue_session');
 
-CREATE INDEX IF NOT EXISTS idx_jobs_active_workload
-    ON jobs (org_id, workload_class, status)
+CREATE INDEX IF NOT EXISTS idx_jobs_active_sandbox_turns
+    ON jobs (org_id, status)
     WHERE job_type IN ('run_agent', 'continue_session')
       AND status IN ('pending', 'running');

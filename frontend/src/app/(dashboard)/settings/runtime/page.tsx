@@ -41,14 +41,12 @@ import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { cn } from "@/lib/utils";
 import {
-  DEFAULT_CODE_REVIEW_MAX_CONCURRENT_TURNS,
   DEFAULT_COMPLETED_SESSION_RETENTION_MINUTES,
   DEFAULT_IDLE_PREVIEW_TTL_MINUTES,
   DEFAULT_PREVIEW_MAX_CPU_MILLIS,
   DEFAULT_PREVIEW_MAX_EPHEMERAL_DISK_MIB,
   DEFAULT_PREVIEW_MAX_MEMORY_MIB,
   DEFAULT_PREVIEW_MAX_PREVIEWS_PER_USER,
-  MAX_CODE_REVIEW_MAX_CONCURRENT_TURNS,
   MAX_COMPLETED_SESSION_RETENTION_MINUTES,
   MAX_CONCURRENT_RUNS,
   MAX_IDLE_PREVIEW_TTL_MINUTES,
@@ -57,7 +55,6 @@ import {
   MAX_PREVIEW_MAX_MEMORY_MIB,
   MAX_PREVIEW_MAX_PREVIEWS_PER_USER,
   MAX_SESSION_DURATION_MINUTES,
-  MIN_CODE_REVIEW_MAX_CONCURRENT_TURNS,
   MIN_COMPLETED_SESSION_RETENTION_MINUTES,
   MIN_CONCURRENT_RUNS,
   MIN_IDLE_PREVIEW_TTL_MINUTES,
@@ -631,9 +628,6 @@ function CapacityLimitsSection() {
   const maxConcurrentRuns =
     settings.max_concurrent_runs ??
     defaultMaxConcurrentRunsForOrgSize(settings.org_size);
-  const codeReviewMaxConcurrentTurns =
-    settings.code_review_max_concurrent_turns ??
-    Math.min(maxConcurrentRuns, DEFAULT_CODE_REVIEW_MAX_CONCURRENT_TURNS);
   const maxPreviewsPerUser =
     settings.preview_max_previews_per_user ??
     DEFAULT_PREVIEW_MAX_PREVIEWS_PER_USER;
@@ -644,19 +638,6 @@ function CapacityLimitsSection() {
     toPatch: (value) => ({ settings: { max_concurrent_runs: value } }),
     clamp: (value) =>
       clampNumber(value, MIN_CONCURRENT_RUNS, MAX_CONCURRENT_RUNS),
-  });
-  const codeReviewTurnsField = useAutosaveNumericField({
-    serverValue: codeReviewMaxConcurrentTurns,
-    autosave,
-    toPatch: (value) => ({
-      settings: { code_review_max_concurrent_turns: value },
-    }),
-    clamp: (value) =>
-      clampNumber(
-        value,
-        MIN_CODE_REVIEW_MAX_CONCURRENT_TURNS,
-        MAX_CODE_REVIEW_MAX_CONCURRENT_TURNS,
-      ),
   });
   const maxPreviewsPerUserField = useAutosaveNumericField({
     serverValue: maxPreviewsPerUser,
@@ -680,9 +661,9 @@ function CapacityLimitsSection() {
           <SettingRow
             id="max-concurrent-runs"
             label="Concurrent agent runs"
-            description="Limit simultaneous coding-agent turns across the organization."
+            description="Limit simultaneous interactive and code-review turns across the organization."
             helper={`Range ${MIN_CONCURRENT_RUNS}-${MAX_CONCURRENT_RUNS}`}
-            tooltip="This protects shared runtime capacity. Users can still queue additional work."
+            tooltip="Interactive sessions and code reviews share this limit. Users can still queue additional work."
           >
             <BoundedNumberInput
               id="max-concurrent-runs"
@@ -701,34 +682,6 @@ function CapacityLimitsSection() {
                   MAX_CONCURRENT_RUNS,
                 );
                 concurrentRunsField.setValueAndSave(next);
-              }}
-            />
-          </SettingRow>
-          <SettingRow
-            id="code-review-max-concurrent-turns"
-            label="Concurrent code-review turns"
-            description="Limit simultaneous reviewer and orchestrator turns across the organization."
-            helper={`Range ${MIN_CODE_REVIEW_MAX_CONCURRENT_TURNS}-${MAX_CODE_REVIEW_MAX_CONCURRENT_TURNS}`}
-            tooltip="Code-review work has its own queue limit and cannot consume worker slots reserved for interactive sessions."
-          >
-            <BoundedNumberInput
-              id="code-review-max-concurrent-turns"
-              label="Concurrent code-review turns"
-              min={MIN_CODE_REVIEW_MAX_CONCURRENT_TURNS}
-              max={MAX_CODE_REVIEW_MAX_CONCURRENT_TURNS}
-              value={codeReviewTurnsField.value}
-              onChange={codeReviewTurnsField.onChange}
-              onBlur={codeReviewTurnsField.onBlur}
-              onStep={(direction) => {
-                const current = Number.parseInt(codeReviewTurnsField.value, 10);
-                const next = clampNumber(
-                  (Number.isNaN(current)
-                    ? codeReviewMaxConcurrentTurns
-                    : current) + direction,
-                  MIN_CODE_REVIEW_MAX_CONCURRENT_TURNS,
-                  MAX_CODE_REVIEW_MAX_CONCURRENT_TURNS,
-                );
-                codeReviewTurnsField.setValueAndSave(next);
               }}
             />
           </SettingRow>

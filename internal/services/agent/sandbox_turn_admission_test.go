@@ -23,11 +23,10 @@ func (s *sandboxAdmissionOrgStore) GetByID(context.Context, uuid.UUID) (models.O
 }
 
 type sandboxAdmissionJobStore struct {
-	active                 int
-	requestedWorkloadClass models.SandboxWorkloadClass
-	releaseCalls           int
-	releasedJobID          uuid.UUID
-	releasedLockToken      uuid.UUID
+	active            int
+	releaseCalls      int
+	releasedJobID     uuid.UUID
+	releasedLockToken uuid.UUID
 }
 
 func (s *sandboxAdmissionJobStore) Enqueue(context.Context, uuid.UUID, string, string, any, int, *string) (uuid.UUID, error) {
@@ -46,8 +45,7 @@ func (s *sandboxAdmissionJobStore) QueueChangesetPRCreation(context.Context, uui
 	return uuid.New(), true, nil
 }
 
-func (s *sandboxAdmissionJobStore) CountActiveSandboxTurnsByOrgAndClass(_ context.Context, _ uuid.UUID, workloadClass models.SandboxWorkloadClass) (int, error) {
-	s.requestedWorkloadClass = workloadClass
+func (s *sandboxAdmissionJobStore) CountActiveSandboxTurnsByOrg(context.Context, uuid.UUID) (int, error) {
 	return s.active, nil
 }
 
@@ -58,16 +56,19 @@ func (s *sandboxAdmissionJobStore) ReleaseSandboxRoutingPlacementWithLease(_ con
 	return true, nil
 }
 
-func TestAdmitSandboxTurnAppliesCodeReviewOrgLimit(t *testing.T) {
+func TestAdmitSandboxTurnAppliesSharedOrgLimit(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name      string
+		origin    models.SessionOrigin
 		active    int
 		expectErr bool
 	}{
-		{name: "allows the claimed turn at the configured limit", active: 2},
-		{name: "rejects a claimed turn beyond the configured limit", active: 3, expectErr: true},
+		{name: "allows claimed interactive turn at the shared limit", origin: models.SessionOriginManual, active: 2},
+		{name: "rejects interactive turn beyond the shared limit", origin: models.SessionOriginManual, active: 3, expectErr: true},
+		{name: "allows claimed code-review turn at the shared limit", origin: models.SessionOriginCodeReview, active: 2},
+		{name: "rejects code-review turn beyond the shared limit", origin: models.SessionOriginCodeReview, active: 3, expectErr: true},
 	}
 
 	for _, tt := range tests {
@@ -76,66 +77,23 @@ func TestAdmitSandboxTurnAppliesCodeReviewOrgLimit(t *testing.T) {
 
 			orgID := uuid.New()
 			orchestrator := &Orchestrator{
-				orgs: &sandboxAdmissionOrgStore{settings: json.RawMessage(`{
-					"max_concurrent_runs": 20,
-					"code_review_max_concurrent_turns": 2
-				}`)},
+				orgs:   &sandboxAdmissionOrgStore{settings: json.RawMessage(`{"max_concurrent_runs":2}`)},
 				jobs:   &sandboxAdmissionJobStore{active: tt.active},
 				logger: zerolog.Nop(),
-			}
-			reservation, err := orchestrator.admitSandboxTurn(context.Background(), &models.Session{
-				ID:     uuid.New(),
-				OrgID:  orgID,
-				Origin: models.SessionOriginCodeReview,
-			}, "continue_session", false, false)
-
-			if tt.expectErr {
-				require.ErrorIs(t, err, ErrSandboxTurnConcurrency, "code-review turn above the org limit should wait without consuming an attempt")
-				require.Nil(t, reservation, "rejected org admission should not reserve local capacity")
-				return
-			}
-			require.NoError(t, err, "the current claimed code-review turn should be allowed at the configured limit")
-			require.Nil(t, reservation, "existing-sandbox turns should not reserve another local sandbox slot")
-		})
-	}
-}
-
-func TestAdmitSandboxTurnCountsOnlyInteractiveWorkAgainstInteractiveLimit(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		active    int
-		expectErr bool
-	}{
-		{name: "allows a new interactive session below the limit", active: 1},
-		{name: "rejects a new interactive session at the limit", active: 2, expectErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			jobs := &sandboxAdmissionJobStore{}
-			orchestrator := &Orchestrator{
-				jobs:          jobs,
-				sessions:      &runtimeTestSessionStore{countRunning: tt.active},
-				maxConcurrent: 2,
-				logger:        zerolog.Nop(),
 			}
 			ctx := jobctx.WithJobID(context.Background(), uuid.New())
 			reservation, err := orchestrator.admitSandboxTurn(ctx, &models.Session{
 				ID:     uuid.New(),
-				OrgID:  uuid.New(),
-				Origin: models.SessionOriginManual,
+				OrgID:  orgID,
+				Origin: tt.origin,
 			}, "continue_session", false, false)
 
 			if tt.expectErr {
-				require.ErrorIs(t, err, ErrConcurrencyLimit, "interactive work above its own limit should wait")
-				require.Nil(t, reservation, "rejected interactive admission should not reserve local capacity")
+				require.ErrorIs(t, err, ErrSandboxTurnConcurrency, "turn above the shared org limit should wait without consuming an attempt")
+				require.Nil(t, reservation, "rejected org admission should not reserve local capacity")
 				return
 			}
-			require.NoError(t, err, "interactive admission should preserve session-based org concurrency semantics")
+			require.NoError(t, err, "the current claimed turn should be allowed at the shared limit")
 			require.Nil(t, reservation, "existing-sandbox turns should not reserve another local sandbox slot")
 		})
 	}
@@ -147,10 +105,7 @@ func TestAdmitSandboxTurnReleasesRejectedDurablePlacement(t *testing.T) {
 	jobID, lockToken := uuid.New(), uuid.New()
 	jobs := &sandboxAdmissionJobStore{active: 3}
 	orchestrator := &Orchestrator{
-		orgs: &sandboxAdmissionOrgStore{settings: json.RawMessage(`{
-			"max_concurrent_runs": 20,
-			"code_review_max_concurrent_turns": 2
-		}`)},
+		orgs:   &sandboxAdmissionOrgStore{settings: json.RawMessage(`{"max_concurrent_runs":2}`)},
 		jobs:   jobs,
 		logger: zerolog.Nop(),
 	}
@@ -162,7 +117,7 @@ func TestAdmitSandboxTurnReleasesRejectedDurablePlacement(t *testing.T) {
 		Origin: models.SessionOriginCodeReview,
 	}, "continue_session", false, false)
 
-	require.ErrorIs(t, err, ErrSandboxTurnConcurrency, "org admission should reject a review turn beyond its configured limit")
+	require.ErrorIs(t, err, ErrSandboxTurnConcurrency, "org admission should reject a turn beyond the shared limit")
 	require.Nil(t, reservation, "rejected admission should not hold local capacity")
 	require.Equal(t, 1, jobs.releaseCalls, "rejected admission should release its durable routing placement exactly once")
 	require.Equal(t, jobID, jobs.releasedJobID, "placement release should be fenced to the claimed job")
