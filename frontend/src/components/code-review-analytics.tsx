@@ -266,9 +266,9 @@ export function CodeReviewAnalyticsReport({
         />
       ) : null}
 
-      <ApprovalOutcomeCards summary={summary} />
-
       {filters}
+
+      <ApprovalOutcomeCards summary={summary} />
 
       <SectionGroup
         title="Usage by PR author"

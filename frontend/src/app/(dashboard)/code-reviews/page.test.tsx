@@ -803,7 +803,7 @@ describe("CodeReviewsPage", () => {
     expect(within(evidenceSheet).getByText("Required checks were not passing")).toBeInTheDocument();
   });
 
-  it("renders the PR-centric Analytics report with headline metrics first", async () => {
+  it("renders the PR-centric Analytics report with controls before headline metrics", async () => {
     const user = userEvent.setup();
     const analyticsRequests: URLSearchParams[] = [];
     // The retired insights report has no handler in the base mocks, so a
@@ -848,10 +848,10 @@ describe("CodeReviewsPage", () => {
     const authorUsage = screen.getByText("Usage by PR author");
     const authorTable = screen.getByRole("table", { name: "Code review analytics by PR author" });
     expect(
-      approvalOutcomes.compareDocumentPosition(analyticsFilters as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
+      (analyticsFilters as Node).compareDocumentPosition(approvalOutcomes) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(
-      (analyticsFilters as Node).compareDocumentPosition(authorUsage) & Node.DOCUMENT_POSITION_FOLLOWING,
+      approvalOutcomes.compareDocumentPosition(authorUsage) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(screen.getByText("Line-count limit exceeded")).toBeInTheDocument();
     expect(screen.getByText("Reviewers found a blocking issue")).toBeInTheDocument();
