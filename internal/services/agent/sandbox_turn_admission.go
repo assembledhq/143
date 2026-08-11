@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
@@ -16,12 +17,18 @@ import (
 // pointlessly move an affinity-bound turn to another node.
 var ErrSandboxTurnConcurrency = errors.New("sandbox turn concurrency limit reached")
 
+const sandboxRoutingCleanupTimeout = 5 * time.Second
+
 type activeSandboxTurnCounter interface {
 	CountActiveSandboxTurnsByOrgAndClass(ctx context.Context, orgID uuid.UUID, workloadClass models.SandboxWorkloadClass) (int, error)
 }
 
 type sandboxSlotReservationReleaser interface {
 	ReleaseSandboxSlotReservationWithLease(ctx context.Context, jobID, lockToken uuid.UUID) (bool, error)
+}
+
+type sandboxRoutingPlacementReleaser interface {
+	ReleaseSandboxRoutingPlacementWithLease(ctx context.Context, jobID, lockToken uuid.UUID) (bool, error)
 }
 
 // admitSandboxTurn is the shared admission boundary for RunAgent and
@@ -41,11 +48,13 @@ func (o *Orchestrator) admitSandboxTurn(
 	workloadClass := models.SandboxWorkloadClassForSession(session)
 	switch workloadClass {
 	case models.SandboxWorkloadClassInteractive:
-		if err := o.checkConcurrency(ctx, session.OrgID, excludeCurrentInteractiveSession); err != nil {
+		if err := o.checkInteractiveTurnConcurrency(ctx, session.OrgID, excludeCurrentInteractiveSession); err != nil {
+			o.releaseRejectedSandboxRoutingPlacement(ctx, o.logger)
 			return nil, err
 		}
 	case models.SandboxWorkloadClassCodeReview:
 		if err := o.checkCodeReviewTurnConcurrency(ctx, session.OrgID); err != nil {
+			o.releaseRejectedSandboxRoutingPlacement(ctx, o.logger)
 			return nil, err
 		}
 	default:
@@ -62,9 +71,26 @@ func (o *Orchestrator) admitSandboxTurn(
 		WorkloadClass: workloadClass,
 	})
 	if err != nil {
+		o.releaseRejectedSandboxRoutingPlacement(ctx, o.logger)
 		return nil, err
 	}
 	return reservation, nil
+}
+
+func (o *Orchestrator) checkInteractiveTurnConcurrency(ctx context.Context, orgID uuid.UUID, excludeCurrentRunning bool) error {
+	counter, ok := o.jobs.(activeSandboxTurnCounter)
+	if !ok {
+		return o.checkConcurrency(ctx, orgID, excludeCurrentRunning)
+	}
+	active, err := counter.CountActiveSandboxTurnsByOrgAndClass(ctx, orgID, models.SandboxWorkloadClassInteractive)
+	if err != nil {
+		return err
+	}
+	_, currentJobIncluded := jobctx.JobIDFromContext(ctx)
+	if active > o.maxConcurrent || (!currentJobIncluded && active >= o.maxConcurrent) {
+		return fmt.Errorf("%w: %d/%d interactive turns active", ErrConcurrencyLimit, active, o.maxConcurrent)
+	}
+	return nil
 }
 
 func (o *Orchestrator) checkCodeReviewTurnConcurrency(ctx context.Context, orgID uuid.UUID) error {
@@ -107,12 +133,36 @@ func (o *Orchestrator) releaseSandboxRoutingReservation(ctx context.Context, log
 	if !hasJobID || !hasLockToken {
 		return
 	}
-	released, err := releaser.ReleaseSandboxSlotReservationWithLease(ctx, jobID, lockToken)
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sandboxRoutingCleanupTimeout)
+	defer cancel()
+	released, err := releaser.ReleaseSandboxSlotReservationWithLease(releaseCtx, jobID, lockToken)
 	if err != nil {
 		log.Warn().Err(err).Str("job_id", jobID.String()).Msg("failed to release durable sandbox routing reservation")
 		return
 	}
 	if released {
 		log.Debug().Str("job_id", jobID.String()).Msg("released durable sandbox routing reservation")
+	}
+}
+
+func (o *Orchestrator) releaseRejectedSandboxRoutingPlacement(ctx context.Context, log zerolog.Logger) {
+	releaser, ok := o.jobs.(sandboxRoutingPlacementReleaser)
+	if !ok {
+		return
+	}
+	jobID, hasJobID := jobctx.JobIDFromContext(ctx)
+	lockToken, hasLockToken := jobctx.LockTokenFromContext(ctx)
+	if !hasJobID || !hasLockToken {
+		return
+	}
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sandboxRoutingCleanupTimeout)
+	defer cancel()
+	released, err := releaser.ReleaseSandboxRoutingPlacementWithLease(releaseCtx, jobID, lockToken)
+	if err != nil {
+		log.Warn().Err(err).Str("job_id", jobID.String()).Msg("failed to release rejected sandbox routing placement")
+		return
+	}
+	if released {
+		log.Debug().Str("job_id", jobID.String()).Msg("released rejected sandbox routing placement")
 	}
 }

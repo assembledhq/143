@@ -14,6 +14,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -21,6 +22,20 @@ import (
 
 type wakeTestStore struct {
 	claims atomic.Int32
+}
+
+type routingTestStore struct {
+	wakeTestStore
+	results []*db.SandboxRoutingResult
+	calls   atomic.Int32
+}
+
+func (s *routingTestStore) RouteNextSandboxJob(context.Context) (*db.SandboxRoutingResult, error) {
+	call := int(s.calls.Add(1)) - 1
+	if call >= len(s.results) {
+		return nil, nil
+	}
+	return s.results[call], nil
 }
 
 type retryWindowLeaseStoreStub struct {
@@ -241,9 +256,11 @@ func TestWorker_Poll(t *testing.T) {
 			name: "no pending jobs returns cleanly",
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()
+				mock.ExpectBegin()
 				mock.ExpectQuery("WITH unavailable_target_nodes AS").
-					WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
+					WithArgs(pgxmock.AnyArg(), "test-node", pgxmock.AnyArg()).
 					WillReturnError(pgx.ErrNoRows)
+				mock.ExpectRollback()
 			},
 		},
 		{
@@ -577,8 +594,13 @@ func TestWorker_Poll(t *testing.T) {
 				jobID := uuid.New()
 				orgID := uuid.New()
 				now := time.Now()
+				mock.ExpectBegin()
 				mock.ExpectQuery("WITH unavailable_target_nodes AS").
-					WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
+					WithArgs(pgxmock.AnyArg(), "test-node", pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "workload_class", "status", "created_at"}).
+						AddRow(jobID, orgID, "missing_token", models.SandboxWorkloadClassInteractive, models.JobStatusPending, now))
+				mock.ExpectQuery("UPDATE jobs j").
+					WithArgs("test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds()), jobID).
 					WillReturnRows(pgxmock.NewRows([]string{
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
@@ -588,6 +610,8 @@ func TestWorker_Poll(t *testing.T) {
 						jobID, orgID, "default", "missing_token", json.RawMessage(`{}`), 5, "running",
 						1, 3, now, "test-node", now, now.Add(defaultLeaseDuration), nil, "test-node", string(models.JobOwnerKindWorker), nil, nil, models.SandboxWorkloadClassInteractive, nil, nil, nil, now, now, nil,
 					))
+				mock.ExpectCommit()
+				mock.ExpectRollback()
 			},
 		},
 	}
@@ -684,6 +708,33 @@ func TestWorker_Start_WakeTriggersPoll(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("worker should stop promptly after context cancellation")
 	}
+}
+
+func TestWorkerPollContinuesRoutingAfterCapacityDeferral(t *testing.T) {
+	t.Parallel()
+
+	store := &routingTestStore{results: []*db.SandboxRoutingResult{
+		{
+			JobID:         uuid.New(),
+			WorkloadClass: models.SandboxWorkloadClassCodeReview,
+			Deferred:      true,
+			Reason:        db.SandboxRoutingReasonOrgLimit,
+		},
+		nil,
+	}}
+	w := &Worker{
+		jobs:          store,
+		sandboxRouter: store,
+		logger:        zerolog.Nop(),
+		nodeID:        "test-node",
+		handlers:      map[string]JobHandler{},
+		leaseDuration: defaultLeaseDuration,
+	}
+
+	w.poll(context.Background())
+
+	require.Equal(t, int32(2), store.calls.Load(), "a deferred review job should not monopolize the routing pass")
+	require.Equal(t, int32(1), store.claims.Load(), "the worker should still attempt a normal claim after draining deferred routing decisions")
 }
 
 func TestWorker_Wake_DropsDuplicateSignalsWhenBufferFull(t *testing.T) {
@@ -837,6 +888,9 @@ func TestWorker_Poll_LostLeaseSkipsTerminalWrite(t *testing.T) {
 	mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+").
 		WithArgs(int(defaultLeaseDuration.Seconds()), jobID, lockToken).
 		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectQuery("WITH target AS").
+		WithArgs(jobID, lockToken, pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(0)))
 
 	w.poll(context.Background())
 
@@ -941,9 +995,11 @@ func TestWorker_Start_StopsOnContextCancel(t *testing.T) {
 	w.pollInterval = 10 * time.Millisecond
 	mock.MatchExpectationsInOrder(false)
 	for range 5 {
+		mock.ExpectBegin()
 		mock.ExpectQuery("WITH unavailable_target_nodes AS").
-			WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
+			WithArgs(pgxmock.AnyArg(), "test-node", pgxmock.AnyArg()).
 			WillReturnError(pgx.ErrNoRows)
+		mock.ExpectRollback()
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
@@ -1135,8 +1191,13 @@ func expectClaimWithAttemptsAndTarget(mock pgxmock.PgxPoolIface, jobID, orgID uu
 	if targetNodeID != nil {
 		target = *targetNodeID
 	}
+	mock.ExpectBegin()
 	mock.ExpectQuery("WITH unavailable_target_nodes AS").
-		WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
+		WithArgs(pgxmock.AnyArg(), "test-node", pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "workload_class", "status", "created_at"}).
+			AddRow(jobID, orgID, jobType, models.SandboxWorkloadClassInteractive, models.JobStatusPending, createdAt))
+	mock.ExpectQuery("UPDATE jobs j").
+		WithArgs("test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds()), jobID).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 			"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
@@ -1147,4 +1208,6 @@ func expectClaimWithAttemptsAndTarget(mock pgxmock.PgxPoolIface, jobID, orgID uu
 			attempts, maxAttempts, createdAt, "test-node", createdAt, createdAt.Add(defaultLeaseDuration),
 			lockToken.String(), "test-node", string(models.JobOwnerKindWorker), nil, nil, models.SandboxWorkloadClassInteractive, target, nil, nil, createdAt, createdAt, nil,
 		))
+	mock.ExpectCommit()
+	mock.ExpectRollback()
 }

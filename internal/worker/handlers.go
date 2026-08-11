@@ -152,8 +152,13 @@ func sandboxTurnCapacityRetryTarget(ctx context.Context, stores *Stores, logger 
 		targetNodeID, clearTargetNodeID := sandboxCapacityRetryTarget(ctx, stores, logger)
 		return targetNodeID, clearTargetNodeID, sandboxCapacityRetryDelay
 	}
+	lockToken, ok := jobctx.LockTokenFromContext(ctx)
+	if !ok || lockToken == uuid.Nil {
+		logger.Warn().Str("job_id", jobID.String()).Msg("sandbox capacity retry is missing its fencing token")
+		return nil, false, sandboxRoutingErrorRetryDelay
+	}
 	excludeNodeID, _ := jobctx.WorkerNodeIDFromContext(ctx)
-	result, err := stores.Jobs.ReserveSandboxSlotForRetry(ctx, jobID, excludeNodeID)
+	result, err := stores.Jobs.ReserveSandboxSlotForRetry(ctx, jobID, lockToken, excludeNodeID)
 	if err != nil {
 		logger.Warn().Err(err).Msg("failed to reserve worker sandbox capacity for retry")
 		return nil, false, sandboxRoutingErrorRetryDelay
