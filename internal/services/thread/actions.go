@@ -179,10 +179,6 @@ func (s *Service) enqueueThreadContinuation(ctx context.Context, orgID, sessionI
 	if s.jobStore == nil {
 		return nil
 	}
-	session, err := s.sessionStore.GetByID(ctx, orgID, sessionID)
-	if err != nil {
-		return fmt.Errorf("load session for thread continuation: %w", err)
-	}
 	payload := map[string]string{
 		"session_id": sessionID.String(),
 		"thread_id":  threadID.String(),
@@ -190,17 +186,31 @@ func (s *Service) enqueueThreadContinuation(ctx context.Context, orgID, sessionI
 	}
 	dedupeKey := db.ContinueSessionDedupeKey(threadID)
 	enqueueOpts := db.EnqueueOpts{
-		Queue:        "agent",
-		JobType:      "continue_session",
-		Payload:      payload,
-		Priority:     5,
-		DedupeKey:    &dedupeKey,
-		TargetNodeID: models.SessionWorkerTarget(&session),
+		Queue:         "agent",
+		JobType:       "continue_session",
+		Payload:       payload,
+		Priority:      5,
+		DedupeKey:     &dedupeKey,
+		WorkloadClass: models.SandboxWorkloadClassInteractive,
 	}
-	if models.SandboxWorkloadClassForSession(&session) == models.SandboxWorkloadClassCodeReview {
-		enqueueOpts.WorkloadClass = models.SandboxWorkloadClassCodeReview
+	// Session lookup enriches the enqueue with affinity and workload class, but
+	// it is not required to preserve the accepted message. When the dependency
+	// is absent or temporarily unavailable, leave the job unpinned and use the
+	// conservative interactive fallback; the worker reloads the authoritative
+	// session before execution.
+	if s.sessionStore != nil {
+		session, err := s.sessionStore.GetByID(ctx, orgID, sessionID)
+		if err != nil {
+			s.logger.Warn().Err(err).
+				Str("session_id", sessionID.String()).
+				Str("thread_id", threadID.String()).
+				Msg("failed to enrich thread continuation routing; enqueueing unpinned interactive fallback")
+		} else {
+			enqueueOpts.TargetNodeID = models.SessionWorkerTarget(&session)
+			enqueueOpts.WorkloadClass = models.SandboxWorkloadClassForSession(&session)
+		}
 	}
-	_, err = s.jobStore.EnqueueWithOpts(ctx, orgID, enqueueOpts)
+	_, err := s.jobStore.EnqueueWithOpts(ctx, orgID, enqueueOpts)
 	return err
 }
 

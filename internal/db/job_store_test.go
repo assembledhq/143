@@ -748,10 +748,12 @@ func TestJobStore_ClaimNextRunnableAtomicallyDefersAffinityCodeReviewAtOrgLimit(
 	mock.ExpectExec(`(?s)UPDATE jobs.*target_node_id = CASE.*sandbox_slot_reserved_until IS NULL THEN target_node_id.*sandbox_slot_reserved_until = NULL`).
 		WithArgs(int(sandboxOrgLimitRetryDelay.Seconds()), jobID).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+	mock.ExpectRollback()
+	mock.ExpectBegin()
 	mock.ExpectQuery(`(?s)WITH unavailable_target_nodes AS.*SELECT j.id, j.org_id, j.job_type`).
 		WithArgs(pgxmock.AnyArg(), "worker-1", pgxmock.AnyArg()).
 		WillReturnError(pgx.ErrNoRows)
-	mock.ExpectCommit()
 	mock.ExpectRollback()
 
 	job, err := NewJobStore(mock).ClaimNextRunnable(context.Background(), "worker-1", "worker-1", uuid.New(), time.Minute)
@@ -1489,6 +1491,11 @@ func TestJobStore_RouteNextSandboxJob(t *testing.T) {
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), tt.workloadClass)
 				if tt.candidateNodeID == "" {
 					candidateQuery.WillReturnRows(pgxmock.NewRows([]string{"id"}))
+					if tt.expectedReason == SandboxRoutingReasonFleetCapacity {
+						mock.ExpectQuery(`(?s)SELECT EXISTS.*max_active_sandboxes`).
+							WithArgs(pgxmock.AnyArg()).
+							WillReturnRows(pgxmock.NewRows([]string{"available"}).AddRow(true))
+					}
 				} else {
 					candidateQuery.WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(tt.candidateNodeID))
 					mock.ExpectQuery(`SELECT pg_try_advisory_xact_lock`).
@@ -1526,6 +1533,44 @@ func TestJobStore_RouteNextSandboxJob(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "routing should keep the job, org decision, and worker reservation in one transaction")
 		})
 	}
+}
+
+func TestJobStore_RouteNextSandboxJobFallsBackWhenFleetCapacityMetadataIsMissing(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	jobID, orgID := uuid.New(), uuid.New()
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT j.id, j.org_id, j.workload_class, j.status, j.created_at.*FROM jobs j`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "workload_class", "status", "created_at"}).
+			AddRow(jobID, orgID, models.SandboxWorkloadClassInteractive, models.JobStatusPending, time.Now()))
+	mock.ExpectQuery(`(?s)WITH raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), models.SandboxWorkloadClassInteractive).
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectQuery(`(?s)SELECT EXISTS.*max_active_sandboxes`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"available"}).AddRow(false))
+	mock.ExpectQuery(`(?s)SELECT n.id.*FROM nodes n.*active_job_count`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow("worker-without-capacity-metadata"))
+	mock.ExpectExec(`(?s)UPDATE jobs.*target_node_id =.*sandbox_slot_reserved_until =.*status =`).
+		WithArgs("worker-without-capacity-metadata", (*time.Time)(nil), jobID, models.JobStatusPending).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+	mock.ExpectRollback()
+
+	result, err := NewJobStore(mock).RouteNextSandboxJob(context.Background())
+	require.NoError(t, err, "missing fleet metadata should use the compatibility route instead of waiting eight minutes")
+	require.NotNil(t, result, "metadata fallback should report its placement")
+	require.Equal(t, SandboxRoutingReasonMetadataFallback, result.Reason, "routing should expose missing fleet metadata as an operational signal")
+	require.False(t, result.Deferred, "missing metadata should not masquerade as genuine fleet saturation")
+	require.NotNil(t, result.TargetNodeID, "metadata fallback should select a fresh worker")
+	require.Equal(t, "worker-without-capacity-metadata", *result.TargetNodeID, "metadata fallback should persist the selected compatibility worker")
+	require.NoError(t, mock.ExpectationsWereMet(), "metadata fallback placement should commit atomically")
 }
 
 func TestJobStore_RouteNextSandboxJobUsesTerminalProbeAfterBoundedDeferral(t *testing.T) {
@@ -1651,6 +1696,33 @@ func TestJobStore_ReserveSandboxSlotForRetryRequiresCurrentLease(t *testing.T) {
 
 func jobDedupeKeyPtr(s string) *string {
 	return &s
+}
+
+func TestRunAgentEnqueueOptsPreservesSessionWorkloadClass(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		origin   models.SessionOrigin
+		expected models.SandboxWorkloadClass
+	}{
+		{name: "interactive uses rolling-deploy schema default", origin: models.SessionOriginManual},
+		{name: "code review is persisted explicitly", origin: models.SessionOriginCodeReview, expected: models.SandboxWorkloadClassCodeReview},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			session := &models.Session{ID: uuid.New(), OrgID: uuid.New(), Origin: tt.origin}
+			dedupeKey := RunAgentDedupeKey(session.ID)
+			opts := RunAgentEnqueueOpts(session, 5, &dedupeKey)
+
+			require.Equal(t, "run_agent", opts.JobType, "canonical enqueue policy should always schedule run_agent")
+			require.Equal(t, tt.expected, opts.WorkloadClass, "canonical enqueue policy should preserve review classification while using the interactive schema default")
+			require.Equal(t, &dedupeKey, opts.DedupeKey, "canonical enqueue policy should preserve caller deduplication")
+		})
+	}
 }
 
 func TestOpenPRDedupeKeyUsesChangesetScope(t *testing.T) {

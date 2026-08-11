@@ -2165,6 +2165,23 @@ func (s *SessionStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (
 	return count, err
 }
 
+// CountRunningInteractiveByOrg preserves the org concurrency contract for
+// user-facing sessions while allowing code reviews to use their independent
+// workload-specific turn limit.
+func (s *SessionStore) CountRunningInteractiveByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx, `
+		SELECT count(*)
+		FROM sessions
+		WHERE org_id = @org_id
+		  AND status = 'running'
+		  AND origin <> @code_review_origin`, pgx.NamedArgs{
+		"org_id":             orgID,
+		"code_review_origin": models.SessionOriginCodeReview,
+	}).Scan(&count)
+	return count, err
+}
+
 func (s *SessionStore) ListByIssue(ctx context.Context, orgID, issueID uuid.UUID) ([]models.Session, error) {
 	query := `
 		SELECT ` + sessionListColumns + `

@@ -78,19 +78,7 @@ func (o *Orchestrator) admitSandboxTurn(
 }
 
 func (o *Orchestrator) checkInteractiveTurnConcurrency(ctx context.Context, orgID uuid.UUID, excludeCurrentRunning bool) error {
-	counter, ok := o.jobs.(activeSandboxTurnCounter)
-	if !ok {
-		return o.checkConcurrency(ctx, orgID, excludeCurrentRunning)
-	}
-	active, err := counter.CountActiveSandboxTurnsByOrgAndClass(ctx, orgID, models.SandboxWorkloadClassInteractive)
-	if err != nil {
-		return err
-	}
-	_, currentJobIncluded := jobctx.JobIDFromContext(ctx)
-	if active > o.maxConcurrent || (!currentJobIncluded && active >= o.maxConcurrent) {
-		return fmt.Errorf("%w: %d/%d interactive turns active", ErrConcurrencyLimit, active, o.maxConcurrent)
-	}
-	return nil
+	return o.checkConcurrency(ctx, orgID, excludeCurrentRunning)
 }
 
 func (o *Orchestrator) checkCodeReviewTurnConcurrency(ctx context.Context, orgID uuid.UUID) error {

@@ -108,17 +108,18 @@ func TestAdmitSandboxTurnCountsOnlyInteractiveWorkAgainstInteractiveLimit(t *tes
 		active    int
 		expectErr bool
 	}{
-		{name: "allows the claimed interactive turn at the limit", active: 2},
-		{name: "rejects a claimed interactive turn beyond the limit", active: 3, expectErr: true},
+		{name: "allows a new interactive session below the limit", active: 1},
+		{name: "rejects a new interactive session at the limit", active: 2, expectErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			jobs := &sandboxAdmissionJobStore{active: tt.active}
+			jobs := &sandboxAdmissionJobStore{}
 			orchestrator := &Orchestrator{
 				jobs:          jobs,
+				sessions:      &runtimeTestSessionStore{countRunning: tt.active},
 				maxConcurrent: 2,
 				logger:        zerolog.Nop(),
 			}
@@ -129,13 +130,12 @@ func TestAdmitSandboxTurnCountsOnlyInteractiveWorkAgainstInteractiveLimit(t *tes
 				Origin: models.SessionOriginManual,
 			}, "continue_session", false, false)
 
-			require.Equal(t, models.SandboxWorkloadClassInteractive, jobs.requestedWorkloadClass, "interactive admission should count only interactive running jobs")
 			if tt.expectErr {
 				require.ErrorIs(t, err, ErrConcurrencyLimit, "interactive work above its own limit should wait")
 				require.Nil(t, reservation, "rejected interactive admission should not reserve local capacity")
 				return
 			}
-			require.NoError(t, err, "code-review sessions should not consume the interactive org limit")
+			require.NoError(t, err, "interactive admission should preserve session-based org concurrency semantics")
 			require.Nil(t, reservation, "existing-sandbox turns should not reserve another local sandbox slot")
 		})
 	}

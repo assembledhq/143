@@ -186,6 +186,14 @@ func (s *sessionStarterJobStoreFake) Enqueue(_ context.Context, orgID uuid.UUID,
 	return uuid.New(), nil
 }
 
+func (s *sessionStarterJobStoreFake) EnqueueWithOpts(_ context.Context, orgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+	s.orgID = orgID
+	s.queue = opts.Queue
+	s.jobType = opts.JobType
+	s.payload = opts.Payload
+	return uuid.New(), nil
+}
+
 type sessionStarterProviderStateStoreFake struct {
 	orgID     uuid.UUID
 	sessionID uuid.UUID

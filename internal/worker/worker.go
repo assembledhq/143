@@ -35,10 +35,11 @@ type RetryableError struct {
 	// grow across repeated attempts. Leave false for capacity/dependency gates
 	// that should not spend the job's normal attempt budget.
 	ConsumeAttempt bool
-	// BypassMaxRetryDuration lets narrowly-scoped self-healing retries run even
-	// when the job row is older than maxRetryableDuration. Use this only when a
-	// successful retry is expected immediately after the current attempt repaired
-	// durable state, not for capacity/backlog gates.
+	// BypassMaxRetryDuration lets durable user work wait on a terminal condition
+	// that is checked on every retry (for example, a continuation waiting for its
+	// org turn limit), and lets narrowly-scoped self-healing retries survive an
+	// old job row. Do not use it for an unbounded dependency wait with no separate
+	// cancellation or terminal-state check.
 	BypassMaxRetryDuration bool
 	// MaxRetryDuration overrides the default retry window for a bounded external
 	// wait. Unlike BypassMaxRetryDuration, the job is still guaranteed to
@@ -113,6 +114,10 @@ type retryWindowLeaseStore interface {
 type targetRetryLeaseStore interface {
 	RetryWithLeaseAndTarget(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time, targetNodeID *string) (bool, error)
 	RetryWithoutConsumingAttemptWithLeaseAndTarget(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time, targetNodeID *string) (bool, error)
+}
+
+type retryJobNotifier interface {
+	Notify(ctx context.Context, id uuid.UUID)
 }
 
 type sandboxJobRouter interface {
@@ -223,6 +228,12 @@ func (w *Worker) poll(ctx context.Context) {
 				event.Str("target_node_id", *result.TargetNodeID)
 			}
 			event.Msg("sandbox job routing evaluated")
+			if result.Reason == db.SandboxRoutingReasonMetadataFallback {
+				w.logger.Warn().
+					Str("job_id", result.JobID.String()).
+					Str("target_node_id", stringValue(result.TargetNodeID)).
+					Msg("fleet has no usable sandbox capacity metadata; routing through compatibility fallback")
+			}
 			if !result.Deferred {
 				break
 			}
@@ -526,6 +537,10 @@ func (w *Worker) retryJobWithDelay(ctx context.Context, jobID, lockToken uuid.UU
 	}
 	if !ok {
 		w.logger.Warn().Str("job_id", jobID.String()).Msg("lost ownership before scheduling job retry")
+		return
+	}
+	if notifier, supportsNotify := w.jobs.(retryJobNotifier); supportsNotify {
+		notifier.Notify(context.WithoutCancel(ctx), jobID)
 	}
 }
 

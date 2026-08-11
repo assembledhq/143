@@ -46,6 +46,27 @@ func RunAgentPayload(run *models.Session) map[string]string {
 	return payload
 }
 
+// RunAgentEnqueueOpts is the canonical scheduling policy for a session's
+// initial agent turn. Keeping workload classification next to payload and
+// dedupe construction prevents retry and secondary-dispatch paths from
+// silently falling back to the interactive default.
+func RunAgentEnqueueOpts(run *models.Session, priority int, dedupeKey *string) EnqueueOpts {
+	opts := EnqueueOpts{
+		Queue:     "agent",
+		JobType:   "run_agent",
+		Payload:   RunAgentPayload(run),
+		Priority:  priority,
+		DedupeKey: dedupeKey,
+	}
+	// Interactive is the schema default, which keeps rolling-deploy inserts and
+	// their query shape stable. Code review must be explicit so every initial or
+	// retried review turn enters the review-specific queue fence.
+	if models.SandboxWorkloadClassForSession(run) == models.SandboxWorkloadClassCodeReview {
+		opts.WorkloadClass = models.SandboxWorkloadClassCodeReview
+	}
+	return opts
+}
+
 // ContinueSessionDedupeKey returns the dedupe key used for continue_session
 // enqueues. Thread-level: each thread/tab gets its own dedupe scope so a
 // concurrent send to thread B is not silently dropped while thread A is
@@ -748,11 +769,12 @@ const (
 type SandboxRoutingReason string
 
 const (
-	SandboxRoutingReasonReserved       SandboxRoutingReason = "reserved"
-	SandboxRoutingReasonFleetCapacity  SandboxRoutingReason = "fleet_capacity"
-	SandboxRoutingReasonOrgLimit       SandboxRoutingReason = "org_limit"
-	SandboxRoutingReasonLockContention SandboxRoutingReason = "lock_contention"
-	SandboxRoutingReasonTerminalProbe  SandboxRoutingReason = "terminal_probe"
+	SandboxRoutingReasonReserved         SandboxRoutingReason = "reserved"
+	SandboxRoutingReasonFleetCapacity    SandboxRoutingReason = "fleet_capacity"
+	SandboxRoutingReasonOrgLimit         SandboxRoutingReason = "org_limit"
+	SandboxRoutingReasonLockContention   SandboxRoutingReason = "lock_contention"
+	SandboxRoutingReasonTerminalProbe    SandboxRoutingReason = "terminal_probe"
+	SandboxRoutingReasonMetadataFallback SandboxRoutingReason = "capacity_metadata_unavailable"
 )
 
 // SandboxRoutingResult reports the durable placement decision made before a
@@ -832,7 +854,19 @@ func (s *JobStore) RouteNextSandboxJob(ctx context.Context) (*SandboxRoutingResu
 		return nil, err
 	}
 	if result.TargetNodeID == nil && result.Reason != SandboxRoutingReasonLockContention {
+		fallbackReason := SandboxRoutingReason("")
 		if time.Since(job.CreatedAt) >= sandboxRoutingTerminalProbeAge {
+			fallbackReason = SandboxRoutingReasonTerminalProbe
+		} else if result.Reason == SandboxRoutingReasonFleetCapacity {
+			metadataAvailable, metadataErr := sandboxCapacityMetadataAvailable(ctx, tx)
+			if metadataErr != nil {
+				return nil, metadataErr
+			}
+			if !metadataAvailable {
+				fallbackReason = SandboxRoutingReasonMetadataFallback
+			}
+		}
+		if fallbackReason != "" {
 			targetNodeID, fallbackErr := selectSandboxRoutingFallbackNode(ctx, tx)
 			if fallbackErr != nil && !errors.Is(fallbackErr, pgx.ErrNoRows) {
 				return nil, fallbackErr
@@ -842,7 +876,7 @@ func (s *JobStore) RouteNextSandboxJob(ctx context.Context) (*SandboxRoutingResu
 					return nil, err
 				}
 				result.TargetNodeID = &targetNodeID
-				result.Reason = SandboxRoutingReasonTerminalProbe
+				result.Reason = fallbackReason
 			}
 		}
 	}
@@ -878,6 +912,27 @@ func (s *JobStore) RouteNextSandboxJob(ctx context.Context) (*SandboxRoutingResu
 		s.notify(ctx, job.ID)
 	}
 	return result, nil
+}
+
+// lint:allow-no-orgid reason="fleet routing readiness intentionally inspects worker heartbeat metadata across organizations"
+func sandboxCapacityMetadataAvailable(ctx context.Context, tx pgx.Tx) (bool, error) {
+	var available bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM nodes
+			WHERE mode IN ('worker', 'all')
+			  AND status = 'active'
+			  AND last_heartbeat_at >= @dead_before
+			  AND COALESCE(NULLIF(metadata->>'max_active_sandboxes', '')::int, 0) > 0
+			  AND COALESCE(metadata->>'live_sandbox_count_error', '') = ''
+		)`, pgx.NamedArgs{
+		"dead_before": time.Now().Add(-nodeDeadHeartbeatThreshold),
+	}).Scan(&available)
+	if err != nil {
+		return false, fmt.Errorf("inspect fleet sandbox capacity metadata: %w", err)
+	}
+	return available, nil
 }
 
 // ReserveSandboxSlotForRetry atomically retargets a currently running sandbox
@@ -1303,13 +1358,30 @@ type jobExecer interface {
 // turn starves until the node dies; the claimer hydrates from the snapshot.
 // lint:allow-no-orgid reason="worker queue consumer scans cross-org jobs by design"
 func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, error) {
+	for attempt := 0; attempt < maxClaimAdmissionSkips; attempt++ {
+		job, deferred, err := s.claimNextRunnableAttempt(ctx, nodeID, ownerID, lockToken, leaseDuration)
+		if err != nil {
+			return nil, err
+		}
+		if job != nil || !deferred {
+			return job, nil
+		}
+	}
+	return nil, nil
+}
+
+// claimNextRunnableAttempt owns exactly one candidate transaction. In
+// particular, an org-limit deferral commits before the next candidate is
+// examined, so organization row locks can never accumulate in cross-org scan
+// order and deadlock another dispatcher or a settings update.
+func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID string, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, bool, error) {
 	txStarter, ok := s.db.(TxStarter)
 	if !ok {
-		return nil, fmt.Errorf("job store does not support claim transactions")
+		return nil, false, fmt.Errorf("job store does not support claim transactions")
 	}
 	tx, err := txStarter.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("begin claim next runnable job: %w", err)
+		return nil, false, fmt.Errorf("begin claim next runnable job: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -1317,10 +1389,9 @@ func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string
 		sandboxRoutingJob
 		JobType string
 	}
-	excludedJobIDs := make([]uuid.UUID, 0)
-	for len(excludedJobIDs) < maxClaimAdmissionSkips {
-		var candidate claimCandidate
-		err := tx.QueryRow(ctx, `
+	var candidate claimCandidate
+	excludedJobIDs := []uuid.UUID{}
+	err = tx.QueryRow(ctx, `
 			WITH unavailable_target_nodes AS (
 				SELECT id
 				FROM nodes
@@ -1355,37 +1426,32 @@ func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string
 				j.created_at ASC
 			FOR UPDATE OF j SKIP LOCKED
 			LIMIT 1`, pgx.NamedArgs{
-			"dead_before":      time.Now().Add(-nodeDeadHeartbeatThreshold),
-			"node_id":          nodeID,
-			"excluded_job_ids": excludedJobIDs,
-		}).Scan(
-			&candidate.ID,
-			&candidate.OrgID,
-			&candidate.JobType,
-			&candidate.WorkloadClass,
-			&candidate.Status,
-			&candidate.CreatedAt,
-		)
-		if errors.Is(err, pgx.ErrNoRows) {
-			if len(excludedJobIDs) > 0 {
-				if commitErr := tx.Commit(ctx); commitErr != nil {
-					return nil, fmt.Errorf("commit sandbox org-limit deferrals: %w", commitErr)
-				}
-			}
-			return nil, nil
-		}
-		if err != nil {
-			return nil, fmt.Errorf("select next runnable job: %w", err)
-		}
+		"dead_before":      time.Now().Add(-nodeDeadHeartbeatThreshold),
+		"node_id":          nodeID,
+		"excluded_job_ids": excludedJobIDs,
+	}).Scan(
+		&candidate.ID,
+		&candidate.OrgID,
+		&candidate.JobType,
+		&candidate.WorkloadClass,
+		&candidate.Status,
+		&candidate.CreatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("select next runnable job: %w", err)
+	}
 
-		isSandboxJob := candidate.JobType == "run_agent" || candidate.JobType == "continue_session"
-		if isSandboxJob && candidate.WorkloadClass == models.SandboxWorkloadClassCodeReview && time.Since(candidate.CreatedAt) < sandboxRoutingTerminalProbeAge {
-			admitted, admissionErr := admitLockedCodeReviewTurn(ctx, tx, candidate.sandboxRoutingJob)
-			if admissionErr != nil {
-				return nil, admissionErr
-			}
-			if !admitted {
-				deferResult, deferErr := tx.Exec(ctx, `
+	isSandboxJob := candidate.JobType == "run_agent" || candidate.JobType == "continue_session"
+	if isSandboxJob && candidate.WorkloadClass == models.SandboxWorkloadClassCodeReview && time.Since(candidate.CreatedAt) < sandboxRoutingTerminalProbeAge {
+		admitted, admissionErr := admitLockedCodeReviewTurn(ctx, tx, candidate.sandboxRoutingJob)
+		if admissionErr != nil {
+			return nil, false, admissionErr
+		}
+		if !admitted {
+			deferResult, deferErr := tx.Exec(ctx, `
 					UPDATE jobs
 					SET run_at = now() + (@retry_seconds * interval '1 second'),
 						target_node_id = CASE
@@ -1396,21 +1462,23 @@ func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string
 						updated_at = now()
 					WHERE id = @job_id
 					  AND status = 'pending'`, pgx.NamedArgs{
-					"job_id":        candidate.ID,
-					"retry_seconds": int(sandboxOrgLimitRetryDelay.Seconds()),
-				})
-				if deferErr != nil {
-					return nil, fmt.Errorf("defer affinity-bound code-review job at org limit: %w", deferErr)
-				}
-				if deferResult.RowsAffected() != 1 {
-					return nil, fmt.Errorf("defer affinity-bound code-review job at org limit: pending job %s changed ownership", candidate.ID)
-				}
-				excludedJobIDs = append(excludedJobIDs, candidate.ID)
-				continue
+				"job_id":        candidate.ID,
+				"retry_seconds": int(sandboxOrgLimitRetryDelay.Seconds()),
+			})
+			if deferErr != nil {
+				return nil, false, fmt.Errorf("defer affinity-bound code-review job at org limit: %w", deferErr)
 			}
+			if deferResult.RowsAffected() != 1 {
+				return nil, false, fmt.Errorf("defer affinity-bound code-review job at org limit: pending job %s changed ownership", candidate.ID)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return nil, false, fmt.Errorf("commit sandbox org-limit deferral: %w", err)
+			}
+			return nil, true, nil
 		}
+	}
 
-		query := fmt.Sprintf(`
+	query := fmt.Sprintf(`
 			UPDATE jobs j
 			SET status = 'running',
 				locked_by_node_id = @node_id,
@@ -1424,27 +1492,20 @@ func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string
 			WHERE j.id = @job_id
 			  AND j.status = 'pending'
 			RETURNING %s`, claimedJobColumns)
-		job, err := scanJobRow(tx.QueryRow(ctx, query, pgx.NamedArgs{
-			"job_id":        candidate.ID,
-			"node_id":       nodeID,
-			"owner_id":      ownerID,
-			"lock_token":    lockToken,
-			"lease_seconds": int(leaseDuration.Seconds()),
-		}))
-		if err != nil {
-			return nil, fmt.Errorf("claim next runnable job: %w", err)
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("commit claim next runnable job: %w", err)
-		}
-		return job, nil
+	job, err := scanJobRow(tx.QueryRow(ctx, query, pgx.NamedArgs{
+		"job_id":        candidate.ID,
+		"node_id":       nodeID,
+		"owner_id":      ownerID,
+		"lock_token":    lockToken,
+		"lease_seconds": int(leaseDuration.Seconds()),
+	}))
+	if err != nil {
+		return nil, false, fmt.Errorf("claim next runnable job: %w", err)
 	}
-	if len(excludedJobIDs) > 0 {
-		if err := tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("commit bounded sandbox org-limit deferrals: %w", err)
-		}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, false, fmt.Errorf("commit claim next runnable job: %w", err)
 	}
-	return nil, nil
+	return job, false, nil
 }
 
 func scanJobRow(row pgx.Row) (*models.Job, error) {
