@@ -177,6 +177,22 @@ function ApprovalOutcomeCards({ summary }: { summary: CodeReviewAnalytics["summa
   );
 }
 
+function ApprovalOutcomeCardsSkeleton() {
+  const cards = ["prs-reviewed", "approved", "approval-rate", "median-rounds"];
+  return (
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-hidden="true">
+      {cards.map((card) => (
+        <Card key={card}>
+          <CardContent className="space-y-1.5">
+            <div className="h-4 w-24 animate-pulse rounded bg-muted" />
+            <div className="h-8 w-16 animate-pulse rounded bg-muted" />
+          </CardContent>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
 export function CodeReviewAnalyticsReport({
   analytics,
   isLoading,
@@ -203,7 +219,8 @@ export function CodeReviewAnalyticsReport({
 }) {
   if (!analytics && isLoading) {
     return (
-      <div className="space-y-4">
+      <div className="space-y-6">
+        <ApprovalOutcomeCardsSkeleton />
         {filters}
         <p className="py-12 text-center text-sm text-muted-foreground">Loading code review analytics…</p>
       </div>
@@ -246,6 +263,7 @@ export function CodeReviewAnalyticsReport({
             action={{ label: "Retry", onClick: onRetry }}
           />
         ) : null}
+        <ApprovalOutcomeCards summary={summary} />
         {filters}
         <EmptyState
           icon={ChartNoAxesColumnIncreasing}

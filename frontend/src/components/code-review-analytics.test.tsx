@@ -66,6 +66,27 @@ function renderReport(analytics: CodeReviewAnalytics) {
 }
 
 describe("CodeReviewAnalyticsReport PR cohort states", () => {
+  it("reserves the headline metric layout while analytics load", () => {
+    const { container } = render(
+      <CodeReviewAnalyticsReport
+        isLoading
+        isError={false}
+        onRetry={vi.fn()}
+        authorSort="reviews"
+        authorSortOrder="desc"
+        onAuthorSort={vi.fn()}
+        reviewLinkFilters={{ range: "30d" }}
+        filters={<div>Analytics filters</div>}
+      />,
+    );
+
+    const metricSkeleton = container.querySelector(".animate-pulse");
+    const filters = screen.getByText("Analytics filters");
+    expect(metricSkeleton).not.toBeNull();
+    expect(metricSkeleton!.compareDocumentPosition(filters) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
+  });
+
   it("shows headline metric definitions in tooltips without subdescriptions", async () => {
     const user = userEvent.setup();
     const analytics = emptyAnalytics(4);
@@ -92,6 +113,7 @@ describe("CodeReviewAnalyticsReport PR cohort states", () => {
   it("shows PR-oriented empty copy when the cohort has no PRs", () => {
     renderReport(emptyAnalytics());
 
+    expect(screen.getByLabelText("Approval outcomes")).toBeInTheDocument();
     expect(screen.getByText("No PRs first sent to 143 in this time window")).toBeInTheDocument();
     expect(screen.getByText(/another repository to analyze PR outcomes/)).toBeInTheDocument();
   });
