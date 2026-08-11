@@ -141,6 +141,9 @@ func (r *SessionExecutorRuntime) Run(ctx context.Context, executorID uuid.UUID) 
 	handlerCtx = jobctx.WithLockToken(handlerCtx, executor.LockToken)
 	handlerCtx = jobctx.WithOwnerKind(handlerCtx, string(models.JobOwnerKindSessionExecutor))
 	handlerCtx = jobctx.WithJobCreatedAt(handlerCtx, job.CreatedAt)
+	if job.RetryWindowStartedAt != nil {
+		handlerCtx = jobctx.WithJobRetryWindowStartedAt(handlerCtx, *job.RetryWindowStartedAt)
+	}
 	handlerCtx = jobctx.WithWorkerNodeID(handlerCtx, executor.HostNodeID)
 	if job.TargetNodeID != nil && *job.TargetNodeID != "" && *job.TargetNodeID != executor.HostNodeID {
 		handlerCtx = jobctx.WithDeadTargetNode(handlerCtx, *job.TargetNodeID)

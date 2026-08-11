@@ -9559,6 +9559,28 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		if err != nil {
 			return fmt.Errorf("fetch session: %w", err)
 		}
+
+		if _, waitedForCapacity := jobctx.JobRetryWindowStartedAtFromContext(ctx); waitedForCapacity {
+			var waitedThreadID uuid.UUID
+			var waitedWithThread bool
+			if input.ThreadID != "" && stores.SessionThreads != nil {
+				if parsedThreadID, parseErr := uuid.Parse(input.ThreadID); parseErr == nil {
+					waitedThreadID = parsedThreadID
+					waitedWithThread = true
+				}
+			}
+			stopContinuation, stopErr := shouldStopContinueSessionForDurableState(ctx, stores, orgID, sessionID, waitedThreadID, waitedWithThread)
+			if stopErr != nil {
+				return stopErr
+			}
+			if stopContinuation {
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Str("thread_id", input.ThreadID).
+					Msg("session or thread became terminal or cancelled while waiting for capacity; stopping continue_session before work")
+				return nil
+			}
+		}
 		// Apply the per-session wall-clock timeout (see newRunAgentHandler for
 		// rationale). HandlerCleanupBuffer lets the orchestrator clean up
 		// after the timeout fires without racing the handler context.
@@ -9827,7 +9849,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 
 		if err := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts); err != nil {
 			if errors.Is(err, agent.ErrConcurrencyLimit) || errors.Is(err, agent.ErrSandboxTurnConcurrency) {
-				stopRetry, stopErr := shouldStopContinueSessionCapacityRetry(ctx, stores, orgID, sessionID, threadID, hasThread)
+				stopRetry, stopErr := shouldStopContinueSessionForDurableState(ctx, stores, orgID, sessionID, threadID, hasThread)
 				if stopErr != nil {
 					return stopErr
 				}
@@ -10253,7 +10275,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 	}
 }
 
-func shouldStopContinueSessionCapacityRetry(
+func shouldStopContinueSessionForDurableState(
 	ctx context.Context,
 	stores *Stores,
 	orgID, sessionID, threadID uuid.UUID,

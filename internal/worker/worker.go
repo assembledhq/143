@@ -288,6 +288,9 @@ func (w *Worker) poll(ctx context.Context) {
 	handlerCtx = jobctx.WithLockToken(handlerCtx, *job.LockToken)
 	handlerCtx = jobctx.WithOwnerKind(handlerCtx, string(job.OwnerKind))
 	handlerCtx = jobctx.WithJobCreatedAt(handlerCtx, job.CreatedAt)
+	if job.RetryWindowStartedAt != nil {
+		handlerCtx = jobctx.WithJobRetryWindowStartedAt(handlerCtx, *job.RetryWindowStartedAt)
+	}
 	handlerCtx = jobctx.WithWorkerNodeID(handlerCtx, w.nodeID)
 	if job.TargetNodeID != nil && *job.TargetNodeID != "" && *job.TargetNodeID != w.nodeID {
 		handlerCtx = jobctx.WithDeadTargetNode(handlerCtx, *job.TargetNodeID)

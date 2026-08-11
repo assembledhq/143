@@ -1682,6 +1682,47 @@ func TestJobStore_RouteNextSandboxJobUsesTerminalProbeAfterBoundedDeferral(t *te
 	require.NoError(t, mock.ExpectationsWereMet(), "terminal probe placement should explicitly clear stale reservation metadata")
 }
 
+func TestJobStore_RouteNextSandboxJobUsesTerminalProbeForFleetBlockedContinuation(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	jobID, orgID := uuid.New(), uuid.New()
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT j.id, j.org_id,.*effective_workload_class.*j.status,.*j.created_at.*FROM jobs j`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
+			AddRow(jobID, orgID, "continue_session", nil, models.SandboxWorkloadClassInteractive, models.JobStatusPending, time.Now().Add(-time.Minute), time.Now().Add(-sandboxRoutingTerminalProbeAge-time.Minute)))
+	mock.ExpectQuery(`(?s)SELECT settings.*FROM organizations`).
+		WithArgs(orgID).
+		WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow([]byte(`{"max_concurrent_runs":3}`)))
+	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\).*FROM jobs.*id <>.*job_type IN`).
+		WithArgs(orgID, jobID).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery(`(?s)WITH raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), models.SandboxWorkloadClassInteractive).
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectQuery(`(?s)SELECT n.id.*FROM nodes n.*active_job_count`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow("worker-continuation-terminal-probe"))
+	mock.ExpectExec(`(?s)UPDATE jobs.*target_node_id =.*sandbox_slot_reserved_until = NULL.*retry_window_started_at = created_at.*status =`).
+		WithArgs(models.SandboxWorkloadClassInteractive, "worker-continuation-terminal-probe", jobID, models.JobStatusPending).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+	mock.ExpectRollback()
+
+	result, err := NewJobStore(mock).RouteNextSandboxJob(context.Background())
+	require.NoError(t, err, "a continuation blocked by genuine fleet saturation should reach its bounded handler path")
+	require.NotNil(t, result, "routing should report the continuation terminal probe placement")
+	require.Equal(t, SandboxRoutingReasonTerminalProbe, result.Reason, "fleet-blocked continuations should stop deferring after the bounded wait")
+	require.False(t, result.Deferred, "terminal continuation probes should become claimable")
+	require.NotNil(t, result.TargetNodeID, "terminal continuation probes should target a live worker")
+	require.Equal(t, "worker-continuation-terminal-probe", *result.TargetNodeID, "terminal continuation probes should use the selected fallback worker")
+	require.NoError(t, mock.ExpectationsWereMet(), "continuation terminal probing should persist the existing bounded retry marker")
+}
+
 func TestJobStore_RouteNextSandboxJobUsesTerminalProbeAtOrgLimitForInitialRun(t *testing.T) {
 	t.Parallel()
 

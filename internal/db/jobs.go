@@ -870,9 +870,11 @@ func (s *JobStore) RouteNextSandboxJob(ctx context.Context) (*SandboxRoutingResu
 	}
 	if result.TargetNodeID == nil && result.Reason != SandboxRoutingReasonLockContention {
 		fallbackReason := SandboxRoutingReason("")
-		if job.JobType == "run_agent" &&
-			time.Since(job.CreatedAt) >= sandboxRoutingTerminalProbeAge &&
-			(result.Reason == SandboxRoutingReasonFleetCapacity || result.Reason == SandboxRoutingReasonOrgLimit) {
+		terminalProbeEligible := time.Since(job.CreatedAt) >= sandboxRoutingTerminalProbeAge &&
+			((job.JobType == "run_agent" &&
+				(result.Reason == SandboxRoutingReasonFleetCapacity || result.Reason == SandboxRoutingReasonOrgLimit)) ||
+				(job.JobType == "continue_session" && result.Reason == SandboxRoutingReasonFleetCapacity))
+		if terminalProbeEligible {
 			fallbackReason = SandboxRoutingReasonTerminalProbe
 		} else if result.Reason == SandboxRoutingReasonFleetCapacity {
 			metadataAvailable, metadataErr := sandboxCapacityMetadataAvailable(ctx, tx)
@@ -914,6 +916,7 @@ func (s *JobStore) RouteNextSandboxJob(ctx context.Context) (*SandboxRoutingResu
 			SET workload_class = @workload_class,
 				target_node_id = NULL,
 				sandbox_slot_reserved_until = NULL,
+				retry_window_started_at = COALESCE(retry_window_started_at, now()),
 				run_at = @run_at,
 				updated_at = now()
 			WHERE id = @job_id
@@ -1219,7 +1222,9 @@ func updateSandboxRoutingPlacement(ctx context.Context, tx pgx.Tx, job sandboxRo
 // updateSandboxTerminalProbePlacement uses created_at as a durable marker that
 // claim can distinguish from an ordinary handler retry window. Overwriting a
 // prior retry timestamp ensures an aged initial run cannot become unbounded if
-// its limiting reason changes between fleet and organization capacity.
+// its limiting reason changes between fleet and organization capacity, and
+// lets a fleet-blocked continuation reach its existing bounded dead-letter
+// path.
 func updateSandboxTerminalProbePlacement(ctx context.Context, tx pgx.Tx, job sandboxRoutingJob, targetNodeID string) error {
 	result, err := tx.Exec(ctx, `
 		UPDATE jobs
@@ -1585,6 +1590,7 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 					UPDATE jobs
 					SET workload_class = @workload_class,
 						run_at = now() + (@retry_seconds * interval '1 second'),
+						retry_window_started_at = COALESCE(retry_window_started_at, now()),
 						target_node_id = CASE
 							WHEN sandbox_slot_reserved_until IS NULL THEN target_node_id
 							ELSE NULL

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -137,6 +138,17 @@ func TestWithJobID_RoundTrip(t *testing.T) {
 	got, ok := jobctx.JobIDFromContext(ctx)
 	require.True(t, ok, "WithJobID should store the job id in context")
 	require.Equal(t, want, got, "JobIDFromContext should return the stored job id")
+}
+
+func TestWithJobRetryWindowStartedAt_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	want := time.Date(2026, time.August, 11, 21, 45, 0, 0, time.UTC)
+	ctx := jobctx.WithJobRetryWindowStartedAt(context.Background(), want)
+
+	got, ok := jobctx.JobRetryWindowStartedAtFromContext(ctx)
+	require.True(t, ok, "WithJobRetryWindowStartedAt should store the durable retry start in context")
+	require.Equal(t, want, got, "JobRetryWindowStartedAtFromContext should return the stored retry start")
 }
 
 func TestWithOwnerKind_RoundTrip(t *testing.T) {
