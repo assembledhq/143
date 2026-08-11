@@ -66,6 +66,32 @@ function renderReport(analytics: CodeReviewAnalytics) {
 }
 
 describe("CodeReviewAnalyticsReport PR cohort states", () => {
+  it.each([
+    { name: "loading", analytics: undefined, isLoading: true, isError: false },
+    { name: "unavailable", analytics: undefined, isLoading: false, isError: true },
+    { name: "empty", analytics: emptyAnalytics(), isLoading: false, isError: false },
+  ])("keeps headline metrics before filters while $name", ({ analytics, isLoading, isError }) => {
+    render(
+      <CodeReviewAnalyticsReport
+        analytics={analytics}
+        isLoading={isLoading}
+        isError={isError}
+        onRetry={vi.fn()}
+        authorSort="reviews"
+        authorSortOrder="desc"
+        onAuthorSort={vi.fn()}
+        reviewLinkFilters={{ range: "30d" }}
+        filters={<div>Analytics filters</div>}
+      />,
+    );
+
+    const outcomes = screen.getByLabelText("Approval outcomes");
+    const filters = screen.getByText("Analytics filters");
+    expect(
+      outcomes.compareDocumentPosition(filters) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("shows headline metric definitions in tooltips without subdescriptions", async () => {
     const user = userEvent.setup();
     const analytics = emptyAnalytics(4);
