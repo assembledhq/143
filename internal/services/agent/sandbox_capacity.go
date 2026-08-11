@@ -188,8 +188,9 @@ func (g *SandboxCapacityGate) Acquire(ctx context.Context, req SandboxCapacityRe
 		if total >= effectiveMax {
 			reserved := g.reserved
 			cleaner := g.cleaner
+			physicallyFull := total >= g.maxActive
 			g.mu.Unlock()
-			if !cleanedForPressure && cleaner != nil {
+			if physicallyFull && !cleanedForPressure && cleaner != nil {
 				cleanedForPressure = true
 				cleanCtx, cancel := context.WithTimeout(ctx, g.cleanTTL)
 				cleanErr := cleaner.ReapForCapacity(cleanCtx, time.Now())

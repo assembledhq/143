@@ -10792,11 +10792,11 @@ func TestSandboxTurnCapacityRetryTargetImmediatelyReservesAlternateWorker(t *tes
 	stores, mock := newTestStores(t)
 	defer mock.Close()
 
-	jobID, orgID := uuid.New(), uuid.New()
+	jobID, orgID, lockToken := uuid.New(), uuid.New(), uuid.New()
 	mock.ExpectBegin()
-	mock.ExpectQuery(`(?s)SELECT id, org_id, workload_class.*FROM jobs.*status = 'running'`).
-		WithArgs(jobID).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "workload_class"}).AddRow(jobID, orgID, models.SandboxWorkloadClassInteractive))
+	mock.ExpectQuery(`(?s)SELECT id, org_id, workload_class, status, created_at.*FROM jobs.*status = 'running'.*lock_token =`).
+		WithArgs(jobID, lockToken).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "workload_class", "status", "created_at"}).AddRow(jobID, orgID, models.SandboxWorkloadClassInteractive, models.JobStatusRunning, time.Now()))
 	mock.ExpectQuery(`(?s)WITH raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), models.SandboxWorkloadClassInteractive).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow("worker-with-space"))
@@ -10807,12 +10807,12 @@ func TestSandboxTurnCapacityRetryTargetImmediatelyReservesAlternateWorker(t *tes
 		WithArgs(jobID, "worker-with-space", pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"live", "local_reserved", "sandbox_turn_local_reserved", "max_active", "interactive_reserved", "pending_durable_reserved", "running_durable_reserved"}).AddRow(1, 0, 0, 4, 1, 0, 0))
 	mock.ExpectExec(`(?s)UPDATE jobs.*sandbox_slot_reserved_until =`).
-		WithArgs("worker-with-space", pgxmock.AnyArg(), jobID).
+		WithArgs("worker-with-space", pgxmock.AnyArg(), jobID, models.JobStatusRunning, lockToken).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
 	mock.ExpectRollback()
 
-	ctx := jobctx.WithJobID(jobctx.WithWorkerNodeID(context.Background(), "worker-full"), jobID)
+	ctx := jobctx.WithLockToken(jobctx.WithJobID(jobctx.WithWorkerNodeID(context.Background(), "worker-full"), jobID), lockToken)
 	targetNodeID, clearTargetNodeID, retryAfter := sandboxTurnCapacityRetryTarget(ctx, stores, zerolog.Nop())
 	require.NotNil(t, targetNodeID, "capacity retry should return the atomically reserved alternate worker")
 	require.Equal(t, "worker-with-space", *targetNodeID, "capacity retry should exclude the full worker")

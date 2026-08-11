@@ -119,6 +119,8 @@ type sandboxJobRouter interface {
 	RouteNextSandboxJob(ctx context.Context) (*db.SandboxRoutingResult, error)
 }
 
+const maxSandboxRoutingDecisionsPerPoll = 64
+
 // maxRetryableDuration is the maximum wall-clock time a retryable job is
 // allowed to keep retrying before being dead-lettered. This prevents jobs
 // from retrying indefinitely (e.g. when stuck behind a concurrency limit).
@@ -203,10 +205,15 @@ func (w *Worker) poll(ctx context.Context) {
 		return
 	}
 	if w.sandboxRouter != nil {
-		result, err := w.sandboxRouter.RouteNextSandboxJob(ctx)
-		if err != nil {
-			w.logger.Error().Err(err).Msg("failed to route pending sandbox job")
-		} else if result != nil {
+		for decision := 0; decision < maxSandboxRoutingDecisionsPerPoll; decision++ {
+			result, err := w.sandboxRouter.RouteNextSandboxJob(ctx)
+			if err != nil {
+				w.logger.Error().Err(err).Msg("failed to route pending sandbox job")
+				break
+			}
+			if result == nil {
+				break
+			}
 			event := w.logger.Info().
 				Str("job_id", result.JobID.String()).
 				Str("workload_class", string(result.WorkloadClass)).
@@ -216,6 +223,9 @@ func (w *Worker) poll(ctx context.Context) {
 				event.Str("target_node_id", *result.TargetNodeID)
 			}
 			event.Msg("sandbox job routing evaluated")
+			if !result.Deferred {
+				break
+			}
 		}
 	}
 

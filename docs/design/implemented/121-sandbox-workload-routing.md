@@ -80,9 +80,17 @@ Before normal queue claim, a dispatcher transaction:
    running sandbox-turn reservation twice;
 5. persists the target worker and expiring reservation atomically.
 
-Unbound sandbox jobs cannot be claimed before this routing step. Existing
-sandbox affinity remains authoritative and is only released through the
-existing dead/draining-worker recovery path.
+Unbound sandbox jobs cannot be claimed before this routing step. Dispatchers
+prefer interactive work at equal queue priority and continue routing after a
+capacity deferral, so an older org-limited review cannot monopolize each poll.
+
+Existing sandbox affinity remains authoritative and is only released through
+the existing dead/draining-worker recovery path. Claiming an affinity-bound
+code-review job is nevertheless serialized by the same organization-row lock
+and active-turn check. The claim transaction preserves the worker target while
+atomically changing the admitted job to `running`; an org-limited affinity job
+keeps its affinity pin and is briefly deferred so other runnable work can be
+considered.
 
 If a worker's authoritative local gate still rejects a fresh sandbox, the
 running job immediately performs the same atomic reservation against an
@@ -91,6 +99,19 @@ The existing 10-second delay is retained only when no fleet slot is available.
 The code-review org limit uses a shorter policy retry, while advisory-lock
 contention leaves the job immediately runnable so another dispatcher can retry
 without pretending the fleet is full.
+
+Retry-time retargeting is fenced by the running attempt's `lock_token` in both
+the locked read and every placement write. If shared admission rejects a
+pre-routed turn, it clears that attempt's durable reservation and scheduling
+target before returning the retryable error. Normal affinity pins have no
+durable reservation and are not cleared by this rejection cleanup.
+
+Capacity deferral is bounded to eight minutes. Once an unbound turn reaches
+that age, routing assigns it to a fresh active worker as a terminal probe
+without claiming a capacity reservation. The authoritative local/org gate then
+rejects it through the normal claimed-job retry path, which invokes the
+existing user-visible failure updates, dead-letter hooks, and operational
+signals instead of leaving the job silently pending forever.
 
 ## Capacity isolation
 
@@ -102,8 +123,11 @@ self-hosted worker remains usable for code review.
 
 `code_review_max_concurrent_turns` defaults to the smaller of the org's
 `max_concurrent_runs` and `10`, and is configurable from Runtime settings. The
-router serializes this decision per organization, and the shared local
-admission layer remains the authoritative final fence after claim.
+router and affinity-aware claim path serialize this decision per organization,
+and the shared local admission layer remains the authoritative final fence
+after claim. Interactive admission counts only active `interactive` jobs, so
+review turns do not consume the interactive org limit in addition to their own
+review-specific limit.
 
 Worker heartbeats publish
 `interactive_reserved_sandbox_slots` and `sandbox_turn_reserved_count`
@@ -119,3 +143,7 @@ without permanently pinning work if a dispatcher dies. A fenced executor
 clears its durable reservation as soon as sandbox creation or hydration
 finishes, avoiding double-counting the reservation and live container for the
 remainder of the TTL.
+
+Pressure cleanup runs only when the worker is physically full. A code-review
+request rejected solely because it reached the interactive reserve boundary
+does not reap healthy sandboxes while physical capacity remains.

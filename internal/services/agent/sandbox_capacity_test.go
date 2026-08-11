@@ -273,6 +273,30 @@ func TestSandboxCapacityGate_AcquireRunsPressureCleanupBeforeRejectingFullHost(t
 	reservation.Release()
 }
 
+func TestSandboxCapacityGate_AcquireSkipsPressureCleanupForInteractiveReserve(t *testing.T) {
+	t.Parallel()
+
+	counter := &fakeLiveSandboxCounter{count: 3}
+	cleaner := &fakeSandboxPressureCleaner{}
+	gate := agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:             counter,
+		PressureCleaner:     cleaner,
+		MaxActive:           4,
+		InteractiveReserved: 1,
+		NodeID:              "worker-1",
+		Logger:              zerolog.Nop(),
+	})
+
+	reservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{
+		Purpose:       "agent_run",
+		WorkloadClass: models.SandboxWorkloadClassCodeReview,
+	})
+	require.ErrorIs(t, err, agent.ErrSandboxCapacity, "code-review work should stop at the interactive reserve boundary")
+	require.Nil(t, reservation, "reserve-only rejection should not return a local slot")
+	require.Equal(t, int64(0), cleaner.calls.Load(), "interactive reserve pressure should not reap healthy sandboxes while the host still has physical capacity")
+	require.Equal(t, int64(1), counter.calls.Load(), "reserve-only rejection should not recount after unnecessary cleanup")
+}
+
 func TestSandboxCapacityGate_AcquireRunsPressureCleanupAtMostOnce(t *testing.T) {
 	t.Parallel()
 
