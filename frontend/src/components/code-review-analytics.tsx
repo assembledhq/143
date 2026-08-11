@@ -177,6 +177,26 @@ function ApprovalOutcomeCards({ summary }: { summary: CodeReviewAnalytics["summa
   );
 }
 
+function ApprovalOutcomeCardsSkeleton() {
+  return (
+    <div
+      className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"
+      aria-label="Loading approval outcomes"
+      role="status"
+    >
+      {Array.from({ length: 4 }, (_, index) => (
+        <Card key={index} aria-hidden="true">
+          <CardContent className="space-y-2">
+            <div className="h-3 w-24 animate-pulse rounded bg-muted" />
+            <div className="h-8 w-16 animate-pulse rounded bg-muted" />
+          </CardContent>
+        </Card>
+      ))}
+      <span className="sr-only">Loading approval outcomes</span>
+    </div>
+  );
+}
+
 export function CodeReviewAnalyticsReport({
   analytics,
   isLoading,
@@ -203,7 +223,8 @@ export function CodeReviewAnalyticsReport({
 }) {
   if (!analytics && isLoading) {
     return (
-      <div className="space-y-4">
+      <div className="space-y-6">
+        <ApprovalOutcomeCardsSkeleton />
         {filters}
         <p className="py-12 text-center text-sm text-muted-foreground">Loading code review analytics…</p>
       </div>
@@ -238,7 +259,7 @@ export function CodeReviewAnalyticsReport({
   };
   if (summary.prs_reviewed === 0) {
     return (
-      <div className="space-y-3">
+      <div className="space-y-6">
         {isError ? (
           <ErrorNotice
             title="Analytics may be out of date"
@@ -246,6 +267,7 @@ export function CodeReviewAnalyticsReport({
             action={{ label: "Retry", onClick: onRetry }}
           />
         ) : null}
+        <ApprovalOutcomeCards summary={summary} />
         {filters}
         <EmptyState
           icon={ChartNoAxesColumnIncreasing}

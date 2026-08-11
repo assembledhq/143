@@ -49,7 +49,7 @@ function emptyAnalytics(prsReviewed = 0): CodeReviewAnalytics {
   };
 }
 
-function renderReport(analytics: CodeReviewAnalytics) {
+function renderReport(analytics?: CodeReviewAnalytics) {
   render(
     <CodeReviewAnalyticsReport
       analytics={analytics}
@@ -92,8 +92,29 @@ describe("CodeReviewAnalyticsReport PR cohort states", () => {
   it("shows PR-oriented empty copy when the cohort has no PRs", () => {
     renderReport(emptyAnalytics());
 
+    expect(screen.getByLabelText("Approval outcomes")).toBeInTheDocument();
     expect(screen.getByText("No PRs first sent to 143 in this time window")).toBeInTheDocument();
     expect(screen.getByText(/another repository to analyze PR outcomes/)).toBeInTheDocument();
+  });
+
+  it("keeps headline metrics ahead of filters while the report is loading", () => {
+    render(
+      <CodeReviewAnalyticsReport
+        isLoading
+        isError={false}
+        onRetry={vi.fn()}
+        authorSort="reviews"
+        authorSortOrder="desc"
+        onAuthorSort={vi.fn()}
+        reviewLinkFilters={{ range: "30d" }}
+        filters={<div data-testid="analytics-filters">Filters</div>}
+      />,
+    );
+
+    const outcomes = screen.getByLabelText("Loading approval outcomes");
+    const filters = screen.getByTestId("analytics-filters");
+    expect(outcomes.compareDocumentPosition(filters) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
   });
 
   it("shows every round bucket and an empty median when no PR has approval", () => {
