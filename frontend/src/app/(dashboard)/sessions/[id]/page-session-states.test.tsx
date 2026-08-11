@@ -287,6 +287,41 @@ describe('SessionDetailPage session states', () => {
     expect(screen.getByText('This session will start automatically when another run finishes or the limit is raised.').parentElement).toBe(body);
   });
 
+  it('uses active agent runs when an older server omits active sandbox turns', async () => {
+    const pendingSession: Session = {
+      ...mockSessions[0],
+      status: 'pending',
+      completed_at: undefined,
+      current_turn: 0,
+      sandbox_state: 'none',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: pendingSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/settings/runtime/status', () => {
+        return HttpResponse.json({
+          data: {
+            static_egress: { available: true, enabled: false },
+            capacity: {
+              state: 'limited',
+              active_agent_runs: 2,
+              max_concurrent_agent_runs: 2,
+              active_previews: 0,
+              max_previews_per_user: 5,
+            },
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={pendingSession.id} />);
+
+    expect(await screen.findByText('Waiting for capacity')).toBeInTheDocument();
+    expect(await screen.findByText('Your organization is already at its max concurrency limit of 2 active runs.')).toBeInTheDocument();
+  });
+
   it('shows the environment setup message for a pending session when the org is below its concurrency limit', async () => {
     const pendingSession: Session = {
       ...mockSessions[0],

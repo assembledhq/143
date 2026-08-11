@@ -2475,7 +2475,8 @@ function ChatPanel({
     refetchInterval: 15_000,
   });
   const capacity = runtimeStatusQuery.data?.data.capacity;
-  const isCapacityLimited = capacity != null && capacity.active_sandbox_turns >= capacity.max_concurrent_agent_runs;
+  const activeSandboxTurns = capacity?.active_sandbox_turns ?? capacity?.active_agent_runs;
+  const isCapacityLimited = capacity != null && activeSandboxTurns != null && activeSandboxTurns >= capacity.max_concurrent_agent_runs;
   const maxConcurrentRuns = capacity?.max_concurrent_agent_runs;
   const initialThreadAnchorPosition = useMemo<SessionAnchorPosition | null>(() => {
     if (!activeThreadId || !viewerScope || typeof window === "undefined") return null;

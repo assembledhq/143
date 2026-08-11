@@ -10794,9 +10794,10 @@ func TestSandboxTurnCapacityRetryTargetImmediatelyReservesAlternateWorker(t *tes
 
 	jobID, orgID, lockToken := uuid.New(), uuid.New(), uuid.New()
 	mock.ExpectBegin()
-	mock.ExpectQuery(`(?s)SELECT j.id, j.org_id,.*effective_workload_class.*j.status, j.created_at.*FROM jobs j.*j.status = 'running'.*j.lock_token =`).
+	mock.ExpectQuery(`(?s)SELECT j.id, j.org_id,.*effective_workload_class.*j.status,.*j.created_at.*FROM jobs j.*j.status = 'running'.*j.lock_token =`).
 		WithArgs(jobID, lockToken).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "workload_class", "status", "created_at"}).AddRow(jobID, orgID, models.SandboxWorkloadClassInteractive, models.JobStatusRunning, time.Now()))
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
+			AddRow(jobID, orgID, "run_agent", nil, models.SandboxWorkloadClassInteractive, models.JobStatusRunning, nil, time.Now()))
 	mock.ExpectQuery(`(?s)SELECT settings.*FROM organizations.*FOR UPDATE`).
 		WithArgs(orgID).
 		WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow([]byte(`{"max_concurrent_runs":3}`)))

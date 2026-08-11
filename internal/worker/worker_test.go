@@ -650,8 +650,8 @@ func TestWorker_Poll(t *testing.T) {
 				mock.ExpectBegin()
 				mock.ExpectQuery("WITH unavailable_target_nodes AS").
 					WithArgs(pgxmock.AnyArg(), "test-node").
-					WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "workload_class", "status", "created_at"}).
-						AddRow(jobID, orgID, "missing_token", models.SandboxWorkloadClassInteractive, models.JobStatusPending, now))
+					WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
+						AddRow(jobID, orgID, "missing_token", nil, models.SandboxWorkloadClassInteractive, models.JobStatusPending, nil, now))
 				mock.ExpectQuery("UPDATE jobs j").
 					WithArgs("test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds()), jobID).
 					WillReturnRows(pgxmock.NewRows([]string{
@@ -790,7 +790,7 @@ func TestWorkerPollContinuesRoutingAfterCapacityDeferral(t *testing.T) {
 	require.Equal(t, int32(1), store.claims.Load(), "the worker should still attempt a normal claim after draining deferred routing decisions")
 }
 
-func TestWorkerPollNotifiesAfterRoutingJobToAvailableWorker(t *testing.T) {
+func TestWorkerPollDoesNotRepublishRoutingNotification(t *testing.T) {
 	t.Parallel()
 
 	jobID := uuid.New()
@@ -813,7 +813,7 @@ func TestWorkerPollNotifiesAfterRoutingJobToAvailableWorker(t *testing.T) {
 
 	w.poll(context.Background())
 
-	require.Equal(t, jobID, store.notifiedJobID, "routing to an available worker should publish an immediate queue wake-up")
+	require.Equal(t, uuid.Nil, store.notifiedJobID, "worker should not republish the queue wake-up already emitted by the routing store")
 	require.Equal(t, int32(1), store.claims.Load(), "the routing worker should still attempt a claim in case it owns the reservation")
 }
 
@@ -1274,8 +1274,8 @@ func expectClaimWithAttemptsAndTarget(mock pgxmock.PgxPoolIface, jobID, orgID uu
 	mock.ExpectBegin()
 	mock.ExpectQuery("WITH unavailable_target_nodes AS").
 		WithArgs(pgxmock.AnyArg(), "test-node").
-		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "workload_class", "status", "created_at"}).
-			AddRow(jobID, orgID, jobType, models.SandboxWorkloadClassInteractive, models.JobStatusPending, createdAt))
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
+			AddRow(jobID, orgID, jobType, nil, models.SandboxWorkloadClassInteractive, models.JobStatusPending, nil, createdAt))
 	if jobType == "run_agent" || jobType == "continue_session" {
 		mock.ExpectQuery(`(?s)SELECT settings.*FROM organizations.*FOR UPDATE`).
 			WithArgs(orgID).
