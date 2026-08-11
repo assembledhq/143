@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -76,16 +77,18 @@ type jobHandoffStoreStub struct {
 	jobID      uuid.UUID
 	lockToken  uuid.UUID
 	executorID uuid.UUID
+	lease      time.Duration
 	ok         bool
 	err        error
 }
 
-func (s *jobHandoffStoreStub) HandoffToSessionExecutorWithLease(ctx context.Context, orgID, jobID, lockToken, executorID uuid.UUID) (bool, error) {
+func (s *jobHandoffStoreStub) HandoffToSessionExecutorWithLease(ctx context.Context, orgID, jobID, lockToken, executorID uuid.UUID, leaseDuration time.Duration) (bool, error) {
 	s.calls++
 	s.orgID = orgID
 	s.jobID = jobID
 	s.lockToken = lockToken
 	s.executorID = executorID
+	s.lease = leaseDuration
 	if s.err != nil {
 		return false, s.err
 	}
@@ -125,6 +128,7 @@ func TestDurableSessionExecutorDispatcher_DispatchPreservesLockToken(t *testing.
 	jobID := uuid.New()
 	lockToken := uuid.New()
 	executorID := uuid.New()
+	handoffLease := 75 * time.Second
 	ctx := jobctx.WithJobID(context.Background(), jobID)
 	ctx = jobctx.WithLockToken(ctx, lockToken)
 
@@ -132,12 +136,13 @@ func TestDurableSessionExecutorDispatcher_DispatchPreservesLockToken(t *testing.
 	jobs := &jobHandoffStoreStub{ok: true}
 	launcher := &executorLauncherStub{}
 	dispatcher := &DurableSessionExecutorDispatcher{
-		Executors: executors,
-		Jobs:      jobs,
-		Launcher:  launcher,
-		NodeID:    "worker-a",
-		Image:     "ghcr.io/assembledhq/143-server:test",
-		BuildSHA:  "build-sha",
+		Executors:     executors,
+		Jobs:          jobs,
+		Launcher:      launcher,
+		NodeID:        "worker-a",
+		Image:         "ghcr.io/assembledhq/143-server:test",
+		BuildSHA:      "build-sha",
+		LeaseDuration: handoffLease,
 	}
 
 	got, err := dispatcher.Dispatch(ctx, "run_agent", models.Session{ID: sessionID, OrgID: orgID}, &threadID)
@@ -159,6 +164,7 @@ func TestDurableSessionExecutorDispatcher_DispatchPreservesLockToken(t *testing.
 	require.Equal(t, jobID, jobs.jobID, "handoff should target the running job")
 	require.Equal(t, lockToken, jobs.lockToken, "handoff should preserve the existing fencing token")
 	require.Equal(t, executorID, jobs.executorID, "handoff should assign ownership to the created executor")
+	require.Equal(t, handoffLease, jobs.lease, "handoff should renew the job and durable sandbox reservation for a full executor lease")
 }
 
 func TestDurableSessionExecutorDispatcher_DispatchLogsHandoffLifecycle(t *testing.T) {

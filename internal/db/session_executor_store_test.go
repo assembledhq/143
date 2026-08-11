@@ -128,15 +128,16 @@ func TestJobStore_HandoffToSessionExecutorWithLease(t *testing.T) {
 	orgID := uuid.New()
 	lockToken := uuid.New()
 	executorID := uuid.New()
+	leaseDuration := 75 * time.Second
 
-	mock.ExpectExec("UPDATE jobs\\s+SET owner_kind = 'session_executor'").
-		WithArgs(executorID.String(), orgID, jobID, lockToken).
+	mock.ExpectExec("UPDATE jobs\\s+SET owner_kind = 'session_executor'[\\s\\S]+lease_expires_at = now\\(\\) \\+[\\s\\S]+sandbox_slot_reserved_until = CASE").
+		WithArgs(executorID.String(), orgID, jobID, lockToken, int(leaseDuration.Seconds())).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	ok, err := store.HandoffToSessionExecutorWithLease(context.Background(), orgID, jobID, lockToken, executorID)
+	ok, err := store.HandoffToSessionExecutorWithLease(context.Background(), orgID, jobID, lockToken, executorID, leaseDuration)
 	require.NoError(t, err, "HandoffToSessionExecutorWithLease should update the job owner")
 	require.True(t, ok, "HandoffToSessionExecutorWithLease should report that the fenced update landed")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	require.NoError(t, mock.ExpectationsWereMet(), "handoff should renew both the job lease and any durable sandbox reservation")
 }
 
 func TestJobStore_RenewLeaseForSessionExecutorFencesOwner(t *testing.T) {

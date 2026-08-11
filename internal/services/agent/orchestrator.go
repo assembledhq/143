@@ -4611,6 +4611,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			OrgID:     sandboxCfg.OrgID,
 			Purpose:   sandboxCfg.Purpose,
 		}
+		if capacityReservation != nil {
+			capacityReservation.Release()
+		}
+		o.releaseSandboxRoutingReservation(ctx, log)
 		log.Info().Str("container_id", sandbox.ID).Msg("reusing existing sandbox container (preview is holding it)")
 	case hasSnapshot:
 		sandbox, err = HydrateSandboxFromSnapshot(ctx, o.provider, o.snapshots, *session.SnapshotKey, sandboxCfg)

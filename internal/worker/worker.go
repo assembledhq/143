@@ -245,7 +245,6 @@ func (w *Worker) poll(ctx context.Context) {
 					Msg("fleet has no usable sandbox capacity metadata; routing through compatibility fallback")
 			}
 			if !result.Deferred {
-				w.notifyRunnableJob(ctx, result.JobID)
 				break
 			}
 		}
