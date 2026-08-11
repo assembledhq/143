@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
@@ -162,6 +163,15 @@ func (w *Worker) EnableSandboxRouting() {
 	}
 }
 
+// SetJobNotifier wires the process-wide queue wake-up publisher into the
+// worker's private JobStore. Enqueue paths use the shared store from server
+// wiring, but routing and retry transitions are written through this store.
+func (w *Worker) SetJobNotifier(notifier *cache.JobNotifier) {
+	if store, ok := w.jobs.(*db.JobStore); ok {
+		store.SetNotifier(notifier)
+	}
+}
+
 func New(pool db.DBTX, logger zerolog.Logger, nodeID string) *Worker {
 	return &Worker{
 		jobs:                      db.NewJobStore(pool),
@@ -235,6 +245,7 @@ func (w *Worker) poll(ctx context.Context) {
 					Msg("fleet has no usable sandbox capacity metadata; routing through compatibility fallback")
 			}
 			if !result.Deferred {
+				w.notifyRunnableJob(ctx, result.JobID)
 				break
 			}
 		}
@@ -539,6 +550,12 @@ func (w *Worker) retryJobWithDelay(ctx context.Context, jobID, lockToken uuid.UU
 		w.logger.Warn().Str("job_id", jobID.String()).Msg("lost ownership before scheduling job retry")
 		return
 	}
+	if backoff <= 0 {
+		w.notifyRunnableJob(ctx, jobID)
+	}
+}
+
+func (w *Worker) notifyRunnableJob(ctx context.Context, jobID uuid.UUID) {
 	if notifier, supportsNotify := w.jobs.(retryJobNotifier); supportsNotify {
 		notifier.Notify(context.WithoutCancel(ctx), jobID)
 	}

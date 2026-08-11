@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/golang-migrate/migrate/v4"
+	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,6 +31,68 @@ func (f *fakeDirtyMigrationRepairer) Force(version int) error {
 	f.forceInvoked = true
 	f.forcedTo = version
 	return f.forceErr
+}
+
+func TestPrepareSandboxWorkloadRoutingOnConn(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		schemaReady    bool
+		invalidIndexes map[string]bool
+	}{
+		{
+			name: "skips databases before the prerequisite schema exists",
+		},
+		{
+			name:        "adds columns backfills reviews and creates indexes concurrently",
+			schemaReady: true,
+		},
+		{
+			name:        "rebuilds an invalid interrupted concurrent index",
+			schemaReady: true,
+			invalidIndexes: map[string]bool{
+				"idx_jobs_sandbox_routing": true,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create migration preparation mock")
+			defer mock.Close()
+
+			mock.ExpectQuery(`(?s)SELECT to_regclass.*information_schema\.columns`).
+				WillReturnRows(pgxmock.NewRows([]string{"schema_ready"}).AddRow(tt.schemaReady))
+			if tt.schemaReady {
+				mock.ExpectExec(`SET lock_timeout = '5s'`).
+					WillReturnResult(pgxmock.NewResult("SET", 0))
+				mock.ExpectExec(`(?s)ALTER TABLE jobs.*ADD COLUMN IF NOT EXISTS workload_class.*sandbox_slot_reserved_until`).
+					WillReturnResult(pgxmock.NewResult("ALTER TABLE", 0))
+				mock.ExpectExec(`(?s)UPDATE jobs j.*FROM sessions s.*s\.origin = 'code_review'.*j\.status IN \('pending', 'running'\)`).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+				for _, index := range sandboxRoutingConcurrentIndexes {
+					invalid := tt.invalidIndexes[index.name]
+					mock.ExpectQuery(`(?s)SELECT EXISTS.*pg_index.*NOT i\.indisvalid`).
+						WithArgs(index.name).
+						WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(invalid))
+					if invalid {
+						mock.ExpectExec("DROP INDEX CONCURRENTLY IF EXISTS " + index.name).
+							WillReturnResult(pgxmock.NewResult("DROP INDEX", 0))
+					}
+					mock.ExpectExec(`(?s)CREATE INDEX CONCURRENTLY IF NOT EXISTS ` + index.name).
+						WillReturnResult(pgxmock.NewResult("CREATE INDEX", 0))
+				}
+			}
+
+			err = prepareSandboxWorkloadRoutingOnConn(context.Background(), mock)
+			require.NoError(t, err, "sandbox workload routing preparation should complete")
+			require.NoError(t, mock.ExpectationsWereMet(), "preparation should execute the staged hot-table rollout in order")
+		})
+	}
 }
 
 func TestRepairKnownDirtyMigration(t *testing.T) {
@@ -253,6 +317,28 @@ func TestMigrationsDoNotUseConcurrentIndexes(t *testing.T) {
 			)
 		})
 	}
+}
+
+func TestSandboxWorkloadRoutingMigrationIsStagedForHotTable(t *testing.T) {
+	t.Parallel()
+
+	shapeBody, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000286_sandbox_workload_routing.up.sql"))
+	require.NoError(t, err, "sandbox routing shape migration should be readable")
+	shapeSQL := string(shapeBody)
+	lockTimeoutAt := strings.Index(shapeSQL, "SET LOCAL lock_timeout")
+	alterJobsAt := strings.Index(shapeSQL, "ALTER TABLE jobs")
+	require.GreaterOrEqual(t, lockTimeoutAt, 0, "shape migration should install a lock timeout")
+	require.GreaterOrEqual(t, alterJobsAt, 0, "shape migration should alter the jobs table")
+	require.Less(t, lockTimeoutAt, alterJobsAt, "lock timeout should be installed before the first jobs-table DDL")
+	require.Contains(t, shapeSQL, "ADD COLUMN IF NOT EXISTS workload_class", "shape migration should tolerate columns preinstalled by migrate up")
+	require.Contains(t, shapeSQL, "s.origin = 'code_review'", "shape migration should preserve active code-review classification")
+	require.NotContains(t, shapeSQL, "VALIDATE CONSTRAINT chk_jobs_workload_class", "shape migration should not retain its table lock while validating existing rows")
+
+	validationBody, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000287_validate_sandbox_workload_routing.up.sql"))
+	require.NoError(t, err, "sandbox routing validation migration should be readable")
+	validationSQL := string(validationBody)
+	require.Contains(t, validationSQL, "SET LOCAL lock_timeout", "validation should have a bounded lock acquisition")
+	require.Contains(t, validationSQL, "VALIDATE CONSTRAINT chk_jobs_workload_class", "validation should run in its own migration transaction")
 }
 
 func TestRenumberedPreviewResourceMigrationIsReplaySafe(t *testing.T) {

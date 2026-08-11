@@ -115,6 +115,7 @@ describe("RuntimeSettingsPage", () => {
         capacity: {
           state: "limited",
           active_agent_runs: 4,
+          active_sandbox_turns: 4,
           max_concurrent_agent_runs: 5,
           active_previews: 3,
           max_previews_per_user: 7,

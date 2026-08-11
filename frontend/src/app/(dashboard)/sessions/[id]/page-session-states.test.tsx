@@ -258,7 +258,8 @@ describe('SessionDetailPage session states', () => {
             static_egress: { available: true, enabled: false },
             capacity: {
               state: 'limited',
-              active_agent_runs: 2,
+              active_agent_runs: 1,
+              active_sandbox_turns: 2,
               max_concurrent_agent_runs: 2,
               active_previews: 0,
               max_previews_per_user: 5,
@@ -271,8 +272,8 @@ describe('SessionDetailPage session states', () => {
     renderWithProviders(<SessionDetailContent id={pendingSession.id} />);
 
     expect(await screen.findByText('Waiting for capacity')).toBeInTheDocument();
-    expect(await screen.findByText('Your organization is already at its max concurrency limit of 2 running sessions.')).toBeInTheDocument();
-    expect(screen.getByText('This session will start automatically when another session finishes or the limit is raised.')).toBeInTheDocument();
+    expect(await screen.findByText('Your organization is already at its max concurrency limit of 2 active runs.')).toBeInTheDocument();
+    expect(screen.getByText('This session will start automatically when another run finishes or the limit is raised.')).toBeInTheDocument();
     expect(screen.queryByText('Setting up environment')).not.toBeInTheDocument();
 
     // Flat block: clock, title and badge share one row, and both body lines are
@@ -283,7 +284,7 @@ describe('SessionDetailPage session states', () => {
     expect(heading).toHaveClass('gap-1.5');
     expect(heading?.querySelector('.lucide-clock')).toBeInTheDocument();
     expect(screen.getByText('Max concurrency reached').parentElement).toBe(heading);
-    expect(screen.getByText('This session will start automatically when another session finishes or the limit is raised.').parentElement).toBe(body);
+    expect(screen.getByText('This session will start automatically when another run finishes or the limit is raised.').parentElement).toBe(body);
   });
 
   it('shows the environment setup message for a pending session when the org is below its concurrency limit', async () => {
@@ -306,6 +307,7 @@ describe('SessionDetailPage session states', () => {
             capacity: {
               state: 'normal',
               active_agent_runs: 0,
+              active_sandbox_turns: 0,
               max_concurrent_agent_runs: 2,
               active_previews: 0,
               max_previews_per_user: 5,
@@ -345,6 +347,7 @@ describe('SessionDetailPage session states', () => {
               // setting up — not queued behind the concurrency limit.
               state: 'limited',
               active_agent_runs: 0,
+              active_sandbox_turns: 0,
               max_concurrent_agent_runs: 2,
               active_previews: 5,
               max_previews_per_user: 5,

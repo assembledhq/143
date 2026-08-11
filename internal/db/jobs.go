@@ -816,9 +816,17 @@ func (s *JobStore) RouteNextSandboxJob(ctx context.Context) (*SandboxRoutingResu
 
 	var job sandboxRoutingJob
 	err = tx.QueryRow(ctx, `
-		SELECT j.id, j.org_id, j.workload_class, j.status, j.created_at
+		SELECT j.id, j.org_id,
+			CASE
+				WHEN routed_session.origin = 'code_review' THEN 'code_review'
+				ELSE j.workload_class
+			END AS effective_workload_class,
+			j.status, j.created_at
 		FROM jobs j
 		LEFT JOIN nodes target ON target.id = j.target_node_id
+		LEFT JOIN sessions routed_session
+		  ON routed_session.org_id = j.org_id
+		 AND routed_session.id::text = j.payload->>'session_id'
 		WHERE j.status = 'pending'
 		  AND j.run_at <= now()
 		  AND j.job_type IN ('run_agent', 'continue_session')
@@ -836,7 +844,10 @@ func (s *JobStore) RouteNextSandboxJob(ctx context.Context) (*SandboxRoutingResu
 		  )
 		ORDER BY
 			j.priority DESC,
-			CASE WHEN j.workload_class = 'interactive' THEN 0 ELSE 1 END,
+			CASE
+				WHEN routed_session.origin = 'code_review' OR j.workload_class = 'code_review' THEN 1
+				ELSE 0
+			END,
 			j.created_at ASC
 		FOR UPDATE OF j SKIP LOCKED
 		LIMIT 1`, pgx.NamedArgs{
@@ -855,7 +866,7 @@ func (s *JobStore) RouteNextSandboxJob(ctx context.Context) (*SandboxRoutingResu
 	}
 	if result.TargetNodeID == nil && result.Reason != SandboxRoutingReasonLockContention {
 		fallbackReason := SandboxRoutingReason("")
-		if time.Since(job.CreatedAt) >= sandboxRoutingTerminalProbeAge {
+		if result.Reason == SandboxRoutingReasonFleetCapacity && time.Since(job.CreatedAt) >= sandboxRoutingTerminalProbeAge {
 			fallbackReason = SandboxRoutingReasonTerminalProbe
 		} else if result.Reason == SandboxRoutingReasonFleetCapacity {
 			metadataAvailable, metadataErr := sandboxCapacityMetadataAvailable(ctx, tx)
@@ -888,14 +899,16 @@ func (s *JobStore) RouteNextSandboxJob(ctx context.Context) (*SandboxRoutingResu
 		deferredUntil := time.Now().Add(retryDelay)
 		resultTag, err := tx.Exec(ctx, `
 			UPDATE jobs
-			SET target_node_id = NULL,
+			SET workload_class = @workload_class,
+				target_node_id = NULL,
 				sandbox_slot_reserved_until = NULL,
 				run_at = @run_at,
 				updated_at = now()
 			WHERE id = @job_id
 			  AND status = 'pending'`, pgx.NamedArgs{
-			"job_id": job.ID,
-			"run_at": deferredUntil,
+			"job_id":         job.ID,
+			"run_at":         deferredUntil,
+			"workload_class": job.WorkloadClass,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("defer sandbox job without capacity: %w", err)
@@ -952,13 +965,21 @@ func (s *JobStore) ReserveSandboxSlotForRetry(ctx context.Context, jobID, lockTo
 
 	var job sandboxRoutingJob
 	err = tx.QueryRow(ctx, `
-		SELECT id, org_id, workload_class, status, created_at
-		FROM jobs
-		WHERE id = @job_id
-		  AND status = 'running'
-		  AND lock_token = @lock_token
-		  AND job_type IN ('run_agent', 'continue_session')
-		FOR UPDATE`, pgx.NamedArgs{
+		SELECT j.id, j.org_id,
+			CASE
+				WHEN routed_session.origin = 'code_review' THEN 'code_review'
+				ELSE j.workload_class
+			END AS effective_workload_class,
+			j.status, j.created_at
+		FROM jobs j
+		LEFT JOIN sessions routed_session
+		  ON routed_session.org_id = j.org_id
+		 AND routed_session.id::text = j.payload->>'session_id'
+		WHERE j.id = @job_id
+		  AND j.status = 'running'
+		  AND j.lock_token = @lock_token
+		  AND j.job_type IN ('run_agent', 'continue_session')
+		FOR UPDATE OF j`, pgx.NamedArgs{
 		"job_id":     jobID,
 		"lock_token": lockToken,
 	}).Scan(&job.ID, &job.OrgID, &job.WorkloadClass, &job.Status, &job.CreatedAt)
@@ -974,14 +995,16 @@ func (s *JobStore) ReserveSandboxSlotForRetry(ctx context.Context, jobID, lockTo
 	if result.TargetNodeID == nil {
 		resultTag, err := tx.Exec(ctx, `
 			UPDATE jobs
-			SET target_node_id = NULL,
+			SET workload_class = @workload_class,
+				target_node_id = NULL,
 				sandbox_slot_reserved_until = NULL,
 				updated_at = now()
 			WHERE id = @job_id
 			  AND status = 'running'
 			  AND lock_token = @lock_token`, pgx.NamedArgs{
-			"job_id":     job.ID,
-			"lock_token": lockToken,
+			"job_id":         job.ID,
+			"lock_token":     lockToken,
+			"workload_class": job.WorkloadClass,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("clear sandbox retry reservation: %w", err)
@@ -1098,7 +1121,8 @@ func admitLockedSandboxTurn(ctx context.Context, tx pgx.Tx, job sandboxRoutingJo
 func updateSandboxRoutingPlacement(ctx context.Context, tx pgx.Tx, job sandboxRoutingJob, targetNodeID string, reservedUntil *time.Time) error {
 	query := `
 		UPDATE jobs
-		SET target_node_id = @target_node_id,
+		SET workload_class = @workload_class,
+			target_node_id = @target_node_id,
 			sandbox_slot_reserved_until = @reserved_until,
 			updated_at = now()
 		WHERE id = @job_id
@@ -1108,6 +1132,7 @@ func updateSandboxRoutingPlacement(ctx context.Context, tx pgx.Tx, job sandboxRo
 		"status":         job.Status,
 		"target_node_id": targetNodeID,
 		"reserved_until": reservedUntil,
+		"workload_class": job.WorkloadClass,
 	}
 	if job.LockToken != nil {
 		query += ` AND lock_token = @lock_token`
@@ -1382,7 +1407,6 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 		JobType string
 	}
 	var candidate claimCandidate
-	excludedJobIDs := []uuid.UUID{}
 	err = tx.QueryRow(ctx, `
 			WITH unavailable_target_nodes AS (
 				SELECT id
@@ -1396,12 +1420,19 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 				  AND status = 'active'
 				  AND last_heartbeat_at >= @dead_before
 			)
-			SELECT j.id, j.org_id, j.job_type, j.workload_class, j.status, j.created_at
+			SELECT j.id, j.org_id, j.job_type,
+				CASE
+					WHEN routed_session.origin = 'code_review' THEN 'code_review'
+					ELSE j.workload_class
+				END AS effective_workload_class,
+				j.status, j.created_at
 			FROM jobs j
 			LEFT JOIN unavailable_target_nodes d ON d.id = j.target_node_id
+			LEFT JOIN sessions routed_session
+			  ON routed_session.org_id = j.org_id
+			 AND routed_session.id::text = j.payload->>'session_id'
 			JOIN claiming_node cn ON TRUE
 			WHERE j.status = 'pending' AND j.run_at <= now()
-			  AND NOT (j.id = ANY(@excluded_job_ids::uuid[]))
 			  AND (j.job_type NOT IN ('run_agent', 'continue_session') OR j.target_node_id IS NOT NULL)
 			  AND (
 			    j.target_node_id IS NULL
@@ -1411,16 +1442,17 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 			ORDER BY
 				j.priority DESC,
 				CASE
-					WHEN j.job_type IN ('run_agent', 'continue_session') AND j.workload_class = 'interactive' THEN 0
+					WHEN j.job_type IN ('run_agent', 'continue_session')
+					 AND routed_session.origin IS DISTINCT FROM 'code_review'
+					 AND j.workload_class = 'interactive' THEN 0
 					WHEN j.job_type IN ('run_agent', 'continue_session') THEN 1
 					ELSE 0
 				END,
 				j.created_at ASC
 			FOR UPDATE OF j SKIP LOCKED
 			LIMIT 1`, pgx.NamedArgs{
-		"dead_before":      time.Now().Add(-nodeDeadHeartbeatThreshold),
-		"node_id":          nodeID,
-		"excluded_job_ids": excludedJobIDs,
+		"dead_before": time.Now().Add(-nodeDeadHeartbeatThreshold),
+		"node_id":     nodeID,
 	}).Scan(
 		&candidate.ID,
 		&candidate.OrgID,
@@ -1437,7 +1469,7 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 	}
 
 	isSandboxJob := candidate.JobType == "run_agent" || candidate.JobType == "continue_session"
-	if isSandboxJob && time.Since(candidate.CreatedAt) < sandboxRoutingTerminalProbeAge {
+	if isSandboxJob {
 		admitted, admissionErr := admitLockedSandboxTurn(ctx, tx, candidate.sandboxRoutingJob)
 		if admissionErr != nil {
 			return nil, false, admissionErr
@@ -1445,7 +1477,8 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 		if !admitted {
 			deferResult, deferErr := tx.Exec(ctx, `
 					UPDATE jobs
-					SET run_at = now() + (@retry_seconds * interval '1 second'),
+					SET workload_class = @workload_class,
+						run_at = now() + (@retry_seconds * interval '1 second'),
 						target_node_id = CASE
 							WHEN sandbox_slot_reserved_until IS NULL THEN target_node_id
 							ELSE NULL
@@ -1454,8 +1487,9 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 						updated_at = now()
 					WHERE id = @job_id
 					  AND status = 'pending'`, pgx.NamedArgs{
-				"job_id":        candidate.ID,
-				"retry_seconds": int(sandboxOrgLimitRetryDelay.Seconds()),
+				"job_id":         candidate.ID,
+				"retry_seconds":  int(sandboxOrgLimitRetryDelay.Seconds()),
+				"workload_class": candidate.WorkloadClass,
 			})
 			if deferErr != nil {
 				return nil, false, fmt.Errorf("defer affinity-bound sandbox job at org limit: %w", deferErr)
@@ -1633,6 +1667,10 @@ func (s *JobStore) RenewLeaseForSessionExecutor(ctx context.Context, orgID, jobI
 	query := `
 		UPDATE jobs
 		SET lease_expires_at = now() + (@lease_seconds * interval '1 second'),
+			sandbox_slot_reserved_until = CASE
+				WHEN sandbox_slot_reserved_until IS NULL THEN NULL
+				ELSE now() + (@lease_seconds * interval '1 second')
+			END,
 			updated_at = now()
 		WHERE id = @job_id
 		  AND org_id = @org_id
@@ -1680,6 +1718,10 @@ func (s *JobStore) RenewLease(ctx context.Context, jobID, lockToken uuid.UUID, l
 	query := `
 		UPDATE jobs
 		SET lease_expires_at = now() + (@lease_seconds * interval '1 second'),
+			sandbox_slot_reserved_until = CASE
+				WHEN sandbox_slot_reserved_until IS NULL THEN NULL
+				ELSE now() + (@lease_seconds * interval '1 second')
+			END,
 			updated_at = now()
 		WHERE id = @job_id
 		  AND status = 'running'

@@ -1096,6 +1096,7 @@ export const handlers = [
         capacity: {
           state: 'normal',
           active_agent_runs: 0,
+          active_sandbox_turns: 0,
           max_concurrent_agent_runs: 5,
           active_previews: 0,
           max_previews_per_user: 5,

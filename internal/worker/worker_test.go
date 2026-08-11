@@ -26,8 +26,9 @@ type wakeTestStore struct {
 
 type routingTestStore struct {
 	wakeTestStore
-	results []*db.SandboxRoutingResult
-	calls   atomic.Int32
+	results       []*db.SandboxRoutingResult
+	calls         atomic.Int32
+	notifiedJobID uuid.UUID
 }
 
 func (s *routingTestStore) RouteNextSandboxJob(context.Context) (*db.SandboxRoutingResult, error) {
@@ -36,6 +37,10 @@ func (s *routingTestStore) RouteNextSandboxJob(context.Context) (*db.SandboxRout
 		return nil, nil
 	}
 	return s.results[call], nil
+}
+
+func (s *routingTestStore) Notify(_ context.Context, jobID uuid.UUID) {
+	s.notifiedJobID = jobID
 }
 
 type retryWindowLeaseStoreStub struct {
@@ -119,17 +124,37 @@ func TestRetryableError(t *testing.T) {
 	require.ErrorIs(t, retryable.Unwrap(), cause, "Unwrap should expose the wrapped error")
 }
 
-func TestWorker_RetryNotifiesAfterJobBecomesRunnable(t *testing.T) {
+func TestWorker_RetryNotifiesOnlyAfterJobBecomesImmediatelyRunnable(t *testing.T) {
 	t.Parallel()
 
-	store := &retryNotifyStore{}
-	w := &Worker{jobs: store, logger: zerolog.Nop()}
-	jobID := uuid.New()
+	zeroDelay := time.Duration(0)
+	tests := []struct {
+		name             string
+		override         *time.Duration
+		expectedNotified bool
+	}{
+		{name: "immediate retry wakes workers", override: &zeroDelay, expectedNotified: true},
+		{name: "delayed retry waits for polling", expectedNotified: false},
+	}
 
-	w.retryJobWithDelay(context.Background(), jobID, uuid.New(), "capacity moved", 1, false, nil, nil, false)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	require.Equal(t, jobID, store.retriedJobID, "retry should first persist the pending job transition")
-	require.Equal(t, jobID, store.notifiedJobID, "successful requeue should wake the destination after the job is runnable")
+			store := &retryNotifyStore{}
+			w := &Worker{jobs: store, logger: zerolog.Nop()}
+			jobID := uuid.New()
+
+			w.retryJobWithDelay(context.Background(), jobID, uuid.New(), "capacity moved", 1, false, tt.override, nil, false)
+
+			require.Equal(t, jobID, store.retriedJobID, "retry should first persist the pending job transition")
+			if tt.expectedNotified {
+				require.Equal(t, jobID, store.notifiedJobID, "an immediately runnable retry should wake workers")
+			} else {
+				require.Equal(t, uuid.Nil, store.notifiedJobID, "a delayed retry should not wake the fleet before run_at")
+			}
+		})
+	}
 }
 
 func TestRetryableDurationExceeded(t *testing.T) {
@@ -286,7 +311,7 @@ func TestWorker_Poll(t *testing.T) {
 				t.Helper()
 				mock.ExpectBegin()
 				mock.ExpectQuery("WITH unavailable_target_nodes AS").
-					WithArgs(pgxmock.AnyArg(), "test-node", pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), "test-node").
 					WillReturnError(pgx.ErrNoRows)
 				mock.ExpectRollback()
 			},
@@ -624,7 +649,7 @@ func TestWorker_Poll(t *testing.T) {
 				now := time.Now()
 				mock.ExpectBegin()
 				mock.ExpectQuery("WITH unavailable_target_nodes AS").
-					WithArgs(pgxmock.AnyArg(), "test-node", pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), "test-node").
 					WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "workload_class", "status", "created_at"}).
 						AddRow(jobID, orgID, "missing_token", models.SandboxWorkloadClassInteractive, models.JobStatusPending, now))
 				mock.ExpectQuery("UPDATE jobs j").
@@ -763,6 +788,33 @@ func TestWorkerPollContinuesRoutingAfterCapacityDeferral(t *testing.T) {
 
 	require.Equal(t, int32(2), store.calls.Load(), "a deferred review job should not monopolize the routing pass")
 	require.Equal(t, int32(1), store.claims.Load(), "the worker should still attempt a normal claim after draining deferred routing decisions")
+}
+
+func TestWorkerPollNotifiesAfterRoutingJobToAvailableWorker(t *testing.T) {
+	t.Parallel()
+
+	jobID := uuid.New()
+	store := &routingTestStore{results: []*db.SandboxRoutingResult{
+		{
+			JobID:         jobID,
+			WorkloadClass: models.SandboxWorkloadClassCodeReview,
+			TargetNodeID:  ptr("alternate-worker"),
+			Reason:        db.SandboxRoutingReasonReserved,
+		},
+	}}
+	w := &Worker{
+		jobs:          store,
+		sandboxRouter: store,
+		logger:        zerolog.Nop(),
+		nodeID:        "test-node",
+		handlers:      map[string]JobHandler{},
+		leaseDuration: defaultLeaseDuration,
+	}
+
+	w.poll(context.Background())
+
+	require.Equal(t, jobID, store.notifiedJobID, "routing to an available worker should publish an immediate queue wake-up")
+	require.Equal(t, int32(1), store.claims.Load(), "the routing worker should still attempt a claim in case it owns the reservation")
 }
 
 func TestWorker_Wake_DropsDuplicateSignalsWhenBufferFull(t *testing.T) {
@@ -1025,7 +1077,7 @@ func TestWorker_Start_StopsOnContextCancel(t *testing.T) {
 	for range 5 {
 		mock.ExpectBegin()
 		mock.ExpectQuery("WITH unavailable_target_nodes AS").
-			WithArgs(pgxmock.AnyArg(), "test-node", pgxmock.AnyArg()).
+			WithArgs(pgxmock.AnyArg(), "test-node").
 			WillReturnError(pgx.ErrNoRows)
 		mock.ExpectRollback()
 	}
@@ -1221,7 +1273,7 @@ func expectClaimWithAttemptsAndTarget(mock pgxmock.PgxPoolIface, jobID, orgID uu
 	}
 	mock.ExpectBegin()
 	mock.ExpectQuery("WITH unavailable_target_nodes AS").
-		WithArgs(pgxmock.AnyArg(), "test-node", pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), "test-node").
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "workload_class", "status", "created_at"}).
 			AddRow(jobID, orgID, jobType, models.SandboxWorkloadClassInteractive, models.JobStatusPending, createdAt))
 	if jobType == "run_agent" || jobType == "continue_session" {

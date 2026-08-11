@@ -93,6 +93,48 @@ func TestSessionStore_GetByIDScansPRPushErrorCode(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionStore_HasPendingCancelRequest(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		pending   bool
+		expectErr bool
+	}{
+		{name: "reports pending request", pending: true},
+		{name: "reports no pending request"},
+		{name: "returns query failure", expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create session cancel mock")
+			defer mock.Close()
+
+			orgID, sessionID := uuid.New(), uuid.New()
+			expectation := mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM session_cancel_requests.*org_id = @org_id.*session_id = @session_id.*delivered_at IS NULL`).
+				WithArgs(orgID, sessionID)
+			if tt.expectErr {
+				expectation.WillReturnError(errors.New("cancel state unavailable"))
+			} else {
+				expectation.WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(tt.pending))
+			}
+
+			pending, err := NewSessionStore(mock).HasPendingCancelRequest(context.Background(), orgID, sessionID)
+			if tt.expectErr {
+				require.Error(t, err, "pending cancellation lookup should return database failures")
+			} else {
+				require.NoError(t, err, "pending cancellation lookup should complete")
+			}
+			require.Equal(t, tt.pending, pending, "pending cancellation lookup should return the exact durable state")
+			require.NoError(t, mock.ExpectationsWereMet(), "pending cancellation lookup should stay tenant scoped")
+		})
+	}
+}
+
 func claimForResumeQueryPattern() string {
 	return `UPDATE sessions\s+SET status = 'running', started_at = now\(\), completed_at = NULL,\s+` +
 		sqlFragmentPattern(sessionResumeRuntimeResetAssignments) +
