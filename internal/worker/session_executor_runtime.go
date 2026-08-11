@@ -465,6 +465,12 @@ func (r *SessionExecutorRuntime) retryJob(ctx context.Context, executor models.S
 	}
 	if !ok {
 		r.loggerPtr().Warn().Str("job_id", job.ID.String()).Msg("lost ownership before scheduling session executor job retry")
+		return
+	}
+	if backoff <= 0 {
+		if notifier, supportsNotify := r.Jobs.(retryJobNotifier); supportsNotify {
+			notifier.Notify(context.WithoutCancel(ctx), job.ID)
+		}
 	}
 }
 

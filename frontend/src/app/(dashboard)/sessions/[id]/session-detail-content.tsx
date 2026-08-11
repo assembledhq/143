@@ -2464,9 +2464,9 @@ function ChatPanel({
   // that is queued because the org is at its concurrency limit. The two look
   // identical on the session row, so consult the runtime capacity signal to
   // decide which message to show instead of assuming every pending session is
-  // capacity-blocked. Gate on the agent-run dimension specifically rather than
-  // the conflated `state`, which also flips to "limited" when only the
-  // unrelated preview limit is reached.
+  // capacity-blocked. Gate on the shared sandbox-turn count rather than the
+  // conflated `state`, which also flips to "limited" when only the unrelated
+  // preview limit is reached.
   const runtimeStatusQuery = useQuery({
     queryKey: queryKeys.settings.runtimeStatus,
     queryFn: () => api.settings.getRuntimeStatus(),
@@ -2475,7 +2475,7 @@ function ChatPanel({
     refetchInterval: 15_000,
   });
   const capacity = runtimeStatusQuery.data?.data.capacity;
-  const isCapacityLimited = capacity != null && capacity.active_agent_runs >= capacity.max_concurrent_agent_runs;
+  const isCapacityLimited = capacity != null && capacity.active_sandbox_turns >= capacity.max_concurrent_agent_runs;
   const maxConcurrentRuns = capacity?.max_concurrent_agent_runs;
   const initialThreadAnchorPosition = useMemo<SessionAnchorPosition | null>(() => {
     if (!activeThreadId || !viewerScope || typeof window === "undefined") return null;
@@ -3478,8 +3478,8 @@ function ChatPanel({
 
 function PendingCapacityNotice({ maxConcurrentRuns }: { maxConcurrentRuns?: number }) {
   const limitText = maxConcurrentRuns && maxConcurrentRuns > 0
-    ? `Your organization is already at its max concurrency limit of ${maxConcurrentRuns} running ${maxConcurrentRuns === 1 ? "session" : "sessions"}.`
-    : "Your organization is already at its max concurrency limit for running sessions.";
+    ? `Your organization is already at its max concurrency limit of ${maxConcurrentRuns} active ${maxConcurrentRuns === 1 ? "run" : "runs"}.`
+    : "Your organization is already at its max concurrency limit for active runs.";
 
   return (
     <div className="flex justify-center py-8">
@@ -3494,7 +3494,7 @@ function PendingCapacityNotice({ maxConcurrentRuns }: { maxConcurrentRuns?: numb
           </div>
           <p className="text-sm text-muted-foreground">{limitText}</p>
           <p className="text-sm text-muted-foreground">
-            This session will start automatically when another session finishes or the limit is raised.
+            This session will start automatically when another run finishes or the limit is raised.
           </p>
         </CardContent>
       </Card>

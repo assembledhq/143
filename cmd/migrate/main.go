@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"github.com/golang-migrate/migrate/v4/database"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // migrateLogger implements migrate.Logger to surface verbose migration output.
@@ -23,6 +26,38 @@ const (
 type dirtyMigrationRepairer interface {
 	Version() (uint, bool, error)
 	Force(version int) error
+}
+
+type migrationPreparationConn interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+type concurrentIndexPreparation struct {
+	name      string
+	createSQL string
+}
+
+var sandboxRoutingConcurrentIndexes = []concurrentIndexPreparation{
+	{
+		name: "idx_jobs_sandbox_routing",
+		createSQL: `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_jobs_sandbox_routing
+			ON jobs (
+				priority DESC,
+				(CASE WHEN workload_class = 'interactive' THEN 0 ELSE 1 END),
+				created_at ASC,
+				run_at
+			)
+			WHERE status = 'pending'
+			  AND job_type IN ('run_agent', 'continue_session')`,
+	},
+	{
+		name: "idx_jobs_active_sandbox_turns",
+		createSQL: `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_jobs_active_sandbox_turns
+			ON jobs (org_id, status)
+			WHERE job_type IN ('run_agent', 'continue_session')
+			  AND status IN ('pending', 'running')`,
+	},
 }
 
 func (l migrateLogger) Printf(format string, v ...interface{}) {
@@ -59,6 +94,10 @@ func main() {
 
 	switch os.Args[1] {
 	case "up":
+		if err := prepareSandboxWorkloadRouting(context.Background(), dbURL); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to prepare sandbox workload routing migration: %v\n", err)
+			os.Exit(1)
+		}
 		if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 			logMigrationError("up", m, err)
 			os.Exit(1)
@@ -96,6 +135,88 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1]) // #nosec G705 -- writing to stderr, not HTTP response
 		os.Exit(1)
 	}
+}
+
+// prepareSandboxWorkloadRouting performs the non-transactional portion of the
+// hot jobs-table migration. Production deploys and provisions already invoke
+// `migrate up`, so keeping the preparation here makes the staged rollout
+// executable instead of relying on an operator to copy SQL from a comment.
+func prepareSandboxWorkloadRouting(ctx context.Context, dbURL string) (resultErr error) {
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		return fmt.Errorf("connect for sandbox workload routing preparation: %w", err)
+	}
+	defer func() {
+		if err := conn.Close(context.WithoutCancel(ctx)); err != nil && resultErr == nil {
+			resultErr = fmt.Errorf("close sandbox workload routing preparation connection: %w", err)
+		}
+	}()
+	return prepareSandboxWorkloadRoutingOnConn(ctx, conn)
+}
+
+func prepareSandboxWorkloadRoutingOnConn(ctx context.Context, conn migrationPreparationConn) error {
+	var schemaReady bool
+	if err := conn.QueryRow(ctx, `
+		SELECT to_regclass('public.jobs') IS NOT NULL
+		   AND EXISTS (
+			SELECT 1
+			FROM information_schema.columns
+			WHERE table_schema = 'public'
+			  AND table_name = 'sessions'
+			  AND column_name = 'origin'
+		   )`).Scan(&schemaReady); err != nil {
+		return fmt.Errorf("inspect sandbox workload routing prerequisites: %w", err)
+	}
+	if !schemaReady {
+		return nil
+	}
+
+	statements := []struct {
+		name string
+		sql  string
+	}{
+		{name: "set lock timeout", sql: `SET lock_timeout = '5s'`},
+		{name: "add routing columns", sql: `ALTER TABLE jobs
+			ADD COLUMN IF NOT EXISTS workload_class text NOT NULL DEFAULT 'interactive',
+			ADD COLUMN IF NOT EXISTS sandbox_slot_reserved_until timestamptz`},
+		{name: "backfill active code reviews", sql: `UPDATE jobs j
+			SET workload_class = 'code_review'
+			FROM sessions s
+			WHERE s.org_id = j.org_id
+			  AND s.id::text = j.payload->>'session_id'
+			  AND s.origin = 'code_review'
+			  AND j.job_type IN ('run_agent', 'continue_session')
+			  AND j.status IN ('pending', 'running')
+			  AND j.workload_class <> 'code_review'`},
+	}
+	for _, statement := range statements {
+		if _, err := conn.Exec(ctx, statement.sql); err != nil {
+			return fmt.Errorf("%s: %w", statement.name, err)
+		}
+	}
+
+	for _, index := range sandboxRoutingConcurrentIndexes {
+		var invalid bool
+		if err := conn.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_index i
+				JOIN pg_class c ON c.oid = i.indexrelid
+				WHERE c.relname = $1
+				  AND NOT i.indisvalid
+			)`, index.name).Scan(&invalid); err != nil {
+			return fmt.Errorf("inspect concurrent index %s: %w", index.name, err)
+		}
+		if invalid {
+			if _, err := conn.Exec(ctx, "DROP INDEX CONCURRENTLY IF EXISTS "+index.name); err != nil {
+				return fmt.Errorf("drop invalid concurrent index %s: %w", index.name, err)
+			}
+		}
+		if _, err := conn.Exec(ctx, index.createSQL); err != nil {
+			return fmt.Errorf("create concurrent index %s: %w", index.name, err)
+		}
+	}
+	return nil
 }
 
 // repairKnownDirtyMigration clears only dirty markers whose production failure

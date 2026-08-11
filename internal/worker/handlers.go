@@ -9827,6 +9827,16 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 
 		if err := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts); err != nil {
 			if errors.Is(err, agent.ErrConcurrencyLimit) || errors.Is(err, agent.ErrSandboxTurnConcurrency) {
+				stopRetry, stopErr := shouldStopContinueSessionCapacityRetry(ctx, stores, orgID, sessionID, threadID, hasThread)
+				if stopErr != nil {
+					return stopErr
+				}
+				if stopRetry {
+					logger.Info().
+						Str("session_id", sessionID.String()).
+						Msg("session or thread became terminal or cancelled while waiting for capacity; stopping continue_session retry")
+					return nil
+				}
 				var capacityThreadID *uuid.UUID
 				if hasThread {
 					threadIDLocal := threadID
@@ -10241,6 +10251,51 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		enqueueSessionPreviewWarmBuildIfCandidate(ctx, stores, services, logger, orgID, sessionID, "continue_session_completed")
 		return nil
 	}
+}
+
+func shouldStopContinueSessionCapacityRetry(
+	ctx context.Context,
+	stores *Stores,
+	orgID, sessionID, threadID uuid.UUID,
+	hasThread bool,
+) (bool, error) {
+	currentSession, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+	if err != nil {
+		return false, fmt.Errorf("reload session before capacity retry: %w", err)
+	}
+	if currentSession.Status.IsTerminal() {
+		return true, nil
+	}
+	pendingCancel, err := stores.Sessions.HasPendingCancelRequest(ctx, orgID, sessionID)
+	if err != nil {
+		return false, err
+	}
+	if pendingCancel {
+		if err := stores.Sessions.UpdateStatus(ctx, orgID, sessionID, models.SessionStatusCancelled); err != nil {
+			return false, fmt.Errorf("cancel session while waiting for capacity: %w", err)
+		}
+		if _, err := stores.Sessions.ConsumeCancelRequest(ctx, orgID, sessionID); err != nil {
+			return false, fmt.Errorf("consume session cancellation after capacity wait: %w", err)
+		}
+		return true, nil
+	}
+	if !hasThread || stores.SessionThreads == nil {
+		return false, nil
+	}
+	thread, err := stores.SessionThreads.GetByID(ctx, orgID, threadID)
+	if err != nil {
+		return false, fmt.Errorf("reload session thread before capacity retry: %w", err)
+	}
+	if thread.Status == models.ThreadStatusCancelled {
+		return true, nil
+	}
+	if thread.CancelRequestedAt == nil {
+		return false, nil
+	}
+	if err := stores.SessionThreads.UpdateStatus(ctx, orgID, threadID, models.ThreadStatusCancelled); err != nil {
+		return false, fmt.Errorf("cancel session thread while waiting for capacity: %w", err)
+	}
+	return true, nil
 }
 
 // turnWorkspaceChanged compares the review turn's resulting workspace diff to

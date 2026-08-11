@@ -1025,6 +1025,7 @@ func startProcessWorkers(
 	workers := make([]*worker.Worker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
 		w := worker.New(pool, logger, nodeID)
+		w.SetJobNotifier(jobNotifier)
 		w.EnableSandboxRouting()
 		worker.RegisterHandlers(w, stores, services, retentionCfg, logger)
 		workers = append(workers, w)

@@ -1239,6 +1239,25 @@ func (s *SessionStore) ConsumeCancelRequest(ctx context.Context, orgID, sessionI
 	return tag.RowsAffected() == 1, nil
 }
 
+// HasPendingCancelRequest reports whether cancellation has been requested but
+// not yet delivered to a live runtime. Capacity retries use this durable check
+// so a queued continuation cannot outlive a user's cancellation request.
+func (s *SessionStore) HasPendingCancelRequest(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error) {
+	var pending bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM session_cancel_requests
+			WHERE org_id = @org_id
+			  AND session_id = @session_id
+			  AND delivered_at IS NULL
+		)`, pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).Scan(&pending)
+	if err != nil {
+		return false, fmt.Errorf("check pending session cancel request: %w", err)
+	}
+	return pending, nil
+}
+
 func (s *SessionStore) RecordRuntimeProgress(ctx context.Context, orgID, sessionID uuid.UUID, progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time) error {
 	query := `
 		UPDATE sessions
