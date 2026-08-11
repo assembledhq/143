@@ -3,6 +3,7 @@ import type { AutomationGitHubEvent } from "./types";
 export type AutomationProductTrigger =
   | "github.pr.opened"
   | "github.pr.updated"
+  | "github.pr.ready_for_review"
   | "github.pr.feedback"
   | "github.checks.completed"
   | "github.pr.merged";
@@ -16,6 +17,7 @@ export const prFeedbackGitHubEvents: AutomationGitHubEvent[] = [
 const productTriggerEvents: Record<AutomationProductTrigger, AutomationGitHubEvent[]> = {
   "github.pr.opened": ["github.pull_request.opened"],
   "github.pr.updated": ["github.pull_request.updated"],
+  "github.pr.ready_for_review": ["github.pull_request.ready_for_review"],
   "github.pr.feedback": prFeedbackGitHubEvents,
   "github.checks.completed": ["github.check_suite.completed", "github.check_run.completed"],
   "github.pr.merged": ["github.pull_request.merged"],
@@ -26,6 +28,10 @@ export const automationProductTriggerOptions: {
   label: string;
 }[] = [
   { value: "github.pr.opened", label: "When a PR is opened" },
+  {
+    value: "github.pr.ready_for_review",
+    label: "When a PR is ready for review",
+  },
   { value: "github.pr.updated", label: "When a PR is updated" },
   { value: "github.pr.feedback", label: "When there is new PR feedback" },
   { value: "github.checks.completed", label: "When checks finish" },
@@ -54,6 +60,9 @@ export function githubEventsToAutomationProductTriggers(events: AutomationGitHub
 
   if (eventSet.has("github.pull_request.opened")) {
     triggers.push("github.pr.opened");
+  }
+  if (eventSet.has("github.pull_request.ready_for_review")) {
+    triggers.push("github.pr.ready_for_review");
   }
   if (eventSet.has("github.pull_request.updated")) {
     triggers.push("github.pr.updated");

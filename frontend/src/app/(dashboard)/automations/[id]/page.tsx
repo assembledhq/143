@@ -621,6 +621,12 @@ function TriggersEditor({
             onCommit={(value) => saveFilter("paths", value)}
           />
           <TriggerFilterField
+            id="trigger-labels"
+            label="PR labels"
+            serverValue={(filters.labels ?? []).join(", ")}
+            onCommit={(value) => saveFilter("labels", value)}
+          />
+          <TriggerFilterField
             id="trigger-feedback-types"
             label="Feedback types"
             serverValue={(filters.feedback_types ?? []).join(", ")}

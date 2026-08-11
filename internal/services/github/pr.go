@@ -184,6 +184,7 @@ type LinearMilestoneEnqueuer func(ctx context.Context, orgID, sessionID uuid.UUI
 
 type AutomationEventTriggerer interface {
 	TriggerGitHubEvent(ctx context.Context, req automationevents.GitHubEventTriggerRequest) error
+	RememberKnownLabels(req automationevents.GitHubEventTriggerRequest)
 }
 
 // SetLinearMilestoneEnqueuer wires the Linear post-event hook.
@@ -2457,12 +2458,33 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// githubLabelRef is the slice of a GitHub label object webhook consumers need.
+// Labels appear on pull_request, issue, and the embedded pull_request objects
+// of review webhooks.
+type githubLabelRef struct {
+	Name string `json:"name"`
+}
+
+// githubLabelNames flattens webhook label objects into names. It returns a
+// non-nil (possibly empty) slice so callers can mark the labels as known: a PR
+// with no labels is a determinate answer, not a missing one.
+func githubLabelNames(labels []githubLabelRef) []string {
+	names := make([]string, 0, len(labels))
+	for _, label := range labels {
+		if name := strings.TrimSpace(label.Name); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 // PullRequestEvent represents a GitHub pull_request webhook event.
 type PullRequestEvent struct {
-	Action     string     `json:"action"`
-	Number     int        `json:"number"`
-	OwnerOrgID *uuid.UUID `json:"-"`
-	DeliveryID string     `json:"-"`
+	Action     string         `json:"action"`
+	Number     int            `json:"number"`
+	OwnerOrgID *uuid.UUID     `json:"-"`
+	DeliveryID string         `json:"-"`
+	Label      githubLabelRef `json:"label"`
 	Sender     struct {
 		Login string `json:"login"`
 		Type  string `json:"type"`
@@ -2470,6 +2492,7 @@ type PullRequestEvent struct {
 	PR struct {
 		Merged         bool       `json:"merged"`
 		Draft          bool       `json:"draft"`
+		State          string     `json:"state"`
 		HTMLURL        string     `json:"html_url"`
 		Title          string     `json:"title"`
 		Body           string     `json:"body"`
@@ -2492,6 +2515,7 @@ type PullRequestEvent struct {
 			Login string `json:"login"`
 			Type  string `json:"type"`
 		} `json:"user"`
+		Labels []githubLabelRef `json:"labels"`
 	} `json:"pull_request"`
 	Repository struct {
 		ID            int64  `json:"id"`
@@ -2502,21 +2526,25 @@ type PullRequestEvent struct {
 
 // HandlePullRequestEvent processes pull_request webhook events.
 func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullRequestEvent) error {
-	if automationEvent, ok := automationGitHubEventForPullRequest(event); ok {
-		s.triggerGitHubAutomations(ctx, automationevents.GitHubEventTriggerRequest{
-			Event:             automationEvent,
-			Repository:        event.Repository.FullName,
-			PullRequestNumber: event.Number,
-			PullRequestURL:    event.PR.HTMLURL,
-			PullRequestTitle:  event.PR.Title,
-			HeadSHA:           event.PR.Head.SHA,
-			Actor:             event.Sender.Login,
-			ActorType:         event.Sender.Type,
-			Body:              githubPullRequestBody(event.PR.Title, event.PR.Body),
-			ProviderEventID:   event.DeliveryID,
-			EventID:           fmt.Sprintf("pull_request:%s:%d", event.Action, event.Number),
-			BaseBranch:        event.PR.Base.Ref,
-		}, event.OwnerOrgID, event.Repository.ID)
+	if automationEvents := automationGitHubEventsForPullRequest(event); len(automationEvents) > 0 || event.Action == "unlabeled" {
+		s.triggerGitHubAutomationEvents(ctx, automationevents.GitHubEventTriggerRequest{
+			Repository:         event.Repository.FullName,
+			PullRequestNumber:  event.Number,
+			PullRequestAction:  event.Action,
+			PullRequestURL:     event.PR.HTMLURL,
+			PullRequestTitle:   event.PR.Title,
+			HeadSHA:            event.PR.Head.SHA,
+			Actor:              event.Sender.Login,
+			ActorType:          event.Sender.Type,
+			Body:               githubPullRequestBody(event.PR.Title, event.PR.Body),
+			ProviderEventID:    event.DeliveryID,
+			EventID:            fmt.Sprintf("pull_request:%s:%d", event.Action, event.Number),
+			BaseBranch:         event.PR.Base.Ref,
+			Labels:             githubLabelNames(event.PR.Labels),
+			LabelsKnown:        true,
+			RequireLabelFilter: event.Action == "labeled",
+			ChangedLabel:       event.Label.Name,
+		}, automationEvents, event.OwnerOrgID, event.Repository.ID)
 	}
 
 	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.Number)
@@ -2822,18 +2850,57 @@ func (s *PRService) enqueuePRPreviewSurfaceSyncForRepo(ctx context.Context, repo
 	}
 }
 
-func automationGitHubEventForPullRequest(event PullRequestEvent) (models.AutomationGitHubEvent, bool) {
+// automationGitHubEventsForPullRequest maps a pull_request webhook action onto
+// every automation event it satisfies. One action can satisfy several: a
+// non-draft "opened" is both "PR opened" and "PR ready for review" (GitHub
+// sends no separate ready_for_review delivery for a PR that opens ready), and
+// "ready_for_review" stays an update so automations that predate the dedicated
+// trigger keep firing. Applying a configured label to an open PR re-evaluates
+// these lifecycle events for label-filtered automations; one marker for the
+// PR's lifecycle occurrence prevents that cross-delivery re-evaluation from
+// creating a second run.
+//
+// Within one delivery, the provider event ID still deduplicates multi-event
+// fan-out for automations subscribed to more than one mapped event.
+func automationGitHubEventsForPullRequest(event PullRequestEvent) []models.AutomationGitHubEvent {
 	switch event.Action {
-	case "opened":
-		return models.AutomationGitHubEventPullRequestOpened, true
-	case "synchronize", "edited", "reopened", "ready_for_review", "converted_to_draft":
-		return models.AutomationGitHubEventPullRequestUpdated, true
+	case automationevents.PullRequestActionOpened:
+		events := []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestOpened}
+		if !event.PR.Draft {
+			events = append(events, models.AutomationGitHubEventPullRequestReadyForReview)
+		}
+		return events
+	case "ready_for_review":
+		return []models.AutomationGitHubEvent{
+			models.AutomationGitHubEventPullRequestReadyForReview,
+			models.AutomationGitHubEventPullRequestUpdated,
+		}
+	case "reopened":
+		events := []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestUpdated}
+		if !event.PR.Draft {
+			events = append(events, models.AutomationGitHubEventPullRequestReadyForReview)
+		}
+		return events
+	case "synchronize", "edited", "converted_to_draft":
+		return []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestUpdated}
+	case "labeled":
+		if event.PR.State != "open" {
+			return nil
+		}
+		events := []models.AutomationGitHubEvent{
+			models.AutomationGitHubEventPullRequestOpened,
+			models.AutomationGitHubEventPullRequestUpdated,
+		}
+		if !event.PR.Draft {
+			events = append(events, models.AutomationGitHubEventPullRequestReadyForReview)
+		}
+		return events
 	case "closed":
 		if event.PR.Merged {
-			return models.AutomationGitHubEventPullRequestMerged, true
+			return []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestMerged}
 		}
 	}
-	return "", false
+	return nil
 }
 
 func (s *PRService) getWebhookPullRequest(ctx context.Context, ownerOrgID *uuid.UUID, repo string, number int) (models.PullRequest, error) {
@@ -3485,6 +3552,7 @@ type PullRequestReviewEvent struct {
 		Base struct {
 			Ref string `json:"ref"`
 		} `json:"base"`
+		Labels []githubLabelRef `json:"labels"`
 	} `json:"pull_request"`
 	Repository struct {
 		ID       int64  `json:"id"`
@@ -3542,6 +3610,8 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 		EventID:           githubIDEventKey("review", event.Review.ID),
 		DedupeGroupID:     githubIDEventKey("review", event.Review.ID),
 		ReviewState:       event.Review.State,
+		Labels:            githubLabelNames(event.PullRequest.Labels),
+		LabelsKnown:       true,
 	}, event.OwnerOrgID, event.Repository.ID)
 
 	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.PullRequest.Number)
@@ -3648,6 +3718,7 @@ type PullRequestReviewCommentEvent struct {
 		Base struct {
 			Ref string `json:"ref"`
 		} `json:"base"`
+		Labels []githubLabelRef `json:"labels"`
 	} `json:"pull_request"`
 	Repository struct {
 		ID       int64  `json:"id"`
@@ -3690,6 +3761,8 @@ func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, eve
 		EventID:           githubIDEventKey("review_comment", event.Comment.ID),
 		DedupeGroupID:     githubReviewCommentDedupeGroup(event.Comment.PullRequestReviewID),
 		Path:              event.Comment.Path,
+		Labels:            githubLabelNames(event.PullRequest.Labels),
+		LabelsKnown:       true,
 	}, event.OwnerOrgID, event.Repository.ID)
 	if event.RecordOnly {
 		return nil
@@ -3762,10 +3835,11 @@ type IssueCommentEvent struct {
 		PerformedViaGitHubApp *FeedbackGitHubAppIdentity `json:"performed_via_github_app"`
 	} `json:"comment"`
 	Issue struct {
-		Number      int       `json:"number"`
-		HTMLURL     string    `json:"html_url"`
-		Title       string    `json:"title"`
-		PullRequest *struct{} `json:"pull_request"`
+		Number      int              `json:"number"`
+		HTMLURL     string           `json:"html_url"`
+		Title       string           `json:"title"`
+		PullRequest *struct{}        `json:"pull_request"`
+		Labels      []githubLabelRef `json:"labels"`
 	} `json:"issue"`
 	Repository struct {
 		ID       int64  `json:"id"`
@@ -3839,11 +3913,21 @@ func (s *PRService) HandleIssueCommentEvent(ctx context.Context, event IssueComm
 		Body:              event.Comment.Body,
 		ProviderEventID:   event.DeliveryID,
 		EventID:           githubIDEventKey("issue_comment", event.Comment.ID),
+		Labels:            githubLabelNames(event.Issue.Labels),
+		LabelsKnown:       true,
 	}, event.OwnerOrgID, event.Repository.ID)
 	return nil
 }
 
 func (s *PRService) triggerGitHubAutomations(ctx context.Context, req automationevents.GitHubEventTriggerRequest, ownerOrgID *uuid.UUID, githubRepoID int64) {
+	s.triggerGitHubAutomationEvents(ctx, req, []models.AutomationGitHubEvent{req.Event}, ownerOrgID, githubRepoID)
+}
+
+// triggerGitHubAutomationEvents dispatches one webhook as several automation
+// events — a non-draft "opened" is both a PR-opened and a PR-ready-for-review
+// event, for instance. The repository and head lookups are shared across all of
+// them so a single delivery costs a single resolution.
+func (s *PRService) triggerGitHubAutomationEvents(ctx context.Context, req automationevents.GitHubEventTriggerRequest, events []models.AutomationGitHubEvent, ownerOrgID *uuid.UUID, githubRepoID int64) {
 	if s.automationEventTriggers == nil || s.repos == nil {
 		return
 	}
@@ -3857,8 +3941,16 @@ func (s *PRService) triggerGitHubAutomations(ctx context.Context, req automation
 	req.OrgID = repo.OrgID
 	req.RepositoryID = repo.ID
 	s.populateGitHubAutomationHead(ctx, &repo, &req)
-	if err := s.automationEventTriggers.TriggerGitHubEvent(ctx, req); err != nil {
-		s.logger.Warn().Err(err).Str("repo", req.Repository).Str("github_event", string(req.Event)).Msg("failed to trigger github event automations")
+	if len(events) == 0 {
+		s.automationEventTriggers.RememberKnownLabels(req)
+		return
+	}
+	for _, event := range events {
+		eventReq := req
+		eventReq.Event = event
+		if err := s.automationEventTriggers.TriggerGitHubEvent(ctx, eventReq); err != nil {
+			s.logger.Warn().Err(err).Str("repo", eventReq.Repository).Str("github_event", string(event)).Msg("failed to trigger github event automations")
+		}
 	}
 }
 
@@ -4294,6 +4386,7 @@ type PullRequestHead struct {
 	Branch     string
 	SHA        string
 	BaseBranch string
+	Labels     []string
 }
 
 // CodeReviewPullRequestSnapshot is the current GitHub state needed by code
@@ -4448,6 +4541,7 @@ func (s *PRService) GetPullRequestHead(ctx context.Context, token, owner, repo s
 		Base struct {
 			Ref string `json:"ref"`
 		} `json:"base"`
+		Labels []githubLabelRef `json:"labels"`
 	}
 	if err := json.Unmarshal(body, &details); err != nil {
 		return PullRequestHead{}, fmt.Errorf("decode pull request head: %w", err)
@@ -4462,7 +4556,38 @@ func (s *PRService) GetPullRequestHead(ctx context.Context, token, owner, repo s
 		Branch:     details.Head.Ref,
 		SHA:        details.Head.SHA,
 		BaseBranch: details.Base.Ref,
+		Labels:     githubLabelNames(details.Labels),
 	}, nil
+}
+
+// ResolvePullRequestLabels returns a pull request's current labels from the
+// GitHub API. It backs the automation label filter for webhook payloads that
+// name a PR without carrying its labels (check_suite / check_run), and is
+// called only when an automation actually filters on labels.
+func (s *PRService) ResolvePullRequestLabels(ctx context.Context, orgID, repositoryID uuid.UUID, pullRequestNumber int) ([]string, error) {
+	if s == nil || s.repos == nil || s.tokenProvider == nil {
+		return nil, fmt.Errorf("pull request label lookup is not configured")
+	}
+	if pullRequestNumber <= 0 {
+		return nil, fmt.Errorf("invalid pull request number %d", pullRequestNumber)
+	}
+	repo, err := s.repos.GetByID(ctx, orgID, repositoryID)
+	if err != nil {
+		return nil, fmt.Errorf("load repository for label lookup: %w", err)
+	}
+	owner, repoName, ok := strings.Cut(repo.FullName, "/")
+	if !ok || owner == "" || repoName == "" {
+		return nil, fmt.Errorf("malformed repository name %q", repo.FullName)
+	}
+	token, err := s.getInstallationTokenForRepo(ctx, orgID, &repo)
+	if err != nil {
+		return nil, fmt.Errorf("get installation token for label lookup: %w", err)
+	}
+	head, err := s.GetPullRequestHead(ctx, token, owner, repoName, pullRequestNumber)
+	if err != nil {
+		return nil, fmt.Errorf("get pull request labels: %w", err)
+	}
+	return head.Labels, nil
 }
 
 func (s *PRService) ListRepositoryTree(ctx context.Context, token, owner, repo, branch string) ([]models.RepositoryTreeEntry, error) {

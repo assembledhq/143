@@ -260,8 +260,13 @@ func (t AutomationTriggeredBy) Validate() error {
 type AutomationGitHubEvent string
 
 const (
-	AutomationGitHubEventPullRequestOpened               AutomationGitHubEvent = "github.pull_request.opened"
-	AutomationGitHubEventPullRequestUpdated              AutomationGitHubEvent = "github.pull_request.updated"
+	AutomationGitHubEventPullRequestOpened  AutomationGitHubEvent = "github.pull_request.opened"
+	AutomationGitHubEventPullRequestUpdated AutomationGitHubEvent = "github.pull_request.updated"
+	// AutomationGitHubEventPullRequestReadyForReview fires when a pull request
+	// becomes reviewable: GitHub's ready_for_review action (draft lifted) and
+	// non-draft opened/reopened actions, which GitHub does not follow with a
+	// separate ready_for_review delivery.
+	AutomationGitHubEventPullRequestReadyForReview       AutomationGitHubEvent = "github.pull_request.ready_for_review"
 	AutomationGitHubEventPullRequestMerged               AutomationGitHubEvent = "github.pull_request.merged"
 	AutomationGitHubEventCheckSuiteCompleted             AutomationGitHubEvent = "github.check_suite.completed"
 	AutomationGitHubEventCheckRunCompleted               AutomationGitHubEvent = "github.check_run.completed"
@@ -274,6 +279,7 @@ func (e AutomationGitHubEvent) Validate() error {
 	switch e {
 	case AutomationGitHubEventPullRequestOpened,
 		AutomationGitHubEventPullRequestUpdated,
+		AutomationGitHubEventPullRequestReadyForReview,
 		AutomationGitHubEventPullRequestMerged,
 		AutomationGitHubEventCheckSuiteCompleted,
 		AutomationGitHubEventCheckRunCompleted,
@@ -289,17 +295,19 @@ func (e AutomationGitHubEvent) Validate() error {
 type AutomationProductTrigger string
 
 const (
-	AutomationProductTriggerPROpened        AutomationProductTrigger = "github.pr.opened"
-	AutomationProductTriggerPRUpdated       AutomationProductTrigger = "github.pr.updated"
-	AutomationProductTriggerPRFeedback      AutomationProductTrigger = "github.pr.feedback"
-	AutomationProductTriggerChecksCompleted AutomationProductTrigger = "github.checks.completed"
-	AutomationProductTriggerPRMerged        AutomationProductTrigger = "github.pr.merged"
+	AutomationProductTriggerPROpened         AutomationProductTrigger = "github.pr.opened"
+	AutomationProductTriggerPRUpdated        AutomationProductTrigger = "github.pr.updated"
+	AutomationProductTriggerPRReadyForReview AutomationProductTrigger = "github.pr.ready_for_review"
+	AutomationProductTriggerPRFeedback       AutomationProductTrigger = "github.pr.feedback"
+	AutomationProductTriggerChecksCompleted  AutomationProductTrigger = "github.checks.completed"
+	AutomationProductTriggerPRMerged         AutomationProductTrigger = "github.pr.merged"
 )
 
 func (t AutomationProductTrigger) Validate() error {
 	switch t {
 	case AutomationProductTriggerPROpened,
 		AutomationProductTriggerPRUpdated,
+		AutomationProductTriggerPRReadyForReview,
 		AutomationProductTriggerPRFeedback,
 		AutomationProductTriggerChecksCompleted,
 		AutomationProductTriggerPRMerged:
@@ -310,9 +318,15 @@ func (t AutomationProductTrigger) Validate() error {
 }
 
 type AutomationGitHubEventFilters struct {
-	BaseBranches  []string `json:"base_branches,omitempty"`
-	Authors       []string `json:"authors,omitempty"`
-	Paths         []string `json:"paths,omitempty"`
+	BaseBranches []string `json:"base_branches,omitempty"`
+	Authors      []string `json:"authors,omitempty"`
+	Paths        []string `json:"paths,omitempty"`
+	// Labels matches the pull request's GitHub labels. An event passes when the
+	// PR carries at least one of the configured labels (case-insensitive).
+	// Unlike the other filters this one is strict: an event whose labels could
+	// not be determined is filtered out rather than allowed through, so a
+	// "frontend"-scoped automation never fires on an unlabelled PR.
+	Labels        []string `json:"labels,omitempty"`
 	FeedbackTypes []string `json:"feedback_types,omitempty"`
 	ReviewStates  []string `json:"review_states,omitempty"`
 }

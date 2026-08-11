@@ -53,6 +53,9 @@ func (r *webhookAutomationEventRecorder) TriggerGitHubEvent(_ context.Context, r
 	return nil
 }
 
+func (r *webhookAutomationEventRecorder) RememberKnownLabels(_ automationevents.GitHubEventTriggerRequest) {
+}
+
 func computeTestSignature(secret string, payload []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(payload)
@@ -608,7 +611,9 @@ func TestWebhook_HandlePullRequestScopesLookupToActiveOwner(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rr.Code, "pull request webhook should be acknowledged")
 	require.Contains(t, rr.Body.String(), "processed", "pull request webhook should be processed")
-	require.Len(t, triggerRecorder.calls, 1, "pull request webhook should trigger one automation event")
+	require.Len(t, triggerRecorder.calls, 2, "a non-draft opened PR should trigger both the opened and ready-for-review automation events")
+	require.Equal(t, models.AutomationGitHubEventPullRequestOpened, triggerRecorder.calls[0].Event, "first automation event should be PR opened")
+	require.Equal(t, models.AutomationGitHubEventPullRequestReadyForReview, triggerRecorder.calls[1].Event, "second automation event should be PR ready for review")
 	require.Equal(t, "delivery-123", triggerRecorder.calls[0].ProviderEventID, "webhook handler should forward the GitHub delivery id")
 	require.NoError(t, mock.ExpectationsWereMet(), "webhook should scope pull request lookup to the active owner org")
 }
