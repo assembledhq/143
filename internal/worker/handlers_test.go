@@ -12052,6 +12052,46 @@ func TestContinueSessionHandler_StopsCapacityRetryAfterTerminalOrCancel(t *testi
 	}
 }
 
+func TestContinueSessionHandler_StopsCapacityWaitedThreadBeforeContinuationWork(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID, sessionID, threadID, issueID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	sessionRow := workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)
+	requestedAt := time.Now().Add(-time.Minute)
+	threadRow := workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)
+	threadRow[26] = &requestedAt
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM session_cancel_requests.*delivered_at IS NULL`).
+		WithArgs(orgID, sessionID).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(threadRow...))
+	mock.ExpectExec("UPDATE session_threads SET status = @status").
+		WithArgs(models.ThreadStatusCancelled, threadID, orgID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	orch := &orchestratorServiceStub{}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+	handlerCtx := jobctx.WithJobRetryWindowStartedAt(context.Background(), time.Now().Add(-2*time.Minute))
+
+	err := handler(handlerCtx, "continue_session", payload)
+	require.NoError(t, err, "a cancelled thread that waited for capacity should stop cleanly before continuation work")
+	require.Equal(t, 0, orch.continueSessionCalls, "cancelled capacity-waited work must not reach the orchestrator")
+	require.NoError(t, mock.ExpectationsWereMet(), "pre-work cancellation should use tenant-scoped durable state and finalize the thread")
+}
+
 func TestContinueSessionHandler_PinsWrongNodeRetryToSandboxOwner(t *testing.T) {
 	t.Parallel()
 
