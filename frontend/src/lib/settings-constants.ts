@@ -6,8 +6,6 @@
  * - `DefaultMaxConcurrentRuns` / `OrgSize.MaxConcurrentRuns()` — the UI
  *   max mirrors the Enterprise tier's recommendation; any int is accepted
  *   by the server, so the UI cap is purely for sanity.
- * - `DefaultCodeReviewMaxConcurrentTurns` and its min/max constants mirror
- *   the code-review-specific server admission bounds.
  * - `MinMaxSessionDurationSeconds` / `MaxMaxSessionDurationSeconds` are
  *   enforced by `ParseOrgSettings`, which clamps on save. These mirror
  *   those bounds so the number input matches server clamping.
@@ -15,9 +13,6 @@
 
 export const MIN_CONCURRENT_RUNS = 1;
 export const MAX_CONCURRENT_RUNS = 25;
-export const DEFAULT_CODE_REVIEW_MAX_CONCURRENT_TURNS = 10;
-export const MIN_CODE_REVIEW_MAX_CONCURRENT_TURNS = 1;
-export const MAX_CODE_REVIEW_MAX_CONCURRENT_TURNS = 25;
 
 export function defaultMaxConcurrentRunsForOrgSize(
   orgSize?: "small" | "medium" | "large" | "enterprise",

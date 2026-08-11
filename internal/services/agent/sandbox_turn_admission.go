@@ -12,15 +12,15 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// ErrSandboxTurnConcurrency is returned when a workload-specific org limit is
-// full. It is distinct from worker-local ErrSandboxCapacity so callers do not
-// pointlessly move an affinity-bound turn to another node.
+// ErrSandboxTurnConcurrency is returned when the shared organization turn
+// limit is full. It is distinct from worker-local ErrSandboxCapacity so
+// callers do not pointlessly move an affinity-bound turn to another node.
 var ErrSandboxTurnConcurrency = errors.New("sandbox turn concurrency limit reached")
 
 const sandboxRoutingCleanupTimeout = 5 * time.Second
 
 type activeSandboxTurnCounter interface {
-	CountActiveSandboxTurnsByOrgAndClass(ctx context.Context, orgID uuid.UUID, workloadClass models.SandboxWorkloadClass) (int, error)
+	CountActiveSandboxTurnsByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
 }
 
 type sandboxSlotReservationReleaser interface {
@@ -32,33 +32,27 @@ type sandboxRoutingPlacementReleaser interface {
 }
 
 // admitSandboxTurn is the shared admission boundary for RunAgent and
-// ContinueSession. It applies workload-specific org policy first, then reserves
-// local capacity only when the turn needs a fresh sandbox. Existing-sandbox
-// continuations still pass org admission but do not consume another local slot.
+// ContinueSession. Every workload draws from the same organization turn limit;
+// workload class only affects worker placement and reserved interactive
+// capacity. Existing-sandbox continuations still pass org admission but do not
+// consume another local slot.
 func (o *Orchestrator) admitSandboxTurn(
 	ctx context.Context,
 	session *models.Session,
 	purpose string,
 	needsFreshSandbox bool,
-	excludeCurrentInteractiveSession bool,
+	excludeCurrentRunningSession bool,
 ) (*SandboxCapacityReservation, error) {
 	if session == nil {
 		return nil, fmt.Errorf("admit sandbox turn: session is nil")
 	}
 	workloadClass := models.SandboxWorkloadClassForSession(session)
-	switch workloadClass {
-	case models.SandboxWorkloadClassInteractive:
-		if err := o.checkInteractiveTurnConcurrency(ctx, session.OrgID, excludeCurrentInteractiveSession); err != nil {
-			o.releaseRejectedSandboxRoutingPlacement(ctx, o.logger)
-			return nil, err
-		}
-	case models.SandboxWorkloadClassCodeReview:
-		if err := o.checkCodeReviewTurnConcurrency(ctx, session.OrgID); err != nil {
-			o.releaseRejectedSandboxRoutingPlacement(ctx, o.logger)
-			return nil, err
-		}
-	default:
-		return nil, fmt.Errorf("admit sandbox turn: %w", workloadClass.Validate())
+	if err := workloadClass.Validate(); err != nil {
+		return nil, fmt.Errorf("admit sandbox turn: %w", err)
+	}
+	if err := o.checkSharedTurnConcurrency(ctx, session.OrgID, excludeCurrentRunningSession); err != nil {
+		o.releaseRejectedSandboxRoutingPlacement(ctx, o.logger)
+		return nil, err
 	}
 
 	if !needsFreshSandbox || o.sandboxCapacity == nil {
@@ -77,36 +71,29 @@ func (o *Orchestrator) admitSandboxTurn(
 	return reservation, nil
 }
 
-func (o *Orchestrator) checkInteractiveTurnConcurrency(ctx context.Context, orgID uuid.UUID, excludeCurrentRunning bool) error {
-	return o.checkConcurrency(ctx, orgID, excludeCurrentRunning)
-}
-
-func (o *Orchestrator) checkCodeReviewTurnConcurrency(ctx context.Context, orgID uuid.UUID) error {
+func (o *Orchestrator) checkSharedTurnConcurrency(ctx context.Context, orgID uuid.UUID, excludeCurrentRunning bool) error {
 	if o.orgs == nil {
-		o.logger.Warn().Str("org_id", orgID.String()).Msg("code-review turn admission skipped because organization store is unavailable")
-		return nil
+		return o.checkConcurrency(ctx, orgID, excludeCurrentRunning)
 	}
 	counter, ok := o.jobs.(activeSandboxTurnCounter)
 	if !ok {
-		o.logger.Warn().Str("org_id", orgID.String()).Msg("code-review turn admission skipped because active-turn counter is unavailable")
-		return nil
+		return o.checkConcurrency(ctx, orgID, excludeCurrentRunning)
 	}
 	org, err := o.orgs.GetByID(ctx, orgID)
 	if err != nil {
-		return fmt.Errorf("load org settings for code-review turn admission: %w", err)
+		return fmt.Errorf("load org settings for shared turn admission: %w", err)
 	}
 	settings, err := models.ParseOrgSettings(org.Settings)
 	if err != nil {
-		return fmt.Errorf("parse org settings for code-review turn admission: %w", err)
+		return fmt.Errorf("parse org settings for shared turn admission: %w", err)
 	}
-	active, err := counter.CountActiveSandboxTurnsByOrgAndClass(ctx, orgID, models.SandboxWorkloadClassCodeReview)
+	active, err := counter.CountActiveSandboxTurnsByOrg(ctx, orgID)
 	if err != nil {
 		return err
 	}
-	// The worker has already claimed the current job, so it is included in the
-	// count. Equality is allowed; only the first turn beyond the limit waits.
-	if active > settings.CodeReviewMaxConcurrentTurns {
-		return fmt.Errorf("%w: %d/%d code-review turns active", ErrSandboxTurnConcurrency, active, settings.CodeReviewMaxConcurrentTurns)
+	_, currentJobIncluded := jobctx.JobIDFromContext(ctx)
+	if active > settings.MaxConcurrentRuns || (!currentJobIncluded && active >= settings.MaxConcurrentRuns) {
+		return fmt.Errorf("%w: %d/%d agent turns active", ErrSandboxTurnConcurrency, active, settings.MaxConcurrentRuns)
 	}
 	return nil
 }

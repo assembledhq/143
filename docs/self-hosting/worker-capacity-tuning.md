@@ -89,8 +89,8 @@ Per-sandbox defaults are intentionally consistent across buckets unless you expl
 - `SANDBOX_MEMORY_LIMIT_MB=3072`
 - `SANDBOX_DISK_LIMIT_GB=10`
 
-`max_concurrent_runs` and `code_review_max_concurrent_turns` are separate
-org-level execution policies in app settings, not host-capacity bucket knobs.
+`max_concurrent_runs` is the shared org-level execution policy for interactive
+and code-review turns in app settings; it is not a host-capacity bucket knob.
 `WORKER_INTERACTIVE_RESERVED_SANDBOXES` (default `1`) keeps that many slots per
 worker unavailable to code-review work, while interactive work may use the full
 host cap. Capacity-aware routing reserves an available worker immediately and

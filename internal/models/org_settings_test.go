@@ -15,7 +15,6 @@ func TestParseOrgSettings_Defaults(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, DefaultMaxConcurrentRuns, s.MaxConcurrentRuns, "should default max_concurrent_runs")
-	require.Equal(t, DefaultMaxConcurrentRuns, s.CodeReviewMaxConcurrentTurns, "code-review concurrency should default no higher than the org run limit")
 	require.Equal(t, DefaultWeightCustomerImpact, s.PriorityWeights.CustomerImpact, "should default customer_impact weight")
 	require.Equal(t, DefaultWeightSeverity, s.PriorityWeights.Severity, "should default severity weight")
 	require.Equal(t, DefaultWeightRecency, s.PriorityWeights.Recency, "should default recency weight")
@@ -87,33 +86,6 @@ func TestParseOrgSettings_EmptyJSON(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, DefaultMaxConcurrentRuns, s.MaxConcurrentRuns, "should default max_concurrent_runs for empty JSON")
-	require.Equal(t, DefaultMaxConcurrentRuns, s.CodeReviewMaxConcurrentTurns, "empty settings should derive the code-review limit from the org run limit")
-}
-
-func TestParseOrgSettings_CodeReviewMaxConcurrentTurns(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		raw      json.RawMessage
-		expected int
-	}{
-		{name: "defaults below org limit", raw: json.RawMessage(`{"max_concurrent_runs":25}`), expected: DefaultCodeReviewMaxConcurrentTurns},
-		{name: "defaults to smaller org limit", raw: json.RawMessage(`{"max_concurrent_runs":4}`), expected: 4},
-		{name: "keeps explicit value", raw: json.RawMessage(`{"max_concurrent_runs":25,"code_review_max_concurrent_turns":7}`), expected: 7},
-		{name: "clamps below minimum", raw: json.RawMessage(`{"code_review_max_concurrent_turns":-2}`), expected: MinCodeReviewMaxConcurrentTurns},
-		{name: "clamps above maximum", raw: json.RawMessage(`{"code_review_max_concurrent_turns":99}`), expected: MaxCodeReviewMaxConcurrentTurns},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			settings, err := ParseOrgSettings(tt.raw)
-			require.NoError(t, err, "code-review concurrency settings should parse")
-			require.Equal(t, tt.expected, settings.CodeReviewMaxConcurrentTurns, "code-review concurrency should use the expected bounded value")
-		})
-	}
 }
 
 func TestParseOrgSettings_DefaultWorkRepositoryID(t *testing.T) {

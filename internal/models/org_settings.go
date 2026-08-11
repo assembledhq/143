@@ -223,11 +223,7 @@ func (p PRAuthorship) Validate() error {
 
 // OrgSettings is the strongly-typed representation of organizations.settings JSONB.
 type OrgSettings struct {
-	MaxConcurrentRuns int `json:"max_concurrent_runs"`
-	// CodeReviewMaxConcurrentTurns limits active reviewer/orchestrator agent
-	// turns independently from interactive sessions. Zero defaults to the
-	// smaller of MaxConcurrentRuns and DefaultCodeReviewMaxConcurrentTurns.
-	CodeReviewMaxConcurrentTurns int                           `json:"code_review_max_concurrent_turns,omitempty"`
+	MaxConcurrentRuns            int                           `json:"max_concurrent_runs"`
 	PriorityWeights              PriorityWeights               `json:"priority_weights"`
 	ProductContext               *ProductContext               `json:"product_context,omitempty"`
 	LLMModel                     string                        `json:"llm_model"`
@@ -687,13 +683,10 @@ const (
 	// no size-derived value. Kept deliberately low so a freshly created org
 	// (and, on an open-signup deployment, an anonymous one) cannot saturate
 	// shared capacity; admins raise it per-org in settings for trusted teams.
-	DefaultMaxConcurrentRuns                      = 3
-	DefaultCodeReviewMaxConcurrentTurns           = 10
-	MinCodeReviewMaxConcurrentTurns               = 1
-	MaxCodeReviewMaxConcurrentTurns               = 25
-	DefaultDefaultAgentType             AgentType = AgentTypeCodex
-	DefaultAuditRetentionDays                     = 90
-	DefaultOrgSize                      OrgSize   = OrgSizeMedium
+	DefaultMaxConcurrentRuns            = 3
+	DefaultDefaultAgentType   AgentType = AgentTypeCodex
+	DefaultAuditRetentionDays           = 90
+	DefaultOrgSize            OrgSize   = OrgSizeMedium
 
 	DefaultWeightCustomerImpact = 0.35
 	DefaultWeightSeverity       = 0.25
@@ -835,13 +828,6 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 
 	if s.MaxConcurrentRuns == 0 {
 		s.MaxConcurrentRuns = effectiveSize.MaxConcurrentRuns()
-	}
-	if s.CodeReviewMaxConcurrentTurns == 0 {
-		s.CodeReviewMaxConcurrentTurns = min(s.MaxConcurrentRuns, DefaultCodeReviewMaxConcurrentTurns)
-	} else if s.CodeReviewMaxConcurrentTurns < MinCodeReviewMaxConcurrentTurns {
-		s.CodeReviewMaxConcurrentTurns = MinCodeReviewMaxConcurrentTurns
-	} else if s.CodeReviewMaxConcurrentTurns > MaxCodeReviewMaxConcurrentTurns {
-		s.CodeReviewMaxConcurrentTurns = MaxCodeReviewMaxConcurrentTurns
 	}
 	if s.PriorityWeights == (PriorityWeights{}) {
 		s.PriorityWeights = PriorityWeights{

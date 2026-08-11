@@ -449,12 +449,6 @@ func (m *mockSessionStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUI
 	return m.countRunning, m.countRunningErr
 }
 
-func (m *mockSessionStore) CountRunningInteractiveByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.countRunning, m.countRunningErr
-}
-
 func (m *mockSessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

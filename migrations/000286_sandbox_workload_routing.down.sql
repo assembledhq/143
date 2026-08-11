@@ -1,4 +1,4 @@
-DROP INDEX IF EXISTS idx_jobs_active_workload;
+DROP INDEX IF EXISTS idx_jobs_active_sandbox_turns;
 DROP INDEX IF EXISTS idx_jobs_sandbox_routing;
 
 ALTER TABLE jobs DROP CONSTRAINT IF EXISTS chk_jobs_workload_class;

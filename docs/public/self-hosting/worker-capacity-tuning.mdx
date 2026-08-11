@@ -38,11 +38,10 @@ there immediately. The 10-second retry delay is used only when the fleet is
 actually full; organization-limit and routing-contention retries follow their
 own shorter paths.
 
-Code-review reviewer and orchestrator turns have a separate organization limit,
-configured as **Concurrent code-review turns** under **Settings → Runtime →
-Capacity**. This protects an organization from an unbounded review fan-out;
-`WORKER_INTERACTIVE_RESERVED_SANDBOXES` separately protects interactive work on
-each host.
+Interactive and code-review turns share the **Concurrent agent runs**
+organization limit under **Settings → Runtime → Capacity**.
+`WORKER_INTERACTIVE_RESERVED_SANDBOXES` separately keeps background review work
+from consuming every sandbox slot on an individual host.
 
 ## Warning signs
 
