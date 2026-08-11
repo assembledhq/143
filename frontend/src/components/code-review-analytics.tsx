@@ -152,7 +152,11 @@ function MetricCard({
 // review activity only and answer a different question.
 function ApprovalOutcomeCards({ summary }: { summary: CodeReviewAnalytics["summary"] }) {
   return (
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Approval outcomes">
+    <div
+      className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"
+      role="region"
+      aria-label="Approval outcomes"
+    >
       <MetricCard
         label="PRs reviewed"
         value={summary.prs_reviewed.toLocaleString()}

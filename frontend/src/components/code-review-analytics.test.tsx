@@ -73,7 +73,7 @@ describe("CodeReviewAnalyticsReport PR cohort states", () => {
     analytics.summary.median_rounds_to_approval = 2;
     renderReport(analytics);
 
-    const outcomes = screen.getByLabelText("Approval outcomes");
+    const outcomes = screen.getByRole("region", { name: "Approval outcomes" });
     expect(within(outcomes).queryByText("First sent to 143 in this period")).not.toBeInTheDocument();
     expect(within(outcomes).queryByText("50% of PRs reviewed")).not.toBeInTheDocument();
     expect(within(outcomes).queryByText("Approved PRs only")).not.toBeInTheDocument();
