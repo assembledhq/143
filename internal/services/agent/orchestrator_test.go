@@ -1865,7 +1865,9 @@ func TestRunAgent_RateLimitRetriesWithFallbackCredential(t *testing.T) {
 
 	firstCredID := uuid.New()
 	secondCredID := uuid.New()
-	resetAt := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC)
+	// The reset must be in the future: PickRunnableMulti only excludes a shed
+	// credential while its rate limit has not yet expired.
+	resetAt := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
 	d := defaultDeps()
 	d.adapter = &mockAgentAdapter{name: models.AgentTypeAmp}
 	codingCreds := &mockCodingCredentialProvider{
