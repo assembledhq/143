@@ -118,7 +118,7 @@ describe("CodeReviewAnalyticsReport PR cohort states", () => {
 
     const authorUsage = screen.getByText("Usage by PR author");
     const approvalByRound = screen.getByText("Approval by round");
-    expect(outcomes.compareDocumentPosition(authorUsage) & Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(authorUsage.compareDocumentPosition(outcomes) & Node.DOCUMENT_POSITION_FOLLOWING)
       .toBeTruthy();
     expect(authorUsage.compareDocumentPosition(approvalByRound) & Node.DOCUMENT_POSITION_FOLLOWING)
       .toBeTruthy();
