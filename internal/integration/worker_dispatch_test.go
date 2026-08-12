@@ -129,6 +129,48 @@ func TestIntegration_CodeReviewJobsUseFleetCapacityAndPreserveInteractiveReserve
 	}
 }
 
+// A worker that advertises capacity but cannot currently measure its live
+// sandbox count is not a legacy worker. Routing must wait for healthy telemetry
+// instead of bypassing capacity controls through the compatibility fallback.
+//
+// This test cannot run in parallel because the integration suite shares one
+// database and setup truncates queue state between tests.
+func TestIntegration_ConfiguredWorkerWithLiveCountErrorDefersSandboxRouting(t *testing.T) {
+	pool := setup(t)
+	ctx := context.Background()
+	orgID := seedOrg(t, pool)
+	session := seedSession(t, pool, orgID, sessionOpts{Status: models.SessionStatusPending})
+
+	nodeID := "unhealthy-count-worker-" + orgID.String()[:8]
+	seedWorkerNode(t, pool, nodeID)
+	setWorkerSandboxCapacity(t, pool, nodeID, 2)
+	_, err := pool.Exec(ctx, `
+		UPDATE nodes
+		SET metadata = metadata || jsonb_build_object(
+			'live_sandbox_count_error', 'container runtime unavailable'
+		)
+		WHERE id = $1`, nodeID)
+	require.NoError(t, err, "worker should advertise a temporary live-count failure")
+
+	store := db.NewJobStore(pool)
+	jobID, err := store.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue:         "agent",
+		JobType:       "run_agent",
+		Payload:       map[string]string{"session_id": session.ID.String(), "org_id": orgID.String()},
+		Priority:      5,
+		WorkloadClass: models.SandboxWorkloadClassInteractive,
+	})
+	require.NoError(t, err, "interactive sandbox job should enqueue")
+
+	result, err := store.RouteNextSandboxJob(ctx)
+	require.NoError(t, err, "routing should safely handle unhealthy live-count telemetry")
+	require.NotNil(t, result, "routing should report its capacity decision")
+	require.Equal(t, jobID, result.JobID, "routing should evaluate the queued sandbox job")
+	require.Equal(t, db.SandboxRoutingReasonFleetCapacity, result.Reason, "configured but unhealthy capacity metadata should be treated as temporarily unavailable capacity")
+	require.True(t, result.Deferred, "routing should defer until a trustworthy live count is available")
+	require.Nil(t, result.TargetNodeID, "routing should not pin work through the compatibility fallback")
+}
+
 // TestIntegration_WorkerDispatch_PicksUpAndCallsHandler closes the loop on
 // the queue → worker → handler seam. The session-side tests upstream prove
 // that pushing/creating/retrying/ending writes the right job row; this test

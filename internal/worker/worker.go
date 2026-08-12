@@ -386,11 +386,15 @@ func ensureRetryWindowStartedAt(ctx context.Context, store retryWindowLeaseStore
 	if job == nil {
 		return time.Time{}, false, errors.New("ensure retry window start: job is nil")
 	}
-	if retryable == nil || retryable.MaxRetryDuration == nil || retryable.BypassMaxRetryDuration {
-		return job.CreatedAt, true, nil
-	}
+	// Routing may have started a fleet-specific retry window after clearing an
+	// older organization-capacity wait. Always prefer that durable marker over
+	// the job's creation time, including for ordinary retryable errors that use
+	// the default maximum duration.
 	if job.RetryWindowStartedAt != nil {
 		return *job.RetryWindowStartedAt, true, nil
+	}
+	if retryable == nil || retryable.MaxRetryDuration == nil || retryable.BypassMaxRetryDuration {
+		return job.CreatedAt, true, nil
 	}
 	if job.LockToken == nil {
 		return time.Time{}, false, errors.New("ensure retry window start: job lock token is nil")
