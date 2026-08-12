@@ -976,6 +976,12 @@ func (s *SessionThreadStore) publishThreadRuntimeByID(ctx context.Context, orgID
 	s.publishThreadRuntime(ctx, thread)
 }
 
+// PublishRuntimeUpdate emits the thread status written by a transaction owned
+// by another session-domain store after that transaction commits.
+func (s *SessionThreadStore) PublishRuntimeUpdate(ctx context.Context, orgID, threadID uuid.UUID) {
+	s.publishThreadRuntimeByID(ctx, orgID, threadID)
+}
+
 func (s *SessionThreadStore) publishThreadRuntime(ctx context.Context, thread models.SessionThread) {
 	if s.streams == nil {
 		return
