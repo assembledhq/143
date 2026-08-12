@@ -4,8 +4,11 @@
 -- process-local counters alone.
 CREATE TABLE sandbox_capacity_reservations ( -- lint:no-org-id reason="ephemeral fleet capacity leases are worker-scoped and may represent work from any organization"
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    node_id text NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
-    job_id uuid REFERENCES jobs(id) ON DELETE CASCADE,
+    -- Runtime leases intentionally avoid parent FKs: creating them during a
+    -- rolling deploy would lock the hot nodes/jobs tables, while orphaned
+    -- leases are harmless after expires_at and are cleaned on admission.
+    node_id text NOT NULL,
+    job_id uuid,
     workload_class text NOT NULL,
     expires_at timestamptz NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),

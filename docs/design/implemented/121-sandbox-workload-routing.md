@@ -50,9 +50,10 @@ timeout as the rollout-safe fallback.
 Migration `000288_shared_sandbox_capacity_reservations` adds the ephemeral,
 worker-scoped `sandbox_capacity_reservations` table for final-admission leases
 shared by every process using the same Docker host. These leases are not
-tenant-owned data and therefore intentionally have no `org_id`. Foreign keys
-to `nodes` and `jobs` remove leases when their worker or job is deleted, while
-`expires_at` bounds leases left by a crashed process. A partial unique index
+tenant-owned data and therefore intentionally have no `org_id`. As ephemeral
+runtime state, they avoid foreign keys to the hot `nodes` and `jobs` tables so
+the rollout does not lock queue writes; `expires_at` bounds their admission
+effect and worker-local cleanup removes expired rows. A partial unique index
 ensures at most one final-admission lease exists for a job.
 
 ## API contract
@@ -158,9 +159,10 @@ pending durable reservations as additional load, but overlaps running durable
 reservations with the heartbeat's sandbox-turn reservation subtype using the
 larger count. Non-turn local reservations, such as preview startup, remain
 additive. It also counts unexpired shared final-admission leases, deduplicated
-against durable reservations for the same job. This prevents one admitted turn
-from appearing as both a local and a durable reservation while preserving
-independent capacity consumers.
+against durable reservations for the same job and overlapped with the matching
+heartbeat reservation subtype. This prevents one admitted turn or preview from
+appearing twice while preserving independent capacity consumers running in
+other processes.
 
 Durable routing reservations expire after 30 seconds, bridging the heartbeat
 interval without permanently pinning work if a dispatcher dies. At final
