@@ -771,7 +771,7 @@ func TestWorker_Start_WakeTriggersPoll(t *testing.T) {
 	}
 }
 
-func TestWorkerPollBoundsRoutingBeforeNormalClaim(t *testing.T) {
+func TestWorkerPollContinuesRoutingAfterOrgCapacityDeferral(t *testing.T) {
 	t.Parallel()
 
 	store := &routingTestStore{results: []*db.SandboxRoutingResult{
@@ -781,6 +781,7 @@ func TestWorkerPollBoundsRoutingBeforeNormalClaim(t *testing.T) {
 			Deferred:      true,
 			Reason:        db.SandboxRoutingReasonOrgLimit,
 		},
+		nil,
 	}}
 	w := &Worker{
 		jobs:          store,
@@ -793,8 +794,35 @@ func TestWorkerPollBoundsRoutingBeforeNormalClaim(t *testing.T) {
 
 	w.poll(context.Background())
 
-	require.Equal(t, int32(1), store.calls.Load(), "each poll should perform at most one routing transaction before normal queue work")
-	require.Equal(t, int32(1), store.claims.Load(), "the worker should attempt a normal claim immediately after a capacity deferral")
+	require.Equal(t, int32(2), store.calls.Load(), "an organization-limited job should move aside so another tenant can be routed")
+	require.Equal(t, int32(1), store.claims.Load(), "the worker should still attempt a normal claim after bounded routing work")
+}
+
+func TestWorkerPollStopsRoutingAfterFleetCapacityDeferral(t *testing.T) {
+	t.Parallel()
+
+	store := &routingTestStore{results: []*db.SandboxRoutingResult{
+		{
+			JobID:         uuid.New(),
+			WorkloadClass: models.SandboxWorkloadClassCodeReview,
+			Deferred:      true,
+			Reason:        db.SandboxRoutingReasonFleetCapacity,
+		},
+		nil,
+	}}
+	w := &Worker{
+		jobs:          store,
+		sandboxRouter: store,
+		logger:        zerolog.Nop(),
+		nodeID:        "test-node",
+		handlers:      map[string]JobHandler{},
+		leaseDuration: defaultLeaseDuration,
+	}
+
+	w.poll(context.Background())
+
+	require.Equal(t, int32(1), store.calls.Load(), "fleet saturation should stop the routing batch after one decision")
+	require.Equal(t, int32(1), store.claims.Load(), "the worker should give unrelated queue work a claim opportunity after fleet saturation")
 }
 
 func TestWorkerPollDoesNotRepublishRoutingNotification(t *testing.T) {
