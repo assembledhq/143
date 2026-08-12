@@ -44,8 +44,9 @@ import (
 )
 
 const (
-	sandboxCapacityRetryDelay = 10 * time.Second
-	sandboxOrgLimitRetryDelay = 5 * time.Second
+	sandboxCapacityRetryDelay        = 10 * time.Second
+	sandboxAlternateWorkerRetryDelay = time.Second
+	sandboxOrgLimitRetryDelay        = 5 * time.Second
 )
 const previewCapacityRetryDelay = 5 * time.Second
 const previewStartupInterruptedRetryDelay = 2 * time.Second
@@ -167,8 +168,12 @@ func sandboxTurnCapacityRetryTarget(ctx context.Context, stores *Stores, logger 
 			Str("target_node_id", *result.TargetNodeID).
 			Str("excluded_node_id", excludeNodeID).
 			Str("routing_reason", string(result.Reason)).
-			Msg("immediately routing sandbox capacity retry to reserved worker slot")
-		return result.TargetNodeID, false, 0
+			Msg("quickly routing sandbox capacity retry to reserved worker slot")
+		// The reservation makes the handoff atomic, but worker heartbeat load can
+		// lag the authoritative local capacity gate. A small delay prevents a job
+		// from hot-looping between workers while that metadata converges, while
+		// remaining well below the full-fleet backoff.
+		return result.TargetNodeID, false, sandboxAlternateWorkerRetryDelay
 	}
 	logger.Info().
 		Str("excluded_node_id", excludeNodeID).
@@ -9891,7 +9896,14 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Str("session_id", sessionID.String()).
 					Err(err).
 					Msg("local sandbox capacity reached; retrying continue_session")
-				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: targetNodeID, ClearTargetNodeID: clearTargetNodeID}
+				capacityRetryWindow := maxRetryableDuration
+				return &RetryableError{
+					Err:               err,
+					RetryAfter:        &retryAfter,
+					MaxRetryDuration:  &capacityRetryWindow,
+					TargetNodeID:      targetNodeID,
+					ClearTargetNodeID: clearTargetNodeID,
+				}
 			}
 			// A pending post-PR snapshot upload is a transient state — wrap
 			// in RetryableError so the job is requeued without consuming an

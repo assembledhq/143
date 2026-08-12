@@ -804,6 +804,33 @@ func TestWorkerPollStopsRoutingAfterFleetCapacityDeferral(t *testing.T) {
 	store := &routingTestStore{results: []*db.SandboxRoutingResult{
 		{
 			JobID:         uuid.New(),
+			WorkloadClass: models.SandboxWorkloadClassInteractive,
+			Deferred:      true,
+			Reason:        db.SandboxRoutingReasonFleetCapacity,
+		},
+		nil,
+	}}
+	w := &Worker{
+		jobs:          store,
+		sandboxRouter: store,
+		logger:        zerolog.Nop(),
+		nodeID:        "test-node",
+		handlers:      map[string]JobHandler{},
+		leaseDuration: defaultLeaseDuration,
+	}
+
+	w.poll(context.Background())
+
+	require.Equal(t, int32(1), store.calls.Load(), "interactive fleet saturation should stop the routing batch after one decision")
+	require.Equal(t, int32(1), store.claims.Load(), "the worker should give unrelated queue work a claim opportunity after fleet saturation")
+}
+
+func TestWorkerPollContinuesRoutingAfterCodeReviewCapacityDeferral(t *testing.T) {
+	t.Parallel()
+
+	store := &routingTestStore{results: []*db.SandboxRoutingResult{
+		{
+			JobID:         uuid.New(),
 			WorkloadClass: models.SandboxWorkloadClassCodeReview,
 			Deferred:      true,
 			Reason:        db.SandboxRoutingReasonFleetCapacity,
@@ -821,8 +848,8 @@ func TestWorkerPollStopsRoutingAfterFleetCapacityDeferral(t *testing.T) {
 
 	w.poll(context.Background())
 
-	require.Equal(t, int32(1), store.calls.Load(), "fleet saturation should stop the routing batch after one decision")
-	require.Equal(t, int32(1), store.claims.Load(), "the worker should give unrelated queue work a claim opportunity after fleet saturation")
+	require.Equal(t, int32(2), store.calls.Load(), "review-only saturation should keep scanning for work that can use interactive-reserved capacity")
+	require.Equal(t, int32(1), store.claims.Load(), "the worker should still attempt a normal claim after the bounded routing pass")
 }
 
 func TestWorkerPollDoesNotRepublishRoutingNotification(t *testing.T) {

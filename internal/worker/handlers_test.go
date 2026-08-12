@@ -10786,7 +10786,7 @@ func TestRunAgentHandler_SandboxCapacityRetries(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestSandboxTurnCapacityRetryTargetImmediatelyReservesAlternateWorker(t *testing.T) {
+func TestSandboxTurnCapacityRetryTargetQuicklyReservesAlternateWorker(t *testing.T) {
 	t.Parallel()
 
 	stores, mock := newTestStores(t)
@@ -10824,8 +10824,9 @@ func TestSandboxTurnCapacityRetryTargetImmediatelyReservesAlternateWorker(t *tes
 	require.NotNil(t, targetNodeID, "capacity retry should return the atomically reserved alternate worker")
 	require.Equal(t, "worker-with-space", *targetNodeID, "capacity retry should exclude the full worker")
 	require.False(t, clearTargetNodeID, "capacity retry should preserve the new target reservation")
-	require.Equal(t, time.Duration(0), retryAfter, "capacity retry should reroute immediately when another worker has capacity")
-	require.NoError(t, mock.ExpectationsWereMet(), "alternate selection and reservation should commit before the immediate retry")
+	require.Equal(t, sandboxAlternateWorkerRetryDelay, retryAfter, "capacity retry should use the short alternate-worker handoff delay")
+	require.Less(t, retryAfter, sandboxCapacityRetryDelay, "alternate-worker handoff should remain faster than a full-fleet retry")
+	require.NoError(t, mock.ExpectationsWereMet(), "alternate selection and reservation should commit before the quick retry")
 }
 
 func TestSandboxTurnCapacityRetryTargetClearsPinWhenFencingTokenIsMissing(t *testing.T) {
@@ -12356,6 +12357,8 @@ func TestContinueSessionHandler_SandboxCapacityRetries(t *testing.T) {
 	require.ErrorAs(t, err, &retryable, "ErrSandboxCapacity must be wrapped as RetryableError so the attempt counter is not consumed")
 	require.NotNil(t, retryable.RetryAfter, "sandbox capacity retries should use a fixed short delay")
 	require.Equal(t, 10*time.Second, *retryable.RetryAfter, "sandbox capacity retries should wait briefly before checking the local host again")
+	require.NotNil(t, retryable.MaxRetryDuration, "continuation capacity retries should use the durable fleet-wait window")
+	require.Equal(t, maxRetryableDuration, *retryable.MaxRetryDuration, "continuation capacity retries should preserve the bounded fleet-wait deadline")
 	require.ErrorIs(t, retryable.Err, agent.ErrSandboxCapacity, "the wrapped error must preserve the ErrSandboxCapacity sentinel")
 	require.NotNil(t, retryable.TargetNodeID, "sandbox capacity retries should target a worker that advertises available sandbox capacity")
 	require.Equal(t, "worker-with-space", *retryable.TargetNodeID, "sandbox capacity retries should avoid requeueing onto the full worker when another worker has capacity")
@@ -12397,6 +12400,8 @@ func TestContinueSessionHandler_SandboxCapacityRetriesClearsTargetWhenNoWorkerAv
 	require.Error(t, err, "continue_session should return a retryable error when local sandbox capacity is full")
 	var retryable *RetryableError
 	require.ErrorAs(t, err, &retryable, "ErrSandboxCapacity must be wrapped as RetryableError so the attempt counter is not consumed")
+	require.NotNil(t, retryable.MaxRetryDuration, "continuation capacity retries should use the durable fleet-wait window")
+	require.Equal(t, maxRetryableDuration, *retryable.MaxRetryDuration, "continuation capacity retries should preserve the bounded fleet-wait deadline")
 	require.Nil(t, retryable.TargetNodeID, "sandbox capacity retries should not pin to a worker when none advertise available capacity")
 	require.True(t, retryable.ClearTargetNodeID, "sandbox capacity retries should clear any stale target pin when no replacement worker is selected")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")

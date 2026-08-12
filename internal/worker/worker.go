@@ -250,7 +250,11 @@ func (w *Worker) poll(ctx context.Context) {
 			if !result.Deferred {
 				break
 			}
-			if result.Reason == db.SandboxRoutingReasonFleetCapacity {
+			// An interactive fleet-capacity miss means every usable slot is
+			// occupied. A code-review miss may only mean that the review share is
+			// full while interactive-reserved capacity remains, so keep scanning
+			// the bounded batch for a later interactive job.
+			if result.Reason == db.SandboxRoutingReasonFleetCapacity && result.WorkloadClass == models.SandboxWorkloadClassInteractive {
 				break
 			}
 		}

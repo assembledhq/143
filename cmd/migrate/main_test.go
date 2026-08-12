@@ -116,6 +116,13 @@ func TestRepairSandboxWorkloadRoutingDirtyMigration(t *testing.T) {
 			expectedForce: sandboxWorkloadRoutingMigrationVersion - 1,
 		},
 		{
+			name:          "rewinds dirty routing validation migration",
+			repairer:      fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingValidationMigrationVersion, dirty: true},
+			expectRepair:  true,
+			expectForce:   true,
+			expectedForce: sandboxWorkloadRoutingValidationMigrationVersion - 1,
+		},
+		{
 			name:     "leaves clean routing migration unchanged",
 			repairer: fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion},
 		},
@@ -152,10 +159,10 @@ func TestRepairSandboxWorkloadRoutingDirtyMigration(t *testing.T) {
 			} else {
 				require.NoError(t, err, "routing migration repair should complete without error")
 			}
-			require.Equal(t, tt.expectRepair, repaired, "routing migration repair should report whether it rewound version 286")
-			require.Equal(t, tt.expectForce, repairer.forceInvoked, "routing migration repair should force only dirty version 286")
+			require.Equal(t, tt.expectRepair, repaired, "routing migration repair should report whether it rewound an allowlisted routing migration")
+			require.Equal(t, tt.expectForce, repairer.forceInvoked, "routing migration repair should force only an allowlisted routing migration")
 			if tt.expectForce {
-				require.Equal(t, tt.expectedForce, repairer.forcedTo, "routing migration repair should rewind to version 285")
+				require.Equal(t, tt.expectedForce, repairer.forcedTo, "routing migration repair should rewind to the prior version")
 			}
 		})
 	}
@@ -249,6 +256,14 @@ func TestRepairKnownDirtyMigration(t *testing.T) {
 			expectedVersion:  sandboxWorkloadRoutingMigrationVersion,
 			expectedRepaired: true,
 			expectedForce:    sandboxWorkloadRoutingMigrationVersion - 1,
+			expectForce:      true,
+		},
+		{
+			name:             "repairs exact dirty sandbox workload routing validation migration",
+			repairer:         fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingValidationMigrationVersion, dirty: true},
+			expectedVersion:  sandboxWorkloadRoutingValidationMigrationVersion,
+			expectedRepaired: true,
+			expectedForce:    sandboxWorkloadRoutingValidationMigrationVersion - 1,
 			expectForce:      true,
 		},
 		{
