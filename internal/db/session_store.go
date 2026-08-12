@@ -1258,6 +1258,66 @@ func (s *SessionStore) HasPendingCancelRequest(ctx context.Context, orgID, sessi
 	return pending, nil
 }
 
+// CancelPendingCapacityWait atomically consumes a pending cancellation and
+// finalizes both the session and its matching continuation thread. The thread
+// ID is scoped through session_id as well as org_id so a malformed payload
+// cannot cancel a thread from another session.
+func (s *SessionStore) CancelPendingCapacityWait(ctx context.Context, orgID, sessionID uuid.UUID, threadID *uuid.UUID) (bool, bool, error) {
+	tx, err := s.Begin(ctx)
+	if err != nil {
+		return false, false, fmt.Errorf("begin capacity-wait cancellation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	consumeResult, err := tx.Exec(ctx, `
+		UPDATE session_cancel_requests
+		SET delivered_at = now()
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		  AND delivered_at IS NULL`, pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID,
+	})
+	if err != nil {
+		return false, false, fmt.Errorf("consume capacity-wait cancellation: %w", err)
+	}
+	if consumeResult.RowsAffected() == 0 {
+		return false, false, nil
+	}
+
+	session, err := s.updateStatusRow(ctx, tx, orgID, sessionID, models.SessionStatusCancelled)
+	if err != nil {
+		return false, false, fmt.Errorf("cancel session while waiting for capacity: %w", err)
+	}
+
+	threadCancelled := false
+	if threadID != nil && *threadID != uuid.Nil {
+		threadResult, threadErr := tx.Exec(ctx, `
+			UPDATE session_threads
+			SET status = @status,
+				completed_at = now()
+			WHERE id = @thread_id
+			  AND session_id = @session_id
+			  AND org_id = @org_id
+			  AND archived_at IS NULL`, pgx.NamedArgs{
+			"org_id":     orgID,
+			"session_id": sessionID,
+			"status":     models.ThreadStatusCancelled,
+			"thread_id":  *threadID,
+		})
+		if threadErr != nil {
+			return false, false, fmt.Errorf("cancel session thread while waiting for capacity: %w", threadErr)
+		}
+		threadCancelled = threadResult.RowsAffected() == 1
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return false, false, fmt.Errorf("commit capacity-wait cancellation: %w", err)
+	}
+	s.publishStatus(ctx, &session)
+	return true, threadCancelled, nil
+}
+
 func (s *SessionStore) RecordRuntimeProgress(ctx context.Context, orgID, sessionID uuid.UUID, progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time) error {
 	query := `
 		UPDATE sessions

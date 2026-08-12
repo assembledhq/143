@@ -868,9 +868,16 @@ func (s *JobStore) RouteNextSandboxJob(ctx context.Context) (*SandboxRoutingResu
 	if err != nil {
 		return nil, err
 	}
+	durableTerminalProbe := false
+	if result.TargetNodeID == nil && result.Reason == SandboxRoutingReasonOrgLimit {
+		durableTerminalProbe, err = continueSessionNeedsTerminalProbe(ctx, tx, job)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if result.TargetNodeID == nil && result.Reason != SandboxRoutingReasonLockContention {
 		fallbackReason := SandboxRoutingReason("")
-		terminalProbeEligible := (job.JobType == "run_agent" &&
+		terminalProbeEligible := durableTerminalProbe || (job.JobType == "run_agent" &&
 			time.Since(job.CreatedAt) >= sandboxRoutingTerminalProbeAge &&
 			(result.Reason == SandboxRoutingReasonFleetCapacity || result.Reason == SandboxRoutingReasonOrgLimit)) ||
 			(job.JobType == "continue_session" &&
@@ -1148,6 +1155,56 @@ func admitLockedSandboxTurn(ctx context.Context, tx pgx.Tx, job sandboxRoutingJo
 	return active < settings.MaxConcurrentRuns, nil
 }
 
+// continueSessionNeedsTerminalProbe lets cancellation and non-resumable
+// terminal state reach the lightweight handler cleanup path even when the
+// organization has no sandbox turns available. The thread comparison stays
+// text-based so malformed legacy payloads cannot fail the UUID cast.
+func continueSessionNeedsTerminalProbe(ctx context.Context, tx pgx.Tx, job sandboxRoutingJob) (bool, error) {
+	if job.JobType != "continue_session" || job.SessionID == nil {
+		return false, nil
+	}
+
+	var sessionStatus models.SessionStatus
+	var pendingSessionCancel bool
+	var stoppedThread bool
+	err := tx.QueryRow(ctx, `
+		SELECT s.status,
+			EXISTS (
+				SELECT 1
+				FROM session_cancel_requests scr
+				WHERE scr.org_id = @org_id
+				  AND scr.session_id = @session_id
+				  AND scr.delivered_at IS NULL
+			),
+			EXISTS (
+				SELECT 1
+				FROM session_threads st
+				JOIN jobs payload_job
+				  ON payload_job.id = @job_id
+				 AND payload_job.org_id = @org_id
+				WHERE st.org_id = @org_id
+				  AND st.session_id = @session_id
+				  AND st.id::text = payload_job.payload->>'thread_id'
+				  AND st.archived_at IS NULL
+				  AND (st.status = 'cancelled' OR st.cancel_requested_at IS NOT NULL)
+			)
+		FROM sessions s
+		WHERE s.org_id = @org_id
+		  AND s.id = @session_id
+		  AND s.deleted_at IS NULL`, pgx.NamedArgs{
+		"job_id":     job.ID,
+		"org_id":     job.OrgID,
+		"session_id": *job.SessionID,
+	}).Scan(&sessionStatus, &pendingSessionCancel, &stoppedThread)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect durable continue_session state before capacity deferral: %w", err)
+	}
+	return (sessionStatus.IsTerminal() && !sessionStatus.IsResumable()) || pendingSessionCancel || stoppedThread, nil
+}
+
 func parseSandboxRoutingSessionID(raw pgtype.Text) *uuid.UUID {
 	if !raw.Valid || raw.String == "" {
 		return nil
@@ -1242,6 +1299,10 @@ func updateSandboxTerminalProbePlacement(ctx context.Context, tx pgx.Tx, job san
 	result, err := tx.Exec(ctx, `
 		UPDATE jobs
 		SET workload_class = @workload_class,
+			payload = CASE
+				WHEN job_type = 'continue_session' THEN jsonb_set(payload, '{capacity_waited}', 'true'::jsonb, true)
+				ELSE payload
+			END,
 			target_node_id = @target_node_id,
 			sandbox_slot_reserved_until = NULL,
 			retry_window_started_at = @retry_window_started_at,
@@ -1600,7 +1661,27 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 			return nil, false, admissionErr
 		}
 		if !admitted {
-			deferResult, deferErr := tx.Exec(ctx, `
+			terminalProbe, probeErr := continueSessionNeedsTerminalProbe(ctx, tx, candidate)
+			if probeErr != nil {
+				return nil, false, probeErr
+			}
+			if terminalProbe {
+				probeResult, markErr := tx.Exec(ctx, `
+					UPDATE jobs
+					SET payload = jsonb_set(payload, '{capacity_waited}', 'true'::jsonb, true),
+						sandbox_slot_reserved_until = NULL,
+						updated_at = now()
+					WHERE id = @job_id
+					  AND status = 'pending'
+					  AND job_type = 'continue_session'`, pgx.NamedArgs{"job_id": candidate.ID})
+				if markErr != nil {
+					return nil, false, fmt.Errorf("mark org-limited continuation for terminal cleanup: %w", markErr)
+				}
+				if probeResult.RowsAffected() != 1 {
+					return nil, false, fmt.Errorf("mark org-limited continuation for terminal cleanup: pending job %s changed ownership", candidate.ID)
+				}
+			} else {
+				deferResult, deferErr := tx.Exec(ctx, `
 					UPDATE jobs
 					SET workload_class = @workload_class,
 						payload = CASE
@@ -1620,20 +1701,21 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 						updated_at = now()
 					WHERE id = @job_id
 					  AND status = 'pending'`, pgx.NamedArgs{
-				"job_id":         candidate.ID,
-				"retry_seconds":  int(sandboxOrgLimitRetryDelay.Seconds()),
-				"workload_class": candidate.WorkloadClass,
-			})
-			if deferErr != nil {
-				return nil, false, fmt.Errorf("defer affinity-bound sandbox job at org limit: %w", deferErr)
+					"job_id":         candidate.ID,
+					"retry_seconds":  int(sandboxOrgLimitRetryDelay.Seconds()),
+					"workload_class": candidate.WorkloadClass,
+				})
+				if deferErr != nil {
+					return nil, false, fmt.Errorf("defer affinity-bound sandbox job at org limit: %w", deferErr)
+				}
+				if deferResult.RowsAffected() != 1 {
+					return nil, false, fmt.Errorf("defer affinity-bound sandbox job at org limit: pending job %s changed ownership", candidate.ID)
+				}
+				if err := tx.Commit(ctx); err != nil {
+					return nil, false, fmt.Errorf("commit sandbox org-limit deferral: %w", err)
+				}
+				return nil, true, nil
 			}
-			if deferResult.RowsAffected() != 1 {
-				return nil, false, fmt.Errorf("defer affinity-bound sandbox job at org limit: pending job %s changed ownership", candidate.ID)
-			}
-			if err := tx.Commit(ctx); err != nil {
-				return nil, false, fmt.Errorf("commit sandbox org-limit deferral: %w", err)
-			}
-			return nil, true, nil
 		}
 	}
 

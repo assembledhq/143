@@ -10297,31 +10297,43 @@ func shouldStopContinueSessionForDurableState(
 	if err != nil {
 		return false, err
 	}
-	if pendingCancel {
-		if err := stores.Sessions.UpdateStatus(ctx, orgID, sessionID, models.SessionStatusCancelled); err != nil {
-			return false, fmt.Errorf("cancel session while waiting for capacity: %w", err)
+	if !pendingCancel {
+		if !hasThread || stores.SessionThreads == nil {
+			return false, nil
 		}
-		if _, err := stores.Sessions.ConsumeCancelRequest(ctx, orgID, sessionID); err != nil {
-			return false, fmt.Errorf("consume session cancellation after capacity wait: %w", err)
+		thread, err := stores.SessionThreads.GetByID(ctx, orgID, threadID)
+		if err != nil {
+			return false, fmt.Errorf("reload session thread before capacity retry: %w", err)
+		}
+		if thread.SessionID != sessionID {
+			return false, fmt.Errorf("session thread %s does not belong to session %s", threadID, sessionID)
+		}
+		if thread.Status == models.ThreadStatusCancelled {
+			return true, nil
+		}
+		if thread.CancelRequestedAt == nil {
+			return false, nil
+		}
+		if err := stores.SessionThreads.UpdateStatus(ctx, orgID, threadID, models.ThreadStatusCancelled); err != nil {
+			return false, fmt.Errorf("cancel session thread while waiting for capacity: %w", err)
 		}
 		return true, nil
 	}
-	if !hasThread || stores.SessionThreads == nil {
-		return false, nil
+
+	var cancellationThreadID *uuid.UUID
+	if hasThread {
+		threadIDCopy := threadID
+		cancellationThreadID = &threadIDCopy
 	}
-	thread, err := stores.SessionThreads.GetByID(ctx, orgID, threadID)
+	cancelled, threadCancelled, err := stores.Sessions.CancelPendingCapacityWait(ctx, orgID, sessionID, cancellationThreadID)
 	if err != nil {
-		return false, fmt.Errorf("reload session thread before capacity retry: %w", err)
+		return false, err
 	}
-	if thread.Status == models.ThreadStatusCancelled {
-		return true, nil
+	if cancelled && threadCancelled && stores.SessionThreads != nil {
+		stores.SessionThreads.PublishRuntimeUpdate(ctx, orgID, threadID)
 	}
-	if thread.CancelRequestedAt == nil {
-		return false, nil
-	}
-	if err := stores.SessionThreads.UpdateStatus(ctx, orgID, threadID, models.ThreadStatusCancelled); err != nil {
-		return false, fmt.Errorf("cancel session thread while waiting for capacity: %w", err)
-	}
+	// If another cancellation consumer won the race after the durable read,
+	// this queued continuation still predates that cancellation and must stop.
 	return true, nil
 }
 
