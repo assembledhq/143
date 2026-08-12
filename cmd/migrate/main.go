@@ -19,9 +19,10 @@ import (
 type migrateLogger struct{ verbose bool }
 
 const (
-	prReadinessDirtyMigrationVersion        = 267
-	codeReviewDisputesDirtyMigrationVersion = 281
-	sandboxWorkloadRoutingMigrationVersion  = 286
+	prReadinessDirtyMigrationVersion                 = 267
+	codeReviewDisputesDirtyMigrationVersion          = 281
+	sandboxWorkloadRoutingMigrationVersion           = 286
+	sandboxWorkloadRoutingValidationMigrationVersion = 287
 )
 
 type dirtyMigrationRepairer interface {
@@ -127,7 +128,7 @@ func main() {
 			os.Exit(1)
 		}
 		if repaired {
-			fmt.Printf("Repaired dirty migration %d; replaying sandbox workload routing preparation.\n", sandboxWorkloadRoutingMigrationVersion)
+			fmt.Println("Repaired dirty sandbox workload routing migration; replaying routing migrations.")
 		}
 		preparationRequired, err := sandboxWorkloadRoutingPreparationRequired(m)
 		if err != nil {
@@ -274,9 +275,10 @@ func prepareSandboxWorkloadRoutingOnConn(ctx context.Context, conn migrationPrep
 }
 
 // repairSandboxWorkloadRoutingDirtyMigration makes direct `migrate up` calls
-// recover the same way as the deploy wrapper. Migration 286 is executed by the
-// Postgres driver as one transaction, so a failure rolls its schema/data work
-// back while leaving only golang-migrate's dirty marker to rewind.
+// recover the same way as the deploy wrapper. Migrations 286 and 287 are each
+// executed by the Postgres driver as one transaction, so a failure rolls their
+// schema/data work back while leaving only golang-migrate's dirty marker to
+// rewind.
 func repairSandboxWorkloadRoutingDirtyMigration(m dirtyMigrationRepairer) (bool, error) {
 	version, dirty, err := m.Version()
 	if err != nil {
@@ -285,11 +287,12 @@ func repairSandboxWorkloadRoutingDirtyMigration(m dirtyMigrationRepairer) (bool,
 		}
 		return false, fmt.Errorf("read migration version: %w", err)
 	}
-	if !dirty || version != sandboxWorkloadRoutingMigrationVersion {
+	if !dirty || (version != sandboxWorkloadRoutingMigrationVersion && version != sandboxWorkloadRoutingValidationMigrationVersion) {
 		return false, nil
 	}
-	if err := m.Force(sandboxWorkloadRoutingMigrationVersion - 1); err != nil {
-		return false, fmt.Errorf("force migration version to %d: %w", sandboxWorkloadRoutingMigrationVersion-1, err)
+	previousVersion := int(version) - 1
+	if err := m.Force(previousVersion); err != nil {
+		return false, fmt.Errorf("force migration version to %d: %w", previousVersion, err)
 	}
 	return true, nil
 }
@@ -314,11 +317,12 @@ func repairKnownDirtyMigration(m dirtyMigrationRepairer) (uint, bool, error) {
 	previousVersion, known := knownDirtyMigrationPreviousVersion(version)
 	if !known {
 		return 0, false, fmt.Errorf(
-			"database is dirty at version %d; refusing repair because only versions %d, %d, and %d are allowlisted",
+			"database is dirty at version %d; refusing repair because only versions %d, %d, %d, and %d are allowlisted",
 			version,
 			prReadinessDirtyMigrationVersion,
 			codeReviewDisputesDirtyMigrationVersion,
 			sandboxWorkloadRoutingMigrationVersion,
+			sandboxWorkloadRoutingValidationMigrationVersion,
 		)
 	}
 	if err := m.Force(previousVersion); err != nil {
@@ -331,7 +335,8 @@ func knownDirtyMigrationPreviousVersion(version uint) (int, bool) {
 	switch version {
 	case prReadinessDirtyMigrationVersion,
 		codeReviewDisputesDirtyMigrationVersion,
-		sandboxWorkloadRoutingMigrationVersion:
+		sandboxWorkloadRoutingMigrationVersion,
+		sandboxWorkloadRoutingValidationMigrationVersion:
 		return int(version) - 1, true
 	default:
 		return 0, false
