@@ -1108,14 +1108,15 @@ Durable, database-backed async work queue for the full pipeline (`ingest_webhook
 
 Short-lived final-admission leases shared by every process using one worker's
 Docker host. This is cluster runtime state rather than tenant data, so it has no
-`org_id`. Its worker and optional job references cascade on parent deletion;
-lease expiry and admission cleanup bound rows left by a crashed process.
+`org_id`. It intentionally has no foreign keys to the hot `nodes` or `jobs`
+tables; expired leases stop affecting admission and cleanup removes them when
+that worker next admits work.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | id | uuid | PK |
-| node_id | text | worker whose Docker capacity is reserved; FK to `nodes(id)` with cascade delete |
-| job_id | uuid | nullable FK to `jobs(id)` with cascade delete; null for non-job consumers such as previews |
+| node_id | text | worker whose Docker capacity is reserved |
+| job_id | uuid | nullable job identity; null for non-job consumers such as previews |
 | workload_class | text | `interactive` or `code_review` |
 | expires_at | timestamptz | lease expiry used for crash recovery |
 | created_at | timestamptz | |
