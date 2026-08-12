@@ -99,6 +99,14 @@ func main() {
 
 	switch os.Args[1] {
 	case "up":
+		repaired, err := repairSandboxWorkloadRoutingDirtyMigration(m)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to repair dirty sandbox workload routing migration: %v\n", err)
+			os.Exit(1)
+		}
+		if repaired {
+			fmt.Printf("Repaired dirty migration %d; replaying sandbox workload routing preparation.\n", sandboxWorkloadRoutingMigrationVersion)
+		}
 		preparationRequired, err := sandboxWorkloadRoutingPreparationRequired(m)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to inspect sandbox workload routing migration state: %v\n", err)
@@ -220,6 +228,12 @@ func prepareSandboxWorkloadRoutingOnConn(ctx context.Context, conn migrationPrep
 			return fmt.Errorf("%s: %w", statement.name, err)
 		}
 	}
+	// The short timeout protects only the blocking ALTER/UPDATE phase. Concurrent
+	// index construction is intentionally allowed to wait for the brief locks it
+	// needs instead of turning ordinary jobs-table traffic into a deploy failure.
+	if _, err := conn.Exec(ctx, `SET lock_timeout = '0'`); err != nil {
+		return fmt.Errorf("reset lock timeout before concurrent indexes: %w", err)
+	}
 
 	for _, index := range sandboxRoutingConcurrentIndexes {
 		var invalid bool
@@ -245,6 +259,27 @@ func prepareSandboxWorkloadRoutingOnConn(ctx context.Context, conn migrationPrep
 	return nil
 }
 
+// repairSandboxWorkloadRoutingDirtyMigration makes direct `migrate up` calls
+// recover the same way as the deploy wrapper. Migration 286 is executed by the
+// Postgres driver as one transaction, so a failure rolls its schema/data work
+// back while leaving only golang-migrate's dirty marker to rewind.
+func repairSandboxWorkloadRoutingDirtyMigration(m dirtyMigrationRepairer) (bool, error) {
+	version, dirty, err := m.Version()
+	if err != nil {
+		if errors.Is(err, migrate.ErrNilVersion) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read migration version: %w", err)
+	}
+	if !dirty || version != sandboxWorkloadRoutingMigrationVersion {
+		return false, nil
+	}
+	if err := m.Force(sandboxWorkloadRoutingMigrationVersion - 1); err != nil {
+		return false, fmt.Errorf("force migration version to %d: %w", sandboxWorkloadRoutingMigrationVersion-1, err)
+	}
+	return true, nil
+}
+
 // repairKnownDirtyMigration clears only dirty markers whose production failure
 // was observed and whose migration transaction was verified to have rolled back
 // completely. This is deliberately an exact allowlist rather than a general
@@ -265,10 +300,11 @@ func repairKnownDirtyMigration(m dirtyMigrationRepairer) (uint, bool, error) {
 	previousVersion, known := knownDirtyMigrationPreviousVersion(version)
 	if !known {
 		return 0, false, fmt.Errorf(
-			"database is dirty at version %d; refusing repair because only versions %d and %d are allowlisted",
+			"database is dirty at version %d; refusing repair because only versions %d, %d, and %d are allowlisted",
 			version,
 			prReadinessDirtyMigrationVersion,
 			codeReviewDisputesDirtyMigrationVersion,
+			sandboxWorkloadRoutingMigrationVersion,
 		)
 	}
 	if err := m.Force(previousVersion); err != nil {
@@ -279,7 +315,9 @@ func repairKnownDirtyMigration(m dirtyMigrationRepairer) (uint, bool, error) {
 
 func knownDirtyMigrationPreviousVersion(version uint) (int, bool) {
 	switch version {
-	case prReadinessDirtyMigrationVersion, codeReviewDisputesDirtyMigrationVersion:
+	case prReadinessDirtyMigrationVersion,
+		codeReviewDisputesDirtyMigrationVersion,
+		sandboxWorkloadRoutingMigrationVersion:
 		return int(version) - 1, true
 	default:
 		return 0, false

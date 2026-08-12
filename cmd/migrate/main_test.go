@@ -74,6 +74,8 @@ func TestPrepareSandboxWorkloadRoutingOnConn(t *testing.T) {
 					WillReturnResult(pgxmock.NewResult("ALTER TABLE", 0))
 				mock.ExpectExec(`(?s)UPDATE jobs j.*FROM sessions s.*s\.origin = 'code_review'.*j\.status IN \('pending', 'running'\)`).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+				mock.ExpectExec(`SET lock_timeout = '0'`).
+					WillReturnResult(pgxmock.NewResult("SET", 0))
 				for _, index := range sandboxRoutingConcurrentIndexes {
 					invalid := tt.invalidIndexes[index.name]
 					mock.ExpectQuery(`(?s)SELECT EXISTS.*pg_index.*NOT i\.indisvalid`).
@@ -91,6 +93,70 @@ func TestPrepareSandboxWorkloadRoutingOnConn(t *testing.T) {
 			err = prepareSandboxWorkloadRoutingOnConn(context.Background(), mock)
 			require.NoError(t, err, "sandbox workload routing preparation should complete")
 			require.NoError(t, mock.ExpectationsWereMet(), "preparation should execute the staged hot-table rollout in order")
+		})
+	}
+}
+
+func TestRepairSandboxWorkloadRoutingDirtyMigration(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		repairer      fakeDirtyMigrationRepairer
+		expectRepair  bool
+		expectForce   bool
+		expectedForce int
+		expectError   bool
+	}{
+		{
+			name:          "rewinds dirty routing migration",
+			repairer:      fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion, dirty: true},
+			expectRepair:  true,
+			expectForce:   true,
+			expectedForce: sandboxWorkloadRoutingMigrationVersion - 1,
+		},
+		{
+			name:     "leaves clean routing migration unchanged",
+			repairer: fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion},
+		},
+		{
+			name:     "leaves unrelated dirty migration for normal diagnostics",
+			repairer: fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion - 1, dirty: true},
+		},
+		{
+			name:     "allows an empty database",
+			repairer: fakeDirtyMigrationRepairer{versionErr: migrate.ErrNilVersion},
+		},
+		{
+			name:        "returns version inspection failure",
+			repairer:    fakeDirtyMigrationRepairer{versionErr: errors.New("version unavailable")},
+			expectError: true,
+		},
+		{
+			name:          "returns force failure",
+			repairer:      fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion, dirty: true, forceErr: errors.New("force rejected")},
+			expectForce:   true,
+			expectedForce: sandboxWorkloadRoutingMigrationVersion - 1,
+			expectError:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			repairer := tt.repairer
+			repaired, err := repairSandboxWorkloadRoutingDirtyMigration(&repairer)
+			if tt.expectError {
+				require.Error(t, err, "routing migration repair should return the expected failure")
+			} else {
+				require.NoError(t, err, "routing migration repair should complete without error")
+			}
+			require.Equal(t, tt.expectRepair, repaired, "routing migration repair should report whether it rewound version 286")
+			require.Equal(t, tt.expectForce, repairer.forceInvoked, "routing migration repair should force only dirty version 286")
+			if tt.expectForce {
+				require.Equal(t, tt.expectedForce, repairer.forcedTo, "routing migration repair should rewind to version 285")
+			}
 		})
 	}
 }
@@ -175,6 +241,14 @@ func TestRepairKnownDirtyMigration(t *testing.T) {
 			expectedVersion:  codeReviewDisputesDirtyMigrationVersion,
 			expectedRepaired: true,
 			expectedForce:    codeReviewDisputesDirtyMigrationVersion - 1,
+			expectForce:      true,
+		},
+		{
+			name:             "repairs exact dirty sandbox workload routing migration",
+			repairer:         fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion, dirty: true},
+			expectedVersion:  sandboxWorkloadRoutingMigrationVersion,
+			expectedRepaired: true,
+			expectedForce:    sandboxWorkloadRoutingMigrationVersion - 1,
 			expectForce:      true,
 		},
 		{
