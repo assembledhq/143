@@ -21,11 +21,16 @@ type migrateLogger struct{ verbose bool }
 const (
 	prReadinessDirtyMigrationVersion        = 267
 	codeReviewDisputesDirtyMigrationVersion = 281
+	sandboxWorkloadRoutingMigrationVersion  = 286
 )
 
 type dirtyMigrationRepairer interface {
 	Version() (uint, bool, error)
 	Force(version int) error
+}
+
+type migrationVersionReader interface {
+	Version() (uint, bool, error)
 }
 
 type migrationPreparationConn interface {
@@ -94,9 +99,16 @@ func main() {
 
 	switch os.Args[1] {
 	case "up":
-		if err := prepareSandboxWorkloadRouting(context.Background(), dbURL); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to prepare sandbox workload routing migration: %v\n", err)
+		preparationRequired, err := sandboxWorkloadRoutingPreparationRequired(m)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to inspect sandbox workload routing migration state: %v\n", err)
 			os.Exit(1)
+		}
+		if preparationRequired {
+			if err := prepareSandboxWorkloadRouting(context.Background(), dbURL); err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to prepare sandbox workload routing migration: %v\n", err)
+				os.Exit(1)
+			}
 		}
 		if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 			logMigrationError("up", m, err)
@@ -135,6 +147,20 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1]) // #nosec G705 -- writing to stderr, not HTTP response
 		os.Exit(1)
 	}
+}
+
+func sandboxWorkloadRoutingPreparationRequired(reader migrationVersionReader) (bool, error) {
+	version, dirty, err := reader.Version()
+	if err != nil {
+		if errors.Is(err, migrate.ErrNilVersion) {
+			return true, nil
+		}
+		return false, fmt.Errorf("read migration version: %w", err)
+	}
+	if version < sandboxWorkloadRoutingMigrationVersion {
+		return true, nil
+	}
+	return version == sandboxWorkloadRoutingMigrationVersion && dirty, nil
 }
 
 // prepareSandboxWorkloadRouting performs the non-transactional portion of the

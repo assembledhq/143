@@ -10798,7 +10798,7 @@ func TestSandboxTurnCapacityRetryTargetImmediatelyReservesAlternateWorker(t *tes
 		WithArgs(jobID, lockToken).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
 			AddRow(jobID, orgID, "run_agent", nil, models.SandboxWorkloadClassInteractive, models.JobStatusRunning, nil, time.Now()))
-	mock.ExpectQuery(`(?s)SELECT settings.*FROM organizations.*FOR UPDATE`).
+	mock.ExpectQuery(`(?s)SELECT settings.*FROM organizations.*FOR NO KEY UPDATE`).
 		WithArgs(orgID).
 		WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow([]byte(`{"max_concurrent_runs":3}`)))
 	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\).*FROM jobs.*id <>.*job_type IN`).
@@ -11993,8 +11993,8 @@ func TestContinueSessionHandler_StopsCapacityRetryAfterTerminalOrCancel(t *testi
 		expectCancelRead bool
 	}{
 		{
-			name:           "session became terminal",
-			reloadedStatus: models.SessionStatusCancelled,
+			name:           "session became non-resumable terminal",
+			reloadedStatus: models.SessionStatusSkipped,
 		},
 		{
 			name:             "session has pending cancellation",
@@ -12052,6 +12052,34 @@ func TestContinueSessionHandler_StopsCapacityRetryAfterTerminalOrCancel(t *testi
 	}
 }
 
+func TestShouldStopContinueSessionForDurableStatePreservesResumableStatuses(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range models.ResumableSessionStatuses {
+		status := status
+		t.Run(string(status), func(t *testing.T) {
+			t.Parallel()
+
+			stores, mock := newTestStores(t)
+			defer mock.Close()
+
+			orgID, sessionID := uuid.New(), uuid.New()
+			mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM session_cancel_requests.*delivered_at IS NULL`).
+				WithArgs(orgID, sessionID).
+				WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+
+			stop, err := shouldStopContinueSessionForDurableState(context.Background(), stores, models.Session{
+				ID:     sessionID,
+				OrgID:  orgID,
+				Status: status,
+			}, uuid.Nil, false)
+			require.NoError(t, err, "durable continuation state should load successfully")
+			require.False(t, stop, "an accepted continuation should remain runnable from every resumable session status")
+			require.NoError(t, mock.ExpectationsWereMet(), "resumable-state checks should remain tenant scoped and cancellation aware")
+		})
+	}
+}
+
 func TestContinueSessionHandler_StopsCapacityWaitedThreadBeforeContinuationWork(t *testing.T) {
 	t.Parallel()
 
@@ -12068,9 +12096,6 @@ func TestContinueSessionHandler_StopsCapacityWaitedThreadBeforeContinuationWork(
 	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
-	mock.ExpectQuery("SELECT .* FROM sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
 	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM session_cancel_requests.*delivered_at IS NULL`).
 		WithArgs(orgID, sessionID).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
@@ -12083,10 +12108,9 @@ func TestContinueSessionHandler_StopsCapacityWaitedThreadBeforeContinuationWork(
 
 	orch := &orchestratorServiceStub{}
 	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
-	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
-	handlerCtx := jobctx.WithJobRetryWindowStartedAt(context.Background(), time.Now().Add(-2*time.Minute))
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `","capacity_waited":true}`)
 
-	err := handler(handlerCtx, "continue_session", payload)
+	err := handler(context.Background(), "continue_session", payload)
 	require.NoError(t, err, "a cancelled thread that waited for capacity should stop cleanly before continuation work")
 	require.Equal(t, 0, orch.continueSessionCalls, "cancelled capacity-waited work must not reach the orchestrator")
 	require.NoError(t, mock.ExpectationsWereMet(), "pre-work cancellation should use tenant-scoped durable state and finalize the thread")

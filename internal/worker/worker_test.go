@@ -1277,7 +1277,7 @@ func expectClaimWithAttemptsAndTarget(mock pgxmock.PgxPoolIface, jobID, orgID uu
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
 			AddRow(jobID, orgID, jobType, nil, models.SandboxWorkloadClassInteractive, models.JobStatusPending, nil, createdAt))
 	if jobType == "run_agent" || jobType == "continue_session" {
-		mock.ExpectQuery(`(?s)SELECT settings.*FROM organizations.*FOR UPDATE`).
+		mock.ExpectQuery(`(?s)SELECT settings.*FROM organizations.*FOR NO KEY UPDATE`).
 			WithArgs(orgID).
 			WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow([]byte(`{"max_concurrent_runs":3}`)))
 		mock.ExpectQuery(`(?s)SELECT COUNT\(\*\).*FROM jobs.*id <>.*job_type IN`).

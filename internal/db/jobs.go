@@ -870,10 +870,13 @@ func (s *JobStore) RouteNextSandboxJob(ctx context.Context) (*SandboxRoutingResu
 	}
 	if result.TargetNodeID == nil && result.Reason != SandboxRoutingReasonLockContention {
 		fallbackReason := SandboxRoutingReason("")
-		terminalProbeEligible := time.Since(job.CreatedAt) >= sandboxRoutingTerminalProbeAge &&
-			((job.JobType == "run_agent" &&
-				(result.Reason == SandboxRoutingReasonFleetCapacity || result.Reason == SandboxRoutingReasonOrgLimit)) ||
-				(job.JobType == "continue_session" && result.Reason == SandboxRoutingReasonFleetCapacity))
+		terminalProbeEligible := (job.JobType == "run_agent" &&
+			time.Since(job.CreatedAt) >= sandboxRoutingTerminalProbeAge &&
+			(result.Reason == SandboxRoutingReasonFleetCapacity || result.Reason == SandboxRoutingReasonOrgLimit)) ||
+			(job.JobType == "continue_session" &&
+				result.Reason == SandboxRoutingReasonFleetCapacity &&
+				job.RetryWindowStartedAt != nil &&
+				time.Since(*job.RetryWindowStartedAt) >= sandboxRoutingTerminalProbeAge)
 		if terminalProbeEligible {
 			fallbackReason = SandboxRoutingReasonTerminalProbe
 		} else if result.Reason == SandboxRoutingReasonFleetCapacity {
@@ -911,19 +914,28 @@ func (s *JobStore) RouteNextSandboxJob(ctx context.Context) (*SandboxRoutingResu
 			retryDelay = sandboxOrgLimitRetryDelay
 		}
 		deferredUntil := time.Now().Add(retryDelay)
+		clearRetryWindow := job.JobType == "continue_session" && result.Reason == SandboxRoutingReasonOrgLimit
 		resultTag, err := tx.Exec(ctx, `
 			UPDATE jobs
 			SET workload_class = @workload_class,
+				payload = CASE
+					WHEN job_type = 'continue_session' THEN jsonb_set(payload, '{capacity_waited}', 'true'::jsonb, true)
+					ELSE payload
+				END,
 				target_node_id = NULL,
 				sandbox_slot_reserved_until = NULL,
-				retry_window_started_at = COALESCE(retry_window_started_at, now()),
+				retry_window_started_at = CASE
+					WHEN @clear_retry_window THEN NULL
+					ELSE COALESCE(retry_window_started_at, now())
+				END,
 				run_at = @run_at,
 				updated_at = now()
 			WHERE id = @job_id
 			  AND status = 'pending'`, pgx.NamedArgs{
-			"job_id":         job.ID,
-			"run_at":         deferredUntil,
-			"workload_class": job.WorkloadClass,
+			"clear_retry_window": clearRetryWindow,
+			"job_id":             job.ID,
+			"run_at":             deferredUntil,
+			"workload_class":     job.WorkloadClass,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("defer sandbox job without capacity: %w", err)
@@ -1111,7 +1123,7 @@ func admitLockedSandboxTurn(ctx context.Context, tx pgx.Tx, job sandboxRoutingJo
 		SELECT settings
 		FROM organizations
 		WHERE id = @org_id
-		FOR UPDATE`, pgx.NamedArgs{"org_id": job.OrgID}).Scan(&rawSettings); err != nil {
+		FOR NO KEY UPDATE`, pgx.NamedArgs{"org_id": job.OrgID}).Scan(&rawSettings); err != nil {
 		return false, fmt.Errorf("lock organization for shared sandbox admission: %w", err)
 	}
 	settings, err := models.ParseOrgSettings(rawSettings)
@@ -1219,26 +1231,29 @@ func updateSandboxRoutingPlacement(ctx context.Context, tx pgx.Tx, job sandboxRo
 	return nil
 }
 
-// updateSandboxTerminalProbePlacement uses created_at as a durable marker that
-// claim can distinguish from an ordinary handler retry window. Overwriting a
-// prior retry timestamp ensures an aged initial run cannot become unbounded if
-// its limiting reason changes between fleet and organization capacity, and
-// lets a fleet-blocked continuation reach its existing bounded dead-letter
-// path.
+// updateSandboxTerminalProbePlacement uses created_at as the durable marker for
+// an initial run and preserves the fleet-wait marker for a continuation. Claim
+// can therefore distinguish an initial-run terminal probe while continuations
+// get a full bounded fleet window even after an unbounded organization wait.
 func updateSandboxTerminalProbePlacement(ctx context.Context, tx pgx.Tx, job sandboxRoutingJob, targetNodeID string) error {
+	retryWindowStartedAt := job.CreatedAt
+	if job.JobType == "continue_session" && job.RetryWindowStartedAt != nil {
+		retryWindowStartedAt = *job.RetryWindowStartedAt
+	}
 	result, err := tx.Exec(ctx, `
 		UPDATE jobs
 		SET workload_class = @workload_class,
 			target_node_id = @target_node_id,
 			sandbox_slot_reserved_until = NULL,
-			retry_window_started_at = created_at,
+			retry_window_started_at = @retry_window_started_at,
 			updated_at = now()
 		WHERE id = @job_id
 		  AND status = @status`, pgx.NamedArgs{
-		"job_id":         job.ID,
-		"status":         job.Status,
-		"target_node_id": targetNodeID,
-		"workload_class": job.WorkloadClass,
+		"job_id":                  job.ID,
+		"status":                  job.Status,
+		"target_node_id":          targetNodeID,
+		"workload_class":          job.WorkloadClass,
+		"retry_window_started_at": retryWindowStartedAt,
 	})
 	if err != nil {
 		return fmt.Errorf("persist sandbox terminal probe placement: %w", err)
@@ -1589,8 +1604,15 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 			deferResult, deferErr := tx.Exec(ctx, `
 					UPDATE jobs
 					SET workload_class = @workload_class,
+						payload = CASE
+							WHEN job_type = 'continue_session' THEN jsonb_set(payload, '{capacity_waited}', 'true'::jsonb, true)
+							ELSE payload
+						END,
 						run_at = now() + (@retry_seconds * interval '1 second'),
-						retry_window_started_at = COALESCE(retry_window_started_at, now()),
+						retry_window_started_at = CASE
+							WHEN job_type = 'continue_session' THEN NULL
+							ELSE COALESCE(retry_window_started_at, now())
+						END,
 						target_node_id = CASE
 							WHEN sandbox_slot_reserved_until IS NULL THEN target_node_id
 							ELSE NULL
