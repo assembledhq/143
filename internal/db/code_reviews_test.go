@@ -225,6 +225,31 @@ func TestCodeReviewStore_CreatePromptRecordPreservesEffectivePrompt(t *testing.T
 	require.NoError(t, mock.ExpectationsWereMet(), "all prompt record expectations should be met")
 }
 
+func TestCodeReviewStore_GetPromptRecordByKeyFiltersByOrg(t *testing.T) {
+	t.Parallel()
+
+	orgID, sessionID, recordID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	recordKey := "code-review-prompts/session/head/visual-evidence-v1"
+	metadata := json.RawMessage(`{"version":1}`)
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery("SELECT .+ FROM code_review_prompt_records").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "record_key": recordKey}).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "session_id", "record_key", "role", "agent_provider", "content", "metadata", "created_at"}).
+			AddRow(recordID, orgID, sessionID, recordKey, "visual_evidence", "", "captured 2 images", metadata, now))
+
+	record, err := NewCodeReviewStore(mock).GetPromptRecordByKey(context.Background(), orgID, recordKey)
+
+	require.NoError(t, err, "GetPromptRecordByKey should load the immutable evidence checkpoint")
+	require.Equal(t, models.CodeReviewPromptRecord{
+		ID: recordID, OrgID: orgID, SessionID: sessionID, RecordKey: recordKey, Role: "visual_evidence",
+		Content: "captured 2 images", Metadata: metadata, CreatedAt: now,
+	}, record, "GetPromptRecordByKey should return the exact org-scoped record")
+	require.NoError(t, mock.ExpectationsWereMet(), "prompt-record lookup should include the tenant boundary")
+}
+
 func TestCodeReviewStore_GetActiveGitHubTriggerFiltersByOrgAndRepo(t *testing.T) {
 	t.Parallel()
 

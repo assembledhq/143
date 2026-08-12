@@ -3963,6 +3963,10 @@ func (s *PRService) enqueueReinforceMemories(ctx context.Context, orgID uuid.UUI
 // --- GitHub API helpers ---
 
 func (s *PRService) doGitHubRequest(ctx context.Context, token, method, path string, body any) ([]byte, error) {
+	return s.doGitHubRequestWithAccept(ctx, token, method, path, body, "application/vnd.github+json")
+}
+
+func (s *PRService) doGitHubRequestWithAccept(ctx context.Context, token, method, path string, body any, accept string) ([]byte, error) {
 	ctx = githubtelemetry.WithRequestMetadata(ctx, s.githubRequestMetadataForToken(ctx, token))
 	var bodyReader io.Reader
 	if body != nil {
@@ -3978,7 +3982,7 @@ func (s *PRService) doGitHubRequest(ctx context.Context, token, method, path str
 		return nil, err
 	}
 	req.Header.Set("Authorization", "token "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Accept", accept)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
