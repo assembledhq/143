@@ -869,7 +869,7 @@ func (s *JobStore) RouteNextSandboxJob(ctx context.Context) (*SandboxRoutingResu
 		return nil, err
 	}
 	durableTerminalProbe := false
-	if result.TargetNodeID == nil && result.Reason == SandboxRoutingReasonOrgLimit {
+	if result.TargetNodeID == nil && (result.Reason == SandboxRoutingReasonOrgLimit || result.Reason == SandboxRoutingReasonFleetCapacity) {
 		durableTerminalProbe, err = continueSessionNeedsTerminalProbe(ctx, tx, job)
 		if err != nil {
 			return nil, err
@@ -903,6 +903,11 @@ func (s *JobStore) RouteNextSandboxJob(ctx context.Context) (*SandboxRoutingResu
 			if fallbackErr == nil {
 				var placementErr error
 				if fallbackReason == SandboxRoutingReasonTerminalProbe {
+					if durableTerminalProbe {
+						if err := markSandboxCancellationCleanup(ctx, tx, job); err != nil {
+							return nil, err
+						}
+					}
 					placementErr = updateSandboxTerminalProbePlacement(ctx, tx, job, targetNodeID)
 				} else {
 					placementErr = updateSandboxRoutingPlacement(ctx, tx, job, targetNodeID, nil)
@@ -1167,6 +1172,7 @@ func continueSessionNeedsTerminalProbe(ctx context.Context, tx pgx.Tx, job sandb
 	var sessionStatus models.SessionStatus
 	var pendingSessionCancel bool
 	var stoppedThread bool
+	var cancellationCleanup bool
 	err := tx.QueryRow(ctx, `
 		SELECT s.status,
 			EXISTS (
@@ -1187,6 +1193,13 @@ func continueSessionNeedsTerminalProbe(ctx context.Context, tx pgx.Tx, job sandb
 				  AND st.id::text = payload_job.payload->>'thread_id'
 				  AND st.archived_at IS NULL
 				  AND (st.status = 'cancelled' OR st.cancel_requested_at IS NOT NULL)
+			),
+			EXISTS (
+				SELECT 1
+				FROM jobs cleanup_job
+				WHERE cleanup_job.id = @job_id
+				  AND cleanup_job.org_id = @org_id
+				  AND cleanup_job.payload->>'capacity_cleanup' = 'true'
 			)
 		FROM sessions s
 		WHERE s.org_id = @org_id
@@ -1195,14 +1208,14 @@ func continueSessionNeedsTerminalProbe(ctx context.Context, tx pgx.Tx, job sandb
 		"job_id":     job.ID,
 		"org_id":     job.OrgID,
 		"session_id": *job.SessionID,
-	}).Scan(&sessionStatus, &pendingSessionCancel, &stoppedThread)
+	}).Scan(&sessionStatus, &pendingSessionCancel, &stoppedThread, &cancellationCleanup)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("inspect durable continue_session state before capacity deferral: %w", err)
 	}
-	return (sessionStatus.IsTerminal() && !sessionStatus.IsResumable()) || pendingSessionCancel || stoppedThread, nil
+	return (sessionStatus.IsTerminal() && !sessionStatus.IsResumable()) || pendingSessionCancel || stoppedThread || cancellationCleanup, nil
 }
 
 func parseSandboxRoutingSessionID(raw pgtype.Text) *uuid.UUID {
@@ -1320,6 +1333,31 @@ func updateSandboxTerminalProbePlacement(ctx context.Context, tx pgx.Tx, job san
 	}
 	if result.RowsAffected() != 1 {
 		return fmt.Errorf("persist sandbox terminal probe placement: job %s changed ownership", job.ID)
+	}
+	return nil
+}
+
+func markSandboxCancellationCleanup(ctx context.Context, tx pgx.Tx, job sandboxRoutingJob) error {
+	result, err := tx.Exec(ctx, `
+		UPDATE jobs
+		SET payload = jsonb_set(
+				jsonb_set(payload, '{capacity_waited}', 'true'::jsonb, true),
+				'{capacity_cleanup}', 'true'::jsonb, true
+			),
+			updated_at = now()
+		WHERE id = @job_id
+		  AND org_id = @org_id
+		  AND status = @status
+		  AND job_type = 'continue_session'`, pgx.NamedArgs{
+		"job_id": job.ID,
+		"org_id": job.OrgID,
+		"status": job.Status,
+	})
+	if err != nil {
+		return fmt.Errorf("mark continuation for capacity cleanup: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return fmt.Errorf("mark continuation for capacity cleanup: job %s changed ownership", job.ID)
 	}
 	return nil
 }
@@ -1668,7 +1706,10 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 			if terminalProbe {
 				probeResult, markErr := tx.Exec(ctx, `
 					UPDATE jobs
-					SET payload = jsonb_set(payload, '{capacity_waited}', 'true'::jsonb, true),
+					SET payload = jsonb_set(
+							jsonb_set(payload, '{capacity_waited}', 'true'::jsonb, true),
+							'{capacity_cleanup}', 'true'::jsonb, true
+						),
 						sandbox_slot_reserved_until = NULL,
 						updated_at = now()
 					WHERE id = @job_id

@@ -12027,6 +12027,12 @@ func TestContinueSessionHandler_StopsCapacityRetryAfterTerminalOrCancel(t *testi
 					WithArgs(orgID, sessionID).
 					WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(tt.pendingCancel))
 				mock.ExpectBegin()
+				mock.ExpectQuery(`(?s)SELECT id.*FROM organizations.*id = @org_id.*FOR NO KEY UPDATE`).
+					WithArgs(orgID).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(orgID))
+				mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM jobs j.*j\.id <> @current_job_id.*capacity_cleanup`).
+					WithArgs(orgID, uuid.Nil, sessionID.String()).
+					WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
 				mock.ExpectExec(`(?s)UPDATE session_cancel_requests.*SET delivered_at = now\(\).*delivered_at IS NULL`).
 					WithArgs(orgID, sessionID).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -12072,6 +12078,12 @@ func TestContinueSessionHandler_CancelsAssociatedThreadForPendingSessionCancella
 		WithArgs(orgID, sessionID).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
 	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT id.*FROM organizations.*id = @org_id.*FOR NO KEY UPDATE`).
+		WithArgs(orgID).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(orgID))
+	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM jobs j.*j\.id <> @current_job_id.*capacity_cleanup`).
+		WithArgs(orgID, uuid.Nil, sessionID.String()).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
 	mock.ExpectExec(`(?s)UPDATE session_cancel_requests.*SET delivered_at = now\(\).*delivered_at IS NULL`).
 		WithArgs(orgID, sessionID).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -12096,6 +12108,67 @@ func TestContinueSessionHandler_CancelsAssociatedThreadForPendingSessionCancella
 	require.NoError(t, mock.ExpectationsWereMet(), "session, matching thread, and cancel request should finalize in one transaction")
 }
 
+func TestContinueSessionHandler_PreservesCancellationForLiveSiblingTurn(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID, sessionID, issueID, currentJobID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)...,
+		))
+	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM session_cancel_requests.*delivered_at IS NULL`).
+		WithArgs(orgID, sessionID).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT id.*FROM organizations.*id = @org_id.*FOR NO KEY UPDATE`).
+		WithArgs(orgID).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(orgID))
+	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM jobs j.*j\.id <> @current_job_id.*capacity_cleanup`).
+		WithArgs(orgID, currentJobID, sessionID.String()).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+	mock.ExpectRollback()
+
+	orch := &orchestratorServiceStub{}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","capacity_waited":true,"capacity_cleanup":true}`)
+	ctx := jobctx.WithJobID(context.Background(), currentJobID)
+
+	err := handler(ctx, "continue_session", payload)
+	require.NoError(t, err, "queued cleanup should stop without stealing a live sibling turn's cancellation")
+	require.Equal(t, 0, orch.continueSessionCalls, "cancellation cleanup must not reach the orchestrator")
+	require.NoError(t, mock.ExpectationsWereMet(), "live sibling should retain the undelivered session cancellation request")
+}
+
+func TestContinueSessionHandler_StopsCleanupAfterCancellationWasConsumed(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID, sessionID, issueID := uuid.New(), uuid.New(), uuid.New()
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)...,
+		))
+	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM session_cancel_requests.*delivered_at IS NULL`).
+		WithArgs(orgID, sessionID).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+
+	orch := &orchestratorServiceStub{}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","capacity_waited":true,"capacity_cleanup":true}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.NoError(t, err, "persisted cleanup marker should stop work after a live turn consumed cancellation")
+	require.Equal(t, 0, orch.continueSessionCalls, "consumed cancellation must not let the older queued continuation run")
+	require.NoError(t, mock.ExpectationsWereMet(), "consumed cancellation cleanup should stop after the tenant-scoped request check")
+}
+
 func TestShouldStopContinueSessionForDurableStatePreservesResumableStatuses(t *testing.T) {
 	t.Parallel()
 
@@ -12116,7 +12189,7 @@ func TestShouldStopContinueSessionForDurableStatePreservesResumableStatuses(t *t
 				ID:     sessionID,
 				OrgID:  orgID,
 				Status: status,
-			}, uuid.Nil, false)
+			}, uuid.Nil, false, false)
 			require.NoError(t, err, "durable continuation state should load successfully")
 			require.False(t, stop, "an accepted continuation should remain runnable from every resumable session status")
 			require.NoError(t, mock.ExpectationsWereMet(), "resumable-state checks should remain tenant scoped and cancellation aware")
@@ -12182,7 +12255,7 @@ func TestShouldStopContinueSessionForDurableStateRejectsThreadFromAnotherSession
 		ID:     sessionID,
 		OrgID:  orgID,
 		Status: models.SessionStatusRunning,
-	}, threadID, true)
+	}, threadID, true, false)
 	require.Error(t, err, "cross-session thread payload should be rejected")
 	require.False(t, stop, "cross-session thread payload should not mutate or stop the requested session")
 	require.Contains(t, err.Error(), "does not belong", "error should explain the session-thread ownership mismatch")

@@ -24,15 +24,27 @@ END $$;
 
 -- Preserve the classification of active reviews that were queued by a binary
 -- deployed before workload_class existed (or before it was populated).
+WITH active_sandbox_jobs AS MATERIALIZED (
+    SELECT j.id,
+           j.org_id,
+           CASE
+               WHEN j.payload->>'session_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+               THEN (j.payload->>'session_id')::uuid
+           END AS session_id
+    FROM jobs j
+    WHERE j.job_type IN ('run_agent', 'continue_session')
+      AND j.status IN ('pending', 'running')
+      AND j.workload_class <> 'code_review'
+)
 UPDATE jobs j
 SET workload_class = 'code_review'
-FROM sessions s
-WHERE s.org_id = j.org_id
-  AND s.id::text = j.payload->>'session_id'
-  AND s.origin = 'code_review'
-  AND j.job_type IN ('run_agent', 'continue_session')
-  AND j.status IN ('pending', 'running')
-  AND j.workload_class <> 'code_review';
+FROM active_sandbox_jobs active
+JOIN sessions s
+  ON s.id = active.session_id
+ AND s.org_id = active.org_id
+WHERE j.id = active.id
+  AND j.org_id = active.org_id
+  AND s.origin = 'code_review';
 
 -- jobs is a hot queue table, and golang-migrate wraps this file in a
 -- transaction. `migrate up` therefore adds the columns and pre-builds both

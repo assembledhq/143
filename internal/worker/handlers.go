@@ -9539,6 +9539,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			PostSuccessAction      string `json:"post_success_action"`
 			PostSuccessAuthorMode  string `json:"post_success_author_mode"`
 			CapacityWaited         bool   `json:"capacity_waited"`
+			CapacityCleanup        bool   `json:"capacity_cleanup"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal continue_session payload: %w", err)
@@ -9562,7 +9563,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		}
 
 		_, hasFleetWaitMarker := jobctx.JobRetryWindowStartedAtFromContext(ctx)
-		if input.CapacityWaited || hasFleetWaitMarker {
+		if input.CapacityWaited || input.CapacityCleanup || hasFleetWaitMarker {
 			var durableThreadID uuid.UUID
 			var hasDurableThread bool
 			if input.ThreadID != "" && stores.SessionThreads != nil {
@@ -9571,7 +9572,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					hasDurableThread = true
 				}
 			}
-			stopContinuation, stopErr := shouldStopContinueSessionForDurableState(ctx, stores, session, durableThreadID, hasDurableThread)
+			stopContinuation, stopErr := shouldStopContinueSessionForDurableState(ctx, stores, session, durableThreadID, hasDurableThread, input.CapacityCleanup)
 			if stopErr != nil {
 				return stopErr
 			}
@@ -9855,7 +9856,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				if reloadErr != nil {
 					return fmt.Errorf("reload session before capacity retry: %w", reloadErr)
 				}
-				stopRetry, stopErr := shouldStopContinueSessionForDurableState(ctx, stores, currentSession, threadID, hasThread)
+				stopRetry, stopErr := shouldStopContinueSessionForDurableState(ctx, stores, currentSession, threadID, hasThread, false)
 				if stopErr != nil {
 					return stopErr
 				}
@@ -10287,6 +10288,7 @@ func shouldStopContinueSessionForDurableState(
 	currentSession models.Session,
 	threadID uuid.UUID,
 	hasThread bool,
+	capacityCleanup bool,
 ) (bool, error) {
 	orgID := currentSession.OrgID
 	sessionID := currentSession.ID
@@ -10298,6 +10300,11 @@ func shouldStopContinueSessionForDurableState(
 		return false, err
 	}
 	if !pendingCancel {
+		if capacityCleanup {
+			// A live sibling may have consumed the session-scoped request after
+			// routing marked this older queued continuation for cleanup.
+			return true, nil
+		}
 		if !hasThread || stores.SessionThreads == nil {
 			return false, nil
 		}
@@ -10325,7 +10332,8 @@ func shouldStopContinueSessionForDurableState(
 		threadIDCopy := threadID
 		cancellationThreadID = &threadIDCopy
 	}
-	cancelled, threadCancelled, err := stores.Sessions.CancelPendingCapacityWait(ctx, orgID, sessionID, cancellationThreadID)
+	currentJobID, _ := jobctx.JobIDFromContext(ctx)
+	cancelled, threadCancelled, err := stores.Sessions.CancelPendingCapacityWait(ctx, orgID, sessionID, currentJobID, cancellationThreadID)
 	if err != nil {
 		return false, err
 	}
