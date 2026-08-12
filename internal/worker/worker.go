@@ -125,11 +125,10 @@ type sandboxJobRouter interface {
 	RouteNextSandboxJob(ctx context.Context) (*db.SandboxRoutingResult, error)
 }
 
-// Route at most one sandbox job before giving the normal queue a claim
-// opportunity. Every worker runs this pass, so draining a large batch here
-// would multiply database work and delay unrelated jobs while the fleet is
-// saturated.
-const maxSandboxRoutingDecisionsPerPoll = 1
+// Keep per-poll routing bounded while allowing an organization-limited head
+// candidate to move aside for another tenant. Fleet-capacity deferrals stop
+// the pass immediately because no later sandbox job can be placed either.
+const maxSandboxRoutingDecisionsPerPoll = 16
 
 // maxRetryableDuration is the maximum wall-clock time a retryable job is
 // allowed to keep retrying before being dead-lettered. This prevents jobs
@@ -249,6 +248,9 @@ func (w *Worker) poll(ctx context.Context) {
 					Msg("fleet has no usable sandbox capacity metadata; routing through compatibility fallback")
 			}
 			if !result.Deferred {
+				break
+			}
+			if result.Reason == db.SandboxRoutingReasonFleetCapacity {
 				break
 			}
 		}
