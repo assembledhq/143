@@ -9538,6 +9538,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			QueuedMessageID        string `json:"queued_message_id"`
 			PostSuccessAction      string `json:"post_success_action"`
 			PostSuccessAuthorMode  string `json:"post_success_author_mode"`
+			CapacityWaited         bool   `json:"capacity_waited"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal continue_session payload: %w", err)
@@ -9560,16 +9561,17 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			return fmt.Errorf("fetch session: %w", err)
 		}
 
-		if _, waitedForCapacity := jobctx.JobRetryWindowStartedAtFromContext(ctx); waitedForCapacity {
-			var waitedThreadID uuid.UUID
-			var waitedWithThread bool
+		_, hasFleetWaitMarker := jobctx.JobRetryWindowStartedAtFromContext(ctx)
+		if input.CapacityWaited || hasFleetWaitMarker {
+			var durableThreadID uuid.UUID
+			var hasDurableThread bool
 			if input.ThreadID != "" && stores.SessionThreads != nil {
 				if parsedThreadID, parseErr := uuid.Parse(input.ThreadID); parseErr == nil {
-					waitedThreadID = parsedThreadID
-					waitedWithThread = true
+					durableThreadID = parsedThreadID
+					hasDurableThread = true
 				}
 			}
-			stopContinuation, stopErr := shouldStopContinueSessionForDurableState(ctx, stores, orgID, sessionID, waitedThreadID, waitedWithThread)
+			stopContinuation, stopErr := shouldStopContinueSessionForDurableState(ctx, stores, session, durableThreadID, hasDurableThread)
 			if stopErr != nil {
 				return stopErr
 			}
@@ -9577,7 +9579,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				logger.Info().
 					Str("session_id", sessionID.String()).
 					Str("thread_id", input.ThreadID).
-					Msg("session or thread became terminal or cancelled while waiting for capacity; stopping continue_session before work")
+					Msg("session or thread became terminal or cancelled before continue_session work; stopping continuation")
 				return nil
 			}
 		}
@@ -9849,7 +9851,11 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 
 		if err := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts); err != nil {
 			if errors.Is(err, agent.ErrConcurrencyLimit) || errors.Is(err, agent.ErrSandboxTurnConcurrency) {
-				stopRetry, stopErr := shouldStopContinueSessionForDurableState(ctx, stores, orgID, sessionID, threadID, hasThread)
+				currentSession, reloadErr := stores.Sessions.GetByID(ctx, orgID, sessionID)
+				if reloadErr != nil {
+					return fmt.Errorf("reload session before capacity retry: %w", reloadErr)
+				}
+				stopRetry, stopErr := shouldStopContinueSessionForDurableState(ctx, stores, currentSession, threadID, hasThread)
 				if stopErr != nil {
 					return stopErr
 				}
@@ -10278,14 +10284,13 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 func shouldStopContinueSessionForDurableState(
 	ctx context.Context,
 	stores *Stores,
-	orgID, sessionID, threadID uuid.UUID,
+	currentSession models.Session,
+	threadID uuid.UUID,
 	hasThread bool,
 ) (bool, error) {
-	currentSession, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
-	if err != nil {
-		return false, fmt.Errorf("reload session before capacity retry: %w", err)
-	}
-	if currentSession.Status.IsTerminal() {
+	orgID := currentSession.OrgID
+	sessionID := currentSession.ID
+	if currentSession.Status.IsTerminal() && !currentSession.Status.IsResumable() {
 		return true, nil
 	}
 	pendingCancel, err := stores.Sessions.HasPendingCancelRequest(ctx, orgID, sessionID)

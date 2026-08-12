@@ -95,6 +95,60 @@ func TestPrepareSandboxWorkloadRoutingOnConn(t *testing.T) {
 	}
 }
 
+func TestSandboxWorkloadRoutingPreparationRequired(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		reader    fakeDirtyMigrationRepairer
+		expected  bool
+		expectErr bool
+	}{
+		{
+			name:     "prepares a fresh database",
+			reader:   fakeDirtyMigrationRepairer{versionErr: migrate.ErrNilVersion},
+			expected: true,
+		},
+		{
+			name:     "prepares before routing migration",
+			reader:   fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion - 1},
+			expected: true,
+		},
+		{
+			name:     "allows recovery from dirty routing migration",
+			reader:   fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion, dirty: true},
+			expected: true,
+		},
+		{
+			name:   "skips after routing migration is applied",
+			reader: fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion},
+		},
+		{
+			name:   "skips later migration versions",
+			reader: fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion + 1},
+		},
+		{
+			name:      "returns migration state failures",
+			reader:    fakeDirtyMigrationRepairer{versionErr: errors.New("version unavailable")},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			required, err := sandboxWorkloadRoutingPreparationRequired(&tt.reader)
+			if tt.expectErr {
+				require.Error(t, err, "migration state inspection should return the expected failure")
+			} else {
+				require.NoError(t, err, "migration state inspection should complete")
+			}
+			require.Equal(t, tt.expected, required, "preparation should only run until migration 286 is safely applied")
+		})
+	}
+}
+
 func TestRepairKnownDirtyMigration(t *testing.T) {
 	t.Parallel()
 
