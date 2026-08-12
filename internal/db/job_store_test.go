@@ -427,27 +427,65 @@ func TestJobStore_HasActiveByDedupeKeyFiltersByOrg(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestJobStore_RetryWithoutConsumingAttemptWithLeaseAndTarget_PinsRetry(t *testing.T) {
+func TestJobStore_RetryWithLeaseAndTargetMaintainsReservationConsistency(t *testing.T) {
 	t.Parallel()
 
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "should create mock pool")
-	defer mock.Close()
-
-	store := NewJobStore(mock)
-	jobID := uuid.New()
-	lockToken := uuid.New()
-	runAt := time.Now()
 	target := "worker-host-c"
+	tests := []struct {
+		name             string
+		preserveAttempts bool
+		targetNodeID     *string
+		queryPattern     string
+	}{
+		{
+			name:             "preserves attempts and reserved target",
+			preserveAttempts: true,
+			targetNodeID:     &target,
+			queryPattern:     `(?s)UPDATE jobs.*attempts = GREATEST.*target_node_id = \$5.*sandbox_slot_reserved_until = CASE.*WHEN \$5 IS NULL THEN NULL`,
+		},
+		{
+			name:             "preserves attempts and clears stale reservation",
+			preserveAttempts: true,
+			queryPattern:     `(?s)UPDATE jobs.*attempts = GREATEST.*target_node_id = \$5.*sandbox_slot_reserved_until = CASE.*WHEN \$5 IS NULL THEN NULL`,
+		},
+		{
+			name:         "consumes attempt and preserves reserved target",
+			targetNodeID: &target,
+			queryPattern: `(?s)UPDATE jobs.*run_at = \$2.*target_node_id = \$5.*sandbox_slot_reserved_until = CASE.*WHEN \$5 IS NULL THEN NULL`,
+		},
+		{
+			name:         "consumes attempt and clears stale reservation",
+			queryPattern: `(?s)UPDATE jobs.*run_at = \$2.*target_node_id = \$5.*sandbox_slot_reserved_until = CASE.*WHEN \$5 IS NULL THEN NULL`,
+		},
+	}
 
-	mock.ExpectExec("UPDATE jobs[\\s\\S]+attempts = GREATEST[\\s\\S]+target_node_id = \\$[0-9]+").
-		WithArgs("retry", runAt, jobID, lockToken, &target).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	ok, err := store.RetryWithoutConsumingAttemptWithLeaseAndTarget(context.Background(), jobID, lockToken, "retry", runAt, &target)
-	require.NoError(t, err, "targeted retry should not return an error")
-	require.True(t, ok, "targeted retry should report that the fenced row was updated")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewJobStore(mock)
+			jobID := uuid.New()
+			lockToken := uuid.New()
+			runAt := time.Now()
+			mock.ExpectExec(tt.queryPattern).
+				WithArgs("retry", runAt, jobID, lockToken, tt.targetNodeID).
+				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+			var ok bool
+			if tt.preserveAttempts {
+				ok, err = store.RetryWithoutConsumingAttemptWithLeaseAndTarget(context.Background(), jobID, lockToken, "retry", runAt, tt.targetNodeID)
+			} else {
+				ok, err = store.RetryWithLeaseAndTarget(context.Background(), jobID, lockToken, "retry", runAt, tt.targetNodeID)
+			}
+			require.NoError(t, err, "targeted retry should not return an error")
+			require.True(t, ok, "targeted retry should report that the fenced row was updated")
+			require.NoError(t, mock.ExpectationsWereMet(), "targeted retry should keep the reservation only when a target remains pinned")
+		})
+	}
 }
 
 func TestJobStore_GetLatestFailedByType(t *testing.T) {

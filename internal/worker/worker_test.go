@@ -771,7 +771,7 @@ func TestWorker_Start_WakeTriggersPoll(t *testing.T) {
 	}
 }
 
-func TestWorkerPollContinuesRoutingAfterCapacityDeferral(t *testing.T) {
+func TestWorkerPollBoundsRoutingBeforeNormalClaim(t *testing.T) {
 	t.Parallel()
 
 	store := &routingTestStore{results: []*db.SandboxRoutingResult{
@@ -781,7 +781,6 @@ func TestWorkerPollContinuesRoutingAfterCapacityDeferral(t *testing.T) {
 			Deferred:      true,
 			Reason:        db.SandboxRoutingReasonOrgLimit,
 		},
-		nil,
 	}}
 	w := &Worker{
 		jobs:          store,
@@ -794,8 +793,8 @@ func TestWorkerPollContinuesRoutingAfterCapacityDeferral(t *testing.T) {
 
 	w.poll(context.Background())
 
-	require.Equal(t, int32(2), store.calls.Load(), "a deferred review job should not monopolize the routing pass")
-	require.Equal(t, int32(1), store.claims.Load(), "the worker should still attempt a normal claim after draining deferred routing decisions")
+	require.Equal(t, int32(1), store.calls.Load(), "each poll should perform at most one routing transaction before normal queue work")
+	require.Equal(t, int32(1), store.claims.Load(), "the worker should attempt a normal claim immediately after a capacity deferral")
 }
 
 func TestWorkerPollDoesNotRepublishRoutingNotification(t *testing.T) {

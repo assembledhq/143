@@ -10300,45 +10300,39 @@ func shouldStopContinueSessionForDurableState(
 		return false, err
 	}
 	if !pendingCancel {
-		if capacityCleanup {
-			// A live sibling may have consumed the session-scoped request after
-			// routing marked this older queued continuation for cleanup.
-			return true, nil
+		if hasThread && stores.SessionThreads != nil {
+			thread, err := stores.SessionThreads.GetByID(ctx, orgID, threadID)
+			if err != nil {
+				return false, fmt.Errorf("reload session thread before capacity retry: %w", err)
+			}
+			if thread.SessionID != sessionID {
+				return false, fmt.Errorf("session thread %s does not belong to session %s", threadID, sessionID)
+			}
+			if thread.Status == models.ThreadStatusCancelled {
+				return true, nil
+			}
+			if thread.CancelRequestedAt != nil {
+				if err := stores.SessionThreads.UpdateStatus(ctx, orgID, threadID, models.ThreadStatusCancelled); err != nil {
+					return false, fmt.Errorf("cancel session thread while waiting for capacity: %w", err)
+				}
+				return true, nil
+			}
 		}
-		if !hasThread || stores.SessionThreads == nil {
-			return false, nil
-		}
-		thread, err := stores.SessionThreads.GetByID(ctx, orgID, threadID)
-		if err != nil {
-			return false, fmt.Errorf("reload session thread before capacity retry: %w", err)
-		}
-		if thread.SessionID != sessionID {
-			return false, fmt.Errorf("session thread %s does not belong to session %s", threadID, sessionID)
-		}
-		if thread.Status == models.ThreadStatusCancelled {
-			return true, nil
-		}
-		if thread.CancelRequestedAt == nil {
-			return false, nil
-		}
-		if err := stores.SessionThreads.UpdateStatus(ctx, orgID, threadID, models.ThreadStatusCancelled); err != nil {
-			return false, fmt.Errorf("cancel session thread while waiting for capacity: %w", err)
-		}
-		return true, nil
+		// A live sibling may have consumed the session-scoped request after
+		// routing marked this older queued continuation for cleanup. Revalidate
+		// and finalize any thread cancellation above before stopping this job.
+		return capacityCleanup, nil
 	}
 
-	var cancellationThreadID *uuid.UUID
-	if hasThread {
-		threadIDCopy := threadID
-		cancellationThreadID = &threadIDCopy
-	}
 	currentJobID, _ := jobctx.JobIDFromContext(ctx)
-	cancelled, threadCancelled, err := stores.Sessions.CancelPendingCapacityWait(ctx, orgID, sessionID, currentJobID, cancellationThreadID)
+	cancelled, cancelledThreadIDs, err := stores.Sessions.CancelPendingCapacityWait(ctx, orgID, sessionID, currentJobID)
 	if err != nil {
 		return false, err
 	}
-	if cancelled && threadCancelled && stores.SessionThreads != nil {
-		stores.SessionThreads.PublishRuntimeUpdate(ctx, orgID, threadID)
+	if cancelled && stores.SessionThreads != nil {
+		for _, cancelledThreadID := range cancelledThreadIDs {
+			stores.SessionThreads.PublishRuntimeUpdate(ctx, orgID, cancelledThreadID)
+		}
 	}
 	// If another cancellation consumer won the race after the durable read,
 	// this queued continuation still predates that cancellation and must stop.
