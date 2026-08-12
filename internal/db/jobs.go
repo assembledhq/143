@@ -1457,7 +1457,7 @@ func selectSandboxRoutingCandidate(ctx context.Context, tx pgx.Tx, workloadClass
 				live_sandboxes
 					+ GREATEST(local_reservations - sandbox_turn_local_reservations, shared_non_turn_reservations, 0)
 					+ pending_durable_reservations
-					+ GREATEST(sandbox_turn_local_reservations, running_durable_reservations, shared_sandbox_turn_reservations) AS capacity_load
+					+ GREATEST(sandbox_turn_local_reservations, running_durable_reservations + shared_sandbox_turn_reservations) AS capacity_load
 			FROM raw_load
 		)
 		SELECT id
@@ -1563,7 +1563,7 @@ func sandboxRoutingCandidateHasCapacity(ctx context.Context, tx pgx.Tx, nodeID s
 
 func sandboxRoutingCapacityLoad(live, localReserved, sandboxTurnLocalReserved, pendingDurableReserved, runningDurableReserved, sharedTurnReserved, sharedNonTurnReserved int) int {
 	overlappingNonTurns := max(localReserved-sandboxTurnLocalReserved, sharedNonTurnReserved, 0)
-	overlappingSandboxTurns := max(sandboxTurnLocalReserved, runningDurableReserved, sharedTurnReserved)
+	overlappingSandboxTurns := max(sandboxTurnLocalReserved, runningDurableReserved+sharedTurnReserved)
 	return live + overlappingNonTurns + pendingDurableReserved + overlappingSandboxTurns
 }
 
@@ -1985,12 +1985,15 @@ func (s *JobStore) RenewLeaseForSessionExecutor(ctx context.Context, orgID, jobI
 		SET lease_expires_at = now() + (@lease_seconds * interval '1 second'),
 			sandbox_slot_reserved_until = CASE
 				WHEN sandbox_slot_reserved_until IS NULL THEN NULL
-				WHEN NULLIF(payload->>'session_id', '') IS NOT NULL
+				WHEN payload->>'session_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 					AND EXISTS (
 						SELECT 1
 						FROM sessions sandbox_session
 						WHERE sandbox_session.org_id = jobs.org_id
-						  AND sandbox_session.id::text = payload->>'session_id'
+						  AND sandbox_session.id = CASE
+							WHEN payload->>'session_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+							THEN (payload->>'session_id')::uuid
+						  END
 						  AND sandbox_session.container_id IS NOT NULL
 					) THEN NULL
 				ELSE now() + (@lease_seconds * interval '1 second')
@@ -2009,7 +2012,10 @@ func (s *JobStore) RenewLeaseForSessionExecutor(ctx context.Context, orgID, jobI
 		      SELECT 1
 		      FROM sessions s
 		      WHERE s.org_id = jobs.org_id
-		        AND s.id::text = payload->>'session_id'
+		        AND s.id = CASE
+		          WHEN payload->>'session_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+		          THEN (payload->>'session_id')::uuid
+		        END
 		        AND s.status NOT IN ('completed', 'failed', 'cancelled', 'skipped')
 		    )
 		  )
@@ -2044,12 +2050,15 @@ func (s *JobStore) RenewLease(ctx context.Context, jobID, lockToken uuid.UUID, l
 		SET lease_expires_at = now() + (@lease_seconds * interval '1 second'),
 			sandbox_slot_reserved_until = CASE
 				WHEN sandbox_slot_reserved_until IS NULL THEN NULL
-				WHEN NULLIF(payload->>'session_id', '') IS NOT NULL
+				WHEN payload->>'session_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 					AND EXISTS (
 						SELECT 1
 						FROM sessions sandbox_session
 						WHERE sandbox_session.org_id = jobs.org_id
-						  AND sandbox_session.id::text = payload->>'session_id'
+						  AND sandbox_session.id = CASE
+							WHEN payload->>'session_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+							THEN (payload->>'session_id')::uuid
+						  END
 						  AND sandbox_session.container_id IS NOT NULL
 					) THEN NULL
 				ELSE now() + (@lease_seconds * interval '1 second')
@@ -2065,7 +2074,10 @@ func (s *JobStore) RenewLease(ctx context.Context, jobID, lockToken uuid.UUID, l
 		      SELECT 1
 		      FROM sessions s
 		      WHERE s.org_id = jobs.org_id
-		        AND s.id::text = payload->>'session_id'
+		        AND s.id = CASE
+		          WHEN payload->>'session_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+		          THEN (payload->>'session_id')::uuid
+		        END
 		        AND s.status NOT IN ('completed', 'failed', 'cancelled', 'skipped')
 		    )
 		  )

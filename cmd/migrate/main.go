@@ -188,10 +188,13 @@ func sandboxWorkloadRoutingPreparationRequired(reader migrationVersionReader) (b
 		}
 		return false, fmt.Errorf("read migration version: %w", err)
 	}
+	if dirty {
+		return false, fmt.Errorf("database is dirty at migration %d; repair it before sandbox workload routing preparation", version)
+	}
 	if version < sandboxWorkloadRoutingMigrationVersion {
 		return true, nil
 	}
-	return version == sandboxWorkloadRoutingMigrationVersion && dirty, nil
+	return false, nil
 }
 
 // prepareSandboxWorkloadRouting performs the non-transactional portion of the
@@ -236,14 +239,13 @@ func prepareSandboxWorkloadRoutingOnConn(ctx context.Context, conn migrationPrep
 		{name: "add routing columns", sql: `ALTER TABLE jobs
 			ADD COLUMN IF NOT EXISTS workload_class text NOT NULL DEFAULT 'interactive',
 			ADD COLUMN IF NOT EXISTS sandbox_slot_reserved_until timestamptz`},
-		{name: "backfill active code reviews", sql: sandboxWorkloadBackfillSQL},
 	}
 	for _, statement := range statements {
 		if _, err := conn.Exec(ctx, statement.sql); err != nil {
 			return fmt.Errorf("%s: %w", statement.name, err)
 		}
 	}
-	// The short timeout protects only the blocking ALTER/UPDATE phase. Concurrent
+	// The short timeout protects only blocking table/row locks. Concurrent
 	// index construction is intentionally allowed to wait for the brief locks it
 	// needs instead of turning ordinary jobs-table traffic into a deploy failure.
 	if _, err := conn.Exec(ctx, `SET lock_timeout = '0'`); err != nil {
@@ -270,6 +272,19 @@ func prepareSandboxWorkloadRoutingOnConn(ctx context.Context, conn migrationPrep
 		if _, err := conn.Exec(ctx, index.createSQL); err != nil {
 			return fmt.Errorf("create concurrent index %s: %w", index.name, err)
 		}
+	}
+
+	// Build the partial active-turn index before the one-time classification
+	// repair so the backfill walks the small active sandbox-job set instead of
+	// scanning the entire hot queue table.
+	if _, err := conn.Exec(ctx, `SET lock_timeout = '5s'`); err != nil {
+		return fmt.Errorf("set lock timeout before sandbox workload backfill: %w", err)
+	}
+	if _, err := conn.Exec(ctx, sandboxWorkloadBackfillSQL); err != nil {
+		return fmt.Errorf("backfill active code reviews: %w", err)
+	}
+	if _, err := conn.Exec(ctx, `SET lock_timeout = '0'`); err != nil {
+		return fmt.Errorf("reset lock timeout after sandbox workload backfill: %w", err)
 	}
 	return nil
 }

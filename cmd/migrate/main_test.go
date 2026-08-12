@@ -72,8 +72,6 @@ func TestPrepareSandboxWorkloadRoutingOnConn(t *testing.T) {
 					WillReturnResult(pgxmock.NewResult("SET", 0))
 				mock.ExpectExec(`(?s)ALTER TABLE jobs.*ADD COLUMN IF NOT EXISTS workload_class.*sandbox_slot_reserved_until`).
 					WillReturnResult(pgxmock.NewResult("ALTER TABLE", 0))
-				mock.ExpectExec(`(?s)WITH active_sandbox_jobs AS MATERIALIZED.*j\.status IN \('pending', 'running'\).*UPDATE jobs j.*JOIN sessions s.*s\.id = active\.session_id.*s\.origin = 'code_review'`).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 2))
 				mock.ExpectExec(`SET lock_timeout = '0'`).
 					WillReturnResult(pgxmock.NewResult("SET", 0))
 				for _, index := range sandboxRoutingConcurrentIndexes {
@@ -88,6 +86,12 @@ func TestPrepareSandboxWorkloadRoutingOnConn(t *testing.T) {
 					mock.ExpectExec(`(?s)CREATE INDEX CONCURRENTLY IF NOT EXISTS ` + index.name).
 						WillReturnResult(pgxmock.NewResult("CREATE INDEX", 0))
 				}
+				mock.ExpectExec(`SET lock_timeout = '5s'`).
+					WillReturnResult(pgxmock.NewResult("SET", 0))
+				mock.ExpectExec(`(?s)WITH active_sandbox_jobs AS MATERIALIZED.*j\.status IN \('pending', 'running'\).*UPDATE jobs j.*JOIN sessions s.*s\.id = active\.session_id.*s\.origin = 'code_review'`).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+				mock.ExpectExec(`SET lock_timeout = '0'`).
+					WillReturnResult(pgxmock.NewResult("SET", 0))
 			}
 
 			err = prepareSandboxWorkloadRoutingOnConn(context.Background(), mock)
@@ -188,9 +192,14 @@ func TestSandboxWorkloadRoutingPreparationRequired(t *testing.T) {
 			expected: true,
 		},
 		{
-			name:     "allows recovery from dirty routing migration",
-			reader:   fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion, dirty: true},
-			expected: true,
+			name:      "requires routing migration repair before preparation",
+			reader:    fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion, dirty: true},
+			expectErr: true,
+		},
+		{
+			name:      "refuses unrelated earlier dirty migration",
+			reader:    fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion - 1, dirty: true},
+			expectErr: true,
 		},
 		{
 			name:   "skips after routing migration is applied",

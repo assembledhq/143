@@ -1075,6 +1075,9 @@ func TestJobStore_RenewLease_GuardsSessionJobsAgainstTerminalSessions(t *testing
 	require.Contains(t, sql, "payload->>'session_id'", "RenewLease should inspect the durable session reference in session job payloads")
 	require.Contains(t, sql, "s.status NOT IN ('completed', 'failed', 'cancelled', 'skipped')", "RenewLease should refuse renewal when the referenced session is terminal")
 	require.Contains(t, sql, "s.org_id = jobs.org_id", "RenewLease should scope the session guard to the job org")
+	require.NotContains(t, sql, "sandbox_session.id::text = payload->>'session_id'", "reservation renewal should not cast away the sessions primary-key index")
+	require.NotContains(t, sql, "s.id::text = payload->>'session_id'", "terminal-session renewal checks should not cast away the sessions primary-key index")
+	require.Contains(t, sql, "THEN (payload->>'session_id')::uuid", "renewal should guard and cast the payload value for indexed UUID lookup")
 }
 
 func TestJobStore_TerminalizeRunningSessionJobs(t *testing.T) {
@@ -2095,6 +2098,8 @@ func TestSandboxRoutingCapacityLoadDoesNotDoubleCountRunningTurns(t *testing.T) 
 		{name: "heartbeat and shared preview reservation overlap", localReserved: 1, sharedNonTurnReserved: 1, expected: 1},
 		{name: "heartbeat and shared turn reservation overlap", sandboxTurnLocalReserved: 1, sharedTurnReserved: 1, expected: 1},
 		{name: "shared executor turns exceed main-process heartbeat", sandboxTurnLocalReserved: 1, sharedTurnReserved: 2, expected: 2},
+		{name: "durable and shared turns are disjoint", runningDurable: 1, sharedTurnReserved: 1, expected: 2},
+		{name: "heartbeat overlaps combined durable and shared turns", sandboxTurnLocalReserved: 2, runningDurable: 1, sharedTurnReserved: 1, expected: 2},
 		{name: "durable reservation covers pre-admission heartbeat lag", runningDurable: 1, expected: 1},
 		{name: "live sandboxes remain additive", live: 2, localReserved: 1, sandboxTurnLocalReserved: 1, runningDurable: 1, expected: 3},
 	}

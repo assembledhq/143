@@ -1100,7 +1100,7 @@ Durable, database-backed async work queue for the full pipeline (`ingest_webhook
 - `(queue, status, run_at, priority DESC)` — queue-specific workers
 - `(org_id, created_at DESC)` — org job history
 - `(locked_by_node_id, locked_at)` — dead-worker recovery
-- `(priority DESC, (CASE WHEN workload_class = 'interactive' THEN 0 ELSE 1 END), created_at ASC, run_at)` partial for pending `run_agent`/`continue_session` — capacity-aware sandbox routing and interactive-first ordering
+- `(priority DESC, (CASE WHEN workload_class = 'interactive' THEN 0 ELSE 1 END), run_at ASC, created_at ASC)` partial for pending `run_agent`/`continue_session` — capacity-aware sandbox routing and interactive-first ordering
 - `(org_id, status)` partial for pending/running `run_agent`/`continue_session` — shared organization sandbox-turn admission counts
 - `(queue, dedupe_key)` unique where `dedupe_key IS NOT NULL AND status IN ('pending', 'running')` — in-flight dedupe
 

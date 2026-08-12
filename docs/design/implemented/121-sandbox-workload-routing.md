@@ -169,9 +169,11 @@ interval without permanently pinning work if a dispatcher dies. At final
 admission, the main worker, isolated session executors, and preview paths use
 the same per-node advisory lock to atomically compare the current Docker count,
 durable job reservations, and shared final-admission leases before inserting a
-15-minute shared lease. The lease is released as soon as sandbox creation or
-hydration finishes; its TTL bounds leaks if a process dies. A fenced executor
-also clears its durable routing reservation after creation or hydration.
+15-minute shared lease. Cross-process coordination has a 10-second bound while
+the Docker inspection inside the lock keeps its shorter two-second bound. The
+lease is released as soon as sandbox creation or hydration finishes; its TTL
+bounds leaks if a process dies. A fenced executor also clears its durable
+routing reservation after creation or hydration.
 
 Pressure cleanup runs only when the worker is physically full. A code-review
 request rejected solely because it reached the interactive reserve boundary

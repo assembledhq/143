@@ -105,6 +105,9 @@ func (s *SandboxCapacityReservationStore) ReserveSandboxCapacity(
 	}
 
 	var reservationID uuid.UUID
+	// A fenced job has at most one live admission attempt. The upsert makes a
+	// retry before release idempotent; callers must still release the single
+	// returned lease exactly once after sandbox creation or failure.
 	err = tx.QueryRow(ctx, `
 		INSERT INTO sandbox_capacity_reservations (
 			node_id, job_id, workload_class, expires_at
