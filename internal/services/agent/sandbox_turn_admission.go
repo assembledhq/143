@@ -58,10 +58,15 @@ func (o *Orchestrator) admitSandboxTurn(
 	if !needsFreshSandbox || o.sandboxCapacity == nil {
 		return nil, nil
 	}
+	var jobID *uuid.UUID
+	if currentJobID, ok := jobctx.JobIDFromContext(ctx); ok && currentJobID != uuid.Nil {
+		jobID = &currentJobID
+	}
 	reservation, err := o.sandboxCapacity.Acquire(ctx, SandboxCapacityRequest{
 		Purpose:       purpose,
 		SessionID:     session.ID.String(),
 		OrgID:         session.OrgID.String(),
+		JobID:         jobID,
 		WorkloadClass: workloadClass,
 	})
 	if err != nil {

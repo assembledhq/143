@@ -5504,7 +5504,7 @@ func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, 
 		log.Warn().Err(err).Msg("failed to fetch messages for post-turn queue drain")
 		return
 	}
-	terminalCodeReviewThreads := o.terminalCodeReviewThreadsForDrain(ctx, session, log)
+	nonDrainableCodeReviewThreads := o.nonDrainableCodeReviewThreadsForDrain(ctx, session, log)
 	var queued *models.SessionMessage
 	for i := range messages {
 		m := messages[i]
@@ -5519,12 +5519,12 @@ func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, 
 			continue
 		}
 		if m.ThreadID != nil {
-			if terminalThread, terminal := terminalCodeReviewThreads[*m.ThreadID]; terminal {
+			if nonDrainableThread, nonDrainable := nonDrainableCodeReviewThreads[*m.ThreadID]; nonDrainable {
 				log.Info().
-					Str("thread_id", terminalThread.ID.String()).
+					Str("thread_id", nonDrainableThread.ID.String()).
 					Int64("message_id", m.ID).
-					Str("thread_status", string(terminalThread.Status)).
-					Msg("skipping queued message for terminal code review thread")
+					Str("thread_status", string(nonDrainableThread.Status)).
+					Msg("skipping queued message for non-drainable code review thread")
 				continue
 			}
 		}
@@ -5588,33 +5588,37 @@ func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, 
 	}
 }
 
-func (o *Orchestrator) terminalCodeReviewThreadsForDrain(ctx context.Context, session *models.Session, log zerolog.Logger) map[uuid.UUID]models.SessionThread {
-	terminal := make(map[uuid.UUID]models.SessionThread)
+func (o *Orchestrator) nonDrainableCodeReviewThreadsForDrain(ctx context.Context, session *models.Session, log zerolog.Logger) map[uuid.UUID]models.SessionThread {
+	nonDrainable := make(map[uuid.UUID]models.SessionThread)
 	if session == nil || session.Origin != models.SessionOriginCodeReview || o.sessionThreads == nil {
-		return terminal
+		return nonDrainable
 	}
 	lister, ok := o.sessionThreads.(sessionThreadDrainLister)
 	if !ok {
 		log.Warn().Msg("session thread store does not support batched code review queue-drain lookup")
-		return terminal
+		return nonDrainable
 	}
 	threads, err := lister.ListBySessionWithOptions(ctx, session.OrgID, session.ID, true)
 	if err != nil {
 		log.Warn().Err(err).
 			Str("session_id", session.ID.String()).
 			Msg("failed to list code review threads during queue drain")
-		return terminal
+		return nonDrainable
 	}
 	for _, thread := range threads {
 		if thread.ExecutionMode != models.ThreadExecutionModeReview || thread.FilesystemMode != models.ThreadFilesystemModeReadOnly {
 			continue
 		}
 		switch thread.Status {
-		case models.ThreadStatusCompleted, models.ThreadStatusFailed, models.ThreadStatusCancelled:
-			terminal[thread.ID] = thread
+		case models.ThreadStatusPending,
+			models.ThreadStatusRunning,
+			models.ThreadStatusCompleted,
+			models.ThreadStatusFailed,
+			models.ThreadStatusCancelled:
+			nonDrainable[thread.ID] = thread
 		}
 	}
-	return terminal
+	return nonDrainable
 }
 
 func (o *Orchestrator) admitNextQueuedThread(ctx context.Context, session *models.Session, log zerolog.Logger) {

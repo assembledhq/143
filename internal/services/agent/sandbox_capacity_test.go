@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
@@ -19,6 +20,40 @@ type fakeLiveSandboxCounter struct {
 	count int
 	err   error
 	calls atomic.Int64
+}
+
+type fakeSharedSandboxCapacityStore struct {
+	reservationID uuid.UUID
+	total         int
+	acquired      bool
+	err           error
+	jobID         *uuid.UUID
+	workloadClass models.SandboxWorkloadClass
+	live          int
+	effectiveMax  int
+	reserveCalls  atomic.Int64
+	releaseCalls  atomic.Int64
+}
+
+func (f *fakeSharedSandboxCapacityStore) ReserveSandboxCapacity(ctx context.Context, _ string, jobID *uuid.UUID, workloadClass models.SandboxWorkloadClass, countLiveSandboxes func(context.Context) (int, error), effectiveMax int, _ time.Time) (uuid.UUID, int, int, bool, error) {
+	f.reserveCalls.Add(1)
+	f.jobID = jobID
+	f.workloadClass = workloadClass
+	f.effectiveMax = effectiveMax
+	if f.err != nil {
+		return uuid.Nil, 0, f.total, false, f.err
+	}
+	liveSandboxes, err := countLiveSandboxes(ctx)
+	if err != nil {
+		return uuid.Nil, 0, f.total, false, err
+	}
+	f.live = liveSandboxes
+	return f.reservationID, liveSandboxes, f.total, f.acquired, nil
+}
+
+func (f *fakeSharedSandboxCapacityStore) ReleaseSandboxCapacity(context.Context, uuid.UUID) error {
+	f.releaseCalls.Add(1)
+	return f.err
 }
 
 type contextWaitingLiveSandboxCounter struct {
@@ -177,6 +212,71 @@ func TestSandboxCapacityGate_AcquireRejectsWhenFull(t *testing.T) {
 	require.ErrorIs(t, err, agent.ErrSandboxCapacity, "Acquire should reject when live sandboxes are already at capacity")
 	require.Nil(t, reservation, "Acquire should not return a reservation when capacity is exhausted")
 	require.Equal(t, 0, gate.ReservedCount(), "Rejected acquire should not leak a reservation")
+}
+
+func TestSandboxCapacityGate_AcquireIncludesCrossProcessReservations(t *testing.T) {
+	t.Parallel()
+
+	jobID := uuid.New()
+	shared := &fakeSharedSandboxCapacityStore{total: 3}
+	cleaner := &fakeSandboxPressureCleaner{}
+	gate := agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:            &fakeLiveSandboxCounter{count: 1},
+		SharedReservations: shared,
+		PressureCleaner:    cleaner,
+		MaxActive:          3,
+		NodeID:             "worker-1",
+		Logger:             zerolog.Nop(),
+	})
+
+	reservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "continue_session", JobID: &jobID})
+
+	require.ErrorIs(t, err, agent.ErrSandboxCapacity, "other processes' reservations should participate in final local admission")
+	require.Nil(t, reservation, "admission at shared capacity should not return a local reservation")
+	require.Equal(t, &jobID, shared.jobID, "shared admission should identify the current job so its routing reservation is not double counted")
+	require.Equal(t, int64(1), shared.reserveCalls.Load(), "final admission should use the shared reservation store once")
+	require.Equal(t, int64(0), cleaner.calls.Load(), "shared reservations should not trigger physical pressure cleanup while Docker still has capacity")
+}
+
+func TestSandboxCapacityGate_AcquireReleasesSharedReservation(t *testing.T) {
+	t.Parallel()
+
+	shared := &fakeSharedSandboxCapacityStore{reservationID: uuid.New(), total: 1, acquired: true}
+	gate := agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:            &fakeLiveSandboxCounter{},
+		SharedReservations: shared,
+		MaxActive:          2,
+		NodeID:             "worker-1",
+		Logger:             zerolog.Nop(),
+	})
+
+	reservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "branch_preview"})
+	require.NoError(t, err, "capacity admission should persist a shared cross-process reservation")
+	require.Equal(t, 1, gate.ReservedCount(), "shared admission should remain visible in local heartbeat metadata")
+	require.Equal(t, int64(0), shared.releaseCalls.Load(), "shared reservation should remain active during sandbox creation")
+
+	reservation.Release()
+	require.Equal(t, 0, gate.ReservedCount(), "reservation release should clear local heartbeat state")
+	require.Equal(t, int64(1), shared.releaseCalls.Load(), "reservation release should remove the shared capacity lease")
+}
+
+func TestSandboxCapacityGate_AcquireFailsClosedWhenSharedReservationFails(t *testing.T) {
+	t.Parallel()
+
+	shared := &fakeSharedSandboxCapacityStore{err: errors.New("database unavailable")}
+	gate := agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:            &fakeLiveSandboxCounter{},
+		SharedReservations: shared,
+		MaxActive:          2,
+		NodeID:             "worker-1",
+		Logger:             zerolog.Nop(),
+	})
+
+	reservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "branch_preview"})
+
+	require.ErrorIs(t, err, agent.ErrSandboxCapacity, "shared reservation failures should fail closed")
+	require.ErrorContains(t, err, "database unavailable", "capacity error should retain the shared reservation failure")
+	require.Nil(t, reservation, "failed shared reservations should not reserve local capacity")
 }
 
 func TestSandboxCapacityGate_SnapshotSeparatesSandboxTurnReservations(t *testing.T) {

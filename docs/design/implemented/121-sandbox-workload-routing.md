@@ -1,6 +1,6 @@
 # Design: Workload-aware sandbox routing
 
-> **Status:** Implemented | **Last reviewed:** 2026-08-10
+> **Status:** Implemented | **Last reviewed:** 2026-08-12
 
 ## Problem
 
@@ -45,8 +45,15 @@ interactive-first workload class, and FIFO dispatch.
 and running sandbox turns.
 Because `jobs` is hot and migrations are transactional, production pre-builds
 both indexes concurrently; the migration uses `IF NOT EXISTS` and a short lock
-timeout as the rollout-safe fallback. No new table is introduced;
-`jobs.org_id` remains the tenant boundary.
+timeout as the rollout-safe fallback.
+
+Migration `000288_shared_sandbox_capacity_reservations` adds the ephemeral,
+worker-scoped `sandbox_capacity_reservations` table for final-admission leases
+shared by every process using the same Docker host. These leases are not
+tenant-owned data and therefore intentionally have no `org_id`. Foreign keys
+to `nodes` and `jobs` remove leases when their worker or job is deleted, while
+`expires_at` bounds leases left by a crashed process. A partial unique index
+ensures at most one final-admission lease exists for a job.
 
 ## API contract
 
@@ -75,8 +82,8 @@ Before normal queue claim, a dispatcher transaction:
    code-review turns against `max_concurrent_runs`;
 3. chooses a fresh active worker from heartbeat capacity metadata;
 4. obtains a transaction-scoped advisory lock for that worker and rechecks its
-   live, local-reserved, and durable-reserved counts without counting the same
-   running sandbox-turn reservation twice;
+   live, local-reserved, durable-reserved, and shared final-admission counts
+   without counting the same job reservation twice;
 5. persists the target worker and expiring reservation atomically.
 
 Unbound sandbox jobs cannot be claimed before this routing step. Dispatchers
@@ -96,8 +103,9 @@ deadlocks and keeps runtime-settings writes independent of a long claim scan.
 
 If a worker's authoritative local gate still rejects a fresh sandbox, the
 running job immediately performs the same atomic reservation against an
-alternate worker. A successful alternate reservation retries with zero delay.
-The existing 10-second delay is retained only when no fleet slot is available.
+alternate worker. A successful alternate reservation retries after one second,
+which avoids hot handoff loops while heartbeat metadata catches up. The
+existing 10-second delay is retained only when no fleet slot is available.
 The shared org limit uses a shorter policy retry, while advisory-lock contention
 leaves the job immediately runnable so another dispatcher can retry without
 pretending the fleet is full.
@@ -149,14 +157,19 @@ alongside live, total local-reserved, and max sandbox counts. The router treats
 pending durable reservations as additional load, but overlaps running durable
 reservations with the heartbeat's sandbox-turn reservation subtype using the
 larger count. Non-turn local reservations, such as preview startup, remain
-additive. This prevents one admitted turn from appearing as both a local and a
-durable reservation while preserving independent capacity consumers.
+additive. It also counts unexpired shared final-admission leases, deduplicated
+against durable reservations for the same job. This prevents one admitted turn
+from appearing as both a local and a durable reservation while preserving
+independent capacity consumers.
 
-Durable reservations expire after 30 seconds, bridging the heartbeat interval
-without permanently pinning work if a dispatcher dies. A fenced executor
-clears its durable reservation as soon as sandbox creation or hydration
-finishes, avoiding double-counting the reservation and live container for the
-remainder of the TTL.
+Durable routing reservations expire after 30 seconds, bridging the heartbeat
+interval without permanently pinning work if a dispatcher dies. At final
+admission, the main worker, isolated session executors, and preview paths use
+the same per-node advisory lock to atomically compare the current Docker count,
+durable job reservations, and shared final-admission leases before inserting a
+15-minute shared lease. The lease is released as soon as sandbox creation or
+hydration finishes; its TTL bounds leaks if a process dies. A fenced executor
+also clears its durable routing reservation after creation or hydration.
 
 Pressure cleanup runs only when the worker is physically full. A code-review
 request rejected solely because it reached the interactive reserve boundary

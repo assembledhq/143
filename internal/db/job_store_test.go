@@ -1655,7 +1655,7 @@ func TestJobStore_RouteNextSandboxJob(t *testing.T) {
 						WillReturnRows(pgxmock.NewRows([]string{"locked"}).AddRow(true))
 					mock.ExpectQuery(`(?s)SELECT.*FROM nodes n.*WHERE n.id =`).
 						WithArgs(jobID, tt.candidateNodeID, pgxmock.AnyArg()).
-						WillReturnRows(pgxmock.NewRows([]string{"live", "local_reserved", "sandbox_turn_local_reserved", "max_active", "interactive_reserved", "pending_durable_reserved", "running_durable_reserved"}).AddRow(1, 0, 0, 4, 1, 0, 0))
+						WillReturnRows(pgxmock.NewRows([]string{"live", "local_reserved", "sandbox_turn_local_reserved", "max_active", "interactive_reserved", "pending_durable_reserved", "running_durable_reserved", "shared_turn_reserved", "shared_non_turn_reserved"}).AddRow(1, 0, 0, 4, 1, 0, 0, 0, 0))
 					mock.ExpectExec(`(?s)UPDATE jobs.*sandbox_slot_reserved_until =`).
 						WithArgs(tt.workloadClass, tt.candidateNodeID, pgxmock.AnyArg(), jobID, models.JobStatusPending).
 						WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -2084,11 +2084,17 @@ func TestSandboxRoutingCapacityLoadDoesNotDoubleCountRunningTurns(t *testing.T) 
 		sandboxTurnLocalReserved int
 		pendingDurable           int
 		runningDurable           int
+		sharedTurnReserved       int
+		sharedNonTurnReserved    int
 		expected                 int
 	}{
 		{name: "running turn overlaps local reservation", localReserved: 1, sandboxTurnLocalReserved: 1, runningDurable: 1, expected: 1},
 		{name: "pending reservation remains additive", localReserved: 1, sandboxTurnLocalReserved: 1, runningDurable: 1, pendingDurable: 1, expected: 2},
 		{name: "preview reservation remains independent", localReserved: 2, sandboxTurnLocalReserved: 1, runningDurable: 1, expected: 2},
+		{name: "shared preview reservation remains additive", runningDurable: 1, sharedNonTurnReserved: 1, expected: 2},
+		{name: "heartbeat and shared preview reservation overlap", localReserved: 1, sharedNonTurnReserved: 1, expected: 1},
+		{name: "heartbeat and shared turn reservation overlap", sandboxTurnLocalReserved: 1, sharedTurnReserved: 1, expected: 1},
+		{name: "shared executor turns exceed main-process heartbeat", sandboxTurnLocalReserved: 1, sharedTurnReserved: 2, expected: 2},
 		{name: "durable reservation covers pre-admission heartbeat lag", runningDurable: 1, expected: 1},
 		{name: "live sandboxes remain additive", live: 2, localReserved: 1, sandboxTurnLocalReserved: 1, runningDurable: 1, expected: 3},
 	}
@@ -2097,7 +2103,7 @@ func TestSandboxRoutingCapacityLoadDoesNotDoubleCountRunningTurns(t *testing.T) 
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			actual := sandboxRoutingCapacityLoad(tt.live, tt.localReserved, tt.sandboxTurnLocalReserved, tt.pendingDurable, tt.runningDurable)
+			actual := sandboxRoutingCapacityLoad(tt.live, tt.localReserved, tt.sandboxTurnLocalReserved, tt.pendingDurable, tt.runningDurable, tt.sharedTurnReserved, tt.sharedNonTurnReserved)
 			require.Equal(t, tt.expected, actual, "capacity load should count each distinct sandbox or reservation exactly once")
 		})
 	}

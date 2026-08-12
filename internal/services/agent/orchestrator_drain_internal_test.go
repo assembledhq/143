@@ -466,44 +466,61 @@ func TestDrainQueuedMessages_ThreadScopeDrainsQueuedSiblingThread(t *testing.T) 
 	require.Equal(t, threadB.String(), payload["thread_id"], "thread-scope drain must target the queued sibling thread")
 }
 
-func TestDrainQueuedMessages_SkipsTerminalCodeReviewReviewerThread(t *testing.T) {
+func TestDrainQueuedMessages_SkipsNonDrainableCodeReviewReviewerThread(t *testing.T) {
 	t.Parallel()
 
-	orgID := uuid.New()
-	sessionID := uuid.New()
-	completedReviewerThreadID := uuid.New()
-	failedReviewerThreadID := uuid.New()
-	processed := &models.SessionMessage{
-		ID:        5,
-		OrgID:     orgID,
-		SessionID: sessionID,
-		Role:      models.MessageRoleUser,
-		ThreadID:  &completedReviewerThreadID,
+	tests := []struct {
+		name   string
+		status models.ThreadStatus
+	}{
+		{name: "pending reviewer", status: models.ThreadStatusPending},
+		{name: "running reviewer", status: models.ThreadStatusRunning},
+		{name: "completed reviewer", status: models.ThreadStatusCompleted},
+		{name: "failed reviewer", status: models.ThreadStatusFailed},
+		{name: "cancelled reviewer", status: models.ThreadStatusCancelled},
 	}
-	messages := &drainStubMessages{messages: []models.SessionMessage{
-		*processed,
-		{ID: 6, OrgID: orgID, SessionID: sessionID, Role: models.MessageRoleUser, ThreadID: &failedReviewerThreadID, Content: "run the failed reviewer again"},
-	}}
-	sessions := &drainStubSessions{session: models.Session{Status: models.SessionStatusIdle, Origin: models.SessionOriginCodeReview}}
-	jobs := &drainStubJobs{}
-	threads := &drainStubThreads{threadsByID: map[uuid.UUID]models.SessionThread{
-		failedReviewerThreadID: {
-			ID:             failedReviewerThreadID,
-			OrgID:          orgID,
-			SessionID:      sessionID,
-			Status:         models.ThreadStatusFailed,
-			ExecutionMode:  models.ThreadExecutionModeReview,
-			FilesystemMode: models.ThreadFilesystemModeReadOnly,
-		},
-	}}
-	o := newDrainOrchestrator(messages, sessions, jobs, threads)
-	session := &models.Session{ID: sessionID, OrgID: orgID, Origin: models.SessionOriginCodeReview}
 
-	o.drainQueuedMessages(context.Background(), session, processed, &completedReviewerThreadID, zerolog.Nop())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	require.Empty(t, jobs.enqueues, "a failed code-review reviewer prompt must not be redispatched by a sibling's post-turn queue drain")
-	require.Empty(t, threads.clearedThreadIDs, "skipped terminal reviewer messages should retain their pending count for auditability")
-	require.Equal(t, 1, threads.listBySessionCalls, "queue drain should batch all reviewer thread states into one store read")
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			processedThreadID := uuid.New()
+			targetReviewerThreadID := uuid.New()
+			processed := &models.SessionMessage{
+				ID:        5,
+				OrgID:     orgID,
+				SessionID: sessionID,
+				Role:      models.MessageRoleUser,
+				ThreadID:  &processedThreadID,
+			}
+			messages := &drainStubMessages{messages: []models.SessionMessage{
+				*processed,
+				{ID: 6, OrgID: orgID, SessionID: sessionID, Role: models.MessageRoleUser, ThreadID: &targetReviewerThreadID, Content: "review prompt"},
+			}}
+			sessions := &drainStubSessions{session: models.Session{Status: models.SessionStatusIdle, Origin: models.SessionOriginCodeReview}}
+			jobs := &drainStubJobs{}
+			threads := &drainStubThreads{threadsByID: map[uuid.UUID]models.SessionThread{
+				targetReviewerThreadID: {
+					ID:             targetReviewerThreadID,
+					OrgID:          orgID,
+					SessionID:      sessionID,
+					Status:         tt.status,
+					ExecutionMode:  models.ThreadExecutionModeReview,
+					FilesystemMode: models.ThreadFilesystemModeReadOnly,
+				},
+			}}
+			o := newDrainOrchestrator(messages, sessions, jobs, threads)
+			session := &models.Session{ID: sessionID, OrgID: orgID, Origin: models.SessionOriginCodeReview}
+
+			o.drainQueuedMessages(context.Background(), session, processed, &processedThreadID, zerolog.Nop())
+
+			require.Empty(t, jobs.enqueues, "a non-drainable code-review prompt must not be redispatched by a sibling's post-turn queue drain")
+			require.Empty(t, threads.clearedThreadIDs, "skipped reviewer messages should retain their pending count for auditability")
+			require.Equal(t, 1, threads.listBySessionCalls, "queue drain should batch all reviewer thread states into one store read")
+		})
+	}
 }
 
 func TestDrainQueuedMessages_ThreadScopeClearsAndEnqueues(t *testing.T) {

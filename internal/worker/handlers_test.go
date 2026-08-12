@@ -10812,7 +10812,7 @@ func TestSandboxTurnCapacityRetryTargetQuicklyReservesAlternateWorker(t *testing
 		WillReturnRows(pgxmock.NewRows([]string{"locked"}).AddRow(true))
 	mock.ExpectQuery(`(?s)SELECT.*FROM nodes n.*WHERE n.id =`).
 		WithArgs(jobID, "worker-with-space", pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"live", "local_reserved", "sandbox_turn_local_reserved", "max_active", "interactive_reserved", "pending_durable_reserved", "running_durable_reserved"}).AddRow(1, 0, 0, 4, 1, 0, 0))
+		WillReturnRows(pgxmock.NewRows([]string{"live", "local_reserved", "sandbox_turn_local_reserved", "max_active", "interactive_reserved", "pending_durable_reserved", "running_durable_reserved", "shared_turn_reserved", "shared_non_turn_reserved"}).AddRow(1, 0, 0, 4, 1, 0, 0, 0, 0))
 	mock.ExpectExec(`(?s)UPDATE jobs.*sandbox_slot_reserved_until =`).
 		WithArgs(models.SandboxWorkloadClassInteractive, "worker-with-space", pgxmock.AnyArg(), jobID, models.JobStatusRunning, lockToken).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
