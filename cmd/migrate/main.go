@@ -72,8 +72,8 @@ var sandboxRoutingConcurrentIndexes = []concurrentIndexPreparation{
 			ON jobs (
 				priority DESC,
 				(CASE WHEN workload_class = 'interactive' THEN 0 ELSE 1 END),
-				created_at ASC,
-				run_at
+				run_at ASC,
+				created_at ASC
 			)
 			WHERE status = 'pending'
 			  AND job_type IN ('run_agent', 'continue_session')`,

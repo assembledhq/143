@@ -392,15 +392,16 @@ func ensureRetryWindowStartedAt(ctx context.Context, store retryWindowLeaseStore
 	if job == nil {
 		return time.Time{}, false, errors.New("ensure retry window start: job is nil")
 	}
-	// Routing may have started a fleet-specific retry window after clearing an
-	// older organization-capacity wait. Always prefer that durable marker over
-	// the job's creation time, including for ordinary retryable errors that use
-	// the default maximum duration.
-	if job.RetryWindowStartedAt != nil {
-		return *job.RetryWindowStartedAt, true, nil
-	}
+	// The default retry budget remains anchored to job creation. Sandbox
+	// routing also uses the durable marker for its bounded capacity probe and
+	// may reset that marker after an org-limit wait; letting it override the
+	// default here would allow alternating capacity states to extend an
+	// unrelated handler retry window indefinitely.
 	if retryable == nil || retryable.MaxRetryDuration == nil || retryable.BypassMaxRetryDuration {
 		return job.CreatedAt, true, nil
+	}
+	if job.RetryWindowStartedAt != nil {
+		return *job.RetryWindowStartedAt, true, nil
 	}
 	if job.LockToken == nil {
 		return time.Time{}, false, errors.New("ensure retry window start: job lock token is nil")

@@ -154,7 +154,7 @@ func TestJobStore_RenewLeaseForSessionExecutorFencesOwner(t *testing.T) {
 	executorID := uuid.New()
 	leaseExpiresAt := time.Now().Add(time.Minute)
 
-	mock.ExpectQuery("UPDATE jobs\\s+SET lease_expires_at[\\s\\S]*sandbox_slot_reserved_until = CASE").
+	mock.ExpectQuery("UPDATE jobs\\s+SET lease_expires_at[\\s\\S]*sandbox_slot_reserved_until = CASE[\\s\\S]*sandbox_session.container_id IS NOT NULL[\\s\\S]*ELSE now\\(\\) \\+").
 		WithArgs(pgx.NamedArgs{
 			"lease_seconds": int(time.Minute.Seconds()),
 			"org_id":        orgID,
@@ -197,7 +197,7 @@ func TestJobStore_RenewLeaseForSessionExecutor_TerminalizesTerminalSessionJob(t 
 	lockToken := uuid.New()
 	executorID := uuid.New()
 
-	mock.ExpectQuery("UPDATE jobs\\s+SET lease_expires_at[\\s\\S]*sandbox_slot_reserved_until = CASE").
+	mock.ExpectQuery("UPDATE jobs\\s+SET lease_expires_at[\\s\\S]*sandbox_slot_reserved_until = CASE[\\s\\S]*sandbox_session.container_id IS NOT NULL[\\s\\S]*ELSE now\\(\\) \\+").
 		WithArgs(pgx.NamedArgs{
 			"lease_seconds": int(time.Minute.Seconds()),
 			"org_id":        orgID,
