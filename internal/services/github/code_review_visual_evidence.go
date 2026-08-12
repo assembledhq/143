@@ -261,7 +261,7 @@ func visualEvidenceSourcesFromHTML(metadata visualEvidenceSourceMetadata, render
 					UpdatedAt:         metadata.UpdatedAt,
 					ImageIndex:        imageIndex,
 					ImageURL:          imageURL,
-					AltText:           strings.TrimSpace(htmlAttribute(node, "alt")),
+					AltText:           boundedVisualEvidenceText(htmlAttribute(node, "alt")),
 					ContextText:       visualEvidenceContext(node),
 					Untrusted:         true,
 				})
@@ -357,7 +357,11 @@ func visualEvidenceContext(image *html.Node) string {
 		}
 	}
 	walkText(contextNode)
-	contextText := strings.Join(strings.Fields(textBuilder.String()), " ")
+	return boundedVisualEvidenceText(textBuilder.String())
+}
+
+func boundedVisualEvidenceText(value string) string {
+	contextText := strings.Join(strings.Fields(value), " ")
 	if utf8.RuneCountInString(contextText) <= maxVisualEvidenceContextRunes {
 		return contextText
 	}

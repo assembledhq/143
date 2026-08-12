@@ -250,6 +250,60 @@ func TestCodeReviewStore_GetPromptRecordByKeyFiltersByOrg(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "prompt-record lookup should include the tenant boundary")
 }
 
+func TestCodeReviewStore_CreatePromptRecordIfAbsent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		conflict        bool
+		expectedCreated bool
+	}{
+		{name: "creates the first immutable record", expectedCreated: true},
+		{name: "restores the winner after a conflict", conflict: true, expectedCreated: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID, sessionID, recordID := uuid.New(), uuid.New(), uuid.New()
+			now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+			recordKey := "code-review-prompts/session/head/visual-evidence-v1"
+			metadata := json.RawMessage(`{"version":1}`)
+			record := &models.CodeReviewPromptRecord{
+				OrgID: orgID, SessionID: sessionID, RecordKey: recordKey, Role: "visual_evidence",
+				Content: "captured 1 image", Metadata: metadata,
+			}
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock should initialize")
+			defer mock.Close()
+			insertRows := pgxmock.NewRows([]string{"id", "org_id", "session_id", "record_key", "role", "agent_provider", "content", "metadata", "created_at"})
+			if !tt.conflict {
+				insertRows.AddRow(recordID, orgID, sessionID, recordKey, "visual_evidence", "", record.Content, metadata, now)
+			}
+			mock.ExpectQuery("INSERT INTO code_review_prompt_records").
+				WithArgs(orgID, sessionID, recordKey, "visual_evidence", "", record.Content, metadata).
+				WillReturnRows(insertRows)
+			if tt.conflict {
+				mock.ExpectQuery("SELECT .+ FROM code_review_prompt_records").
+					WithArgs(pgx.NamedArgs{"org_id": orgID, "record_key": recordKey}).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "session_id", "record_key", "role", "agent_provider", "content", "metadata", "created_at"}).
+						AddRow(recordID, orgID, sessionID, recordKey, "visual_evidence", "", "winner content", metadata, now))
+			}
+
+			created, err := NewCodeReviewStore(mock).CreatePromptRecordIfAbsent(context.Background(), record)
+
+			require.NoError(t, err, "CreatePromptRecordIfAbsent should preserve one immutable winner")
+			require.Equal(t, tt.expectedCreated, created, "CreatePromptRecordIfAbsent should report whether this call inserted the record")
+			require.Equal(t, recordID, record.ID, "CreatePromptRecordIfAbsent should return the persisted record identity")
+			if tt.conflict {
+				require.Equal(t, "winner content", record.Content, "a conflicting capture should restore rather than overwrite the first snapshot")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "immutable prompt-record expectations should be met")
+		})
+	}
+}
+
 func TestCodeReviewStore_GetActiveGitHubTriggerFiltersByOrgAndRepo(t *testing.T) {
 	t.Parallel()
 

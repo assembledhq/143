@@ -2338,6 +2338,45 @@ func (s *CodeReviewStore) CreatePromptRecord(ctx context.Context, record *models
 	return nil
 }
 
+// CreatePromptRecordIfAbsent persists an immutable prompt/evidence checkpoint.
+// When another worker won the same org-scoped record key, it returns that
+// existing record without overwriting mutable GitHub evidence captured first.
+func (s *CodeReviewStore) CreatePromptRecordIfAbsent(ctx context.Context, record *models.CodeReviewPromptRecord) (bool, error) {
+	rows, err := s.db.Query(ctx, `
+		INSERT INTO code_review_prompt_records (
+			org_id, session_id, record_key, role, agent_provider, content, metadata
+		) VALUES (
+			@org_id, @session_id, @record_key, @role, @agent_provider, @content, COALESCE(@metadata, '{}'::jsonb)
+		)
+		ON CONFLICT (org_id, record_key) DO NOTHING
+		RETURNING `+codeReviewPromptRecordColumns, pgx.NamedArgs{
+		"org_id":         record.OrgID,
+		"session_id":     record.SessionID,
+		"record_key":     record.RecordKey,
+		"role":           record.Role,
+		"agent_provider": record.AgentProvider,
+		"content":        record.Content,
+		"metadata":       record.Metadata,
+	})
+	if err != nil {
+		return false, fmt.Errorf("create immutable code review prompt record: %w", err)
+	}
+	created, err := collectOneCodeReviewPromptRecord(rows)
+	if err == nil {
+		*record = created
+		return true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return false, err
+	}
+	existing, err := s.GetPromptRecordByKey(ctx, record.OrgID, record.RecordKey)
+	if err != nil {
+		return false, fmt.Errorf("load existing immutable code review prompt record: %w", err)
+	}
+	*record = existing
+	return false, nil
+}
+
 func (s *CodeReviewStore) ListPromptRecords(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.CodeReviewPromptRecord, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT `+codeReviewPromptRecordColumns+`

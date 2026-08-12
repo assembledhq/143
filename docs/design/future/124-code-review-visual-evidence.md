@@ -120,6 +120,13 @@ SSRF-safe client. Resolve and revalidate every redirect target and reject
 loopback, private, link-local, multicast, unspecified, and cloud-metadata
 addresses.
 
+A private-repository spike on 2026-08-12 confirmed the current attachment
+flow: the canonical `github.com/user-attachments/assets/...` request returns
+404 without authorization, returns a redirect with installation authorization,
+and lands on a signed `*.s3.amazonaws.com` URL. The implementation therefore
+sends installation authorization only to the exact GitHub user-attachment
+route and rebuilds each redirect request without that header.
+
 Validate decoded magic bytes instead of trusting URL extensions or response
 headers. Initially accept PNG, JPEG, GIF, and WebP. Reject SVG rather than
 passing active vector content to agents. Enforce:

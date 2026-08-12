@@ -3,7 +3,9 @@ package models
 import (
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -98,6 +100,40 @@ func TestCodeReviewEvidenceAuthorTypeIsHuman(t *testing.T) {
 			require.Equal(t, tt.expected, tt.authorType.IsHuman(), "author classification should admit only human GitHub actor types")
 		})
 	}
+}
+
+func TestCodeReviewVisualEvidenceSnapshotCanonicalHash(t *testing.T) {
+	t.Parallel()
+
+	repositoryID := uuid.New()
+	base := CodeReviewVisualEvidenceSnapshot{
+		Version: 1, RepositoryID: repositoryID, Repository: "acme/web", PullRequestNumber: 42,
+		HeadSHA: strings.Repeat("a", 40), CapturedAt: time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC), Complete: true,
+		Evidence: []CodeReviewVisualEvidence{{
+			EvidenceID: "ve_1", Source: CodeReviewVisualEvidenceSource{
+				SourceID: "ves_1", Surface: CodeReviewEvidenceSurfaceIssueComment, ProviderObjectID: "99", ImageIndex: 1,
+				ImageURL: "https://github.com/user-attachments/assets/original", AltText: "untrusted caption", Untrusted: true,
+			},
+			OriginalURL: "https://github.com/user-attachments/assets/original", StorageKey: "org/code-review-evidence/session/hash.png",
+			StoredURL: "/api/v1/uploads/files/old", ContentSHA256: strings.Repeat("b", 64), ContentType: "image/png",
+			ByteSize: 100, Width: 10, Height: 10, Status: CodeReviewVisualEvidenceFetchStatusAvailable,
+		}},
+	}
+	mutableCopy := base
+	mutableCopy.CapturedAt = base.CapturedAt.Add(time.Hour)
+	mutableCopy.Evidence = append([]CodeReviewVisualEvidence(nil), base.Evidence...)
+	mutableCopy.Evidence[0].StoredURL = "/api/v1/uploads/files/new"
+	contentCopy := mutableCopy
+	contentCopy.Evidence = append([]CodeReviewVisualEvidence(nil), mutableCopy.Evidence...)
+	contentCopy.Evidence[0].ContentSHA256 = strings.Repeat("c", 64)
+	untrustedCopy := mutableCopy
+	untrustedCopy.Evidence = append([]CodeReviewVisualEvidence(nil), mutableCopy.Evidence...)
+	untrustedCopy.Evidence[0].Source.AltText = "edited captured caption"
+
+	require.NotEmpty(t, base.CanonicalHash(), "canonical visual-evidence hash should be available for a valid snapshot")
+	require.Equal(t, base.CanonicalHash(), mutableCopy.CanonicalHash(), "canonical visual-evidence hash should exclude mutable first-party URLs and capture timing")
+	require.NotEqual(t, base.CanonicalHash(), contentCopy.CanonicalHash(), "canonical visual-evidence hash should change when captured image content changes")
+	require.NotEqual(t, base.CanonicalHash(), untrustedCopy.CanonicalHash(), "canonical visual-evidence hash should change when captured untrusted context changes")
 }
 
 func TestCodeReviewFindingSeverityIsBlocking(t *testing.T) {
