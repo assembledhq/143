@@ -17,9 +17,16 @@ import (
 // more sandbox container right now. Callers should treat it as transient.
 var ErrSandboxCapacity = errors.New("sandbox capacity reached")
 
+// ErrSandboxCapacityCoordination distinguishes a retry caused by the shared
+// admission fence being unavailable from a normal at-capacity rejection.
+// Coordination failures also wrap ErrSandboxCapacity so worker retry policy
+// remains conservative and does not consume the job attempt.
+var ErrSandboxCapacityCoordination = errors.New("sandbox capacity coordination unavailable")
+
 const (
 	defaultSandboxCapacityCountTimeout   = 2 * time.Second
 	defaultSandboxPressureCleanupTimeout = 5 * time.Second
+	defaultSharedSandboxAdmissionTimeout = 10 * time.Second
 	defaultSharedSandboxReservationTTL   = 15 * time.Minute
 )
 
@@ -43,12 +50,16 @@ type SandboxPressureCleaner interface {
 
 // SandboxCapacityGateConfig configures local sandbox admission control.
 type SandboxCapacityGateConfig struct {
-	Counter                LiveSandboxCounter
+	Counter LiveSandboxCounter
+	// SharedReservations is required in production so every process on the
+	// worker uses the same final fence. A nil value retains the in-process path
+	// for isolated embedders and unit tests that do not have Postgres.
 	SharedReservations     SharedSandboxCapacityStore
 	PressureCleaner        SandboxPressureCleaner
 	MaxActive              int
 	InteractiveReserved    int
 	CountTimeout           time.Duration
+	SharedAdmissionTimeout time.Duration
 	PressureCleanupTimeout time.Duration
 	NodeID                 string
 	Logger                 zerolog.Logger
@@ -76,15 +87,16 @@ type SandboxCapacitySnapshot struct {
 // SandboxCapacityGate gates new local sandbox creation against the current
 // live Docker count plus in-flight reservations.
 type SandboxCapacityGate struct {
-	counter             LiveSandboxCounter
-	sharedReservations  SharedSandboxCapacityStore
-	cleaner             SandboxPressureCleaner
-	maxActive           int
-	interactiveReserved int
-	countTTL            time.Duration
-	cleanTTL            time.Duration
-	nodeID              string
-	logger              zerolog.Logger
+	counter                LiveSandboxCounter
+	sharedReservations     SharedSandboxCapacityStore
+	cleaner                SandboxPressureCleaner
+	maxActive              int
+	interactiveReserved    int
+	countTTL               time.Duration
+	sharedAdmissionTimeout time.Duration
+	cleanTTL               time.Duration
+	nodeID                 string
+	logger                 zerolog.Logger
 
 	mu                  sync.Mutex
 	reserved            int
@@ -99,20 +111,25 @@ func NewSandboxCapacityGate(cfg SandboxCapacityGateConfig) *SandboxCapacityGate 
 	if countTTL <= 0 {
 		countTTL = defaultSandboxCapacityCountTimeout
 	}
+	sharedAdmissionTimeout := cfg.SharedAdmissionTimeout
+	if sharedAdmissionTimeout <= 0 {
+		sharedAdmissionTimeout = defaultSharedSandboxAdmissionTimeout
+	}
 	cleanTTL := cfg.PressureCleanupTimeout
 	if cleanTTL <= 0 {
 		cleanTTL = defaultSandboxPressureCleanupTimeout
 	}
 	return &SandboxCapacityGate{
-		counter:             cfg.Counter,
-		sharedReservations:  cfg.SharedReservations,
-		cleaner:             cfg.PressureCleaner,
-		maxActive:           cfg.MaxActive,
-		interactiveReserved: clampInteractiveSandboxReserve(cfg.MaxActive, cfg.InteractiveReserved),
-		countTTL:            countTTL,
-		cleanTTL:            cleanTTL,
-		nodeID:              cfg.NodeID,
-		logger:              cfg.Logger,
+		counter:                cfg.Counter,
+		sharedReservations:     cfg.SharedReservations,
+		cleaner:                cfg.PressureCleaner,
+		maxActive:              cfg.MaxActive,
+		interactiveReserved:    clampInteractiveSandboxReserve(cfg.MaxActive, cfg.InteractiveReserved),
+		countTTL:               countTTL,
+		sharedAdmissionTimeout: sharedAdmissionTimeout,
+		cleanTTL:               cleanTTL,
+		nodeID:                 cfg.NodeID,
+		logger:                 cfg.Logger,
 	}
 }
 
@@ -213,7 +230,7 @@ func (g *SandboxCapacityGate) Acquire(ctx context.Context, req SandboxCapacityRe
 		if total >= effectiveMax {
 			reserved := g.reserved
 			cleaner := g.cleaner
-			physicallyFull := total >= g.maxActive
+			physicallyFull := live >= g.maxActive
 			g.mu.Unlock()
 			if physicallyFull && !cleanedForPressure && cleaner != nil {
 				cleanedForPressure = true
@@ -250,19 +267,28 @@ func (g *SandboxCapacityGate) acquireSharedReservation(
 	effectiveMax int,
 	cleanedForPressure bool,
 ) (*SandboxCapacityReservation, bool, error) {
-	reservationCtx, cancel := context.WithTimeout(ctx, g.countTTL)
+	// The cross-process transaction may wait behind another admission's node
+	// lock, so it needs a wider budget than one Docker count. Keep the actual
+	// container-runtime call bounded by countTTL once this admission owns the
+	// shared lock.
+	reservationCtx, cancel := context.WithTimeout(ctx, g.sharedAdmissionTimeout)
+	countLiveSandboxes := func(countCtx context.Context) (int, error) {
+		boundedCountCtx, countCancel := context.WithTimeout(countCtx, g.countTTL)
+		defer countCancel()
+		return g.counter.CountLiveSandboxes(boundedCountCtx)
+	}
 	reservationID, live, total, acquired, err := g.sharedReservations.ReserveSandboxCapacity(
 		reservationCtx,
 		g.nodeID,
 		req.JobID,
 		req.WorkloadClass,
-		g.counter.CountLiveSandboxes,
+		countLiveSandboxes,
 		effectiveMax,
 		time.Now().Add(defaultSharedSandboxReservationTTL),
 	)
 	cancel()
 	if err != nil {
-		wrapped := fmt.Errorf("%w: reserve shared sandbox capacity: %w", ErrSandboxCapacity, err)
+		wrapped := fmt.Errorf("%w: %w: reserve shared sandbox capacity: %w", ErrSandboxCapacity, ErrSandboxCapacityCoordination, err)
 		g.logCapacity(req, live, g.ReservedCount()).Err(err).Msg("failed to reserve shared sandbox capacity; rejecting sandbox admission")
 		return nil, false, wrapped
 	}

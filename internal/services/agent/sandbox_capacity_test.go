@@ -35,6 +35,25 @@ type fakeSharedSandboxCapacityStore struct {
 	releaseCalls  atomic.Int64
 }
 
+type contextWaitingSharedSandboxCapacityStore struct{}
+
+func (contextWaitingSharedSandboxCapacityStore) ReserveSandboxCapacity(
+	ctx context.Context,
+	_ string,
+	_ *uuid.UUID,
+	_ models.SandboxWorkloadClass,
+	_ func(context.Context) (int, error),
+	_ int,
+	_ time.Time,
+) (uuid.UUID, int, int, bool, error) {
+	<-ctx.Done()
+	return uuid.Nil, 0, 0, false, ctx.Err()
+}
+
+func (contextWaitingSharedSandboxCapacityStore) ReleaseSandboxCapacity(context.Context, uuid.UUID) error {
+	return nil
+}
+
 func (f *fakeSharedSandboxCapacityStore) ReserveSandboxCapacity(ctx context.Context, _ string, jobID *uuid.UUID, workloadClass models.SandboxWorkloadClass, countLiveSandboxes func(context.Context) (int, error), effectiveMax int, _ time.Time) (uuid.UUID, int, int, bool, error) {
 	f.reserveCalls.Add(1)
 	f.jobID = jobID
@@ -275,6 +294,7 @@ func TestSandboxCapacityGate_AcquireFailsClosedWhenSharedReservationFails(t *tes
 	reservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "branch_preview"})
 
 	require.ErrorIs(t, err, agent.ErrSandboxCapacity, "shared reservation failures should fail closed")
+	require.ErrorIs(t, err, agent.ErrSandboxCapacityCoordination, "shared reservation failures should be distinguishable from genuine saturation")
 	require.ErrorContains(t, err, "database unavailable", "capacity error should retain the shared reservation failure")
 	require.Nil(t, reservation, "failed shared reservations should not reserve local capacity")
 }
@@ -479,6 +499,31 @@ func TestSandboxCapacityGate_AcquireUsesCountTimeout(t *testing.T) {
 	require.Nil(t, reservation, "Acquire should not return a reservation when counting times out")
 	require.Less(t, time.Since(started), 500*time.Millisecond, "Acquire should use the configured short count timeout instead of the caller's long-lived context")
 	require.Equal(t, int64(1), counter.calls.Load(), "Acquire should invoke the live counter once")
+}
+
+func TestSandboxCapacityGate_AcquireUsesSeparateSharedAdmissionTimeout(t *testing.T) {
+	t.Parallel()
+
+	gate := agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:                &fakeLiveSandboxCounter{},
+		SharedReservations:     contextWaitingSharedSandboxCapacityStore{},
+		MaxActive:              2,
+		CountTimeout:           20 * time.Millisecond,
+		SharedAdmissionTimeout: 80 * time.Millisecond,
+		NodeID:                 "worker-1",
+		Logger:                 zerolog.Nop(),
+	})
+
+	started := time.Now()
+	reservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "agent_run"})
+	elapsed := time.Since(started)
+
+	require.ErrorIs(t, err, agent.ErrSandboxCapacity, "shared admission timeout should remain retryable as worker capacity")
+	require.ErrorIs(t, err, agent.ErrSandboxCapacityCoordination, "shared admission timeout should be distinguishable from genuine saturation")
+	require.ErrorIs(t, err, context.DeadlineExceeded, "shared admission should retain its timeout cause")
+	require.Nil(t, reservation, "timed-out shared admission should not return a reservation")
+	require.GreaterOrEqual(t, elapsed, 50*time.Millisecond, "shared lock contention should not consume only the shorter Docker count budget")
+	require.Less(t, elapsed, 500*time.Millisecond, "shared admission should remain bounded by its dedicated timeout")
 }
 
 func TestSandboxCapacityGate_ReleaseDoesNotWaitForBlockedCount(t *testing.T) {
