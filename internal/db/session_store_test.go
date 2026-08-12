@@ -139,18 +139,16 @@ func TestSessionStore_CancelPendingCapacityWait(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name                    string
-		pendingCancel           bool
-		withThread              bool
-		matchingThread          bool
-		liveSibling             bool
-		expectedCancelled       bool
-		expectedThreadCancelled bool
+		name               string
+		pendingCancel      bool
+		liveSibling        bool
+		queuedSiblingCount int
+		activeThreadCount  int
+		expectedCancelled  bool
 	}{
 		{name: "no pending cancellation"},
 		{name: "cancels session without thread", pendingCancel: true, expectedCancelled: true},
-		{name: "atomically cancels matching thread", pendingCancel: true, withThread: true, matchingThread: true, expectedCancelled: true, expectedThreadCancelled: true},
-		{name: "does not cancel thread from another session", pendingCancel: true, withThread: true, expectedCancelled: true},
+		{name: "atomically cancels queued siblings and all active threads", pendingCancel: true, queuedSiblingCount: 3, activeThreadCount: 2, expectedCancelled: true},
 		{name: "preserves cancellation for live sibling turn", pendingCancel: true, liveSibling: true},
 	}
 
@@ -162,14 +160,27 @@ func TestSessionStore_CancelPendingCapacityWait(t *testing.T) {
 			require.NoError(t, err, "should create session cancellation mock")
 			defer mock.Close()
 
-			orgID, sessionID, issueID, threadID, currentJobID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
-			var threadIDArg *uuid.UUID
-			if tt.withThread {
-				threadIDCopy := threadID
-				threadIDArg = &threadIDCopy
+			orgID, sessionID, issueID, currentJobID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			queuedSiblingJobIDs := make([]uuid.UUID, tt.queuedSiblingCount)
+			for i := range queuedSiblingJobIDs {
+				queuedSiblingJobIDs[i] = uuid.New()
+			}
+			var cancelledThreadIDs []uuid.UUID
+			if tt.pendingCancel {
+				cancelledThreadIDs = make([]uuid.UUID, tt.activeThreadCount)
+				for i := range cancelledThreadIDs {
+					cancelledThreadIDs[i] = uuid.New()
+				}
 			}
 
 			mock.ExpectBegin()
+			siblingRows := pgxmock.NewRows([]string{"id"})
+			for _, queuedSiblingJobID := range queuedSiblingJobIDs {
+				siblingRows.AddRow(queuedSiblingJobID)
+			}
+			mock.ExpectQuery(`(?s)SELECT id.*FROM jobs.*org_id = @org_id.*id <> @current_job_id.*job_type = 'continue_session'.*status = 'pending'.*payload->>'session_id' = @session_id.*FOR UPDATE`).
+				WithArgs(orgID, currentJobID, sessionID.String()).
+				WillReturnRows(siblingRows)
 			mock.ExpectQuery(`(?s)SELECT id.*FROM organizations.*id = @org_id.*FOR NO KEY UPDATE`).
 				WithArgs(orgID).
 				WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(orgID))
@@ -178,10 +189,10 @@ func TestSessionStore_CancelPendingCapacityWait(t *testing.T) {
 				WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(tt.liveSibling))
 			if tt.liveSibling {
 				mock.ExpectRollback()
-				cancelled, threadCancelled, err := NewSessionStore(mock).CancelPendingCapacityWait(context.Background(), orgID, sessionID, currentJobID, threadIDArg)
+				cancelled, actualThreadIDs, err := NewSessionStore(mock).CancelPendingCapacityWait(context.Background(), orgID, sessionID, currentJobID)
 				require.NoError(t, err, "live sibling check should complete")
 				require.False(t, cancelled, "queued cleanup must not consume a live turn's cancellation")
-				require.False(t, threadCancelled, "queued cleanup must not finalize a thread while a live turn owns cancellation")
+				require.Empty(t, actualThreadIDs, "queued cleanup must not finalize threads while a live turn owns cancellation")
 				require.NoError(t, mock.ExpectationsWereMet(), "live sibling should leave cancellation delivery untouched")
 				return
 			}
@@ -199,23 +210,26 @@ func TestSessionStore_CancelPendingCapacityWait(t *testing.T) {
 				mock.ExpectQuery(`(?s)UPDATE sessions SET status = @status, completed_at = now\(\).*id = @id AND org_id = @org_id.*RETURNING`).
 					WithArgs(string(models.SessionStatusCancelled), sessionID, orgID).
 					WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(sessionRow...))
-				if tt.withThread {
-					rowsAffected := int64(0)
-					if tt.matchingThread {
-						rowsAffected = 1
-					}
-					mock.ExpectExec(`(?s)UPDATE session_threads.*status = @status.*id = @thread_id.*session_id = @session_id.*org_id = @org_id.*archived_at IS NULL`).
-						WithArgs(models.ThreadStatusCancelled, threadID, sessionID, orgID).
-						WillReturnResult(pgxmock.NewResult("UPDATE", rowsAffected))
+				if len(queuedSiblingJobIDs) > 0 {
+					mock.ExpectExec(`(?s)UPDATE jobs.*status = 'cancelled'.*id = ANY\(@sibling_job_ids\).*job_type = 'continue_session'.*status = 'pending'.*payload->>'session_id' = @session_id`).
+						WithArgs(orgID, queuedSiblingJobIDs, sessionID.String()).
+						WillReturnResult(pgxmock.NewResult("UPDATE", int64(len(queuedSiblingJobIDs))))
 				}
+				threadRows := pgxmock.NewRows([]string{"id"})
+				for _, cancelledThreadID := range cancelledThreadIDs {
+					threadRows.AddRow(cancelledThreadID)
+				}
+				mock.ExpectQuery(`(?s)UPDATE session_threads.*status = @status.*session_id = @session_id.*org_id = @org_id.*status IN \('pending', 'running', 'awaiting_input'\).*RETURNING id`).
+					WithArgs(models.ThreadStatusCancelled, sessionID, orgID).
+					WillReturnRows(threadRows)
 				mock.ExpectCommit()
 			}
 			mock.ExpectRollback()
 
-			cancelled, threadCancelled, err := NewSessionStore(mock).CancelPendingCapacityWait(context.Background(), orgID, sessionID, currentJobID, threadIDArg)
+			cancelled, actualThreadIDs, err := NewSessionStore(mock).CancelPendingCapacityWait(context.Background(), orgID, sessionID, currentJobID)
 			require.NoError(t, err, "capacity-wait cancellation should complete atomically")
 			require.Equal(t, tt.expectedCancelled, cancelled, "result should report whether a pending cancellation was consumed")
-			require.Equal(t, tt.expectedThreadCancelled, threadCancelled, "result should report whether the matching session thread was cancelled")
+			require.Equal(t, cancelledThreadIDs, actualThreadIDs, "result should return every active thread cancelled in the transaction")
 			require.NoError(t, mock.ExpectationsWereMet(), "capacity-wait cancellation should scope every write by organization and session")
 		})
 	}

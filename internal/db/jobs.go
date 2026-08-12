@@ -2221,6 +2221,10 @@ func (s *JobStore) RetryWithLeaseAndTarget(ctx context.Context, jobID, lockToken
 			locked_at = NULL,
 			lease_expires_at = NULL,
 			target_node_id = $5,
+			sandbox_slot_reserved_until = CASE
+				WHEN $5 IS NULL THEN NULL
+				ELSE sandbox_slot_reserved_until
+			END,
 			updated_at = now()
 		WHERE id = $3
 		  AND status = 'running'
@@ -2275,6 +2279,10 @@ func (s *JobStore) RetryWithoutConsumingAttemptWithLeaseAndTarget(ctx context.Co
 			locked_at = NULL,
 			lease_expires_at = NULL,
 			target_node_id = $5,
+			sandbox_slot_reserved_until = CASE
+				WHEN $5 IS NULL THEN NULL
+				ELSE sandbox_slot_reserved_until
+			END,
 			updated_at = now()
 		WHERE id = $3
 		  AND status = 'running'

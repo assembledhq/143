@@ -125,7 +125,11 @@ type sandboxJobRouter interface {
 	RouteNextSandboxJob(ctx context.Context) (*db.SandboxRoutingResult, error)
 }
 
-const maxSandboxRoutingDecisionsPerPoll = 64
+// Route at most one sandbox job before giving the normal queue a claim
+// opportunity. Every worker runs this pass, so draining a large batch here
+// would multiply database work and delay unrelated jobs while the fleet is
+// saturated.
+const maxSandboxRoutingDecisionsPerPoll = 1
 
 // maxRetryableDuration is the maximum wall-clock time a retryable job is
 // allowed to keep retrying before being dead-lettered. This prevents jobs
