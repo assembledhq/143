@@ -239,6 +239,14 @@ func TestEnsureRetryWindowStartedAt(t *testing.T) {
 			expectedOK:    true,
 		},
 		{
+			name:          "default retry reuses persisted fleet window after organization wait",
+			job:           &models.Job{CreatedAt: createdAt, RetryWindowStartedAt: &persistedStart},
+			retryable:     &RetryableError{Err: errors.New("sandbox capacity reached")},
+			store:         &retryWindowLeaseStoreStub{},
+			expectedStart: persistedStart,
+			expectedOK:    true,
+		},
+		{
 			name:          "new bounded retry gets a durable window independent of job age",
 			job:           &models.Job{ID: uuid.New(), LockToken: &lockToken, CreatedAt: createdAt},
 			retryable:     &RetryableError{Err: errors.New("rate limited"), MaxRetryDuration: &customWindow},

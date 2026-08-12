@@ -880,11 +880,11 @@ func (s *JobStore) RouteNextSandboxJob(ctx context.Context) (*SandboxRoutingResu
 		if terminalProbeEligible {
 			fallbackReason = SandboxRoutingReasonTerminalProbe
 		} else if result.Reason == SandboxRoutingReasonFleetCapacity {
-			metadataAvailable, metadataErr := sandboxCapacityMetadataAvailable(ctx, tx)
+			metadataConfigured, metadataErr := sandboxCapacityMetadataConfigured(ctx, tx)
 			if metadataErr != nil {
 				return nil, metadataErr
 			}
-			if !metadataAvailable {
+			if !metadataConfigured {
 				fallbackReason = SandboxRoutingReasonMetadataFallback
 			}
 		}
@@ -955,8 +955,8 @@ func (s *JobStore) RouteNextSandboxJob(ctx context.Context) (*SandboxRoutingResu
 }
 
 // lint:allow-no-orgid reason="fleet routing readiness intentionally inspects worker heartbeat metadata across organizations"
-func sandboxCapacityMetadataAvailable(ctx context.Context, tx pgx.Tx) (bool, error) {
-	var available bool
+func sandboxCapacityMetadataConfigured(ctx context.Context, tx pgx.Tx) (bool, error) {
+	var configured bool
 	err := tx.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1
@@ -965,14 +965,13 @@ func sandboxCapacityMetadataAvailable(ctx context.Context, tx pgx.Tx) (bool, err
 			  AND status = 'active'
 			  AND last_heartbeat_at >= @dead_before
 			  AND COALESCE(NULLIF(metadata->>'max_active_sandboxes', '')::int, 0) > 0
-			  AND COALESCE(metadata->>'live_sandbox_count_error', '') = ''
 		)`, pgx.NamedArgs{
 		"dead_before": time.Now().Add(-nodeDeadHeartbeatThreshold),
-	}).Scan(&available)
+	}).Scan(&configured)
 	if err != nil {
-		return false, fmt.Errorf("inspect fleet sandbox capacity metadata: %w", err)
+		return false, fmt.Errorf("inspect configured fleet sandbox capacity metadata: %w", err)
 	}
-	return available, nil
+	return configured, nil
 }
 
 // ReserveSandboxSlotForRetry atomically retargets a currently running sandbox
