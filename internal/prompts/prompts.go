@@ -290,6 +290,21 @@ type CodeReviewReviewerPromptData struct {
 	BlockedPathPatterns     []string
 	RequiredChecks          []string
 	ChangedFiles            []string
+	VisualEvidence          []CodeReviewVisualEvidencePromptData
+}
+
+type CodeReviewVisualEvidencePromptData struct {
+	EvidenceID            string
+	Surface               string
+	SourceURL             string
+	Author                string
+	ObservedAt            string
+	AttachmentIndex       int
+	AltText               string
+	ContextText           string
+	Status                string
+	DuplicateOfEvidenceID string
+	FailureReason         string
 }
 
 type CodeReviewDescriptionRequirementPromptData struct {
@@ -300,6 +315,7 @@ type CodeReviewDescriptionRequirementPromptData struct {
 }
 
 func CodeReviewReviewerPrompt(data CodeReviewReviewerPromptData) string {
+	data.VisualEvidence = sanitizeCodeReviewVisualEvidence(data.VisualEvidence)
 	return render("code_review_reviewer.template", data)
 }
 
@@ -327,22 +343,47 @@ type CodeReviewOrchestratorPromptData struct {
 	ReviewInstructions         string
 	AutomatedApprovalPolicy    string
 	UseAutomatedApprovalPolicy bool
+	VisualEvidence             []CodeReviewVisualEvidencePromptData
 }
 
 func CodeReviewOrchestratorPrompt(data CodeReviewOrchestratorPromptData) string {
 	data.RequestContextAuthor = sanitizeUntrustedXML(data.RequestContextAuthor)
 	data.RequestContextBody = sanitizeUntrustedXML(data.RequestContextBody)
 	data.RequestContextURL = sanitizeUntrustedXML(data.RequestContextURL)
+	data.VisualEvidence = sanitizeCodeReviewVisualEvidence(data.VisualEvidence)
 	return render("code_review_orchestrator.template", data)
 }
 
 type CodeReviewOrchestratorRepairPromptData struct {
 	ValidationError         string
 	DescriptionRequirements []CodeReviewDescriptionRequirementPromptData
+	VisualEvidence          []CodeReviewVisualEvidencePromptData
 }
 
 func CodeReviewOrchestratorRepairPrompt(data CodeReviewOrchestratorRepairPromptData) string {
+	data.ValidationError = sanitizeUntrustedXML(data.ValidationError)
+	data.VisualEvidence = sanitizeCodeReviewVisualEvidence(data.VisualEvidence)
 	return render("code_review_orchestrator_repair.template", data)
+}
+
+func sanitizeCodeReviewVisualEvidence(entries []CodeReviewVisualEvidencePromptData) []CodeReviewVisualEvidencePromptData {
+	sanitized := make([]CodeReviewVisualEvidencePromptData, len(entries))
+	for index, entry := range entries {
+		sanitized[index] = CodeReviewVisualEvidencePromptData{
+			EvidenceID:            sanitizeUntrustedXML(entry.EvidenceID),
+			Surface:               sanitizeUntrustedXML(entry.Surface),
+			SourceURL:             sanitizeUntrustedXML(entry.SourceURL),
+			Author:                sanitizeUntrustedXML(entry.Author),
+			ObservedAt:            sanitizeUntrustedXML(entry.ObservedAt),
+			AttachmentIndex:       entry.AttachmentIndex,
+			AltText:               sanitizeUntrustedXML(entry.AltText),
+			ContextText:           sanitizeUntrustedXML(entry.ContextText),
+			Status:                sanitizeUntrustedXML(entry.Status),
+			DuplicateOfEvidenceID: sanitizeUntrustedXML(entry.DuplicateOfEvidenceID),
+			FailureReason:         sanitizeUntrustedXML(entry.FailureReason),
+		}
+	}
+	return sanitized
 }
 
 // ─── Automations ────────────────────────────────────────────────────────────

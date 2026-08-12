@@ -1782,6 +1782,14 @@ func buildServices(
 		},
 	)
 	codeReviewLifecycle.SetReviewStatusCommentJobs(jobStore)
+	codeReviewVisualEvidence := codereviewsvc.NewVisualEvidenceService(
+		prService,
+		codeReviewLifecycleStore,
+		repoStore,
+		ghSvc,
+		uploadStore,
+		logger,
+	)
 	codeReviewDisputeStore := db.NewCodeReviewDisputeStore(pool)
 	codeReviewDisputeStore.SetJobStore(jobStore)
 	codeReviewDisputes := codereviewsvc.NewDisputeService(
@@ -1826,6 +1834,7 @@ func buildServices(
 		CodeReviewDisputes:         codeReviewDisputes,
 		CodeReviewInsights:         codeReviewInsights,
 		CodeReviewDisputePublisher: prService,
+		CodeReviewVisualEvidence:   codeReviewVisualEvidence,
 		CodingAgents:               agentEnv,
 		GitHubOrgRoster:            ghSvc,
 		Snapshots:                  snapshotStore,

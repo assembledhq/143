@@ -136,6 +136,39 @@ func TestCodeReviewVisualEvidenceSnapshotCanonicalHash(t *testing.T) {
 	require.NotEqual(t, base.CanonicalHash(), untrustedCopy.CanonicalHash(), "canonical visual-evidence hash should change when captured untrusted context changes")
 }
 
+func TestCodeReviewDescriptionEvidenceBasisValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		basis     CodeReviewDescriptionEvidenceBasis
+		expectErr bool
+	}{
+		{name: "image", basis: CodeReviewDescriptionEvidenceBasisImage},
+		{name: "preview link", basis: CodeReviewDescriptionEvidenceBasisPreviewLink},
+		{name: "repository", basis: CodeReviewDescriptionEvidenceBasisRepository},
+		{name: "pull request description", basis: CodeReviewDescriptionEvidenceBasisPullRequestDescription},
+		{name: "diff", basis: CodeReviewDescriptionEvidenceBasisDiff},
+		{name: "not applicable", basis: CodeReviewDescriptionEvidenceBasisNotApplicable},
+		{name: "missing", basis: CodeReviewDescriptionEvidenceBasisMissing},
+		{name: "empty", basis: "", expectErr: true},
+		{name: "unknown", basis: "other", expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.basis.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "invalid description evidence basis should be rejected")
+				return
+			}
+			require.NoError(t, err, "supported description evidence basis should validate")
+		})
+	}
+}
+
 func TestCodeReviewFindingSeverityIsBlocking(t *testing.T) {
 	t.Parallel()
 
