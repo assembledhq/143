@@ -839,8 +839,8 @@ func TestJobStore_ClaimNextRunnableBypassesOrgLimitForCancelledContinuation(t *t
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery(`(?s)SELECT s.status.*session_cancel_requests.*session_threads.*JOIN jobs payload_job.*s.deleted_at IS NULL`).
 		WithArgs(orgID, sessionID, jobID).
-		WillReturnRows(pgxmock.NewRows([]string{"status", "pending_cancel", "stopped_thread"}).
-			AddRow(models.SessionStatusRunning, true, false))
+		WillReturnRows(pgxmock.NewRows([]string{"status", "pending_cancel", "stopped_thread", "capacity_cleanup"}).
+			AddRow(models.SessionStatusRunning, true, false, false))
 	mock.ExpectExec(`(?s)UPDATE jobs.*jsonb_set\(payload, '\{capacity_waited\}'.*sandbox_slot_reserved_until = NULL.*job_type = 'continue_session'`).
 		WithArgs(jobID).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -852,7 +852,7 @@ func TestJobStore_ClaimNextRunnableBypassesOrgLimitForCancelledContinuation(t *t
 			"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
 			"dedupe_key", "workload_class", "target_node_id", "sandbox_slot_reserved_until", "retry_window_started_at", "created_at", "updated_at", "completed_at",
 		}).AddRow(
-			jobID, orgID, "agent", "continue_session", []byte(`{"session_id":"`+sessionID.String()+`","capacity_waited":true}`), 1, models.JobStatusRunning,
+			jobID, orgID, "agent", "continue_session", []byte(`{"session_id":"`+sessionID.String()+`","capacity_waited":true,"capacity_cleanup":true}`), 1, models.JobStatusRunning,
 			1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "worker", nil,
 			nil, models.SandboxWorkloadClassCodeReview, "worker-1", nil, nil, now, now, nil,
 		))
@@ -863,6 +863,7 @@ func TestJobStore_ClaimNextRunnableBypassesOrgLimitForCancelledContinuation(t *t
 	require.NoError(t, err, "cancelled continuation should bypass shared org admission for lightweight cleanup")
 	require.NotNil(t, job, "cancelled continuation should be claimed instead of deferred")
 	require.Contains(t, string(job.Payload), `"capacity_waited":true`, "claimed cleanup job should force the handler durable-state check")
+	require.Contains(t, string(job.Payload), `"capacity_cleanup":true`, "claimed cleanup job should remain terminal if a live turn consumes cancellation first")
 	require.NoError(t, mock.ExpectationsWereMet(), "claim should probe tenant-scoped cancellation before org-limit deferral")
 }
 
@@ -1876,11 +1877,14 @@ func TestJobStore_RouteNextSandboxJobBypassesOrgLimitForCancelledContinuation(t 
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery(`(?s)SELECT s.status.*session_cancel_requests.*session_threads.*JOIN jobs payload_job.*s.deleted_at IS NULL`).
 		WithArgs(orgID, sessionID, jobID).
-		WillReturnRows(pgxmock.NewRows([]string{"status", "pending_cancel", "stopped_thread"}).
-			AddRow(models.SessionStatusRunning, true, false))
+		WillReturnRows(pgxmock.NewRows([]string{"status", "pending_cancel", "stopped_thread", "capacity_cleanup"}).
+			AddRow(models.SessionStatusRunning, true, false, false))
 	mock.ExpectQuery(`(?s)SELECT n.id.*FROM nodes n.*active_job_count`).
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow("worker-cleanup"))
+	mock.ExpectExec(`(?s)UPDATE jobs.*capacity_waited.*capacity_cleanup.*org_id = @org_id.*job_type = 'continue_session'`).
+		WithArgs(jobID, orgID, models.JobStatusPending).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec(`(?s)UPDATE jobs.*jsonb_set\(payload, '\{capacity_waited\}'.*target_node_id =.*sandbox_slot_reserved_until = NULL.*retry_window_started_at =`).
 		WithArgs(models.SandboxWorkloadClassCodeReview, "worker-cleanup", createdAt, jobID, models.JobStatusPending).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -1897,6 +1901,58 @@ func TestJobStore_RouteNextSandboxJobBypassesOrgLimitForCancelledContinuation(t 
 	require.NoError(t, mock.ExpectationsWereMet(), "routing should inspect tenant-scoped cancellation before deferring")
 }
 
+func TestJobStore_RouteNextSandboxJobBypassesFleetCapacityForCancelledContinuation(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	jobID, orgID, sessionID := uuid.New(), uuid.New(), uuid.New()
+	createdAt := time.Now().Add(-time.Minute)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT j.id, j.org_id,.*effective_workload_class.*j.status,.*j.created_at.*FROM jobs j`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
+			AddRow(jobID, orgID, "continue_session", sessionID.String(), models.SandboxWorkloadClassInteractive, models.JobStatusPending, nil, createdAt))
+	mock.ExpectQuery(`(?s)SELECT origin.*FROM sessions.*org_id = @org_id.*id = @session_id`).
+		WithArgs(orgID, sessionID).
+		WillReturnRows(pgxmock.NewRows([]string{"origin"}).AddRow(models.SessionOriginManual))
+	mock.ExpectQuery(`(?s)SELECT settings.*FROM organizations.*FOR NO KEY UPDATE`).
+		WithArgs(orgID).
+		WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow([]byte(`{"max_concurrent_runs":3}`)))
+	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\).*FROM jobs.*id <>.*job_type IN`).
+		WithArgs(orgID, jobID).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery(`(?s)WITH raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), models.SandboxWorkloadClassInteractive).
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectQuery(`(?s)SELECT s.status.*session_cancel_requests.*session_threads.*JOIN jobs payload_job.*capacity_cleanup.*s.deleted_at IS NULL`).
+		WithArgs(orgID, sessionID, jobID).
+		WillReturnRows(pgxmock.NewRows([]string{"status", "pending_cancel", "stopped_thread", "capacity_cleanup"}).
+			AddRow(models.SessionStatusRunning, true, false, false))
+	mock.ExpectQuery(`(?s)SELECT n.id.*FROM nodes n.*active_job_count`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow("worker-fleet-cleanup"))
+	mock.ExpectExec(`(?s)UPDATE jobs.*capacity_waited.*capacity_cleanup.*org_id = @org_id.*job_type = 'continue_session'`).
+		WithArgs(jobID, orgID, models.JobStatusPending).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec(`(?s)UPDATE jobs.*jsonb_set\(payload, '\{capacity_waited\}'.*target_node_id =.*sandbox_slot_reserved_until = NULL.*retry_window_started_at =`).
+		WithArgs(models.SandboxWorkloadClassInteractive, "worker-fleet-cleanup", createdAt, jobID, models.JobStatusPending).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+	mock.ExpectRollback()
+
+	result, err := NewJobStore(mock).RouteNextSandboxJob(context.Background())
+	require.NoError(t, err, "cancelled continuation should bypass a full fleet for lightweight cleanup")
+	require.NotNil(t, result, "routing should report the fleet cancellation cleanup placement")
+	require.Equal(t, SandboxRoutingReasonTerminalProbe, result.Reason, "fleet cancellation should use the terminal-probe path")
+	require.False(t, result.Deferred, "cancelled continuation should not wait for fleet capacity")
+	require.NotNil(t, result.TargetNodeID, "fleet cancellation cleanup should target a live worker")
+	require.Equal(t, "worker-fleet-cleanup", *result.TargetNodeID, "fleet cancellation cleanup should use the selected fallback worker")
+	require.NoError(t, mock.ExpectationsWereMet(), "fleet routing should inspect durable cancellation before deferring")
+}
+
 func TestContinueSessionNeedsTerminalProbe(t *testing.T) {
 	t.Parallel()
 
@@ -1905,11 +1961,13 @@ func TestContinueSessionNeedsTerminalProbe(t *testing.T) {
 		status               models.SessionStatus
 		pendingSessionCancel bool
 		stoppedThread        bool
+		capacityCleanup      bool
 		expected             bool
 	}{
 		{name: "pending session cancellation", status: models.SessionStatusRunning, pendingSessionCancel: true, expected: true},
 		{name: "non-resumable terminal session", status: models.SessionStatusSkipped, expected: true},
 		{name: "cancelled thread", status: models.SessionStatusRunning, stoppedThread: true, expected: true},
+		{name: "persisted capacity cleanup", status: models.SessionStatusRunning, capacityCleanup: true, expected: true},
 		{name: "resumable session", status: models.SessionStatusFailed},
 	}
 
@@ -1925,8 +1983,8 @@ func TestContinueSessionNeedsTerminalProbe(t *testing.T) {
 			mock.ExpectBegin()
 			mock.ExpectQuery(`(?s)SELECT s.status.*session_cancel_requests.*session_threads.*JOIN jobs payload_job.*s.deleted_at IS NULL`).
 				WithArgs(orgID, sessionID, jobID).
-				WillReturnRows(pgxmock.NewRows([]string{"status", "pending_cancel", "stopped_thread"}).
-					AddRow(tt.status, tt.pendingSessionCancel, tt.stoppedThread))
+				WillReturnRows(pgxmock.NewRows([]string{"status", "pending_cancel", "stopped_thread", "capacity_cleanup"}).
+					AddRow(tt.status, tt.pendingSessionCancel, tt.stoppedThread, tt.capacityCleanup))
 			mock.ExpectRollback()
 
 			tx, err := mock.Begin(context.Background())

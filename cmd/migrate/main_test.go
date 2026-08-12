@@ -72,7 +72,7 @@ func TestPrepareSandboxWorkloadRoutingOnConn(t *testing.T) {
 					WillReturnResult(pgxmock.NewResult("SET", 0))
 				mock.ExpectExec(`(?s)ALTER TABLE jobs.*ADD COLUMN IF NOT EXISTS workload_class.*sandbox_slot_reserved_until`).
 					WillReturnResult(pgxmock.NewResult("ALTER TABLE", 0))
-				mock.ExpectExec(`(?s)UPDATE jobs j.*FROM sessions s.*s\.origin = 'code_review'.*j\.status IN \('pending', 'running'\)`).
+				mock.ExpectExec(`(?s)WITH active_sandbox_jobs AS MATERIALIZED.*j\.status IN \('pending', 'running'\).*UPDATE jobs j.*JOIN sessions s.*s\.id = active\.session_id.*s\.origin = 'code_review'`).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 2))
 				mock.ExpectExec(`SET lock_timeout = '0'`).
 					WillReturnResult(pgxmock.NewResult("SET", 0))
@@ -460,6 +460,10 @@ func TestSandboxWorkloadRoutingMigrationIsStagedForHotTable(t *testing.T) {
 	require.Less(t, lockTimeoutAt, alterJobsAt, "lock timeout should be installed before the first jobs-table DDL")
 	require.Contains(t, shapeSQL, "ADD COLUMN IF NOT EXISTS workload_class", "shape migration should tolerate columns preinstalled by migrate up")
 	require.Contains(t, shapeSQL, "s.origin = 'code_review'", "shape migration should preserve active code-review classification")
+	require.Contains(t, shapeSQL, "WITH active_sandbox_jobs AS MATERIALIZED", "backfill should first restrict the hot jobs-table driving set")
+	require.Contains(t, shapeSQL, "THEN (j.payload->>'session_id')::uuid", "backfill should guard and cast the payload value instead of casting the indexed sessions key")
+	require.Contains(t, shapeSQL, "s.id = active.session_id", "backfill should preserve the indexed UUID session lookup")
+	require.NotContains(t, shapeSQL, "s.id::text", "backfill must not cast away the sessions primary-key index")
 	require.NotContains(t, shapeSQL, "VALIDATE CONSTRAINT chk_jobs_workload_class", "shape migration should not retain its table lock while validating existing rows")
 
 	validationBody, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000287_validate_sandbox_workload_routing.up.sql"))

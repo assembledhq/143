@@ -1262,12 +1262,49 @@ func (s *SessionStore) HasPendingCancelRequest(ctx context.Context, orgID, sessi
 // finalizes both the session and its matching continuation thread. The thread
 // ID is scoped through session_id as well as org_id so a malformed payload
 // cannot cancel a thread from another session.
-func (s *SessionStore) CancelPendingCapacityWait(ctx context.Context, orgID, sessionID uuid.UUID, threadID *uuid.UUID) (bool, bool, error) {
+func (s *SessionStore) CancelPendingCapacityWait(ctx context.Context, orgID, sessionID, currentJobID uuid.UUID, threadID *uuid.UUID) (bool, bool, error) {
 	tx, err := s.Begin(ctx)
 	if err != nil {
 		return false, false, fmt.Errorf("begin capacity-wait cancellation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Admission takes the same organization lock before a sandbox job becomes
+	// running. Holding it here prevents a new sibling turn from starting between
+	// the live-turn check and cancellation consumption.
+	var lockedOrgID uuid.UUID
+	if err := tx.QueryRow(ctx, `
+		SELECT id
+		FROM organizations
+		WHERE id = @org_id
+		FOR NO KEY UPDATE`, pgx.NamedArgs{"org_id": orgID}).Scan(&lockedOrgID); err != nil {
+		return false, false, fmt.Errorf("lock organization for capacity-wait cancellation: %w", err)
+	}
+
+	var liveSiblingTurn bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM jobs j
+			WHERE j.org_id = @org_id
+			  AND j.id <> @current_job_id
+			  AND j.job_type IN ('run_agent', 'continue_session')
+			  AND j.status = 'running'
+			  AND j.lease_expires_at > now()
+			  AND j.payload->>'session_id' = @session_id
+			  AND COALESCE(j.payload->>'capacity_cleanup', 'false') <> 'true'
+		)`, pgx.NamedArgs{
+		"current_job_id": currentJobID,
+		"org_id":         orgID,
+		"session_id":     sessionID.String(),
+	}).Scan(&liveSiblingTurn); err != nil {
+		return false, false, fmt.Errorf("inspect live sibling before capacity-wait cancellation: %w", err)
+	}
+	if liveSiblingTurn {
+		// The live turn or its targeted cancel_session job owns delivery. Leave
+		// delivered_at untouched so this queued cleanup cannot steal the signal.
+		return false, false, nil
+	}
 
 	consumeResult, err := tx.Exec(ctx, `
 		UPDATE session_cancel_requests
