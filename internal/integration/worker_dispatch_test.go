@@ -17,6 +17,69 @@ import (
 	"github.com/assembledhq/143/internal/worker"
 )
 
+// TestIntegration_SharedSandboxAdmissionDeduplicatesCurrentRoutingReservation
+// exercises the real advisory-lock and lease-union query. The final gate must
+// replace, rather than add to, its own durable routing reservation while still
+// rejecting an independent consumer once that worker slot is occupied.
+//
+// This test cannot run in parallel because the integration suite shares one
+// database and setup truncates queue state between tests.
+func TestIntegration_SharedSandboxAdmissionDeduplicatesCurrentRoutingReservation(t *testing.T) {
+	pool := setup(t)
+	ctx := context.Background()
+	orgID := seedOrg(t, pool)
+	nodeID := "shared-admission-worker-" + orgID.String()[:8]
+	seedWorkerNode(t, pool, nodeID)
+	setWorkerSandboxCapacity(t, pool, nodeID, 1)
+
+	session := seedSession(t, pool, orgID, sessionOpts{Status: models.SessionStatusPending})
+	jobStore := db.NewJobStore(pool)
+	jobID, err := jobStore.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue:         "agent",
+		JobType:       "run_agent",
+		Payload:       map[string]string{"session_id": session.ID.String(), "org_id": orgID.String()},
+		Priority:      5,
+		WorkloadClass: models.SandboxWorkloadClassInteractive,
+	})
+	require.NoError(t, err, "sandbox-producing job should enqueue")
+	routed, err := jobStore.RouteNextSandboxJob(ctx)
+	require.NoError(t, err, "sandbox-producing job should receive a durable worker reservation")
+	require.NotNil(t, routed, "routing should return the reserved job")
+	require.NotNil(t, routed.TargetNodeID, "routing should select the only worker")
+	require.Equal(t, nodeID, *routed.TargetNodeID, "routing should target the configured worker")
+
+	capacityStore := db.NewSandboxCapacityReservationStore(pool)
+	reservationID, live, total, acquired, err := capacityStore.ReserveSandboxCapacity(
+		ctx,
+		nodeID,
+		&jobID,
+		models.SandboxWorkloadClassInteractive,
+		func(context.Context) (int, error) { return 0, nil },
+		1,
+		time.Now().Add(time.Minute),
+	)
+	require.NoError(t, err, "final admission should replace the current job's durable routing reservation")
+	require.True(t, acquired, "current job should acquire the one worker slot")
+	require.Equal(t, 0, live, "final admission should use the live Docker count taken under the node lock")
+	require.Equal(t, 1, total, "durable and final reservations for the same job should count once")
+	require.NotEqual(t, uuid.Nil, reservationID, "successful final admission should persist a lease")
+
+	otherReservationID, _, blockedTotal, otherAcquired, err := capacityStore.ReserveSandboxCapacity(
+		ctx,
+		nodeID,
+		nil,
+		models.SandboxWorkloadClassInteractive,
+		func(context.Context) (int, error) { return 0, nil },
+		1,
+		time.Now().Add(time.Minute),
+	)
+	require.NoError(t, err, "independent admission should return a capacity decision")
+	require.False(t, otherAcquired, "independent admission should not exceed the worker limit")
+	require.Equal(t, uuid.Nil, otherReservationID, "rejected admission should not persist another lease")
+	require.Equal(t, 1, blockedTotal, "shared and durable reservations for the admitted job should remain deduplicated")
+	require.NoError(t, capacityStore.ReleaseSandboxCapacity(ctx, reservationID), "test should release its shared admission lease")
+}
+
 // TestIntegration_CodeReviewJobsUseFleetCapacityAndPreserveInteractiveReserve
 // uses the real queue and Postgres locking path to exercise a mixed-version
 // code-review burst. It intentionally enqueues review jobs with the legacy

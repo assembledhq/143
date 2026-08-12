@@ -1421,6 +1421,28 @@ func selectSandboxRoutingCandidate(ctx context.Context, tx pgx.Tx, workloadClass
 					  AND reserved_job.sandbox_slot_reserved_until > now()
 					  AND reserved_job.status = 'running'
 				) AS running_durable_reservations,
+				(
+					SELECT COUNT(*)
+					FROM sandbox_capacity_reservations shared_reservation
+					WHERE shared_reservation.node_id = n.id
+					  AND shared_reservation.expires_at > now()
+					  AND shared_reservation.job_id IS NOT NULL
+					  AND NOT EXISTS (
+						SELECT 1
+						FROM jobs reserved_job
+						WHERE reserved_job.id = shared_reservation.job_id
+						  AND reserved_job.target_node_id = n.id
+						  AND reserved_job.sandbox_slot_reserved_until > now()
+						  AND reserved_job.status IN ('pending', 'running')
+					  )
+				) AS shared_sandbox_turn_reservations,
+				(
+					SELECT COUNT(*)
+					FROM sandbox_capacity_reservations shared_reservation
+					WHERE shared_reservation.node_id = n.id
+					  AND shared_reservation.expires_at > now()
+					  AND shared_reservation.job_id IS NULL
+				) AS shared_non_turn_reservations,
 				n.last_heartbeat_at
 			FROM nodes n
 			WHERE n.mode IN ('worker', 'all')
@@ -1433,9 +1455,9 @@ func selectSandboxRoutingCandidate(ctx context.Context, tx pgx.Tx, workloadClass
 			SELECT
 				*,
 				live_sandboxes
-					+ GREATEST(local_reservations - sandbox_turn_local_reservations, 0)
+					+ GREATEST(local_reservations - sandbox_turn_local_reservations, shared_non_turn_reservations, 0)
 					+ pending_durable_reservations
-					+ GREATEST(sandbox_turn_local_reservations, running_durable_reservations) AS capacity_load
+					+ GREATEST(sandbox_turn_local_reservations, running_durable_reservations, shared_sandbox_turn_reservations) AS capacity_load
 			FROM raw_load
 		)
 		SELECT id
@@ -1465,7 +1487,7 @@ func selectSandboxRoutingCandidate(ctx context.Context, tx pgx.Tx, workloadClass
 
 // lint:allow-no-orgid reason="worker capacity routing intentionally aggregates reservations across organizations"
 func sandboxRoutingCandidateHasCapacity(ctx context.Context, tx pgx.Tx, nodeID string, jobID uuid.UUID, workloadClass models.SandboxWorkloadClass) (bool, error) {
-	var live, localReserved, sandboxTurnLocalReserved, maxActive, interactiveReserved, pendingDurableReserved, runningDurableReserved int
+	var live, localReserved, sandboxTurnLocalReserved, maxActive, interactiveReserved, pendingDurableReserved, runningDurableReserved, sharedTurnReserved, sharedNonTurnReserved int
 	err := tx.QueryRow(ctx, `
 		SELECT
 			COALESCE(NULLIF(n.metadata->>'live_sandbox_count', '')::int, 0),
@@ -1491,6 +1513,29 @@ func sandboxRoutingCandidateHasCapacity(ctx context.Context, tx pgx.Tx, nodeID s
 				  AND reserved_job.id <> @job_id
 				  AND reserved_job.sandbox_slot_reserved_until > now()
 				  AND reserved_job.status = 'running'
+			),
+			(
+				SELECT COUNT(*)
+				FROM sandbox_capacity_reservations shared_reservation
+				WHERE shared_reservation.node_id = n.id
+				  AND shared_reservation.expires_at > now()
+				  AND shared_reservation.job_id IS NOT NULL
+				  AND shared_reservation.job_id <> @job_id
+				  AND NOT EXISTS (
+					SELECT 1
+					FROM jobs reserved_job
+					WHERE reserved_job.id = shared_reservation.job_id
+					  AND reserved_job.target_node_id = n.id
+					  AND reserved_job.sandbox_slot_reserved_until > now()
+					  AND reserved_job.status IN ('pending', 'running')
+				  )
+			),
+			(
+				SELECT COUNT(*)
+				FROM sandbox_capacity_reservations shared_reservation
+				WHERE shared_reservation.node_id = n.id
+				  AND shared_reservation.expires_at > now()
+				  AND shared_reservation.job_id IS NULL
 			)
 		FROM nodes n
 		WHERE n.id = @node_id
@@ -1501,7 +1546,7 @@ func sandboxRoutingCandidateHasCapacity(ctx context.Context, tx pgx.Tx, nodeID s
 		"job_id":      jobID,
 		"node_id":     nodeID,
 		"dead_before": time.Now().Add(-nodeDeadHeartbeatThreshold),
-	}).Scan(&live, &localReserved, &sandboxTurnLocalReserved, &maxActive, &interactiveReserved, &pendingDurableReserved, &runningDurableReserved)
+	}).Scan(&live, &localReserved, &sandboxTurnLocalReserved, &maxActive, &interactiveReserved, &pendingDurableReserved, &runningDurableReserved, &sharedTurnReserved, &sharedNonTurnReserved)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -1512,14 +1557,14 @@ func sandboxRoutingCandidateHasCapacity(ctx context.Context, tx pgx.Tx, nodeID s
 	if workloadClass == models.SandboxWorkloadClassCodeReview {
 		effectiveMax -= interactiveReserved
 	}
-	load := sandboxRoutingCapacityLoad(live, localReserved, sandboxTurnLocalReserved, pendingDurableReserved, runningDurableReserved)
+	load := sandboxRoutingCapacityLoad(live, localReserved, sandboxTurnLocalReserved, pendingDurableReserved, runningDurableReserved, sharedTurnReserved, sharedNonTurnReserved)
 	return effectiveMax > 0 && load < effectiveMax, nil
 }
 
-func sandboxRoutingCapacityLoad(live, localReserved, sandboxTurnLocalReserved, pendingDurableReserved, runningDurableReserved int) int {
-	localOnlyReserved := max(localReserved-sandboxTurnLocalReserved, 0)
-	overlappingSandboxTurns := max(sandboxTurnLocalReserved, runningDurableReserved)
-	return live + localOnlyReserved + pendingDurableReserved + overlappingSandboxTurns
+func sandboxRoutingCapacityLoad(live, localReserved, sandboxTurnLocalReserved, pendingDurableReserved, runningDurableReserved, sharedTurnReserved, sharedNonTurnReserved int) int {
+	overlappingNonTurns := max(localReserved-sandboxTurnLocalReserved, sharedNonTurnReserved, 0)
+	overlappingSandboxTurns := max(sandboxTurnLocalReserved, runningDurableReserved, sharedTurnReserved)
+	return live + overlappingNonTurns + pendingDurableReserved + overlappingSandboxTurns
 }
 
 // CountActiveSandboxTurnsByOrg returns claimed interactive and code-review

@@ -1,6 +1,6 @@
 # Design: Database Schema
 
-> **Status:** Implemented | **Last reviewed:** 2026-08-10
+> **Status:** Implemented | **Last reviewed:** 2026-08-12
 
 This document defines the PostgreSQL schema for 143.dev. All entities flow through the pipeline: ingestion -> prioritization -> agent run -> validation -> PR -> deploy -> observation.
 
@@ -1103,6 +1103,26 @@ Durable, database-backed async work queue for the full pipeline (`ingest_webhook
 - `(priority DESC, (CASE WHEN workload_class = 'interactive' THEN 0 ELSE 1 END), created_at ASC, run_at)` partial for pending `run_agent`/`continue_session` — capacity-aware sandbox routing and interactive-first ordering
 - `(org_id, status)` partial for pending/running `run_agent`/`continue_session` — shared organization sandbox-turn admission counts
 - `(queue, dedupe_key)` unique where `dedupe_key IS NOT NULL AND status IN ('pending', 'running')` — in-flight dedupe
+
+### `sandbox_capacity_reservations`
+
+Short-lived final-admission leases shared by every process using one worker's
+Docker host. This is cluster runtime state rather than tenant data, so it has no
+`org_id`. Its worker and optional job references cascade on parent deletion;
+lease expiry and admission cleanup bound rows left by a crashed process.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | uuid | PK |
+| node_id | text | worker whose Docker capacity is reserved; FK to `nodes(id)` with cascade delete |
+| job_id | uuid | nullable FK to `jobs(id)` with cascade delete; null for non-job consumers such as previews |
+| workload_class | text | `interactive` or `code_review` |
+| expires_at | timestamptz | lease expiry used for crash recovery |
+| created_at | timestamptz | |
+
+**Indexes:**
+- `(job_id)` unique where `job_id IS NOT NULL` — one final-admission lease per job
+- `(node_id, expires_at)` — active worker lease count and expiry cleanup
 
 ### `nodes`
 
