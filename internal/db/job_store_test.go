@@ -792,7 +792,7 @@ func TestJobStore_ClaimNextRunnableRequiresSandboxRouting(t *testing.T) {
 	leaseDuration := 60 * time.Second
 	lockToken := uuid.New()
 	mock.ExpectBegin()
-	mock.ExpectQuery(`(?s)WITH unavailable_target_nodes AS.*j.job_type NOT IN \('run_agent', 'continue_session'\) OR j.target_node_id IS NOT NULL.*d.id IS NOT NULL AND j.sandbox_slot_reserved_until IS NULL`).
+	mock.ExpectQuery(`(?s)WITH unavailable_target_nodes AS.*j.job_type NOT IN \('run_agent', 'continue_session'\) OR j.target_node_id IS NOT NULL.*d.id IS NOT NULL AND j.sandbox_slot_reserved_until IS NULL.*ORDER BY.*j.priority DESC,.*CASE.*j.run_at ASC,.*j.created_at ASC`).
 		WithArgs(pgxmock.AnyArg(), "worker-1").
 		WillReturnError(pgx.ErrNoRows)
 	mock.ExpectRollback()
@@ -992,7 +992,7 @@ func TestJobStore_RenewLease(t *testing.T) {
 		{
 			name: "renews active lease",
 			setupMock: func(mock pgxmock.PgxPoolIface, lockToken uuid.UUID, leaseDuration time.Duration) {
-				mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+[\\s\\S]*sandbox_slot_reserved_until = CASE").
+				mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+[\\s\\S]*sandbox_slot_reserved_until = CASE[\\s\\S]*sandbox_session.container_id IS NOT NULL[\\s\\S]*ELSE now\\(\\) \\+").
 					WithArgs(int(leaseDuration.Seconds()), uuid.MustParse("11111111-1111-1111-1111-111111111111"), lockToken).
 					WillReturnRows(pgxmock.NewRows([]string{"lease_expires_at"}).AddRow(time.Now().Add(leaseDuration)))
 			},
@@ -1001,7 +1001,7 @@ func TestJobStore_RenewLease(t *testing.T) {
 		{
 			name: "returns inactive when ownership was lost",
 			setupMock: func(mock pgxmock.PgxPoolIface, lockToken uuid.UUID, leaseDuration time.Duration) {
-				mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+[\\s\\S]*sandbox_slot_reserved_until = CASE").
+				mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+[\\s\\S]*sandbox_slot_reserved_until = CASE[\\s\\S]*sandbox_session.container_id IS NOT NULL[\\s\\S]*ELSE now\\(\\) \\+").
 					WithArgs(int(leaseDuration.Seconds()), uuid.MustParse("11111111-1111-1111-1111-111111111111"), lockToken).
 					WillReturnError(pgx.ErrNoRows)
 				mock.ExpectQuery("WITH target AS[\\s\\S]*UPDATE session_executors[\\s\\S]*UPDATE jobs[\\s\\S]*owner_kind = 'worker'").
@@ -1012,7 +1012,7 @@ func TestJobStore_RenewLease(t *testing.T) {
 		{
 			name: "terminalizes session job when referenced session is already terminal",
 			setupMock: func(mock pgxmock.PgxPoolIface, lockToken uuid.UUID, leaseDuration time.Duration) {
-				mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+[\\s\\S]*sandbox_slot_reserved_until = CASE").
+				mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+[\\s\\S]*sandbox_slot_reserved_until = CASE[\\s\\S]*sandbox_session.container_id IS NOT NULL[\\s\\S]*ELSE now\\(\\) \\+").
 					WithArgs(int(leaseDuration.Seconds()), uuid.MustParse("11111111-1111-1111-1111-111111111111"), lockToken).
 					WillReturnError(pgx.ErrNoRows)
 				mock.ExpectQuery("WITH target AS[\\s\\S]*s.status IN \\('completed', 'failed', 'cancelled', 'skipped'\\)[\\s\\S]*UPDATE session_executors[\\s\\S]*UPDATE jobs").
@@ -1023,7 +1023,7 @@ func TestJobStore_RenewLease(t *testing.T) {
 		{
 			name: "returns errors from renewal query",
 			setupMock: func(mock pgxmock.PgxPoolIface, lockToken uuid.UUID, leaseDuration time.Duration) {
-				mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+[\\s\\S]*sandbox_slot_reserved_until = CASE").
+				mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+[\\s\\S]*sandbox_slot_reserved_until = CASE[\\s\\S]*sandbox_session.container_id IS NOT NULL[\\s\\S]*ELSE now\\(\\) \\+").
 					WithArgs(int(leaseDuration.Seconds()), uuid.MustParse("11111111-1111-1111-1111-111111111111"), lockToken).
 					WillReturnError(errors.New("write failed"))
 			},
@@ -1624,7 +1624,7 @@ func TestJobStore_RouteNextSandboxJob(t *testing.T) {
 
 			jobID, orgID := uuid.New(), uuid.New()
 			mock.ExpectBegin()
-			mock.ExpectQuery(`(?s)SELECT j.id, j.org_id,.*effective_workload_class.*j.status,.*j.created_at.*FROM jobs j`).
+			mock.ExpectQuery(`(?s)SELECT j.id, j.org_id,.*effective_workload_class.*j.status,.*j.created_at.*FROM jobs j.*ORDER BY.*j.priority DESC,.*CASE WHEN j.workload_class = 'interactive' THEN 0 ELSE 1 END,.*j.run_at ASC,.*j.created_at ASC`).
 				WithArgs(pgxmock.AnyArg()).
 				WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
 					AddRow(jobID, orgID, tt.jobType, nil, tt.workloadClass, models.JobStatusPending, nil, time.Now().Add(-tt.jobAge)))

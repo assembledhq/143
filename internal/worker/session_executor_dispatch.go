@@ -79,7 +79,6 @@ type DurableSessionExecutorDispatcher struct {
 	NodeID                string
 	Image                 string
 	BuildSHA              string
-	LeaseDuration         time.Duration
 	ResolveRuntimeCeiling func(context.Context, uuid.UUID) time.Duration
 	Logger                zerolog.Logger
 }
@@ -207,10 +206,7 @@ func (d *DurableSessionExecutorDispatcher) Dispatch(ctx context.Context, jobType
 		logger.Warn().Msg("session executor launch returned without a container id")
 	}
 
-	leaseDuration := d.LeaseDuration
-	if leaseDuration <= 0 {
-		leaseDuration = defaultLeaseDuration
-	}
+	leaseDuration := defaultLeaseDuration
 	logger.Info().Dur("lease_duration", leaseDuration).Msg("session executor job handoff starting")
 	ok, err = d.Jobs.HandoffToSessionExecutorWithLease(ctx, session.OrgID, jobID, lockToken, executorID, leaseDuration)
 	if err != nil {

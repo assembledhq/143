@@ -464,6 +464,7 @@ func TestSandboxWorkloadRoutingMigrationIsStagedForHotTable(t *testing.T) {
 	require.Contains(t, shapeSQL, "THEN (j.payload->>'session_id')::uuid", "backfill should guard and cast the payload value instead of casting the indexed sessions key")
 	require.Contains(t, shapeSQL, "s.id = active.session_id", "backfill should preserve the indexed UUID session lookup")
 	require.NotContains(t, shapeSQL, "s.id::text", "backfill must not cast away the sessions primary-key index")
+	require.Contains(t, shapeSQL, "run_at ASC,\n        created_at ASC", "routing index should preserve the durable deferral order before FIFO tie-breaking")
 	require.NotContains(t, shapeSQL, "VALIDATE CONSTRAINT chk_jobs_workload_class", "shape migration should not retain its table lock while validating existing rows")
 
 	validationBody, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000287_validate_sandbox_workload_routing.up.sql"))

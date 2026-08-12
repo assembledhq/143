@@ -763,7 +763,7 @@ const (
 	sandboxFleetRetryDelay         = 10 * time.Second
 	sandboxOrgLimitRetryDelay      = 5 * time.Second
 	sandboxRoutingTerminalProbeAge = 8 * time.Minute
-	maxClaimAdmissionSkips         = 64
+	maxClaimAdmissionSkips         = 16
 )
 
 type SandboxRoutingReason string
@@ -844,6 +844,10 @@ func (s *JobStore) RouteNextSandboxJob(ctx context.Context) (*SandboxRoutingResu
 		ORDER BY
 			j.priority DESC,
 			CASE WHEN j.workload_class = 'interactive' THEN 0 ELSE 1 END,
+			-- run_at is the durable fairness cursor: a capacity deferral moves
+			-- the job behind still-due peers so a bounded routing pass cannot
+			-- restart at the same saturated prefix on every worker poll.
+			j.run_at ASC,
 			j.created_at ASC
 		FOR UPDATE OF j SKIP LOCKED
 		LIMIT 1`, pgx.NamedArgs{
@@ -1233,6 +1237,9 @@ func resolveSandboxRoutingWorkloadClass(ctx context.Context, tx pgx.Tx, job *san
 	if job.WorkloadClass == models.SandboxWorkloadClassCodeReview || job.SessionID == nil {
 		return nil
 	}
+	// Rolling-deploy compatibility for jobs inserted by binaries that predate
+	// workload_class. Remove this repair lookup once every supported writer is
+	// guaranteed to persist the class at enqueue time.
 	var origin models.SessionOrigin
 	err := tx.QueryRow(ctx, `
 		SELECT origin
@@ -1653,6 +1660,9 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 					WHEN j.job_type IN ('run_agent', 'continue_session') THEN 1
 					ELSE 0
 				END,
+				-- Capacity deferrals advance run_at, so this durable order lets a
+				-- bounded claim pass resume beyond the previously deferred prefix.
+				j.run_at ASC,
 				j.created_at ASC
 			FOR UPDATE OF j SKIP LOCKED
 			LIMIT 1`, pgx.NamedArgs{
@@ -1930,6 +1940,14 @@ func (s *JobStore) RenewLeaseForSessionExecutor(ctx context.Context, orgID, jobI
 		SET lease_expires_at = now() + (@lease_seconds * interval '1 second'),
 			sandbox_slot_reserved_until = CASE
 				WHEN sandbox_slot_reserved_until IS NULL THEN NULL
+				WHEN NULLIF(payload->>'session_id', '') IS NOT NULL
+					AND EXISTS (
+						SELECT 1
+						FROM sessions sandbox_session
+						WHERE sandbox_session.org_id = jobs.org_id
+						  AND sandbox_session.id::text = payload->>'session_id'
+						  AND sandbox_session.container_id IS NOT NULL
+					) THEN NULL
 				ELSE now() + (@lease_seconds * interval '1 second')
 			END,
 			updated_at = now()
@@ -1981,6 +1999,14 @@ func (s *JobStore) RenewLease(ctx context.Context, jobID, lockToken uuid.UUID, l
 		SET lease_expires_at = now() + (@lease_seconds * interval '1 second'),
 			sandbox_slot_reserved_until = CASE
 				WHEN sandbox_slot_reserved_until IS NULL THEN NULL
+				WHEN NULLIF(payload->>'session_id', '') IS NOT NULL
+					AND EXISTS (
+						SELECT 1
+						FROM sessions sandbox_session
+						WHERE sandbox_session.org_id = jobs.org_id
+						  AND sandbox_session.id::text = payload->>'session_id'
+						  AND sandbox_session.container_id IS NOT NULL
+					) THEN NULL
 				ELSE now() + (@lease_seconds * interval '1 second')
 			END,
 			updated_at = now()
