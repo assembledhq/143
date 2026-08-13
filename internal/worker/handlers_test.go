@@ -10804,7 +10804,7 @@ func TestSandboxTurnCapacityRetryTargetQuicklyReservesAlternateWorker(t *testing
 	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\).*FROM jobs.*id <>.*job_type IN`).
 		WithArgs(orgID, jobID).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectQuery(`(?s)WITH raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
+	mock.ExpectQuery(`(?s)WITH candidate_nodes AS.*raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), models.SandboxWorkloadClassInteractive).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow("worker-with-space"))
 	mock.ExpectQuery(`SELECT pg_try_advisory_xact_lock`).

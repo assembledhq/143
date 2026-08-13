@@ -47,12 +47,17 @@ type testRuntimeStatusSessionCounter struct {
 }
 
 type testRuntimeStatusSandboxTurnCounter struct {
-	count int
-	err   error
+	count   int
+	waiting bool
+	err     error
 }
 
 func (c testRuntimeStatusSandboxTurnCounter) CountAdmittedSandboxTurnsByOrg(context.Context, uuid.UUID) (int, error) {
 	return c.count, c.err
+}
+
+func (c testRuntimeStatusSandboxTurnCounter) IsSessionWaitingForSandboxCapacity(context.Context, uuid.UUID, uuid.UUID, int) (bool, error) {
+	return c.waiting, c.err
 }
 
 func (c testRuntimeStatusSessionCounter) CountRunningByOrg(context.Context, uuid.UUID) (int, error) {
@@ -240,18 +245,48 @@ func TestSettingsHandler_GetRuntimeStatus(t *testing.T) {
 		testRuntimeStatusSessionCounter{count: 2},
 		testRuntimeStatusPreviewCounter{count: 3},
 	)
-	handler.SetRuntimeStatusSandboxTurnCounter(testRuntimeStatusSandboxTurnCounter{count: 4})
+	handler.SetRuntimeStatusSandboxTurnCounter(testRuntimeStatusSandboxTurnCounter{count: 4, waiting: true})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/runtime/status", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/runtime/status?session_id="+uuid.NewString(), nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
 	w := httptest.NewRecorder()
 
 	handler.GetRuntimeStatus(w, req)
 	require.Equal(t, http.StatusOK, w.Code, "runtime status should return success")
 	require.Contains(t, w.Body.String(), `"static_egress":{"available":true,"enabled":true,"public_ip":"203.0.113.10"}`, "runtime status should include sanitized static egress state")
-	require.Contains(t, w.Body.String(), `"capacity":{"state":"normal","active_agent_runs":2,"active_sandbox_turns":4,"max_concurrent_agent_runs":5,"active_previews":3,"max_previews_per_user":4}`, "runtime status should report both session activity and the shared sandbox-turn admission count")
+	require.Contains(t, w.Body.String(), `"capacity":{"state":"normal","active_agent_runs":2,"active_sandbox_turns":4,"session_waiting_for_capacity":true,"max_concurrent_agent_runs":5,"active_previews":3,"max_previews_per_user":4}`, "runtime status should report aggregate activity and the queried session's own capacity wait state")
 	require.NotContains(t, w.Body.String(), "static_egress_unavailable_reason", "runtime status must not expose backend diagnostics")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSettingsHandler_GetRuntimeStatusRejectsInvalidSessionID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(orgColumns()).AddRow(
+			orgID,
+			"Test Org",
+			json.RawMessage(`{"max_concurrent_runs":2}`),
+			now,
+			now,
+		))
+
+	handler := NewSettingsHandler(db.NewOrganizationStore(mock), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/runtime/status?session_id=not-a-uuid", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.GetRuntimeStatus(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "runtime status should reject a malformed session identifier")
+	require.Contains(t, w.Body.String(), `"code":"INVALID_SESSION_ID"`, "runtime status should return the stable validation error code")
+	require.NoError(t, mock.ExpectationsWereMet(), "invalid session lookup should stop before runtime counters")
 }
 
 func TestSettingsHandler_GetLLMDefaults(t *testing.T) {

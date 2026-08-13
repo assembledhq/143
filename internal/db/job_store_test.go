@@ -643,6 +643,7 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 					WithArgs(pgxmock.AnyArg(), "worker-1").
 					WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
 						AddRow(jobID, orgID, "run_agent", nil, models.SandboxWorkloadClassInteractive, models.JobStatusPending, nil, now))
+				expectSandboxClaimCandidateSavepoint(mock)
 				mock.ExpectQuery(`(?s)SELECT settings.*FROM organizations.*FOR NO KEY UPDATE`).
 					WithArgs(orgID).
 					WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow([]byte(`{"max_concurrent_runs":3}`)))
@@ -676,6 +677,7 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 					WithArgs(pgxmock.AnyArg(), "worker-1").
 					WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
 						AddRow(jobID, orgID, "run_agent", nil, models.SandboxWorkloadClassInteractive, models.JobStatusPending, nil, now))
+				expectSandboxClaimCandidateSavepoint(mock)
 				mock.ExpectQuery(`(?s)SELECT settings.*FROM organizations.*FOR NO KEY UPDATE`).
 					WithArgs(orgID).
 					WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow([]byte(`{"max_concurrent_runs":3}`)))
@@ -709,6 +711,7 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 					WithArgs(pgxmock.AnyArg(), "worker-1").
 					WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
 						AddRow(jobID, orgID, "run_agent", nil, models.SandboxWorkloadClassInteractive, models.JobStatusPending, persistedRetryStart, persistedRetryStart))
+				expectSandboxClaimCandidateSavepoint(mock)
 				mock.ExpectQuery("UPDATE jobs j[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
 					WithArgs("worker-1", "worker-1", lockToken, int(leaseDuration.Seconds()), jobID).
 					WillReturnRows(pgxmock.NewRows([]string{
@@ -828,6 +831,7 @@ func TestJobStore_ClaimNextRunnableAtomicallyDefersAffinitySandboxTurnAtSharedOr
 				WithArgs(pgxmock.AnyArg(), "worker-1").
 				WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
 					AddRow(jobID, orgID, "continue_session", nil, tt.workloadClass, models.JobStatusPending, nil, time.Now().Add(-sandboxRoutingTerminalProbeAge-time.Minute)))
+			expectSandboxClaimCandidateSavepoint(mock)
 			mock.ExpectQuery(`(?s)SELECT settings.*FROM organizations.*FOR NO KEY UPDATE`).
 				WithArgs(orgID).
 				WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow([]byte(`{"max_concurrent_runs":2}`)))
@@ -835,7 +839,7 @@ func TestJobStore_ClaimNextRunnableAtomicallyDefersAffinitySandboxTurnAtSharedOr
 				WithArgs(orgID, jobID).
 				WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(2))
 			mock.ExpectExec(`(?s)UPDATE jobs.*jsonb_set\(payload, '\{capacity_waited\}'.*retry_window_started_at = CASE.*WHEN job_type = 'continue_session' THEN NULL.*target_node_id = CASE.*sandbox_slot_reserved_until IS NULL THEN target_node_id.*sandbox_slot_reserved_until = NULL`).
-				WithArgs(tt.workloadClass, int(sandboxOrgLimitRetryDelay.Seconds()), jobID).
+				WithArgs(tt.workloadClass, int(SandboxOrgLimitRetryDelay.Seconds()), jobID).
 				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			mock.ExpectCommit()
 			mock.ExpectRollback()
@@ -851,6 +855,79 @@ func TestJobStore_ClaimNextRunnableAtomicallyDefersAffinitySandboxTurnAtSharedOr
 			require.NoError(t, mock.ExpectationsWereMet(), "claim should lock the org before counting all active turns and preserve ordinary affinity")
 		})
 	}
+}
+
+func TestJobStore_ClaimNextRunnableIsolatesInvalidSandboxCandidate(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	jobID, orgID := uuid.New(), uuid.New()
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)WITH unavailable_target_nodes AS.*SELECT j.id, j.org_id, j.job_type`).
+		WithArgs(pgxmock.AnyArg(), "worker-1").
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
+			AddRow(jobID, orgID, "run_agent", nil, models.SandboxWorkloadClassInteractive, models.JobStatusPending, nil, time.Now()))
+	expectSandboxClaimCandidateSavepoint(mock)
+	mock.ExpectQuery(`(?s)SELECT settings.*FROM organizations.*FOR NO KEY UPDATE`).
+		WithArgs(orgID).
+		WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow([]byte(`{"session_automation":{"automatic_follow_through":{"pr_feedback_mode":"invalid"}}}`)))
+	mock.ExpectExec(`ROLLBACK TO SAVEPOINT sandbox_claim_candidate`).WillReturnResult(pgxmock.NewResult("ROLLBACK", 0))
+	mock.ExpectExec(`(?s)UPDATE jobs.*last_error = @last_error.*run_at = @run_at.*target_node_id = CASE.*sandbox_slot_reserved_until IS NULL THEN target_node_id.*sandbox_slot_reserved_until = NULL.*org_id = @org_id.*status = 'pending'`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), jobID, orgID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec(`RELEASE SAVEPOINT sandbox_claim_candidate`).WillReturnResult(pgxmock.NewResult("RELEASE", 0))
+	mock.ExpectCommit()
+	mock.ExpectRollback()
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)WITH unavailable_target_nodes AS.*SELECT j.id, j.org_id, j.job_type`).
+		WithArgs(pgxmock.AnyArg(), "worker-1").
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectRollback()
+
+	job, err := NewJobStore(mock).ClaimNextRunnable(context.Background(), "worker-1", "worker-1", uuid.New(), time.Minute)
+	require.NoError(t, err, "one invalid sandbox candidate should not fail the worker claim pass")
+	require.Nil(t, job, "invalid candidate should be deferred instead of claimed")
+	require.NoError(t, mock.ExpectationsWereMet(), "claim should isolate the failed candidate and continue its bounded scan")
+}
+
+func TestJobStore_ClaimNextRunnablePreservesInitialRunTerminalDeadlineAtOrgLimit(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	jobID, orgID := uuid.New(), uuid.New()
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)WITH unavailable_target_nodes AS.*SELECT j.id, j.org_id, j.job_type`).
+		WithArgs(pgxmock.AnyArg(), "worker-1").
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
+			AddRow(jobID, orgID, "run_agent", nil, models.SandboxWorkloadClassInteractive, models.JobStatusPending, nil, time.Now()))
+	expectSandboxClaimCandidateSavepoint(mock)
+	mock.ExpectQuery(`(?s)SELECT settings.*FROM organizations.*FOR NO KEY UPDATE`).
+		WithArgs(orgID).
+		WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow([]byte(`{"max_concurrent_runs":1}`)))
+	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\).*FROM jobs.*id <>.*job_type IN`).
+		WithArgs(orgID, jobID).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectExec(`(?s)UPDATE jobs.*retry_window_started_at = CASE.*WHEN job_type = 'run_agent' AND attempts = 0 THEN created_at.*target_node_id = CASE`).
+		WithArgs(models.SandboxWorkloadClassInteractive, int(SandboxOrgLimitRetryDelay.Seconds()), jobID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+	mock.ExpectRollback()
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)WITH unavailable_target_nodes AS.*SELECT j.id, j.org_id, j.job_type`).
+		WithArgs(pgxmock.AnyArg(), "worker-1").
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectRollback()
+
+	job, err := NewJobStore(mock).ClaimNextRunnable(context.Background(), "worker-1", "worker-1", uuid.New(), time.Minute)
+	require.NoError(t, err, "metadata-fallback initial run should defer cleanly at the org limit")
+	require.Nil(t, job, "org-limited initial run should remain pending until its terminal deadline")
+	require.NoError(t, mock.ExpectationsWereMet(), "first claim deferral should anchor the terminal deadline to job creation")
 }
 
 func TestJobStore_ClaimNextRunnableBypassesOrgLimitForCancelledContinuation(t *testing.T) {
@@ -869,6 +946,7 @@ func TestJobStore_ClaimNextRunnableBypassesOrgLimitForCancelledContinuation(t *t
 		WithArgs(pgxmock.AnyArg(), "worker-1").
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
 			AddRow(jobID, orgID, "continue_session", sessionID.String(), models.SandboxWorkloadClassCodeReview, models.JobStatusPending, nil, now))
+	expectSandboxClaimCandidateSavepoint(mock)
 	mock.ExpectQuery(`(?s)SELECT settings.*FROM organizations.*FOR NO KEY UPDATE`).
 		WithArgs(orgID).
 		WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow([]byte(`{"max_concurrent_runs":1}`)))
@@ -1582,6 +1660,11 @@ func expectSandboxRoutingCandidateSavepoint(mock pgxmock.PgxPoolIface) {
 		WillReturnResult(pgxmock.NewResult("SAVEPOINT", 0))
 }
 
+func expectSandboxClaimCandidateSavepoint(mock pgxmock.PgxPoolIface) {
+	mock.ExpectExec(`SAVEPOINT sandbox_claim_candidate`).
+		WillReturnResult(pgxmock.NewResult("SAVEPOINT", 0))
+}
+
 func TestJobStore_RouteNextSandboxJob(t *testing.T) {
 	t.Parallel()
 
@@ -1648,7 +1731,7 @@ func TestJobStore_RouteNextSandboxJob(t *testing.T) {
 				WithArgs(orgID, jobID).
 				WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(tt.activeTurns))
 			if tt.expectedReason != SandboxRoutingReasonOrgLimit {
-				candidateQuery := mock.ExpectQuery(`(?s)WITH raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
+				candidateQuery := mock.ExpectQuery(`(?s)WITH candidate_nodes AS.*raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), tt.workloadClass)
 				if tt.candidateNodeID == "" {
 					candidateQuery.WillReturnRows(pgxmock.NewRows([]string{"id"}))
@@ -1752,7 +1835,7 @@ func TestJobStore_RouteNextSandboxJobFallsBackWhenFleetCapacityMetadataIsMissing
 	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\).*FROM jobs.*id <>.*job_type IN`).
 		WithArgs(orgID, jobID).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectQuery(`(?s)WITH raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
+	mock.ExpectQuery(`(?s)WITH candidate_nodes AS.*raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), models.SandboxWorkloadClassInteractive).
 		WillReturnError(pgx.ErrNoRows)
 	mock.ExpectQuery(`(?s)SELECT EXISTS.*max_active_sandboxes`).
@@ -1797,7 +1880,7 @@ func TestJobStore_RouteNextSandboxJobUsesTerminalProbeAfterBoundedDeferral(t *te
 	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\).*FROM jobs.*id <>.*job_type IN`).
 		WithArgs(orgID, jobID).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectQuery(`(?s)WITH raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
+	mock.ExpectQuery(`(?s)WITH candidate_nodes AS.*raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), models.SandboxWorkloadClassInteractive).
 		WillReturnError(pgx.ErrNoRows)
 	mock.ExpectQuery(`(?s)SELECT n.id.*FROM nodes n.*active_job_count`).
@@ -1840,7 +1923,7 @@ func TestJobStore_RouteNextSandboxJobUsesTerminalProbeForFleetBlockedContinuatio
 	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\).*FROM jobs.*id <>.*job_type IN`).
 		WithArgs(orgID, jobID).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectQuery(`(?s)WITH raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
+	mock.ExpectQuery(`(?s)WITH candidate_nodes AS.*raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), models.SandboxWorkloadClassInteractive).
 		WillReturnError(pgx.ErrNoRows)
 	mock.ExpectQuery(`(?s)SELECT n.id.*FROM nodes n.*active_job_count`).
@@ -1882,7 +1965,7 @@ func TestJobStore_RouteNextSandboxJobStartsFleetWindowAfterOrgWait(t *testing.T)
 	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\).*FROM jobs.*id <>.*job_type IN`).
 		WithArgs(orgID, jobID).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectQuery(`(?s)WITH raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
+	mock.ExpectQuery(`(?s)WITH candidate_nodes AS.*raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), models.SandboxWorkloadClassInteractive).
 		WillReturnError(pgx.ErrNoRows)
 	mock.ExpectQuery(`(?s)SELECT EXISTS.*max_active_sandboxes`).
@@ -2013,7 +2096,7 @@ func TestJobStore_RouteNextSandboxJobBypassesFleetCapacityForCancelledContinuati
 	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\).*FROM jobs.*id <>.*job_type IN`).
 		WithArgs(orgID, jobID).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectQuery(`(?s)WITH raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
+	mock.ExpectQuery(`(?s)WITH candidate_nodes AS.*raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), models.SandboxWorkloadClassInteractive).
 		WillReturnError(pgx.ErrNoRows)
 	mock.ExpectQuery(`(?s)SELECT s.status.*session_cancel_requests.*session_threads.*JOIN jobs payload_job.*capacity_cleanup.*s.deleted_at IS NULL`).
@@ -2253,6 +2336,38 @@ func TestJobStore_CountAdmittedSandboxTurnsByOrgIncludesPendingReservations(t *t
 	require.NoError(t, err, "admitted turn count should succeed")
 	require.Equal(t, 5, count, "runtime capacity should include running turns and pending durable reservations")
 	require.NoError(t, mock.ExpectationsWereMet(), "admitted turn count should remain scoped to the organization")
+}
+
+func TestJobStore_IsSessionWaitingForSandboxCapacity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		waiting  bool
+		expected bool
+	}{
+		{name: "reports durable capacity wait", waiting: true, expected: true},
+		{name: "does not classify admitted reservation as waiting", expected: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			orgID, sessionID := uuid.New(), uuid.New()
+			mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM jobs.*org_id = @org_id.*payload->>'session_id' = @session_id.*sandbox_slot_reserved_until IS NULL.*sandbox_slot_reserved_until <= now\(\).*capacity_cleanup.*retry_window_started_at = waiting_job.created_at.*terminal_probe_seconds.*COUNT\(\*\).*>= @max_concurrent_runs`).
+				WithArgs(orgID, sessionID.String(), int(sandboxRoutingTerminalProbeAge.Seconds()), 2).
+				WillReturnRows(pgxmock.NewRows([]string{"waiting"}).AddRow(tt.waiting))
+
+			waiting, err := NewJobStore(mock).IsSessionWaitingForSandboxCapacity(context.Background(), orgID, sessionID, 2)
+			require.NoError(t, err, "session capacity wait lookup should succeed")
+			require.Equal(t, tt.expected, waiting, "session wait state should distinguish blocked work from its own reservation")
+			require.NoError(t, mock.ExpectationsWereMet(), "session wait lookup should remain tenant scoped")
+		})
+	}
 }
 
 func jobDedupeKeyPtr(s string) *string {
