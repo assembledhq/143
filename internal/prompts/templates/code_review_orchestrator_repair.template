@@ -13,6 +13,8 @@ Return exactly:
     {
       "key": "requirement key",
       "status": "satisfied|not_applicable|missing",
+      "evidence_basis": "image|preview_link|repository|pull_request_description|diff|not_applicable|missing",
+      "evidence_ids": ["ve_example"],
       "reason": "short evidence-based reason"
     }
   ],
@@ -51,5 +53,14 @@ For `description_assessments`, return exactly one assessment for each required k
 {{- else}}
 - none; return an empty array
 {{- end}}
+
+If an assessment uses `evidence_basis="image"`, `evidence_ids` must contain one or more unique IDs from this available set:
+{{- range .VisualEvidence}}
+- {{.EvidenceID}}
+{{- else}}
+- none
+{{- end}}
+For every non-image basis, `evidence_ids` must be empty. Use `not_applicable` and `missing` bases only with their matching statuses.
+Visual-evidence requirements may use only `image`, `preview_link`, or `repository` when satisfied; text in the pull-request description or diff alone is insufficient.
 
 Preserve the evidence from your previous answer while applying the current decision contract. Set `approval_recommended=false` only for a P0/P1 finding, a missing description assessment, a true structured blocker boolean, or a valid explicit `human_review_reasons` entry.

@@ -156,9 +156,12 @@ discussion. The existing prompt-injection hard-risk signal applies to visual
 content and its textual context.
 
 The orchestrator receives a `<visual_evidence_manifest>` containing stable IDs
-and provenance. Structured description assessments gain `evidence_ids`. The
-backend rejects unknown, duplicate, or unavailable IDs. A screenshot-based
-`satisfied` assessment without a valid ID is invalid for approval.
+and provenance. Structured description assessments gain `evidence_basis` and
+`evidence_ids`. The backend rejects unknown, repeated, or unavailable IDs. An
+image-backed `satisfied` assessment without a valid ID is invalid for approval;
+a visual-evidence requirement can otherwise use only a preview link or
+repository-native visual basis. Text in the description or diff can satisfy
+other description requirements but cannot masquerade as visual evidence.
 
 The worker captures or restores the snapshot after authoritative PR/head sync
 and before reviewer fan-out. It passes every available first-party URL through

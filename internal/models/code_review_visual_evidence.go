@@ -88,6 +88,36 @@ func (s CodeReviewVisualEvidenceFetchStatus) Validate() error {
 	}
 }
 
+// CodeReviewDescriptionEvidenceBasis identifies the evidence class the
+// orchestrator used for one description-policy assessment. Image-backed
+// assessments are the only basis that may carry visual evidence IDs.
+type CodeReviewDescriptionEvidenceBasis string
+
+const (
+	CodeReviewDescriptionEvidenceBasisImage                  CodeReviewDescriptionEvidenceBasis = "image"
+	CodeReviewDescriptionEvidenceBasisPreviewLink            CodeReviewDescriptionEvidenceBasis = "preview_link"
+	CodeReviewDescriptionEvidenceBasisRepository             CodeReviewDescriptionEvidenceBasis = "repository"
+	CodeReviewDescriptionEvidenceBasisPullRequestDescription CodeReviewDescriptionEvidenceBasis = "pull_request_description"
+	CodeReviewDescriptionEvidenceBasisDiff                   CodeReviewDescriptionEvidenceBasis = "diff"
+	CodeReviewDescriptionEvidenceBasisNotApplicable          CodeReviewDescriptionEvidenceBasis = "not_applicable"
+	CodeReviewDescriptionEvidenceBasisMissing                CodeReviewDescriptionEvidenceBasis = "missing"
+)
+
+func (b CodeReviewDescriptionEvidenceBasis) Validate() error {
+	switch b {
+	case CodeReviewDescriptionEvidenceBasisImage,
+		CodeReviewDescriptionEvidenceBasisPreviewLink,
+		CodeReviewDescriptionEvidenceBasisRepository,
+		CodeReviewDescriptionEvidenceBasisPullRequestDescription,
+		CodeReviewDescriptionEvidenceBasisDiff,
+		CodeReviewDescriptionEvidenceBasisNotApplicable,
+		CodeReviewDescriptionEvidenceBasisMissing:
+		return nil
+	default:
+		return fmt.Errorf("invalid CodeReviewDescriptionEvidenceBasis: %q", b)
+	}
+}
+
 // CodeReviewVisualEvidenceSource is one image occurrence discovered in
 // GitHub-rendered PR content. ImageURL, AltText, and ContextText are untrusted
 // pull-request content and must never be treated as instructions.

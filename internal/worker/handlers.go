@@ -821,6 +821,10 @@ type codingAgentAvailability interface {
 	IsAgentAvailable(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, agentType models.AgentType, model string) (bool, error)
 }
 
+type codeReviewVisualEvidenceProvider interface {
+	Capture(ctx context.Context, input codereviewsvc.CaptureVisualEvidenceInput) (models.CodeReviewVisualEvidenceSnapshot, error)
+}
+
 // Services holds the service dependencies needed by job handlers.
 type Services struct {
 	Orchestrator               orchestratorService
@@ -847,6 +851,7 @@ type Services struct {
 	CodeReviewDisputes         codeReviewDisputeService                       // nil-safe: triages and replies to decision disputes
 	CodeReviewInsights         codeReviewInsightService                       // nil-safe: projects outcomes and ranks the policy-owner queue
 	CodeReviewDisputePublisher codeReviewDisputePublisher                     // nil-safe: publishes idempotent GitHub replies
+	CodeReviewVisualEvidence   codeReviewVisualEvidenceProvider               // required for complete code review agent context
 	CodingAgents               codingAgentAvailability                        // nil-safe: code review falls back to the configured roster when nil
 	PublicationIntents         publicationintent.PublicationIntentCoordinator // nil-safe: Slack falls back to an actionable error when publication is unavailable
 	SlackbotMetrics            *metrics.SlackbotMetrics                       // nil-safe: Slackbot observability disabled if nil
