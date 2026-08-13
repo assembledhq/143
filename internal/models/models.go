@@ -1137,9 +1137,12 @@ type Job struct {
 	// TargetNodeID, when set, restricts the job to be claimed by this
 	// specific worker node. Used for sandbox-bound jobs (continue_session,
 	// open_pr, run_agent for resume) where the work must execute on the same
-	// docker daemon as the session's recorded container_id. NULL means any
-	// worker can claim. A pinned job becomes claimable by any worker if its
-	// target node is marked dead in the `nodes` table (starvation safety).
+	// docker daemon as the session's recorded container_id, and for routed
+	// placements holding a SandboxSlotReservedUntil reservation. NULL means
+	// any worker can claim. An affinity pin (no reservation) becomes
+	// claimable by any worker if its target node is marked dead in the
+	// `nodes` table (starvation safety); a reserved placement is instead
+	// recovered by re-routing once its reservation expires.
 	TargetNodeID *string `db:"target_node_id" json:"target_node_id,omitempty"`
 	// SandboxSlotReservedUntil is the durable, expiring reservation made when
 	// an unbound sandbox job is assigned to TargetNodeID. It closes the race

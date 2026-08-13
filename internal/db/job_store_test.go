@@ -2178,6 +2178,24 @@ func TestJobStore_CountActiveSandboxTurnsByOrgUsesSharedPool(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "shared turn count should remain scoped to the organization")
 }
 
+func TestJobStore_HasActiveCodeReviewSandboxTurn(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM jobs.*org_id = @org_id.*job_type IN.*workload_class = @workload_class.*status = 'running'.*sandbox_slot_reserved_until > now\(\)`).
+		WithArgs(orgID, models.SandboxWorkloadClassCodeReview).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+
+	exists, err := NewJobStore(mock).HasActiveCodeReviewSandboxTurn(context.Background(), orgID)
+	require.NoError(t, err, "code review turn check should succeed")
+	require.True(t, exists, "should report an admitted code-review turn")
+	require.NoError(t, mock.ExpectationsWereMet(), "code review turn check should stay org-scoped and class-filtered")
+}
+
 func jobDedupeKeyPtr(s string) *string {
 	return &s
 }

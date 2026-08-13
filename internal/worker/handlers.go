@@ -8472,6 +8472,28 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 				// If the session has been pending for too long, fail it
 				// instead of retrying indefinitely.
 				if time.Since(run.CreatedAt) > 8*time.Minute {
+					// Code-review turns share max_concurrent_runs but routinely
+					// outlive this deadline. While one holds a slot, keep
+					// waiting: the session detail page advertises that the
+					// session starts automatically when another run finishes,
+					// and a finishing review satisfies that promise. On a
+					// transient check failure, waiting one more cadence is
+					// cheaper than wrongly failing the session.
+					reviewHolds, reviewCheckErr := stores.Jobs.HasActiveCodeReviewSandboxTurn(ctx, orgID)
+					if reviewCheckErr != nil {
+						logger.Warn().
+							Err(reviewCheckErr).
+							Str("session_id", runID.String()).
+							Msg("concurrency limit: could not inspect code-review turn activity; deferring timeout decision")
+					}
+					if reviewHolds || reviewCheckErr != nil {
+						logger.Info().
+							Str("session_id", runID.String()).
+							Dur("age", time.Since(run.CreatedAt)).
+							Msg("concurrency limit: session pending beyond deadline while code-review turns hold slots; continuing to wait")
+						retryAfter := sandboxOrgLimitRetryDelay
+						return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
+					}
 					logger.Warn().
 						Str("session_id", runID.String()).
 						Dur("age", time.Since(run.CreatedAt)).
@@ -10332,6 +10354,21 @@ func shouldStopContinueSessionForDurableState(
 					return false, fmt.Errorf("cancel session thread while waiting for capacity: %w", err)
 				}
 				return true, nil
+			}
+			if capacityCleanup {
+				// Routing marked this queued continuation for cleanup because a
+				// session-scoped cancel or terminal state existed at routing
+				// time, and a live sibling has since consumed that request.
+				// This job is about to be consumed with it, so finalize its
+				// distinct queued thread — otherwise the thread would remain
+				// active with no backing job.
+				switch thread.Status {
+				case models.ThreadStatusPending, models.ThreadStatusRunning, models.ThreadStatusAwaitingInput:
+					if err := stores.SessionThreads.UpdateStatus(ctx, orgID, threadID, models.ThreadStatusCancelled); err != nil {
+						return false, fmt.Errorf("cancel queued session thread during capacity cleanup: %w", err)
+					}
+					stores.SessionThreads.PublishRuntimeUpdate(ctx, orgID, threadID)
+				}
 			}
 		}
 		// A live sibling may have consumed the session-scoped request after
