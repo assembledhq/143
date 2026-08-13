@@ -44,6 +44,7 @@ import (
 )
 
 const sandboxCapacityRetryDelay = 10 * time.Second
+const sandboxAlternateWorkerRetryDelay = time.Duration(0)
 const previewCapacityRetryDelay = 5 * time.Second
 const previewStartupInterruptedRetryDelay = 2 * time.Second
 const prePRReviewRetryDelay = 5 * time.Second
@@ -156,6 +157,18 @@ func sandboxCapacityRetryTarget(ctx context.Context, stores *Stores, logger zero
 		Str("excluded_node_id", excludeNodeID).
 		Msg("no alternate worker advertises sandbox capacity; clearing retry target pin")
 	return nil, true
+}
+
+// sandboxTurnCapacityRetryTarget keeps the existing fleet-capacity selector,
+// but avoids making a sandbox turn wait after an alternate worker has already
+// advertised a free slot. The longer delay remains the backoff for genuine
+// fleet saturation (or a selector failure).
+func sandboxTurnCapacityRetryTarget(ctx context.Context, stores *Stores, logger zerolog.Logger) (*string, bool, time.Duration) {
+	targetNodeID, clearTargetNodeID := sandboxCapacityRetryTarget(ctx, stores, logger)
+	if targetNodeID != nil {
+		return targetNodeID, clearTargetNodeID, sandboxAlternateWorkerRetryDelay
+	}
+	return nil, clearTargetNodeID, sandboxCapacityRetryDelay
 }
 
 func previewBusyRetryTarget(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID) *string {
@@ -8297,8 +8310,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		}
 		if err := runErr; err != nil {
 			if errors.Is(err, agent.ErrSandboxCapacity) {
-				retryAfter := sandboxCapacityRetryDelay
-				targetNodeID, clearTargetNodeID := sandboxCapacityRetryTarget(ctx, stores, logger)
+				targetNodeID, clearTargetNodeID, retryAfter := sandboxTurnCapacityRetryTarget(ctx, stores, logger)
 				registerSandboxCapacityDeadLetter(ctx, stores, services, logger, run, run.PrimaryThreadID, "run_agent")
 				logger.Info().
 					Str("session_id", runID.String()).
@@ -9754,8 +9766,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 
 		if err := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts); err != nil {
 			if errors.Is(err, agent.ErrSandboxCapacity) {
-				retryAfter := sandboxCapacityRetryDelay
-				targetNodeID, clearTargetNodeID := sandboxCapacityRetryTarget(ctx, stores, logger)
+				targetNodeID, clearTargetNodeID, retryAfter := sandboxTurnCapacityRetryTarget(ctx, stores, logger)
 				var capacityThreadID *uuid.UUID
 				if hasThread {
 					threadIDLocal := threadID
