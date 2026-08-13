@@ -2566,15 +2566,28 @@ function AdvancedPolicySettings({
                 }
                       />
                       <PolicyStringListEditor
-                        label="Eligible authors"
-                        description="Authors allowed by this policy. Leave empty to allow any author."
-                        placeholder="Add GitHub handle or author"
-                        emptyText="Any author is eligible."
+                        label="Eligible GitHub users"
+                        description="GitHub usernames allowed to receive automated approval. User and team entries are combined as an OR-based whitelist."
+                        placeholder="Add GitHub username"
+                        emptyText="No individual GitHub users configured."
                         serverValue={config?.risk_policy.eligible_authors ?? []}
                         disabled={!config}
                 onCommitItems={(items) =>
                   commitPolicy((next) => {
                     next.risk_policy.eligible_authors = items;
+                  })
+                }
+                      />
+                      <PolicyStringListEditor
+                        label="Eligible GitHub teams"
+                        description="PR authors who are active members of any selected GitHub team can receive automated approval. Use organization/team-slug."
+                        placeholder="Add team, e.g. acme/platform"
+                        emptyText="No GitHub teams configured. With no user or team entries, any author is eligible."
+                        serverValue={config?.risk_policy.eligible_author_teams ?? []}
+                        disabled={!config}
+                onCommitItems={(items) =>
+                  commitPolicy((next) => {
+                    next.risk_policy.eligible_author_teams = items;
                   })
                 }
                       />

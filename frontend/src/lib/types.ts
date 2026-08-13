@@ -197,6 +197,7 @@ export interface CodeReviewPolicyConfig {
     require_up_to_date: boolean;
     allow_forks: boolean;
     eligible_authors?: string[];
+    eligible_author_teams?: string[];
     required_checks?: string[];
   };
   agent_roster: {

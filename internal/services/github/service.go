@@ -432,6 +432,47 @@ func (s *Service) IsActiveOrgMember(ctx context.Context, installationID int64, o
 	return result.State == "active", nil
 }
 
+// IsActiveTeamMember reports whether username is an active member of the
+// named GitHub organization team. A missing team or membership is a normal
+// negative result; authorization and provider failures are returned so
+// approval callers can fail closed and retry.
+func (s *Service) IsActiveTeamMember(ctx context.Context, installationID int64, orgLogin, teamSlug, username string) (bool, error) {
+	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
+		Kind:           githubtelemetry.RequestKindAPI,
+		AuthType:       githubtelemetry.AuthTypeAppInstallation,
+		InstallationID: installationID,
+	})
+	token, err := s.GetInstallationToken(ctx, installationID)
+	if err != nil {
+		return false, err
+	}
+	path := fmt.Sprintf("/orgs/%s/teams/%s/memberships/%s", urlPathEscape(orgLogin), urlPathEscape(teamSlug), urlPathEscape(username))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.apiURL(path), nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := s.httpClient.Do(req) // #nosec G704 -- URL is GitHub API endpoint from config
+	if err != nil {
+		return false, fmt.Errorf("request team membership: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, newGitHubAPIResponseError(http.MethodGet, path, resp)
+	}
+	var result struct {
+		State string `json:"state"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return false, fmt.Errorf("decode team membership: %w", err)
+	}
+	return result.State == "active", nil
+}
+
 func newGitHubAPIResponseError(method, path string, resp *http.Response) error {
 	body, readErr := io.ReadAll(resp.Body)
 	apiErr := &GitHubAPIError{

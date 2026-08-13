@@ -315,7 +315,9 @@ func normalizeRoute(requestURL *url.URL) (string, string) {
 				segments[3] = ":user"
 			case "teams":
 				segments[3] = ":team"
-				if len(segments) >= 7 && segments[4] == "repos" {
+				if len(segments) >= 6 && segments[4] == "memberships" {
+					segments[5] = ":user"
+				} else if len(segments) >= 7 && segments[4] == "repos" {
 					repository = segments[5] + "/" + segments[6]
 					segments[5] = ":owner"
 					segments[6] = ":repo"

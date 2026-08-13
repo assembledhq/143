@@ -117,6 +117,7 @@ const policy: CodeReviewResolvedPolicy = {
       blocked_path_patterns: ["migrations/**"],
       required_checks: ["lint", "test"],
       eligible_authors: ["anya"],
+      eligible_author_teams: ["acme/platform"],
       require_up_to_date: false,
       allow_forks: false,
     },
@@ -2602,7 +2603,8 @@ describe("CodeReviewsPage", () => {
       "Allowed path patterns",
       "Blocked path patterns",
       "Required checks",
-      "Eligible authors",
+      "Eligible GitHub users",
+      "Eligible GitHub teams",
       "Reviewer models",
       "Add reviewer model",
       "Reviewer 1 model",
@@ -3266,6 +3268,21 @@ describe("CodeReviewsPage", () => {
     expect(within(requiredChecksEditor as HTMLElement).getByText("test")).toBeInTheDocument();
 
     expect(screen.getByRole("button", { name: "Add required check" })).toBeInTheDocument();
+
+    const eligibleTeamsInput = screen.getByRole("textbox", { name: "Eligible GitHub teams" });
+    await user.type(eligibleTeamsInput, "acme/security-reviewers{enter}");
+
+    await waitFor(() => {
+      expect(policyUpdates).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          risk_policy: expect.objectContaining({
+            eligible_author_teams: ["acme/platform", "acme/security-reviewers"],
+          }),
+        }),
+        "manual",
+      );
+    });
+    expect(await screen.findByText("acme/security-reviewers")).toBeInTheDocument();
   });
 
   it("saves code review timeout in seconds from the selected unit", async () => {

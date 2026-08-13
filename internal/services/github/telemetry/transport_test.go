@@ -292,6 +292,7 @@ func TestNormalizeRoute(t *testing.T) {
 		{name: "contents", rawURL: "https://api.github.com/repos/acme/widget/contents/.github/workflows/test.yml?ref=main", expectedRoute: "/repos/:owner/:repo/contents/:path", expectedRepository: "acme/widget"},
 		{name: "org membership", rawURL: "https://api.github.com/orgs/acme/memberships/octocat", expectedRoute: "/orgs/:org/memberships/:user"},
 		{name: "org member", rawURL: "https://api.github.com/orgs/acme/members/octocat", expectedRoute: "/orgs/:org/members/:user"},
+		{name: "org team membership", rawURL: "https://api.github.com/orgs/acme/teams/reviewers/memberships/octocat", expectedRoute: "/orgs/:org/teams/:team/memberships/:user"},
 		{name: "org team repository", rawURL: "https://api.github.com/orgs/acme/teams/reviewers/repos/acme/widget", expectedRoute: "/orgs/:org/teams/:team/repos/:owner/:repo", expectedRepository: "acme/widget"},
 		{name: "installation token", rawURL: "https://api.github.com/app/installations/123/access_tokens", expectedRoute: "/app/installations/:installation_id/access_tokens"},
 		{name: "graphql", rawURL: "https://api.github.com/graphql", expectedRoute: "/graphql"},
