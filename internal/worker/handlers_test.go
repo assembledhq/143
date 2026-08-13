@@ -3739,6 +3739,99 @@ func TestRunAgentHandler_LinearPrepareStateFailedDeadLetters(t *testing.T) {
 	require.Equal(t, 0, orch.runAgentCalls, "orchestrator must not run after the prepare path failed")
 }
 
+// workerSessionRowCreatedAt mirrors workerSessionRow but pins created_at so
+// tests can put a session past the eight-minute concurrency deadline.
+func workerSessionRowCreatedAt(sessionID, issueID, orgID uuid.UUID, status models.SessionStatus, createdAt time.Time) []any {
+	row := workerSessionRow(sessionID, issueID, orgID, status, 0, nil, nil)
+	for i, col := range workerSessionColumns {
+		if col == "created_at" {
+			row[i] = createdAt
+		}
+	}
+	return row
+}
+
+// TestRunAgentHandler_ConcurrencyDeadlineWaitsWhileCodeReviewHoldsSlots locks
+// the shared-limit contract: an interactive session past the eight-minute
+// pending deadline must keep waiting (the UI advertises it will start
+// automatically) while a code-review turn holds one of the org's shared
+// slots, instead of terminally failing.
+func TestRunAgentHandler_ConcurrencyDeadlineWaitsWhileCodeReviewHoldsSlots(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRowCreatedAt(runID, issueID, orgID, models.SessionStatusPending, time.Now().Add(-10*time.Minute))...,
+		))
+	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM jobs.*workload_class = @workload_class`).
+		WithArgs(orgID, models.SandboxWorkloadClassCodeReview).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+
+	orch := &orchestratorServiceStub{
+		runAgentFn: func(context.Context, *models.Session) error {
+			return fmt.Errorf("turns full: %w", agent.ErrSandboxTurnConcurrency)
+		},
+	}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "the deadline must defer, not fail, while a review holds a shared slot")
+	require.ErrorIs(t, retryable.Err, agent.ErrSandboxTurnConcurrency, "retry should preserve the org-capacity sentinel")
+	require.True(t, retryable.BypassMaxRetryDuration, "the review-blocked wait must not dead-letter under the generic retry window")
+	require.NotNil(t, retryable.RetryAfter, "the review-blocked wait should use the admission cadence")
+	require.Equal(t, sandboxOrgLimitRetryDelay, *retryable.RetryAfter, "the review-blocked wait should poll at the org-limit cadence")
+	require.NoError(t, mock.ExpectationsWereMet(), "the deadline check should consult admitted code-review turns")
+}
+
+// TestRunAgentHandler_ConcurrencyDeadlineFailsWithoutCodeReviewTurns locks
+// the other half of the deadline contract: with no code-review turn holding
+// a slot, the pre-existing eight-minute terminal failure still applies.
+func TestRunAgentHandler_ConcurrencyDeadlineFailsWithoutCodeReviewTurns(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRowCreatedAt(runID, issueID, orgID, models.SessionStatusPending, time.Now().Add(-10*time.Minute))...,
+		))
+	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM jobs.*workload_class = @workload_class`).
+		WithArgs(orgID, models.SandboxWorkloadClassCodeReview).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+	// The terminal path then performs best-effort session updates and Slack
+	// notification lookups; the handler ignores their errors, so the strict
+	// mock can let them fail while the test asserts the FatalError below.
+
+	orch := &orchestratorServiceStub{
+		runAgentFn: func(context.Context, *models.Session) error {
+			return fmt.Errorf("turns full: %w", agent.ErrSandboxTurnConcurrency)
+		},
+	}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+	var fatal *FatalError
+	require.ErrorAs(t, err, &fatal, "without review turns the deadline must still terminally fail the session")
+	require.NoError(t, mock.ExpectationsWereMet(), "the deadline check should consult admitted code-review turns before failing")
+}
+
 func TestLinearJobHandlers(t *testing.T) {
 	t.Parallel()
 
@@ -12326,6 +12419,48 @@ func TestContinueSessionHandler_FinalizesThreadBeforeStoppingCapacityCleanup(t *
 	require.NoError(t, err, "capacity cleanup should finalize a requested thread cancellation before stopping")
 	require.Equal(t, 0, orch.continueSessionCalls, "cancelled capacity-cleanup work must not reach the orchestrator")
 	require.NoError(t, mock.ExpectationsWereMet(), "cleanup should revalidate tenant-scoped durable state and finalize the thread")
+}
+
+// TestContinueSessionHandler_FinalizesActiveThreadWhenSiblingConsumedCancel
+// locks the sibling-race contract: when routing marked a queued continuation
+// for capacity cleanup but a live sibling consumed the session-scoped cancel
+// before this job ran, consuming the job must still finalize its distinct
+// queued thread — otherwise the thread stays active with no backing job.
+func TestContinueSessionHandler_FinalizesActiveThreadWhenSiblingConsumedCancel(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID, sessionID, threadID, issueID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	sessionRow := workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)
+	// The thread is still plain running: no cancelled status and no
+	// cancel_requested_at marker — the sibling consumed the session-scoped
+	// request without touching this queued thread.
+	threadRow := workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM session_cancel_requests.*delivered_at IS NULL`).
+		WithArgs(orgID, sessionID).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(threadRow...))
+	mock.ExpectExec("UPDATE session_threads SET status = @status").
+		WithArgs(models.ThreadStatusCancelled, threadID, orgID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	orch := &orchestratorServiceStub{}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `","capacity_waited":true,"capacity_cleanup":true}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.NoError(t, err, "capacity cleanup should stop cleanly after finalizing the orphaned thread")
+	require.Equal(t, 0, orch.continueSessionCalls, "capacity-cleanup work must not reach the orchestrator")
+	require.NoError(t, mock.ExpectationsWereMet(), "cleanup must cancel the still-active queued thread before consuming the job")
 }
 
 func TestShouldStopContinueSessionForDurableStateRejectsThreadFromAnotherSession(t *testing.T) {

@@ -331,6 +331,25 @@ func TestValidateSettingsModels(t *testing.T) {
 			},
 		},
 		{
+			name: "accepts zero max concurrent runs as the org-size default",
+			settings: OrgSettings{
+				MaxConcurrentRuns: 0,
+			},
+		},
+		{
+			name: "accepts positive max concurrent runs",
+			settings: OrgSettings{
+				MaxConcurrentRuns: 7,
+			},
+		},
+		{
+			name: "rejects negative max concurrent runs",
+			settings: OrgSettings{
+				MaxConcurrentRuns: -1,
+			},
+			wantErr: true,
+		},
+		{
 			name: "accepts valid llm model",
 			settings: OrgSettings{
 				LLMModel: "gpt-5.4-mini",

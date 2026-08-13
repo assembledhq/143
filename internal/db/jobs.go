@@ -234,8 +234,10 @@ type EnqueueOpts struct {
 	// specific worker node. Used for sandbox-bound jobs (continue_session,
 	// open_pr, run_agent for resume) where the work must execute on the
 	// same docker daemon as the session's recorded container_id. NULL means
-	// any worker can claim. See ClaimNextRunnable for the unavailable-node
-	// fallback that keeps a pinned job from starving.
+	// any worker can claim. See ClaimNextRunnable for the dead-node
+	// fallback that keeps an affinity-pinned job from starving; routed
+	// placements holding a slot reservation are recovered by re-routing
+	// instead.
 	TargetNodeID *string
 }
 
@@ -1921,6 +1923,34 @@ func (s *JobStore) IsSessionWaitingForSandboxCapacity(ctx context.Context, orgID
 		return false, fmt.Errorf("inspect session sandbox capacity wait: %w", err)
 	}
 	return waiting, nil
+}
+
+// HasActiveCodeReviewSandboxTurn reports whether an admitted sandbox turn for
+// the organization belongs to a code-review session. Code-review turns share
+// max_concurrent_runs but routinely run longer than the eight-minute pending
+// deadline for initial runs, so that deadline is suspended while one holds a
+// slot: the queued session genuinely will start when the review finishes.
+func (s *JobStore) HasActiveCodeReviewSandboxTurn(ctx context.Context, orgID uuid.UUID) (bool, error) {
+	var exists bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM jobs
+			WHERE org_id = @org_id
+			  AND job_type IN ('run_agent', 'continue_session')
+			  AND workload_class = @workload_class
+			  AND (
+				status = 'running'
+				OR (status = 'pending' AND sandbox_slot_reserved_until > now())
+			  )
+		)`, pgx.NamedArgs{
+		"org_id":         orgID,
+		"workload_class": models.SandboxWorkloadClassCodeReview,
+	}).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check active code review sandbox turns: %w", err)
+	}
+	return exists, nil
 }
 
 // ReleaseSandboxSlotReservationWithLease clears a routing reservation once
