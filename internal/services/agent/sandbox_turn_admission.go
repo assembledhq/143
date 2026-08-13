@@ -90,7 +90,7 @@ func (o *Orchestrator) admitSandboxTurn(
 	return reservation, nil
 }
 
-func (o *Orchestrator) checkSharedTurnConcurrency(ctx context.Context, orgID uuid.UUID, jobType string, excludeCurrentRunning bool) error {
+func (o *Orchestrator) checkSharedTurnConcurrency(ctx context.Context, orgID uuid.UUID, purpose string, excludeCurrentRunning bool) error {
 	if o.orgs == nil {
 		return o.checkConcurrency(ctx, orgID, excludeCurrentRunning)
 	}
@@ -111,7 +111,7 @@ func (o *Orchestrator) checkSharedTurnConcurrency(ctx context.Context, orgID uui
 		return err
 	}
 	_, hasCurrentJob := jobctx.JobIDFromContext(ctx)
-	currentJobIncluded := hasCurrentJob && (jobType == "run_agent" || jobType == "continue_session")
+	currentJobIncluded := hasCurrentJob && (purpose == "agent_run" || purpose == "continue_session")
 	// The shared job counter identifies the current claimed turn directly, so
 	// its greater-than comparison supersedes the legacy session-row
 	// excludeCurrentRunning adjustment used by the fallbacks above.

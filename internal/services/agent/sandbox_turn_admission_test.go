@@ -99,7 +99,7 @@ func TestAdmitSandboxTurnAppliesSharedOrgLimit(t *testing.T) {
 		jobType   string
 		expectErr bool
 	}{
-		{name: "allows claimed interactive turn at the shared limit", origin: models.SessionOriginManual, active: 2, jobType: "continue_session"},
+		{name: "allows claimed initial turn at the shared limit", origin: models.SessionOriginManual, active: 2, jobType: "agent_run"},
 		{name: "rejects interactive turn beyond the shared limit", origin: models.SessionOriginManual, active: 3, jobType: "continue_session", expectErr: true},
 		{name: "allows claimed code-review turn at the shared limit", origin: models.SessionOriginCodeReview, active: 2, jobType: "continue_session"},
 		{name: "rejects code-review turn beyond the shared limit", origin: models.SessionOriginCodeReview, active: 3, jobType: "continue_session", expectErr: true},
