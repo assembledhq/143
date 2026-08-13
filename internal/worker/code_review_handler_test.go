@@ -1190,6 +1190,67 @@ func TestValidateCodeReviewDescriptionAssessmentEvidence(t *testing.T) {
 	}
 }
 
+func TestCodeReviewDescriptionEvaluationUsesExplicitEvidenceKind(t *testing.T) {
+	t.Parallel()
+
+	visualEvidence := models.CodeReviewVisualEvidenceSnapshot{
+		Version: 1, Complete: true,
+		Evidence: []models.CodeReviewVisualEvidence{{
+			EvidenceID: "ve_human_comment",
+			Source: models.CodeReviewVisualEvidenceSource{
+				SourceID: "ves_human_comment", Surface: models.CodeReviewEvidenceSurfaceIssueComment,
+				AuthorLogin: "contributor", AuthorType: models.CodeReviewEvidenceAuthorTypeUser, Untrusted: true,
+			},
+			StoredURL: "/api/v1/uploads/files/org/code-review-evidence/session/hash.png",
+			Status:    models.CodeReviewVisualEvidenceFetchStatusAvailable,
+		}},
+	}
+	tests := []struct {
+		name        string
+		kind        models.CodeReviewDescriptionEvidenceKind
+		basis       models.CodeReviewDescriptionEvidenceBasis
+		evidenceIDs []string
+		expectErr   bool
+	}{
+		{
+			name: "custom visual requirement rejects description text", kind: models.CodeReviewDescriptionEvidenceKindVisual,
+			basis: models.CodeReviewDescriptionEvidenceBasisPullRequestDescription, expectErr: true,
+		},
+		{
+			name: "custom visual requirement accepts a human comment image", kind: models.CodeReviewDescriptionEvidenceKindVisual,
+			basis: models.CodeReviewDescriptionEvidenceBasisImage, evidenceIDs: []string{"ve_human_comment"},
+		},
+		{
+			name: "general requirement is not inferred as visual from screenshot prose", kind: models.CodeReviewDescriptionEvidenceKindGeneral,
+			basis: models.CodeReviewDescriptionEvidenceBasisPullRequestDescription,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			policy := models.DefaultCodeReviewPolicyConfig()
+			policy.DescriptionPolicy.Requirements = []models.CodeReviewDescriptionRequirement{{
+				Key: "custom", Title: "Screenshot evidence", Prompt: "Attach a before-and-after screenshot.",
+				Required: true, EvidenceKind: tt.kind, AppliesWhen: models.CodeReviewDescriptionApplicability{Kind: models.CodeReviewDescriptionApplicabilityAll},
+			}}
+			actual, err := codeReviewDescriptionEvaluationFromSynthesis(policy, nil, codeReviewOrchestratorSynthesis{
+				DescriptionAssessments: []codeReviewDescriptionAssessment{{
+					Key: "custom", Status: codeReviewDescriptionAssessmentSatisfied, EvidenceBasis: tt.basis,
+					EvidenceIDs: tt.evidenceIDs, Reason: "The requested evidence is present.",
+				}},
+			}, visualEvidence)
+			if tt.expectErr {
+				require.Error(t, err, "visual requirements should reject non-visual satisfaction")
+				return
+			}
+			require.NoError(t, err, "evidence should validate according to the explicit requirement kind")
+			require.True(t, actual.Passed, "supported evidence should satisfy the custom description requirement")
+		})
+	}
+}
+
 func TestCodeReviewVisualEvidencePromptProjection(t *testing.T) {
 	t.Parallel()
 

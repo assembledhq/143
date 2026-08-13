@@ -84,6 +84,7 @@ func TestDiscoverCodeReviewVisualEvidenceIncludesAllHumanSurfaces(t *testing.T) 
 		Repository:        "assembledhq/assembled",
 		PullRequestNumber: 42,
 		HeadSHA:           "head-sha",
+		SourceCount:       5,
 		Sources: []models.CodeReviewVisualEvidenceSource{
 			{
 				SourceID: codeReviewVisualEvidenceSourceID(models.CodeReviewEvidenceSurfaceDescription, "42", 1, "https://github.com/user-attachments/assets/description"),
@@ -160,12 +161,56 @@ func TestDiscoverCodeReviewVisualEvidencePaginatesDiscussion(t *testing.T) {
 
 	require.NoError(t, err, "visual evidence discovery should paginate until GitHub returns a short page")
 	require.Equal(t, int32(1), secondPageRequests.Load(), "visual evidence discovery should request the second issue-comment page")
+	require.Equal(t, 1, discovery.SourceCount, "visual evidence discovery should count images found across every page")
 	require.Equal(t, []models.CodeReviewVisualEvidenceSource{{
 		SourceID: codeReviewVisualEvidenceSourceID(models.CodeReviewEvidenceSurfaceIssueComment, "101", 1, "https://example.com/page-two.png"),
 		Surface:  models.CodeReviewEvidenceSurfaceIssueComment, ProviderObjectID: "101", SourceURL: "https://github.com/assembledhq/assembled/pull/42#issuecomment-101",
 		AuthorLogin: "human", AuthorType: models.CodeReviewEvidenceAuthorTypeUser, ImageIndex: 1, ImageURL: "https://example.com/page-two.png", Untrusted: true,
 	}}, discovery.Sources, "visual evidence discovery should include human images found after the first page")
 	require.NoError(t, mock.ExpectationsWereMet(), "paginated discovery should use an org-scoped repository lookup")
+}
+
+func TestDiscoverCodeReviewVisualEvidenceBoundsRetainedProvenance(t *testing.T) {
+	t.Parallel()
+
+	const discoveredImages = models.CodeReviewVisualEvidenceMaxImages + 8
+	var commentHTML strings.Builder
+	for index := 1; index <= discoveredImages; index++ {
+		_, err := fmt.Fprintf(&commentHTML, `<img src="https://example.com/image-%02d.png">`, index)
+		require.NoError(t, err, "visual evidence fixture should render each image")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var response any
+		switch r.URL.Path {
+		case "/repos/assembledhq/assembled/pulls/42":
+			response = map[string]any{"number": 42, "html_url": "https://github.com/assembledhq/assembled/pull/42", "body_html": "", "head": map[string]string{"sha": "head-sha"}}
+		case "/repos/assembledhq/assembled/issues/42/comments":
+			response = []map[string]any{{
+				"id": 101, "html_url": "https://github.com/assembledhq/assembled/pull/42#issuecomment-101",
+				"body_html": commentHTML.String(), "user": map[string]string{"login": "human", "type": "User"},
+			}}
+		case "/repos/assembledhq/assembled/pulls/42/reviews", "/repos/assembledhq/assembled/pulls/42/comments":
+			response = []any{}
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		require.NoError(t, json.NewEncoder(w).Encode(response), "bounded GitHub fixture should be encoded")
+	}))
+	t.Cleanup(server.Close)
+
+	orgID := uuid.New()
+	repositoryID := uuid.New()
+	service, mock := newVisualEvidenceTestService(t, server, orgID, repositoryID)
+
+	discovery, err := service.DiscoverCodeReviewVisualEvidence(context.Background(), orgID, repositoryID, 42)
+
+	require.NoError(t, err, "visual evidence discovery should succeed when a human comment exceeds the image limit")
+	require.Equal(t, discoveredImages, discovery.SourceCount, "discovery should retain an aggregate count for omitted sources")
+	require.Len(t, discovery.Sources, models.CodeReviewVisualEvidenceMaxImages, "discovery should bound persisted and prompted provenance globally")
+	require.Equal(t, "https://example.com/image-01.png", discovery.Sources[0].ImageURL, "bounded discovery should retain deterministic earliest provenance")
+	require.Equal(t, "https://example.com/image-32.png", discovery.Sources[len(discovery.Sources)-1].ImageURL, "bounded discovery should stop retaining provenance at the global limit")
+	require.NoError(t, mock.ExpectationsWereMet(), "bounded discovery should use an org-scoped repository lookup")
 }
 
 func TestDiscoverCodeReviewVisualEvidenceFailsWhenASurfaceIsUnavailable(t *testing.T) {

@@ -159,6 +159,7 @@ export type CodeReviewDescriptionApplicabilityKind =
   | "all"
   | "nontrivial"
   | "paths";
+export type CodeReviewDescriptionEvidenceKind = "general" | "visual";
 
 export interface CodeReviewDescriptionApplicability {
   kind?: CodeReviewDescriptionApplicabilityKind;
@@ -172,6 +173,7 @@ export interface CodeReviewDescriptionRequirement {
   title: string;
   prompt: string;
   required: boolean;
+  evidence_kind?: CodeReviewDescriptionEvidenceKind;
   applicability?: string;
   applies_when?: CodeReviewDescriptionApplicability;
 }
@@ -505,6 +507,7 @@ export interface CodeReviewVisualEvidenceSnapshot {
   captured_at: string;
   complete: boolean;
   overflow: boolean;
+  omitted_source_count?: number;
   evidence: CodeReviewVisualEvidenceItem[];
 }
 

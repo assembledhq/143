@@ -89,6 +89,7 @@ const policy: CodeReviewResolvedPolicy = {
           title: "Understandable description",
           prompt: "Explain intent.",
           required: true,
+          evidence_kind: "general",
           applies_when: { kind: "all" },
         },
         {
@@ -96,6 +97,7 @@ const policy: CodeReviewResolvedPolicy = {
           title: "Testing evidence",
           prompt: "Show validation.",
           required: true,
+          evidence_kind: "general",
           applicability: "nontrivial",
           applies_when: {
             kind: "nontrivial",
@@ -218,7 +220,8 @@ const evidence: CodeReviewEvidence = {
     head_sha: "abcdef123456",
     captured_at: "2026-06-26T12:01:00Z",
     complete: true,
-    overflow: false,
+    overflow: true,
+    omitted_source_count: 3,
     evidence: [
       {
         evidence_id: "ve_comment",
@@ -677,6 +680,10 @@ describe("CodeReviewsPage", () => {
     ).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("Review this PR.")).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("Visual evidence")).toBeInTheDocument();
+    const imageMetric = within(evidenceSheet).getByText("Images").parentElement;
+    expect(imageMetric).not.toBeNull();
+    expect(within(imageMetric!).getByText("5")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("3 additional images were omitted after the 32-image capture limit.")).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("ve_comment")).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("PR comment")).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("@outside-contributor", { exact: false })).toBeInTheDocument();
@@ -2868,7 +2875,7 @@ describe("CodeReviewsPage", () => {
 
   it("edits description requirements in a focused side sheet", async () => {
     const user = userEvent.setup();
-    mockCodeReviewBaseHandlers();
+    const state = mockCodeReviewBaseHandlers();
 
     renderWithProviders(<CodeReviewsPage />);
 
@@ -2885,6 +2892,7 @@ describe("CodeReviewsPage", () => {
     });
     expect(sheet).toBeInTheDocument();
     expect(screen.getByDisplayValue("Testing evidence")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Requirement evidence type" })).toHaveTextContent("General evidence");
     expect(screen.getByRole("combobox", { name: "Requirement applicability" })).toHaveTextContent("Nontrivial");
     expect(screen.getByText("Files changed at least")).toBeInTheDocument();
     expect(screen.getByText("Lines changed at least")).toBeInTheDocument();
@@ -2892,6 +2900,7 @@ describe("CodeReviewsPage", () => {
     for (const label of [
       "Title",
       "Required description check",
+      "Evidence type",
       "Applies to",
       "Files changed at least",
       "Lines changed at least",
@@ -2900,6 +2909,12 @@ describe("CodeReviewsPage", () => {
     ]) {
       expect(within(sheet).getByRole("button", { name: `About ${label}` })).toBeInTheDocument();
     }
+
+    await user.click(screen.getByRole("combobox", { name: "Requirement evidence type" }));
+    await user.click(await screen.findByRole("option", { name: "Visual evidence" }));
+    await waitFor(() => {
+      expect(state.getCurrentConfig().description_policy.requirements[1]?.evidence_kind).toBe("visual");
+    });
 
     await user.click(screen.getByRole("combobox", { name: "Requirement applicability" }));
     await user.click(await screen.findByRole("option", { name: "Paths" }));

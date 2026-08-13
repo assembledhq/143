@@ -291,6 +291,7 @@ type CodeReviewReviewerPromptData struct {
 	RequiredChecks          []string
 	ChangedFiles            []string
 	VisualEvidence          []CodeReviewVisualEvidencePromptData
+	VisualEvidenceOmitted   int
 }
 
 type CodeReviewVisualEvidencePromptData struct {
@@ -312,6 +313,7 @@ type CodeReviewDescriptionRequirementPromptData struct {
 	Title         string
 	Prompt        string
 	Applicability string
+	EvidenceKind  string
 }
 
 func CodeReviewReviewerPrompt(data CodeReviewReviewerPromptData) string {
@@ -344,6 +346,7 @@ type CodeReviewOrchestratorPromptData struct {
 	AutomatedApprovalPolicy    string
 	UseAutomatedApprovalPolicy bool
 	VisualEvidence             []CodeReviewVisualEvidencePromptData
+	VisualEvidenceOmitted      int
 }
 
 func CodeReviewOrchestratorPrompt(data CodeReviewOrchestratorPromptData) string {

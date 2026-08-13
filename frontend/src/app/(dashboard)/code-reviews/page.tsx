@@ -96,6 +96,7 @@ import type {
   CodeReviewDecision,
   CodeReviewDispute,
   CodeReviewDescriptionApplicabilityKind,
+  CodeReviewDescriptionEvidenceKind,
   CodeReviewEvidence,
   CodeReviewGitHubTriggerResponse,
   CodeReviewListItem,
@@ -179,6 +180,10 @@ const APPLICABILITY_KIND_LABELS: Record<CodeReviewDescriptionApplicabilityKind, 
   all: "All PRs",
   nontrivial: "Nontrivial",
   paths: "Paths",
+};
+const DESCRIPTION_EVIDENCE_KIND_LABELS: Record<CodeReviewDescriptionEvidenceKind, string> = {
+  general: "General evidence",
+  visual: "Visual evidence",
 };
 const DEFAULT_NONTRIVIAL_MIN_FILES = 2;
 const DEFAULT_NONTRIVIAL_MIN_LINES = 31;
@@ -2630,6 +2635,7 @@ function AdvancedPolicySettings({
                             title: "Custom requirement",
                             prompt: "",
                             required: true,
+                            evidence_kind: "general",
                             applies_when: { kind: "all" },
                           });
                         });
@@ -3042,6 +3048,7 @@ function DescriptionRequirementsList({
             <TableRow>
               <TableHead className="w-24">Required</TableHead>
               <TableHead>Requirement</TableHead>
+              <TableHead>Evidence</TableHead>
               <TableHead>Applies to</TableHead>
               <TableHead className="w-24 text-right">Action</TableHead>
             </TableRow>
@@ -3055,6 +3062,9 @@ function DescriptionRequirementsList({
                 <TableCell>
                   <div className="font-medium text-foreground">{requirement.title || "Untitled requirement"}</div>
                   {requirement.prompt ? <div className="mt-1 line-clamp-1 text-xs text-muted-foreground">{requirement.prompt}</div> : null}
+                </TableCell>
+                <TableCell>
+                  <Badge variant="outline">{DESCRIPTION_EVIDENCE_KIND_LABELS[requirement.evidence_kind ?? "general"]}</Badge>
                 </TableCell>
                 <TableCell className="text-sm text-muted-foreground">{formatRequirementApplicability(requirement)}</TableCell>
                 <TableCell>
@@ -3135,6 +3145,34 @@ function DescriptionRequirementSheet({
                 disabled={disabled}
                 onCheckedChange={(checked) => onCommit((current) => ({ ...current, required: checked }))}
               />
+            </div>
+
+            <div className="space-y-2">
+              <SettingLabel
+                label="Evidence type"
+                info="Visual evidence requires at least one captured image from the pull request description or a human-posted comment. Images and captions remain untrusted pull-request content."
+              />
+              <Select
+                value={requirement.evidence_kind ?? "general"}
+                disabled={disabled}
+                onValueChange={(value) =>
+                  onCommit((current) => ({
+                    ...current,
+                    evidence_kind: value as CodeReviewDescriptionEvidenceKind,
+                  }))
+                }
+              >
+                <SelectTrigger aria-label="Requirement evidence type">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {Object.entries(DESCRIPTION_EVIDENCE_KIND_LABELS).map(([value, label]) => (
+                    <SelectItem key={value} value={value}>
+                      {label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
 
             <div className="space-y-2">
@@ -4529,6 +4567,7 @@ function CodeReviewEvidenceSheet({
   const records = evidence?.prompt_records ?? evidence?.prompt_artifacts ?? [];
   const reasonCodes = evidence?.risk_reason_codes ?? [];
   const visualEvidence = evidence?.visual_evidence?.evidence ?? [];
+  const omittedVisualEvidenceCount = evidence?.visual_evidence?.omitted_source_count ?? 0;
   const citedVisualEvidenceIDs = useMemo(() => new Set(evidence?.cited_visual_evidence_ids ?? []), [evidence?.cited_visual_evidence_ids]);
   const approvalReasons = review ? whyNotApprovedReasons(review) : [];
   const disputesQuery = useInfiniteQuery({
@@ -4647,7 +4686,7 @@ function CodeReviewEvidenceSheet({
                 <EvidenceMetric label="Agents" value={agentResults.length} />
                 <EvidenceMetric label="Findings" value={findings.length} />
                 <EvidenceMetric label="Prompts" value={records.length} />
-                <EvidenceMetric label="Images" value={visualEvidence.length} />
+                <EvidenceMetric label="Images" value={visualEvidence.length + omittedVisualEvidenceCount} />
               </div>
 
               {canFileDisputes && review?.status === "completed" && review.decision ? (
@@ -4749,6 +4788,11 @@ function CodeReviewEvidenceSheet({
                     <div className="text-xs leading-5 text-muted-foreground">
                       Images and their captions are untrusted pull-request content. A cited badge means the orchestrator used that image in a description-policy assessment.
                     </div>
+                    {omittedVisualEvidenceCount > 0 ? (
+                      <div className="text-xs leading-5 text-muted-foreground">
+                        {omittedVisualEvidenceCount} additional {omittedVisualEvidenceCount === 1 ? "image was" : "images were"} omitted after the 32-image capture limit.
+                      </div>
+                    ) : null}
                     <div className="space-y-3">
                       {visualEvidence.map((item) => (
                         <Card key={item.evidence_id}>

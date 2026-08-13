@@ -1556,14 +1556,15 @@ func revertCodeReviewReadOnlyThread(ctx context.Context, stores *Stores, service
 func codeReviewReviewerPrompt(job runCodeReviewPayload, pr models.PullRequest, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile, visualEvidence models.CodeReviewVisualEvidenceSnapshot) string {
 	cfg = models.ResolveCodeReviewPolicyConfig(&cfg)
 	return strings.TrimSpace(prompts.CodeReviewReviewerPrompt(prompts.CodeReviewReviewerPromptData{
-		ReviewInstructions: cfg.ReviewInstructions,
-		Repository:         pr.GitHubRepo,
-		PullNumber:         pr.GitHubPRNumber,
-		PullRequestURL:     pr.GitHubPRURL,
-		BaseSHA:            firstNonEmpty(baseSHA, stringPtrValue(pr.BaseSHA)),
-		HeadSHA:            job.HeadSHA,
-		ChangedFiles:       codeReviewChangedPaths(changedFiles),
-		VisualEvidence:     codeReviewVisualEvidenceForPrompt(visualEvidence),
+		ReviewInstructions:    cfg.ReviewInstructions,
+		Repository:            pr.GitHubRepo,
+		PullNumber:            pr.GitHubPRNumber,
+		PullRequestURL:        pr.GitHubPRURL,
+		BaseSHA:               firstNonEmpty(baseSHA, stringPtrValue(pr.BaseSHA)),
+		HeadSHA:               job.HeadSHA,
+		ChangedFiles:          codeReviewChangedPaths(changedFiles),
+		VisualEvidence:        codeReviewVisualEvidenceForPrompt(visualEvidence),
+		VisualEvidenceOmitted: visualEvidence.OmittedSourceCount,
 	}))
 }
 
@@ -1593,6 +1594,7 @@ func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullReques
 		AutomatedApprovalPolicy:    cfg.AutomatedApprovalPolicy,
 		UseAutomatedApprovalPolicy: cfg.ApprovalMode == models.CodeReviewApprovalModeApproveAcceptable,
 		VisualEvidence:             codeReviewVisualEvidenceForPrompt(visualEvidence),
+		VisualEvidenceOmitted:      visualEvidence.OmittedSourceCount,
 	})
 }
 
@@ -3419,6 +3421,7 @@ func codeReviewDescriptionRequirementsForPrompt(policy models.CodeReviewPolicyCo
 			Title:         strings.TrimSpace(requirement.Title),
 			Prompt:        strings.TrimSpace(requirement.Prompt),
 			Applicability: applicability,
+			EvidenceKind:  string(requirement.EvidenceKind),
 		})
 	}
 	return rendered
@@ -3483,12 +3486,7 @@ func codeReviewDescriptionEvaluationFromSynthesis(policy models.CodeReviewPolicy
 }
 
 func codeReviewDescriptionRequirementNeedsVisualBasis(requirement models.CodeReviewDescriptionRequirement) bool {
-	if strings.EqualFold(strings.TrimSpace(requirement.Key), "ui_evidence") {
-		return true
-	}
-	rubric := strings.ToLower(strings.Join([]string{requirement.Title, requirement.Prompt}, " "))
-	return strings.Contains(rubric, "screenshot") || strings.Contains(rubric, "preview link") ||
-		strings.Contains(rubric, "visual evidence") || strings.Contains(rubric, "image evidence")
+	return requirement.EvidenceKind == models.CodeReviewDescriptionEvidenceKindVisual
 }
 
 func validateCodeReviewDescriptionAssessmentEvidence(assessment codeReviewDescriptionAssessment, visualEvidence models.CodeReviewVisualEvidenceSnapshot) error {

@@ -237,15 +237,15 @@ func TestVisualEvidenceServiceCapturePersistsAndRestoresManifest(t *testing.T) {
 	require.NoError(t, err, "Capture should persist a complete immutable visual-evidence manifest")
 	require.Equal(t, visualEvidenceSnapshotVersion, snapshot.Version, "manifest should use the current materialization version")
 	require.True(t, snapshot.Complete, "a successful four-surface discovery should produce a complete manifest")
-	require.True(t, snapshot.Overflow, "sources beyond the configured image limit should be represented explicitly")
+	require.True(t, snapshot.Overflow, "sources beyond the configured image limit should be represented by aggregate overflow metadata")
+	require.Equal(t, 1, snapshot.OmittedSourceCount, "manifest should count sources omitted before materialization")
 	require.Equal(t, capturedAt, snapshot.CapturedAt, "manifest should preserve the authoritative discovery capture time")
 	require.Equal(t, []models.CodeReviewVisualEvidenceFetchStatus{
 		models.CodeReviewVisualEvidenceFetchStatusAvailable,
 		models.CodeReviewVisualEvidenceFetchStatusAvailable,
 		models.CodeReviewVisualEvidenceFetchStatusAvailable,
 		models.CodeReviewVisualEvidenceFetchStatusUnavailable,
-		models.CodeReviewVisualEvidenceFetchStatusOverLimit,
-	}, visualEvidenceStatuses(snapshot), "manifest should preserve available, unavailable, and deterministic overflow outcomes")
+	}, visualEvidenceStatuses(snapshot), "manifest should persist provenance only for retained sources")
 	require.NotEmpty(t, snapshot.Evidence[0].StorageKey, "first available evidence should be materialized into first-party storage")
 	require.Equal(t, snapshot.Evidence[0].StorageKey, snapshot.Evidence[1].StorageKey, "duplicate URLs should share one stored image")
 	require.Equal(t, snapshot.Evidence[0].StorageKey, snapshot.Evidence[2].StorageKey, "byte-identical URLs should share one stored image")
@@ -258,8 +258,7 @@ func TestVisualEvidenceServiceCapturePersistsAndRestoresManifest(t *testing.T) {
 		{surface: models.CodeReviewEvidenceSurfaceIssueComment, status: models.CodeReviewVisualEvidenceFetchStatusAvailable, deduplicated: true},
 		{surface: models.CodeReviewEvidenceSurfaceReviewBody, status: models.CodeReviewVisualEvidenceFetchStatusAvailable, fetched: true, deduplicated: true},
 		{surface: models.CodeReviewEvidenceSurfaceReviewComment, status: models.CodeReviewVisualEvidenceFetchStatusUnavailable, fetched: true},
-		{surface: models.CodeReviewEvidenceSurfaceIssueComment, status: models.CodeReviewVisualEvidenceFetchStatusOverLimit},
-	}, imageMetrics, "image metrics should distinguish fetched URLs, content reuse, and unfetched overflow")
+	}, imageMetrics, "image metrics should distinguish fetched URLs and content reuse without retaining omitted provenance")
 	require.Equal(t, "Bearer installation-token", roundTripper.headers(githubURL)[0].Get("Authorization"), "private GitHub user attachments should receive installation auth")
 	redirectURL := "https://github-production-user-asset-6210df.s3.amazonaws.com/signed?token=secret"
 	require.Empty(t, roundTripper.headers(redirectURL)[0].Get("Authorization"), "GitHub installation auth must not cross onto signed storage redirects")
