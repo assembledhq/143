@@ -44,9 +44,9 @@ import (
 )
 
 const (
-	sandboxCapacityRetryDelay        = 10 * time.Second
+	sandboxCapacityRetryDelay        = db.SandboxFleetRetryDelay
 	sandboxAlternateWorkerRetryDelay = time.Duration(0)
-	sandboxOrgLimitRetryDelay        = 5 * time.Second
+	sandboxOrgLimitRetryDelay        = db.SandboxOrgLimitRetryDelay
 	sandboxLockContentionRetryDelay  = 500 * time.Millisecond
 )
 const previewCapacityRetryDelay = 5 * time.Second

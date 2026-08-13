@@ -166,6 +166,149 @@ func TestIntegration_BlueGreenGenerationsSharePhysicalHostCapacity(t *testing.T)
 	require.Equal(t, db.SandboxRoutingReasonFleetCapacity, second.Reason, "shared-host saturation should retain the fleet-capacity reason")
 }
 
+// TestIntegration_ClaimIsolationSkipsMalformedSandboxCandidate verifies the
+// real savepoint path: one tenant's invalid settings cannot stop unrelated
+// worker queue claims.
+func TestIntegration_ClaimIsolationSkipsMalformedSandboxCandidate(t *testing.T) {
+	pool := setup(t)
+	ctx := context.Background()
+	poisonOrgID := seedOrg(t, pool)
+	healthyOrgID := seedOrg(t, pool)
+	nodeID := "claim-worker-" + poisonOrgID.String()[:8]
+	seedWorkerNode(t, pool, nodeID)
+
+	_, err := pool.Exec(ctx, `
+		UPDATE organizations
+		SET settings = '{"session_automation":{"automatic_follow_through":{"pr_feedback_mode":"invalid"}}}'::jsonb
+		WHERE id = $1`, poisonOrgID)
+	require.NoError(t, err, "test should persist semantically invalid org settings")
+
+	store := db.NewJobStore(pool)
+	poisonSession := seedSession(t, pool, poisonOrgID, sessionOpts{Status: models.SessionStatusPending})
+	poisonJobID, err := store.EnqueueWithOpts(ctx, poisonOrgID, db.EnqueueOpts{
+		Queue:         "agent",
+		JobType:       "run_agent",
+		Payload:       map[string]string{"session_id": poisonSession.ID.String(), "org_id": poisonOrgID.String()},
+		Priority:      10,
+		TargetNodeID:  &nodeID,
+		WorkloadClass: models.SandboxWorkloadClassInteractive,
+	})
+	require.NoError(t, err, "poison sandbox job should enqueue")
+	healthyJobID, err := store.EnqueueWithOpts(ctx, healthyOrgID, db.EnqueueOpts{
+		Queue:    "default",
+		JobType:  "integration_noop",
+		Payload:  map[string]string{"org_id": healthyOrgID.String()},
+		Priority: 1,
+	})
+	require.NoError(t, err, "healthy non-sandbox job should enqueue")
+
+	claimed, err := store.ClaimNextRunnable(ctx, nodeID, nodeID, uuid.New(), time.Minute)
+	require.NoError(t, err, "claim pass should isolate invalid sandbox admission")
+	require.NotNil(t, claimed, "claim pass should continue to unrelated work")
+	require.Equal(t, healthyJobID, claimed.ID, "lower-priority healthy job should bypass the durably deferred poison candidate")
+
+	var poisonStatus models.JobStatus
+	var poisonLastError *string
+	err = pool.QueryRow(ctx, `SELECT status, last_error FROM jobs WHERE org_id = $1 AND id = $2`, poisonOrgID, poisonJobID).Scan(&poisonStatus, &poisonLastError)
+	require.NoError(t, err, "poison job state should remain queryable")
+	require.Equal(t, models.JobStatusPending, poisonStatus, "poison candidate should remain pending for repair and retry")
+	require.NotNil(t, poisonLastError, "poison candidate should record its isolated admission error")
+	require.Contains(t, *poisonLastError, "invalid PR feedback human mode", "recorded error should identify the malformed setting")
+}
+
+// TestIntegration_MetadataFallbackClaimKeepsInitialRunDeadline verifies that a
+// null-reservation compatibility placement still reaches the bounded terminal
+// path after repeated organization-limit deferrals.
+func TestIntegration_MetadataFallbackClaimKeepsInitialRunDeadline(t *testing.T) {
+	pool := setup(t)
+	ctx := context.Background()
+	orgID := seedOrg(t, pool)
+	nodeID := "fallback-worker-" + orgID.String()[:8]
+	seedWorkerNode(t, pool, nodeID)
+	_, err := pool.Exec(ctx, `UPDATE organizations SET settings = jsonb_set(settings, '{max_concurrent_runs}', '1'::jsonb, true) WHERE id = $1`, orgID)
+	require.NoError(t, err, "test org should use a single shared turn")
+
+	store := db.NewJobStore(pool)
+	blockingSession := seedSession(t, pool, orgID, sessionOpts{Status: models.SessionStatusRunning})
+	_, err = store.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue:        "agent",
+		JobType:      "run_agent",
+		Payload:      map[string]string{"session_id": blockingSession.ID.String(), "org_id": orgID.String()},
+		Priority:     5,
+		TargetNodeID: &nodeID,
+	})
+	require.NoError(t, err, "blocking job should enqueue")
+	blockingJob, err := store.ClaimNextRunnable(ctx, nodeID, nodeID, uuid.New(), time.Minute)
+	require.NoError(t, err, "blocking job should claim")
+	require.NotNil(t, blockingJob, "blocking job should consume the org turn")
+
+	pendingSession := seedSession(t, pool, orgID, sessionOpts{Status: models.SessionStatusPending})
+	pendingJobID, err := store.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue:        "agent",
+		JobType:      "run_agent",
+		Payload:      map[string]string{"session_id": pendingSession.ID.String(), "org_id": orgID.String()},
+		Priority:     5,
+		TargetNodeID: &nodeID,
+	})
+	require.NoError(t, err, "metadata-fallback job should enqueue with a target and no reservation")
+
+	claimed, err := store.ClaimNextRunnable(ctx, nodeID, nodeID, uuid.New(), time.Minute)
+	require.NoError(t, err, "org-limited metadata fallback should defer cleanly")
+	require.Nil(t, claimed, "org-limited metadata fallback should remain pending")
+	var createdAt time.Time
+	var retryStartedAt *time.Time
+	err = pool.QueryRow(ctx, `SELECT created_at, retry_window_started_at FROM jobs WHERE org_id = $1 AND id = $2`, orgID, pendingJobID).Scan(&createdAt, &retryStartedAt)
+	require.NoError(t, err, "deferred fallback job should remain queryable")
+	require.NotNil(t, retryStartedAt, "first claim deferral should persist the terminal deadline marker")
+	require.WithinDuration(t, createdAt, *retryStartedAt, time.Microsecond, "initial-run terminal deadline should remain anchored to job creation")
+}
+
+// TestIntegration_SessionCapacityStatusExcludesOwnReservation verifies the
+// runtime-status distinction between an admitted pending session and another
+// session that is genuinely waiting behind the organization limit.
+//
+// This test cannot run in parallel because the integration suite shares one
+// database and setup truncates queue state between tests.
+func TestIntegration_SessionCapacityStatusExcludesOwnReservation(t *testing.T) {
+	pool := setup(t)
+	ctx := context.Background()
+	orgID := seedOrg(t, pool)
+	nodeID := "status-worker-" + orgID.String()[:8]
+	seedWorkerNode(t, pool, nodeID)
+	store := db.NewJobStore(pool)
+
+	admittedSession := seedSession(t, pool, orgID, sessionOpts{Status: models.SessionStatusPending})
+	admittedJobID, err := store.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue:        "agent",
+		JobType:      "run_agent",
+		Payload:      map[string]string{"session_id": admittedSession.ID.String(), "org_id": orgID.String()},
+		Priority:     5,
+		TargetNodeID: &nodeID,
+	})
+	require.NoError(t, err, "admitted session job should enqueue")
+	_, err = pool.Exec(ctx, `
+		UPDATE jobs
+		SET sandbox_slot_reserved_until = now() + interval '1 minute'
+		WHERE org_id = $1 AND id = $2`, orgID, admittedJobID)
+	require.NoError(t, err, "test should give the admitted session a live worker reservation")
+
+	waitingSession := seedSession(t, pool, orgID, sessionOpts{Status: models.SessionStatusPending})
+	_, err = store.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue:    "agent",
+		JobType:  "run_agent",
+		Payload:  map[string]string{"session_id": waitingSession.ID.String(), "org_id": orgID.String()},
+		Priority: 5,
+	})
+	require.NoError(t, err, "waiting session job should enqueue")
+
+	admittedWaiting, err := store.IsSessionWaitingForSandboxCapacity(ctx, orgID, admittedSession.ID, 1)
+	require.NoError(t, err, "admitted session capacity lookup should succeed")
+	require.False(t, admittedWaiting, "a session's own live reservation should not make it appear capacity-blocked")
+	waiting, err := store.IsSessionWaitingForSandboxCapacity(ctx, orgID, waitingSession.ID, 1)
+	require.NoError(t, err, "queued session capacity lookup should succeed")
+	require.True(t, waiting, "a queued session should report waiting when another admitted turn consumes the organization limit")
+}
+
 // TestIntegration_CodeReviewJobsUseFleetCapacityAndPreserveInteractiveReserve
 // uses the real queue and Postgres locking path to exercise a mixed-version
 // code-review burst. It intentionally enqueues review jobs with the legacy

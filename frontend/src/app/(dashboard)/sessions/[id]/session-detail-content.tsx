@@ -2460,23 +2460,23 @@ function ChatPanel({
   const isPending = activeThread ? activeThread.status === "pending" : session.status === "pending";
   const isSnapshotExpired = session.sandbox_state === "destroyed";
   const canSendMessage = session.status !== "skipped" && session.status !== "pending" && !isSnapshotExpired;
-  // `pending` covers both the normal environment-setup window and a session
-  // that is queued because the org is at its concurrency limit. The two look
-  // identical on the session row, so consult the runtime capacity signal to
-  // decide which message to show instead of assuming every pending session is
-  // capacity-blocked. Gate on the shared sandbox-turn count rather than the
-  // conflated `state`, which also flips to "limited" when only the unrelated
-  // preview limit is reached.
+  // `pending` covers both environment setup and a durable capacity deferral.
+  // Ask for this session's own wait state: the aggregate count includes an
+  // admitted pending session's reservation and cannot distinguish it from work
+  // waiting behind other turns. Older servers omit the per-session field, so
+  // retain the aggregate fallback during rolling deploys.
   const runtimeStatusQuery = useQuery({
-    queryKey: queryKeys.settings.runtimeStatus,
-    queryFn: () => api.settings.getRuntimeStatus(),
+    queryKey: [...queryKeys.settings.runtimeStatus, sessionId],
+    queryFn: () => api.settings.getRuntimeStatus(sessionId),
     enabled: isPending,
     staleTime: 15_000,
     refetchInterval: 15_000,
   });
   const capacity = runtimeStatusQuery.data?.data.capacity;
   const activeSandboxTurns = capacity?.active_sandbox_turns ?? capacity?.active_agent_runs;
-  const isCapacityLimited = capacity != null && activeSandboxTurns != null && activeSandboxTurns >= capacity.max_concurrent_agent_runs;
+  const isCapacityLimited = capacity?.session_waiting_for_capacity ?? (
+    capacity != null && activeSandboxTurns != null && activeSandboxTurns >= capacity.max_concurrent_agent_runs
+  );
   const maxConcurrentRuns = capacity?.max_concurrent_agent_runs;
   const initialThreadAnchorPosition = useMemo<SessionAnchorPosition | null>(() => {
     if (!activeThreadId || !viewerScope || typeof window === "undefined") return null;

@@ -2342,6 +2342,7 @@ export interface RuntimeSettingsStatus {
     state: "normal" | "limited";
     active_agent_runs: number;
     active_sandbox_turns?: number;
+    session_waiting_for_capacity?: boolean;
     max_concurrent_agent_runs: number;
     active_previews: number;
     max_previews_per_user: number;

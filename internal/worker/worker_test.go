@@ -175,6 +175,24 @@ func TestWorker_RetryNotifiesWhenJobBecomesRunnable(t *testing.T) {
 	}
 }
 
+func TestWorker_DelayedRetryWakeStopsWithWorkerContext(t *testing.T) {
+	t.Parallel()
+
+	delay := 20 * time.Millisecond
+	store := &retryNotifyStore{}
+	w := &Worker{jobs: store, logger: zerolog.Nop(), wakeCh: make(chan struct{}, 1)}
+	jobID := uuid.New()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	w.retryJobWithDelay(ctx, jobID, uuid.New(), "capacity moved", 1, false, &delay, nil, false)
+	cancel()
+
+	require.Never(t, func() bool {
+		_, notifiedJobID := store.retryState()
+		return notifiedJobID != uuid.Nil || len(w.wakeCh) != 0
+	}, 100*time.Millisecond, 5*time.Millisecond, "worker shutdown should cancel delayed retry wake-ups")
+}
+
 func TestRetryableDurationExceeded(t *testing.T) {
 	t.Parallel()
 
@@ -1357,6 +1375,8 @@ func expectClaimWithAttemptsAndTarget(mock pgxmock.PgxPoolIface, jobID, orgID uu
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
 			AddRow(jobID, orgID, jobType, nil, models.SandboxWorkloadClassInteractive, models.JobStatusPending, nil, createdAt))
 	if jobType == "run_agent" || jobType == "continue_session" {
+		mock.ExpectExec(`SAVEPOINT sandbox_claim_candidate`).
+			WillReturnResult(pgxmock.NewResult("SAVEPOINT", 0))
 		mock.ExpectQuery(`(?s)SELECT settings.*FROM organizations.*FOR NO KEY UPDATE`).
 			WithArgs(orgID).
 			WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow([]byte(`{"max_concurrent_runs":3}`)))

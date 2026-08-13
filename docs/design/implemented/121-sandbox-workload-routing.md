@@ -60,8 +60,13 @@ ensures at most one final-admission lease exists for a job.
 
 No new route or setting is introduced. The existing authenticated settings
 APIs expose `max_concurrent_runs`, and the Runtime settings page describes it as
-the shared limit for interactive and code-review turns. Existing settings
-errors remain unchanged: `400 INVALID_JSON` or `400 INVALID_SETTINGS`.
+the shared limit for interactive and code-review turns. The runtime-status
+route accepts an optional tenant-scoped `session_id` query parameter and then
+returns `capacity.session_waiting_for_capacity`; this distinguishes a pending
+session blocked by other admitted turns from one whose own reservation is
+already included in the aggregate count. A malformed identifier returns
+`400 INVALID_SESSION_ID`. Existing settings errors remain unchanged:
+`400 INVALID_JSON` or `400 INVALID_SETTINGS`.
 
 Worker capacity reservation is an internal queue/heartbeat contract, not a
 public API. Heartbeat metadata adds
@@ -107,6 +112,9 @@ work can be considered. Each candidate is handled in its own transaction, so
 committing an org-limit deferral releases that organization's row lock before
 the dispatcher examines another tenant. This prevents cross-org lock-order
 deadlocks and keeps runtime-settings writes independent of a long claim scan.
+The claim path also wraps sandbox-specific workload resolution and admission in
+a per-candidate savepoint. A malformed tenant setting therefore records and
+defers only that job; unrelated job types remain claimable on the worker.
 
 If a worker's authoritative local gate still rejects a fresh sandbox, the
 running job immediately performs the same atomic reservation against an
@@ -141,11 +149,16 @@ Accepted `continue_session` work waiting on an org turn limit is a durable user
 input, not a generic transient dependency. It retries on the short admission
 cadence without consuming attempts or the generic eight-minute retry window;
 session/thread terminal-state checks remain the independent termination path.
+Compatibility placements for an initial `run_agent` preserve the job creation
+time as their terminal-probe deadline even when claim-time org admission
+repeatedly defers them, so an older worker heartbeat format cannot leave the
+job pending forever.
 After any successful requeue, the worker publishes the queue wake-up only once
 the pending transition (including a new target) has committed. Immediately
-runnable work publishes at commit; positive-delay retries arm a best-effort
-wake-up for `run_at`, with the normal database poll remaining the recovery path
-if that worker process exits first.
+runnable work publishes at commit; retry delays up to ten seconds arm a
+best-effort, worker-lifecycle-bound wake-up for `run_at`. Longer generic
+backoffs and process exits rely on the normal database poll, avoiding detached
+timers that outlive the worker.
 
 ## Capacity isolation
 

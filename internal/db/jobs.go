@@ -759,9 +759,11 @@ const claimedJobColumns = `j.id, j.org_id, j.queue, j.job_type, j.payload, j.pri
 const nodeDeadHeartbeatThreshold = 90 * time.Second
 
 const (
-	sandboxSlotReservationTTL      = 30 * time.Second
-	sandboxFleetRetryDelay         = 10 * time.Second
-	sandboxOrgLimitRetryDelay      = 5 * time.Second
+	sandboxSlotReservationTTL = 30 * time.Second
+	// SandboxFleetRetryDelay and SandboxOrgLimitRetryDelay are exported so the
+	// routing transaction and worker handler cannot silently drift apart.
+	SandboxFleetRetryDelay         = 10 * time.Second
+	SandboxOrgLimitRetryDelay      = 5 * time.Second
 	sandboxRoutingErrorRetryDelay  = 10 * time.Second
 	sandboxRoutingTerminalProbeAge = 8 * time.Minute
 	maxClaimAdmissionSkips         = 16
@@ -931,9 +933,9 @@ func (s *JobStore) RouteNextSandboxJob(ctx context.Context) (*SandboxRoutingResu
 		}
 	}
 	if result.TargetNodeID == nil && result.Reason != SandboxRoutingReasonLockContention {
-		retryDelay := sandboxFleetRetryDelay
+		retryDelay := SandboxFleetRetryDelay
 		if result.Reason == SandboxRoutingReasonOrgLimit {
-			retryDelay = sandboxOrgLimitRetryDelay
+			retryDelay = SandboxOrgLimitRetryDelay
 		}
 		deferredUntil := time.Now().Add(retryDelay)
 		clearRetryWindow := job.JobType == "continue_session" && result.Reason == SandboxRoutingReasonOrgLimit
@@ -1457,7 +1459,20 @@ func selectSandboxRoutingFallbackNode(ctx context.Context, tx pgx.Tx) (string, e
 func selectSandboxRoutingCandidate(ctx context.Context, tx pgx.Tx, workloadClass models.SandboxWorkloadClass, excludedNodeIDs []string) (string, error) {
 	var nodeID string
 	err := tx.QueryRow(ctx, `
-		WITH raw_load AS (
+		WITH candidate_nodes AS (
+			SELECT n.*,
+				COALESCE(
+					NULLIF(n.metadata->>'sandbox_capacity_node_id', ''),
+					regexp_replace(n.id, '-g[0-9]{14}-[A-Za-z0-9._-]+$', '')
+				) AS capacity_node_id
+			FROM nodes n
+			WHERE n.mode IN ('worker', 'all')
+			  AND n.status = 'active'
+			  AND n.last_heartbeat_at >= @dead_before
+			  AND COALESCE(n.metadata->>'live_sandbox_count_error', '') = ''
+			  AND NOT (n.id = ANY(@excluded_node_ids::text[]))
+		),
+		raw_load AS (
 			SELECT
 				n.id,
 				COALESCE(NULLIF(n.metadata->>'live_sandbox_count', '')::int, 0) AS live_sandboxes,
@@ -1472,28 +1487,40 @@ func selectSandboxRoutingCandidate(ctx context.Context, tx pgx.Tx, workloadClass
 				(
 					SELECT COUNT(*)
 					FROM jobs reserved_job
-					WHERE reserved_job.target_node_id = n.id
+					JOIN nodes reserved_node ON reserved_node.id = reserved_job.target_node_id
+					WHERE COALESCE(
+							NULLIF(reserved_node.metadata->>'sandbox_capacity_node_id', ''),
+							regexp_replace(reserved_node.id, '-g[0-9]{14}-[A-Za-z0-9._-]+$', '')
+						) = n.capacity_node_id
 					  AND reserved_job.sandbox_slot_reserved_until > now()
 					  AND reserved_job.status = 'pending'
 				) AS pending_durable_reservations,
 				(
 					SELECT COUNT(*)
 					FROM jobs reserved_job
-					WHERE reserved_job.target_node_id = n.id
+					JOIN nodes reserved_node ON reserved_node.id = reserved_job.target_node_id
+					WHERE COALESCE(
+							NULLIF(reserved_node.metadata->>'sandbox_capacity_node_id', ''),
+							regexp_replace(reserved_node.id, '-g[0-9]{14}-[A-Za-z0-9._-]+$', '')
+						) = n.capacity_node_id
 					  AND reserved_job.sandbox_slot_reserved_until > now()
 					  AND reserved_job.status = 'running'
 				) AS running_durable_reservations,
 				(
 					SELECT COUNT(*)
 					FROM sandbox_capacity_reservations shared_reservation
-					WHERE shared_reservation.node_id = n.id
+					WHERE shared_reservation.node_id = n.capacity_node_id
 					  AND shared_reservation.expires_at > now()
 					  AND shared_reservation.job_id IS NOT NULL
 					  AND NOT EXISTS (
 						SELECT 1
 						FROM jobs reserved_job
+						JOIN nodes reserved_node ON reserved_node.id = reserved_job.target_node_id
 						WHERE reserved_job.id = shared_reservation.job_id
-						  AND reserved_job.target_node_id = n.id
+						  AND COALESCE(
+								NULLIF(reserved_node.metadata->>'sandbox_capacity_node_id', ''),
+								regexp_replace(reserved_node.id, '-g[0-9]{14}-[A-Za-z0-9._-]+$', '')
+							) = n.capacity_node_id
 						  AND reserved_job.sandbox_slot_reserved_until > now()
 						  AND reserved_job.status IN ('pending', 'running')
 					  )
@@ -1501,17 +1528,12 @@ func selectSandboxRoutingCandidate(ctx context.Context, tx pgx.Tx, workloadClass
 				(
 					SELECT COUNT(*)
 					FROM sandbox_capacity_reservations shared_reservation
-					WHERE shared_reservation.node_id = n.id
+					WHERE shared_reservation.node_id = n.capacity_node_id
 					  AND shared_reservation.expires_at > now()
 					  AND shared_reservation.job_id IS NULL
 				) AS shared_non_turn_reservations,
 				n.last_heartbeat_at
-			FROM nodes n
-			WHERE n.mode IN ('worker', 'all')
-			  AND n.status = 'active'
-			  AND n.last_heartbeat_at >= @dead_before
-			  AND COALESCE(n.metadata->>'live_sandbox_count_error', '') = ''
-			  AND NOT (n.id = ANY(@excluded_node_ids::text[]))
+			FROM candidate_nodes n
 		),
 		candidate_load AS (
 			SELECT
@@ -1690,6 +1712,56 @@ func (s *JobStore) CountAdmittedSandboxTurnsByOrg(ctx context.Context, orgID uui
 	return count, nil
 }
 
+// IsSessionWaitingForSandboxCapacity reports whether a pending turn for the
+// session is blocked by other admitted turns at the shared organization limit.
+// The candidate's own live reservation is excluded so an admitted session is
+// not mislabeled as waiting while its environment starts.
+func (s *JobStore) IsSessionWaitingForSandboxCapacity(ctx context.Context, orgID, sessionID uuid.UUID, maxConcurrentRuns int) (bool, error) {
+	var waiting bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM jobs waiting_job
+			WHERE waiting_job.org_id = @org_id
+			  AND waiting_job.job_type IN ('run_agent', 'continue_session')
+			  AND waiting_job.status = 'pending'
+			  AND waiting_job.payload->>'session_id' = @session_id
+			  AND (
+				waiting_job.sandbox_slot_reserved_until IS NULL
+				OR waiting_job.sandbox_slot_reserved_until <= now()
+			  )
+			  AND waiting_job.payload->>'capacity_cleanup' IS DISTINCT FROM 'true'
+			  AND NOT (
+				waiting_job.job_type = 'run_agent'
+				AND waiting_job.retry_window_started_at = waiting_job.created_at
+				AND waiting_job.created_at <= now() - (@terminal_probe_seconds * interval '1 second')
+			  )
+			  AND (
+				SELECT COUNT(*)
+				FROM jobs admitted_job
+				WHERE admitted_job.org_id = @org_id
+				  AND admitted_job.id <> waiting_job.id
+				  AND admitted_job.job_type IN ('run_agent', 'continue_session')
+				  AND (
+					admitted_job.status = 'running'
+					OR (
+						admitted_job.status = 'pending'
+						AND admitted_job.sandbox_slot_reserved_until > now()
+					)
+				  )
+			  ) >= @max_concurrent_runs
+		)`, pgx.NamedArgs{
+		"max_concurrent_runs":    maxConcurrentRuns,
+		"org_id":                 orgID,
+		"session_id":             sessionID.String(),
+		"terminal_probe_seconds": int(sandboxRoutingTerminalProbeAge.Seconds()),
+	}).Scan(&waiting)
+	if err != nil {
+		return false, fmt.Errorf("inspect session sandbox capacity wait: %w", err)
+	}
+	return waiting, nil
+}
+
 // ReleaseSandboxSlotReservationWithLease clears a routing reservation once
 // the authoritative local gate has finished creating or hydrating the
 // sandbox. The fencing token prevents a stale executor from clearing a newer
@@ -1841,8 +1913,11 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 
 	isSandboxJob := candidate.JobType == "run_agent" || candidate.JobType == "continue_session"
 	if isSandboxJob {
+		if _, err := tx.Exec(ctx, `SAVEPOINT sandbox_claim_candidate`); err != nil {
+			return nil, false, fmt.Errorf("create sandbox claim candidate savepoint: %w", err)
+		}
 		if err := resolveSandboxRoutingWorkloadClass(ctx, tx, &candidate); err != nil {
-			return nil, false, err
+			return s.deferSandboxClaimJobError(ctx, tx, candidate, err)
 		}
 	}
 	// A terminal placement stamps the initial job creation time into the retry
@@ -1855,12 +1930,12 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 	if isSandboxJob && !isTerminalInitialRun {
 		admitted, admissionErr := admitLockedSandboxTurn(ctx, tx, candidate)
 		if admissionErr != nil {
-			return nil, false, admissionErr
+			return s.deferSandboxClaimJobError(ctx, tx, candidate, admissionErr)
 		}
 		if !admitted {
 			terminalProbe, probeErr := continueSessionNeedsTerminalProbe(ctx, tx, candidate)
 			if probeErr != nil {
-				return nil, false, probeErr
+				return s.deferSandboxClaimJobError(ctx, tx, candidate, probeErr)
 			}
 			if terminalProbe {
 				probeResult, markErr := tx.Exec(ctx, `
@@ -1875,10 +1950,10 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 					  AND status = 'pending'
 					  AND job_type = 'continue_session'`, pgx.NamedArgs{"job_id": candidate.ID})
 				if markErr != nil {
-					return nil, false, fmt.Errorf("mark org-limited continuation for terminal cleanup: %w", markErr)
+					return s.deferSandboxClaimJobError(ctx, tx, candidate, fmt.Errorf("mark org-limited continuation for terminal cleanup: %w", markErr))
 				}
 				if probeResult.RowsAffected() != 1 {
-					return nil, false, fmt.Errorf("mark org-limited continuation for terminal cleanup: pending job %s changed ownership", candidate.ID)
+					return s.deferSandboxClaimJobError(ctx, tx, candidate, fmt.Errorf("mark org-limited continuation for terminal cleanup: pending job %s changed ownership", candidate.ID))
 				}
 			} else {
 				deferResult, deferErr := tx.Exec(ctx, `
@@ -1891,6 +1966,7 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 						run_at = now() + (@retry_seconds * interval '1 second'),
 						retry_window_started_at = CASE
 							WHEN job_type = 'continue_session' THEN NULL
+							WHEN job_type = 'run_agent' AND attempts = 0 THEN created_at
 							ELSE COALESCE(retry_window_started_at, now())
 						END,
 						target_node_id = CASE
@@ -1902,14 +1978,14 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 					WHERE id = @job_id
 					  AND status = 'pending'`, pgx.NamedArgs{
 					"job_id":         candidate.ID,
-					"retry_seconds":  int(sandboxOrgLimitRetryDelay.Seconds()),
+					"retry_seconds":  int(SandboxOrgLimitRetryDelay.Seconds()),
 					"workload_class": candidate.WorkloadClass,
 				})
 				if deferErr != nil {
-					return nil, false, fmt.Errorf("defer affinity-bound sandbox job at org limit: %w", deferErr)
+					return s.deferSandboxClaimJobError(ctx, tx, candidate, fmt.Errorf("defer affinity-bound sandbox job at org limit: %w", deferErr))
 				}
 				if deferResult.RowsAffected() != 1 {
-					return nil, false, fmt.Errorf("defer affinity-bound sandbox job at org limit: pending job %s changed ownership", candidate.ID)
+					return s.deferSandboxClaimJobError(ctx, tx, candidate, fmt.Errorf("defer affinity-bound sandbox job at org limit: pending job %s changed ownership", candidate.ID))
 				}
 				if err := tx.Commit(ctx); err != nil {
 					return nil, false, fmt.Errorf("commit sandbox org-limit deferral: %w", err)
@@ -1941,12 +2017,62 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 		"lease_seconds": int(leaseDuration.Seconds()),
 	}))
 	if err != nil {
+		if isSandboxJob {
+			return s.deferSandboxClaimJobError(ctx, tx, candidate, fmt.Errorf("claim next runnable job: %w", err))
+		}
 		return nil, false, fmt.Errorf("claim next runnable job: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, false, fmt.Errorf("commit claim next runnable job: %w", err)
 	}
 	return job, false, nil
+}
+
+// deferSandboxClaimJobError recovers the candidate transaction after a
+// deterministic sandbox admission error, then advances only that locked job.
+// ClaimNextRunnable can continue its bounded scan instead of letting one
+// malformed tenant configuration block every job type on the worker.
+func (s *JobStore) deferSandboxClaimJobError(ctx context.Context, tx pgx.Tx, candidate sandboxRoutingJob, claimErr error) (*models.Job, bool, error) {
+	if _, rollbackErr := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT sandbox_claim_candidate`); rollbackErr != nil {
+		return nil, false, fmt.Errorf("rollback failed sandbox claim work for job %s after %v: %w", candidate.ID, claimErr, rollbackErr)
+	}
+	result, err := tx.Exec(ctx, `
+		UPDATE jobs
+		SET last_error = @last_error,
+			run_at = @run_at,
+			target_node_id = CASE
+				WHEN sandbox_slot_reserved_until IS NULL THEN target_node_id
+				ELSE NULL
+			END,
+			sandbox_slot_reserved_until = NULL,
+			updated_at = now()
+		WHERE id = @job_id
+		  AND org_id = @org_id
+		  AND status = 'pending'`, pgx.NamedArgs{
+		"job_id":     candidate.ID,
+		"last_error": fmt.Sprintf("sandbox claim deferred: %v", claimErr),
+		"org_id":     candidate.OrgID,
+		"run_at":     time.Now().Add(sandboxRoutingErrorRetryDelay),
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("defer failed sandbox claim for job %s after %v: %w", candidate.ID, claimErr, err)
+	}
+	if result.RowsAffected() != 1 {
+		return nil, false, fmt.Errorf("defer failed sandbox claim for job %s after %v: pending job changed ownership", candidate.ID, claimErr)
+	}
+	if _, err := tx.Exec(ctx, `RELEASE SAVEPOINT sandbox_claim_candidate`); err != nil {
+		return nil, false, fmt.Errorf("release failed sandbox claim savepoint for job %s after %v: %w", candidate.ID, claimErr, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, false, fmt.Errorf("commit failed sandbox claim deferral for job %s after %v: %w", candidate.ID, claimErr, err)
+	}
+	s.logger.Error().
+		Err(claimErr).
+		Str("job_id", candidate.ID.String()).
+		Str("org_id", candidate.OrgID.String()).
+		Str("job_type", candidate.JobType).
+		Msg("sandbox claim failed; deferred only the affected job")
+	return nil, true, nil
 }
 
 func scanJobRow(row pgx.Row) (*models.Job, error) {
