@@ -101,6 +101,71 @@ func TestIntegration_SharedSandboxAdmissionDeduplicatesCurrentRoutingReservation
 	require.Equal(t, 0, remainingReservations, "shared capacity release should delete its lease after the admission lock is available")
 }
 
+// TestIntegration_BlueGreenGenerationsSharePhysicalHostCapacity verifies that
+// generation-specific routing IDs cannot make one Docker daemon look like two
+// independent capacity pools during a rolling deploy.
+//
+// This test cannot run in parallel because the integration suite shares one
+// database and setup truncates queue state between tests.
+func TestIntegration_BlueGreenGenerationsSharePhysicalHostCapacity(t *testing.T) {
+	pool := setup(t)
+	ctx := context.Background()
+	orgID := seedOrg(t, pool)
+	capacityNodeID := "physical-worker-" + orgID.String()[:8]
+	nodeIDs := []string{
+		capacityNodeID + "-g20260813000101-blue",
+		capacityNodeID + "-g20260813000202-green",
+	}
+	for i, nodeID := range nodeIDs {
+		seedWorkerNode(t, pool, nodeID)
+		setWorkerSandboxCapacity(t, pool, nodeID, 1)
+		if i > 0 {
+			_, err := pool.Exec(ctx, `
+				UPDATE nodes
+				SET metadata = metadata || jsonb_build_object('sandbox_capacity_node_id', $2::text)
+				WHERE id = $1`, nodeID, capacityNodeID)
+			require.NoError(t, err, "new worker generation should advertise the shared physical-host capacity identity")
+		}
+	}
+
+	store := db.NewJobStore(pool)
+	for range 2 {
+		session := seedSession(t, pool, orgID, sessionOpts{Status: models.SessionStatusPending})
+		_, err := store.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+			Queue:         "agent",
+			JobType:       "run_agent",
+			Payload:       map[string]string{"session_id": session.ID.String(), "org_id": orgID.String()},
+			Priority:      5,
+			WorkloadClass: models.SandboxWorkloadClassInteractive,
+		})
+		require.NoError(t, err, "test sandbox job should enqueue")
+	}
+
+	first, err := store.RouteNextSandboxJob(ctx)
+	require.NoError(t, err, "first generation should reserve the physical host slot")
+	require.NotNil(t, first, "first route should return a capacity decision")
+	require.NotNil(t, first.TargetNodeID, "first route should select one worker generation")
+	_, _, finalLoad, admitted, err := db.NewSandboxCapacityReservationStore(pool).ReserveSandboxCapacity(
+		ctx,
+		capacityNodeID,
+		nil,
+		models.SandboxWorkloadClassInteractive,
+		func(context.Context) (int, error) { return 0, nil },
+		1,
+		time.Now().Add(time.Minute),
+	)
+	require.NoError(t, err, "final admission should resolve generation job ownership to the physical host")
+	require.False(t, admitted, "final admission should not bypass the routed generation's durable reservation")
+	require.Equal(t, 1, finalLoad, "final admission should count the durable reservation across worker generations")
+
+	second, err := store.RouteNextSandboxJob(ctx)
+	require.NoError(t, err, "second generation should share the physical host admission fence")
+	require.NotNil(t, second, "second route should return a capacity decision")
+	require.Nil(t, second.TargetNodeID, "second generation must not expose another slot on the same Docker host")
+	require.True(t, second.Deferred, "second job should defer when the shared physical host is full")
+	require.Equal(t, db.SandboxRoutingReasonFleetCapacity, second.Reason, "shared-host saturation should retain the fleet-capacity reason")
+}
+
 // TestIntegration_CodeReviewJobsUseFleetCapacityAndPreserveInteractiveReserve
 // uses the real queue and Postgres locking path to exercise a mixed-version
 // code-review burst. It intentionally enqueues review jobs with the legacy

@@ -7,6 +7,8 @@ CREATE TABLE sandbox_capacity_reservations ( -- lint:no-org-id reason="ephemeral
     -- Runtime leases intentionally avoid parent FKs: creating them during a
     -- rolling deploy would lock the hot nodes/jobs tables, while orphaned
     -- leases are harmless after expires_at and are cleaned on admission.
+    -- Stable physical-host capacity ID. Blue/green worker generations that
+    -- share one Docker daemon intentionally use the same value.
     node_id text NOT NULL,
     job_id uuid,
     workload_class text NOT NULL,

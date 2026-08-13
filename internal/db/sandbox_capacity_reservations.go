@@ -75,7 +75,11 @@ func (s *SandboxCapacityReservationStore) ReserveSandboxCapacity(
 		WITH active_capacity_keys AS (
 			SELECT 'job:' || reserved_job.id::text AS capacity_key
 			FROM jobs reserved_job
-			WHERE reserved_job.target_node_id = @node_id
+			JOIN nodes reserved_node ON reserved_node.id = reserved_job.target_node_id
+			WHERE COALESCE(
+					NULLIF(reserved_node.metadata->>'sandbox_capacity_node_id', ''),
+					regexp_replace(reserved_node.id, '-g[0-9]{14}-[A-Za-z0-9._-]+$', '')
+				) = @node_id
 			  AND reserved_job.sandbox_slot_reserved_until > now()
 			  AND reserved_job.status IN ('pending', 'running')
 			  AND (@job_id::uuid IS NULL OR reserved_job.id <> @job_id)

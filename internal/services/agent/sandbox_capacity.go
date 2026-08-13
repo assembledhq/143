@@ -152,6 +152,15 @@ func (g *SandboxCapacityGate) InteractiveReserved() int {
 	return g.interactiveReserved
 }
 
+// CapacityNodeID returns the physical-host identity used by the shared
+// admission fence. Multiple worker generations on one Docker host share it.
+func (g *SandboxCapacityGate) CapacityNodeID() string {
+	if g == nil {
+		return ""
+	}
+	return g.nodeID
+}
+
 // SetPressureCleaner installs or replaces the cleanup hook used when a worker
 // host is full. It is safe to call during startup before workers begin polling.
 func (g *SandboxCapacityGate) SetPressureCleaner(cleaner SandboxPressureCleaner) {

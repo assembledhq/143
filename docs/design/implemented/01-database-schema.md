@@ -1115,7 +1115,7 @@ that worker next admits work.
 | Column | Type | Notes |
 |--------|------|-------|
 | id | uuid | PK |
-| node_id | text | worker whose Docker capacity is reserved |
+| node_id | text | stable physical-host capacity ID shared by worker generations using one Docker daemon |
 | job_id | uuid | nullable job identity; null for non-job consumers such as previews |
 | workload_class | text | `interactive` or `code_review` |
 | expires_at | timestamptz | lease expiry used for crash recovery |

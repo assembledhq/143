@@ -89,10 +89,11 @@ services:
       # working DNS and fail their first preview-infra lookup.
       sandbox-dns:
         condition: service_healthy
-    # NODE_ID, WORKER_PRIVATE_IP, PREVIEW_INTERNAL_BASE_URL, WORKER_HOST_PORT,
-    # and DOCKER_GID are runtime identity values. The stable host defaults live
-    # in /opt/143/.env.local and deploy.sh overrides NODE_ID/HOST_PORT/BASE_URL
-    # per blue/green generation so old and new worker containers can overlap.
+    # NODE_ID, WORKER_CAPACITY_NODE_ID, WORKER_PRIVATE_IP,
+    # PREVIEW_INTERNAL_BASE_URL, WORKER_HOST_PORT, and DOCKER_GID are runtime
+    # identity values. The stable host defaults live in /opt/143/.env.local;
+    # deploy.sh overrides NODE_ID/HOST_PORT/BASE_URL per blue/green generation
+    # while keeping WORKER_CAPACITY_NODE_ID stable across overlapping containers.
     # The :? syntax fails the deploy loudly if required host values are missing
     # — without it, the internal preview API could bind to the public interface
     # or the node could heartbeat without a preview_internal_base_url.
@@ -104,6 +105,7 @@ services:
       CHROME_WS_URL: ${CHROME_WS_URL:-ws://chrome:9222}
       MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-5}
       NODE_ID: ${NODE_ID:?missing in /opt/143/.env.local}
+      WORKER_CAPACITY_NODE_ID: ${WORKER_CAPACITY_NODE_ID:-${NODE_ID:?missing in /opt/143/.env.local}}
       WORKER_INTERACTIVE_RESERVED_SANDBOXES: ${WORKER_INTERACTIVE_RESERVED_SANDBOXES:-1}
       WORKER_PREVIEW_DRAIN_TIMEOUT: ${WORKER_PREVIEW_DRAIN_TIMEOUT:-2h}
       PREVIEW_INTERNAL_BASE_URL: ${PREVIEW_INTERNAL_BASE_URL:?missing in /opt/143/.env.local}
