@@ -3,8 +3,10 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -46,6 +48,130 @@ func TestCodeReviewHandler_GetPolicyReturnsPromptFields(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response), "policy GET response should be valid JSON")
 	require.Equal(t, config.ReviewInstructions, response.Data.Config.ReviewInstructions, "policy GET should return review instructions")
 	require.Equal(t, config.AutomatedApprovalPolicy, response.Data.Config.AutomatedApprovalPolicy, "policy GET should return automated approval policy")
+}
+
+func TestCodeReviewVisualEvidenceForAPI(t *testing.T) {
+	t.Parallel()
+
+	orgID, sessionID := uuid.New(), uuid.New()
+	snapshot := models.CodeReviewVisualEvidenceSnapshot{
+		Version: 1, RepositoryID: uuid.New(), Repository: "acme/web", PullRequestNumber: 42,
+		HeadSHA: strings.Repeat("a", 40), CapturedAt: time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC), Complete: true,
+		Evidence: []models.CodeReviewVisualEvidence{
+			apiVisualEvidenceFixture(orgID, sessionID, "ve_comment_source"),
+			apiVisualEvidenceFixture(orgID, sessionID, "ve_description_source"),
+			apiUnavailableVisualEvidenceFixture("ve_unavailable_source"),
+		},
+	}
+	metadata, err := json.Marshal(snapshot)
+	require.NoError(t, err, "visual evidence fixture should marshal")
+	validRecord := models.CodeReviewPromptRecord{Role: "visual_evidence", Metadata: metadata}
+	validResult := models.CodeReviewAgentResult{
+		Role: models.CodeReviewAgentRoleOrchestrator, Status: models.CodeReviewAgentResultStatusCompleted,
+		StructuredResult: json.RawMessage(fmt.Sprintf(`{"synthesis_validated":true,"synthesis":{"description_assessments":[{"status":"satisfied","evidence_basis":"image","evidence_ids":[%q,"ve_unknown",%q]},{"status":"satisfied","evidence_basis":"image","evidence_ids":[%q,%q]},{"status":"missing","evidence_basis":"missing","evidence_ids":[%q]},{"status":"satisfied","evidence_basis":"pull_request_description","evidence_ids":[%q]}]}}`, snapshot.Evidence[0].EvidenceID, snapshot.Evidence[2].EvidenceID, snapshot.Evidence[0].EvidenceID, snapshot.Evidence[1].EvidenceID, snapshot.Evidence[1].EvidenceID, snapshot.Evidence[1].EvidenceID)),
+	}
+	tests := []struct {
+		name        string
+		records     []models.CodeReviewPromptRecord
+		results     []models.CodeReviewAgentResult
+		expected    *models.CodeReviewVisualEvidenceSnapshot
+		expectedIDs []string
+		expectErr   bool
+	}{
+		{name: "supports historical reviews without a snapshot"},
+		{
+			name: "returns the immutable snapshot and validated citation order", records: []models.CodeReviewPromptRecord{validRecord},
+			results: []models.CodeReviewAgentResult{validResult}, expected: &snapshot, expectedIDs: []string{snapshot.Evidence[0].EvidenceID, snapshot.Evidence[1].EvidenceID},
+		},
+		{
+			name: "rejects a corrupt snapshot", records: []models.CodeReviewPromptRecord{{Role: "visual_evidence", Metadata: json.RawMessage(`{"version":1,"complete":false}`)}},
+			expectErr: true,
+		},
+		{
+			name: "rejects multiple immutable snapshots", records: []models.CodeReviewPromptRecord{validRecord, validRecord},
+			expectErr: true,
+		},
+		{
+			name: "rejects a non-first-party stored image", records: []models.CodeReviewPromptRecord{{Role: "visual_evidence", Metadata: func() json.RawMessage {
+				corrupt := snapshot
+				corrupt.Evidence = append([]models.CodeReviewVisualEvidence(nil), snapshot.Evidence...)
+				corrupt.Evidence[0].StoredURL = "https://attacker.example/evidence.png"
+				encoded, marshalErr := json.Marshal(corrupt)
+				require.NoError(t, marshalErr, "corrupt visual evidence fixture should marshal")
+				return encoded
+			}()}}, expectErr: true,
+		},
+		{
+			name: "rejects an unsafe source link", records: []models.CodeReviewPromptRecord{{Role: "visual_evidence", Metadata: func() json.RawMessage {
+				corrupt := snapshot
+				corrupt.Evidence = append([]models.CodeReviewVisualEvidence(nil), snapshot.Evidence...)
+				corrupt.Evidence[0].Source.SourceURL = "javascript:alert(1)"
+				encoded, marshalErr := json.Marshal(corrupt)
+				require.NoError(t, marshalErr, "corrupt visual evidence fixture should marshal")
+				return encoded
+			}()}}, expectErr: true,
+		},
+		{
+			name: "rejects a non-canonical storage key", records: []models.CodeReviewPromptRecord{{Role: "visual_evidence", Metadata: func() json.RawMessage {
+				corrupt := snapshot
+				corrupt.Evidence = append([]models.CodeReviewVisualEvidence(nil), snapshot.Evidence...)
+				corrupt.Evidence[0].StorageKey = fmt.Sprintf("%s/code-review-evidence/%s/../other.png", orgID, sessionID)
+				corrupt.Evidence[0].StoredURL = "/api/v1/uploads/files/" + corrupt.Evidence[0].StorageKey
+				encoded, marshalErr := json.Marshal(corrupt)
+				require.NoError(t, marshalErr, "corrupt visual evidence fixture should marshal")
+				return encoded
+			}()}}, expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual, actualIDs, err := codeReviewVisualEvidenceForAPI(orgID, sessionID, tt.records, tt.results)
+			if tt.expectErr {
+				require.Error(t, err, "corrupt visual evidence should fail the evidence response")
+				return
+			}
+			require.NoError(t, err, "valid or historical evidence should load")
+			require.Equal(t, tt.expected, actual, "evidence API should return the expected immutable visual snapshot")
+			require.Equal(t, tt.expectedIDs, actualIDs, "evidence API should return unique known citations in assessment order")
+		})
+	}
+}
+
+func apiVisualEvidenceFixture(orgID, sessionID uuid.UUID, sourceID string) models.CodeReviewVisualEvidence {
+	contentHash := strings.Repeat("a", 64)
+	storageKey := fmt.Sprintf("%s/code-review-evidence/%s/%s.png", orgID, sessionID, contentHash)
+	return models.CodeReviewVisualEvidence{
+		EvidenceID: apiVisualEvidenceID(sourceID, contentHash, models.CodeReviewVisualEvidenceFetchStatusAvailable),
+		Source: models.CodeReviewVisualEvidenceSource{
+			SourceID: sourceID, Surface: models.CodeReviewEvidenceSurfaceDescription, ProviderObjectID: "42",
+			SourceURL: "https://github.com/acme/web/pull/42", AuthorType: models.CodeReviewEvidenceAuthorTypeUser,
+			ImageIndex: 1, ImageURL: "https://github.com/user-attachments/assets/example", Untrusted: true,
+		},
+		StorageKey: storageKey, StoredURL: "/api/v1/uploads/files/" + storageKey,
+		ContentSHA256: contentHash, ContentType: "image/png", ByteSize: 128, Width: 10, Height: 10,
+		Status: models.CodeReviewVisualEvidenceFetchStatusAvailable,
+	}
+}
+
+func apiUnavailableVisualEvidenceFixture(sourceID string) models.CodeReviewVisualEvidence {
+	return models.CodeReviewVisualEvidence{
+		EvidenceID: apiVisualEvidenceID(sourceID, "", models.CodeReviewVisualEvidenceFetchStatusUnavailable),
+		Source: models.CodeReviewVisualEvidenceSource{
+			SourceID: sourceID, Surface: models.CodeReviewEvidenceSurfaceIssueComment, ProviderObjectID: "43",
+			SourceURL: "https://github.com/acme/web/pull/42#issuecomment-43", AuthorLogin: "human",
+			AuthorType: models.CodeReviewEvidenceAuthorTypeUser, ImageIndex: 1,
+			ImageURL: "https://example.com/unavailable.png", Untrusted: true,
+		},
+		Status: models.CodeReviewVisualEvidenceFetchStatusUnavailable, FailureReason: "image is unavailable",
+	}
+}
+
+func apiVisualEvidenceID(sourceID, contentHash string, status models.CodeReviewVisualEvidenceFetchStatus) string {
+	digest := sha256.Sum256([]byte(sourceID + "\x00" + contentHash + "\x00" + string(status)))
+	return "ve_" + fmt.Sprintf("%x", digest[:12])
 }
 
 // Get backs the ?evidence=<session id> deep link used by the dispute queue and

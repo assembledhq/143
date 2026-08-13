@@ -629,6 +629,32 @@ compare decisions against the policy active at the time.
 - `(org_id, repository_id, created_at DESC)` — repository review history
 - `(org_id, created_at DESC)` where `status = 'completed'` — organization analytics windows
 
+### `code_review_prompt_records`
+
+Immutable prompt, output, and visual-evidence audit records for a code review
+assessment.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | uuid | PK |
+| org_id | uuid | FK -> organizations |
+| session_id | uuid | FK -> sessions with cascade delete |
+| record_key | text | Stable idempotency/checkpoint key |
+| role | text | `reviewer`, `orchestrator`, `description_policy`, `reviewer_output`, `orchestrator_output`, or `visual_evidence` |
+| agent_provider | text | Provider key, or empty for provider-independent records |
+| content | text | Rendered prompt/output or bounded visual-evidence audit summary |
+| metadata | jsonb | Structured metadata; the complete immutable manifest for `visual_evidence` |
+| created_at | timestamptz | |
+
+**Constraints and indexes:**
+- check constraint on the `role` values above
+- `(org_id, record_key)` unique — org-scoped checkpoint and idempotency key
+- `(org_id, session_id, created_at DESC)` — ordered assessment audit records
+
+Installations draining the legacy output-naming generation can temporarily
+retain a synchronized `code_review_prompt_artifacts` table with the equivalent
+role constraint. New installations use only `code_review_prompt_records`.
+
 ### `deploys`
 
 Tracks deploy events detected after PR merge.

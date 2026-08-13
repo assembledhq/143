@@ -1089,10 +1089,12 @@ type CodeReviewAnalytics struct {
 }
 
 type CodeReviewEvidence struct {
-	AgentResults    []CodeReviewAgentResult    `json:"agent_results"`
-	Findings        []CodeReviewFinding        `json:"findings"`
-	PromptRecords   []CodeReviewPromptRecord   `json:"prompt_records,omitempty"`
-	RiskReasonCodes []CodeReviewRiskReasonCode `json:"risk_reason_codes"`
+	AgentResults           []CodeReviewAgentResult           `json:"agent_results"`
+	Findings               []CodeReviewFinding               `json:"findings"`
+	PromptRecords          []CodeReviewPromptRecord          `json:"prompt_records,omitempty"`
+	RiskReasonCodes        []CodeReviewRiskReasonCode        `json:"risk_reason_codes"`
+	VisualEvidence         *CodeReviewVisualEvidenceSnapshot `json:"visual_evidence,omitempty"`
+	CitedVisualEvidenceIDs []string                          `json:"cited_visual_evidence_ids,omitempty"`
 }
 
 // MarshalJSON emits both collection names until old API clients are outside

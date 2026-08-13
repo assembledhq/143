@@ -190,6 +190,12 @@ func (r *visualEvidenceRoundTripper) count(rawURL string) int {
 
 func TestVisualEvidenceServiceCapturePersistsAndRestoresManifest(t *testing.T) {
 	t.Parallel()
+	type imageMetric struct {
+		surface      models.CodeReviewEvidenceSurface
+		status       models.CodeReviewVisualEvidenceFetchStatus
+		fetched      bool
+		deduplicated bool
+	}
 
 	orgID, sessionID, repositoryID := uuid.New(), uuid.New(), uuid.New()
 	headSHA := strings.Repeat("a", 40)
@@ -215,6 +221,13 @@ func TestVisualEvidenceServiceCapturePersistsAndRestoresManifest(t *testing.T) {
 	roundTripper := &visualEvidenceRoundTripper{requests: make(map[string][]http.Header), counts: make(map[string]int), png: encodeVisualEvidencePNG(t, 10, 8)}
 	service := NewVisualEvidenceService(discoverer, prompts, repos, tokens, uploads, zerolog.Nop())
 	service.maxImages = 4
+	var imageMetrics []imageMetric
+	service.recordImage = func(_ context.Context, surface, status, _ string, _ int64, _ float64, fetched, deduplicated bool) {
+		imageMetrics = append(imageMetrics, imageMetric{
+			surface: models.CodeReviewEvidenceSurface(surface), status: models.CodeReviewVisualEvidenceFetchStatus(status),
+			fetched: fetched, deduplicated: deduplicated,
+		})
+	}
 	service.downloader.client = &http.Client{Transport: roundTripper, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	service.downloader.retryWait = func(context.Context, time.Duration) error { return nil }
 	input := CaptureVisualEvidenceInput{OrgID: orgID, SessionID: sessionID, RepositoryID: repositoryID, PullRequestNumber: 42, HeadSHA: headSHA}
@@ -240,6 +253,13 @@ func TestVisualEvidenceServiceCapturePersistsAndRestoresManifest(t *testing.T) {
 	require.Equal(t, snapshot.Evidence[0].EvidenceID, snapshot.Evidence[2].DuplicateOfEvidenceID, "byte-identical provenance should point at the first evidence item")
 	require.Equal(t, 1, uploads.saveCalls, "content-addressed materialization should upload duplicate bytes once")
 	require.Equal(t, 1, roundTripper.count(githubURL), "duplicate GitHub URLs should be downloaded once")
+	require.Equal(t, []imageMetric{
+		{surface: models.CodeReviewEvidenceSurfaceDescription, status: models.CodeReviewVisualEvidenceFetchStatusAvailable, fetched: true},
+		{surface: models.CodeReviewEvidenceSurfaceIssueComment, status: models.CodeReviewVisualEvidenceFetchStatusAvailable, deduplicated: true},
+		{surface: models.CodeReviewEvidenceSurfaceReviewBody, status: models.CodeReviewVisualEvidenceFetchStatusAvailable, fetched: true, deduplicated: true},
+		{surface: models.CodeReviewEvidenceSurfaceReviewComment, status: models.CodeReviewVisualEvidenceFetchStatusUnavailable, fetched: true},
+		{surface: models.CodeReviewEvidenceSurfaceIssueComment, status: models.CodeReviewVisualEvidenceFetchStatusOverLimit},
+	}, imageMetrics, "image metrics should distinguish fetched URLs, content reuse, and unfetched overflow")
 	require.Equal(t, "Bearer installation-token", roundTripper.headers(githubURL)[0].Get("Authorization"), "private GitHub user attachments should receive installation auth")
 	redirectURL := "https://github-production-user-asset-6210df.s3.amazonaws.com/signed?token=secret"
 	require.Empty(t, roundTripper.headers(redirectURL)[0].Get("Authorization"), "GitHub installation auth must not cross onto signed storage redirects")
@@ -253,6 +273,39 @@ func TestVisualEvidenceServiceCapturePersistsAndRestoresManifest(t *testing.T) {
 	require.Equal(t, 1, discoverer.callCount(), "Capture retry should not refetch mutable GitHub content")
 	require.Equal(t, 1, uploads.saveCalls, "Capture retry should not rewrite first-party images")
 	require.NotEmpty(t, restored.CanonicalHash(), "persisted visual evidence should expose a stable description-input hash")
+}
+
+func TestVisualEvidenceServiceRecordsIncompleteCapture(t *testing.T) {
+	t.Parallel()
+
+	type captureMetric struct {
+		discovered int
+		persisted  int
+		complete   bool
+		overflow   bool
+		restored   bool
+	}
+	var recorded []captureMetric
+	service := NewVisualEvidenceService(
+		&visualEvidenceDiscovererStub{err: errors.New("GitHub review comments are unavailable")},
+		&visualEvidencePromptStoreStub{records: make(map[string]models.CodeReviewPromptRecord)},
+		&visualEvidenceRepositoryStoreStub{},
+		nil,
+		&visualEvidenceUploadStoreStub{saved: make(map[string][]byte)},
+		zerolog.Nop(),
+	)
+	service.recordCapture = func(_ context.Context, discovered, persisted int, complete, overflow, restored bool) {
+		recorded = append(recorded, captureMetric{
+			discovered: discovered, persisted: persisted, complete: complete, overflow: overflow, restored: restored,
+		})
+	}
+
+	_, err := service.Capture(context.Background(), CaptureVisualEvidenceInput{
+		OrgID: uuid.New(), SessionID: uuid.New(), RepositoryID: uuid.New(), PullRequestNumber: 42, HeadSHA: strings.Repeat("f", 40),
+	})
+
+	require.Error(t, err, "Capture should fail when an authoritative GitHub surface is unavailable")
+	require.Equal(t, []captureMetric{{}}, recorded, "failed capture should emit one bounded incomplete-snapshot metric")
 }
 
 func TestVisualEvidenceServiceEnforcesAggregateLimit(t *testing.T) {

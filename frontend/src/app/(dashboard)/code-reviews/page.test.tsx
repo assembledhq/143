@@ -210,6 +210,60 @@ const evidence: CodeReviewEvidence = {
       created_at: "2026-06-26T12:02:00Z",
     },
   ],
+  visual_evidence: {
+    version: 1,
+    repository_id: "repo-1",
+    repository: "acme/api",
+    pull_request_number: 428,
+    head_sha: "abcdef123456",
+    captured_at: "2026-06-26T12:01:00Z",
+    complete: true,
+    overflow: false,
+    evidence: [
+      {
+        evidence_id: "ve_comment",
+        source: {
+          source_id: "ves_comment",
+          surface: "issue_comment",
+          provider_object_id: "991",
+          source_url: "https://github.com/acme/api/pull/428#issuecomment-991",
+          author_login: "outside-contributor",
+          author_type: "User",
+          created_at: "2026-06-26T11:59:00Z",
+          image_index: 1,
+          image_url: "https://github.com/user-attachments/assets/example",
+          untrusted: true,
+        },
+        original_url: "https://github.com/user-attachments/assets/example",
+        stored_url: "/api/v1/uploads/files/org-1/code-review-evidence/session-1/hash.png",
+        content_sha256: "a".repeat(64),
+        content_type: "image/png",
+        byte_size: 2048,
+        width: 640,
+        height: 360,
+        status: "available",
+      },
+      {
+        evidence_id: "ve_review_comment",
+        source: {
+          source_id: "ves_review_comment",
+          surface: "review_comment",
+          provider_object_id: "992",
+          source_url: "javascript:alert('untrusted evidence source')",
+          author_login: "reviewer",
+          author_type: "User",
+          created_at: "2026-06-26T12:00:00Z",
+          image_index: 1,
+          image_url: "https://example.com/missing.png",
+          untrusted: true,
+        },
+        original_url: "https://example.com/missing.png",
+        status: "unavailable",
+        failure_reason: "image is unavailable",
+      },
+    ],
+  },
+  cited_visual_evidence_ids: ["ve_comment"],
 };
 
 const reviewStats: CodeReviewStats = {
@@ -622,6 +676,20 @@ describe("CodeReviewsPage", () => {
       ),
     ).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("Review this PR.")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("Visual evidence")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("ve_comment")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("PR comment")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("@outside-contributor", { exact: false })).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("Cited")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("ve_review_comment")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("image is unavailable")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByRole("img", { name: "Captured visual evidence ve_comment" })).toHaveAttribute(
+      "src",
+      expect.stringContaining("/api/v1/uploads/files/org-1/code-review-evidence/session-1/hash.png"),
+    );
+    const visualEvidenceSourceLinks = within(evidenceSheet).getAllByRole("link", { name: "View source" });
+    expect(visualEvidenceSourceLinks).toHaveLength(1);
+    expect(visualEvidenceSourceLinks[0]).toHaveAttribute("href", "https://github.com/acme/api/pull/428#issuecomment-991");
     expect(within(evidenceSheet).getByText("Completed")).toBeInTheDocument();
     await user.click(within(evidenceSheet).getByRole("button", { name: "Close" }));
 

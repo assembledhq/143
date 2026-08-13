@@ -50,16 +50,18 @@ type VisualEvidenceRepositoryStore interface {
 }
 
 type VisualEvidenceService struct {
-	discoverer VisualEvidenceDiscoverer
-	prompts    VisualEvidencePromptStore
-	repos      VisualEvidenceRepositoryStore
-	tokens     InstallationTokenProvider
-	uploads    storage.UploadStore
-	downloader *visualEvidenceDownloader
-	logger     zerolog.Logger
-	maxImages  int
-	maxBytes   int64
-	concurrent int
+	discoverer    VisualEvidenceDiscoverer
+	prompts       VisualEvidencePromptStore
+	repos         VisualEvidenceRepositoryStore
+	tokens        InstallationTokenProvider
+	uploads       storage.UploadStore
+	downloader    *visualEvidenceDownloader
+	logger        zerolog.Logger
+	maxImages     int
+	maxBytes      int64
+	concurrent    int
+	recordCapture func(context.Context, int, int, bool, bool, bool)
+	recordImage   func(context.Context, string, string, string, int64, float64, bool, bool)
 }
 
 type CaptureVisualEvidenceInput struct {
@@ -79,16 +81,18 @@ func NewVisualEvidenceService(
 	logger zerolog.Logger,
 ) *VisualEvidenceService {
 	return &VisualEvidenceService{
-		discoverer: discoverer,
-		prompts:    prompts,
-		repos:      repos,
-		tokens:     tokens,
-		uploads:    uploads,
-		downloader: newVisualEvidenceDownloader(),
-		logger:     logger,
-		maxImages:  visualEvidenceMaxImages,
-		maxBytes:   visualEvidenceMaxTotalBytes,
-		concurrent: visualEvidenceConcurrency,
+		discoverer:    discoverer,
+		prompts:       prompts,
+		repos:         repos,
+		tokens:        tokens,
+		uploads:       uploads,
+		downloader:    newVisualEvidenceDownloader(),
+		logger:        logger,
+		maxImages:     visualEvidenceMaxImages,
+		maxBytes:      visualEvidenceMaxTotalBytes,
+		concurrent:    visualEvidenceConcurrency,
+		recordCapture: metrics.RecordCodeReviewVisualEvidenceCapture,
+		recordImage:   metrics.RecordCodeReviewVisualEvidenceImage,
 	}
 }
 
@@ -97,6 +101,20 @@ func (s *VisualEvidenceService) Capture(ctx context.Context, input CaptureVisual
 	if input.OrgID == uuid.Nil || input.SessionID == uuid.Nil || input.RepositoryID == uuid.Nil || input.PullRequestNumber <= 0 || !visualEvidenceHeadSHA.MatchString(input.HeadSHA) {
 		return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("org_id, session_id, repository_id, positive pull request number, and a full Git head SHA are required")
 	}
+	recordCapture := metrics.RecordCodeReviewVisualEvidenceCapture
+	if s != nil && s.recordCapture != nil {
+		recordCapture = s.recordCapture
+	}
+	discoveredCount := 0
+	persistedCount := 0
+	overflow := false
+	restoreAttempt := false
+	metricRecorded := false
+	defer func() {
+		if !metricRecorded {
+			recordCapture(ctx, discoveredCount, persistedCount, false, overflow, restoreAttempt)
+		}
+	}()
 	if s == nil || s.discoverer == nil || s.prompts == nil || s.repos == nil || s.uploads == nil || s.downloader == nil {
 		return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("code review visual evidence service is not configured")
 	}
@@ -107,11 +125,13 @@ func (s *VisualEvidenceService) Capture(ctx context.Context, input CaptureVisual
 	recordKey := visualEvidenceRecordKey(input.SessionID, input.HeadSHA)
 	record, err := s.prompts.GetPromptRecordByKey(ctx, input.OrgID, recordKey)
 	if err == nil {
-		restored, restoreErr := restoreVisualEvidenceSnapshot(record, input)
+		restoreAttempt = true
+		restoredSnapshot, restoreErr := restoreVisualEvidenceSnapshot(record, input)
 		if restoreErr == nil {
-			metrics.RecordCodeReviewVisualEvidenceCapture(ctx, len(restored.Evidence), len(restored.Evidence), restored.Complete, restored.Overflow, true)
+			recordCapture(ctx, len(restoredSnapshot.Evidence), len(restoredSnapshot.Evidence), restoredSnapshot.Complete, restoredSnapshot.Overflow, true)
+			metricRecorded = true
 		}
-		return restored, restoreErr
+		return restoredSnapshot, restoreErr
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("load code review visual evidence checkpoint: %w", err)
@@ -124,6 +144,7 @@ func (s *VisualEvidenceService) Capture(ctx context.Context, input CaptureVisual
 	if err := validateVisualEvidenceDiscovery(discovery, input); err != nil {
 		return models.CodeReviewVisualEvidenceSnapshot{}, err
 	}
+	discoveredCount = len(discovery.Sources)
 
 	token := ""
 	if discoveryNeedsGitHubAssetToken(discovery) {
@@ -141,6 +162,7 @@ func (s *VisualEvidenceService) Capture(ctx context.Context, input CaptureVisual
 	}
 
 	snapshot := s.materialize(ctx, input, discovery, token)
+	overflow = snapshot.Overflow
 	metadata, err := json.Marshal(snapshot)
 	if err != nil {
 		return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("encode code review visual evidence manifest: %w", err)
@@ -157,7 +179,9 @@ func (s *VisualEvidenceService) Capture(ctx context.Context, input CaptureVisual
 	if err != nil {
 		return models.CodeReviewVisualEvidenceSnapshot{}, err
 	}
-	metrics.RecordCodeReviewVisualEvidenceCapture(ctx, len(discovery.Sources), len(persisted.Evidence), persisted.Complete, persisted.Overflow, !created)
+	persistedCount = len(persisted.Evidence)
+	recordCapture(ctx, len(discovery.Sources), len(persisted.Evidence), persisted.Complete, persisted.Overflow, !created)
+	metricRecorded = true
 	return persisted, nil
 }
 
@@ -195,6 +219,10 @@ func validateVisualEvidenceDiscovery(discovery models.CodeReviewVisualEvidenceDi
 }
 
 func (s *VisualEvidenceService) materialize(ctx context.Context, input CaptureVisualEvidenceInput, discovery models.CodeReviewVisualEvidenceDiscovery, token string) models.CodeReviewVisualEvidenceSnapshot {
+	recordImage := metrics.RecordCodeReviewVisualEvidenceImage
+	if s.recordImage != nil {
+		recordImage = s.recordImage
+	}
 	snapshot := models.CodeReviewVisualEvidenceSnapshot{
 		Version: visualEvidenceSnapshotVersion, RepositoryID: input.RepositoryID, Repository: discovery.Repository,
 		PullRequestNumber: input.PullRequestNumber, HeadSHA: input.HeadSHA, CapturedAt: discovery.CapturedAt,
@@ -308,7 +336,7 @@ func (s *VisualEvidenceService) materialize(ctx context.Context, input CaptureVi
 		if index >= s.maxImages {
 			evidence := overLimitVisualEvidence(source, originalURL, fmt.Sprintf("assessment exceeds the %d image limit", s.maxImages))
 			snapshot.Evidence = append(snapshot.Evidence, evidence)
-			metrics.RecordCodeReviewVisualEvidenceImage(ctx, string(source.Surface), string(evidence.Status), visualEvidenceHostClass(originalURL), 0, 0)
+			recordImage(ctx, string(source.Surface), string(evidence.Status), visualEvidenceHostClass(originalURL), 0, 0, false, false)
 			continue
 		}
 
@@ -325,7 +353,8 @@ func (s *VisualEvidenceService) materialize(ctx context.Context, input CaptureVi
 			evidence.DuplicateOfEvidenceID = prepared.duplicateOfEvidenceID
 		}
 		snapshot.Evidence = append(snapshot.Evidence, evidence)
-		metrics.RecordCodeReviewVisualEvidenceImage(ctx, string(source.Surface), string(evidence.Status), prepared.hostClass, evidence.ByteSize, prepared.duration.Seconds())
+		fetched := firstSourceIndexes[urlIndexes[originalURL]] == index
+		recordImage(ctx, string(source.Surface), string(evidence.Status), prepared.hostClass, evidence.ByteSize, prepared.duration.Seconds(), fetched, evidence.DuplicateOfEvidenceID != "")
 	}
 	return snapshot
 }
@@ -345,55 +374,90 @@ func restoreVisualEvidenceSnapshot(record models.CodeReviewPromptRecord, input C
 	if snapshot.Version != visualEvidenceSnapshotVersion || snapshot.RepositoryID != input.RepositoryID || snapshot.PullRequestNumber != input.PullRequestNumber || !strings.EqualFold(snapshot.HeadSHA, input.HeadSHA) || !snapshot.Complete {
 		return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("stored code review visual evidence manifest is incomplete or does not match the assessment")
 	}
+	if err := ValidateVisualEvidenceSnapshot(snapshot, input.OrgID, input.SessionID); err != nil {
+		return models.CodeReviewVisualEvidenceSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
+// ValidateVisualEvidenceSnapshot enforces the persisted manifest invariants
+// shared by worker restoration and read APIs. In particular, an available
+// image must resolve through this assessment's first-party upload route; a
+// corrupt audit record must never turn an evidence read into an external image
+// request.
+func ValidateVisualEvidenceSnapshot(snapshot models.CodeReviewVisualEvidenceSnapshot, orgID, sessionID uuid.UUID) error {
+	if orgID == uuid.Nil || sessionID == uuid.Nil || snapshot.Version != visualEvidenceSnapshotVersion ||
+		snapshot.RepositoryID == uuid.Nil || strings.TrimSpace(snapshot.Repository) == "" ||
+		snapshot.PullRequestNumber <= 0 || !visualEvidenceHeadSHA.MatchString(strings.TrimSpace(snapshot.HeadSHA)) ||
+		snapshot.CapturedAt.IsZero() || !snapshot.Complete {
+		return fmt.Errorf("stored code review visual evidence manifest has invalid snapshot identity")
+	}
 	seenIDs := make(map[string]struct{}, len(snapshot.Evidence))
 	seenSourceIDs := make(map[string]struct{}, len(snapshot.Evidence))
 	for _, evidence := range snapshot.Evidence {
-		if strings.TrimSpace(evidence.EvidenceID) == "" || strings.TrimSpace(evidence.Source.SourceID) == "" || !evidence.Source.Untrusted {
-			return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("stored code review visual evidence manifest contains invalid evidence identity")
+		if strings.TrimSpace(evidence.EvidenceID) == "" || strings.TrimSpace(evidence.Source.SourceID) == "" ||
+			strings.TrimSpace(evidence.Source.ProviderObjectID) == "" || !isSafeVisualEvidenceSourceURL(evidence.Source.SourceURL) ||
+			strings.TrimSpace(evidence.Source.ImageURL) == "" || evidence.Source.ImageIndex <= 0 || !evidence.Source.Untrusted {
+			return fmt.Errorf("stored code review visual evidence manifest contains invalid evidence identity")
 		}
 		if _, duplicate := seenIDs[evidence.EvidenceID]; duplicate {
-			return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("stored code review visual evidence manifest contains duplicate evidence IDs")
+			return fmt.Errorf("stored code review visual evidence manifest contains duplicate evidence IDs")
 		}
 		seenIDs[evidence.EvidenceID] = struct{}{}
 		if _, duplicate := seenSourceIDs[evidence.Source.SourceID]; duplicate {
-			return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("stored code review visual evidence manifest contains duplicate source IDs")
+			return fmt.Errorf("stored code review visual evidence manifest contains duplicate source IDs")
 		}
 		seenSourceIDs[evidence.Source.SourceID] = struct{}{}
 		if err := evidence.Source.Surface.Validate(); err != nil {
-			return models.CodeReviewVisualEvidenceSnapshot{}, err
+			return err
 		}
 		if err := evidence.Source.AuthorType.Validate(); err != nil {
-			return models.CodeReviewVisualEvidenceSnapshot{}, err
+			return err
+		}
+		if evidence.Source.Surface != models.CodeReviewEvidenceSurfaceDescription &&
+			(!evidence.Source.AuthorType.IsHuman() || strings.TrimSpace(evidence.Source.AuthorLogin) == "") {
+			return fmt.Errorf("stored code review visual evidence manifest contains non-human discussion content")
 		}
 		if err := evidence.Status.Validate(); err != nil {
-			return models.CodeReviewVisualEvidenceSnapshot{}, err
+			return err
 		}
 		if evidence.EvidenceID != visualEvidenceID(evidence.Source.SourceID, evidence.ContentSHA256, evidence.Status) {
-			return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("stored code review visual evidence manifest contains a non-canonical evidence ID")
+			return fmt.Errorf("stored code review visual evidence manifest contains a non-canonical evidence ID")
 		}
 		if evidence.Status == models.CodeReviewVisualEvidenceFetchStatusAvailable &&
 			(strings.TrimSpace(evidence.StorageKey) == "" || strings.TrimSpace(evidence.StoredURL) == "" || strings.TrimSpace(evidence.ContentSHA256) == "") {
-			return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("stored code review visual evidence manifest contains an unavailable attachment marked available")
+			return fmt.Errorf("stored code review visual evidence manifest contains an unavailable attachment marked available")
 		}
 		if evidence.Status == models.CodeReviewVisualEvidenceFetchStatusAvailable {
-			expectedStoragePrefix := fmt.Sprintf("%s/code-review-evidence/%s/", input.OrgID, input.SessionID)
-			if !strings.HasPrefix(evidence.StorageKey, expectedStoragePrefix) ||
-				evidence.StoredURL != "/api/v1/uploads/files/"+evidence.StorageKey ||
-				!visualEvidenceContentSHA.MatchString(evidence.ContentSHA256) || evidence.ByteSize <= 0 ||
-				evidence.Width <= 0 || evidence.Height <= 0 {
-				return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("stored code review visual evidence manifest contains an invalid first-party attachment")
+			if !visualEvidenceContentSHA.MatchString(evidence.ContentSHA256) || evidence.ByteSize <= 0 ||
+				evidence.ByteSize > visualEvidenceMaxImageBytes || evidence.Width <= 0 || evidence.Height <= 0 ||
+				int64(evidence.Width) > visualEvidenceMaxPixels || int64(evidence.Height) > visualEvidenceMaxPixels ||
+				int64(evidence.Width)*int64(evidence.Height) > visualEvidenceMaxPixels ||
+				!isSupportedVisualEvidenceContentType(evidence.ContentType) {
+				return fmt.Errorf("stored code review visual evidence manifest contains an invalid first-party attachment")
 			}
+			expectedStorageKey := fmt.Sprintf("%s/code-review-evidence/%s/%s%s", orgID, sessionID, evidence.ContentSHA256, visualEvidenceExtension(evidence.ContentType))
+			if evidence.StorageKey != expectedStorageKey || evidence.StoredURL != "/api/v1/uploads/files/"+expectedStorageKey {
+				return fmt.Errorf("stored code review visual evidence manifest contains an invalid first-party attachment")
+			}
+		} else if strings.TrimSpace(evidence.StorageKey) != "" || strings.TrimSpace(evidence.StoredURL) != "" {
+			return fmt.Errorf("stored code review visual evidence manifest exposes storage for unavailable evidence")
 		}
 		if evidence.DuplicateOfEvidenceID != "" {
 			if evidence.DuplicateOfEvidenceID == evidence.EvidenceID {
-				return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("stored code review visual evidence manifest contains a self-referential duplicate")
+				return fmt.Errorf("stored code review visual evidence manifest contains a self-referential duplicate")
 			}
 			if _, exists := seenIDs[evidence.DuplicateOfEvidenceID]; !exists {
-				return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("stored code review visual evidence manifest contains an invalid duplicate reference")
+				return fmt.Errorf("stored code review visual evidence manifest contains an invalid duplicate reference")
 			}
 		}
 	}
-	return snapshot, nil
+	return nil
+}
+
+func isSafeVisualEvidenceSourceURL(rawURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	return err == nil && parsed.Scheme == "https" && strings.EqualFold(parsed.Hostname(), "github.com") && parsed.User == nil
 }
 
 func discoveryNeedsGitHubAssetToken(discovery models.CodeReviewVisualEvidenceDiscovery) bool {
@@ -430,6 +494,15 @@ func visualEvidenceExtension(contentType string) string {
 		return ".webp"
 	default:
 		return path.Ext(contentType)
+	}
+}
+
+func isSupportedVisualEvidenceContentType(contentType string) bool {
+	switch contentType {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+		return true
+	default:
+		return false
 	}
 }
 

@@ -717,6 +717,11 @@ func (h *CodeReviewHandler) Evidence(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_PROMPTS_LOAD_FAILED", "failed to load code review prompt records", err)
 		return
 	}
+	visualEvidence, citedVisualEvidenceIDs, err := codeReviewVisualEvidenceForAPI(orgID, sessionID, records, results)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_VISUAL_EVIDENCE_LOAD_FAILED", "failed to load code review visual evidence", err)
+		return
+	}
 	reasonCodes, err := h.store.GetRiskReasonCodesBySession(r.Context(), orgID, sessionID)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REASONS_LOAD_FAILED", "failed to load code review reason codes", err)
@@ -724,7 +729,77 @@ func (h *CodeReviewHandler) Evidence(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewEvidence]{Data: models.CodeReviewEvidence{
 		AgentResults: results, Findings: findings, PromptRecords: records, RiskReasonCodes: reasonCodes,
+		VisualEvidence: visualEvidence, CitedVisualEvidenceIDs: citedVisualEvidenceIDs,
 	}})
+}
+
+func codeReviewVisualEvidenceForAPI(orgID, sessionID uuid.UUID, records []models.CodeReviewPromptRecord, results []models.CodeReviewAgentResult) (*models.CodeReviewVisualEvidenceSnapshot, []string, error) {
+	var snapshot *models.CodeReviewVisualEvidenceSnapshot
+	for _, record := range records {
+		if record.Role != "visual_evidence" {
+			continue
+		}
+		if snapshot != nil {
+			return nil, nil, errors.New("multiple visual evidence snapshots were recorded for one assessment")
+		}
+		var decoded models.CodeReviewVisualEvidenceSnapshot
+		if err := json.Unmarshal(record.Metadata, &decoded); err != nil {
+			return nil, nil, fmt.Errorf("decode visual evidence prompt record: %w", err)
+		}
+		if decoded.Version != 1 || !decoded.Complete || decoded.RepositoryID == uuid.Nil || decoded.PullRequestNumber <= 0 || strings.TrimSpace(decoded.HeadSHA) == "" {
+			return nil, nil, errors.New("visual evidence prompt record is incomplete")
+		}
+		if err := codereviewsvc.ValidateVisualEvidenceSnapshot(decoded, orgID, sessionID); err != nil {
+			return nil, nil, fmt.Errorf("validate visual evidence prompt record: %w", err)
+		}
+		snapshot = &decoded
+	}
+	if snapshot == nil {
+		return nil, nil, nil
+	}
+	availableIDs := make(map[string]struct{}, len(snapshot.Evidence))
+	for _, evidence := range snapshot.Evidence {
+		if evidence.EvidenceID != "" && evidence.Status == models.CodeReviewVisualEvidenceFetchStatusAvailable {
+			availableIDs[evidence.EvidenceID] = struct{}{}
+		}
+	}
+	cited := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, result := range results {
+		if result.Role != models.CodeReviewAgentRoleOrchestrator || result.Status != models.CodeReviewAgentResultStatusCompleted {
+			continue
+		}
+		var structured struct {
+			SynthesisValidated bool `json:"synthesis_validated"`
+			Synthesis          struct {
+				DescriptionAssessments []struct {
+					Status        string                                    `json:"status"`
+					EvidenceBasis models.CodeReviewDescriptionEvidenceBasis `json:"evidence_basis"`
+					EvidenceIDs   []string                                  `json:"evidence_ids"`
+				} `json:"description_assessments"`
+			} `json:"synthesis"`
+		}
+		if err := json.Unmarshal(result.StructuredResult, &structured); err != nil || !structured.SynthesisValidated {
+			continue
+		}
+		for _, assessment := range structured.Synthesis.DescriptionAssessments {
+			if assessment.Status != "satisfied" || assessment.EvidenceBasis != models.CodeReviewDescriptionEvidenceBasisImage {
+				continue
+			}
+			for _, rawID := range assessment.EvidenceIDs {
+				evidenceID := strings.TrimSpace(rawID)
+				if _, available := availableIDs[evidenceID]; !available {
+					continue
+				}
+				if _, duplicate := seen[evidenceID]; duplicate {
+					continue
+				}
+				seen[evidenceID] = struct{}{}
+				cited = append(cited, evidenceID)
+			}
+		}
+	}
+	return snapshot, cited, nil
 }
 
 func (h *CodeReviewHandler) Retry(w http.ResponseWriter, r *http.Request) {
