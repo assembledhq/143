@@ -577,7 +577,18 @@ func (w *Worker) retryJobWithDelay(ctx context.Context, jobID, lockToken uuid.UU
 	}
 	if backoff <= 0 {
 		w.notifyRunnableJob(ctx, jobID)
+		return
 	}
+	// Postgres notifications are edge-triggered: publishing before run_at would
+	// only make peers poll too early, while publishing nothing leaves the job at
+	// the mercy of the five-second fallback poll. Wake the fleet when the
+	// persisted retry actually becomes runnable.
+	time.AfterFunc(backoff, func() {
+		wakeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		w.notifyRunnableJob(wakeCtx, jobID)
+		w.Wake()
+	})
 }
 
 func (w *Worker) notifyRunnableJob(ctx context.Context, jobID uuid.UUID) {
