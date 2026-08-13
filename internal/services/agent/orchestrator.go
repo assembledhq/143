@@ -5623,6 +5623,7 @@ func (o *Orchestrator) nonDrainableCodeReviewThreadsForDrain(ctx context.Context
 		switch thread.Status {
 		case models.ThreadStatusPending,
 			models.ThreadStatusRunning,
+			models.ThreadStatusAwaitingInput,
 			models.ThreadStatusCompleted,
 			models.ThreadStatusFailed,
 			models.ThreadStatusCancelled:

@@ -475,6 +475,7 @@ func TestDrainQueuedMessages_SkipsNonDrainableCodeReviewReviewerThread(t *testin
 	}{
 		{name: "pending reviewer", status: models.ThreadStatusPending},
 		{name: "running reviewer", status: models.ThreadStatusRunning},
+		{name: "reviewer awaiting human input", status: models.ThreadStatusAwaitingInput},
 		{name: "completed reviewer", status: models.ThreadStatusCompleted},
 		{name: "failed reviewer", status: models.ThreadStatusFailed},
 		{name: "cancelled reviewer", status: models.ThreadStatusCancelled},
