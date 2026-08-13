@@ -1,6 +1,7 @@
 package agent_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"sync"
@@ -322,12 +323,13 @@ func TestSandboxCapacityGate_AcquireFailsClosedWhenSharedReservationFails(t *tes
 	t.Parallel()
 
 	shared := &fakeSharedSandboxCapacityStore{err: errors.New("database unavailable")}
+	var logs bytes.Buffer
 	gate := agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
 		Counter:            &fakeLiveSandboxCounter{},
 		SharedReservations: shared,
 		MaxActive:          2,
 		NodeID:             "worker-1",
-		Logger:             zerolog.Nop(),
+		Logger:             zerolog.New(&logs),
 	})
 
 	reservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "branch_preview"})
@@ -336,6 +338,8 @@ func TestSandboxCapacityGate_AcquireFailsClosedWhenSharedReservationFails(t *tes
 	require.ErrorIs(t, err, agent.ErrSandboxCapacityCoordination, "shared reservation failures should be distinguishable from genuine saturation")
 	require.ErrorContains(t, err, "database unavailable", "capacity error should retain the shared reservation failure")
 	require.Nil(t, reservation, "failed shared reservations should not reserve local capacity")
+	require.Contains(t, logs.String(), `"sandbox_capacity_coordination_failure":true`, "coordination failures should emit an alertable structured signal")
+	require.Contains(t, logs.String(), `"shared_admission_timeout":10000`, "coordination failures should report the configured admission budget in milliseconds")
 }
 
 func TestSandboxCapacityGate_SnapshotSeparatesSandboxTurnReservations(t *testing.T) {

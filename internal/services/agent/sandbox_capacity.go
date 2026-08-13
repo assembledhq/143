@@ -300,7 +300,11 @@ func (g *SandboxCapacityGate) acquireSharedReservation(
 	cancel()
 	if err != nil {
 		wrapped := fmt.Errorf("%w: %w: reserve shared sandbox capacity: %w", ErrSandboxCapacity, ErrSandboxCapacityCoordination, err)
-		g.logCapacity(req, live, g.ReservedCount()).Err(err).Msg("failed to reserve shared sandbox capacity; rejecting sandbox admission")
+		g.logCapacity(req, live, g.ReservedCount()).
+			Bool("sandbox_capacity_coordination_failure", true).
+			Dur("shared_admission_timeout", g.sharedAdmissionTimeout).
+			Err(err).
+			Msg("failed to reserve shared sandbox capacity; rejecting sandbox admission")
 		return nil, false, wrapped
 	}
 	if !acquired {

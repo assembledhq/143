@@ -97,6 +97,9 @@ func (o *Orchestrator) checkSharedTurnConcurrency(ctx context.Context, orgID uui
 		return err
 	}
 	_, currentJobIncluded := jobctx.JobIDFromContext(ctx)
+	// The shared job counter identifies the current claimed turn directly, so
+	// its greater-than comparison supersedes the legacy session-row
+	// excludeCurrentRunning adjustment used by the fallbacks above.
 	if active > settings.MaxConcurrentRuns || (!currentJobIncluded && active >= settings.MaxConcurrentRuns) {
 		return fmt.Errorf("%w: %d/%d agent turns active", ErrSandboxTurnConcurrency, active, settings.MaxConcurrentRuns)
 	}
