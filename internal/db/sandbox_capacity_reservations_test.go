@@ -42,6 +42,7 @@ func TestSandboxCapacityReservationStore_ReserveSandboxCapacity(t *testing.T) {
 
 			jobID, lockToken, reservationID := uuid.New(), uuid.New(), uuid.New()
 			expiresAt := time.Now().Add(time.Minute)
+			conflictingExpiresAt := time.Now().Add(30 * time.Second)
 			mock.ExpectBegin()
 			mock.ExpectExec(`SELECT pg_advisory_xact_lock`).
 				WithArgs("worker-1").
@@ -58,9 +59,13 @@ func TestSandboxCapacityReservationStore_ReserveSandboxCapacity(t *testing.T) {
 			mock.ExpectQuery(`(?s)WITH active_capacity_keys AS.*FROM jobs reserved_job.*UNION.*FROM sandbox_capacity_reservations.*SELECT COUNT`).
 				WithArgs("worker-1", &jobID, &lockToken).
 				WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(tt.reserved))
-			mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM sandbox_capacity_reservations.*job_id = @job_id.*job_lock_token IS DISTINCT FROM @job_lock_token`).
+			conflictRows := pgxmock.NewRows([]string{"expires_at"})
+			if tt.conflicting {
+				conflictRows.AddRow(conflictingExpiresAt)
+			}
+			mock.ExpectQuery(`(?s)SELECT expires_at.*FROM sandbox_capacity_reservations.*job_id = @job_id.*job_lock_token IS DISTINCT FROM @job_lock_token.*ORDER BY expires_at DESC.*LIMIT 1`).
 				WithArgs(&jobID, &lockToken).
-				WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(tt.conflicting))
+				WillReturnRows(conflictRows)
 			if tt.expectInsert {
 				mock.ExpectQuery(`(?s)INSERT INTO sandbox_capacity_reservations.*job_lock_token.*ON CONFLICT \(job_id\).*job_lock_token = EXCLUDED.job_lock_token.*WHERE sandbox_capacity_reservations.job_lock_token IS NOT DISTINCT FROM EXCLUDED.job_lock_token.*RETURNING id`).
 					WithArgs("worker-1", &jobID, &lockToken, models.SandboxWorkloadClassInteractive, expiresAt).
@@ -77,6 +82,9 @@ func TestSandboxCapacityReservationStore_ReserveSandboxCapacity(t *testing.T) {
 
 			if tt.expectConflict {
 				require.ErrorIs(t, err, ErrSandboxCapacityAttemptConflict, "replacement attempt should report stale-attempt coordination separately from fleet saturation")
+				var conflictErr *SandboxCapacityAttemptConflictError
+				require.ErrorAs(t, err, &conflictErr, "replacement attempt should expose the stale lease deadline")
+				require.Equal(t, conflictingExpiresAt, conflictErr.ExpiresAt, "replacement attempt should wait for the persisted stale lease expiry")
 			} else {
 				require.NoError(t, err, "shared capacity reservation should complete")
 			}

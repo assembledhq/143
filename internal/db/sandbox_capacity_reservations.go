@@ -22,6 +22,22 @@ type SandboxCapacityReservationStore struct {
 // is a coordination condition, not evidence that the physical fleet is full.
 var ErrSandboxCapacityAttemptConflict = errors.New("prior sandbox capacity job attempt still owns a live reservation")
 
+// SandboxCapacityAttemptConflictError reports when the stale attempt's lease
+// will stop fencing a replacement. Callers can wait directly for this durable
+// deadline instead of repeatedly launching executors or applying the shorter
+// fleet-capacity retry budget.
+type SandboxCapacityAttemptConflictError struct {
+	ExpiresAt time.Time
+}
+
+func (e *SandboxCapacityAttemptConflictError) Error() string {
+	return fmt.Sprintf("%s until %s", ErrSandboxCapacityAttemptConflict, e.ExpiresAt.UTC().Format(time.RFC3339Nano))
+}
+
+func (e *SandboxCapacityAttemptConflictError) Unwrap() error {
+	return ErrSandboxCapacityAttemptConflict
+}
+
 func NewSandboxCapacityReservationStore(db TxStarter) *SandboxCapacityReservationStore {
 	return &SandboxCapacityReservationStore{db: db}
 }
@@ -152,28 +168,31 @@ func (s *SandboxCapacityReservationStore) ReserveSandboxCapacity(
 		return uuid.Nil, liveSandboxes, liveSandboxes, false, fmt.Errorf("count shared sandbox capacity reservations: %w", err)
 	}
 	total := liveSandboxes + reserved
-	var conflictingJobAttempt bool
+	var conflictingJobAttemptExpiresAt time.Time
 	if jobID != nil {
 		err = tx.QueryRow(ctx, `
-			SELECT EXISTS (
-				SELECT 1
-				FROM sandbox_capacity_reservations
-				WHERE job_id = @job_id
-				  AND expires_at > now()
-				  AND job_lock_token IS DISTINCT FROM @job_lock_token
-			)`, pgx.NamedArgs{
+			SELECT expires_at
+			FROM sandbox_capacity_reservations
+			WHERE job_id = @job_id
+			  AND expires_at > now()
+			  AND job_lock_token IS DISTINCT FROM @job_lock_token
+			ORDER BY expires_at DESC
+			LIMIT 1`, pgx.NamedArgs{
 			"job_id":         jobID,
 			"job_lock_token": jobLockToken,
-		}).Scan(&conflictingJobAttempt)
+		}).Scan(&conflictingJobAttemptExpiresAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = nil
+		}
 		if err != nil {
 			return uuid.Nil, liveSandboxes, total, false, fmt.Errorf("inspect prior sandbox capacity job attempt: %w", err)
 		}
 	}
-	if conflictingJobAttempt {
+	if !conflictingJobAttemptExpiresAt.IsZero() {
 		if err := tx.Commit(ctx); err != nil {
 			return uuid.Nil, liveSandboxes, total, false, fmt.Errorf("commit conflicting sandbox capacity attempt: %w", err)
 		}
-		return uuid.Nil, liveSandboxes, total, false, ErrSandboxCapacityAttemptConflict
+		return uuid.Nil, liveSandboxes, total, false, &SandboxCapacityAttemptConflictError{ExpiresAt: conflictingJobAttemptExpiresAt}
 	}
 	if effectiveMax <= 0 || total >= effectiveMax {
 		if err := tx.Commit(ctx); err != nil {

@@ -143,9 +143,10 @@ func TestIntegration_SharedSandboxAdmissionFencesReclaimedJobAttempt(t *testing.
 	require.NotNil(t, claimed, "first queue attempt should own the job before final admission")
 
 	capacityStore := db.NewSandboxCapacityReservationStore(pool)
+	firstReservationExpiresAt := time.Now().Add(time.Minute)
 	firstReservationID, _, _, acquired, err := capacityStore.ReserveSandboxCapacity(
 		ctx, nodeID, &jobID, &firstLockToken, models.SandboxWorkloadClassInteractive,
-		func(context.Context) (int, error) { return 0, nil }, 3, time.Now().Add(time.Minute),
+		func(context.Context) (int, error) { return 0, nil }, 3, firstReservationExpiresAt,
 	)
 	require.NoError(t, err, "first queue attempt should reserve final-admission capacity")
 	require.True(t, acquired, "first queue attempt should acquire final-admission capacity")
@@ -176,6 +177,9 @@ func TestIntegration_SharedSandboxAdmissionFencesReclaimedJobAttempt(t *testing.
 		func(context.Context) (int, error) { return 0, nil }, 3, time.Now().Add(time.Minute),
 	)
 	require.ErrorIs(t, err, db.ErrSandboxCapacityAttemptConflict, "replacement attempt should distinguish stale-attempt coordination from physical capacity saturation")
+	var conflictErr *db.SandboxCapacityAttemptConflictError
+	require.ErrorAs(t, err, &conflictErr, "replacement attempt should receive the stale lease deadline")
+	require.WithinDuration(t, firstReservationExpiresAt, conflictErr.ExpiresAt, time.Millisecond, "replacement attempt should wait for the persisted stale lease expiry")
 	require.False(t, replacementAcquired, "replacement attempt must wait for the stale attempt's live reservation on another worker")
 	require.Equal(t, 0, blockedTotal, "another worker's lease is a fencing conflict rather than local capacity load")
 
