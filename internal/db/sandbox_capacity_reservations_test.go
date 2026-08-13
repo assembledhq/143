@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 
@@ -20,12 +21,14 @@ func TestSandboxCapacityReservationStore_ReserveSandboxCapacity(t *testing.T) {
 		name             string
 		reserved         int
 		effectiveMax     int
+		conflicting      bool
 		expectInsert     bool
 		expectedTotal    int
 		expectedAcquired bool
 	}{
 		{name: "reserves below shared capacity", reserved: 1, effectiveMax: 3, expectInsert: true, expectedTotal: 3, expectedAcquired: true},
 		{name: "rejects at shared capacity", reserved: 2, effectiveMax: 3, expectedTotal: 3},
+		{name: "waits for prior job attempt lease", reserved: 1, effectiveMax: 3, conflicting: true, expectedTotal: 2},
 	}
 
 	for _, tt := range tests {
@@ -36,7 +39,7 @@ func TestSandboxCapacityReservationStore_ReserveSandboxCapacity(t *testing.T) {
 			require.NoError(t, err, "should create mock pool")
 			defer mock.Close()
 
-			jobID, reservationID := uuid.New(), uuid.New()
+			jobID, lockToken, reservationID := uuid.New(), uuid.New(), uuid.New()
 			expiresAt := time.Now().Add(time.Minute)
 			mock.ExpectBegin()
 			mock.ExpectExec(`SELECT pg_advisory_xact_lock`).
@@ -45,12 +48,21 @@ func TestSandboxCapacityReservationStore_ReserveSandboxCapacity(t *testing.T) {
 			mock.ExpectExec(`(?s)DELETE FROM sandbox_capacity_reservations.*node_id = @node_id`).
 				WithArgs("worker-1").
 				WillReturnResult(pgxmock.NewResult("DELETE", 0))
+			mock.ExpectQuery(`(?s)SELECT id.*FROM jobs.*status = 'running'.*lock_token = @job_lock_token.*FOR UPDATE`).
+				WithArgs(&jobID, &lockToken).
+				WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+			mock.ExpectExec(`(?s)DELETE FROM sandbox_capacity_reservations.*job_id = @job_id.*expires_at <= now\(\).*job_lock_token IS DISTINCT FROM @job_lock_token`).
+				WithArgs(&jobID, &lockToken).
+				WillReturnResult(pgxmock.NewResult("DELETE", 0))
 			mock.ExpectQuery(`(?s)WITH active_capacity_keys AS.*FROM jobs reserved_job.*UNION.*FROM sandbox_capacity_reservations.*SELECT COUNT`).
-				WithArgs("worker-1", &jobID).
+				WithArgs("worker-1", &jobID, &lockToken).
 				WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(tt.reserved))
+			mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM sandbox_capacity_reservations.*job_id = @job_id.*job_lock_token IS DISTINCT FROM @job_lock_token`).
+				WithArgs(&jobID, &lockToken).
+				WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(tt.conflicting))
 			if tt.expectInsert {
-				mock.ExpectQuery(`(?s)INSERT INTO sandbox_capacity_reservations.*ON CONFLICT \(job_id\).*RETURNING id`).
-					WithArgs("worker-1", &jobID, models.SandboxWorkloadClassInteractive, expiresAt).
+				mock.ExpectQuery(`(?s)INSERT INTO sandbox_capacity_reservations.*job_lock_token.*ON CONFLICT \(job_id\).*job_lock_token = EXCLUDED.job_lock_token.*WHERE sandbox_capacity_reservations.job_lock_token IS NOT DISTINCT FROM EXCLUDED.job_lock_token.*RETURNING id`).
+					WithArgs("worker-1", &jobID, &lockToken, models.SandboxWorkloadClassInteractive, expiresAt).
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(reservationID))
 			}
 			mock.ExpectCommit()
@@ -58,7 +70,7 @@ func TestSandboxCapacityReservationStore_ReserveSandboxCapacity(t *testing.T) {
 
 			store := NewSandboxCapacityReservationStore(mock)
 			actualID, live, total, acquired, err := store.ReserveSandboxCapacity(
-				context.Background(), "worker-1", &jobID, models.SandboxWorkloadClassInteractive,
+				context.Background(), "worker-1", &jobID, &lockToken, models.SandboxWorkloadClassInteractive,
 				func(context.Context) (int, error) { return 1, nil }, tt.effectiveMax, expiresAt,
 			)
 
@@ -90,7 +102,7 @@ func TestSandboxCapacityReservationStore_ReserveSandboxCapacityFailsClosed(t *te
 	mock.ExpectRollback()
 
 	reservationID, _, _, acquired, err := NewSandboxCapacityReservationStore(mock).ReserveSandboxCapacity(
-		context.Background(), "worker-1", nil, models.SandboxWorkloadClassInteractive,
+		context.Background(), "worker-1", nil, nil, models.SandboxWorkloadClassInteractive,
 		func(context.Context) (int, error) { return 0, nil }, 2, time.Now().Add(time.Minute),
 	)
 
@@ -98,6 +110,37 @@ func TestSandboxCapacityReservationStore_ReserveSandboxCapacityFailsClosed(t *te
 	require.False(t, acquired, "failed shared capacity admission should fail closed")
 	require.Equal(t, uuid.Nil, reservationID, "failed shared capacity admission should not return a reservation")
 	require.NoError(t, mock.ExpectationsWereMet(), "failed admission should roll back its transaction")
+}
+
+func TestSandboxCapacityReservationStore_ReserveSandboxCapacityRejectsStaleJobAttempt(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	jobID, staleLockToken := uuid.New(), uuid.New()
+	mock.ExpectBegin()
+	mock.ExpectExec(`SELECT pg_advisory_xact_lock`).
+		WithArgs("worker-1").
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectExec(`(?s)DELETE FROM sandbox_capacity_reservations.*node_id = @node_id`).
+		WithArgs("worker-1").
+		WillReturnResult(pgxmock.NewResult("DELETE", 0))
+	mock.ExpectQuery(`(?s)SELECT id.*FROM jobs.*status = 'running'.*lock_token = @job_lock_token.*FOR UPDATE`).
+		WithArgs(&jobID, &staleLockToken).
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectRollback()
+
+	reservationID, _, _, acquired, err := NewSandboxCapacityReservationStore(mock).ReserveSandboxCapacity(
+		context.Background(), "worker-1", &jobID, &staleLockToken, models.SandboxWorkloadClassInteractive,
+		func(context.Context) (int, error) { return 0, nil }, 2, time.Now().Add(time.Minute),
+	)
+
+	require.ErrorContains(t, err, "job attempt no longer owns", "stale queue attempts must fail final admission")
+	require.False(t, acquired, "stale queue attempts must not acquire shared capacity")
+	require.Equal(t, uuid.Nil, reservationID, "stale queue attempts must not receive a reservation")
+	require.NoError(t, mock.ExpectationsWereMet(), "stale attempt admission should stop before counting or inserting capacity")
 }
 
 func TestSandboxCapacityReservationStore_CountsLiveSandboxesInsideTransaction(t *testing.T) {
@@ -120,6 +163,7 @@ func TestSandboxCapacityReservationStore_CountsLiveSandboxesInsideTransaction(t 
 	reservationID, live, total, acquired, err := NewSandboxCapacityReservationStore(mock).ReserveSandboxCapacity(
 		context.Background(),
 		"worker-1",
+		nil,
 		nil,
 		models.SandboxWorkloadClassInteractive,
 		func(context.Context) (int, error) { return 0, countErr },
@@ -147,13 +191,14 @@ func TestSandboxCapacityReservationStore_ReleaseSandboxCapacity(t *testing.T) {
 	mock.ExpectExec(`SELECT pg_advisory_xact_lock`).
 		WithArgs("worker-1").
 		WillReturnResult(pgxmock.NewResult("SELECT", 1))
-	mock.ExpectExec(`(?s)DELETE FROM sandbox_capacity_reservations.*WHERE id = @reservation_id.*AND node_id = @node_id`).
-		WithArgs(reservationID, "worker-1").
+	lockToken := uuid.New()
+	mock.ExpectExec(`(?s)DELETE FROM sandbox_capacity_reservations.*WHERE id = @reservation_id.*AND node_id = @node_id.*job_lock_token = @job_lock_token`).
+		WithArgs(reservationID, "worker-1", &lockToken).
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
 	mock.ExpectCommit()
 	mock.ExpectRollback()
 
-	err = NewSandboxCapacityReservationStore(mock).ReleaseSandboxCapacity(context.Background(), "worker-1", reservationID)
+	err = NewSandboxCapacityReservationStore(mock).ReleaseSandboxCapacity(context.Background(), "worker-1", reservationID, &lockToken)
 
 	require.NoError(t, err, "shared capacity release should delete the reservation")
 	require.NoError(t, mock.ExpectationsWereMet(), "shared capacity release should hold the worker admission lock and target the exact reservation")

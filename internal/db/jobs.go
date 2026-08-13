@@ -1517,6 +1517,7 @@ func selectSandboxRoutingCandidate(ctx context.Context, tx pgx.Tx, workloadClass
 						FROM jobs reserved_job
 						JOIN nodes reserved_node ON reserved_node.id = reserved_job.target_node_id
 						WHERE reserved_job.id = shared_reservation.job_id
+						  AND reserved_job.lock_token = shared_reservation.job_lock_token
 						  AND COALESCE(
 								NULLIF(reserved_node.metadata->>'sandbox_capacity_node_id', ''),
 								regexp_replace(reserved_node.id, '-g[0-9]{14}-[A-Za-z0-9._-]+$', '')
@@ -1625,12 +1626,12 @@ func sandboxRoutingCandidateHasCapacity(ctx context.Context, tx pgx.Tx, nodeID s
 				WHERE shared_reservation.node_id = n.capacity_node_id
 				  AND shared_reservation.expires_at > now()
 				  AND shared_reservation.job_id IS NOT NULL
-				  AND shared_reservation.job_id <> @job_id
 				  AND NOT EXISTS (
 					SELECT 1
 					FROM jobs reserved_job
 					JOIN nodes reserved_node ON reserved_node.id = reserved_job.target_node_id
 					WHERE reserved_job.id = shared_reservation.job_id
+					  AND reserved_job.lock_token = shared_reservation.job_lock_token
 					  AND COALESCE(
 							NULLIF(reserved_node.metadata->>'sandbox_capacity_node_id', ''),
 							regexp_replace(reserved_node.id, '-g[0-9]{14}-[A-Za-z0-9._-]+$', '')

@@ -40,8 +40,8 @@ type LiveSandboxCounter interface {
 // SharedSandboxCapacityStore coordinates final admission across processes that
 // share one worker node and Docker daemon.
 type SharedSandboxCapacityStore interface {
-	ReserveSandboxCapacity(ctx context.Context, nodeID string, jobID *uuid.UUID, workloadClass models.SandboxWorkloadClass, countLiveSandboxes func(context.Context) (int, error), effectiveMax int, expiresAt time.Time) (reservationID uuid.UUID, liveSandboxes, total int, acquired bool, err error)
-	ReleaseSandboxCapacity(ctx context.Context, nodeID string, reservationID uuid.UUID) error
+	ReserveSandboxCapacity(ctx context.Context, nodeID string, jobID, jobLockToken *uuid.UUID, workloadClass models.SandboxWorkloadClass, countLiveSandboxes func(context.Context) (int, error), effectiveMax int, expiresAt time.Time) (reservationID uuid.UUID, liveSandboxes, total int, acquired bool, err error)
+	ReleaseSandboxCapacity(ctx context.Context, nodeID string, reservationID uuid.UUID, jobLockToken *uuid.UUID) error
 }
 
 // SandboxPressureCleaner performs a best-effort local cleanup pass when a
@@ -73,6 +73,7 @@ type SandboxCapacityRequest struct {
 	SessionID     string
 	OrgID         string
 	JobID         *uuid.UUID
+	JobLockToken  *uuid.UUID
 	WorkloadClass models.SandboxWorkloadClass
 }
 
@@ -292,6 +293,7 @@ func (g *SandboxCapacityGate) acquireSharedReservation(
 		reservationCtx,
 		g.nodeID,
 		req.JobID,
+		req.JobLockToken,
 		req.WorkloadClass,
 		countLiveSandboxes,
 		effectiveMax,
@@ -342,6 +344,7 @@ func (g *SandboxCapacityGate) acquireSharedReservation(
 		gate:                g,
 		sandboxTurn:         sandboxTurnReservation,
 		sharedReservationID: reservationID,
+		jobLockToken:        req.JobLockToken,
 	}, false, nil
 }
 
@@ -435,6 +438,7 @@ type SandboxCapacityReservation struct {
 	gate                *SandboxCapacityGate
 	sandboxTurn         bool
 	sharedReservationID uuid.UUID
+	jobLockToken        *uuid.UUID
 	once                sync.Once
 }
 
@@ -475,7 +479,7 @@ func (r *SandboxCapacityReservation) Release() {
 func (r *SandboxCapacityReservation) releaseSharedReservation(ctx context.Context) error {
 	delay := defaultSharedSandboxReleaseRetryMin
 	for {
-		err := r.gate.sharedReservations.ReleaseSandboxCapacity(ctx, r.gate.nodeID, r.sharedReservationID)
+		err := r.gate.sharedReservations.ReleaseSandboxCapacity(ctx, r.gate.nodeID, r.sharedReservationID, r.jobLockToken)
 		if err == nil {
 			return nil
 		}

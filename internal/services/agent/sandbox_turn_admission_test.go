@@ -36,19 +36,21 @@ func (sandboxAdmissionLiveCounter) CountLiveSandboxes(context.Context) (int, err
 }
 
 type sandboxAdmissionSharedCapacityStore struct {
-	jobID *uuid.UUID
+	jobID        *uuid.UUID
+	jobLockToken *uuid.UUID
 }
 
 func (s *sandboxAdmissionSharedCapacityStore) ReserveSandboxCapacity(
 	ctx context.Context,
 	_ string,
-	jobID *uuid.UUID,
+	jobID, jobLockToken *uuid.UUID,
 	_ models.SandboxWorkloadClass,
 	countLiveSandboxes func(context.Context) (int, error),
 	_ int,
 	_ time.Time,
 ) (uuid.UUID, int, int, bool, error) {
 	s.jobID = jobID
+	s.jobLockToken = jobLockToken
 	live, err := countLiveSandboxes(ctx)
 	if err != nil {
 		return uuid.Nil, 0, 0, false, err
@@ -56,7 +58,7 @@ func (s *sandboxAdmissionSharedCapacityStore) ReserveSandboxCapacity(
 	return uuid.New(), live, live + 1, true, nil
 }
 
-func (*sandboxAdmissionSharedCapacityStore) ReleaseSandboxCapacity(context.Context, string, uuid.UUID) error {
+func (*sandboxAdmissionSharedCapacityStore) ReleaseSandboxCapacity(context.Context, string, uuid.UUID, *uuid.UUID) error {
 	return nil
 }
 
@@ -158,7 +160,7 @@ func TestAdmitSandboxTurnReleasesRejectedDurablePlacement(t *testing.T) {
 func TestAdmitSandboxTurnIdentifiesCurrentJobToSharedCapacityFence(t *testing.T) {
 	t.Parallel()
 
-	jobID := uuid.New()
+	jobID, lockToken := uuid.New(), uuid.New()
 	sharedCapacity := &sandboxAdmissionSharedCapacityStore{}
 	orchestrator := &Orchestrator{
 		orgs: &sandboxAdmissionOrgStore{settings: json.RawMessage(`{"max_concurrent_runs":2}`)},
@@ -172,7 +174,7 @@ func TestAdmitSandboxTurnIdentifiesCurrentJobToSharedCapacityFence(t *testing.T)
 		}),
 		logger: zerolog.Nop(),
 	}
-	ctx := jobctx.WithJobID(context.Background(), jobID)
+	ctx := jobctx.WithLockToken(jobctx.WithJobID(context.Background(), jobID), lockToken)
 
 	reservation, err := orchestrator.admitSandboxTurn(ctx, &models.Session{
 		ID:     uuid.New(),
@@ -184,5 +186,7 @@ func TestAdmitSandboxTurnIdentifiesCurrentJobToSharedCapacityFence(t *testing.T)
 	require.NotNil(t, reservation, "fresh sandbox admission should return the shared capacity reservation")
 	require.NotNil(t, sharedCapacity.jobID, "shared capacity admission should receive the claimed job id")
 	require.Equal(t, jobID, *sharedCapacity.jobID, "shared admission should exclude the current job's durable routing reservation")
+	require.NotNil(t, sharedCapacity.jobLockToken, "shared capacity admission should receive the claim fencing token")
+	require.Equal(t, lockToken, *sharedCapacity.jobLockToken, "shared admission should fence the reservation to the current claim attempt")
 	reservation.Release()
 }

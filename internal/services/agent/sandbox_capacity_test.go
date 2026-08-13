@@ -34,8 +34,10 @@ type fakeSharedSandboxCapacityStore struct {
 	effectiveMax  int
 	releasedNode  string
 	releasedID    uuid.UUID
+	releasedToken *uuid.UUID
 	releaseErr    error
 	releaseFails  int64
+	jobLockToken  *uuid.UUID
 	reserveCalls  atomic.Int64
 	releaseCalls  atomic.Int64
 }
@@ -46,6 +48,7 @@ func (contextWaitingSharedSandboxCapacityStore) ReserveSandboxCapacity(
 	ctx context.Context,
 	_ string,
 	_ *uuid.UUID,
+	_ *uuid.UUID,
 	_ models.SandboxWorkloadClass,
 	_ func(context.Context) (int, error),
 	_ int,
@@ -55,13 +58,14 @@ func (contextWaitingSharedSandboxCapacityStore) ReserveSandboxCapacity(
 	return uuid.Nil, 0, 0, false, ctx.Err()
 }
 
-func (contextWaitingSharedSandboxCapacityStore) ReleaseSandboxCapacity(context.Context, string, uuid.UUID) error {
+func (contextWaitingSharedSandboxCapacityStore) ReleaseSandboxCapacity(context.Context, string, uuid.UUID, *uuid.UUID) error {
 	return nil
 }
 
-func (f *fakeSharedSandboxCapacityStore) ReserveSandboxCapacity(ctx context.Context, _ string, jobID *uuid.UUID, workloadClass models.SandboxWorkloadClass, countLiveSandboxes func(context.Context) (int, error), effectiveMax int, _ time.Time) (uuid.UUID, int, int, bool, error) {
+func (f *fakeSharedSandboxCapacityStore) ReserveSandboxCapacity(ctx context.Context, _ string, jobID, jobLockToken *uuid.UUID, workloadClass models.SandboxWorkloadClass, countLiveSandboxes func(context.Context) (int, error), effectiveMax int, _ time.Time) (uuid.UUID, int, int, bool, error) {
 	f.reserveCalls.Add(1)
 	f.jobID = jobID
+	f.jobLockToken = jobLockToken
 	f.workloadClass = workloadClass
 	f.effectiveMax = effectiveMax
 	if f.err != nil {
@@ -75,10 +79,11 @@ func (f *fakeSharedSandboxCapacityStore) ReserveSandboxCapacity(ctx context.Cont
 	return f.reservationID, liveSandboxes, f.total, f.acquired, nil
 }
 
-func (f *fakeSharedSandboxCapacityStore) ReleaseSandboxCapacity(_ context.Context, nodeID string, reservationID uuid.UUID) error {
+func (f *fakeSharedSandboxCapacityStore) ReleaseSandboxCapacity(_ context.Context, nodeID string, reservationID uuid.UUID, jobLockToken *uuid.UUID) error {
 	call := f.releaseCalls.Add(1)
 	f.releasedNode = nodeID
 	f.releasedID = reservationID
+	f.releasedToken = jobLockToken
 	if call <= f.releaseFails {
 		return f.releaseErr
 	}
@@ -246,7 +251,7 @@ func TestSandboxCapacityGate_AcquireRejectsWhenFull(t *testing.T) {
 func TestSandboxCapacityGate_AcquireIncludesCrossProcessReservations(t *testing.T) {
 	t.Parallel()
 
-	jobID := uuid.New()
+	jobID, lockToken := uuid.New(), uuid.New()
 	shared := &fakeSharedSandboxCapacityStore{total: 3}
 	cleaner := &fakeSandboxPressureCleaner{}
 	gate := agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
@@ -258,11 +263,12 @@ func TestSandboxCapacityGate_AcquireIncludesCrossProcessReservations(t *testing.
 		Logger:             zerolog.Nop(),
 	})
 
-	reservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "continue_session", JobID: &jobID})
+	reservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "continue_session", JobID: &jobID, JobLockToken: &lockToken})
 
 	require.ErrorIs(t, err, agent.ErrSandboxCapacity, "other processes' reservations should participate in final local admission")
 	require.Nil(t, reservation, "admission at shared capacity should not return a local reservation")
 	require.Equal(t, &jobID, shared.jobID, "shared admission should identify the current job so its routing reservation is not double counted")
+	require.Equal(t, &lockToken, shared.jobLockToken, "shared admission should identify the current claim attempt")
 	require.Equal(t, int64(1), shared.reserveCalls.Load(), "final admission should use the shared reservation store once")
 	require.Equal(t, int64(0), cleaner.calls.Load(), "shared reservations should not trigger physical pressure cleanup while Docker still has capacity")
 }
@@ -270,6 +276,7 @@ func TestSandboxCapacityGate_AcquireIncludesCrossProcessReservations(t *testing.
 func TestSandboxCapacityGate_AcquireReleasesSharedReservation(t *testing.T) {
 	t.Parallel()
 
+	jobID, lockToken := uuid.New(), uuid.New()
 	shared := &fakeSharedSandboxCapacityStore{reservationID: uuid.New(), total: 1, acquired: true}
 	gate := agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
 		Counter:            &fakeLiveSandboxCounter{},
@@ -279,7 +286,7 @@ func TestSandboxCapacityGate_AcquireReleasesSharedReservation(t *testing.T) {
 		Logger:             zerolog.Nop(),
 	})
 
-	reservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "branch_preview"})
+	reservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "continue_session", JobID: &jobID, JobLockToken: &lockToken})
 	require.NoError(t, err, "capacity admission should persist a shared cross-process reservation")
 	require.Equal(t, 1, gate.ReservedCount(), "shared admission should remain visible in local heartbeat metadata")
 	require.Equal(t, int64(0), shared.releaseCalls.Load(), "shared reservation should remain active during sandbox creation")
@@ -289,6 +296,7 @@ func TestSandboxCapacityGate_AcquireReleasesSharedReservation(t *testing.T) {
 	require.Equal(t, int64(1), shared.releaseCalls.Load(), "reservation release should remove the shared capacity lease")
 	require.Equal(t, "worker-1", shared.releasedNode, "reservation release should use the same worker admission-lock namespace")
 	require.Equal(t, shared.reservationID, shared.releasedID, "reservation release should remove the acquired lease")
+	require.Equal(t, &lockToken, shared.releasedToken, "reservation release should be fenced to the acquiring job attempt")
 }
 
 func TestSandboxCapacityGate_ReleaseRetriesTransientSharedStoreFailure(t *testing.T) {

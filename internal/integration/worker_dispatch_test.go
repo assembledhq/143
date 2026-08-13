@@ -47,12 +47,18 @@ func TestIntegration_SharedSandboxAdmissionDeduplicatesCurrentRoutingReservation
 	require.NotNil(t, routed, "routing should return the reserved job")
 	require.NotNil(t, routed.TargetNodeID, "routing should select the only worker")
 	require.Equal(t, nodeID, *routed.TargetNodeID, "routing should target the configured worker")
+	lockToken := uuid.New()
+	claimed, err := jobStore.ClaimNextRunnable(ctx, nodeID, nodeID, lockToken, time.Minute)
+	require.NoError(t, err, "routed sandbox job should be claimed by its target worker")
+	require.NotNil(t, claimed, "routed sandbox job should be available to final admission")
+	require.Equal(t, jobID, claimed.ID, "final admission should use the claimed routing job")
 
 	capacityStore := db.NewSandboxCapacityReservationStore(pool)
 	reservationID, live, total, acquired, err := capacityStore.ReserveSandboxCapacity(
 		ctx,
 		nodeID,
 		&jobID,
+		&lockToken,
 		models.SandboxWorkloadClassInteractive,
 		func(context.Context) (int, error) { return 0, nil },
 		1,
@@ -67,6 +73,7 @@ func TestIntegration_SharedSandboxAdmissionDeduplicatesCurrentRoutingReservation
 	otherReservationID, _, blockedTotal, otherAcquired, err := capacityStore.ReserveSandboxCapacity(
 		ctx,
 		nodeID,
+		nil,
 		nil,
 		models.SandboxWorkloadClassInteractive,
 		func(context.Context) (int, error) { return 0, nil },
@@ -85,7 +92,7 @@ func TestIntegration_SharedSandboxAdmissionDeduplicatesCurrentRoutingReservation
 
 	releaseDone := make(chan error, 1)
 	go func() {
-		releaseDone <- capacityStore.ReleaseSandboxCapacity(ctx, nodeID, reservationID)
+		releaseDone <- capacityStore.ReleaseSandboxCapacity(ctx, nodeID, reservationID, &lockToken)
 	}()
 	select {
 	case releaseErr := <-releaseDone:
@@ -99,6 +106,105 @@ func TestIntegration_SharedSandboxAdmissionDeduplicatesCurrentRoutingReservation
 	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM sandbox_capacity_reservations WHERE id = $1`, reservationID).Scan(&remainingReservations)
 	require.NoError(t, err, "test should inspect the released shared reservation")
 	require.Equal(t, 0, remainingReservations, "shared capacity release should delete its lease after the admission lock is available")
+}
+
+// TestIntegration_SharedSandboxAdmissionFencesReclaimedJobAttempt verifies
+// that a replacement queue owner cannot share or overwrite the stale owner's
+// final-admission lease. The replacement waits for the prior attempt to
+// release (or expire), and either attempt can release only its own lease.
+//
+// This test cannot run in parallel because the integration suite shares one
+// database and setup truncates queue state between tests.
+func TestIntegration_SharedSandboxAdmissionFencesReclaimedJobAttempt(t *testing.T) {
+	pool := setup(t)
+	ctx := context.Background()
+	orgID := seedOrg(t, pool)
+	nodeID := "attempt-fence-worker-" + orgID.String()[:8]
+	seedWorkerNode(t, pool, nodeID)
+	setWorkerSandboxCapacity(t, pool, nodeID, 3)
+
+	session := seedSession(t, pool, orgID, sessionOpts{Status: models.SessionStatusPending})
+	jobStore := db.NewJobStore(pool)
+	jobID, err := jobStore.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue:         "agent",
+		JobType:       "run_agent",
+		Payload:       map[string]string{"session_id": session.ID.String(), "org_id": orgID.String()},
+		Priority:      5,
+		WorkloadClass: models.SandboxWorkloadClassInteractive,
+	})
+	require.NoError(t, err, "sandbox-producing job should enqueue")
+	routed, err := jobStore.RouteNextSandboxJob(ctx)
+	require.NoError(t, err, "sandbox-producing job should receive a durable worker reservation")
+	require.NotNil(t, routed, "routing should return the sandbox-producing job")
+
+	firstLockToken := uuid.New()
+	claimed, err := jobStore.ClaimNextRunnable(ctx, nodeID, nodeID, firstLockToken, time.Minute)
+	require.NoError(t, err, "first queue attempt should claim the routed job")
+	require.NotNil(t, claimed, "first queue attempt should own the job before final admission")
+
+	capacityStore := db.NewSandboxCapacityReservationStore(pool)
+	firstReservationID, _, _, acquired, err := capacityStore.ReserveSandboxCapacity(
+		ctx, nodeID, &jobID, &firstLockToken, models.SandboxWorkloadClassInteractive,
+		func(context.Context) (int, error) { return 0, nil }, 3, time.Now().Add(time.Minute),
+	)
+	require.NoError(t, err, "first queue attempt should reserve final-admission capacity")
+	require.True(t, acquired, "first queue attempt should acquire final-admission capacity")
+	_, err = pool.Exec(ctx, `
+		INSERT INTO sandbox_capacity_reservations (node_id, job_id, workload_class, expires_at)
+		VALUES ($1, $2, 'interactive', now() + interval '1 minute')
+		ON CONFLICT (job_id) WHERE job_id IS NOT NULL
+		DO UPDATE SET node_id = EXCLUDED.node_id, expires_at = EXCLUDED.expires_at`, nodeID, jobID)
+	require.ErrorContains(t, err, "requires a matching job lock token", "rolling-deploy legacy admission must fail closed instead of sharing the current attempt's row")
+
+	replacementNodeID := nodeID + "-replacement"
+	seedWorkerNode(t, pool, replacementNodeID)
+	setWorkerSandboxCapacity(t, pool, replacementNodeID, 3)
+	secondLockToken := uuid.New()
+	_, err = pool.Exec(ctx, `
+		UPDATE jobs
+		SET lock_token = $3,
+			locked_by_node_id = $2,
+			run_owner_id = $2,
+			target_node_id = $2,
+			locked_at = now(),
+			lease_expires_at = now() + interval '1 minute'
+		WHERE org_id = $1 AND id = $4`, orgID, replacementNodeID, secondLockToken, jobID)
+	require.NoError(t, err, "test should simulate the queue reclaiming the job on another worker with a new fencing token")
+
+	_, _, blockedTotal, replacementAcquired, err := capacityStore.ReserveSandboxCapacity(
+		ctx, replacementNodeID, &jobID, &secondLockToken, models.SandboxWorkloadClassInteractive,
+		func(context.Context) (int, error) { return 0, nil }, 3, time.Now().Add(time.Minute),
+	)
+	require.NoError(t, err, "replacement attempt should receive a serialized capacity decision")
+	require.False(t, replacementAcquired, "replacement attempt must wait for the stale attempt's live reservation on another worker")
+	require.Equal(t, 0, blockedTotal, "another worker's lease is a fencing conflict rather than local capacity load")
+
+	_, _, _, staleAcquired, err := capacityStore.ReserveSandboxCapacity(
+		ctx, nodeID, &jobID, &firstLockToken, models.SandboxWorkloadClassInteractive,
+		func(context.Context) (int, error) { return 0, nil }, 3, time.Now().Add(time.Minute),
+	)
+	require.ErrorContains(t, err, "job attempt no longer owns", "stale attempt should fail transactional ownership validation")
+	require.False(t, staleAcquired, "stale attempt must not reacquire final-admission capacity")
+
+	_, err = pool.Exec(ctx, `
+		UPDATE sandbox_capacity_reservations
+		SET expires_at = now() - interval '1 second'
+		WHERE id = $1`, firstReservationID)
+	require.NoError(t, err, "test should expire the stale attempt lease without releasing it")
+	secondReservationID, _, _, replacementAcquired, err := capacityStore.ReserveSandboxCapacity(
+		ctx, replacementNodeID, &jobID, &secondLockToken, models.SandboxWorkloadClassInteractive,
+		func(context.Context) (int, error) { return 0, nil }, 3, time.Now().Add(time.Minute),
+	)
+	require.NoError(t, err, "replacement attempt should reserve after the prior lease expires")
+	require.True(t, replacementAcquired, "replacement attempt should acquire its own final-admission lease")
+	require.NotEqual(t, firstReservationID, secondReservationID, "replacement attempt should receive a distinct reservation identity")
+
+	require.NoError(t, capacityStore.ReleaseSandboxCapacity(ctx, nodeID, firstReservationID, &firstLockToken), "late stale release should be harmless")
+	var replacementRows int
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM sandbox_capacity_reservations WHERE id = $1 AND job_lock_token = $2`, secondReservationID, secondLockToken).Scan(&replacementRows)
+	require.NoError(t, err, "test should inspect the replacement attempt reservation")
+	require.Equal(t, 1, replacementRows, "stale release must not delete the replacement attempt's reservation")
+	require.NoError(t, capacityStore.ReleaseSandboxCapacity(ctx, replacementNodeID, secondReservationID, &secondLockToken), "replacement attempt should release its own reservation")
 }
 
 // TestIntegration_BlueGreenGenerationsSharePhysicalHostCapacity verifies that
@@ -148,6 +254,7 @@ func TestIntegration_BlueGreenGenerationsSharePhysicalHostCapacity(t *testing.T)
 	_, _, finalLoad, admitted, err := db.NewSandboxCapacityReservationStore(pool).ReserveSandboxCapacity(
 		ctx,
 		capacityNodeID,
+		nil,
 		nil,
 		models.SandboxWorkloadClassInteractive,
 		func(context.Context) (int, error) { return 0, nil },

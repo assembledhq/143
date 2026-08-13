@@ -196,6 +196,9 @@ the same per-node advisory lock to atomically compare the current Docker count,
 durable job reservations, and shared final-admission leases before inserting a
 15-minute shared lease. Cross-process coordination has a 10-second bound while
 the Docker inspection inside the lock keeps its shorter two-second bound. The
+queue claim token fences each job-backed lease: admission transactionally
+validates the current owner, a replacement attempt waits for a live prior lease
+instead of sharing it, and release can delete only the acquiring attempt's row.
 lease is released under the same per-node admission lock as soon as sandbox
 creation or hydration finishes. Transient release failures retry within the
 shared coordination budget; the TTL bounds leaks if a process dies or the
