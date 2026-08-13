@@ -281,11 +281,15 @@ describe('SessionDetailPage session states', () => {
     // Flat block: clock, title and badge share one row, and both body lines are
     // direct children so nothing is indented past a former icon tile.
     const body = screen.getByTestId('pending-capacity-body');
+    const card = body.parentElement;
     const heading = screen.getByText('Waiting for capacity').parentElement;
+    expect(card).toHaveClass('border-warning/20', 'bg-warning/5');
     expect(heading?.parentElement).toBe(body);
     expect(heading).toHaveClass('gap-1.5');
-    expect(heading?.querySelector('.lucide-clock')).toBeInTheDocument();
-    expect(screen.getByText('Max concurrency reached').parentElement).toBe(heading);
+    expect(heading?.querySelector('.lucide-clock')).toHaveClass('text-warning');
+    const capacityBadge = screen.getByText('Max concurrency reached');
+    expect(capacityBadge.parentElement).toBe(heading);
+    expect(capacityBadge).toHaveAttribute('data-variant', 'warning');
     expect(screen.getByText('This session will start automatically when another run finishes or the limit is raised.').parentElement).toBe(body);
   });
 

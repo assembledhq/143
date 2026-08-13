@@ -3484,12 +3484,12 @@ function PendingCapacityNotice({ maxConcurrentRuns }: { maxConcurrentRuns?: numb
 
   return (
     <div className="flex justify-center py-8">
-      <Card className="w-full max-w-[34rem] border-amber-200/70 bg-amber-50/70 shadow-none dark:border-amber-900/60 dark:bg-amber-950/20">
+      <Card className="w-full max-w-[34rem] border-warning/20 bg-warning/5 shadow-none">
         <CardContent className="space-y-1.5 p-4" data-testid="pending-capacity-body">
           <div className="flex flex-wrap items-center gap-1.5">
-            <Clock className="h-4 w-4 shrink-0 text-amber-700 dark:text-amber-300" aria-hidden />
+            <Clock className="h-4 w-4 shrink-0 text-warning" aria-hidden />
             <p className="text-sm font-semibold text-foreground">Waiting for capacity</p>
-            <Badge variant="outline" className="border-amber-300/80 bg-background/70 text-amber-800 dark:border-amber-800 dark:text-amber-300">
+            <Badge variant="warning">
               Max concurrency reached
             </Badge>
           </div>
